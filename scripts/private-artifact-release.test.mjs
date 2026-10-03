@@ -44,7 +44,7 @@ const privateArtifactWorkflowPath = join(repositoryRoot, '.github/workflows/priv
 const privateArtifactWorkflowText = readFileSync(privateArtifactWorkflowPath, 'utf8');
 const pinnedSetupNodeAction = 'uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0';
 const pinnedNodeVersion = 'node-version: 24.18.0';
-const nodeVersionCheck = `test "$(node --version)" = 'v24.18.0'`;
+const nodeVersionCheck = `test "$(node --version)" = 'v24.18.0' || { echo "::error::expected Node v24.18.0, got $(node --version)"; exit 1; }`;
 
 function privateWorkflowJob(workflow, name) {
   const header = `  ${name}:\n`;
@@ -64,6 +64,12 @@ function privateWorkflowStep(job, name) {
   const remainder = job.slice(contentStart);
   const nextStep = remainder.search(/^      - name: /m);
   return job.slice(start, nextStep === -1 ? undefined : contentStart + nextStep);
+}
+
+function privateWorkflowStepHeaders(job) {
+  const stepsStart = job.indexOf('    steps:\n');
+  if(stepsStart === -1) throw new Error('Missing workflow job steps');
+  return [...job.slice(stepsStart).matchAll(/^      - (.+)$/gm)].map(([, header]) => header.trim());
 }
 
 function movePrivateWorkflowStepBefore(job, stepName, targetName) {
@@ -128,9 +134,16 @@ function assertPrivateBuildDependencyBoundary(job) {
     throw new Error('Private build setup, validation, cache, and install order is unsafe');
   }
 
-  const beforeValidation = job.slice(0, positions[1]);
-  if(/pnpm\/action-setup|actions\/cache@|^\s*cache[\w-]*\s*:|pnpm install/m.test(beforeValidation)) {
-    throw new Error('Dependency setup, cache, and install must follow pre-install validation');
+  const stepHeaders = privateWorkflowStepHeaders(job);
+  const validationHeader = 'name: Validate the immutable target before installation';
+  const validationIndex = stepHeaders.indexOf(validationHeader);
+  const permittedBeforeValidation = [
+    'name: Check out the allowlisted target commit',
+    'name: Download the immutable target snapshot',
+    'name: Set up Node.js 24.18.0 before target validation'
+  ];
+  if(validationIndex === -1 || JSON.stringify(stepHeaders.slice(0, validationIndex)) !== JSON.stringify(permittedBeforeValidation)) {
+    throw new Error('Only checkout, snapshot download, and runtime setup may precede pre-install validation');
   }
 
   assertPinnedNodeSetup(runtimeSetup);
@@ -236,15 +249,23 @@ describe('private artifact workflow Node runtime', () => {
     }
   );
 
-  it('rejects a standalone dependency cache before immutable target validation', () => {
+  it.each([
+    ['legacy cache action', '      - name: Restore pnpm cache\n        uses: actions/cache@v4\n'],
+    ['cache restore action', '      - uses: actions/cache/restore@v4\n'],
+    ['cache save action', '      - uses: actions/cache/save@v4\n'],
+    ['npm install command', '      - name: Install npm dependencies\n        run: npm install\n'],
+    ['pnpm shorthand install command', '      - name: Install pnpm dependencies\n        run: pnpm i\n'],
+    ['corepack command', '      - name: Enable Corepack\n        run: corepack enable\n'],
+    ['unnamed command step', '      - run: corepack enable\n']
+  ])('rejects a pre-validation %s step', (_label, earlyStep) => {
     const job = privateWorkflowJob(privateArtifactWorkflowText, 'private-build');
-    const withEarlyCache = job.replace(
+    const withEarlyStep = job.replace(
       '      - name: Validate the immutable target before installation\n',
-      '      - name: Restore pnpm cache\n        uses: actions/cache@v4\n\n      - name: Validate the immutable target before installation\n'
+      `${earlyStep}\n      - name: Validate the immutable target before installation\n`
     );
 
-    expect(withEarlyCache).not.toBe(job);
-    expect(() => assertPrivateBuildDependencyBoundary(withEarlyCache)).toThrow(/must follow pre-install validation/);
+    expect(withEarlyStep).not.toBe(job);
+    expect(() => assertPrivateBuildDependencyBoundary(withEarlyStep)).toThrow(/Only checkout, snapshot download, and runtime setup/);
   });
 
   it('keeps the isolated publisher credential-free and adjacent to upload after verification', () => {

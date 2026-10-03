@@ -71,7 +71,7 @@ jobs:
           PRIVATE_ARTIFACT_TARGET_REF: ${{ github.event_name == 'push' && 'refs/heads/master' || '' }}
           PRIVATE_ARTIFACT_PREVIOUS_COMMIT: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: |
-          test "$(node --version)" = 'v24.18.0'
+          test "$(node --version)" = 'v24.18.0' || { echo "::error::expected Node v24.18.0, got $(node --version)"; exit 1; }
           node scripts/private-artifact-release.mjs prepare \
             --event "$PRIVATE_ARTIFACT_EVENT" \
             --head-branch "$PRIVATE_ARTIFACT_HEAD_BRANCH" \
@@ -155,7 +155,7 @@ jobs:
           MTPROTO_PRIVATE_ENDPOINT: ${{ needs.publication-prepare.outputs.private_endpoint }}
           MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.publication-prepare.outputs.private_key_file }}
         run: |
-          test "$(node --version)" = 'v24.18.0'
+          test "$(node --version)" = 'v24.18.0' || { echo "::error::expected Node v24.18.0, got $(node --version)"; exit 1; }
           node scripts/private-artifact-release.mjs validate-target --snapshot "$RUNNER_TEMP/private-target-snapshot"
 
       - name: Set up pnpm
@@ -178,7 +178,7 @@ jobs:
           MTPROTO_PRIVATE_ENDPOINT: ${{ needs.publication-prepare.outputs.private_endpoint }}
           MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.publication-prepare.outputs.private_key_file }}
         run: |
-          test "$(node --version)" = 'v24.18.0'
+          test "$(node --version)" = 'v24.18.0' || { echo "::error::expected Node v24.18.0, got $(node --version)"; exit 1; }
           node scripts/private-artifact-release.mjs validate-target --snapshot "$RUNNER_TEMP/private-target-snapshot"
 
       - name: Run private negative-input and route-matrix tests
@@ -260,7 +260,7 @@ jobs:
 
       - name: Reverify the downloaded unit in the isolated publisher
         run: |
-          test "$(node --version)" = 'v24.18.0'
+          test "$(node --version)" = 'v24.18.0' || { echo "::error::expected Node v24.18.0, got $(node --version)"; exit 1; }
           node "$RUNNER_TEMP/private-target-snapshot/publisher-verify.mjs" \
             --dist dist-private \
             --snapshot "$RUNNER_TEMP/private-target-snapshot" \
