@@ -11,6 +11,7 @@ const privateNetworkers = new WeakSet<object>();
 
 type NetworkerWithLogger = {
   log: Logger,
+  sentMessages: Record<string, {humanReadable?: string, container?: boolean, inner?: string[]}>,
   wrapApiCall: MTPNetworker['wrapApiCall']
 };
 
@@ -22,17 +23,29 @@ function redactAuthCallArgs(args: any[]) {
   return [args[0], args[1], '[REDACTED]', '[REDACTED]', '[REDACTED]'];
 }
 
-function redactAuthMessageArgs(args: any[]) {
+function containsAuthRequest(message: any, sentMessages: NetworkerWithLogger['sentMessages'], visited = new Set<string>()): boolean {
+  if(!message || typeof message !== 'object') return false;
+  if(typeof message.humanReadable === 'string' && message.humanReadable.startsWith('auth.')) return true;
+  if(!message.container || !Array.isArray(message.inner)) return false;
+
+  return message.inner.some((messageId: string) => {
+    if(visited.has(messageId)) return false;
+    visited.add(messageId);
+    return containsAuthRequest(sentMessages[messageId], sentMessages, visited);
+  });
+}
+
+function redactAuthMessageArgs(args: any[], sentMessages: NetworkerWithLogger['sentMessages']) {
   const message = args[1];
-  if(args[0] !== 'sending' || !message || typeof message !== 'object' || typeof message.humanReadable !== 'string' || !message.humanReadable.startsWith('auth.')) {
+  if(args[0] !== 'sending' || !containsAuthRequest(message, sentMessages)) {
     return args;
   }
 
   return [args[0], {...message, body: '[REDACTED]'}, ...args.slice(2)];
 }
 
-function wrapPrivateAuthLogger(boundLogger: Logger, prefix: string): Logger {
-  const redactArgs = prefix === 'wrapApiCall' ? redactAuthCallArgs : redactAuthMessageArgs;
+function wrapPrivateAuthLogger(boundLogger: Logger, prefix: string, sentMessages: NetworkerWithLogger['sentMessages']): Logger {
+  const redactArgs = prefix === 'wrapApiCall' ? redactAuthCallArgs : (args: any[]) => redactAuthMessageArgs(args, sentMessages);
   return new Proxy(boundLogger, {
     apply(target, thisArg, args) {
       return Reflect.apply(target, thisArg, redactArgs(args));
@@ -61,7 +74,7 @@ function securePrivateNetworker(networker: MTPNetworker): MTPNetworker {
 
       return (prefix: string, ...args: any[]) => {
         const boundLogger = Reflect.apply(bindPrefix, target, [prefix, ...args]);
-        return prefix === 'wrapApiCall' || prefix === 'sendEncryptedRequest' ? wrapPrivateAuthLogger(boundLogger, prefix) : boundLogger;
+        return prefix === 'wrapApiCall' || prefix === 'sendEncryptedRequest' ? wrapPrivateAuthLogger(boundLogger, prefix, privateNetworker.sentMessages) : boundLogger;
       };
     }
   });
