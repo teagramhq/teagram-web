@@ -2,7 +2,7 @@ import {describe, expect, it, vi} from 'vitest';
 
 import {ApiManager} from '@appManagers/apiManager';
 
-describe.skipIf(!__MTPROTO_PRIVATE__)('ApiManager auth error logging', () => {
+describe.skipIf(!__MTPROTO_PRIVATE__)('private username auth error logging', () => {
   it('redacts auth.signIn params when SESSION_PASSWORD_NEEDED is logged', async() => {
     const logError = vi.fn();
     const params = {
@@ -29,5 +29,6 @@ describe.skipIf(!__MTPROTO_PRIVATE__)('ApiManager auth error logging', () => {
     expect(logged).not.toContain('Alice_123');
     expect(logged).not.toContain('mock-code-hash');
     expect(logged).toContain('[REDACTED]');
+    expect(manager.log.error).toBe(logError);
   });
 });

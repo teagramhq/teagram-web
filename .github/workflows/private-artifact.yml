@@ -89,6 +89,13 @@ jobs:
           src/tests/mtprotoWorkerReady.test.ts
           src/tests/superMessagePort.test.ts
 
+      - name: Test private username auth log redaction
+        env:
+          MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}
+          MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}
+          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}
+        run: pnpm exec vitest run src/tests/api/apiManagerAuthLogging.test.ts
+
       - name: Build the reviewed private artifact
         env:
           MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}

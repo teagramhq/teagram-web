@@ -139,6 +139,7 @@ const ADDITIONAL_ALIASES = {
 };
 
 const TARGET_SPECIFIC_ALIASES = mtprotoTarget.mode === 'private' ? {
+  '@appManagers/apiManager': resolve(rootDir, 'src/lib/appManagers/PrivateApiManager.ts'),
   '@/pages/cards/SignInCard': resolve(rootDir, 'src/pages/cards/PrivateSignInCard.tsx'),
   '@/pages/cards/PasswordCard': resolve(rootDir, 'src/pages/cards/PrivatePasswordCard.tsx')
 } : {};
