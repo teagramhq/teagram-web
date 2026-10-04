@@ -635,7 +635,7 @@ export class ApiManager extends ApiManagerMethods {
       const startTime = Date.now();
       const interval = ctx.setInterval(() => {
         if(!cachedNetworker || !cachedNetworker.isStopped()) {
-          this.log.error('Request is still processing:', method, params, options, 'time:', (Date.now() - startTime) / 1000);
+          this.log.error('Request is still processing:', method, __MTPROTO_PRIVATE__ && String(method).startsWith('auth.') ? '[REDACTED]' : params, options, 'time:', (Date.now() - startTime) / 1000);
         }
         // this.cachedUploadNetworkers[2].requestMessageStatus();
       }, 5e3);
@@ -707,7 +707,7 @@ export class ApiManager extends ApiManagerMethods {
       return promise.catch((error: ApiError) => {
         // if(!options.ignoreErrors) {
         if(error.type !== 'FILE_REFERENCE_EXPIRED' && error.type !== 'FILE_REFERENCE_INVALID'/*  && error.type !== 'MSG_WAIT_FAILED' */) {
-          this.log.error('Error', error.code, error.type, this.baseDcId, dcId, method, params);
+          this.log.error('Error', error.code, error.type, this.baseDcId, dcId, method, __MTPROTO_PRIVATE__ && String(method).startsWith('auth.') ? '[REDACTED]' : params);
         }
 
         if(error.code === 401 && this.baseDcId === dcId) {

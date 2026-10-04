@@ -4,15 +4,25 @@ import {render} from 'solid-js/web';
 const mocks = vi.hoisted(() => ({
   getState: vi.fn(),
   check: vi.fn(),
+  requestRecovery: vi.fn(),
+  deleteAccount: vi.fn(),
   pushToState: vi.fn(),
   navigate: vi.fn(),
-  toIm: vi.fn()
+  toIm: vi.fn(),
+  showConfirmation: vi.fn(),
+  anchorCallback: vi.fn(),
+  toastNew: vi.fn()
 }));
 
 vi.mock('@/pages/authFlow', () => ({
   useAuthFlow: () => ({
     managers: {
-      passwordManager: {getState: mocks.getState, check: mocks.check},
+      passwordManager: {
+        getState: mocks.getState,
+        check: mocks.check,
+        requestRecovery: mocks.requestRecovery
+      },
+      appAccountManager: {deleteAccount: mocks.deleteAccount},
       appStateManager: {pushToState: mocks.pushToState}
     },
     navigate: mocks.navigate,
@@ -64,10 +74,10 @@ vi.mock('@components/passwordInputField', () => ({
   }
 }));
 
-vi.mock('@components/popups/simpleConfirmation', () => ({SimpleConfirmationPopup: {show: vi.fn()}}));
-vi.mock('@components/toast', () => ({toastNew: vi.fn()}));
+vi.mock('@components/popups/simpleConfirmation', () => ({SimpleConfirmationPopup: {show: mocks.showConfirmation}}));
+vi.mock('@components/toast', () => ({toastNew: mocks.toastNew}));
 vi.mock('@components/wrappers/wrapDuration', () => ({wrapFormattedDuration: vi.fn()}));
-vi.mock('@helpers/dom/anchorCallback', () => ({default: vi.fn(() => vi.fn())}));
+vi.mock('@helpers/dom/anchorCallback', () => ({default: mocks.anchorCallback}));
 vi.mock('@helpers/dom/focusWhenConnected', () => ({default: vi.fn(() => () => {})}));
 vi.mock('@helpers/dom/htmlToSpan', () => ({default: vi.fn()}));
 vi.mock('@helpers/formatDuration', () => ({default: vi.fn()}));
@@ -96,9 +106,14 @@ describe('private password card', () => {
   beforeEach(() => {
     mocks.getState.mockReset().mockResolvedValue({hint: ''});
     mocks.check.mockReset().mockRejectedValue({type: 'PASSWORD_HASH_INVALID'});
+    mocks.requestRecovery.mockReset().mockResolvedValue({email_pattern: 'a***@example.test'});
+    mocks.deleteAccount.mockReset().mockResolvedValue(undefined);
     mocks.pushToState.mockReset();
     mocks.navigate.mockReset();
     mocks.toIm.mockReset();
+    mocks.showConfirmation.mockReset().mockResolvedValue(undefined);
+    mocks.anchorCallback.mockReset().mockImplementation(() => vi.fn());
+    mocks.toastNew.mockReset();
     clearPrivateUsernameLogin();
   });
 
@@ -148,6 +163,26 @@ describe('private password card', () => {
 
     expect(mocks.toIm).toHaveBeenCalledOnce();
     expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('does not log a raw account reset failure from the private password flow', async() => {
+    markPrivateUsernameLogin();
+    await mount();
+    mocks.requestRecovery.mockRejectedValue({type: 'PASSWORD_RECOVERY_NA'});
+    const resetError = {type: 'ACCOUNT_RESET_FAILED', code: 500, phone_number: 'Alice_123'};
+    mocks.deleteAccount.mockRejectedValue(resetError);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onForgotPassword = mocks.anchorCallback.mock.calls[0]?.[0] as (() => void) | undefined;
+
+    expect(onForgotPassword).toBeTypeOf('function');
+    onForgotPassword!();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mocks.deleteAccount).toHaveBeenCalledWith('Forgot password');
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain('Alice_123');
+    expect(consoleError.mock.calls.flat()).not.toContain(resetError);
+    expect(mocks.toastNew).toHaveBeenCalledOnce();
+    consoleError.mockRestore();
   });
 
   it('clears the transient username-flow marker when password card is cancelled', async() => {

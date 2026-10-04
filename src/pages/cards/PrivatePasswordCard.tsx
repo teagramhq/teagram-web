@@ -110,7 +110,7 @@ export default function PasswordCard(_props: {spec: Spec}) {
                 button: {langKey: 'OK'}
               });
             } else {
-              console.error(err);
+              console.error('Account reset failed');
               toastNew({langPackKey: 'Error.AnError'});
             }
           });
