@@ -54,14 +54,26 @@ async function capturePrivateRpcResponse(result: any) {
 
   Object.assign(networker, {
     sentMessages: {'auth-response-request-id': sentMessage},
+    lastServerMessages: new Set(),
     ackMessage: vi.fn(),
     processResentReqMessage: vi.fn()
   });
 
+  const inboundContainer = {
+    _: 'msg_container',
+    messages: [{
+      _: 'message',
+      msg_id: '00000000000000000004',
+      seqno: 1,
+      bytes: 64,
+      body: {_: 'rpc_result', req_msg_id: sentMessage.msg_id, result}
+    }]
+  };
+
   setLogBufferEnabled(true);
   try {
     await manager.getNetworker(2);
-    networker.processMessage({_: 'rpc_result', req_msg_id: sentMessage.msg_id, result}, '00000000000000000002', new Uint8Array(8));
+    networker.processMessage(inboundContainer, '00000000000000000002', new Uint8Array(8));
     const responseLog = consoleLog.mock.calls.find((args) => args.includes(result._ === 'rpc_error' ? 'rpc error' : 'rpc result'));
 
     return {
@@ -69,6 +81,7 @@ async function capturePrivateRpcResponse(result: any) {
       bufferedOutput: JSON.stringify(getLogEntries()),
       responseLog,
       requestBody,
+      inboundContainer,
       sentMessage,
       deferred
     };
@@ -183,7 +196,7 @@ describe.skipIf(!__MTPROTO_PRIVATE__)('private username auth logging and retries
     }
   });
 
-  it('redacts acknowledged auth request bodies and usernames from real successful rpc_result logs', async() => {
+  it('redacts usernames from real successful inbound msg_container logs', async() => {
     const result = {_: 'auth.authorization', user: {id: 123, username: 'Alice_123'}};
     const capture = await capturePrivateRpcResponse(result);
 
@@ -195,13 +208,14 @@ describe.skipIf(!__MTPROTO_PRIVATE__)('private username auth logging and retries
     expect(capture.bufferedOutput).toContain('"username":"[REDACTED]"');
     expect(capture.consoleOutput).toContain('[REDACTED]');
     expect(capture.bufferedOutput).toContain('[REDACTED]');
+    expect(capture.inboundContainer.messages[0].body.result.user.username).toBe('Alice_123');
     expect(result.user.username).toBe('Alice_123');
     expect(capture.deferred.resolve).toHaveBeenCalledWith(result);
     expect(capture.sentMessage.acked).toBe(true);
     expect(capture.sentMessage.body).toBe(capture.requestBody);
   });
 
-  it('redacts auth request bodies and raw errors from real failing rpc_result logs', async() => {
+  it('redacts auth request bodies and errors from real failing inbound msg_container logs', async() => {
     const result = {_: 'rpc_error', error_code: 401, error_message: 'SESSION_PASSWORD_NEEDED:private-auth-error-detail'};
     const capture = await capturePrivateRpcResponse(result);
 
@@ -209,6 +223,7 @@ describe.skipIf(!__MTPROTO_PRIVATE__)('private username auth logging and retries
     expect(capture.bufferedOutput).not.toContain(capture.requestBody);
     expect(capture.consoleOutput).not.toContain('private-auth-error-detail');
     expect(capture.bufferedOutput).not.toContain('private-auth-error-detail');
+    expect(capture.inboundContainer.messages[0].body.result.error_message).toBe('SESSION_PASSWORD_NEEDED:private-auth-error-detail');
     expect(capture.responseLog?.some((value) => value instanceof Error)).toBe(false);
     expect(capture.deferred.reject).toHaveBeenCalledWith(expect.objectContaining({type: 'SESSION_PASSWORD_NEEDED'}));
     expect(capture.sentMessage.acked).toBe(true);

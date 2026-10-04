@@ -40,6 +40,10 @@ function containsAuthRequest(
 
   if(isAuthRequest(message)) return true;
 
+  if(message._ === 'message' && containsAuthRequest(message.body, sentMessages, visited, visitedIds)) {
+    return true;
+  }
+
   if(typeof message.req_msg_id === 'string' && !visitedIds.has(message.req_msg_id)) {
     visitedIds.add(message.req_msg_id);
     if(containsAuthRequest(sentMessages[message.req_msg_id], sentMessages, visited, visitedIds)) return true;
@@ -94,6 +98,10 @@ function redactPrivateLogValue(value: any, sentMessages: NetworkerWithLogger['se
 
   if(isAuthRequest(value) || (value.container && containsAuthRequest(value, sentMessages))) {
     return {...value, body: '[REDACTED]'};
+  }
+
+  if(authContext && value._ === 'message' && containsAuthRequest(value.body, sentMessages)) {
+    return {...value, body: redactPrivateLogValue(value.body, sentMessages, true)};
   }
 
   if(authContext && typeof value._ === 'string' && value._.startsWith('auth.')) {
