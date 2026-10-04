@@ -1338,20 +1338,9 @@ describe('private target diagnostics', () => {
     const requestWorkflowCommit = currentCommit();
     const diagnosticWorkflowCommit = 'e'.repeat(40);
     const requestRunId = '37141749542';
-    const attestationBlob = execFileSync('git', [
-      'rev-parse', '--verify', `${requestWorkflowCommit}:${REVIEWED_PRIVATE_TARGET}`
-    ], {
-      cwd: repositoryRoot,
-      encoding: 'utf8'
-    }).trim();
-    const keyFileBlob = execFileSync('git', [
-      'rev-parse', '--verify', `${requestWorkflowCommit}:scripts/fixtures/private-mtproto-public.pem`
-    ], {
-      cwd: repositoryRoot,
-      encoding: 'utf8'
-    }).trim();
-    expect(attestationBlob).toBe('bd985171365ec77b3ecbe0fc1b6faf46b4ab2311');
-    expect(keyFileBlob).toBe('e857e9c678defbf442e192fe9cbc6cd66589c734');
+    const sourceProvenance = diagnosticSourceProvenance(requestWorkflowCommit);
+    expectDiagnosticSourceProvenance(sourceProvenance);
+    const {attestationBlob, keyFileBlob} = sourceProvenance;
     const result = spawnSync(process.execPath, [
       'scripts/private-artifact-release.mjs',
       'diagnose-target',
@@ -1391,6 +1380,219 @@ describe('private target diagnostics', () => {
       `keyFileBlob=${keyFileBlob}`,
       'targetRef=refs/heads/master'
     ].join('\n') + '\n');
+    expect(readFileSync(outputPath, 'utf8')).toBe('');
+  });
+
+  it('reports exact provenance for a valid reviewed source that differs from HEAD', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'private-target-diagnostic-reviewed-source-'));
+    temporaryDirectories.push(directory);
+    const requestPath = join(directory, 'request.json');
+    const outputPath = join(directory, 'github-output');
+    const requestContents = JSON.stringify({targetRef: 'refs/heads/master'});
+    writeFileSync(requestPath, requestContents);
+    writeFileSync(outputPath, '');
+
+    const fixture = reviewedFixtureForDiagnostic(directory);
+    const {tree, gitEnvironment} = privateTargetTreeWithOverrides(
+      directory,
+      fixture.endpoint,
+      fixture.keyContents,
+      {
+        baseCommit: fixture.baseCommit,
+        keyPath: fixture.keyPath,
+        fingerprint: fixture.fingerprint
+      }
+    );
+    const headProvenance = diagnosticSourceProvenance(fixture.baseCommit);
+    const sourceProvenance = diagnosticSourceProvenance(tree, gitEnvironment);
+    expectDiagnosticSourceProvenance(headProvenance);
+    expectDiagnosticSourceProvenance(sourceProvenance);
+    expect(sourceProvenance.attestationBlob).not.toBe(headProvenance.attestationBlob);
+    expect(sourceProvenance.keyFileBlob).not.toBe(headProvenance.keyFileBlob);
+
+    const diagnosticWorkflowCommit = 'e'.repeat(40);
+    const requestRunId = '37141749542';
+    const result = spawnSync(process.execPath, [
+      'scripts/private-artifact-release.mjs',
+      'diagnose-target',
+      '--request', requestPath,
+      '--workflow-commit', tree
+    ], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ...gitEnvironment,
+        GITHUB_SHA: diagnosticWorkflowCommit,
+        PRIVATE_ARTIFACT_REQUEST_RUN_ID: requestRunId,
+        GITHUB_OUTPUT: outputPath,
+        ImageOS: 'ubuntu26',
+        ImageVersion: '20260927.149.1'
+      }
+    });
+    const requestSha256 = createHash('sha256').update(requestContents).digest('hex');
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe([
+      'failureCode=NONE',
+      'imageOS=ubuntu26',
+      'imageVersion=20260927.149.1',
+      `node=${process.version}`,
+      `openssl=${process.versions.openssl}`,
+      `diagnosticWorkflowCommit=${diagnosticWorkflowCommit}`,
+      `requestWorkflowCommit=${tree}`,
+      `sourceCommit=${tree}`,
+      `requestRunId=${requestRunId}`,
+      `requestSha256=${requestSha256}`,
+      `attestationBlob=${sourceProvenance.attestationBlob}`,
+      `keyFileBlob=${sourceProvenance.keyFileBlob}`,
+      'targetRef=refs/heads/master'
+    ].join('\n') + '\n');
+    expect(result.stdout).not.toContain(fixture.endpoint);
+    expect(result.stdout).not.toContain(fixture.keyContents.toString('utf8'));
+    expect(readFileSync(outputPath, 'utf8')).toBe('');
+  });
+
+  it('rejects a reviewed key digest mismatch without leaking provenance details', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'private-target-diagnostic-key-digest-'));
+    temporaryDirectories.push(directory);
+    const requestPath = join(directory, 'request.json');
+    const outputPath = join(directory, 'github-output');
+    const requestContents = JSON.stringify({targetRef: 'refs/heads/master'});
+    writeFileSync(requestPath, requestContents);
+    writeFileSync(outputPath, '');
+
+    const fixture = reviewedFixtureForDiagnostic(directory);
+    const {tree, targetBlob, keyBlob, gitEnvironment} = privateTargetTreeWithOverrides(
+      directory,
+      fixture.endpoint,
+      fixture.keyContents,
+      {
+        baseCommit: fixture.baseCommit,
+        keyPath: fixture.keyPath,
+        fingerprint: fixture.fingerprint,
+        publicKeySha256: '0'.repeat(64)
+      }
+    );
+    const sourceProvenance = diagnosticSourceProvenance(tree, gitEnvironment);
+    expect(sourceProvenance.attestationBlob).toBe(targetBlob);
+    expect(sourceProvenance.keyFileBlob).toBe(keyBlob);
+    expect(execFileSync('git', ['hash-object', '--stdin'], {
+      cwd: repositoryRoot,
+      env: {...process.env, ...gitEnvironment},
+      input: sourceProvenance.attestationContents
+    }).toString().trim()).toBe(sourceProvenance.attestationBlob);
+    expect(execFileSync('git', ['hash-object', '--stdin'], {
+      cwd: repositoryRoot,
+      env: {...process.env, ...gitEnvironment},
+      input: sourceProvenance.keyContents
+    }).toString().trim()).toBe(sourceProvenance.keyFileBlob);
+    expect(createHash('sha256').update(sourceProvenance.keyContents).digest('hex'))
+      .not.toBe(sourceProvenance.attestation.publicKeySha256);
+    expect(() => expectDiagnosticSourceProvenance(sourceProvenance)).toThrow();
+
+    const diagnosticWorkflowCommit = 'e'.repeat(40);
+    const requestRunId = '37141749542';
+    const result = spawnSync(process.execPath, [
+      'scripts/private-artifact-release.mjs',
+      'diagnose-target',
+      '--request', requestPath,
+      '--workflow-commit', tree
+    ], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ...gitEnvironment,
+        GITHUB_SHA: diagnosticWorkflowCommit,
+        PRIVATE_ARTIFACT_REQUEST_RUN_ID: requestRunId,
+        GITHUB_OUTPUT: outputPath,
+        ImageOS: 'ubuntu26',
+        ImageVersion: '20260927.149.1'
+      }
+    });
+    const requestSha256 = createHash('sha256').update(requestContents).digest('hex');
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe([
+      'failureCode=UNKNOWN',
+      'imageOS=ubuntu26',
+      'imageVersion=20260927.149.1',
+      `node=${process.version}`,
+      `openssl=${process.versions.openssl}`,
+      `diagnosticWorkflowCommit=${diagnosticWorkflowCommit}`,
+      `requestWorkflowCommit=${tree}`,
+      `sourceCommit=${tree}`,
+      `requestRunId=${requestRunId}`,
+      `requestSha256=${requestSha256}`,
+      `attestationBlob=${sourceProvenance.attestationBlob}`,
+      `keyFileBlob=${sourceProvenance.keyFileBlob}`,
+      'targetRef=refs/heads/master'
+    ].join('\n') + '\n');
+    expect(result.stdout).not.toContain(fixture.endpoint);
+    expect(result.stdout).not.toContain(fixture.keyContents.toString('utf8'));
+    for(const line of result.stdout.trimEnd().split('\n')) {
+      expect(linePatterns.some((pattern) => pattern.test(line))).toBe(true);
+    }
+    expect(readFileSync(outputPath, 'utf8')).toBe('');
+  });
+
+  it('rejects an invalid workflow source without substituting HEAD provenance', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'private-target-diagnostic-invalid-source-'));
+    temporaryDirectories.push(directory);
+    const requestPath = join(directory, 'request.json');
+    const outputPath = join(directory, 'github-output');
+    const requestContents = JSON.stringify({targetRef: 'refs/heads/master'});
+    writeFileSync(requestPath, requestContents);
+    writeFileSync(outputPath, '');
+    const workflowCommit = 'not-a-commit';
+    const headProvenance = diagnosticSourceProvenance(currentCommit());
+    const diagnosticWorkflowCommit = 'e'.repeat(40);
+    const requestRunId = '37141749542';
+    const result = spawnSync(process.execPath, [
+      'scripts/private-artifact-release.mjs',
+      'diagnose-target',
+      '--request', requestPath,
+      '--workflow-commit', workflowCommit
+    ], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GITHUB_SHA: diagnosticWorkflowCommit,
+        PRIVATE_ARTIFACT_REQUEST_RUN_ID: requestRunId,
+        GITHUB_OUTPUT: outputPath,
+        ImageOS: 'ubuntu26',
+        ImageVersion: '20260927.149.1'
+      }
+    });
+    const requestSha256 = createHash('sha256').update(requestContents).digest('hex');
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe([
+      'failureCode=UNKNOWN',
+      'imageOS=ubuntu26',
+      'imageVersion=20260927.149.1',
+      `node=${process.version}`,
+      `openssl=${process.versions.openssl}`,
+      `diagnosticWorkflowCommit=${diagnosticWorkflowCommit}`,
+      'requestWorkflowCommit=invalid',
+      'sourceCommit=invalid',
+      `requestRunId=${requestRunId}`,
+      `requestSha256=${requestSha256}`,
+      'attestationBlob=invalid',
+      'keyFileBlob=invalid',
+      'targetRef=refs/heads/master'
+    ].join('\n') + '\n');
+    expect(result.stdout).not.toContain(headProvenance.sourceCommit);
+    expect(result.stdout).not.toContain(headProvenance.attestationBlob);
+    expect(result.stdout).not.toContain(headProvenance.keyFileBlob);
+    for(const line of result.stdout.trimEnd().split('\n')) {
+      expect(linePatterns.some((pattern) => pattern.test(line))).toBe(true);
+    }
     expect(readFileSync(outputPath, 'utf8')).toBe('');
   });
 
@@ -1661,6 +1863,67 @@ function currentCommit() {
   }).trim();
 }
 
+function reviewedFixtureForDiagnostic(directory, baseCommit = currentCommit()) {
+  const keyPath = 'scripts/fixtures/private-mtproto-public.pem';
+  const keyContents = execFileSync('git', ['cat-file', 'blob', `${baseCommit}:${keyPath}`], {
+    cwd: repositoryRoot
+  });
+  const endpoint = 'wss://diagnostic-reviewed.example.test/apiws';
+  const keyFilePath = join(directory, 'reviewed-fixture-public.pem');
+  writeFileSync(keyFilePath, keyContents);
+  const {fingerprint} = resolveMtprotoTarget({
+    MTPROTO_TARGET_MODE: 'private',
+    MTPROTO_PRIVATE_ENDPOINT: endpoint,
+    MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: keyFilePath
+  });
+
+  return {baseCommit, endpoint, fingerprint, keyContents, keyPath};
+}
+
+function diagnosticSourceProvenance(sourceCommit, gitEnvironment = {}) {
+  const gitOptions = {
+    cwd: repositoryRoot,
+    env: {...process.env, ...gitEnvironment}
+  };
+  const attestationContents = execFileSync('git', [
+    'show', `${sourceCommit}:${REVIEWED_PRIVATE_TARGET}`
+  ], gitOptions);
+  const attestation = JSON.parse(attestationContents.toString('utf8'));
+  const keyPath = attestation.MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE;
+  const attestationBlob = execFileSync('git', [
+    'rev-parse', '--verify', `${sourceCommit}:${REVIEWED_PRIVATE_TARGET}`
+  ], {
+    ...gitOptions,
+    encoding: 'utf8'
+  }).trim();
+  const keyFileBlob = execFileSync('git', [
+    'rev-parse', '--verify', `${sourceCommit}:${keyPath}`
+  ], {
+    ...gitOptions,
+    encoding: 'utf8'
+  }).trim();
+  const keyContents = execFileSync('git', ['cat-file', 'blob', `${sourceCommit}:${keyPath}`], {
+    ...gitOptions
+  });
+
+  return {attestation, attestationBlob, attestationContents, gitEnvironment, keyContents, keyFileBlob, keyPath};
+}
+
+function expectDiagnosticSourceProvenance(source) {
+  expect(execFileSync('git', ['hash-object', '--stdin'], {
+    cwd: repositoryRoot,
+    env: {...process.env, ...source.gitEnvironment},
+    input: source.attestationContents
+  }).toString().trim()).toBe(source.attestationBlob);
+  expect(createHash('sha256').update(source.keyContents).digest('hex'))
+    .toBe(source.attestation.publicKeySha256);
+  expect(execFileSync('git', ['hash-object', '--stdin'], {
+    cwd: repositoryRoot,
+    env: {...process.env, ...source.gitEnvironment},
+    input: source.keyContents
+  }).toString().trim()).toBe(source.keyFileBlob);
+}
+
 function previousTargetTree(directory) {
   const gitDirectory = join(directory, 'previous-target.git');
   execFileSync('git', ['init', '--bare', '--quiet', gitDirectory], {cwd: repositoryRoot});
@@ -1691,7 +1954,12 @@ function previousTargetTree(directory) {
   };
 }
 
-function privateTargetTreeWithOverrides(directory, endpoint, keyContents) {
+function privateTargetTreeWithOverrides(directory, endpoint, keyContents, {
+  baseCommit = currentCommit(),
+  keyPath = 'ci/canary-private-target-public.pem',
+  fingerprint,
+  publicKeySha256
+} = {}) {
   const gitDirectory = join(directory, 'diagnostic-target.git');
   execFileSync('git', ['init', '--bare', '--quiet', gitDirectory], {cwd: repositoryRoot});
   const repositoryObjectDirectory = resolve(repositoryRoot, execFileSync('git', ['rev-parse', '--git-path', 'objects'], {
@@ -1708,10 +1976,16 @@ function privateTargetTreeWithOverrides(directory, endpoint, keyContents) {
     encoding: 'utf8',
     env: {...process.env, ...gitEnvironment}
   };
-  const reviewedTarget = JSON.parse(readFileSync(join(repositoryRoot, REVIEWED_PRIVATE_TARGET), 'utf8'));
+  const reviewedTarget = JSON.parse(execFileSync('git', [
+    'show', `${baseCommit}:${REVIEWED_PRIVATE_TARGET}`
+  ], {
+    cwd: repositoryRoot,
+    encoding: 'utf8'
+  }));
   reviewedTarget.MTPROTO_PRIVATE_ENDPOINT = endpoint;
-  reviewedTarget.MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE = 'ci/canary-private-target-public.pem';
-  reviewedTarget.publicKeySha256 = createHash('sha256').update(keyContents).digest('hex');
+  reviewedTarget.MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE = keyPath;
+  if(fingerprint !== undefined) reviewedTarget.fingerprint = fingerprint;
+  reviewedTarget.publicKeySha256 = publicKeySha256 ?? createHash('sha256').update(keyContents).digest('hex');
   const targetBlob = execFileSync('git', ['hash-object', '-w', '--stdin'], {
     ...gitOptions,
     input: JSON.stringify(reviewedTarget, null, 2) + '\n'
@@ -1720,10 +1994,9 @@ function privateTargetTreeWithOverrides(directory, endpoint, keyContents) {
     ...gitOptions,
     input: keyContents
   }).trim();
-  const baseCommit = currentCommit();
   execFileSync('git', ['read-tree', baseCommit], gitOptions);
   execFileSync('git', ['update-index', '--add', '--cacheinfo', `100644,${targetBlob},${REVIEWED_PRIVATE_TARGET}`], gitOptions);
-  execFileSync('git', ['update-index', '--add', '--cacheinfo', `100644,${keyBlob},ci/canary-private-target-public.pem`], gitOptions);
+  execFileSync('git', ['update-index', '--add', '--cacheinfo', `100644,${keyBlob},${keyPath}`], gitOptions);
   const tree = execFileSync('git', ['write-tree'], gitOptions).trim();
 
   return {tree, targetBlob, keyBlob, gitEnvironment};
