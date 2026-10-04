@@ -58,6 +58,30 @@ function containsAuthRequest(
   ));
 }
 
+function redactAuthResponseValue(value: any, visited = new WeakMap<object, any>()): any {
+  if(!value || typeof value !== 'object') return value;
+
+  const existing = visited.get(value);
+  if(existing) return existing;
+
+  if(Array.isArray(value)) {
+    const redacted: any[] = [];
+    visited.set(value, redacted);
+    value.forEach((item) => redacted.push(redactAuthResponseValue(item, visited)));
+    return redacted;
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  if(prototype !== Object.prototype && prototype !== null) return value;
+
+  const redacted = Object.create(prototype);
+  visited.set(value, redacted);
+  Object.keys(value).forEach((key) => {
+    redacted[key] = key === 'username' ? '[REDACTED]' : redactAuthResponseValue(value[key], visited);
+  });
+  return redacted;
+}
+
 function redactPrivateLogValue(value: any, sentMessages: NetworkerWithLogger['sentMessages'], authContext: boolean): any {
   if(!value || typeof value !== 'object') return value;
   if(value instanceof Error && authContext) {
@@ -70,6 +94,10 @@ function redactPrivateLogValue(value: any, sentMessages: NetworkerWithLogger['se
 
   if(isAuthRequest(value) || (value.container && containsAuthRequest(value, sentMessages))) {
     return {...value, body: '[REDACTED]'};
+  }
+
+  if(authContext && typeof value._ === 'string' && value._.startsWith('auth.')) {
+    return redactAuthResponseValue(value);
   }
 
   if(value._ === 'rpc_error' && authContext) {

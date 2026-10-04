@@ -183,14 +183,19 @@ describe.skipIf(!__MTPROTO_PRIVATE__)('private username auth logging and retries
     }
   });
 
-  it('redacts acknowledged auth request bodies from real successful rpc_result logs', async() => {
-    const result = {_: 'auth.sentCode', phone_code_hash: 'safe-response-hash'};
+  it('redacts acknowledged auth request bodies and usernames from real successful rpc_result logs', async() => {
+    const result = {_: 'auth.authorization', user: {id: 123, username: 'Alice_123'}};
     const capture = await capturePrivateRpcResponse(result);
 
     expect(capture.consoleOutput).not.toContain(capture.requestBody);
     expect(capture.bufferedOutput).not.toContain(capture.requestBody);
+    expect(capture.consoleOutput).not.toContain('Alice_123');
+    expect(capture.bufferedOutput).not.toContain('Alice_123');
+    expect(JSON.stringify(capture.responseLog)).toContain('"username":"[REDACTED]"');
+    expect(capture.bufferedOutput).toContain('"username":"[REDACTED]"');
     expect(capture.consoleOutput).toContain('[REDACTED]');
     expect(capture.bufferedOutput).toContain('[REDACTED]');
+    expect(result.user.username).toBe('Alice_123');
     expect(capture.deferred.resolve).toHaveBeenCalledWith(result);
     expect(capture.sentMessage.acked).toBe(true);
     expect(capture.sentMessage.body).toBe(capture.requestBody);
