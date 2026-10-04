@@ -23,38 +23,96 @@ function redactAuthCallArgs(args: any[]) {
   return [args[0], args[1], '[REDACTED]', '[REDACTED]', '[REDACTED]'];
 }
 
-function containsAuthRequest(message: any, sentMessages: NetworkerWithLogger['sentMessages'], visited = new Set<string>()): boolean {
-  if(!message || typeof message !== 'object') return false;
-  if(typeof message.humanReadable === 'string' && message.humanReadable.startsWith('auth.')) return true;
-  if(!message.container || !Array.isArray(message.inner)) return false;
-
-  return message.inner.some((messageId: string) => {
-    if(visited.has(messageId)) return false;
-    visited.add(messageId);
-    return containsAuthRequest(sentMessages[messageId], sentMessages, visited);
-  });
+function isAuthRequest(message: any) {
+  return !!message && typeof message === 'object' && typeof message.humanReadable === 'string' && message.humanReadable.startsWith('auth.');
 }
 
-function redactAuthMessageArgs(args: any[], sentMessages: NetworkerWithLogger['sentMessages']) {
-  const message = args[1];
-  if(args[0] !== 'sending' || !containsAuthRequest(message, sentMessages)) {
-    return args;
+function containsAuthRequest(
+  message: any,
+  sentMessages: NetworkerWithLogger['sentMessages'],
+  visited = new WeakSet<object>(),
+  visitedIds = new Set<string>()
+): boolean {
+  if(!message || typeof message !== 'object') return false;
+  if(visited.has(message)) return false;
+  visited.add(message);
+  if(Array.isArray(message)) return message.some((value) => containsAuthRequest(value, sentMessages, visited, visitedIds));
+
+  if(isAuthRequest(message)) return true;
+
+  if(typeof message.req_msg_id === 'string' && !visitedIds.has(message.req_msg_id)) {
+    visitedIds.add(message.req_msg_id);
+    if(containsAuthRequest(sentMessages[message.req_msg_id], sentMessages, visited, visitedIds)) return true;
   }
 
-  return [args[0], {...message, body: '[REDACTED]'}, ...args.slice(2)];
+  if(message.container && Array.isArray(message.inner) && message.inner.some((messageId: string) => {
+    if(visitedIds.has(messageId)) return false;
+    visitedIds.add(messageId);
+    return containsAuthRequest(sentMessages[messageId], sentMessages, visited, visitedIds);
+  })) {
+    return true;
+  }
+
+  return message._ === 'msg_container' && Array.isArray(message.messages) && message.messages.some((innerMessage: any) => (
+    containsAuthRequest(innerMessage, sentMessages, visited, visitedIds)
+  ));
 }
 
-function wrapPrivateAuthLogger(boundLogger: Logger, prefix: string, sentMessages: NetworkerWithLogger['sentMessages']): Logger {
-  const redactArgs = prefix === 'wrapApiCall' ? redactAuthCallArgs : (args: any[]) => redactAuthMessageArgs(args, sentMessages);
+function redactPrivateLogValue(value: any, sentMessages: NetworkerWithLogger['sentMessages'], authContext: boolean): any {
+  if(!value || typeof value !== 'object') return value;
+  if(value instanceof Error && authContext) {
+    const errorType = (value as Error & {type?: string}).type;
+    return typeof errorType === 'string' ? {type: errorType} : {name: value.name};
+  }
+  if(authContext && typeof value.type === 'string' && ('message' in value || 'code' in value || 'originalError' in value)) {
+    return {type: value.type};
+  }
+
+  if(isAuthRequest(value) || (value.container && containsAuthRequest(value, sentMessages))) {
+    return {...value, body: '[REDACTED]'};
+  }
+
+  if(value._ === 'rpc_error' && authContext) {
+    return {...value, error_message: '[REDACTED]'};
+  }
+
+  if(value._ === 'rpc_result' && containsAuthRequest(value, sentMessages)) {
+    return {...value, result: redactPrivateLogValue(value.result, sentMessages, true)};
+  }
+
+  if(value._ === 'msg_container' && Array.isArray(value.messages) && containsAuthRequest(value, sentMessages)) {
+    return {...value, messages: value.messages.map((message: any) => redactPrivateLogValue(message, sentMessages, true))};
+  }
+
+  if(Array.isArray(value)) {
+    return value.map((item) => redactPrivateLogValue(item, sentMessages, authContext));
+  }
+
+  return value;
+}
+
+function redactPrivateLogArgs(args: any[], sentMessages: NetworkerWithLogger['sentMessages']) {
+  const hasAuthRequest = args.some((value) => containsAuthRequest(value, sentMessages));
+  const authCallArgs = redactAuthCallArgs(args);
+  if(!hasAuthRequest) return authCallArgs;
+
+  return authCallArgs.map((value, index) => index === 0 ? value : redactPrivateLogValue(value, sentMessages, true));
+}
+
+function wrapPrivateNetworkerLogger(boundLogger: Logger, sentMessages: NetworkerWithLogger['sentMessages']): Logger {
   return new Proxy(boundLogger, {
     apply(target, thisArg, args) {
-      return Reflect.apply(target, thisArg, redactArgs(args));
+      return Reflect.apply(target, thisArg, redactPrivateLogArgs(args, sentMessages));
     },
     get(target, property, receiver) {
       const member = Reflect.get(target, property, receiver);
       if(typeof member !== 'function') return member;
 
-      return (...args: any[]) => Reflect.apply(member, target, redactArgs(args));
+      if(property === 'bindPrefix') {
+        return (...args: any[]) => wrapPrivateNetworkerLogger(Reflect.apply(member, target, args), sentMessages);
+      }
+
+      return (...args: any[]) => Reflect.apply(member, target, redactPrivateLogArgs(args, sentMessages));
     }
   });
 }
@@ -65,19 +123,7 @@ function securePrivateNetworker(networker: MTPNetworker): MTPNetworker {
 
   const privateNetworker = networker as unknown as NetworkerWithLogger;
   const networkerLogger = privateNetworker.log;
-  const bindPrefix = networkerLogger.bindPrefix;
-  privateNetworker.log = new Proxy(networkerLogger, {
-    get(target, property, receiver) {
-      if(property !== 'bindPrefix') {
-        return Reflect.get(target, property, receiver);
-      }
-
-      return (prefix: string, ...args: any[]) => {
-        const boundLogger = Reflect.apply(bindPrefix, target, [prefix, ...args]);
-        return prefix === 'wrapApiCall' || prefix === 'sendEncryptedRequest' ? wrapPrivateAuthLogger(boundLogger, prefix, privateNetworker.sentMessages) : boundLogger;
-      };
-    }
-  });
+  privateNetworker.log = wrapPrivateNetworkerLogger(networkerLogger, privateNetworker.sentMessages);
 
   const wrapApiCall = privateNetworker.wrapApiCall;
   privateNetworker.wrapApiCall = function(method, params, options) {

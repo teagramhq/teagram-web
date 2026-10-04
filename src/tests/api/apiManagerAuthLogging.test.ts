@@ -27,9 +27,54 @@ function createNetworkerForCall() {
     connectionInited: true,
     timeManager: {generateId: () => '1234567890'},
     generateSeqNo: () => 1,
+    sentMessages: {},
     pushMessage: vi.fn(() => Promise.resolve({}))
   });
   return networker;
+}
+
+async function capturePrivateRpcResponse(result: any) {
+  const networker = createNetworkerForCall();
+  (networker as any).log = logger('NET-RPC-RESPONSE-TEST', LogTypes.Log | LogTypes.Error | LogTypes.Debug, true);
+  const {manager} = createPrivateManager(networker);
+  const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+  const consoleDebug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+  const originalBufferState = isLogBufferEnabled();
+  const requestBody = 'private-auth-rpc-body';
+  const deferred = {resolve: vi.fn(), reject: vi.fn()};
+  const sentMessage: any = {
+    msg_id: 'auth-response-request-id',
+    seq_no: 1,
+    body: requestBody,
+    humanReadable: 'auth.signIn',
+    isAPI: true,
+    resultType: 'Object',
+    deferred
+  };
+
+  Object.assign(networker, {
+    sentMessages: {'auth-response-request-id': sentMessage},
+    ackMessage: vi.fn(),
+    processResentReqMessage: vi.fn()
+  });
+
+  setLogBufferEnabled(true);
+  try {
+    await manager.getNetworker(2);
+    networker.processMessage({_: 'rpc_result', req_msg_id: sentMessage.msg_id, result}, '00000000000000000002', new Uint8Array(8));
+    const responseLog = consoleLog.mock.calls.find((args) => args.includes(result._ === 'rpc_error' ? 'rpc error' : 'rpc result'));
+
+    return {
+      consoleOutput: JSON.stringify({log: consoleLog.mock.calls, debug: consoleDebug.mock.calls}),
+      bufferedOutput: JSON.stringify(getLogEntries()),
+      responseLog,
+      requestBody,
+      sentMessage,
+      deferred
+    };
+  } finally {
+    setLogBufferEnabled(originalBufferState);
+  }
 }
 
 afterEach(() => {
@@ -133,6 +178,56 @@ describe.skipIf(!__MTPROTO_PRIVATE__)('private username auth logging and retries
       expect(bufferedCall?.args[1]).toMatchObject({container: true, body: '[REDACTED]'});
       expect(getEncryptedOutput).toHaveBeenCalledWith(message);
       expect(message.body).toBe('private-auth-container-body');
+    } finally {
+      setLogBufferEnabled(originalBufferState);
+    }
+  });
+
+  it('redacts acknowledged auth request bodies from real successful rpc_result logs', async() => {
+    const result = {_: 'auth.sentCode', phone_code_hash: 'safe-response-hash'};
+    const capture = await capturePrivateRpcResponse(result);
+
+    expect(capture.consoleOutput).not.toContain(capture.requestBody);
+    expect(capture.bufferedOutput).not.toContain(capture.requestBody);
+    expect(capture.consoleOutput).toContain('[REDACTED]');
+    expect(capture.bufferedOutput).toContain('[REDACTED]');
+    expect(capture.deferred.resolve).toHaveBeenCalledWith(result);
+    expect(capture.sentMessage.acked).toBe(true);
+    expect(capture.sentMessage.body).toBe(capture.requestBody);
+  });
+
+  it('redacts auth request bodies and raw errors from real failing rpc_result logs', async() => {
+    const result = {_: 'rpc_error', error_code: 401, error_message: 'SESSION_PASSWORD_NEEDED:private-auth-error-detail'};
+    const capture = await capturePrivateRpcResponse(result);
+
+    expect(capture.consoleOutput).not.toContain(capture.requestBody);
+    expect(capture.bufferedOutput).not.toContain(capture.requestBody);
+    expect(capture.consoleOutput).not.toContain('private-auth-error-detail');
+    expect(capture.bufferedOutput).not.toContain('private-auth-error-detail');
+    expect(capture.responseLog?.some((value) => value instanceof Error)).toBe(false);
+    expect(capture.deferred.reject).toHaveBeenCalledWith(expect.objectContaining({type: 'SESSION_PASSWORD_NEEDED'}));
+    expect(capture.sentMessage.acked).toBe(true);
+    expect(capture.sentMessage.body).toBe(capture.requestBody);
+  });
+
+  it('redacts auth messages nested in arguments to the root networker logger', async() => {
+    const networker = createNetworkerForCall();
+    (networker as any).log = logger('NET-ROOT-LOGGER-TEST', LogTypes.Error | LogTypes.Debug, true);
+    const {manager} = createPrivateManager(networker);
+    const requestNetworker = networker as any;
+    const consoleDebug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const originalBufferState = isLogBufferEnabled();
+    const message = {msg_id: 'nested-auth-message-id', humanReadable: 'auth.sendCode', body: 'nested-private-auth-body'};
+    requestNetworker.sentMessages = {};
+
+    setLogBufferEnabled(true);
+    try {
+      await manager.getNetworker(2);
+      requestNetworker.log.debug('nested request message', [message]);
+
+      expect(JSON.stringify(consoleDebug.mock.calls)).not.toContain(message.body);
+      expect(JSON.stringify(getLogEntries())).not.toContain(message.body);
+      expect(JSON.stringify(consoleDebug.mock.calls)).toContain('[REDACTED]');
     } finally {
       setLogBufferEnabled(originalBufferState);
     }
