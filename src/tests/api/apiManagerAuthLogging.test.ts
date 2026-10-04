@@ -158,6 +158,41 @@ describe.skipIf(!__MTPROTO_PRIVATE__)('private username auth logging and retries
     }
   });
 
+  it('redacts pending auth requests from transport-missing networker error logs', async() => {
+    const networker = createNetworkerForCall();
+    (networker as any).log = logger('NET-OFFLINE-TEST', LogTypes.Error);
+    const {manager} = createPrivateManager(networker);
+    const requestNetworker = networker as any;
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const originalBufferState = isLogBufferEnabled();
+    const requestBody = 'private-offline-auth-body';
+    const message = {
+      msg_id: 'offline-auth-message-id',
+      seq_no: 1,
+      humanReadable: 'auth.signIn',
+      body: requestBody
+    };
+
+    requestNetworker.sentMessages = {[message.msg_id]: message};
+    vi.spyOn(requestNetworker, 'getEncryptedOutput').mockResolvedValue(new Uint8Array([1, 2, 3]));
+
+    setLogBufferEnabled(true);
+    try {
+      await manager.getNetworker(2);
+      await expect(requestNetworker.sendEncryptedRequest(message)).rejects.toBeDefined();
+
+      const errorEntries = getLogEntries().filter((entry) => entry.args[0] === 'trying to send something when offline');
+      const loggedOutput = JSON.stringify({console: consoleError.mock.calls, buffer: errorEntries});
+      expect(loggedOutput).not.toContain(requestBody);
+      expect(loggedOutput).not.toContain(message.msg_id);
+      expect(loggedOutput).toContain('MTPNetworker');
+      expect(requestNetworker.sentMessages[message.msg_id]).toBe(message);
+      expect(message.body).toBe(requestBody);
+    } finally {
+      setLogBufferEnabled(originalBufferState);
+    }
+  });
+
   it('redacts encrypted containers that include private auth messages', async() => {
     const networker = createNetworkerForCall();
     (networker as any).log = logger('NET-CONTAINER-DEBUG-TEST', LogTypes.Error | LogTypes.Debug, true);

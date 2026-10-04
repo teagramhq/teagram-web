@@ -27,6 +27,11 @@ function isAuthRequest(message: any) {
   return !!message && typeof message === 'object' && typeof message.humanReadable === 'string' && message.humanReadable.startsWith('auth.');
 }
 
+function isNetworkerLogValue(value: any) {
+  return !!value && typeof value === 'object' && typeof value.wrapApiCall === 'function' &&
+    typeof value.generateSeqNo === 'function' && !!value.sentMessages && typeof value.sentMessages === 'object';
+}
+
 function containsAuthRequest(
   message: any,
   sentMessages: NetworkerWithLogger['sentMessages'],
@@ -88,6 +93,14 @@ function redactAuthResponseValue(value: any, visited = new WeakMap<object, any>(
 
 function redactPrivateLogValue(value: any, sentMessages: NetworkerWithLogger['sentMessages'], authContext: boolean): any {
   if(!value || typeof value !== 'object') return value;
+  if(isNetworkerLogValue(value)) {
+    return {
+      type: 'MTPNetworker',
+      transportAvailable: !!value.transport,
+      pendingMessageCount: Object.keys(value.sentMessages).length
+    };
+  }
+
   if(value instanceof Error && authContext) {
     const errorType = (value as Error & {type?: string}).type;
     return typeof errorType === 'string' ? {type: errorType} : {name: value.name};
@@ -130,9 +143,8 @@ function redactPrivateLogValue(value: any, sentMessages: NetworkerWithLogger['se
 function redactPrivateLogArgs(args: any[], sentMessages: NetworkerWithLogger['sentMessages']) {
   const hasAuthRequest = args.some((value) => containsAuthRequest(value, sentMessages));
   const authCallArgs = redactAuthCallArgs(args);
-  if(!hasAuthRequest) return authCallArgs;
 
-  return authCallArgs.map((value, index) => index === 0 ? value : redactPrivateLogValue(value, sentMessages, true));
+  return authCallArgs.map((value, index) => index === 0 ? value : redactPrivateLogValue(value, sentMessages, hasAuthRequest));
 }
 
 function wrapPrivateNetworkerLogger(boundLogger: Logger, sentMessages: NetworkerWithLogger['sentMessages']): Logger {
