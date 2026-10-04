@@ -68,6 +68,38 @@ describe.skipIf(!__MTPROTO_PRIVATE__)('private username auth logging and retries
     }
   });
 
+  it('redacts private auth message bodies in the encrypted-request debug log', async() => {
+    const networker = createNetworkerForCall();
+    (networker as any).log = logger('NET-DEBUG-TEST', LogTypes.Error | LogTypes.Debug, true);
+    const {manager} = createPrivateManager(networker);
+    const requestNetworker = networker as any;
+    const consoleDebug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const originalBufferState = isLogBufferEnabled();
+    const message = {
+      msg_id: '1234567890',
+      seq_no: 1,
+      humanReadable: 'auth.signIn',
+      body: 'private-auth-body'
+    };
+
+    vi.spyOn(requestNetworker, 'getEncryptedOutput').mockResolvedValue(new Uint8Array([1, 2, 3]));
+    Object.assign(networker, {transport: {send: vi.fn().mockResolvedValue(new Uint8Array([1]))}});
+
+    setLogBufferEnabled(true);
+    try {
+      await manager.getNetworker(2);
+      await requestNetworker.sendEncryptedRequest(message);
+
+      const debugCall = consoleDebug.mock.calls.find((args) => args.includes('sending'));
+      expect(debugCall?.[4]).toMatchObject({humanReadable: 'auth.signIn', body: '[REDACTED]'});
+
+      const bufferedCall = getLogEntries().find((entry) => entry.prefix.includes('sendEncryptedRequest'));
+      expect(bufferedCall?.args[1]).toMatchObject({humanReadable: 'auth.signIn', body: '[REDACTED]'});
+    } finally {
+      setLogBufferEnabled(originalBufferState);
+    }
+  });
+
   it('redacts the manager log for an expected SESSION_PASSWORD_NEEDED rejection', async() => {
     const logError = vi.fn();
     const wrapApiCall = vi.fn().mockRejectedValue({code: 401, type: 'SESSION_PASSWORD_NEEDED'});

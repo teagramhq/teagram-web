@@ -22,16 +22,26 @@ function redactAuthCallArgs(args: any[]) {
   return [args[0], args[1], '[REDACTED]', '[REDACTED]', '[REDACTED]'];
 }
 
-function wrapAuthCallLogger(boundLogger: Logger): Logger {
+function redactAuthMessageArgs(args: any[]) {
+  const message = args[1];
+  if(args[0] !== 'sending' || !message || typeof message !== 'object' || typeof message.humanReadable !== 'string' || !message.humanReadable.startsWith('auth.')) {
+    return args;
+  }
+
+  return [args[0], {...message, body: '[REDACTED]'}, ...args.slice(2)];
+}
+
+function wrapPrivateAuthLogger(boundLogger: Logger, prefix: string): Logger {
+  const redactArgs = prefix === 'wrapApiCall' ? redactAuthCallArgs : redactAuthMessageArgs;
   return new Proxy(boundLogger, {
     apply(target, thisArg, args) {
-      return Reflect.apply(target, thisArg, redactAuthCallArgs(args));
+      return Reflect.apply(target, thisArg, redactArgs(args));
     },
     get(target, property, receiver) {
       const member = Reflect.get(target, property, receiver);
       if(typeof member !== 'function') return member;
 
-      return (...args: any[]) => Reflect.apply(member, target, redactAuthCallArgs(args));
+      return (...args: any[]) => Reflect.apply(member, target, redactArgs(args));
     }
   });
 }
@@ -51,7 +61,7 @@ function securePrivateNetworker(networker: MTPNetworker): MTPNetworker {
 
       return (prefix: string, ...args: any[]) => {
         const boundLogger = Reflect.apply(bindPrefix, target, [prefix, ...args]);
-        return prefix === 'wrapApiCall' ? wrapAuthCallLogger(boundLogger) : boundLogger;
+        return prefix === 'wrapApiCall' || prefix === 'sendEncryptedRequest' ? wrapPrivateAuthLogger(boundLogger, prefix) : boundLogger;
       };
     }
   });
