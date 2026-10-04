@@ -138,6 +138,12 @@ const ADDITIONAL_ALIASES = {
   '@': resolve(rootDir, 'src')
 };
 
+const TARGET_SPECIFIC_ALIASES = mtprotoTarget.mode === 'private' ? {
+  '@appManagers/apiManager': resolve(rootDir, 'src/lib/appManagers/PrivateApiManager.ts'),
+  '@/pages/cards/SignInCard': resolve(rootDir, 'src/pages/cards/PrivateSignInCard.tsx'),
+  '@/pages/cards/PasswordCard': resolve(rootDir, 'src/pages/cards/PrivatePasswordCard.tsx')
+} : {};
+
 if(USE_OWN_SOLID) {
   console.log('using own solid', SOLID_PATH, 'built', !USE_SOLID_SRC);
 } else {
@@ -274,6 +280,10 @@ export default defineConfig({
       'solid-js/web': resolve(rootDir, SOLID_PATH, 'web/dist', isDEV ? 'dev.js' : 'web.js'),
       'solid-js/store': resolve(rootDir, SOLID_PATH, 'store/dist', isDEV ? 'dev.js' : 'store.js'),
       'solid-js': resolve(rootDir, SOLID_PATH, 'dist', isDEV ? 'dev.js' : 'solid.js'),
+      ...(mtprotoTarget.mode === 'private' ? TARGET_SPECIFIC_ALIASES : {}),
+      ...ADDITIONAL_ALIASES
+    } : mtprotoTarget.mode === 'private' ? {
+      ...TARGET_SPECIFIC_ALIASES,
       ...ADDITIONAL_ALIASES
     } : ADDITIONAL_ALIASES
   }
