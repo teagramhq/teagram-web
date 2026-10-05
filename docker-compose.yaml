@@ -1,3 +1,4 @@
+name: telegram-web
 version: "3.8"
 services:
   tweb.dependencies:
