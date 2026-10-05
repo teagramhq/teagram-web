@@ -55,6 +55,7 @@ const PRIVATE_FONT_NAME_PATTERN = /^[A-Za-z0-9_-]+\.(?:woff2|woff|ttf)$/;
 const PRIVATE_FONT_SOURCE_DIRECTORY = 'public/assets/fonts';
 const PRIVATE_FONT_SVG_DOCTYPE = /^<!DOCTYPE\s+svg\s+PUBLIC\s+"-\/\/W3C\/\/DTD SVG 1\.1\/\/EN"\s+"http:\/\/www\.w3\.org\/Graphics\/SVG\/1\.1\/DTD\/svg11\.dtd"\s*>$/;
 const PRIVATE_FONT_SVG_NAMESPACE = /^\sxmlns\s*=\s*(?:"http:\/\/www\.w3\.org\/2000\/svg"|'http:\/\/www\.w3\.org\/2000\/svg')$/;
+const PRIVATE_FONT_SVG_EXTERNAL_CSS_REFERENCE = /@import\b|\burl\s*\(\s*(?!["']?\s*#)/i;
 
 const PRIVATE_ROUTE_LOCK = {
   mode: 'private',
@@ -113,7 +114,8 @@ function assertSafePrivateFontSvg(contents) {
   }
 
   const withoutAllowedDeclarations = text.replace(doctypes[0], '').replace(namespaces[0], '');
-  if(/<!DOCTYPE|<!ENTITY|\bxmlns(?::[\w.-]+)?\s*=|https?:\/\/|<\s*script\b|<\s*foreignObject\b|\bon[a-z][\w:.-]*\s*=|\b[\w:.-]*href\s*=|\bsrc\s*=/i.test(withoutAllowedDeclarations)) {
+  if(PRIVATE_FONT_SVG_EXTERNAL_CSS_REFERENCE.test(withoutAllowedDeclarations) ||
+    /<!DOCTYPE|<!ENTITY|\bxmlns(?::[\w.-]+)?\s*=|https?:\/\/|<\s*script\b|<\s*foreignObject\b|\bon[a-z][\w:.-]*\s*=|\b[\w:.-]*href\s*=|\bsrc\s*=/i.test(withoutAllowedDeclarations)) {
     invalidArtifact('font SVG contains active content or an external reference');
   }
 }

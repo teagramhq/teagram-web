@@ -653,6 +653,25 @@ describe('private artifact fonts', () => {
     expect(existsSync(join(directory, 'assets/fonts'))).toBe(false);
   });
 
+  it.each([
+    ['CSS imports', safePrivateFontSvg.replace('</svg>', '<style>@import url(//host/font.css);</style></svg>')],
+    ['protocol-relative CSS URLs', safePrivateFontSvg.replace(
+      '</svg>',
+      '<style>.glyph { fill: url(//host/glyph.svg); }</style></svg>'
+    )],
+    ['relative external CSS URLs', safePrivateFontSvg.replace(
+      '</svg>',
+      '<style>.glyph { fill: url(/assets/glyph.svg); }</style></svg>'
+    )]
+  ])('rejects SVG font CSS containing %s before emission', (_label, svgContents) => {
+    const rootDirectory = privateFontSourceRoot({svgContents});
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-font-css-'));
+    temporaryDirectories.push(directory);
+
+    expect(() => includePrivateArtifactFonts(rootDirectory, directory)).toThrow(/SVG/i);
+    expect(existsSync(join(directory, 'assets/fonts'))).toBe(false);
+  });
+
   it('rejects a font mutation after its bytes are sealed into the artifact digest', () => {
     const directory = temporaryArtifact();
     const fontPath = join(directory, 'assets/fonts/tgico.woff');
