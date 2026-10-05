@@ -1,5 +1,5 @@
-## Telegram Web K
-Based on Webogram, patched and improved. Available for everyone here: https://web.telegram.org/k/
+## teagram-web
+Telegram Web K is based on Webogram, patched and improved. Its source is hosted at [teagramhq/teagram-web](https://github.com/teagramhq/teagram-web). Available for everyone here: https://web.telegram.org/k/
 
 
 ### Developing
