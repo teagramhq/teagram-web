@@ -1,16 +1,60 @@
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {
+  accessSync,
+  constants,
   existsSync,
+  lstatSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   statSync,
   writeFileSync
 } from 'node:fs';
-import {relative, resolve, sep} from 'node:path';
+import {dirname, relative, resolve, sep} from 'node:path';
 import {readHeadContentSecurityPolicies} from './private-artifact-csp.mjs';
 
 export const PRIVATE_ARTIFACT_MANIFEST = 'mtproto-target.json';
+export const PRIVATE_FONT_ASSETS = Object.freeze([
+  'Chewy-Regular.ttf',
+  'CourierPrime-Bold.ttf',
+  'FugazOne-Regular.ttf',
+  'KFOlCnqEu92Fr1MmEU9fABc4AMP6lbBP.woff2',
+  'KFOlCnqEu92Fr1MmEU9fBBc4AMP6lQ.woff2',
+  'KFOlCnqEu92Fr1MmEU9fChc4AMP6lbBP.woff2',
+  'KFOmCnqEu92Fr1Mu4mxKKTU1Kg.woff2',
+  'KFOmCnqEu92Fr1Mu5mxKKTU1Kvnz.woff2',
+  'KFOmCnqEu92Fr1Mu7GxKKTU1Kvnz.woff2',
+  'L0xTDF4xlVMF-BfR8bXMIhJHg45mwgGEFl0_3vrtSM1J-gEPT5Ese6hmHSV0me8iUI0lkQ.woff2',
+  'L0xTDF4xlVMF-BfR8bXMIhJHg45mwgGEFl0_3vrtSM1J-gEPT5Ese6hmHSZ0me8iUI0lkQ.woff2',
+  'L0xTDF4xlVMF-BfR8bXMIhJHg45mwgGEFl0_3vrtSM1J-gEPT5Ese6hmHSd0me8iUI0lkQ.woff2',
+  'L0xTDF4xlVMF-BfR8bXMIhJHg45mwgGEFl0_3vrtSM1J-gEPT5Ese6hmHSh0me8iUI0.woff2',
+  'L0xTDF4xlVMF-BfR8bXMIhJHg45mwgGEFl0_3vrtSM1J-gEPT5Ese6hmHSt0me8iUI0lkQ.woff2',
+  'L0xTDF4xlVMF-BfR8bXMIhJHg45mwgGEFl0_3vrtSM1J-gEPT5Ese6hmHSx0me8iUI0lkQ.woff2',
+  'L0xdDF4xlVMF-BfR8bXMIjhOsXG-q2oeuFoqFrlnAIe2Imhk1T8rbociImtElOUlco8VkKjG.woff2',
+  'L0xdDF4xlVMF-BfR8bXMIjhOsXG-q2oeuFoqFrlnAIe2Imhk1T8rbociImtEleUlco8VkKjG.woff2',
+  'L0xdDF4xlVMF-BfR8bXMIjhOsXG-q2oeuFoqFrlnAIe2Imhk1T8rbociImtEluUlco8VkKjG.woff2',
+  'L0xdDF4xlVMF-BfR8bXMIjhOsXG-q2oeuFoqFrlnAIe2Imhk1T8rbociImtEm-Ulco8VkA.woff2',
+  'L0xdDF4xlVMF-BfR8bXMIjhOsXG-q2oeuFoqFrlnAIe2Imhk1T8rbociImtEmOUlco8VkKjG.woff2',
+  'L0xdDF4xlVMF-BfR8bXMIjhOsXG-q2oeuFoqFrlnAIe2Imhk1T8rbociImtEn-Ulco8VkKjG.woff2',
+  'Numbers-Rounded.woff2',
+  'PlaywriteBEVLG-Regular.ttf',
+  'Roboto-Medium.woff',
+  'Roboto-Medium.woff2',
+  'RubikBubbles-Regular.ttf',
+  'Sedan-Regular.ttf',
+  'SuezOne-Regular.ttf',
+  'tgico.svg',
+  'tgico.ttf',
+  'tgico.woff'
+]);
+
+const PRIVATE_FONT_ASSET_SET = new Set(PRIVATE_FONT_ASSETS);
+const PRIVATE_FONT_NAME_PATTERN = /^[A-Za-z0-9_-]+\.(?:woff2|woff|ttf)$/;
+const PRIVATE_FONT_SOURCE_DIRECTORY = 'public/assets/fonts';
+const PRIVATE_FONT_SVG_DOCTYPE = /^<!DOCTYPE\s+svg\s+PUBLIC\s+"-\/\/W3C\/\/DTD SVG 1\.1\/\/EN"\s+"http:\/\/www\.w3\.org\/Graphics\/SVG\/1\.1\/DTD\/svg11\.dtd"\s*>$/;
+const PRIVATE_FONT_SVG_NAMESPACE = /^\sxmlns\s*=\s*(?:"http:\/\/www\.w3\.org\/2000\/svg"|'http:\/\/www\.w3\.org\/2000\/svg')$/;
 
 const PRIVATE_ROUTE_LOCK = {
   mode: 'private',
@@ -48,6 +92,151 @@ const PRIVATE_WSS_URL = /wss:\/\/[A-Za-z0-9._:[\]-]+(?:\/[A-Za-z0-9._~!$&'()*+,;
 
 function invalidArtifact(message) {
   throw new Error('[MT] private artifact ' + message);
+}
+
+export function assertPrivateFontAssetName(name) {
+  if(typeof name !== 'string' || name.includes('/') || name.includes('\\') ||
+    (name !== 'tgico.svg' && !PRIVATE_FONT_NAME_PATTERN.test(name)) ||
+    !PRIVATE_FONT_ASSET_SET.has(name)) {
+    invalidArtifact('font asset name is invalid or unreviewed');
+  }
+}
+
+function assertSafePrivateFontSvg(contents) {
+  const text = contents.toString('utf8');
+  const doctypes = [...text.matchAll(/<!DOCTYPE\b[^>]*>/g)].map(([declaration]) => declaration);
+  const namespaces = [...text.matchAll(/\sxmlns\s*=\s*(?:"[^"]*"|'[^']*')/g)]
+  .map(([declaration]) => declaration);
+  if(doctypes.length !== 1 || !PRIVATE_FONT_SVG_DOCTYPE.test(doctypes[0]) ||
+    namespaces.length !== 1 || !PRIVATE_FONT_SVG_NAMESPACE.test(namespaces[0])) {
+    invalidArtifact('font SVG contains an unexpected document type or namespace');
+  }
+
+  const withoutAllowedDeclarations = text.replace(doctypes[0], '').replace(namespaces[0], '');
+  if(/<!DOCTYPE|<!ENTITY|\bxmlns(?::[\w.-]+)?\s*=|https?:\/\/|<\s*script\b|<\s*foreignObject\b|\bon[a-z][\w:.-]*\s*=|\b[\w:.-]*href\s*=|\bsrc\s*=/i.test(withoutAllowedDeclarations)) {
+    invalidArtifact('font SVG contains active content or an external reference');
+  }
+}
+
+function ensurePrivateArtifactDirectory(directory) {
+  if(!existsSync(directory)) {
+    mkdirSync(directory);
+  }
+  const stats = lstatSync(directory);
+  if(stats.isSymbolicLink() || !stats.isDirectory()) {
+    invalidArtifact('font output path contains a non-directory entry');
+  }
+}
+
+function readRequiredPrivateFont(sourceDirectory, canonicalSourceDirectory, name) {
+  assertPrivateFontAssetName(name);
+  const file = resolve(sourceDirectory, name);
+  if(dirname(file) !== resolve(sourceDirectory)) {
+    invalidArtifact('font asset path escapes the approved directory');
+  }
+
+  const stats = lstatSync(file);
+  if(stats.isSymbolicLink() || !stats.isFile() || stats.size === 0) {
+    invalidArtifact('required font is missing, empty, or not a regular file');
+  }
+  accessSync(file, constants.R_OK);
+  const canonicalFile = realpathSync(file);
+  if(dirname(canonicalFile) !== canonicalSourceDirectory || canonicalFile !== resolve(canonicalSourceDirectory, name)) {
+    invalidArtifact('font asset path escapes the approved directory');
+  }
+
+  const contents = readFileSync(file);
+  if(contents.length === 0) {
+    invalidArtifact('required font is empty');
+  }
+  if(name === 'tgico.svg') {
+    assertSafePrivateFontSvg(contents);
+  }
+  return contents;
+}
+
+function privateArtifactFontsDirectory(directory) {
+  const artifactDirectory = resolve(directory);
+  const assetsDirectory = resolve(artifactDirectory, 'assets');
+  const fontsDirectory = resolve(assetsDirectory, 'fonts');
+  ensurePrivateArtifactDirectory(artifactDirectory);
+  ensurePrivateArtifactDirectory(assetsDirectory);
+  ensurePrivateArtifactDirectory(fontsDirectory);
+  return fontsDirectory;
+}
+
+export function includePrivateArtifactFonts(rootDirectory, directory) {
+  if(PRIVATE_FONT_ASSETS.length !== 31 || PRIVATE_FONT_ASSET_SET.size !== PRIVATE_FONT_ASSETS.length) {
+    invalidArtifact('font allowlist is invalid');
+  }
+  for(const name of PRIVATE_FONT_ASSETS) {
+    assertPrivateFontAssetName(name);
+  }
+
+  const sourceDirectory = resolve(rootDirectory, PRIVATE_FONT_SOURCE_DIRECTORY);
+  const sourceDirectoryStats = lstatSync(sourceDirectory);
+  if(sourceDirectoryStats.isSymbolicLink() || !sourceDirectoryStats.isDirectory()) {
+    invalidArtifact('approved font source directory is missing or invalid');
+  }
+  const canonicalSourceDirectory = realpathSync(sourceDirectory);
+  const contents = PRIVATE_FONT_ASSETS.map((name) => [
+    name,
+    readRequiredPrivateFont(sourceDirectory, canonicalSourceDirectory, name)
+  ]);
+  const fontsDirectory = privateArtifactFontsDirectory(directory);
+  const existingEntries = readdirSync(fontsDirectory, {withFileTypes: true});
+  for(const entry of existingEntries) {
+    if(!PRIVATE_FONT_ASSET_SET.has(entry.name) || !entry.isFile()) {
+      invalidArtifact('font output contains an unreviewed or non-regular entry');
+    }
+  }
+
+  const existingNames = new Set(existingEntries.map((entry) => entry.name));
+  for(const [name, bytes] of contents) {
+    const outputPath = resolve(fontsDirectory, name);
+    if(dirname(outputPath) !== fontsDirectory) {
+      invalidArtifact('font output path escapes the artifact directory');
+    }
+    if(existingNames.has(name)) {
+      const outputStats = lstatSync(outputPath);
+      if(outputStats.isSymbolicLink() || !outputStats.isFile() || !readFileSync(outputPath).equals(bytes)) {
+        invalidArtifact('existing font output does not match its approved source');
+      }
+      continue;
+    }
+    writeFileSync(outputPath, bytes, {flag: 'wx'});
+  }
+}
+
+function auditPrivateArtifactFonts(directory) {
+  const fontsDirectory = resolve(directory, 'assets', 'fonts');
+  const stats = lstatSync(fontsDirectory);
+  if(stats.isSymbolicLink() || !stats.isDirectory()) {
+    invalidArtifact('font output directory is missing or invalid');
+  }
+
+  const entries = readdirSync(fontsDirectory, {withFileTypes: true});
+  if(entries.length !== PRIVATE_FONT_ASSETS.length || entries.some((entry) =>
+    !PRIVATE_FONT_ASSET_SET.has(entry.name) || !entry.isFile()
+  )) {
+    invalidArtifact('font output does not match the reviewed allowlist');
+  }
+
+  for(const name of PRIVATE_FONT_ASSETS) {
+    const file = resolve(fontsDirectory, name);
+    const fileStats = lstatSync(file);
+    if(fileStats.isSymbolicLink() || !fileStats.isFile() || fileStats.size === 0) {
+      invalidArtifact('required font is missing, empty, or not a regular file');
+    }
+    accessSync(file, constants.R_OK);
+    const contents = readFileSync(file);
+    if(contents.length === 0) {
+      invalidArtifact('required font is empty');
+    }
+    if(name === 'tgico.svg') {
+      assertSafePrivateFontSvg(contents);
+    }
+  }
 }
 
 function artifactFiles(directory) {
@@ -233,6 +422,7 @@ export function auditPrivateArtifact(directory, target) {
   if(lowercaseFiles(files, directory).includes(target.fingerprint.toLowerCase()) === false) {
     invalidArtifact('does not contain its configured RSA fingerprint');
   }
+  auditPrivateArtifactFonts(directory);
 }
 
 function lowercaseFiles(files, directory) {
@@ -290,6 +480,7 @@ export function writePrivateArtifactManifest(directory, target, rootDirectory) {
     invalidArtifact('target and route-lock metadata are inconsistent');
   }
 
+  includePrivateArtifactFonts(rootDirectory, directory);
   auditPrivateArtifact(directory, target);
   const manifest = {
     mode: 'private',

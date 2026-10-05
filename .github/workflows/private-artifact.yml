@@ -311,6 +311,11 @@ jobs:
           MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.publication-prepare.outputs.private_key_file }}
         run: pnpm exec vite build --outDir dist-private
 
+      - name: Require the reviewed font assets in the private artifact
+        run: |
+          test -s dist-private/assets/fonts/KFOmCnqEu92Fr1Mu5mxKKTU1Kvnz.woff2
+          test -s dist-private/assets/fonts/tgico.woff
+
       - name: Audit bundle routes, keys, and digest
         env:
           MTPROTO_TARGET_MODE: ${{ needs.publication-prepare.outputs.target_mode }}

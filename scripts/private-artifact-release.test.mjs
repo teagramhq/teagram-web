@@ -5,13 +5,17 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from 'node:fs';
+import {createServer} from 'node:http';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
+import express from 'express';
 import {afterAll, describe, expect, it} from 'vitest';
 import * as privateArtifactRelease from './private-artifact-release.mjs';
 import {
@@ -28,8 +32,12 @@ import {
 import {resolveMtprotoTarget} from './mtproto-target.mjs';
 import {verifyPublishedArtifact} from './private-artifact-publish-verify.mjs';
 import {
+  PRIVATE_FONT_ASSETS,
+  assertPrivateFontAssetName,
+  includePrivateArtifactFonts,
   privateContentSecurityPolicy,
   verifyPrivateArtifactCsp,
+  verifyPrivateArtifactManifest,
   writePrivateArtifactManifest
 } from './private-artifact.mjs';
 
@@ -41,6 +49,7 @@ const environment = {
   MTPROTO_PRIVATE_ENDPOINT: reviewedTarget.MTPROTO_PRIVATE_ENDPOINT,
   MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: reviewedTarget.MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE
 };
+const privateTarget = resolveMtprotoTarget(environment);
 const privateArtifactWorkflowPath = join(repositoryRoot, '.github/workflows/private-artifact.yml');
 const privateArtifactWorkflowText = readFileSync(privateArtifactWorkflowPath, 'utf8');
 const pinnedSetupNodeAction = 'uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0';
@@ -463,6 +472,175 @@ function temporaryArtifact(indexDocument) {
   writePrivateArtifactManifest(directory, target, repositoryRoot);
   return directory;
 }
+
+const safePrivateFontSvg = [
+  '<?xml version="1.0" standalone="no"?>',
+  '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" >',
+  '<svg xmlns="http://www.w3.org/2000/svg"><defs><font id="tgico"><font-face /></font></defs></svg>'
+].join('\n');
+
+function privateFontSourceRoot({missingFont, emptyFont, symlinkFont, svgContents = safePrivateFontSvg, extraFont} = {}) {
+  const rootDirectory = mkdtempSync(join(tmpdir(), 'private-artifact-font-source-'));
+  temporaryDirectories.push(rootDirectory);
+  const fontDirectory = join(rootDirectory, 'public/assets/fonts');
+  mkdirSync(fontDirectory, {recursive: true});
+  const outsideFont = join(rootDirectory, 'outside-font.woff2');
+  if(symlinkFont) writeFileSync(outsideFont, 'outside-font');
+
+  for(const name of PRIVATE_FONT_ASSETS) {
+    if(name === missingFont) continue;
+    const file = join(fontDirectory, name);
+    if(name === symlinkFont) {
+      symlinkSync(outsideFont, file);
+    } else if(name === emptyFont) {
+      writeFileSync(file, '');
+    } else {
+      writeFileSync(file, name === 'tgico.svg' ? svgContents : Buffer.from('source:' + name));
+    }
+  }
+  if(extraFont) writeFileSync(join(fontDirectory, extraFont), 'unreviewed-font');
+  writeFileSync(join(rootDirectory, 'public/unrelated.js'), 'unrelated public content');
+  return rootDirectory;
+}
+
+function createArtifactShell(directory, target = privateTarget) {
+  writeFileSync(join(directory, 'index.html'), [
+    '<!doctype html><html><head>',
+    `<meta http-equiv="Content-Security-Policy" content="${privateContentSecurityPolicy(target.endpoint)}">`,
+    '</head><body></body></html>'
+  ].join(''));
+  writeFileSync(join(directory, 'client.js'), [
+    `const endpoint = ${JSON.stringify(target.endpoint)};`,
+    `const fingerprint = ${JSON.stringify(target.fingerprint)};`
+  ].join('\n'));
+}
+
+describe('private artifact fonts', () => {
+  it('copies the exact tracked allowlist and serves the requested font bytes with font MIME types', async() => {
+    const directory = temporaryArtifact();
+    const trackedFonts = execFileSync('git', ['ls-files', 'public/assets/fonts'], {
+      cwd: repositoryRoot,
+      encoding: 'utf8'
+    }).trim().split('\n').map((file) => file.split('/').at(-1)).sort();
+    expect(PRIVATE_FONT_ASSETS).toHaveLength(31);
+    expect([...PRIVATE_FONT_ASSETS].sort()).toEqual(trackedFonts);
+
+    for(const name of PRIVATE_FONT_ASSETS) {
+      const source = readFileSync(join(repositoryRoot, 'public/assets/fonts', name));
+      const artifact = readFileSync(join(directory, 'assets/fonts', name));
+      expect(source.length).toBeGreaterThan(0);
+      expect(artifact).toEqual(source);
+    }
+
+    const server = createServer(express.static(directory, {fallthrough: false}));
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const {port} = server.address();
+    try {
+      for(const [requestPath, name, mime] of [
+        ['KFOmCnqEu92Fr1Mu5mxKKTU1Kvnz.woff2', 'KFOmCnqEu92Fr1Mu5mxKKTU1Kvnz.woff2', 'font/woff2'],
+        ['tgico.woff?dno5xw', 'tgico.woff', 'font/woff']
+      ]) {
+        const response = await fetch(`http://127.0.0.1:${port}/assets/fonts/${requestPath}`, {
+          headers: {connection: 'close'}
+        });
+        expect(response.status).toBe(200);
+        expect(response.headers.get('content-type')?.split(';')[0]).toBe(mime);
+        expect(Buffer.from(await response.arrayBuffer())).toEqual(
+          readFileSync(join(repositoryRoot, 'public/assets/fonts', name))
+        );
+      }
+    } finally {
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it('fails before writing the manifest when a required font is missing', () => {
+    const rootDirectory = privateFontSourceRoot({missingFont: PRIVATE_FONT_ASSETS[0]});
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-font-missing-'));
+    temporaryDirectories.push(directory);
+    createArtifactShell(directory);
+
+    expect(() => writePrivateArtifactManifest(directory, privateTarget, rootDirectory))
+    .toThrow(/font/i);
+    expect(existsSync(join(directory, 'mtproto-target.json'))).toBe(false);
+    expect(existsSync(join(directory, 'assets/fonts'))).toBe(false);
+  });
+
+  it('fails before writing the manifest when a required font is empty', () => {
+    const rootDirectory = privateFontSourceRoot({emptyFont: PRIVATE_FONT_ASSETS[0]});
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-font-empty-'));
+    temporaryDirectories.push(directory);
+    createArtifactShell(directory);
+
+    expect(() => writePrivateArtifactManifest(directory, privateTarget, rootDirectory)).toThrow(/font/i);
+    expect(existsSync(join(directory, 'mtproto-target.json'))).toBe(false);
+    expect(existsSync(join(directory, 'assets/fonts'))).toBe(false);
+  });
+
+  it('rejects source symlinks that escape the approved font directory before emission', () => {
+    const rootDirectory = privateFontSourceRoot({symlinkFont: PRIVATE_FONT_ASSETS[0]});
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-font-symlink-'));
+    temporaryDirectories.push(directory);
+
+    expect(() => includePrivateArtifactFonts(rootDirectory, directory)).toThrow(/font/i);
+    expect(existsSync(join(directory, 'assets/fonts'))).toBe(false);
+  });
+
+  it('rejects invalid and traversal font names', () => {
+    for(const name of ['../tgico.woff', '..\\tgico.woff', 'unreviewed.woff2', 'extra.svg', 'tgico.svg/child']) {
+      expect(() => assertPrivateFontAssetName(name)).toThrow(/font asset name/i);
+    }
+  });
+
+  it('excludes unallowlisted fonts and unrelated public files', () => {
+    const rootDirectory = privateFontSourceRoot({extraFont: 'extra.woff2'});
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-font-allowlist-'));
+    temporaryDirectories.push(directory);
+
+    includePrivateArtifactFonts(rootDirectory, directory);
+    expect(readdirSync(join(directory, 'assets/fonts')).sort()).toEqual([...PRIVATE_FONT_ASSETS].sort());
+    expect(existsSync(join(directory, 'assets/fonts/extra.woff2'))).toBe(false);
+    expect(existsSync(join(directory, 'unrelated.js'))).toBe(false);
+    expect(existsSync(join(directory, 'public'))).toBe(false);
+    expect(readFileSync(join(repositoryRoot, 'vite.config.ts'), 'utf8')).toMatch(/copyPublicDir:\s*false/);
+  });
+
+  it.each([
+    ['script elements', safePrivateFontSvg.replace('<font id="tgico">', '<script>alert(1)</script><font id="tgico">')],
+    ['foreignObject elements', safePrivateFontSvg.replace('</svg>', '<foreignObject /></svg>')],
+    ['event handlers', safePrivateFontSvg.replace('<svg ', '<svg onload="alert(1)" ')],
+    ['href references', safePrivateFontSvg.replace('<font id="tgico">', '<font id="tgico" href="#target">')],
+    ['additional HTTP declarations', safePrivateFontSvg.replace('</svg>', '<metadata>https://example.test/icon</metadata></svg>')],
+    ['unreviewed namespace declarations', safePrivateFontSvg.replace(
+      '<svg xmlns="http://www.w3.org/2000/svg">',
+      '<svg xmlns:extra="urn:extra" xmlns="http://www.w3.org/2000/svg">'
+    )],
+    ['changed external DTDs', safePrivateFontSvg.replace(
+      'http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd',
+      'http://example.test/svg11.dtd'
+    )]
+  ])('rejects SVG font content containing %s', (_label, svgContents) => {
+    const rootDirectory = privateFontSourceRoot({svgContents});
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-font-svg-'));
+    temporaryDirectories.push(directory);
+    createArtifactShell(directory);
+
+    expect(() => writePrivateArtifactManifest(directory, privateTarget, rootDirectory)).toThrow(/SVG/i);
+    expect(existsSync(join(directory, 'mtproto-target.json'))).toBe(false);
+    expect(existsSync(join(directory, 'assets/fonts'))).toBe(false);
+  });
+
+  it('rejects a font mutation after its bytes are sealed into the artifact digest', () => {
+    const directory = temporaryArtifact();
+    const fontPath = join(directory, 'assets/fonts/tgico.woff');
+    writeFileSync(fontPath, Buffer.concat([readFileSync(fontPath), Buffer.from([0])]));
+
+    expect(() => verifyPrivateArtifactManifest(directory, privateTarget)).toThrow(/digest/i);
+  });
+});
 
 describe('private artifact publication attestation', () => {
   it('loads the reviewed target and verifies a complete release unit', () => {

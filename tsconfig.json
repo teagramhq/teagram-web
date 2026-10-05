@@ -100,13 +100,14 @@
     "watchFile": "useFsEvents",
     "watchDirectory": "useFsEvents",
     "fallbackPolling": "dynamicPriority",
-    "excludeDirectories": ["**/node_modules", "**/.claude", "dist", "public", "coverage"]
+    "excludeDirectories": ["**/node_modules", "**/.claude", "dist", "dist-private", "public", "coverage"]
   },
   "exclude": [
     "node_modules",
     ".claude",
     "public",
     "dist",
+    "dist-private",
     "coverage",
     "src/scripts",
     "src/solid",
