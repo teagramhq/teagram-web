@@ -662,6 +662,18 @@ describe('private artifact fonts', () => {
     ['relative external CSS URLs', safePrivateFontSvg.replace(
       '</svg>',
       '<style>.glyph { fill: url(/assets/glyph.svg); }</style></svg>'
+    )],
+    ['CSS-escaped external URLs', safePrivateFontSvg.replace(
+      '</svg>',
+      '<style>.glyph { fill: u\\72l(//host/glyph.svg); }</style></svg>'
+    )],
+    ['CSS-escaped URLs in presentation attributes', safePrivateFontSvg.replace(
+      '<font-face />',
+      '<font-face fill="u\\72l(//host/glyph.svg)" />'
+    )],
+    ['XML-encoded external CSS URLs', safePrivateFontSvg.replace(
+      '<font-face />',
+      '<font-face fill="u&#x72;l(&#x2f;&#x2f;host/glyph.svg)" />'
     )]
   ])('rejects SVG font CSS containing %s before emission', (_label, svgContents) => {
     const rootDirectory = privateFontSourceRoot({svgContents});

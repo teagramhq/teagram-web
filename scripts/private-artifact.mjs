@@ -55,6 +55,7 @@ const PRIVATE_FONT_NAME_PATTERN = /^[A-Za-z0-9_-]+\.(?:woff2|woff|ttf)$/;
 const PRIVATE_FONT_SOURCE_DIRECTORY = 'public/assets/fonts';
 const PRIVATE_FONT_SVG_DOCTYPE = /^<!DOCTYPE\s+svg\s+PUBLIC\s+"-\/\/W3C\/\/DTD SVG 1\.1\/\/EN"\s+"http:\/\/www\.w3\.org\/Graphics\/SVG\/1\.1\/DTD\/svg11\.dtd"\s*>$/;
 const PRIVATE_FONT_SVG_NAMESPACE = /^\sxmlns\s*=\s*(?:"http:\/\/www\.w3\.org\/2000\/svg"|'http:\/\/www\.w3\.org\/2000\/svg')$/;
+const PRIVATE_FONT_SVG_STYLE_CONTENT = /<\s*(?:[\w.-]+:)?style\b|\bstyle\s*=/i;
 const PRIVATE_FONT_SVG_EXTERNAL_CSS_REFERENCE = /@import\b|\burl\s*\(\s*(?!["']?\s*#)/i;
 
 const PRIVATE_ROUTE_LOCK = {
@@ -95,6 +96,17 @@ function invalidArtifact(message) {
   throw new Error('[MT] private artifact ' + message);
 }
 
+function decodePrivateFontSvgCharacterReferences(text) {
+  return text.replace(/&#(x[0-9a-f]+|[0-9]+);/gi, (_reference, value) => {
+    const codePoint = value[0].toLowerCase() === 'x' ? parseInt(value.slice(1), 16) : Number(value);
+    if(!Number.isSafeInteger(codePoint) || codePoint > 0x10ffff ||
+      (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+      invalidArtifact('font SVG contains an invalid character reference');
+    }
+    return String.fromCodePoint(codePoint);
+  });
+}
+
 export function assertPrivateFontAssetName(name) {
   if(typeof name !== 'string' || name.includes('/') || name.includes('\\') ||
     (name !== 'tgico.svg' && !PRIVATE_FONT_NAME_PATTERN.test(name)) ||
@@ -113,8 +125,12 @@ function assertSafePrivateFontSvg(contents) {
     invalidArtifact('font SVG contains an unexpected document type or namespace');
   }
 
-  const withoutAllowedDeclarations = text.replace(doctypes[0], '').replace(namespaces[0], '');
-  if(PRIVATE_FONT_SVG_EXTERNAL_CSS_REFERENCE.test(withoutAllowedDeclarations) ||
+  const withoutAllowedDeclarations = decodePrivateFontSvgCharacterReferences(
+    text.replace(doctypes[0], '').replace(namespaces[0], '')
+  );
+  if(PRIVATE_FONT_SVG_STYLE_CONTENT.test(withoutAllowedDeclarations) ||
+    /\\/.test(withoutAllowedDeclarations) ||
+    PRIVATE_FONT_SVG_EXTERNAL_CSS_REFERENCE.test(withoutAllowedDeclarations) ||
     /<!DOCTYPE|<!ENTITY|\bxmlns(?::[\w.-]+)?\s*=|https?:\/\/|<\s*script\b|<\s*foreignObject\b|\bon[a-z][\w:.-]*\s*=|\b[\w:.-]*href\s*=|\bsrc\s*=/i.test(withoutAllowedDeclarations)) {
     invalidArtifact('font SVG contains active content or an external reference');
   }
