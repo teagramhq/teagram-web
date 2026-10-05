@@ -503,6 +503,17 @@ function privateFontSourceRoot({missingFont, emptyFont, symlinkFont, svgContents
   return rootDirectory;
 }
 
+function privateFontSourceRootWithSymlinkedAncestor(ancestorName) {
+  const sourceRoot = privateFontSourceRoot();
+  const rootDirectory = mkdtempSync(join(tmpdir(), 'private-artifact-font-ancestor-'));
+  temporaryDirectories.push(rootDirectory);
+  const linkPath = join(rootDirectory, 'public', ...(ancestorName === 'assets' ? ['assets'] : []));
+  const targetPath = join(sourceRoot, 'public', ...(ancestorName === 'assets' ? ['assets'] : []));
+  if(ancestorName === 'assets') mkdirSync(join(rootDirectory, 'public'));
+  symlinkSync(targetPath, linkPath);
+  return rootDirectory;
+}
+
 function createArtifactShell(directory, target = privateTarget) {
   writeFileSync(join(directory, 'index.html'), [
     '<!doctype html><html><head>',
@@ -583,6 +594,15 @@ describe('private artifact fonts', () => {
   it('rejects source symlinks that escape the approved font directory before emission', () => {
     const rootDirectory = privateFontSourceRoot({symlinkFont: PRIVATE_FONT_ASSETS[0]});
     const directory = mkdtempSync(join(tmpdir(), 'private-artifact-font-symlink-'));
+    temporaryDirectories.push(directory);
+
+    expect(() => includePrivateArtifactFonts(rootDirectory, directory)).toThrow(/font/i);
+    expect(existsSync(join(directory, 'assets/fonts'))).toBe(false);
+  });
+
+  it.each(['public', 'assets'])('rejects a symlinked %s ancestor before emitting fonts', (ancestorName) => {
+    const rootDirectory = privateFontSourceRootWithSymlinkedAncestor(ancestorName);
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-font-ancestor-output-'));
     temporaryDirectories.push(directory);
 
     expect(() => includePrivateArtifactFonts(rootDirectory, directory)).toThrow(/font/i);

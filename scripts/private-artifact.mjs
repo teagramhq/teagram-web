@@ -178,7 +178,11 @@ export function includePrivateArtifactFonts(rootDirectory, directory) {
   if(sourceDirectoryStats.isSymbolicLink() || !sourceDirectoryStats.isDirectory()) {
     invalidArtifact('approved font source directory is missing or invalid');
   }
+  const canonicalRootDirectory = realpathSync(rootDirectory);
   const canonicalSourceDirectory = realpathSync(sourceDirectory);
+  if(canonicalSourceDirectory !== resolve(canonicalRootDirectory, PRIVATE_FONT_SOURCE_DIRECTORY)) {
+    invalidArtifact('approved font source directory escapes the repository root');
+  }
   const contents = PRIVATE_FONT_ASSETS.map((name) => [
     name,
     readRequiredPrivateFont(sourceDirectory, canonicalSourceDirectory, name)
