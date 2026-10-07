@@ -393,7 +393,7 @@ export default function SignQRCard(_props: {spec: Spec}) {
       class={styles.pageSignQR}
       inputWrapper={false}
       header={
-        <MediaHeader>
+        <MediaHeader marginBottom={qrState() !== 'loading'}>
           <MediaHeader.Sticker
             ref={(element) => stickerHost = element}
             class={styles.qrContainer}

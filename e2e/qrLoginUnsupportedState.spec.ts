@@ -1,4 +1,4 @@
-import {BrowserContext, expect, Page, test} from '@playwright/test';
+import {BrowserContext, expect, Locator, Page, test} from '@playwright/test';
 
 type QrFixtureOutcome = 'input-method-invalid' | 'network-bad-response-406' | 'token';
 
@@ -160,6 +160,17 @@ async function getStateIconVisual(page: Page) {
   });
 }
 
+async function expectHeaderActionGap(page: Page, action: Locator) {
+  const subtitleBounds = await page.locator('#qr-fixture-root [aria-live="polite"]')
+  .locator('xpath=..')
+  .boundingBox();
+  const actionBounds = await action.boundingBox();
+
+  expect(subtitleBounds).not.toBeNull();
+  expect(actionBounds).not.toBeNull();
+  expect(actionBounds!.y - (subtitleBounds!.y + subtitleBounds!.height)).toBeGreaterThanOrEqual(16);
+}
+
 async function waitForFixtureMount(page: Page) {
   try {
     await page.waitForFunction(() => !!document.querySelector('#qr-fixture-root[data-qr-fixture-ready="true"]') ||
@@ -243,6 +254,7 @@ for(const scenario of [
     const retryButton = page.getByRole('button', {name: 'Try again', exact: true});
     const escapeButton = page.getByRole('button', {name: scenario.action, exact: true});
     const passkeyButton = page.getByRole('button', {name: /Log in by passkey/});
+    const primaryAction = scenario.retry ? retryButton : escapeButton;
     if(scenario.retry) {
       await expect(retryButton).toBeVisible();
       await expect(retryButton).toHaveClass(/btn-primary btn-color-primary/);
@@ -254,6 +266,7 @@ for(const scenario of [
       await expect(escapeButton).toHaveClass(/btn-primary btn-color-primary/);
       await expect(escapeButton).toBeFocused();
     }
+    await expectHeaderActionGap(page, primaryAction);
 
     const liveDom = await page.locator('#qr-fixture-root').evaluate((root) => [
       root.textContent || '',
@@ -275,6 +288,7 @@ for(const scenario of [
     expect(darkVisual.glyph).toBe(parseInt(scenario.icon, 16));
     expect(darkVisual.color).toBe(darkVisual.secondary);
     expect(darkVisual.color).not.toBe(lightVisual.color);
+    await expectHeaderActionGap(page, primaryAction);
     await expectNoUnexpectedCalls(page, [...BASE_MANAGER_CALLS, 'apiManager.setThemeParams'].sort());
 
     const tileBounds = await page.locator('#qr-fixture-root [class*="qrContainer"]').boundingBox();
@@ -282,7 +296,10 @@ for(const scenario of [
     expect(tileBounds!.width).toBe(240);
     expect(tileBounds!.height).toBe(240);
 
+    await page.setViewportSize({width: 360, height: 720});
+    await expectHeaderActionGap(page, primaryAction);
     await page.setViewportSize({width: 320, height: 720});
+    await expectHeaderActionGap(page, primaryAction);
     const narrowTileBounds = await page.locator('#qr-fixture-root [class*="qrContainer"]').boundingBox();
     expect(narrowTileBounds).not.toBeNull();
     expect(narrowTileBounds!.width).toBeLessThanOrEqual(240);
