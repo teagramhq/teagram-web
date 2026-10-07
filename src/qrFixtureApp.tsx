@@ -1,10 +1,15 @@
 import {render} from 'solid-js/web';
 
 import AccountController from '@lib/accounts/accountController';
+import classNames from '@helpers/string/classNames';
+import themeController from '@helpers/themeController';
 import I18n from '@lib/langPack';
 import rootScope from '@lib/rootScope';
 import {AuthFlowContext} from '@/pages/authFlow';
 import type {AuthFlowContextValue, CardSpec} from '@/pages/authFlow';
+import styles from '@/pages/authFlow.module.scss';
+import {SETTINGS_INIT} from '@config/state';
+import {setAppSettingsSilent} from '@stores/appSettings';
 
 import '@/materialize.scss';
 import '@/scss/style.scss';
@@ -15,12 +20,14 @@ const TOKEN_BYTES = new Uint8Array([81, 82, 45, 70, 73, 88, 84, 85, 82, 69]);
 const TOKEN_EXPIRY = 4_102_444_800;
 
 export type QrFixtureOutcome = 'input-method-invalid' | 'network-bad-response-406' | 'token';
+export type QrFixtureTheme = 'day' | 'night';
 
 type ManagerHandler = (...args: unknown[]) => unknown;
 type ManagerHandlers = Record<string, Record<string, ManagerHandler>>;
 
 type QrFixtureControl = {
   selectOutcome(outcome: QrFixtureOutcome): void,
+  setTheme(theme: QrFixtureTheme): void,
   completePendingToken(): void,
   inspect(): {
     outcome: QrFixtureOutcome,
@@ -62,6 +69,7 @@ export async function mountQrFixtureApp(
 
   const handlers: ManagerHandlers = {
     apiManager: {
+      setThemeParams() {},
       invokeApi(method, params) {
         if(method !== 'auth.exportLoginToken' || !hasEmptyExceptIds(params)) {
           unexpectedManagerCalls.add('apiManager.invokeApi:unexpected');
@@ -133,11 +141,39 @@ export async function mountQrFixtureApp(
   const failClosedAccountRead: typeof AccountController.getUserIds = async() => [];
   AccountController.getUserIds = failClosedAccountRead;
   rootScope.managers = managers;
+  const dispatchEvent = rootScope.dispatchEvent;
+  rootScope.dispatchEvent = ((name: string, ...args: unknown[]) => {
+    if(name === 'language_change') {
+      rootScope.dispatchEventSingle('language_change', args[0] as string);
+      return;
+    }
+
+    dispatchEvent(name as any, ...(args as any));
+  }) as typeof rootScope.dispatchEvent;
+  try {
+    await I18n.getCacheLangPackAndApply();
+  } finally {
+    rootScope.dispatchEvent = dispatchEvent;
+  }
+
+  function applyTheme(theme: QrFixtureTheme) {
+    themeController.applyTheme(themeController.getTheme(theme), document.documentElement);
+    document.documentElement.classList.toggle('night', theme === 'night');
+  }
+
+  setAppSettingsSilent('theme', 'day');
+  setAppSettingsSilent('themes', SETTINGS_INIT.themes);
+  applyTheme('day');
 
   const control: QrFixtureControl = Object.freeze({
     selectOutcome(outcome) {
       if(!isQrFixtureOutcome(outcome)) throw new Error(UNEXPECTED_MANAGER_ERROR);
       selectedOutcome = outcome;
+    },
+    setTheme(theme) {
+      if(theme !== 'day' && theme !== 'night') throw new Error(UNEXPECTED_MANAGER_ERROR);
+      applyTheme(theme);
+      rootScope.dispatchEventSingle('theme_changed');
     },
     completePendingToken() {
       pendingTokenResolvers.shift()?.();
@@ -172,7 +208,15 @@ export async function mountQrFixtureApp(
   const {default: SignQRCard} = await import('@/pages/cards/SignQRCard');
   render(() => (
     <AuthFlowContext.Provider value={flowContext}>
-      <SignQRCard spec={{name: 'signQR'}}/>
+      <div id="auth-pages" class={classNames('whole', styles.host)}>
+        <div class={styles.scrollable}>
+          <div class={classNames(styles.placeholder, styles.placeholderTop)}/>
+          <div class={styles.cardsContainer} data-qr-fixture-cards-container="">
+            <SignQRCard spec={{name: 'signQR'}}/>
+          </div>
+          <div class={styles.placeholder}/>
+        </div>
+      </div>
     </AuthFlowContext.Provider>
   ), host);
   host.dataset.qrFixtureReady = 'true';

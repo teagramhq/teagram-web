@@ -13,6 +13,7 @@ declare global {
   interface Window {
     qrFixture?: {
       selectOutcome(outcome: QrFixtureOutcome): void,
+      setTheme(theme: 'day' | 'night'): void,
       completePendingToken(): void,
       inspect(): QrFixtureObservations
     },
@@ -88,7 +89,7 @@ async function installConfinement(page: Page, context: BrowserContext, baseURL: 
 
   page.on('worker', () => traffic.workers.push('dedicated-worker'));
   page.on('console', (message) => traffic.consoleCategories.push(message.type()));
-  page.on('pageerror', (error) => traffic.pageErrors.push(classifyPageError(error)));
+  page.on('pageerror', (error) => traffic.pageErrors.push(`${classifyPageError(error)}: ${error.message}`));
 
   await context.addInitScript(() => {
     const state = {workerAttempts: [] as string[], authStorageAccesses: 0};
@@ -132,8 +133,13 @@ async function getObservations(page: Page) {
 }
 
 async function waitForFixtureMount(page: Page) {
-  await page.waitForFunction(() => !!document.querySelector('#qr-fixture-root[data-qr-fixture-ready="true"]') ||
-    !!document.querySelector('[data-qr-fixture-error]'));
+  try {
+    await page.waitForFunction(() => !!document.querySelector('#qr-fixture-root[data-qr-fixture-ready="true"]') ||
+      !!document.querySelector('[data-qr-fixture-error]'), undefined, {timeout: 30_000});
+  } catch(error) {
+    const traffic = trafficByContext.get(page.context());
+    throw new Error(`${String(error)}\nPage errors: ${traffic?.pageErrors.join('\n') || 'none'}`);
+  }
 }
 
 async function expectNoUnexpectedCalls(page: Page, expectedCalls: string[]) {
@@ -166,7 +172,7 @@ for(const scenario of [
 ]) {
   test(`mounts the real QR card for ${scenario.outcome}`, async({page,context}) => {
     const traffic = trafficByContext.get(context)!;
-    await page.goto(`/qr-fixture.html?outcome=${scenario.outcome}`);
+    await page.goto(`/qr-fixture.html?outcome=${scenario.outcome}`, {waitUntil: 'domcontentloaded'});
     await waitForFixtureMount(page);
 
     const mountState = await page.evaluate(() => ({
@@ -192,9 +198,12 @@ for(const scenario of [
 
 test('keeps token loading controllable and the cancel button keyboard accessible', async({page,context}) => {
   const traffic = trafficByContext.get(context)!;
-  await page.goto('/qr-fixture.html?outcome=token');
+  await page.goto('/qr-fixture.html?outcome=token', {waitUntil: 'domcontentloaded'});
   await waitForFixtureMount(page);
 
+  await expect(page.getByText('Log in by QR Code', {exact: true})).toBeVisible();
+  await expect(page.getByText('Scan with Telegram app on your phone', {exact: true})).toBeVisible();
+  await expect(page.getByText('Open Telegram on your phone', {exact: true})).toBeVisible();
   await expect(page.locator('#qr-fixture-root')).toHaveAttribute(
     'data-qr-fixture-marker',
     'TWEB_QR_FIXTURE_DEV_ONLY_SENTINEL_6D9B42E1'
@@ -202,6 +211,7 @@ test('keeps token loading controllable and the cancel button keyboard accessible
   await expect(page.locator('#qr-fixture-root .preloader')).toBeVisible();
   const cancelButton = page.getByRole('button').first();
   await expect(cancelButton).toBeVisible();
+  await expect(page.getByRole('button', {name: /Log in by phone number/})).toBeVisible();
   await expectNoUnexpectedCalls(page, BASE_MANAGER_CALLS);
 
   await page.keyboard.press('Tab');
@@ -212,9 +222,9 @@ test('keeps token loading controllable and the cancel button keyboard accessible
   await expectNormalConfinement(page, context, traffic);
 });
 
-test('renders a fixed token after controlled completion at a narrow dark viewport', async({page,context}) => {
+test('repaints the QR for the confined light and dark themes at a narrow viewport', async({page,context}) => {
   const traffic = trafficByContext.get(context)!;
-  await page.goto('/qr-fixture.html?outcome=token');
+  await page.goto('/qr-fixture.html?outcome=token', {waitUntil: 'domcontentloaded'});
   await waitForFixtureMount(page);
 
   await expect(page.locator('#qr-fixture-root')).toHaveAttribute(
@@ -223,17 +233,79 @@ test('renders a fixed token after controlled completion at a narrow dark viewpor
   );
   await expect(page.locator('#qr-fixture-root .preloader')).toBeVisible();
   await expectNoUnexpectedCalls(page, BASE_MANAGER_CALLS);
+
+  const lightPalette = await page.evaluate(() => {
+    const style = getComputedStyle(document.documentElement);
+    return {
+      background: style.getPropertyValue('--light-filled-primary-color').trim(),
+      foreground: style.getPropertyValue('--primary-text-color').trim(),
+      accent: style.getPropertyValue('--primary-color').trim()
+    };
+  });
+  expect(lightPalette.background).not.toBe('');
+  expect(lightPalette.foreground).not.toBe('');
+  expect(lightPalette.accent).not.toBe('');
+
   await page.evaluate(() => window.qrFixture?.completePendingToken());
   await expect(page.locator('#qr-fixture-root canvas')).toHaveCount(1);
   await expectNoUnexpectedCalls(page, [...BASE_MANAGER_CALLS, 'timeManager.getServerTimeOffset']);
+  const lightQr = await page.evaluate(() => {
+    const canvases = document.querySelectorAll<HTMLCanvasElement>('#qr-fixture-root canvas');
+    return canvases[canvases.length - 1]?.toDataURL();
+  });
+
+  await page.evaluate(() => window.qrFixture?.setTheme('night'));
+  const darkPalette = await page.evaluate(() => {
+    const style = getComputedStyle(document.documentElement);
+    return {
+      background: style.getPropertyValue('--light-filled-primary-color').trim(),
+      foreground: style.getPropertyValue('--primary-text-color').trim(),
+      accent: style.getPropertyValue('--primary-color').trim()
+    };
+  });
+  expect(darkPalette.background).not.toBe('');
+  expect(darkPalette.foreground).not.toBe('');
+  expect(darkPalette.accent).not.toBe('');
+  expect(darkPalette).not.toEqual(lightPalette);
+  await expectNoUnexpectedCalls(page, [
+    'apiManager.getBaseDcId',
+    'apiManager.getConfig',
+    'apiManager.invokeApi:auth.exportLoginToken',
+    'apiManager.setThemeParams',
+    'appAccountManager.initPasskeyLogin',
+    'appStateManager.pushToState',
+    'timeManager.getServerTimeOffset'
+  ]);
+  await expect.poll(async() => page.evaluate(() => {
+    const canvases = document.querySelectorAll<HTMLCanvasElement>('#qr-fixture-root canvas');
+    return canvases[canvases.length - 1]?.toDataURL();
+  })).not.toBe(lightQr);
 
   await page.setViewportSize({width: 480, height: 720});
-  await page.emulateMedia({colorScheme: 'dark'});
-  const cardBounds = await page.locator('#qr-fixture-root > div').boundingBox();
+  const cardBounds = await page.locator('[data-qr-fixture-cards-container]').boundingBox();
   expect(cardBounds).not.toBeNull();
   expect(cardBounds!.x).toBeGreaterThanOrEqual(0);
   expect(cardBounds!.x + cardBounds!.width).toBeLessThanOrEqual(480);
   await expectNormalConfinement(page, context, traffic);
+});
+
+test('matches the auth shell cardsContainer width constraint', async({page}) => {
+  await page.goto('/qr-fixture.html?outcome=token', {waitUntil: 'domcontentloaded'});
+  await waitForFixtureMount(page);
+
+  const cardsContainer = page.locator('[data-qr-fixture-cards-container]');
+  await expect(cardsContainer).toBeVisible();
+  const desktopBounds = await cardsContainer.boundingBox();
+  const rootFontSize = await page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize));
+  expect(desktopBounds).not.toBeNull();
+  expect(Math.abs(desktopBounds!.width - 24.5 * rootFontSize)).toBeLessThan(1);
+
+  await page.setViewportSize({width: 320, height: 720});
+  const narrowBounds = await cardsContainer.boundingBox();
+  expect(narrowBounds).not.toBeNull();
+  expect(narrowBounds!.width).toBeLessThan(desktopBounds!.width);
+  expect(narrowBounds!.x).toBeGreaterThanOrEqual(0);
+  expect(narrowBounds!.x + narrowBounds!.width).toBeLessThanOrEqual(320);
 });
 
 test('refuses a browser context with auth state in either storage', async({page,context}) => {
@@ -241,7 +313,7 @@ test('refuses a browser context with auth state in either storage', async({page,
     localStorage.setItem('account1', 'synthetic-placeholder');
     sessionStorage.setItem('dc1_auth_key', 'synthetic-placeholder');
   });
-  await page.goto('/qr-fixture.html?outcome=token');
+  await page.goto('/qr-fixture.html?outcome=token', {waitUntil: 'domcontentloaded'});
   await waitForFixtureMount(page);
 
   await expect(page.locator('[data-qr-fixture-error]')).toHaveText('Synthetic QR fixture refused to mount');
@@ -251,7 +323,7 @@ test('refuses a browser context with auth state in either storage', async({page,
 
 test('refuses unexpected network requests and WebSockets before they connect', async({page,context}) => {
   const traffic = trafficByContext.get(context)!;
-  await page.goto('/qr-fixture.html?outcome=token');
+  await page.goto('/qr-fixture.html?outcome=token', {waitUntil: 'domcontentloaded'});
   await waitForFixtureMount(page);
   await expect(page.locator('#qr-fixture-root .preloader')).toBeVisible();
 
