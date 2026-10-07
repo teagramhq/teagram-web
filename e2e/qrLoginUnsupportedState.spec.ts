@@ -89,7 +89,7 @@ async function installConfinement(page: Page, context: BrowserContext, baseURL: 
 
   page.on('worker', () => traffic.workers.push('dedicated-worker'));
   page.on('console', (message) => traffic.consoleCategories.push(message.type()));
-  page.on('pageerror', (error) => traffic.pageErrors.push(`${classifyPageError(error)}: ${error.message}`));
+  page.on('pageerror', (error) => traffic.pageErrors.push(classifyPageError(error)));
 
   await context.addInitScript(() => {
     const state = {workerAttempts: [] as string[], authStorageAccesses: 0};
@@ -132,13 +132,26 @@ async function getObservations(page: Page) {
   return page.evaluate(() => window.qrFixture?.inspect());
 }
 
+async function getQrPixelDigest(page: Page) {
+  return page.evaluate(async() => {
+    const canvases = document.querySelectorAll<HTMLCanvasElement>('#qr-fixture-root canvas');
+    const canvas = canvases[canvases.length - 1];
+    const context = canvas?.getContext('2d');
+    if(!canvas || !context) return undefined;
+
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    const digest = await crypto.subtle.digest('SHA-256', new Uint8Array(pixels));
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  });
+}
+
 async function waitForFixtureMount(page: Page) {
   try {
     await page.waitForFunction(() => !!document.querySelector('#qr-fixture-root[data-qr-fixture-ready="true"]') ||
       !!document.querySelector('[data-qr-fixture-error]'), undefined, {timeout: 30_000});
-  } catch(error) {
+  } catch{
     const traffic = trafficByContext.get(page.context());
-    throw new Error(`${String(error)}\nPage errors: ${traffic?.pageErrors.join('\n') || 'none'}`);
+    throw new Error(`QR fixture did not reach ready or refusal state; page error categories: ${traffic?.pageErrors.join(', ') || 'none'}`);
   }
 }
 
@@ -249,10 +262,8 @@ test('repaints the QR for the confined light and dark themes at a narrow viewpor
   await page.evaluate(() => window.qrFixture?.completePendingToken());
   await expect(page.locator('#qr-fixture-root canvas')).toHaveCount(1);
   await expectNoUnexpectedCalls(page, [...BASE_MANAGER_CALLS, 'timeManager.getServerTimeOffset']);
-  const lightQr = await page.evaluate(() => {
-    const canvases = document.querySelectorAll<HTMLCanvasElement>('#qr-fixture-root canvas');
-    return canvases[canvases.length - 1]?.toDataURL();
-  });
+  const lightQr = await getQrPixelDigest(page);
+  expect(lightQr).toMatch(/^[a-f0-9]{64}$/);
 
   await page.evaluate(() => window.qrFixture?.setTheme('night'));
   const darkPalette = await page.evaluate(() => {
@@ -276,10 +287,7 @@ test('repaints the QR for the confined light and dark themes at a narrow viewpor
     'appStateManager.pushToState',
     'timeManager.getServerTimeOffset'
   ]);
-  await expect.poll(async() => page.evaluate(() => {
-    const canvases = document.querySelectorAll<HTMLCanvasElement>('#qr-fixture-root canvas');
-    return canvases[canvases.length - 1]?.toDataURL();
-  })).not.toBe(lightQr);
+  await expect.poll(() => getQrPixelDigest(page)).not.toBe(lightQr);
 
   await page.setViewportSize({width: 480, height: 720});
   const cardBounds = await page.locator('[data-qr-fixture-cards-container]').boundingBox();
@@ -319,6 +327,18 @@ test('refuses a browser context with auth state in either storage', async({page,
   await expect(page.locator('[data-qr-fixture-error]')).toHaveText('Synthetic QR fixture refused to mount');
   expect(await page.locator('#qr-fixture-root').getAttribute('data-qr-fixture-marker')).toBeNull();
   expect(await page.evaluate(() => typeof(window.qrFixture))).toBe('undefined');
+});
+
+test('records only fixed page error categories', async({page,context}) => {
+  const traffic = trafficByContext.get(context)!;
+  await page.goto('/qr-fixture.html?outcome=invalid', {waitUntil: 'domcontentloaded'});
+  await waitForFixtureMount(page);
+
+  await page.evaluate(() => setTimeout(() => {
+    throw new Error('qr fixture privacy sentinel');
+  }, 0));
+  await expect.poll(() => traffic.pageErrors.length).toBe(1);
+  expect(traffic.pageErrors[0] === 'other').toBe(true);
 });
 
 test('refuses unexpected network requests and WebSockets before they connect', async({page,context}) => {
