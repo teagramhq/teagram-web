@@ -22,7 +22,7 @@ export default defineConfig({
   },
   projects: [{name: 'qr-fixture-chromium', use: {...devices['Desktop Chrome']}}],
   webServer: {
-    command: `env -i PATH="$PATH" HOME="$HOME" MTPROTO_TARGET_MODE=private MTPROTO_PRIVATE_ENDPOINT=wss://qr-fixture.invalid/ MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE=scripts/fixtures/private-mtproto-public.pem VITE_MTPROTO_AUTO=false VITE_MTPROTO_HAS_HTTP=false VITE_MTPROTO_HAS_WS=true VITE_MTPROTO_HTTP=false VITE_MTPROTO_HTTP_UPLOAD=false VITE_MTPROTO_SW=false VITE_MTPROTO_WORKER=false corepack pnpm exec vite --config vite.config.ts --host 127.0.0.1 --port ${PORT} --strictPort`,
+    command: `env -i PATH="$PATH" HOME="$HOME" MTPROTO_TARGET_MODE=private MTPROTO_PRIVATE_ENDPOINT=wss://qr-fixture.invalid/ MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE=scripts/fixtures/private-mtproto-public.pem VITE_MTPROTO_AUTO= VITE_MTPROTO_HAS_HTTP= VITE_MTPROTO_HAS_WS=true VITE_MTPROTO_HTTP= VITE_MTPROTO_HTTP_UPLOAD= VITE_MTPROTO_SW= VITE_MTPROTO_WORKER= corepack pnpm exec vite --config vite.config.ts --host 127.0.0.1 --port ${PORT} --strictPort`,
     url: baseURL,
     reuseExistingServer: false,
     timeout: 120_000
