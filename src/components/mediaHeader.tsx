@@ -1,10 +1,12 @@
-import {JSX, Ref, Show} from 'solid-js';
+import {JSX, Ref, Show, Suspense, lazy} from 'solid-js';
 
-import LottieAnimation from '@components/lottieAnimation';
 import classNames from '@helpers/string/classNames';
-import lottieLoader, {LottieAssetName} from '@lib/lottie/lottieLoader';
+import type {LottieAssetName} from '@lib/lottie/lottieLoader';
 
 import styles from '@components/mediaHeader.module.scss';
+
+// Custom elements do not need to initialize the worker-backed Lottie manager.
+const LottieSticker = lazy(() => import('@components/mediaHeaderLottieSticker'));
 
 /**
  * Compound header used by auth cards, intro popups, and other "icon → title →
@@ -73,16 +75,15 @@ MediaHeader.Sticker = function MediaHeaderSticker(props: MediaHeaderStickerProps
         when={props.name}
         fallback={typeof(props.element) === 'function' ? props.element() : props.element}
       >
-        <LottieAnimation
-          class={styles.lottie}
-          size={size()}
-          lottieLoader={lottieLoader}
-          restartOnClick={props.restartOnClick ?? true}
-          name={props.name}
-          onPromise={(promise) => {
-            promise.then(props.onReady);
-          }}
-        />
+        <Suspense>
+          <LottieSticker
+            class={styles.lottie}
+            size={size()}
+            restartOnClick={props.restartOnClick ?? true}
+            name={props.name!}
+            onReady={props.onReady}
+          />
+        </Suspense>
       </Show>
     </div>
   );

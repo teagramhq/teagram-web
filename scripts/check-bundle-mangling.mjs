@@ -30,6 +30,7 @@ import fs from 'fs';
 import path from 'path';
 import {parseAst} from 'vite';
 import {verifyPrivateArtifactManifest} from './private-artifact.mjs';
+import {assertNoQrFixtureArtifactContent} from './qr-fixture-artifact.mjs';
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const B64_INDEX = new Map([...B64].map((char, index) => [char, index]));
@@ -208,6 +209,8 @@ if(privateMode || fs.existsSync(path.join(dir, 'mtproto-target.json'))) {
   verifyPrivateArtifactManifest(dir);
   console.log('verified private MTProto artifact manifest and route audit');
 }
+
+assertNoQrFixtureArtifactContent(dir);
 
 const files = fs.readdirSync(dir)
 .filter((file) => file.endsWith('.js') && fs.existsSync(path.join(dir, file + '.map')));
