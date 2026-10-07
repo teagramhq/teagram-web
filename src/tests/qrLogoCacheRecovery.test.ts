@@ -47,6 +47,12 @@ async function importFreshPainter() {
   return import('@helpers/qrCode/paintQrCode');
 }
 
+async function expectRedactedRejection(promise: Promise<unknown>) {
+  const error = await promise.catch((reason: unknown) => reason);
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toBe('QR logo unavailable');
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -60,7 +66,7 @@ it('recovers after a rejected logo fetch and keeps the successful result cached'
   vi.stubGlobal('fetch', fetchMock);
   const {paintQrCode} = await importFreshPainter();
 
-  await expect(paintQrCode(makeOptions())).rejects.toThrow('private fetch detail');
+  await expectRedactedRejection(paintQrCode(makeOptions()));
   const recovered = await paintQrCode(makeOptions());
   const reused = await paintQrCode(makeOptions());
 
@@ -69,6 +75,31 @@ it('recovers after a rejected logo fetch and keeps the successful result cached'
   expect(fetchMock).toHaveBeenCalledTimes(2);
   expect(successfulResponse.text).toHaveBeenCalledOnce();
   expect(recovered.qrCode.options.image).toBe(reused.qrCode.options.image);
+});
+
+it('redacts logo recolor failures and recovers on the next paint', async() => {
+  const successfulResponse = makeSuccessfulResponse();
+  const fetchMock = vi.fn().mockResolvedValue(successfulResponse);
+  const NativeFileReader = globalThis.FileReader;
+  let failConversion = true;
+  vi.stubGlobal('fetch', fetchMock);
+  vi.stubGlobal('FileReader', class extends NativeFileReader {
+    public override readAsDataURL(blob: Blob) {
+      if(failConversion) {
+        failConversion = false;
+        throw new Error('private recolor detail');
+      }
+      super.readAsDataURL(blob);
+    }
+  });
+  const {paintQrCode} = await importFreshPainter();
+
+  await expectRedactedRejection(paintQrCode(makeOptions()));
+  const recovered = await paintQrCode(makeOptions());
+
+  expect(recovered.canvas).toBeInstanceOf(HTMLCanvasElement);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(successfulResponse.text).toHaveBeenCalledTimes(2);
 });
 
 it('treats non-OK logo responses as failures and recovers on the next paint', async() => {
@@ -80,7 +111,7 @@ it('treats non-OK logo responses as failures and recovers on the next paint', as
   vi.stubGlobal('fetch', fetchMock);
   const {paintQrCode} = await importFreshPainter();
 
-  await expect(paintQrCode(makeOptions())).rejects.toThrow('QR logo unavailable');
+  await expectRedactedRejection(paintQrCode(makeOptions()));
   expect(failedResponse.text).not.toHaveBeenCalled();
   expect(successfulResponse.text).not.toHaveBeenCalled();
   const recovered = await paintQrCode(makeOptions());
@@ -103,7 +134,7 @@ it('shares concurrent failures and recovers with one cached successful fetch', a
   const secondPaint = paintQrCode(makeOptions());
   expect(fetchMock).toHaveBeenCalledOnce();
   pendingResponse.reject(new Error('private concurrent fetch detail'));
-  await expect(Promise.all([firstPaint, secondPaint])).rejects.toThrow('private concurrent fetch detail');
+  await expectRedactedRejection(Promise.all([firstPaint, secondPaint]));
 
   const firstRetry = paintQrCode(makeOptions());
   const secondRetry = paintQrCode(makeOptions());
@@ -135,7 +166,7 @@ it('does not let an old rejection evict a newer logo entry', async() => {
   const newerEntry = Promise.resolve('newer-logo-data-url');
   logoUrlCache!.set(LOGO_COLOR, newerEntry);
   pendingResponse.reject(new Error('private stale fetch detail'));
-  await expect(stalePaint).rejects.toThrow('private stale fetch detail');
+  await expectRedactedRejection(stalePaint);
 
   expect(logoUrlCache!.get(LOGO_COLOR)).toBe(newerEntry);
   const nextPaint = await paintQrCode(makeOptions());

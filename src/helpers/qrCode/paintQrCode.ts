@@ -51,9 +51,9 @@ function getLogoUrl(logoColor: string): Promise<string> {
       return res.text();
     })
     .then((text) => textToSvgURL(text.replace(/(fill:).+?(;)/, `$1${logoColor}$2`)))
-    .catch((error) => {
+    .catch(() => {
       if(logoUrlCache.get(logoColor) === url) logoUrlCache.delete(logoColor);
-      throw error;
+      throw new Error('QR logo unavailable');
     });
     logoUrlCache.set(logoColor, url);
   }
