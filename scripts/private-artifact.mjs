@@ -85,9 +85,14 @@ const TRUSTED_MT_PROTO_MODULI = [
 const PRIVATE_EXECUTABLE_EXTENSIONS = new Set(['.js', '.mjs']);
 const OFFICIAL_MT_PROTO_ROUTE = /(?:kws[1-5](?:-1)?|pluto(?:-1)?|venus(?:-1)?|aurora(?:-1)?|vesta(?:-1)?|flora(?:-1)?)\.web\.telegram\.org(?:[/:?#]|$)|web\.telegram\.org\/(?:apiw(?:s|_test1|1)?)(?:[/:?#]|$)/i;
 const OFFICIAL_MT_PROTO_DYNAMIC_ROUTE = /\$\{[^}]+\}[^`]*\.web\.telegram\.org|['"`]\.?web\.telegram\.org\/?['"`]\s*\+|\+\s*['"`]\.?web\.telegram\.org\/?['"`]/i;
+const OFFICIAL_MT_PROTO_DC_HOST = /(?:[a-z0-9-]+\.)+web\.telegram\.org(?:[/:?#]|$)/i;
 const OFFICIAL_MT_PROTO_IP = /\b(?:149\.154|149\.155|91\.108)\.\d{1,3}\.\d{1,3}\b/;
+const OFFICIAL_MT_PROTO_IPV6 = /\b2001:(?:0*b28|0*67c):(?:0*f23|0*4e8)[0-9a-f]*(?::|[\s"'/?#,\])]|$)/i;
 const HTTP_MTPROTO_ROUTE = /https?:\/\/[^\s"'`<>]+\/apiw(?:_test1|1)(?:[/?#"'`<>\s]|$)/i;
-const PRIVATE_WSS_URL = /wss:\/\/[A-Za-z0-9._:[\]-]+(?:\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?/gi;
+const CLEAR_TEXT_WEBSOCKET = /\bws:\/\//i;
+const SOURCE_MAP_DIRECTIVE = /(?:\/\/|\/\*)[#@]\s*source(?:MappingURL|URL)\s*=/i;
+const PRIVATE_KEY_BLOCK = /-----BEGIN [^\r\n-]*PRIVATE KEY-----/i;
+const PRIVATE_WSS_URL = /wss:\/\/[A-Za-z0-9._:[\]-]+(?:\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?(?:\?[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*)?(?:#[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*)?/gi;
 
 function invalidArtifact(message) {
   throw new Error('[MT] private artifact ' + message);
@@ -377,20 +382,45 @@ export function auditPrivateArtifact(directory, target) {
   }
 
   const privateUrls = new Set();
-  for(const file of executableFiles) {
-    const text = normalizedText(readFileSync(file));
+  const executablePrivateUrls = new Set();
+  const mapFiles = [];
+  for(const file of files) {
     const relativePath = relative(directory, file).split(sep).join('/');
-    if(OFFICIAL_MT_PROTO_ROUTE.test(text) || OFFICIAL_MT_PROTO_DYNAMIC_ROUTE.test(text)) {
+    const extension = file.slice(file.lastIndexOf('.')).toLowerCase();
+    const isExecutable = PRIVATE_EXECUTABLE_EXTENSIONS.has(extension);
+    if(relativePath.toLowerCase().endsWith('.map')) {
+      mapFiles.push(relativePath);
+    }
+
+    const contents = readFileSync(file);
+    const scanText = contents.toString('latin1');
+    if(SOURCE_MAP_DIRECTIVE.test(scanText)) {
+      invalidArtifact(`contains a source map or source URL directive in ${relativePath}`);
+    }
+
+    const fontName = relativePath.slice(relativePath.lastIndexOf('/') + 1);
+    const isBinaryFont = relativePath.startsWith('assets/fonts/') &&
+      PRIVATE_FONT_ASSET_SET.has(fontName) && fontName !== 'tgico.svg';
+    if(isBinaryFont) continue;
+
+    if(PRIVATE_KEY_BLOCK.test(scanText)) {
+      invalidArtifact(`contains private key material in ${relativePath}`);
+    }
+    if(CLEAR_TEXT_WEBSOCKET.test(scanText)) {
+      invalidArtifact(`contains a cleartext WebSocket URL in ${relativePath}`);
+    }
+    if(OFFICIAL_MT_PROTO_ROUTE.test(scanText) || OFFICIAL_MT_PROTO_DYNAMIC_ROUTE.test(scanText) ||
+      OFFICIAL_MT_PROTO_DC_HOST.test(scanText)) {
       invalidArtifact(`contains an official Telegram MTProto route in ${relativePath}`);
     }
-    if(OFFICIAL_MT_PROTO_IP.test(text)) {
+    if(OFFICIAL_MT_PROTO_IP.test(scanText) || OFFICIAL_MT_PROTO_IPV6.test(scanText)) {
       invalidArtifact(`contains an official Telegram MTProto IP route in ${relativePath}`);
     }
-    if(HTTP_MTPROTO_ROUTE.test(text)) {
+    if(HTTP_MTPROTO_ROUTE.test(scanText)) {
       invalidArtifact(`contains an HTTP MTProto transport in ${relativePath}`);
     }
 
-    const lower = text.toLowerCase();
+    const lower = scanText.toLowerCase();
     for(const fingerprint of TRUSTED_MT_PROTO_FINGERPRINTS) {
       if(lower.includes(fingerprint)) {
         invalidArtifact(`contains a trusted Telegram RSA fingerprint in ${relativePath}`);
@@ -401,12 +431,16 @@ export function auditPrivateArtifact(directory, target) {
         invalidArtifact(`contains a trusted Telegram RSA public key in ${relativePath}`);
       }
     }
-    for(const endpoint of allPrivateWssUrls(text)) {
+    for(const endpoint of allPrivateWssUrls(scanText)) {
       privateUrls.add(endpoint);
+      if(isExecutable) executablePrivateUrls.add(endpoint);
     }
   }
 
-  if(!privateUrls.has(target.endpoint)) {
+  if(mapFiles.length) {
+    invalidArtifact(`contains a source map file in ${mapFiles[0]}`);
+  }
+  if(!executablePrivateUrls.has(target.endpoint)) {
     invalidArtifact('does not contain its configured WSS endpoint');
   }
   const unexpected = [...privateUrls].filter((endpoint) => endpoint !== target.endpoint);
