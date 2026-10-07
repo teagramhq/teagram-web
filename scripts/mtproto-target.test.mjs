@@ -16,6 +16,7 @@ import {afterAll, describe, expect, it, vi} from 'vitest';
 import * as mtprotoTarget from './mtproto-target.mjs';
 import {
   auditPrivateArtifact,
+  includePrivateArtifactFonts,
   verifyPrivateArtifactCsp,
   writePrivateArtifactManifest
 } from './private-artifact.mjs';
@@ -347,6 +348,7 @@ describe('MTProto build target', () => {
     const outputDirectory = temporaryDirectory();
     writeFileSync(join(outputDirectory, 'client.js'),
       `const endpoint = ${JSON.stringify(endpoint)};\nconst fingerprint = ${JSON.stringify(target.fingerprint)};\n`);
+    includePrivateArtifactFonts(resolve('.'), outputDirectory);
 
     expect(() => auditPrivateArtifact(outputDirectory, target)).not.toThrow();
   });
