@@ -1,3 +1,4 @@
+import {createSignal} from 'solid-js';
 import {render} from 'solid-js/web';
 
 import AccountController from '@lib/accounts/accountController';
@@ -10,6 +11,8 @@ import type {AuthFlowContextValue, CardSpec} from '@/pages/authFlow';
 import styles from '@/pages/authFlow.module.scss';
 import {SETTINGS_INIT} from '@config/state';
 import {setAppSettingsSilent} from '@stores/appSettings';
+import {GrowHeightReveal} from '@helpers/solid/animations';
+import StarsMoreOptionsButton from '@components/popups/starsMoreOptionsButton';
 
 import '@/materialize.scss';
 import '@/scss/style.scss';
@@ -28,6 +31,8 @@ type ManagerHandlers = Record<string, Record<string, ManagerHandler>>;
 type QrFixtureControl = {
   selectOutcome(outcome: QrFixtureOutcome): void,
   setTheme(theme: QrFixtureTheme): void,
+  setRevealProbeVisible(visible: boolean): void,
+  setStarsMoreOptionsVisible(visible: boolean): void,
   completePendingToken(): void,
   inspect(): {
     outcome: QrFixtureOutcome,
@@ -66,6 +71,9 @@ export async function mountQrFixtureApp(
   const unexpectedManagerCalls = new Set<string>();
   const actions: string[] = [];
   const pendingTokenResolvers: Array<() => void> = [];
+  let updateRevealProbes: ((visible: boolean) => void) | undefined;
+  let updateStarsMoreOptionsVisible: ((visible: boolean) => void) | undefined;
+  const showSuggestedLanguage = new URLSearchParams(window.location.search).get('suggested-language') === '1';
 
   const handlers: ManagerHandlers = {
     apiManager: {
@@ -87,13 +95,24 @@ export async function mountQrFixtureApp(
         });
       },
       async getConfig() {
-        return {suggested_lang_code: I18n.getLastRequestedLangCode()};
+        return {suggested_lang_code: showSuggestedLanguage ? 'fixture-language' : I18n.getLastRequestedLangCode()};
       },
       async getBaseDcId() {
         return 1;
       },
       async setBaseDcId() {},
       async setUser() {}
+    },
+    appLangPackManager: {
+      async getStrings(langCode: unknown, strings: unknown) {
+        if(langCode !== 'fixture-language' || !Array.isArray(strings) ||
+          !strings.includes('Login.ContinueOnLanguage')) {
+          unexpectedManagerCalls.add('appLangPackManager.getStrings:unexpected');
+          throw new Error(UNEXPECTED_MANAGER_ERROR);
+        }
+
+        return [{_: 'langPackString', key: 'Login.ContinueOnLanguage', value: 'Continue in fixture language'}];
+      }
     },
     appAccountManager: {
       async initPasskeyLogin() {
@@ -175,6 +194,14 @@ export async function mountQrFixtureApp(
       applyTheme(theme);
       rootScope.dispatchEventSingle('theme_changed');
     },
+    setRevealProbeVisible(visible) {
+      if(typeof(visible) !== 'boolean' || !updateRevealProbes) throw new Error(UNEXPECTED_MANAGER_ERROR);
+      updateRevealProbes(visible);
+    },
+    setStarsMoreOptionsVisible(visible) {
+      if(typeof(visible) !== 'boolean' || !updateStarsMoreOptionsVisible) throw new Error(UNEXPECTED_MANAGER_ERROR);
+      updateStarsMoreOptionsVisible(visible);
+    },
     completePendingToken() {
       pendingTokenResolvers.shift()?.();
     },
@@ -206,18 +233,35 @@ export async function mountQrFixtureApp(
   };
 
   const {default: SignQRCard} = await import('@/pages/cards/SignQRCard');
-  render(() => (
-    <AuthFlowContext.Provider value={flowContext}>
-      <div id="auth-pages" class={classNames('whole', styles.host)}>
-        <div class={styles.scrollable}>
-          <div class={classNames(styles.placeholder, styles.placeholderTop)}/>
-          <div class={styles.cardsContainer} data-qr-fixture-cards-container="">
-            <SignQRCard spec={{name: 'signQR'}}/>
+  render(() => {
+    const [revealProbesVisible, setRevealProbesVisible] = createSignal(false);
+    const [starsMoreOptionsVisible, setStarsMoreOptionsVisible] = createSignal(false);
+    updateRevealProbes = setRevealProbesVisible;
+    updateStarsMoreOptionsVisible = setStarsMoreOptionsVisible;
+    return (
+      <>
+        <AuthFlowContext.Provider value={flowContext}>
+          <div id="auth-pages" class={classNames('whole', styles.host)}>
+            <div class={styles.scrollable}>
+              <div class={classNames(styles.placeholder, styles.placeholderTop)}/>
+              <div class={styles.cardsContainer} data-qr-fixture-cards-container="">
+                <SignQRCard spec={{name: 'signQR'}}/>
+              </div>
+              <div class={styles.placeholder}/>
+            </div>
           </div>
-          <div class={styles.placeholder}/>
-        </div>
-      </div>
-    </AuthFlowContext.Provider>
-  ), host);
+        </AuthFlowContext.Provider>
+        <GrowHeightReveal when={revealProbesVisible()} class="accent-picker-frame">
+          <div class="accent-picker" data-qr-fixture-reveal-probe="accent">Accent picker</div>
+        </GrowHeightReveal>
+        <GrowHeightReveal when={revealProbesVisible()} class="primary-action-focus-inset">
+          <button class="btn-primary btn-primary-transparent" data-qr-fixture-reveal-probe="passkey">
+            Log in by passkey
+          </button>
+        </GrowHeightReveal>
+        <StarsMoreOptionsButton when={starsMoreOptionsVisible()} onClick={() => {}} />
+      </>
+    );
+  }, host);
   host.dataset.qrFixtureReady = 'true';
 }

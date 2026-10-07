@@ -85,7 +85,7 @@ export default function PasskeyLoginButton(props: {
   });
 
   return (
-    <GrowHeightReveal when={visible()}>
+    <GrowHeightReveal when={visible()} class="primary-action-focus-inset">
       <Button
         class="btn-primary btn-secondary btn-primary-transparent primary"
         disabled={submitting() || props.disabled}

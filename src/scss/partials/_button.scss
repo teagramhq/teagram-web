@@ -1055,6 +1055,17 @@ $btn-menu-z-index: 4;
   line-height: var(--line-height);
   text-transform: uppercase;
 
+  &:focus-visible {
+    outline: 2px solid var(--primary-text-color);
+    outline-offset: 2px;
+  }
+
+  .primary-action-focus-inset > & {
+    &:focus-visible {
+      outline-offset: -2px;
+    }
+  }
+
   @include hover() {
     // transition: /* .2s background-color,  */.2s opacity;
     background: var(--dark-primary-color);

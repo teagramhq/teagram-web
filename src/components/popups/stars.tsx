@@ -48,7 +48,7 @@ import bigInt from 'big-integer';
 import safeWindowOpen from '@helpers/dom/safeWindowOpen';
 import {IconTsx} from '@components/iconTsx';
 import Tabs from '@components/tabs';
-import {GrowHeightReveal} from '@helpers/solid/animations';
+import StarsMoreOptionsButton from '@components/popups/starsMoreOptionsButton';
 import getStarsSpendPurposePeerId from '@helpers/getStarsSpendPurposePeerId';
 import confirmationPopup from '@components/confirmationPopup';
 
@@ -766,14 +766,7 @@ export default class PopupStars extends PopupElement {
             );
           }}</For>
         </div>
-        <GrowHeightReveal when={!extended()} appear={false}>
-          <Button
-            class="btn-primary btn-transparent primary popup-stars-more"
-            icon="down"
-            text="ShowMoreOptions"
-            onClick={() => setExtended((v) => !v)}
-          />
-        </GrowHeightReveal>
+        <StarsMoreOptionsButton when={!extended()} onClick={() => setExtended((v) => !v)} />
       </Section>
     );
 

@@ -51,4 +51,13 @@ describe('QR fixture mount guard', () => {
     expect(parseQrFixtureSearchParams(new URLSearchParams('outcome=token&account=1'))).toBeUndefined();
     expect(parseQrFixtureSearchParams(new URLSearchParams('outcome=token&outcome=token'))).toBeUndefined();
   });
+
+  it('allows only the fixed suggested-language fixture toggle', () => {
+    expect(parseQrFixtureSearchParams(new URLSearchParams('outcome=input-method-invalid&suggested-language=1')))
+    .toBe('input-method-invalid');
+    expect(parseQrFixtureSearchParams(new URLSearchParams('outcome=input-method-invalid&suggested-language=0')))
+    .toBeUndefined();
+    expect(parseQrFixtureSearchParams(new URLSearchParams('outcome=input-method-invalid&suggested-language=1&suggested-language=1')))
+    .toBeUndefined();
+  });
 });
