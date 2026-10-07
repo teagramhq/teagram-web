@@ -19,7 +19,7 @@ corepack pnpm exec playwright test e2e/qrLoginUnsupportedState.spec.ts --config=
 
 Playwright starts the Vite server on `127.0.0.1:8173` with a clean process environment, the pinned `wss://qr-fixture.invalid/` private target and the committed test public key. It stops that server when the command exits; pressing Ctrl+C stops the run and server together. The server refuses to reuse an existing process on that port.
 
-The fixture supports the fixed `input-method-invalid`, `network-bad-response-406` and `token` outcomes. Its control surface accepts only those outcome identifiers and a fixed token-completion action. The smoke check verifies the mounted card, loading state, cancel keyboard access, a narrow viewport, dark color-scheme emulation, blocked worker creation, blocked service workers, and refusal of off-origin requests and WebSockets.
+The fixture supports the fixed `input-method-invalid`, `network-bad-response-406` and `token` outcomes. Its control surface accepts only those outcome identifiers and a fixed token-completion action. The smoke check verifies both failure states, their accessible retry or username escape, focus order, light and dark theme tokens, narrow layout, token loading, blocked worker creation, blocked service workers, and refusal of off-origin requests and WebSockets.
 
 Run the focused production-artifact guard test with:
 

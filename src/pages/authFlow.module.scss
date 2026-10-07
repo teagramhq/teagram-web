@@ -236,6 +236,12 @@ $corner-button-size: 2.5rem;
   height: 100%;
 }
 
+.qrStateIcon {
+  color: var(--secondary-text-color);
+  font-size: 5rem;
+  line-height: 1;
+}
+
 // ----- Page-specific modifiers --------------------------------------
 
 .pageSignUp {

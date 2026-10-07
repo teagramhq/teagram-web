@@ -4916,6 +4916,12 @@
 "Login.QR.Cancel" = "Log in by phone number >";
 "Login.QR.Login" = "Log in by QR Code >";
 "Login.QR.Subtitle" = "Scan with Telegram app on your phone";
+"Login.QR.Unsupported.Title" = "QR code sign-in unavailable";
+"Login.QR.Unsupported.Text" = "This server doesn't support QR code sign-in.";
+"Login.QR.Error.Title" = "Connection problem";
+"Login.QR.Error.Text" = "The QR code couldn't be loaded. Check your connection and try again.";
+"Login.QR.Retry" = "Try again";
+"Login.QR.Username" = "Sign in with username";
 "PhoneNumber.Code.Fragment.Info" = "Get the code in the Numbers section on [Fragment](%1$@)";
 "PHONE_CODE_INVALID" = "Invalid code";
 "PHONE_CODE_EXPIRED" = "Code expired";

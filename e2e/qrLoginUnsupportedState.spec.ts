@@ -1,4 +1,4 @@
-import {BrowserContext, expect, Page, test} from '@playwright/test';
+import {BrowserContext, expect, Locator, Page, test} from '@playwright/test';
 
 type QrFixtureOutcome = 'input-method-invalid' | 'network-bad-response-406' | 'token';
 
@@ -145,6 +145,32 @@ async function getQrPixelDigest(page: Page) {
   });
 }
 
+async function getStateIconVisual(page: Page) {
+  return page.locator('#qr-fixture-root [class*="qrStateIcon"]').evaluate((element) => {
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--secondary-text-color)';
+    document.body.appendChild(probe);
+    const secondary = getComputedStyle(probe).color;
+    probe.remove();
+    return {
+      glyph: element.textContent?.codePointAt(0),
+      color: getComputedStyle(element).color,
+      secondary
+    };
+  });
+}
+
+async function expectHeaderActionGap(page: Page, action: Locator) {
+  const subtitleBounds = await page.locator('#qr-fixture-root [aria-live="polite"]')
+  .locator('xpath=..')
+  .boundingBox();
+  const actionBounds = await action.boundingBox();
+
+  expect(subtitleBounds).not.toBeNull();
+  expect(actionBounds).not.toBeNull();
+  expect(actionBounds!.y - (subtitleBounds!.y + subtitleBounds!.height)).toBeGreaterThanOrEqual(16);
+}
+
 async function waitForFixtureMount(page: Page) {
   try {
     await page.waitForFunction(() => !!document.querySelector('#qr-fixture-root[data-qr-fixture-ready="true"]') ||
@@ -180,10 +206,26 @@ test.beforeEach(async({page,context}, testInfo) => {
 });
 
 for(const scenario of [
-  {outcome: 'input-method-invalid' as const, expectedCalls: BASE_MANAGER_CALLS},
-  {outcome: 'network-bad-response-406' as const, expectedCalls: BASE_MANAGER_CALLS}
+  {
+    outcome: 'input-method-invalid' as const,
+    expectedCalls: BASE_MANAGER_CALLS,
+    title: 'QR code sign-in unavailable',
+    subtitle: "This server doesn't support QR code sign-in.",
+    action: 'Sign in with username',
+    icon: 'ea04',
+    retry: false
+  },
+  {
+    outcome: 'network-bad-response-406' as const,
+    expectedCalls: BASE_MANAGER_CALLS,
+    title: 'Connection problem',
+    subtitle: "The QR code couldn't be loaded. Check your connection and try again.",
+    action: 'Sign in with username',
+    icon: 'ea91',
+    retry: true
+  }
 ]) {
-  test(`mounts the real QR card for ${scenario.outcome}`, async({page,context}) => {
+  test(`shows the safe ${scenario.outcome} state on the real QR card`, async({page,context}) => {
     const traffic = trafficByContext.get(context)!;
     await page.goto(`/qr-fixture.html?outcome=${scenario.outcome}`, {waitUntil: 'domcontentloaded'});
     await waitForFixtureMount(page);
@@ -198,18 +240,101 @@ for(const scenario of [
       'data-qr-fixture-marker',
       'TWEB_QR_FIXTURE_DEV_ONLY_SENTINEL_6D9B42E1'
     );
-    await expect(page.locator('#qr-fixture-root .preloader')).toBeVisible();
-    await expect(page.getByRole('button').first()).toBeVisible();
+    await expect(page.getByText(scenario.title, {exact: true})).toBeVisible();
+    await expect(page.locator('[aria-live="polite"][aria-atomic="true"]')).toHaveText(scenario.subtitle);
+    await expect(page.locator('#qr-fixture-root .preloader')).toHaveCount(0);
+    await expect(page.locator('#qr-fixture-root canvas')).toHaveCount(0);
+    await expect(page.locator('#qr-fixture-root [class*="qrDescription"]')).toHaveCount(0);
+    const icon = page.locator('#qr-fixture-root [class*="qrStateIcon"]');
+    await expect(icon).toHaveAttribute('aria-hidden', 'true');
+    const lightVisual = await getStateIconVisual(page);
+    expect(lightVisual.glyph).toBe(parseInt(scenario.icon, 16));
+    expect(lightVisual.color).toBe(lightVisual.secondary);
+
+    const retryButton = page.getByRole('button', {name: 'Try again', exact: true});
+    const escapeButton = page.getByRole('button', {name: scenario.action, exact: true});
+    const passkeyButton = page.getByRole('button', {name: /Log in by passkey/});
+    const primaryAction = scenario.retry ? retryButton : escapeButton;
+    if(scenario.retry) {
+      await expect(retryButton).toBeVisible();
+      await expect(retryButton).toHaveClass(/btn-primary btn-color-primary/);
+      await expect(retryButton).toBeFocused();
+      await page.keyboard.press('Tab');
+      await expect(escapeButton).toBeFocused();
+    } else {
+      await expect(retryButton).toHaveCount(0);
+      await expect(escapeButton).toHaveClass(/btn-primary btn-color-primary/);
+      await expect(escapeButton).toBeFocused();
+    }
+    await expectHeaderActionGap(page, primaryAction);
+
+    const liveDom = await page.locator('#qr-fixture-root').evaluate((root) => [
+      root.textContent || '',
+      ...Array.from(root.querySelectorAll('*')).flatMap((element) =>
+        Array.from(element.attributes).map((attribute) => attribute.value)
+      )
+    ].join('\n'));
+    expect(liveDom).not.toMatch(/INPUT_METHOD_INVALID|NETWORK_BAD_RESPONSE|406|tg:\/\/login/);
+
+    await page.keyboard.press('Tab');
+    await expect(passkeyButton).toBeFocused();
     await expectNoUnexpectedCalls(page, scenario.expectedCalls);
 
     const observations = await getObservations(page);
     expect(observations?.outcome).toBe(scenario.outcome);
+
+    await page.evaluate(() => window.qrFixture?.setTheme('night'));
+    const darkVisual = await getStateIconVisual(page);
+    expect(darkVisual.glyph).toBe(parseInt(scenario.icon, 16));
+    expect(darkVisual.color).toBe(darkVisual.secondary);
+    expect(darkVisual.color).not.toBe(lightVisual.color);
+    await expectHeaderActionGap(page, primaryAction);
+    await expectNoUnexpectedCalls(page, [...BASE_MANAGER_CALLS, 'apiManager.setThemeParams'].sort());
+
+    const tileBounds = await page.locator('#qr-fixture-root [class*="qrContainer"]').boundingBox();
+    expect(tileBounds).not.toBeNull();
+    expect(tileBounds!.width).toBe(240);
+    expect(tileBounds!.height).toBe(240);
+
+    await page.setViewportSize({width: 360, height: 720});
+    await expectHeaderActionGap(page, primaryAction);
+    await page.setViewportSize({width: 320, height: 720});
+    await expectHeaderActionGap(page, primaryAction);
+    const narrowTileBounds = await page.locator('#qr-fixture-root [class*="qrContainer"]').boundingBox();
+    expect(narrowTileBounds).not.toBeNull();
+    expect(narrowTileBounds!.width).toBeLessThanOrEqual(240);
+    expect(narrowTileBounds!.x).toBeGreaterThanOrEqual(0);
+    expect(narrowTileBounds!.x + narrowTileBounds!.width).toBeLessThanOrEqual(320);
+    expect(traffic.consoleCategories).not.toContain('error');
+    expect(traffic.consoleCategories).toContain('warning');
     await expectNormalConfinement(page, context, traffic);
     expect(traffic.pageErrors).toEqual([]);
   });
 }
 
-test('keeps token loading controllable and the cancel button keyboard accessible', async({page,context}) => {
+test('retries only after a keyboard accessible action and restores QR loading', async({page,context}) => {
+  const traffic = trafficByContext.get(context)!;
+  await page.goto('/qr-fixture.html?outcome=network-bad-response-406', {waitUntil: 'domcontentloaded'});
+  await waitForFixtureMount(page);
+  await expect(page.getByText('Connection problem', {exact: true})).toBeVisible();
+  await expect(page.locator('#qr-fixture-root .preloader')).toHaveCount(0);
+
+  await page.evaluate(() => window.qrFixture?.selectOutcome('token'));
+  const retryButton = page.getByRole('button', {name: 'Try again', exact: true});
+  await expect(retryButton).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#qr-fixture-root .preloader')).toBeVisible();
+  await expect(retryButton).toHaveCount(0);
+  await expect(page.getByRole('button', {name: 'Sign in with username', exact: true})).toBeFocused();
+  await page.evaluate(() => window.qrFixture?.completePendingToken());
+  await expect(page.locator('#qr-fixture-root canvas')).toHaveCount(1);
+  await expect(page.getByText('Log in by QR Code', {exact: true})).toBeVisible();
+  await expect(page.getByText('Scan with Telegram app on your phone', {exact: true})).toBeVisible();
+  await expectNoUnexpectedCalls(page, [...BASE_MANAGER_CALLS, 'timeManager.getServerTimeOffset']);
+  await expectNormalConfinement(page, context, traffic);
+});
+
+test('keeps token loading controllable and the username escape keyboard accessible', async({page,context}) => {
   const traffic = trafficByContext.get(context)!;
   await page.goto('/qr-fixture.html?outcome=token', {waitUntil: 'domcontentloaded'});
   await waitForFixtureMount(page);
@@ -222,13 +347,12 @@ test('keeps token loading controllable and the cancel button keyboard accessible
     'TWEB_QR_FIXTURE_DEV_ONLY_SENTINEL_6D9B42E1'
   );
   await expect(page.locator('#qr-fixture-root .preloader')).toBeVisible();
-  const cancelButton = page.getByRole('button').first();
-  await expect(cancelButton).toBeVisible();
-  await expect(page.getByRole('button', {name: /Log in by phone number/})).toBeVisible();
+  const usernameEscape = page.getByRole('button', {name: 'Sign in with username', exact: true});
+  await expect(usernameEscape).toBeVisible();
   await expectNoUnexpectedCalls(page, BASE_MANAGER_CALLS);
 
   await page.keyboard.press('Tab');
-  await expect(cancelButton).toBeFocused();
+  await expect(usernameEscape).toBeFocused();
   await page.keyboard.press('Enter');
   await expect.poll(async() => (await getObservations(page))?.actions).toContain('navigate:signIn');
 

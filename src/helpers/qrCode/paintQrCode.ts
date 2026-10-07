@@ -46,8 +46,15 @@ function getLogoUrl(logoColor: string): Promise<string> {
   let url = logoUrlCache.get(logoColor);
   if(!url) {
     url = fetch('assets/img/logo_padded.svg')
-    .then((res) => res.text())
-    .then((text) => textToSvgURL(text.replace(/(fill:).+?(;)/, `$1${logoColor}$2`)));
+    .then((res) => {
+      if(!res.ok) throw new Error('QR logo unavailable');
+      return res.text();
+    })
+    .then((text) => textToSvgURL(text.replace(/(fill:).+?(;)/, `$1${logoColor}$2`)))
+    .catch(() => {
+      if(logoUrlCache.get(logoColor) === url) logoUrlCache.delete(logoColor);
+      throw new Error('QR logo unavailable');
+    });
     logoUrlCache.set(logoColor, url);
   }
   return url;
