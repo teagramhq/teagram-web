@@ -241,7 +241,7 @@ export default defineConfig({
     // properties natively, so lightningcss leaves them alone; RTL runs off `documentElement.dir`,
     // which index.ts sets on every language, not off `:lang()`.
     cssTarget: ['chrome87', 'edge87', 'firefox78', 'safari14.1'],
-    sourcemap: true,
+    sourcemap: mtprotoTarget.mode === 'private' ? false : true,
     assetsDir: '',
     copyPublicDir: false,
     emptyOutDir: true,

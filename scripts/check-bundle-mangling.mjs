@@ -3,7 +3,7 @@
  * Post-build guard for miscompilations only the production bundle can have. Both
  * of the classes it covers have already shipped and were found by hand.
  *
- * 1. The minifier binds an identifier read from a DEFAULT VALUE — a parameter
+ * 1. In ordinary builds, the minifier binds an identifier read from a DEFAULT VALUE — a parameter
  *    default, a destructuring default, a class field initializer — to the wrong
  *    symbol, while the surrounding function body keeps the correct name. The
  *    emitted code then reads a property off an unrelated module-level binding,
@@ -17,7 +17,7 @@
  *    check how that same variable is spelled everywhere else in the chunk. One
  *    dominant spelling plus a stray one in the default is the signature.
  *
- * 2. A lone surrogate in a folded string constant gets re-encoded as U+FFFD,
+ * 2. In every build, a lone surrogate in a folded string constant gets re-encoded as U+FFFD,
  *    which is what silently killed every astral emoji in the worker chunk. Any
  *    replacement character in a chunk means some literal lost its content — we
  *    author none of them, so the count must stay zero.
@@ -153,7 +153,7 @@ function makeOffsetToPosition(code) {
   };
 }
 
-function checkChunk(dir, file) {
+function checkDefaultBindings(dir, file) {
   const code = fs.readFileSync(path.join(dir, file), 'utf8');
   const lines = code.split('\n');
   const map = JSON.parse(fs.readFileSync(path.join(dir, file + '.map'), 'utf8'));
@@ -192,6 +192,12 @@ function checkChunk(dir, file) {
     );
   }
 
+  return offenders;
+}
+
+function checkLostLiterals(dir, file) {
+  const code = fs.readFileSync(path.join(dir, file), 'utf8');
+  const offenders = [];
   const replacementCharacters = (code.match(/�/g) || []).length;
   if(replacementCharacters) {
     offenders.push(
@@ -203,8 +209,28 @@ function checkChunk(dir, file) {
   return offenders;
 }
 
+function listArtifactFiles(directory, rootDirectory = directory, files = []) {
+  for(const entry of fs.readdirSync(directory, {withFileTypes: true})) {
+    const relativePath = path.join(directory, entry.name);
+    if(entry.isDirectory()) {
+      listArtifactFiles(relativePath, rootDirectory, files);
+    } else if(entry.isFile()) {
+      files.push(path.relative(rootDirectory, relativePath));
+    }
+  }
+  return files;
+}
+
 const dir = process.argv[2] === '--' ? (process.argv[3] || 'dist') : (process.argv[2] || 'dist');
-const privateMode = process.env.MTPROTO_TARGET_MODE === 'private';
+const privateMode = process.env.MTPROTO_TARGET_MODE === 'private' ||
+  fs.existsSync(path.join(dir, 'mtproto-target.json'));
+const files = listArtifactFiles(dir);
+const javascriptFiles = files.filter((file) => /\.(?:m?js)$/i.test(file));
+if(privateMode && javascriptFiles.length === 0) {
+  console.error('[MT] private bundle contains no JavaScript chunks to validate');
+  process.exit(1);
+}
+
 if(privateMode || fs.existsSync(path.join(dir, 'mtproto-target.json'))) {
   verifyPrivateArtifactManifest(dir);
   console.log('verified private MTProto artifact manifest and route audit');
@@ -212,10 +238,14 @@ if(privateMode || fs.existsSync(path.join(dir, 'mtproto-target.json'))) {
 
 assertNoQrFixtureArtifactContent(dir);
 
-const files = fs.readdirSync(dir)
+// Private output has no maps, so the map-dependent default-binding check is ordinary-build-only.
+// Lost-literal validation below runs for every emitted JavaScript chunk in either mode.
+const mappedChunks = privateMode ? [] : javascriptFiles
 .filter((file) => file.endsWith('.js') && fs.existsSync(path.join(dir, file + '.map')));
-
-const offenders = files.flatMap((file) => checkChunk(dir, file));
+const offenders = [
+  ...mappedChunks.flatMap((file) => checkDefaultBindings(dir, file)),
+  ...javascriptFiles.flatMap((file) => checkLostLiterals(dir, file))
+];
 if(offenders.length) {
   console.error(
     `\nThe production bundle is miscompiled in ${offenders.length} place(s):\n` +
@@ -224,4 +254,6 @@ if(offenders.length) {
   process.exit(1);
 }
 
-console.log(`checked ${files.length} chunks, no miscompiled defaults and no lost string literals`);
+console.log(
+  `checked ${javascriptFiles.length} JavaScript chunks for lost literals and ${mappedChunks.length} mapped chunks for miscompiled defaults`
+);

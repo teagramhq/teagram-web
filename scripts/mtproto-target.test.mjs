@@ -10,7 +10,7 @@ import {
   writeFileSync
 } from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join, resolve} from 'node:path';
+import {dirname, join, resolve} from 'node:path';
 import {inspect} from 'node:util';
 import {afterAll, describe, expect, it, vi} from 'vitest';
 import * as mtprotoTarget from './mtproto-target.mjs';
@@ -24,6 +24,8 @@ import {createPrivateWorkerBlobURL} from '../src/helpers/createPrivateWorkerBlob
 const {assertRunnableMtprotoTarget, resolveMtprotoTarget} = mtprotoTarget;
 
 const fixturePath = resolve('scripts/fixtures/private-mtproto-public.pem');
+const trustedOfficialModulus = readFileSync(resolve('scripts/private-artifact.mjs'), 'utf8')
+.match(/const TRUSTED_MT_PROTO_MODULI = \[\s*'([0-9a-f]+)'/i)?.[1];
 const fixtureKey = `-----BEGIN RSA PUBLIC KEY-----
 MIIBCgKCAQEAt0XATe6T6yIGpzy/ZTTulB8sROFQJU/Oo8dKKEHQd5S30CHfkcDE
 jeYOOspc7zHv5ZrM9eQfJ3LelIsP1u6p1iZWchkAhf/UsHzN3P31gh6sjRV/SuBo
@@ -91,6 +93,41 @@ function buildPrivateTarget(overrides = {}, outputDirectory = join(temporaryDire
     env: {...env, ...privateEnv(overrides)}
   });
   return {outputDirectory, result};
+}
+
+function buildTelegramTarget(outputDirectory = join(temporaryDirectory(), 'dist')) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+    name !== 'MTPROTO_TARGET_MODE' && !name.startsWith('MTPROTO_PRIVATE_')
+  ));
+  const result = spawnSync(process.execPath, [
+    resolve('node_modules/vite/bin/vite.js'),
+    'build',
+    '--outDir',
+    outputDirectory
+  ], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    env
+  });
+  return {outputDirectory, result};
+}
+
+function findArtifactFiles(directory, rootDirectory = directory, files = []) {
+  for(const entry of readdirSync(directory, {withFileTypes: true})) {
+    const path = join(directory, entry.name);
+    if(entry.isDirectory()) {
+      findArtifactFiles(path, rootDirectory, files);
+    } else {
+      files.push(path.slice(rootDirectory.length + 1));
+    }
+  }
+  return files;
+}
+
+function writeArtifactFile(directory, relativePath, contents) {
+  const file = join(directory, relativePath);
+  mkdirSync(dirname(file), {recursive: true});
+  writeFileSync(file, contents);
 }
 
 function findEmittedWorkers(directory, workers = []) {
@@ -353,6 +390,91 @@ describe('MTProto build target', () => {
     expect(() => auditPrivateArtifact(outputDirectory, target)).not.toThrow();
   });
 
+  it('rejects a clean JavaScript chunk accompanied by a source map', () => {
+    const target = resolveMtprotoTarget(privateEnv());
+    const outputDirectory = temporaryDirectory();
+    writeFileSync(join(outputDirectory, 'client.js'), [
+      `const endpoint = ${JSON.stringify(target.endpoint)};`,
+      `const fingerprint = ${JSON.stringify(target.fingerprint)};`
+    ].join('\n'));
+    writeFileSync(join(outputDirectory, 'client.js.map'), JSON.stringify({
+      version: 3,
+      names: [],
+      sources: [],
+      mappings: ''
+    }));
+    includePrivateArtifactFonts(resolve('.'), outputDirectory);
+
+    expect(() => writePrivateArtifactManifest(outputDirectory, target, process.cwd())).toThrow(/source map/i);
+    expect(existsSync(join(outputDirectory, 'mtproto-target.json'))).toBe(false);
+  });
+
+  it.each([
+    ['line hash sourceMappingURL', '//# sourceMappingURL=missing.js.map'],
+    ['line at sourceMappingURL data URI', '//@ sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozfQ=='],
+    ['block hash sourceURL', '/*# sourceURL=worker.js */'],
+    ['block at sourceURL', '/*@ sourceURL=worker.js */']
+  ])('rejects %s directives in non-JavaScript output', (_name, directive) => {
+    const target = resolveMtprotoTarget(privateEnv());
+    const outputDirectory = temporaryDirectory();
+    writeFileSync(join(outputDirectory, 'client.js'), [
+      `const endpoint = ${JSON.stringify(target.endpoint)};`,
+      `const fingerprint = ${JSON.stringify(target.fingerprint)};`
+    ].join('\n'));
+    writeFileSync(join(outputDirectory, 'index.html'), `<!-- ${directive} -->`);
+    includePrivateArtifactFonts(resolve('.'), outputDirectory);
+
+    expect(() => auditPrivateArtifact(outputDirectory, target)).toThrow(/source.?map|source url/i);
+  });
+
+  it.each([
+    ['alternate WSS endpoint', 'wss://other.example.test/apiws', /second private MTProto target/i],
+    ['cleartext WebSocket URL', 'ws://telegramd.test/apiws', /cleartext WebSocket/i],
+    ['official DC route', 'https://kws1.web.telegram.org/apiws', /official Telegram MTProto route/i],
+    ['official IPv4 DC address', '149.154.167.91', /official Telegram MTProto IP/i],
+    ['official IPv6 DC prefix', '2001:b28:f23d:f001::a', /official Telegram MTProto IP/i],
+    ['trusted official RSA fingerprint', 'c3b42b026ce86b21', /trusted Telegram RSA fingerprint/i],
+    ['trusted official RSA modulus', trustedOfficialModulus, /trusted Telegram RSA public key/i],
+    ['private-key block', '-----BEGIN PRIVATE KEY-----\ncanary\n-----END PRIVATE KEY-----', /private key material/i]
+  ])('rejects %s in every emitted file', (_name, payload, expectedError) => {
+    const target = resolveMtprotoTarget(privateEnv());
+    const outputDirectory = temporaryDirectory();
+    writeFileSync(join(outputDirectory, 'client.js'), [
+      `const endpoint = ${JSON.stringify(target.endpoint)};`,
+      `const fingerprint = ${JSON.stringify(target.fingerprint)};`
+    ].join('\n'));
+    writeArtifactFile(outputDirectory, 'assets/app.css', payload);
+    includePrivateArtifactFonts(resolve('.'), outputDirectory);
+
+    expect(() => auditPrivateArtifact(outputDirectory, target)).toThrow(expectedError);
+  });
+
+  it('rejects a query variant of the configured WSS endpoint', () => {
+    const target = resolveMtprotoTarget(privateEnv());
+    const outputDirectory = temporaryDirectory();
+    writeFileSync(join(outputDirectory, 'client.js'), [
+      `const endpoint = ${JSON.stringify(target.endpoint)};`,
+      `const fingerprint = ${JSON.stringify(target.fingerprint)};`
+    ].join('\n'));
+    writeArtifactFile(outputDirectory, 'assets/app.css', `content: "${target.endpoint}?variant=canary";`);
+    includePrivateArtifactFonts(resolve('.'), outputDirectory);
+
+    expect(() => auditPrivateArtifact(outputDirectory, target)).toThrow(/second private MTProto target/i);
+  });
+
+  it('allows ordinary HTTPS product references in non-JavaScript output', () => {
+    const target = resolveMtprotoTarget(privateEnv());
+    const outputDirectory = temporaryDirectory();
+    writeFileSync(join(outputDirectory, 'client.js'), [
+      `const endpoint = ${JSON.stringify(target.endpoint)};`,
+      `const fingerprint = ${JSON.stringify(target.fingerprint)};`
+    ].join('\n'));
+    writeArtifactFile(outputDirectory, 'assets/app.css', 'content: "https://web.telegram.org/a/";');
+    includePrivateArtifactFonts(resolve('.'), outputDirectory);
+
+    expect(() => auditPrivateArtifact(outputDirectory, target)).not.toThrow();
+  });
+
   it('rejects an HTTP MTProto route in a private artifact', () => {
     const target = resolveMtprotoTarget(privateEnv());
     const outputDirectory = temporaryDirectory();
@@ -380,6 +502,25 @@ describe('MTProto build target', () => {
     expect(() => auditPrivateArtifact(outputDirectory, target)).toThrow(/official Telegram MTProto route/i);
   });
 
+  it('rejects an executable transport violation when a source map is also present', () => {
+    const target = resolveMtprotoTarget(privateEnv());
+    const outputDirectory = temporaryDirectory();
+    writeFileSync(join(outputDirectory, 'index.worker.js'), [
+      `const endpoint = ${JSON.stringify(target.endpoint)};`,
+      "const route = 'wss://kws1.web.telegram.org/apiws';",
+      `const fingerprint = ${JSON.stringify(target.fingerprint)};`
+    ].join('\n'));
+    writeFileSync(join(outputDirectory, 'index.worker.js.map'), JSON.stringify({
+      version: 3,
+      names: [],
+      sources: [],
+      mappings: ''
+    }));
+    includePrivateArtifactFonts(resolve('.'), outputDirectory);
+
+    expect(() => auditPrivateArtifact(outputDirectory, target)).toThrow(/official Telegram MTProto route/i);
+  });
+
   it('emits a self-identifying private Vite artifact with a blob-safe worker and restrictive CSP', async() => {
     const {outputDirectory, result} = buildPrivateTarget();
     const target = resolveMtprotoTarget(privateEnv());
@@ -398,6 +539,12 @@ describe('MTProto build target', () => {
     expect(index).toContain('Content-Security-Policy');
     expect(index).toContain("connect-src 'self' wss://private.example.test:2443/apiws");
     expect(() => verifyPrivateArtifactCsp(outputDirectory, target.endpoint)).not.toThrow();
+    const artifactFiles = findArtifactFiles(outputDirectory);
+    expect(artifactFiles.some((file) => file.toLowerCase().endsWith('.map'))).toBe(false);
+    for(const file of artifactFiles) {
+      expect(readFileSync(join(outputDirectory, file), 'latin1'))
+      .not.toMatch(/(?:\/\/|\/\*)[#@]\s*source(?:MappingURL|URL)\s*=/i);
+    }
     const executable = readdirSync(outputDirectory)
     .filter((file) => file.endsWith('.js'))
     .map((file) => readFileSync(join(outputDirectory, file), 'utf8'))
@@ -455,15 +602,45 @@ describe('MTProto build target', () => {
     }
   }, 60_000);
 
+  it('retains source maps in an ordinary Telegram production build', () => {
+    const {outputDirectory, result} = buildTelegramTarget();
+
+    expect(result.status).toBe(0);
+    const artifactFiles = findArtifactFiles(outputDirectory);
+    expect(artifactFiles.some((file) => file.endsWith('.map'))).toBe(true);
+    expect(artifactFiles.some((file) => file.endsWith('.js') &&
+      /(?:\/\/|\/\*)[#@]\s*sourceMappingURL\s*=/i.test(readFileSync(join(outputDirectory, file), 'utf8'))
+    )).toBe(true);
+    const audit = spawnSync(process.execPath, [
+      resolve('scripts/check-bundle-mangling.mjs'),
+      outputDirectory
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+        name !== 'MTPROTO_TARGET_MODE' && !name.startsWith('MTPROTO_PRIVATE_')
+      ))
+    });
+    expect(audit.status).toBe(0);
+    expect(audit.stdout).toMatch(/[1-9]\d* mapped chunks for miscompiled defaults/);
+  }, 60_000);
+
+  it('runs the focused private artifact output and audit check', () => {
+    const result = spawnSync(process.execPath, [resolve('scripts/check-private-artifact-output.mjs')], {
+      cwd: process.cwd(),
+      encoding: 'utf8'
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('endpoint=wss://telegramd.test/apiws');
+    expect(result.stdout).toMatch(/sourceCommit=[0-9a-f]{40}/);
+    expect(result.stdout).toMatch(/artifactDigest=sha256:[0-9a-f]{64}/);
+    expect(result.stdout).toMatch(/0 mapped chunks for miscompiled defaults/);
+  }, 120_000);
+
   it('fails private bundle auditing when the sidecar is missing', () => {
     const outputDirectory = temporaryDirectory();
     writeFileSync(join(outputDirectory, 'client.js'), 'const client = 1;\n');
-    writeFileSync(join(outputDirectory, 'client.js.map'), JSON.stringify({
-      version: 3,
-      names: [],
-      sources: [],
-      mappings: ''
-    }));
 
     const audit = spawnSync(process.execPath, [
       resolve('scripts/check-bundle-mangling.mjs'),
@@ -477,6 +654,40 @@ describe('MTProto build target', () => {
     expect(audit.status).not.toBe(0);
     expect(`${audit.stdout}${audit.stderr}`).toMatch(/private artifact manifest is missing/i);
   }, 60_000);
+
+  it('checks lost literals in JavaScript chunks without source maps', () => {
+    const outputDirectory = temporaryDirectory();
+    writeFileSync(join(outputDirectory, 'client.js'), 'const broken = "�";\n');
+
+    const audit = spawnSync(process.execPath, [
+      resolve('scripts/check-bundle-mangling.mjs'),
+      outputDirectory
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+        name !== 'MTPROTO_TARGET_MODE' && !name.startsWith('MTPROTO_PRIVATE_')
+      ))
+    });
+
+    expect(audit.status).not.toBe(0);
+    expect(`${audit.stdout}${audit.stderr}`).toMatch(/U\+FFFD/);
+  });
+
+  it('fails private bundle validation when it would check zero JavaScript chunks', () => {
+    const outputDirectory = temporaryDirectory();
+    const audit = spawnSync(process.execPath, [
+      resolve('scripts/check-bundle-mangling.mjs'),
+      outputDirectory
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {...process.env, MTPROTO_TARGET_MODE: 'private'}
+    });
+
+    expect(audit.status).not.toBe(0);
+    expect(`${audit.stdout}${audit.stderr}`).toMatch(/no JavaScript chunks/i);
+  });
 
   it('fails private artifact verification after a completed artifact is changed', () => {
     const target = resolveMtprotoTarget(privateEnv());
