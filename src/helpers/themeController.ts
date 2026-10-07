@@ -102,7 +102,7 @@ const appColorMap: {[name in AppColorName]: AppColor} = {
   'input-search-background-color': {}
 };
 
-const colorMap: {
+export const colorMap: {
   [name in AppTheme['name']]?: {
     [name in AppColorName]?: string
   }
