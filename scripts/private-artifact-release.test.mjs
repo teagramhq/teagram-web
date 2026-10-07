@@ -473,11 +473,7 @@ function temporaryArtifact(indexDocument) {
   return directory;
 }
 
-const safePrivateFontSvg = [
-  '<?xml version="1.0" standalone="no"?>',
-  '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" >',
-  '<svg xmlns="http://www.w3.org/2000/svg"><defs><font id="tgico"><font-face /></font></defs></svg>'
-].join('\n');
+const safePrivateFontSvg = readFileSync(join(repositoryRoot, 'public/assets/fonts/tgico.svg'), 'utf8');
 
 function privateFontSourceRoot({missingFont, emptyFont, symlinkFont, svgContents = safePrivateFontSvg, extraFont} = {}) {
   const rootDirectory = mkdtempSync(join(tmpdir(), 'private-artifact-font-source-'));
@@ -629,10 +625,24 @@ describe('private artifact fonts', () => {
   });
 
   it.each([
-    ['script elements', safePrivateFontSvg.replace('<font id="tgico">', '<script>alert(1)</script><font id="tgico">')],
+    ['set', '<set attributeName="href" to="javascript:alert(1)"/>'],
+    ['animate', '<animate attributeName="href" values="javascript:alert(1)"/>']
+  ])('rejects SMIL %s animation that assigns a javascript href', (_label, animation) => {
+    const svgContents = readFileSync(join(repositoryRoot, 'public/assets/fonts/tgico.svg'), 'utf8')
+    .replace('</svg>', `<a>${animation}<text>x</text></a></svg>`);
+    const rootDirectory = privateFontSourceRoot({svgContents});
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-font-smil-'));
+    temporaryDirectories.push(directory);
+
+    expect(() => includePrivateArtifactFonts(rootDirectory, directory)).toThrow(/SVG/i);
+    expect(existsSync(join(directory, 'assets/fonts'))).toBe(false);
+  });
+
+  it.each([
+    ['script elements', safePrivateFontSvg.replace('</svg>', '<script>alert(1)</script></svg>')],
     ['foreignObject elements', safePrivateFontSvg.replace('</svg>', '<foreignObject /></svg>')],
     ['event handlers', safePrivateFontSvg.replace('<svg ', '<svg onload="alert(1)" ')],
-    ['href references', safePrivateFontSvg.replace('<font id="tgico">', '<font id="tgico" href="#target">')],
+    ['href references', safePrivateFontSvg.replace('</svg>', '<a href="#target"></a></svg>')],
     ['additional HTTP declarations', safePrivateFontSvg.replace('</svg>', '<metadata>https://example.test/icon</metadata></svg>')],
     ['unreviewed namespace declarations', safePrivateFontSvg.replace(
       '<svg xmlns="http://www.w3.org/2000/svg">',
@@ -668,12 +678,12 @@ describe('private artifact fonts', () => {
       '<style>.glyph { fill: u\\72l(//host/glyph.svg); }</style></svg>'
     )],
     ['CSS-escaped URLs in presentation attributes', safePrivateFontSvg.replace(
-      '<font-face />',
-      '<font-face fill="u\\72l(//host/glyph.svg)" />'
+      '<font-face ',
+      '<font-face fill="u\\72l(//host/glyph.svg)" '
     )],
     ['XML-encoded external CSS URLs', safePrivateFontSvg.replace(
-      '<font-face />',
-      '<font-face fill="u&#x72;l(&#x2f;&#x2f;host/glyph.svg)" />'
+      '<font-face ',
+      '<font-face fill="u&#x72;l(&#x2f;&#x2f;host/glyph.svg)" '
     )]
   ])('rejects SVG font CSS containing %s before emission', (_label, svgContents) => {
     const rootDirectory = privateFontSourceRoot({svgContents});

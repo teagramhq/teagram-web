@@ -53,10 +53,7 @@ export const PRIVATE_FONT_ASSETS = Object.freeze([
 const PRIVATE_FONT_ASSET_SET = new Set(PRIVATE_FONT_ASSETS);
 const PRIVATE_FONT_NAME_PATTERN = /^[A-Za-z0-9_-]+\.(?:woff2|woff|ttf)$/;
 const PRIVATE_FONT_SOURCE_DIRECTORY = 'public/assets/fonts';
-const PRIVATE_FONT_SVG_DOCTYPE = /^<!DOCTYPE\s+svg\s+PUBLIC\s+"-\/\/W3C\/\/DTD SVG 1\.1\/\/EN"\s+"http:\/\/www\.w3\.org\/Graphics\/SVG\/1\.1\/DTD\/svg11\.dtd"\s*>$/;
-const PRIVATE_FONT_SVG_NAMESPACE = /^\sxmlns\s*=\s*(?:"http:\/\/www\.w3\.org\/2000\/svg"|'http:\/\/www\.w3\.org\/2000\/svg')$/;
-const PRIVATE_FONT_SVG_STYLE_CONTENT = /<\s*(?:[\w.-]+:)?style\b|\bstyle\s*=/i;
-const PRIVATE_FONT_SVG_EXTERNAL_CSS_REFERENCE = /@import\b|\burl\s*\(\s*(?!["']?\s*#)/i;
+const PRIVATE_FONT_SVG_SHA256 = '22059cf81a0302ce3c7943e5e5325316ac7a8ac18099b515200efbb93938a505';
 
 const PRIVATE_ROUTE_LOCK = {
   mode: 'private',
@@ -96,17 +93,6 @@ function invalidArtifact(message) {
   throw new Error('[MT] private artifact ' + message);
 }
 
-function decodePrivateFontSvgCharacterReferences(text) {
-  return text.replace(/&#(x[0-9a-f]+|[0-9]+);/gi, (_reference, value) => {
-    const codePoint = value[0].toLowerCase() === 'x' ? parseInt(value.slice(1), 16) : Number(value);
-    if(!Number.isSafeInteger(codePoint) || codePoint > 0x10ffff ||
-      (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
-      invalidArtifact('font SVG contains an invalid character reference');
-    }
-    return String.fromCodePoint(codePoint);
-  });
-}
-
 export function assertPrivateFontAssetName(name) {
   if(typeof name !== 'string' || name.includes('/') || name.includes('\\') ||
     (name !== 'tgico.svg' && !PRIVATE_FONT_NAME_PATTERN.test(name)) ||
@@ -116,23 +102,9 @@ export function assertPrivateFontAssetName(name) {
 }
 
 function assertSafePrivateFontSvg(contents) {
-  const text = contents.toString('utf8');
-  const doctypes = [...text.matchAll(/<!DOCTYPE\b[^>]*>/g)].map(([declaration]) => declaration);
-  const namespaces = [...text.matchAll(/\sxmlns\s*=\s*(?:"[^"]*"|'[^']*')/g)]
-  .map(([declaration]) => declaration);
-  if(doctypes.length !== 1 || !PRIVATE_FONT_SVG_DOCTYPE.test(doctypes[0]) ||
-    namespaces.length !== 1 || !PRIVATE_FONT_SVG_NAMESPACE.test(namespaces[0])) {
-    invalidArtifact('font SVG contains an unexpected document type or namespace');
-  }
-
-  const withoutAllowedDeclarations = decodePrivateFontSvgCharacterReferences(
-    text.replace(doctypes[0], '').replace(namespaces[0], '')
-  );
-  if(PRIVATE_FONT_SVG_STYLE_CONTENT.test(withoutAllowedDeclarations) ||
-    /\\/.test(withoutAllowedDeclarations) ||
-    PRIVATE_FONT_SVG_EXTERNAL_CSS_REFERENCE.test(withoutAllowedDeclarations) ||
-    /<!DOCTYPE|<!ENTITY|\bxmlns(?::[\w.-]+)?\s*=|https?:\/\/|<\s*script\b|<\s*foreignObject\b|\bon[a-z][\w:.-]*\s*=|\b[\w:.-]*href\s*=|\bsrc\s*=/i.test(withoutAllowedDeclarations)) {
-    invalidArtifact('font SVG contains active content or an external reference');
+  const digest = createHash('sha256').update(contents).digest('hex');
+  if(digest !== PRIVATE_FONT_SVG_SHA256) {
+    invalidArtifact('font SVG does not match the pinned reviewed SHA-256');
   }
 }
 
