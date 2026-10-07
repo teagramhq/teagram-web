@@ -30,7 +30,10 @@ export function parseQrFixtureOutcome(value: string | null): QrFixtureOutcome | 
 }
 
 export function parseQrFixtureSearchParams(params: URLSearchParams): QrFixtureOutcome | undefined {
-  if([...params.keys()].some((key) => key !== 'outcome') || params.getAll('outcome').length > 1) {
+  const suggestedLanguageValues = params.getAll('suggested-language');
+  if([...params.keys()].some((key) => key !== 'outcome' && key !== 'suggested-language') ||
+    params.getAll('outcome').length > 1 || suggestedLanguageValues.length > 1 ||
+    suggestedLanguageValues.some((value) => value !== '1')) {
     return undefined;
   }
 

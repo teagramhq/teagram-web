@@ -12,6 +12,7 @@ import styles from '@/pages/authFlow.module.scss';
 import {SETTINGS_INIT} from '@config/state';
 import {setAppSettingsSilent} from '@stores/appSettings';
 import {GrowHeightReveal} from '@helpers/solid/animations';
+import StarsMoreOptionsButton from '@components/popups/starsMoreOptionsButton';
 
 import '@/materialize.scss';
 import '@/scss/style.scss';
@@ -70,6 +71,7 @@ export async function mountQrFixtureApp(
   const actions: string[] = [];
   const pendingTokenResolvers: Array<() => void> = [];
   let updateRevealProbes: ((visible: boolean) => void) | undefined;
+  const showSuggestedLanguage = new URLSearchParams(window.location.search).get('suggested-language') === '1';
 
   const handlers: ManagerHandlers = {
     apiManager: {
@@ -91,13 +93,24 @@ export async function mountQrFixtureApp(
         });
       },
       async getConfig() {
-        return {suggested_lang_code: I18n.getLastRequestedLangCode()};
+        return {suggested_lang_code: showSuggestedLanguage ? 'fixture-language' : I18n.getLastRequestedLangCode()};
       },
       async getBaseDcId() {
         return 1;
       },
       async setBaseDcId() {},
       async setUser() {}
+    },
+    appLangPackManager: {
+      async getStrings(langCode: unknown, strings: unknown) {
+        if(langCode !== 'fixture-language' || !Array.isArray(strings) ||
+          !strings.includes('Login.ContinueOnLanguage')) {
+          unexpectedManagerCalls.add('appLangPackManager.getStrings:unexpected');
+          throw new Error(UNEXPECTED_MANAGER_ERROR);
+        }
+
+        return [{_: 'langPackString', key: 'Login.ContinueOnLanguage', value: 'Continue in fixture language'}];
+      }
     },
     appAccountManager: {
       async initPasskeyLogin() {
@@ -238,6 +251,7 @@ export async function mountQrFixtureApp(
             Log in by passkey
           </button>
         </GrowHeightReveal>
+        <StarsMoreOptionsButton when={revealProbesVisible()} onClick={() => {}} />
       </>
     );
   }, host);

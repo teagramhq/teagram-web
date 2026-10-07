@@ -220,6 +220,32 @@ async function expectPrimaryActionRing(
   await saveStateScreenshot(page, testInfo, `${name}-pointer`);
 }
 
+async function expectClippedActionRing(page: Page, button: Locator, testInfo: TestInfo, name: string) {
+  await page.mouse.click(8, 8);
+  let focused = false;
+  for(let index = 0; index < 10; ++index) {
+    await page.keyboard.press('Tab');
+    if(await button.evaluate((element) => element === document.activeElement)) {
+      focused = true;
+      break;
+    }
+  }
+
+  expect(focused).toBe(true);
+  const visual = await readButtonVisual(button);
+  expect(visual.focusVisible).toBe(true);
+  expect(visual.outlineStyle).toBe('solid');
+  expect(visual.outlineWidth).toBe('2px');
+  expect(visual.outlineOffset).toBe('-2px');
+  expect(visual.outlineColor).toBe(await resolvePrimaryTextColor(page));
+  await expectRingFitsClippingAncestors(button, true);
+
+  const wrapper = button.locator('xpath=..');
+  await expect(wrapper).toHaveClass('primary-action-focus-inset');
+  await expect.poll(() => wrapper.evaluate((element) => getComputedStyle(element).overflow)).toBe('hidden');
+  await saveStateScreenshot(page, testInfo, name);
+}
+
 test.beforeEach(async({page,context}, testInfo) => {
   const baseURL = testInfo.project.use.baseURL;
   if(typeof(baseURL) !== 'string') throw new Error('QR fixture base URL is unavailable');
@@ -362,6 +388,40 @@ for(const theme of themes) {
         [...BASE_MANAGER_CALLS, 'apiManager.setThemeParams'].sort() : BASE_MANAGER_CALLS);
       await expectNormalConfinement(page, context, traffic);
     });
+  }
+}
+
+for(const theme of themes) {
+  for(const viewport of viewports) {
+    for(const consumer of ['suggested-language', 'stars-more-options'] as const) {
+      test(`keeps the ${consumer} action visible inside its clipped wrapper, ${theme}, ${viewport.name}`, async({page,context}, testInfo) => {
+        const traffic = trafficByContext.get(context);
+        if(!traffic) throw new Error('QR fixture confinement was not installed');
+        await page.setViewportSize({width: viewport.width, height: viewport.height});
+        const fixtureQuery = consumer === 'suggested-language' ?
+          'outcome=input-method-invalid&suggested-language=1' : 'outcome=input-method-invalid';
+        await page.goto(`/qr-fixture.html?${fixtureQuery}`, {waitUntil: 'domcontentloaded'});
+        await waitForFixtureMount(page);
+        if(theme === 'night') await page.evaluate(() => window.qrFixture?.setTheme('night'));
+
+        let button: Locator;
+        if(consumer === 'suggested-language') {
+          button = page.getByRole('button', {name: 'Continue in fixture language', exact: true});
+        } else {
+          await page.evaluate(() => window.qrFixture?.setRevealProbeVisible(true));
+          button = page.locator('button.popup-stars-more');
+        }
+        await expect(button).toBeVisible();
+        await expectNoUnexpectedCalls(page, [
+          ...BASE_MANAGER_CALLS,
+          ...(consumer === 'suggested-language' ? ['appLangPackManager.getStrings'] : []),
+          ...(theme === 'night' ? ['apiManager.setThemeParams'] : [])
+        ].sort());
+
+        await expectClippedActionRing(page, button, testInfo, `${theme}-${viewport.name}-${consumer}`);
+        await expectNormalConfinement(page, context, traffic);
+      });
+    }
   }
 }
 
