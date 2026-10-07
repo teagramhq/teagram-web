@@ -7,6 +7,7 @@ describe('paintQrCode', () => {
 
   it('waits for the current qr-code-styling canvas promise', async() => {
     vi.stubGlobal('fetch', vi.fn(async() => ({
+      ok: true,
       text: async() => '<svg style="fill:#000;"></svg>'
     })));
 

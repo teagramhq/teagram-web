@@ -146,7 +146,13 @@ vi.mock('@helpers/string/classNames', () => ({
 vi.mock('@config/app', () => ({default: {id: 1, hash: 'test'}}));
 vi.mock('@helpers/bytes/bytesCmp', () => ({default: (a: ArrayLike<number>, b: ArrayLike<number>) => a.length === b.length && Array.from(a).every((byte, i) => byte === b[i])}));
 vi.mock('qr-code-styling', async() => {
-  return {default: class QRCodeStyling {}};
+  return {default: class QRCodeStyling {
+    public _drawingPromise = Promise.resolve();
+
+    public append(host: HTMLElement) {
+      host.appendChild(document.createElement('canvas'));
+    }
+  }};
 });
 
 type Deferred<T> = {
@@ -220,6 +226,7 @@ describe('QR sign-in failure states', () => {
     dispose = undefined;
     consoleSpies.forEach((spy) => spy.mockRestore());
     vi.useRealTimers();
+    vi.unstubAllGlobals();
     document.body.replaceChildren();
   });
 
@@ -508,6 +515,46 @@ describe('QR sign-in failure states', () => {
     expect(document.body.innerHTML).not.toContain('paint-secret');
     expect(consoleSpies.flatMap((spy) => spy.mock.calls.flat()))
     .toEqual(['SignQRCard: retryable']);
+  });
+
+  it('recovers from a logo fetch failure when Try again runs the real QR painter', async() => {
+    const successfulResponse = {ok: true, text: vi.fn().mockResolvedValue('<svg style="fill:#000;"></svg>')};
+    const fetchMock = vi.fn()
+    .mockRejectedValueOnce(new Error('private logo fetch detail'))
+    .mockResolvedValue(successfulResponse);
+    vi.stubGlobal('fetch', fetchMock);
+    const {paintQrCode} = await vi.importActual<typeof import('@helpers/qrCode/paintQrCode')>(
+      '@helpers/qrCode/paintQrCode'
+    );
+    const pendingPoll = deferred<void>();
+    const pause = await import('@helpers/schedulers/pause');
+    vi.mocked(pause.default).mockReturnValueOnce(pendingPoll.promise);
+    mocks.invokeApi.mockResolvedValueOnce(makeToken()).mockResolvedValueOnce(makeToken());
+    mocks.paintQrCode.mockImplementation(paintQrCode);
+    dispose = await mountCard();
+
+    await waitForText('.media-header-title', 'Connection problem');
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(document.querySelector('canvas')).toBeNull();
+    expect(document.body.innerHTML).not.toContain('private logo fetch detail');
+    expect(consoleSpies.flatMap((spy) => spy.mock.calls.flat()))
+    .toEqual(['SignQRCard: retryable']);
+
+    getButton('Try again')!.click();
+    await vi.waitFor(() => expect(document.querySelector('canvas')).not.toBeNull());
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(successfulResponse.text).toHaveBeenCalledOnce();
+    expect(document.querySelector('.media-header-title')?.textContent).toBe('Log in by QR Code');
+    expect(document.querySelector('.media-header-subtitle')?.textContent).toBe('Scan with Telegram app on your phone');
+    expect(document.querySelector<HTMLElement>('.preloader')?.style.animation).toBe('hide-icon .4s forwards');
+    expect(mocks.invokeApi).toHaveBeenCalledTimes(2);
+    expect(consoleSpies.flatMap((spy) => spy.mock.calls.flat()))
+    .toEqual(['SignQRCard: retryable']);
+
+    dispose();
+    dispose = undefined;
+    pendingPoll.resolve();
   });
 
   it('lets setUser dispatch user_auth before its promise resolves and still enters chats once', async() => {
