@@ -32,6 +32,7 @@ type QrFixtureControl = {
   selectOutcome(outcome: QrFixtureOutcome): void,
   setTheme(theme: QrFixtureTheme): void,
   setRevealProbeVisible(visible: boolean): void,
+  setStarsMoreOptionsVisible(visible: boolean): void,
   completePendingToken(): void,
   inspect(): {
     outcome: QrFixtureOutcome,
@@ -71,6 +72,7 @@ export async function mountQrFixtureApp(
   const actions: string[] = [];
   const pendingTokenResolvers: Array<() => void> = [];
   let updateRevealProbes: ((visible: boolean) => void) | undefined;
+  let updateStarsMoreOptionsVisible: ((visible: boolean) => void) | undefined;
   const showSuggestedLanguage = new URLSearchParams(window.location.search).get('suggested-language') === '1';
 
   const handlers: ManagerHandlers = {
@@ -196,6 +198,10 @@ export async function mountQrFixtureApp(
       if(typeof(visible) !== 'boolean' || !updateRevealProbes) throw new Error(UNEXPECTED_MANAGER_ERROR);
       updateRevealProbes(visible);
     },
+    setStarsMoreOptionsVisible(visible) {
+      if(typeof(visible) !== 'boolean' || !updateStarsMoreOptionsVisible) throw new Error(UNEXPECTED_MANAGER_ERROR);
+      updateStarsMoreOptionsVisible(visible);
+    },
     completePendingToken() {
       pendingTokenResolvers.shift()?.();
     },
@@ -229,7 +235,9 @@ export async function mountQrFixtureApp(
   const {default: SignQRCard} = await import('@/pages/cards/SignQRCard');
   render(() => {
     const [revealProbesVisible, setRevealProbesVisible] = createSignal(false);
+    const [starsMoreOptionsVisible, setStarsMoreOptionsVisible] = createSignal(false);
     updateRevealProbes = setRevealProbesVisible;
+    updateStarsMoreOptionsVisible = setStarsMoreOptionsVisible;
     return (
       <>
         <AuthFlowContext.Provider value={flowContext}>
@@ -251,7 +259,7 @@ export async function mountQrFixtureApp(
             Log in by passkey
           </button>
         </GrowHeightReveal>
-        <StarsMoreOptionsButton when={revealProbesVisible()} onClick={() => {}} />
+        <StarsMoreOptionsButton when={starsMoreOptionsVisible()} onClick={() => {}} />
       </>
     );
   }, host);

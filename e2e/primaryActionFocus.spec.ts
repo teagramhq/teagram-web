@@ -408,7 +408,7 @@ for(const theme of themes) {
         if(consumer === 'suggested-language') {
           button = page.getByRole('button', {name: 'Continue in fixture language', exact: true});
         } else {
-          await page.evaluate(() => window.qrFixture?.setRevealProbeVisible(true));
+          await page.evaluate(() => window.qrFixture?.setStarsMoreOptionsVisible(true));
           button = page.locator('button.popup-stars-more');
         }
         await expect(button).toBeVisible();

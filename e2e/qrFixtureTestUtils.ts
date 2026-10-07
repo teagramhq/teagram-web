@@ -15,6 +15,7 @@ declare global {
       selectOutcome(outcome: QrFixtureOutcome): void,
       setTheme(theme: 'day' | 'night'): void,
       setRevealProbeVisible(visible: boolean): void,
+      setStarsMoreOptionsVisible(visible: boolean): void,
       completePendingToken(): void,
       inspect(): QrFixtureObservations
     },
