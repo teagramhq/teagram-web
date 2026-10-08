@@ -6,7 +6,7 @@ import {AppChatAutomationTab, type AppEditProfileTab} from '@components/solidJsT
 import Section from '@components/section';
 import Row from '@components/rowTsx';
 import {InputFieldTsx} from '@components/inputFieldTsx';
-import {i18n} from '@lib/langPack';
+import {i18n, LangPackKey} from '@lib/langPack';
 import rootScope from '@lib/rootScope';
 import getPeerEditableUsername from '@appManagers/utils/peers/getPeerEditableUsername';
 import EditPeer from '@components/editPeer';
@@ -30,6 +30,16 @@ export type EditProfileTabPayload = {
   user: MaybePromise<User.user>,
   userFull: MaybePromise<UserFull.userFull>,
   connectedBot: MaybePromise<ConnectedBot.connectedBot | undefined>
+};
+
+const getUsernameSaveErrorLangKey = (error: unknown): LangPackKey => {
+  const type = (error as {type?: string} | null | undefined)?.type;
+  switch(type) {
+    case 'USERNAME_IMMUTABLE': return 'EditProfile.Username.Immutable';
+    case 'USERNAME_OCCUPIED': return 'EditProfile.Username.Taken';
+    case 'USERNAME_INVALID': return 'EditProfile.Username.Invalid';
+    default: return 'Error.AnError';
+  }
 };
 
 const EditProfileTab = () => {
@@ -68,13 +78,14 @@ const EditProfileForm = (props: {
 }) => {
   const [tab] = useSuperTab<AppEditProfileTabType>();
   const {user, userFull, bioMaxLength} = props.data;
+  const profilePeerId = rootScope.myId;
 
   tab.container.classList.add('edit-profile-container');
 
   const inputFields: InputField[] = [];
 
   const editPeer = new EditPeer({
-    peerId: rootScope.myId,
+    peerId: profilePeerId,
     inputFields,
     listenerSetter: tab.listenerSetter,
     middleware: tab.middlewareHelper.get()
@@ -95,6 +106,7 @@ const EditProfileForm = (props: {
   const initialPersonalChannelId: ChatId = userFull.personal_channel_id ?
     userFull.personal_channel_id.toChatId() :
     0;
+  const [originalPersonalChannelId, setOriginalPersonalChannelId] = createSignal(initialPersonalChannelId);
   const [personalChannelId, setPersonalChannelId] = createSignal<ChatId>(initialPersonalChannelId);
   const [personalChannelTitle, setPersonalChannelTitle] = createSignal<JSX.Element>(i18n('EditProfile.PersonalChannel.Add'));
   const [hasBirthday, setHasBirthday] = createSignal(!!userFull.birthday);
@@ -107,6 +119,7 @@ const EditProfileForm = (props: {
   let connectedBotVersion = 0;
   onCleanup(() => cleanedUp = true);
   const setConnectedBotFromUpdate = (bot?: ConnectedBot.connectedBot) => {
+    if(cleanedUp) return;
     ++connectedBotVersion;
     setConnectedBot(bot);
     setConnectedBotLoadFailed(false);
@@ -138,9 +151,18 @@ const EditProfileForm = (props: {
 
   loadConnectedBot(props.connectedBot);
 
-  const isPersonalChannelChanged = createMemo(() => personalChannelId() !== initialPersonalChannelId);
+  const isPersonalChannelChanged = createMemo(() => personalChannelId() !== originalPersonalChannelId());
   const origIsChanged = editPeer.isChanged;
   editPeer.isChanged = () => origIsChanged() || isPersonalChannelChanged();
+  let saveInProgress = false;
+  const originalHandleChange = editPeer.handleChange;
+  editPeer.handleChange = () => {
+    if(cleanedUp) return;
+    originalHandleChange();
+    if(saveInProgress) {
+      editPeer.nextBtn.disabled = true;
+    }
+  };
 
   const {setUsername: setPurchaseUsername, element: purchaseEl} = purchaseUsernameCaption();
 
@@ -171,7 +193,7 @@ const EditProfileForm = (props: {
       setChatAutomationTitle(i18n('ChatAutomation.Off'));
     } else {
       wrapPeerTitle({peerId: (bot.bot_id as UserId).toPeerId(false)}).then((title) => {
-        if(version === chatAutomationTitleVersion) setChatAutomationTitle(title);
+        if(!cleanedUp && version === chatAutomationTitleVersion) setChatAutomationTitle(title);
       });
     }
   });
@@ -179,8 +201,10 @@ const EditProfileForm = (props: {
   tab.listenerSetter.add(rootScope)('chat_automation_update', setConnectedBotFromUpdate);
 
   const openChatAutomation = async() => {
+    if(cleanedUp) return;
     if(connectedBotLoadFailed()) {
       await loadConnectedBot(tab.managers.appBusinessManager.getConnectedBot(true));
+      if(cleanedUp) return;
       if(!connectedBotLoaded()) {
         toastNew({langPackKey: 'Error.AnError'});
         return;
@@ -195,14 +219,17 @@ const EditProfileForm = (props: {
   };
 
   const openPersonalChannelPicker = async() => {
+    if(cleanedUp) return;
     let channelIds: ChatId[];
     try {
       channelIds = await tab.managers.appProfileManager.getAdminedPersonalChannels();
     } catch(err) {
-      console.error('getAdminedPersonalChannels error:', err);
-      toastNew({langPackKey: 'Error.AnError'});
+      if(!cleanedUp) {
+        toastNew({langPackKey: 'Error.AnError'});
+      }
       return;
     }
+    if(cleanedUp) return;
 
     if(!channelIds.length && !personalChannelId()) {
       toastNew({langPackKey: 'EditProfile.PersonalChannel.NoChannels'});
@@ -217,6 +244,7 @@ const EditProfileForm = (props: {
       getMoreCustom: async() => ({result: peerIds, isEnd: true}),
       noSearch: true,
       onSelect: (chosen) => {
+        if(cleanedUp) return;
         const newChatId = chosen[0].peerId.toChatId();
         if(newChatId === personalChannelId()) return;
         setPersonalChannelId(newChatId);
@@ -228,6 +256,7 @@ const EditProfileForm = (props: {
             color="danger"
             langKey="EditProfile.PersonalChannel.Remove"
             callback={() => {
+              if(cleanedUp) return;
               setPersonalChannelId(0);
               editPeer.handleChange();
             }}
@@ -237,46 +266,130 @@ const EditProfileForm = (props: {
     });
   };
 
-  const onSave = () => {
+  const onSave = async() => {
+    if(cleanedUp || saveInProgress) return;
+
+    saveInProgress = true;
     editPeer.nextBtn.disabled = true;
 
-    const promises: Promise<any>[] = [];
+    const profileValues = {
+      firstName: firstNameInputField.value,
+      lastName: lastNameInputField.value,
+      about: bioInputField.value
+    };
+    const usernameValue = usernameInputField.value;
+    const personalChannelValue = personalChannelId() || undefined;
+    const avatarUpload = editPeer.uploadAvatar;
+    type WriteKind = 'profile' | 'username' | 'personalChannel' | 'photo';
+    const writes: Array<{kind: WriteKind, value?: unknown, promise: Promise<unknown>}> = [];
+    const addWrite = (kind: WriteKind, value: unknown, write: () => Promise<unknown> | unknown) => {
+      writes.push({kind, value, promise: Promise.resolve().then(write)});
+    };
 
-    promises.push(tab.managers.appProfileManager.updateProfile(
-      firstNameInputField.value,
-      lastNameInputField.value,
-      bioInputField.value
-    ).then(() => {
-      tab.close();
-    }, (err) => {
-      console.error('updateProfile error:', err);
-    }));
+    addWrite('profile', profileValues, () => tab.managers.appProfileManager.updateProfile(
+      profileValues.firstName,
+      profileValues.lastName,
+      profileValues.about
+    ));
 
-    if(editPeer.uploadAvatar) {
-      const {file: fileFn, video: videoFn, videoStartTs} = editPeer.uploadAvatar;
-      const filePromise = fileFn();
-      const videoPromise = videoFn?.();
-      // Surface the upload to the profile's big avatar (progress ring + cancel +
-      // collapse lock) for the duration of the upload.
-      trackAvatarUpload(rootScope.myId, {file: filePromise, video: videoPromise});
-      promises.push(Promise.all([filePromise, videoPromise]).then(([file, video]) => {
+    if(avatarUpload) {
+      const {file: fileFn, video: videoFn, videoStartTs} = avatarUpload;
+      addWrite('photo', avatarUpload, async() => {
+        const filePromise = fileFn();
+        const videoPromise = videoFn?.();
+        // Surface the upload to the profile's big avatar (progress ring + cancel +
+        // collapse lock) for the duration of the upload.
+        trackAvatarUpload(profilePeerId, {file: filePromise, video: videoPromise});
+        const uploadResults = await Promise.allSettled([filePromise, videoPromise]);
+        const uploadFailure = uploadResults.find((result) => result.status === 'rejected');
+        if(uploadFailure?.status === 'rejected') {
+          throw uploadFailure.reason;
+        }
+
+        const [file, video] = await Promise.all([filePromise, videoPromise]);
         return tab.managers.appProfileManager.uploadProfilePhoto({file, video, videoStartTs});
-      }, () => {
-        // swallow cancellation/upload errors so Promise.race below doesn't reject the whole save
-      }));
+      });
     }
 
     if(usernameInputField.isValidToChange()) {
-      promises.push(tab.managers.appUsersManager.updateUsername(usernameInputField.value));
+      addWrite('username', usernameValue, () => tab.managers.appUsersManager.updateUsername(usernameValue));
     }
 
     if(isPersonalChannelChanged()) {
-      promises.push(tab.managers.appProfileManager.updatePersonalChannel(personalChannelId() || undefined));
+      addWrite('personalChannel', personalChannelValue, () => tab.managers.appProfileManager.updatePersonalChannel(personalChannelValue));
     }
 
-    Promise.race(promises).finally(() => {
-      editPeer.nextBtn.removeAttribute('disabled');
-    });
+    try {
+      const results = await Promise.allSettled(writes.map((write) => write.promise));
+      if(cleanedUp) return;
+
+      let hasFailure = false;
+      let hasNonUsernameFailure = false;
+      results.forEach((result, index) => {
+        const write = writes[index];
+        if(result.status === 'rejected') {
+          hasFailure = true;
+          if(write.kind === 'username') {
+            usernameInputField.setSaveError(usernameValue, getUsernameSaveErrorLangKey(result.reason));
+          } else {
+            hasNonUsernameFailure = true;
+          }
+          return;
+        }
+
+        switch(write.kind) {
+          case 'profile': {
+            firstNameInputField.originalValue = profileValues.firstName;
+            lastNameInputField.originalValue = profileValues.lastName;
+            bioInputField.originalValue = profileValues.about;
+            break;
+          }
+
+          case 'username': {
+            usernameInputField.originalValue = usernameValue;
+            break;
+          }
+
+          case 'personalChannel': {
+            setOriginalPersonalChannelId((write.value as ChatId | undefined) || 0);
+            break;
+          }
+
+          case 'photo': {
+            if(editPeer.uploadAvatar === write.value) {
+              editPeer.uploadAvatar = undefined;
+            }
+            break;
+          }
+        }
+      });
+
+      editPeer.handleChange();
+
+      if(hasNonUsernameFailure) {
+        toastNew({langPackKey: 'Error.AnError'});
+      }
+
+      const hasUnsubmittedChanges =
+        firstNameInputField.value !== profileValues.firstName ||
+        lastNameInputField.value !== profileValues.lastName ||
+        bioInputField.value !== profileValues.about ||
+        usernameInputField.value !== usernameValue ||
+        personalChannelId() !== (personalChannelValue || 0) ||
+        !!editPeer.uploadAvatar;
+      if(!hasFailure && !usernameInputField.hasSaveError() && !hasUnsubmittedChanges) {
+        tab.close();
+      }
+    } catch{
+      if(!cleanedUp) {
+        toastNew({langPackKey: 'Error.AnError'});
+      }
+    } finally {
+      saveInProgress = false;
+      if(!cleanedUp) {
+        editPeer.nextBtn.removeAttribute('disabled');
+      }
+    }
   };
 
   attachClickEvent(editPeer.nextBtn, onSave, {listenerSetter: tab.listenerSetter});
@@ -326,9 +439,10 @@ const EditProfileForm = (props: {
         <Show when={!hasBirthday()}>
           <Row clickable={() => {
             showBirthdayPopup({
-              onSave: async(date) => {
-                if(await saveMyBirthday(date)) {
-                  setHasBirthday(true);
+            onSave: async(date) => {
+              if(await saveMyBirthday(date)) {
+                if(cleanedUp) return true;
+                setHasBirthday(true);
                   return true;
                 }
                 return false;
@@ -346,6 +460,7 @@ const EditProfileForm = (props: {
         editPeer={editPeer}
         purchaseEl={purchaseEl}
         onPurchaseUsernameChange={setPurchaseUsername}
+        isActive={() => !cleanedUp}
         usernameInputFieldRef={(ref) => {
           usernameInputField = ref;
           trackInputField(ref);
@@ -353,7 +468,7 @@ const EditProfileForm = (props: {
       />
 
       <UsernamesSection
-        peerId={rootScope.myId}
+        peerId={profilePeerId}
         peer={user}
         usernameInputField={usernameInputField}
       />
@@ -393,6 +508,7 @@ const UsernameSection = (props: {
   editPeer: EditPeer,
   purchaseEl: HTMLElement,
   onPurchaseUsernameChange: (username: string) => void,
+  isActive: () => boolean,
   usernameInputFieldRef: (ref: UsernameInputField) => void
 }) => {
   const [tab] = useSuperTab<AppEditProfileTabType>();
@@ -410,6 +526,7 @@ const UsernameSection = (props: {
     plainText: true,
     listenerSetter: tab.listenerSetter,
     onChange,
+    isActive: props.isActive,
     availableText: 'EditProfile.Username.Available',
     takenText: 'EditProfile.Username.Taken',
     invalidText: 'EditProfile.Username.Invalid'

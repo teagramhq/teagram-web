@@ -21,6 +21,7 @@ const lang = {
   'EditProfile.Username.Available': 'Username is available',
   'EditProfile.Username.Taken': 'Username is already taken',
   'EditProfile.Username.Invalid': 'Username is invalid',
+  'EditProfile.Username.Immutable': 'This username cannot be changed.',
   'EditFolder.Toast.ChooseChat': 'Please choose at least one chat for this folder.',
   'EditFolder.EmojiAsIconTip': 'If you put only one emoji at the beginning (or at the end), it will be displayed as the icon in the folders sidebar',
   'EditProfile.AddBirthdayRow': 'Add Birthday',
