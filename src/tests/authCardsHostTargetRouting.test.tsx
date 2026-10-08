@@ -3,10 +3,15 @@ import {render} from 'solid-js/web';
 
 const mocks = vi.hoisted(() => ({
   privateTarget: false,
+  renderRealQrCard: false,
   currentAccount: 1,
   invokeApi: vi.fn(),
+  setBaseDcId: vi.fn(),
   setUser: vi.fn(),
   pushToState: vi.fn(),
+  getServerTimeOffset: vi.fn(),
+  getUserIds: vi.fn(),
+  paintQrCode: vi.fn(),
   getPasswordState: vi.fn(),
   checkPassword: vi.fn(),
   requestRecovery: vi.fn(),
@@ -16,7 +21,6 @@ const mocks = vi.hoisted(() => ({
   sessionGet: vi.fn(),
   sessionSet: vi.fn(),
   sessionDelete: vi.fn(),
-  navigateQrToSignIn: vi.fn(),
   navigateCard: vi.fn(),
   bootstrapIm: vi.fn()
 }));
@@ -33,8 +37,12 @@ vi.mock('@components/scrollable2', () => ({
 
 vi.mock('@components/buttonTsx', () => {
   const Button = (props: any) => (
-    <button class={props.class} disabled={props.disabled} onClick={props.onClick}>
-      {props.children ?? props.text}
+    <button ref={props.ref} class={props.class} disabled={props.disabled} onClick={props.onClick}>
+      {props.children ?? ({
+        'Login.QR.Cancel': mocks.privateTarget ? 'Sign in with username' : 'Log in by phone number >',
+        'Login.QR.Retry': 'Try again',
+        'Login.QR.Username': 'Sign in with username'
+      } as Record<string, string>)[props.text] ?? props.text}
     </button>
   );
   Button.Icon = (props: any) => (
@@ -67,11 +75,21 @@ vi.mock('@components/inputField', () => ({
 }));
 
 vi.mock('@components/languageChangeButton', () => ({default: (): null => null}));
+vi.mock('@components/iconTsx', () => ({IconTsx: (props: any) => <span>{props.icon}</span>}));
+vi.mock('@components/passkeyLoginButton', () => ({default: (): null => null}));
+vi.mock('@components/putPreloader', () => ({
+  putPreloader: (host: HTMLElement) => {
+    const element = document.createElement('div');
+    element.className = 'preloader';
+    host.appendChild(element);
+    return element;
+  }
+}));
 
 vi.mock('@components/mediaHeader', () => {
   const Header = (props: any) => <header>{props.children}</header>;
-  Header.Sticker = (props: any) => <div>{props.element}</div>;
-  Header.Title = (props: any) => <h1>{props.children}</h1>;
+  Header.Sticker = (props: any) => <div ref={props.ref}>{props.element}</div>;
+  Header.Title = (props: any) => <h1 class="media-header-title">{props.children}</h1>;
   Header.Subtitle = (props: any) => <p>{props.children}</p>;
   return {default: Header};
 });
@@ -117,21 +135,41 @@ vi.mock('@helpers/dom/focusWhenConnected', () => ({default: vi.fn(() => () => {}
 vi.mock('@helpers/dom/htmlToSpan', () => ({default: vi.fn(() => document.createElement('span'))}));
 vi.mock('@helpers/dom/loadFonts', () => ({default: vi.fn(() => Promise.resolve())}));
 vi.mock('@helpers/dom/replaceContent', () => ({default: vi.fn()}));
+vi.mock('@helpers/bytes/bytesCmp', () => ({default: (a: ArrayLike<number>, b: ArrayLike<number>) => a.length === b.length && Array.from(a).every((byte, i) => byte === b[i])}));
+vi.mock('@helpers/bytes/bytesToBase64', () => ({default: () => 'c2VjcmV0LXRva2Vu'}));
+vi.mock('@helpers/fixBase64String', () => ({default: (value: string) => value}));
+vi.mock('@helpers/qrCode/paintQrCode', () => ({paintQrCode: mocks.paintQrCode}));
 vi.mock('@helpers/formatDuration', () => ({default: vi.fn()}));
 vi.mock('@helpers/mediaSizes', () => ({default: {isMobile: false}}));
 vi.mock('@helpers/schedulers', () => ({doubleRaf: vi.fn(() => Promise.resolve())}));
 vi.mock('@helpers/schedulers/pause', () => ({default: vi.fn(() => Promise.resolve())}));
+vi.mock('qr-code-styling', async() => ({
+  default: class {
+    append(host: HTMLElement) {
+      host.appendChild(document.createElement('canvas'));
+    }
+  }
+}));
 vi.mock('@helpers/string/classNames', () => ({
   default: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' ')
 }));
 vi.mock('@helpers/themeController', () => ({default: {switchTheme: vi.fn()}}));
 vi.mock('@lib/accounts/changeAccount', () => ({changeAccount: vi.fn()}));
+vi.mock('@lib/accounts/accountController', () => ({default: {getUserIds: mocks.getUserIds}}));
 vi.mock('@lib/accounts/getCurrentAccount', () => ({getCurrentAccount: () => mocks.currentAccount}));
 vi.mock('@lib/accounts/getValidatedAccount', () => ({getValidatedAccount: (value: number) => value}));
 vi.mock('@lib/langPack', () => ({
   i18n: (key: string) => {
     const element = document.createElement('span');
-    element.textContent = key;
+    element.textContent = ({
+      'Login.QR.Title': 'Log in by QR Code',
+      'Login.QR.Subtitle': 'Scan with Telegram app on your phone',
+      'Login.QR.Help1': 'Open Telegram on your phone',
+      'Login.QR.Help2': 'Go to Settings > Devices > Add Device',
+      'Login.QR.Help3': 'Point your phone at this screen to confirm login',
+      'Login.QR.Unsupported.Title': 'QR code sign-in unavailable',
+      'Login.QR.Unsupported.Text': 'This server doesn\'t support QR code sign-in.'
+    } as Record<string, string>)[key] || key;
     return element;
   }
 }));
@@ -139,8 +177,9 @@ vi.mock('@lib/richTextProcessor/wrapEmojiText', () => ({default: vi.fn()}));
 vi.mock('@lib/rootScope', () => ({
   default: {
     managers: {
-      apiManager: {invokeApi: mocks.invokeApi, setUser: mocks.setUser},
+      apiManager: {invokeApi: mocks.invokeApi, setBaseDcId: mocks.setBaseDcId, setUser: mocks.setUser},
       appStateManager: {pushToState: mocks.pushToState},
+      timeManager: {getServerTimeOffset: mocks.getServerTimeOffset},
       passwordManager: {
         getState: mocks.getPasswordState,
         check: mocks.checkPassword,
@@ -227,11 +266,16 @@ vi.mock('@/pages/cards/SignUpCard', () => ({
 vi.mock('@/pages/cards/EmailRecoverCard', () => ({
   default: () => <div data-card="emailRecover"/>
 }));
-vi.mock('@/pages/cards/SignQRCard', () => ({
-  default: () => mocks.privateTarget ?
-    <button onClick={mocks.navigateQrToSignIn}>Sign in with username</button> :
-    <div data-card="official-signQR"/>
-}));
+vi.mock('@/pages/cards/SignQRCard', async(importOriginal) => {
+  const {default: SignQRCard} = await importOriginal<typeof import('@/pages/cards/SignQRCard')>();
+  return {
+    default: (props: any) => mocks.privateTarget && mocks.renderRealQrCard ?
+      <SignQRCard {...props}/> :
+      mocks.privateTarget ?
+        <button>Sign in with username</button> :
+        <div data-card="official-signQR"/>
+  };
+});
 vi.mock('@/pages/cards/SignImportCard', () => ({
   default: () => <div data-card="signImport"/>
 }));
@@ -259,6 +303,7 @@ describe('AuthCardsHost target-specific routing', () => {
 
   beforeEach(() => {
     mocks.privateTarget = false;
+    mocks.renderRealQrCard = false;
     mocks.currentAccount = 1;
     mocks.invokeApi.mockReset();
     mocks.setUser.mockReset();
@@ -272,9 +317,12 @@ describe('AuthCardsHost target-specific routing', () => {
     mocks.sessionGet.mockReset().mockResolvedValue(undefined);
     mocks.sessionSet.mockReset().mockResolvedValue(undefined);
     mocks.sessionDelete.mockReset().mockResolvedValue(undefined);
-    mocks.navigateQrToSignIn.mockReset();
+    mocks.setBaseDcId.mockReset().mockResolvedValue(undefined);
     mocks.navigateCard.mockReset();
     mocks.bootstrapIm.mockReset();
+    mocks.getServerTimeOffset.mockReset().mockResolvedValue(0);
+    mocks.getUserIds.mockReset().mockResolvedValue([]);
+    mocks.paintQrCode.mockReset();
     consoleSpies = [];
   });
 
@@ -294,7 +342,6 @@ describe('AuthCardsHost target-specific routing', () => {
       await import('@/pages/AuthCardsHost?private-target-test') :
       // @ts-expect-error Vite query IDs keep the module-level target isolated per build mode
       await import('@/pages/AuthCardsHost?official-target-test');
-    mocks.navigateQrToSignIn.mockImplementation(() => authFlow.navigateAuth({name: 'signIn'}));
     authFlow.navigateAuth(spec);
     mocks.navigateCard.mockClear();
     dispose = render(() => <AuthCardsHost/>, document.body);
@@ -399,8 +446,10 @@ describe('AuthCardsHost target-specific routing', () => {
   });
 
   it('uses the same username form for the private QR escape action', async() => {
+    mocks.renderRealQrCard = true;
+    mocks.invokeApi.mockRejectedValueOnce({type: 'INPUT_METHOD_INVALID'});
     await mount(true, {name: 'signQR'});
-    await vi.waitFor(() => expect(document.body.textContent).toContain('Sign in with username'));
+    await vi.waitFor(() => expect(document.querySelector('.media-header-title')?.textContent).toBe('QR code sign-in unavailable'));
 
     Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Sign in with username')!.click();
     await waitForUsername();
