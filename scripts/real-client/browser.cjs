@@ -25,6 +25,12 @@ function matchesPrivateArtifactManifest(manifest, expected) {
     manifest.artifactDigest === expected.artifactDigest;
 }
 
+function getSingleExactMessageFailure(messages, expected) {
+  if(messages.length !== 1) return 'count';
+  if(messages[0] !== expected) return 'content';
+  return null;
+}
+
 function readRuntimeInput() {
   return new Promise((resolve, reject) => {
     let value = '';
@@ -470,10 +476,11 @@ async function main() {
       'bob_direct_chat'
     );
     await openComposer(bob.page, 'bob_direct_chat');
-    const bobDirectMessage = bob.page.locator('#column-center .bubble .message').filter({hasText: MESSAGE});
-    await bobDirectMessage.first().waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_direct_message_visible'));
+    const bobDirectMessages = bob.page.locator('#column-center .bubble .message').filter({hasText: MESSAGE});
+    await bobDirectMessages.first().waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_direct_message_visible'));
     await bob.page.waitForTimeout(600);
-    if(await bobDirectMessage.count() !== 1) failStage('bob_direct_message_count');
+    const directMessageFailure = getSingleExactMessageFailure(await bobDirectMessages.allInnerTexts(), MESSAGE);
+    if(directMessageFailure) failStage(`bob_direct_message_${directMessageFailure}`);
     await captureState(bob.page, runtime.screenshotDirectory, 'bob-direct-message', capturedScreenshots);
     report.push({name: 'message', status: 'passed'});
 
@@ -618,7 +625,7 @@ async function waitForMembers(page, memberRows) {
 }
 
 let runtime;
-module.exports = {matchesPrivateArtifactManifest};
+module.exports = {getSingleExactMessageFailure, matchesPrivateArtifactManifest};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

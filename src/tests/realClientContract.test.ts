@@ -14,9 +14,15 @@ import {
 } from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
-const {matchesPrivateArtifactManifest} = require('../../scripts/real-client/browser.cjs');
+const {getSingleExactMessageFailure, matchesPrivateArtifactManifest} = require('../../scripts/real-client/browser.cjs');
 
 describe('real client scenario contract', () => {
+  it('requires exactly one recipient message with the expected text', () => {
+    expect(getSingleExactMessageFailure(['browser-ci-hello'], 'browser-ci-hello')).toBe(null);
+    expect(getSingleExactMessageFailure(['prefix browser-ci-hello'], 'browser-ci-hello')).toBe('content');
+    expect(getSingleExactMessageFailure(['browser-ci-hello', 'browser-ci-hello'], 'browser-ci-hello')).toBe('count');
+  });
+
   it('rejects missing and empty scenario selection', () => {
     expect(() => parseRequiredScenarios(undefined)).toThrow('scenario selection is required');
     expect(() => parseRequiredScenarios('')).toThrow('scenario selection is required');
