@@ -8,10 +8,12 @@ import {AppManagers} from '@lib/managers';
 export class UsernameInputField extends InputField {
   private checkUsernamePromise: Promise<any>;
   private checkUsernameDebounced: (username: string) => void;
+  private saveError = false;
   public options: InputFieldOptions & {
     peerId?: PeerId,
     listenerSetter: ListenerSetter,
     onChange?: () => void,
+    isActive?: () => boolean,
     invalidText: LangPackKey,
     takenText: LangPackKey,
     availableText: LangPackKey,
@@ -31,6 +33,7 @@ export class UsernameInputField extends InputField {
       const value = this.getValue();
 
       this.error = undefined;
+      this.saveError = false;
       if(value === this.originalValue || !value.length) {
         this.setState(InputState.Neutral);
         this.options.onChange?.();
@@ -61,7 +64,7 @@ export class UsernameInputField extends InputField {
   }
 
   private checkUsername(username: string) {
-    if(this.checkUsernamePromise) return;
+    if(!this.isActive() || this.saveError || this.checkUsernamePromise) return;
 
     this.error = undefined;
     let checkPromise: Promise<any>
@@ -72,7 +75,7 @@ export class UsernameInputField extends InputField {
     }
 
     const promise = this.checkUsernamePromise = checkPromise.then((available) => {
-      if(this.getValue() !== username) return;
+      if(!this.isActive() || this.saveError || this.getValue() !== username) return;
 
       if(available) {
         this.setState(InputState.Valid, this.options.availableText);
@@ -80,7 +83,7 @@ export class UsernameInputField extends InputField {
         this.setError(this.options.takenText);
       }
     }, (err) => {
-      if(this.getValue() !== username) return;
+      if(!this.isActive() || this.saveError || this.getValue() !== username) return;
 
       this.error = err;
       switch(this.error.type) {
@@ -96,10 +99,12 @@ export class UsernameInputField extends InputField {
         }
       }
     }).then(() => {
+      if(!this.isActive()) return;
       if(this.checkUsernamePromise === promise) {
         this.checkUsernamePromise = undefined;
       }
 
+      if(this.saveError) return;
       this.options.onChange?.();
 
       const value = this.getValue();
@@ -108,4 +113,21 @@ export class UsernameInputField extends InputField {
       }
     });
   };
+
+  public setSaveError(username: string, langKey: LangPackKey) {
+    if(!this.isActive() || this.getValue() !== username) return false;
+
+    this.error = undefined;
+    this.saveError = true;
+    this.setError(langKey);
+    return true;
+  }
+
+  public hasSaveError() {
+    return this.saveError;
+  }
+
+  private isActive() {
+    return this.options.isActive?.() ?? true;
+  }
 }
