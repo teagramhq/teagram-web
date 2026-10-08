@@ -1,0 +1,84 @@
+# Real client fixture scenarios
+
+`pnpm run test:real-client` consumes a completed `server-ready` and `artifact-ready` pair from one foreground real-server fixture run. It checks the immutable harness, server and web pins, the fixture's protected synthetic credentials, isolation and audit evidence before driving the production UI. It requires all three scenarios: `sign-in,message,group`.
+
+The accepted positive inputs are harness and server `47daaaea5c71b859d9865c03cabb50da5a1a013b` and web `b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8`. Each run also has a fresh run ID, RSA public key and endpoint identity. Do not reuse readiness or artifacts from another run.
+
+The native arm64 fixture successor is pending separate acceptance in server PR #499 (current draft head `5f294c39abb32fc8ae15a4f7ccb085974098b320`). Keep the accepted harness/server pins and historical negative pair unchanged; do not use the draft head or start the real-client rerun until the fixture owner records the accepted successor.
+
+## Run the fixture
+
+From the accepted `teagram-server` checkout, keep the fixture command in the foreground. `READINESS_FILE` must be accessible from the web checkout and should stay outside both repositories and artifact output.
+
+```sh
+set -euo pipefail
+RUN_ID="$(openssl rand -hex 16)"
+READINESS_FILE="$(mktemp /dev/shm/real-client-readiness.XXXXXX)"
+chmod 600 "$READINESS_FILE"
+printf 'READINESS_FILE=%s\n' "$READINESS_FILE"
+test "$(git rev-parse HEAD)" = 47daaaea5c71b859d9865c03cabb50da5a1a013b
+test -z "$(git status --porcelain --untracked-files=all)"
+bash test/e2e/real_server_fixture/run.sh \
+  --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
+  --web-revision b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8 \
+  --run-id "$RUN_ID" | tee "$READINESS_FILE"
+```
+
+The fixture prints `server-ready` only after real SRP authentication, worker and direct-TCP probes, and its run isolation checks. Keep the foreground process and its stdin open. Do not pass `TG_*` or `MTPROTO_*` variables to it.
+
+## Build and attach the run's artifact
+
+From a clean web checkout at the exact positive web revision, use only that run's public PEM and endpoint. The key file stays outside the repository, fixture secret/build directories and artifact output. Only the build process receives the private-target environment.
+
+```sh
+set -euo pipefail
+READINESS_FILE='/dev/shm/real-client-readiness.<path-printed-in-fixture-terminal>'
+RUN_ID="$(jq -er 'select(.event == "server-ready") | .runId' "$READINESS_FILE")"
+test "$(git rev-parse HEAD)" = b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8
+test -z "$(git status --porcelain --untracked-files=all)"
+KEY_FILE="$(mktemp /dev/shm/real-client-public-key.XXXXXX)"
+chmod 600 "$KEY_FILE"
+jq -er 'select(.event == "server-ready") | .mtprotoPublicKeyPEM' "$READINESS_FILE" > "$KEY_FILE"
+ARTIFACT_PARENT="$(mktemp -d)"
+ARTIFACT_DIR="$ARTIFACT_PARENT/dist-private"
+MTPROTO_TARGET_MODE=private \
+MTPROTO_PRIVATE_ENDPOINT=wss://telegramd.test/apiws \
+MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$KEY_FILE" \
+  corepack pnpm exec vite build --outDir "$ARTIFACT_DIR"
+MTPROTO_TARGET_MODE=private node scripts/check-bundle-mangling.mjs "$ARTIFACT_DIR"
+```
+
+Return to the fixture terminal and enter one command with the absolute artifact path:
+
+```text
+attach /absolute/path/to/dist-private
+```
+
+Wait for `artifact-ready`. This confirms that the immutable fixture independently staged and audited the caller's files, checked the private CSP and run-specific manifest, and loaded the production entry and both workers in its fresh browser. `server-ready` alone is not enough to start the scenarios.
+
+## Drive the UI
+
+Run from the checkout containing `test:real-client`, using the readiness file and pins from that foreground run. The runner validates the artifact's web pin; its own checkout can carry this scenario implementation.
+
+```sh
+corepack pnpm run test:real-client -- \
+  --readiness-file "$READINESS_FILE" \
+  --harness-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
+  --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
+  --web-revision b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8 \
+  --run-id "$RUN_ID" \
+  --scenarios sign-in,message,group
+```
+
+The browser uses two new independent contexts and the actual username/password flow. It sends `browser-ci-hello` to the other account, creates a basic group through the UI with that account, then checks the received group message and member list. It captures each state inside the fixture browser's temporary directory, removes those screenshots and the runner on exit, and emits only scenario and network summaries. It does not import storage state, use test-only authentication, or export credentials, traces or captures.
+
+After the command succeeds or fails, send `stop` to the foreground fixture and wait for its owned cleanup to finish. Then remove the caller-owned artifact and temporary key/readiness files:
+
+```sh
+rm -rf -- "$ARTIFACT_PARENT"
+rm -f -- "$KEY_FILE" "$READINESS_FILE"
+```
+
+## Historical negative pair
+
+The original negative pair is web `09373cc2713d31e93664c38a4fd0335ea37a5f01` with server `6668a0a3519909ef512fdc59e4937975f108671d`, using the accepted harness `47daaaea5c71b859d9865c03cabb50da5a1a013b`. Its accepted CI evidence reaches `server-ready` and fails the independent artifact audit on worker source maps: `officialMtprotoDynamicRoutes`, `officialDcHosts`, `officialDcIpRanges` and `alternateWebSocketRoutes`. It has no `artifact-ready` event, so the UI sign-in scenario is unsupported for that pair. This audit rejection is not an SRP regression result; keep the original browser/SRP regression claim open until a supported negative control can reach the UI.
