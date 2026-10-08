@@ -91,8 +91,14 @@ vi.mock('@components/editPeer', () => ({
     public uploadAvatar: any;
     public avatarEdit = {container: document.createElement('div')};
     public avatarElem = {node: document.createElement('div')};
-    public isChanged = vi.fn(() => false);
-    public handleChange = vi.fn();
+    public isChanged = vi.fn(() =>
+      Object.values(mocks.fields).some((field) => field.isValid() && field.isChanged()) ||
+      !!mocks.usernameField?.isChanged() ||
+      !!this.uploadAvatar
+    );
+    public handleChange = vi.fn(() => {
+      this.nextBtn.classList.toggle('is-visible', this.isChanged());
+    });
     public originalHandleChange = this.handleChange;
 
     constructor() {
@@ -443,6 +449,29 @@ describe('profile save outcomes', () => {
     expect(mocks.fields['first-name'].value).toBe('Grace');
     expect(mocks.fields['first-name'].originalValue).toBe('Ada');
     expect(mocks.usernameField.originalValue).toBe('newhandle');
+  });
+
+  it('shows the save button when a deferred save makes a reverted field dirty', async() => {
+    const profileWrite = deferred<void>();
+    const {tab, button} = await mountEditor({updateProfile: () => profileWrite.promise});
+    const firstName = mocks.fields['first-name'];
+    enter(firstName.input, 'Grace');
+
+    simulateClickEvent(button);
+    await flushPromises();
+    expect(button.classList.contains('is-visible')).toBe(true);
+
+    enter(firstName.input, 'Ada');
+    expect(button.classList.contains('is-visible')).toBe(false);
+
+    profileWrite.resolve(undefined);
+    await flushPromises();
+
+    expect(tab.close).not.toHaveBeenCalled();
+    expect(firstName.originalValue).toBe('Grace');
+    expect(firstName.isChanged()).toBe(true);
+    expect(button.classList.contains('is-visible')).toBe(true);
+    expect(button.disabled).toBe(false);
   });
 
   it('closes once after a successful name-only save', async() => {

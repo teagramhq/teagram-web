@@ -364,6 +364,8 @@ const EditProfileForm = (props: {
         }
       });
 
+      editPeer.handleChange();
+
       if(hasNonUsernameFailure) {
         toastNew({langPackKey: 'Error.AnError'});
       }
