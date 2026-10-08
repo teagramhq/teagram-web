@@ -1,5 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {render} from 'solid-js/web';
+import deferred from './helpers/deferred';
 
 const mocks = vi.hoisted(() => ({
   privateTarget: false,
@@ -356,6 +357,24 @@ describe('AuthCardsHost target-specific routing', () => {
     await waitForSelector('input[aria-label="Username"]');
   }
 
+  async function submitUsernameAndNavigateToQr(pendingSignIn: Promise<unknown>) {
+    mocks.invokeApi
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockReturnValueOnce(pendingSignIn);
+    const navigateAuth = await mount(true, {name: 'signIn'});
+    await waitForUsername();
+
+    const username = document.querySelector('input[aria-label="Username"]') as HTMLInputElement;
+    username.value = USERNAME;
+    username.dispatchEvent(new Event('input', {bubbles: true}));
+    Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Next')!.click();
+    await vi.waitFor(() => expect(mocks.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']));
+
+    navigateAuth({name: 'signQR'});
+    await vi.waitFor(() => expect(document.body.textContent).toContain('Sign in with username'));
+    mocks.navigateCard.mockClear();
+  }
+
   it('shows the username form from private sign-in without requesting a phone code', async() => {
     await mount(true, {name: 'signIn'}, 2);
     await waitForUsername();
@@ -442,6 +461,36 @@ describe('AuthCardsHost target-specific routing', () => {
     expect(mocks.bootstrapIm).not.toHaveBeenCalled();
     expect(document.querySelector('input[aria-label="Username"]')).toBeNull();
     expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.body.textContent).toContain('Sign in with username');
+  });
+
+  it('does not authorize or enter the IM when auth.signIn succeeds after navigating away', async() => {
+    const pendingSignIn = deferred<unknown>();
+    await submitUsernameAndNavigateToQr(pendingSignIn.promise);
+
+    pendingSignIn.resolve({_: 'auth.authorization', user: {_: 'user', id: 42}});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mocks.setUser).not.toHaveBeenCalled();
+    expect(mocks.bootstrapIm).not.toHaveBeenCalled();
+    expect(mocks.navigateCard).not.toHaveBeenCalled();
+    expect(document.querySelector('input[aria-label="Username"]')).toBeNull();
+    expect(document.querySelector('input[aria-label="LoginPassword"]')).toBeNull();
+    expect(document.body.textContent).toContain('Sign in with username');
+  });
+
+  it('does not navigate to password when auth.signIn requires it after navigating away', async() => {
+    const pendingSignIn = deferred<unknown>();
+    await submitUsernameAndNavigateToQr(pendingSignIn.promise);
+
+    pendingSignIn.reject({type: 'SESSION_PASSWORD_NEEDED'});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mocks.setUser).not.toHaveBeenCalled();
+    expect(mocks.bootstrapIm).not.toHaveBeenCalled();
+    expect(mocks.navigateCard).not.toHaveBeenCalledWith({name: 'password'});
+    expect(document.querySelector('input[aria-label="Username"]')).toBeNull();
+    expect(document.querySelector('input[aria-label="LoginPassword"]')).toBeNull();
     expect(document.body.textContent).toContain('Sign in with username');
   });
 
