@@ -1,6 +1,7 @@
 import {JSX, Match, Show, Switch, children, createMemo, lazy, onMount} from 'solid-js';
 
 import Scrollable from '@components/scrollable2';
+import {isPrivateMtprotoTarget} from '@config/mtprotoTarget';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import {IS_MOBILE_SAFARI} from '@environment/userAgent';
 import loadFonts from '@helpers/dom/loadFonts';
@@ -29,6 +30,8 @@ import Button from '@components/buttonTsx';
 
 if(import.meta.hot) import.meta.hot.accept();
 
+const IS_PRIVATE_MTPROTO_TARGET = isPrivateMtprotoTarget();
+
 /* ------------------------------------------------------------------ */
 /* Lazy card slots — same chunk-splitting as the legacy dynamic imports */
 /* ------------------------------------------------------------------ */
@@ -37,6 +40,8 @@ const SignInCard = lazy(() => import('@/pages/cards/SignInCard'));
 const AuthCodeCard = lazy(() => import('@/pages/cards/AuthCodeCard'));
 const PasswordCard = lazy(() => import('@/pages/cards/PasswordCard'));
 const SignUpCard = lazy(() => import('@/pages/cards/SignUpCard'));
+const PrivateSignInCard = lazy(() => import('@/pages/cards/PrivateSignInCard'));
+const PrivatePasswordCard = lazy(() => import('@/pages/cards/PrivatePasswordCard'));
 const EmailRecoverCard = lazy(() => import('@/pages/cards/EmailRecoverCard'));
 const SignQRCard = lazy(() => import('@/pages/cards/SignQRCard'));
 const SignImportCard = lazy(() => import('@/pages/cards/SignImportCard'));
@@ -196,16 +201,24 @@ function CardsTransition(): JSX.Element {
   const cardChild = children(() => (
     <Switch>
       <Match when={matchCard('signIn')} keyed>
-        {(spec) => <SignInCard spec={spec} />}
+        {(spec) => IS_PRIVATE_MTPROTO_TARGET ?
+          <PrivateSignInCard spec={spec} /> :
+          <SignInCard spec={spec} />}
       </Match>
       <Match when={matchCard('authCode')} keyed>
-        {(spec) => <AuthCodeCard spec={spec} />}
+        {(spec) => IS_PRIVATE_MTPROTO_TARGET ?
+          <PrivateSignInCard spec={{name: 'signIn'}} /> :
+          <AuthCodeCard spec={spec} />}
       </Match>
       <Match when={matchCard('password')} keyed>
-        {(spec) => <PasswordCard spec={spec} />}
+        {(spec) => IS_PRIVATE_MTPROTO_TARGET ?
+          <PrivatePasswordCard spec={spec} /> :
+          <PasswordCard spec={spec} />}
       </Match>
       <Match when={matchCard('signUp')} keyed>
-        {(spec) => <SignUpCard spec={spec} />}
+        {(spec) => IS_PRIVATE_MTPROTO_TARGET ?
+          <PrivateSignInCard spec={{name: 'signIn'}} /> :
+          <SignUpCard spec={spec} />}
       </Match>
       <Match when={matchCard('emailRecover')} keyed>
         {(spec) => <EmailRecoverCard spec={spec} />}
