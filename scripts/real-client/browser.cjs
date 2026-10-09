@@ -7,6 +7,7 @@ const REQUIRED_SCENARIOS = ['sign-in', 'message', 'group'];
 const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
 const PRIVATE_CSP_WSS = 'wss://telegramd.test/apiws';
 const PROBE_PATH = '/_fixture_probe/';
+const MODULE_PROBE_PATH = `${PROBE_PATH}module/index.html`;
 const MESSAGE = 'browser-ci-hello';
 const GROUP_MESSAGE = 'browser-ci-group-hello';
 const CONTROL_WINDOW_MS = 10_000;
@@ -22,6 +23,8 @@ const CONTROL_PLAN = Object.freeze([
   Object.freeze({name: 'c5_attach_budget', windowMs: 6000,
     expression: "for(let index = 0; index < 20; index++) new SharedWorker('/_fixture_probe/shared-worker.js', 'budget' + index)"})
 ]);
+const MODULE_CONTROL_PLAN = Object.freeze(Object.keys(observation.MODULE_CONTROL_EXPECTATIONS).map((name) => Object.freeze({name})));
+const TOTAL_CONTROL_CONTEXTS = CONTROL_PLAN.length + MODULE_CONTROL_PLAN.length;
 
 let currentStage = 'runtime_inputs';
 let currentScenario;
@@ -96,9 +99,11 @@ function validateRuntimeInput(config) {
       !/^(?:\d{1,3}\.){3}\d{1,3}$/.test(config.frontIp || '') ||
       config.screenshotDirectory !== `/tmp/real-client-${config.runId}` ||
       (config.observationOnly !== undefined && config.observationOnly !== true) ||
-      !Array.isArray(config.accounts) || config.accounts.length !== 2) {
+      !Array.isArray(config.accounts) || (config.observationOnly === true ? config.accounts.length !== 0 : config.accounts.length !== 2)) {
     failStage('runtime_input_validation');
   }
+
+  if(config.observationOnly === true) return;
 
   const expectedNames = [`u${config.runId.slice(0, 30)}a`, `u${config.runId.slice(0, 30)}b`];
   config.accounts.forEach((account, index) => {
@@ -191,14 +196,18 @@ function createWorkerDiscovery() {
 
   function setupObserver(observer, targetId) {
     const sessionId = targetSessions.get(targetId);
+    const methods = observer.control === true
+      ? ['Network.enable', 'Log.enable', 'Runtime.enable']
+      : ['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable'];
     const setup = (async() => {
-      for(const method of ['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable']) {
+      for(const method of methods) {
         await sendNested(sessionId, method);
       }
-      // A shared worker cannot be held at startup, so this release is a no-op
-      // for it. It stays unconditional: a target this runner attaches to must
-      // never stay frozen because an observer reached it.
-      await sendNested(sessionId, 'Runtime.runIfWaitingForDebugger');
+      if(observer.control !== true) {
+        // Browser-discovered shared workers are already running; page-session
+        // auto-attached targets remain paused until their observer is ready.
+        await sendNested(sessionId, 'Runtime.runIfWaitingForDebugger');
+      }
       observer.noteSetupComplete(targetId);
     })().catch(() => {
       observer.recordObserverError();
@@ -576,7 +585,9 @@ function createNetworkObserver(page, contextName, contextObserver) {
     }
     if(!['http:', 'https:', 'ws:', 'wss:'].includes(parsed.protocol)) return;
 
-    const allowed = parsed.origin === PRIVATE_CSP_ORIGIN || (kind === 'websocket' && url === PRIVATE_CSP_WSS);
+    const probeRoute = observation.isFixtureProbeURL(url);
+    const probeRouteAllowed = !probeRoute || (contextObserver?.control === true && observation.classifyProbeResource(url) !== null);
+    const allowed = (parsed.origin === PRIVATE_CSP_ORIGIN || (kind === 'websocket' && url === PRIVATE_CSP_WSS)) && probeRouteAllowed;
     const key = kind === 'websocket' ? `${targetId}:${kind}:${url}` : undefined;
     if(key && eventKeys.has(key)) return;
     if(key) eventKeys.add(key);
@@ -775,7 +786,11 @@ function createNetworkObserver(page, contextName, contextObserver) {
     await send('Network.enable');
     await send('Audits.enable');
     await send('Log.enable');
-    await send('Target.setAutoAttach', {autoAttach: true, waitForDebuggerOnStart: true, flatten: false});
+    await send('Target.setAutoAttach', {
+      autoAttach: contextObserver?.control !== true,
+      waitForDebuggerOnStart: contextObserver?.control !== true,
+      flatten: false
+    });
     // Complete page coverage: this session is enabled before every navigation.
     contextObserver.state.pageCoverageComplete = true;
   }
@@ -967,6 +982,8 @@ async function waitForMembers(page, memberRows) {
 async function runObserverControls(browser, registry, cleanupIssues) {
   const controls = {};
   const failedControls = [];
+  let unexpectedAttempts = 0;
+  let observerErrors = 0;
   for(const plan of CONTROL_PLAN) {
     const context = await browser.newContext({viewport: {width: 1280, height: 900}});
     const observer = observation.createContextObserver(plan.name, {control: true});
@@ -989,11 +1006,19 @@ async function runObserverControls(browser, registry, cleanupIssues) {
       await Promise.all([networkObserver.waitForSetup(), registry.waitForSetup()]);
       observer.state.windowElapsed = true;
       const block = observer.summary();
-      controls[plan.name] = {...block, expected: observation.evaluateControl(plan.name, block)};
+      const networkSummary = networkObserver.summary();
+      unexpectedAttempts += networkSummary.unexpectedAttempts;
+      observerErrors += networkSummary.observerErrors;
+      controls[plan.name] = {...block, expected: networkSummary.unexpectedAttempts === 0 && networkSummary.observerErrors === 0
+        ? observation.evaluateControl(plan.name, block)
+        : 'fail'};
       if(controls[plan.name].expected === 'fail') failedControls.push(plan.name);
     } catch {
       await Promise.all([networkObserver?.waitForSetup(), registry.waitForSetup()]);
       observer.state.windowElapsed = true;
+      const networkSummary = networkObserver?.summary();
+      unexpectedAttempts += networkSummary?.unexpectedAttempts ?? 0;
+      observerErrors += networkSummary?.observerErrors ?? 0;
       controls[plan.name] = {...observer.summary(), expected: 'fail'};
       failedControls.push(plan.name);
     } finally {
@@ -1013,7 +1038,95 @@ async function runObserverControls(browser, registry, cleanupIssues) {
       }
     }
   }
-  return {controls, failedControls};
+  return {controls, failedControls, unexpectedAttempts, observerErrors};
+}
+
+async function runModuleControls(browser, registry, cleanupIssues) {
+  const moduleRows = {};
+  const failedRows = [];
+  let countedEvents = 0;
+  let attachedTargets = 0;
+  let unexpectedAttempts = 0;
+  let observerErrors = 0;
+  for(const plan of MODULE_CONTROL_PLAN) {
+    const context = await browser.newContext({viewport: {width: 1280, height: 900}});
+    const observer = observation.createContextObserver(plan.name, {control: true});
+    let networkObserver;
+    let reportedTruth = 'unknown';
+    const evaluateRow = () => {
+      const contextSummary = observer.summary();
+      const networkSummary = networkObserver?.summary();
+      return {
+        contextSummary,
+        networkSummary,
+        row: observation.evaluateModuleControl(plan.name, {
+          category: contextSummary.workerFailure,
+          truth: reportedTruth,
+          attemptsByResource: contextSummary.moduleProbeAttempts,
+          unexpectedAttempts: networkSummary?.unexpectedAttempts ?? 0,
+          foreignTargets: registry.foreignTargets,
+          contextlessTargets: registry.contextlessTargets,
+          appContextlessTargets: registry.appContextlessTargets,
+          pageTargets: contextSummary.pageTargets,
+          sharedWorkerTargets: contextSummary.sharedWorkerTargets,
+          discoveryActive: contextSummary.discoveryActive,
+          pageCoverageComplete: contextSummary.pageCoverageComplete,
+          coverageComplete: contextSummary.coverageComplete,
+          observerOverflow: contextSummary.observerOverflow,
+          observerErrors: Math.max(contextSummary.observerErrors, networkSummary?.observerErrors ?? 0)
+        })
+      };
+    };
+    try {
+      const page = await context.newPage();
+      networkObserver = createNetworkObserver(page, plan.name, observer);
+      await networkObserver.start(registry);
+      const response = await page.goto(`${PRIVATE_CSP_ORIGIN}${MODULE_PROBE_PATH}#${plan.name}`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 20_000
+      }).catch(() => null);
+      if(response?.status() !== 200) {
+        observer.recordObserverError();
+      } else {
+        await page.waitForFunction(() => document.body?.dataset.result, undefined, {timeout: 5000}).catch(() => {});
+        const result = await page.locator('body').getAttribute('data-result').catch(() => null);
+        if(['ack', 'worker_error_event', 'no_ack'].includes(result)) reportedTruth = result;
+      }
+      await Promise.all([networkObserver.waitForSetup(), registry.waitForSetup()]);
+      observer.state.windowElapsed = true;
+      const result = evaluateRow();
+      moduleRows[plan.name] = result.row;
+      countedEvents += result.contextSummary.countedEvents;
+      attachedTargets += result.contextSummary.attachedTargets;
+      unexpectedAttempts += result.row.unexpectedAttempts;
+      observerErrors += result.row.observerErrors;
+      if(!result.row.validated) failedRows.push(plan.name);
+    } catch{
+      await Promise.all([networkObserver?.waitForSetup(), registry.waitForSetup()]).catch(() => {});
+      observer.state.windowElapsed = true;
+      const result = evaluateRow();
+      moduleRows[plan.name] = result.row;
+      countedEvents += result.contextSummary.countedEvents;
+      attachedTargets += result.contextSummary.attachedTargets;
+      unexpectedAttempts += result.row.unexpectedAttempts;
+      observerErrors += result.row.observerErrors;
+      failedRows.push(plan.name);
+    } finally {
+      try {
+        const released = await registry.releaseContext(observer);
+        await networkObserver?.stop();
+        if(released?.detachFailures > 0) cleanupIssues.push('observer_control_cleanup');
+      } catch{
+        cleanupIssues.push('observer_control_cleanup');
+      }
+      try {
+        await context.close();
+      } catch{
+        cleanupIssues.push('observer_control_cleanup');
+      }
+    }
+  }
+  return {moduleRows, failedRows, countedEvents, attachedTargets, unexpectedAttempts, observerErrors};
 }
 
 function summarizeEgress(observers) {
@@ -1024,7 +1137,7 @@ function summarizeEgress(observers) {
   };
 }
 
-function buildObservationBlock(registry, appObservers, controls, egress) {
+function buildObservationBlock(registry, appObservers, controls, moduleRun, egress) {
   const contexts = {};
   const controlBlocks = {};
   let countedEvents = 0;
@@ -1044,6 +1157,8 @@ function buildObservationBlock(registry, appObservers, controls, egress) {
     countedEvents += block.countedEvents;
     attachedTargets += block.attachedTargets;
   }
+  countedEvents += moduleRun.countedEvents;
+  attachedTargets += moduleRun.attachedTargets;
   return {
     unexpectedAttempts: egress.unexpectedAttempts,
     observerErrors,
@@ -1055,32 +1170,35 @@ function buildObservationBlock(registry, appObservers, controls, egress) {
     observerOverflow,
     countedEvents,
     contexts,
-    controls: controlBlocks
+    controls: controlBlocks,
+    moduleRows: moduleRun.moduleRows
   };
 }
 
-function buildObserverOnlyReport(registry, controls) {
-  const block = buildObservationBlock(registry, {}, controls, {unexpectedAttempts: 0, observerErrors: 0});
+function buildObserverOnlyReport(registry, controls, moduleRun, egress) {
+  const block = buildObservationBlock(registry, {}, controls, moduleRun, egress);
   const schemaFailure = observation.validateNetworkBlock(block);
   const failedControls = Object.entries(controls).filter(([, block]) => block.expected !== 'pass').map(([name]) => name);
-  if(schemaFailure || failedControls.length > 0 || registry.foreignTargets !== 0 || !registry.discoveryActive) {
+  const failedRows = Object.entries(moduleRun.moduleRows).filter(([, row]) => !row.validated).map(([name]) => name);
+  if(schemaFailure || failedControls.length > 0 || failedRows.length > 0 || registry.foreignTargets !== 0 ||
+      registry.contextlessTargets !== 0 || registry.appContextlessTargets !== 0 || !registry.discoveryActive) {
     return {
       status: 'failed',
       stage: schemaFailure ? 'worker_observation_unclassified' : 'observer_control_mismatch',
-      mode: 'observer_controls',
+      mode: 'controls_only',
       scenarios: [],
       contextCount: 0,
-      controlContextCount: CONTROL_PLAN.length,
+      controlContextCount: TOTAL_CONTROL_CONTEXTS,
       screenshotsCaptured: 0,
       workerObservation: schemaFailure ? observation.UNCLASSIFIED_NETWORK_BLOCK : block
     };
   }
   return {
     status: 'passed',
-    mode: 'observer_controls',
+    mode: 'controls_only',
     scenarios: [],
     contextCount: 0,
-    controlContextCount: CONTROL_PLAN.length,
+    controlContextCount: TOTAL_CONTROL_CONTEXTS,
     screenshotsCaptured: 0,
     workerObservation: block
   };
@@ -1097,6 +1215,8 @@ async function main() {
   let cleanupFailed = false;
   let registry;
   let controls = {};
+  let controlRun = {controls: {}, failedControls: [], unexpectedAttempts: 0, observerErrors: 0};
+  let moduleRun = {moduleRows: {}, failedRows: [], countedEvents: 0, attachedTargets: 0, unexpectedAttempts: 0, observerErrors: 0};
   try {
     runtime = await readRuntimeInput();
     validateRuntimeInput(runtime);
@@ -1126,16 +1246,23 @@ async function main() {
     await registry.launch(browser);
 
     currentStage = 'observer_controls';
-    const controlRun = await runObserverControls(browser, registry, cleanupIssues);
+    controlRun = await runObserverControls(browser, registry, cleanupIssues);
     controls = controlRun.controls;
-    if(controlRun.failedControls.length > 0) failStage('observer_control_mismatch');
+    currentStage = 'module_controls';
+    moduleRun = await runModuleControls(browser, registry, cleanupIssues);
 
-    // The synthetic-only mode proves the observer capability against the
-    // fixture's own probe controls: no app context, no artifact.
+    // The synthetic-only mode proves observer categories and truth against
+    // the fixture's controls, before any app context or scenario is created.
     if(runtime.observationOnly === true) {
-      report = buildObserverOnlyReport(registry, controls);
+      const egress = {
+        unexpectedAttempts: controlRun.unexpectedAttempts + moduleRun.unexpectedAttempts,
+        observerErrors: controlRun.observerErrors + moduleRun.observerErrors
+      };
+      report = buildObserverOnlyReport(registry, controls, moduleRun, egress);
       return;
     }
+
+    if(controlRun.failedControls.length > 0 || moduleRun.failedRows.length > 0) failStage('observer_control_mismatch');
 
     const accounts = runtime.accounts;
     currentStage = 'alice_context';
@@ -1279,8 +1406,12 @@ async function main() {
         allowedWebSocketsBySource: summary.allowedWebSocketsBySource
       }];
     }));
-    const egress = summarizeEgress(observers);
-    const observationBlock = buildObservationBlock(registry, appObservers, controls, egress);
+    const appEgress = summarizeEgress(observers);
+    const egress = {
+      unexpectedAttempts: controlRun.unexpectedAttempts + moduleRun.unexpectedAttempts + appEgress.unexpectedAttempts,
+      observerErrors: controlRun.observerErrors + moduleRun.observerErrors + appEgress.observerErrors
+    };
+    const observationBlock = buildObservationBlock(registry, appObservers, controls, moduleRun, egress);
     if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.length !== 0) failStage('browser_egress_or_page_errors');
     if(registry.foreignTargets !== 0 || registry.appContextlessTargets !== 0) failStage('browser_worker_observation_incomplete');
     if(['alice', 'bob'].some((name) => observationBlock.contexts[name].coverageComplete !== 1)) failStage('browser_worker_observation_incomplete');
@@ -1295,7 +1426,7 @@ async function main() {
       status: 'passed',
       scenarios: report,
       contextCount: contexts.length,
-      controlContextCount: CONTROL_PLAN.length,
+      controlContextCount: TOTAL_CONTROL_CONTEXTS,
       screenshotsCaptured: capturedScreenshots.count,
       network: {unexpectedAttempts: egress.unexpectedAttempts, observerErrors: egress.observerErrors, contexts: networkContexts},
       workerObservation: observationBlock
@@ -1303,11 +1434,15 @@ async function main() {
   } catch(error) {
     await Promise.all(observers.map((observer) => observer.waitForSetup()));
     await registry?.waitForSetup();
-    const egress = summarizeEgress(observers);
+    const appEgress = summarizeEgress(observers);
+    const egress = {
+      unexpectedAttempts: controlRun.unexpectedAttempts + moduleRun.unexpectedAttempts + appEgress.unexpectedAttempts,
+      observerErrors: controlRun.observerErrors + moduleRun.observerErrors + appEgress.observerErrors
+    };
     // The bounded sign-in window has ended by the time a sign-in stage fails,
     // so the failure report states what the observer established, not a blank.
     for(const observer of Object.values(appObservers)) observer.state.windowElapsed = true;
-    const failureBlock = buildObservationBlock(registry, appObservers, controls, egress);
+    const failureBlock = buildObservationBlock(registry, appObservers, controls, moduleRun, egress);
     report = {
       status: 'failed',
       stage: currentStage,
@@ -1315,7 +1450,7 @@ async function main() {
       errorClass: ['TimeoutError', 'TypeError', 'Error', 'AbortError'].includes(error?.name) ? error.name : 'OtherError',
       scenarios: Array.isArray(report) ? report : [],
       contextCount: contexts.length,
-      controlContextCount: CONTROL_PLAN.length,
+      controlContextCount: TOTAL_CONTROL_CONTEXTS,
       screenshotsCaptured: capturedScreenshots.count,
       // On failure the closed-schema evidence is still the point, validated the
       // same way: any schema violation collapses it to `unclassified`.
@@ -1364,10 +1499,14 @@ async function main() {
 // early and the scenario path that runs to completion report identically.
 function emitReport(report, cleanupFailed) {
   if(cleanupFailed) {
-    process.stdout.write(`${JSON.stringify({status: 'failed', stage: 'cleanup'})}\n`);
+    const failureReport = report?.mode === 'controls_only'
+      ? {status: 'failed', mode: 'controls_only', stage: 'cleanup', cleanup: 'failed', workerObservation: report.workerObservation}
+      : {status: 'failed', stage: 'cleanup'};
+    process.stdout.write(`${JSON.stringify(failureReport)}\n`);
     process.exitCode = 1;
     return;
   }
+  if(report?.mode === 'controls_only') report = {...report, cleanup: 'verified'};
   process.stdout.write(`${JSON.stringify(report)}\n`);
   if(report.status !== 'passed') process.exitCode = 1;
 }

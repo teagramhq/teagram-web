@@ -6,6 +6,7 @@ import observation from './observation.cjs';
 
 export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'message', 'group']);
 export const REQUIRED_CONTROLS = Object.freeze(Object.keys(observation.CONTROL_EXPECTATIONS));
+export const REQUIRED_MODULE_CONTROLS = Object.freeze(Object.keys(observation.MODULE_CONTROL_EXPECTATIONS));
 const REQUIRED_OBSERVATION_CONTEXTS = Object.freeze(['alice', 'bob']);
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
@@ -71,7 +72,8 @@ export function parseRealClientArgs(argv) {
     ['--web-revision', 'webRevision'],
     ['--run-id', 'runId'],
     ['--scenarios', 'scenarioSelection'],
-    ['--observer-controls-only', 'observerControlsOnly']
+    ['--controls-only', 'controlsOnly'],
+    ['--observer-controls-only', 'controlsOnly']
   ]);
   const options = new Map();
   for(let index = 0; index < argumentsList.length; index++) {
@@ -79,10 +81,10 @@ export function parseRealClientArgs(argv) {
     if(!names.has(name)) {
       throw new Error(`unknown option: ${name}`);
     }
-    if(options.has(name)) {
+    if(options.has(name) || [...options.keys()].some((existing) => names.get(existing) === names.get(name))) {
       throw new Error(`option was provided more than once: ${name}`);
     }
-    if(name === '--observer-controls-only') {
+    if(name === '--controls-only' || name === '--observer-controls-only') {
       options.set(name, true);
       continue;
     }
@@ -95,12 +97,12 @@ export function parseRealClientArgs(argv) {
     index++;
   }
 
-  const controlsOnly = options.get('--observer-controls-only') === true;
+  const controlsOnly = options.get('--controls-only') === true || options.get('--observer-controls-only') === true;
   if(!controlsOnly && !options.has('--scenarios')) {
     throw new Error('scenario selection is required');
   }
 
-  const optional = new Set(['--scenarios', '--observer-controls-only']);
+  const optional = new Set(['--scenarios', '--controls-only', '--observer-controls-only']);
   const missing = [...names.keys()].filter((name) => !optional.has(name) && !options.has(name));
   if(missing.length) {
     throw new Error(`missing required options: ${missing.join(',')}`);
@@ -114,6 +116,7 @@ export function parseRealClientArgs(argv) {
     throw new Error('run ID must be 128 bits of lowercase hexadecimal');
   }
   if(controlsOnly) {
+    parsed.controlsOnly = true;
     parsed.scenarios = [...REQUIRED_SCENARIOS];
   } else {
     parsed.scenarios = parseRequiredScenarios(parsed.scenarioSelection);
@@ -297,6 +300,24 @@ function assertArtifactReadyEvidence(ready) {
 // report does not prove is a failure of the evidence, never a pass: an
 // `unclassified` block, a missing control, an unknown coverage state, a foreign
 // target, an overflow, or a context owning more than one page.
+function validateModuleControls(moduleRows) {
+  if(!moduleRows || typeof moduleRows !== 'object' || Array.isArray(moduleRows)) {
+    throw new Error('module control evidence is missing');
+  }
+  const rowNames = Object.keys(moduleRows).sort();
+  const expectedNames = Object.keys(observation.MODULE_CONTROL_EXPECTATIONS).sort();
+  if(JSON.stringify(rowNames) !== JSON.stringify(expectedNames)) throw new Error('module controls are incomplete');
+  for(const name of expectedNames) {
+    const row = moduleRows[name];
+    const expected = observation.evaluateModuleControl(name, row);
+    if(row.validated !== true || !expected.validated || row.category !== expected.category || row.truth !== expected.truth ||
+        row.expectedAttempts !== expected.expectedAttempts || row.observedAttempts !== expected.observedAttempts) {
+      throw new Error(`module control ${name} did not validate`);
+    }
+  }
+  return moduleRows;
+}
+
 export function parseWorkerObservation(block) {
   if(!block || typeof block !== 'object' || Array.isArray(block)) {
     throw new Error('isolated browser worker observation is missing');
@@ -310,9 +331,12 @@ export function parseWorkerObservation(block) {
   if(block.discoveryActive !== 1) {
     throw new Error('browser-level shared-worker discovery was never active');
   }
+  if(block.unexpectedAttempts !== 0) throw new Error('browser worker observation includes unexpected attempts');
+  if(block.observerErrors !== 0) throw new Error('browser worker observation includes observer errors');
   if(block.foreignTargets !== 0) {
     throw new Error('shared-worker targets were observed outside the runner contexts');
   }
+  if(block.contextlessTargets !== 0) throw new Error('shared-worker targets are missing context attribution');
   if(block.appContextlessTargets !== 0) {
     throw new Error('app shared-worker targets were never attributed to a browser context');
   }
@@ -339,7 +363,14 @@ export function parseWorkerObservation(block) {
     if(context.mtprotoSourceFetch === 'not_requested') throw new Error(`${name} never fetched the MTProto worker source`);
     if(context.mtprotoSourceChunk !== 'mtproto_worker') throw new Error(`${name} MTProto worker source is not an allowlisted chunk`);
     if(context.mtprotoWorker === 'unknown') throw new Error(`${name} MTProto shared-worker state is unknown`);
+    if(context.workerSourceChunks.some((label) => label.startsWith('probe_'))) {
+      throw new Error(`${name} used a synthetic fixture probe route`);
+    }
+    if(Object.values(context.moduleProbeAttempts).some((counts) => Object.values(counts).some((count) => count !== 0))) {
+      throw new Error(`${name} used a synthetic fixture probe route`);
+    }
   }
+  validateModuleControls(block.moduleRows);
   return block;
 }
 
@@ -356,8 +387,12 @@ export function parseObserverControls(block) {
     throw new Error('observer control evidence does not match the closed schema');
   }
   if(block.discoveryActive !== 1) throw new Error('browser-level shared-worker discovery was never active');
+  if(block.unexpectedAttempts !== 0) throw new Error('observer control evidence includes unexpected attempts');
+  if(block.observerErrors !== 0) throw new Error('observer control evidence includes observer errors');
   if(block.foreignTargets !== 0) throw new Error('shared-worker targets were observed outside the runner contexts');
+  if(block.contextlessTargets !== 0) throw new Error('shared-worker targets are missing context attribution');
   if(block.appContextlessTargets !== 0) throw new Error('app shared-worker targets were never attributed to a browser context');
+  if(block.observerOverflow !== 0) throw new Error('browser worker observer overflowed a resource bound');
   if(Object.keys(block.contexts).length !== 0) throw new Error('observer control evidence carries app contexts');
   const controls = Object.keys(block.controls).sort();
   if(JSON.stringify(controls) !== JSON.stringify([...REQUIRED_CONTROLS].sort())) {
@@ -368,6 +403,7 @@ export function parseObserverControls(block) {
       throw new Error(`observer synthetic control ${name} did not pass`);
     }
   }
+  validateModuleControls(block.moduleRows);
   return block;
 }
 

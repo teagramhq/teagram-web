@@ -3,10 +3,12 @@ import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {dirname, resolve} from 'node:path';
 import {isIPv4} from 'node:net';
+import observation from './observation.cjs';
 
 import {
   assertAllScenariosPassed,
   REQUIRED_CONTROLS,
+  REQUIRED_MODULE_CONTROLS,
   parseFixtureReadiness,
   parseObserverControls,
   parseRealClientArgs,
@@ -15,11 +17,12 @@ import {
 } from './contract.mjs';
 
 const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> --scenarios sign-in,message,group
+       pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> --controls-only
 
-The fixture must remain running after artifact-ready. The command validates its immutable pins,
-protected synthetic credentials, internal browser network, audited artifact evidence, per-context
-shared-worker observation, and all three required UI scenarios. It does not import browser storage
-state or export screenshots or traces.`;
+Keep the fixture running in the foreground while the browser command executes. Normal mode validates
+immutable pins, protected synthetic credentials, internal browser network and artifact evidence,
+then requires all three UI scenarios. --controls-only needs server-ready and runs six existing
+observer controls plus nine module-worker controls without app contexts or credentials.`;
 const NETWORK_SOURCES = ['page', 'shared_worker', 'service_worker', 'worker'];
 
 function hasNetworkSourceEvidence(context) {
@@ -56,6 +59,7 @@ if(args?.help) {
   let browserResult;
   let readiness;
   let controlsOnlyDone = false;
+  const controlsOnly = args.controlsOnly === true;
 
   const docker = (dockerArgs, input, stage, timeout = 30_000) => {
     try {
@@ -74,7 +78,6 @@ if(args?.help) {
   };
 
   try {
-    const controlsOnly = args.observerControlsOnly === true;
     const readinessText = readFileSync(resolve(args.readinessFile), 'utf8');
     readiness = parseFixtureReadiness(readinessText, {
       runId: args.runId,
@@ -83,7 +86,7 @@ if(args?.help) {
       webRevision: args.webRevision
     }, {requireArtifact: !controlsOnly});
     const {serverReady, artifactReady} = readiness;
-    const credentials = readSyntheticCredentials(serverReady.credentials, args.runId);
+    const credentials = controlsOnly ? [] : readSyntheticCredentials(serverReady.credentials, args.runId);
 
     if(!/^[A-Za-z0-9+/]{43}=$/.test(serverReady.leafSPKI || '') ||
         Buffer.from(serverReady.leafSPKI, 'base64').byteLength !== 32) {
@@ -195,6 +198,7 @@ if(args?.help) {
       try {
         const failedRun = JSON.parse(browserStdout.trim());
         if(failedRun.status === 'failed' && typeof failedRun.stage === 'string') {
+          browserResult = failedRun;
           throw new Error(`real client scenario failed at ${failedRun.stage}`);
         }
       } catch(parseError) {
@@ -212,20 +216,21 @@ if(args?.help) {
       throw new Error(`real client scenario failed at ${browserResult.stage || 'unknown stage'}`);
     }
     if(controlsOnly) {
-      if(browserResult.mode !== 'observer_controls' || browserResult.controlContextCount !== REQUIRED_CONTROLS.length ||
-          browserResult.contextCount !== 0 || browserResult.screenshotsCaptured !== 0) {
-        throw new Error('observer control run did not stay synthetic');
+      if(browserResult.mode !== 'controls_only' || browserResult.controlContextCount !== REQUIRED_CONTROLS.length + REQUIRED_MODULE_CONTROLS.length ||
+          browserResult.contextCount !== 0 || browserResult.screenshotsCaptured !== 0 || browserResult.cleanup !== 'verified') {
+        throw new Error('controls-only run did not stay synthetic or clean up');
       }
       parseObserverControls(browserResult.workerObservation);
       controlsOnlyDone = true;
       process.stdout.write(`${JSON.stringify({
         status: 'passed',
-        mode: 'observer_controls',
+        mode: 'controls_only',
         runId: args.runId,
         harnessRevision: args.harnessRevision,
         serverRevision: args.serverRevision,
         webRevision: args.webRevision,
         controlContextCount: browserResult.controlContextCount,
+        cleanup: browserResult.cleanup,
         workerObservation: browserResult.workerObservation
       })}\n`);
     }
@@ -267,6 +272,24 @@ if(args?.help) {
   }
 
   if(cleanupError || operationError) {
+    if(controlsOnly && browserResult?.mode === 'controls_only') {
+      const evidenceValid = browserResult.workerObservation &&
+        !observation.validateNetworkBlock(browserResult.workerObservation);
+      process.stdout.write(`${JSON.stringify({
+        status: 'failed',
+        mode: 'controls_only',
+        runId: args.runId,
+        harnessRevision: args.harnessRevision,
+        serverRevision: args.serverRevision,
+        webRevision: args.webRevision,
+        controlContextCount: REQUIRED_CONTROLS.length + REQUIRED_MODULE_CONTROLS.length,
+        contextCount: 0,
+        screenshotsCaptured: 0,
+        stage: cleanupError ? 'cleanup' : evidenceValid ? 'observer_control_mismatch' : 'worker_observation_unclassified',
+        cleanup: cleanupError || browserResult.cleanup !== 'verified' ? 'failed' : 'verified',
+        workerObservation: evidenceValid ? browserResult.workerObservation : observation.UNCLASSIFIED_NETWORK_BLOCK
+      })}\n`);
+    }
     process.stderr.write(`${cleanupError?.message || operationError?.message || 'real client runner failed'}\n`);
     process.exitCode = 1;
   } else if(!controlsOnlyDone) {

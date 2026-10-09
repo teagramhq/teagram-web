@@ -1,9 +1,10 @@
 import {chmodSync, linkSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
 import {EventEmitter} from 'node:events';
 import {createHash, generateKeyPairSync} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {join, resolve} from 'node:path';
 import {describe, expect, it, vi} from 'vitest';
 
 import {
@@ -68,7 +69,7 @@ async function settleAfterCdpDeadline(promise: Promise<any>) {
 
 const READINESS_PINS = Object.freeze({
   runId: 'a'.repeat(32),
-  harnessRevision: '5f294c39abb32fc8ae15a4f7ccb085974098b320',
+  harnessRevision: 'cacf3b7aa62d84eab08fa9d21f896f134a150f6b',
   serverRevision: '47daaaea5c71b859d9865c03cabb50da5a1a013b',
   webRevision: 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8'
 });
@@ -193,7 +194,7 @@ function networkLoadingFailed(requestId: string) {
 }
 
 function replayContext(events: any[], options: any = {}) {
-  const observer = observation.createContextObserver('alice');
+  const observer = observation.createContextObserver('alice', {control: options.control === true});
   observer.state.discoveryActive = options.discoveryActive !== false;
   observer.state.pageCoverageComplete = options.pageCoverage !== false;
   for(const event of events) {
@@ -293,6 +294,69 @@ function controlBlocks(): Record<string, any> {
   };
 }
 
+const MODULE_PROBE_RESOURCES = [
+  'probe_module_index',
+  'probe_module_driver',
+  'probe_module_ok',
+  'probe_module_dep',
+  'probe_module_missing_import',
+  'probe_module_absent',
+  'probe_module_throw'
+] as const;
+
+type ModuleProbeResource = typeof MODULE_PROBE_RESOURCES[number];
+type ModuleProbeSource = 'page' | 'shared_worker' | 'worker';
+type ModuleControlCase = {
+  name: string,
+  category: string,
+  truth: string,
+  attempts: readonly (readonly [ModuleProbeResource, ModuleProbeSource])[]
+};
+
+const MODULE_CONTROL_CASES: readonly ModuleControlCase[] = Object.freeze([
+  {name: 'P-direct', category: 'no_failure_observed', truth: 'ack', attempts: [['probe_module_index', 'page'], ['probe_module_driver', 'page'], ['probe_module_ok', 'page'], ['probe_module_dep', 'shared_worker']]},
+  {name: 'P-rewrite', category: 'no_failure_observed', truth: 'ack', attempts: [['probe_module_index', 'page'], ['probe_module_driver', 'page'], ['probe_module_ok', 'page'], ['probe_module_dep', 'shared_worker']]},
+  {name: 'P-blob', category: 'module_resolve_failed', truth: 'non_ack', attempts: [['probe_module_index', 'page'], ['probe_module_driver', 'page'], ['probe_module_ok', 'page']]},
+  {name: 'M-direct', category: 'script_load_failed', truth: 'worker_error_event', attempts: [['probe_module_index', 'page'], ['probe_module_driver', 'page'], ['probe_module_missing_import', 'page'], ['probe_module_absent', 'shared_worker']]},
+  {name: 'M-rewrite', category: 'module_fetch_failed', truth: 'worker_error_event', attempts: [['probe_module_index', 'page'], ['probe_module_driver', 'page'], ['probe_module_missing_import', 'page'], ['probe_module_absent', 'shared_worker']]},
+  {name: 'M-blob', category: 'module_resolve_failed', truth: 'non_ack', attempts: [['probe_module_index', 'page'], ['probe_module_driver', 'page'], ['probe_module_missing_import', 'page']]},
+  {name: 'T-direct', category: 'evaluation_exception', truth: 'no_ack', attempts: [['probe_module_index', 'page'], ['probe_module_driver', 'page'], ['probe_module_throw', 'page']]},
+  {name: 'T-rewrite', category: 'evaluation_exception', truth: 'no_ack', attempts: [['probe_module_index', 'page'], ['probe_module_driver', 'page'], ['probe_module_throw', 'page']]},
+  {name: 'T-blob', category: 'evaluation_exception', truth: 'no_ack', attempts: [['probe_module_index', 'page'], ['probe_module_driver', 'page'], ['probe_module_throw', 'page']]}
+]);
+
+function moduleProbeAttemptCounts(pairs: readonly (readonly [ModuleProbeResource, ModuleProbeSource])[]) {
+  const result = Object.fromEntries(MODULE_PROBE_RESOURCES.map((resource) => [resource, {page: 0, shared_worker: 0, worker: 0}])) as Record<ModuleProbeResource, Record<ModuleProbeSource, number>>;
+  for(const [resource, source] of pairs) {
+    if(source === 'page') result[resource].page++;
+    else if(source === 'shared_worker') result[resource].shared_worker++;
+    else result[resource].worker++;
+  }
+  return result;
+}
+
+function moduleControlReportRows() {
+  return Object.fromEntries(MODULE_CONTROL_CASES.map(({name, category, truth, attempts}) => [name, {
+    category,
+    truth,
+    validated: true,
+    attemptsByResource: moduleProbeAttemptCounts(attempts),
+    expectedAttempts: attempts.length,
+    observedAttempts: attempts.length,
+    unexpectedAttempts: 0,
+    foreignTargets: 0,
+    contextlessTargets: 0,
+    appContextlessTargets: 0,
+    pageTargets: 1,
+    sharedWorkerTargets: 1,
+    discoveryActive: 1,
+    pageCoverageComplete: 1,
+    coverageComplete: 1,
+    observerOverflow: 0,
+    observerErrors: 0
+  }]));
+}
+
 function observationBlock(): any {
   const appSummary = replayContext(appContextEvents());
   return {
@@ -306,7 +370,8 @@ function observationBlock(): any {
     observerOverflow: 0,
     countedEvents: appSummary.countedEvents * 2,
     contexts: {alice: appSummary, bob: replayContext(appContextEvents())},
-    controls: controlBlocks()
+    controls: controlBlocks(),
+    moduleRows: moduleControlReportRows()
   };
 }
 
@@ -437,6 +502,23 @@ describe('confined runner shared-worker observation contract', () => {
     expectNoHostileLeak(evaluation);
   });
 
+  it('classifies blob module resolution exceptions without retaining their details', () => {
+    const summary = replayContext([
+      {kind: 'target', target: pageTarget()},
+      {kind: 'target', target: sharedWorker('blob-worker', HOSTILE.blobUrl)},
+      {kind: 'attach', targetId: 'blob-worker'},
+      {kind: 'setup', targetId: 'blob-worker'},
+      {kind: 'worker', targetId: 'blob-worker', method: 'Runtime.exceptionThrown', params: {exceptionDetails: {
+        text: `Uncaught TypeError: Failed to resolve module specifier "./${HOSTILE.password}.js"`,
+        exception: {description: `TypeError: Failed to resolve module specifier "./${HOSTILE.password}.js"`}
+      }}}
+    ], {control: true});
+
+    expect(summary.workerFailure).toBe('module_resolve_failed');
+    expect(summary.workerFailureValidation).toBe('unvalidated');
+    expectNoHostileLeak(summary);
+  });
+
   it('classifies a blob script-load log as a module fetch, not a script load', () => {
     const summary = replayContext([
       {kind: 'target', target: pageTarget()},
@@ -444,6 +526,57 @@ describe('confined runner shared-worker observation contract', () => {
       {kind: 'attach', targetId: 'blob-worker'},
       {kind: 'setup', targetId: 'blob-worker'},
       {kind: 'page', method: 'Log.entryAdded', params: {entry: {source: 'worker', level: 'error', text: 'Failed to fetch a worker script.', url: HOSTILE.blobUrl}}}
+    ]);
+
+    expect(summary.workerFailure).toBe('module_fetch_failed');
+    expect(summary.workerFailureValidation).toBe('unvalidated');
+    expectNoHostileLeak(summary);
+  });
+
+  it('prefers observed module failures to generic worker load errors in control contexts', () => {
+    const events = [
+      {kind: 'target', target: pageTarget()},
+      {kind: 'target', target: sharedWorker('blob-worker', HOSTILE.blobUrl)},
+      {kind: 'attach', targetId: 'blob-worker'},
+      {kind: 'setup', targetId: 'blob-worker'},
+      {kind: 'page', method: 'Log.entryAdded', params: {entry: {source: 'worker', level: 'error', text: 'Failed to fetch a worker script.', url: `${APP_ORIGIN}/_fixture_probe/module/ok.js`}}},
+      {kind: 'worker', targetId: 'blob-worker', method: 'Log.entryAdded', params: {entry: {source: 'rendering', level: 'error', text: 'Failed to resolve module specifier "./dep.js"', url: HOSTILE.blobUrl}}}
+    ];
+    const appSummary = replayContext(events);
+    const controlSummary = replayContext(events, {control: true});
+
+    expect(appSummary.workerFailure).toBe('script_load_failed');
+    expect(controlSummary.workerFailure).toBe('module_resolve_failed');
+    expectNoHostileLeak(controlSummary);
+  });
+
+  it('reports imported module fetch failures ahead of their generic load errors in controls', () => {
+    const summary = replayContext([
+      {kind: 'target', target: pageTarget()},
+      {kind: 'target', target: sharedWorker('blob-worker', HOSTILE.blobUrl)},
+      {kind: 'attach', targetId: 'blob-worker'},
+      {kind: 'setup', targetId: 'blob-worker'},
+      {kind: 'page', method: 'Log.entryAdded', params: {entry: {source: 'worker', level: 'error', text: 'Failed to fetch a worker script.', url: `${APP_ORIGIN}/_fixture_probe/module/missing-import.js`}}},
+      {kind: 'worker', targetId: 'blob-worker', method: 'Network.responseReceived', params: {type: 'Script', response: {
+        url: `${APP_ORIGIN}/_fixture_probe/module/absent.js`,
+        status: 404
+      }}}
+    ], {control: true});
+
+    expect(summary.workerFailure).toBe('module_fetch_failed');
+    expectNoHostileLeak(summary);
+  });
+
+  it('classifies a failed imported script from a blob worker as module fetch failure', () => {
+    const summary = replayContext([
+      {kind: 'target', target: pageTarget()},
+      {kind: 'target', target: sharedWorker('blob-worker', HOSTILE.blobUrl)},
+      {kind: 'attach', targetId: 'blob-worker'},
+      {kind: 'setup', targetId: 'blob-worker'},
+      {kind: 'worker', targetId: 'blob-worker', method: 'Network.responseReceived', params: {type: 'Script', response: {
+        url: `${APP_ORIGIN}/_fixture_probe/module/absent.js?token=${HOSTILE.token}`,
+        status: 404
+      }}}
     ]);
 
     expect(summary.workerFailure).toBe('module_fetch_failed');
@@ -477,6 +610,115 @@ describe('confined runner shared-worker observation contract', () => {
 
       expect(contextObserver.summary().countedEvents).toBe(1);
       expect(networkObserver.events).toHaveLength(1);
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
+  it('keeps app page-session worker setup independent from browser controls', async() => {
+    const contextObserver = observation.createContextObserver('module-control');
+    const workerCommands: string[] = [];
+    const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver, {
+      send: async(method: string, params: any) => {
+        if(method === 'Target.sendMessageToTarget') {
+          const command = JSON.parse(params.message);
+          workerCommands.push(command.method);
+          queueMicrotask(() => cdp.emit('Target.receivedMessageFromTarget', {
+            sessionId: params.sessionId,
+            message: JSON.stringify({id: command.id, result: {}})
+          }));
+        }
+        return method === 'Target.getTargetInfo' ? {targetInfo: {browserContextId: 'contract-test'}} : {};
+      }
+    });
+    await networkObserver.start();
+    cdp.emit('Target.attachedToTarget', {
+      sessionId: 'module-worker-session',
+      targetInfo: sharedWorker('module-worker', `${APP_ORIGIN}/_fixture_probe/module/throw.js`, 'contract-test')
+    });
+
+    try {
+      await networkObserver.waitForSetup();
+      expect(workerCommands).toEqual([
+        'Network.enable',
+        'Audits.enable',
+        'Log.enable',
+        'Runtime.runIfWaitingForDebugger'
+      ]);
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
+  it('attaches discovered shared workers through the browser session in control contexts', async() => {
+    const commands: string[] = [];
+    const discovery = createDiscoveryHarness((method: string) => {
+      commands.push(method);
+      return Promise.resolve({});
+    });
+    const contextObserver = observation.createContextObserver('module-control', {control: true});
+    await discovery.registry.launch(discovery.browser);
+    discovery.registry.registerContext('context-control', contextObserver);
+    discovery.session.emit('Target.targetCreated', {
+      targetInfo: sharedWorker('module-worker', `${APP_ORIGIN}/_fixture_probe/module/throw.js`, 'context-control')
+    });
+
+    try {
+      await discovery.registry.waitForSetup();
+      expect(contextObserver.summary().sharedWorkerTargets).toBe(1);
+      expect(commands).toContain('Target.attachToTarget');
+    } finally {
+      await discovery.registry.stop();
+    }
+  });
+
+  it('uses bounded Network, Log and Runtime setup for control shared workers', async() => {
+    const session: any = new EventEmitter();
+    const workerCommands: string[] = [];
+    session.send = async(method: string, params: any) => {
+      if(method === 'Target.attachToTarget') return {sessionId: 'module-worker-session'};
+      if(method === 'Target.sendMessageToTarget') {
+        const command = JSON.parse(params.message);
+        workerCommands.push(command.method);
+        queueMicrotask(() => session.emit('Target.receivedMessageFromTarget', {
+          sessionId: params.sessionId,
+          message: JSON.stringify({id: command.id, result: {}})
+        }));
+      }
+      return {};
+    };
+    const browser: any = {newBrowserCDPSession: async() => session};
+    const registry = createWorkerDiscovery();
+    const contextObserver = observation.createContextObserver('module-control', {control: true});
+
+    await registry.launch(browser);
+    registry.registerContext('context-control', contextObserver);
+    session.emit('Target.targetCreated', {
+      targetInfo: sharedWorker('module-worker', `${APP_ORIGIN}/_fixture_probe/module/throw.js`, 'context-control')
+    });
+
+    try {
+      await registry.waitForSetup();
+      expect(workerCommands).toEqual(['Network.enable', 'Log.enable', 'Runtime.enable']);
+    } finally {
+      await registry.stop();
+    }
+  });
+
+  it('disables page-session auto-attach in control contexts', async() => {
+    const contextObserver = observation.createContextObserver('module-control', {control: true});
+    const autoAttachCalls: any[] = [];
+    const {networkObserver} = createNetworkObserverHarness(contextObserver, {
+      send: async(method: string, params: any) => {
+        if(method === 'Target.setAutoAttach') autoAttachCalls.push(params);
+        return method === 'Target.getTargetInfo' ? {targetInfo: {browserContextId: 'contract-test'}} : {};
+      }
+    });
+
+    await networkObserver.start();
+
+    try {
+      expect(autoAttachCalls).toEqual([{autoAttach: false, waitForDebuggerOnStart: false, flatten: false}]);
     } finally {
       await networkObserver.stop();
     }
@@ -908,6 +1150,158 @@ describe('confined runner shared-worker observation contract', () => {
     expect(JSON.stringify(observation.classifyWorkerSource(MTPROTO_CHUNK_URL))).not.toContain('AbCdEfGh');
   });
 
+  it('labels only the anchored synthetic module routes and drops query canaries', () => {
+    const labeled = observation.classifyProbeResource(`${APP_ORIGIN}/_fixture_probe/module/missing-import.js?token=${HOSTILE.token}`);
+
+    expect(labeled).toBe('probe_module_missing_import');
+    expect(observation.classifyProbeResource(`${APP_ORIGIN}/_fixture_probe/module/missing-import.js.evil`)).toBe(null);
+    expect(observation.classifyProbeResource(`${APP_ORIGIN}/_fixture_probeish/module/missing-import.js`)).toBe(null);
+    expect(JSON.stringify(labeled)).not.toContain(HOSTILE.token);
+    expect(JSON.stringify(labeled)).not.toContain('telegramd.test');
+  });
+
+  it('counts only fixed module probe labels by page and shared-worker source', () => {
+    const summary = replayContext([
+      {kind: 'target', target: pageTarget('module-page', 'module-context')},
+      {kind: 'page', method: 'Network.requestWillBeSent', params: networkRequestWillBeSent('module-index', `${APP_ORIGIN}/_fixture_probe/module/index.html`)},
+      {kind: 'page', method: 'Network.requestWillBeSent', params: networkRequestWillBeSent('module-driver', `${APP_ORIGIN}/_fixture_probe/module/driver.js`)},
+      {kind: 'target', target: sharedWorker('module-worker', `${APP_ORIGIN}/_fixture_probe/module/ok.js`, 'module-context')},
+      {kind: 'attach', targetId: 'module-worker'},
+      {kind: 'setup', targetId: 'module-worker'},
+      {kind: 'worker', targetId: 'module-worker', method: 'Network.requestWillBeSent', params: networkRequestWillBeSent('module-ok', `${APP_ORIGIN}/_fixture_probe/module/ok.js`)},
+      {kind: 'worker', targetId: 'module-worker', method: 'Network.requestWillBeSent', params: networkRequestWillBeSent('module-dep', `${APP_ORIGIN}/_fixture_probe/module/dep.js?token=${HOSTILE.token}`)}
+    ]);
+
+    expect(summary.moduleProbeAttempts).toEqual(moduleProbeAttemptCounts([
+      ['probe_module_index', 'page'],
+      ['probe_module_driver', 'page'],
+      ['probe_module_ok', 'shared_worker'],
+      ['probe_module_dep', 'shared_worker']
+    ]));
+    expect(JSON.stringify(summary)).not.toContain(HOSTILE.token);
+    expect(JSON.stringify(summary)).not.toContain('telegramd.test');
+  });
+
+  it('treats synthetic probe routes as unexpected in application contexts', async() => {
+    const observer = observation.createContextObserver('alice');
+    const {cdp, networkObserver} = createNetworkObserverHarness(observer);
+    await networkObserver.start(null);
+    cdp.emit('Network.requestWillBeSent', networkRequestWillBeSent('app-probe', `${APP_ORIGIN}/_fixture_probe/module/index.html`));
+    const summary = networkObserver.summary();
+
+    expect(summary.unexpectedAttempts).toBe(1);
+    expect(summary.attemptsBySource.page).toBe(1);
+    expect(JSON.stringify(summary)).not.toContain('telegramd.test');
+    await networkObserver.stop();
+  });
+
+  it('records immediate canary exceptions and import paths only as closed worker categories', () => {
+    const exception = 'https://fixture-user:fixture-password@telegramd.test/_fixture_probe/module/throw.js?token=fixture-top-level-canary';
+    const importPath = './absent.js?token=fixture-import-token-canary';
+    const summary = replayContext([
+      {kind: 'target', target: pageTarget('module-page', 'module-context')},
+      {kind: 'target', target: sharedWorker('module-worker', HOSTILE.blobUrl, 'module-context')},
+      {kind: 'attach', targetId: 'module-worker'},
+      {kind: 'setup', targetId: 'module-worker'},
+      {kind: 'worker', targetId: 'module-worker', method: 'Runtime.exceptionThrown', params: {exceptionDetails: {text: 'Uncaught', exception: {className: 'Error', description: exception}, stackTrace: {callFrames: [{url: exception}]}}}},
+      {kind: 'worker', targetId: 'module-worker', method: 'Log.entryAdded', params: {entry: {source: 'worker', level: 'error', text: `Failed to resolve module specifier "${importPath}"`, url: HOSTILE.blobUrl}}}
+    ]);
+
+    expect(summary.workerFailure).toBe('module_resolve_failed');
+    expect(summary.workerFailureValidation).toBe('unvalidated');
+    expect(JSON.stringify(summary)).not.toContain('fixture-top-level-canary');
+    expect(JSON.stringify(summary)).not.toContain('fixture-import-token-canary');
+    expect(JSON.stringify(summary)).not.toContain('fixture-user');
+    expect(JSON.stringify(summary)).not.toContain('fixture-password');
+  });
+
+  it('validates each module row against its exact source-aware attempt set and paired truth', () => {
+    for(const {name, category, truth, attempts} of MODULE_CONTROL_CASES) {
+      const reportedTruth = name.startsWith('T-') ? 'worker_error_event' : truth;
+      const result = observation.evaluateModuleControl(name, {
+        category,
+        truth: reportedTruth,
+        attemptsByResource: moduleProbeAttemptCounts(attempts),
+        pageTargets: 1,
+        sharedWorkerTargets: 1,
+        discoveryActive: 1,
+        pageCoverageComplete: 1,
+        coverageComplete: 1,
+        observerOverflow: 0,
+        observerErrors: 0,
+        unexpectedAttempts: 0,
+        foreignTargets: 0,
+        contextlessTargets: 0,
+        appContextlessTargets: 0
+      });
+
+      expect(result.validated, name).toBe(true);
+      expect(result.category, name).toBe(category);
+      expect(result.truth, name).toBe(truth);
+      expect(result.expectedAttempts, name).toBe(attempts.length);
+      expect(result.observedAttempts, name).toBe(attempts.length);
+      expect(result.attemptsByResource, name).toEqual(moduleProbeAttemptCounts(attempts));
+    }
+
+    const blobMissing = MODULE_CONTROL_CASES.find(({name}) => name === 'M-blob')!;
+    const wrongAttempts = moduleProbeAttemptCounts(blobMissing.attempts);
+    wrongAttempts.probe_module_absent.shared_worker = 1;
+    const mismatch = observation.evaluateModuleControl('M-blob', {
+      category: 'module_resolve_failed',
+      truth: 'non_ack',
+      attemptsByResource: wrongAttempts,
+      pageTargets: 1,
+      sharedWorkerTargets: 1,
+      discoveryActive: 1,
+      pageCoverageComplete: 1,
+      coverageComplete: 1,
+      observerOverflow: 0,
+      observerErrors: 0,
+      unexpectedAttempts: 0,
+      foreignTargets: 0,
+      contextlessTargets: 0,
+      appContextlessTargets: 0
+    });
+    expect(mismatch.validated).toBe(false);
+    expect(mismatch.attemptsByResource.probe_module_absent.shared_worker).toBe(1);
+
+    const directMissing = observation.evaluateModuleControl('M-direct', {
+      category: 'destroyed_before_attach',
+      truth: 'worker_error_event',
+      attemptsByResource: moduleProbeAttemptCounts(MODULE_CONTROL_CASES.find(({name}) => name === 'M-direct')!.attempts),
+      pageTargets: 1,
+      sharedWorkerTargets: 1,
+      discoveryActive: 1,
+      pageCoverageComplete: 1,
+      coverageComplete: 1,
+      observerOverflow: 0,
+      observerErrors: 0,
+      unexpectedAttempts: 0,
+      foreignTargets: 0,
+      contextlessTargets: 0,
+      appContextlessTargets: 0
+    });
+    expect(directMissing.validated).toBe(true);
+    expect(directMissing.category).toBe('destroyed_before_attach');
+    const rewriteMissing = observation.evaluateModuleControl('M-rewrite', {
+      category: 'destroyed_before_attach',
+      truth: 'worker_error_event',
+      attemptsByResource: moduleProbeAttemptCounts(MODULE_CONTROL_CASES.find(({name}) => name === 'M-rewrite')!.attempts),
+      pageTargets: 1,
+      sharedWorkerTargets: 1,
+      discoveryActive: 1,
+      pageCoverageComplete: 1,
+      coverageComplete: 1,
+      observerOverflow: 0,
+      observerErrors: 0,
+      unexpectedAttempts: 0,
+      foreignTargets: 0,
+      contextlessTargets: 0,
+      appContextlessTargets: 0
+    });
+    expect(rewriteMissing.validated).toBe(false);
+  });
+
   it('fails the closed schema on any value outside the fixed enums, counts and names', () => {
     expect(observation.validateNetworkBlock(observationBlock())).toBe(null);
     expect(observation.UNCLASSIFIED_NETWORK_BLOCK).toEqual({classification: 'unclassified'});
@@ -1020,6 +1414,9 @@ describe('confined runner shared-worker observation contract', () => {
     expect(() => parseWorkerObservation(tampered((block: any) => {
       block.contexts.alice.mtprotoSourceChunk = 'none';
     }))).toThrow('alice MTProto worker source is not an allowlisted chunk');
+    expect(() => parseWorkerObservation(tampered((block: any) => {
+      block.contexts.alice.workerSourceChunks = ['probe_shared_worker'];
+    }))).toThrow('alice used a synthetic fixture probe route');
     expect(() => parseWorkerObservation(tampered((block: any) => {
       block.foreignTargets = 1;
     }))).toThrow('shared-worker targets were observed outside the runner contexts');
@@ -1181,7 +1578,7 @@ describe('real client scenario contract', () => {
   it('requires explicit immutable pins, readiness and the complete scenario set', () => {
     const args = [
       '--readiness-file', './fixture.jsonl',
-      '--harness-revision', '5f294c39abb32fc8ae15a4f7ccb085974098b320',
+      '--harness-revision', 'cacf3b7aa62d84eab08fa9d21f896f134a150f6b',
       '--server-revision', '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       '--web-revision', 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       '--run-id', 'a'.repeat(32),
@@ -1190,7 +1587,7 @@ describe('real client scenario contract', () => {
 
     expect(parseRealClientArgs(args)).toEqual({
       readinessFile: './fixture.jsonl',
-      harnessRevision: '5f294c39abb32fc8ae15a4f7ccb085974098b320',
+      harnessRevision: 'cacf3b7aa62d84eab08fa9d21f896f134a150f6b',
       serverRevision: '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       webRevision: 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       runId: 'a'.repeat(32),
@@ -1215,7 +1612,7 @@ describe('real client scenario contract', () => {
     .toThrow('server-ready security evidence is incomplete');
   });
 
-  it('requires the observer-controls-only flag to be explicit and complete', () => {
+  it('requires controls-only mode to be explicit while normal mode keeps every scenario required', () => {
     const args = [
       '--readiness-file', './fixture.jsonl',
       '--harness-revision', READINESS_PINS.harnessRevision,
@@ -1224,18 +1621,43 @@ describe('real client scenario contract', () => {
       '--run-id', READINESS_PINS.runId
     ];
 
-    expect(parseRealClientArgs([...args, '--observer-controls-only'])).toEqual({
+    expect(parseRealClientArgs([...args, '--controls-only'])).toEqual({
       readinessFile: './fixture.jsonl',
       harnessRevision: READINESS_PINS.harnessRevision,
       serverRevision: READINESS_PINS.serverRevision,
       webRevision: READINESS_PINS.webRevision,
       runId: READINESS_PINS.runId,
-      observerControlsOnly: true,
+      controlsOnly: true,
       scenarios: ['sign-in', 'message', 'group']
     });
-    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group', '--observer-controls-only']).observerControlsOnly).toBe(true);
+    expect(parseRealClientArgs([...args, '--observer-controls-only']).controlsOnly).toBe(true);
+    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group', '--controls-only']).controlsOnly).toBe(true);
     expect(() => parseRealClientArgs(args)).toThrow('scenario selection is required');
-    expect(() => parseRealClientArgs([...args, '--observer-controls-only', '--observer-controls-only'])).toThrow('option was provided more than once');
+    expect(() => parseRealClientArgs([...args, '--controls-only', '--observer-controls-only'])).toThrow('option was provided more than once');
+  });
+
+  it('reports controls-only readiness failures without crashing the error handler', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'real-client-runner-contract-'));
+    const readinessFile = join(directory, 'readiness.jsonl');
+    writeFileSync(readinessFile, '');
+
+    try {
+      const result = spawnSync(process.execPath, [
+        resolve(process.cwd(), 'scripts/real-client/run.mjs'),
+        '--readiness-file', readinessFile,
+        '--harness-revision', READINESS_PINS.harnessRevision,
+        '--server-revision', READINESS_PINS.serverRevision,
+        '--web-revision', READINESS_PINS.webRevision,
+        '--run-id', READINESS_PINS.runId,
+        '--controls-only'
+      ], {encoding: 'utf8'});
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('one fixture readiness event is required');
+      expect(result.stderr).not.toContain('ReferenceError');
+    } finally {
+      rmSync(directory, {recursive: true, force: true});
+    }
   });
 
   it('requires every synthetic control to pass in the controls-only report', () => {
@@ -1251,6 +1673,7 @@ describe('real client scenario contract', () => {
       countedEvents: 40,
       contexts: {},
       controls: controlBlocks(),
+      moduleRows: moduleControlReportRows(),
       ...overrides
     });
 
@@ -1265,5 +1688,14 @@ describe('real client scenario contract', () => {
     const failing = controlsOnly();
     failing.controls.c2_missing_module_script.expected = 'fail';
     expect(() => parseObserverControls(failing)).toThrow('observer synthetic control c2_missing_module_script did not pass');
+    const unvalidated = controlsOnly();
+    unvalidated.moduleRows['T-rewrite'].validated = false;
+    expect(() => parseObserverControls(unvalidated)).toThrow('module control T-rewrite did not validate');
+    const unknownCategory = controlsOnly();
+    unknownCategory.moduleRows['T-rewrite'].category = HOSTILE.phrase;
+    expect(() => parseObserverControls(unknownCategory)).toThrow('closed schema');
+    const missingRow = controlsOnly();
+    delete missingRow.moduleRows['M-blob'];
+    expect(() => parseObserverControls(missingRow)).toThrow('module controls are incomplete');
   });
 });
