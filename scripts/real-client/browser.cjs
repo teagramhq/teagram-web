@@ -329,6 +329,14 @@ async function signIn(page, account, name, screenshotDirectory, capturedScreensh
   }
 
   const username = page.locator('input[aria-label="Username"]');
+  if(!(await username.isVisible())) {
+    currentStage = `${name}_username_entry`;
+    const usernameEntry = page.getByRole('button', {name: /sign in with username/i});
+    await usernameEntry.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`${name}_username_entry`));
+    if(await usernameEntry.count() !== 1) failStage(`${name}_username_entry_not_unique`);
+    await usernameEntry.click();
+  }
+  currentStage = `${name}_username_field`;
   await username.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`${name}_username_field`));
   await captureState(page, screenshotDirectory, `${name}-sign-in`, capturedScreenshots);
   await username.fill(account.username);

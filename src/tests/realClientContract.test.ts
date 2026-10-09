@@ -86,7 +86,7 @@ describe('real client scenario contract', () => {
     const runId = 'a'.repeat(32);
     const pins = {
       runId,
-      harnessRevision: '47daaaea5c71b859d9865c03cabb50da5a1a013b',
+      harnessRevision: '5f294c39abb32fc8ae15a4f7ccb085974098b320',
       serverRevision: '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       webRevision: 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8'
     };
@@ -219,7 +219,7 @@ describe('real client scenario contract', () => {
   it('requires explicit immutable pins, readiness and the complete scenario set', () => {
     const args = [
       '--readiness-file', './fixture.jsonl',
-      '--harness-revision', '47daaaea5c71b859d9865c03cabb50da5a1a013b',
+      '--harness-revision', '5f294c39abb32fc8ae15a4f7ccb085974098b320',
       '--server-revision', '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       '--web-revision', 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       '--run-id', 'a'.repeat(32),
@@ -228,7 +228,7 @@ describe('real client scenario contract', () => {
 
     expect(parseRealClientArgs(args)).toEqual({
       readinessFile: './fixture.jsonl',
-      harnessRevision: '47daaaea5c71b859d9865c03cabb50da5a1a013b',
+      harnessRevision: '5f294c39abb32fc8ae15a4f7ccb085974098b320',
       serverRevision: '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       webRevision: 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       runId: 'a'.repeat(32),

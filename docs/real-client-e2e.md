@@ -2,9 +2,9 @@
 
 `pnpm run test:real-client` consumes a completed `server-ready` and `artifact-ready` pair from one foreground real-server fixture run. It checks the immutable harness, server and web pins, the fixture's protected synthetic credentials, isolation and audit evidence before driving the production UI. It requires all three scenarios: `sign-in,message,group`.
 
-The accepted positive inputs are harness and server `47daaaea5c71b859d9865c03cabb50da5a1a013b` and web `b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8`. Each run also has a fresh run ID, RSA public key and endpoint identity. Do not reuse readiness or artifacts from another run.
+The accepted positive inputs are harness `5f294c39abb32fc8ae15a4f7ccb085974098b320`, server `47daaaea5c71b859d9865c03cabb50da5a1a013b` and web `b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8`. Each run also has a fresh run ID, RSA public key and endpoint identity. Do not reuse readiness or artifacts from another run.
 
-The native arm64 fixture successor is pending separate acceptance in server PR #499 (current draft head `5f294c39abb32fc8ae15a4f7ccb085974098b320`). Keep the accepted harness/server pins and historical negative pair unchanged; do not use the draft head or start the real-client rerun until the fixture owner records the accepted successor.
+The native arm64 fixture successor was accepted from server PR #499, merged as `b61fbe1a53348edd0039885fb4a4659e0dc455c0`. The executable harness pin remains the reviewed PR head `5f294c39abb32fc8ae15a4f7ccb085974098b320`; do not substitute the squash merge or moving main. The server-under-test and historical negative pair remain unchanged.
 
 ## Run the fixture
 
@@ -16,7 +16,7 @@ RUN_ID="$(openssl rand -hex 16)"
 READINESS_FILE="$(mktemp /dev/shm/real-client-readiness.XXXXXX)"
 chmod 600 "$READINESS_FILE"
 printf 'READINESS_FILE=%s\n' "$READINESS_FILE"
-test "$(git rev-parse HEAD)" = 47daaaea5c71b859d9865c03cabb50da5a1a013b
+test "$(git rev-parse HEAD)" = 5f294c39abb32fc8ae15a4f7ccb085974098b320
 test -z "$(git status --porcelain --untracked-files=all)"
 bash test/e2e/real_server_fixture/run.sh \
   --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
@@ -63,7 +63,7 @@ Run from the checkout containing `test:real-client`, using the readiness file an
 ```sh
 corepack pnpm run test:real-client -- \
   --readiness-file "$READINESS_FILE" \
-  --harness-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
+  --harness-revision 5f294c39abb32fc8ae15a4f7ccb085974098b320 \
   --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
   --web-revision b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8 \
   --run-id "$RUN_ID" \
