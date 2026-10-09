@@ -691,6 +691,85 @@ describe('confined runner shared-worker observation contract', () => {
     });
   });
 
+  it('drains a delayed browser attachment rejection before finalizing observer evidence', async() => {
+    let rejectAttach: ((error: Error) => void) | undefined;
+    const discovery = createDiscoveryHarness((method: string) => {
+      if(method === 'Target.attachToTarget') {
+        return new Promise((resolve, reject) => {
+          rejectAttach = reject;
+        });
+      }
+      return Promise.resolve({});
+    });
+    await discovery.registry.launch(discovery.browser);
+    const contextObserver = observation.createContextObserver('delayed-attach-rejection');
+    discovery.registry.registerContext('context-delayed-rejection', contextObserver);
+    discovery.session.emit('Target.targetCreated', {
+      targetInfo: sharedWorker('delayed-rejection-worker', HOSTILE.blobUrl, 'context-delayed-rejection')
+    });
+
+    const setupPromise = discovery.registry.waitForSetup();
+    let setupSettled = false;
+    setupPromise.then(() => setupSettled = true);
+    await Promise.resolve();
+
+    try {
+      expect(setupSettled).toBe(false);
+      expect(rejectAttach).toBeTypeOf('function');
+    } finally {
+      rejectAttach?.(new Error('delayed attach failure'));
+      await setupPromise;
+      await discovery.registry.stop();
+    }
+
+    expect(contextObserver.summary().observerErrors).toBe(1);
+    expect(contextObserver.summary().sharedWorkerState).toBe('unknown');
+  });
+
+  it('drains a delayed browser attachment success and detaches it during shutdown', async() => {
+    let resolveAttach: ((result: {sessionId: string}) => void) | undefined;
+    const detachedSessions: string[] = [];
+    const discovery = createDiscoveryHarness((method: string, params: any) => {
+      if(method === 'Target.attachToTarget') {
+        return new Promise((resolve) => {
+          resolveAttach = resolve;
+        });
+      }
+      if(method === 'Target.sendMessageToTarget') {
+        const {id} = JSON.parse(params.message);
+        queueMicrotask(() => discovery.session.emit('Target.receivedMessageFromTarget', {
+          sessionId: params.sessionId,
+          message: JSON.stringify({id, result: {}})
+        }));
+      }
+      if(method === 'Target.detachFromTarget') detachedSessions.push(params.sessionId);
+      return Promise.resolve({});
+    });
+    await discovery.registry.launch(discovery.browser);
+    const contextObserver = observation.createContextObserver('delayed-attach-success');
+    discovery.registry.registerContext('context-delayed-success', contextObserver);
+    discovery.session.emit('Target.targetCreated', {
+      targetInfo: sharedWorker('delayed-success-worker', HOSTILE.blobUrl, 'context-delayed-success')
+    });
+
+    const setupPromise = discovery.registry.waitForSetup();
+    const stopPromise = discovery.registry.stop();
+    let stopSettled = false;
+    stopPromise.then(() => stopSettled = true);
+    await Promise.resolve();
+
+    try {
+      expect(stopSettled).toBe(false);
+      expect(resolveAttach).toBeTypeOf('function');
+    } finally {
+      resolveAttach?.({sessionId: 'late-browser-session'});
+    }
+    await Promise.all([setupPromise, stopPromise]);
+
+    expect(detachedSessions).toContain('late-browser-session');
+    expect(contextObserver.summary().observerErrors).toBe(0);
+  });
+
   it('stops attributing MTProto to blobs that predate the fetch, are cross-origin, or follow a failed fetch', () => {
     const sourceFetch = {kind: 'page', method: 'Network.responseReceived', params: {type: 'Script', response: {url: MTPROTO_CHUNK_URL, status: 200}}};
     const sourceRequest = {kind: 'page', method: 'Network.requestWillBeSent', params: networkRequestWillBeSent('mtproto-source-request', MTPROTO_CHUNK_URL)};

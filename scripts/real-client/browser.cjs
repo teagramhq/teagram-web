@@ -133,6 +133,8 @@ function createWorkerDiscovery() {
   const sessionTargets = new Map();
   const attachedSessions = new Set();
   const attachingTargets = new Set();
+  const pendingAttachments = new Map();
+  const retiredObservers = new WeakSet();
   const pendingByContext = new Map();
   const baselineTargets = new Set();
   const unattributedTargets = new Set();
@@ -146,6 +148,7 @@ function createWorkerDiscovery() {
   let nextCommandId = 0;
   let discoveryActive = false;
   let orphanDetachFailures = 0;
+  let stopping = false;
 
   function ownerOf(targetId) {
     return targetOwners.get(targetId);
@@ -203,19 +206,51 @@ function createWorkerDiscovery() {
     setupPromises.add(setup);
   }
 
+  function attachTarget(observer, targetInfo, sessionId) {
+    const targetId = targetInfo.targetId;
+    const existingSessionId = targetSessions.get(targetId);
+    if(existingSessionId) {
+      if(existingSessionId !== sessionId) {
+        send('Target.detachFromTarget', {sessionId}).catch(() => {
+          orphanDetachFailures++;
+        });
+      }
+      return;
+    }
+    targetSessions.set(targetId, sessionId);
+    sessionTargets.set(sessionId, targetId);
+    attachedSessions.add(sessionId);
+    attachingTargets.delete(targetId);
+    setupObserver(observer, targetId);
+  }
+
   function attachSharedWorker(observer, targetInfo) {
     const targetId = targetInfo.targetId;
-    if(targetSessions.has(targetId) || attachingTargets.has(targetId)) return;
+    if(stopping || retiredObservers.has(observer) || targetSessions.has(targetId) || attachingTargets.has(targetId)) return;
     attachingTargets.add(targetId);
     if(!observer.noteAttached(targetId)) {
       attachingTargets.delete(targetId);
       return;
     }
-    send('Target.attachToTarget', {targetId, flatten: false})
+    let attachment;
+    attachment = send('Target.attachToTarget', {targetId, flatten: false})
+    .then((result) => {
+      const sessionId = result?.sessionId;
+      if(typeof sessionId !== 'string') throw new Error('target_attach_failed');
+      if(targetSessions.has(targetId)) return;
+      if(retiredObservers.has(observer) || ownerOf(targetId) !== observer || !attachingTargets.has(targetId)) {
+        return send('Target.detachFromTarget', {sessionId}).catch(() => {
+          orphanDetachFailures++;
+        });
+      }
+      attachTarget(observer, targetInfo, sessionId);
+    })
     .catch(() => {
       attachingTargets.delete(targetId);
-      observer.noteAttachFailure();
-    });
+      if(!targetSessions.has(targetId)) observer.noteAttachFailure();
+    })
+    .finally(() => pendingAttachments.delete(targetId));
+    pendingAttachments.set(targetId, attachment);
   }
 
   function attribute(targetInfo) {
@@ -252,10 +287,11 @@ function createWorkerDiscovery() {
   }
 
   function onTargetInfo(targetInfo) {
+    if(stopping) return;
     const targetId = targetInfo?.targetId;
     const currentOwner = typeof targetId === 'string' ? ownerOf(targetId) : null;
     const observer = currentOwner || attribute(targetInfo);
-    if(!observer) return;
+    if(!observer || retiredObservers.has(observer)) return;
     observer.registerTarget(targetInfo);
     if(observer.state.overflow) return;
     if(!currentOwner) {
@@ -293,6 +329,12 @@ function createWorkerDiscovery() {
     observer.noteWorkerEvent(targetId, payload.method, payload.params);
   }
 
+  async function waitForSetup() {
+    while(pendingAttachments.size > 0 || setupPromises.size > 0) {
+      await Promise.all([...pendingAttachments.values(), ...setupPromises]);
+    }
+  }
+
   return {
     get discoveryActive() {
       return discoveryActive;
@@ -316,17 +358,21 @@ function createWorkerDiscovery() {
       session.on('Target.targetInfoChanged', ({targetInfo}) => onTargetInfo(targetInfo));
       session.on('Target.attachedToTarget', ({sessionId, targetInfo}) => {
         const observer = ownerOf(targetInfo.targetId);
-        if(!observer) {
+        if(targetSessions.has(targetInfo.targetId)) {
+          if(targetSessions.get(targetInfo.targetId) !== sessionId) {
+            send('Target.detachFromTarget', {sessionId}).catch(() => {
+              orphanDetachFailures++;
+            });
+          }
+          return;
+        }
+        if(!observer || retiredObservers.has(observer) || (stopping && !attachingTargets.has(targetInfo.targetId))) {
           send('Target.detachFromTarget', {sessionId}).catch(() => {
             orphanDetachFailures++;
           });
           return;
         }
-        sessionTargets.set(sessionId, targetInfo.targetId);
-        targetSessions.set(targetInfo.targetId, sessionId);
-        attachedSessions.add(sessionId);
-        attachingTargets.delete(targetInfo.targetId);
-        setupObserver(observer, targetInfo.targetId);
+        attachTarget(observer, targetInfo, sessionId);
       });
       session.on('Target.receivedMessageFromTarget', (event) => onReceivedMessage(event));
       session.on('Target.detachedFromTarget', ({sessionId}) => {
@@ -380,11 +426,11 @@ function createWorkerDiscovery() {
       .catch(() => observer.noteAttachFailure());
     },
     async waitForSetup() {
-      while(setupPromises.size > 0) {
-        await Promise.all([...setupPromises]);
-      }
+      await waitForSetup();
     },
     async releaseContext(observer) {
+      retiredObservers.add(observer);
+      await waitForSetup();
       let detachFailures = 0;
       for(const [targetId, owner] of [...targetOwners.entries()]) {
         if(owner !== observer) continue;
@@ -408,7 +454,16 @@ function createWorkerDiscovery() {
     // cleanup stage must go nonzero on them, never resolve silently.
     async stop() {
       if(!session) return {detachFailures: 0, discoveryDisabled: true};
-      let detachFailures = orphanDetachFailures;
+      stopping = true;
+      let detachFailures = 0;
+      let discoveryDisabled = true;
+      try {
+        await send('Target.setDiscoverTargets', {discover: false});
+      } catch {
+        discoveryDisabled = false;
+      }
+      await waitForSetup();
+      detachFailures += orphanDetachFailures;
       for(const sessionId of [...attachedSessions]) {
         try {
           await send('Target.detachFromTarget', {sessionId});
@@ -420,12 +475,6 @@ function createWorkerDiscovery() {
       sessionTargets.clear();
       targetSessions.clear();
       session.removeAllListeners();
-      let discoveryDisabled = true;
-      try {
-        await send('Target.setDiscoverTargets', {discover: false});
-      } catch {
-        discoveryDisabled = false;
-      }
       return {detachFailures, discoveryDisabled};
     }
   };
@@ -936,11 +985,13 @@ async function runObserverControls(browser, registry, cleanupIssues) {
       if(plan.fault === 'attach') await registry.simulateAttachFailure(observer);
       if(plan.fault === 'overflow') observer.noteInjectedControlFault('overflow');
       await page.waitForTimeout(plan.windowMs || CONTROL_WINDOW_MS);
+      await Promise.all([networkObserver.waitForSetup(), registry.waitForSetup()]);
       observer.state.windowElapsed = true;
       const block = observer.summary();
       controls[plan.name] = {...block, expected: observation.evaluateControl(plan.name, block)};
       if(controls[plan.name].expected === 'fail') failedControls.push(plan.name);
     } catch {
+      await Promise.all([networkObserver?.waitForSetup(), registry.waitForSetup()]);
       observer.state.windowElapsed = true;
       controls[plan.name] = {...observer.summary(), expected: 'fail'};
       failedControls.push(plan.name);
@@ -1249,6 +1300,8 @@ async function main() {
       workerObservation: observationBlock
     };
   } catch(error) {
+    await Promise.all(observers.map((observer) => observer.waitForSetup()));
+    await registry?.waitForSetup();
     const egress = summarizeEgress(observers);
     // The bounded sign-in window has ended by the time a sign-in stage fails,
     // so the failure report states what the observer established, not a blank.
