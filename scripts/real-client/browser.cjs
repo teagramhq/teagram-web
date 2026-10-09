@@ -433,6 +433,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
     const allowed = parsed.origin === PRIVATE_CSP_ORIGIN || (kind === 'websocket' && url === PRIVATE_CSP_WSS);
     const key = kind === 'websocket' ? `${targetId}:${kind}:${url}` : undefined;
     if(key && eventKeys.has(key)) return;
+    if(contextObserver && !contextObserver.noteEvent()) return;
     if(key) eventKeys.add(key);
     events.push({
       source,
@@ -441,7 +442,6 @@ function createNetworkObserver(page, contextName, contextObserver) {
       allowedWebSocket: kind === 'websocket' && url === PRIVATE_CSP_WSS,
       event: eventName
     });
-    contextObserver?.noteEvent();
   }
 
   function sendTargetCommand(sessionId, method, params = {}) {
@@ -670,8 +670,9 @@ function createNetworkObserver(page, contextName, contextObserver) {
       cdp?.removeAllListeners();
       try {
         await cdp?.detach();
-      } catch {
+      } catch(error) {
         contextObserver?.recordObserverError();
+        throw error;
       }
     }
   };
@@ -1206,7 +1207,7 @@ function emitReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {getSingleExactMessageFailure, matchesPrivateArtifactManifest};
+module.exports = {createNetworkObserver, getSingleExactMessageFailure, matchesPrivateArtifactManifest};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

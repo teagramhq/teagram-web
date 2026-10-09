@@ -1,4 +1,5 @@
 import {chmodSync, linkSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync} from 'node:fs';
+import {EventEmitter} from 'node:events';
 import {createHash, generateKeyPairSync} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
@@ -16,7 +17,7 @@ import {
 } from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
-const {getSingleExactMessageFailure, matchesPrivateArtifactManifest} = require('../../scripts/real-client/browser.cjs');
+const {createNetworkObserver, getSingleExactMessageFailure, matchesPrivateArtifactManifest} = require('../../scripts/real-client/browser.cjs');
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -33,6 +34,16 @@ const HOSTILE = Object.freeze({
   phrase: 'hunter2 secret passphrase',
   frame: `at ${APP_ORIGIN}/index.worker-AbCdEfGh.js:1:7 (${HOSTILE_PASSWORD})`
 });
+
+function createNetworkObserverHarness(observer: any, detach = async() => {}) {
+  const cdp: any = new EventEmitter();
+  cdp.send = async(method: string) => method === 'Target.getTargetInfo'
+    ? {targetInfo: {browserContextId: 'contract-test'}}
+    : {};
+  cdp.detach = detach;
+  const page: any = {context: () => ({newCDPSession: async() => cdp})};
+  return {cdp, networkObserver: createNetworkObserver(page, 'contract-test', observer)};
+}
 
 const READINESS_PINS = Object.freeze({
   runId: 'a'.repeat(32),
@@ -399,7 +410,7 @@ describe('confined runner shared-worker observation contract', () => {
     expectNoHostileLeak(summary);
   });
 
-  it('makes the context unknown and records overflow on every resource bound', () => {
+  it('makes the context unknown and records overflow on every resource bound', async() => {
     const attachEvents: any[] = [{kind: 'target', target: pageTarget()}];
     for(let index = 0; index < observation.LIMITS.attachedTargets + 4; index++) {
       attachEvents.push({kind: 'target', target: sharedWorker(`worker-${index}`, HOSTILE.blobUrl)});
@@ -420,6 +431,37 @@ describe('confined runner shared-worker observation contract', () => {
     expect(eventOverflow.observerOverflow).toBe(1);
     expect(eventOverflow.countedEvents).toBe(observation.LIMITS.countedEventsPerContext);
     expect(eventOverflow.mtprotoWorker).toBe('unknown');
+
+    const networkContextObserver = observation.createContextObserver('network-overflow');
+    const {cdp, networkObserver} = createNetworkObserverHarness(networkContextObserver);
+    await networkObserver.start();
+    let requestIndex = 0;
+    const emitWebSocketRequest = () => {
+      cdp.emit('Network.requestWillBeSent', {
+        type: 'WebSocket',
+        request: {url: `wss://unannounced.invalid/apiws?request=${requestIndex++}`}
+      });
+    };
+    for(let index = 0; index <= observation.LIMITS.countedEventsPerContext && networkContextObserver.summary().observerOverflow === 0; index++) {
+      emitWebSocketRequest();
+    }
+    expect(networkContextObserver.summary().observerOverflow).toBe(1);
+    const eventsAtOverflow = networkObserver.events.length;
+    for(let index = 0; index < 20; index++) emitWebSocketRequest();
+    expect(networkContextObserver.summary().countedEvents).toBe(observation.LIMITS.countedEventsPerContext);
+    expect(networkObserver.events).toHaveLength(eventsAtOverflow);
+    await networkObserver.stop();
+  });
+
+  it('rejects cleanup when the page observer session cannot detach', async() => {
+    const detachFailure = new Error('observer detach failed');
+    const contextObserver = observation.createContextObserver('detach-failure');
+    const {networkObserver} = createNetworkObserverHarness(contextObserver, async() => {
+      throw detachFailure;
+    });
+    await networkObserver.start();
+
+    await expect(networkObserver.stop()).rejects.toBe(detachFailure);
   });
 
   it('stops attributing MTProto to blobs that predate the fetch, are cross-origin, or follow a failed fetch', () => {
@@ -904,4 +946,3 @@ describe('real client scenario contract', () => {
     expect(() => parseObserverControls(failing)).toThrow('observer synthetic control c2_missing_module_script did not pass');
   });
 });
-
