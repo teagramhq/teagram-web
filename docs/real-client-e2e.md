@@ -79,6 +79,32 @@ rm -rf -- "$ARTIFACT_PARENT"
 rm -f -- "$KEY_FILE" "$READINESS_FILE"
 ```
 
+## Shared-worker and installation-failure evidence
+
+The runner reports what the browser did with workers, next to the scenario and egress summaries. Browser-level target discovery starts before this runner creates its first context, so shared-worker creation cannot be missed and absence becomes provable. Every page, shared worker, service worker and dedicated worker target is attributed by its browser context; a worker target that belongs to no runner context fails the run.
+
+Each context reports one page, the shared-worker targets split by script and blob construction, service and dedicated workers, the allowlisted logical names of fetched worker scripts, the MTProto classification (`mtproto_candidate` for one allowlisted chunk plus one blob worker, `ambiguous` for two or more, `absent` for an allowlisted source fetch with no blob worker under complete coverage, otherwise `unknown`) with the status of that source fetch, the installation-failure category with its validation state, and coverage counters.
+
+Failure categories are `script_load_failed`, `module_resolve_failed`, `module_fetch_failed`, `evaluation_exception`, `csp_blocked`, `destroyed_before_attach`, `no_failure_observed` and `unknown`, each in a separate `validated` or `unvalidated` state. Only a category with an exact browser signal is validated: the page's own worker-script fetch failure, a CSP-attributed block, a worker target destroyed before its session attached, and `no_failure_observed` under complete coverage. The remaining categories stay best-effort and never become a stated cause. `unknown` is a reportable answer, not a failure of the observer.
+
+Synthetic controls run in their own contexts against the fixture's own probe routes, before any application context, and the application scenarios start only when every control passes: a shared worker that is created, a shared-worker script that is missing, no construction at all, a worker target destroyed before its session attaches, and an event stream that exceeds the bound. A control that does not behave as specified blocks the application scenarios.
+
+Resource bounds are fixed: 16 attached targets, 512 counted events per context, 256 KiB per CDP message, 5 seconds per command. Overflow reports the context as `unknown` with a nonzero overflow flag and fails the run. CDP methods are allowlisted per session role, including nested sends, so page and worker evaluation is never reachable. The report is a closed schema of allowlisted logical chunk names with content hashes stripped: no URL, credential, password, key, endpoint list, page text or free-form log line is ever serialized. A schema violation is serialized as `unclassified` and fails the run.
+
+The controls can be executed on their own, which is the only mode that does not require `artifact-ready`. `$SERVER_READY_FILE` holds the fixture's single `server-ready` line, written from the foreground fixture output:
+
+```sh
+corepack pnpm run test:real-client -- \
+  --readiness-file "$SERVER_READY_FILE" \
+  --harness-revision 5f294c39abb32fc8ae15a4f7ccb085974098b320 \
+  --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
+  --web-revision b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8 \
+  --run-id "$RUN_ID" \
+  --observer-controls-only
+```
+
+That run touches no application context, captures no screenshot and reads no artifact: it emits `mode: observer_controls` with the observation block, and the fixture lifecycle and its owned cleanup stay the same.
+
 ## Historical negative pair
 
 The original negative pair is web `09373cc2713d31e93664c38a4fd0335ea37a5f01` with server `6668a0a3519909ef512fdc59e4937975f108671d`, using the accepted harness `47daaaea5c71b859d9865c03cabb50da5a1a013b`. Its accepted CI evidence reaches `server-ready` and fails the independent artifact audit on worker source maps: `officialMtprotoDynamicRoutes`, `officialDcHosts`, `officialDcIpRanges` and `alternateWebSocketRoutes`. It has no `artifact-ready` event, so the UI sign-in scenario is unsupported for that pair. This audit rejection is not an SRP regression result; keep the original browser/SRP regression claim open until a supported negative control can reach the UI.

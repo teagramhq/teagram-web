@@ -1,12 +1,23 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const {chromium} = require('playwright');
+const observation = require('./observation.cjs');
 
 const REQUIRED_SCENARIOS = ['sign-in', 'message', 'group'];
-const PRIVATE_CSP_ORIGIN = 'https://telegramd.test';
+const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
 const PRIVATE_CSP_WSS = 'wss://telegramd.test/apiws';
+const PROBE_PATH = '/_fixture_probe/';
 const MESSAGE = 'browser-ci-hello';
 const GROUP_MESSAGE = 'browser-ci-group-hello';
+const CONTROL_WINDOW_MS = 10_000;
+const INJECTED_TARGET_ID = '000000000000000000000000000000fe';
+const CONTROL_PLAN = Object.freeze([
+  Object.freeze({name: 'c1_shared_worker_created', expression: "new SharedWorker('/_fixture_probe/shared-worker.js')"}),
+  Object.freeze({name: 'c2_missing_module_script', expression: "new SharedWorker('/_fixture_probe/missing.js', {type: 'module'})"}),
+  Object.freeze({name: 'c3_no_construction'}),
+  Object.freeze({name: 'c4_attach_failure', fault: 'attach', windowMs: 2000}),
+  Object.freeze({name: 'c4_overflow', fault: 'overflow', windowMs: 2000})
+]);
 
 let currentStage = 'runtime_inputs';
 let currentScenario;
@@ -58,13 +69,16 @@ function validateRuntimeInput(config) {
       config.endpoint !== PRIVATE_CSP_ORIGIN || config.wssEndpoint !== PRIVATE_CSP_WSS ||
       !/^[0-9a-f]{16}$/.test(config.fingerprint || '') ||
       !/^[0-9a-f]{64}$/.test(config.publicKeySHA256 || '') ||
-      !/^sha256:[0-9a-f]{64}$/.test(config.artifactDigest || '') ||
+      (config.observationOnly === true
+        ? config.artifactDigest !== null
+        : !/^sha256:[0-9a-f]{64}$/.test(config.artifactDigest || '')) ||
       !/^[0-9a-f]{40}$/.test(config.webRevision || '') ||
       !/^[A-Za-z0-9+/]{43}=$/.test(config.leafSPKI || '') ||
       Buffer.from(config.leafSPKI, 'base64').byteLength !== 32 ||
       Buffer.from(config.leafSPKI, 'base64').toString('base64') !== config.leafSPKI ||
       !/^(?:\d{1,3}\.){3}\d{1,3}$/.test(config.frontIp || '') ||
       config.screenshotDirectory !== `/tmp/real-client-${config.runId}` ||
+      (config.observationOnly !== undefined && config.observationOnly !== true) ||
       !Array.isArray(config.accounts) || config.accounts.length !== 2) {
     failStage('runtime_input_validation');
   }
@@ -77,7 +91,300 @@ function validateRuntimeInput(config) {
   });
 }
 
-function createNetworkObserver(page, contextName) {
+// Every CDP send is gated by session scope. A method outside the accepted scope
+// fails the run, and the nested worker channel carried by
+// Target.sendMessageToTarget is gated by the worker scope as well.
+function createGatedSender(scope, session, observer) {
+  return function send(method, params = {}) {
+    if(!observation.allowCdpMethod(scope, method)) {
+      observer?.recordObserverError();
+      return Promise.reject(new Error('cdp_method_not_allowed'));
+    }
+    return session.send(method, params);
+  };
+}
+
+// Browser-level target discovery. Shared workers are visible only here: the
+// page-session auto-attach path holds dedicated and service workers and never
+// announces a shared worker, so its zero counts cannot establish absence.
+// Discovery is turned on before this runner creates any context.
+function createWorkerDiscovery() {
+  const ATTRIBUTED_TYPES = ['page', 'shared_worker', 'service_worker', 'worker'];
+  const contextObservers = new Map();
+  const targetOwners = new Map();
+  const targetSessions = new Map();
+  const sessionTargets = new Map();
+  const attachedSessions = new Set();
+  const attachingTargets = new Set();
+  const pendingByContext = new Map();
+  const baselineTargets = new Set();
+  const unattributedTargets = new Set();
+  const contextlessTargets = new Map();
+  const appContextlessTargets = new Map();
+  let appContextCount = 0;
+  const pendingCommands = new Map();
+  const setupPromises = new Set();
+  let session;
+  let nextCommandId = 0;
+  let discoveryActive = false;
+
+  function ownerOf(targetId) {
+    return targetOwners.get(targetId);
+  }
+
+  function sendNested(sessionId, method, params = {}) {
+    const observer = ownerOf(sessionTargets.get(sessionId));
+    if(!observation.allowCdpMethod('worker', method)) {
+      observer?.recordObserverError();
+      return Promise.reject(new Error('cdp_method_not_allowed'));
+    }
+    const id = ++nextCommandId;
+    const key = `${sessionId}:${id}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingCommands.delete(key);
+        reject(new Error('cdp_command_timeout'));
+      }, observation.LIMITS.commandTimeoutMs);
+      pendingCommands.set(key, {
+        resolve: (result) => {
+          clearTimeout(timer);
+          resolve(result);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
+      session.send('Target.sendMessageToTarget', {
+        sessionId,
+        message: JSON.stringify({id, method, params})
+      }).catch((error) => {
+        const pending = pendingCommands.get(key);
+        if(!pending) return;
+        pendingCommands.delete(key);
+        pending.reject(error);
+      });
+    });
+  }
+
+  function setupObserver(observer, targetId) {
+    const sessionId = targetSessions.get(targetId);
+    const setup = (async() => {
+      for(const method of ['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable']) {
+        await sendNested(sessionId, method);
+      }
+      // A shared worker cannot be held at startup, so this release is a no-op
+      // for it. It stays unconditional: a target this runner attaches to must
+      // never stay frozen because an observer reached it.
+      await sendNested(sessionId, 'Runtime.runIfWaitingForDebugger');
+      observer.noteSetupComplete(targetId);
+    })().catch(() => {
+      observer.recordObserverError();
+    }).finally(() => setupPromises.delete(setup));
+    setupPromises.add(setup);
+  }
+
+  function attachSharedWorker(observer, targetInfo) {
+    const targetId = targetInfo.targetId;
+    if(targetSessions.has(targetId) || attachingTargets.has(targetId)) return;
+    attachingTargets.add(targetId);
+    if(!observer.noteAttached(targetId)) {
+      attachingTargets.delete(targetId);
+      return;
+    }
+    session.send('Target.attachToTarget', {targetId, flatten: false})
+    .catch(() => {
+      attachingTargets.delete(targetId);
+      observer.noteAttachFailure();
+    });
+  }
+
+  function attribute(targetInfo) {
+    if(typeof targetInfo.targetId !== 'string' || !ATTRIBUTED_TYPES.includes(targetInfo.type)) return null;
+    if(typeof targetInfo.browserContextId !== 'string') {
+      // Chromium can announce a short-lived worker before it names the context
+      // it belongs to. Such a target belongs to no app evidence, and a later
+      // targetInfoChanged that carries the context id resolves it.
+      if(targetOwners.has(targetInfo.targetId)) return null;
+      contextlessTargets.set(targetInfo.targetId, true);
+      if(appContextCount > 0) appContextlessTargets.set(targetInfo.targetId, true);
+      return null;
+    }
+    contextlessTargets.delete(targetInfo.targetId);
+    appContextlessTargets.delete(targetInfo.targetId);
+    const observer = contextObservers.get(targetInfo.browserContextId);
+    if(observer) {
+      discoveryActive = true;
+      observer.state.discoveryActive = true;
+      targetOwners.set(targetInfo.targetId, observer);
+      unattributedTargets.delete(targetInfo.targetId);
+      return observer;
+    }
+    if(contextObservers.size === 0) {
+      // A target announced before this runner created any context belongs to
+      // the browser itself, not to the app under test.
+      baselineTargets.add(targetInfo.targetId);
+      return null;
+    }
+    if(baselineTargets.has(targetInfo.targetId)) return null;
+    const pending = pendingByContext.get(targetInfo.browserContextId) || [];
+    pending.push(targetInfo);
+    pendingByContext.set(targetInfo.browserContextId, pending);
+    unattributedTargets.add(targetInfo.targetId);
+    return null;
+  }
+
+  function onTargetInfo(targetInfo) {
+    const observer = ownerOf(targetInfo.targetId) || attribute(targetInfo);
+    if(!observer) return;
+    observer.registerTarget(targetInfo);
+    if(targetInfo.type === 'shared_worker') attachSharedWorker(observer, targetInfo);
+  }
+
+  function onReceivedMessage(event) {
+    const targetId = sessionTargets.get(event.sessionId);
+    const observer = targetId ? ownerOf(targetId) : null;
+    if(!observer) return;
+    if(typeof event.message !== 'string' || Buffer.byteLength(event.message, 'utf8') > observation.LIMITS.cdpMessageBytes) {
+      observer.recordObserverError();
+      return;
+    }
+    let payload;
+    try {
+      payload = JSON.parse(event.message);
+    } catch {
+      observer.recordObserverError();
+      return;
+    }
+    if(typeof payload.id === 'number') {
+      const key = `${event.sessionId}:${payload.id}`;
+      const pending = pendingCommands.get(key);
+      if(!pending) return;
+      pendingCommands.delete(key);
+      if(payload.error) pending.reject(new Error('worker_cdp_command_failed'));
+      else pending.resolve(payload.result || {});
+      return;
+    }
+    if(typeof payload.method !== 'string') return;
+    observer.noteWorkerEvent(targetId, payload.method, payload.params);
+  }
+
+  return {
+    get discoveryActive() {
+      return discoveryActive;
+    },
+    get foreignTargets() {
+      return unattributedTargets.size;
+    },
+    get contextlessTargets() {
+      return contextlessTargets.size;
+    },
+    get appContextlessTargets() {
+      return appContextlessTargets.size;
+    },
+    async launch(browser) {
+      session = await browser.newBrowserCDPSession();
+      const send = createGatedSender('browser', session, null);
+      session.on('Target.targetCreated', ({targetInfo}) => onTargetInfo(targetInfo));
+      session.on('Target.targetInfoChanged', ({targetInfo}) => onTargetInfo(targetInfo));
+      session.on('Target.attachedToTarget', ({sessionId, targetInfo}) => {
+        const observer = ownerOf(targetInfo.targetId);
+        if(!observer) {
+          session.send('Target.detachFromTarget', {sessionId}).catch(() => {});
+          return;
+        }
+        sessionTargets.set(sessionId, targetInfo.targetId);
+        targetSessions.set(targetInfo.targetId, sessionId);
+        attachedSessions.add(sessionId);
+        attachingTargets.delete(targetInfo.targetId);
+        setupObserver(observer, targetInfo.targetId);
+      });
+      session.on('Target.receivedMessageFromTarget', (event) => onReceivedMessage(event));
+      session.on('Target.detachedFromTarget', ({sessionId}) => {
+        const targetId = sessionTargets.get(sessionId);
+        attachedSessions.delete(sessionId);
+        sessionTargets.delete(sessionId);
+        if(!targetId) return;
+        targetSessions.delete(targetId);
+        const observer = ownerOf(targetId);
+        if(observer && !observer.targets.get(targetId)?.setupComplete) observer.noteDetachBeforeSetup();
+      });
+      session.on('Target.targetDestroyed', ({targetId}) => {
+        contextlessTargets.delete(targetId);
+        appContextlessTargets.delete(targetId);
+        const observer = ownerOf(targetId);
+        if(observer) observer.noteDestroyed(targetId);
+      });
+      await send('Target.setDiscoverTargets', {discover: true});
+      discoveryActive = true;
+    },
+    registerContext(browserContextId, observer) {
+      if(!browserContextId) {
+        observer.recordObserverError();
+        return;
+      }
+      contextObservers.set(browserContextId, observer);
+      if(observer.control !== true) appContextCount++;
+      observer.state.discoveryActive = discoveryActive;
+      const pending = pendingByContext.get(browserContextId) || [];
+      pendingByContext.delete(browserContextId);
+      for(const targetInfo of pending) {
+        unattributedTargets.delete(targetInfo.targetId);
+        targetOwners.set(targetInfo.targetId, observer);
+        observer.registerTarget(targetInfo);
+        if(targetInfo.type === 'shared_worker') attachSharedWorker(observer, targetInfo);
+      }
+    },
+    // Synthetic control only: drive the real attach-failure branch.
+    simulateAttachFailure(observer) {
+      return session.send('Target.attachToTarget', {targetId: INJECTED_TARGET_ID, flatten: false})
+      .then(({sessionId}) => {
+        session.send('Target.detachFromTarget', {sessionId}).catch(() => {});
+        observer.noteAttachFailure();
+      })
+      .catch(() => observer.noteAttachFailure());
+    },
+    async waitForSetup() {
+      while(setupPromises.size > 0) {
+        await Promise.all([...setupPromises]);
+      }
+    },
+    async releaseContext(observer) {
+      for(const [targetId, owner] of [...targetOwners.entries()]) {
+        if(owner !== observer) continue;
+        targetOwners.delete(targetId);
+        attachingTargets.delete(targetId);
+        const sessionId = targetSessions.get(targetId);
+        if(!sessionId) continue;
+        targetSessions.delete(targetId);
+        sessionTargets.delete(sessionId);
+        attachedSessions.delete(sessionId);
+        try {
+          await session.send('Target.detachFromTarget', {sessionId});
+        } catch {
+          observer.recordObserverError();
+        }
+      }
+    },
+    async stop() {
+      if(!session) return;
+      for(const sessionId of [...attachedSessions]) {
+        try {
+          await session.send('Target.detachFromTarget', {sessionId});
+        } catch {
+          // Detach failures surface through the cleanup stage, never silently.
+        }
+      }
+      attachedSessions.clear();
+      sessionTargets.clear();
+      targetSessions.clear();
+      session.removeAllListeners();
+      await session.send('Target.setDiscoverTargets', {discover: false}).catch(() => {});
+    }
+  };
+}
+
+function createNetworkObserver(page, contextName, contextObserver) {
   const events = [];
   const eventKeys = new Set();
   const targets = new Map();
@@ -87,6 +394,7 @@ function createNetworkObserver(page, contextName) {
   const errors = [];
   let nextCommandId = 0;
   let cdp;
+  let send;
 
   function record(targetId, source, kind, url, eventName) {
     let parsed;
@@ -117,16 +425,22 @@ function createNetworkObserver(page, contextName) {
       allowedWebSocket: kind === 'websocket' && url === PRIVATE_CSP_WSS,
       event: eventName
     });
+    contextObserver?.noteEvent();
   }
 
   function sendTargetCommand(sessionId, method, params = {}) {
+    if(!observation.allowCdpMethod('worker', method)) {
+      errors.push('cdp_method_not_allowed');
+      contextObserver?.recordObserverError();
+      return Promise.reject(new Error('cdp_method_not_allowed'));
+    }
     const id = ++nextCommandId;
     const key = `${sessionId}:${id}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pendingCommands.delete(key);
-        reject(new Error(`cdp_timeout:${method}`));
-      }, 5000);
+        reject(new Error('cdp_command_timeout'));
+      }, observation.LIMITS.commandTimeoutMs);
       pendingCommands.set(key, {
         resolve: (result) => {
           clearTimeout(timer);
@@ -152,6 +466,8 @@ function createNetworkObserver(page, contextName) {
   function addTarget(sessionId, targetInfo) {
     if(targets.has(sessionId)) return;
     targets.set(sessionId, targetInfo);
+    contextObserver?.registerTarget(targetInfo);
+    contextObserver?.noteAttached(targetInfo.targetId);
     if(targetInfo.type === 'shared_worker' || targetInfo.type === 'service_worker') {
       observedWorkerTargets[targetInfo.type].add(targetInfo.targetId);
     }
@@ -161,9 +477,12 @@ function createNetworkObserver(page, contextName) {
         await sendTargetCommand(sessionId, 'Audits.enable');
         await sendTargetCommand(sessionId, 'Log.enable');
       }
+      // Unconditional startup release: page auto-attach holds the target.
       await sendTargetCommand(sessionId, 'Runtime.runIfWaitingForDebugger');
+      contextObserver?.noteSetupComplete(targetInfo.targetId);
     })().catch(() => {
       errors.push('worker_target_setup');
+      contextObserver?.recordObserverError();
     }).finally(() => setupPromises.delete(setup));
     setupPromises.add(setup);
   }
@@ -198,11 +517,17 @@ function createNetworkObserver(page, contextName) {
   }
 
   function dispatchTargetMessage(sessionId, message) {
+    if(typeof message !== 'string' || Buffer.byteLength(message, 'utf8') > observation.LIMITS.cdpMessageBytes) {
+      errors.push('cdp_message_overflow');
+      contextObserver?.recordObserverError();
+      return;
+    }
     let payload;
     try {
       payload = JSON.parse(message);
     } catch {
       errors.push('invalid_worker_cdp_message');
+      contextObserver?.recordObserverError();
       return;
     }
     if(payload.id !== undefined) {
@@ -231,24 +556,44 @@ function createNetworkObserver(page, contextName) {
     } else if(payload.method === 'Log.entryAdded') {
       recordLogViolation(targetInfo.type, targetInfo.targetId, payload.params.entry);
     }
+    contextObserver?.noteWorkerEvent(targetInfo.targetId, payload.method, payload.params);
   }
 
-  async function start() {
+  async function start(registry) {
     cdp = await page.context().newCDPSession(page);
+    send = createGatedSender('page', cdp, contextObserver);
+    // Page-session identity mapping only: the browser context this page lives
+    // in is what attributes every browser-level shared worker to it.
+    const info = await send('Target.getTargetInfo');
+    registry?.registerContext(info?.targetInfo?.browserContextId, contextObserver);
     cdp.on('Network.requestWillBeSent', (event) => {
       const kind = event.type === 'WebSocket' ? 'websocket' : 'fetch';
       record('page', 'page', kind, event.request.url, 'Network.requestWillBeSent');
+      contextObserver?.notePageEvent('Network.requestWillBeSent', event);
     });
-    cdp.on('Network.webSocketCreated', (event) => record('page', 'page', 'websocket', event.url, 'Network.webSocketCreated'));
-    cdp.on('Audits.issueAdded', ({issue}) => recordCspIssue('page', 'page', issue));
-    cdp.on('Log.entryAdded', ({entry}) => recordLogViolation('page', 'page', entry));
+    cdp.on('Network.responseReceived', (event) => contextObserver?.notePageEvent('Network.responseReceived', event));
+    cdp.on('Network.loadingFailed', (event) => contextObserver?.notePageEvent('Network.loadingFailed', event));
+    cdp.on('Network.webSocketCreated', (event) => {
+      record('page', 'page', 'websocket', event.url, 'Network.webSocketCreated');
+      contextObserver?.noteEvent();
+    });
+    cdp.on('Audits.issueAdded', ({issue}) => {
+      recordCspIssue('page', 'page', issue);
+      contextObserver?.notePageEvent('Audits.issueAdded', {issue});
+    });
+    cdp.on('Log.entryAdded', ({entry}) => {
+      recordLogViolation('page', 'page', entry);
+      contextObserver?.notePageEvent('Log.entryAdded', {entry});
+    });
     cdp.on('Target.attachedToTarget', ({sessionId, targetInfo}) => addTarget(sessionId, targetInfo));
     cdp.on('Target.receivedMessageFromTarget', ({sessionId, message}) => dispatchTargetMessage(sessionId, message));
     cdp.on('Target.detachedFromTarget', ({sessionId}) => targets.delete(sessionId));
-    await cdp.send('Network.enable');
-    await cdp.send('Audits.enable');
-    await cdp.send('Log.enable');
-    await cdp.send('Target.setAutoAttach', {autoAttach: true, waitForDebuggerOnStart: true, flatten: false});
+    await send('Network.enable');
+    await send('Audits.enable');
+    await send('Log.enable');
+    await send('Target.setAutoAttach', {autoAttach: true, waitForDebuggerOnStart: true, flatten: false});
+    // Complete page coverage: this session is enabled before every navigation.
+    contextObserver.state.pageCoverageComplete = true;
   }
 
   async function waitForSetup() {
@@ -260,8 +605,8 @@ function createNetworkObserver(page, contextName) {
   return {
     events,
     errors,
-    async start() {
-      await start();
+    async start(registry) {
+      await start(registry);
     },
     async waitForSetup() {
       await waitForSetup();
@@ -291,18 +636,24 @@ function createNetworkObserver(page, contextName) {
         contextName
       };
     },
-    stop() {
+    async stop() {
       cdp?.removeAllListeners();
+      try {
+        await cdp?.detach();
+      } catch {
+        contextObserver?.recordObserverError();
+      }
     }
   };
 }
 
-async function waitForWorkerTargets(page, observer) {
+async function waitForWorkerTargets(page, networkObserver, contextObserver) {
   const deadline = Date.now() + 25_000;
   while(Date.now() < deadline) {
-    await observer.waitForSetup();
-    const summary = observer.summary();
-    if(summary.workerTargets.shared_worker > 0 && summary.workerTargets.service_worker > 0) return;
+    await networkObserver.waitForSetup();
+    const summary = networkObserver.summary();
+    const sharedWorkerObserved = contextObserver.sharedWorkerTargetIds.size > 0 || summary.workerTargets.shared_worker > 0;
+    if(sharedWorkerObserved && summary.workerTargets.service_worker > 0) return;
     await page.waitForTimeout(100);
   }
   failStage('browser_worker_observation');
@@ -408,13 +759,148 @@ async function sendText(page, text, stage) {
   if(count !== 1) failStage(`${stage}_message_count`);
 }
 
+async function waitForMembers(page, memberRows) {
+  const deadline = Date.now() + 20_000;
+  while(Date.now() < deadline) {
+    if(await memberRows.count() >= 2) return;
+    await page.waitForTimeout(100);
+  }
+  failStage('bob_group_member_count');
+}
+
+// The accepted fixture's synthetic controls, run before any app context exists.
+// Each control owns its own browser context, so its targets never enter app
+// counts, and any mismatch stops the run before the app scenarios start.
+async function runObserverControls(browser, registry, cleanupIssues) {
+  const controls = {};
+  const failedControls = [];
+  for(const plan of CONTROL_PLAN) {
+    const context = await browser.newContext({viewport: {width: 1280, height: 900}});
+    const observer = observation.createContextObserver(plan.name, {control: true});
+    let networkObserver;
+    try {
+      const page = await context.newPage();
+      networkObserver = createNetworkObserver(page, plan.name, observer);
+      await networkObserver.start(registry);
+      const response = await page.goto(`${PRIVATE_CSP_ORIGIN}${PROBE_PATH}`, {waitUntil: 'domcontentloaded', timeout: 20_000}).catch(() => null);
+      if(response?.status() !== 200) {
+        observer.recordObserverError();
+      } else if(plan.expression) {
+        // A control context is a fixture-owned probe page, not an app context:
+        // this is where the synthetic worker construction is issued.
+        await page.evaluate(`(() => { ${plan.expression}; })()`).catch(() => observer.recordObserverError());
+      }
+      if(plan.fault === 'attach') await registry.simulateAttachFailure(observer);
+      if(plan.fault === 'overflow') observer.noteInjectedControlFault('overflow');
+      await page.waitForTimeout(plan.windowMs || CONTROL_WINDOW_MS);
+      observer.state.windowElapsed = true;
+      const block = observer.summary();
+      controls[plan.name] = {...block, expected: observation.evaluateControl(plan.name, block)};
+      if(controls[plan.name].expected === 'fail') failedControls.push(plan.name);
+    } catch {
+      observer.state.windowElapsed = true;
+      controls[plan.name] = {...observer.summary(), expected: 'fail'};
+      failedControls.push(plan.name);
+    } finally {
+      // Observer sessions detach and this context's discovery attribution is
+      // released before the context itself closes.
+      try {
+        await registry.releaseContext(observer);
+        await networkObserver?.stop();
+      } catch {
+        cleanupIssues.push('observer_control_cleanup');
+      }
+      try {
+        await context.close();
+      } catch {
+        cleanupIssues.push('observer_control_cleanup');
+      }
+    }
+  }
+  return {controls, failedControls};
+}
+
+function summarizeEgress(observers) {
+  const summaries = observers.map((observer) => observer.summary());
+  return {
+    unexpectedAttempts: summaries.reduce((sum, summary) => sum + summary.unexpectedAttempts, 0),
+    observerErrors: summaries.reduce((sum, summary) => sum + summary.observerErrors, 0)
+  };
+}
+
+function buildObservationBlock(registry, appObservers, controls, egress) {
+  const contexts = {};
+  const controlBlocks = {};
+  let countedEvents = 0;
+  let attachedTargets = 0;
+  let observerOverflow = 0;
+  let observerErrors = egress.observerErrors;
+  for(const [name, observer] of Object.entries(appObservers)) {
+    const block = observer.summary();
+    contexts[name] = block;
+    countedEvents += block.countedEvents;
+    attachedTargets += block.attachedTargets;
+    observerErrors += block.observerErrors;
+    if(block.observerOverflow === 1) observerOverflow = 1;
+  }
+  for(const [name, block] of Object.entries(controls)) {
+    controlBlocks[name] = block;
+    countedEvents += block.countedEvents;
+    attachedTargets += block.attachedTargets;
+  }
+  return {
+    unexpectedAttempts: egress.unexpectedAttempts,
+    observerErrors,
+    foreignTargets: registry?.foreignTargets || 0,
+    contextlessTargets: registry?.contextlessTargets || 0,
+    appContextlessTargets: registry?.appContextlessTargets || 0,
+    discoveryActive: registry?.discoveryActive ? 1 : 0,
+    attachedTargets,
+    observerOverflow,
+    countedEvents,
+    contexts,
+    controls: controlBlocks
+  };
+}
+
+function buildObserverOnlyReport(registry, controls) {
+  const block = buildObservationBlock(registry, {}, controls, {unexpectedAttempts: 0, observerErrors: 0});
+  const schemaFailure = observation.validateNetworkBlock(block);
+  const failedControls = Object.entries(controls).filter(([, block]) => block.expected !== 'pass').map(([name]) => name);
+  if(schemaFailure || failedControls.length > 0 || registry.foreignTargets !== 0 || !registry.discoveryActive) {
+    return {
+      status: 'failed',
+      stage: schemaFailure ? 'worker_observation_unclassified' : 'observer_control_mismatch',
+      mode: 'observer_controls',
+      scenarios: [],
+      contextCount: 0,
+      controlContextCount: CONTROL_PLAN.length,
+      screenshotsCaptured: 0,
+      workerObservation: schemaFailure ? observation.UNCLASSIFIED_NETWORK_BLOCK : block
+    };
+  }
+  return {
+    status: 'passed',
+    mode: 'observer_controls',
+    scenarios: [],
+    contextCount: 0,
+    controlContextCount: CONTROL_PLAN.length,
+    screenshotsCaptured: 0,
+    workerObservation: block
+  };
+}
+
 async function main() {
   let report;
   let browser;
   const contexts = [];
   const observers = [];
+  const appObservers = {};
   const capturedScreenshots = {count: 0};
+  const cleanupIssues = [];
   let cleanupFailed = false;
+  let registry;
+  let controls = {};
   try {
     runtime = await readRuntimeInput();
     validateRuntimeInput(runtime);
@@ -437,20 +923,44 @@ async function main() {
       ]
     });
 
+    // Browser-level discovery starts before this runner creates any context,
+    // so shared-worker creation is never missed and absence becomes provable.
+    currentStage = 'browser_worker_discovery';
+    registry = createWorkerDiscovery();
+    await registry.launch(browser);
+
+    currentStage = 'observer_controls';
+    const controlRun = await runObserverControls(browser, registry, cleanupIssues);
+    controls = controlRun.controls;
+    if(controlRun.failedControls.length > 0) failStage('observer_control_mismatch');
+
+    // The synthetic-only mode proves the observer capability against the
+    // fixture's own probe controls: no app context, no artifact.
+    if(runtime.observationOnly === true) {
+      report = buildObserverOnlyReport(registry, controls);
+      return;
+    }
+
     const accounts = runtime.accounts;
+    currentStage = 'alice_context';
     const alice = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(alice.context);
     alice.page = await alice.context.newPage();
-    alice.observer = createNetworkObserver(alice.page, 'alice');
-    observers.push(alice.observer);
-    await alice.observer.start();
+    alice.observer = observation.createContextObserver('alice');
+    appObservers.alice = alice.observer;
+    alice.networkObserver = createNetworkObserver(alice.page, 'alice', alice.observer);
+    observers.push(alice.networkObserver);
+    await alice.networkObserver.start(registry);
 
+    currentStage = 'bob_context';
     const bob = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(bob.context);
     bob.page = await bob.context.newPage();
-    bob.observer = createNetworkObserver(bob.page, 'bob');
-    observers.push(bob.observer);
-    await bob.observer.start();
+    bob.observer = observation.createContextObserver('bob');
+    appObservers.bob = bob.observer;
+    bob.networkObserver = createNetworkObserver(bob.page, 'bob', bob.observer);
+    observers.push(bob.networkObserver);
+    await bob.networkObserver.start(registry);
 
     const pageErrors = [];
     for(const page of [alice.page, bob.page]) {
@@ -460,8 +970,10 @@ async function main() {
     currentScenario = 'sign-in';
     await signIn(alice.page, accounts[0], 'alice', runtime.screenshotDirectory, capturedScreenshots);
     await signIn(bob.page, accounts[1], 'bob', runtime.screenshotDirectory, capturedScreenshots);
-    await waitForWorkerTargets(alice.page, alice.observer);
-    await waitForWorkerTargets(bob.page, bob.observer);
+    alice.observer.state.windowElapsed = true;
+    bob.observer.state.windowElapsed = true;
+    await waitForWorkerTargets(alice.page, alice.networkObserver, alice.observer);
+    await waitForWorkerTargets(bob.page, bob.networkObserver, bob.observer);
     report = [{name: 'sign-in', status: 'passed'}];
 
     currentScenario = 'message';
@@ -559,8 +1071,10 @@ async function main() {
     report.push({name: 'group', status: 'passed'});
 
     await Promise.all(observers.map((observer) => observer.waitForSetup()));
-    const networkContexts = Object.fromEntries([['alice', alice.observer], ['bob', bob.observer]].map(([name, observer]) => {
-      const summary = observer.summary();
+    await registry.waitForSetup();
+    const apps = {alice, bob};
+    const networkContexts = Object.fromEntries(Object.entries(apps).map(([name, app]) => {
+      const summary = app.networkObserver.summary();
       return [name, {
         workerTargets: summary.workerTargets,
         allowedWebSockets: summary.allowedWebSockets,
@@ -569,22 +1083,33 @@ async function main() {
         allowedWebSocketsBySource: summary.allowedWebSocketsBySource
       }];
     }));
-    const unexpectedAttempts = observers.reduce((sum, observer) => sum + observer.summary().unexpectedAttempts, 0);
-    const observerErrors = observers.reduce((sum, observer) => sum + observer.summary().observerErrors, 0);
-    if(unexpectedAttempts !== 0 || observerErrors !== 0 || pageErrors.length !== 0) failStage('browser_egress_or_page_errors');
-    if(['alice', 'bob'].some((name) => networkContexts[name].workerTargets.shared_worker < 1 ||
-        networkContexts[name].workerTargets.service_worker < 1 || networkContexts[name].allowedWebSockets < 1)) {
+    const egress = summarizeEgress(observers);
+    const observationBlock = buildObservationBlock(registry, appObservers, controls, egress);
+    if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.length !== 0) failStage('browser_egress_or_page_errors');
+    if(registry.foreignTargets !== 0 || registry.appContextlessTargets !== 0) failStage('browser_worker_observation_incomplete');
+    if(['alice', 'bob'].some((name) => observationBlock.contexts[name].coverageComplete !== 1)) failStage('browser_worker_observation_incomplete');
+    if(['alice', 'bob'].some((name) => observationBlock.contexts[name].sharedWorkerState !== 'created')) failStage('browser_worker_or_websocket_evidence');
+    if(['alice', 'bob'].some((name) => networkContexts[name].workerTargets.service_worker < 1 ||
+        networkContexts[name].allowedWebSockets < 1)) {
       failStage('browser_worker_or_websocket_evidence');
     }
+    if(observation.validateNetworkBlock(observationBlock)) failStage('worker_observation_unclassified');
 
     report = {
       status: 'passed',
       scenarios: report,
       contextCount: contexts.length,
+      controlContextCount: CONTROL_PLAN.length,
       screenshotsCaptured: capturedScreenshots.count,
-      network: {unexpectedAttempts, observerErrors, contexts: networkContexts}
+      network: {unexpectedAttempts: egress.unexpectedAttempts, observerErrors: egress.observerErrors, contexts: networkContexts},
+      workerObservation: observationBlock
     };
   } catch(error) {
+    const egress = summarizeEgress(observers);
+    // The bounded sign-in window has ended by the time a sign-in stage fails,
+    // so the failure report states what the observer established, not a blank.
+    for(const observer of Object.values(appObservers)) observer.state.windowElapsed = true;
+    const failureBlock = buildObservationBlock(registry, appObservers, controls, egress);
     report = {
       status: 'failed',
       stage: currentStage,
@@ -592,10 +1117,28 @@ async function main() {
       errorClass: ['TimeoutError', 'TypeError', 'Error', 'AbortError'].includes(error?.name) ? error.name : 'OtherError',
       scenarios: Array.isArray(report) ? report : [],
       contextCount: contexts.length,
-      screenshotsCaptured: capturedScreenshots.count
+      controlContextCount: CONTROL_PLAN.length,
+      screenshotsCaptured: capturedScreenshots.count,
+      // On failure the closed-schema evidence is still the point, validated the
+      // same way: any schema violation collapses it to `unclassified`.
+      ...(registry ? {
+        workerObservation: observation.validateNetworkBlock(failureBlock) ? observation.UNCLASSIFIED_NETWORK_BLOCK : failureBlock
+      } : {})
     };
   } finally {
     currentStage = 'cleanup';
+    try {
+      await registry?.stop();
+    } catch {
+      cleanupFailed = true;
+    }
+    for(const observer of observers) {
+      try {
+        await observer.stop();
+      } catch {
+        cleanupFailed = true;
+      }
+    }
     try {
       await Promise.all(contexts.map((context) => context.close()));
     } catch {
@@ -611,9 +1154,14 @@ async function main() {
     } catch {
       cleanupFailed = true;
     }
-    for(const observer of observers) observer.stop();
+    if(cleanupIssues.length > 0) cleanupFailed = true;
+    emitReport(report, cleanupFailed);
   }
+}
 
+// Emitted from the cleanup block, so the synthetic-only path that returns
+// early and the scenario path that runs to completion report identically.
+function emitReport(report, cleanupFailed) {
   if(cleanupFailed) {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: 'cleanup'})}\n`);
     process.exitCode = 1;
@@ -621,15 +1169,6 @@ async function main() {
   }
   process.stdout.write(`${JSON.stringify(report)}\n`);
   if(report.status !== 'passed') process.exitCode = 1;
-}
-
-async function waitForMembers(page, memberRows) {
-  const deadline = Date.now() + 20_000;
-  while(Date.now() < deadline) {
-    if(await memberRows.count() >= 2) return;
-    await page.waitForTimeout(100);
-  }
-  failStage('bob_group_member_count');
 }
 
 let runtime;

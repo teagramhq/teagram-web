@@ -7,15 +7,18 @@ import {isIPv4} from 'node:net';
 import {
   assertAllScenariosPassed,
   parseFixtureReadiness,
+  parseObserverControls,
   parseRealClientArgs,
+  parseWorkerObservation,
   readSyntheticCredentials
 } from './contract.mjs';
 
 const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> --scenarios sign-in,message,group
 
 The fixture must remain running after artifact-ready. The command validates its immutable pins,
-protected synthetic credentials, internal browser network, audited artifact evidence, and all three
-required UI scenarios. It does not import browser storage state or export screenshots or traces.`;
+protected synthetic credentials, internal browser network, audited artifact evidence, per-context
+shared-worker observation, and all three required UI scenarios. It does not import browser storage
+state or export screenshots or traces.`;
 const NETWORK_SOURCES = ['page', 'shared_worker', 'service_worker', 'worker'];
 
 function hasNetworkSourceEvidence(context) {
@@ -47,9 +50,11 @@ if(args?.help) {
   let cleanupError;
   let operationError;
   let browserScriptInstalled = false;
+  let observerScriptInstalled = false;
   let browserContainerValidated = false;
   let browserResult;
   let readiness;
+  let controlsOnlyDone = false;
 
   const docker = (dockerArgs, input, stage, timeout = 30_000) => {
     try {
@@ -68,13 +73,14 @@ if(args?.help) {
   };
 
   try {
+    const controlsOnly = args.observerControlsOnly === true;
     const readinessText = readFileSync(resolve(args.readinessFile), 'utf8');
     readiness = parseFixtureReadiness(readinessText, {
       runId: args.runId,
       harnessRevision: args.harnessRevision,
       serverRevision: args.serverRevision,
       webRevision: args.webRevision
-    });
+    }, {requireArtifact: !controlsOnly});
     const {serverReady, artifactReady} = readiness;
     const credentials = readSyntheticCredentials(serverReady.credentials, args.runId);
 
@@ -147,18 +153,27 @@ if(args?.help) {
 
     const sourceDirectory = dirname(fileURLToPath(import.meta.url));
     const browserScript = readFileSync(resolve(sourceDirectory, 'browser.cjs'));
-    const remoteScript = `/tmp/real-client-${args.runId}.cjs`;
+    const observerScript = readFileSync(resolve(sourceDirectory, 'observation.cjs'));
     const screenshotDirectory = `/tmp/real-client-${args.runId}`;
+    // The staged scripts live beside, never inside, the screenshot directory:
+    // the browser script creates that directory itself and must find it absent.
+    const remoteDirectory = `/tmp/real-client-${args.runId}-runner`;
+    const remoteScript = `${remoteDirectory}/runner.cjs`;
+    const remoteObserverScript = `${remoteDirectory}/observation.cjs`;
+    docker(['exec', browserName, '/bin/sh', '-c', `umask 077; mkdir -p ${remoteDirectory}`], undefined, 'browser runner staging');
     browserScriptInstalled = true;
     docker(['exec', '-i', browserName, '/bin/sh', '-c', `umask 077; cat > ${remoteScript}`], browserScript, 'browser runner staging');
+    docker(['exec', '-i', browserName, '/bin/sh', '-c', `umask 077; cat > ${remoteObserverScript}`], observerScript, 'shared-worker observer staging');
+    observerScriptInstalled = true;
 
     const browserInput = JSON.stringify({
+      ...(controlsOnly ? {observationOnly: true} : {}),
       runId: args.runId,
       endpoint: serverReady.endpoint,
       wssEndpoint: serverReady.wssEndpoint,
       fingerprint: serverReady.fingerprint,
       publicKeySHA256: serverReady.publicKeySHA256,
-      artifactDigest: artifactReady.artifactDigest,
+      artifactDigest: controlsOnly ? null : artifactReady.artifactDigest,
       leafSPKI: serverReady.leafSPKI,
       webRevision: args.webRevision,
       frontIp,
@@ -195,17 +210,40 @@ if(args?.help) {
     if(browserResult.status !== 'passed') {
       throw new Error(`real client scenario failed at ${browserResult.stage || 'unknown stage'}`);
     }
-    assertAllScenariosPassed(browserResult.scenarios);
-    if(browserResult.contextCount !== 2 || browserResult.screenshotsCaptured !== 16 ||
-        browserResult.network?.unexpectedAttempts !== 0 || browserResult.network?.observerErrors !== 0 ||
-        ['alice', 'bob'].some((account) => {
-          const context = browserResult.network?.contexts?.[account];
-          return !hasNetworkSourceEvidence(context) ||
-            !Number.isSafeInteger(context.workerTargets?.shared_worker) || context.workerTargets.shared_worker < 1 ||
-            !Number.isSafeInteger(context.workerTargets?.service_worker) || context.workerTargets.service_worker < 1;
-        })) {
-      throw new Error('real client UI or page/worker egress evidence is incomplete');
+    if(controlsOnly) {
+      if(browserResult.mode !== 'observer_controls' || browserResult.controlContextCount !== 5 ||
+          browserResult.contextCount !== 0 || browserResult.screenshotsCaptured !== 0) {
+        throw new Error('observer control run did not stay synthetic');
+      }
+      parseObserverControls(browserResult.workerObservation);
+      controlsOnlyDone = true;
+      process.stdout.write(`${JSON.stringify({
+        status: 'passed',
+        mode: 'observer_controls',
+        runId: args.runId,
+        harnessRevision: args.harnessRevision,
+        serverRevision: args.serverRevision,
+        webRevision: args.webRevision,
+        controlContextCount: browserResult.controlContextCount,
+        workerObservation: browserResult.workerObservation
+      })}\n`);
     }
+    if(!controlsOnlyDone) {
+      assertAllScenariosPassed(browserResult.scenarios);
+      if(browserResult.contextCount !== 2 || browserResult.screenshotsCaptured !== 16 ||
+          browserResult.network?.unexpectedAttempts !== 0 || browserResult.network?.observerErrors !== 0 ||
+          ['alice', 'bob'].some((account) => {
+            const context = browserResult.network?.contexts?.[account];
+            return !hasNetworkSourceEvidence(context) ||
+              !Number.isSafeInteger(context.workerTargets?.service_worker) || context.workerTargets.service_worker < 1;
+          })) {
+        throw new Error('real client UI or page/worker egress evidence is incomplete');
+      }
+    }
+    // The page-session observer cannot see shared workers, so the shared-worker
+    // evidence is the browser-level observation block: synthetic controls, per-context
+    // attribution by browser context, and complete coverage.
+    parseWorkerObservation(browserResult.workerObservation);
   } catch(error) {
     operationError = error;
   } finally {
@@ -217,10 +255,10 @@ if(args?.help) {
         cleanupError = new Error('screenshot cleanup failed');
       }
     }
-    if(browserScriptInstalled) {
+    if(browserScriptInstalled || observerScriptInstalled) {
       try {
         const browserName = `telegram-fixture-${args.runId}browser`;
-        docker(['exec', browserName, 'rm', '-f', `/tmp/real-client-${args.runId}.cjs`], undefined, 'browser runner cleanup');
+        docker(['exec', browserName, 'rm', '-rf', '--', `/tmp/real-client-${args.runId}-runner`], undefined, 'browser runner cleanup');
       } catch {
         cleanupError ||= new Error('browser runner cleanup failed');
       }
@@ -230,7 +268,7 @@ if(args?.help) {
   if(cleanupError || operationError) {
     process.stderr.write(`${cleanupError?.message || operationError?.message || 'real client runner failed'}\n`);
     process.exitCode = 1;
-  } else {
+  } else if(!controlsOnlyDone) {
 
     process.stdout.write(`${JSON.stringify({
       status: 'passed',
@@ -238,7 +276,7 @@ if(args?.help) {
       harnessRevision: args.harnessRevision,
       serverRevision: args.serverRevision,
       webRevision: args.webRevision,
-      artifactDigest: readiness.artifactReady.artifactDigest,
+      artifactDigest: readiness?.artifactReady?.artifactDigest ?? null,
       artifactAuditChecks: readiness.artifactReady.auditChecks,
       controlledProbeEvidence: {
         workers: readiness.serverReady.evidence.workerProbes,
@@ -248,7 +286,8 @@ if(args?.help) {
       scenarios: browserResult.scenarios,
       contextCount: browserResult.contextCount,
       screenshotsCaptured: browserResult.screenshotsCaptured,
-      network: browserResult.network
+      network: browserResult.network,
+      workerObservation: browserResult.workerObservation
     })}\n`);
   }
 }
