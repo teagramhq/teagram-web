@@ -16,7 +16,11 @@ const CONTROL_PLAN = Object.freeze([
   Object.freeze({name: 'c2_missing_module_script', expression: "new SharedWorker('/_fixture_probe/missing.js', {type: 'module'})"}),
   Object.freeze({name: 'c3_no_construction'}),
   Object.freeze({name: 'c4_attach_failure', fault: 'attach', windowMs: 2000}),
-  Object.freeze({name: 'c4_overflow', fault: 'overflow', windowMs: 2000})
+  Object.freeze({name: 'c4_overflow', fault: 'overflow', windowMs: 2000}),
+  // More distinct shared workers than the attached-target budget: the observer
+  // must stop attaching, release the rejected targets and stay bounded.
+  Object.freeze({name: 'c5_attach_budget', windowMs: 6000,
+    expression: "for(let index = 0; index < 20; index++) new SharedWorker('/_fixture_probe/shared-worker.js', 'budget' + index)"})
 ]);
 
 let currentStage = 'runtime_inputs';
@@ -350,6 +354,7 @@ function createWorkerDiscovery() {
       }
     },
     async releaseContext(observer) {
+      let detachFailures = 0;
       for(const [targetId, owner] of [...targetOwners.entries()]) {
         if(owner !== observer) continue;
         targetOwners.delete(targetId);
@@ -362,24 +367,35 @@ function createWorkerDiscovery() {
         try {
           await session.send('Target.detachFromTarget', {sessionId});
         } catch {
+          detachFailures++;
           observer.recordObserverError();
         }
       }
+      return {detachFailures};
     },
+    // Detach and discovery-disable failures are counted and returned: the
+    // cleanup stage must go nonzero on them, never resolve silently.
     async stop() {
-      if(!session) return;
+      if(!session) return {detachFailures: 0, discoveryDisabled: true};
+      let detachFailures = 0;
       for(const sessionId of [...attachedSessions]) {
         try {
           await session.send('Target.detachFromTarget', {sessionId});
         } catch {
-          // Detach failures surface through the cleanup stage, never silently.
+          detachFailures++;
         }
       }
       attachedSessions.clear();
       sessionTargets.clear();
       targetSessions.clear();
       session.removeAllListeners();
-      await session.send('Target.setDiscoverTargets', {discover: false}).catch(() => {});
+      let discoveryDisabled = true;
+      try {
+        await session.send('Target.setDiscoverTargets', {discover: false});
+      } catch {
+        discoveryDisabled = false;
+      }
+      return {detachFailures, discoveryDisabled};
     }
   };
 }
@@ -467,9 +483,23 @@ function createNetworkObserver(page, contextName, contextObserver) {
     if(targets.has(sessionId)) return;
     targets.set(sessionId, targetInfo);
     contextObserver?.registerTarget(targetInfo);
-    contextObserver?.noteAttached(targetInfo.targetId);
     if(targetInfo.type === 'shared_worker' || targetInfo.type === 'service_worker') {
       observedWorkerTargets[targetInfo.type].add(targetInfo.targetId);
+    }
+    // The attached-target budget bounds protocol setup, not just a counter: a
+    // target that cannot be counted gets no enables and is released at once.
+    if(contextObserver && !contextObserver.noteAttached(targetInfo.targetId)) {
+      targets.delete(sessionId);
+      const release = (async() => {
+        try {
+          await send('Target.detachFromTarget', {sessionId});
+        } catch {
+          errors.push('worker_target_release');
+          contextObserver?.recordObserverError();
+        }
+      })().finally(() => setupPromises.delete(release));
+      setupPromises.add(release);
+      return;
     }
     const setup = (async() => {
       if(['shared_worker', 'service_worker', 'worker'].includes(targetInfo.type)) {
@@ -805,8 +835,9 @@ async function runObserverControls(browser, registry, cleanupIssues) {
       // Observer sessions detach and this context's discovery attribution is
       // released before the context itself closes.
       try {
-        await registry.releaseContext(observer);
+        const released = await registry.releaseContext(observer);
         await networkObserver?.stop();
+        if(released?.detachFailures > 0) cleanupIssues.push('observer_control_cleanup');
       } catch {
         cleanupIssues.push('observer_control_cleanup');
       }
@@ -1128,9 +1159,12 @@ async function main() {
   } finally {
     currentStage = 'cleanup';
     try {
-      await registry?.stop();
+      const discoveryStopped = await registry?.stop();
+      if(discoveryStopped && (discoveryStopped.detachFailures > 0 || discoveryStopped.discoveryDisabled === false)) {
+        cleanupIssues.push('worker_discovery_cleanup');
+      }
     } catch {
-      cleanupFailed = true;
+      cleanupIssues.push('worker_discovery_cleanup');
     }
     for(const observer of observers) {
       try {

@@ -6,6 +6,7 @@ import {isIPv4} from 'node:net';
 
 import {
   assertAllScenariosPassed,
+  REQUIRED_CONTROLS,
   parseFixtureReadiness,
   parseObserverControls,
   parseRealClientArgs,
@@ -211,7 +212,7 @@ if(args?.help) {
       throw new Error(`real client scenario failed at ${browserResult.stage || 'unknown stage'}`);
     }
     if(controlsOnly) {
-      if(browserResult.mode !== 'observer_controls' || browserResult.controlContextCount !== 5 ||
+      if(browserResult.mode !== 'observer_controls' || browserResult.controlContextCount !== REQUIRED_CONTROLS.length ||
           browserResult.contextCount !== 0 || browserResult.screenshotsCaptured !== 0) {
         throw new Error('observer control run did not stay synthetic');
       }
@@ -239,11 +240,11 @@ if(args?.help) {
           })) {
         throw new Error('real client UI or page/worker egress evidence is incomplete');
       }
+      // The page-session observer cannot see shared workers, so the shared-worker
+      // evidence is the browser-level observation block: synthetic controls, per-context
+      // attribution by browser context, and complete coverage.
+      parseWorkerObservation(browserResult.workerObservation);
     }
-    // The page-session observer cannot see shared workers, so the shared-worker
-    // evidence is the browser-level observation block: synthetic controls, per-context
-    // attribution by browser context, and complete coverage.
-    parseWorkerObservation(browserResult.workerObservation);
   } catch(error) {
     operationError = error;
   } finally {

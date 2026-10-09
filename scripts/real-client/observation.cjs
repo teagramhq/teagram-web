@@ -39,7 +39,8 @@ const PAGE_CDP_METHODS = Object.freeze([
   'Log.enable',
   'Target.setAutoAttach',
   'Target.getTargetInfo',
-  'Target.sendMessageToTarget'
+  'Target.sendMessageToTarget',
+  'Target.detachFromTarget'
 ]);
 const WORKER_CDP_METHODS = Object.freeze([
   'Network.enable',
@@ -180,9 +181,10 @@ function statusCategory(status) {
   return 'ok';
 }
 
-function createTargetRecord(source, targetId) {
+function createTargetRecord(source, targetId, sequence) {
   return {
     targetId,
+    registeredSequence: sequence,
     label: source.label,
     originClass: source.originClass,
     isBlob: source.isBlob,
@@ -219,9 +221,10 @@ function createContextObserver(name, options = {}) {
     windowElapsed: false,
     attachFailures: 0,
     detachBeforeSetup: 0,
-    mtprotoSourceRequested: false,
     mtprotoSourceFetch: 'not_requested',
+    mtprotoSourceFetchedSequence: null,
     mtprotoSourceChunk: 'none',
+    sequence: 0,
     failures: new Set()
   };
 
@@ -230,22 +233,34 @@ function createContextObserver(name, options = {}) {
     state.overflow = true;
   }
 
+  // A bound that only clamps a counter is not a bound. Once a limit is reached
+  // the observer closes: handlers stop, nothing further is retained, and the
+  // overflow flag plus the clamped counter become the whole answer.
+  function closed() {
+    return state.overflow;
+  }
+
   // Counts stay bounded integers: the overflow flag is the signal, never a
   // counter that runs past the schema bound.
   function countEvent() {
+    if(state.overflow) return false;
+    state.sequence++;
     if(state.countedEvents >= LIMITS.countedEventsPerContext) {
       state.countedEvents = LIMITS.countedEventsPerContext;
       recordOverflow();
-      return;
+      return false;
     }
     state.countedEvents++;
+    return true;
   }
 
   function recordObserverError() {
+    if(closed()) return;
     state.observerErrors++;
   }
 
   function addFailure(category) {
+    if(closed()) return;
     if(typeof category === 'string' && WORKER_FAILURE_STATES.includes(category)) state.failures.add(category);
   }
 
@@ -266,7 +281,7 @@ function createContextObserver(name, options = {}) {
       }
       return existing;
     }
-    const record = createTargetRecord(source, targetInfo.targetId);
+    const record = createTargetRecord(source, targetInfo.targetId, state.sequence);
     targets.set(targetInfo.targetId, record);
     workerSourceLabels.add(record.label);
     if(record.isBlob) blobSharedWorkerTargetIds.add(targetInfo.targetId);
@@ -275,7 +290,7 @@ function createContextObserver(name, options = {}) {
   }
 
   function registerTarget(targetInfo) {
-    countEvent();
+    if(!countEvent()) return null;
     if(!targetInfo || typeof targetInfo.targetId !== 'string') return null;
     if(targetInfo.type === 'page') {
       pageTargetIds.add(targetInfo.targetId);
@@ -295,7 +310,7 @@ function createContextObserver(name, options = {}) {
   }
 
   function noteAttached(targetId = null) {
-    countEvent();
+    if(!countEvent()) return false;
     if(state.attachedTargets >= LIMITS.attachedTargets) {
       recordOverflow();
       return false;
@@ -307,12 +322,13 @@ function createContextObserver(name, options = {}) {
   }
 
   function noteSetupComplete(targetId) {
+    if(closed()) return;
     const record = targets.get(targetId);
     if(record) record.setupComplete = true;
   }
 
   function noteDestroyed(targetId) {
-    countEvent();
+    if(!countEvent()) return;
     const record = targets.get(targetId);
     if(!record) return;
     record.destroyed = true;
@@ -324,11 +340,13 @@ function createContextObserver(name, options = {}) {
   }
 
   function noteAttachFailure() {
+    if(closed()) return;
     state.attachFailures++;
     state.observerErrors++;
   }
 
   function noteDetachBeforeSetup() {
+    if(closed()) return;
     state.detachBeforeSetup++;
     state.observerErrors++;
   }
@@ -345,7 +363,7 @@ function createContextObserver(name, options = {}) {
   }
 
   function noteWorkerEvent(targetId, method, params) {
-    countEvent();
+    if(!countEvent()) return;
     const record = targets.get(targetId);
     if(!record) return;
     if(method === 'Log.entryAdded') {
@@ -397,11 +415,10 @@ function createContextObserver(name, options = {}) {
   // Page-session coverage. The page session is enabled before navigation, so
   // the source fetch of the allowlisted MTProto chunk is observed completely.
   function notePageEvent(method, params) {
-    countEvent();
+    if(!countEvent()) return;
     if(method === 'Network.requestWillBeSent') {
       const source = classifyWorkerSource(params?.request?.url);
       if(source.label === 'mtproto_worker') {
-        state.mtprotoSourceRequested = true;
         state.mtprotoSourceChunk = 'mtproto_worker';
       }
       if(isWorkerScriptType(params?.type) && source.label !== 'cross_origin') workerSourceLabels.add(source.label);
@@ -412,9 +429,9 @@ function createContextObserver(name, options = {}) {
       const status = params?.response?.status;
       if(typeof status !== 'number') return;
       if(source.label === 'mtproto_worker') {
-        state.mtprotoSourceRequested = true;
         state.mtprotoSourceChunk = 'mtproto_worker';
         state.mtprotoSourceFetch = statusCategory(status);
+        if(status < 400 && state.mtprotoSourceFetchedSequence === null) state.mtprotoSourceFetchedSequence = state.sequence;
         return;
       }
       if(isWorkerScriptType(params?.type)) noteScriptResponseStatus(source.label, status);
@@ -423,7 +440,6 @@ function createContextObserver(name, options = {}) {
     if(method === 'Network.loadingFailed') {
       const source = classifyWorkerSource(params?.request?.url);
       if(source.label === 'mtproto_worker') {
-        state.mtprotoSourceRequested = true;
         state.mtprotoSourceChunk = 'mtproto_worker';
         state.mtprotoSourceFetch = 'failed';
         return;
@@ -448,6 +464,7 @@ function createContextObserver(name, options = {}) {
   }
 
   function noteScriptLoadFailure(label) {
+    if(closed()) return;
     const match = [...targets.values()].find((record) => !record.isBlob && record.label === label);
     if(!match || match.failures.has('script_load_failed')) return;
     match.failures.add('script_load_failed');
@@ -469,11 +486,25 @@ function createContextObserver(name, options = {}) {
     return sharedWorkerTargetIds.size >= 1 ? 'created' : 'absent';
   }
 
+  // Attribution needs three independent facts: the allowlisted chunk source
+  // fetched successfully, and a same-origin blob worker created after that
+  // fetch. A blob that predates the fetch, a cross-origin blob and a blob under
+  // a failed or absent fetch are all unattributable, and presence of any blob
+  // rules out absence.
+  function attributableMtprotoBlobs() {
+    if(state.mtprotoSourceFetch !== 'ok' || state.mtprotoSourceFetchedSequence === null) return [];
+    return [...blobSharedWorkerTargetIds].filter((targetId) => {
+      const record = targets.get(targetId);
+      return record && record.originClass === 'blob_same_origin' && record.registeredSequence > state.mtprotoSourceFetchedSequence;
+    });
+  }
+
   function classifyMtproto() {
     if(!coverageComplete()) return 'unknown';
-    if(blobSharedWorkerTargetIds.size >= 2) return 'ambiguous';
-    if(blobSharedWorkerTargetIds.size === 1 && state.mtprotoSourceRequested) return 'mtproto_candidate';
-    if(blobSharedWorkerTargetIds.size === 0 && state.mtprotoSourceRequested) return 'absent';
+    const attributable = attributableMtprotoBlobs();
+    if(attributable.length >= 2) return 'ambiguous';
+    if(attributable.length === 1) return 'mtproto_candidate';
+    if(blobSharedWorkerTargetIds.size === 0 && state.mtprotoSourceFetch === 'ok') return 'absent';
     return 'unknown';
   }
 
@@ -548,11 +579,11 @@ function createContextObserver(name, options = {}) {
 const FLAG_VALUES = Object.freeze([0, 1]);
 const CONTEXT_SCHEMA = Object.freeze({
   pageTargets: {kind: 'count', max: 8},
-  sharedWorkerTargets: {kind: 'count', max: LIMITS.attachedTargets},
-  blobSharedWorkerTargets: {kind: 'count', max: LIMITS.attachedTargets},
-  scriptSharedWorkerTargets: {kind: 'count', max: LIMITS.attachedTargets},
-  serviceWorkerTargets: {kind: 'count', max: LIMITS.attachedTargets},
-  dedicatedWorkerTargets: {kind: 'count', max: LIMITS.attachedTargets},
+  sharedWorkerTargets: {kind: 'count', max: LIMITS.countedEventsPerContext},
+  blobSharedWorkerTargets: {kind: 'count', max: LIMITS.countedEventsPerContext},
+  scriptSharedWorkerTargets: {kind: 'count', max: LIMITS.countedEventsPerContext},
+  serviceWorkerTargets: {kind: 'count', max: LIMITS.countedEventsPerContext},
+  dedicatedWorkerTargets: {kind: 'count', max: LIMITS.countedEventsPerContext},
   workerSourceChunks: {kind: 'labels', values: WORKER_SOURCE_LABELS},
   mtprotoSourceChunk: {kind: 'enum', values: Object.freeze(['none', 'mtproto_worker'])},
   mtprotoSourceFetch: {kind: 'enum', values: SOURCE_FETCH_STATES},
@@ -646,7 +677,9 @@ const CONTROL_EXPECTATIONS = Object.freeze({
   c2_missing_module_script: (block) => block.workerFailure === 'script_load_failed' || block.workerFailure === 'destroyed_before_attach',
   c3_no_construction: (block) => block.sharedWorkerState === 'absent',
   c4_attach_failure: (block) => block.sharedWorkerState === 'unknown' && block.observerErrors > 0,
-  c4_overflow: (block) => block.sharedWorkerState === 'unknown' && block.observerOverflow === 1
+  c4_overflow: (block) => block.sharedWorkerState === 'unknown' && block.observerOverflow === 1,
+  c5_attach_budget: (block) => block.observerOverflow === 1 && block.sharedWorkerState === 'unknown' &&
+    block.attachedTargets === LIMITS.attachedTargets
 });
 
 function evaluateControl(name, block) {

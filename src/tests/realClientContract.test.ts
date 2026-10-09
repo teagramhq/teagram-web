@@ -177,6 +177,15 @@ function expectNoHostileLeak(summary: any) {
   expect(serialized).not.toMatch(/wss?:/);
 }
 
+function overBudgetAttachEvents(): any[] {
+  const events: any[] = [];
+  for(let index = 0; index < observation.LIMITS.attachedTargets + 4; index++) {
+    events.push({kind: 'target', target: sharedWorker(`budget-worker-${index}`, HOSTILE.blobUrl, 'context-c5')});
+    events.push({kind: 'attach', targetId: `budget-worker-${index}`});
+  }
+  return events;
+}
+
 function controlBlocks(): Record<string, any> {
   return {
     c1_shared_worker_created: {
@@ -209,6 +218,14 @@ function controlBlocks(): Record<string, any> {
     c4_overflow: {
       ...replayContext([
         {kind: 'target', target: pageTarget('page-c4b', 'context-c4b')},
+        {kind: 'fault', fault: 'overflow'}
+      ]),
+      expected: 'pass'
+    },
+    c5_attach_budget: {
+      ...replayContext([
+        {kind: 'target', target: pageTarget('page-c5', 'context-c5')},
+        ...overBudgetAttachEvents(),
         {kind: 'fault', fault: 'overflow'}
       ]),
       expected: 'pass'
@@ -403,6 +420,96 @@ describe('confined runner shared-worker observation contract', () => {
     expect(eventOverflow.observerOverflow).toBe(1);
     expect(eventOverflow.countedEvents).toBe(observation.LIMITS.countedEventsPerContext);
     expect(eventOverflow.mtprotoWorker).toBe('unknown');
+  });
+
+  it('stops attributing MTProto to blobs that predate the fetch, are cross-origin, or follow a failed fetch', () => {
+    const sourceFetch = {kind: 'page', method: 'Network.responseReceived', params: {type: 'Script', response: {url: MTPROTO_CHUNK_URL, status: 200}}};
+    const sourceRequest = {kind: 'page', method: 'Network.requestWillBeSent', params: {type: 'Script', request: {url: MTPROTO_CHUNK_URL}}};
+
+    const preexistingBlob = replayContext([
+      {kind: 'target', target: pageTarget()},
+      {kind: 'target', target: sharedWorker('pre-worker', HOSTILE.blobUrl)},
+      {kind: 'attach', targetId: 'pre-worker'},
+      {kind: 'setup', targetId: 'pre-worker'},
+      sourceRequest,
+      sourceFetch
+    ]);
+    expect(preexistingBlob.mtprotoSourceFetch).toBe('ok');
+    expect(preexistingBlob.sharedWorkerState).toBe('created');
+    expect(preexistingBlob.mtprotoWorker).toBe('unknown');
+
+    const crossOriginBlob = replayContext([
+      {kind: 'target', target: pageTarget()},
+      sourceRequest,
+      sourceFetch,
+      {kind: 'target', target: sharedWorker('foreign-worker', 'blob:https://unannounced.invalid/0e4a2c1a-1111-2222-3333-444444444444')}
+    ]);
+    expect(crossOriginBlob.blobSharedWorkerTargets).toBe(1);
+    expect(crossOriginBlob.mtprotoWorker).toBe('unknown');
+    expectNoHostileLeak(crossOriginBlob);
+
+    const failedFetch = replayContext([
+      {kind: 'target', target: pageTarget()},
+      sourceRequest,
+      {kind: 'page', method: 'Network.loadingFailed', params: {type: 'Script', request: {url: MTPROTO_CHUNK_URL}, errorText: 'net::ERR_INTERNET_DISCONNECTED'}},
+      {kind: 'target', target: sharedWorker('post-failure-worker', HOSTILE.blobUrl)}
+    ]);
+    expect(failedFetch.mtprotoSourceFetch).toBe('failed');
+    expect(failedFetch.mtprotoWorker).toBe('unknown');
+
+    const notFetched = replayContext([
+      {kind: 'target', target: pageTarget()},
+      sourceRequest,
+      {kind: 'target', target: sharedWorker('unattributed-worker', HOSTILE.blobUrl)}
+    ]);
+    expect(notFetched.mtprotoSourceFetch).toBe('not_requested');
+    expect(notFetched.mtprotoWorker).toBe('unknown');
+
+    expect(replayContext(appContextEvents()).mtprotoWorker).toBe('mtproto_candidate');
+  });
+
+  it('closes the observer at a resource bound and retains nothing afterwards', () => {
+    const observer = observation.createContextObserver('alice');
+    observer.state.discoveryActive = true;
+    observer.state.pageCoverageComplete = true;
+    observer.registerTarget(pageTarget());
+    observer.noteInjectedControlFault('overflow');
+    observer.notePageEvent('Network.responseReceived', {type: 'Script', response: {url: MTPROTO_CHUNK_URL, status: 200}});
+    observer.registerTarget(sharedWorker('late-worker', HOSTILE.blobUrl));
+    observer.noteAttached('late-worker');
+    observer.noteWorkerEvent('late-worker', 'Runtime.exceptionThrown', {exceptionDetails: {text: 'Uncaught', exception: {className: 'Error', description: HOSTILE.frame}}});
+    observer.state.windowElapsed = true;
+    const summary = observer.summary();
+
+    expect(summary.observerOverflow).toBe(1);
+    expect(summary.countedEvents).toBe(observation.LIMITS.countedEventsPerContext);
+    expect(summary.attachedTargets).toBe(0);
+    expect(summary.sharedWorkerTargets).toBe(0);
+    expect(summary.workerFailure).toBe('no_failure_observed');
+    expect(summary.mtprotoSourceChunk).toBe('none');
+    expect(summary.coverageComplete).toBe(0);
+    expectNoHostileLeak(summary);
+  });
+
+  it('refuses attachments past the budget and bounds the counted total', () => {
+    const observer = observation.createContextObserver('alice');
+    observer.state.discoveryActive = true;
+    observer.state.pageCoverageComplete = true;
+    observer.registerTarget(pageTarget());
+    const accepted: boolean[] = [];
+    for(let index = 0; index < observation.LIMITS.attachedTargets + 6; index++) {
+      const targetId = `worker-${index}`;
+      observer.registerTarget(sharedWorker(targetId, HOSTILE.blobUrl));
+      accepted.push(observer.noteAttached(targetId));
+    }
+    observer.state.windowElapsed = true;
+    const summary = observer.summary();
+
+    expect(accepted.filter((value) => value)).toHaveLength(observation.LIMITS.attachedTargets);
+    expect(accepted.filter((value) => !value)).toHaveLength(6);
+    expect(summary.attachedTargets).toBe(observation.LIMITS.attachedTargets);
+    expect(summary.observerOverflow).toBe(1);
+    expect(summary.sharedWorkerState).toBe('unknown');
   });
 
   it('rejects every CDP method outside the accepted scope, including nested sends', () => {
