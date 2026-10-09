@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import {createServer} from 'node:http';
 import {tmpdir} from 'node:os';
-import {join, resolve} from 'node:path';
+import {join, relative, resolve, sep} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import express from 'express';
 import {afterAll, describe, expect, it} from 'vitest';
@@ -32,8 +32,10 @@ import {
 import {resolveMtprotoTarget} from './mtproto-target.mjs';
 import {verifyPublishedArtifact} from './private-artifact-publish-verify.mjs';
 import {
+  PRIVATE_BACKGROUND_ASSETS,
   PRIVATE_FONT_ASSETS,
   assertPrivateFontAssetName,
+  includePrivateArtifactBackground,
   includePrivateArtifactFonts,
   privateContentSecurityPolicy,
   verifyPrivateArtifactCsp,
@@ -510,6 +512,80 @@ function privateFontSourceRootWithSymlinkedAncestor(ancestorName) {
   return rootDirectory;
 }
 
+const safePrivateBackground = readFileSync(join(repositoryRoot, 'public/assets/img/pattern.svg'));
+
+function privateBackgroundSourceRoot({
+  missingBackground,
+  emptyBackground,
+  changedBackground,
+  symlinkBackground,
+  directoryBackground,
+  extraImage
+} = {}) {
+  const rootDirectory = mkdtempSync(join(tmpdir(), 'private-artifact-background-source-'));
+  temporaryDirectories.push(rootDirectory);
+  const imageDirectory = join(rootDirectory, 'public/assets/img');
+  mkdirSync(imageDirectory, {recursive: true});
+  const sourcePath = join(imageDirectory, 'pattern.svg');
+  const outsideSource = join(rootDirectory, 'outside-pattern.svg');
+
+  if(symlinkBackground) {
+    writeFileSync(outsideSource, safePrivateBackground);
+    symlinkSync(outsideSource, sourcePath);
+  } else if(directoryBackground) {
+    mkdirSync(sourcePath);
+  } else if(!missingBackground) {
+    if(emptyBackground) {
+      writeFileSync(sourcePath, '');
+    } else {
+      const contents = Buffer.from(safePrivateBackground);
+      if(changedBackground) contents[0] ^= 1;
+      writeFileSync(sourcePath, contents);
+    }
+  }
+  if(extraImage) writeFileSync(join(imageDirectory, 'x.svg'), '<svg/>');
+  return rootDirectory;
+}
+
+function privateBackgroundSourceRootWithSymlinkedAncestor() {
+  const sourceRoot = privateBackgroundSourceRoot();
+  const rootDirectory = mkdtempSync(join(tmpdir(), 'private-artifact-background-ancestor-'));
+  temporaryDirectories.push(rootDirectory);
+  mkdirSync(join(rootDirectory, 'public'));
+  symlinkSync(join(sourceRoot, 'public/assets'), join(rootDirectory, 'public/assets'));
+  return rootDirectory;
+}
+
+function recomputedArtifactDigest(directory) {
+  const files = [];
+  const visit = (current) => {
+    for(const entry of readdirSync(current, {withFileTypes: true})) {
+      const file = join(current, entry.name);
+      if(entry.isDirectory()) {
+        visit(file);
+      } else if(entry.isFile()) {
+        files.push(file);
+      } else {
+        throw new Error(`Unexpected artifact entry: ${file}`);
+      }
+    }
+  };
+  visit(directory);
+
+  const hash = createHash('sha256');
+  for(const file of files.sort((left, right) =>
+    relative(directory, left).localeCompare(relative(directory, right))
+  )) {
+    const relativePath = relative(directory, file).split(sep).join('/');
+    if(relativePath === 'mtproto-target.json') continue;
+    const contents = readFileSync(file);
+    hash.update(relativePath + '\0' + contents.length + '\0');
+    hash.update(contents);
+    hash.update('\0');
+  }
+  return 'sha256:' + hash.digest('hex');
+}
+
 function createArtifactShell(directory, target = privateTarget) {
   writeFileSync(join(directory, 'index.html'), [
     '<!doctype html><html><head>',
@@ -700,6 +776,107 @@ describe('private artifact fonts', () => {
     writeFileSync(fontPath, Buffer.concat([readFileSync(fontPath), Buffer.from([0])]));
 
     expect(() => verifyPrivateArtifactManifest(directory, privateTarget)).toThrow(/digest/i);
+  });
+});
+
+describe('private artifact background', () => {
+  it('includes only the reviewed source bytes and binds them into the manifest digest', () => {
+    expect(Object.isFrozen(PRIVATE_BACKGROUND_ASSETS)).toBe(true);
+    expect(PRIVATE_BACKGROUND_ASSETS).toHaveLength(1);
+    expect(Object.isFrozen(PRIVATE_BACKGROUND_ASSETS[0])).toBe(true);
+    expect(PRIVATE_BACKGROUND_ASSETS[0]).toEqual({
+      name: 'pattern.svg',
+      size: 507515,
+      sha256: '1438ef595b769726f29bb0d2353e8fe41ce0df29309e83d017287800a774de77'
+    });
+
+    const directory = temporaryArtifact();
+    const outputPath = join(directory, 'assets/img/pattern.svg');
+    const manifest = JSON.parse(readFileSync(join(directory, 'mtproto-target.json'), 'utf8'));
+    expect(readFileSync(outputPath)).toEqual(safePrivateBackground);
+    expect(readdirSync(join(directory, 'assets/img'))).toEqual(['pattern.svg']);
+    expect(readdirSync(join(repositoryRoot, 'public/assets/img')).length).toBeGreaterThan(1);
+    expect(manifest.artifactDigest).toBe(recomputedArtifactDigest(directory));
+    expect(readFileSync(join(repositoryRoot, 'vite.config.ts'), 'utf8')).toMatch(/copyPublicDir:\s*false/);
+
+    const withoutBackground = mkdtempSync(join(tmpdir(), 'private-artifact-without-background-'));
+    temporaryDirectories.push(withoutBackground);
+    cpSync(directory, withoutBackground, {recursive: true});
+    rmSync(join(withoutBackground, 'assets/img/pattern.svg'));
+    expect(manifest.artifactDigest).not.toBe(recomputedArtifactDigest(withoutBackground));
+  });
+
+  it.each([
+    ['missing', {missingBackground: true}],
+    ['empty', {emptyBackground: true}],
+    ['changed', {changedBackground: true}],
+    ['symlinked', {symlinkBackground: true}],
+    ['non-regular', {directoryBackground: true}]
+  ])('rejects a %s source before emission', (_label, options) => {
+    const rootDirectory = privateBackgroundSourceRoot(options);
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-background-invalid-'));
+    temporaryDirectories.push(directory);
+
+    expect(() => includePrivateArtifactBackground(rootDirectory, directory)).toThrow(/background image/i);
+    expect(existsSync(join(directory, 'assets/img'))).toBe(false);
+  });
+
+  it('rejects a source directory reached through a symlinked ancestor', () => {
+    const rootDirectory = privateBackgroundSourceRootWithSymlinkedAncestor();
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-background-ancestor-output-'));
+    temporaryDirectories.push(directory);
+
+    expect(() => includePrivateArtifactBackground(rootDirectory, directory))
+    .toThrow(/background image source directory escapes the repository root/i);
+    expect(existsSync(join(directory, 'assets/img'))).toBe(false);
+  });
+
+  it('does not admit another image found in the public source directory', () => {
+    const rootDirectory = privateBackgroundSourceRoot({extraImage: true});
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-background-source-extra-'));
+    temporaryDirectories.push(directory);
+
+    includePrivateArtifactBackground(rootDirectory, directory);
+    expect(readdirSync(join(directory, 'assets/img'))).toEqual(['pattern.svg']);
+    expect(existsSync(join(directory, 'assets/img/x.svg'))).toBe(false);
+  });
+
+  it('rejects a symlinked output directory', () => {
+    const rootDirectory = privateBackgroundSourceRoot();
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-background-symlink-output-'));
+    const outsideDirectory = mkdtempSync(join(tmpdir(), 'private-artifact-background-symlink-target-'));
+    temporaryDirectories.push(directory, outsideDirectory);
+    mkdirSync(join(directory, 'assets'));
+    writeFileSync(join(outsideDirectory, 'x.svg'), '<svg/>');
+    symlinkSync(outsideDirectory, join(directory, 'assets/img'));
+
+    expect(() => includePrivateArtifactBackground(rootDirectory, directory)).toThrow(/background image/i);
+    expect(readdirSync(outsideDirectory)).toEqual(['x.svg']);
+  });
+
+  it('rejects a pre-populated output with an extra image without overwriting it', () => {
+    const rootDirectory = privateBackgroundSourceRoot();
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-background-extra-output-'));
+    temporaryDirectories.push(directory);
+    const imageDirectory = join(directory, 'assets/img');
+    mkdirSync(imageDirectory, {recursive: true});
+    writeFileSync(join(imageDirectory, 'x.svg'), 'keep this entry');
+
+    expect(() => includePrivateArtifactBackground(rootDirectory, directory)).toThrow(/background image/i);
+    expect(readFileSync(join(imageDirectory, 'x.svg'), 'utf8')).toBe('keep this entry');
+    expect(existsSync(join(imageDirectory, 'pattern.svg'))).toBe(false);
+  });
+
+  it('rejects an extra image planted before manifest verification audits the inventory', () => {
+    const directory = temporaryArtifact();
+    const manifestPath = join(directory, 'mtproto-target.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    writeFileSync(join(directory, 'assets/img/x.svg'), '<svg/>');
+    manifest.artifactDigest = recomputedArtifactDigest(directory);
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+
+    expect(() => verifyPrivateArtifactManifest(directory, privateTarget))
+    .toThrow(/background image output does not match the reviewed allowlist/i);
   });
 });
 
