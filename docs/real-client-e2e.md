@@ -2,9 +2,9 @@
 
 `pnpm run test:real-client` consumes a completed `server-ready` and `artifact-ready` pair from one foreground real-server fixture run. It checks the immutable harness, server and web pins, the fixture's protected synthetic credentials, isolation and audit evidence before driving the production UI. It requires all three scenarios: `sign-in,message,group`.
 
-The accepted positive inputs are harness `5f294c39abb32fc8ae15a4f7ccb085974098b320`, server `47daaaea5c71b859d9865c03cabb50da5a1a013b` and web `b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8`. Each run also has a fresh run ID, RSA public key and endpoint identity. Do not reuse readiness or artifacts from another run.
+The accepted positive inputs are harness `cacf3b7aa62d84eab08fa9d21f896f134a150f6b`, server `47daaaea5c71b859d9865c03cabb50da5a1a013b` and web `b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8`. Each run also has a fresh run ID, RSA public key and endpoint identity. Do not reuse readiness or artifacts from another run.
 
-The native arm64 fixture successor was accepted from server PR #499, merged as `b61fbe1a53348edd0039885fb4a4659e0dc455c0`. The executable harness pin remains the reviewed PR head `5f294c39abb32fc8ae15a4f7ccb085974098b320`; do not substitute the squash merge or moving main. The server-under-test and historical negative pair remain unchanged.
+The reviewed fixture successor adds the nine module-worker routes to the native arm64 harness. Keep the executable harness pin at `cacf3b7aa62d84eab08fa9d21f896f134a150f6b`; do not substitute a moving branch. The server-under-test and historical negative pair remain unchanged.
 
 ## Run the fixture
 
@@ -16,7 +16,7 @@ RUN_ID="$(openssl rand -hex 16)"
 READINESS_FILE="$(mktemp /dev/shm/real-client-readiness.XXXXXX)"
 chmod 600 "$READINESS_FILE"
 printf 'READINESS_FILE=%s\n' "$READINESS_FILE"
-test "$(git rev-parse HEAD)" = 5f294c39abb32fc8ae15a4f7ccb085974098b320
+test "$(git rev-parse HEAD)" = cacf3b7aa62d84eab08fa9d21f896f134a150f6b
 test -z "$(git status --porcelain --untracked-files=all)"
 bash test/e2e/real_server_fixture/run.sh \
   --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
@@ -63,7 +63,7 @@ Run from the checkout containing `test:real-client`, using the readiness file an
 ```sh
 corepack pnpm run test:real-client -- \
   --readiness-file "$READINESS_FILE" \
-  --harness-revision 5f294c39abb32fc8ae15a4f7ccb085974098b320 \
+  --harness-revision cacf3b7aa62d84eab08fa9d21f896f134a150f6b \
   --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
   --web-revision b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8 \
   --run-id "$RUN_ID" \
@@ -87,23 +87,26 @@ Each context reports one page, the shared-worker targets split by script and blo
 
 Failure categories are `script_load_failed`, `module_resolve_failed`, `module_fetch_failed`, `evaluation_exception`, `csp_blocked`, `destroyed_before_attach`, `no_failure_observed` and `unknown`, each in a separate `validated` or `unvalidated` state. Only a category with an exact browser signal is validated: the page's own worker-script fetch failure, a CSP-attributed block, a worker target destroyed before its session attached, and `no_failure_observed` under complete coverage. The remaining categories stay best-effort and never become a stated cause. `unknown` is a reportable answer, not a failure of the observer.
 
-Synthetic controls run in their own contexts against the fixture's own probe routes, before any application context, and the application scenarios start only when every control passes: a shared worker that is created, a shared-worker script that is missing, no construction at all, a worker target destroyed before its session attaches, an event stream that exceeds the bound, and more shared workers than the attached-target budget. A control that does not behave as specified blocks the application scenarios.
+Synthetic controls run in their own contexts against the fixture's own probe routes, before any application context, and the application scenarios start only when every control passes: a shared worker that is created, a shared-worker script that is missing, no construction at all, a worker target destroyed before its session attaches, an event stream that exceeds the bound, and more shared workers than the attached-target budget. Nine module-worker rows then check P-direct/P-rewrite acknowledgements, P-blob resolution failure, M-direct/M-rewrite fetch failure with worker error events, M-blob resolution failure without an `absent.js` request, and immediate evaluation exceptions for T-direct/T-rewrite/T-blob. Every row gets one fresh context and page. Any failed control blocks the application scenarios.
 
 Resource bounds are fixed: 16 attached targets, 512 counted events per context, 256 KiB per CDP message, 5 seconds per command. Reaching a bound closes the observer: counting, retention and classification stop, and the context reports `unknown` with a nonzero overflow flag and fails the run. The attached-target budget bounds protocol setup as well as a counter: a target that cannot be counted receives no enables and is released immediately. CDP methods are allowlisted per session role, including nested sends, so page and worker evaluation is never reachable. The report is a closed schema of allowlisted logical chunk names with content hashes stripped: no URL, credential, password, key, endpoint list, page text or free-form log line is ever serialized. A schema violation is serialized as `unclassified` and fails the run.
 
-The controls can be executed on their own, which is the only mode that does not require `artifact-ready`. `$SERVER_READY_FILE` holds the fixture's single `server-ready` line, written from the foreground fixture output:
+The controls can also run without application scenarios. Normal mode still requires all three scenarios. `--controls-only` reads a one-line `server-ready` file and does not read credential files or send account details to the browser. It creates only the six existing observer-control contexts and nine module-control contexts; no app context, screenshot or scenario is created. Keep the fixture foreground process open while the command runs. After `artifact-ready` is written to `$READINESS_FILE`, make a private one-line server readiness file:
 
 ```sh
+SERVER_READY_FILE="$(mktemp /dev/shm/real-client-server-ready.XXXXXX)"
+chmod 600 "$SERVER_READY_FILE"
+jq -ec 'select(.event == "server-ready")' "$READINESS_FILE" > "$SERVER_READY_FILE"
 corepack pnpm run test:real-client -- \
   --readiness-file "$SERVER_READY_FILE" \
-  --harness-revision 5f294c39abb32fc8ae15a4f7ccb085974098b320 \
+  --harness-revision cacf3b7aa62d84eab08fa9d21f896f134a150f6b \
   --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
   --web-revision b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8 \
   --run-id "$RUN_ID" \
-  --observer-controls-only
+  --controls-only
 ```
 
-That run touches no application context, captures no screenshot and reads no artifact: it emits `mode: observer_controls` with the observation block, and the fixture lifecycle and its owned cleanup stay the same.
+The output contains the nine sanitized row/category/truth results, run-local validation flags, bounded attempt counts by fixed probe label, immutable pins and `cleanup: verified`. The module rows must match their exact page and worker request sets, categories and DOM acknowledgement truth. `module_resolve_failed`, `module_fetch_failed` and `evaluation_exception` remain permanently `unvalidated` in the passive observer; a passing control only validates its row for that run. No exception, import path, URL, blob identifier, target ID, context ID, stack or raw capture is serialized. Any probe route used by an application context, missing positive-control acknowledgement, unknown failure result, incomplete coverage, or request mismatch fails before app contexts. After the command succeeds or fails, send `stop` to the fixture and wait for owned cleanup; remove `$SERVER_READY_FILE` along with the other temporary files.
 
 ## Historical negative pair
 

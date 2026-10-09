@@ -80,6 +80,15 @@ const FAILURE_PRECEDENCE = Object.freeze([
   'destroyed_before_attach',
   'unknown'
 ]);
+const MODULE_CONTROL_FAILURE_PRECEDENCE = Object.freeze([
+  'csp_blocked',
+  'module_resolve_failed',
+  'module_fetch_failed',
+  'evaluation_exception',
+  'script_load_failed',
+  'destroyed_before_attach',
+  'unknown'
+]);
 
 // The artifact's own worker chunks, addressed by name with the hash stripped.
 const WORKER_CHUNK_PATTERNS = Object.freeze([
@@ -91,12 +100,40 @@ const WORKER_CHUNK_PATTERNS = Object.freeze([
   {label: 'tinyld_worker', pattern: /^\/tinyld\.worker-[0-9a-zA-Z_-]{8}\.js$/},
   {label: 'compositor_worker', pattern: /^\/compositor\.worker-[0-9a-zA-Z_-]{8}\.js$/},
   {label: 'service_worker', pattern: /^\/sw-[0-9a-zA-Z_-]{8}\.js$/},
+  {label: 'probe_module_index', pattern: /^\/_fixture_probe\/module\/index\.html$/},
+  {label: 'probe_module_driver', pattern: /^\/_fixture_probe\/module\/driver\.js$/},
+  {label: 'probe_module_ok', pattern: /^\/_fixture_probe\/module\/ok\.js$/},
+  {label: 'probe_module_dep', pattern: /^\/_fixture_probe\/module\/dep\.js$/},
+  {label: 'probe_module_missing_import', pattern: /^\/_fixture_probe\/module\/missing-import\.js$/},
+  {label: 'probe_module_absent', pattern: /^\/_fixture_probe\/module\/absent\.js$/},
+  {label: 'probe_module_throw', pattern: /^\/_fixture_probe\/module\/throw\.js$/},
   {label: 'probe_shared_worker', pattern: /^\/_fixture_probe\/shared-worker\.js$/},
   {label: 'probe_missing_script', pattern: /^\/_fixture_probe\/missing\.js$/}
 ]);
 
 const ORIGIN_CLASSES = Object.freeze(['blob_same_origin', 'other_same_origin', 'cross_origin']);
 const WORKER_SOURCE_LABELS = Object.freeze([...new Set([...WORKER_CHUNK_PATTERNS.map((entry) => entry.label), ...ORIGIN_CLASSES])]);
+const MODULE_PROBE_RESOURCE_LABELS = Object.freeze([
+  'probe_module_index',
+  'probe_module_driver',
+  'probe_module_ok',
+  'probe_module_dep',
+  'probe_module_missing_import',
+  'probe_module_absent',
+  'probe_module_throw'
+]);
+const MODULE_PROBE_ATTEMPT_SOURCES = Object.freeze(['page', 'shared_worker', 'worker']);
+const MODULE_CONTROL_TRUTHS = Object.freeze(['ack', 'non_ack', 'worker_error_event', 'no_ack', 'unknown']);
+const PROBE_RESOURCE_PATTERNS = Object.freeze([
+  {label: 'probe_page', pattern: /^\/_fixture_probe\/$/},
+  {label: 'probe_shared_worker', pattern: /^\/_fixture_probe\/shared-worker\.js$/},
+  {label: 'probe_missing_script', pattern: /^\/_fixture_probe\/missing\.js$/},
+  ...MODULE_PROBE_RESOURCE_LABELS.map((label) => ({
+    label,
+    pattern: WORKER_CHUNK_PATTERNS.find((entry) => entry.label === label).pattern
+  }))
+]);
+const FIXTURE_PROBE_PREFIX = '/_fixture_probe/';
 
 const UNCLASSIFIED_NETWORK_BLOCK = Object.freeze({classification: 'unclassified'});
 
@@ -108,6 +145,29 @@ function allowCdpMethod(scope, method) {
 function labelForPathname(pathname) {
   const match = WORKER_CHUNK_PATTERNS.find((entry) => entry.pattern.test(pathname));
   return match ? match.label : null;
+}
+
+function classifyProbeResource(url, origin = PRIVATE_CSP_ORIGIN) {
+  if(typeof url !== 'string' || !url) return null;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch{
+    return null;
+  }
+  if(parsed.origin !== origin) return null;
+  const match = PROBE_RESOURCE_PATTERNS.find((entry) => entry.pattern.test(parsed.pathname));
+  return match ? match.label : null;
+}
+
+function isFixtureProbeURL(url, origin = PRIVATE_CSP_ORIGIN) {
+  if(typeof url !== 'string' || !url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === origin && parsed.pathname.startsWith(FIXTURE_PROBE_PREFIX);
+  } catch{
+    return false;
+  }
 }
 
 // A worker source becomes a logical name, never a URL: the hash and the query
@@ -171,6 +231,17 @@ function classifyWorkerLogEntry(entry, isBlobWorker) {
   return null;
 }
 
+function classifyWorkerException(params, isBlobWorker) {
+  const details = params?.exceptionDetails;
+  if(!details || typeof details !== 'object') return 'evaluation_exception';
+  const text = [details.text, details.exception?.description]
+  .filter((value) => typeof value === 'string')
+  .map((value) => value.slice(0, 512))
+  .join('\n');
+  if(isBlobWorker && /Failed to resolve module specifier\b/.test(text)) return 'module_resolve_failed';
+  return 'evaluation_exception';
+}
+
 function isWorkerScriptType(type) {
   return type === 'Script' || type === 'Worker' || type === 'SharedWorker' || type === 'ServiceWorker';
 }
@@ -181,10 +252,11 @@ function statusCategory(status) {
   return 'ok';
 }
 
-function createTargetRecord(source, targetId, sequence) {
+function createTargetRecord(source, targetInfo, sequence) {
   return {
-    targetId,
+    targetId: targetInfo.targetId,
     registeredSequence: sequence,
+    type: targetInfo.type,
     label: source.label,
     originClass: source.originClass,
     isBlob: source.isBlob,
@@ -210,6 +282,9 @@ function createContextObserver(name, options = {}) {
   const dedicatedWorkerTargetIds = new Set();
   const workerSourceLabels = new Set();
   const requestLabels = new Map();
+  const moduleProbeAttempts = Object.fromEntries(MODULE_PROBE_RESOURCE_LABELS.map((label) => [label,
+    Object.fromEntries(MODULE_PROBE_ATTEMPT_SOURCES.map((source) => [source, 0]))
+  ]));
 
   const state = {
     countedEvents: 0,
@@ -266,6 +341,17 @@ function createContextObserver(name, options = {}) {
     if(typeof category === 'string' && WORKER_FAILURE_STATES.includes(category)) state.failures.add(category);
   }
 
+  function noteModuleProbeAttempt(url, source) {
+    const label = classifyProbeResource(url);
+    if(!label || !Object.hasOwn(moduleProbeAttempts, label) || !MODULE_PROBE_ATTEMPT_SOURCES.includes(source)) return;
+    const count = moduleProbeAttempts[label][source];
+    if(count >= LIMITS.countedEventsPerContext) {
+      recordOverflow();
+      return;
+    }
+    moduleProbeAttempts[label][source]++;
+  }
+
   function classifySharedTarget(targetInfo) {
     const source = classifyWorkerSource(targetInfo.url);
     const existing = targets.get(targetInfo.targetId);
@@ -283,7 +369,7 @@ function createContextObserver(name, options = {}) {
       }
       return existing;
     }
-    const record = createTargetRecord(source, targetInfo.targetId, state.sequence);
+    const record = createTargetRecord(source, targetInfo, state.sequence);
     targets.set(targetInfo.targetId, record);
     workerSourceLabels.add(record.label);
     if(record.isBlob) blobSharedWorkerTargetIds.add(targetInfo.targetId);
@@ -368,6 +454,10 @@ function createContextObserver(name, options = {}) {
     if(!countEvent()) return;
     const record = targets.get(targetId);
     if(!record) return;
+    if(method === 'Network.requestWillBeSent') {
+      noteModuleProbeAttempt(params?.request?.url, record.type === 'shared_worker' ? 'shared_worker' : 'worker');
+      return;
+    }
     if(method === 'Log.entryAdded') {
       const category = classifyWorkerLogEntry(params?.entry, record.isBlob);
       if(category) {
@@ -377,8 +467,9 @@ function createContextObserver(name, options = {}) {
       return;
     }
     if(method === 'Runtime.exceptionThrown') {
-      record.failures.add('evaluation_exception');
-      addFailure('evaluation_exception');
+      const category = classifyWorkerException(params, record.isBlob);
+      record.failures.add(category);
+      addFailure(category);
       return;
     }
     if(method === 'Network.loadingFailed') {
@@ -391,8 +482,9 @@ function createContextObserver(name, options = {}) {
     if(method === 'Network.responseReceived') {
       const status = params?.response?.status;
       if(isWorkerScriptType(params?.type) && typeof status === 'number' && status >= 400) {
-        record.failures.add('script_load_failed');
-        addFailure('script_load_failed');
+        const category = record.isBlob ? 'module_fetch_failed' : 'script_load_failed';
+        record.failures.add(category);
+        addFailure(category);
       }
       return;
     }
@@ -419,6 +511,7 @@ function createContextObserver(name, options = {}) {
   function notePageEvent(method, params) {
     if(!countEvent()) return;
     if(method === 'Network.requestWillBeSent') {
+      noteModuleProbeAttempt(params?.request?.url, 'page');
       const source = classifyWorkerSource(params?.request?.url);
       const requestId = params?.requestId;
       if(source.label === 'mtproto_worker') {
@@ -522,7 +615,8 @@ function createContextObserver(name, options = {}) {
   }
 
   function classifyFailure() {
-    for(const category of FAILURE_PRECEDENCE) {
+    const precedence = control ? MODULE_CONTROL_FAILURE_PRECEDENCE : FAILURE_PRECEDENCE;
+    for(const category of precedence) {
       if(state.failures.has(category)) return category;
     }
     if(targets.size > 0) return [...targets.values()].some((record) => record.crashed) ? 'unknown' : 'no_failure_observed';
@@ -539,6 +633,7 @@ function createContextObserver(name, options = {}) {
       serviceWorkerTargets: serviceWorkerTargetIds.size,
       dedicatedWorkerTargets: dedicatedWorkerTargetIds.size,
       workerSourceChunks: [...workerSourceLabels].sort(),
+      moduleProbeAttempts: Object.fromEntries(MODULE_PROBE_RESOURCE_LABELS.map((label) => [label, {...moduleProbeAttempts[label]}])),
       mtprotoSourceChunk: state.mtprotoSourceChunk,
       mtprotoSourceFetch: state.mtprotoSourceFetch,
       sharedWorkerState: classifySharedWorker(),
@@ -598,6 +693,7 @@ const CONTEXT_SCHEMA = Object.freeze({
   serviceWorkerTargets: {kind: 'count', max: LIMITS.countedEventsPerContext},
   dedicatedWorkerTargets: {kind: 'count', max: LIMITS.countedEventsPerContext},
   workerSourceChunks: {kind: 'labels', values: WORKER_SOURCE_LABELS},
+  moduleProbeAttempts: {kind: 'moduleAttempts'},
   mtprotoSourceChunk: {kind: 'enum', values: Object.freeze(['none', 'mtproto_worker'])},
   mtprotoSourceFetch: {kind: 'enum', values: SOURCE_FETCH_STATES},
   sharedWorkerState: {kind: 'enum', values: SHARED_WORKER_STATES},
@@ -616,6 +712,26 @@ const CONTEXT_KEYS = Object.freeze(Object.keys(CONTEXT_SCHEMA));
 
 const CONTROL_SCHEMA = Object.freeze({...CONTEXT_SCHEMA, expected: {kind: 'enum', values: Object.freeze(['pass', 'fail'])}});
 const CONTROL_KEYS = Object.freeze(Object.keys(CONTROL_SCHEMA));
+const MODULE_CONTROL_ROW_SCHEMA = Object.freeze({
+  category: {kind: 'enum', values: WORKER_FAILURE_STATES},
+  truth: {kind: 'enum', values: MODULE_CONTROL_TRUTHS},
+  validated: {kind: 'boolean'},
+  attemptsByResource: {kind: 'moduleAttempts'},
+  expectedAttempts: {kind: 'count', max: 1_000_000},
+  observedAttempts: {kind: 'count', max: 1_000_000},
+  unexpectedAttempts: {kind: 'count', max: 1_000_000},
+  foreignTargets: {kind: 'count', max: 1_000_000},
+  contextlessTargets: {kind: 'count', max: 1_000_000},
+  appContextlessTargets: {kind: 'count', max: 1_000_000},
+  pageTargets: {kind: 'count', max: 8},
+  sharedWorkerTargets: {kind: 'count', max: LIMITS.countedEventsPerContext},
+  discoveryActive: {kind: 'flag'},
+  pageCoverageComplete: {kind: 'flag'},
+  coverageComplete: {kind: 'flag'},
+  observerOverflow: {kind: 'flag'},
+  observerErrors: {kind: 'count', max: 4096}
+});
+const MODULE_CONTROL_ROW_KEYS = Object.freeze(Object.keys(MODULE_CONTROL_ROW_SCHEMA));
 
 const NETWORK_KEYS = Object.freeze([
   'unexpectedAttempts',
@@ -628,7 +744,8 @@ const NETWORK_KEYS = Object.freeze([
   'observerOverflow',
   'countedEvents',
   'contexts',
-  'controls'
+  'controls',
+  'moduleRows'
 ]);
 
 function isCount(value, max) {
@@ -643,7 +760,9 @@ function validateContextBlock(block, schema, keys) {
     const value = block[key];
     if(rule.kind === 'count' && !isCount(value, rule.max)) return `context_${key}`;
     if(rule.kind === 'flag' && !FLAG_VALUES.includes(value)) return `context_${key}`;
+    if(rule.kind === 'boolean' && typeof value !== 'boolean') return `context_${key}`;
     if(rule.kind === 'enum' && !rule.values.includes(value)) return `context_${key}`;
+    if(rule.kind === 'moduleAttempts' && validateModuleProbeAttempts(value)) return `context_${key}`;
     if(rule.kind === 'labels') {
       if(!Array.isArray(value)) return `context_${key}`;
       const seen = new Set();
@@ -654,6 +773,24 @@ function validateContextBlock(block, schema, keys) {
     }
   }
   return null;
+}
+
+function validateModuleProbeAttempts(value) {
+  if(!value || typeof value !== 'object' || Array.isArray(value) ||
+      JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...MODULE_PROBE_RESOURCE_LABELS].sort())) return 'module_attempts_shape';
+  for(const label of MODULE_PROBE_RESOURCE_LABELS) {
+    const sourceCounts = value[label];
+    if(!sourceCounts || typeof sourceCounts !== 'object' || Array.isArray(sourceCounts) ||
+        JSON.stringify(Object.keys(sourceCounts).sort()) !== JSON.stringify([...MODULE_PROBE_ATTEMPT_SOURCES].sort())) return 'module_attempt_sources';
+    for(const source of MODULE_PROBE_ATTEMPT_SOURCES) {
+      if(!isCount(sourceCounts[source], LIMITS.countedEventsPerContext)) return 'module_attempt_count';
+    }
+  }
+  return null;
+}
+
+function validateModuleControlRow(row) {
+  return validateContextBlock(row, MODULE_CONTROL_ROW_SCHEMA, MODULE_CONTROL_ROW_KEYS);
 }
 
 // The emit-time validator. Any value outside the closed schema makes the whole
@@ -672,6 +809,7 @@ function validateNetworkBlock(block) {
   if(!isCount(block.countedEvents, 1_000_000)) return 'network_countedEvents';
   if(!block.contexts || typeof block.contexts !== 'object' || Array.isArray(block.contexts)) return 'network_contexts_shape';
   if(!block.controls || typeof block.controls !== 'object' || Array.isArray(block.controls)) return 'network_controls_shape';
+  if(!block.moduleRows || typeof block.moduleRows !== 'object' || Array.isArray(block.moduleRows)) return 'network_moduleRows_shape';
   for(const [name, context] of Object.entries(block.contexts)) {
     if(!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) return 'network_context_name';
     const failure = validateContextBlock(context, CONTEXT_SCHEMA, CONTEXT_KEYS);
@@ -680,6 +818,11 @@ function validateNetworkBlock(block) {
   for(const [name, control] of Object.entries(block.controls)) {
     if(/^[a-z][a-z0-9_-]{0,31}$/.test(name) === false) return 'network_control_name';
     const failure = validateContextBlock(control, CONTROL_SCHEMA, CONTROL_KEYS);
+    if(failure) return `${name}:${failure}`;
+  }
+  for(const [name, row] of Object.entries(block.moduleRows)) {
+    if(!Object.hasOwn(MODULE_CONTROL_EXPECTATIONS, name)) return 'network_module_control_name';
+    const failure = validateModuleControlRow(row);
     if(failure) return `${name}:${failure}`;
   }
   return null;
@@ -694,6 +837,152 @@ const CONTROL_EXPECTATIONS = Object.freeze({
   c5_attach_budget: (block) => block.observerOverflow === 1 && block.sharedWorkerState === 'unknown' &&
     block.attachedTargets === LIMITS.attachedTargets
 });
+
+function makeModuleProbeAttempts(page = [], sharedWorker = [], worker = []) {
+  const attempts = Object.fromEntries(MODULE_PROBE_RESOURCE_LABELS.map((label) => [label, {page: 0, shared_worker: 0, worker: 0}]));
+  for(const label of page) attempts[label].page++;
+  for(const label of sharedWorker) attempts[label].shared_worker++;
+  for(const label of worker) attempts[label].worker++;
+  return Object.freeze(Object.fromEntries(MODULE_PROBE_RESOURCE_LABELS.map((label) => [label, Object.freeze(attempts[label])])));
+}
+
+const MODULE_CONTROL_EXPECTATIONS = Object.freeze({
+  'P-direct': Object.freeze({
+    categories: Object.freeze(['no_failure_observed']),
+    truth: 'ack',
+    attempts: makeModuleProbeAttempts(['probe_module_index', 'probe_module_driver', 'probe_module_ok'], ['probe_module_dep'])
+  }),
+  'P-rewrite': Object.freeze({
+    categories: Object.freeze(['no_failure_observed']),
+    truth: 'ack',
+    attempts: makeModuleProbeAttempts(['probe_module_index', 'probe_module_driver', 'probe_module_ok'], ['probe_module_dep'])
+  }),
+  'P-blob': Object.freeze({
+    categories: Object.freeze(['module_resolve_failed']),
+    truth: 'non_ack',
+    attempts: makeModuleProbeAttempts(['probe_module_index', 'probe_module_driver', 'probe_module_ok'])
+  }),
+  'M-direct': Object.freeze({
+    categories: Object.freeze(['script_load_failed', 'module_fetch_failed', 'destroyed_before_attach']),
+    truth: 'worker_error_event',
+    attempts: makeModuleProbeAttempts(['probe_module_index', 'probe_module_driver', 'probe_module_missing_import'], ['probe_module_absent'])
+  }),
+  'M-rewrite': Object.freeze({
+    categories: Object.freeze(['module_fetch_failed']),
+    truth: 'worker_error_event',
+    attempts: makeModuleProbeAttempts(['probe_module_index', 'probe_module_driver', 'probe_module_missing_import'], ['probe_module_absent'])
+  }),
+  'M-blob': Object.freeze({
+    categories: Object.freeze(['module_resolve_failed']),
+    truth: 'non_ack',
+    attempts: makeModuleProbeAttempts(['probe_module_index', 'probe_module_driver', 'probe_module_missing_import'])
+  }),
+  'T-direct': Object.freeze({
+    categories: Object.freeze(['evaluation_exception']),
+    truth: 'no_ack',
+    attempts: makeModuleProbeAttempts(['probe_module_index', 'probe_module_driver', 'probe_module_throw'])
+  }),
+  'T-rewrite': Object.freeze({
+    categories: Object.freeze(['evaluation_exception']),
+    truth: 'no_ack',
+    attempts: makeModuleProbeAttempts(['probe_module_index', 'probe_module_driver', 'probe_module_throw'])
+  }),
+  'T-blob': Object.freeze({
+    categories: Object.freeze(['evaluation_exception']),
+    truth: 'no_ack',
+    attempts: makeModuleProbeAttempts(['probe_module_index', 'probe_module_driver', 'probe_module_throw'])
+  })
+});
+
+function emptyModuleProbeAttempts() {
+  return Object.fromEntries(MODULE_PROBE_RESOURCE_LABELS.map((label) => [label,
+    Object.fromEntries(MODULE_PROBE_ATTEMPT_SOURCES.map((source) => [source, 0]))
+  ]));
+}
+
+function sanitizeModuleProbeAttempts(value) {
+  const attempts = emptyModuleProbeAttempts();
+  if(!value || typeof value !== 'object' || Array.isArray(value) ||
+      JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...MODULE_PROBE_RESOURCE_LABELS].sort())) {
+    return {attempts, valid: false};
+  }
+  let valid = true;
+  for(const label of MODULE_PROBE_RESOURCE_LABELS) {
+    const sourceCounts = value[label];
+    if(!sourceCounts || typeof sourceCounts !== 'object' || Array.isArray(sourceCounts) ||
+        JSON.stringify(Object.keys(sourceCounts).sort()) !== JSON.stringify([...MODULE_PROBE_ATTEMPT_SOURCES].sort())) {
+      valid = false;
+      continue;
+    }
+    for(const source of MODULE_PROBE_ATTEMPT_SOURCES) {
+      const count = sourceCounts[source];
+      if(!isCount(count, LIMITS.countedEventsPerContext)) {
+        valid = false;
+        continue;
+      }
+      attempts[label][source] = count;
+    }
+  }
+  return {attempts, valid};
+}
+
+function safeEvidenceCount(value, max = 1_000_000) {
+  return isCount(value, max) ? {value, valid: true} : {value: 0, valid: false};
+}
+
+function moduleAttemptTotal(attempts) {
+  return MODULE_PROBE_RESOURCE_LABELS.reduce((total, label) =>
+    total + MODULE_PROBE_ATTEMPT_SOURCES.reduce((sourceTotal, source) => sourceTotal + attempts[label][source], 0), 0);
+}
+
+function evaluateModuleControl(name, evidence) {
+  const expectation = MODULE_CONTROL_EXPECTATIONS[name];
+  const category = WORKER_FAILURE_STATES.includes(evidence?.category) ? evidence.category : 'unknown';
+  const rawTruth = MODULE_CONTROL_TRUTHS.includes(evidence?.truth) ? evidence.truth : 'unknown';
+  const truth = expectation?.truth === 'non_ack' && ['non_ack', 'worker_error_event', 'no_ack'].includes(rawTruth) ? 'non_ack' :
+    expectation?.truth === 'no_ack' && rawTruth === 'worker_error_event' ? 'no_ack' : rawTruth;
+  const attemptResult = sanitizeModuleProbeAttempts(evidence?.attemptsByResource);
+  const countNames = [
+    'unexpectedAttempts',
+    'foreignTargets',
+    'contextlessTargets',
+    'appContextlessTargets',
+    'pageTargets',
+    'sharedWorkerTargets',
+    'observerErrors'
+  ];
+  const counts = {};
+  let countsValid = true;
+  for(const key of countNames) {
+    const result = safeEvidenceCount(evidence?.[key], key === 'observerErrors' ? 4096 : 1_000_000);
+    counts[key] = result.value;
+    if(!result.valid) countsValid = false;
+  }
+  const flags = {};
+  for(const key of ['discoveryActive', 'pageCoverageComplete', 'coverageComplete', 'observerOverflow']) {
+    const value = evidence?.[key];
+    flags[key] = value === 0 || value === 1 ? value : 0;
+    if(value !== 0 && value !== 1) countsValid = false;
+  }
+  const expectedAttempts = expectation ? moduleAttemptTotal(expectation.attempts) : 0;
+  const observedAttempts = moduleAttemptTotal(attemptResult.attempts);
+  const exactAttempts = expectation && JSON.stringify(attemptResult.attempts) === JSON.stringify(expectation.attempts);
+  const validated = Boolean(expectation && expectation.categories.includes(category) && truth === expectation.truth &&
+    attemptResult.valid && exactAttempts && countsValid && counts.pageTargets === 1 && counts.sharedWorkerTargets === 1 &&
+    counts.unexpectedAttempts === 0 && counts.foreignTargets === 0 && counts.contextlessTargets === 0 &&
+    counts.appContextlessTargets === 0 && counts.observerErrors === 0 && flags.discoveryActive === 1 &&
+    flags.pageCoverageComplete === 1 && flags.coverageComplete === 1 && flags.observerOverflow === 0);
+  return {
+    category,
+    truth,
+    validated,
+    attemptsByResource: attemptResult.attempts,
+    expectedAttempts,
+    observedAttempts,
+    ...counts,
+    ...flags
+  };
+}
 
 function evaluateControl(name, block) {
   const expectation = CONTROL_EXPECTATIONS[name];
@@ -710,6 +999,10 @@ module.exports = {
   CONTEXT_KEYS,
   CONTEXT_SCHEMA,
   CONTROL_EXPECTATIONS,
+  MODULE_CONTROL_EXPECTATIONS,
+  MODULE_CONTROL_TRUTHS,
+  MODULE_PROBE_ATTEMPT_SOURCES,
+  MODULE_PROBE_RESOURCE_LABELS,
   CONTROL_KEYS,
   CONTROL_SCHEMA,
   LIMITS,
@@ -727,10 +1020,13 @@ module.exports = {
   WORKER_FAILURE_STATES,
   WORKER_SOURCE_LABELS,
   allowCdpMethod,
+  classifyProbeResource,
   classifyWorkerLogEntry,
   classifyWorkerSource,
+  isFixtureProbeURL,
   createContextObserver,
   evaluateControl,
+  evaluateModuleControl,
   isWorkerScriptType,
   labelForPathname,
   validateContextBlock,
