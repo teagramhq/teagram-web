@@ -16,6 +16,7 @@ import {afterAll, describe, expect, it, vi} from 'vitest';
 import * as mtprotoTarget from './mtproto-target.mjs';
 import {
   auditPrivateArtifact,
+  includePrivateArtifactBackground,
   includePrivateArtifactFonts,
   verifyPrivateArtifactCsp,
   writePrivateArtifactManifest
@@ -386,6 +387,7 @@ describe('MTProto build target', () => {
     writeFileSync(join(outputDirectory, 'client.js'),
       `const endpoint = ${JSON.stringify(endpoint)};\nconst fingerprint = ${JSON.stringify(target.fingerprint)};\n`);
     includePrivateArtifactFonts(resolve('.'), outputDirectory);
+    includePrivateArtifactBackground(resolve('.'), outputDirectory);
 
     expect(() => auditPrivateArtifact(outputDirectory, target)).not.toThrow();
   });
@@ -471,6 +473,7 @@ describe('MTProto build target', () => {
     ].join('\n'));
     writeArtifactFile(outputDirectory, 'assets/app.css', 'content: "https://web.telegram.org/a/";');
     includePrivateArtifactFonts(resolve('.'), outputDirectory);
+    includePrivateArtifactBackground(resolve('.'), outputDirectory);
 
     expect(() => auditPrivateArtifact(outputDirectory, target)).not.toThrow();
   });

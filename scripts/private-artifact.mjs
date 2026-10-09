@@ -54,6 +54,15 @@ const PRIVATE_FONT_ASSET_SET = new Set(PRIVATE_FONT_ASSETS);
 const PRIVATE_FONT_NAME_PATTERN = /^[A-Za-z0-9_-]+\.(?:woff2|woff|ttf)$/;
 const PRIVATE_FONT_SOURCE_DIRECTORY = 'public/assets/fonts';
 const PRIVATE_FONT_SVG_SHA256 = '22059cf81a0302ce3c7943e5e5325316ac7a8ac18099b515200efbb93938a505';
+export const PRIVATE_BACKGROUND_ASSETS = Object.freeze([
+  Object.freeze({
+    name: 'pattern.svg',
+    size: 507515,
+    sha256: '1438ef595b769726f29bb0d2353e8fe41ce0df29309e83d017287800a774de77'
+  })
+]);
+const PRIVATE_BACKGROUND_ASSET_SET = new Set(PRIVATE_BACKGROUND_ASSETS.map(({name}) => name));
+const PRIVATE_BACKGROUND_SOURCE_DIRECTORY = 'public/assets/img';
 
 const PRIVATE_ROUTE_LOCK = {
   mode: 'private',
@@ -113,13 +122,13 @@ function assertSafePrivateFontSvg(contents) {
   }
 }
 
-function ensurePrivateArtifactDirectory(directory) {
+function ensurePrivateArtifactDirectory(directory, assetType = 'font') {
   if(!existsSync(directory)) {
     mkdirSync(directory);
   }
   const stats = lstatSync(directory);
   if(stats.isSymbolicLink() || !stats.isDirectory()) {
-    invalidArtifact('font output path contains a non-directory entry');
+    invalidArtifact(`${assetType} output path contains a non-directory entry`);
   }
 }
 
@@ -207,6 +216,112 @@ export function includePrivateArtifactFonts(rootDirectory, directory) {
   }
 }
 
+function assertPrivateBackgroundAsset(contents) {
+  const [{name, size, sha256}] = PRIVATE_BACKGROUND_ASSETS;
+  const digest = createHash('sha256').update(contents).digest('hex');
+  if(contents.length !== size || digest !== sha256) {
+    invalidArtifact(`background image ${name} does not match the pinned reviewed bytes`);
+  }
+}
+
+function readRequiredPrivateBackground(sourceDirectory, canonicalSourceDirectory, name) {
+  if(!PRIVATE_BACKGROUND_ASSET_SET.has(name) || name.includes('/') || name.includes('\\')) {
+    invalidArtifact('background image name is invalid or unreviewed');
+  }
+  const file = resolve(sourceDirectory, name);
+  if(dirname(file) !== resolve(sourceDirectory)) {
+    invalidArtifact('background image path escapes the approved directory');
+  }
+
+  let stats;
+  try {
+    stats = lstatSync(file);
+  } catch(cause) {
+    if(cause?.code === 'ENOENT') {
+      invalidArtifact(`required background image ${name} is missing`);
+    }
+    throw cause;
+  }
+  if(stats.isSymbolicLink() || !stats.isFile() || stats.size === 0) {
+    invalidArtifact(`required background image ${name} is empty or not a regular file`);
+  }
+  accessSync(file, constants.R_OK);
+  const canonicalFile = realpathSync(file);
+  if(dirname(canonicalFile) !== canonicalSourceDirectory || canonicalFile !== resolve(canonicalSourceDirectory, name)) {
+    invalidArtifact('background image path escapes the approved directory');
+  }
+
+  const contents = readFileSync(file);
+  if(contents.length === 0) {
+    invalidArtifact(`required background image ${name} is empty`);
+  }
+  assertPrivateBackgroundAsset(contents);
+  return contents;
+}
+
+function privateArtifactBackgroundDirectory(directory) {
+  const artifactDirectory = resolve(directory);
+  const assetsDirectory = resolve(artifactDirectory, 'assets');
+  const imageDirectory = resolve(assetsDirectory, 'img');
+  ensurePrivateArtifactDirectory(artifactDirectory, 'background image');
+  ensurePrivateArtifactDirectory(assetsDirectory, 'background image');
+  ensurePrivateArtifactDirectory(imageDirectory, 'background image');
+  return imageDirectory;
+}
+
+export function includePrivateArtifactBackground(rootDirectory, directory) {
+  if(PRIVATE_BACKGROUND_ASSETS.length !== 1 || PRIVATE_BACKGROUND_ASSET_SET.size !== 1 ||
+    PRIVATE_BACKGROUND_ASSETS[0].name !== 'pattern.svg') {
+    invalidArtifact('background image allowlist is invalid');
+  }
+
+  const sourceDirectory = resolve(rootDirectory, PRIVATE_BACKGROUND_SOURCE_DIRECTORY);
+  let sourceDirectoryStats;
+  try {
+    sourceDirectoryStats = lstatSync(sourceDirectory);
+  } catch(cause) {
+    if(cause?.code === 'ENOENT') {
+      invalidArtifact('approved background image source directory is missing or invalid');
+    }
+    throw cause;
+  }
+  if(sourceDirectoryStats.isSymbolicLink() || !sourceDirectoryStats.isDirectory()) {
+    invalidArtifact('approved background image source directory is missing or invalid');
+  }
+  const canonicalRootDirectory = realpathSync(rootDirectory);
+  const canonicalSourceDirectory = realpathSync(sourceDirectory);
+  if(canonicalSourceDirectory !== resolve(canonicalRootDirectory, PRIVATE_BACKGROUND_SOURCE_DIRECTORY)) {
+    invalidArtifact('approved background image source directory escapes the repository root');
+  }
+  const contents = PRIVATE_BACKGROUND_ASSETS.map(({name}) => [
+    name,
+    readRequiredPrivateBackground(sourceDirectory, canonicalSourceDirectory, name)
+  ]);
+  const imageDirectory = privateArtifactBackgroundDirectory(directory);
+  const existingEntries = readdirSync(imageDirectory, {withFileTypes: true});
+  for(const entry of existingEntries) {
+    if(!PRIVATE_BACKGROUND_ASSET_SET.has(entry.name) || !entry.isFile()) {
+      invalidArtifact('background image output contains an unreviewed or non-regular entry');
+    }
+  }
+
+  const existingNames = new Set(existingEntries.map((entry) => entry.name));
+  for(const [name, bytes] of contents) {
+    const outputPath = resolve(imageDirectory, name);
+    if(dirname(outputPath) !== imageDirectory) {
+      invalidArtifact('background image output path escapes the artifact directory');
+    }
+    if(existingNames.has(name)) {
+      const outputStats = lstatSync(outputPath);
+      if(outputStats.isSymbolicLink() || !outputStats.isFile() || !readFileSync(outputPath).equals(bytes)) {
+        invalidArtifact('existing background image output does not match its approved source');
+      }
+      continue;
+    }
+    writeFileSync(outputPath, bytes, {flag: 'wx'});
+  }
+}
+
 function auditPrivateArtifactFonts(directory) {
   const fontsDirectory = resolve(directory, 'assets', 'fonts');
   const stats = lstatSync(fontsDirectory);
@@ -235,6 +350,39 @@ function auditPrivateArtifactFonts(directory) {
     if(name === 'tgico.svg') {
       assertSafePrivateFontSvg(contents);
     }
+  }
+}
+
+function auditPrivateArtifactBackground(directory) {
+  const imageDirectory = resolve(directory, 'assets', 'img');
+  let stats;
+  try {
+    stats = lstatSync(imageDirectory);
+  } catch(cause) {
+    if(cause?.code === 'ENOENT') {
+      invalidArtifact('background image output directory is missing or invalid');
+    }
+    throw cause;
+  }
+  if(stats.isSymbolicLink() || !stats.isDirectory()) {
+    invalidArtifact('background image output directory is missing or invalid');
+  }
+
+  const entries = readdirSync(imageDirectory, {withFileTypes: true});
+  if(entries.length !== PRIVATE_BACKGROUND_ASSETS.length || entries.some((entry) =>
+    !PRIVATE_BACKGROUND_ASSET_SET.has(entry.name) || !entry.isFile()
+  )) {
+    invalidArtifact('background image output does not match the reviewed allowlist');
+  }
+
+  for(const {name} of PRIVATE_BACKGROUND_ASSETS) {
+    const file = resolve(imageDirectory, name);
+    const fileStats = lstatSync(file);
+    if(fileStats.isSymbolicLink() || !fileStats.isFile() || fileStats.size === 0) {
+      invalidArtifact(`required background image ${name} is missing, empty, or not a regular file`);
+    }
+    accessSync(file, constants.R_OK);
+    assertPrivateBackgroundAsset(readFileSync(file));
   }
 }
 
@@ -451,6 +599,7 @@ export function auditPrivateArtifact(directory, target) {
     invalidArtifact('does not contain its configured RSA fingerprint');
   }
   auditPrivateArtifactFonts(directory);
+  auditPrivateArtifactBackground(directory);
 }
 
 function lowercaseFiles(files, directory) {
@@ -509,6 +658,7 @@ export function writePrivateArtifactManifest(directory, target, rootDirectory) {
   }
 
   includePrivateArtifactFonts(rootDirectory, directory);
+  includePrivateArtifactBackground(rootDirectory, directory);
   auditPrivateArtifact(directory, target);
   const manifest = {
     mode: 'private',
