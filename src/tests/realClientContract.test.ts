@@ -566,6 +566,24 @@ describe('confined runner shared-worker observation contract', () => {
     await networkObserver.stop();
   });
 
+  it('skips page URL classifiers after observer overflow', async() => {
+    const contextObserver = observation.createContextObserver('page-handler-overflow');
+    const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver);
+    await networkObserver.start();
+    contextObserver.noteInjectedControlFault('overflow');
+
+    cdp.emit('Network.requestWillBeSent', {
+      type: 'Script',
+      request: {get url() {throw new Error('request URL inspected after overflow');}}
+    });
+    cdp.emit('Network.webSocketCreated', {get url() {throw new Error('websocket URL inspected after overflow');}});
+    cdp.emit('Audits.issueAdded', {get issue() {throw new Error('CSP issue inspected after overflow');}});
+    cdp.emit('Log.entryAdded', {get entry() {throw new Error('log entry inspected after overflow');}});
+
+    expect(contextObserver.summary().observerOverflow).toBe(1);
+    await networkObserver.stop();
+  });
+
   it('rejects cleanup when the page observer session cannot detach', async() => {
     const detachFailure = new Error('observer detach failed');
     const contextObserver = observation.createContextObserver('detach-failure');

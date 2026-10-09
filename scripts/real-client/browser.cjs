@@ -443,15 +443,20 @@ function createNetworkObserver(page, contextName, contextObserver) {
   let cdp;
   let send;
 
+  function observerClosed() {
+    return contextObserver?.state.overflow === true;
+  }
+
   // Nested-message failures bypass normal event accounting; coalesce their
   // fixed classes and charge each failure to the context budget.
   function recordError(category) {
-    if(contextObserver?.state.overflow) return;
+    if(observerClosed()) return;
     if(errors.length < 8 && !errors.includes(category)) errors.push(category);
     if(contextObserver && contextObserver.noteEvent()) contextObserver.recordObserverError();
   }
 
   function record(targetId, source, kind, url, eventName) {
+    if(observerClosed()) return;
     let parsed;
     try {
       parsed = new URL(url);
@@ -553,6 +558,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
   }
 
   function recordCspIssue(source, targetId, issue) {
+    if(observerClosed()) return;
     const details = issue?.details?.contentSecurityPolicyIssueDetails;
     if(!details || details.isReportOnly || typeof details.blockedURL !== 'string' || !details.blockedURL) return;
     const protocol = (() => {
@@ -567,6 +573,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
   }
 
   function recordLogViolation(source, targetId, entry) {
+    if(observerClosed()) return;
     if(!['violation', 'security'].includes(entry?.source)) return;
     const match = /'((?:https?|wss?):\/\/[^']+)'/.exec(entry.text || '');
     if(!match) return;
@@ -582,7 +589,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
   }
 
   function dispatchTargetMessage(sessionId, message) {
-    if(contextObserver?.state.overflow) return;
+    if(observerClosed()) return;
     if(typeof message !== 'string' || Buffer.byteLength(message, 'utf8') > observation.LIMITS.cdpMessageBytes) {
       recordError('cdp_message_overflow');
       return;
@@ -631,21 +638,33 @@ function createNetworkObserver(page, contextName, contextObserver) {
     const info = await send('Target.getTargetInfo');
     registry?.registerContext(info?.targetInfo?.browserContextId, contextObserver);
     cdp.on('Network.requestWillBeSent', (event) => {
+      if(observerClosed()) return;
       const kind = event.type === 'WebSocket' ? 'websocket' : 'fetch';
       record('page', 'page', kind, event.request.url, 'Network.requestWillBeSent');
       contextObserver?.notePageEvent('Network.requestWillBeSent', event);
     });
-    cdp.on('Network.responseReceived', (event) => contextObserver?.notePageEvent('Network.responseReceived', event));
-    cdp.on('Network.loadingFailed', (event) => contextObserver?.notePageEvent('Network.loadingFailed', event));
+    cdp.on('Network.responseReceived', (event) => {
+      if(observerClosed()) return;
+      contextObserver?.notePageEvent('Network.responseReceived', event);
+    });
+    cdp.on('Network.loadingFailed', (event) => {
+      if(observerClosed()) return;
+      contextObserver?.notePageEvent('Network.loadingFailed', event);
+    });
     cdp.on('Network.webSocketCreated', (event) => {
+      if(observerClosed()) return;
       record('page', 'page', 'websocket', event.url, 'Network.webSocketCreated');
       contextObserver?.noteEvent();
     });
-    cdp.on('Audits.issueAdded', ({issue}) => {
+    cdp.on('Audits.issueAdded', (event) => {
+      if(observerClosed()) return;
+      const issue = event.issue;
       recordCspIssue('page', 'page', issue);
       contextObserver?.notePageEvent('Audits.issueAdded', {issue});
     });
-    cdp.on('Log.entryAdded', ({entry}) => {
+    cdp.on('Log.entryAdded', (event) => {
+      if(observerClosed()) return;
+      const entry = event.entry;
       recordLogViolation('page', 'page', entry);
       contextObserver?.notePageEvent('Log.entryAdded', {entry});
     });
