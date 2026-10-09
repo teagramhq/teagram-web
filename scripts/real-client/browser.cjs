@@ -579,10 +579,6 @@ function createNetworkObserver(page, contextName, contextObserver) {
     const allowed = parsed.origin === PRIVATE_CSP_ORIGIN || (kind === 'websocket' && url === PRIVATE_CSP_WSS);
     const key = kind === 'websocket' ? `${targetId}:${kind}:${url}` : undefined;
     if(key && eventKeys.has(key)) return;
-    if(contextObserver && !contextObserver.noteEvent()) {
-      observerClosed();
-      return;
-    }
     if(key) eventKeys.add(key);
     events.push({
       source,
@@ -715,6 +711,8 @@ function createNetworkObserver(page, contextName, contextObserver) {
 
     const targetInfo = targets.get(sessionId);
     if(!targetInfo) return;
+    contextObserver?.noteWorkerEvent(targetInfo.targetId, payload.method, payload.params);
+    if(observerClosed()) return;
     if(payload.method === 'Network.requestWillBeSent') {
       const kind = payload.params.type === 'WebSocket' ? 'websocket' : 'fetch';
       record(targetInfo.targetId, targetInfo.type, kind, payload.params.request.url, payload.method);
@@ -725,8 +723,6 @@ function createNetworkObserver(page, contextName, contextObserver) {
     } else if(payload.method === 'Log.entryAdded') {
       recordLogViolation(targetInfo.type, targetInfo.targetId, payload.params.entry);
     }
-    contextObserver?.noteWorkerEvent(targetInfo.targetId, payload.method, payload.params);
-    observerClosed();
   }
 
   async function start(registry) {
@@ -739,8 +735,9 @@ function createNetworkObserver(page, contextName, contextObserver) {
     cdp.on('Network.requestWillBeSent', (event) => {
       if(observerClosed()) return;
       const kind = event.type === 'WebSocket' ? 'websocket' : 'fetch';
-      record('page', 'page', kind, event.request.url, 'Network.requestWillBeSent');
       notePageEvent('Network.requestWillBeSent', event);
+      if(observerClosed()) return;
+      record('page', 'page', kind, event.request.url, 'Network.requestWillBeSent');
     });
     cdp.on('Network.responseReceived', (event) => {
       if(observerClosed()) return;
@@ -752,21 +749,25 @@ function createNetworkObserver(page, contextName, contextObserver) {
     });
     cdp.on('Network.webSocketCreated', (event) => {
       if(observerClosed()) return;
+      if(contextObserver && !contextObserver.noteEvent()) {
+        observerClosed();
+        return;
+      }
       record('page', 'page', 'websocket', event.url, 'Network.webSocketCreated');
-      contextObserver?.noteEvent();
-      observerClosed();
     });
     cdp.on('Audits.issueAdded', (event) => {
       if(observerClosed()) return;
       const issue = event.issue;
-      recordCspIssue('page', 'page', issue);
       notePageEvent('Audits.issueAdded', {issue});
+      if(observerClosed()) return;
+      recordCspIssue('page', 'page', issue);
     });
     cdp.on('Log.entryAdded', (event) => {
       if(observerClosed()) return;
       const entry = event.entry;
-      recordLogViolation('page', 'page', entry);
       notePageEvent('Log.entryAdded', {entry});
+      if(observerClosed()) return;
+      recordLogViolation('page', 'page', entry);
     });
     cdp.on('Target.attachedToTarget', ({sessionId, targetInfo}) => addTarget(sessionId, targetInfo));
     cdp.on('Target.receivedMessageFromTarget', ({sessionId, message}) => dispatchTargetMessage(sessionId, message));

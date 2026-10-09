@@ -467,6 +467,21 @@ describe('confined runner shared-worker observation contract', () => {
     expectNoHostileLeak(summary);
   });
 
+  it('counts each page network request once', async() => {
+    const contextObserver = observation.createContextObserver('single-page-request');
+    const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver);
+    await networkObserver.start();
+
+    try {
+      cdp.emit('Network.requestWillBeSent', networkRequestWillBeSent('page-request', MTPROTO_CHUNK_URL));
+
+      expect(contextObserver.summary().countedEvents).toBe(1);
+      expect(networkObserver.events).toHaveLength(1);
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
   it('makes the context unknown and records overflow on every resource bound', async() => {
     const attachEvents: any[] = [{kind: 'target', target: pageTarget()}];
     for(let index = 0; index < observation.LIMITS.attachedTargets + 4; index++) {
