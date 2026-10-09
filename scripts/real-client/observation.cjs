@@ -209,6 +209,7 @@ function createContextObserver(name, options = {}) {
   const serviceWorkerTargetIds = new Set();
   const dedicatedWorkerTargetIds = new Set();
   const workerSourceLabels = new Set();
+  const requestLabels = new Map();
 
   const state = {
     countedEvents: 0,
@@ -231,6 +232,7 @@ function createContextObserver(name, options = {}) {
   function recordOverflow() {
     if(!state.overflow) state.observerErrors++;
     state.overflow = true;
+    requestLabels.clear();
   }
 
   // A bound that only clamps a counter is not a bound. Once a limit is reached
@@ -418,10 +420,15 @@ function createContextObserver(name, options = {}) {
     if(!countEvent()) return;
     if(method === 'Network.requestWillBeSent') {
       const source = classifyWorkerSource(params?.request?.url);
+      const requestId = params?.requestId;
       if(source.label === 'mtproto_worker') {
         state.mtprotoSourceChunk = 'mtproto_worker';
       }
       if(isWorkerScriptType(params?.type) && source.label !== 'cross_origin') workerSourceLabels.add(source.label);
+      if(typeof requestId === 'string' && (source.label === 'mtproto_worker' || isWorkerScriptType(params?.type)) &&
+          (requestLabels.has(requestId) || requestLabels.size < LIMITS.countedEventsPerContext)) {
+        requestLabels.set(requestId, source.label);
+      }
       return;
     }
     if(method === 'Network.responseReceived') {
@@ -438,13 +445,19 @@ function createContextObserver(name, options = {}) {
       return;
     }
     if(method === 'Network.loadingFailed') {
-      const source = classifyWorkerSource(params?.request?.url);
-      if(source.label === 'mtproto_worker') {
+      const requestId = params?.requestId;
+      const sourceLabel = typeof requestId === 'string' ? requestLabels.get(requestId) : null;
+      if(sourceLabel === 'mtproto_worker') {
         state.mtprotoSourceChunk = 'mtproto_worker';
         state.mtprotoSourceFetch = 'failed';
-        return;
+      } else if(isWorkerScriptType(params?.type) && sourceLabel) {
+        noteScriptLoadFailure(sourceLabel);
       }
-      if(isWorkerScriptType(params?.type)) noteScriptLoadFailure(source.label);
+      if(typeof requestId === 'string') requestLabels.delete(requestId);
+      return;
+    }
+    if(method === 'Network.loadingFinished') {
+      if(typeof params?.requestId === 'string') requestLabels.delete(params.requestId);
       return;
     }
     if(method === 'Log.entryAdded') {

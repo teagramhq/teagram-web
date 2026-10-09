@@ -46,6 +46,19 @@ function getSingleExactMessageFailure(messages, expected) {
   return null;
 }
 
+function withCommandTimeout(operation) {
+  let timer;
+  const command = Promise.resolve().then(operation);
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('cdp_command_timeout')), observation.LIMITS.commandTimeoutMs);
+  });
+  return Promise.race([command, timeout]).finally(() => clearTimeout(timer));
+}
+
+function sendCdpCommand(session, method, params = {}) {
+  return withCommandTimeout(() => session.send(method, params));
+}
+
 function readRuntimeInput() {
   return new Promise((resolve, reject) => {
     let value = '';
@@ -104,7 +117,7 @@ function createGatedSender(scope, session, observer) {
       observer?.recordObserverError();
       return Promise.reject(new Error('cdp_method_not_allowed'));
     }
-    return session.send(method, params);
+    return sendCdpCommand(session, method, params);
   };
 }
 
@@ -129,8 +142,10 @@ function createWorkerDiscovery() {
   const pendingCommands = new Map();
   const setupPromises = new Set();
   let session;
+  let send;
   let nextCommandId = 0;
   let discoveryActive = false;
+  let orphanDetachFailures = 0;
 
   function ownerOf(targetId) {
     return targetOwners.get(targetId);
@@ -159,7 +174,7 @@ function createWorkerDiscovery() {
           reject(error);
         }
       });
-      session.send('Target.sendMessageToTarget', {
+      send('Target.sendMessageToTarget', {
         sessionId,
         message: JSON.stringify({id, method, params})
       }).catch((error) => {
@@ -196,7 +211,7 @@ function createWorkerDiscovery() {
       attachingTargets.delete(targetId);
       return;
     }
-    session.send('Target.attachToTarget', {targetId, flatten: false})
+    send('Target.attachToTarget', {targetId, flatten: false})
     .catch(() => {
       attachingTargets.delete(targetId);
       observer.noteAttachFailure();
@@ -220,8 +235,6 @@ function createWorkerDiscovery() {
     if(observer) {
       discoveryActive = true;
       observer.state.discoveryActive = true;
-      targetOwners.set(targetInfo.targetId, observer);
-      unattributedTargets.delete(targetInfo.targetId);
       return observer;
     }
     if(contextObservers.size === 0) {
@@ -239,9 +252,16 @@ function createWorkerDiscovery() {
   }
 
   function onTargetInfo(targetInfo) {
-    const observer = ownerOf(targetInfo.targetId) || attribute(targetInfo);
+    const targetId = targetInfo?.targetId;
+    const currentOwner = typeof targetId === 'string' ? ownerOf(targetId) : null;
+    const observer = currentOwner || attribute(targetInfo);
     if(!observer) return;
     observer.registerTarget(targetInfo);
+    if(observer.state.overflow) return;
+    if(!currentOwner) {
+      targetOwners.set(targetId, observer);
+      unattributedTargets.delete(targetId);
+    }
     if(targetInfo.type === 'shared_worker') attachSharedWorker(observer, targetInfo);
   }
 
@@ -286,15 +306,20 @@ function createWorkerDiscovery() {
     get appContextlessTargets() {
       return appContextlessTargets.size;
     },
+    get ownedTargetCount() {
+      return targetOwners.size;
+    },
     async launch(browser) {
-      session = await browser.newBrowserCDPSession();
-      const send = createGatedSender('browser', session, null);
+      session = await withCommandTimeout(() => browser.newBrowserCDPSession());
+      send = createGatedSender('browser', session, null);
       session.on('Target.targetCreated', ({targetInfo}) => onTargetInfo(targetInfo));
       session.on('Target.targetInfoChanged', ({targetInfo}) => onTargetInfo(targetInfo));
       session.on('Target.attachedToTarget', ({sessionId, targetInfo}) => {
         const observer = ownerOf(targetInfo.targetId);
         if(!observer) {
-          session.send('Target.detachFromTarget', {sessionId}).catch(() => {});
+          send('Target.detachFromTarget', {sessionId}).catch(() => {
+            orphanDetachFailures++;
+          });
           return;
         }
         sessionTargets.set(sessionId, targetInfo.targetId);
@@ -333,18 +358,24 @@ function createWorkerDiscovery() {
       const pending = pendingByContext.get(browserContextId) || [];
       pendingByContext.delete(browserContextId);
       for(const targetInfo of pending) {
-        unattributedTargets.delete(targetInfo.targetId);
-        targetOwners.set(targetInfo.targetId, observer);
         observer.registerTarget(targetInfo);
+        unattributedTargets.delete(targetInfo.targetId);
+        if(observer.state.overflow) continue;
+        targetOwners.set(targetInfo.targetId, observer);
         if(targetInfo.type === 'shared_worker') attachSharedWorker(observer, targetInfo);
       }
     },
     // Synthetic control only: drive the real attach-failure branch.
     simulateAttachFailure(observer) {
-      return session.send('Target.attachToTarget', {targetId: INJECTED_TARGET_ID, flatten: false})
-      .then(({sessionId}) => {
-        session.send('Target.detachFromTarget', {sessionId}).catch(() => {});
+      return send('Target.attachToTarget', {targetId: INJECTED_TARGET_ID, flatten: false})
+      .then(async({sessionId}) => {
         observer.noteAttachFailure();
+        try {
+          await send('Target.detachFromTarget', {sessionId});
+        } catch {
+          orphanDetachFailures++;
+          observer.recordObserverError();
+        }
       })
       .catch(() => observer.noteAttachFailure());
     },
@@ -365,7 +396,7 @@ function createWorkerDiscovery() {
         sessionTargets.delete(sessionId);
         attachedSessions.delete(sessionId);
         try {
-          await session.send('Target.detachFromTarget', {sessionId});
+          await send('Target.detachFromTarget', {sessionId});
         } catch {
           detachFailures++;
           observer.recordObserverError();
@@ -377,10 +408,10 @@ function createWorkerDiscovery() {
     // cleanup stage must go nonzero on them, never resolve silently.
     async stop() {
       if(!session) return {detachFailures: 0, discoveryDisabled: true};
-      let detachFailures = 0;
+      let detachFailures = orphanDetachFailures;
       for(const sessionId of [...attachedSessions]) {
         try {
-          await session.send('Target.detachFromTarget', {sessionId});
+          await send('Target.detachFromTarget', {sessionId});
         } catch {
           detachFailures++;
         }
@@ -391,7 +422,7 @@ function createWorkerDiscovery() {
       session.removeAllListeners();
       let discoveryDisabled = true;
       try {
-        await session.send('Target.setDiscoverTargets', {discover: false});
+        await send('Target.setDiscoverTargets', {discover: false});
       } catch {
         discoveryDisabled = false;
       }
@@ -467,7 +498,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
           reject(error);
         }
       });
-      cdp.send('Target.sendMessageToTarget', {
+      send('Target.sendMessageToTarget', {
         sessionId,
         message: JSON.stringify({id, method, params})
       }).catch((error) => {
@@ -590,7 +621,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
   }
 
   async function start(registry) {
-    cdp = await page.context().newCDPSession(page);
+    cdp = await withCommandTimeout(() => page.context().newCDPSession(page));
     send = createGatedSender('page', cdp, contextObserver);
     // Page-session identity mapping only: the browser context this page lives
     // in is what attributes every browser-level shared worker to it.
@@ -669,7 +700,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
     async stop() {
       cdp?.removeAllListeners();
       try {
-        await cdp?.detach();
+        if(cdp) await withCommandTimeout(() => cdp.detach());
       } catch(error) {
         contextObserver?.recordObserverError();
         throw error;
@@ -1207,7 +1238,7 @@ function emitReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {createNetworkObserver, getSingleExactMessageFailure, matchesPrivateArtifactManifest};
+module.exports = {createNetworkObserver, createWorkerDiscovery, getSingleExactMessageFailure, matchesPrivateArtifactManifest};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

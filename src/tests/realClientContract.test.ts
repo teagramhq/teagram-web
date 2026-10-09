@@ -4,7 +4,7 @@ import {createHash, generateKeyPairSync} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 
 import {
   assertAllScenariosPassed,
@@ -17,7 +17,7 @@ import {
 } from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
-const {createNetworkObserver, getSingleExactMessageFailure, matchesPrivateArtifactManifest} = require('../../scripts/real-client/browser.cjs');
+const {createNetworkObserver, createWorkerDiscovery, getSingleExactMessageFailure, matchesPrivateArtifactManifest} = require('../../scripts/real-client/browser.cjs');
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -35,14 +35,34 @@ const HOSTILE = Object.freeze({
   frame: `at ${APP_ORIGIN}/index.worker-AbCdEfGh.js:1:7 (${HOSTILE_PASSWORD})`
 });
 
-function createNetworkObserverHarness(observer: any, detach = async() => {}) {
+function createNetworkObserverHarness(observer: any, options: any = {}) {
   const cdp: any = new EventEmitter();
-  cdp.send = async(method: string) => method === 'Target.getTargetInfo'
+  cdp.send = options.send || (async(method: string) => method === 'Target.getTargetInfo'
     ? {targetInfo: {browserContextId: 'contract-test'}}
-    : {};
-  cdp.detach = detach;
+    : {});
+  cdp.detach = options.detach || (async() => {});
   const page: any = {context: () => ({newCDPSession: async() => cdp})};
   return {cdp, networkObserver: createNetworkObserver(page, 'contract-test', observer)};
+}
+
+function createDiscoveryHarness(send: (method: string, params: any) => Promise<any> = async() => ({})) {
+  const session: any = new EventEmitter();
+  session.send = send;
+  const browser: any = {newBrowserCDPSession: async() => session};
+  return {browser, registry: createWorkerDiscovery(), session};
+}
+
+async function settleAfterCdpDeadline(promise: Promise<any>) {
+  const settled = promise.then(
+    (value) => ({status: 'resolved' as const, value}),
+    (error) => ({status: 'rejected' as const, error})
+  );
+  await vi.advanceTimersByTimeAsync(observation.LIMITS.commandTimeoutMs);
+  vi.useRealTimers();
+  return Promise.race([
+    settled,
+    new Promise<{status: 'stalled'}>((resolve) => setTimeout(() => resolve({status: 'stalled'}), 100))
+  ]);
 }
 
 const READINESS_PINS = Object.freeze({
@@ -143,6 +163,34 @@ function sharedWorker(targetId: string, url: string, browserContextId: string = 
   return {targetId, type: 'shared_worker', url, browserContextId};
 }
 
+function networkRequestWillBeSent(requestId: string, url: string) {
+  return {
+    requestId,
+    loaderId: 'loader-1',
+    documentURL: APP_ORIGIN,
+    request: {
+      url,
+      method: 'GET',
+      headers: {},
+      initialPriority: 'High',
+      referrerPolicy: 'no-referrer-when-downgrade'
+    },
+    timestamp: 1,
+    wallTime: 1,
+    initiator: {type: 'script'},
+    type: 'Script'
+  };
+}
+
+function networkLoadingFailed(requestId: string) {
+  return {
+    requestId,
+    timestamp: 2,
+    type: 'Script',
+    errorText: 'net::ERR_INTERNET_DISCONNECTED'
+  };
+}
+
 function replayContext(events: any[], options: any = {}) {
   const observer = observation.createContextObserver('alice');
   observer.state.discoveryActive = options.discoveryActive !== false;
@@ -165,7 +213,7 @@ function replayContext(events: any[], options: any = {}) {
 function appContextEvents(): any[] {
   return [
     {kind: 'target', target: pageTarget()},
-    {kind: 'page', method: 'Network.requestWillBeSent', params: {type: 'Script', request: {url: MTPROTO_CHUNK_URL}, timestamp: 1}},
+    {kind: 'page', method: 'Network.requestWillBeSent', params: networkRequestWillBeSent('mtproto-source', MTPROTO_CHUNK_URL)},
     {kind: 'page', method: 'Network.responseReceived', params: {type: 'Script', response: {url: MTPROTO_CHUNK_URL, status: 200, headers: {authorization: HOSTILE.token}}}},
     {kind: 'target', target: sharedWorker('mtproto-worker', HOSTILE.blobUrl)},
     {kind: 'attach', targetId: 'mtproto-worker'},
@@ -306,17 +354,25 @@ describe('confined runner shared-worker observation contract', () => {
   });
 
   it('classifies the source fetch status from page coverage alone', () => {
+    const requestId = 'mtproto-source-request';
     const statusOf = (response: any) => replayContext([
       {kind: 'target', target: pageTarget()},
-      {kind: 'page', method: 'Network.requestWillBeSent', params: {type: 'Script', request: {url: MTPROTO_CHUNK_URL}}},
+      {kind: 'page', method: 'Network.requestWillBeSent', params: networkRequestWillBeSent(requestId, MTPROTO_CHUNK_URL)},
       response
     ]).mtprotoSourceFetch;
 
     expect(statusOf({kind: 'page', method: 'Network.responseReceived', params: {type: 'Script', response: {url: MTPROTO_CHUNK_URL, status: 200}}})).toBe('ok');
     expect(statusOf({kind: 'page', method: 'Network.responseReceived', params: {type: 'Script', response: {url: MTPROTO_CHUNK_URL, status: 404}}})).toBe('http_4xx');
     expect(statusOf({kind: 'page', method: 'Network.responseReceived', params: {type: 'Script', response: {url: MTPROTO_CHUNK_URL, status: 503}}})).toBe('http_5xx');
-    expect(statusOf({kind: 'page', method: 'Network.loadingFailed', params: {type: 'Script', request: {url: MTPROTO_CHUNK_URL}, errorText: 'net::ERR_INTERNET_DISCONNECTED'}})).toBe('failed');
+    expect(statusOf({kind: 'page', method: 'Network.loadingFailed', params: networkLoadingFailed(requestId)})).toBe('failed');
     expect(replayContext([{kind: 'target', target: pageTarget()}]).mtprotoSourceFetch).toBe('not_requested');
+
+    expect(replayContext([
+      {kind: 'target', target: pageTarget()},
+      {kind: 'page', method: 'Network.requestWillBeSent', params: networkRequestWillBeSent(requestId, MTPROTO_CHUNK_URL)},
+      {kind: 'page', method: 'Network.responseReceived', params: {type: 'Script', response: {url: MTPROTO_CHUNK_URL, status: 200}}},
+      {kind: 'page', method: 'Network.loadingFailed', params: networkLoadingFailed(requestId)}
+    ]).mtprotoSourceFetch).toBe('failed');
   });
 
   it('never reads a worker destroyed before attach as loaded', () => {
@@ -359,7 +415,7 @@ describe('confined runner shared-worker observation contract', () => {
       {kind: 'target', target: sharedWorker('blob-worker', HOSTILE.blobUrl)},
       {kind: 'attach', targetId: 'blob-worker'},
       {kind: 'setup', targetId: 'blob-worker'},
-      {kind: 'worker', targetId: 'blob-worker', method: 'Network.loadingFailed', params: {type: 'Script', errorText: 'net::ERR_NAME_NOT_RESOLVED', request: {url: HOSTILE.url}}}
+      {kind: 'worker', targetId: 'blob-worker', method: 'Network.loadingFailed', params: {requestId: 'worker-script-request', timestamp: 2, type: 'Script', errorText: 'net::ERR_NAME_NOT_RESOLVED'}}
     ]);
     const evaluation = replayContext([
       {kind: 'target', target: pageTarget()},
@@ -451,22 +507,92 @@ describe('confined runner shared-worker observation contract', () => {
     expect(networkContextObserver.summary().countedEvents).toBe(observation.LIMITS.countedEventsPerContext);
     expect(networkObserver.events).toHaveLength(eventsAtOverflow);
     await networkObserver.stop();
+
+    const {browser, registry, session} = createDiscoveryHarness();
+    await registry.launch(browser);
+    const discoveryObserver = observation.createContextObserver('discovery-overflow');
+    registry.registerContext('context-overflow', discoveryObserver);
+    const emitPageTarget = (index: number) => session.emit('Target.targetCreated', {
+      targetInfo: {targetId: `page-${index}`, type: 'page', url: `${APP_ORIGIN}/`, browserContextId: 'context-overflow'}
+    });
+    for(let index = 0; index <= observation.LIMITS.countedEventsPerContext && discoveryObserver.summary().observerOverflow === 0; index++) {
+      emitPageTarget(index);
+    }
+    const targetsAtOverflow = registry.ownedTargetCount;
+    for(let index = 0; index < 20; index++) emitPageTarget(observation.LIMITS.countedEventsPerContext + index + 1);
+    expect(discoveryObserver.summary().observerOverflow).toBe(1);
+    expect(targetsAtOverflow).toBeLessThanOrEqual(observation.LIMITS.countedEventsPerContext);
+    expect(registry.ownedTargetCount).toBe(targetsAtOverflow);
+    await registry.stop();
   });
 
   it('rejects cleanup when the page observer session cannot detach', async() => {
     const detachFailure = new Error('observer detach failed');
     const contextObserver = observation.createContextObserver('detach-failure');
-    const {networkObserver} = createNetworkObserverHarness(contextObserver, async() => {
-      throw detachFailure;
-    });
+    const {networkObserver} = createNetworkObserverHarness(contextObserver, {detach: async() => {throw detachFailure;}});
     await networkObserver.start();
 
     await expect(networkObserver.stop()).rejects.toBe(detachFailure);
   });
 
+  it('times out a stalled page observer cleanup command', async() => {
+    const contextObserver = observation.createContextObserver('stalled-detach');
+    const {networkObserver} = createNetworkObserverHarness(contextObserver, {detach: () => new Promise(() => {})});
+    await networkObserver.start();
+
+    vi.useFakeTimers();
+    const outcome = await settleAfterCdpDeadline(networkObserver.stop());
+    expect(outcome).toMatchObject({status: 'rejected', error: {message: 'cdp_command_timeout'}});
+  });
+
+  it('times out stalled page and browser discovery setup commands', async() => {
+    const contextObserver = observation.createContextObserver('stalled-setup');
+    const page = createNetworkObserverHarness(contextObserver, {
+      send: async(method: string) => method === 'Network.enable' ? new Promise(() => {}) : method === 'Target.getTargetInfo'
+        ? {targetInfo: {browserContextId: 'contract-test'}}
+        : {}
+    });
+    const discovery = createDiscoveryHarness((method: string, params: any) => {
+      if(method === 'Target.setDiscoverTargets' && params.discover === true) return new Promise(() => {});
+      return Promise.resolve({});
+    });
+
+    vi.useFakeTimers();
+    try {
+      const outcome = await settleAfterCdpDeadline(Promise.allSettled([
+        page.networkObserver.start(),
+        discovery.registry.launch(discovery.browser)
+      ]));
+      expect(outcome.status).toBe('resolved');
+      if(outcome.status === 'resolved') {
+        expect(outcome.value.map((result: any) => result.status)).toEqual(['rejected', 'rejected']);
+        expect(outcome.value.map((result: any) => result.reason.message)).toEqual(['cdp_command_timeout', 'cdp_command_timeout']);
+      }
+    } finally {
+      vi.useRealTimers();
+      await page.networkObserver.stop();
+      await discovery.registry.stop();
+    }
+  });
+
+  it('times out stalled browser discovery cleanup commands', async() => {
+    const discovery = createDiscoveryHarness((method: string, params: any) => {
+      if(method === 'Target.setDiscoverTargets' && params.discover === false) return new Promise(() => {});
+      return Promise.resolve({});
+    });
+    await discovery.registry.launch(discovery.browser);
+
+    vi.useFakeTimers();
+    const outcome = await settleAfterCdpDeadline(discovery.registry.stop());
+    expect(outcome).toMatchObject({
+      status: 'resolved',
+      value: {detachFailures: 0, discoveryDisabled: false}
+    });
+  });
+
   it('stops attributing MTProto to blobs that predate the fetch, are cross-origin, or follow a failed fetch', () => {
     const sourceFetch = {kind: 'page', method: 'Network.responseReceived', params: {type: 'Script', response: {url: MTPROTO_CHUNK_URL, status: 200}}};
-    const sourceRequest = {kind: 'page', method: 'Network.requestWillBeSent', params: {type: 'Script', request: {url: MTPROTO_CHUNK_URL}}};
+    const sourceRequest = {kind: 'page', method: 'Network.requestWillBeSent', params: networkRequestWillBeSent('mtproto-source-request', MTPROTO_CHUNK_URL)};
 
     const preexistingBlob = replayContext([
       {kind: 'target', target: pageTarget()},
@@ -493,7 +619,7 @@ describe('confined runner shared-worker observation contract', () => {
     const failedFetch = replayContext([
       {kind: 'target', target: pageTarget()},
       sourceRequest,
-      {kind: 'page', method: 'Network.loadingFailed', params: {type: 'Script', request: {url: MTPROTO_CHUNK_URL}, errorText: 'net::ERR_INTERNET_DISCONNECTED'}},
+      {kind: 'page', method: 'Network.loadingFailed', params: networkLoadingFailed('mtproto-source-request')},
       {kind: 'target', target: sharedWorker('post-failure-worker', HOSTILE.blobUrl)}
     ]);
     expect(failedFetch.mtprotoSourceFetch).toBe('failed');
