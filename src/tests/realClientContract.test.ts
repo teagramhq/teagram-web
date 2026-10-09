@@ -526,6 +526,46 @@ describe('confined runner shared-worker observation contract', () => {
     await registry.stop();
   });
 
+  it('does not retain page-session targets rejected after observer overflow', async() => {
+    const contextObserver = observation.createContextObserver('page-session-overflow');
+    const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver);
+    await networkObserver.start();
+    for(let index = 0; index < observation.LIMITS.countedEventsPerContext - 1; index++) contextObserver.noteEvent();
+
+    const emitAttachedWorker = (index: number) => cdp.emit('Target.attachedToTarget', {
+      sessionId: `session-${index}`,
+      targetInfo: sharedWorker(`worker-${index}`, HOSTILE.blobUrl)
+    });
+    emitAttachedWorker(0);
+    for(let index = 1; index < 25; index++) emitAttachedWorker(index);
+    await networkObserver.waitForSetup();
+
+    expect(contextObserver.summary().observerOverflow).toBe(1);
+    expect(networkObserver.summary().workerTargets.shared_worker).toBe(0);
+    await networkObserver.stop();
+  });
+
+  it('caps malformed nested-message errors and stops after observer overflow', async() => {
+    const contextObserver = observation.createContextObserver('message-overflow');
+    const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver);
+    await networkObserver.start();
+    const oversizedMessage = 'x'.repeat(observation.LIMITS.cdpMessageBytes + 1);
+    const emitInvalidMessage = (index: number) => cdp.emit('Target.receivedMessageFromTarget', {
+      sessionId: 'untracked-session',
+      message: index % 2 === 0 ? '{invalid' : oversizedMessage
+    });
+    for(let index = 0; index < observation.LIMITS.countedEventsPerContext + 20; index++) emitInvalidMessage(index);
+
+    expect(contextObserver.summary().observerOverflow).toBe(1);
+    expect(contextObserver.summary().countedEvents).toBe(observation.LIMITS.countedEventsPerContext);
+    expect(networkObserver.errors.length).toBeLessThanOrEqual(2);
+    const retainedErrors = networkObserver.errors.length;
+    for(let index = 0; index < 20; index++) emitInvalidMessage(index);
+    expect(networkObserver.errors).toHaveLength(retainedErrors);
+    expect(contextObserver.summary().observerErrors).toBeLessThanOrEqual(observation.LIMITS.countedEventsPerContext + 1);
+    await networkObserver.stop();
+  });
+
   it('rejects cleanup when the page observer session cannot detach', async() => {
     const detachFailure = new Error('observer detach failed');
     const contextObserver = observation.createContextObserver('detach-failure');

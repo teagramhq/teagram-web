@@ -443,6 +443,14 @@ function createNetworkObserver(page, contextName, contextObserver) {
   let cdp;
   let send;
 
+  // Nested-message failures bypass normal event accounting; coalesce their
+  // fixed classes and charge each failure to the context budget.
+  function recordError(category) {
+    if(contextObserver?.state.overflow) return;
+    if(errors.length < 8 && !errors.includes(category)) errors.push(category);
+    if(contextObserver && contextObserver.noteEvent()) contextObserver.recordObserverError();
+  }
+
   function record(targetId, source, kind, url, eventName) {
     let parsed;
     try {
@@ -477,8 +485,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
 
   function sendTargetCommand(sessionId, method, params = {}) {
     if(!observation.allowCdpMethod('worker', method)) {
-      errors.push('cdp_method_not_allowed');
-      contextObserver?.recordObserverError();
+      recordError('cdp_method_not_allowed');
       return Promise.reject(new Error('cdp_method_not_allowed'));
     }
     const id = ++nextCommandId;
@@ -512,25 +519,23 @@ function createNetworkObserver(page, contextName, contextObserver) {
 
   function addTarget(sessionId, targetInfo) {
     if(targets.has(sessionId)) return;
-    targets.set(sessionId, targetInfo);
     contextObserver?.registerTarget(targetInfo);
-    if(targetInfo.type === 'shared_worker' || targetInfo.type === 'service_worker') {
-      observedWorkerTargets[targetInfo.type].add(targetInfo.targetId);
-    }
     // The attached-target budget bounds protocol setup, not just a counter: a
     // target that cannot be counted gets no enables and is released at once.
     if(contextObserver && !contextObserver.noteAttached(targetInfo.targetId)) {
-      targets.delete(sessionId);
       const release = (async() => {
         try {
           await send('Target.detachFromTarget', {sessionId});
         } catch {
-          errors.push('worker_target_release');
-          contextObserver?.recordObserverError();
+          recordError('worker_target_release');
         }
       })().finally(() => setupPromises.delete(release));
       setupPromises.add(release);
       return;
+    }
+    targets.set(sessionId, targetInfo);
+    if(targetInfo.type === 'shared_worker' || targetInfo.type === 'service_worker') {
+      observedWorkerTargets[targetInfo.type].add(targetInfo.targetId);
     }
     const setup = (async() => {
       if(['shared_worker', 'service_worker', 'worker'].includes(targetInfo.type)) {
@@ -542,8 +547,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
       await sendTargetCommand(sessionId, 'Runtime.runIfWaitingForDebugger');
       contextObserver?.noteSetupComplete(targetInfo.targetId);
     })().catch(() => {
-      errors.push('worker_target_setup');
-      contextObserver?.recordObserverError();
+      recordError('worker_target_setup');
     }).finally(() => setupPromises.delete(setup));
     setupPromises.add(setup);
   }
@@ -578,17 +582,16 @@ function createNetworkObserver(page, contextName, contextObserver) {
   }
 
   function dispatchTargetMessage(sessionId, message) {
+    if(contextObserver?.state.overflow) return;
     if(typeof message !== 'string' || Buffer.byteLength(message, 'utf8') > observation.LIMITS.cdpMessageBytes) {
-      errors.push('cdp_message_overflow');
-      contextObserver?.recordObserverError();
+      recordError('cdp_message_overflow');
       return;
     }
     let payload;
     try {
       payload = JSON.parse(message);
     } catch {
-      errors.push('invalid_worker_cdp_message');
-      contextObserver?.recordObserverError();
+      recordError('invalid_worker_cdp_message');
       return;
     }
     if(payload.id !== undefined) {
