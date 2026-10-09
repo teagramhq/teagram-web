@@ -438,13 +438,49 @@ function createNetworkObserver(page, contextName, contextObserver) {
   const observedWorkerTargets = {shared_worker: new Set(), service_worker: new Set()};
   const pendingCommands = new Map();
   const setupPromises = new Set();
+  const pendingReleases = new Set();
   const errors = [];
+  // Reaching the release limit closes the disposable app context, which
+  // releases any targets already paused by auto-attach.
+  const maxPendingReleases = observation.LIMITS.attachedTargets;
   let nextCommandId = 0;
   let cdp;
   let send;
+  let autoAttachDisablePromise;
+  let overflowContextClosePromise;
+  let overflowContextCloseError;
+  let overflowContextClosed = false;
+
+  function closeContextOnOverflow() {
+    if(!overflowContextClosePromise) {
+      overflowContextClosePromise = withCommandTimeout(() => page.context().close()).then(() => {
+        overflowContextClosed = true;
+      }, (error) => {
+        overflowContextCloseError = error;
+      });
+    }
+    return overflowContextClosePromise;
+  }
+
+  function disableAutoAttach() {
+    if(!send || autoAttachDisablePromise) return autoAttachDisablePromise;
+    autoAttachDisablePromise = send('Target.setAutoAttach', {
+      autoAttach: false,
+      waitForDebuggerOnStart: false,
+      flatten: false
+    }).catch(() => closeContextOnOverflow());
+    return autoAttachDisablePromise;
+  }
 
   function observerClosed() {
-    return contextObserver?.state.overflow === true;
+    const closed = contextObserver?.state.overflow === true;
+    if(closed) disableAutoAttach();
+    return closed;
+  }
+
+  function notePageEvent(method, params) {
+    contextObserver?.notePageEvent(method, params);
+    observerClosed();
   }
 
   // Nested-message failures bypass normal event accounting; coalesce their
@@ -453,6 +489,23 @@ function createNetworkObserver(page, contextName, contextObserver) {
     if(observerClosed()) return;
     if(errors.length < 8 && !errors.includes(category)) errors.push(category);
     if(contextObserver && contextObserver.noteEvent()) contextObserver.recordObserverError();
+    else if(observerClosed()) return;
+  }
+
+  function releaseRejectedTarget(sessionId) {
+    disableAutoAttach();
+    if(overflowContextClosePromise) return;
+    if(pendingReleases.size >= maxPendingReleases) {
+      closeContextOnOverflow();
+      return;
+    }
+    // Cleanup stays separate from setup so a target flood cannot hold
+    // waitForSetup open while these bounded releases settle.
+    let release;
+    release = send('Target.detachFromTarget', {sessionId})
+    .catch(() => closeContextOnOverflow())
+    .finally(() => pendingReleases.delete(release));
+    pendingReleases.add(release);
   }
 
   function record(targetId, source, kind, url, eventName) {
@@ -477,7 +530,10 @@ function createNetworkObserver(page, contextName, contextObserver) {
     const allowed = parsed.origin === PRIVATE_CSP_ORIGIN || (kind === 'websocket' && url === PRIVATE_CSP_WSS);
     const key = kind === 'websocket' ? `${targetId}:${kind}:${url}` : undefined;
     if(key && eventKeys.has(key)) return;
-    if(contextObserver && !contextObserver.noteEvent()) return;
+    if(contextObserver && !contextObserver.noteEvent()) {
+      observerClosed();
+      return;
+    }
     if(key) eventKeys.add(key);
     events.push({
       source,
@@ -528,14 +584,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
     // The attached-target budget bounds protocol setup, not just a counter: a
     // target that cannot be counted gets no enables and is released at once.
     if(contextObserver && !contextObserver.noteAttached(targetInfo.targetId)) {
-      const release = (async() => {
-        try {
-          await send('Target.detachFromTarget', {sessionId});
-        } catch {
-          recordError('worker_target_release');
-        }
-      })().finally(() => setupPromises.delete(release));
-      setupPromises.add(release);
+      releaseRejectedTarget(sessionId);
       return;
     }
     targets.set(sessionId, targetInfo);
@@ -628,6 +677,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
       recordLogViolation(targetInfo.type, targetInfo.targetId, payload.params.entry);
     }
     contextObserver?.noteWorkerEvent(targetInfo.targetId, payload.method, payload.params);
+    observerClosed();
   }
 
   async function start(registry) {
@@ -641,32 +691,33 @@ function createNetworkObserver(page, contextName, contextObserver) {
       if(observerClosed()) return;
       const kind = event.type === 'WebSocket' ? 'websocket' : 'fetch';
       record('page', 'page', kind, event.request.url, 'Network.requestWillBeSent');
-      contextObserver?.notePageEvent('Network.requestWillBeSent', event);
+      notePageEvent('Network.requestWillBeSent', event);
     });
     cdp.on('Network.responseReceived', (event) => {
       if(observerClosed()) return;
-      contextObserver?.notePageEvent('Network.responseReceived', event);
+      notePageEvent('Network.responseReceived', event);
     });
     cdp.on('Network.loadingFailed', (event) => {
       if(observerClosed()) return;
-      contextObserver?.notePageEvent('Network.loadingFailed', event);
+      notePageEvent('Network.loadingFailed', event);
     });
     cdp.on('Network.webSocketCreated', (event) => {
       if(observerClosed()) return;
       record('page', 'page', 'websocket', event.url, 'Network.webSocketCreated');
       contextObserver?.noteEvent();
+      observerClosed();
     });
     cdp.on('Audits.issueAdded', (event) => {
       if(observerClosed()) return;
       const issue = event.issue;
       recordCspIssue('page', 'page', issue);
-      contextObserver?.notePageEvent('Audits.issueAdded', {issue});
+      notePageEvent('Audits.issueAdded', {issue});
     });
     cdp.on('Log.entryAdded', (event) => {
       if(observerClosed()) return;
       const entry = event.entry;
       recordLogViolation('page', 'page', entry);
-      contextObserver?.notePageEvent('Log.entryAdded', {entry});
+      notePageEvent('Log.entryAdded', {entry});
     });
     cdp.on('Target.attachedToTarget', ({sessionId, targetInfo}) => addTarget(sessionId, targetInfo));
     cdp.on('Target.receivedMessageFromTarget', ({sessionId, message}) => dispatchTargetMessage(sessionId, message));
@@ -683,6 +734,13 @@ function createNetworkObserver(page, contextName, contextObserver) {
     while(setupPromises.size > 0) {
       await Promise.all([...setupPromises]);
     }
+  }
+
+  async function waitForOverflowCleanup() {
+    if(autoAttachDisablePromise) await autoAttachDisablePromise;
+    await Promise.all([...pendingReleases]);
+    if(overflowContextClosePromise) await overflowContextClosePromise;
+    if(overflowContextCloseError) throw overflowContextCloseError;
   }
 
   return {
@@ -722,7 +780,8 @@ function createNetworkObserver(page, contextName, contextObserver) {
     async stop() {
       cdp?.removeAllListeners();
       try {
-        if(cdp) await withCommandTimeout(() => cdp.detach());
+        await waitForOverflowCleanup();
+        if(cdp && !overflowContextClosed) await withCommandTimeout(() => cdp.detach());
       } catch(error) {
         contextObserver?.recordObserverError();
         throw error;

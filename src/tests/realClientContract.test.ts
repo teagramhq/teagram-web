@@ -41,7 +41,8 @@ function createNetworkObserverHarness(observer: any, options: any = {}) {
     ? {targetInfo: {browserContextId: 'contract-test'}}
     : {});
   cdp.detach = options.detach || (async() => {});
-  const page: any = {context: () => ({newCDPSession: async() => cdp})};
+  const context = {newCDPSession: async() => cdp, close: options.closeContext || (async() => {})};
+  const page: any = {context: () => context};
   return {cdp, networkObserver: createNetworkObserver(page, 'contract-test', observer)};
 }
 
@@ -582,6 +583,48 @@ describe('confined runner shared-worker observation contract', () => {
 
     expect(contextObserver.summary().observerOverflow).toBe(1);
     await networkObserver.stop();
+  });
+
+  it('disables page auto-attach and bounds overflow target releases', async() => {
+    const contextObserver = observation.createContextObserver('page-release-overflow');
+    const detachResolvers: Array<() => void> = [];
+    let autoAttachDisabled = 0;
+    let contextClosed = 0;
+    const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver, {
+      send: async(method: string, params: any) => {
+        if(method === 'Target.setAutoAttach' && params.autoAttach === false) autoAttachDisabled++;
+        if(method === 'Target.detachFromTarget') return new Promise<void>((resolve) => detachResolvers.push(resolve));
+        return {};
+      },
+      closeContext: async() => {
+        contextClosed++;
+        for(const resolve of detachResolvers) resolve();
+      }
+    });
+    await networkObserver.start();
+    contextObserver.noteInjectedControlFault('overflow');
+    for(let index = 0; index < observation.LIMITS.attachedTargets * 3; index++) {
+      cdp.emit('Target.attachedToTarget', {
+        sessionId: `overflow-session-${index}`,
+        targetInfo: sharedWorker(`overflow-worker-${index}`, HOSTILE.blobUrl)
+      });
+    }
+
+    const setupPromise = networkObserver.waitForSetup();
+    let setupSettled = false;
+    setupPromise.then(() => setupSettled = true);
+    try {
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(autoAttachDisabled).toBe(1);
+      expect(detachResolvers.length).toBeLessThanOrEqual(observation.LIMITS.attachedTargets);
+      expect(contextClosed).toBe(1);
+      expect(setupSettled).toBe(true);
+    } finally {
+      for(const resolve of detachResolvers) resolve();
+      await setupPromise;
+      await networkObserver.stop();
+    }
   });
 
   it('rejects cleanup when the page observer session cannot detach', async() => {
