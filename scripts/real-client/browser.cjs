@@ -858,7 +858,19 @@ async function captureState(page, screenshotDirectory, name, capturedScreenshots
   capturedScreenshots.count++;
 }
 
-async function signIn(page, account, name, screenshotDirectory, capturedScreenshots) {
+async function waitForUsernameField(page, name) {
+  currentStage = `${name}_username_field`;
+  const username = page.getByRole('textbox', {name: 'Username', exact: true});
+  if(await username.count() > 1) failStage(`${name}_username_field_not_unique`);
+  await username.waitFor({state: 'visible', timeout: 30_000}).catch(async() => {
+    if(await username.count() > 1) failStage(`${name}_username_field_not_unique`);
+    failStage(`${name}_username_field`);
+  });
+  if(await username.count() !== 1) failStage(`${name}_username_field_not_unique`);
+  return username;
+}
+
+async function prepareUsernameEntry(page, name, expected) {
   currentStage = `${name}_sign_in_form`;
   const response = await page.goto(PRIVATE_CSP_ORIGIN, {waitUntil: 'domcontentloaded', timeout: 30_000});
   if(response?.status() !== 200) failStage(`${name}_artifact_load`);
@@ -868,21 +880,17 @@ async function signIn(page, account, name, screenshotDirectory, capturedScreensh
     if(!response.ok) throw new Error('manifest_not_ready');
     return response.json();
   }).catch(() => failStage(`${name}_manifest_load`));
-  if(!matchesPrivateArtifactManifest(manifest, runtime)) {
+  if(!matchesPrivateArtifactManifest(manifest, expected)) {
     failStage(`${name}_manifest_mismatch`);
   }
 
-  const username = page.locator('input[aria-label="Username"]');
-  if(!(await username.isVisible())) {
-    currentStage = `${name}_username_entry`;
-    const usernameEntry = page.getByRole('button', {name: /sign in with username/i});
-    await usernameEntry.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`${name}_username_entry`));
-    if(await usernameEntry.count() !== 1) failStage(`${name}_username_entry_not_unique`);
-    await usernameEntry.click();
-  }
-  currentStage = `${name}_username_field`;
-  await username.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`${name}_username_field`));
+  return waitForUsernameField(page, name);
+}
+
+async function signIn(page, account, name, screenshotDirectory, capturedScreenshots) {
+  const username = await prepareUsernameEntry(page, name, runtime);
   await captureState(page, screenshotDirectory, `${name}-sign-in`, capturedScreenshots);
+  if(await username.count() !== 1) failStage(`${name}_username_field_not_unique`);
   await username.fill(account.username);
   await username.press('Enter');
 
@@ -1373,7 +1381,7 @@ function emitReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {createNetworkObserver, createWorkerDiscovery, getSingleExactMessageFailure, matchesPrivateArtifactManifest};
+module.exports = {createNetworkObserver, createWorkerDiscovery, getSingleExactMessageFailure, matchesPrivateArtifactManifest, prepareUsernameEntry};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

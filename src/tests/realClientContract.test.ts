@@ -1,10 +1,11 @@
 import {chmodSync, linkSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync} from 'node:fs';
 import {EventEmitter} from 'node:events';
 import {createHash, generateKeyPairSync} from 'node:crypto';
+import {createServer} from 'node:http';
 import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {describe, expect, it, vi} from 'vitest';
+import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
 
 import {
   assertAllScenariosPassed,
@@ -17,7 +18,8 @@ import {
 } from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
-const {createNetworkObserver, createWorkerDiscovery, getSingleExactMessageFailure, matchesPrivateArtifactManifest} = require('../../scripts/real-client/browser.cjs');
+const {chromium} = require('@playwright/test');
+const {createNetworkObserver, createWorkerDiscovery, getSingleExactMessageFailure, matchesPrivateArtifactManifest, prepareUsernameEntry} = require('../../scripts/real-client/browser.cjs');
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -1265,5 +1267,189 @@ describe('real client scenario contract', () => {
     const failing = controlsOnly();
     failing.controls.c2_missing_module_script.expected = 'fail';
     expect(() => parseObserverControls(failing)).toThrow('observer synthetic control c2_missing_module_script did not pass');
+  });
+});
+
+function usernameReadinessMarkup({delay = 0, fieldCount = 1, legacyButton = false}: {delay?: number, fieldCount?: number, legacyButton?: boolean} = {}) {
+  const fields = Array.from({length: fieldCount}, () => '<input aria-label="Username">').join('');
+  const button = legacyButton ? '<button id="legacy-entry" type="button">Sign in with username</button>' : '';
+  const renderFields = delay > 0
+    ? `setTimeout(() => {document.querySelector('#login').insertAdjacentHTML('beforeend', ${JSON.stringify(fields)})}, ${delay});`
+    : `document.querySelector('#login').insertAdjacentHTML('beforeend', ${JSON.stringify(fields)});`;
+
+  return `<!doctype html><html><body>
+    ${button}<form id="login"></form>
+    <script>
+      window.legacyClicks = 0;
+      window.formSubmissions = 0;
+      document.querySelector('#legacy-entry')?.addEventListener('click', () => {window.legacyClicks++});
+      document.querySelector('#login').addEventListener('submit', (event) => {event.preventDefault(); window.formSubmissions++});
+      ${renderFields}
+    </script>
+  </body></html>`;
+}
+
+const USERNAME_ENTRY_RUNTIME = Object.freeze({
+  wssEndpoint: 'wss://telegramd.test/apiws',
+  fingerprint: '1234567890abcdef',
+  webRevision: READINESS_PINS.webRevision,
+  artifactDigest: `sha256:${'c'.repeat(64)}`
+});
+const DUMMY_USERNAME = 'runner-contract-user';
+
+function usernameEntryManifest() {
+  return {
+    artifactDigest: USERNAME_ENTRY_RUNTIME.artifactDigest,
+    endpoint: USERNAME_ENTRY_RUNTIME.wssEndpoint,
+    fingerprint: USERNAME_ENTRY_RUNTIME.fingerprint,
+    mode: 'private',
+    sourceCommit: USERNAME_ENTRY_RUNTIME.webRevision
+  };
+}
+
+describe('real client username field readiness', () => {
+  let browser: any;
+  let fixtureServer: any;
+  let fixtureOrigin: string;
+  let fixtureMarkup = '';
+  let fixtureManifest: any;
+  let fixtureRequests: string[];
+
+  beforeAll(async() => {
+    fixtureServer = createServer((request, response) => {
+      const requestPath = request.url || '/';
+      fixtureRequests.push(requestPath);
+      if(requestPath === '/') {
+        response.writeHead(200, {'content-type': 'text/html'});
+        response.end(fixtureMarkup);
+      } else if(requestPath === '/mtproto-target.json') {
+        response.writeHead(200, {'content-type': 'application/json'});
+        response.end(JSON.stringify(fixtureManifest));
+      } else {
+        response.writeHead(404);
+        response.end();
+      }
+    });
+    await new Promise<void>((resolve, reject) => {
+      fixtureServer.once('error', reject);
+      fixtureServer.listen(0, '127.0.0.1', resolve);
+    });
+    const address = fixtureServer.address();
+    if(!address || typeof address === 'string') throw new Error('loopback fixture did not bind');
+    fixtureOrigin = `http://127.0.0.1:${address.port}`;
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+    await new Promise<void>((resolve) => fixtureServer?.close(resolve));
+  }, 15_000);
+
+  function setFixture(markup: string, manifest: any = usernameEntryManifest()) {
+    fixtureMarkup = markup;
+    fixtureManifest = manifest;
+    fixtureRequests = [];
+  }
+
+  async function createRunnerPage() {
+    const page = await browser.newPage();
+    await page.route('**/*', async(route: any) => {
+      const requestUrl = new URL(route.request().url());
+      if(requestUrl.origin !== APP_ORIGIN) {
+        await route.abort();
+        return;
+      }
+      const response = await fetch(`${fixtureOrigin}${requestUrl.pathname}`);
+      await route.fulfill({
+        status: response.status,
+        headers: {'content-type': response.headers.get('content-type') || 'text/plain'},
+        body: await response.text()
+      });
+    });
+    return page;
+  }
+
+  it('reaches a delayed Username field without a legacy entry button', async() => {
+    setFixture(usernameReadinessMarkup({delay: 100}));
+    const page = await createRunnerPage();
+    try {
+      const username = await prepareUsernameEntry(page, 'alice', USERNAME_ENTRY_RUNTIME);
+
+      expect(await username.count()).toBe(1);
+      expect(await username.isVisible()).toBe(true);
+      await username.fill(DUMMY_USERNAME);
+      expect(await username.inputValue()).toBe(DUMMY_USERNAME);
+      expect(await page.evaluate(() => (window as any).formSubmissions)).toBe(0);
+      expect(fixtureRequests.slice(0, 2)).toEqual(['/', '/mtproto-target.json']);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('does not click a visible legacy-style decoy while waiting for Username', async() => {
+    setFixture(usernameReadinessMarkup({delay: 100, legacyButton: true}));
+    const page = await createRunnerPage();
+    try {
+      const username = await prepareUsernameEntry(page, 'alice', USERNAME_ENTRY_RUNTIME);
+
+      expect(await username.isVisible()).toBe(true);
+      await username.fill(DUMMY_USERNAME);
+      expect(await username.inputValue()).toBe(DUMMY_USERNAME);
+      expect(await page.evaluate(() => (window as any).legacyClicks)).toBe(0);
+      expect(await page.evaluate(() => (window as any).formSubmissions)).toBe(0);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('accepts an immediately visible Username field', async() => {
+    setFixture(usernameReadinessMarkup());
+    const page = await createRunnerPage();
+    try {
+      const username = await prepareUsernameEntry(page, 'alice', USERNAME_ENTRY_RUNTIME);
+
+      expect(await username.isVisible()).toBe(true);
+      expect(await username.inputValue()).toBe('');
+      expect(await page.evaluate(() => (window as any).formSubmissions)).toBe(0);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails at Username readiness when the field never appears', async() => {
+    setFixture(usernameReadinessMarkup({fieldCount: 0}));
+    const page = await createRunnerPage();
+    try {
+      await expect(prepareUsernameEntry(page, 'alice', USERNAME_ENTRY_RUNTIME)).rejects.toThrow('alice_username_field');
+      expect(await page.locator('input[aria-label="Username"]').count()).toBe(0);
+      expect(await page.evaluate(() => (window as any).formSubmissions)).toBe(0);
+      expect(fixtureRequests.slice(0, 2)).toEqual(['/', '/mtproto-target.json']);
+    } finally {
+      await page.close();
+    }
+  }, 40_000);
+
+  it('fails safely when multiple accessible Username fields match', async() => {
+    setFixture(usernameReadinessMarkup({fieldCount: 2}));
+    const page = await createRunnerPage();
+    try {
+      await expect(prepareUsernameEntry(page, 'alice', USERNAME_ENTRY_RUNTIME)).rejects.toThrow('alice_username_field_not_unique');
+      expect(await page.locator('input[aria-label="Username"]').evaluateAll((inputs: HTMLInputElement[]) => inputs.map((input) => input.value)))
+      .toEqual(['', '']);
+      expect(await page.evaluate(() => (window as any).formSubmissions)).toBe(0);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('validates the private manifest before waiting for Username', async() => {
+    setFixture(usernameReadinessMarkup(), {...usernameEntryManifest(), fingerprint: 'different-fingerprint'});
+    const page = await createRunnerPage();
+    try {
+      await expect(prepareUsernameEntry(page, 'alice', USERNAME_ENTRY_RUNTIME)).rejects.toThrow('alice_manifest_mismatch');
+      expect(fixtureRequests.slice(0, 2)).toEqual(['/', '/mtproto-target.json']);
+    } finally {
+      await page.close();
+    }
   });
 });
