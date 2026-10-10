@@ -371,7 +371,7 @@ describe('AuthCardsHost target-specific routing', () => {
     await vi.waitFor(() => expect(mocks.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']));
 
     navigateAuth({name: 'signQR'});
-    await vi.waitFor(() => expect(document.body.textContent).toContain('Sign in with username'));
+    await vi.waitFor(() => expect(document.body.textContent).toContain('Sign in with your username'));
     mocks.navigateCard.mockClear();
   }
 
@@ -449,7 +449,7 @@ describe('AuthCardsHost target-specific routing', () => {
     username.dispatchEvent(new Event('input', {bubbles: true}));
     Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Next')!.click();
     navigateAuth({name: 'signQR'});
-    await vi.waitFor(() => expect(document.body.textContent).toContain('Sign in with username'));
+    await vi.waitFor(() => expect(document.body.textContent).toContain('Sign in with your username'));
     mocks.navigateCard.mockClear();
 
     resolveSendCode(SENT_CODE);
@@ -459,9 +459,9 @@ describe('AuthCardsHost target-specific routing', () => {
     expect(mocks.navigateCard).not.toHaveBeenCalled();
     expect(mocks.setUser).not.toHaveBeenCalled();
     expect(mocks.bootstrapIm).not.toHaveBeenCalled();
-    expect(document.querySelector('input[aria-label="Username"]')).toBeNull();
+    expect(document.querySelector('input[aria-label="Username"]')).not.toBeNull();
     expect(document.querySelector('[role="alert"]')).toBeNull();
-    expect(document.body.textContent).toContain('Sign in with username');
+    expect(document.body.textContent).toContain('Sign in with your username');
   });
 
   it('does not authorize or enter the IM when auth.signIn succeeds after navigating away', async() => {
@@ -474,9 +474,9 @@ describe('AuthCardsHost target-specific routing', () => {
     expect(mocks.setUser).not.toHaveBeenCalled();
     expect(mocks.bootstrapIm).not.toHaveBeenCalled();
     expect(mocks.navigateCard).not.toHaveBeenCalled();
-    expect(document.querySelector('input[aria-label="Username"]')).toBeNull();
+    expect(document.querySelector('input[aria-label="Username"]')).not.toBeNull();
     expect(document.querySelector('input[aria-label="LoginPassword"]')).toBeNull();
-    expect(document.body.textContent).toContain('Sign in with username');
+    expect(document.body.textContent).toContain('Sign in with your username');
   });
 
   it('does not navigate to password when auth.signIn requires it after navigating away', async() => {
@@ -489,22 +489,32 @@ describe('AuthCardsHost target-specific routing', () => {
     expect(mocks.setUser).not.toHaveBeenCalled();
     expect(mocks.bootstrapIm).not.toHaveBeenCalled();
     expect(mocks.navigateCard).not.toHaveBeenCalledWith({name: 'password'});
-    expect(document.querySelector('input[aria-label="Username"]')).toBeNull();
+    expect(document.querySelector('input[aria-label="Username"]')).not.toBeNull();
     expect(document.querySelector('input[aria-label="LoginPassword"]')).toBeNull();
-    expect(document.body.textContent).toContain('Sign in with username');
+    expect(document.body.textContent).toContain('Sign in with your username');
   });
 
-  it('uses the same username form for the private QR escape action', async() => {
-    mocks.renderRealQrCard = true;
-    mocks.invokeApi.mockRejectedValueOnce({type: 'INPUT_METHOD_INVALID'});
+  it('routes private QR navigation directly to username sign-in', async() => {
     await mount(true, {name: 'signQR'});
-    await vi.waitFor(() => expect(document.querySelector('.media-header-title')?.textContent).toBe('QR code sign-in unavailable'));
-
-    Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Sign in with username')!.click();
     await waitForUsername();
 
+    expect(document.body.textContent).toContain('Sign in with your username');
+    expect(document.body.textContent).not.toMatch(/QR code|phone number/i);
     expect(document.querySelector('input[type="tel"]')).toBeNull();
-    expect(mocks.navigateCard).toHaveBeenCalledWith({name: 'signIn'});
+    expect(document.querySelector('canvas')).toBeNull();
+    expect(mocks.invokeApi).not.toHaveBeenCalled();
+  });
+
+  it('routes private web-token import state to username sign-in', async() => {
+    await mount(true, {
+      name: 'signImport',
+      payload: {token: 'synthetic-token', userId: 1, dcId: 1, isTest: false, tgAddr: ''}
+    });
+    await waitForUsername();
+
+    expect(document.body.textContent).toContain('Sign in with your username');
+    expect(document.querySelector('[data-card="signImport"]')).toBeNull();
+    expect(mocks.invokeApi).not.toHaveBeenCalled();
   });
 
   it('retains every official phone-sign-in card mapping', async() => {
