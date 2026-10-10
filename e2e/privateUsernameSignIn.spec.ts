@@ -1,6 +1,6 @@
 import {expect, test} from '@playwright/test';
 
-const AUTH_STATES = ['signIn', 'authCode', 'signUp', 'signQR', 'signImport'] as const;
+const AUTH_STATES = ['authCode', 'signUp', 'signQR', 'signImport', 'signIn'] as const;
 
 test('private target keeps every unauthenticated state on username sign-in', async({page}, testInfo) => {
   await page.setViewportSize({width: 320, height: 720});
@@ -54,6 +54,10 @@ test('private target keeps every unauthenticated state on username sign-in', asy
   });
 
   for(const name of AUTH_STATES) {
+    const username = auth.getByRole('textbox', {name: 'Username'});
+    const previousCard = await username.evaluateHandle((input) => input.closest('[class*="card"]'));
+    expect(await previousCard.evaluate((card) => !!card && card.isConnected)).toBe(true);
+
     await page.evaluate(async(name) => {
       const moduleUrl = new URL('/src/pages/authFlow.tsx', window.location.origin).href;
       const {navigateAuth} = await import(moduleUrl);
@@ -90,8 +94,14 @@ test('private target keeps every unauthenticated state on username sign-in', asy
       }
     }, name);
 
-    const username = auth.getByRole('textbox', {name: 'Username'});
-    await expect(username).toBeVisible();
+    await expect.poll(
+      () => previousCard.evaluate((card) => !card || !card.isConnected),
+      {message: `previous auth card should detach after forcing ${name}`}
+    ).toBe(true);
+    await previousCard.dispose();
+
+    const replacementUsername = auth.getByRole('textbox', {name: 'Username'});
+    await expect(replacementUsername).toBeVisible();
     await expect(auth.getByText('Sign in with your username', {exact: true})).toBeVisible();
     await page.waitForFunction(() => {
       const card = document.querySelector('#auth-pages input[aria-label="Username"]')?.closest('[class*="card"]');
