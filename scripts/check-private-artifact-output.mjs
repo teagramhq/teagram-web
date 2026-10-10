@@ -4,7 +4,7 @@
 // instead of the composite `pnpm build`, which also runs the full local suite.
 
 import {execFileSync, spawnSync} from 'node:child_process';
-import {mkdtempSync, rmSync} from 'node:fs';
+import {mkdtempSync, readFileSync, readdirSync, rmSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
@@ -14,6 +14,7 @@ import {resolveMtprotoTarget} from './mtproto-target.mjs';
 const ROOT_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PRIVATE_ENDPOINT = 'wss://telegramd.test/apiws';
 const PUBLIC_KEY_FILE = resolve(ROOT_DIRECTORY, 'scripts/fixtures/private-mtproto-public.pem');
+const TEST_ONLY_HARNESS_MARKER = 'teagram-l1-prekey-test-only';
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'teagram-private-artifact-output-'));
 const outputDirectory = join(temporaryRoot, 'dist-private');
 const targetEnvironment = {
@@ -45,11 +46,27 @@ function run(command, args, environment) {
   return result.stdout;
 }
 
+function rejectTestOnlyHarness(outputDirectory) {
+  const pending = [outputDirectory];
+  while(pending.length) {
+    const directory = pending.pop();
+    for(const entry of readdirSync(directory, {withFileTypes: true})) {
+      const entryPath = join(directory, entry.name);
+      if(entry.isDirectory()) {
+        pending.push(entryPath);
+      } else if(readFileSync(entryPath).includes(TEST_ONLY_HARNESS_MARKER)) {
+        throw new Error('[MT] private artifact contains test-only L1 harness code');
+      }
+    }
+  }
+}
+
 try {
   const target = resolveMtprotoTarget(targetEnvironment);
   const viteCli = resolve(ROOT_DIRECTORY, 'node_modules/vite/bin/vite.js');
   const buildCommand = [process.execPath, viteCli, 'build', '--outDir', outputDirectory];
   run(buildCommand[0], buildCommand.slice(1), builderEnvironment());
+  rejectTestOnlyHarness(outputDirectory);
   const auditOutput = run(process.execPath, [
     resolve(ROOT_DIRECTORY, 'scripts/check-bundle-mangling.mjs'),
     outputDirectory
@@ -71,6 +88,7 @@ try {
     `[private-artifact] fingerprint=${manifest.fingerprint}`,
     `[private-artifact] sourceCommit=${manifest.sourceCommit}`,
     `[private-artifact] artifactDigest=${manifest.artifactDigest}`,
+    '[private-artifact] test-only L1 pre-key harness=excluded',
     '[private-artifact] audit=source maps and directives, alternate WSS and cleartext WS, official MTProto routes and IPv4/IPv6 DC addresses, official RSA fingerprints and moduli, private-key blocks',
     auditOutput.trimEnd()
   ].join('\n') + '\n');

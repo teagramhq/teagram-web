@@ -15,6 +15,7 @@
     "verify:deployment-artifact": "node scripts/verify-deployment-artifact.mjs",
     "verify-private-artifact": "node scripts/private-artifact-release.mjs verify",
     "test": "vitest",
+    "test:l1-prekey": "node ./src/tests/l1PrekeyRun.mjs",
     "test:ephemeral-bot": "node ./src/tests/fixtures/ephemeralBot/bot.mjs",
     "test:real-client": "node ./scripts/real-client/run.mjs",
     "test:lottie": "playwright test e2e/lottie*.spec.ts",
