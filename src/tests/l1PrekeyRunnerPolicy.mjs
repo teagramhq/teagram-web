@@ -1,51 +1,261 @@
-import {mkdir, readFile, rm, stat, writeFile} from 'node:fs/promises';
+import {createConnection, createServer} from 'node:net';
+import {open, lstat, mkdir, readFile, rm, rmdir, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
 const MAX_ATTEMPTS = 3;
 const WINDOW_MS = 10 * 60 * 1000;
 const MIN_INTERVAL_MS = 5 * 1000;
-const STALE_LOCK_MS = 60 * 1000;
+const ACTIVE_LOCK_NAME = 'active.lock';
+const MAINTENANCE_LOCK_NAME = 'maintenance.lock';
+const OWNER_MARKER_NAME = 'owner.lock';
+const OWNER_SOCKET_NAME = 'owner.sock';
+const MAINTENANCE_RELEASE_RETRIES = 100;
 const stateDirectory = join(
   tmpdir(),
   `teagram-web-l1-prekey-${typeof process.getuid === 'function' ? process.getuid() : 'shared'}`
 );
 
+/** @typedef {{afterUnownedLockObserved?: (lockPath: string) => Promise<void>}} PolicyTestHooks */
+/** @typedef {{directory?: string, now?: number, testHooks?: PolicyTestHooks}} AcquireAttemptOptions */
+
 function isMissing(error) {
   return error && typeof error === 'object' && error.code === 'ENOENT';
 }
 
-async function removeStaleLock(lockPath) {
-  let lockStats;
+function isAlreadyExists(error) {
+  return error && typeof error === 'object' && error.code === 'EEXIST';
+}
+
+function sameDirectory(first, second) {
+  return first && second && first.dev === second.dev && first.ino === second.ino;
+}
+
+function sameFile(first, second) {
+  return first && second && first.dev === second.dev && first.ino === second.ino;
+}
+
+async function getDirectoryIdentity(path) {
   try {
-    lockStats = await stat(lockPath);
+    const current = await lstat(path);
+    return current.isDirectory() ? current : undefined;
   } catch(error) {
-    if(isMissing(error)) return true;
+    if(isMissing(error)) return undefined;
+    throw error;
+  }
+}
+
+async function getOwnerMarkerIdentity(path) {
+  try {
+    const current = await lstat(path);
+    return current.isFile() && current.size === 0 ? current : undefined;
+  } catch(error) {
+    if(isMissing(error)) return undefined;
+    throw error;
+  }
+}
+
+async function ownerSocketExists(path) {
+  try {
+    const current = await lstat(path);
+    return current.isSocket() || current.isFile();
+  } catch(error) {
+    if(isMissing(error)) return false;
+    throw error;
+  }
+}
+
+function ownerIsReachable(socketPath) {
+  return new Promise(resolve => {
+    const socket = createConnection(socketPath);
+    let settled = false;
+    const timeout = setTimeout(() => finish(false), 100);
+    const finish = reachable => {
+      if(settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.destroy();
+      resolve(reachable);
+    };
+
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+  });
+}
+
+async function makeOwnerServer(socketPath) {
+  const server = createServer(socket => socket.end());
+  await new Promise((resolvePromise, rejectPromise) => {
+    const onError = error => rejectPromise(error);
+    server.once('error', onError);
+    server.listen(socketPath, () => {
+      server.removeListener('error', onError);
+      resolvePromise();
+    });
+  });
+  return server;
+}
+
+async function closeOwnerServer(server) {
+  if(!server.listening) return;
+  await new Promise(resolvePromise => server.close(() => resolvePromise()));
+}
+
+async function tryAcquireMaintenanceLock(directory) {
+  const path = join(directory, MAINTENANCE_LOCK_NAME);
+  try {
+    await mkdir(path, {mode: 0o700});
+  } catch(error) {
+    if(isAlreadyExists(error)) return undefined;
     throw error;
   }
 
-  if(Date.now() - lockStats.mtimeMs < STALE_LOCK_MS) return false;
-
-  await rm(lockPath, {recursive: true, force: true});
-  return true;
+  return {
+    release: () => rmdir(path)
+  };
 }
 
-async function acquireLock(directory) {
-  const lockPath = join(directory, 'active.lock');
-  for(let attempt = 0; attempt < 2; ++attempt) {
-    try {
-      await mkdir(lockPath, {mode: 0o700});
-      return {
-        acquired: true,
-        release: () => rm(lockPath, {recursive: true, force: true})
-      };
-    } catch(error) {
-      if(!error || typeof error !== 'object' || error.code !== 'EEXIST') throw error;
-      if(!await removeStaleLock(lockPath)) return {acquired: false};
-    }
+async function waitForMaintenanceLock(directory) {
+  for(let attempt = 0; attempt < MAINTENANCE_RELEASE_RETRIES; ++attempt) {
+    const lock = await tryAcquireMaintenanceLock(directory);
+    if(lock) return lock;
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 5));
+  }
+  return undefined;
+}
+
+async function removeUnownedLock(lockPath, identity, testHooks) {
+  const ownerSocket = join(lockPath, OWNER_SOCKET_NAME);
+  const ownerMarkerPath = join(lockPath, OWNER_MARKER_NAME);
+  let ownerHandle;
+  try {
+    ownerHandle = await open(ownerMarkerPath, 'r');
+  } catch(error) {
+    if(isMissing(error)) return false;
+    throw error;
   }
 
-  return {acquired: false};
+  try {
+    const ownerIdentity = await ownerHandle.stat();
+    if(!ownerIdentity.isFile() || ownerIdentity.size !== 0 ||
+      !await ownerSocketExists(ownerSocket) || await ownerIsReachable(ownerSocket)) return false;
+    if(typeof testHooks?.afterUnownedLockObserved === 'function') {
+      await testHooks.afterUnownedLockObserved(lockPath);
+    }
+
+    const current = await getDirectoryIdentity(lockPath);
+    const currentOwner = await getOwnerMarkerIdentity(ownerMarkerPath);
+    if(!sameDirectory(identity, current) || !sameFile(ownerIdentity, currentOwner)) return false;
+    if(!await ownerSocketExists(ownerSocket) || await ownerIsReachable(ownerSocket)) return false;
+
+    const latest = await getDirectoryIdentity(lockPath);
+    const latestOwner = await getOwnerMarkerIdentity(ownerMarkerPath);
+    if(!sameDirectory(identity, latest) || !sameFile(ownerIdentity, latestOwner) ||
+      await ownerIsReachable(ownerSocket)) return false;
+
+    await ownerHandle.close();
+    ownerHandle = undefined;
+    await rm(lockPath, {recursive: true, force: false});
+    return true;
+  } finally {
+    await ownerHandle?.close();
+  }
+}
+
+async function releaseActiveLock(directory, lockPath, identity, ownerIdentity, ownerHandle, ownerServer) {
+  const maintenanceLock = await waitForMaintenanceLock(directory);
+  if(!maintenanceLock) {
+    await ownerHandle.close();
+    ownerServer.unref();
+    return;
+  }
+
+  try {
+    const current = await getDirectoryIdentity(lockPath);
+    const currentOwner = await getOwnerMarkerIdentity(join(lockPath, OWNER_MARKER_NAME));
+    await closeOwnerServer(ownerServer);
+    if(sameDirectory(identity, current) && sameFile(ownerIdentity, currentOwner)) {
+      await ownerHandle.close();
+      await rm(lockPath, {recursive: true, force: false});
+    } else {
+      await ownerHandle.close();
+    }
+  } finally {
+    await maintenanceLock.release();
+  }
+}
+
+async function acquireLock(directory, testHooks) {
+  const maintenanceLock = await tryAcquireMaintenanceLock(directory);
+  if(!maintenanceLock) return {acquired: false};
+
+  let releasedMaintenanceLock = false;
+  const releaseMaintenanceLock = async() => {
+    if(releasedMaintenanceLock) return;
+    releasedMaintenanceLock = true;
+    await maintenanceLock.release();
+  };
+
+  try {
+    const lockPath = join(directory, ACTIVE_LOCK_NAME);
+    for(let attempt = 0; attempt < 2; ++attempt) {
+      try {
+        await mkdir(lockPath, {mode: 0o700});
+      } catch(error) {
+        if(!isAlreadyExists(error)) throw error;
+        const identity = await getDirectoryIdentity(lockPath);
+        if(!identity) return {acquired: false};
+        if(!await removeUnownedLock(lockPath, identity, testHooks)) return {acquired: false};
+        continue;
+      }
+
+      const identity = await getDirectoryIdentity(lockPath);
+      if(!identity) return {acquired: false};
+      let ownerHandle;
+      try {
+        ownerHandle = await open(join(lockPath, OWNER_MARKER_NAME), 'wx', 0o600);
+      } catch(error) {
+        const current = await getDirectoryIdentity(lockPath);
+        if(sameDirectory(identity, current)) await rm(lockPath, {recursive: true, force: true});
+        throw error;
+      }
+      let ownerIdentity;
+      try {
+        ownerIdentity = await ownerHandle.stat();
+      } catch(error) {
+        await ownerHandle.close();
+        const current = await getDirectoryIdentity(lockPath);
+        if(sameDirectory(identity, current)) await rm(lockPath, {recursive: true, force: true});
+        throw error;
+      }
+      let ownerServer;
+      try {
+        ownerServer = await makeOwnerServer(join(lockPath, OWNER_SOCKET_NAME));
+      } catch(error) {
+        const current = await getDirectoryIdentity(lockPath);
+        await ownerHandle.close();
+        if(sameDirectory(identity, current)) await rm(lockPath, {recursive: true, force: true});
+        throw error;
+      }
+
+      const current = await getDirectoryIdentity(lockPath);
+      if(!sameDirectory(identity, current)) {
+        await closeOwnerServer(ownerServer);
+        await ownerHandle.close();
+        return {acquired: false};
+      }
+
+      await releaseMaintenanceLock();
+      return {
+        acquired: true,
+        release: () => releaseActiveLock(directory, lockPath, identity, ownerIdentity, ownerHandle, ownerServer)
+      };
+    }
+
+    return {acquired: false};
+  } finally {
+    await releaseMaintenanceLock();
+  }
 }
 
 async function readAttemptState(path) {
@@ -64,10 +274,11 @@ async function readAttemptState(path) {
   }
 }
 
-export async function acquireAttemptPermit({directory = stateDirectory, now = Date.now()} = {}) {
+/** @param {AcquireAttemptOptions} [options] */
+export async function acquireAttemptPermit({directory = stateDirectory, now = Date.now(), testHooks} = {}) {
   if(!Number.isSafeInteger(now) || now < 0) return {allowed: false, reason: 'invalid_input'};
   await mkdir(directory, {recursive: true, mode: 0o700});
-  const lock = await acquireLock(directory);
+  const lock = await acquireLock(directory, testHooks);
   if(!lock.acquired) return {allowed: false, reason: 'concurrency_limited'};
 
   let released = false;

@@ -1,7 +1,6 @@
-import WebSocket from 'ws';
 import {Authorizer} from '@lib/mtproto/authorizer';
 import TcpObfuscated from '@lib/mtproto/transports/tcpObfuscated';
-import {AbridgedPacketStream, MAX_PRE_AUTH_ABRIDGED_PACKET_BYTES} from '@lib/mtproto/transports/abridged';
+import {AbridgedPacketStream} from '@lib/mtproto/transports/abridged';
 import {TLDeserialization} from '@lib/mtproto/tl_utils';
 import Schema from '@lib/mtproto/schema';
 import type {MTProtoConstructor} from '@lib/mtproto/schema';
@@ -13,6 +12,8 @@ import CryptoWorker from '@lib/crypto/cryptoMessagePort';
 import {randomBytes} from '@helpers/random';
 import bytesCmp from '@helpers/bytes/bytesCmp';
 import {serializeDiagnosticResult} from './l1PrekeyContract';
+import {NodeWebSocketConnection} from './l1PrekeyNodeWebSocket';
+import type {NodeWebSocketMetrics} from './l1PrekeyNodeWebSocket';
 
 const ATTEMPT_DEADLINE_MS = 20_000;
 const PREKEY_BOUNDARY = Symbol.for('teagram-l1-prekey-test-only');
@@ -42,13 +43,7 @@ type ValidatedDiagnosticInput = Omit<DiagnosticInput, 'target'> & {
   target: Extract<MtprotoTarget, {mode: 'private'}>
 };
 
-type AttemptMetrics = {
-  upgradeStatus?: number,
-  requestCount: number,
-  close1000Sent: boolean,
-  peerClosed: boolean,
-  malformed: boolean
-};
+type AttemptMetrics = NodeWebSocketMetrics;
 
 type AttemptTransport = {
   send: (data: Uint8Array) => Promise<Uint8Array> | void,
@@ -98,111 +93,6 @@ type HarnessOptions = {
   createConnection?: (input: DiagnosticInput, metrics: AttemptMetrics) => HarnessConnectionConstructable,
   deadlineMs?: number
 };
-
-class NodeWebSocketConnection {
-  private socket: WebSocket;
-  private listeners = new Map<string, Set<RuntimeConnectionListener>>();
-  private localClose = false;
-  private closeDispatched = false;
-  private initSent = false;
-
-  constructor(
-    _dcId: number,
-    endpoint: string,
-    _logSuffix: string,
-    origin: string,
-    subprotocol: string,
-    private metrics: AttemptMetrics
-  ) {
-    this.socket = new WebSocket(endpoint, subprotocol, {
-      headers: {Origin: origin},
-      perMessageDeflate: false
-    });
-
-    this.socket.on('upgrade', (response) => {
-      this.metrics.upgradeStatus = response.statusCode;
-    });
-    this.socket.on('open', () => {
-      this.metrics.upgradeStatus = 101;
-      this.dispatch('open');
-    });
-    this.socket.on('unexpected-response', (_request, response) => {
-      this.metrics.upgradeStatus = response.statusCode;
-      response.resume();
-      this.socket.terminate();
-      this.dispatchClose();
-    });
-    this.socket.on('message', (data, isBinary) => {
-      if(!isBinary) {
-        this.metrics.malformed = true;
-        this.close();
-        this.dispatchClose();
-        return;
-      }
-
-      const bytes = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as Buffer);
-      if(bytes.byteLength > MAX_PRE_AUTH_ABRIDGED_PACKET_BYTES) this.metrics.malformed = true;
-      const copy = new Uint8Array(bytes.byteLength);
-      copy.set(bytes);
-      this.dispatch('message', copy.buffer);
-    });
-    this.socket.on('close', () => {
-      if(!this.localClose) this.metrics.peerClosed = true;
-      this.dispatchClose();
-    });
-    this.socket.on('error', () => {
-      if(this.metrics.upgradeStatus === undefined) this.metrics.upgradeStatus = 0;
-      if(this.socket.readyState === WebSocket.CONNECTING) this.socket.terminate();
-    });
-  }
-
-  public addEventListener(type: string, listener: RuntimeConnectionListener) {
-    const listeners = this.listeners.get(type) ?? new Set<RuntimeConnectionListener>();
-    listeners.add(listener);
-    this.listeners.set(type, listeners);
-  }
-
-  public removeEventListener(type: string, listener: RuntimeConnectionListener) {
-    const listeners = this.listeners.get(type);
-    listeners?.delete(listener);
-    if(!listeners?.size) this.listeners.delete(type);
-  }
-
-  public send(data: Uint8Array) {
-    if(this.socket.readyState !== WebSocket.OPEN) {
-      throw new Error('connection_not_open');
-    }
-
-    if(this.initSent) this.metrics.requestCount++;
-    else this.initSent = true;
-    this.socket.send(Buffer.from(data));
-  }
-
-  public close() {
-    if(this.socket.readyState === WebSocket.OPEN) {
-      try {
-        this.localClose = true;
-        this.socket.close(1000);
-        this.metrics.close1000Sent = true;
-      } catch{
-        this.metrics.close1000Sent = false;
-      }
-    } else if(this.socket.readyState === WebSocket.CONNECTING) {
-      this.localClose = true;
-      this.socket.terminate();
-    }
-  }
-
-  private dispatch(type: string, data?: ArrayBuffer) {
-    for(const listener of this.listeners.get(type) ?? []) listener(data);
-  }
-
-  private dispatchClose() {
-    if(this.closeDispatched) return;
-    this.closeDispatched = true;
-    this.dispatch('close');
-  }
-}
 
 const quietLogger = Object.assign(() => {}, {
   error: () => {},
