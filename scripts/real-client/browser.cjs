@@ -879,7 +879,7 @@ async function waitForUsernameField(page, name) {
   return username;
 }
 
-function passwordReadinessProbe({usernameField, deadline}) {
+function passwordReadinessProbe({usernameField, deadline, classifyOnly = false}) {
   const fields = document.querySelectorAll('#auth-pages input[name="notsearch_password"]');
   const count = fields.length;
   if(count > 1) return {ready: false, reason: 'password_field_not_unique', count};
@@ -890,13 +890,17 @@ function passwordReadinessProbe({usernameField, deadline}) {
     return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
   };
   const usernameVisible = isVisible(usernameField);
+  let passwordFieldReady = false;
   if(count === 1) {
     const field = fields[0];
     const className = field.getAttribute('class') || '';
     const stealthy = className.split(/\s+/).includes('stealthy');
     const visible = isVisible(field);
     const type = field.getAttribute('type');
-    if(visible && !stealthy && type === 'password' && !usernameVisible) return {ready: true, count: 1};
+    if(visible && !stealthy && type === 'password' && !usernameVisible) {
+      if(!classifyOnly && Date.now() < deadline) return {ready: true, count: 1};
+      passwordFieldReady = true;
+    }
     if(visible && !stealthy && type !== 'password' && !usernameVisible) {
       return {ready: false, reason: 'password_field_unmasked', count: 1};
     }
@@ -905,6 +909,7 @@ function passwordReadinessProbe({usernameField, deadline}) {
   if(Date.now() < deadline) return false;
   if(usernameVisible) return {ready: false, reason: 'password_card_not_reached', count};
   if(count === 0) return {ready: false, reason: 'password_field_absent', count: 0};
+  if(passwordFieldReady) return {ready: false, reason: 'password_card_not_reached', count: 1};
   return {ready: false, reason: 'password_field_hidden', count: 1};
 }
 
@@ -931,7 +936,7 @@ async function waitForPasswordField(page, usernameField, name, passwordEvidence 
     state = await readinessHandle.jsonValue();
   } catch(error) {
     if(error?.name !== 'TimeoutError') throw error;
-    state = await page.evaluate(passwordReadinessProbe, {usernameField, deadline: 0});
+    state = await page.evaluate(passwordReadinessProbe, {usernameField, deadline: 0, classifyOnly: true});
   } finally {
     await readinessHandle?.dispose();
   }

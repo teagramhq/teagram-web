@@ -1599,6 +1599,35 @@ describe('real client username field readiness', () => {
     }
   });
 
+  it('does not accept a password field that mounts after the readiness wait times out', async() => {
+    setFixture(passwordStageMarkup({delay: 50}));
+    const page = await createRunnerPage();
+    const evidence: any[] = [];
+    const originalWaitForFunction = page.waitForFunction.bind(page);
+    (page as any).waitForFunction = async(pageFunction: any, argument: any, options: any) => {
+      try {
+        return await originalWaitForFunction(pageFunction, argument, {...options, timeout: 1});
+      } catch(error) {
+        if((error as any)?.name !== 'TimeoutError') throw error;
+        const lateMount = await originalWaitForFunction(
+          () => Boolean(document.querySelector('#auth-pages input[name="notsearch_password"]')),
+          undefined,
+          {timeout: 500}
+        );
+        await lateMount.dispose();
+        throw error;
+      }
+    };
+
+    try {
+      await expect(startPasswordStage(page, evidence, 'alice', 1000)).rejects.toThrow('alice_password_card_not_reached');
+      expect(evidence).toEqual([{stage: 'alice_password_card_not_reached', count: 1}]);
+      expect(await passwordInputValues(page)).toEqual(['', '', '']);
+    } finally {
+      await page.close();
+    }
+  });
+
   it('fails with a fixed absent stage when only stealthy password decoys exist', async() => {
     setFixture(passwordStageMarkup({includeActual: false}));
     const page = await createRunnerPage();
