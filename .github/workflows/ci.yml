@@ -59,6 +59,20 @@ jobs:
           MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}
         run: pnpm exec vite build && pnpm run check-bundle
 
+      - name: Audit default bindings in an isolated source-mapped build
+        env:
+          CI: 'true'
+          MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}
+          MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}
+          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}
+          MTPROTO_SOURCE_MAP_AUDIT: '1'
+        run: |
+          audit_dir="$(mktemp -d "$RUNNER_TEMP/teagram-source-map-audit.XXXXXX")"
+          trap 'rm -rf "$audit_dir"' EXIT
+          pnpm exec vite build --outDir "$audit_dir"
+          env -u MTPROTO_TARGET_MODE -u MTPROTO_PRIVATE_ENDPOINT -u MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE \
+            pnpm run check-bundle -- "$audit_dir"
+
       - name: Lint
         run: pnpm run lint
 

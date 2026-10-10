@@ -613,6 +613,41 @@ describe('MTProto build target', () => {
     expect(existsSync(outputDirectory)).toBe(false);
   }, 60_000);
 
+  it('rejects source-map audit builds outside CI', () => {
+    const {outputDirectory, result} = buildPrivateTarget({
+      CI: 'false',
+      MTPROTO_SOURCE_MAP_AUDIT: '1'
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain('source-map audit builds require CI');
+    expect(existsSync(outputDirectory)).toBe(false);
+  }, 60_000);
+
+  it('audits mapped private-target chunks without producing a deployable artifact', () => {
+    const {outputDirectory, result} = buildPrivateTarget({
+      CI: 'true',
+      MTPROTO_SOURCE_MAP_AUDIT: '1'
+    });
+    const auditEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+      name !== 'MTPROTO_TARGET_MODE' && !name.startsWith('MTPROTO_PRIVATE_')
+    ));
+    const audit = result.status === 0 ? spawnSync(process.execPath, [
+      resolve('scripts/check-bundle-mangling.mjs'),
+      outputDirectory
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: auditEnvironment
+    }) : undefined;
+
+    expect(result.status).toBe(0);
+    expect(existsSync(join(outputDirectory, 'mtproto-target.json'))).toBe(false);
+    expect(findArtifactFiles(outputDirectory).some((file) => file.endsWith('.map'))).toBe(true);
+    expect(audit?.status).toBe(0);
+    expect(audit?.stdout).toMatch(/[1-9]\d* mapped chunks for miscompiled defaults/);
+  }, 120_000);
+
   it('runs the focused private artifact output and audit check', () => {
     const result = spawnSync(process.execPath, [resolve('scripts/check-private-artifact-output.mjs')], {
       cwd: process.cwd(),

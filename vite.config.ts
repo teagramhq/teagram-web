@@ -19,6 +19,10 @@ import path from 'path';
 
 const mtprotoTarget = resolveMtprotoTarget(process.env);
 assertRunnableMtprotoTarget(mtprotoTarget);
+const SOURCE_MAP_AUDIT = process.env.MTPROTO_SOURCE_MAP_AUDIT === '1';
+if(SOURCE_MAP_AUDIT && process.env.CI !== 'true') {
+  throw new Error('[MT] source-map audit builds require CI');
+}
 
 const rootDir = resolve(__dirname);
 const certsDir = path.join(rootDir, 'certs');
@@ -162,7 +166,9 @@ const baseConfig = defineConfig({
     // }),
     process.env.VITEST || process.env.TWEB_PREVIEW ? undefined : devChecks(rootDir),
     process.env.VITEST ? undefined : settingsSearchPlugin(rootDir),
-    mtprotoTarget.mode === 'private' ? createPrivateArtifactPlugin(rootDir, mtprotoTarget) : undefined,
+    // The isolated mapped audit must not acquire the manifest that disables map checks.
+    mtprotoTarget.mode === 'private' && !SOURCE_MAP_AUDIT ?
+      createPrivateArtifactPlugin(rootDir, mtprotoTarget) : undefined,
     webVersionResourcePlugin(),
     solidPlugin(),
     handlebarsPlugin as any,
@@ -241,7 +247,7 @@ const baseConfig = defineConfig({
     // properties natively, so lightningcss leaves them alone; RTL runs off `documentElement.dir`,
     // which index.ts sets on every language, not off `:lang()`.
     cssTarget: ['chrome87', 'edge87', 'firefox78', 'safari14.1'],
-    sourcemap: mtprotoTarget.mode === 'private' ? false : true,
+    sourcemap: SOURCE_MAP_AUDIT || mtprotoTarget.mode !== 'private',
     assetsDir: '',
     copyPublicDir: false,
     emptyOutDir: true,

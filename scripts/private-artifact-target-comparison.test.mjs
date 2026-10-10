@@ -376,6 +376,20 @@ describe('private artifact target comparison', () => {
     expect(buildStep).toContain('run: pnpm exec vite build && pnpm run check-bundle');
   });
 
+  it('runs the source-map default-binding audit outside the deploy artifact path', () => {
+    const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
+    const auditStep = workflow.split('      - name: Audit default bindings in an isolated source-mapped build\n')[1]
+    ?.split('\n      - name: ')[0];
+
+    expect(auditStep).toContain("CI: 'true'");
+    expect(auditStep).toContain("MTPROTO_SOURCE_MAP_AUDIT: '1'");
+    expect(auditStep).toContain('mktemp -d "$RUNNER_TEMP/teagram-source-map-audit.XXXXXX"');
+    expect(auditStep).toContain('pnpm exec vite build --outDir "$audit_dir"');
+    expect(auditStep).toContain('trap \'rm -rf "$audit_dir"\' EXIT');
+    expect(auditStep).toContain('env -u MTPROTO_TARGET_MODE');
+    expect(auditStep).toContain('pnpm run check-bundle -- "$audit_dir"');
+  });
+
   it('runs the private username auth browser smoke in CI', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
     const packageJson = readFileSync(join(repositoryRoot, 'package.json'), 'utf8');
