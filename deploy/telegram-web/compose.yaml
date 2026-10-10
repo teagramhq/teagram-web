@@ -5,6 +5,8 @@ services:
     build:
       context: ../..
       dockerfile: deploy/telegram-web/Dockerfile
+      args:
+        PRIVATE_ARTIFACT_COMMIT: "${PRIVATE_ARTIFACT_COMMIT:?set this to the private artifact source commit}"
     image: telegram-web:local
     restart: unless-stopped
     init: true

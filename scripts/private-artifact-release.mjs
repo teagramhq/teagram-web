@@ -524,6 +524,42 @@ export function assertReviewedEnvironment(
   }
 }
 
+export function reviewedTargetGithubOutputs(reviewed) {
+  const values = {
+    mode: reviewed?.MTPROTO_TARGET_MODE,
+    endpoint: reviewed?.MTPROTO_PRIVATE_ENDPOINT,
+    key_file: reviewed?.MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE
+  };
+  for(const [name, value] of Object.entries(values)) {
+    if(typeof value !== 'string' || !value || /[\r\n]/.test(value)) {
+      fail(`reviewed target ${name} output is invalid`);
+    }
+  }
+  return values;
+}
+
+export function writeTargetGithubOutputs(reviewed, outputPath) {
+  if(typeof outputPath !== 'string' || !outputPath) {
+    fail('GitHub output file is missing');
+  }
+  const values = reviewedTargetGithubOutputs(reviewed);
+  appendFileSync(outputPath, Object.entries(values)
+  .map(([name, value]) => `${name}=${value}`)
+  .join('\n') + '\n');
+  return values;
+}
+
+export function writeReviewedTargetGithubOutputs({
+  rootDirectory = ROOT_DIRECTORY,
+  outputPath = process.env.GITHUB_OUTPUT
+} = {}) {
+  if(typeof outputPath !== 'string' || !outputPath) {
+    fail('GitHub output file is missing');
+  }
+  const {reviewed} = loadReviewedPrivateTarget({rootDirectory});
+  return writeTargetGithubOutputs(reviewed, outputPath);
+}
+
 function assertCommit(expectedCommit, rootDirectory) {
   const currentCommit = gitCommit(rootDirectory);
   const commit = expectedCommit || currentCommit;
@@ -787,6 +823,10 @@ function preparePublication(args) {
 
 function main() {
   const [command = 'verify', ...args] = process.argv.slice(2);
+  if(command === 'write-target-outputs') {
+    writeReviewedTargetGithubOutputs();
+    return;
+  }
   if(command === 'validate-ref') {
     validatePublicationRef();
     return;

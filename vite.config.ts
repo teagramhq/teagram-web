@@ -150,7 +150,7 @@ if(USE_OWN_SOLID) {
   console.log('using original solid');
 }
 
-export default defineConfig({
+const baseConfig = defineConfig({
   define: {
     __MTPROTO_TARGET__: JSON.stringify(mtprotoTarget),
     __MTPROTO_PRIVATE__: JSON.stringify(mtprotoTarget.mode === 'private')
@@ -287,4 +287,12 @@ export default defineConfig({
       ...ADDITIONAL_ALIASES
     } : ADDITIONAL_ALIASES
   }
+});
+
+export default defineConfig(({command}) => {
+  if(command === 'build' && mtprotoTarget.mode !== 'private') {
+    throw new Error('[MT] Teagram production builds require a private MTProto target');
+  }
+
+  return baseConfig;
 });

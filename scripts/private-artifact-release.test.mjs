@@ -27,6 +27,8 @@ import {
   loadPublicationRequest,
   loadReviewedPrivateTarget,
   snapshotReviewedPrivateTarget,
+  writeReviewedTargetGithubOutputs,
+  writeTargetGithubOutputs,
   verifyPrivateArtifactRelease
 } from './private-artifact-release.mjs';
 import {resolveMtprotoTarget} from './mtproto-target.mjs';
@@ -475,6 +477,12 @@ function temporaryArtifact(indexDocument) {
   return directory;
 }
 
+function temporaryOutputPath() {
+  const directory = mkdtempSync(join(tmpdir(), 'private-artifact-release-output-'));
+  temporaryDirectories.push(directory);
+  return join(directory, 'github-output');
+}
+
 const safePrivateFontSvg = readFileSync(join(repositoryRoot, 'public/assets/fonts/tgico.svg'), 'utf8');
 
 function privateFontSourceRoot({missingFont, emptyFont, symlinkFont, svgContents = safePrivateFontSvg, extraFont} = {}) {
@@ -900,6 +908,34 @@ describe('private artifact publication attestation', () => {
       ...environment,
       MTPROTO_PRIVATE_ENDPOINT: 'wss://other.example.test:2443/apiws'
     })).toThrow(/endpoint.*reviewed target/i);
+  });
+
+  it('rejects newline injection before writing reviewed target outputs', () => {
+    const outputPath = temporaryOutputPath();
+    writeFileSync(outputPath, 'before=unchanged\n');
+
+    expect(() => writeTargetGithubOutputs({
+      ...reviewedTarget,
+      MTPROTO_PRIVATE_ENDPOINT: 'wss://private.example.test/apiws\nnext=untrusted'
+    }, outputPath)).toThrow(/endpoint output is invalid/i);
+    expect(readFileSync(outputPath, 'utf8')).toBe('before=unchanged\n');
+  });
+
+  it('writes reviewed target outputs as one validated block', () => {
+    const outputPath = temporaryOutputPath();
+    const outputs = writeReviewedTargetGithubOutputs({rootDirectory: repositoryRoot, outputPath});
+
+    expect(outputs).toEqual({
+      mode: reviewedTarget.MTPROTO_TARGET_MODE,
+      endpoint: reviewedTarget.MTPROTO_PRIVATE_ENDPOINT,
+      key_file: reviewedTarget.MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE
+    });
+    expect(readFileSync(outputPath, 'utf8')).toBe([
+      `mode=${reviewedTarget.MTPROTO_TARGET_MODE}`,
+      `endpoint=${reviewedTarget.MTPROTO_PRIVATE_ENDPOINT}`,
+      `key_file=${reviewedTarget.MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE}`,
+      ''
+    ].join('\n'));
   });
 
   it('accepts only an explicitly reviewed release ref', () => {

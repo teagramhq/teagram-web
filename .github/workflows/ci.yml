@@ -45,9 +45,23 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Read and validate the reviewed private target
+        id: target
+        run: node scripts/private-artifact-release.mjs write-target-outputs
+
       # build runs the repository's full test suite and typecheck before bundling.
       - name: Build, typecheck and test
+        env:
+          MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}
+          MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}
+          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}
         run: pnpm run build
 
       - name: Lint
         run: pnpm run lint
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run private username auth browser smoke
+        run: pnpm run test:private-auth

@@ -605,27 +605,12 @@ describe('MTProto build target', () => {
     }
   }, 60_000);
 
-  it('retains source maps in an ordinary Telegram production build', () => {
+  it('rejects a production build without a private target', () => {
     const {outputDirectory, result} = buildTelegramTarget();
 
-    expect(result.status).toBe(0);
-    const artifactFiles = findArtifactFiles(outputDirectory);
-    expect(artifactFiles.some((file) => file.endsWith('.map'))).toBe(true);
-    expect(artifactFiles.some((file) => file.endsWith('.js') &&
-      /(?:\/\/|\/\*)[#@]\s*sourceMappingURL\s*=/i.test(readFileSync(join(outputDirectory, file), 'utf8'))
-    )).toBe(true);
-    const audit = spawnSync(process.execPath, [
-      resolve('scripts/check-bundle-mangling.mjs'),
-      outputDirectory
-    ], {
-      cwd: process.cwd(),
-      encoding: 'utf8',
-      env: Object.fromEntries(Object.entries(process.env).filter(([name]) =>
-        name !== 'MTPROTO_TARGET_MODE' && !name.startsWith('MTPROTO_PRIVATE_')
-      ))
-    });
-    expect(audit.status).toBe(0);
-    expect(audit.stdout).toMatch(/[1-9]\d* mapped chunks for miscompiled defaults/);
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toContain('Teagram production builds require a private MTProto target');
+    expect(existsSync(outputDirectory)).toBe(false);
   }, 60_000);
 
   it('runs the focused private artifact output and audit check', () => {

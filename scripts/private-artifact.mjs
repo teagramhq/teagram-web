@@ -408,7 +408,7 @@ function artifactFiles(directory) {
   return files.sort((left, right) => relative(directory, left).localeCompare(relative(directory, right)));
 }
 
-function digestArtifact(directory) {
+export function computePrivateArtifactDigest(directory) {
   const hash = createHash('sha256');
   for(const file of artifactFiles(directory)) {
     const relativePath = relative(directory, file).split(sep).join('/');
@@ -602,6 +602,14 @@ export function auditPrivateArtifact(directory, target) {
   auditPrivateArtifactBackground(directory);
 }
 
+export function verifyPrivateUsernameSignIn(directory) {
+  const executableFiles = artifactFiles(directory)
+  .filter((file) => PRIVATE_EXECUTABLE_EXTENSIONS.has(file.slice(file.lastIndexOf('.')).toLowerCase()));
+  if(!executableFiles.some((file) => readFileSync(file, 'utf8').includes('Sign in with your username'))) {
+    invalidArtifact('does not contain the username sign-in marker in executable JavaScript');
+  }
+}
+
 function lowercaseFiles(files, directory) {
   return files
   .filter((file) => PRIVATE_EXECUTABLE_EXTENSIONS.has(file.slice(file.lastIndexOf('.'))))
@@ -635,7 +643,7 @@ export function verifyPrivateArtifactManifest(directory, expectedTarget) {
     expectedTarget.endpoint !== manifest.endpoint || expectedTarget.fingerprint !== manifest.fingerprint)) {
     invalidArtifact('manifest does not match the validated target');
   }
-  const digest = digestArtifact(directory);
+  const digest = computePrivateArtifactDigest(directory);
   if(digest !== manifest.artifactDigest) {
     invalidArtifact('digest does not match the completed artifact');
   }
@@ -665,7 +673,7 @@ export function writePrivateArtifactManifest(directory, target, rootDirectory) {
     endpoint: target.endpoint,
     fingerprint: target.fingerprint,
     sourceCommit: sourceCommit(rootDirectory),
-    artifactDigest: digestArtifact(directory)
+    artifactDigest: computePrivateArtifactDigest(directory)
   };
   assertManifestShape(manifest);
   writeFileSync(resolve(directory, PRIVATE_ARTIFACT_MANIFEST), JSON.stringify(manifest, null, 2) + '\n');
