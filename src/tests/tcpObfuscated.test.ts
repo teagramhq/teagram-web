@@ -286,6 +286,27 @@ describe('TcpObfuscated abridged receive path', () => {
     expect(decode).toHaveBeenCalledTimes(1);
   });
 
+  it('continues with queued authenticated packets after a consumer rejects one', async() => {
+    const received: Uint8Array[] = [];
+    const networker = {
+      onTransportOpen: vi.fn(),
+      onTransportData: vi.fn()
+      .mockRejectedValueOnce(new Error('invalid first packet'))
+      .mockImplementation(async(data: Uint8Array) => {received.push(data.slice());}),
+      setConnectionStatus: vi.fn()
+    };
+    const {connection} = await createTransport(networker);
+    const first = new Uint8Array([1, 2, 3, 4]);
+    const second = new Uint8Array([5, 6, 7, 8]);
+
+    connection.message(concat(packet(first), packet(second)));
+    await flushMicrotasks();
+
+    expect(networker.onTransportData).toHaveBeenCalledTimes(2);
+    expect(received).toEqual([second]);
+    expect(connection.closeCount).toBe(0);
+  });
+
   it('deserializes a complete short-header packet from an aligned payload', async() => {
     const values: number[] = [];
     const networker = createDeserializingNetworker(values);
