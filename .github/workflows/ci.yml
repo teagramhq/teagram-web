@@ -45,6 +45,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
       - name: Read and validate the reviewed private target
         id: target
         run: node scripts/private-artifact-release.mjs write-target-outputs
@@ -75,9 +78,6 @@ jobs:
 
       - name: Lint
         run: pnpm run lint
-
-      - name: Install Playwright Chromium
-        run: pnpm exec playwright install --with-deps chromium
 
       - name: Run private username auth browser smoke
         run: pnpm run test:private-auth
