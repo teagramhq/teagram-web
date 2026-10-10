@@ -362,14 +362,18 @@ describe('private artifact target comparison', () => {
     expect(checkoutStep).toContain('fetch-depth: 0');
   });
 
-  it('builds the application with values loaded from the reviewed target', () => {
+  it('uses the reviewed private target only for the production bundle build', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
-    const buildStep = workflow.split('      - name: Build, typecheck and test\n')[1]?.split('\n      - name: ')[0];
+    const testStep = workflow.split('      - name: Test, typecheck and prepare bundle\n')[1]?.split('\n      - name: ')[0];
+    const buildStep = workflow.split('      - name: Build and audit production bundle\n')[1]?.split('\n      - name: ')[0];
 
     expect(workflow).toContain('node scripts/private-artifact-release.mjs write-target-outputs');
+    expect(testStep).toContain('run: pnpm test --run && pnpm run typecheck && pnpm run generate-changelog');
+    expect(testStep).not.toContain('MTPROTO_');
     expect(buildStep).toContain('MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}');
     expect(buildStep).toContain('MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}');
     expect(buildStep).toContain('MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}');
+    expect(buildStep).toContain('run: pnpm exec vite build && pnpm run check-bundle');
   });
 
   it('runs the private username auth browser smoke in CI', () => {
