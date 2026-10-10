@@ -3,6 +3,7 @@ import EventListenerBase from '@helpers/eventListenerBase';
 import abridgedPacketCodec from '@lib/mtproto/transports/abridged';
 import Obfuscation from '@lib/mtproto/transports/obfuscation';
 import TcpObfuscated from '@lib/mtproto/transports/tcpObfuscated';
+import {TLDeserialization} from '@lib/mtproto/tl_utils';
 import deferred from './helpers/deferred';
 
 type ConnectionEvents = {
@@ -67,6 +68,12 @@ const packet = (payload: Uint8Array) => {
   return concat(header, payload);
 };
 
+const intPayload = (value: number) => {
+  const payload = new Uint8Array(4);
+  new DataView(payload.buffer).setInt32(0, value, true);
+  return payload;
+};
+
 const flushMicrotasks = async() => {
   for(let i = 0; i < 8; i++) {
     await Promise.resolve();
@@ -82,6 +89,14 @@ const createTransport = async(networker?: Record<string, any>) => {
   await connection.open();
   return {transport, connection};
 };
+
+const createDeserializingNetworker = (values: number[]) => ({
+  onTransportOpen: vi.fn(),
+  onTransportData: vi.fn(async(data: Uint8Array) => {
+    values.push(new TLDeserialization(data).fetchInt());
+  }),
+  setConnectionStatus: vi.fn()
+});
 
 const createRequest = (transport: TcpObfuscated) => {
   let outcome: {status: 'resolved', value: Uint8Array} | {status: 'rejected', error: unknown} | undefined;
@@ -269,6 +284,50 @@ describe('TcpObfuscated abridged receive path', () => {
     expect(received).toEqual([first, second]);
     expect(networker.onTransportData).toHaveBeenCalledTimes(2);
     expect(decode).toHaveBeenCalledTimes(1);
+  });
+
+  it('deserializes a complete short-header packet from an aligned payload', async() => {
+    const values: number[] = [];
+    const networker = createDeserializingNetworker(values);
+    const {connection} = await createTransport(networker);
+    const expected = 0x12345678;
+
+    connection.message(packet(intPayload(expected)));
+    await flushMicrotasks();
+
+    expect(values).toEqual([expected]);
+    expect(networker.onTransportData).toHaveBeenCalledTimes(1);
+    expect(connection.closeCount).toBe(0);
+  });
+
+  it('deserializes a split short-header packet from an aligned payload', async() => {
+    const values: number[] = [];
+    const networker = createDeserializingNetworker(values);
+    const {connection} = await createTransport(networker);
+    const expected = 0x23456789;
+    const framed = packet(intPayload(expected));
+
+    connection.message(framed.subarray(0, 1));
+    connection.message(framed.subarray(1));
+    await flushMicrotasks();
+
+    expect(values).toEqual([expected]);
+    expect(networker.onTransportData).toHaveBeenCalledTimes(1);
+    expect(connection.closeCount).toBe(0);
+  });
+
+  it('deserializes coalesced short-header packets from aligned payloads', async() => {
+    const values: number[] = [];
+    const networker = createDeserializingNetworker(values);
+    const {connection} = await createTransport(networker);
+    const expected = [0x3456789a, 0x456789ab];
+
+    connection.message(concat(...expected.map(intPayload).map(packet)));
+    await flushMicrotasks();
+
+    expect(values).toEqual(expected);
+    expect(networker.onTransportData).toHaveBeenCalledTimes(expected.length);
+    expect(connection.closeCount).toBe(0);
   });
 
   it('serializes deobfuscation and authenticated packet delivery', async() => {

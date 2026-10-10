@@ -34,6 +34,8 @@ const readAbridgedPacketHeader = (header: Uint8Array, maxPacketBytes: number): A
   return {headerLength, packetLength};
 };
 
+const copyAlignedPacketPayload = (payload: Uint8Array) => new Uint8Array(payload);
+
 export class AbridgedPacketStream {
   private frame = new Uint8Array(0);
   private frameBytes = 0;
@@ -73,7 +75,7 @@ export class AbridgedPacketStream {
 
         const header = readAbridgedPacketHeader(data.subarray(offset, offset + headerLength), maxPacketBytes);
         if(available >= header.packetLength) {
-          const packet = data.subarray(offset + header.headerLength, offset + header.packetLength);
+          const packet = copyAlignedPacketPayload(data.subarray(offset + header.headerLength, offset + header.packetLength));
           offset += header.packetLength;
           const result = onPacket(packet);
           if(result && typeof(result as Promise<void>).then === 'function') await result;
@@ -108,7 +110,7 @@ export class AbridgedPacketStream {
 
       if(this.frameBytes < this.frameLength) return;
 
-      const packet = this.frame.subarray(this.frameHeaderLength, this.frameLength);
+      const packet = copyAlignedPacketPayload(this.frame.subarray(this.frameHeaderLength, this.frameLength));
       this.reset();
       const result = onPacket(packet);
       if(result && typeof(result as Promise<void>).then === 'function') await result;
