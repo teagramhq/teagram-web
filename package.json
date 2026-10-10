@@ -16,6 +16,7 @@
     "test:ephemeral-bot": "node ./src/tests/fixtures/ephemeralBot/bot.mjs",
     "test:real-client": "node ./scripts/real-client/run.mjs",
     "test:lottie": "playwright test e2e/lottie*.spec.ts",
+    "test:private-auth": "playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts",
     "test:popups": "playwright test e2e/popupSandbox.spec.ts",
     "whybundled": "pnpm run profile && whybundled stats.json",
     "generate-mtproto-types": "node ./src/scripts/generate_mtproto_types.js src/",

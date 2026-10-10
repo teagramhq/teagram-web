@@ -224,10 +224,14 @@ function CardsTransition(): JSX.Element {
         {(spec) => <EmailRecoverCard spec={spec} />}
       </Match>
       <Match when={matchCard('signQR')} keyed>
-        {(spec) => <SignQRCard spec={spec} />}
+        {(spec) => IS_PRIVATE_MTPROTO_TARGET ?
+          <PrivateSignInCard spec={{name: 'signIn'}} /> :
+          <SignQRCard spec={spec} />}
       </Match>
       <Match when={matchCard('signImport')} keyed>
-        {(spec) => <SignImportCard spec={spec} />}
+        {(spec) => IS_PRIVATE_MTPROTO_TARGET ?
+          <PrivateSignInCard spec={{name: 'signIn'}} /> :
+          <SignImportCard spec={spec} />}
       </Match>
     </Switch>
   ));
