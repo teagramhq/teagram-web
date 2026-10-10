@@ -1,6 +1,15 @@
 *
-!public/
-!public/**
+!dist-private/
+!dist-private/**
+!ci/
+!ci/private-mtproto-target.json
+!ci/private-mtproto-server-public.pem
+!scripts/
+!scripts/mtproto-target.mjs
+!scripts/private-artifact-csp.mjs
+!scripts/private-artifact.mjs
+!scripts/private-artifact-release.mjs
+!scripts/verify-deployment-artifact.mjs
 !deploy/
 !deploy/telegram-web/
 !deploy/telegram-web/**

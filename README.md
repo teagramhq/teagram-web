@@ -17,7 +17,7 @@ Open http://localhost:8080/ in your browser.
 
 #### Running in production
 
-Run `node build` to build the minimized production version of the app. Copy `public` folder contents to your web server.
+Build the reviewed private deployment artifact with `pnpm run build:deployment-artifact`. Production Vite builds without a valid private target fail closed; the verified `dist-private/` output is the only bundle accepted by the Telegram Web serving image.
 
 #### Building a private MTProto artifact
 
@@ -42,7 +42,7 @@ pnpm exec vite build --outDir dist-private
 
 The build fails closed when target validation or the production-bundle audit fails. The audit rejects Telegram MTProto hostnames and IPs, HTTP MTProto transports, Telegram or test RSA keys, and additional WSS targets. A successful private artifact contains a restrictive CSP and the `mtproto-target.json` sidecar with only `mode`, normalized `endpoint`, RSA `fingerprint`, `sourceCommit`, and the completed artifact `artifactDigest`. The digest excludes the sidecar itself. Verify an existing output with `MTPROTO_TARGET_MODE=private pnpm run check-bundle -- dist-private`; private mode fails if the sidecar is missing.
 
-Do not edit the sidecar or swap endpoints and keys in an existing output. Build a new artifact with the desired three variables. Leaving these variables unset keeps the ordinary Telegram build unchanged and does not emit a private manifest.
+Do not edit the sidecar or swap endpoints and keys in an existing output. Build a new artifact with the desired three variables. Production builds fail closed when the private target is missing or invalid. For the deployment artifact, use `pnpm run build:deployment-artifact`; it loads the checked-in reviewed target, verifies its key hash, builds into `dist-private`, and verifies the result.
 
 The `Private MTProto Artifact Request` workflow is the data-only manual entry point. It accepts a target ref as input and records it without checking out code or installing dependencies. The trusted `Private MTProto Artifact Publication` workflow receives only successful requests from the reviewed `master` workflow, resolves `refs/heads/master` or an exact release tag listed with its reviewed commit in `ci/private-artifact-reviewed-release-refs.json`, and rejects every other ref before dependency installation. It snapshots the reviewed target attestation and public key before the build, checks out only the allowlisted commit, and re-verifies the downloaded bundle, sidecar digest, source commit, CSP, and snapshot in an isolated publisher before upload. Changing the workflow definition, target, public-key bytes, or source commit without passing the reviewed request and snapshot checks fails closed.
 

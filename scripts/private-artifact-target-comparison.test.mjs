@@ -361,4 +361,41 @@ describe('private artifact target comparison', () => {
 
     expect(checkoutStep).toContain('fetch-depth: 0');
   });
+
+  it('uses the reviewed private target only for the production bundle build', () => {
+    const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
+    const testStep = workflow.split('      - name: Test, typecheck and prepare bundle\n')[1]?.split('\n      - name: ')[0];
+    const buildStep = workflow.split('      - name: Build and audit production bundle\n')[1]?.split('\n      - name: ')[0];
+
+    expect(workflow).toContain('node scripts/private-artifact-release.mjs write-target-outputs');
+    expect(testStep).toContain('run: pnpm test --run && pnpm run typecheck && pnpm run generate-changelog');
+    expect(testStep).not.toContain('MTPROTO_');
+    expect(buildStep).toContain('MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}');
+    expect(buildStep).toContain('MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}');
+    expect(buildStep).toContain('MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}');
+    expect(buildStep).toContain('run: pnpm exec vite build && pnpm run check-bundle');
+  });
+
+  it('runs the source-map default-binding audit outside the deploy artifact path', () => {
+    const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
+    const auditStep = workflow.split('      - name: Audit default bindings in an isolated source-mapped build\n')[1]
+    ?.split('\n      - name: ')[0];
+
+    expect(auditStep).toContain("CI: 'true'");
+    expect(auditStep).toContain("MTPROTO_SOURCE_MAP_AUDIT: '1'");
+    expect(auditStep).toContain('mktemp -d "$RUNNER_TEMP/teagram-source-map-audit.XXXXXX"');
+    expect(auditStep).toContain('pnpm exec vite build --outDir "$audit_dir"');
+    expect(auditStep).toContain('trap \'rm -rf "$audit_dir"\' EXIT');
+    expect(auditStep).toContain('env -u MTPROTO_TARGET_MODE');
+    expect(auditStep).toContain('pnpm run check-bundle -- "$audit_dir"');
+  });
+
+  it('runs the private username auth browser smoke in CI', () => {
+    const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
+    const packageJson = readFileSync(join(repositoryRoot, 'package.json'), 'utf8');
+
+    expect(packageJson).toContain('"test:private-auth": "playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts"');
+    expect(workflow).toContain('pnpm exec playwright install --with-deps chromium');
+    expect(workflow).toContain('pnpm run test:private-auth');
+  });
 });

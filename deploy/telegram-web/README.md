@@ -24,19 +24,24 @@ The Compose network is not marked `internal`, because Docker must publish this
 host-side listener. The loopback host binding is the ingress boundary; the
 browser's `connect-src 'self'` CSP is the separate egress boundary below.
 
-The image copies the committed `public/` artifact directly. It does not run a
-Node or Vite build on the LXC. Resource isolation is provided by the target
-LXC's existing 2 vCPU and 4 GiB allocation, leaving the box's CPU and memory
-for Postgres and `telegramd`; the nested Docker cgroup exposes no controllers,
-so this Compose service deliberately requests no per-container memory, CPU, or
-PID limit. Nginx logs go to the container log with Docker's 10 MiB, three-file
-rotation.
+The image consumes the CI-published private artifact staged at
+`/opt/telegram-web/dist-private`. Set `PRIVATE_ARTIFACT_COMMIT` to the artifact's
+40-character source commit before building. Docker verifies the manifest,
+artifact digest, reviewed endpoint and RSA fingerprint, attested key hash, CSP,
+and username sign-in marker before copying the bundle into the final image.
+The verification stage uses Node; the Nginx serving image does not contain a
+Node runtime. Keep the artifact's source commit and digest from the successful
+Private MTProto Artifact Publication run together when staging it.
 
-The enforced CSP allows `connect-src 'self'` only. The current Web K artifact
-therefore cannot open its hard-coded official Telegram WebSocket or HTTP
-endpoints: the browser reports a CSP violation and the client remains a
-placeholder until a local endpoint is deliberately configured in a later
-client/server change.
+Resource isolation is provided by the target LXC's existing 2 vCPU and 4 GiB
+allocation, leaving the box's CPU and memory for Postgres and `telegramd`; the
+nested Docker cgroup exposes no controllers, so this Compose service
+deliberately requests no per-container memory, CPU, or PID limit. Nginx logs go
+to the container log with Docker's 10 MiB, three-file rotation.
+
+The Nginx response CSP remains `connect-src 'self'`. The verified private
+artifact also carries its audited target metadata and CSP; this change leaves
+the existing Nginx policy and serving layout intact.
 
 The only persistent volume is `telegram-web-edge-nginx-cache`, owned by this Compose
 project. `docker compose down` is safe and leaves that cache intact; never use

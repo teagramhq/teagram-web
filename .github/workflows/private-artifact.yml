@@ -50,26 +50,7 @@ jobs:
 
       - name: Read and validate the reviewed target
         id: target
-        run: |
-          node --input-type=module <<'NODE'
-          import {appendFileSync} from 'node:fs';
-          import {loadReviewedPrivateTarget} from './scripts/private-artifact-release.mjs';
-
-          const {reviewed} = loadReviewedPrivateTarget();
-          const values = {
-            mode: reviewed.MTPROTO_TARGET_MODE,
-            endpoint: reviewed.MTPROTO_PRIVATE_ENDPOINT,
-            key_file: reviewed.MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE
-          };
-
-          if(Object.values(values).some((value) => typeof value !== 'string' || !value || /[\r\n]/.test(value))) {
-            throw new Error('[MT] reviewed target values are invalid');
-          }
-
-          for(const [name, value] of Object.entries(values)) {
-            appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`);
-          }
-          NODE
+        run: node scripts/private-artifact-release.mjs write-target-outputs
 
       - name: Validate the reviewed target in private mode
         env:
