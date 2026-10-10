@@ -1345,6 +1345,23 @@ function passwordStageMarkup({
 }
 
 describe('real client password evidence contract', () => {
+  it('preserves cleanup failure reports that omit password evidence', () => {
+    const formatBrowserFailureMessage = (realClientContract as any).formatBrowserFailureMessage;
+
+    expect(typeof formatBrowserFailureMessage).toBe('function');
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'cleanup'})).toBe('real client scenario failed at cleanup');
+    expect(formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'sign-in',
+      passwordEvidence: [{stage: 'alice_password_field_absent', count: 0}]
+    })).toBe('real client scenario failed at sign-in; password evidence [{"stage":"alice_password_field_absent","count":0}]');
+    expect(() => formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'cleanup',
+      passwordEvidence: null
+    })).toThrow('password evidence is invalid');
+  });
+
   it('keeps only fixed stages and counts in serialized evidence', () => {
     const parsePasswordEvidence = (realClientContract as any).parsePasswordEvidence;
     const evidence = [

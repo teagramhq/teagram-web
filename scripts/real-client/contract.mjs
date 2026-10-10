@@ -398,6 +398,17 @@ export function parsePasswordEvidence(evidence) {
   });
 }
 
+export function formatBrowserFailureMessage(report, controlsOnly = false) {
+  const hasPasswordEvidence = report.passwordEvidence !== undefined;
+  const failedPasswordEvidence = controlsOnly || !hasPasswordEvidence
+    ? []
+    : parsePasswordEvidence(report.passwordEvidence);
+  const evidenceSummary = controlsOnly || !hasPasswordEvidence
+    ? ''
+    : `; password evidence ${JSON.stringify(failedPasswordEvidence)}`;
+  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}`;
+}
+
 export function assertAllScenariosPassed(results) {
   if(!Array.isArray(results)) {
     throw new Error('scenario results are required');

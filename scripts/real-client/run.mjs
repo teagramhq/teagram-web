@@ -6,6 +6,7 @@ import {isIPv4} from 'node:net';
 
 import {
   assertAllScenariosPassed,
+  formatBrowserFailureMessage,
   REQUIRED_CONTROLS,
   parseFixtureReadiness,
   parseObserverControls,
@@ -197,9 +198,7 @@ if(args?.help) {
       try {
         const failedRun = JSON.parse(browserStdout.trim());
         if(failedRun.status === 'failed' && typeof failedRun.stage === 'string') {
-          const failedPasswordEvidence = controlsOnly ? [] : parsePasswordEvidence(failedRun.passwordEvidence);
-          const evidenceSummary = controlsOnly ? '' : `; password evidence ${JSON.stringify(failedPasswordEvidence)}`;
-          throw new Error(`real client scenario failed at ${failedRun.stage}${evidenceSummary}`);
+          throw new Error(formatBrowserFailureMessage(failedRun, controlsOnly));
         }
       } catch(parseError) {
         if(parseError instanceof Error && parseError.message.startsWith('real client scenario failed at ')) throw parseError;
@@ -213,9 +212,7 @@ if(args?.help) {
     }
 
     if(browserResult.status !== 'passed') {
-      const failedPasswordEvidence = controlsOnly ? [] : parsePasswordEvidence(browserResult.passwordEvidence);
-      const evidenceSummary = controlsOnly ? '' : `; password evidence ${JSON.stringify(failedPasswordEvidence)}`;
-      throw new Error(`real client scenario failed at ${browserResult.stage || 'unknown stage'}${evidenceSummary}`);
+      throw new Error(formatBrowserFailureMessage(browserResult, controlsOnly));
     }
     if(controlsOnly) {
       if(browserResult.mode !== 'observer_controls' || browserResult.controlContextCount !== REQUIRED_CONTROLS.length ||
