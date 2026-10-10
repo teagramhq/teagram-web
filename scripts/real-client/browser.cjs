@@ -9,6 +9,15 @@ const PRIVATE_CSP_WSS = 'wss://telegramd.test/apiws';
 const PROBE_PATH = '/_fixture_probe/';
 const MESSAGE = 'browser-ci-hello';
 const GROUP_MESSAGE = 'browser-ci-group-hello';
+const PASSWORD_FIELD_SELECTOR = '#auth-pages input[name="notsearch_password"]';
+const PASSWORD_FIELD_TIMEOUT_MS = 30_000;
+const PASSWORD_FAILURE_STAGES = new Set([
+  'password_field_absent',
+  'password_field_not_unique',
+  'password_field_hidden',
+  'password_field_unmasked',
+  'password_card_not_reached'
+]);
 const CONTROL_WINDOW_MS = 10_000;
 const INJECTED_TARGET_ID = '000000000000000000000000000000fe';
 const CONTROL_PLAN = Object.freeze([
@@ -870,6 +879,112 @@ async function waitForUsernameField(page, name) {
   return username;
 }
 
+function passwordReadinessProbe({usernameField, deadline, classifyOnly = false}) {
+  const fields = document.querySelectorAll('#auth-pages input[name="notsearch_password"]');
+  const count = fields.length;
+  if(count > 1) return {ready: false, reason: 'password_field_not_unique', count};
+
+  const isVisible = (element) => {
+    if(!element || !element.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+  };
+  const usernameVisible = isVisible(usernameField);
+  let passwordFieldReady = false;
+  if(count === 1) {
+    const field = fields[0];
+    const className = field.getAttribute('class') || '';
+    const stealthy = className.split(/\s+/).includes('stealthy');
+    const visible = isVisible(field);
+    const type = field.getAttribute('type');
+    if(visible && !stealthy && type === 'password' && !usernameVisible) {
+      if(!classifyOnly && Date.now() < deadline) return {ready: true, count: 1};
+      passwordFieldReady = true;
+    }
+    if(visible && !stealthy && type !== 'password' && !usernameVisible) {
+      return {ready: false, reason: 'password_field_unmasked', count: 1};
+    }
+  }
+
+  if(Date.now() < deadline) return false;
+  if(usernameVisible) return {ready: false, reason: 'password_card_not_reached', count};
+  if(count === 0) return {ready: false, reason: 'password_field_absent', count: 0};
+  if(passwordFieldReady) return {ready: false, reason: 'password_card_not_reached', count: 1};
+  return {ready: false, reason: 'password_field_hidden', count: 1};
+}
+
+function failPasswordStage(name, reason, count, passwordEvidence) {
+  const safeReason = PASSWORD_FAILURE_STAGES.has(reason) ? reason : 'password_field_absent';
+  const stage = `${name}_${safeReason}`;
+  passwordEvidence.push({stage, count: Number.isInteger(count) && count >= 0 ? count : 0});
+  failStage(stage);
+}
+
+async function waitForPasswordField(page, usernameField, name, passwordEvidence = [], timeoutMs = PASSWORD_FIELD_TIMEOUT_MS) {
+  currentStage = `${name}_password_form`;
+  const boundedTimeoutMs = Math.max(1, Math.min(timeoutMs, PASSWORD_FIELD_TIMEOUT_MS));
+  const deadline = Date.now() + Math.max(1, boundedTimeoutMs - 250);
+  const password = page.locator(PASSWORD_FIELD_SELECTOR);
+  let readinessHandle;
+  let state;
+  try {
+    readinessHandle = await page.waitForFunction(
+      passwordReadinessProbe,
+      {usernameField, deadline},
+      {timeout: boundedTimeoutMs}
+    );
+    state = await readinessHandle.jsonValue();
+  } catch(error) {
+    if(error?.name !== 'TimeoutError') throw error;
+    state = await page.evaluate(passwordReadinessProbe, {usernameField, deadline: 0, classifyOnly: true});
+  } finally {
+    await readinessHandle?.dispose();
+  }
+
+  if(!state?.ready) failPasswordStage(name, state?.reason, state?.count, passwordEvidence);
+  return password;
+}
+
+async function submitPassword(password, usernameField, value, name, passwordEvidence = []) {
+  currentStage = `${name}_password_form`;
+  const count = await password.count();
+  if(count === 0) failPasswordStage(name, 'password_field_absent', count, passwordEvidence);
+  if(count !== 1) failPasswordStage(name, 'password_field_not_unique', count, passwordEvidence);
+
+  let selected;
+  try {
+    selected = await password.elementHandle({timeout: 1000});
+  } catch(error) {
+    if(error?.name !== 'TimeoutError') throw error;
+    const changedCount = await password.count();
+    if(changedCount === 0) failPasswordStage(name, 'password_field_absent', changedCount, passwordEvidence);
+    if(changedCount !== 1) failPasswordStage(name, 'password_field_not_unique', changedCount, passwordEvidence);
+    failPasswordStage(name, 'password_field_hidden', changedCount, passwordEvidence);
+  }
+  if(!selected) failPasswordStage(name, 'password_field_hidden', count, passwordEvidence);
+
+  const visible = await selected.isVisible();
+  const className = await selected.getAttribute('class') || '';
+  if(!visible || className.split(/\s+/).includes('stealthy')) {
+    failPasswordStage(name, 'password_field_hidden', count, passwordEvidence);
+  }
+  if(await usernameField.isVisible()) {
+    failPasswordStage(name, 'password_card_not_reached', count, passwordEvidence);
+  }
+
+  const finalCount = await password.count();
+  if(finalCount === 0) failPasswordStage(name, 'password_field_absent', finalCount, passwordEvidence);
+  if(finalCount !== 1) failPasswordStage(name, 'password_field_not_unique', finalCount, passwordEvidence);
+  if(await selected.getAttribute('type') !== 'password') {
+    failPasswordStage(name, 'password_field_unmasked', finalCount, passwordEvidence);
+  }
+
+  await selected.fill(value);
+  await selected.press('Enter');
+  await selected.dispose();
+  passwordEvidence.push({stage: `${name}_password_field_ready`, count: finalCount});
+}
+
 async function prepareUsernameEntry(page, name, expected) {
   currentStage = `${name}_sign_in_form`;
   const response = await page.goto(PRIVATE_CSP_ORIGIN, {waitUntil: 'domcontentloaded', timeout: 30_000});
@@ -887,19 +1002,20 @@ async function prepareUsernameEntry(page, name, expected) {
   return waitForUsernameField(page, name);
 }
 
-async function signIn(page, account, name, screenshotDirectory, capturedScreenshots) {
+async function signIn(page, account, name, screenshotDirectory, capturedScreenshots, passwordEvidence) {
   const username = await prepareUsernameEntry(page, name, runtime);
   await captureState(page, screenshotDirectory, `${name}-sign-in`, capturedScreenshots);
   if(await username.count() !== 1) failStage(`${name}_username_field_not_unique`);
+  const usernameField = await username.elementHandle();
+  if(!usernameField) failStage(`${name}_username_field`);
   await username.fill(account.username);
   await username.press('Enter');
 
   currentStage = `${name}_password_form`;
-  const password = page.locator('input[type="password"]');
-  await password.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`${name}_password_field`));
+  const password = await waitForPasswordField(page, usernameField, name, passwordEvidence);
   await captureState(page, screenshotDirectory, `${name}-password`, capturedScreenshots);
-  await password.fill(account.password);
-  await password.press('Enter');
+  await submitPassword(password, usernameField, account.password, name, passwordEvidence);
+  await usernameField.dispose();
 
   currentStage = `${name}_chats_list`;
   await page.waitForFunction(() => {
@@ -1101,6 +1217,7 @@ async function main() {
   const observers = [];
   const appObservers = {};
   const capturedScreenshots = {count: 0};
+  const passwordEvidence = [];
   const cleanupIssues = [];
   let cleanupFailed = false;
   let registry;
@@ -1172,8 +1289,8 @@ async function main() {
     }
 
     currentScenario = 'sign-in';
-    await signIn(alice.page, accounts[0], 'alice', runtime.screenshotDirectory, capturedScreenshots);
-    await signIn(bob.page, accounts[1], 'bob', runtime.screenshotDirectory, capturedScreenshots);
+    await signIn(alice.page, accounts[0], 'alice', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
+    await signIn(bob.page, accounts[1], 'bob', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
     alice.observer.state.windowElapsed = true;
     bob.observer.state.windowElapsed = true;
     await waitForWorkerTargets(alice.page, alice.networkObserver, alice.observer);
@@ -1305,6 +1422,7 @@ async function main() {
       contextCount: contexts.length,
       controlContextCount: CONTROL_PLAN.length,
       screenshotsCaptured: capturedScreenshots.count,
+      passwordEvidence,
       network: {unexpectedAttempts: egress.unexpectedAttempts, observerErrors: egress.observerErrors, contexts: networkContexts},
       workerObservation: observationBlock
     };
@@ -1325,6 +1443,7 @@ async function main() {
       contextCount: contexts.length,
       controlContextCount: CONTROL_PLAN.length,
       screenshotsCaptured: capturedScreenshots.count,
+      passwordEvidence,
       // On failure the closed-schema evidence is still the point, validated the
       // same way: any schema violation collapses it to `unclassified`.
       ...(registry ? {
@@ -1381,7 +1500,7 @@ function emitReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {createNetworkObserver, createWorkerDiscovery, getSingleExactMessageFailure, matchesPrivateArtifactManifest, prepareUsernameEntry};
+module.exports = {createNetworkObserver, createWorkerDiscovery, getSingleExactMessageFailure, matchesPrivateArtifactManifest, prepareUsernameEntry, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
