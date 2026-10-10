@@ -46,6 +46,23 @@ export class NodeWebSocketConnection {
       maxPayload: MAX_PRE_AUTH_ABRIDGED_PACKET_BYTES,
       perMessageDeflate: false
     });
+    const requestClose = this.socket.close.bind(this.socket);
+    this.socket.close = (code?: number) => {
+      if(code === 1009 && this.socket.readyState === WS_OPEN) {
+        this.metrics.malformed = true;
+        this.localClose = true;
+        try {
+          requestClose(1000);
+          this.metrics.close1000Sent = true;
+        } catch(error) {
+          this.metrics.close1000Sent = false;
+          throw error;
+        }
+        return;
+      }
+
+      requestClose(code);
+    };
 
     this.socket.on('upgrade', (response) => {
       this.metrics.upgradeStatus = response.statusCode;

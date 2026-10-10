@@ -16,7 +16,8 @@ const stateDirectory = join(
   `teagram-web-l1-prekey-${typeof process.getuid === 'function' ? process.getuid() : 'shared'}`
 );
 
-/** @typedef {{afterUnownedLockObserved?: (lockPath: string) => Promise<void>}} PolicyTestHooks */
+/** @typedef {Pick<import('node:net').Socket, 'once'|'destroy'>} OwnerProbeSocket */
+/** @typedef {{afterUnownedLockObserved?: (lockPath: string) => Promise<void>, createOwnerConnection?: (socketPath: string) => OwnerProbeSocket}} PolicyTestHooks */
 /** @typedef {{directory?: string, now?: number, testHooks?: PolicyTestHooks}} AcquireAttemptOptions */
 
 function isMissing(error) {
@@ -65,21 +66,31 @@ async function ownerSocketExists(path) {
   }
 }
 
-function ownerIsReachable(socketPath) {
-  return new Promise(resolve => {
-    const socket = createConnection(socketPath);
+/** @param {string} socketPath @param {(socketPath: string) => OwnerProbeSocket} [createSocket] */
+function probeOwnerSocket(socketPath, createSocket = createConnection) {
+  return new Promise(resolvePromise => {
+    let socket;
     let settled = false;
-    const timeout = setTimeout(() => finish(false), 100);
-    const finish = reachable => {
+    const timeout = setTimeout(() => finish('unknown'), 100);
+    const finish = result => {
       if(settled) return;
       settled = true;
       clearTimeout(timeout);
-      socket.destroy();
-      resolve(reachable);
+      socket?.destroy();
+      resolvePromise(result);
     };
 
-    socket.once('connect', () => finish(true));
-    socket.once('error', () => finish(false));
+    try {
+      socket = createSocket(socketPath);
+    } catch{
+      finish('unknown');
+      return;
+    }
+    socket.once('connect', () => finish('reachable'));
+    socket.once('error', error => {
+      const code = error && typeof error === 'object' ? error.code : undefined;
+      finish(code === 'ECONNREFUSED' ? 'stale' : 'unknown');
+    });
   });
 }
 
@@ -127,6 +138,7 @@ async function waitForMaintenanceLock(directory) {
 async function removeUnownedLock(lockPath, identity, testHooks) {
   const ownerSocket = join(lockPath, OWNER_SOCKET_NAME);
   const ownerMarkerPath = join(lockPath, OWNER_MARKER_NAME);
+  const createOwnerConnection = testHooks?.createOwnerConnection;
   let ownerHandle;
   try {
     ownerHandle = await open(ownerMarkerPath, 'r');
@@ -138,7 +150,8 @@ async function removeUnownedLock(lockPath, identity, testHooks) {
   try {
     const ownerIdentity = await ownerHandle.stat();
     if(!ownerIdentity.isFile() || ownerIdentity.size !== 0 ||
-      !await ownerSocketExists(ownerSocket) || await ownerIsReachable(ownerSocket)) return false;
+      !await ownerSocketExists(ownerSocket) ||
+      await probeOwnerSocket(ownerSocket, createOwnerConnection) !== 'stale') return false;
     if(typeof testHooks?.afterUnownedLockObserved === 'function') {
       await testHooks.afterUnownedLockObserved(lockPath);
     }
@@ -146,12 +159,13 @@ async function removeUnownedLock(lockPath, identity, testHooks) {
     const current = await getDirectoryIdentity(lockPath);
     const currentOwner = await getOwnerMarkerIdentity(ownerMarkerPath);
     if(!sameDirectory(identity, current) || !sameFile(ownerIdentity, currentOwner)) return false;
-    if(!await ownerSocketExists(ownerSocket) || await ownerIsReachable(ownerSocket)) return false;
+    if(!await ownerSocketExists(ownerSocket) ||
+      await probeOwnerSocket(ownerSocket, createOwnerConnection) !== 'stale') return false;
 
     const latest = await getDirectoryIdentity(lockPath);
     const latestOwner = await getOwnerMarkerIdentity(ownerMarkerPath);
     if(!sameDirectory(identity, latest) || !sameFile(ownerIdentity, latestOwner) ||
-      await ownerIsReachable(ownerSocket)) return false;
+      await probeOwnerSocket(ownerSocket, createOwnerConnection) !== 'stale') return false;
 
     await ownerHandle.close();
     ownerHandle = undefined;

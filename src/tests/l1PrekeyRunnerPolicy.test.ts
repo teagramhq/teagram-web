@@ -1,6 +1,7 @@
 import {mkdtemp, mkdir, readFile, rm, utimes, writeFile} from 'node:fs/promises';
+import {EventEmitter} from 'node:events';
 import {createConnection, createServer} from 'node:net';
-import type {Server} from 'node:net';
+import type {Server, Socket} from 'node:net';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {afterEach, describe, expect, it} from 'vitest';
@@ -34,6 +35,20 @@ function ownerIsReachable(socketPath: string) {
       resolvePromise(false);
     });
   });
+}
+
+function createOwnerProbeSocket() {
+  const socket = new EventEmitter() as EventEmitter & {destroy: () => void};
+  socket.destroy = () => {};
+  return socket;
+}
+
+function createOwnerProbeErrorConnection(code: string) {
+  return () => {
+    const socket = createOwnerProbeSocket();
+    queueMicrotask(() => socket.emit('error', Object.assign(new Error('probe failed'), {code})));
+    return socket as unknown as Pick<Socket, 'once'|'destroy'>;
+  };
 }
 
 describe('L1 pre-key runner limits', () => {
@@ -98,6 +113,7 @@ describe('L1 pre-key runner limits', () => {
       directory,
       now: 2_750_000,
       testHooks: {
+        createOwnerConnection: createOwnerProbeErrorConnection('ECONNREFUSED'),
         afterUnownedLockObserved: async(observedLockPath: string) => {
           if(observedLockPath !== lockPath) return;
           await rm(lockPath, {recursive: true, force: true});
@@ -115,6 +131,47 @@ describe('L1 pre-key runner limits', () => {
 
     expect(result).toMatchObject({allowed: false, reason: 'concurrency_limited'});
     await expect(ownerIsReachable(join(lockPath, 'owner.sock'))).resolves.toBe(true);
+  });
+
+  it('fails closed when the owner socket probe times out', async() => {
+    const directory = await createPolicyDirectory();
+    const lockPath = join(directory, 'active.lock');
+    await mkdir(lockPath);
+    await writeFile(join(lockPath, 'owner.lock'), '');
+    await writeFile(join(lockPath, 'owner.sock'), 'owner socket marker');
+    let probeCount = 0;
+
+    const result = await acquireAttemptPermit({
+      directory,
+      now: 2_800_000,
+      testHooks: {
+        createOwnerConnection: () => {
+          probeCount++;
+          return createOwnerProbeSocket() as unknown as Pick<Socket, 'once'|'destroy'>;
+        }
+      }
+    });
+
+    expect(result).toMatchObject({allowed: false, reason: 'concurrency_limited'});
+    expect(probeCount).toBe(1);
+    await expect(readFile(join(lockPath, 'owner.lock'), 'utf8')).resolves.toBe('');
+  });
+
+  it.each(['ECONNRESET', 'ETIMEDOUT'])('fails closed on an inconclusive owner socket error (%s)', async(code) => {
+    const directory = await createPolicyDirectory();
+    const lockPath = join(directory, 'active.lock');
+    await mkdir(lockPath);
+    await writeFile(join(lockPath, 'owner.lock'), '');
+    await writeFile(join(lockPath, 'owner.sock'), 'owner socket marker');
+
+    const result = await acquireAttemptPermit({
+      directory,
+      now: 2_900_000,
+      testHooks: {createOwnerConnection: createOwnerProbeErrorConnection(code)}
+    });
+
+    expect(result).toMatchObject({allowed: false, reason: 'concurrency_limited'});
+    await expect(readFile(join(lockPath, 'owner.lock'), 'utf8')).resolves.toBe('');
   });
 
   it('blocks further attempts in the window after a valid DH inner reply', async() => {

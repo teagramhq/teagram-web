@@ -75,7 +75,7 @@ describe('Node WebSocket pre-auth payload bound', () => {
     }
   });
 
-  it('classifies a WebSocket max-payload rejection as malformed', () => {
+  it('requests close 1000 when WebSocket rejects an oversized message after upgrade', () => {
     const metrics = {requestCount: 0, close1000Sent: false, peerClosed: false, malformed: false};
     let socket: FakeWebSocket | undefined;
     class CapturedWebSocket extends FakeWebSocket {
@@ -94,11 +94,14 @@ describe('Node WebSocket pre-auth payload bound', () => {
       CapturedWebSocket
     );
 
+    socket!.emit('open');
+    socket!.close(1009);
     socket!.emit('error', {code: 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH'});
     socket!.emit('close', 1009, Buffer.alloc(0));
 
+    expect(socket!.closeCode).toBe(1000);
     expect(metrics.malformed).toBe(true);
     expect(metrics.peerClosed).toBe(false);
-    expect(metrics.close1000Sent).toBe(false);
+    expect(metrics.close1000Sent).toBe(true);
   });
 });
