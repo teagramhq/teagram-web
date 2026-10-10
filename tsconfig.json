@@ -109,6 +109,7 @@
     "dist",
     "dist-private",
     "coverage",
+    "tmp",
     "src/scripts",
     "src/solid",
     "src/opus-recorder",
