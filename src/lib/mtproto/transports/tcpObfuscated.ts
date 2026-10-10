@@ -394,6 +394,7 @@ export default class TcpObfuscated implements MTTransport {
             try {
               await this.networker.onTransportData(packet, queued.time);
             } catch{
+              this.log.error('authenticated packet consumer failed');
               return;
             }
             return;

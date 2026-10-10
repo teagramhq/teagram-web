@@ -288,10 +288,12 @@ describe('TcpObfuscated abridged receive path', () => {
 
   it('continues with queued authenticated packets after a consumer rejects one', async() => {
     const received: Uint8Array[] = [];
+    const consumerError = new Error('consumer error details');
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
     const networker = {
       onTransportOpen: vi.fn(),
       onTransportData: vi.fn()
-      .mockRejectedValueOnce(new Error('invalid first packet'))
+      .mockRejectedValueOnce(consumerError)
       .mockImplementation(async(data: Uint8Array) => {received.push(data.slice());}),
       setConnectionStatus: vi.fn()
     };
@@ -305,6 +307,10 @@ describe('TcpObfuscated abridged receive path', () => {
     expect(networker.onTransportData).toHaveBeenCalledTimes(2);
     expect(received).toEqual([second]);
     expect(connection.closeCount).toBe(0);
+    expect(errorLog).toHaveBeenCalledTimes(1);
+    const errorLogText = errorLog.mock.calls.flat().map(String).join(' ');
+    expect(errorLogText).toContain('authenticated packet consumer failed');
+    expect(errorLogText).not.toContain(consumerError.message);
   });
 
   it('deserializes a complete short-header packet from an aligned payload', async() => {
