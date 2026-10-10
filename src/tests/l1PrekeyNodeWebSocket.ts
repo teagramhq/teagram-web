@@ -6,6 +6,7 @@ export type NodeWebSocketMetrics = {
   requestCount: number,
   close1000Sent: boolean,
   peerClosed: boolean,
+  networkError: boolean,
   malformed: boolean
 };
 
@@ -100,13 +101,18 @@ export class NodeWebSocketConnection {
       copy.set(bytes);
       this.dispatch('message', copy.buffer);
     });
-    this.socket.on('close', () => {
-      if(!this.localClose && !this.metrics.malformed) this.metrics.peerClosed = true;
+    this.socket.on('close', (code) => {
+      if(!this.localClose) {
+        if(code === 1005 || code === 1006 || code === 1015) this.metrics.networkError = true;
+        else if(!this.metrics.malformed) this.metrics.peerClosed = true;
+      }
       this.dispatchClose();
     });
     this.socket.on('error', error => {
       const code = error && typeof error === 'object' ? (error as {code?: unknown}).code : undefined;
       if(code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH') this.metrics.malformed = true;
+      else if(this.metrics.upgradeStatus === 101 &&
+        (typeof code !== 'string' || !code.startsWith('WS_ERR_'))) this.metrics.networkError = true;
       if(this.metrics.upgradeStatus === undefined) this.metrics.upgradeStatus = 0;
       if(this.socket.readyState === WebSocket.CONNECTING) this.socket.terminate();
     });

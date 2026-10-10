@@ -76,6 +76,10 @@ export function sanitizeReport(value) {
   return output;
 }
 
+export async function markAttemptStopForResult(permit, report) {
+  if(report.result === 'dh_inner_valid' || report.result === 'unknown') await permit.markStopped();
+}
+
 export function normalizeRuntimeInput(value) {
   if(!isRecord(value)) return undefined;
   const refs = safeReferences(value);
@@ -331,7 +335,7 @@ async function runParent() {
     try {
       const deadlineAt = Date.now() + MAX_ATTEMPT_MS;
       const report = await superviseAttempt(input, deadlineAt);
-      if(report.result === 'dh_inner_valid' || report.result === 'unknown') await permit.markStopped();
+      await markAttemptStopForResult(permit, report);
       process.stdout.write(JSON.stringify(report) + '\n');
     } finally {
       await permit.release();

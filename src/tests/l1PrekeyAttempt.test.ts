@@ -1,4 +1,7 @@
 import {constants, createCipheriv, createDecipheriv, createHash, generateKeyPairSync, privateDecrypt} from 'node:crypto';
+import {mkdtemp, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {describe, expect, it} from 'vitest';
 import '@lib/crypto/crypto.worker';
 import cryptoWorker from '@lib/crypto/cryptoMessagePort';
@@ -8,6 +11,8 @@ import bytesFromHex from '@helpers/bytes/bytesFromHex';
 import bytesXor from '@helpers/bytes/bytesXor';
 import {bigIntToBytes} from '@helpers/bigInt/bigIntConversion';
 import bigInt from 'big-integer';
+import {acquireAttemptPermit} from './l1PrekeyRunnerPolicy.mjs';
+import {markAttemptStopForResult} from './l1PrekeyRun.mjs';
 
 const REQ_PQ_MULTI = -1099002127;
 const REQ_DH_PARAMS = -686627650;
@@ -88,7 +93,7 @@ class SyntheticConnection {
   private inboundCipher: ReturnType<typeof createCipheriv>;
   private localClose = false;
   private opened = false;
-  private readonly metrics: {upgradeStatus?: number, requestCount: number, close1000Sent: boolean, peerClosed: boolean, malformed: boolean};
+  private readonly metrics: {upgradeStatus?: number, requestCount: number, close1000Sent: boolean, peerClosed: boolean, networkError: boolean, malformed: boolean};
   private readonly target: ReturnType<typeof buildTarget>['target'];
   private readonly privateKey: ReturnType<typeof buildTarget>['privateKey'];
   private readonly nonceOverride?: Uint8Array;
@@ -107,7 +112,7 @@ class SyntheticConnection {
     _dcId: number,
     _endpoint: string,
     _logSuffix: string,
-    metrics: {upgradeStatus?: number, requestCount: number, close1000Sent: boolean, peerClosed: boolean, malformed: boolean},
+    metrics: {upgradeStatus?: number, requestCount: number, close1000Sent: boolean, peerClosed: boolean, networkError: boolean, malformed: boolean},
     options: {
     target: ReturnType<typeof buildTarget>['target'],
     privateKey: ReturnType<typeof buildTarget>['privateKey'],
@@ -115,6 +120,7 @@ class SyntheticConnection {
     malformedRespq?: boolean,
     malformedFraming?: boolean,
     noResponse?: boolean,
+    abruptDisconnect?: boolean,
     neverOpen?: boolean,
     invalidPq?: boolean,
     fingerprintMismatch?: boolean,
@@ -133,6 +139,7 @@ class SyntheticConnection {
     this.malformedRespq = options.malformedRespq ?? false;
     this.malformedFraming = options.malformedFraming ?? false;
     this.noResponse = options.noResponse ?? false;
+    this.abruptDisconnect = options.abruptDisconnect ?? false;
     this.invalidPq = options.invalidPq ?? false;
     this.fingerprintMismatch = options.fingerprintMismatch ?? false;
     this.dhParamsFail = options.dhParamsFail ?? false;
@@ -151,6 +158,7 @@ class SyntheticConnection {
   }
 
   private readonly noResponse: boolean;
+  private readonly abruptDisconnect: boolean;
 
   public addEventListener(type: string, listener: (data?: ArrayBuffer) => void) {
     const listeners = this.listeners.get(type) ?? new Set();
@@ -190,6 +198,10 @@ class SyntheticConnection {
   private async respond(data: Uint8Array) {
     const {deserializer, methodId} = readRequest(data);
     this.requests.push({methodId, data: new Uint8Array(data)});
+    if(this.abruptDisconnect) {
+      this.dispatch('close', undefined, 1006);
+      return;
+    }
     if(this.noResponse) return;
     if(this.malformedFraming) {
       this.dispatchEncrypted(new Uint8Array([0]));
@@ -311,8 +323,11 @@ class SyntheticConnection {
     this.dispatch('close');
   }
 
-  private dispatch(type: string, data?: ArrayBuffer) {
-    if(type === 'close' && !this.localClose) this.metrics.peerClosed = true;
+  private dispatch(type: string, data?: ArrayBuffer, closeCode?: number) {
+    if(type === 'close' && !this.localClose) {
+      if(closeCode === 1006) this.metrics.networkError = true;
+      else this.metrics.peerClosed = true;
+    }
     for(const listener of this.listeners.get(type) ?? []) listener(data);
   }
 }
@@ -606,6 +621,31 @@ describe('shipped-client L1 pre-key harness', () => {
     expect(result).not.toHaveProperty('dh_reply');
     expect(result).not.toHaveProperty('dh_inner_valid');
     expect(peer.connection.requests).toHaveLength(1);
+  });
+
+  it('stops later attempts after an abnormal post-upgrade close', async() => {
+    const {runDiagnosticAttempt} = await import('./l1PrekeyAttempt');
+    const {privateKey, target} = buildTarget();
+    const peer = makeSyntheticConnection({target, privateKey, abruptDisconnect: true});
+    const directory = await mkdtemp(join(tmpdir(), 'teagram-l1-abnormal-close-test-'));
+    const permit = await acquireAttemptPermit({directory, now: 3_500_000});
+    expect(permit).toMatchObject({allowed: true});
+
+    try {
+      const result = await runDiagnosticAttempt(buildAttemptInput(target), {
+        createConnection: peer.createConnection
+      });
+
+      expect(result).toMatchObject({upgrade: '101', result: 'unknown'});
+      await markAttemptStopForResult(permit, result);
+      await permit.release();
+
+      const blocked = await acquireAttemptPermit({directory, now: 3_505_000});
+      expect(blocked).toMatchObject({allowed: false, reason: 'already_stopped'});
+    } finally {
+      await permit.release();
+      await rm(directory, {recursive: true, force: true});
+    }
   });
 
   it('does not report a 1000 close when no WebSocket was opened', async() => {

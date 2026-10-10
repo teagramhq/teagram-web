@@ -168,6 +168,10 @@ function createLiveTransport(
 }
 
 function setErrorResult(observed: ObservedResult, error: unknown, metrics: AttemptMetrics, sentCount: number) {
+  if(metrics.networkError) {
+    observed.result = 'unknown';
+    return;
+  }
   if(observed.respq === 'proto_error') {
     observed.result = 'respq_protocol_error';
     return;
@@ -333,6 +337,7 @@ export async function runDiagnosticAttempt(input: DiagnosticInput, options: Harn
     requestCount: 0,
     close1000Sent: false,
     peerClosed: false,
+    networkError: false,
     malformed: false
   };
   const observed: ObservedResult = {

@@ -38,7 +38,7 @@ class FakeWebSocket {
 
 describe('Node WebSocket pre-auth payload bound', () => {
   it('sets the WebSocket limit and drops oversized messages before copying or dispatching', () => {
-    const metrics = {requestCount: 0, close1000Sent: false, peerClosed: false, malformed: false};
+    const metrics = {requestCount: 0, close1000Sent: false, peerClosed: false, networkError: false, malformed: false};
     let socket: FakeWebSocket | undefined;
     class CapturedWebSocket extends FakeWebSocket {
       constructor(endpoint: string, subprotocol: string, options: {maxPayload: number}) {
@@ -76,7 +76,7 @@ describe('Node WebSocket pre-auth payload bound', () => {
   });
 
   it('requests close 1000 when WebSocket rejects an oversized message after upgrade', () => {
-    const metrics = {requestCount: 0, close1000Sent: false, peerClosed: false, malformed: false};
+    const metrics = {requestCount: 0, close1000Sent: false, peerClosed: false, networkError: false, malformed: false};
     let socket: FakeWebSocket | undefined;
     class CapturedWebSocket extends FakeWebSocket {
       constructor(endpoint: string, subprotocol: string, options: {maxPayload: number}) {
@@ -103,5 +103,31 @@ describe('Node WebSocket pre-auth payload bound', () => {
     expect(metrics.malformed).toBe(true);
     expect(metrics.peerClosed).toBe(false);
     expect(metrics.close1000Sent).toBe(true);
+  });
+
+  it('preserves an abnormal post-upgrade close as a network error', () => {
+    const metrics = {requestCount: 0, close1000Sent: false, peerClosed: false, networkError: false, malformed: false};
+    let socket: FakeWebSocket | undefined;
+    class CapturedWebSocket extends FakeWebSocket {
+      constructor(endpoint: string, subprotocol: string, options: {maxPayload: number}) {
+        super(endpoint, subprotocol, options);
+        socket = this;
+      }
+    }
+    new NodeWebSocketConnection(
+      1,
+      'wss://diagnostic.example.test/apiws',
+      '-test',
+      'https://web.example.test',
+      'binary',
+      metrics,
+      CapturedWebSocket
+    );
+
+    socket!.emit('open');
+    socket!.emit('close', 1006, Buffer.alloc(0));
+
+    expect(metrics.networkError).toBe(true);
+    expect(metrics.peerClosed).toBe(false);
   });
 });
