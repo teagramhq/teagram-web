@@ -371,6 +371,33 @@ export function parseObserverControls(block) {
   return block;
 }
 
+export function parsePasswordEvidence(evidence) {
+  if(!Array.isArray(evidence)) throw new Error('password evidence is invalid');
+
+  const seenAccounts = new Set();
+  return evidence.map((entry) => {
+    if(!entry || typeof entry !== 'object' || Array.isArray(entry) ||
+        JSON.stringify(Object.keys(entry).sort()) !== JSON.stringify(['count', 'stage']) ||
+        typeof entry.stage !== 'string' || !Number.isSafeInteger(entry.count) || entry.count < 0) {
+      throw new Error('password evidence is invalid');
+    }
+
+    const match = /^(alice|bob)_(password_field_ready|password_field_absent|password_field_not_unique|password_field_hidden|password_field_unmasked|password_card_not_reached)$/.exec(entry.stage);
+    if(!match || seenAccounts.has(match[1])) throw new Error('password evidence is invalid');
+    seenAccounts.add(match[1]);
+
+    const category = match[2];
+    if((category === 'password_field_absent' && entry.count !== 0) ||
+        (category === 'password_field_not_unique' && entry.count < 2) ||
+        (category === 'password_card_not_reached' && entry.count > 1) ||
+        (!['password_field_absent', 'password_field_not_unique', 'password_card_not_reached'].includes(category) && entry.count !== 1)) {
+      throw new Error('password evidence is invalid');
+    }
+
+    return {stage: entry.stage, count: entry.count};
+  });
+}
+
 export function assertAllScenariosPassed(results) {
   if(!Array.isArray(results)) {
     throw new Error('scenario results are required');

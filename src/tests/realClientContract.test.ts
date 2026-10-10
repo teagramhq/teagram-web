@@ -16,10 +16,11 @@ import {
   parseWorkerObservation,
   readSyntheticCredentials
 } from '../../scripts/real-client/contract.mjs';
+import * as realClientContract from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
-const {createNetworkObserver, createWorkerDiscovery, getSingleExactMessageFailure, matchesPrivateArtifactManifest, prepareUsernameEntry} = require('../../scripts/real-client/browser.cjs');
+const {createNetworkObserver, createWorkerDiscovery, getSingleExactMessageFailure, matchesPrivateArtifactManifest, prepareUsernameEntry, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -1289,6 +1290,88 @@ function usernameReadinessMarkup({delay = 0, fieldCount = 1, legacyButton = fals
   </body></html>`;
 }
 
+function escapeHtmlAttribute(value: string) {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function passwordStageMarkup({
+  delay = 0,
+  actualCount = 1,
+  includeActual = true,
+  actualType = 'password',
+  actualStyle = '',
+  actualClass = '',
+  usernameRemainsVisible = false,
+  label = 'Password',
+  alertText = ''
+}: {
+  delay?: number,
+  actualCount?: number,
+  includeActual?: boolean,
+  actualType?: string,
+  actualStyle?: string,
+  actualClass?: string,
+  usernameRemainsVisible?: boolean,
+  label?: string,
+  alertText?: string
+} = {}) {
+  const actualFields = includeActual
+    ? Array.from({length: actualCount}, (_, index) => `<input id="password-real-${index}" data-password-test="true" name="notsearch_password" type="${escapeHtmlAttribute(actualType)}" class="${escapeHtmlAttribute(actualClass)}" style="${escapeHtmlAttribute(actualStyle)}" aria-label="${escapeHtmlAttribute(label)}">`).join('')
+    : '';
+  const decoys = [
+    '<input id="decoy-email" data-password-test="true" class="stealthy" name="email" type="password" style="position:absolute;opacity:0;width:1px;height:1px">',
+    '<input id="decoy-name" data-password-test="true" class="stealthy" name="name" type="password" style="position:absolute;opacity:0;width:1px;height:1px">'
+  ].join('');
+  const insertScript = `document.querySelector('#auth-pages').insertAdjacentHTML('beforeend', ${JSON.stringify(`${actualFields}${decoys}<div id="fixture-alert" role="alert"></div>`)});
+        document.querySelector('#fixture-alert').textContent = ${JSON.stringify(alertText)};`;
+  const attachScript = delay > 0 ? `setTimeout(() => {${insertScript}}, ${delay});` : insertScript;
+
+  return `<!doctype html><html><body>
+    <div id="auth-pages"><form id="login"><input id="username" aria-label="Username"></form></div>
+    <script>
+      window.passwordEnters = [];
+      document.querySelector('#login').addEventListener('submit', (event) => event.preventDefault());
+      document.addEventListener('keydown', (event) => {
+        if(event.key === 'Enter' && event.target.hasAttribute('data-password-test')) window.passwordEnters.push(event.target.id);
+      });
+      document.querySelector('#username').addEventListener('keydown', (event) => {
+        if(event.key !== 'Enter') return;
+        event.preventDefault();
+        ${usernameRemainsVisible ? '' : 'event.currentTarget.style.display = "none";'}
+        ${attachScript}
+      });
+    </script>
+  </body></html>`;
+}
+
+describe('real client password evidence contract', () => {
+  it('keeps only fixed stages and counts in serialized evidence', () => {
+    const parsePasswordEvidence = (realClientContract as any).parsePasswordEvidence;
+    const evidence = [
+      {stage: 'alice_password_field_not_unique', count: 2},
+      {stage: 'bob_password_field_ready', count: 1}
+    ];
+
+    expect(parsePasswordEvidence(evidence)).toEqual(evidence);
+    expect(parsePasswordEvidence([
+      {stage: 'alice_password_card_not_reached', count: 0}
+    ])).toEqual([{stage: 'alice_password_card_not_reached', count: 0}]);
+    const serialized = JSON.stringify(parsePasswordEvidence(evidence));
+    expect(serialized).not.toContain(HOSTILE.password);
+    expect(serialized).not.toContain(HOSTILE.phrase);
+    expect(serialized).not.toContain(HOSTILE.token);
+    expect(() => parsePasswordEvidence([
+      {stage: 'alice_password_field_hidden', count: 1, hint: HOSTILE.phrase}
+    ])).toThrow('password evidence is invalid');
+    expect(() => parsePasswordEvidence([
+      {stage: 'bob_password_rejected', count: 1, alert: HOSTILE.token}
+    ])).toThrow('password evidence is invalid');
+    expect(() => parsePasswordEvidence([
+      {stage: 'alice_password_field_absent', count: 1}
+    ])).toThrow('password evidence is invalid');
+  });
+});
+
 const USERNAME_ENTRY_RUNTIME = Object.freeze({
   wssEndpoint: 'wss://telegramd.test/apiws',
   fingerprint: '1234567890abcdef',
@@ -1367,6 +1450,24 @@ describe('real client username field readiness', () => {
       });
     });
     return page;
+  }
+
+  async function startPasswordStage(page: any, evidence: any[], name = 'alice', timeoutMs = 1000) {
+    const username = await prepareUsernameEntry(page, name, USERNAME_ENTRY_RUNTIME);
+    const usernameField = await username.elementHandle();
+    try {
+      await username.fill(DUMMY_USERNAME);
+      await username.press('Enter');
+      const password = await waitForPasswordField(page, usernameField, name, evidence, timeoutMs);
+      return {usernameField, password};
+    } catch(error) {
+      await usernameField?.dispose();
+      throw error;
+    }
+  }
+
+  async function passwordInputValues(page: any) {
+    return page.locator('#auth-pages input[data-password-test]').evaluateAll((inputs: HTMLInputElement[]) => inputs.map((input) => input.value));
   }
 
   it('reaches a delayed Username field without a legacy entry button', async() => {
@@ -1449,6 +1550,174 @@ describe('real client username field readiness', () => {
       await expect(prepareUsernameEntry(page, 'alice', USERNAME_ENTRY_RUNTIME)).rejects.toThrow('alice_manifest_mismatch');
       expect(fixtureRequests.slice(0, 2)).toEqual(['/', '/mtproto-target.json']);
     } finally {
+      await page.close();
+    }
+  });
+
+  it('fills and submits only the named masked field with both decoys and an account hint label', async() => {
+    const outcomes = [];
+    for(const label of ['Password', HOSTILE.phrase]) {
+      setFixture(passwordStageMarkup({label, alertText: HOSTILE.token}));
+      const page = await createRunnerPage();
+      const evidence: any[] = [];
+      try {
+        const {usernameField, password} = await startPasswordStage(page, evidence);
+        await submitPassword(password, usernameField, HOSTILE.password, 'alice', evidence);
+        outcomes.push({
+          values: await passwordInputValues(page),
+          entered: await page.evaluate(() => (window as any).passwordEnters),
+          evidence
+        });
+      } finally {
+        await page.close();
+      }
+    }
+
+    expect(outcomes[0]).toEqual(outcomes[1]);
+    expect(outcomes[0]).toEqual({
+      values: [HOSTILE.password, '', ''],
+      entered: ['password-real-0'],
+      evidence: [{stage: 'alice_password_field_ready', count: 1}]
+    });
+    const serializedEvidence = JSON.stringify(outcomes.map((outcome) => outcome.evidence));
+    expect(serializedEvidence).not.toContain(HOSTILE.password);
+    expect(serializedEvidence).not.toContain(HOSTILE.phrase);
+    expect(serializedEvidence).not.toContain(HOSTILE.token);
+  });
+
+  it('waits for the named password field to mount inside the readiness bound', async() => {
+    setFixture(passwordStageMarkup({delay: 50}));
+    const page = await createRunnerPage();
+    const evidence: any[] = [];
+    try {
+      const {usernameField, password} = await startPasswordStage(page, evidence);
+      await submitPassword(password, usernameField, HOSTILE.password, 'alice', evidence);
+      expect(evidence).toEqual([{stage: 'alice_password_field_ready', count: 1}]);
+      expect(await passwordInputValues(page)).toEqual([HOSTILE.password, '', '']);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails with a fixed absent stage when only stealthy password decoys exist', async() => {
+    setFixture(passwordStageMarkup({includeActual: false}));
+    const page = await createRunnerPage();
+    const evidence: any[] = [];
+    try {
+      await expect(startPasswordStage(page, evidence)).rejects.toThrow('alice_password_field_absent');
+      expect(evidence).toEqual([{stage: 'alice_password_field_absent', count: 0}]);
+      expect(await passwordInputValues(page)).toEqual(['', '']);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails with a fixed hidden stage when the real field is hidden beside decoys', async() => {
+    setFixture(passwordStageMarkup({actualStyle: 'display:none'}));
+    const page = await createRunnerPage();
+    const evidence: any[] = [];
+    try {
+      await expect(startPasswordStage(page, evidence)).rejects.toThrow('alice_password_field_hidden');
+      expect(evidence).toEqual([{stage: 'alice_password_field_hidden', count: 1}]);
+      expect(await passwordInputValues(page)).toEqual(['', '', '']);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails with a fixed non-unique stage when two named fields exist', async() => {
+    setFixture(passwordStageMarkup({actualCount: 2}));
+    const page = await createRunnerPage();
+    const evidence: any[] = [];
+    try {
+      await expect(startPasswordStage(page, evidence)).rejects.toThrow('alice_password_field_not_unique');
+      expect(evidence).toEqual([{stage: 'alice_password_field_not_unique', count: 2}]);
+      expect(await passwordInputValues(page)).toEqual(['', '', '', '']);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails with a fixed unmasked stage when the named field is a text input', async() => {
+    setFixture(passwordStageMarkup({actualType: 'text'}));
+    const page = await createRunnerPage();
+    const evidence: any[] = [];
+    try {
+      await expect(startPasswordStage(page, evidence)).rejects.toThrow('alice_password_field_unmasked');
+      expect(evidence).toEqual([{stage: 'alice_password_field_unmasked', count: 1}]);
+      expect(await passwordInputValues(page)).toEqual(['', '', '']);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails with a fixed card-not-reached stage while Username remains visible', async() => {
+    setFixture(passwordStageMarkup({includeActual: false, usernameRemainsVisible: true}));
+    const page = await createRunnerPage();
+    const evidence: any[] = [];
+    try {
+      await expect(startPasswordStage(page, evidence)).rejects.toThrow('alice_password_card_not_reached');
+      expect(evidence).toEqual([{stage: 'alice_password_card_not_reached', count: 0}]);
+      expect(await passwordInputValues(page)).toEqual(['', '']);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('never treats a stealthy named match as ready', async() => {
+    setFixture(passwordStageMarkup({actualClass: 'stealthy'}));
+    const page = await createRunnerPage();
+    const evidence: any[] = [];
+    try {
+      await expect(startPasswordStage(page, evidence)).rejects.toThrow('alice_password_field_hidden');
+      expect(evidence).toEqual([{stage: 'alice_password_field_hidden', count: 1}]);
+      expect(await passwordInputValues(page)).toEqual(['', '', '']);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('rechecks the named-field count before filling', async() => {
+    setFixture(passwordStageMarkup());
+    const page = await createRunnerPage();
+    const evidence: any[] = [];
+    let usernameField: any;
+    try {
+      const ready = await startPasswordStage(page, evidence);
+      usernameField = ready.usernameField;
+      await page.locator('#auth-pages').evaluate((root: HTMLElement) => {
+        const input = document.createElement('input');
+        input.id = 'password-real-added';
+        input.name = 'notsearch_password';
+        input.type = 'password';
+        input.setAttribute('data-password-test', 'true');
+        root.append(input);
+      });
+
+      await expect(submitPassword(ready.password, usernameField, HOSTILE.password, 'alice', evidence)).rejects.toThrow('alice_password_field_not_unique');
+      expect(evidence).toEqual([{stage: 'alice_password_field_not_unique', count: 2}]);
+      expect(await passwordInputValues(page)).toEqual(['', '', '', '']);
+    } finally {
+      await usernameField?.dispose();
+      await page.close();
+    }
+  });
+
+  it('rechecks the masked type before filling', async() => {
+    setFixture(passwordStageMarkup());
+    const page = await createRunnerPage();
+    const evidence: any[] = [];
+    let usernameField: any;
+    try {
+      const ready = await startPasswordStage(page, evidence);
+      usernameField = ready.usernameField;
+      await page.locator('#password-real-0').evaluate((input: HTMLInputElement) => {input.type = 'text'});
+
+      await expect(submitPassword(ready.password, usernameField, HOSTILE.password, 'alice', evidence)).rejects.toThrow('alice_password_field_unmasked');
+      expect(evidence).toEqual([{stage: 'alice_password_field_unmasked', count: 1}]);
+      expect(await passwordInputValues(page)).toEqual(['', '', '']);
+    } finally {
+      await usernameField?.dispose();
       await page.close();
     }
   });

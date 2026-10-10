@@ -2,7 +2,7 @@
 
 `pnpm run test:real-client` consumes a completed `server-ready` and `artifact-ready` pair from one foreground real-server fixture run. It checks the immutable harness, server and web pins, the fixture's protected synthetic credentials, isolation and audit evidence before driving the production UI. It requires all three scenarios: `sign-in,message,group`.
 
-The accepted positive inputs are harness `5f294c39abb32fc8ae15a4f7ccb085974098b320`, server `47daaaea5c71b859d9865c03cabb50da5a1a013b` and web `b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8`. Each run also has a fresh run ID, RSA public key and endpoint identity. Do not reuse readiness or artifacts from another run.
+The accepted positive inputs are harness `5f294c39abb32fc8ae15a4f7ccb085974098b320`, server `47daaaea5c71b859d9865c03cabb50da5a1a013b` and web artifact source `c88211e3985942343bf40dcbbcb8e8f5b4b7d364`. The scenario runner revision is recorded separately from the artifact source revision. Each run also has a fresh run ID, RSA public key and endpoint identity. Do not reuse readiness or artifacts from another run.
 
 The native arm64 fixture successor was accepted from server PR #499, merged as `b61fbe1a53348edd0039885fb4a4659e0dc455c0`. The executable harness pin remains the reviewed PR head `5f294c39abb32fc8ae15a4f7ccb085974098b320`; do not substitute the squash merge or moving main. The server-under-test and historical negative pair remain unchanged.
 
@@ -20,7 +20,7 @@ test "$(git rev-parse HEAD)" = 5f294c39abb32fc8ae15a4f7ccb085974098b320
 test -z "$(git status --porcelain --untracked-files=all)"
 bash test/e2e/real_server_fixture/run.sh \
   --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
-  --web-revision b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8 \
+  --web-revision c88211e3985942343bf40dcbbcb8e8f5b4b7d364 \
   --run-id "$RUN_ID" | tee "$READINESS_FILE"
 ```
 
@@ -34,7 +34,7 @@ From a clean web checkout at the exact positive web revision, use only that run'
 set -euo pipefail
 READINESS_FILE='/dev/shm/real-client-readiness.<path-printed-in-fixture-terminal>'
 RUN_ID="$(jq -er 'select(.event == "server-ready") | .runId' "$READINESS_FILE")"
-test "$(git rev-parse HEAD)" = b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8
+test "$(git rev-parse HEAD)" = c88211e3985942343bf40dcbbcb8e8f5b4b7d364
 test -z "$(git status --porcelain --untracked-files=all)"
 KEY_FILE="$(mktemp /dev/shm/real-client-public-key.XXXXXX)"
 chmod 600 "$KEY_FILE"
@@ -65,12 +65,14 @@ corepack pnpm run test:real-client -- \
   --readiness-file "$READINESS_FILE" \
   --harness-revision 5f294c39abb32fc8ae15a4f7ccb085974098b320 \
   --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
-  --web-revision b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8 \
+  --web-revision c88211e3985942343bf40dcbbcb8e8f5b4b7d364 \
   --run-id "$RUN_ID" \
   --scenarios sign-in,message,group
 ```
 
-The browser uses two new independent contexts and the actual username/password flow. It sends `browser-ci-hello` to the other account, creates a basic group through the UI with that account, then checks the received group message and member list. It captures each state inside the fixture browser's temporary directory, removes those screenshots and the runner on exit, and emits only scenario and network summaries. It does not import storage state, use test-only authentication, or export credentials, traces or captures.
+The browser uses two new independent contexts and the actual username/password flow. It sends `browser-ci-hello` to the other account, creates a basic group through the UI with that account, then checks the received group message and member list. It captures each state inside the fixture browser's temporary directory, removes those screenshots and the runner on exit, and emits only scenario, fixed password-stage and network summaries. It does not import storage state, use test-only authentication, or export credentials, traces or captures.
+
+Password readiness selects only `#auth-pages input[name="notsearch_password"]`. Within one bounded wait of at most 30 seconds, it requires exactly one visible, non-`stealthy`, password-type match and the original Username field to be hidden. The runner keeps the password-card screenshot before filling, rechecks the count and masked type, then fills and presses Enter on the same element handle. Failures use fixed stages (`<name>_password_field_absent`, `_password_field_not_unique`, `_password_field_hidden`, `_password_field_unmasked` or `_password_card_not_reached`). Password-stage evidence contains only stage names and match counts; it does not read labels, hints, values, alert text or response bodies, and it takes no capture after filling before the card transition.
 
 After the command succeeds or fails, send `stop` to the foreground fixture and wait for its owned cleanup to finish. Then remove the caller-owned artifact and temporary key/readiness files:
 
@@ -98,7 +100,7 @@ corepack pnpm run test:real-client -- \
   --readiness-file "$SERVER_READY_FILE" \
   --harness-revision 5f294c39abb32fc8ae15a4f7ccb085974098b320 \
   --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
-  --web-revision b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8 \
+  --web-revision c88211e3985942343bf40dcbbcb8e8f5b4b7d364 \
   --run-id "$RUN_ID" \
   --observer-controls-only
 ```

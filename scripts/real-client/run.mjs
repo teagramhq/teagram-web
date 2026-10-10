@@ -9,6 +9,7 @@ import {
   REQUIRED_CONTROLS,
   parseFixtureReadiness,
   parseObserverControls,
+  parsePasswordEvidence,
   parseRealClientArgs,
   parseWorkerObservation,
   readSyntheticCredentials
@@ -54,6 +55,7 @@ if(args?.help) {
   let observerScriptInstalled = false;
   let browserContainerValidated = false;
   let browserResult;
+  let passwordEvidence = [];
   let readiness;
   let controlsOnlyDone = false;
 
@@ -195,7 +197,9 @@ if(args?.help) {
       try {
         const failedRun = JSON.parse(browserStdout.trim());
         if(failedRun.status === 'failed' && typeof failedRun.stage === 'string') {
-          throw new Error(`real client scenario failed at ${failedRun.stage}`);
+          const failedPasswordEvidence = controlsOnly ? [] : parsePasswordEvidence(failedRun.passwordEvidence);
+          const evidenceSummary = controlsOnly ? '' : `; password evidence ${JSON.stringify(failedPasswordEvidence)}`;
+          throw new Error(`real client scenario failed at ${failedRun.stage}${evidenceSummary}`);
         }
       } catch(parseError) {
         if(parseError instanceof Error && parseError.message.startsWith('real client scenario failed at ')) throw parseError;
@@ -209,7 +213,9 @@ if(args?.help) {
     }
 
     if(browserResult.status !== 'passed') {
-      throw new Error(`real client scenario failed at ${browserResult.stage || 'unknown stage'}`);
+      const failedPasswordEvidence = controlsOnly ? [] : parsePasswordEvidence(browserResult.passwordEvidence);
+      const evidenceSummary = controlsOnly ? '' : `; password evidence ${JSON.stringify(failedPasswordEvidence)}`;
+      throw new Error(`real client scenario failed at ${browserResult.stage || 'unknown stage'}${evidenceSummary}`);
     }
     if(controlsOnly) {
       if(browserResult.mode !== 'observer_controls' || browserResult.controlContextCount !== REQUIRED_CONTROLS.length ||
@@ -230,6 +236,13 @@ if(args?.help) {
       })}\n`);
     }
     if(!controlsOnlyDone) {
+      passwordEvidence = parsePasswordEvidence(browserResult.passwordEvidence);
+      if(JSON.stringify(passwordEvidence.map((entry) => entry.stage)) !== JSON.stringify([
+        'alice_password_field_ready',
+        'bob_password_field_ready'
+      ])) {
+        throw new Error('password readiness evidence is incomplete');
+      }
       assertAllScenariosPassed(browserResult.scenarios);
       if(browserResult.contextCount !== 2 || browserResult.screenshotsCaptured !== 16 ||
           browserResult.network?.unexpectedAttempts !== 0 || browserResult.network?.observerErrors !== 0 ||
@@ -287,6 +300,7 @@ if(args?.help) {
       scenarios: browserResult.scenarios,
       contextCount: browserResult.contextCount,
       screenshotsCaptured: browserResult.screenshotsCaptured,
+      passwordEvidence,
       network: browserResult.network,
       workerObservation: browserResult.workerObservation
     })}\n`);
