@@ -34,6 +34,7 @@ import {assertNoQrFixtureArtifactContent} from './qr-fixture-artifact.mjs';
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const B64_INDEX = new Map([...B64].map((char, index) => [char, index]));
+const TEST_ONLY_HARNESS_MARKER = 'teagram-l1-prekey-test-only';
 
 function decodeMappings(mappings) {
   const out = [];
@@ -231,6 +232,16 @@ if(privateMode && javascriptFiles.length === 0) {
   process.exit(1);
 }
 
+const testOnlyHarnessFiles = files.filter((file) =>
+  fs.readFileSync(path.join(dir, file)).includes(TEST_ONLY_HARNESS_MARKER)
+);
+if(testOnlyHarnessFiles.length) {
+  console.error(
+    '[MT] production bundle contains test-only L1 pre-key harness code: ' + testOnlyHarnessFiles.join(', ')
+  );
+  process.exit(1);
+}
+
 if(privateMode || fs.existsSync(path.join(dir, 'mtproto-target.json'))) {
   verifyPrivateArtifactManifest(dir);
   console.log('verified private MTProto artifact manifest and route audit');
@@ -257,3 +268,4 @@ if(offenders.length) {
 console.log(
   `checked ${javascriptFiles.length} JavaScript chunks for lost literals and ${mappedChunks.length} mapped chunks for miscompiled defaults`
 );
+console.log('test-only L1 pre-key harness=excluded');
