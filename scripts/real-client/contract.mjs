@@ -574,9 +574,15 @@ function parseAuthProgressNetwork(network) {
         !Number.isSafeInteger(context.allowedWebSockets) || context.allowedWebSockets < 0 || context.allowedWebSockets > 1_000_000) {
       throw new Error('auth progress network evidence is invalid');
     }
-    for(const sourceMap of [context.workerTargets, context.attemptsBySource, context.unexpectedAttemptsBySource, context.allowedWebSocketsBySource]) {
+    const sourceMaps = [
+      [context.workerTargets, ['shared_worker', 'service_worker']],
+      [context.attemptsBySource, sources],
+      [context.unexpectedAttemptsBySource, sources],
+      [context.allowedWebSocketsBySource, sources]
+    ];
+    for(const [sourceMap, sourceNames] of sourceMaps) {
       if(!sourceMap || typeof sourceMap !== 'object' || Array.isArray(sourceMap) ||
-          JSON.stringify(Object.keys(sourceMap).sort()) !== JSON.stringify([...sources].sort()) ||
+          JSON.stringify(Object.keys(sourceMap).sort()) !== JSON.stringify([...sourceNames].sort()) ||
           Object.values(sourceMap).some((count) => !Number.isSafeInteger(count) || count < 0 || count > 1_000_000)) {
         throw new Error('auth progress network evidence is invalid');
       }
