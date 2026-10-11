@@ -1,4 +1,4 @@
-import {chmodSync, existsSync, linkSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync} from 'node:fs';
+import {chmodSync, existsSync, linkSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {EventEmitter} from 'node:events';
 import {createHash, generateKeyPairSync} from 'node:crypto';
@@ -321,22 +321,72 @@ function authProgressObservationBlock(): any {
   return block;
 }
 
-function authProgressNetwork(): any {
-  const sources = ['page', 'shared_worker', 'service_worker', 'worker'];
-  const counts = {page: 0, shared_worker: 0, service_worker: 1, worker: 0};
-  return {
-    unexpectedAttempts: 0,
-    observerErrors: 0,
-    contexts: {
-      alice: {
-        workerTargets: {...counts},
-        allowedWebSockets: 1,
-        attemptsBySource: {...counts},
-        unexpectedAttemptsBySource: Object.fromEntries(sources.map((source) => [source, 0])),
-        allowedWebSocketsBySource: {...counts}
+function createAuthProgressNetworkObserver(contextObserver: any, onStop: () => void = () => {}) {
+  const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver, {
+    send: async(method: string, params: any) => {
+      if(method === 'Target.sendMessageToTarget') {
+        const {id} = JSON.parse(params.message);
+        queueMicrotask(() => cdp.emit('Target.receivedMessageFromTarget', {
+          sessionId: params.sessionId,
+          message: JSON.stringify({id, result: {}})
+        }));
       }
+      return method === 'Target.getTargetInfo' ? {targetInfo: {browserContextId: 'contract-test'}} : {};
+    }
+  });
+  return {
+    async start(registry: any = undefined) {
+      await networkObserver.start(registry);
+      contextObserver.state.discoveryActive = true;
+      contextObserver.state.pageCoverageComplete = true;
+      contextObserver.registerTarget({targetId: 'alice-page', type: 'page'});
+      cdp.emit('Target.attachedToTarget', {
+        sessionId: 'service-worker-session',
+        targetInfo: {targetId: 'service-worker-target', type: 'service_worker', url: `${APP_ORIGIN}/service-worker.js`}
+      });
+      await networkObserver.waitForSetup();
+      cdp.emit('Target.receivedMessageFromTarget', {
+        sessionId: 'service-worker-session',
+        message: JSON.stringify({
+          method: 'Network.requestWillBeSent',
+          params: {type: 'WebSocket', request: {url: 'wss://telegramd.test/apiws'}}
+        })
+      });
+    },
+    async waitForSetup() {
+      await networkObserver.waitForSetup();
+    },
+    async stop() {
+      onStop();
+      await networkObserver.stop();
+    },
+    summary() {
+      return networkObserver.summary();
     }
   };
+}
+
+async function authProgressNetwork(): Promise<any> {
+  const networkObserver = createAuthProgressNetworkObserver(observation.createContextObserver('auth-progress-network'));
+  await networkObserver.start();
+  try {
+    const summary = networkObserver.summary();
+    return {
+      unexpectedAttempts: summary.unexpectedAttempts,
+      observerErrors: summary.observerErrors,
+      contexts: {
+        alice: {
+          workerTargets: summary.workerTargets,
+          allowedWebSockets: summary.allowedWebSockets,
+          attemptsBySource: summary.attemptsBySource,
+          unexpectedAttemptsBySource: summary.unexpectedAttemptsBySource,
+          allowedWebSocketsBySource: summary.allowedWebSocketsBySource
+        }
+      }
+    };
+  } finally {
+    await networkObserver.stop();
+  }
 }
 
 describe('confined runner shared-worker observation contract', () => {
@@ -1313,7 +1363,8 @@ describe('real client scenario contract', () => {
     expect(result.stdout).toBe('');
   });
 
-  it('accepts only bounded fixed one-submission evidence', () => {
+  it('accepts only bounded fixed one-submission evidence', async() => {
+    const network = await authProgressNetwork();
     const report = (overrides = {}) => ({
       status: 'passed',
       mode: 'auth_progress_one_submission',
@@ -1327,11 +1378,15 @@ describe('real client scenario contract', () => {
       controlContextCount: Object.keys(observation.CONTROL_EXPECTATIONS).length,
       screenshotsCaptured: 0,
       passwordEvidence: [{stage: 'alice_password_field_ready', count: 1}],
-      network: authProgressNetwork(),
+      network: structuredClone(network),
       workerObservation: authProgressObservationBlock(),
       ...overrides
     });
 
+    expect(Object.keys(network.contexts.alice.workerTargets).sort()).toEqual(['service_worker', 'shared_worker']);
+    for(const sourceMap of [network.contexts.alice.attemptsBySource, network.contexts.alice.unexpectedAttemptsBySource, network.contexts.alice.allowedWebSocketsBySource]) {
+      expect(Object.keys(sourceMap).sort()).toEqual(['page', 'service_worker', 'shared_worker', 'worker']);
+    }
     expect(parseAuthProgressReport(report())).toEqual(report());
     expect(parseAuthProgressReport(report({
       status: 'failed',
@@ -1354,17 +1409,59 @@ describe('real client scenario contract', () => {
     expect(() => parseAuthProgressReport(report({stage: 'arbitrary server text'}))).toThrow('auth progress report is invalid');
     expect(() => parseAuthProgressReport(report({workerObservation: {classification: 'unclassified', secret: HOSTILE.password}})))
     .toThrow('auth progress report is invalid');
-    const networkWithRpc = {...authProgressNetwork(), rpcCount: 1};
+    const networkWithRpc = {...structuredClone(network), rpcCount: 1};
     expect(() => parseAuthProgressReport(report({network: networkWithRpc})))
     .toThrow('auth progress report is invalid');
-    const unmatchedAttempts = authProgressNetwork();
+    const unmatchedAttempts = structuredClone(network);
     unmatchedAttempts.contexts.alice.attemptsBySource.page = 1;
     unmatchedAttempts.contexts.alice.unexpectedAttemptsBySource.page = 1;
     expect(() => parseAuthProgressReport(report({network: unmatchedAttempts})))
     .toThrow('auth progress report is invalid');
+
+    const invalidNetworks = [
+      (() => { const invalid = structuredClone(network); delete invalid.contexts.alice.workerTargets.shared_worker; return invalid; })(),
+      (() => { const invalid = structuredClone(network); invalid.contexts.alice.workerTargets.page = 0; return invalid; })(),
+      ...['attemptsBySource', 'unexpectedAttemptsBySource', 'allowedWebSocketsBySource'].map((key) => {
+        const invalid = structuredClone(network);
+        delete invalid.contexts.alice[key].worker;
+        return invalid;
+      }),
+      ...['attemptsBySource', 'unexpectedAttemptsBySource', 'allowedWebSocketsBySource'].map((key) => {
+        const invalid = structuredClone(network);
+        invalid.contexts.alice[key].unknown = 0;
+        return invalid;
+      }),
+      ...[
+        ['workerTargets', 'service_worker', -1],
+        ['workerTargets', 'shared_worker', 0.5],
+        ['workerTargets', 'service_worker', 1_000_001],
+        ['workerTargets', 'shared_worker', Number.MAX_SAFE_INTEGER + 1],
+        ['attemptsBySource', 'page', -1],
+        ['unexpectedAttemptsBySource', 'worker', 0.5],
+        ['allowedWebSocketsBySource', 'shared_worker', 1_000_001]
+      ].map(([key, source, count]) => {
+        const invalid = structuredClone(network);
+        invalid.contexts.alice[key][source] = count;
+        return invalid;
+      }),
+      (() => {
+        const invalid = structuredClone(network);
+        invalid.contexts.alice.attemptsBySource.page = 0;
+        invalid.contexts.alice.unexpectedAttemptsBySource.page = 1;
+        invalid.unexpectedAttempts = 1;
+        return invalid;
+      })(),
+      (() => { const invalid = structuredClone(network); invalid.contexts.alice.attemptsBySource.service_worker = 0; return invalid; })(),
+      (() => { const invalid = structuredClone(network); invalid.contexts.alice.allowedWebSockets = 0; return invalid; })(),
+      (() => { const invalid = structuredClone(network); invalid.unexpectedAttempts = 1; return invalid; })()
+    ];
+    for(const invalidNetwork of invalidNetworks) {
+      expect(() => parseAuthProgressReport(report({network: invalidNetwork}))).toThrow('auth progress report is invalid');
+    }
   });
 
-  it('turns cleanup failure into a fixed failed one-submission report and nonzero exit', () => {
+  it('turns cleanup failure into a fixed failed one-submission report and nonzero exit', async() => {
+    const network = await authProgressNetwork();
     const report = {
       status: 'passed',
       mode: 'auth_progress_one_submission',
@@ -1378,7 +1475,7 @@ describe('real client scenario contract', () => {
       controlContextCount: Object.keys(observation.CONTROL_EXPECTATIONS).length,
       screenshotsCaptured: 0,
       passwordEvidence: [{stage: 'alice_password_field_ready', count: 1}],
-      network: authProgressNetwork(),
+      network,
       workerObservation: authProgressObservationBlock()
     };
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -1721,6 +1818,7 @@ describe('real client username field readiness', () => {
       async launch() {
         counts.registryLaunches++;
       },
+      registerContext() {},
       async waitForSetup() {},
       async stop() {
         counts.registryStops++;
@@ -1749,7 +1847,7 @@ describe('real client username field readiness', () => {
         createWorkerDiscovery: () => registry,
         runObserverControls: async() => {
           counts.controlsRuns++;
-          return {controls: {}, failedControls: [] as string[]};
+          return {controls: controlBlocks(), failedControls: [] as string[]};
         },
         ...(realEmitter ? {} : {
           emitAuthProgressReport: (report: any, cleanupFailed: boolean) => {
@@ -1764,26 +1862,7 @@ describe('real client username field readiness', () => {
               pageCounts = await args[0].evaluate((): any => (window as any).authProgressCounts).catch((_: any): null => null);
             }
           },
-          createNetworkObserver: (_page: any, _name: string, observer: any) => ({
-            async start() {
-              observer.state.discoveryActive = true;
-              observer.state.pageCoverageComplete = true;
-              observer.registerTarget({targetId: 'alice-page', type: 'page'});
-            },
-            async waitForSetup() {},
-            async stop() {
-              counts.networkStops++;
-            },
-            summary: () => ({
-              workerTargets: {service_worker: 1},
-              allowedWebSockets: 1,
-              attemptsBySource: {},
-              unexpectedAttemptsBySource: {},
-              allowedWebSocketsBySource: {},
-              unexpectedAttempts: 0,
-              observerErrors: 0
-            })
-          })
+          createNetworkObserver: (_page: any, _name: string, observer: any) => createAuthProgressNetworkObserver(observer, () => counts.networkStops++)
         }
       });
 
@@ -1801,6 +1880,119 @@ describe('real client username field readiness', () => {
       process.exitCode = originalExitCode;
       await ownedBrowser.close();
       rmSync(screenshotDirectory, {recursive: true, force: true});
+    }
+  }
+
+  function runOuterAuthProgressRunner(browserOutput: string, {browserExitCode = 0, failRunnerCleanup = false}: {browserExitCode?: number, failRunnerCleanup?: boolean} = {}) {
+    const fixtureDirectory = mkdtempSync(join(tmpdir(), 'real-client-runner-contract-'));
+    const secretDirectory = mkdtempSync(join(tmpdir(), `telegram-fixture-${READINESS_PINS.runId}.`));
+    const passwordFiles = [join(secretDirectory, 'a-password'), join(secretDirectory, 'b-password')];
+    const statePath = join(fixtureDirectory, 'docker-state.json');
+    const readinessPath = join(fixtureDirectory, 'readiness.jsonl');
+    const browserOutputPath = join(fixtureDirectory, 'browser-output.jsonl');
+    const cleanupPath = join(fixtureDirectory, 'cleanup.log');
+    const runLabel = 'org.teagram.fixture.run';
+    const browserName = `telegram-fixture-${READINESS_PINS.runId}browser`;
+    const edgeName = `telegram-fixture-${READINESS_PINS.runId}edge`;
+    const serverName = `telegram-fixture-${READINESS_PINS.runId}server`;
+    const browser = {
+      NetworkSettings: {Networks: {[edgeName]: {IPAddress: '172.20.0.2'}}},
+      Config: {Labels: {[runLabel]: READINESS_PINS.runId}, Env: [] as string[], User: '1001:1001'},
+      HostConfig: {
+        NetworkMode: edgeName,
+        ReadonlyRootfs: true,
+        Privileged: false,
+        CapDrop: ['ALL'],
+        SecurityOpt: ['no-new-privileges:true', 'seccomp=fixture-profile'],
+        PortBindings: {}
+      },
+      Mounts: [] as {Type?: string}[]
+    };
+    const front = {
+      NetworkSettings: {Networks: {
+        [edgeName]: {IPAddress: '172.20.0.3'},
+        [serverName]: {IPAddress: '172.19.0.2'}
+      }},
+      Config: {Labels: {[runLabel]: READINESS_PINS.runId}, Env: [] as string[], User: '1001:1001'},
+      HostConfig: {
+        NetworkMode: edgeName,
+        ReadonlyRootfs: true,
+        Privileged: false,
+        CapDrop: ['ALL'],
+        SecurityOpt: ['no-new-privileges:true'],
+        PortBindings: {}
+      },
+      Mounts: [] as {Type?: string}[]
+    };
+    const network = {Labels: {[runLabel]: READINESS_PINS.runId}, Internal: true, EnableIPv6: false};
+    const serverReady = {
+      ...buildServerReady(),
+      credentials: passwordFiles.map((passwordFile, index) => ({
+        username: `u${READINESS_PINS.runId.slice(0, 30)}${index === 0 ? 'a' : 'b'}`,
+        passwordFile
+      }))
+    };
+    const artifactReady = buildArtifactReady(serverReady);
+    const dockerScript = [
+      '#!/usr/bin/env node',
+      'const {appendFileSync, readFileSync} = require(\'node:fs\');',
+      'const args = process.argv.slice(2);',
+      'const state = JSON.parse(readFileSync(process.env.REAL_CLIENT_DOCKER_FIXTURE_STATE, \'utf8\'));',
+      'const write = (value) => process.stdout.write(typeof value === \'string\' ? value : JSON.stringify(value));',
+      'if(args[0] === \'inspect\') write(args.at(-1) === state.browserName ? state.browser : state.front);',
+      'else if(args[0] === \'network\') write(state.network);',
+      'else if(args[0] === \'exec\') {',
+      '  if(args.includes(\'/proc/net/route\')) write(\'Iface Destination Gateway\\n\');',
+      '  else if(args.includes(\'/proc/net/ipv6_route\')) {}',
+      '  else if(args.includes(\'node\')) { write(readFileSync(state.browserOutputPath, \'utf8\')); if(state.browserExitCode) process.exitCode = state.browserExitCode; }',
+      '  else if(args.includes(\'rm\')) { appendFileSync(state.cleanupPath, `${args.at(-1)}\\n`); if(state.failRunnerCleanup && args.at(-1).endsWith(\'-runner\')) process.exitCode = 1; }',
+      '}'
+    ].join('\n');
+    const dockerPath = join(fixtureDirectory, 'docker');
+    const runnerPath = resolve(process.cwd(), 'scripts/real-client/run.mjs');
+
+    try {
+      passwordFiles.forEach((passwordFile, index) => {
+        writeFileSync(passwordFile, `${String(index + 1).repeat(64)}\n`, {mode: 0o400});
+        chmodSync(passwordFile, 0o400);
+      });
+      writeFileSync(readinessPath, `${[serverReady, artifactReady].map((event) => JSON.stringify(event)).join('\n')}\n`);
+      writeFileSync(browserOutputPath, browserOutput);
+      writeFileSync(statePath, JSON.stringify({
+        browserName,
+        browser,
+        front,
+        network,
+        browserOutputPath,
+        browserExitCode,
+        cleanupPath,
+        failRunnerCleanup
+      }));
+      writeFileSync(dockerPath, dockerScript, {mode: 0o755});
+      chmodSync(dockerPath, 0o755);
+
+      const result = spawnSync(process.execPath, [runnerPath,
+        '--readiness-file', readinessPath,
+        '--harness-revision', READINESS_PINS.harnessRevision,
+        '--server-revision', READINESS_PINS.serverRevision,
+        '--web-revision', READINESS_PINS.webRevision,
+        '--run-id', READINESS_PINS.runId,
+        '--auth-progress-one-submission'
+      ], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${fixtureDirectory}:${process.env.PATH}`,
+          REAL_CLIENT_DOCKER_FIXTURE_STATE: statePath
+        }
+      });
+      return {
+        ...result,
+        cleanup: existsSync(cleanupPath) ? readFileSync(cleanupPath, 'utf8').trim().split('\n') : []
+      };
+    } finally {
+      rmSync(fixtureDirectory, {recursive: true, force: true});
+      rmSync(secretDirectory, {recursive: true, force: true});
     }
   }
 
@@ -1854,7 +2046,7 @@ describe('real client username field readiness', () => {
   });
 
   it('runs auth progress through teardown with one Alice context and no later scenarios', async() => {
-    const result = await runAuthProgressRunner();
+    const result = await runAuthProgressRunner({realEmitter: true});
 
     expect(result.report).toMatchObject({
       status: 'passed',
@@ -1865,6 +2057,11 @@ describe('real client username field readiness', () => {
       laterScenarioCount: 0,
       contextCount: 1
     });
+    expect(parseAuthProgressReport(result.report)).toEqual(result.report);
+    expect(Object.keys(result.report.network.contexts.alice.workerTargets).sort()).toEqual(['service_worker', 'shared_worker']);
+    expect(result.report.network.contexts.alice.attemptsBySource).toEqual({page: 0, shared_worker: 0, service_worker: 1, worker: 0});
+    expect(result.report.network.contexts.alice.unexpectedAttemptsBySource).toEqual({page: 0, shared_worker: 0, service_worker: 0, worker: 0});
+    expect(result.report.network.contexts.alice.allowedWebSocketsBySource).toEqual({page: 0, shared_worker: 0, service_worker: 1, worker: 0});
     expect(result.counts).toEqual({
       contextCreates: 1,
       contextCloses: 1,
@@ -1881,6 +2078,22 @@ describe('real client username field readiness', () => {
       passwordSubmissions: 0
     });
     expect(result.fixtureRequests).toEqual(['/', '/mtproto-target.json']);
+
+    const outer = runOuterAuthProgressRunner(result.output);
+    expect(outer.status).toBe(0);
+    expect(outer.stderr).toBe('');
+    expect(outer.cleanup).toHaveLength(2);
+    expect(outer.stdout.trim().split('\n')).toHaveLength(1);
+    const finalReport = JSON.parse(outer.stdout.trim());
+    expect(finalReport).toMatchObject(result.report);
+    expect(finalReport.network).toEqual(result.report.network);
+
+    const cleanupFailure = runOuterAuthProgressRunner(result.output, {failRunnerCleanup: true});
+    expect(cleanupFailure.status).toBe(1);
+    expect(cleanupFailure.cleanup).toHaveLength(2);
+    const cleanupReport = JSON.parse(cleanupFailure.stdout.trim());
+    expect(cleanupReport).toMatchObject({...result.report, status: 'failed', stage: 'cleanup'});
+    expect(cleanupReport.network).toEqual(result.report.network);
   });
 
   it('reports a timeout after cleaning up and exits nonzero', async() => {
@@ -1895,6 +2108,7 @@ describe('real client username field readiness', () => {
       laterScenarioCount: 0,
       contextCount: 1
     });
+    expect(parseAuthProgressReport(result.report)).toEqual(result.report);
     expect(result.exitCode).toBe(1);
     expect(result.counts).toEqual({
       contextCreates: 1,
@@ -1911,6 +2125,12 @@ describe('real client username field readiness', () => {
       passwordFills: 0,
       passwordSubmissions: 0
     });
+
+    const outer = runOuterAuthProgressRunner(result.output, {browserExitCode: 1});
+    expect(outer.status).toBe(1);
+    expect(outer.stderr).toBe('');
+    expect(outer.cleanup).toHaveLength(2);
+    expect(JSON.parse(outer.stdout.trim())).toMatchObject(result.report);
   });
 
   it('emits a cleanup failure and exits nonzero when the app context cannot close', async() => {
@@ -1922,6 +2142,7 @@ describe('real client username field readiness', () => {
       usernameSubmissions: 1,
       contextCount: 1
     });
+    expect(parseAuthProgressReport(result.report)).toEqual(result.report);
     expect(result.exitCode).toBe(1);
     expect(result.counts).toEqual({
       contextCreates: 1,
@@ -1933,6 +2154,10 @@ describe('real client username field readiness', () => {
       controlsRuns: 1
     });
     expect(result.screenshotExists).toBe(false);
+    const outer = runOuterAuthProgressRunner(result.output, {browserExitCode: 1});
+    expect(outer.status).toBe(1);
+    expect(outer.cleanup).toHaveLength(2);
+    expect(JSON.parse(outer.stdout.trim())).toMatchObject(result.report);
   });
 
   it('records a fixed timeout stage after one Username submission without retrying', async() => {
