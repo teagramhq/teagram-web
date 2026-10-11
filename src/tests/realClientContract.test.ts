@@ -344,6 +344,10 @@ function createAuthProgressNetworkObserver(contextObserver: any, onStop: () => v
         sessionId: 'service-worker-session',
         targetInfo: {targetId: 'service-worker-target', type: 'service_worker', url: `${APP_ORIGIN}/service-worker.js`}
       });
+      cdp.emit('Target.attachedToTarget', {
+        sessionId: 'shared-worker-session',
+        targetInfo: {targetId: 'shared-worker-target', type: 'shared_worker', url: PROBE_WORKER_URL}
+      });
       await networkObserver.waitForSetup();
       cdp.emit('Target.receivedMessageFromTarget', {
         sessionId: 'service-worker-session',
@@ -1384,6 +1388,7 @@ describe('real client scenario contract', () => {
     });
 
     expect(Object.keys(network.contexts.alice.workerTargets).sort()).toEqual(['service_worker', 'shared_worker']);
+    expect(network.contexts.alice.workerTargets).toEqual({shared_worker: 1, service_worker: 1});
     for(const sourceMap of [network.contexts.alice.attemptsBySource, network.contexts.alice.unexpectedAttemptsBySource, network.contexts.alice.allowedWebSocketsBySource]) {
       expect(Object.keys(sourceMap).sort()).toEqual(['page', 'service_worker', 'shared_worker', 'worker']);
     }
@@ -1770,6 +1775,7 @@ describe('real client username field readiness', () => {
     const ownedBrowser = await chromium.launch({headless: true});
     let pageCounts: any;
     let emittedReport: any;
+    let reportBeforeEmission: any;
     let output = '';
     const originalExitCode = process.exitCode;
     process.exitCode = 0;
@@ -1849,8 +1855,14 @@ describe('real client username field readiness', () => {
           counts.controlsRuns++;
           return {controls: controlBlocks(), failedControls: [] as string[]};
         },
-        ...(realEmitter ? {} : {
+        ...(realEmitter ? {
           emitAuthProgressReport: (report: any, cleanupFailed: boolean) => {
+            reportBeforeEmission = report;
+            emitAuthProgressReport(report, cleanupFailed);
+          }
+        } : {
+          emitAuthProgressReport: (report: any, cleanupFailed: boolean) => {
+            reportBeforeEmission = report;
             emittedReport = cleanupFailed ? {...report, status: 'failed', stage: 'cleanup'} : report;
           }
         }),
@@ -1868,6 +1880,7 @@ describe('real client username field readiness', () => {
 
       return {
         report: realEmitter ? JSON.parse(output.trim()) : emittedReport,
+        reportBeforeEmission,
         output,
         counts,
         pageCounts,
@@ -2057,7 +2070,10 @@ describe('real client username field readiness', () => {
       laterScenarioCount: 0,
       contextCount: 1
     });
+    expect(result.reportBeforeEmission.network.contexts.alice.workerTargets).toEqual({shared_worker: 1, service_worker: 1});
+    expect(JSON.parse(result.output.trim()).network.contexts.alice.workerTargets).toEqual({shared_worker: 1, service_worker: 1});
     expect(parseAuthProgressReport(result.report)).toEqual(result.report);
+    expect(parseAuthProgressReport(result.report).network.contexts.alice.workerTargets).toEqual({shared_worker: 1, service_worker: 1});
     expect(Object.keys(result.report.network.contexts.alice.workerTargets).sort()).toEqual(['service_worker', 'shared_worker']);
     expect(result.report.network.contexts.alice.attemptsBySource).toEqual({page: 0, shared_worker: 0, service_worker: 1, worker: 0});
     expect(result.report.network.contexts.alice.unexpectedAttemptsBySource).toEqual({page: 0, shared_worker: 0, service_worker: 0, worker: 0});
@@ -2087,6 +2103,7 @@ describe('real client username field readiness', () => {
     const finalReport = JSON.parse(outer.stdout.trim());
     expect(finalReport).toMatchObject(result.report);
     expect(finalReport.network).toEqual(result.report.network);
+    expect(finalReport.network.contexts.alice.workerTargets).toEqual({shared_worker: 1, service_worker: 1});
 
     const cleanupFailure = runOuterAuthProgressRunner(result.output, {failRunnerCleanup: true});
     expect(cleanupFailure.status).toBe(1);
