@@ -1653,6 +1653,157 @@ describe('real client username field readiness', () => {
     return page;
   }
 
+  async function runAuthProgressRunner({
+    card = 'ready',
+    failContextClose = false,
+    realEmitter = false
+  }: {card?: 'ready' | 'timeout' | 'ambiguous', failContextClose?: boolean, realEmitter?: boolean} = {}) {
+    setFixture(authProgressMarkup({card}));
+    const runId = createHash('sha256').update(`${process.pid}-${Date.now()}-${Math.random()}`).digest('hex').slice(0, 32);
+    const screenshotDirectory = `/tmp/real-client-${runId}`;
+    const counts = {
+      contextCreates: 0,
+      contextCloses: 0,
+      browserCloses: 0,
+      networkStops: 0,
+      registryStops: 0,
+      registryLaunches: 0,
+      controlsRuns: 0
+    };
+    const ownedBrowser = await chromium.launch({headless: true});
+    let pageCounts: any;
+    let emittedReport: any;
+    let output = '';
+    const originalExitCode = process.exitCode;
+    process.exitCode = 0;
+    const stdoutWrite = realEmitter
+      ? vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: any) => {
+        output += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+        return true;
+      }) as any)
+      : undefined;
+    const syntheticBrowser = {
+      async newContext(options: any) {
+        counts.contextCreates++;
+        const context = await ownedBrowser.newContext(options);
+        await context.route('**/*', async(route: any) => {
+          const requestUrl = new URL(route.request().url());
+          if(requestUrl.origin !== APP_ORIGIN) {
+            await route.abort();
+            return;
+          }
+          const response = await fetch(`${fixtureOrigin}${requestUrl.pathname}`);
+          await route.fulfill({
+            status: response.status,
+            headers: {'content-type': response.headers.get('content-type') || 'text/plain'},
+            body: await response.text()
+          });
+        });
+        return {
+          newPage: () => context.newPage(),
+          async close() {
+            counts.contextCloses++;
+            if(failContextClose) throw new Error('synthetic_context_close_failed');
+            await context.close();
+          }
+        };
+      },
+      async close() {
+        counts.browserCloses++;
+        await ownedBrowser.close();
+      }
+    };
+    const registry = {
+      discoveryActive: true,
+      foreignTargets: 0,
+      contextlessTargets: 0,
+      appContextlessTargets: 0,
+      async launch() {
+        counts.registryLaunches++;
+      },
+      async waitForSetup() {},
+      async stop() {
+        counts.registryStops++;
+        return {detachFailures: 0, discoveryDisabled: true};
+      }
+    };
+
+    try {
+      const runtimeConfig = {
+        runId,
+        endpoint: APP_ORIGIN,
+        wssEndpoint: USERNAME_ENTRY_RUNTIME.wssEndpoint,
+        fingerprint: USERNAME_ENTRY_RUNTIME.fingerprint,
+        publicKeySHA256: 'a'.repeat(64),
+        artifactDigest: USERNAME_ENTRY_RUNTIME.artifactDigest,
+        webRevision: USERNAME_ENTRY_RUNTIME.webRevision,
+        leafSPKI: Buffer.alloc(32, 1).toString('base64'),
+        frontIp: '127.0.0.1',
+        screenshotDirectory,
+        authProgressOneSubmission: true,
+        accounts: [{username: `u${runId.slice(0, 30)}a`, password: 'b'.repeat(64)}]
+      };
+      await runRealClient({
+        runtimeConfig,
+        launchBrowser: async() => syntheticBrowser,
+        createWorkerDiscovery: () => registry,
+        runObserverControls: async() => {
+          counts.controlsRuns++;
+          return {controls: {}, failedControls: [] as string[]};
+        },
+        ...(realEmitter ? {} : {
+          emitAuthProgressReport: (report: any, cleanupFailed: boolean) => {
+            emittedReport = cleanupFailed ? {...report, status: 'failed', stage: 'cleanup'} : report;
+          }
+        }),
+        authProgressDependencies: {
+          submitUsernameOnceAndWaitForPassword: async(...args: any[]) => {
+            try {
+              await submitUsernameOnceAndWaitForPassword(...args, card === 'timeout' ? 100 : 1000);
+            } finally {
+              pageCounts = await args[0].evaluate((): any => (window as any).authProgressCounts).catch((_: any): null => null);
+            }
+          },
+          createNetworkObserver: (_page: any, _name: string, observer: any) => ({
+            async start() {
+              observer.state.discoveryActive = true;
+              observer.state.pageCoverageComplete = true;
+              observer.registerTarget({targetId: 'alice-page', type: 'page'});
+            },
+            async waitForSetup() {},
+            async stop() {
+              counts.networkStops++;
+            },
+            summary: () => ({
+              workerTargets: {service_worker: 1},
+              allowedWebSockets: 1,
+              attemptsBySource: {},
+              unexpectedAttemptsBySource: {},
+              allowedWebSocketsBySource: {},
+              unexpectedAttempts: 0,
+              observerErrors: 0
+            })
+          })
+        }
+      });
+
+      return {
+        report: realEmitter ? JSON.parse(output.trim()) : emittedReport,
+        output,
+        counts,
+        pageCounts,
+        exitCode: process.exitCode,
+        screenshotExists: existsSync(screenshotDirectory),
+        fixtureRequests: [...fixtureRequests]
+      };
+    } finally {
+      stdoutWrite?.mockRestore();
+      process.exitCode = originalExitCode;
+      await ownedBrowser.close();
+      rmSync(screenshotDirectory, {recursive: true, force: true});
+    }
+  }
+
   async function startPasswordStage(page: any, evidence: any[], name = 'alice', timeoutMs = 1000) {
     const username = await prepareUsernameEntry(page, name, USERNAME_ENTRY_RUNTIME);
     const usernameField = await username.elementHandle();
@@ -1703,148 +1854,85 @@ describe('real client username field readiness', () => {
   });
 
   it('runs auth progress through teardown with one Alice context and no later scenarios', async() => {
-    setFixture(authProgressMarkup());
-    const runId = createHash('sha256').update(`${process.pid}-${Date.now()}-${Math.random()}`).digest('hex').slice(0, 32);
-    const screenshotDirectory = `/tmp/real-client-${runId}`;
-    const counts = {
-      contextCreates: 0,
-      contextCloses: 0,
-      browserCloses: 0,
-      networkStops: 0,
-      registryStops: 0,
-      registryLaunches: 0,
-      controlsRuns: 0
-    };
-    const ownedBrowser = await chromium.launch({headless: true});
-    const syntheticBrowser = {
-      async newContext(options: any) {
-        counts.contextCreates++;
-        const context = await ownedBrowser.newContext(options);
-        await context.route('**/*', async(route: any) => {
-          const requestUrl = new URL(route.request().url());
-          if(requestUrl.origin !== APP_ORIGIN) {
-            await route.abort();
-            return;
-          }
-          const response = await fetch(`${fixtureOrigin}${requestUrl.pathname}`);
-          await route.fulfill({
-            status: response.status,
-            headers: {'content-type': response.headers.get('content-type') || 'text/plain'},
-            body: await response.text()
-          });
-        });
-        return {
-          newPage: () => context.newPage(),
-          async close() {
-            counts.contextCloses++;
-            await context.close();
-          }
-        };
-      },
-      async close() {
-        counts.browserCloses++;
-        await ownedBrowser.close();
-      }
-    };
-    const registry = {
-      discoveryActive: true,
-      foreignTargets: 0,
-      contextlessTargets: 0,
-      appContextlessTargets: 0,
-      async launch() {
-        counts.registryLaunches++;
-      },
-      async waitForSetup() {},
-      async stop() {
-        counts.registryStops++;
-        return {detachFailures: 0, discoveryDisabled: true};
-      }
-    };
-    try {
-      let pageCounts: any;
-      let emittedReport: any;
-      const runtimeConfig = {
-        runId,
-        endpoint: APP_ORIGIN,
-        wssEndpoint: USERNAME_ENTRY_RUNTIME.wssEndpoint,
-        fingerprint: USERNAME_ENTRY_RUNTIME.fingerprint,
-        publicKeySHA256: 'a'.repeat(64),
-        artifactDigest: USERNAME_ENTRY_RUNTIME.artifactDigest,
-        webRevision: USERNAME_ENTRY_RUNTIME.webRevision,
-        leafSPKI: Buffer.alloc(32, 1).toString('base64'),
-        frontIp: '127.0.0.1',
-        screenshotDirectory,
-        authProgressOneSubmission: true,
-        accounts: [{username: `u${runId.slice(0, 30)}a`, password: 'b'.repeat(64)}]
-      };
-      await runRealClient({
-        runtimeConfig,
-        launchBrowser: async() => syntheticBrowser,
-        createWorkerDiscovery: () => registry,
-        runObserverControls: async() => {
-          counts.controlsRuns++;
-          return {controls: {}, failedControls: [] as string[]};
-        },
-        emitAuthProgressReport: (report: any, cleanupFailed: boolean) => {
-          emittedReport = cleanupFailed ? {...report, status: 'failed', stage: 'cleanup'} : report;
-        },
-        authProgressDependencies: {
-          submitUsernameOnceAndWaitForPassword: async(...args: any[]) => {
-            await submitUsernameOnceAndWaitForPassword(...args);
-            pageCounts = await args[0].evaluate(() => (window as any).authProgressCounts);
-          },
-          createNetworkObserver: (_page: any, _name: string, observer: any) => ({
-            async start() {
-              observer.state.discoveryActive = true;
-              observer.state.pageCoverageComplete = true;
-              observer.registerTarget({targetId: 'alice-page', type: 'page'});
-            },
-            async waitForSetup() {},
-            async stop() {
-              counts.networkStops++;
-            },
-            summary: () => ({
-              workerTargets: {service_worker: 1},
-              allowedWebSockets: 1,
-              attemptsBySource: {},
-              unexpectedAttemptsBySource: {},
-              allowedWebSocketsBySource: {},
-              unexpectedAttempts: 0,
-              observerErrors: 0
-            })
-          })
-        }
-      });
+    const result = await runAuthProgressRunner();
 
-      expect(emittedReport).toMatchObject({
-        status: 'passed',
-        usernameSubmissions: 1,
-        passwordFills: 0,
-        passwordSubmissions: 0,
-        bobContextCount: 0,
-        laterScenarioCount: 0,
-        contextCount: 1
-      });
-      expect(counts).toEqual({
-        contextCreates: 1,
-        contextCloses: 1,
-        browserCloses: 1,
-        networkStops: 1,
-        registryStops: 1,
-        registryLaunches: 1,
-        controlsRuns: 1
-      });
-      expect(existsSync(screenshotDirectory)).toBe(false);
-      expect(pageCounts).toEqual({
-        usernameSubmissions: 1,
-        passwordFills: 0,
-        passwordSubmissions: 0
-      });
-      expect(fixtureRequests).toEqual(['/', '/mtproto-target.json']);
-    } finally {
-      await ownedBrowser.close();
-      rmSync(screenshotDirectory, {recursive: true, force: true});
-    }
+    expect(result.report).toMatchObject({
+      status: 'passed',
+      usernameSubmissions: 1,
+      passwordFills: 0,
+      passwordSubmissions: 0,
+      bobContextCount: 0,
+      laterScenarioCount: 0,
+      contextCount: 1
+    });
+    expect(result.counts).toEqual({
+      contextCreates: 1,
+      contextCloses: 1,
+      browserCloses: 1,
+      networkStops: 1,
+      registryStops: 1,
+      registryLaunches: 1,
+      controlsRuns: 1
+    });
+    expect(result.screenshotExists).toBe(false);
+    expect(result.pageCounts).toEqual({
+      usernameSubmissions: 1,
+      passwordFills: 0,
+      passwordSubmissions: 0
+    });
+    expect(result.fixtureRequests).toEqual(['/', '/mtproto-target.json']);
+  });
+
+  it('reports a timeout after cleaning up and exits nonzero', async() => {
+    const result = await runAuthProgressRunner({card: 'timeout', realEmitter: true});
+
+    expect(result.report).toMatchObject({
+      status: 'failed',
+      stage: 'alice_password_card_not_reached',
+      usernameSubmissions: 1,
+      passwordEvidence: [{stage: 'alice_password_card_not_reached', count: 0}],
+      bobContextCount: 0,
+      laterScenarioCount: 0,
+      contextCount: 1
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.counts).toEqual({
+      contextCreates: 1,
+      contextCloses: 1,
+      browserCloses: 1,
+      networkStops: 1,
+      registryStops: 1,
+      registryLaunches: 1,
+      controlsRuns: 1
+    });
+    expect(result.screenshotExists).toBe(false);
+    expect(result.pageCounts).toEqual({
+      usernameSubmissions: 1,
+      passwordFills: 0,
+      passwordSubmissions: 0
+    });
+  });
+
+  it('emits a cleanup failure and exits nonzero when the app context cannot close', async() => {
+    const result = await runAuthProgressRunner({failContextClose: true, realEmitter: true});
+
+    expect(result.report).toMatchObject({
+      status: 'failed',
+      stage: 'cleanup',
+      usernameSubmissions: 1,
+      contextCount: 1
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.counts).toEqual({
+      contextCreates: 1,
+      contextCloses: 1,
+      browserCloses: 1,
+      networkStops: 1,
+      registryStops: 1,
+      registryLaunches: 1,
+      controlsRuns: 1
+    });
+    expect(result.screenshotExists).toBe(false);
   });
 
   it('records a fixed timeout stage after one Username submission without retrying', async() => {
