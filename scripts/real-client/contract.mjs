@@ -7,6 +7,36 @@ import observation from './observation.cjs';
 export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'message', 'group']);
 export const REQUIRED_CONTROLS = Object.freeze(Object.keys(observation.CONTROL_EXPECTATIONS));
 const REQUIRED_OBSERVATION_CONTEXTS = Object.freeze(['alice', 'bob']);
+const AUTH_PROGRESS_OBSERVATION_CONTEXTS = Object.freeze(['alice']);
+const AUTH_PROGRESS_REPORT_STAGES = Object.freeze([
+  'runtime_inputs',
+  'runtime_input_validation',
+  'runtime_credential_validation',
+  'browser_launch',
+  'browser_worker_discovery',
+  'observer_controls',
+  'observer_control_mismatch',
+  'alice_context',
+  'alice_sign_in_form',
+  'alice_artifact_load',
+  'alice_manifest_load',
+  'alice_manifest_mismatch',
+  'alice_username_field',
+  'alice_username_field_not_unique',
+  'alice_password_form',
+  'alice_password_field_ready',
+  'alice_password_field_absent',
+  'alice_password_field_not_unique',
+  'alice_password_field_hidden',
+  'alice_password_field_unmasked',
+  'alice_password_card_not_reached',
+  'browser_worker_observation',
+  'browser_egress_or_page_errors',
+  'browser_worker_observation_incomplete',
+  'browser_worker_or_websocket_evidence',
+  'worker_observation_unclassified',
+  'cleanup'
+]);
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
 const RUN_ID = /^[0-9a-f]{32}$/;
@@ -71,7 +101,8 @@ export function parseRealClientArgs(argv) {
     ['--web-revision', 'webRevision'],
     ['--run-id', 'runId'],
     ['--scenarios', 'scenarioSelection'],
-    ['--observer-controls-only', 'observerControlsOnly']
+    ['--observer-controls-only', 'observerControlsOnly'],
+    ['--auth-progress-one-submission', 'authProgressOneSubmission']
   ]);
   const options = new Map();
   for(let index = 0; index < argumentsList.length; index++) {
@@ -82,7 +113,7 @@ export function parseRealClientArgs(argv) {
     if(options.has(name)) {
       throw new Error(`option was provided more than once: ${name}`);
     }
-    if(name === '--observer-controls-only') {
+    if(name === '--observer-controls-only' || name === '--auth-progress-one-submission') {
       options.set(name, true);
       continue;
     }
@@ -96,11 +127,15 @@ export function parseRealClientArgs(argv) {
   }
 
   const controlsOnly = options.get('--observer-controls-only') === true;
-  if(!controlsOnly && !options.has('--scenarios')) {
+  const authProgress = options.get('--auth-progress-one-submission') === true;
+  if(authProgress && (controlsOnly || options.has('--scenarios'))) {
+    throw new Error('--auth-progress-one-submission cannot be combined with --scenarios or --observer-controls-only');
+  }
+  if(!controlsOnly && !authProgress && !options.has('--scenarios')) {
     throw new Error('scenario selection is required');
   }
 
-  const optional = new Set(['--scenarios', '--observer-controls-only']);
+  const optional = new Set(['--scenarios', '--observer-controls-only', '--auth-progress-one-submission']);
   const missing = [...names.keys()].filter((name) => !optional.has(name) && !options.has(name));
   if(missing.length) {
     throw new Error(`missing required options: ${missing.join(',')}`);
@@ -115,7 +150,7 @@ export function parseRealClientArgs(argv) {
   }
   if(controlsOnly) {
     parsed.scenarios = [...REQUIRED_SCENARIOS];
-  } else {
+  } else if(!authProgress) {
     parsed.scenarios = parseRequiredScenarios(parsed.scenarioSelection);
   }
   delete parsed.scenarioSelection;
@@ -174,12 +209,12 @@ export function parseFixtureReadiness(text, expected, options = {}) {
   return {serverReady, artifactReady};
 }
 
-export function readSyntheticCredentials(credentials, runId) {
-  if(!RUN_ID.test(runId || '') || !Array.isArray(credentials) || credentials.length !== 2) {
+export function readSyntheticCredentials(credentials, runId, count = 2) {
+  if(!RUN_ID.test(runId || '') || !Array.isArray(credentials) || credentials.length !== 2 || ![1, 2].includes(count)) {
     throw new Error('two fixture credentials and a full run ID are required');
   }
 
-  return credentials.map((credential, index) => {
+  return credentials.slice(0, count).map((credential, index) => {
     const suffix = index === 0 ? 'a' : 'b';
     const username = `u${runId.slice(0, 30)}${suffix}`;
     const filePath = credential?.passwordFile;
@@ -298,6 +333,34 @@ function assertArtifactReadyEvidence(ready) {
 // `unclassified` block, a missing control, an unknown coverage state, a foreign
 // target, an overflow, or a context owning more than one page.
 export function parseWorkerObservation(block) {
+  return parseWorkerObservationForContexts(block, REQUIRED_OBSERVATION_CONTEXTS);
+}
+
+export function parseAuthProgressWorkerObservation(block) {
+  if(!block || typeof block !== 'object' || Array.isArray(block) || block.classification === 'unclassified' ||
+      observation.validateNetworkBlock(block)) {
+    throw new Error('isolated browser worker observation does not match the closed schema');
+  }
+  if(block.discoveryActive !== 1 || block.foreignTargets !== 0 || block.appContextlessTargets !== 0 || block.observerOverflow !== 0) {
+    throw new Error('isolated browser worker observation is incomplete');
+  }
+  const controls = Object.keys(block.controls).sort();
+  if(JSON.stringify(controls) !== JSON.stringify([...REQUIRED_CONTROLS].sort()) ||
+      REQUIRED_CONTROLS.some((name) => block.controls[name].expected !== 'pass')) {
+    throw new Error('observer synthetic controls are incomplete');
+  }
+  const contexts = Object.keys(block.contexts).sort();
+  if(JSON.stringify(contexts) !== JSON.stringify([...AUTH_PROGRESS_OBSERVATION_CONTEXTS].sort())) {
+    throw new Error('worker observation app contexts are incomplete');
+  }
+  const alice = block.contexts.alice;
+  if(alice.pageTargets !== 1 || alice.coverageComplete !== 1) {
+    throw new Error('alice shared-worker observation coverage is incomplete');
+  }
+  return block;
+}
+
+function parseWorkerObservationForContexts(block, expectedContexts) {
   if(!block || typeof block !== 'object' || Array.isArray(block)) {
     throw new Error('isolated browser worker observation is missing');
   }
@@ -329,10 +392,10 @@ export function parseWorkerObservation(block) {
     }
   }
   const contexts = Object.keys(block.contexts).sort();
-  if(JSON.stringify(contexts) !== JSON.stringify([...REQUIRED_OBSERVATION_CONTEXTS].sort())) {
+  if(JSON.stringify(contexts) !== JSON.stringify([...expectedContexts].sort())) {
     throw new Error('worker observation app contexts are incomplete');
   }
-  for(const name of REQUIRED_OBSERVATION_CONTEXTS) {
+  for(const name of expectedContexts) {
     const context = block.contexts[name];
     if(context.pageTargets !== 1) throw new Error(`${name} does not own exactly one page`);
     if(context.coverageComplete !== 1) throw new Error(`${name} shared-worker observation coverage is incomplete`);
@@ -378,7 +441,7 @@ export function parsePasswordEvidence(evidence) {
   return evidence.map((entry) => {
     if(!entry || typeof entry !== 'object' || Array.isArray(entry) ||
         JSON.stringify(Object.keys(entry).sort()) !== JSON.stringify(['count', 'stage']) ||
-        typeof entry.stage !== 'string' || !Number.isSafeInteger(entry.count) || entry.count < 0) {
+        typeof entry.stage !== 'string' || !Number.isSafeInteger(entry.count) || entry.count < 0 || entry.count > 1_000_000) {
       throw new Error('password evidence is invalid');
     }
 
@@ -407,6 +470,135 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
     ? ''
     : `; password evidence ${JSON.stringify(failedPasswordEvidence)}`;
   return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}`;
+}
+
+export function parseAuthProgressReport(report) {
+  const keys = [
+    'status',
+    'mode',
+    'stage',
+    'usernameSubmissions',
+    'passwordFills',
+    'passwordSubmissions',
+    'bobContextCount',
+    'laterScenarioCount',
+    'contextCount',
+    'controlContextCount',
+    'screenshotsCaptured',
+    'passwordEvidence',
+    'network',
+    'workerObservation'
+  ];
+  if(!report || typeof report !== 'object' || Array.isArray(report) ||
+      JSON.stringify(Object.keys(report).sort()) !== JSON.stringify([...keys].sort()) ||
+      report.mode !== 'auth_progress_one_submission' ||
+      !['passed', 'failed'].includes(report.status) ||
+      !AUTH_PROGRESS_REPORT_STAGES.includes(report.stage) ||
+      !Number.isSafeInteger(report.usernameSubmissions) || report.usernameSubmissions < 0 || report.usernameSubmissions > 1 ||
+      report.passwordFills !== 0 || report.passwordSubmissions !== 0 ||
+      report.bobContextCount !== 0 || report.laterScenarioCount !== 0 ||
+      !Number.isSafeInteger(report.contextCount) || report.contextCount < 0 || report.contextCount > 1 ||
+      !Number.isSafeInteger(report.controlContextCount) || report.controlContextCount < 0 || report.controlContextCount > REQUIRED_CONTROLS.length ||
+      report.screenshotsCaptured !== 0) {
+    throw new Error('auth progress report is invalid');
+  }
+
+  let network;
+  try {
+    network = parseAuthProgressNetwork(report.network);
+  } catch {
+    throw new Error('auth progress report is invalid');
+  }
+  let workerObservation = report.workerObservation;
+  if(report.status === 'passed') {
+    try {
+      workerObservation = parseAuthProgressWorkerObservation(workerObservation);
+    } catch {
+      throw new Error('auth progress report is invalid');
+    }
+  } else if(workerObservation !== null) {
+    if(workerObservation?.classification === 'unclassified') {
+      if(JSON.stringify(Object.keys(workerObservation).sort()) !== JSON.stringify(['classification'])) {
+        throw new Error('auth progress report is invalid');
+      }
+    } else if(observation.validateNetworkBlock(workerObservation)) {
+      throw new Error('auth progress report is invalid');
+    }
+  }
+
+  let passwordEvidence;
+  try {
+    passwordEvidence = parsePasswordEvidence(report.passwordEvidence);
+  } catch {
+    throw new Error('auth progress report is invalid');
+  }
+
+  const isPasswordStage = report.stage.startsWith('alice_password_field_') || report.stage === 'alice_password_card_not_reached';
+  if(passwordEvidence.length > 1 || passwordEvidence.some((entry) => !entry.stage.startsWith('alice_')) ||
+      (report.contextCount === 0 && report.usernameSubmissions !== 0) ||
+      (report.usernameSubmissions === 1 && report.contextCount !== 1) ||
+      (report.contextCount === 1 && report.controlContextCount !== REQUIRED_CONTROLS.length) ||
+      (isPasswordStage && (passwordEvidence.length !== 1 || passwordEvidence[0].stage !== report.stage || report.usernameSubmissions !== 1)) ||
+      (passwordEvidence.length === 1 && report.usernameSubmissions !== 1)) {
+    throw new Error('auth progress report is invalid');
+  }
+
+  if(report.status === 'passed' && (report.stage !== 'alice_password_field_ready' ||
+      passwordEvidence.length !== 1 || passwordEvidence[0].stage !== 'alice_password_field_ready' || passwordEvidence[0].count !== 1 ||
+      report.usernameSubmissions !== 1 || report.contextCount !== 1 || report.controlContextCount !== REQUIRED_CONTROLS.length ||
+      !network.contexts.alice || network.unexpectedAttempts !== 0 || network.observerErrors !== 0 ||
+      network.contexts.alice.allowedWebSockets < 1 || network.contexts.alice.workerTargets.service_worker < 1)) {
+    throw new Error('auth progress report is invalid');
+  }
+
+  return {...report, passwordEvidence, network, workerObservation};
+}
+
+function parseAuthProgressNetwork(network) {
+  const sources = ['page', 'shared_worker', 'service_worker', 'worker'];
+  const keys = ['unexpectedAttempts', 'observerErrors', 'contexts'];
+  if(!network || typeof network !== 'object' || Array.isArray(network) ||
+      JSON.stringify(Object.keys(network).sort()) !== JSON.stringify(keys.sort()) ||
+      !Number.isSafeInteger(network.unexpectedAttempts) || network.unexpectedAttempts < 0 || network.unexpectedAttempts > 1_000_000 ||
+      !Number.isSafeInteger(network.observerErrors) || network.observerErrors < 0 || network.observerErrors > 4096 ||
+      !network.contexts || typeof network.contexts !== 'object' || Array.isArray(network.contexts) ||
+      ![[], ['alice']].some((names) => JSON.stringify(Object.keys(network.contexts).sort()) === JSON.stringify(names))) {
+    throw new Error('auth progress network evidence is invalid');
+  }
+
+  let unexpectedAttempts = 0;
+  for(const context of Object.values(network.contexts)) {
+    const contextKeys = ['workerTargets', 'allowedWebSockets', 'attemptsBySource', 'unexpectedAttemptsBySource', 'allowedWebSocketsBySource'];
+    if(!context || typeof context !== 'object' || Array.isArray(context) ||
+        JSON.stringify(Object.keys(context).sort()) !== JSON.stringify(contextKeys.sort()) ||
+        !Number.isSafeInteger(context.allowedWebSockets) || context.allowedWebSockets < 0 || context.allowedWebSockets > 1_000_000) {
+      throw new Error('auth progress network evidence is invalid');
+    }
+    for(const sourceMap of [context.workerTargets, context.attemptsBySource, context.unexpectedAttemptsBySource, context.allowedWebSocketsBySource]) {
+      if(!sourceMap || typeof sourceMap !== 'object' || Array.isArray(sourceMap) ||
+          JSON.stringify(Object.keys(sourceMap).sort()) !== JSON.stringify([...sources].sort()) ||
+          Object.values(sourceMap).some((count) => !Number.isSafeInteger(count) || count < 0 || count > 1_000_000)) {
+        throw new Error('auth progress network evidence is invalid');
+      }
+    }
+    for(const source of sources) {
+      if(context.unexpectedAttemptsBySource[source] > context.attemptsBySource[source] ||
+          context.allowedWebSocketsBySource[source] > context.attemptsBySource[source]) {
+        throw new Error('auth progress network evidence is invalid');
+      }
+    }
+    const contextUnexpectedAttempts = Object.values(context.unexpectedAttemptsBySource).reduce((sum, count) => sum + count, 0);
+    const contextAllowedWebSockets = Object.values(context.allowedWebSocketsBySource).reduce((sum, count) => sum + count, 0);
+    if(contextUnexpectedAttempts > 1_000_000 || contextAllowedWebSockets !== context.allowedWebSockets) {
+      throw new Error('auth progress network evidence is invalid');
+    }
+    unexpectedAttempts += contextUnexpectedAttempts;
+  }
+  if(unexpectedAttempts !== network.unexpectedAttempts) {
+    throw new Error('auth progress network evidence is invalid');
+  }
+
+  return network;
 }
 
 export function assertAllScenariosPassed(results) {

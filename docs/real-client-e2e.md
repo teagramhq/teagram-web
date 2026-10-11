@@ -81,6 +81,22 @@ rm -rf -- "$ARTIFACT_PARENT"
 rm -f -- "$KEY_FILE" "$READINESS_FILE"
 ```
 
+## Check one Username submission
+
+For a bounded authentication-progress check, use the accepted completed `artifact-ready` pair for web source `569529c1f36923c098760ef727808254dcb6a662` and its matching immutable pins. Do not rebuild or modify that artifact. The runner creates Alice's ordinary browser context, fills and submits Username once, then stops when the masked password field is ready or the fixed password-card wait expires. It never creates Bob's context, fills or submits a password, retries Username, or enters the messaging and group scenarios. This mode cannot be combined with `--scenarios` or `--observer-controls-only`.
+
+```sh
+corepack pnpm run test:real-client -- \
+  --readiness-file "$READINESS_FILE" \
+  --harness-revision 5f294c39abb32fc8ae15a4f7ccb085974098b320 \
+  --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
+  --web-revision 569529c1f36923c098760ef727808254dcb6a662 \
+  --run-id "$RUN_ID" \
+  --auth-progress-one-submission
+```
+
+The report contains the immutable run and artifact references, fixed stage and count fields, and the existing privacy-safe network and worker observations. It does not report an application RPC count; the server snapshot consumer owns that evidence. A timeout or ambiguous password card emits its fixed stage and match count, then the runner closes its browser and removes its temporary files.
+
 ## Shared-worker and installation-failure evidence
 
 The runner reports what the browser did with workers, next to the scenario and egress summaries. Browser-level target discovery starts before this runner creates its first context, so shared-worker creation cannot be missed and absence becomes provable. Every page, shared worker, service worker and dedicated worker target is attributed by its browser context; a worker target that belongs to no runner context fails the run.
