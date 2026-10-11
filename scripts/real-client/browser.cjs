@@ -91,6 +91,7 @@ function readRuntimeInput() {
 }
 
 function validateRuntimeInput(config) {
+  const authProgress = config?.authProgressOneSubmission === true;
   if(!/^[0-9a-f]{32}$/.test(config?.runId || '') ||
       config.endpoint !== PRIVATE_CSP_ORIGIN || config.wssEndpoint !== PRIVATE_CSP_WSS ||
       !/^[0-9a-f]{16}$/.test(config.fingerprint || '') ||
@@ -105,11 +106,15 @@ function validateRuntimeInput(config) {
       !/^(?:\d{1,3}\.){3}\d{1,3}$/.test(config.frontIp || '') ||
       config.screenshotDirectory !== `/tmp/real-client-${config.runId}` ||
       (config.observationOnly !== undefined && config.observationOnly !== true) ||
-      !Array.isArray(config.accounts) || config.accounts.length !== 2) {
+      (config.authProgressOneSubmission !== undefined && !authProgress) ||
+      (authProgress && config.observationOnly === true) ||
+      !Array.isArray(config.accounts) || config.accounts.length !== (authProgress ? 1 : 2)) {
     failStage('runtime_input_validation');
   }
 
-  const expectedNames = [`u${config.runId.slice(0, 30)}a`, `u${config.runId.slice(0, 30)}b`];
+  const expectedNames = authProgress
+    ? [`u${config.runId.slice(0, 30)}a`]
+    : [`u${config.runId.slice(0, 30)}a`, `u${config.runId.slice(0, 30)}b`];
   config.accounts.forEach((account, index) => {
     if(account?.username !== expectedNames[index] || !/^[0-9a-f]{64}$/.test(account.password || '')) {
       failStage('runtime_credential_validation');
@@ -1029,6 +1034,24 @@ async function signIn(page, account, name, screenshotDirectory, capturedScreensh
   .catch(() => failStage(`${name}_service_worker_controller`));
 }
 
+async function submitUsernameOnceAndWaitForPassword(page, account, expected, name, passwordEvidence, actionCounts, timeoutMs = PASSWORD_FIELD_TIMEOUT_MS) {
+  const username = await prepareUsernameEntry(page, name, expected);
+  if(await username.count() !== 1) failStage(`${name}_username_field_not_unique`);
+  const usernameField = await username.elementHandle();
+  if(!usernameField) failStage(`${name}_username_field`);
+
+  try {
+    await username.fill(account.username);
+    actionCounts.usernameSubmissions++;
+    await username.press('Enter');
+    await waitForPasswordField(page, usernameField, name, passwordEvidence, timeoutMs);
+    passwordEvidence.push({stage: `${name}_password_field_ready`, count: 1});
+    currentStage = `${name}_password_field_ready`;
+  } finally {
+    await usernameField.dispose();
+  }
+}
+
 async function selectUniquePeer(page, inputSelector, resultsSelector, username, stage) {
   currentStage = stage;
   const input = page.locator(inputSelector).first();
@@ -1210,13 +1233,53 @@ function buildObserverOnlyReport(registry, controls) {
   };
 }
 
+function buildAuthProgressReport(status, stage, contexts, controlCount, passwordEvidence, registry, appObservers, appNetworkObservers, controls, egress) {
+  const networkContexts = Object.fromEntries(Object.entries(appNetworkObservers).map(([name, observer]) => {
+    const summary = observer.summary();
+    return [name, {
+      workerTargets: summary.workerTargets,
+      allowedWebSockets: summary.allowedWebSockets,
+      attemptsBySource: summary.attemptsBySource,
+      unexpectedAttemptsBySource: summary.unexpectedAttemptsBySource,
+      allowedWebSocketsBySource: summary.allowedWebSocketsBySource
+    }];
+  }));
+  const observationBlock = registry
+    ? buildObservationBlock(registry, appObservers, controls, egress)
+    : null;
+  return {
+    status,
+    mode: 'auth_progress_one_submission',
+    stage,
+    usernameSubmissions: contexts.usernameSubmissions,
+    passwordFills: 0,
+    passwordSubmissions: 0,
+    bobContextCount: 0,
+    laterScenarioCount: 0,
+    contextCount: contexts.contextCount,
+    controlContextCount: controlCount,
+    screenshotsCaptured: 0,
+    passwordEvidence,
+    network: {
+      unexpectedAttempts: egress.unexpectedAttempts,
+      observerErrors: egress.observerErrors,
+      contexts: networkContexts
+    },
+    workerObservation: observationBlock && !observation.validateNetworkBlock(observationBlock)
+      ? observationBlock
+      : observationBlock ? observation.UNCLASSIFIED_NETWORK_BLOCK : null
+  };
+}
+
 async function main() {
   let report;
   let browser;
   const contexts = [];
   const observers = [];
   const appObservers = {};
+  const appNetworkObservers = {};
   const capturedScreenshots = {count: 0};
+  const actionCounts = {usernameSubmissions: 0};
   const passwordEvidence = [];
   const cleanupIssues = [];
   let cleanupFailed = false;
@@ -1270,8 +1333,56 @@ async function main() {
     alice.observer = observation.createContextObserver('alice');
     appObservers.alice = alice.observer;
     alice.networkObserver = createNetworkObserver(alice.page, 'alice', alice.observer);
+    appNetworkObservers.alice = alice.networkObserver;
     observers.push(alice.networkObserver);
     await alice.networkObserver.start(registry);
+
+    const pageErrors = [];
+    alice.page.on('pageerror', () => pageErrors.push('pageerror'));
+
+    if(runtime.authProgressOneSubmission === true) {
+      await submitUsernameOnceAndWaitForPassword(
+        alice.page,
+        runtime.accounts[0],
+        runtime,
+        'alice',
+        passwordEvidence,
+        actionCounts
+      );
+      currentStage = 'browser_worker_observation';
+      await Promise.all(observers.map((observer) => observer.waitForSetup()));
+      await registry.waitForSetup();
+      alice.observer.state.windowElapsed = true;
+      const egress = summarizeEgress(observers);
+      const workerBlock = buildObservationBlock(registry, appObservers, controls, egress);
+      const network = alice.networkObserver.summary();
+      if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.length !== 0) {
+        failStage('browser_egress_or_page_errors');
+      }
+      if(registry.foreignTargets !== 0 || registry.appContextlessTargets !== 0 || workerBlock.discoveryActive !== 1 ||
+          workerBlock.observerOverflow !== 0 || workerBlock.contexts.alice.pageTargets !== 1 ||
+          workerBlock.contexts.alice.coverageComplete !== 1 || workerBlock.contexts.alice.observerErrors !== 0) {
+        failStage('browser_worker_observation_incomplete');
+      }
+      if(network.workerTargets.service_worker < 1 || network.allowedWebSockets < 1) {
+        failStage('browser_worker_or_websocket_evidence');
+      }
+      if(observation.validateNetworkBlock(workerBlock)) failStage('worker_observation_unclassified');
+      currentStage = 'alice_password_field_ready';
+      report = buildAuthProgressReport(
+        'passed',
+        currentStage,
+        {usernameSubmissions: actionCounts.usernameSubmissions, contextCount: contexts.length},
+        Object.keys(controls).length,
+        passwordEvidence,
+        registry,
+        appObservers,
+        appNetworkObservers,
+        controls,
+        egress
+      );
+      return;
+    }
 
     currentStage = 'bob_context';
     const bob = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
@@ -1280,13 +1391,11 @@ async function main() {
     bob.observer = observation.createContextObserver('bob');
     appObservers.bob = bob.observer;
     bob.networkObserver = createNetworkObserver(bob.page, 'bob', bob.observer);
+    appNetworkObservers.bob = bob.networkObserver;
     observers.push(bob.networkObserver);
     await bob.networkObserver.start(registry);
 
-    const pageErrors = [];
-    for(const page of [alice.page, bob.page]) {
-      page.on('pageerror', () => pageErrors.push('pageerror'));
-    }
+    bob.page.on('pageerror', () => pageErrors.push('pageerror'));
 
     currentScenario = 'sign-in';
     await signIn(alice.page, accounts[0], 'alice', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
@@ -1427,29 +1536,48 @@ async function main() {
       workerObservation: observationBlock
     };
   } catch(error) {
-    await Promise.all(observers.map((observer) => observer.waitForSetup()));
-    await registry?.waitForSetup();
-    const egress = summarizeEgress(observers);
-    // The bounded sign-in window has ended by the time a sign-in stage fails,
-    // so the failure report states what the observer established, not a blank.
-    for(const observer of Object.values(appObservers)) observer.state.windowElapsed = true;
-    const failureBlock = buildObservationBlock(registry, appObservers, controls, egress);
-    report = {
-      status: 'failed',
-      stage: currentStage,
-      ...(currentScenario ? {scenario: currentScenario} : {}),
-      errorClass: ['TimeoutError', 'TypeError', 'Error', 'AbortError'].includes(error?.name) ? error.name : 'OtherError',
-      scenarios: Array.isArray(report) ? report : [],
-      contextCount: contexts.length,
-      controlContextCount: CONTROL_PLAN.length,
-      screenshotsCaptured: capturedScreenshots.count,
-      passwordEvidence,
-      // On failure the closed-schema evidence is still the point, validated the
-      // same way: any schema violation collapses it to `unclassified`.
-      ...(registry ? {
-        workerObservation: observation.validateNetworkBlock(failureBlock) ? observation.UNCLASSIFIED_NETWORK_BLOCK : failureBlock
-      } : {})
-    };
+    if(runtime?.authProgressOneSubmission === true) {
+      await Promise.all(observers.map((observer) => observer.waitForSetup().catch(() => {})));
+      await registry?.waitForSetup().catch(() => {});
+      for(const observer of Object.values(appObservers)) observer.state.windowElapsed = true;
+      const egress = summarizeEgress(observers);
+      report = buildAuthProgressReport(
+        'failed',
+        currentStage,
+        {usernameSubmissions: actionCounts.usernameSubmissions, contextCount: contexts.length},
+        Object.keys(controls).length,
+        passwordEvidence,
+        registry,
+        appObservers,
+        appNetworkObservers,
+        controls,
+        egress
+      );
+    } else {
+      await Promise.all(observers.map((observer) => observer.waitForSetup()));
+      await registry?.waitForSetup();
+      const egress = summarizeEgress(observers);
+      // The bounded sign-in window has ended by the time a sign-in stage fails,
+      // so the failure report states what the observer established, not a blank.
+      for(const observer of Object.values(appObservers)) observer.state.windowElapsed = true;
+      const failureBlock = buildObservationBlock(registry, appObservers, controls, egress);
+      report = {
+        status: 'failed',
+        stage: currentStage,
+        ...(currentScenario ? {scenario: currentScenario} : {}),
+        errorClass: ['TimeoutError', 'TypeError', 'Error', 'AbortError'].includes(error?.name) ? error.name : 'OtherError',
+        scenarios: Array.isArray(report) ? report : [],
+        contextCount: contexts.length,
+        controlContextCount: CONTROL_PLAN.length,
+        screenshotsCaptured: capturedScreenshots.count,
+        passwordEvidence,
+        // On failure the closed-schema evidence is still the point, validated the
+        // same way: any schema violation collapses it to `unclassified`.
+        ...(registry ? {
+          workerObservation: observation.validateNetworkBlock(failureBlock) ? observation.UNCLASSIFIED_NETWORK_BLOCK : failureBlock
+        } : {})
+      };
+    }
   } finally {
     currentStage = 'cleanup';
     try {
@@ -1483,7 +1611,11 @@ async function main() {
       cleanupFailed = true;
     }
     if(cleanupIssues.length > 0) cleanupFailed = true;
-    emitReport(report, cleanupFailed);
+    if(runtime?.authProgressOneSubmission === true) {
+      emitAuthProgressReport(report, cleanupFailed);
+    } else {
+      emitReport(report, cleanupFailed);
+    }
   }
 }
 
@@ -1499,8 +1631,16 @@ function emitReport(report, cleanupFailed) {
   if(report.status !== 'passed') process.exitCode = 1;
 }
 
+function emitAuthProgressReport(report, cleanupFailed) {
+  const finalReport = cleanupFailed
+    ? {...report, status: 'failed', stage: 'cleanup'}
+    : report;
+  process.stdout.write(`${JSON.stringify(finalReport)}\n`);
+  if(finalReport.status !== 'passed') process.exitCode = 1;
+}
+
 let runtime;
-module.exports = {createNetworkObserver, createWorkerDiscovery, getSingleExactMessageFailure, matchesPrivateArtifactManifest, prepareUsernameEntry, waitForPasswordField, submitPassword};
+module.exports = {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

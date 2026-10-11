@@ -1,14 +1,16 @@
 import {chmodSync, linkSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
 import {EventEmitter} from 'node:events';
 import {createHash, generateKeyPairSync} from 'node:crypto';
 import {createServer} from 'node:http';
 import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {join, resolve} from 'node:path';
 import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
 
 import {
   assertAllScenariosPassed,
+  parseAuthProgressReport,
   parseFixtureReadiness,
   parseObserverControls,
   parseRealClientArgs,
@@ -20,7 +22,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
-const {createNetworkObserver, createWorkerDiscovery, getSingleExactMessageFailure, matchesPrivateArtifactManifest, prepareUsernameEntry, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
+const {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -310,6 +312,30 @@ function observationBlock(): any {
     countedEvents: appSummary.countedEvents * 2,
     contexts: {alice: appSummary, bob: replayContext(appContextEvents())},
     controls: controlBlocks()
+  };
+}
+
+function authProgressObservationBlock(): any {
+  const block = observationBlock();
+  delete block.contexts.bob;
+  return block;
+}
+
+function authProgressNetwork(): any {
+  const sources = ['page', 'shared_worker', 'service_worker', 'worker'];
+  const counts = {page: 0, shared_worker: 0, service_worker: 1, worker: 0};
+  return {
+    unexpectedAttempts: 0,
+    observerErrors: 0,
+    contexts: {
+      alice: {
+        workerTargets: {...counts},
+        allowedWebSockets: 1,
+        attemptsBySource: {...counts},
+        unexpectedAttemptsBySource: Object.fromEntries(sources.map((source) => [source, 0])),
+        allowedWebSocketsBySource: {...counts}
+      }
+    }
   };
 }
 
@@ -1165,6 +1191,9 @@ describe('real client scenario contract', () => {
         {username: `u${runId.slice(0, 30)}a`, password: '1'.repeat(64)},
         {username: `u${runId.slice(0, 30)}b`, password: '2'.repeat(64)}
       ]);
+      expect(readSyntheticCredentials(credentials, runId, 1)).toEqual([
+        {username: `u${runId.slice(0, 30)}a`, password: '1'.repeat(64)}
+      ]);
 
       chmodSync(passwordFileA, 0o600);
       expect(() => readSyntheticCredentials(credentials, runId)).toThrow('synthetic password file is not protected');
@@ -1239,6 +1268,131 @@ describe('real client scenario contract', () => {
     expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group', '--observer-controls-only']).observerControlsOnly).toBe(true);
     expect(() => parseRealClientArgs(args)).toThrow('scenario selection is required');
     expect(() => parseRealClientArgs([...args, '--observer-controls-only', '--observer-controls-only'])).toThrow('option was provided more than once');
+  });
+
+  it('keeps one-submission mode separate from scenario and observer modes', () => {
+    const args = [
+      '--readiness-file', './fixture.jsonl',
+      '--harness-revision', READINESS_PINS.harnessRevision,
+      '--server-revision', READINESS_PINS.serverRevision,
+      '--web-revision', READINESS_PINS.webRevision,
+      '--run-id', READINESS_PINS.runId
+    ];
+
+    expect(parseRealClientArgs([...args, '--auth-progress-one-submission'])).toEqual({
+      readinessFile: './fixture.jsonl',
+      harnessRevision: READINESS_PINS.harnessRevision,
+      serverRevision: READINESS_PINS.serverRevision,
+      webRevision: READINESS_PINS.webRevision,
+      runId: READINESS_PINS.runId,
+      authProgressOneSubmission: true
+    });
+    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group', '--auth-progress-one-submission']))
+    .toThrow('cannot be combined');
+    expect(() => parseRealClientArgs([...args, '--observer-controls-only', '--auth-progress-one-submission']))
+    .toThrow('cannot be combined');
+    expect(() => parseRealClientArgs([...args, '--auth-progress-one-submission', '--auth-progress-one-submission']))
+    .toThrow('option was provided more than once');
+  });
+
+  it('rejects conflicting runner modes before reading readiness or starting Docker', () => {
+    const runnerPath = resolve(process.cwd(), 'scripts/real-client/run.mjs');
+    const result = spawnSync(process.execPath, [runnerPath,
+      '--readiness-file', '/path/that/does/not/exist',
+      '--harness-revision', READINESS_PINS.harnessRevision,
+      '--server-revision', READINESS_PINS.serverRevision,
+      '--web-revision', READINESS_PINS.webRevision,
+      '--run-id', READINESS_PINS.runId,
+      '--scenarios', 'sign-in,message,group',
+      '--auth-progress-one-submission'
+    ], {encoding: 'utf8'});
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('cannot be combined');
+    expect(result.stderr).not.toContain('does/not/exist');
+    expect(result.stdout).toBe('');
+  });
+
+  it('accepts only bounded fixed one-submission evidence', () => {
+    const report = (overrides = {}) => ({
+      status: 'passed',
+      mode: 'auth_progress_one_submission',
+      stage: 'alice_password_field_ready',
+      usernameSubmissions: 1,
+      passwordFills: 0,
+      passwordSubmissions: 0,
+      bobContextCount: 0,
+      laterScenarioCount: 0,
+      contextCount: 1,
+      controlContextCount: Object.keys(observation.CONTROL_EXPECTATIONS).length,
+      screenshotsCaptured: 0,
+      passwordEvidence: [{stage: 'alice_password_field_ready', count: 1}],
+      network: authProgressNetwork(),
+      workerObservation: authProgressObservationBlock(),
+      ...overrides
+    });
+
+    expect(parseAuthProgressReport(report())).toEqual(report());
+    expect(parseAuthProgressReport(report({
+      status: 'failed',
+      stage: 'alice_password_card_not_reached',
+      passwordEvidence: [{stage: 'alice_password_card_not_reached', count: 0}]
+    }))).toEqual(report({
+      status: 'failed',
+      stage: 'alice_password_card_not_reached',
+      passwordEvidence: [{stage: 'alice_password_card_not_reached', count: 0}]
+    }));
+    expect(parseAuthProgressReport(report({
+      status: 'failed',
+      stage: 'alice_password_field_not_unique',
+      passwordEvidence: [{stage: 'alice_password_field_not_unique', count: 2}]
+    })).passwordEvidence).toEqual([{stage: 'alice_password_field_not_unique', count: 2}]);
+    expect(() => parseAuthProgressReport(report({rpcCount: 1}))).toThrow('auth progress report is invalid');
+    expect(() => parseAuthProgressReport(report({passwordFills: 1}))).toThrow('auth progress report is invalid');
+    expect(() => parseAuthProgressReport(report({bobContextCount: 1}))).toThrow('auth progress report is invalid');
+    expect(() => parseAuthProgressReport(report({laterScenarioCount: 1}))).toThrow('auth progress report is invalid');
+    expect(() => parseAuthProgressReport(report({stage: 'arbitrary server text'}))).toThrow('auth progress report is invalid');
+    expect(() => parseAuthProgressReport(report({workerObservation: {classification: 'unclassified', secret: HOSTILE.password}})))
+    .toThrow('auth progress report is invalid');
+    const networkWithRpc = {...authProgressNetwork(), rpcCount: 1};
+    expect(() => parseAuthProgressReport(report({network: networkWithRpc})))
+    .toThrow('auth progress report is invalid');
+    const unmatchedAttempts = authProgressNetwork();
+    unmatchedAttempts.contexts.alice.attemptsBySource.page = 1;
+    unmatchedAttempts.contexts.alice.unexpectedAttemptsBySource.page = 1;
+    expect(() => parseAuthProgressReport(report({network: unmatchedAttempts})))
+    .toThrow('auth progress report is invalid');
+  });
+
+  it('turns cleanup failure into a fixed failed one-submission report and nonzero exit', () => {
+    const report = {
+      status: 'passed',
+      mode: 'auth_progress_one_submission',
+      stage: 'alice_password_field_ready',
+      usernameSubmissions: 1,
+      passwordFills: 0,
+      passwordSubmissions: 0,
+      bobContextCount: 0,
+      laterScenarioCount: 0,
+      contextCount: 1,
+      controlContextCount: Object.keys(observation.CONTROL_EXPECTATIONS).length,
+      screenshotsCaptured: 0,
+      passwordEvidence: [{stage: 'alice_password_field_ready', count: 1}],
+      network: authProgressNetwork(),
+      workerObservation: authProgressObservationBlock()
+    };
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const originalExitCode = process.exitCode;
+    process.exitCode = 0;
+    try {
+      emitAuthProgressReport(report, true);
+
+      expect(write).toHaveBeenCalledWith(`${JSON.stringify({...report, status: 'failed', stage: 'cleanup'})}\n`);
+      expect(process.exitCode).toBe(1);
+    } finally {
+      write.mockRestore();
+      process.exitCode = originalExitCode;
+    }
   });
 
   it('requires every synthetic control to pass in the controls-only report', () => {
@@ -1407,6 +1561,36 @@ function usernameEntryManifest() {
   };
 }
 
+function authProgressMarkup({card = 'ready', delay = 0}: {card?: 'ready' | 'timeout' | 'ambiguous', delay?: number} = {}) {
+  const count = card === 'ready' ? 1 : card === 'ambiguous' ? 2 : 0;
+  const passwordFields = Array.from({length: count}, (_, index) =>
+    `<input id="progress-password-${index}" name="notsearch_password" type="password">`
+  ).join('');
+  const revealPasswordCard = card === 'timeout' ? '' : `
+    document.querySelector('#username').style.display = 'none';
+    setTimeout(() => {
+      document.querySelector('#auth-pages').insertAdjacentHTML('beforeend', '<form id="password-form">${passwordFields}</form>');
+    }, ${delay});`;
+
+  return `<!doctype html><html><body>
+    <div id="auth-pages"><form id="login"><input id="username" aria-label="Username"></form></div>
+    <script>
+      window.authProgressCounts = {usernameSubmissions: 0, passwordFills: 0, passwordSubmissions: 0};
+      document.querySelector('#login').addEventListener('submit', (event) => {
+        event.preventDefault();
+        window.authProgressCounts.usernameSubmissions++;
+        ${revealPasswordCard}
+      });
+      document.addEventListener('input', (event) => {
+        if(event.target?.name === 'notsearch_password') window.authProgressCounts.passwordFills++;
+      });
+      document.addEventListener('keydown', (event) => {
+        if(event.key === 'Enter' && event.target?.name === 'notsearch_password') window.authProgressCounts.passwordSubmissions++;
+      });
+    </script>
+  </body></html>`;
+}
+
 describe('real client username field readiness', () => {
   let browser: any;
   let fixtureServer: any;
@@ -1486,6 +1670,95 @@ describe('real client username field readiness', () => {
   async function passwordInputValues(page: any) {
     return page.locator('#auth-pages input[data-password-test]').evaluateAll((inputs: HTMLInputElement[]) => inputs.map((input) => input.value));
   }
+
+  it('submits Username once and stops at the masked password-card boundary', async() => {
+    setFixture(authProgressMarkup());
+    const page = await createRunnerPage();
+    const passwordEvidence: any[] = [];
+    const actionCounts = {usernameSubmissions: 0};
+    try {
+      await submitUsernameOnceAndWaitForPassword(
+        page,
+        {username: DUMMY_USERNAME},
+        USERNAME_ENTRY_RUNTIME,
+        'alice',
+        passwordEvidence,
+        actionCounts,
+        1000
+      );
+
+      expect(actionCounts.usernameSubmissions).toBe(1);
+      expect(passwordEvidence).toEqual([{stage: 'alice_password_field_ready', count: 1}]);
+      expect(await page.evaluate(() => (window as any).authProgressCounts)).toEqual({
+        usernameSubmissions: 1,
+        passwordFills: 0,
+        passwordSubmissions: 0
+      });
+      expect(await page.locator('#auth-pages input[name="notsearch_password"]').evaluateAll((inputs: HTMLInputElement[]) => inputs.map((input) => input.value)))
+      .toEqual(['']);
+      expect(await page.locator('#page-chats').count()).toBe(0);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('records a fixed timeout stage after one Username submission without retrying', async() => {
+    setFixture(authProgressMarkup({card: 'timeout'}));
+    const page = await createRunnerPage();
+    const passwordEvidence: any[] = [];
+    const actionCounts = {usernameSubmissions: 0};
+    try {
+      await expect(submitUsernameOnceAndWaitForPassword(
+        page,
+        {username: DUMMY_USERNAME},
+        USERNAME_ENTRY_RUNTIME,
+        'alice',
+        passwordEvidence,
+        actionCounts,
+        500
+      )).rejects.toThrow('alice_password_card_not_reached');
+
+      expect(actionCounts.usernameSubmissions).toBe(1);
+      expect(passwordEvidence).toEqual([{stage: 'alice_password_card_not_reached', count: 0}]);
+      expect(await page.evaluate(() => (window as any).authProgressCounts)).toEqual({
+        usernameSubmissions: 1,
+        passwordFills: 0,
+        passwordSubmissions: 0
+      });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('records an ambiguous password card after one Username submission without acting on a password', async() => {
+    setFixture(authProgressMarkup({card: 'ambiguous'}));
+    const page = await createRunnerPage();
+    const passwordEvidence: any[] = [];
+    const actionCounts = {usernameSubmissions: 0};
+    try {
+      await expect(submitUsernameOnceAndWaitForPassword(
+        page,
+        {username: DUMMY_USERNAME},
+        USERNAME_ENTRY_RUNTIME,
+        'alice',
+        passwordEvidence,
+        actionCounts,
+        1000
+      )).rejects.toThrow('alice_password_field_not_unique');
+
+      expect(actionCounts.usernameSubmissions).toBe(1);
+      expect(passwordEvidence).toEqual([{stage: 'alice_password_field_not_unique', count: 2}]);
+      expect(await page.evaluate(() => (window as any).authProgressCounts)).toEqual({
+        usernameSubmissions: 1,
+        passwordFills: 0,
+        passwordSubmissions: 0
+      });
+      expect(await page.locator('#auth-pages input[name="notsearch_password"]').evaluateAll((inputs: HTMLInputElement[]) => inputs.map((input) => input.value)))
+      .toEqual(['', '']);
+    } finally {
+      await page.close();
+    }
+  });
 
   it('reaches a delayed Username field without a legacy entry button', async() => {
     setFixture(usernameReadinessMarkup({delay: 100}));

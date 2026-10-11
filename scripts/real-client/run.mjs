@@ -9,6 +9,7 @@ import {
   formatBrowserFailureMessage,
   REQUIRED_CONTROLS,
   parseFixtureReadiness,
+  parseAuthProgressReport,
   parseObserverControls,
   parsePasswordEvidence,
   parseRealClientArgs,
@@ -16,12 +17,12 @@ import {
   readSyntheticCredentials
 } from './contract.mjs';
 
-const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> --scenarios sign-in,message,group
+const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> (--scenarios sign-in,message,group | --auth-progress-one-submission)
 
 The fixture must remain running after artifact-ready. The command validates its immutable pins,
 protected synthetic credentials, internal browser network, audited artifact evidence, per-context
-shared-worker observation, and all three required UI scenarios. It does not import browser storage
-state or export screenshots or traces.`;
+shared-worker observation, and all three required UI scenarios or one bounded Username submission.
+The one-submission mode stops at password-field readiness without entering or submitting a password.`;
 const NETWORK_SOURCES = ['page', 'shared_worker', 'service_worker', 'worker'];
 
 function hasNetworkSourceEvidence(context) {
@@ -59,6 +60,7 @@ if(args?.help) {
   let passwordEvidence = [];
   let readiness;
   let controlsOnlyDone = false;
+  let authProgressFailure = false;
 
   const docker = (dockerArgs, input, stage, timeout = 30_000) => {
     try {
@@ -78,6 +80,7 @@ if(args?.help) {
 
   try {
     const controlsOnly = args.observerControlsOnly === true;
+    const authProgress = args.authProgressOneSubmission === true;
     const readinessText = readFileSync(resolve(args.readinessFile), 'utf8');
     readiness = parseFixtureReadiness(readinessText, {
       runId: args.runId,
@@ -86,7 +89,7 @@ if(args?.help) {
       webRevision: args.webRevision
     }, {requireArtifact: !controlsOnly});
     const {serverReady, artifactReady} = readiness;
-    const credentials = readSyntheticCredentials(serverReady.credentials, args.runId);
+    const credentials = readSyntheticCredentials(serverReady.credentials, args.runId, authProgress ? 1 : 2);
 
     if(!/^[A-Za-z0-9+/]{43}=$/.test(serverReady.leafSPKI || '') ||
         Buffer.from(serverReady.leafSPKI, 'base64').byteLength !== 32) {
@@ -172,6 +175,7 @@ if(args?.help) {
 
     const browserInput = JSON.stringify({
       ...(controlsOnly ? {observationOnly: true} : {}),
+      ...(authProgress ? {authProgressOneSubmission: true} : {}),
       runId: args.runId,
       endpoint: serverReady.endpoint,
       wssEndpoint: serverReady.wssEndpoint,
@@ -195,26 +199,51 @@ if(args?.help) {
     } catch(error) {
       const browserStdout = typeof error?.stdout === 'string' ? error.stdout :
         Buffer.isBuffer(error?.stdout) ? error.stdout.toString('utf8') : '';
-      try {
-        const failedRun = JSON.parse(browserStdout.trim());
-        if(failedRun.status === 'failed' && typeof failedRun.stage === 'string') {
-          throw new Error(formatBrowserFailureMessage(failedRun, controlsOnly));
+      if(authProgress) {
+        try {
+          browserResult = parseAuthProgressReport(JSON.parse(browserStdout.trim()));
+          if(browserResult.status !== 'failed') throw new Error('auth progress browser exit status is invalid');
+          authProgressFailure = true;
+        } catch {
+          throw new Error('isolated auth progress runner failed');
         }
-      } catch(parseError) {
-        if(parseError instanceof Error && parseError.message.startsWith('real client scenario failed at ')) throw parseError;
+      } else {
+        try {
+          const failedRun = JSON.parse(browserStdout.trim());
+          if(failedRun.status === 'failed' && typeof failedRun.stage === 'string') {
+            throw new Error(formatBrowserFailureMessage(failedRun, controlsOnly));
+          }
+        } catch(parseError) {
+          if(parseError instanceof Error && parseError.message.startsWith('real client scenario failed at ')) throw parseError;
+        }
+        throw error;
       }
-      throw error;
     }
-    try {
-      browserResult = JSON.parse(browserOutput.trim());
-    } catch {
-      throw new Error('isolated browser returned an invalid report');
+    if(!browserResult) {
+      try {
+        browserResult = authProgress
+          ? parseAuthProgressReport(JSON.parse(browserOutput.trim()))
+          : JSON.parse(browserOutput.trim());
+      } catch {
+        throw new Error(authProgress ? 'isolated auth progress runner returned an invalid report' : 'isolated browser returned an invalid report');
+      }
+      if(authProgress && browserResult.status === 'failed') authProgressFailure = true;
     }
 
-    if(browserResult.status !== 'passed') {
+    if(authProgress) {
+      if(browserResult.status !== 'passed' && browserResult.status !== 'failed') {
+        throw new Error('auth progress browser status is invalid');
+      }
+    } else if(browserResult.status !== 'passed') {
       throw new Error(formatBrowserFailureMessage(browserResult, controlsOnly));
     }
-    if(controlsOnly) {
+    if(authProgressFailure) {
+      controlsOnlyDone = true;
+    } else if(authProgress) {
+      if(browserResult.mode !== 'auth_progress_one_submission') {
+        throw new Error('browser report did not use one-submission mode');
+      }
+    } else if(controlsOnly) {
       if(browserResult.mode !== 'observer_controls' || browserResult.controlContextCount !== REQUIRED_CONTROLS.length ||
           browserResult.contextCount !== 0 || browserResult.screenshotsCaptured !== 0) {
         throw new Error('observer control run did not stay synthetic');
@@ -232,7 +261,7 @@ if(args?.help) {
         workerObservation: browserResult.workerObservation
       })}\n`);
     }
-    if(!controlsOnlyDone) {
+    if(!controlsOnlyDone && !authProgress) {
       passwordEvidence = parsePasswordEvidence(browserResult.passwordEvidence);
       if(JSON.stringify(passwordEvidence.map((entry) => entry.stage)) !== JSON.stringify([
         'alice_password_field_ready',
@@ -276,7 +305,25 @@ if(args?.help) {
     }
   }
 
-  if(cleanupError || operationError) {
+  if(args.authProgressOneSubmission === true && browserResult && !operationError) {
+    const finalReport = {
+      ...browserResult,
+      ...(readiness ? {
+        runId: args.runId,
+        harnessRevision: args.harnessRevision,
+        serverRevision: args.serverRevision,
+        webRevision: args.webRevision,
+        artifactSourceCommit: readiness.artifactReady.webRevision,
+        artifactDigest: readiness.artifactReady.artifactDigest
+      } : {})
+    };
+    if(cleanupError) {
+      finalReport.status = 'failed';
+      finalReport.stage = 'cleanup';
+    }
+    process.stdout.write(`${JSON.stringify(finalReport)}\n`);
+    if(finalReport.status !== 'passed') process.exitCode = 1;
+  } else if(cleanupError || operationError) {
     process.stderr.write(`${cleanupError?.message || operationError?.message || 'real client runner failed'}\n`);
     process.exitCode = 1;
   } else if(!controlsOnlyDone) {
