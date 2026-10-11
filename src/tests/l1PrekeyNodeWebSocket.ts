@@ -49,7 +49,7 @@ export class NodeWebSocketConnection {
     });
     const requestClose = this.socket.close.bind(this.socket);
     this.socket.close = (code?: number) => {
-      if(code === 1009 && this.socket.readyState === WS_OPEN) {
+      if((code === 1002 || code === 1007 || code === 1009) && this.socket.readyState === WS_OPEN) {
         this.metrics.malformed = true;
         this.localClose = true;
         try {

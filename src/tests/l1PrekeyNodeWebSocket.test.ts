@@ -151,11 +151,14 @@ describe('Node WebSocket pre-auth payload bound', () => {
     );
 
     socket!.emit('open');
+    socket!.close(1002);
     socket!.emit('error', {code: 'WS_ERR_INVALID_OPCODE'});
     socket!.emit('close', 1002, Buffer.from('invalid opcode'));
 
+    expect(socket!.closeCode).toBe(1000);
     expect(metrics.malformed).toBe(true);
     expect(metrics.peerClosed).toBe(false);
     expect(metrics.networkError).toBe(false);
+    expect(metrics.close1000Sent).toBe(true);
   });
 });
