@@ -14,6 +14,7 @@ import {dirname, join, resolve} from 'node:path';
 import {inspect} from 'node:util';
 import {afterAll, describe, expect, it, vi} from 'vitest';
 import * as mtprotoTarget from './mtproto-target.mjs';
+import {L1_PREKEY_HARNESS_MARKER} from '../src/tests/l1PrekeyHarnessMarker.mjs';
 import {
   auditPrivateArtifact,
   includePrivateArtifactBackground,
@@ -659,6 +660,7 @@ describe('MTProto build target', () => {
     expect(result.stdout).toMatch(/sourceCommit=[0-9a-f]{40}/);
     expect(result.stdout).toMatch(/artifactDigest=sha256:[0-9a-f]{64}/);
     expect(result.stdout).toMatch(/0 mapped chunks for miscompiled defaults/);
+    expect(result.stdout).toContain('test-only L1 pre-key harness=excluded');
   }, 120_000);
 
   it('fails private bundle auditing when the sidecar is missing', () => {
@@ -695,6 +697,28 @@ describe('MTProto build target', () => {
 
     expect(audit.status).not.toBe(0);
     expect(`${audit.stdout}${audit.stderr}`).toMatch(/U\+FFFD/);
+  });
+
+  it('rejects the retained L1 pre-key harness marker in a production bundle', () => {
+    const outputDirectory = temporaryDirectory();
+    writeFileSync(
+      join(outputDirectory, 'client.js'),
+      `const boundary = Symbol.for(${JSON.stringify(L1_PREKEY_HARNESS_MARKER)});\n`
+    );
+
+    const audit = spawnSync(process.execPath, [
+      resolve('scripts/check-bundle-mangling.mjs'),
+      outputDirectory
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+        name !== 'MTPROTO_TARGET_MODE' && !name.startsWith('MTPROTO_PRIVATE_')
+      ))
+    });
+
+    expect(audit.status).not.toBe(0);
+    expect(`${audit.stdout}${audit.stderr}`).toContain('test-only L1 pre-key harness');
   });
 
   it('fails private bundle validation when it would check zero JavaScript chunks', () => {
