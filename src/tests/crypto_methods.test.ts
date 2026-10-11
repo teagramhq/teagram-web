@@ -324,6 +324,35 @@ describe('AES-CTR', () => {
     expect(chunkedHead.concat(chunkedTail)).toEqual(singleCall);
   });
 
+  test.each(['encrypt', 'decrypt'] as const)(
+    'preserves AES-CTR state across short fragmented writes while %s',
+    async(operation: 'encrypt' | 'decrypt') => {
+      const singleCallId = await prepare();
+      const chunkedId = await prepare();
+      const data = new Uint8Array(Array.from({length: 737}, (_, index) => index & 0xff));
+      const chunkLengths = [1, 84, 4, 648];
+
+      const singleCall = await cryptoWorker.invokeCrypto('aes-ctr-process', {
+        id: singleCallId,
+        operation,
+        data
+      });
+      const chunks: Uint8Array[] = [];
+      let offset = 0;
+      for(const length of chunkLengths) {
+        chunks.push(await cryptoWorker.invokeCrypto('aes-ctr-process', {
+          id: chunkedId,
+          operation,
+          data: data.slice(offset, offset + length)
+        }));
+        offset += length;
+      }
+
+      expect(offset).toBe(data.length);
+      expect(chunks.reduce((result, chunk) => result.concat(chunk), new Uint8Array(0))).toEqual(singleCall);
+    }
+  );
+
   test('decrypt', async() => {
     type Encrypted = string;
     type Result = string;

@@ -61,6 +61,14 @@ export default class CTR {
       // const leftLength = this.encLeft.byteLength;
       const leftLength = this.leftLength;
       const leftLength2 = COUNTER_LENGTH - leftLength;
+      if(toEncrypt.length < leftLength2) {
+        // Hold the counter until the current block is complete.
+        const left = (new Uint8Array(leftLength)).concat(toEncrypt);
+        const performed = await this.perform(left);
+        this.leftLength += toEncrypt.length;
+        return new Uint8Array(performed.slice(leftLength));
+      }
+
       // const left = this.encLeft.concat(toEncrypt.slice(0, leftLength2));
       const left = (new Uint8Array(leftLength)).concat(toEncrypt.slice(0, leftLength2));
 
