@@ -31,10 +31,10 @@ import path from 'path';
 import {parseAst} from 'vite';
 import {verifyPrivateArtifactManifest} from './private-artifact.mjs';
 import {assertNoQrFixtureArtifactContent} from './qr-fixture-artifact.mjs';
+import {L1_PREKEY_HARNESS_MARKER} from '../src/tests/l1PrekeyHarnessMarker.mjs';
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const B64_INDEX = new Map([...B64].map((char, index) => [char, index]));
-const TEST_ONLY_HARNESS_MARKER = 'teagram-l1-prekey-test-only';
 
 function decodeMappings(mappings) {
   const out = [];
@@ -233,7 +233,7 @@ if(privateMode && javascriptFiles.length === 0) {
 }
 
 const testOnlyHarnessFiles = files.filter((file) =>
-  fs.readFileSync(path.join(dir, file)).includes(TEST_ONLY_HARNESS_MARKER)
+  fs.readFileSync(path.join(dir, file)).includes(L1_PREKEY_HARNESS_MARKER)
 );
 if(testOnlyHarnessFiles.length) {
   console.error(

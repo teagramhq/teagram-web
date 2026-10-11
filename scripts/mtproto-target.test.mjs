@@ -14,6 +14,7 @@ import {dirname, join, resolve} from 'node:path';
 import {inspect} from 'node:util';
 import {afterAll, describe, expect, it, vi} from 'vitest';
 import * as mtprotoTarget from './mtproto-target.mjs';
+import {L1_PREKEY_HARNESS_MARKER} from '../src/tests/l1PrekeyHarnessMarker.mjs';
 import {
   auditPrivateArtifact,
   includePrivateArtifactBackground,
@@ -698,9 +699,12 @@ describe('MTProto build target', () => {
     expect(`${audit.stdout}${audit.stderr}`).toMatch(/U\+FFFD/);
   });
 
-  it('rejects a planted test-only L1 harness marker in a production bundle', () => {
+  it('rejects the retained L1 pre-key harness marker in a production bundle', () => {
     const outputDirectory = temporaryDirectory();
-    writeFileSync(join(outputDirectory, 'client.js'), 'const marker = "teagram-l1-prekey-test-only";\n');
+    writeFileSync(
+      join(outputDirectory, 'client.js'),
+      `const boundary = Symbol.for(${JSON.stringify(L1_PREKEY_HARNESS_MARKER)});\n`
+    );
 
     const audit = spawnSync(process.execPath, [
       resolve('scripts/check-bundle-mangling.mjs'),

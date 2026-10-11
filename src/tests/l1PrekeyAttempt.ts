@@ -12,11 +12,12 @@ import CryptoWorker from '@lib/crypto/cryptoMessagePort';
 import {randomBytes} from '@helpers/random';
 import bytesCmp from '@helpers/bytes/bytesCmp';
 import {serializeDiagnosticResult} from './l1PrekeyContract';
+import {L1_PREKEY_HARNESS_MARKER} from './l1PrekeyHarnessMarker.mjs';
 import {NodeWebSocketConnection} from './l1PrekeyNodeWebSocket';
 import type {NodeWebSocketMetrics} from './l1PrekeyNodeWebSocket';
 
 const ATTEMPT_DEADLINE_MS = 20_000;
-const PREKEY_BOUNDARY = Symbol.for('teagram-l1-prekey-test-only');
+const PREKEY_BOUNDARY = Symbol.for(L1_PREKEY_HARNESS_MARKER);
 const SAFE_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SERVER_DH_PARAMS_FAIL: MTProtoConstructor = {
   id: 0x79cb045d,
