@@ -135,6 +135,10 @@ describe('authorizer long server_DH_params reply over the Web transport', () => 
       transport
     };
 
+    // The pre-auth response is tied to the exchange by nonce checks in Authorizer;
+    // encrypted_answer integrity and DH parameter validation happen in this helper.
+    // Stub that boundary only to isolate Web framing and constructor dispatch; this
+    // fixture does not cover those cryptographic checks.
     const decryptEntry = vi.spyOn(internals, 'decryptServerDhDataAnswer').mockResolvedValue();
     vi.spyOn(internals, 'sendSetClientDhParams').mockResolvedValue(auth);
 
