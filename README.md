@@ -79,7 +79,7 @@ You can use `docker build -f ./.docker/Dockerfile_production -t {dockerhub-usern
 
 ### Debugging
 
-Source maps are included in stock (non-private) production builds and omitted from private deployment builds. Use `debug=1` for additional logging or `noSharedWorker=1` to disable the Shared Worker while debugging locally.
+Private deployment builds omit source maps. The only production build that emits them is the isolated CI source-map audit, whose temporary output is removed after the audit. Use `debug=1` for additional logging or `noSharedWorker=1` to disable the Shared Worker while debugging locally.
 
 #### Taking local storage snapshots
 You can also take and load snapshots of the local storage and indexed DB using the `./snapshot-server` [mini-app](/snapshot-server/README.md). Check the `README.md` under this folder for more details.
