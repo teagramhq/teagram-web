@@ -130,4 +130,32 @@ describe('Node WebSocket pre-auth payload bound', () => {
     expect(metrics.networkError).toBe(true);
     expect(metrics.peerClosed).toBe(false);
   });
+
+  it('marks a non-size WebSocket parser error as malformed framing', () => {
+    const metrics = {requestCount: 0, close1000Sent: false, peerClosed: false, networkError: false, malformed: false};
+    let socket: FakeWebSocket | undefined;
+    class CapturedWebSocket extends FakeWebSocket {
+      constructor(endpoint: string, subprotocol: string, options: {maxPayload: number}) {
+        super(endpoint, subprotocol, options);
+        socket = this;
+      }
+    }
+    new NodeWebSocketConnection(
+      1,
+      'wss://diagnostic.example.test/apiws',
+      '-test',
+      'https://web.example.test',
+      'binary',
+      metrics,
+      CapturedWebSocket
+    );
+
+    socket!.emit('open');
+    socket!.emit('error', {code: 'WS_ERR_INVALID_OPCODE'});
+    socket!.emit('close', 1002, Buffer.from('invalid opcode'));
+
+    expect(metrics.malformed).toBe(true);
+    expect(metrics.peerClosed).toBe(false);
+    expect(metrics.networkError).toBe(false);
+  });
 });

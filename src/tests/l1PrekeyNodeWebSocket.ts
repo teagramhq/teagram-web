@@ -110,9 +110,8 @@ export class NodeWebSocketConnection {
     });
     this.socket.on('error', error => {
       const code = error && typeof error === 'object' ? (error as {code?: unknown}).code : undefined;
-      if(code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH') this.metrics.malformed = true;
-      else if(this.metrics.upgradeStatus === 101 &&
-        (typeof code !== 'string' || !code.startsWith('WS_ERR_'))) this.metrics.networkError = true;
+      if(typeof code === 'string' && code.startsWith('WS_ERR_')) this.metrics.malformed = true;
+      else if(this.metrics.upgradeStatus === 101) this.metrics.networkError = true;
       if(this.metrics.upgradeStatus === undefined) this.metrics.upgradeStatus = 0;
       if(this.socket.readyState === WebSocket.CONNECTING) this.socket.terminate();
     });
