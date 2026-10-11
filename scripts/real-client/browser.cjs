@@ -1271,7 +1271,142 @@ function buildAuthProgressReport(status, stage, contexts, controlCount, password
   };
 }
 
-async function main() {
+async function cleanupBrowserRun({registry, observers, contexts, browser, screenshotDirectory, cleanupIssues}) {
+  let cleanupFailed = false;
+  try {
+    const discoveryStopped = await registry?.stop();
+    if(discoveryStopped && (discoveryStopped.detachFailures > 0 || discoveryStopped.discoveryDisabled === false)) {
+      cleanupIssues.push('worker_discovery_cleanup');
+    }
+  } catch {
+    cleanupIssues.push('worker_discovery_cleanup');
+  }
+  for(const observer of observers) {
+    try {
+      await observer.stop();
+    } catch {
+      cleanupFailed = true;
+    }
+  }
+  try {
+    await Promise.all(contexts.map((context) => context.close()));
+  } catch {
+    cleanupFailed = true;
+  }
+  try {
+    await browser?.close();
+  } catch {
+    cleanupFailed = true;
+  }
+  try {
+    if(screenshotDirectory) fs.rmSync(screenshotDirectory, {recursive: true, force: true});
+  } catch {
+    cleanupFailed = true;
+  }
+  if(cleanupIssues.length > 0) cleanupFailed = true;
+  return cleanupFailed;
+}
+
+async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, controls, cleanupIssues = [], dependencies = {}}) {
+  const contexts = [];
+  const observers = [];
+  const appObservers = {};
+  const appNetworkObservers = {};
+  const actionCounts = {usernameSubmissions: 0};
+  const passwordEvidence = [];
+  const createContextObserver = dependencies.createContextObserver || observation.createContextObserver;
+  const createAppNetworkObserver = dependencies.createNetworkObserver || createNetworkObserver;
+  const submitUsername = dependencies.submitUsernameOnceAndWaitForPassword || submitUsernameOnceAndWaitForPassword;
+  let report;
+  let cleanupFailed = false;
+
+  try {
+    currentStage = 'alice_context';
+    const alice = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
+    contexts.push(alice.context);
+    alice.page = await alice.context.newPage();
+    alice.observer = createContextObserver('alice');
+    appObservers.alice = alice.observer;
+    alice.networkObserver = createAppNetworkObserver(alice.page, 'alice', alice.observer);
+    appNetworkObservers.alice = alice.networkObserver;
+    observers.push(alice.networkObserver);
+    await alice.networkObserver.start(registry);
+
+    const pageErrors = [];
+    alice.page.on('pageerror', () => pageErrors.push('pageerror'));
+    await submitUsername(
+      alice.page,
+      runtimeConfig.accounts[0],
+      runtimeConfig,
+      'alice',
+      passwordEvidence,
+      actionCounts
+    );
+    currentStage = 'browser_worker_observation';
+    await Promise.all(observers.map((observer) => observer.waitForSetup()));
+    await registry.waitForSetup();
+    alice.observer.state.windowElapsed = true;
+    const egress = summarizeEgress(observers);
+    const workerBlock = buildObservationBlock(registry, appObservers, controls, egress);
+    const network = alice.networkObserver.summary();
+    if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.length !== 0) {
+      failStage('browser_egress_or_page_errors');
+    }
+    if(registry.foreignTargets !== 0 || registry.appContextlessTargets !== 0 || workerBlock.discoveryActive !== 1 ||
+        workerBlock.observerOverflow !== 0 || workerBlock.contexts.alice.pageTargets !== 1 ||
+        workerBlock.contexts.alice.coverageComplete !== 1 || workerBlock.contexts.alice.observerErrors !== 0) {
+      failStage('browser_worker_observation_incomplete');
+    }
+    if(network.workerTargets.service_worker < 1 || network.allowedWebSockets < 1) {
+      failStage('browser_worker_or_websocket_evidence');
+    }
+    if(observation.validateNetworkBlock(workerBlock)) failStage('worker_observation_unclassified');
+    currentStage = 'alice_password_field_ready';
+    report = buildAuthProgressReport(
+      'passed',
+      currentStage,
+      {usernameSubmissions: actionCounts.usernameSubmissions, contextCount: contexts.length},
+      Object.keys(controls).length,
+      passwordEvidence,
+      registry,
+      appObservers,
+      appNetworkObservers,
+      controls,
+      egress
+    );
+  } catch(error) {
+    await Promise.all(observers.map((observer) => observer.waitForSetup().catch(() => {})));
+    await registry?.waitForSetup().catch(() => {});
+    for(const observer of Object.values(appObservers)) observer.state.windowElapsed = true;
+    const egress = summarizeEgress(observers);
+    report = buildAuthProgressReport(
+      'failed',
+      currentStage,
+      {usernameSubmissions: actionCounts.usernameSubmissions, contextCount: contexts.length},
+      Object.keys(controls).length,
+      passwordEvidence,
+      registry,
+      appObservers,
+      appNetworkObservers,
+      controls,
+      egress
+    );
+  } finally {
+    currentStage = 'cleanup';
+    cleanupFailed = await cleanupBrowserRun({
+      registry,
+      observers,
+      contexts,
+      browser,
+      screenshotDirectory: runtimeConfig.screenshotDirectory,
+      cleanupIssues
+    });
+  }
+
+  return {report, cleanupFailed};
+}
+
+async function main(dependencies = {}) {
   let report;
   let browser;
   const contexts = [];
@@ -1283,15 +1418,18 @@ async function main() {
   const passwordEvidence = [];
   const cleanupIssues = [];
   let cleanupFailed = false;
+  let authProgressCleanupHandled = false;
   let registry;
   let controls = {};
   try {
-    runtime = await readRuntimeInput();
-    validateRuntimeInput(runtime);
+    runtime = Object.prototype.hasOwnProperty.call(dependencies, 'runtimeConfig')
+      ? dependencies.runtimeConfig
+      : await (dependencies.readRuntimeInput || readRuntimeInput)();
+    (dependencies.validateRuntimeInput || validateRuntimeInput)(runtime);
     fs.mkdirSync(runtime.screenshotDirectory, {mode: 0o700});
 
     currentStage = 'browser_launch';
-    browser = await chromium.launch({
+    browser = await (dependencies.launchBrowser || ((options) => chromium.launch(options)))({
       headless: true,
       chromiumSandbox: true,
       args: [
@@ -1310,11 +1448,11 @@ async function main() {
     // Browser-level discovery starts before this runner creates any context,
     // so shared-worker creation is never missed and absence becomes provable.
     currentStage = 'browser_worker_discovery';
-    registry = createWorkerDiscovery();
+    registry = (dependencies.createWorkerDiscovery || createWorkerDiscovery)();
     await registry.launch(browser);
 
     currentStage = 'observer_controls';
-    const controlRun = await runObserverControls(browser, registry, cleanupIssues);
+    const controlRun = await (dependencies.runObserverControls || runObserverControls)(browser, registry, cleanupIssues);
     controls = controlRun.controls;
     if(controlRun.failedControls.length > 0) failStage('observer_control_mismatch');
 
@@ -1326,6 +1464,21 @@ async function main() {
     }
 
     const accounts = runtime.accounts;
+    if(runtime.authProgressOneSubmission === true) {
+      authProgressCleanupHandled = true;
+      const result = await runAuthProgressOneSubmission({
+        browser,
+        runtimeConfig: runtime,
+        registry,
+        controls,
+        cleanupIssues,
+        dependencies: dependencies.authProgressDependencies
+      });
+      report = result.report;
+      cleanupFailed = result.cleanupFailed;
+      return;
+    }
+
     currentStage = 'alice_context';
     const alice = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(alice.context);
@@ -1339,50 +1492,6 @@ async function main() {
 
     const pageErrors = [];
     alice.page.on('pageerror', () => pageErrors.push('pageerror'));
-
-    if(runtime.authProgressOneSubmission === true) {
-      await submitUsernameOnceAndWaitForPassword(
-        alice.page,
-        runtime.accounts[0],
-        runtime,
-        'alice',
-        passwordEvidence,
-        actionCounts
-      );
-      currentStage = 'browser_worker_observation';
-      await Promise.all(observers.map((observer) => observer.waitForSetup()));
-      await registry.waitForSetup();
-      alice.observer.state.windowElapsed = true;
-      const egress = summarizeEgress(observers);
-      const workerBlock = buildObservationBlock(registry, appObservers, controls, egress);
-      const network = alice.networkObserver.summary();
-      if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.length !== 0) {
-        failStage('browser_egress_or_page_errors');
-      }
-      if(registry.foreignTargets !== 0 || registry.appContextlessTargets !== 0 || workerBlock.discoveryActive !== 1 ||
-          workerBlock.observerOverflow !== 0 || workerBlock.contexts.alice.pageTargets !== 1 ||
-          workerBlock.contexts.alice.coverageComplete !== 1 || workerBlock.contexts.alice.observerErrors !== 0) {
-        failStage('browser_worker_observation_incomplete');
-      }
-      if(network.workerTargets.service_worker < 1 || network.allowedWebSockets < 1) {
-        failStage('browser_worker_or_websocket_evidence');
-      }
-      if(observation.validateNetworkBlock(workerBlock)) failStage('worker_observation_unclassified');
-      currentStage = 'alice_password_field_ready';
-      report = buildAuthProgressReport(
-        'passed',
-        currentStage,
-        {usernameSubmissions: actionCounts.usernameSubmissions, contextCount: contexts.length},
-        Object.keys(controls).length,
-        passwordEvidence,
-        registry,
-        appObservers,
-        appNetworkObservers,
-        controls,
-        egress
-      );
-      return;
-    }
 
     currentStage = 'bob_context';
     const bob = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
@@ -1579,42 +1688,21 @@ async function main() {
       };
     }
   } finally {
-    currentStage = 'cleanup';
-    try {
-      const discoveryStopped = await registry?.stop();
-      if(discoveryStopped && (discoveryStopped.detachFailures > 0 || discoveryStopped.discoveryDisabled === false)) {
-        cleanupIssues.push('worker_discovery_cleanup');
-      }
-    } catch {
-      cleanupIssues.push('worker_discovery_cleanup');
+    if(!authProgressCleanupHandled) {
+      currentStage = 'cleanup';
+      cleanupFailed = await cleanupBrowserRun({
+        registry,
+        observers,
+        contexts,
+        browser,
+        screenshotDirectory: runtime?.screenshotDirectory,
+        cleanupIssues
+      });
     }
-    for(const observer of observers) {
-      try {
-        await observer.stop();
-      } catch {
-        cleanupFailed = true;
-      }
-    }
-    try {
-      await Promise.all(contexts.map((context) => context.close()));
-    } catch {
-      cleanupFailed = true;
-    }
-    try {
-      await browser?.close();
-    } catch {
-      cleanupFailed = true;
-    }
-    try {
-      if(runtime?.screenshotDirectory) fs.rmSync(runtime.screenshotDirectory, {recursive: true, force: true});
-    } catch {
-      cleanupFailed = true;
-    }
-    if(cleanupIssues.length > 0) cleanupFailed = true;
     if(runtime?.authProgressOneSubmission === true) {
-      emitAuthProgressReport(report, cleanupFailed);
+      (dependencies.emitAuthProgressReport || emitAuthProgressReport)(report, cleanupFailed);
     } else {
-      emitReport(report, cleanupFailed);
+      (dependencies.emitReport || emitReport)(report, cleanupFailed);
     }
   }
 }
@@ -1640,7 +1728,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, waitForPasswordField, submitPassword};
+module.exports = {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
