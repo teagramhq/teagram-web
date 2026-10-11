@@ -1,5 +1,6 @@
-## teagram-web
-Telegram Web K is based on Webogram, patched and improved. Its source is hosted at [teagramhq/teagram-web](https://github.com/teagramhq/teagram-web). Available for everyone here: https://web.telegram.org/k/
+# Teagram Web
+
+Teagram Web is a web client that supports private builds for the Teagram server. Accounts use a username and password only; phone and QR sign-in are not supported. Username/password sign-in is in progress (MAIN-1541), and web sign-in does not work yet.
 
 
 ### Developing
@@ -11,7 +12,7 @@ This will install all the needed dependencies.
 
 
 #### Running web-server
-Just run `pnpm start` to start the web server and the livereload task.
+Run `pnpm start` to start the web server and the livereload task. With no private MTProto target configured, it runs the stock Telegram client against Telegram's DCs and emits no private manifest. Only private mode targets the Teagram server.
 Open http://localhost:8080/ in your browser.
 
 
@@ -29,7 +30,7 @@ MTPROTO_PRIVATE_ENDPOINT=wss://mtproto.example.test:2443/apiws
 MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE=/path/to/public-key.pem
 ```
 
-The endpoint must be a normalized `wss://` URL outside `telegram.org`. The key file must contain exactly one 2048-bit RSA public key with exponent 65537 in either `RSA PUBLIC KEY` (PKCS#1) or `PUBLIC KEY` (SPKI) PEM format. It must not contain private key material.
+The endpoint must be a normalized `wss://` URL outside `telegram.org` and its subdomains, and must target the Teagram server. The key file must contain exactly one 2048-bit RSA public key with exponent 65537 in either `RSA PUBLIC KEY` (PKCS#1) or `PUBLIC KEY` (SPKI) PEM format. It must not contain private key material.
 
 Build the artifact with the same Vite command used by the project, for example:
 
@@ -77,16 +78,8 @@ You can use `docker build -f ./.docker/Dockerfile_production -t {dockerhub-usern
 * [Temml](https://github.com/ronkok/Temml) ([MIT License](https://github.com/ronkok/Temml/blob/main/LICENSE))
 
 ### Debugging
-You are welcome in helping to minimize the impact of bugs. There are classes, binded to global context. Look through the code for certain one and just get it by its name in developer tools.
-Source maps are included in production build for your convenience.
 
-#### Additional query parameters
-* **test=1**: to use test DCs
-* **debug=1**: to enable additional logging
-* **noSharedWorker=1**: to disable Shared Worker, can be useful for debugging
-* **http=1**: to force the use of HTTPS transport when connecting to Telegram servers
-
-Should be applied like that: http://localhost:8080/?test=1
+Source maps are included in production builds. Use `debug=1` for additional logging or `noSharedWorker=1` to disable the Shared Worker while debugging locally.
 
 #### Taking local storage snapshots
 You can also take and load snapshots of the local storage and indexed DB using the `./snapshot-server` [mini-app](/snapshot-server/README.md). Check the `README.md` under this folder for more details.
@@ -94,9 +87,9 @@ You can also take and load snapshots of the local storage and indexed DB using t
 #### Preview all icons
 You can see all the available svg icons by calling the `showIconLibrary()` global function in the browser's console.
 
-### Troubleshooting & Suggesting
+### Troubleshooting
 
-If you find an issue with this app or wish something to be added, let Telegram know using the [Suggestions Platform](https://bugs.telegram.org/c/4002).
+Report bugs through the [Teagram Web issue tracker](https://github.com/teagramhq/teagram-web/issues).
 
 ### Licensing
 
