@@ -1591,6 +1591,12 @@ describe('discovery shared-worker network accounting', () => {
       harness.emit(alice, 'alice-worker', 'Audits.issueAdded', {
         issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: HOSTILE.url, isReportOnly: true}}}
       });
+      for(const blockedURL of ['', `https://[invalid?secret=${HOSTILE.token}`]) {
+        harness.emit(alice, 'alice-worker', 'Audits.issueAdded', {
+          issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL, isReportOnly: true}}}
+        });
+      }
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 0, coverageComplete: 1});
       expect(alice.networkObserver.summary().unexpectedAttempts).toBe(0);
       harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'query-socket', url: 'wss://telegramd.test/apiws?extra=1'});
       expect(alice.networkObserver.summary()).toMatchObject({unexpectedAttempts: 1, allowedWebSockets: 0});
@@ -1744,6 +1750,49 @@ describe('discovery shared-worker network accounting', () => {
     }
   });
 
+  it.each([
+    ['Network.webSocketCreated', {requestId: 'invalid-socket', url: ''}],
+    ['Network.webSocketCreated', {requestId: 'invalid-socket', url: `relative-path?secret=${HOSTILE.token}`}],
+    ['Network.requestWillBeSent', {type: 'Fetch', request: {url: ''}}],
+    ['Network.requestWillBeSent', {type: 'Fetch', request: {url: `https://[invalid?secret=${HOSTILE.token}`}}],
+    ['Audits.issueAdded', {issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: '', isReportOnly: false}}}}],
+    ['Audits.issueAdded', {issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: `https://[invalid?secret=${HOSTILE.token}`, isReportOnly: false}}}}],
+    ['Log.entryAdded', {entry: {source: 'security', text: `Refused to connect to 'https://[invalid?secret=${HOSTILE.token}'`}}]
+  ])('rejects invalid URL strings from discovery %s without charging twice or inventing attempts', async(method, params) => {
+    const harness = await createDiscoveryNetworkHarness({observeWebSocket101: false});
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'alice-worker');
+      const before = alice.observer.eventCount();
+      expect(() => harness.emit(alice, 'alice-worker', method, params)).not.toThrow();
+      expect(alice.observer.eventCount()).toBe(before + 1);
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 1, coverageComplete: 0});
+      expect(alice.networkObserver.summary()).toMatchObject({observerErrors: 1, allowedWebSockets: 0, unexpectedAttempts: 0});
+      expect(alice.networkObserver.events).toHaveLength(0);
+      expectNoHostileLeak({network: alice.networkObserver.summary(), worker: alice.observer.summary(), errors: alice.networkObserver.errors});
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it.each(['page', 'auto'])('rejects invalid URL strings from the existing %s path with one event charge', async(via) => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      if(via === 'auto') await harness.attach(alice, 'alice-worker', 'auto');
+      const before = alice.observer.eventCount();
+      const params = {requestId: 'invalid-socket', url: ''};
+      if(via === 'page') alice.cdp.emit('Network.webSocketCreated', params);
+      else harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', params, 'auto');
+      expect(alice.observer.eventCount()).toBe(before + 1);
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 1, coverageComplete: 0});
+      expect(alice.networkObserver.summary()).toMatchObject({observerErrors: 1, allowedWebSockets: 0, unexpectedAttempts: 0});
+      expect(alice.networkObserver.events).toHaveLength(0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
   it('records an observer error when an owned discovery session has no network sink', async() => {
     const harness = await createDiscoveryNetworkHarness();
     const {alice} = harness;
@@ -1827,6 +1876,21 @@ describe('discovery shared-worker network accounting', () => {
     const report = await runDiscoveryAccountingGate([{method: 'Network.requestWillBeSent', params: null}]);
     expect(report.status).toBe('failed');
     expect(report.workerObservation.contexts.alice.coverageComplete).toBe(0);
+  });
+
+  it.each([
+    {method: 'Network.webSocketCreated', params: {requestId: 'invalid-socket', url: ''}},
+    {method: 'Network.requestWillBeSent', params: {type: 'Fetch', request: {url: ''}}},
+    {method: 'Audits.issueAdded', params: {issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: '', isReportOnly: false}}}}},
+    {method: 'Log.entryAdded', params: {entry: {source: 'security', text: `Refused to connect to 'https://[invalid?secret=${HOSTILE.token}'`}}}
+  ])('fails the egress gate on invalid URL strings from discovery $method', async(event) => {
+    const report = await runDiscoveryAccountingGate([event]);
+    expect(report).toMatchObject({
+      status: 'failed', stage: 'browser_egress_or_page_errors', network: {unexpectedAttempts: 0, observerErrors: 1}
+    });
+    expect(report.workerObservation.contexts.alice.coverageComplete).toBe(0);
+    expect(report.network.websocket_101_by_context_phase).toEqual(emptyWebSocket101Grid());
+    expectNoHostileLeak(report);
   });
 
   it('does not backfill allowed attempts from a 101 whose creation was missed', async() => {

@@ -596,14 +596,19 @@ function createNetworkObserver(page, contextName, contextObserver) {
     pendingReleases.add(release);
   }
 
+  function parseNetworkUrl(url) {
+    try {
+      return new URL(url);
+    } catch {
+      recordError('invalid_worker_cdp_message', true);
+      return null;
+    }
+  }
+
   function record(targetId, source, kind, url, eventName) {
     if(observerClosed()) return;
-    let parsed;
-    try {
-      parsed = new URL(url);
-    } catch {
-      return;
-    }
+    const parsed = parseNetworkUrl(url);
+    if(!parsed) return;
 
     if(parsed.protocol === 'data:' || parsed.protocol === 'about:') return;
     if(parsed.protocol === 'blob:') {
@@ -691,14 +696,10 @@ function createNetworkObserver(page, contextName, contextObserver) {
   function recordCspIssue(source, targetId, issue) {
     if(observerClosed()) return;
     const details = issue?.details?.contentSecurityPolicyIssueDetails;
-    if(!details || details.isReportOnly || typeof details.blockedURL !== 'string' || !details.blockedURL) return;
-    const protocol = (() => {
-      try {
-        return new URL(details.blockedURL).protocol;
-      } catch {
-        return '';
-      }
-    })();
+    if(!details || details.isReportOnly || typeof details.blockedURL !== 'string') return;
+    const parsed = parseNetworkUrl(details.blockedURL);
+    if(!parsed) return;
+    const protocol = parsed.protocol;
     if(!['http:', 'https:', 'ws:', 'wss:'].includes(protocol)) return;
     record(targetId, source, ['ws:', 'wss:'].includes(protocol) ? 'websocket' : 'fetch', details.blockedURL, 'Audits.issueAdded');
   }
@@ -708,13 +709,9 @@ function createNetworkObserver(page, contextName, contextObserver) {
     if(!['violation', 'security'].includes(entry?.source)) return;
     const match = /'((?:https?|wss?):\/\/[^']+)'/.exec(entry.text || '');
     if(!match) return;
-    const protocol = (() => {
-      try {
-        return new URL(match[1]).protocol;
-      } catch {
-        return '';
-      }
-    })();
+    const parsed = parseNetworkUrl(match[1]);
+    if(!parsed) return;
+    const protocol = parsed.protocol;
     if(!['http:', 'https:', 'ws:', 'wss:'].includes(protocol)) return;
     record(targetId, source, ['ws:', 'wss:'].includes(protocol) ? 'websocket' : 'fetch', match[1], 'Log.entryAdded');
   }
