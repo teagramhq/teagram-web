@@ -8,6 +8,8 @@ export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'message', 'group'])
 export const REQUIRED_CONTROLS = Object.freeze(Object.keys(observation.CONTROL_EXPECTATIONS));
 const REQUIRED_OBSERVATION_CONTEXTS = Object.freeze(['alice', 'bob']);
 const AUTH_PROGRESS_OBSERVATION_CONTEXTS = Object.freeze(['alice']);
+const AUTH_PROGRESS_WEBSOCKET_101_CONTEXTS = Object.freeze(['alice', 'control', 'other']);
+const AUTH_PROGRESS_WEBSOCKET_101_PHASES = Object.freeze(['pre_submit', 'post_submit', 'unknown']);
 const AUTH_PROGRESS_REPORT_STAGES = Object.freeze([
   'runtime_inputs',
   'runtime_input_validation',
@@ -556,7 +558,7 @@ export function parseAuthProgressReport(report) {
 
 function parseAuthProgressNetwork(network) {
   const sources = ['page', 'shared_worker', 'service_worker', 'worker'];
-  const keys = ['unexpectedAttempts', 'observerErrors', 'contexts'];
+  const keys = ['unexpectedAttempts', 'observerErrors', 'contexts', 'websocket_101_by_context_phase'];
   if(!network || typeof network !== 'object' || Array.isArray(network) ||
       JSON.stringify(Object.keys(network).sort()) !== JSON.stringify(keys.sort()) ||
       !Number.isSafeInteger(network.unexpectedAttempts) || network.unexpectedAttempts < 0 || network.unexpectedAttempts > 1_000_000 ||
@@ -564,6 +566,21 @@ function parseAuthProgressNetwork(network) {
       !network.contexts || typeof network.contexts !== 'object' || Array.isArray(network.contexts) ||
       ![[], ['alice']].some((names) => JSON.stringify(Object.keys(network.contexts).sort()) === JSON.stringify(names))) {
     throw new Error('auth progress network evidence is invalid');
+  }
+
+  const websocket101 = network.websocket_101_by_context_phase;
+  if(!hasExactOwnKeys(websocket101, AUTH_PROGRESS_WEBSOCKET_101_CONTEXTS)) {
+    throw new Error('auth progress websocket upgrade evidence is invalid');
+  }
+  for(const context of AUTH_PROGRESS_WEBSOCKET_101_CONTEXTS) {
+    const phases = websocket101[context];
+    if(!hasExactOwnKeys(phases, AUTH_PROGRESS_WEBSOCKET_101_PHASES) ||
+        AUTH_PROGRESS_WEBSOCKET_101_PHASES.some((phase) => {
+          const count = phases[phase];
+          return !Number.isInteger(count) || count < 0 || count > 2_147_483_647;
+        })) {
+      throw new Error('auth progress websocket upgrade evidence is invalid');
+    }
   }
 
   let unexpectedAttempts = 0;
@@ -605,6 +622,14 @@ function parseAuthProgressNetwork(network) {
   }
 
   return network;
+}
+
+function hasExactOwnKeys(value, keys) {
+  if(!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const ownKeys = Reflect.ownKeys(value);
+  return ownKeys.length === keys.length &&
+    keys.every((key) => Object.hasOwn(value, key)) &&
+    ownKeys.every((key) => typeof key === 'string' && keys.includes(key));
 }
 
 export function assertAllScenariosPassed(results) {
