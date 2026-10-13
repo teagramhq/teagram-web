@@ -620,6 +620,27 @@ describe('confined runner shared-worker observation contract', () => {
     });
   });
 
+  it.each([
+    {creationPhase: 'pre_submit', expectedAlice: {pre_submit: 1, post_submit: 0, unknown: 0}},
+    {creationPhase: 'during_submit', expectedAlice: {pre_submit: 0, post_submit: 0, unknown: 1}}
+  ])('attributes a delayed 101 to the $creationPhase creation phase', ({creationPhase, expectedAlice}) => {
+    const observer = observation.createContextObserver('alice', {observeWebSocket101: true});
+    if(creationPhase === 'during_submit') observer.beginUsernameSubmission();
+    observer.notePageEvent('Network.webSocketCreated', {requestId: 'delayed-socket'});
+    if(creationPhase === 'pre_submit') observer.beginUsernameSubmission();
+    observer.completeUsernameSubmission();
+    observer.notePageEvent('Network.webSocketHandshakeResponseReceived', {
+      requestId: 'delayed-socket',
+      response: {status: 101}
+    });
+
+    expect(observer.webSocket101ByContextPhase()).toEqual({
+      alice: expectedAlice,
+      control: {pre_submit: 0, post_submit: 0, unknown: 0},
+      other: {pre_submit: 0, post_submit: 0, unknown: 0}
+    });
+  });
+
   it('counts only numeric 101 once and treats missing or session-mismatched creation as unknown', () => {
     const observer = observation.createContextObserver('alice', {observeWebSocket101: true});
     observer.notePageEvent('Network.webSocketCreated', {requestId: 'page-socket'});
