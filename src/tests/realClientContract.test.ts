@@ -51,6 +51,22 @@ function createNetworkObserverHarness(observer: any, options: any = {}) {
   return {cdp, networkObserver: createNetworkObserver(page, 'contract-test', observer)};
 }
 
+function emptyWebSocket101Grid() {
+  return {
+    alice: {pre_submit: 0, post_submit: 0, unknown: 0},
+    control: {pre_submit: 0, post_submit: 0, unknown: 0},
+    other: {pre_submit: 0, post_submit: 0, unknown: 0}
+  };
+}
+
+function emitContextWebSocket101(observer: any, targetId: string, sessionId: string, requestId: string) {
+  observer.noteWorkerEvent(targetId, 'Network.webSocketCreated', {requestId}, sessionId);
+  observer.noteWorkerEvent(targetId, 'Network.webSocketHandshakeResponseReceived', {
+    requestId,
+    response: {status: 101}
+  }, sessionId);
+}
+
 function createDiscoveryHarness(send: (method: string, params: any) => Promise<any> = async() => ({})) {
   const session: any = new EventEmitter();
   session.send = send;
@@ -371,7 +387,8 @@ function createAuthProgressNetworkObserver(contextObserver: any, onStop: () => v
 }
 
 async function authProgressNetwork(): Promise<any> {
-  const networkObserver = createAuthProgressNetworkObserver(observation.createContextObserver('auth-progress-network'));
+  const contextObserver = observation.createContextObserver('auth-progress-network', {observeWebSocket101: true});
+  const networkObserver = createAuthProgressNetworkObserver(contextObserver);
   await networkObserver.start();
   try {
     const summary = networkObserver.summary();
@@ -386,7 +403,8 @@ async function authProgressNetwork(): Promise<any> {
           unexpectedAttemptsBySource: summary.unexpectedAttemptsBySource,
           allowedWebSocketsBySource: summary.allowedWebSocketsBySource
         }
-      }
+      },
+      websocket_101_by_context_phase: contextObserver.webSocket101ByContextPhase()
     };
   } finally {
     await networkObserver.stop();
@@ -560,6 +578,245 @@ describe('confined runner shared-worker observation contract', () => {
 
       expect(contextObserver.summary().countedEvents).toBe(1);
       expect(networkObserver.events).toHaveLength(1);
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
+  it('populates all websocket 101 context and submission phase cells', () => {
+    const phase = observation.createWebSocket101Phase();
+    const alice = observation.createContextObserver('alice', {observeWebSocket101: true, webSocket101Phase: phase});
+    const control = observation.createContextObserver('c1_shared_worker_created', {control: true, observeWebSocket101: true, webSocket101Phase: phase});
+    const other = observation.createContextObserver('bob', {observeWebSocket101: true, webSocket101Phase: phase});
+
+    emitContextWebSocket101(alice, 'alice-page', 'alice-session', 'alice-pre');
+    emitContextWebSocket101(control, 'control-page', 'control-session', 'control-pre');
+    emitContextWebSocket101(other, 'other-page', 'other-session', 'other-pre');
+
+    alice.beginUsernameSubmission();
+    emitContextWebSocket101(alice, 'alice-page', 'alice-session', 'alice-during');
+    emitContextWebSocket101(control, 'control-page', 'control-session', 'control-during');
+    emitContextWebSocket101(other, 'other-page', 'other-session', 'other-during');
+
+    alice.completeUsernameSubmission();
+    emitContextWebSocket101(alice, 'alice-page', 'alice-session', 'alice-post');
+    emitContextWebSocket101(control, 'control-page', 'control-session', 'control-post');
+    emitContextWebSocket101(other, 'other-page', 'other-session', 'other-post');
+
+    expect(alice.webSocket101ByContextPhase()).toEqual({
+      alice: {pre_submit: 1, post_submit: 1, unknown: 1},
+      control: {pre_submit: 0, post_submit: 0, unknown: 0},
+      other: {pre_submit: 0, post_submit: 0, unknown: 0}
+    });
+    expect(control.webSocket101ByContextPhase()).toEqual({
+      alice: {pre_submit: 0, post_submit: 0, unknown: 0},
+      control: {pre_submit: 1, post_submit: 1, unknown: 1},
+      other: {pre_submit: 0, post_submit: 0, unknown: 0}
+    });
+    expect(other.webSocket101ByContextPhase()).toEqual({
+      alice: {pre_submit: 0, post_submit: 0, unknown: 0},
+      control: {pre_submit: 0, post_submit: 0, unknown: 0},
+      other: {pre_submit: 1, post_submit: 1, unknown: 1}
+    });
+  });
+
+  it.each([
+    {creationPhase: 'pre_submit', expectedAlice: {pre_submit: 1, post_submit: 0, unknown: 0}},
+    {creationPhase: 'during_submit', expectedAlice: {pre_submit: 0, post_submit: 0, unknown: 1}}
+  ])('attributes a delayed 101 to the $creationPhase creation phase', ({creationPhase, expectedAlice}) => {
+    const observer = observation.createContextObserver('alice', {observeWebSocket101: true});
+    if(creationPhase === 'during_submit') observer.beginUsernameSubmission();
+    observer.notePageEvent('Network.webSocketCreated', {requestId: 'delayed-socket'});
+    if(creationPhase === 'pre_submit') observer.beginUsernameSubmission();
+    observer.completeUsernameSubmission();
+    observer.notePageEvent('Network.webSocketHandshakeResponseReceived', {
+      requestId: 'delayed-socket',
+      response: {status: 101}
+    });
+
+    expect(observer.webSocket101ByContextPhase()).toEqual({
+      alice: expectedAlice,
+      control: {pre_submit: 0, post_submit: 0, unknown: 0},
+      other: {pre_submit: 0, post_submit: 0, unknown: 0}
+    });
+  });
+
+  it('counts only numeric 101 once and treats missing or session-mismatched creation as unknown', () => {
+    const observer = observation.createContextObserver('alice', {observeWebSocket101: true});
+    observer.notePageEvent('Network.webSocketCreated', {requestId: 'page-socket'});
+    observer.notePageEvent('Network.webSocketHandshakeResponseReceived', {requestId: 'page-socket', response: {status: 101}});
+    observer.notePageEvent('Network.webSocketHandshakeResponseReceived', {requestId: 'page-socket', response: {status: 101}});
+    observer.notePageEvent('Network.webSocketHandshakeResponseReceived', {requestId: 'not-created', response: {status: 101}});
+    observer.notePageEvent('Network.webSocketHandshakeResponseReceived', {requestId: 'not-created', response: {status: 101}});
+    observer.notePageEvent('Network.webSocketHandshakeResponseReceived', {requestId: 'not-upgraded', response: {status: 200}});
+    observer.notePageEvent('Network.webSocketHandshakeResponseReceived', {requestId: 'string-status', response: {status: '101'}});
+    observer.notePageEvent('Network.webSocketCreated', {requestId: 'session-local'});
+    observer.noteWorkerEvent('worker-target', 'Network.webSocketHandshakeResponseReceived', {
+      requestId: 'session-local',
+      response: {status: 101}
+    }, 'different-session');
+
+    expect(observer.webSocket101ByContextPhase()).toEqual({
+      alice: {pre_submit: 1, post_submit: 0, unknown: 2},
+      control: {pre_submit: 0, post_submit: 0, unknown: 0},
+      other: {pre_submit: 0, post_submit: 0, unknown: 0}
+    });
+  });
+
+  it('preserves upgrade counts after an observer overflow closes coverage', () => {
+    const observer = observation.createContextObserver('alice', {observeWebSocket101: true});
+    emitContextWebSocket101(observer, 'alice-page', 'alice-session', 'observed-before-overflow');
+    const beforeOverflow = observer.webSocket101ByContextPhase();
+    for(let index = observer.eventCount(); index < observation.LIMITS.countedEventsPerContext; index++) observer.noteEvent();
+    observer.notePageEvent('Network.webSocketHandshakeResponseReceived', {requestId: 'after-overflow', response: {status: 101}});
+
+    expect(observer.summary().observerOverflow).toBe(1);
+    expect(observer.webSocket101ByContextPhase()).toEqual(beforeOverflow);
+  });
+
+  it('reads 101s from the existing page CDP session without retaining handshake data', async() => {
+    const observer = observation.createContextObserver('alice', {observeWebSocket101: true});
+    const {cdp, networkObserver} = createNetworkObserverHarness(observer);
+    await networkObserver.start();
+
+    try {
+      cdp.emit('Network.webSocketCreated', {requestId: 'page-socket', url: 'wss://telegramd.test/apiws'});
+      cdp.emit('Network.webSocketHandshakeResponseReceived', {
+        requestId: 'page-socket',
+        response: {
+          status: 101,
+          url: HOSTILE.url,
+          headers: {cookie: HOSTILE.password},
+          headersText: HOSTILE.token,
+          timestamp: 12345
+        }
+      });
+
+      expect(observer.webSocket101ByContextPhase()).toEqual({
+        alice: {pre_submit: 1, post_submit: 0, unknown: 0},
+        control: {pre_submit: 0, post_submit: 0, unknown: 0},
+        other: {pre_submit: 0, post_submit: 0, unknown: 0}
+      });
+      const output = JSON.stringify({events: networkObserver.events, summary: networkObserver.summary(), upgrades: observer.webSocket101ByContextPhase()});
+      expect(output).not.toContain(HOSTILE.url);
+      expect(output).not.toContain(HOSTILE.password);
+      expect(output).not.toContain(HOSTILE.token);
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
+  it('reads 101s from an existing page auto-attach worker session without retaining handshake data', async() => {
+    const observer = observation.createContextObserver('alice', {observeWebSocket101: true});
+    const cdp: any = new EventEmitter();
+    cdp.send = async(method: string, params: any) => {
+      if(method === 'Target.sendMessageToTarget') {
+        const {id} = JSON.parse(params.message);
+        queueMicrotask(() => cdp.emit('Target.receivedMessageFromTarget', {
+          sessionId: params.sessionId,
+          message: JSON.stringify({id, result: {}})
+        }));
+      }
+      return method === 'Target.getTargetInfo' ? {targetInfo: {browserContextId: 'alice-context'}} : {};
+    };
+    cdp.detach = async() => {};
+    const context = {newCDPSession: async() => cdp, close: async() => {}};
+    const page: any = {context: () => context};
+    const networkObserver = createNetworkObserver(page, 'contract-test', observer);
+    await networkObserver.start();
+
+    try {
+      cdp.emit('Target.attachedToTarget', {
+        sessionId: 'service-worker-session',
+        targetInfo: {targetId: 'service-worker-target', type: 'service_worker', url: `${APP_ORIGIN}/sw-test.js`}
+      });
+      await networkObserver.waitForSetup();
+      const emitWorkerEvent = (method: string, params: any) => cdp.emit('Target.receivedMessageFromTarget', {
+        sessionId: 'service-worker-session',
+        message: JSON.stringify({method, params})
+      });
+      emitWorkerEvent('Network.webSocketCreated', {requestId: 'service-socket', url: 'wss://telegramd.test/apiws'});
+      emitWorkerEvent('Network.webSocketHandshakeResponseReceived', {
+        requestId: 'service-socket',
+        response: {
+          status: 101,
+          url: HOSTILE.url,
+          headers: {cookie: HOSTILE.password, 'x-secret': HOSTILE.token},
+          headersText: HOSTILE.phrase,
+          timestamp: 12345
+        }
+      });
+
+      expect(observer.webSocket101ByContextPhase()).toEqual({
+        alice: {pre_submit: 1, post_submit: 0, unknown: 0},
+        control: {pre_submit: 0, post_submit: 0, unknown: 0},
+        other: {pre_submit: 0, post_submit: 0, unknown: 0}
+      });
+      const output = JSON.stringify({events: networkObserver.events, summary: networkObserver.summary(), upgrades: observer.webSocket101ByContextPhase()});
+      expect(output).not.toContain(HOSTILE.url);
+      expect(output).not.toContain(HOSTILE.password);
+      expect(output).not.toContain(HOSTILE.token);
+      expect(output).not.toContain(HOSTILE.phrase);
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
+  it('reads 101s from the existing discovery-attached shared-worker session', async() => {
+    const observer = observation.createContextObserver('alice', {observeWebSocket101: true});
+    const session: any = new EventEmitter();
+    session.send = async(method: string, params: any) => {
+      if(method === 'Target.attachToTarget') return {sessionId: 'shared-worker-session'};
+      if(method === 'Target.sendMessageToTarget') {
+        const {id} = JSON.parse(params.message);
+        queueMicrotask(() => session.emit('Target.receivedMessageFromTarget', {
+          sessionId: params.sessionId,
+          message: JSON.stringify({id, result: {}})
+        }));
+      }
+      return {};
+    };
+    const browser: any = {newBrowserCDPSession: async() => session};
+    const registry = createWorkerDiscovery();
+    await registry.launch(browser);
+    registry.registerContext('alice-context', observer);
+
+    try {
+      session.emit('Target.targetCreated', {
+        targetInfo: {targetId: 'shared-worker-target', type: 'shared_worker', url: PROBE_WORKER_URL, browserContextId: 'alice-context'}
+      });
+      await registry.waitForSetup();
+      const emitWorkerEvent = (method: string, params: any) => session.emit('Target.receivedMessageFromTarget', {
+        sessionId: 'shared-worker-session',
+        message: JSON.stringify({method, params})
+      });
+      emitWorkerEvent('Network.webSocketCreated', {requestId: 'shared-socket', url: 'wss://telegramd.test/apiws'});
+      emitWorkerEvent('Network.webSocketHandshakeResponseReceived', {
+        requestId: 'shared-socket',
+        response: {status: 101, url: HOSTILE.url, headers: {cookie: HOSTILE.password}, headersText: HOSTILE.token}
+      });
+
+      expect(observer.webSocket101ByContextPhase()).toEqual({
+        alice: {pre_submit: 1, post_submit: 0, unknown: 0},
+        control: {pre_submit: 0, post_submit: 0, unknown: 0},
+        other: {pre_submit: 0, post_submit: 0, unknown: 0}
+      });
+      expect(JSON.stringify(observer.webSocket101ByContextPhase())).not.toContain(HOSTILE.url);
+    } finally {
+      await registry.stop();
+    }
+  });
+
+  it('keeps paired-only websocket cells out of normal observer summaries', async() => {
+    const observer = observation.createContextObserver('normal-mode');
+    const {cdp, networkObserver} = createNetworkObserverHarness(observer);
+    await networkObserver.start();
+
+    try {
+      cdp.emit('Network.webSocketHandshakeResponseReceived', {requestId: 'normal-socket', response: {status: 101}});
+
+      expect(observer.summary()).not.toHaveProperty('websocket_101_by_context_phase');
+      expect(networkObserver.summary()).not.toHaveProperty('websocket_101_by_context_phase');
     } finally {
       await networkObserver.stop();
     }
@@ -971,6 +1228,7 @@ describe('confined runner shared-worker observation contract', () => {
     }
 
     expect(observation.BROWSER_CDP_METHODS).toEqual(['Target.setDiscoverTargets', 'Target.attachToTarget', 'Target.detachFromTarget', 'Target.sendMessageToTarget']);
+    expect(observation.PAGE_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.sendMessageToTarget', 'Target.detachFromTarget']);
     expect(observation.WORKER_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable', 'Runtime.runIfWaitingForDebugger']);
     expect(observation.allowCdpMethod('page', 'Target.getTargetInfo')).toBe(true);
     expect(observation.allowCdpMethod('page', 'Runtime.enable')).toBe(false);
@@ -1465,6 +1723,49 @@ describe('real client scenario contract', () => {
     }
   });
 
+  it('requires all websocket 101 cells with closed context and phase enums', async() => {
+    const network = await authProgressNetwork();
+    const grid: any = emptyWebSocket101Grid();
+    grid.alice.post_submit = 2_147_483_647;
+    const makeReport = (counts: any): any => ({
+      status: 'failed',
+      mode: 'auth_progress_one_submission',
+      stage: 'browser_launch',
+      usernameSubmissions: 0,
+      passwordFills: 0,
+      passwordSubmissions: 0,
+      bobContextCount: 0,
+      laterScenarioCount: 0,
+      contextCount: 0,
+      controlContextCount: 0,
+      screenshotsCaptured: 0,
+      passwordEvidence: [] as any[],
+      network: {...structuredClone(network), websocket_101_by_context_phase: counts},
+      workerObservation: null as any
+    });
+    const validReport = makeReport(grid);
+
+    expect(parseAuthProgressReport(validReport)).toEqual(validReport);
+
+    const invalidGrids = [
+      (() => { const invalid = structuredClone(grid); delete invalid.alice.unknown; return invalid; })(),
+      (() => { const invalid = structuredClone(grid); invalid.alice.extra = 0; return invalid; })(),
+      (() => { const invalid = structuredClone(grid); invalid.bob = invalid.alice; return invalid; })(),
+      (() => { const invalid = structuredClone(grid); invalid.constructor = invalid.alice; return invalid; })(),
+      (() => { const invalid = structuredClone(grid); Object.defineProperty(invalid.alice, '__proto__', {value: 0, enumerable: true}); return invalid; })(),
+      ...[1.5, -1, 2_147_483_648].map((count) => {
+        const invalid = structuredClone(grid);
+        invalid.other.unknown = count;
+        return invalid;
+      }),
+      (() => { const invalid = Object.create({alice: grid.alice}); invalid.control = grid.control; invalid.other = grid.other; return invalid; })()
+    ];
+    for(const invalidGrid of invalidGrids) {
+      expect(() => parseAuthProgressReport(makeReport(invalidGrid))).toThrow('auth progress report is invalid');
+    }
+    expect(() => parseAuthProgressReport(makeReport(undefined))).toThrow('auth progress report is invalid');
+  });
+
   it('turns cleanup failure into a fixed failed one-submission report and nonzero exit', async() => {
     const network = await authProgressNetwork();
     const report = {
@@ -1869,7 +2170,7 @@ describe('real client username field readiness', () => {
         authProgressDependencies: {
           submitUsernameOnceAndWaitForPassword: async(...args: any[]) => {
             try {
-              await submitUsernameOnceAndWaitForPassword(...args, card === 'timeout' ? 100 : 1000);
+              await submitUsernameOnceAndWaitForPassword(...args.slice(0, 6), card === 'timeout' ? 100 : 1000, args[7]);
             } finally {
               pageCounts = await args[0].evaluate((): any => (window as any).authProgressCounts).catch((_: any): null => null);
             }
@@ -2073,6 +2374,8 @@ describe('real client username field readiness', () => {
     expect(result.reportBeforeEmission.network.contexts.alice.workerTargets).toEqual({shared_worker: 1, service_worker: 1});
     expect(JSON.parse(result.output.trim()).network.contexts.alice.workerTargets).toEqual({shared_worker: 1, service_worker: 1});
     expect(parseAuthProgressReport(result.report)).toEqual(result.report);
+    expect(result.report.network.websocket_101_by_context_phase).toEqual(emptyWebSocket101Grid());
+    expect(JSON.parse(result.output.trim()).network.websocket_101_by_context_phase).toEqual(emptyWebSocket101Grid());
     expect(parseAuthProgressReport(result.report).network.contexts.alice.workerTargets).toEqual({shared_worker: 1, service_worker: 1});
     expect(Object.keys(result.report.network.contexts.alice.workerTargets).sort()).toEqual(['service_worker', 'shared_worker']);
     expect(result.report.network.contexts.alice.attemptsBySource).toEqual({page: 0, shared_worker: 0, service_worker: 1, worker: 0});

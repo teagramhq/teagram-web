@@ -340,7 +340,7 @@ function createWorkerDiscovery() {
       return;
     }
     if(typeof payload.method !== 'string') return;
-    observer.noteWorkerEvent(targetId, payload.method, payload.params);
+    observer.noteWorkerEvent(targetId, payload.method, payload.params, event.sessionId);
   }
 
   async function waitForSetup() {
@@ -725,7 +725,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
 
     const targetInfo = targets.get(sessionId);
     if(!targetInfo) return;
-    contextObserver?.noteWorkerEvent(targetInfo.targetId, payload.method, payload.params);
+    contextObserver?.noteWorkerEvent(targetInfo.targetId, payload.method, payload.params, sessionId);
     if(observerClosed()) return;
     if(payload.method === 'Network.requestWillBeSent') {
       const kind = payload.params.type === 'WebSocket' ? 'websocket' : 'fetch';
@@ -763,12 +763,16 @@ function createNetworkObserver(page, contextName, contextObserver) {
     });
     cdp.on('Network.webSocketCreated', (event) => {
       if(observerClosed()) return;
-      if(contextObserver && !contextObserver.noteEvent()) {
-        observerClosed();
-        return;
-      }
+      notePageEvent('Network.webSocketCreated', event);
+      if(observerClosed()) return;
       record('page', 'page', 'websocket', event.url, 'Network.webSocketCreated');
     });
+    if(contextObserver?.observeWebSocket101) {
+      cdp.on('Network.webSocketHandshakeResponseReceived', (event) => {
+        if(observerClosed()) return;
+        notePageEvent('Network.webSocketHandshakeResponseReceived', event);
+      });
+    }
     cdp.on('Audits.issueAdded', (event) => {
       if(observerClosed()) return;
       const issue = event.issue;
@@ -1034,7 +1038,7 @@ async function signIn(page, account, name, screenshotDirectory, capturedScreensh
   .catch(() => failStage(`${name}_service_worker_controller`));
 }
 
-async function submitUsernameOnceAndWaitForPassword(page, account, expected, name, passwordEvidence, actionCounts, timeoutMs = PASSWORD_FIELD_TIMEOUT_MS) {
+async function submitUsernameOnceAndWaitForPassword(page, account, expected, name, passwordEvidence, actionCounts, timeoutMs = PASSWORD_FIELD_TIMEOUT_MS, webSocket101Observer) {
   const username = await prepareUsernameEntry(page, name, expected);
   if(await username.count() !== 1) failStage(`${name}_username_field_not_unique`);
   const usernameField = await username.elementHandle();
@@ -1043,7 +1047,9 @@ async function submitUsernameOnceAndWaitForPassword(page, account, expected, nam
   try {
     await username.fill(account.username);
     actionCounts.usernameSubmissions++;
+    webSocket101Observer?.beginUsernameSubmission();
     await username.press('Enter');
+    webSocket101Observer?.completeUsernameSubmission();
     await waitForPasswordField(page, usernameField, name, passwordEvidence, timeoutMs);
     passwordEvidence.push({stage: `${name}_password_field_ready`, count: 1});
     currentStage = `${name}_password_field_ready`;
@@ -1111,12 +1117,15 @@ async function waitForMembers(page, memberRows) {
 // The accepted fixture's synthetic controls, run before any app context exists.
 // Each control owns its own browser context, so its targets never enter app
 // counts, and any mismatch stops the run before the app scenarios start.
-async function runObserverControls(browser, registry, cleanupIssues) {
+async function runObserverControls(browser, registry, cleanupIssues, webSocket101Phase) {
   const controls = {};
   const failedControls = [];
+  const webSocket101Observers = [];
+  const observeWebSocket101 = Boolean(webSocket101Phase);
   for(const plan of CONTROL_PLAN) {
     const context = await browser.newContext({viewport: {width: 1280, height: 900}});
-    const observer = observation.createContextObserver(plan.name, {control: true});
+    const observer = observation.createContextObserver(plan.name, {control: true, observeWebSocket101, webSocket101Phase});
+    if(observeWebSocket101) webSocket101Observers.push(observer);
     let networkObserver;
     try {
       const page = await context.newPage();
@@ -1160,7 +1169,13 @@ async function runObserverControls(browser, registry, cleanupIssues) {
       }
     }
   }
-  return {controls, failedControls};
+  return {
+    controls,
+    failedControls,
+    ...(observeWebSocket101 ? {websocket101ByContextPhase: mergeWebSocket101ByContextPhase(
+      webSocket101Observers.map((observer) => observer.webSocket101ByContextPhase())
+    )} : {})
+  };
 }
 
 function summarizeEgress(observers) {
@@ -1169,6 +1184,17 @@ function summarizeEgress(observers) {
     unexpectedAttempts: summaries.reduce((sum, summary) => sum + summary.unexpectedAttempts, 0),
     observerErrors: summaries.reduce((sum, summary) => sum + summary.observerErrors, 0)
   };
+}
+
+function mergeWebSocket101ByContextPhase(grids) {
+  const merged = observation.createWebSocket101Grid();
+  for(const grid of grids) {
+    if(!grid) continue;
+    for(const context of observation.WEBSOCKET_101_CONTEXTS) {
+      for(const phase of observation.WEBSOCKET_101_PHASES) merged[context][phase] += grid[context][phase];
+    }
+  }
+  return merged;
 }
 
 function buildObservationBlock(registry, appObservers, controls, egress) {
@@ -1233,7 +1259,7 @@ function buildObserverOnlyReport(registry, controls) {
   };
 }
 
-function buildAuthProgressReport(status, stage, contexts, controlCount, passwordEvidence, registry, appObservers, appNetworkObservers, controls, egress) {
+function buildAuthProgressReport(status, stage, contexts, controlCount, passwordEvidence, registry, appObservers, appNetworkObservers, controls, egress, controlWebSocket101ByContextPhase) {
   const networkContexts = Object.fromEntries(Object.entries(appNetworkObservers).map(([name, observer]) => {
     const summary = observer.summary();
     return [name, {
@@ -1263,7 +1289,11 @@ function buildAuthProgressReport(status, stage, contexts, controlCount, password
     network: {
       unexpectedAttempts: egress.unexpectedAttempts,
       observerErrors: egress.observerErrors,
-      contexts: networkContexts
+      contexts: networkContexts,
+      websocket_101_by_context_phase: mergeWebSocket101ByContextPhase([
+        controlWebSocket101ByContextPhase,
+        ...Object.values(appObservers).map((observer) => observer.webSocket101ByContextPhase())
+      ])
     },
     workerObservation: observationBlock && !observation.validateNetworkBlock(observationBlock)
       ? observationBlock
@@ -1307,7 +1337,7 @@ async function cleanupBrowserRun({registry, observers, contexts, browser, screen
   return cleanupFailed;
 }
 
-async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, controls, cleanupIssues = [], dependencies = {}}) {
+async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, controls, cleanupIssues = [], dependencies = {}, webSocket101Phase, controlWebSocket101ByContextPhase}) {
   const contexts = [];
   const observers = [];
   const appObservers = {};
@@ -1325,7 +1355,7 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
     const alice = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(alice.context);
     alice.page = await alice.context.newPage();
-    alice.observer = createContextObserver('alice');
+    alice.observer = createContextObserver('alice', {observeWebSocket101: true, webSocket101Phase});
     appObservers.alice = alice.observer;
     alice.networkObserver = createAppNetworkObserver(alice.page, 'alice', alice.observer);
     appNetworkObservers.alice = alice.networkObserver;
@@ -1340,7 +1370,9 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
       runtimeConfig,
       'alice',
       passwordEvidence,
-      actionCounts
+      actionCounts,
+      PASSWORD_FIELD_TIMEOUT_MS,
+      alice.observer
     );
     currentStage = 'browser_worker_observation';
     await Promise.all(observers.map((observer) => observer.waitForSetup()));
@@ -1372,7 +1404,8 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
       appObservers,
       appNetworkObservers,
       controls,
-      egress
+      egress,
+      controlWebSocket101ByContextPhase
     );
   } catch(error) {
     await Promise.all(observers.map((observer) => observer.waitForSetup().catch(() => {})));
@@ -1389,7 +1422,8 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
       appObservers,
       appNetworkObservers,
       controls,
-      egress
+      egress,
+      controlWebSocket101ByContextPhase
     );
   } finally {
     currentStage = 'cleanup';
@@ -1421,6 +1455,8 @@ async function main(dependencies = {}) {
   let authProgressCleanupHandled = false;
   let registry;
   let controls = {};
+  let webSocket101Phase;
+  let controlWebSocket101ByContextPhase;
   try {
     runtime = Object.prototype.hasOwnProperty.call(dependencies, 'runtimeConfig')
       ? dependencies.runtimeConfig
@@ -1452,8 +1488,10 @@ async function main(dependencies = {}) {
     await registry.launch(browser);
 
     currentStage = 'observer_controls';
-    const controlRun = await (dependencies.runObserverControls || runObserverControls)(browser, registry, cleanupIssues);
+    webSocket101Phase = runtime.authProgressOneSubmission === true ? observation.createWebSocket101Phase() : undefined;
+    const controlRun = await (dependencies.runObserverControls || runObserverControls)(browser, registry, cleanupIssues, webSocket101Phase);
     controls = controlRun.controls;
+    controlWebSocket101ByContextPhase = controlRun.websocket101ByContextPhase;
     if(controlRun.failedControls.length > 0) failStage('observer_control_mismatch');
 
     // The synthetic-only mode proves the observer capability against the
@@ -1472,7 +1510,9 @@ async function main(dependencies = {}) {
         registry,
         controls,
         cleanupIssues,
-        dependencies: dependencies.authProgressDependencies
+        dependencies: dependencies.authProgressDependencies,
+        webSocket101Phase,
+        controlWebSocket101ByContextPhase
       });
       report = result.report;
       cleanupFailed = result.cleanupFailed;
@@ -1660,7 +1700,8 @@ async function main(dependencies = {}) {
         appObservers,
         appNetworkObservers,
         controls,
-        egress
+        egress,
+        controlWebSocket101ByContextPhase
       );
     } else {
       await Promise.all(observers.map((observer) => observer.waitForSetup()));

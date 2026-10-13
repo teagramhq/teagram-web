@@ -97,8 +97,27 @@ const WORKER_CHUNK_PATTERNS = Object.freeze([
 
 const ORIGIN_CLASSES = Object.freeze(['blob_same_origin', 'other_same_origin', 'cross_origin']);
 const WORKER_SOURCE_LABELS = Object.freeze([...new Set([...WORKER_CHUNK_PATTERNS.map((entry) => entry.label), ...ORIGIN_CLASSES])]);
+const WEBSOCKET_101_CONTEXTS = Object.freeze(['alice', 'control', 'other']);
+const WEBSOCKET_101_PHASES = Object.freeze(['pre_submit', 'post_submit', 'unknown']);
 
 const UNCLASSIFIED_NETWORK_BLOCK = Object.freeze({classification: 'unclassified'});
+
+function createWebSocket101Grid() {
+  return {
+    alice: {pre_submit: 0, post_submit: 0, unknown: 0},
+    control: {pre_submit: 0, post_submit: 0, unknown: 0},
+    other: {pre_submit: 0, post_submit: 0, unknown: 0}
+  };
+}
+
+function createWebSocket101Phase() {
+  let phase = 'pre_submit';
+  return {
+    current: () => phase,
+    begin: () => { phase = 'during_submit'; },
+    complete: () => { phase = 'post_submit'; }
+  };
+}
 
 function allowCdpMethod(scope, method) {
   const allowlist = scope === 'browser' ? BROWSER_CDP_METHODS : scope === 'page' ? PAGE_CDP_METHODS : WORKER_CDP_METHODS;
@@ -201,6 +220,12 @@ function createTargetRecord(source, targetId, sequence) {
 // control context. `control` contexts are never counted as app evidence.
 function createContextObserver(name, options = {}) {
   const control = options.control === true;
+  const observeWebSocket101 = options.observeWebSocket101 === true;
+  const webSocket101Context = control ? 'control' : name === 'alice' ? 'alice' : 'other';
+  const webSocket101Phase = options.webSocket101Phase || createWebSocket101Phase();
+  const webSocket101Counts = createWebSocket101Grid();
+  const webSocket101RequestStates = new Map();
+  let webSocket101RequestCount = 0;
   const targets = new Map();
   const pageTargetIds = new Set();
   const sharedWorkerTargetIds = new Set();
@@ -233,6 +258,8 @@ function createContextObserver(name, options = {}) {
     if(!state.overflow) state.observerErrors++;
     state.overflow = true;
     requestLabels.clear();
+    webSocket101RequestStates.clear();
+    webSocket101RequestCount = 0;
   }
 
   // A bound that only clamps a counter is not a bound. Once a limit is reached
@@ -259,6 +286,78 @@ function createContextObserver(name, options = {}) {
   function recordObserverError() {
     if(closed()) return;
     state.observerErrors++;
+  }
+
+  function webSocket101RequestState(sessionId, requestId) {
+    return webSocket101RequestStates.get(sessionId)?.get(requestId);
+  }
+
+  function setWebSocket101RequestState(sessionId, requestId, requestState) {
+    let sessionRequests = webSocket101RequestStates.get(sessionId);
+    if(sessionRequests?.has(requestId)) return true;
+    if(webSocket101RequestCount >= LIMITS.countedEventsPerContext) {
+      recordOverflow();
+      return false;
+    }
+    if(!sessionRequests) {
+      sessionRequests = new Map();
+      webSocket101RequestStates.set(sessionId, sessionRequests);
+    }
+    sessionRequests.set(requestId, requestState);
+    webSocket101RequestCount++;
+    return true;
+  }
+
+  function noteWebSocket101Event(sessionId, method, params) {
+    if(!observeWebSocket101 || closed()) return;
+    if(method === 'Network.webSocketCreated') {
+      const requestId = params?.requestId;
+      if(typeof sessionId !== 'string' || !sessionId || typeof requestId !== 'string' || !requestId) {
+        recordObserverError();
+        return;
+      }
+      if(webSocket101RequestState(sessionId, requestId)) return;
+      const phase = webSocket101Phase.current();
+      setWebSocket101RequestState(sessionId, requestId, {
+        phase: phase === 'during_submit' ? 'unknown' : phase,
+        counted: false
+      });
+      return;
+    }
+    if(method !== 'Network.webSocketHandshakeResponseReceived') return;
+    const status = params?.response?.status;
+    if(typeof status !== 'number' || status !== 101) return;
+    const requestId = params?.requestId;
+    if(typeof sessionId !== 'string' || !sessionId || typeof requestId !== 'string' || !requestId) {
+      recordObserverError();
+      return;
+    }
+    let requestState = webSocket101RequestState(sessionId, requestId);
+    if(requestState?.counted) return;
+    if(!requestState) {
+      requestState = {phase: 'unknown', counted: true};
+      if(!setWebSocket101RequestState(sessionId, requestId, requestState)) return;
+    } else {
+      requestState.counted = true;
+    }
+    const phase = WEBSOCKET_101_PHASES.includes(requestState.phase) ? requestState.phase : 'unknown';
+    webSocket101Counts[webSocket101Context][phase]++;
+  }
+
+  function beginUsernameSubmission() {
+    if(observeWebSocket101) webSocket101Phase.begin();
+  }
+
+  function completeUsernameSubmission() {
+    if(observeWebSocket101) webSocket101Phase.complete();
+  }
+
+  function webSocket101ByContextPhase() {
+    const counts = createWebSocket101Grid();
+    for(const context of WEBSOCKET_101_CONTEXTS) {
+      for(const phase of WEBSOCKET_101_PHASES) counts[context][phase] = webSocket101Counts[context][phase];
+    }
+    return counts;
   }
 
   function addFailure(category) {
@@ -364,8 +463,11 @@ function createContextObserver(name, options = {}) {
     noteAttachFailure();
   }
 
-  function noteWorkerEvent(targetId, method, params) {
+  function noteWorkerEvent(targetId, method, params, sessionId = targetId) {
     if(!countEvent()) return;
+    if(method === 'Network.webSocketCreated' || method === 'Network.webSocketHandshakeResponseReceived') {
+      noteWebSocket101Event(sessionId, method, params);
+    }
     const record = targets.get(targetId);
     if(!record) return;
     if(method === 'Log.entryAdded') {
@@ -418,6 +520,10 @@ function createContextObserver(name, options = {}) {
   // the source fetch of the allowlisted MTProto chunk is observed completely.
   function notePageEvent(method, params) {
     if(!countEvent()) return;
+    if(method === 'Network.webSocketCreated' || method === 'Network.webSocketHandshakeResponseReceived') {
+      noteWebSocket101Event('page', method, params);
+      return;
+    }
     if(method === 'Network.requestWillBeSent') {
       const source = classifyWorkerSource(params?.request?.url);
       const requestId = params?.requestId;
@@ -558,6 +664,7 @@ function createContextObserver(name, options = {}) {
   return {
     name,
     control,
+    observeWebSocket101,
     targets,
     state,
     pageTargetIds,
@@ -575,6 +682,9 @@ function createContextObserver(name, options = {}) {
     noteInjectedControlFault,
     noteWorkerEvent,
     notePageEvent,
+    beginUsernameSubmission,
+    completeUsernameSubmission,
+    webSocket101ByContextPhase,
     noteEvent: countEvent,
     recordOverflow,
     recordObserverError,
@@ -726,10 +836,14 @@ module.exports = {
   WORKER_CHUNK_PATTERNS,
   WORKER_FAILURE_STATES,
   WORKER_SOURCE_LABELS,
+  WEBSOCKET_101_CONTEXTS,
+  WEBSOCKET_101_PHASES,
   allowCdpMethod,
   classifyWorkerLogEntry,
   classifyWorkerSource,
   createContextObserver,
+  createWebSocket101Grid,
+  createWebSocket101Phase,
   evaluateControl,
   isWorkerScriptType,
   labelForPathname,
