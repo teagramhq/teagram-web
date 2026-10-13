@@ -74,6 +74,137 @@ function createDiscoveryHarness(send: (method: string, params: any) => Promise<a
   return {browser, registry: createWorkerDiscovery(), session};
 }
 
+function acknowledgeCdpCommand(session: any, params: any, error = false) {
+  const {id} = JSON.parse(params.message);
+  queueMicrotask(() => session.emit('Target.receivedMessageFromTarget', {
+    sessionId: params.sessionId,
+    message: JSON.stringify(error ? {id, error: {message: HOSTILE.phrase}} : {id, result: {}})
+  }));
+}
+
+function createWorkerNetworkObserverHarness(observer: any, browserContextId: string) {
+  const harness = createNetworkObserverHarness(observer, {
+    send: async(method: string, params: any) => {
+      if(method === 'Target.sendMessageToTarget') acknowledgeCdpCommand(harness.cdp, params);
+      return method === 'Target.getTargetInfo' ? {targetInfo: {browserContextId}} : {};
+    }
+  });
+  return harness;
+}
+
+async function createDiscoveryNetworkHarness(options: any = {}) {
+  const calls: any[] = [];
+  const discovery = createDiscoveryHarness(async(method, params) => {
+    calls.push({method, params});
+    if(method === 'Target.attachToTarget') {
+      if(options.attachFailure) throw new Error(HOSTILE.phrase);
+      return {sessionId: `discovery-${params.targetId}`};
+    }
+    if(method === 'Target.sendMessageToTarget') {
+      const {method: nestedMethod} = JSON.parse(params.message);
+      if(options.detachBeforeSetup && nestedMethod === 'Network.enable') {
+        discovery.session.emit('Target.detachedFromTarget', {sessionId: params.sessionId});
+      }
+      acknowledgeCdpCommand(discovery.session, params, options.setupFailure && nestedMethod === 'Network.enable');
+    }
+    return {};
+  });
+  if(options.launch !== false) await discovery.registry.launch(discovery.browser);
+  const contexts: any[] = [];
+  async function startContext(name: string, control = false) {
+    const observer = observation.createContextObserver(name, {control, observeWebSocket101: options.observeWebSocket101 !== false});
+    const {cdp, networkObserver} = createWorkerNetworkObserverHarness(observer, name);
+    await networkObserver.start(discovery.registry);
+    discovery.session.emit('Target.targetCreated', {targetInfo: pageTarget(`${name}-page`, name)});
+    observer.state.windowElapsed = true;
+    const context = {name, observer, cdp, networkObserver};
+    contexts.push(context);
+    return context;
+  }
+  const alice = options.startContext === false ? undefined : await startContext('alice');
+  return {
+    ...discovery,
+    calls,
+    alice,
+    startContext,
+    async attach(context: any, targetId: string, via = 'discovery', type = 'shared_worker') {
+      const targetInfo = {targetId, type, url: HOSTILE.blobUrl, browserContextId: context.name};
+      if(via === 'discovery') discovery.session.emit('Target.targetCreated', {targetInfo});
+      else context.cdp.emit('Target.attachedToTarget', {sessionId: `auto-${targetId}`, targetInfo});
+      await Promise.all([context.networkObserver.waitForSetup(), discovery.registry.waitForSetup()]);
+    },
+    emit(context: any, targetId: string, method: string, params: any, via = 'discovery', forged: any = {}) {
+      const emitter = via === 'discovery' ? discovery.session : context.cdp;
+      emitter.emit('Target.receivedMessageFromTarget', {
+        sessionId: `${via === 'discovery' ? 'discovery' : 'auto'}-${targetId}`,
+        message: JSON.stringify({...forged, method, params})
+      });
+    },
+    async stop() {
+      await discovery.registry.stop();
+      for(const context of contexts) await context.networkObserver.stop();
+    }
+  };
+}
+
+async function runDiscoveryAccountingGate(events: any[], fault?: string) {
+  const harness = await createDiscoveryNetworkHarness({
+    startContext: false,
+    launch: false,
+    attachFailure: fault === 'attach',
+    setupFailure: fault === 'setup',
+    detachBeforeSetup: fault === 'detach'
+  });
+  const page = new EventEmitter();
+  const context = {newPage: async() => page, close: async() => {}};
+  const browser = {...harness.browser, newContext: async() => context, close: async() => {}};
+  const runId = createHash('sha256').update(`${process.pid}-${Math.random()}`).digest('hex').slice(0, 32);
+  const runtimeConfig = {
+    runId,
+    endpoint: APP_ORIGIN,
+    wssEndpoint: 'wss://telegramd.test/apiws',
+    fingerprint: '1234567890abcdef',
+    publicKeySHA256: 'a'.repeat(64),
+    artifactDigest: `sha256:${'b'.repeat(64)}`,
+    webRevision: READINESS_PINS.webRevision,
+    leafSPKI: Buffer.alloc(32, 1).toString('base64'),
+    frontIp: '127.0.0.1',
+    screenshotDirectory: `/tmp/real-client-${runId}`,
+    authProgressOneSubmission: true,
+    accounts: [{username: `u${runId.slice(0, 30)}a`, password: 'c'.repeat(64)}]
+  };
+  let app: any;
+  let report: any;
+  await runRealClient({
+    runtimeConfig,
+    launchBrowser: async() => browser,
+    createWorkerDiscovery: () => harness.registry,
+    runObserverControls: async() => ({controls: controlBlocks(), failedControls: [] as string[]}),
+    emitAuthProgressReport: (value: any, cleanupFailed: boolean) => {
+      report = cleanupFailed ? {...value, status: 'failed', stage: 'cleanup'} : value;
+    },
+    authProgressDependencies: {
+      createNetworkObserver: (_page: any, name: string, observer: any) => {
+        const {cdp, networkObserver} = createWorkerNetworkObserverHarness(observer, name);
+        app = {name, observer, cdp, networkObserver};
+        return networkObserver;
+      },
+      submitUsernameOnceAndWaitForPassword: async(_page: any, _account: any, _runtime: any, _name: string, evidence: any, counts: any) => {
+        counts.usernameSubmissions++;
+        evidence.push({stage: 'alice_password_field_ready', count: 1});
+        harness.session.emit('Target.targetCreated', {targetInfo: pageTarget('alice-page', 'alice')});
+        await harness.attach(app, 'alice-worker');
+        await harness.attach(app, 'service-worker', 'auto', 'service_worker');
+        harness.emit(app, 'service-worker', 'Network.webSocketCreated', {requestId: 'service-allowed', url: 'wss://telegramd.test/apiws'}, 'auto');
+        harness.emit(app, 'alice-worker', 'Network.webSocketCreated', {requestId: 'allowed', url: 'wss://telegramd.test/apiws'});
+        if(fault === 'overflow') app.observer.noteInjectedControlFault('overflow');
+        for(const event of events) harness.emit(app, 'alice-worker', event.method, event.params);
+      }
+    }
+  });
+  return report;
+}
+
 async function settleAfterCdpDeadline(promise: Promise<any>) {
   const settled = promise.then(
     (value) => ({status: 'resolved' as const, value}),
@@ -1398,6 +1529,500 @@ describe('confined runner shared-worker observation contract', () => {
   });
 });
 
+
+describe('discovery shared-worker network accounting', () => {
+  it('counts one observed allowed creation without creating an upgrade or charging twice', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'alice-worker');
+      const before = alice.observer.eventCount();
+      const workerEvents = vi.spyOn(alice.observer, 'noteWorkerEvent');
+      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'socket', url: 'wss://telegramd.test/apiws'});
+
+      expect(alice.observer.eventCount()).toBe(before + 1);
+      expect(workerEvents).toHaveBeenCalledTimes(1);
+      expect(alice.networkObserver.summary()).toMatchObject({
+        workerTargets: {shared_worker: 1, service_worker: 0},
+        allowedWebSockets: 1,
+        unexpectedAttempts: 0,
+        attemptsBySource: {page: 0, shared_worker: 1, service_worker: 0, worker: 0},
+        allowedWebSocketsBySource: {page: 0, shared_worker: 1, service_worker: 0, worker: 0}
+      });
+      expect(alice.observer.webSocket101ByContextPhase()).toEqual(emptyWebSocket101Grid());
+      harness.emit(alice, 'alice-worker', 'Network.requestWillBeSent', {type: 'WebSocket', request: {url: 'wss://telegramd.test/apiws'}});
+      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'repeat', url: 'wss://telegramd.test/apiws'});
+      expect(alice.networkObserver.events).toHaveLength(1);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it.each([
+    ['Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}}],
+    ['Network.webSocketCreated', {requestId: 'disallowed-socket', url: 'wss://unannounced.invalid/socket?secret=bearer-secret-value'}],
+    ['Audits.issueAdded', {issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: HOSTILE.url, isReportOnly: false}}}}],
+    ['Log.entryAdded', {entry: {source: 'security', text: `Refused to connect to '${HOSTILE.url}'`}}]
+  ])('classifies discovery-only disallowed egress from %s without serializing inputs', async(method, params) => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'hostile-target-id');
+      harness.emit(alice, 'hostile-target-id', method, params);
+      expect(alice.networkObserver.summary()).toMatchObject({
+        unexpectedAttempts: 1,
+        attemptsBySource: {page: 0, shared_worker: 1, service_worker: 0, worker: 0},
+        unexpectedAttemptsBySource: {page: 0, shared_worker: 1, service_worker: 0, worker: 0}
+      });
+      const output = {network: alice.networkObserver.summary(), events: alice.networkObserver.events, worker: alice.observer.summary()};
+      expectNoHostileLeak(output);
+      expect(JSON.stringify(output)).not.toContain('hostile-target-id');
+      expect(JSON.stringify(output)).not.toContain('discovery-hostile-target-id');
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('preserves report-only CSP behavior and requires the exact allowed websocket URL', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'alice-worker');
+      harness.emit(alice, 'alice-worker', 'Audits.issueAdded', {
+        issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: HOSTILE.url, isReportOnly: true}}}
+      });
+      for(const blockedURL of ['', `https://[invalid?secret=${HOSTILE.token}`]) {
+        harness.emit(alice, 'alice-worker', 'Audits.issueAdded', {
+          issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL, isReportOnly: true}}}
+        });
+      }
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 0, coverageComplete: 1});
+      expect(alice.networkObserver.summary().unexpectedAttempts).toBe(0);
+      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'query-socket', url: 'wss://telegramd.test/apiws?extra=1'});
+      expect(alice.networkObserver.summary()).toMatchObject({unexpectedAttempts: 1, allowedWebSockets: 0});
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('accepts omitted optional resource types and CSP URLs without inventing attempts', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'alice-worker');
+      harness.emit(alice, 'alice-worker', 'Network.requestWillBeSent', {request: {url: `${APP_ORIGIN}/fetch`}});
+      harness.emit(alice, 'alice-worker', 'Audits.issueAdded', {issue: {details: {contentSecurityPolicyIssueDetails: {isReportOnly: false}}}});
+      harness.emit(alice, 'alice-worker', 'Audits.issueAdded', {issue: {details: {otherIssueDetails: {}}}});
+      harness.emit(alice, 'alice-worker', 'Log.entryAdded', {entry: {source: 'javascript', text: `ignored '${HOSTILE.url}'`}});
+      expect(alice.observer.summary()).toMatchObject({coverageComplete: 1, observerErrors: 0});
+      expect(alice.networkObserver.summary()).toMatchObject({
+        allowedWebSockets: 0,
+        unexpectedAttempts: 0,
+        attemptsBySource: {page: 0, shared_worker: 1, service_worker: 0, worker: 0}
+      });
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it.each(['discovery', 'auto'])('uses the first %s session for a target on both paths and unions distinct targets', async(first) => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    const second = first === 'discovery' ? 'auto' : 'discovery';
+    try {
+      await harness.attach(alice, 'duplicate-worker', first);
+      await harness.attach(alice, 'duplicate-worker', second);
+      for(const via of [first, second]) {
+        harness.emit(alice, 'duplicate-worker', 'Network.webSocketCreated', {requestId: 'socket', url: 'wss://telegramd.test/apiws'}, via);
+        harness.emit(alice, 'duplicate-worker', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: `${APP_ORIGIN}/fetch`}}, via);
+      }
+      harness.emit(alice, 'duplicate-worker', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}}, second);
+      expect(alice.networkObserver.summary()).toMatchObject({
+        allowedWebSockets: 1,
+        unexpectedAttempts: 0,
+        attemptsBySource: {page: 0, shared_worker: 2, service_worker: 0, worker: 0},
+        workerTargets: {shared_worker: 1, service_worker: 0}
+      });
+      await harness.attach(alice, 'distinct-worker', second);
+      harness.emit(alice, 'distinct-worker', 'Network.webSocketCreated', {requestId: 'distinct-socket', url: 'wss://telegramd.test/apiws'}, second);
+      expect(alice.networkObserver.summary()).toMatchObject({allowedWebSockets: 2, workerTargets: {shared_worker: 2, service_worker: 0}});
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('attributes forged fields to the session owner and keeps Alice, Bob and controls separate', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    const bob = await harness.startContext('bob');
+    const control = await harness.startContext('c1_shared_worker_created', true);
+    try {
+      for(const context of [alice, bob, control]) await harness.attach(context, `${context.name}-worker`);
+      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {
+        requestId: 'alice-socket', url: 'wss://telegramd.test/apiws', targetId: 'bob-worker', type: 'service_worker', source: 'page'
+      }, 'discovery', {targetId: 'bob-worker', type: 'service_worker', source: 'page'});
+      expect(alice.networkObserver.summary().attemptsBySource).toEqual({page: 0, shared_worker: 1, service_worker: 0, worker: 0});
+      expect(bob.networkObserver.events).toHaveLength(0);
+      expect(control.networkObserver.events).toHaveLength(0);
+      harness.emit(bob, 'bob-worker', 'Network.webSocketCreated', {requestId: 'bob-socket', url: 'wss://telegramd.test/apiws'});
+      harness.emit(control, `${control.name}-worker`, 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}});
+      expect(alice.networkObserver.summary().allowedWebSockets).toBe(1);
+      expect(bob.networkObserver.summary().allowedWebSockets).toBe(1);
+      expect(control.networkObserver.summary()).toMatchObject({allowedWebSockets: 0, unexpectedAttempts: 1});
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('ignores baseline, contextless, unattributed and pending targets until registration', async() => {
+    const harness = await createDiscoveryNetworkHarness({startContext: false});
+    try {
+      harness.session.emit('Target.targetCreated', {targetInfo: sharedWorker('baseline', HOSTILE.blobUrl, 'baseline-context')});
+      const alice = await harness.startContext('alice');
+      harness.session.emit('Target.targetCreated', {targetInfo: {targetId: 'contextless', type: 'shared_worker', url: HOSTILE.blobUrl}});
+      for(const targetId of ['unattributed', 'pending']) {
+        harness.session.emit('Target.targetCreated', {targetInfo: sharedWorker(targetId, HOSTILE.blobUrl, targetId)});
+      }
+      for(const targetId of ['baseline', 'contextless', 'unattributed', 'pending']) {
+        harness.emit(alice, targetId, 'Network.webSocketCreated', {requestId: targetId, url: 'wss://telegramd.test/apiws'});
+      }
+      expect(alice.networkObserver.summary()).toMatchObject({allowedWebSockets: 0, workerTargets: {shared_worker: 0, service_worker: 0}});
+      expect(alice.networkObserver.events).toHaveLength(0);
+      const pending = await harness.startContext('pending');
+      await harness.registry.waitForSetup();
+      harness.emit(pending, 'pending', 'Network.webSocketCreated', {requestId: 'now-owned', url: 'wss://telegramd.test/apiws'});
+      expect(pending.networkObserver.summary()).toMatchObject({allowedWebSockets: 1, workerTargets: {shared_worker: 1, service_worker: 0}});
+      expect(alice.networkObserver.events).toHaveLength(0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('rejects late discovery and auto-attach evidence as soon as a context is released', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'discovery-worker');
+      await harness.attach(alice, 'auto-worker', 'auto');
+      const before = alice.observer.eventCount();
+      const errorsBefore = alice.observer.summary().observerErrors;
+      const releasing = harness.registry.releaseContext(alice.observer);
+      harness.emit(alice, 'discovery-worker', 'Network.webSocketCreated', {requestId: 'late-discovery', url: 'wss://telegramd.test/apiws'});
+      harness.emit(alice, 'auto-worker', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}}, 'auto');
+      for(const [emitter, sessionId] of [[harness.session, 'discovery-discovery-worker'], [alice.cdp, 'auto-auto-worker']]) {
+        expect(() => emitter.emit('Target.receivedMessageFromTarget', {sessionId, message: 'null'})).not.toThrow();
+        expect(() => emitter.emit('Target.receivedMessageFromTarget', {sessionId, message: '{invalid'})).not.toThrow();
+      }
+      await releasing;
+      expect(alice.networkObserver.events).toHaveLength(0);
+      expect(alice.observer.eventCount()).toBe(before);
+      expect(alice.observer.summary().observerErrors).toBe(errorsBefore);
+      expect(harness.registry.ownedTargetCount).toBe(0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it.each([
+    ['Network.webSocketCreated', null],
+    ['Network.webSocketCreated', []],
+    ['Network.webSocketCreated', 'not-object'],
+    ['Network.webSocketCreated', {url: 42}],
+    ['Network.requestWillBeSent', {type: 'Fetch', request: null}],
+    ['Network.requestWillBeSent', {type: 42, request: {url: HOSTILE.url}}],
+    ['Network.requestWillBeSent', {type: 'Fetch', request: {url: {secret: HOSTILE.token}}}],
+    ['Audits.issueAdded', {issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: 42}}}}],
+    ['Audits.issueAdded', {issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: HOSTILE.url, isReportOnly: 'true'}}}}],
+    ['Log.entryAdded', {entry: {source: 'security', text: {secret: HOSTILE.token}}}]
+  ])('fails coverage without throwing or adding an attempt for malformed %s params %j', async(method, params) => {
+    const harness = await createDiscoveryNetworkHarness({observeWebSocket101: false});
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'alice-worker');
+      const before = alice.observer.eventCount();
+      expect(() => harness.emit(alice, 'alice-worker', method, params)).not.toThrow();
+      expect(alice.observer.eventCount()).toBe(before + 1);
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 1, coverageComplete: 0});
+      expect(alice.networkObserver.events).toHaveLength(0);
+      expectNoHostileLeak(alice.networkObserver.summary());
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it.each([
+    ['Network.webSocketCreated', {requestId: 'invalid-socket', url: ''}],
+    ['Network.webSocketCreated', {requestId: 'invalid-socket', url: `relative-path?secret=${HOSTILE.token}`}],
+    ['Network.requestWillBeSent', {type: 'Fetch', request: {url: ''}}],
+    ['Network.requestWillBeSent', {type: 'Fetch', request: {url: `https://[invalid?secret=${HOSTILE.token}`}}],
+    ['Network.requestWillBeSent', {type: 'Fetch', request: {url: 'data'}}]
+  ])('rejects invalid URL strings from discovery %s without charging twice or inventing attempts', async(method, params) => {
+    const harness = await createDiscoveryNetworkHarness({observeWebSocket101: false});
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'alice-worker');
+      const before = alice.observer.eventCount();
+      expect(() => harness.emit(alice, 'alice-worker', method, params)).not.toThrow();
+      expect(alice.observer.eventCount()).toBe(before + 1);
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 1, coverageComplete: 0});
+      expect(alice.networkObserver.summary()).toMatchObject({observerErrors: 1, allowedWebSockets: 0, unexpectedAttempts: 0});
+      expect(alice.networkObserver.events).toHaveLength(0);
+      expectNoHostileLeak({network: alice.networkObserver.summary(), worker: alice.observer.summary(), errors: alice.networkObserver.errors});
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it.each(['page', 'auto'])('rejects invalid URL strings from the existing %s path with one event charge', async(via) => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      if(via === 'auto') await harness.attach(alice, 'alice-worker', 'auto');
+      const before = alice.observer.eventCount();
+      const params = {requestId: 'invalid-socket', url: ''};
+      if(via === 'page') alice.cdp.emit('Network.webSocketCreated', params);
+      else harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', params, 'auto');
+      expect(alice.observer.eventCount()).toBe(before + 1);
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 1, coverageComplete: 0});
+      expect(alice.networkObserver.summary()).toMatchObject({observerErrors: 1, allowedWebSockets: 0, unexpectedAttempts: 0});
+      expect(alice.networkObserver.events).toHaveLength(0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it.each(['page', 'auto', 'discovery'])('ignores normalized CSP diagnostic values on the %s path', async(via) => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      if(via !== 'page') await harness.attach(alice, 'alice-worker', via);
+      for(const blockedURL of ['', 'blob', 'data', `https://[invalid?secret=${HOSTILE.token}`]) {
+        const before = alice.observer.eventCount();
+        const params = {issue: {details: {contentSecurityPolicyIssueDetails: {
+          blockedURL,
+          violatedDirective: 'connect-src \'self\'',
+          contentSecurityPolicyViolationType: 'kURLViolation',
+          isReportOnly: false
+        }}}};
+        if(via === 'page') alice.cdp.emit('Audits.issueAdded', params);
+        else harness.emit(alice, 'alice-worker', 'Audits.issueAdded', params, via);
+        expect(alice.observer.eventCount()).toBe(before + 1);
+        expect(alice.observer.summary()).toMatchObject({observerErrors: 0, coverageComplete: 1});
+        expect(alice.networkObserver.summary()).toMatchObject({observerErrors: 0, allowedWebSockets: 0, unexpectedAttempts: 0});
+        expect(alice.networkObserver.events).toHaveLength(0);
+      }
+      expectNoHostileLeak({network: alice.networkObserver.summary(), worker: alice.observer.summary(), errors: alice.networkObserver.errors});
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('ignores unparseable log diagnostic URLs without treating the text as a malformed request', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'alice-worker');
+      const before = alice.observer.eventCount();
+      harness.emit(alice, 'alice-worker', 'Log.entryAdded', {
+        entry: {source: 'security', text: `Refused to connect to 'https://[invalid?secret=${HOSTILE.token}'`}
+      });
+      expect(alice.observer.eventCount()).toBe(before + 1);
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 0, coverageComplete: 1});
+      expect(alice.networkObserver.summary()).toMatchObject({observerErrors: 0, allowedWebSockets: 0, unexpectedAttempts: 0});
+      expect(alice.networkObserver.events).toHaveLength(0);
+      expectNoHostileLeak(alice.observer.summary());
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('records an observer error when an owned discovery session has no network sink', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      harness.registry.registerContext('alice', alice.observer);
+      await harness.attach(alice, 'alice-worker');
+      harness.emit(alice, 'alice-worker', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}});
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 1, coverageComplete: 0});
+      expect(alice.networkObserver.events).toHaveLength(0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('rejects malformed discovery payloads without throwing or leaking their text', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'alice-worker');
+      const invalidPayloads: any[] = [null, 42, HOSTILE.phrase, [], {}, {method: 42}];
+      for(const value of invalidPayloads) {
+        expect(() => harness.session.emit('Target.receivedMessageFromTarget', {
+          sessionId: 'discovery-alice-worker', message: JSON.stringify(value)
+        })).not.toThrow();
+      }
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 6, coverageComplete: 0});
+      expect(alice.networkObserver.events).toHaveLength(0);
+      expectNoHostileLeak(alice.observer.summary());
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it.each([
+    {method: 'Network.requestWillBeSent', params: {type: 'Fetch', request: {url: HOSTILE.url}}},
+    {method: 'Audits.issueAdded', params: {issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: HOSTILE.url, isReportOnly: false}}}}}
+  ])('fails the existing egress gate on discovery-only $method', async(event) => {
+    const report = await runDiscoveryAccountingGate([event]);
+    expect(report).toMatchObject({status: 'failed', stage: 'browser_egress_or_page_errors', network: {unexpectedAttempts: 1}});
+    expect(report.network.contexts.alice.unexpectedAttemptsBySource).toEqual({page: 0, shared_worker: 1, service_worker: 0, worker: 0});
+    expectNoHostileLeak(report);
+  });
+
+  it('keeps the successful paired report compatible with the existing parser and controls', async() => {
+    const report = await runDiscoveryAccountingGate([]);
+    expect(report).toMatchObject({status: 'passed', stage: 'alice_password_field_ready'});
+    expect(report.network.contexts.alice).toEqual({
+      workerTargets: {shared_worker: 1, service_worker: 1},
+      allowedWebSockets: 2,
+      attemptsBySource: {page: 0, shared_worker: 1, service_worker: 1, worker: 0},
+      unexpectedAttemptsBySource: {page: 0, shared_worker: 0, service_worker: 0, worker: 0},
+      allowedWebSocketsBySource: {page: 0, shared_worker: 1, service_worker: 1, worker: 0}
+    });
+    expect(report.network.websocket_101_by_context_phase).toEqual(emptyWebSocket101Grid());
+    expect(JSON.stringify(report.workerObservation.controls)).toBe(JSON.stringify(controlBlocks()));
+    expect(observation.validateNetworkBlock(report.workerObservation)).toBe(null);
+    expect(parseAuthProgressReport(report).network).toEqual(report.network);
+  });
+
+  it.each(['overflow', 'attach', 'setup'])('rejects a passing verdict after a discovery %s fault', async(fault) => {
+    const report = await runDiscoveryAccountingGate([], fault);
+    expect(report.status).toBe('failed');
+    expect(report.workerObservation.contexts.alice.coverageComplete).toBe(0);
+  });
+
+  it('drains a discovery detach before setup and rejects a passing verdict', async() => {
+    vi.useFakeTimers();
+    try {
+      const outcome = await settleAfterCdpDeadline(runDiscoveryAccountingGate([], 'detach'));
+      expect(outcome.status).toBe('resolved');
+      if(outcome.status === 'resolved') {
+        expect(outcome.value.status).toBe('failed');
+        expect(outcome.value.workerObservation.contexts.alice.coverageComplete).toBe(0);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects a passing verdict after malformed discovery egress', async() => {
+    const report = await runDiscoveryAccountingGate([{method: 'Network.requestWillBeSent', params: null}]);
+    expect(report.status).toBe('failed');
+    expect(report.workerObservation.contexts.alice.coverageComplete).toBe(0);
+  });
+
+  it.each([
+    {method: 'Network.webSocketCreated', params: {requestId: 'invalid-socket', url: ''}},
+    {method: 'Network.requestWillBeSent', params: {type: 'Fetch', request: {url: ''}}}
+  ])('fails the egress gate on invalid URL strings from discovery $method', async(event) => {
+    const report = await runDiscoveryAccountingGate([event]);
+    expect(report).toMatchObject({
+      status: 'failed', stage: 'browser_egress_or_page_errors', network: {unexpectedAttempts: 0, observerErrors: 1}
+    });
+    expect(report.workerObservation.contexts.alice.coverageComplete).toBe(0);
+    expect(report.network.websocket_101_by_context_phase).toEqual(emptyWebSocket101Grid());
+    expectNoHostileLeak(report);
+  });
+
+  it.each(['', 'blob', 'data', `https://[invalid?secret=${HOSTILE.token}`])('keeps a passing scenario verdict for CSP diagnostic value %j', async(blockedURL) => {
+    const report = await runDiscoveryAccountingGate([{method: 'Audits.issueAdded', params: {
+      issue: {details: {contentSecurityPolicyIssueDetails: {
+        blockedURL,
+        violatedDirective: 'connect-src \'self\'',
+        contentSecurityPolicyViolationType: 'kURLViolation',
+        isReportOnly: false
+      }}}
+    }}]);
+    expect(report).toMatchObject({
+      status: 'passed', stage: 'alice_password_field_ready', network: {unexpectedAttempts: 0, observerErrors: 0}
+    });
+    expect(report.workerObservation.contexts.alice.coverageComplete).toBe(1);
+    expect(report.network.contexts.alice.attemptsBySource).toEqual({page: 0, shared_worker: 1, service_worker: 1, worker: 0});
+    expect(report.network.websocket_101_by_context_phase).toEqual(emptyWebSocket101Grid());
+    expectNoHostileLeak(report);
+  });
+
+  it('does not backfill allowed attempts from a 101 whose creation was missed', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'alice-worker');
+      harness.emit(alice, 'alice-worker', 'Network.webSocketHandshakeResponseReceived', {requestId: 'missed-creation', response: {status: 101, url: HOSTILE.url}});
+      expect(alice.networkObserver.summary()).toMatchObject({allowedWebSockets: 0, unexpectedAttempts: 0});
+      expect(alice.networkObserver.events).toHaveLength(0);
+      expect(alice.observer.webSocket101ByContextPhase()).toEqual({
+        alice: {pre_submit: 0, post_submit: 0, unknown: 1},
+        control: {pre_submit: 0, post_submit: 0, unknown: 0},
+        other: {pre_submit: 0, post_submit: 0, unknown: 0}
+      });
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('keeps Runtime, Inspector, response, frame and nested Target messages out of network accounting', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'alice-worker');
+      for(const method of ['Runtime.consoleAPICalled', 'Runtime.exceptionThrown', 'Inspector.targetCrashed', 'Network.responseReceived', 'Network.webSocketFrameReceived', 'Target.attachedToTarget']) {
+        harness.emit(alice, 'alice-worker', method, {
+          url: HOSTILE.url, request: {url: HOSTILE.url}, type: 'WebSocket', response: {status: 101},
+          sessionId: 'forged-session', targetInfo: sharedWorker('forged-target', HOSTILE.url, 'bob')
+        });
+      }
+      expect(alice.networkObserver.events).toHaveLength(0);
+      expect(alice.networkObserver.summary().workerTargets).toEqual({shared_worker: 1, service_worker: 0});
+      expect(harness.calls.filter((call) => call.method === 'Target.attachToTarget')).toHaveLength(1);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('bounds discovery event and target memory with the existing budgets', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      for(let index = 0; index < observation.LIMITS.attachedTargets; index++) await harness.attach(alice, `bounded-${index}`);
+      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(16);
+      for(let index = 0; index < observation.LIMITS.countedEventsPerContext + 20; index++) {
+        harness.emit(alice, 'bounded-0', 'Network.webSocketCreated', {requestId: `socket-${index}`, url: `wss://unannounced.invalid/${index}`});
+      }
+      expect(alice.observer.summary()).toMatchObject({countedEvents: 512, observerOverflow: 1, coverageComplete: 0});
+      expect(alice.networkObserver.events).toHaveLength(479);
+      const retained = alice.networkObserver.events.length;
+      await harness.attach(alice, 'over-budget-target');
+      harness.emit(alice, 'bounded-0', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}});
+      expect(alice.networkObserver.events).toHaveLength(retained);
+      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(16);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('caps the discovery target union and protocol attachments at the existing attachment limit', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      for(let index = 0; index < 20; index++) await harness.attach(alice, `bounded-${index}`);
+      expect(alice.networkObserver.summary().workerTargets).toEqual({shared_worker: 16, service_worker: 0});
+      expect(harness.calls.filter((call) => call.method === 'Target.attachToTarget')).toHaveLength(16);
+      expect(alice.observer.summary()).toMatchObject({attachedTargets: 16, observerOverflow: 1, coverageComplete: 0});
+    } finally {
+      await harness.stop();
+    }
+  });
+});
 
 describe('real client scenario contract', () => {
   it('requires exactly one recipient message with the expected text', () => {
