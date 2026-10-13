@@ -142,6 +142,7 @@ function createGatedSender(scope, session, observer) {
 function createWorkerDiscovery() {
   const ATTRIBUTED_TYPES = ['page', 'shared_worker', 'service_worker', 'worker'];
   const contextObservers = new Map();
+  const networkSinks = new Map();
   const targetOwners = new Map();
   const targetSessions = new Map();
   const sessionTargets = new Map();
@@ -235,6 +236,7 @@ function createWorkerDiscovery() {
     sessionTargets.set(sessionId, targetId);
     attachedSessions.add(sessionId);
     attachingTargets.delete(targetId);
+    networkSinks.get(observer)?.claimTarget(targetId, 'shared_worker', sessionId);
     setupObserver(observer, targetId);
   }
 
@@ -319,15 +321,20 @@ function createWorkerDiscovery() {
     const targetId = sessionTargets.get(event.sessionId);
     const observer = targetId ? ownerOf(targetId) : null;
     if(!observer) return;
+    const retired = retiredObservers.has(observer);
     if(typeof event.message !== 'string' || Buffer.byteLength(event.message, 'utf8') > observation.LIMITS.cdpMessageBytes) {
-      observer.recordObserverError();
+      if(!retired) observer.recordObserverError();
       return;
     }
     let payload;
     try {
       payload = JSON.parse(event.message);
     } catch {
-      observer.recordObserverError();
+      if(!retired) observer.recordObserverError();
+      return;
+    }
+    if(!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      if(!retired) observer.recordObserverError();
       return;
     }
     if(typeof payload.id === 'number') {
@@ -339,8 +346,19 @@ function createWorkerDiscovery() {
       else pending.resolve(payload.result || {});
       return;
     }
-    if(typeof payload.method !== 'string') return;
+    if(retired || observer.state.overflow) return;
+    if(typeof payload.method !== 'string') {
+      observer.recordObserverError();
+      return;
+    }
     observer.noteWorkerEvent(targetId, payload.method, payload.params, event.sessionId);
+    if(observer.state.overflow) return;
+    const sink = networkSinks.get(observer);
+    if(!sink) {
+      observer.recordObserverError();
+      return;
+    }
+    sink.recordWorkerEvent(targetId, 'shared_worker', event.sessionId, payload.method, payload.params);
   }
 
   async function waitForSetup() {
@@ -407,12 +425,14 @@ function createWorkerDiscovery() {
       await send('Target.setDiscoverTargets', {discover: true});
       discoveryActive = true;
     },
-    registerContext(browserContextId, observer) {
+    registerContext(browserContextId, observer, networkSink) {
       if(!browserContextId) {
         observer.recordObserverError();
         return;
       }
       contextObservers.set(browserContextId, observer);
+      if(networkSink) networkSinks.set(observer, networkSink);
+      else networkSinks.delete(observer);
       if(observer.control !== true) appContextCount++;
       observer.state.discoveryActive = discoveryActive;
       const pending = pendingByContext.get(browserContextId) || [];
@@ -444,6 +464,8 @@ function createWorkerDiscovery() {
     },
     async releaseContext(observer) {
       retiredObservers.add(observer);
+      networkSinks.get(observer)?.release();
+      networkSinks.delete(observer);
       await waitForSetup();
       let detachFailures = 0;
       for(const [targetId, owner] of [...targetOwners.entries()]) {
@@ -488,6 +510,7 @@ function createWorkerDiscovery() {
       attachedSessions.clear();
       sessionTargets.clear();
       targetSessions.clear();
+      networkSinks.clear();
       session.removeAllListeners();
       return {detachFailures, discoveryDisabled};
     }
@@ -499,6 +522,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
   const eventKeys = new Set();
   const targets = new Map();
   const observedWorkerTargets = {shared_worker: new Set(), service_worker: new Set()};
+  const workerSessions = new Map();
   const pendingCommands = new Map();
   const setupPromises = new Set();
   const pendingReleases = new Set();
@@ -513,6 +537,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
   let overflowContextClosePromise;
   let overflowContextCloseError;
   let overflowContextClosed = false;
+  let released = false;
 
   function closeContextOnOverflow() {
     if(!overflowContextClosePromise) {
@@ -538,7 +563,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
   function observerClosed() {
     const closed = contextObserver?.state.overflow === true;
     if(closed) disableAutoAttach();
-    return closed;
+    return closed || released;
   }
 
   function notePageEvent(method, params) {
@@ -546,12 +571,12 @@ function createNetworkObserver(page, contextName, contextObserver) {
     observerClosed();
   }
 
-  // Nested-message failures bypass normal event accounting; coalesce their
-  // fixed classes and charge each failure to the context budget.
-  function recordError(category) {
+  // Coalesce fixed error classes, charging failures only when their message
+  // has not already consumed the context event budget.
+  function recordError(category, eventCounted = false) {
     if(observerClosed()) return;
     if(errors.length < 8 && !errors.includes(category)) errors.push(category);
-    if(contextObserver && contextObserver.noteEvent()) contextObserver.recordObserverError();
+    if(contextObserver && (eventCounted || contextObserver.noteEvent())) contextObserver.recordObserverError();
     else if(observerClosed()) return;
   }
 
@@ -647,9 +672,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
       return;
     }
     targets.set(sessionId, targetInfo);
-    if(targetInfo.type === 'shared_worker' || targetInfo.type === 'service_worker') {
-      observedWorkerTargets[targetInfo.type].add(targetInfo.targetId);
-    }
+    claimTarget(targetInfo.targetId, targetInfo.type, sessionId);
     const setup = (async() => {
       if(['shared_worker', 'service_worker', 'worker'].includes(targetInfo.type)) {
         await sendTargetCommand(sessionId, 'Network.enable');
@@ -696,8 +719,63 @@ function createNetworkObserver(page, contextName, contextObserver) {
     record(targetId, source, ['ws:', 'wss:'].includes(protocol) ? 'websocket' : 'fetch', match[1], 'Log.entryAdded');
   }
 
+  // Both attachment paths share one bounded target/session claim. Fetches have
+  // no URL dedup key, so only the first session may supply network attempts.
+  function claimTarget(targetId, source, sessionId) {
+    if(observerClosed() || workerSessions.has(targetId)) return;
+    workerSessions.set(targetId, sessionId);
+    if(source === 'shared_worker' || source === 'service_worker') observedWorkerTargets[source].add(targetId);
+  }
+
+  // The caller has already charged and observed this message. This classifier
+  // never re-enters worker observation or the independent per-socket 101 path.
+  function recordWorkerEvent(targetId, source, sessionId, method, params) {
+    if(observerClosed() || workerSessions.get(targetId) !== sessionId) return;
+    if(!['Network.requestWillBeSent', 'Network.webSocketCreated', 'Audits.issueAdded', 'Log.entryAdded'].includes(method)) return;
+    if(!params || typeof params !== 'object' || Array.isArray(params)) {
+      recordError('invalid_worker_cdp_message', true);
+      return;
+    }
+    if(method === 'Network.requestWillBeSent') {
+      if((params.type !== undefined && typeof params.type !== 'string') || !params.request || typeof params.request !== 'object' ||
+          Array.isArray(params.request) || typeof params.request.url !== 'string') {
+        recordError('invalid_worker_cdp_message', true);
+        return;
+      }
+      record(targetId, source, params.type === 'WebSocket' ? 'websocket' : 'fetch', params.request.url, method);
+    } else if(method === 'Network.webSocketCreated') {
+      if(typeof params.url !== 'string') {
+        recordError('invalid_worker_cdp_message', true);
+        return;
+      }
+      record(targetId, source, 'websocket', params.url, method);
+    } else if(method === 'Audits.issueAdded') {
+      const issue = params.issue;
+      const details = issue?.details?.contentSecurityPolicyIssueDetails;
+      if(!issue || typeof issue !== 'object' || Array.isArray(issue) || !issue.details ||
+          typeof issue.details !== 'object' || Array.isArray(issue.details) ||
+          (details !== undefined && (!details || typeof details !== 'object' || Array.isArray(details) ||
+            (details.blockedURL !== undefined && typeof details.blockedURL !== 'string') ||
+            (details.isReportOnly !== undefined && typeof details.isReportOnly !== 'boolean')))) {
+        recordError('invalid_worker_cdp_message', true);
+        return;
+      }
+      recordCspIssue(source, targetId, issue);
+    } else if(method === 'Log.entryAdded') {
+      const entry = params.entry;
+      if(!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.source !== 'string' || typeof entry.text !== 'string') {
+        recordError('invalid_worker_cdp_message', true);
+        return;
+      }
+      recordLogViolation(source, targetId, entry);
+    }
+  }
+
   function dispatchTargetMessage(sessionId, message) {
-    if(observerClosed()) return;
+    if(contextObserver?.state.overflow) {
+      observerClosed();
+      return;
+    }
     if(typeof message !== 'string' || Buffer.byteLength(message, 'utf8') > observation.LIMITS.cdpMessageBytes) {
       recordError('cdp_message_overflow');
       return;
@@ -706,6 +784,10 @@ function createNetworkObserver(page, contextName, contextObserver) {
     try {
       payload = JSON.parse(message);
     } catch {
+      recordError('invalid_worker_cdp_message');
+      return;
+    }
+    if(!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       recordError('invalid_worker_cdp_message');
       return;
     }
@@ -718,6 +800,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
       else pending.resolve(payload.result || {});
       return;
     }
+    if(observerClosed()) return;
     if(payload.method === 'Target.attachedToTarget') {
       addTarget(payload.params.sessionId, payload.params.targetInfo);
       return;
@@ -727,16 +810,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
     if(!targetInfo) return;
     contextObserver?.noteWorkerEvent(targetInfo.targetId, payload.method, payload.params, sessionId);
     if(observerClosed()) return;
-    if(payload.method === 'Network.requestWillBeSent') {
-      const kind = payload.params.type === 'WebSocket' ? 'websocket' : 'fetch';
-      record(targetInfo.targetId, targetInfo.type, kind, payload.params.request.url, payload.method);
-    } else if(payload.method === 'Network.webSocketCreated') {
-      record(targetInfo.targetId, targetInfo.type, 'websocket', payload.params.url, payload.method);
-    } else if(payload.method === 'Audits.issueAdded') {
-      recordCspIssue(targetInfo.type, targetInfo.targetId, payload.params.issue);
-    } else if(payload.method === 'Log.entryAdded') {
-      recordLogViolation(targetInfo.type, targetInfo.targetId, payload.params.entry);
-    }
+    recordWorkerEvent(targetInfo.targetId, targetInfo.type, sessionId, payload.method, payload.params);
   }
 
   async function start(registry) {
@@ -745,7 +819,11 @@ function createNetworkObserver(page, contextName, contextObserver) {
     // Page-session identity mapping only: the browser context this page lives
     // in is what attributes every browser-level shared worker to it.
     const info = await send('Target.getTargetInfo');
-    registry?.registerContext(info?.targetInfo?.browserContextId, contextObserver);
+    registry?.registerContext(info?.targetInfo?.browserContextId, contextObserver, {
+      claimTarget,
+      recordWorkerEvent,
+      release: () => { released = true; }
+    });
     cdp.on('Network.requestWillBeSent', (event) => {
       if(observerClosed()) return;
       const kind = event.type === 'WebSocket' ? 'websocket' : 'fetch';
