@@ -600,7 +600,6 @@ function createNetworkObserver(page, contextName, contextObserver) {
     try {
       return new URL(url);
     } catch {
-      recordError('invalid_worker_cdp_message', true);
       return null;
     }
   }
@@ -608,7 +607,10 @@ function createNetworkObserver(page, contextName, contextObserver) {
   function record(targetId, source, kind, url, eventName) {
     if(observerClosed()) return;
     const parsed = parseNetworkUrl(url);
-    if(!parsed) return;
+    if(!parsed) {
+      recordError('invalid_worker_cdp_message', true);
+      return;
+    }
 
     if(parsed.protocol === 'data:' || parsed.protocol === 'about:') return;
     if(parsed.protocol === 'blob:') {

@@ -1755,9 +1755,7 @@ describe('discovery shared-worker network accounting', () => {
     ['Network.webSocketCreated', {requestId: 'invalid-socket', url: `relative-path?secret=${HOSTILE.token}`}],
     ['Network.requestWillBeSent', {type: 'Fetch', request: {url: ''}}],
     ['Network.requestWillBeSent', {type: 'Fetch', request: {url: `https://[invalid?secret=${HOSTILE.token}`}}],
-    ['Audits.issueAdded', {issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: '', isReportOnly: false}}}}],
-    ['Audits.issueAdded', {issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: `https://[invalid?secret=${HOSTILE.token}`, isReportOnly: false}}}}],
-    ['Log.entryAdded', {entry: {source: 'security', text: `Refused to connect to 'https://[invalid?secret=${HOSTILE.token}'`}}]
+    ['Network.requestWillBeSent', {type: 'Fetch', request: {url: 'data'}}]
   ])('rejects invalid URL strings from discovery %s without charging twice or inventing attempts', async(method, params) => {
     const harness = await createDiscoveryNetworkHarness({observeWebSocket101: false});
     const {alice} = harness;
@@ -1788,6 +1786,51 @@ describe('discovery shared-worker network accounting', () => {
       expect(alice.observer.summary()).toMatchObject({observerErrors: 1, coverageComplete: 0});
       expect(alice.networkObserver.summary()).toMatchObject({observerErrors: 1, allowedWebSockets: 0, unexpectedAttempts: 0});
       expect(alice.networkObserver.events).toHaveLength(0);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it.each(['page', 'auto', 'discovery'])('ignores normalized CSP diagnostic values on the %s path', async(via) => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      if(via !== 'page') await harness.attach(alice, 'alice-worker', via);
+      for(const blockedURL of ['', 'blob', 'data', `https://[invalid?secret=${HOSTILE.token}`]) {
+        const before = alice.observer.eventCount();
+        const params = {issue: {details: {contentSecurityPolicyIssueDetails: {
+          blockedURL,
+          violatedDirective: 'connect-src \'self\'',
+          contentSecurityPolicyViolationType: 'kURLViolation',
+          isReportOnly: false
+        }}}};
+        if(via === 'page') alice.cdp.emit('Audits.issueAdded', params);
+        else harness.emit(alice, 'alice-worker', 'Audits.issueAdded', params, via);
+        expect(alice.observer.eventCount()).toBe(before + 1);
+        expect(alice.observer.summary()).toMatchObject({observerErrors: 0, coverageComplete: 1});
+        expect(alice.networkObserver.summary()).toMatchObject({observerErrors: 0, allowedWebSockets: 0, unexpectedAttempts: 0});
+        expect(alice.networkObserver.events).toHaveLength(0);
+      }
+      expectNoHostileLeak({network: alice.networkObserver.summary(), worker: alice.observer.summary(), errors: alice.networkObserver.errors});
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('ignores unparseable log diagnostic URLs without treating the text as a malformed request', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'alice-worker');
+      const before = alice.observer.eventCount();
+      harness.emit(alice, 'alice-worker', 'Log.entryAdded', {
+        entry: {source: 'security', text: `Refused to connect to 'https://[invalid?secret=${HOSTILE.token}'`}
+      });
+      expect(alice.observer.eventCount()).toBe(before + 1);
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 0, coverageComplete: 1});
+      expect(alice.networkObserver.summary()).toMatchObject({observerErrors: 0, allowedWebSockets: 0, unexpectedAttempts: 0});
+      expect(alice.networkObserver.events).toHaveLength(0);
+      expectNoHostileLeak(alice.observer.summary());
     } finally {
       await harness.stop();
     }
@@ -1880,15 +1923,31 @@ describe('discovery shared-worker network accounting', () => {
 
   it.each([
     {method: 'Network.webSocketCreated', params: {requestId: 'invalid-socket', url: ''}},
-    {method: 'Network.requestWillBeSent', params: {type: 'Fetch', request: {url: ''}}},
-    {method: 'Audits.issueAdded', params: {issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: '', isReportOnly: false}}}}},
-    {method: 'Log.entryAdded', params: {entry: {source: 'security', text: `Refused to connect to 'https://[invalid?secret=${HOSTILE.token}'`}}}
+    {method: 'Network.requestWillBeSent', params: {type: 'Fetch', request: {url: ''}}}
   ])('fails the egress gate on invalid URL strings from discovery $method', async(event) => {
     const report = await runDiscoveryAccountingGate([event]);
     expect(report).toMatchObject({
       status: 'failed', stage: 'browser_egress_or_page_errors', network: {unexpectedAttempts: 0, observerErrors: 1}
     });
     expect(report.workerObservation.contexts.alice.coverageComplete).toBe(0);
+    expect(report.network.websocket_101_by_context_phase).toEqual(emptyWebSocket101Grid());
+    expectNoHostileLeak(report);
+  });
+
+  it.each(['', 'blob', 'data', `https://[invalid?secret=${HOSTILE.token}`])('keeps a passing scenario verdict for CSP diagnostic value %j', async(blockedURL) => {
+    const report = await runDiscoveryAccountingGate([{method: 'Audits.issueAdded', params: {
+      issue: {details: {contentSecurityPolicyIssueDetails: {
+        blockedURL,
+        violatedDirective: 'connect-src \'self\'',
+        contentSecurityPolicyViolationType: 'kURLViolation',
+        isReportOnly: false
+      }}}
+    }}]);
+    expect(report).toMatchObject({
+      status: 'passed', stage: 'alice_password_field_ready', network: {unexpectedAttempts: 0, observerErrors: 0}
+    });
+    expect(report.workerObservation.contexts.alice.coverageComplete).toBe(1);
+    expect(report.network.contexts.alice.attemptsBySource).toEqual({page: 0, shared_worker: 1, service_worker: 1, worker: 0});
     expect(report.network.websocket_101_by_context_phase).toEqual(emptyWebSocket101Grid());
     expectNoHostileLeak(report);
   });
