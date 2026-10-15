@@ -1481,7 +1481,8 @@ async function captureGroupNameFormState(trace = groupNameFormTrace, timeoutMs =
 }
 
 // Runs in the page. Counts and booleans only: the group name is compared
-// against the headers here and never returned.
+// against the active chat's header here and never returned. Inactive chats
+// stay rendered and are hidden by opacity, so only the active one counts.
 function groupCreatedProbe({groupName}) {
   const isVisible = (element) => {
     if(!element || !element.isConnected) return false;
@@ -1491,8 +1492,9 @@ function groupCreatedProbe({groupName}) {
   const center = document.getElementById('column-center');
   const chats = center ? Array.from(center.querySelectorAll('.chat')) : [];
   const active = chats.filter((chat) => chat.classList.contains('active'));
-  const peerId = active.length === 1 ? active[0].querySelector('.topbar .avatar[data-peer-id]')?.getAttribute('data-peer-id') || '' : '';
-  const headers = center ? Array.from(center.querySelectorAll('.chat .topbar .chat-info')) : [];
+  const chat = active.length === 1 ? active[0] : undefined;
+  const peerId = chat?.querySelector('.topbar .avatar[data-peer-id]')?.getAttribute('data-peer-id') || '';
+  const headers = chat ? Array.from(chat.querySelectorAll('.topbar .chat-info')) : [];
   return {
     activeChat: !/^-?[0-9]{1,20}$/.test(peerId) ? 'none' : peerId.startsWith('-') ? 'group' : 'user',
     chatCount: chats.length,

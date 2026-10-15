@@ -3928,9 +3928,10 @@ describe('real client group created', () => {
   }, 15_000);
 
   // The centre column as tweb leaves it after the confirm: Bob's direct chat
-  // and the new group's chat side by side, only one of them active.
+  // and the new group's chat side by side, only one of them active. Like the
+  // client, an inactive chat stays rendered and is hidden by opacity.
   function chatMarkup({peerId, title, active}: {peerId: string, title: string, active: boolean}) {
-    return `<div class="chat tabs-tab${active ? ' active' : ''}"${active ? '' : ' style="display:none"'}>
+    return `<div class="chat tabs-tab${active ? ' active' : ''}" style="position:absolute;inset:0;opacity:${active ? 1 : 0}">
       <div class="topbar"><div class="chat-info"><div class="avatar" data-peer-id="${peerId}"></div><span class="peer-title">${title}</span></div></div>
       <div class="bubbles"><div class="bubble"><div class="message">${HOSTILE.phrase}</div></div></div>
       <div class="chat-input"><div class="input-message-container">
