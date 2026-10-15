@@ -11,7 +11,8 @@ const MESSAGE = 'browser-ci-hello';
 const GROUP_MESSAGE = 'browser-ci-group-hello';
 const PASSWORD_FIELD_SELECTOR = '#auth-pages input[name="notsearch_password"]';
 const PASSWORD_FIELD_TIMEOUT_MS = 30_000;
-const COMPOSER_SELECTOR = '#column-center .input-message-input[contenteditable="true"]';
+// The height mirror next to the composer shares its class and editability.
+const COMPOSER_SELECTOR = '#column-center .input-message-input:not(.input-field-input-fake)[contenteditable="true"]';
 const CENTER_COLUMN_CAPTURE_TIMEOUT_MS = 5_000;
 const RPC_ERROR_TYPE_LIMIT = 16;
 const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;

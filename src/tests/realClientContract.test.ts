@@ -3528,7 +3528,7 @@ describe('real client centre-column failure state', () => {
 
   // The production chat keeps the composer and its height mirror side by side,
   // both `.input-message-input` and both contenteditable.
-  function chatMarkup({editable = 'true', chatInput = 'chat-input', control = ''} = {}) {
+  function chatMarkup({editable = 'true', chatInput = 'chat-input', control = '', extraInput = ''} = {}) {
     return `<div id="column-center"><div class="chats-container">
       <div class="chat tabs-tab active">
         <div class="topbar"><div class="chat-info"><div class="avatar" data-peer-id="1000002"></div>${HOSTILE.username}</div></div>
@@ -3536,16 +3536,29 @@ describe('real client centre-column failure state', () => {
         <div class="${chatInput}"><div class="input-message-container">
           <div class="input-message-input" contenteditable="${editable}">${HOSTILE.password}</div>
           <div class="input-message-input input-field-input-fake" contenteditable="true" style="opacity:0;position:absolute;top:0;z-index:-3"></div>
+          ${extraInput}
         </div></div>
         <div class="chat-input-control">${control}</div>
       </div>
     </div></div>`;
   }
 
-  it('records a composer wait that two matching inputs end, without page text', async() => {
+  it('waits for the editable composer and not its height mirror', async() => {
     const page = await browser.newPage();
     try {
       await page.setContent(chatMarkup());
+      const input = await openComposer(page, 'alice_direct_chat');
+      expect(await input.count()).toBe(1);
+      expect(await input.evaluate((element: HTMLElement) => element.classList.contains('input-field-input-fake'))).toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('records a composer wait that two matching inputs end, without page text', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(chatMarkup({extraInput: '<div class="input-message-input" contenteditable="true"></div>'}));
       await expect(openComposer(page, 'alice_direct_chat')).rejects.toThrow('alice_direct_chat_composer');
       const state = await captureCenterColumnState();
       expect(state).toEqual({
@@ -3553,10 +3566,10 @@ describe('real client centre-column failure state', () => {
         activeChatCount: 1,
         activePeerId: '1000002',
         composerMatches: 2,
-        composerInputs: 1,
+        composerInputs: 2,
         composerFakeInputs: 1,
-        composerVisible: 1,
-        composerEditable: 1,
+        composerVisible: 2,
+        composerEditable: 2,
         chatInput: 'visible',
         controlBar: 'none',
         selectedPeerId: null,
