@@ -10,7 +10,9 @@ import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
 
 import {
   assertAllScenariosPassed,
+  formatBrowserFailureMessage,
   parseAuthProgressReport,
+  parseCenterColumnState,
   parseFixtureReadiness,
   parseObserverControls,
   parseRealClientArgs,
@@ -22,7 +24,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
-const {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main: runRealClient, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
+const {captureCenterColumnState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main: runRealClient, matchesPrivateArtifactManifest, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -3510,5 +3512,189 @@ describe('real client username field readiness', () => {
       await usernameField?.dispose();
       await page.close();
     }
+  });
+});
+
+describe('real client centre-column failure state', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  // The production chat keeps the composer and its height mirror side by side,
+  // both `.input-message-input` and both contenteditable.
+  function chatMarkup({editable = 'true', chatInput = 'chat-input', control = ''} = {}) {
+    return `<div id="column-center"><div class="chats-container">
+      <div class="chat tabs-tab active">
+        <div class="topbar"><div class="chat-info"><div class="avatar" data-peer-id="1000002"></div>${HOSTILE.username}</div></div>
+        <div class="bubbles"><div class="bubble"><div class="message">${HOSTILE.phrase}</div></div></div>
+        <div class="${chatInput}"><div class="input-message-container">
+          <div class="input-message-input" contenteditable="${editable}">${HOSTILE.password}</div>
+          <div class="input-message-input input-field-input-fake" contenteditable="true" style="opacity:0;position:absolute;top:0;z-index:-3"></div>
+        </div></div>
+        <div class="chat-input-control">${control}</div>
+      </div>
+    </div></div>`;
+  }
+
+  it('records a composer wait that two matching inputs end, without page text', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(chatMarkup());
+      await expect(openComposer(page, 'alice_direct_chat')).rejects.toThrow('alice_direct_chat_composer');
+      const state = await captureCenterColumnState();
+      expect(state).toEqual({
+        chatCount: 1,
+        activeChatCount: 1,
+        activePeerId: '1000002',
+        composerMatches: 2,
+        composerInputs: 1,
+        composerFakeInputs: 1,
+        composerVisible: 1,
+        composerEditable: 1,
+        chatInput: 'visible',
+        controlBar: 'none',
+        selectedPeerId: null,
+        composerWait: 'strict_mode_violation',
+        pageErrorsSinceSelection: null,
+        consoleErrorsSinceSelection: null,
+        rpcErrorsSinceSelection: null,
+        rpcErrorTypesSinceSelection: null
+      });
+      expect(parseCenterColumnState(state)).toEqual(state);
+      expectNoHostileLeak(state);
+      expect(JSON.stringify(state)).not.toContain('Unblock');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('names a bottom bar that replaced the composer and counts client and RPC errors since selection', async() => {
+    const page = await browser.newPage();
+    try {
+      await countClientErrors(page);
+      const markup = chatMarkup({
+        editable: 'false',
+        chatInput: 'chat-input is-hidden',
+        control: '<button class="btn-primary chat-input-control-button">Unblock</button>'
+      });
+      await page.route(`${APP_ORIGIN}/**`, (route: any) => route.fulfill({contentType: 'text/html', body: markup}));
+      await page.goto(`${APP_ORIGIN}/`);
+      // A worker port as the app uses it; an error before selection is the baseline.
+      await page.evaluate(() => {
+        const channel = new MessageChannel();
+        channel.port2.addEventListener('message', () => {});
+        channel.port2.start();
+        (window as any).workerPort = channel.port1;
+        channel.port1.postMessage({type: 'result', payload: {taskId: 1, error: {type: 'SESSION_PASSWORD_NEEDED', code: 401}}});
+      });
+      await page.waitForTimeout(50);
+      await page.evaluate((text: string) => {
+        const port = (window as any).workerPort;
+        port.postMessage({type: 'batch', payload: [
+          {type: 'result', payload: {taskId: 2, error: {type: 'PEER_ID_INVALID', code: 400, description: text}}},
+          {type: 'result', payload: {taskId: 3, result: text}}
+        ]});
+        port.postMessage({type: 'ack', payload: {taskId: 4, cached: true, error: {type: text, message: text}}});
+        port.postMessage({type: 'invoke', payload: {type: 'invoke', payload: text}});
+        console.error(text);
+        setTimeout(() => {
+          throw new Error(text);
+        });
+      }, HOSTILE.phrase);
+      await page.waitForTimeout(100);
+      const state = await captureCenterColumnState({
+        page,
+        selectedPeerId: '1000002',
+        errorsAtSelection: {pageErrors: 0, consoleErrors: 0, rpc: {total: 1, byType: {SESSION_PASSWORD_NEEDED: 1}}},
+        composerWait: 'timeout'
+      });
+      expect(state).toMatchObject({
+        activePeerId: '1000002',
+        selectedPeerId: '1000002',
+        composerEditable: 0,
+        chatInput: 'hidden',
+        controlBar: 'unblock',
+        composerWait: 'timeout',
+        pageErrorsSinceSelection: 1,
+        consoleErrorsSinceSelection: 1,
+        rpcErrorsSinceSelection: 2,
+        rpcErrorTypesSinceSelection: {PEER_ID_INVALID: 1}
+      });
+      expect(parseCenterColumnState(state)).toEqual(state);
+      expectNoHostileLeak(state);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('reports an unreadable page as unavailable', async() => {
+    const page = await browser.newPage();
+    await page.close();
+    expect(await captureCenterColumnState({page, composerWait: 'timeout'})).toBe('unavailable');
+    expect(await captureCenterColumnState({composerWait: 'none'})).toBe('unavailable');
+  });
+
+  it('reports unavailable within the capture deadline when a page read never settles', async() => {
+    const probe: any = {chatCount: 0, activeChatCount: 0, activePeerId: null, composerMatches: 0, composerInputs: 0,
+      composerFakeInputs: 0, composerVisible: 0, composerEditable: 0, chatInput: 'absent', controlBar: 'none'};
+    for(const stalled of [0, 1]) {
+      let calls = 0;
+      const page = {evaluate: () => calls++ === stalled ? new Promise(() => {}) : Promise.resolve(probe)};
+      const started = Date.now();
+      expect(await captureCenterColumnState({page, composerWait: 'timeout'}, 50)).toBe('unavailable');
+      expect(Date.now() - started).toBeLessThan(1_000);
+    }
+  });
+
+  it('keeps only the closed schema in the failure message', () => {
+    const state: any = {
+      chatCount: 1,
+      activeChatCount: 0,
+      activePeerId: null,
+      composerMatches: 0,
+      composerInputs: 0,
+      composerFakeInputs: 0,
+      composerVisible: 0,
+      composerEditable: 0,
+      chatInput: 'absent',
+      controlBar: 'none',
+      selectedPeerId: '1000002',
+      composerWait: 'timeout',
+      pageErrorsSinceSelection: 0,
+      consoleErrorsSinceSelection: 2,
+      rpcErrorsSinceSelection: 3,
+      rpcErrorTypesSinceSelection: {PEER_ID_INVALID: 2}
+    };
+    expect(formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'alice_direct_chat_composer',
+      passwordEvidence: [],
+      centerColumn: state
+    })).toBe(`real client scenario failed at alice_direct_chat_composer; password evidence []; centre column ${JSON.stringify(parseCenterColumnState(state))}`);
+    expect(parseCenterColumnState(state)).toEqual(state);
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'alice_direct_chat_composer', centerColumn: 'unavailable'}))
+    .toBe('real client scenario failed at alice_direct_chat_composer; centre column "unavailable"');
+    for(const hostile of [
+      {...state, hint: HOSTILE.phrase},
+      {...state, activePeerId: HOSTILE.username},
+      {...state, controlBar: HOSTILE.phrase},
+      {...state, composerMatches: -1},
+      {...state, rpcErrorTypesSinceSelection: {[HOSTILE.phrase]: 1}},
+      {...state, rpcErrorTypesSinceSelection: Object.fromEntries(Array.from({length: 17}, (_, index) => [`ERROR_${index}`, 1]))},
+      {...state, rpcErrorTypesSinceSelection: {PEER_ID_INVALID: 0}},
+      {...state, rpcErrorTypesSinceSelection: null},
+      HOSTILE.phrase,
+      null
+    ]) {
+      const message = formatBrowserFailureMessage({status: 'failed', stage: 'alice_direct_chat_composer', centerColumn: hostile});
+      expect(message).toBe('real client scenario failed at alice_direct_chat_composer; centre column "unclassified"');
+    }
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_chats_list'})).toBe('real client scenario failed at bob_chats_list');
   });
 });

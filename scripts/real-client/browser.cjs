@@ -11,6 +11,20 @@ const MESSAGE = 'browser-ci-hello';
 const GROUP_MESSAGE = 'browser-ci-group-hello';
 const PASSWORD_FIELD_SELECTOR = '#auth-pages input[name="notsearch_password"]';
 const PASSWORD_FIELD_TIMEOUT_MS = 30_000;
+const COMPOSER_SELECTOR = '#column-center .input-message-input[contenteditable="true"]';
+const CENTER_COLUMN_CAPTURE_TIMEOUT_MS = 5_000;
+const RPC_ERROR_TYPE_LIMIT = 16;
+const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
+// Bottom-bar buttons that replace the composer, keyed by their English label.
+// Only the key is reported; the label never leaves the page.
+const CONTROL_BAR_LABELS = Object.freeze({
+  'START': 'start',
+  'Unblock': 'unblock',
+  'JOIN': 'join',
+  'Mute': 'mute',
+  'Unmute': 'unmute',
+  'Open Chat': 'open_chat'
+});
 const PASSWORD_FAILURE_STAGES = new Set([
   'password_field_absent',
   'password_field_not_unique',
@@ -34,6 +48,13 @@ const CONTROL_PLAN = Object.freeze([
 
 let currentStage = 'runtime_inputs';
 let currentScenario;
+// The chat that the scenario last selected and the page it waits on, kept so a
+// failing chat stage can describe the centre column it gave up on.
+let centerColumnTrace = createCenterColumnTrace();
+
+function createCenterColumnTrace() {
+  return {page: undefined, selectedPeerId: undefined, errorsAtSelection: undefined, composerWait: 'none'};
+}
 
 function failStage(stage) {
   currentStage = stage;
@@ -1162,14 +1183,181 @@ async function selectUniquePeer(page, inputSelector, resultsSelector, username, 
   }
   const peerId = await selectedRow.getAttribute('data-peer-id');
   if(!peerId) failStage(`${stage}_peer_identity`);
+  centerColumnTrace = {
+    ...createCenterColumnTrace(),
+    page,
+    selectedPeerId: peerId,
+    errorsAtSelection: {...clientErrorCounts.get(page), rpc: await readRpcErrorCounts(page)}
+  };
   await selectedRow.click();
   return peerId;
 }
 
 async function openComposer(page, stage) {
-  const input = page.locator('#column-center .input-message-input[contenteditable="true"]');
-  await input.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`${stage}_composer`));
+  if(centerColumnTrace.page !== page) centerColumnTrace = {...createCenterColumnTrace(), page};
+  const input = page.locator(COMPOSER_SELECTOR);
+  await input.waitFor({state: 'visible', timeout: 30_000}).catch((error) => {
+    centerColumnTrace.composerWait = classifyLocatorError(error);
+    failStage(`${stage}_composer`);
+  });
   return input;
+}
+
+function classifyLocatorError(error) {
+  if(error?.name === 'TimeoutError') return 'timeout';
+  if(typeof error?.message === 'string' && error.message.includes('strict mode violation')) return 'strict_mode_violation';
+  return 'other';
+}
+
+// Counts only: neither an exception message nor console text is read.
+const clientErrorCounts = new WeakMap();
+async function countClientErrors(page) {
+  const counts = {pageErrors: 0, consoleErrors: 0};
+  clientErrorCounts.set(page, counts);
+  page.on('pageerror', () => counts.pageErrors++);
+  page.on('console', (message) => {
+    if(message.type() === 'error') counts.consoleErrors++;
+  });
+  await page.addInitScript(installRpcErrorCounter, {limit: RPC_ERROR_TYPE_LIMIT, pattern: RPC_ERROR_TYPE_PATTERN.source});
+}
+
+// Runs in the page before the app. Handled RPC failures reach the page as
+// `result`/`ack` tasks with an `error` on the worker's MessagePort; a passive
+// listener counts them and keeps only an error type that matches the fixed
+// pattern, up to `limit` types. Messages, results and arguments are not read.
+function installRpcErrorCounter({limit, pattern}) {
+  const typePattern = new RegExp(pattern);
+  const byType = new Map();
+  let total = 0;
+  const listened = new WeakSet();
+  const record = (data) => {
+    const tasks = data?.type === 'batch' && Array.isArray(data.payload) ? data.payload : [data];
+    for(const task of tasks) {
+      if((task?.type !== 'result' && task?.type !== 'ack') || !task.payload || !('error' in task.payload)) continue;
+      total = Math.min(total + 1, 1_000_000);
+      const type = task.payload.error?.type;
+      if(typeof type === 'string' && typePattern.test(type) && (byType.has(type) || byType.size < limit)) {
+        byType.set(type, Math.min((byType.get(type) || 0) + 1, 1_000_000));
+      }
+    }
+  };
+  const addEventListener = MessagePort.prototype.addEventListener;
+  MessagePort.prototype.addEventListener = function(type, ...rest) {
+    if(type === 'message' && !listened.has(this)) {
+      listened.add(this);
+      addEventListener.call(this, 'message', (event) => {
+        try {
+          record(event.data);
+        } catch {}
+      });
+    }
+    return addEventListener.call(this, type, ...rest);
+  };
+  Object.defineProperty(window, '__realClientRpcErrors', {
+    value: () => ({total, byType: Object.fromEntries(byType)})
+  });
+}
+
+// Bounded so an unresponsive page cannot hold up the scenario or its report.
+async function withDeadline(promise, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('center_column_capture_timeout')), timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function readRpcErrorCounts(page) {
+  const counts = await withDeadline(page.evaluate(() => window.__realClientRpcErrors?.()), CENTER_COLUMN_CAPTURE_TIMEOUT_MS).catch(() => undefined);
+  return sanitizeRpcErrorCounts(counts);
+}
+
+function sanitizeRpcErrorCounts(counts) {
+  if(!counts || !Number.isSafeInteger(counts.total) || !counts.byType || typeof counts.byType !== 'object') return undefined;
+  const byType = Object.entries(counts.byType)
+  .filter(([type, count]) => RPC_ERROR_TYPE_PATTERN.test(type) && Number.isSafeInteger(count) && count > 0)
+  .slice(0, RPC_ERROR_TYPE_LIMIT);
+  return {total: counts.total, byType: Object.fromEntries(byType)};
+}
+
+function rpcErrorsSince(before, after) {
+  if(!before || !after) return {rpcErrorsSinceSelection: null, rpcErrorTypesSinceSelection: null};
+  const types = Object.entries(after.byType)
+  .map(([type, count]) => [type, count - (before.byType[type] || 0)])
+  .filter(([, count]) => count > 0);
+  return {
+    rpcErrorsSinceSelection: Math.max(after.total - before.total, 0),
+    rpcErrorTypesSinceSelection: Object.fromEntries(types)
+  };
+}
+
+// Runs in the page. Reads fixed selectors, classes and the composer's
+// editability; a bottom-bar label is only compared against the fixed table.
+function centerColumnProbe({composerSelector, controlBarLabels}) {
+  const center = document.getElementById('column-center');
+  const isVisible = (element) => {
+    if(!element || !element.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+  };
+  const chats = center ? Array.from(center.querySelectorAll('.chat')) : [];
+  const active = chats.filter((chat) => chat.classList.contains('active'));
+  const chat = active.length === 1 ? active[0] : undefined;
+  const peerId = chat?.querySelector('.topbar .avatar[data-peer-id]')?.getAttribute('data-peer-id') || '';
+  const inputs = chat ? Array.from(chat.querySelectorAll('.input-message-input:not(.input-field-input-fake)')) : [];
+  const chatInput = chat?.querySelector('.chat-input');
+  const buttons = chat ? Array.from(chat.querySelectorAll('.chat-input-control-button')).filter(isVisible) : [];
+  let controlBar = 'none';
+  if(buttons.length > 1) {
+    controlBar = 'multiple';
+  } else if(buttons.length === 1) {
+    const label = (buttons[0].textContent || '').trim();
+    controlBar = buttons[0].querySelector('.chat-input-frozen-text') ? 'frozen' :
+      Object.prototype.hasOwnProperty.call(controlBarLabels, label) ? controlBarLabels[label] : 'other';
+  }
+  return {
+    chatCount: chats.length,
+    activeChatCount: active.length,
+    activePeerId: /^-?[0-9]{1,20}$/.test(peerId) ? peerId : null,
+    composerMatches: center ? center.querySelectorAll(composerSelector).length : 0,
+    composerInputs: inputs.length,
+    composerFakeInputs: chat ? chat.querySelectorAll('.input-field-input-fake').length : 0,
+    composerVisible: inputs.filter(isVisible).length,
+    composerEditable: inputs.filter((input) => input.isContentEditable).length,
+    chatInput: !chatInput ? 'absent' : chatInput.classList.contains('is-hidden') || !isVisible(chatInput) ? 'hidden' : 'visible',
+    controlBar
+  };
+}
+
+// Written only when a message or group stage fails: what the centre column
+// showed, how the composer wait ended, and the client errors since selection.
+async function captureCenterColumnState(trace = centerColumnTrace, timeoutMs = CENTER_COLUMN_CAPTURE_TIMEOUT_MS) {
+  if(!trace.page) return 'unavailable';
+  try {
+    // One deadline covers both page reads.
+    const [probe, rpc] = await withDeadline(Promise.all([
+      trace.page.evaluate(centerColumnProbe, {composerSelector: COMPOSER_SELECTOR, controlBarLabels: CONTROL_BAR_LABELS}),
+      trace.page.evaluate(() => window.__realClientRpcErrors?.()).catch(() => undefined)
+    ]), timeoutMs);
+    const counts = clientErrorCounts.get(trace.page);
+    const since = (key) => counts && trace.errorsAtSelection ? counts[key] - trace.errorsAtSelection[key] : null;
+    return {
+      ...probe,
+      selectedPeerId: /^-?[0-9]{1,20}$/.test(trace.selectedPeerId || '') ? trace.selectedPeerId : null,
+      composerWait: trace.composerWait,
+      pageErrorsSinceSelection: since('pageErrors'),
+      consoleErrorsSinceSelection: since('consoleErrors'),
+      ...rpcErrorsSince(trace.errorsAtSelection?.rpc, sanitizeRpcErrorCounts(rpc))
+    };
+  } catch {
+    return 'unavailable';
+  }
 }
 
 async function sendText(page, text, stage) {
@@ -1536,6 +1724,7 @@ async function main(dependencies = {}) {
   let controls = {};
   let webSocket101Phase;
   let controlWebSocket101ByContextPhase;
+  centerColumnTrace = createCenterColumnTrace();
   try {
     runtime = Object.prototype.hasOwnProperty.call(dependencies, 'runtimeConfig')
       ? dependencies.runtimeConfig
@@ -1611,6 +1800,7 @@ async function main(dependencies = {}) {
 
     const pageErrors = [];
     alice.page.on('pageerror', () => pageErrors.push('pageerror'));
+    await countClientErrors(alice.page);
 
     currentStage = 'bob_context';
     const bob = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
@@ -1624,6 +1814,7 @@ async function main(dependencies = {}) {
     await bob.networkObserver.start(registry);
 
     bob.page.on('pageerror', () => pageErrors.push('pageerror'));
+    await countClientErrors(bob.page);
 
     currentScenario = 'sign-in';
     await signIn(alice.page, accounts[0], 'alice', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
@@ -1790,6 +1981,7 @@ async function main(dependencies = {}) {
       // so the failure report states what the observer established, not a blank.
       for(const observer of Object.values(appObservers)) observer.state.windowElapsed = true;
       const failureBlock = buildObservationBlock(registry, appObservers, controls, egress);
+      const centerColumn = ['message', 'group'].includes(currentScenario) ? await captureCenterColumnState() : undefined;
       report = {
         status: 'failed',
         stage: currentStage,
@@ -1800,6 +1992,7 @@ async function main(dependencies = {}) {
         controlContextCount: CONTROL_PLAN.length,
         screenshotsCaptured: capturedScreenshots.count,
         passwordEvidence,
+        ...(centerColumn ? {centerColumn} : {}),
         // On failure the closed-schema evidence is still the point, validated the
         // same way: any schema violation collapses it to `unclassified`.
         ...(registry ? {
@@ -1848,7 +2041,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main, matchesPrivateArtifactManifest, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
