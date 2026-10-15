@@ -497,6 +497,25 @@ export function parseCenterColumnState(state) {
   return Object.fromEntries(keys.map((key) => [key, state[key]]));
 }
 
+const GROUP_NAME_FORM_COUNT_KEYS = ['formCount', 'visibleInputs', 'visibleEditables', 'nameFieldMatches', 'nameFieldVisible', 'confirmCount'];
+const GROUP_NAME_FORM_FLAG_KEYS = ['formVisible', 'nameHasValue', 'confirmShown', 'confirmEnabled'];
+
+// Closed schema like the centre column: fixed counts, booleans and the step
+// wait's outcome, anything else is `unclassified`.
+export function parseGroupNameFormState(state) {
+  if(state === 'unavailable') return state;
+  const keys = [...GROUP_NAME_FORM_COUNT_KEYS, ...GROUP_NAME_FORM_FLAG_KEYS, 'stepWait'];
+  const isCount = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000;
+  if(!state || typeof state !== 'object' || Array.isArray(state) ||
+      JSON.stringify(Object.keys(state).sort()) !== JSON.stringify([...keys].sort()) ||
+      !GROUP_NAME_FORM_COUNT_KEYS.every((key) => isCount(state[key])) ||
+      !GROUP_NAME_FORM_FLAG_KEYS.every((key) => typeof state[key] === 'boolean') ||
+      !CENTER_COLUMN_ENUMS.composerWait.includes(state.stepWait)) {
+    return 'unclassified';
+  }
+  return Object.fromEntries(keys.map((key) => [key, state[key]]));
+}
+
 export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const hasPasswordEvidence = report.passwordEvidence !== undefined;
   const failedPasswordEvidence = controlsOnly || !hasPasswordEvidence
@@ -508,7 +527,10 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const centerColumnSummary = controlsOnly || report.centerColumn === undefined
     ? ''
     : `; centre column ${JSON.stringify(parseCenterColumnState(report.centerColumn))}`;
-  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}`;
+  const groupNameFormSummary = controlsOnly || report.groupNameForm === undefined
+    ? ''
+    : `; group name form ${JSON.stringify(parseGroupNameFormState(report.groupNameForm))}`;
+  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}`;
 }
 
 export function parseAuthProgressReport(report) {
