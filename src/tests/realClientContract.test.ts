@@ -22,7 +22,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
-const {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main: runRealClient, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
+const {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main: runRealClient, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -2122,9 +2122,37 @@ describe('real client scenario contract', () => {
     expect(parse(artifactReady).artifactReady.artifactDigest).toBe(artifactReady.artifactDigest);
     const {manifestArtifactDigest: _omitted, ...missing} = artifactReady;
     expect(() => parse(missing)).toThrow('fixture artifact identity is invalid');
-    for(const malformed of [null, 7, 'f'.repeat(64), `sha256:${'f'.repeat(63)}`, `sha256:${'F'.repeat(64)}`, `sha512:${'f'.repeat(64)}`]) {
+    for(const malformed of [null, 7, [artifactReady.manifestArtifactDigest], 'f'.repeat(64), `sha256:${'f'.repeat(63)}`, `sha256:${'F'.repeat(64)}`, `sha512:${'f'.repeat(64)}`]) {
       expect(() => parse({...artifactReady, manifestArtifactDigest: malformed})).toThrow('fixture artifact identity is invalid');
     }
+  });
+
+  it('requires a string manifest payload digest in the browser runtime input', () => {
+    const runId = 'a'.repeat(32);
+    const runtime = {
+      runId,
+      endpoint: APP_ORIGIN,
+      wssEndpoint: 'wss://telegramd.test/apiws',
+      fingerprint: '1234567890abcdef',
+      publicKeySHA256: 'a'.repeat(64),
+      artifactDigest: `sha256:${'c'.repeat(64)}`,
+      manifestArtifactDigest: `sha256:${'f'.repeat(64)}`,
+      webRevision: READINESS_PINS.webRevision,
+      leafSPKI: Buffer.alloc(32, 1).toString('base64'),
+      frontIp: '127.0.0.1',
+      screenshotDirectory: `/tmp/real-client-${runId}`,
+      accounts: [
+        {username: `u${runId.slice(0, 30)}a`, password: 'b'.repeat(64)},
+        {username: `u${runId.slice(0, 30)}b`, password: 'c'.repeat(64)}
+      ]
+    };
+
+    expect(() => validateRuntimeInput(runtime)).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, observationOnly: true, artifactDigest: null, manifestArtifactDigest: null})).not.toThrow();
+    for(const malformed of [undefined, null, [runtime.manifestArtifactDigest], `sha256:${'f'.repeat(63)}`]) {
+      expect(() => validateRuntimeInput({...runtime, manifestArtifactDigest: malformed})).toThrow('runtime_input_validation');
+    }
+    expect(() => validateRuntimeInput({...runtime, observationOnly: true, artifactDigest: null})).toThrow('runtime_input_validation');
   });
 
   it('reads only the fixture-owned mode-0400 synthetic password files', () => {

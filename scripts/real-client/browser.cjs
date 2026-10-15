@@ -99,7 +99,8 @@ function validateRuntimeInput(config) {
       (config.observationOnly === true
         ? config.artifactDigest !== null || config.manifestArtifactDigest !== null
         : !/^sha256:[0-9a-f]{64}$/.test(config.artifactDigest || '') ||
-          !/^sha256:[0-9a-f]{64}$/.test(config.manifestArtifactDigest || '')) ||
+          typeof config.manifestArtifactDigest !== 'string' ||
+          !/^sha256:[0-9a-f]{64}$/.test(config.manifestArtifactDigest)) ||
       !/^[0-9a-f]{40}$/.test(config.webRevision || '') ||
       !/^[A-Za-z0-9+/]{43}=$/.test(config.leafSPKI || '') ||
       Buffer.from(config.leafSPKI, 'base64').byteLength !== 32 ||
@@ -1847,7 +1848,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, waitForPasswordField, submitPassword};
+module.exports = {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

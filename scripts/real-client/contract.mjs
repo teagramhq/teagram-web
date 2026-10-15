@@ -200,7 +200,8 @@ export function parseFixtureReadiness(text, expected, options = {}) {
       (requireArtifact && (!SHA256.test(artifactReady.manifestSHA256 || '') ||
         !SHA256.test(artifactReady.indexSHA256 || '') ||
         !/^sha256:[0-9a-f]{64}$/.test(artifactReady.artifactDigest || '') ||
-        !/^sha256:[0-9a-f]{64}$/.test(artifactReady.manifestArtifactDigest || '')))) {
+        typeof artifactReady.manifestArtifactDigest !== 'string' ||
+        !/^sha256:[0-9a-f]{64}$/.test(artifactReady.manifestArtifactDigest)))) {
     throw new Error('fixture artifact identity is invalid');
   }
 
