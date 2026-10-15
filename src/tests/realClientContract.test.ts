@@ -3562,7 +3562,9 @@ describe('real client centre-column failure state', () => {
         selectedPeerId: null,
         composerWait: 'strict_mode_violation',
         pageErrorsSinceSelection: null,
-        consoleErrorsSinceSelection: null
+        consoleErrorsSinceSelection: null,
+        rpcErrorsSinceSelection: null,
+        rpcErrorTypesSinceSelection: null
       });
       expect(parseCenterColumnState(state)).toEqual(state);
       expectNoHostileLeak(state);
@@ -3572,16 +3574,34 @@ describe('real client centre-column failure state', () => {
     }
   });
 
-  it('names a bottom bar that replaced the composer and counts client errors since selection', async() => {
+  it('names a bottom bar that replaced the composer and counts client and RPC errors since selection', async() => {
     const page = await browser.newPage();
     try {
-      countClientErrors(page);
-      await page.setContent(chatMarkup({
+      await countClientErrors(page);
+      const markup = chatMarkup({
         editable: 'false',
         chatInput: 'chat-input is-hidden',
         control: '<button class="btn-primary chat-input-control-button">Unblock</button>'
-      }));
+      });
+      await page.route(`${APP_ORIGIN}/**`, (route: any) => route.fulfill({contentType: 'text/html', body: markup}));
+      await page.goto(`${APP_ORIGIN}/`);
+      // A worker port as the app uses it; an error before selection is the baseline.
+      await page.evaluate(() => {
+        const channel = new MessageChannel();
+        channel.port2.addEventListener('message', () => {});
+        channel.port2.start();
+        (window as any).workerPort = channel.port1;
+        channel.port1.postMessage({type: 'result', payload: {taskId: 1, error: {type: 'SESSION_PASSWORD_NEEDED', code: 401}}});
+      });
+      await page.waitForTimeout(50);
       await page.evaluate((text: string) => {
+        const port = (window as any).workerPort;
+        port.postMessage({type: 'batch', payload: [
+          {type: 'result', payload: {taskId: 2, error: {type: 'PEER_ID_INVALID', code: 400, description: text}}},
+          {type: 'result', payload: {taskId: 3, result: text}}
+        ]});
+        port.postMessage({type: 'ack', payload: {taskId: 4, cached: true, error: {type: text, message: text}}});
+        port.postMessage({type: 'invoke', payload: {type: 'invoke', payload: text}});
         console.error(text);
         setTimeout(() => {
           throw new Error(text);
@@ -3591,7 +3611,7 @@ describe('real client centre-column failure state', () => {
       const state = await captureCenterColumnState({
         page,
         selectedPeerId: '1000002',
-        errorsAtSelection: {pageErrors: 0, consoleErrors: 0},
+        errorsAtSelection: {pageErrors: 0, consoleErrors: 0, rpc: {total: 1, byType: {SESSION_PASSWORD_NEEDED: 1}}},
         composerWait: 'timeout'
       });
       expect(state).toMatchObject({
@@ -3602,8 +3622,11 @@ describe('real client centre-column failure state', () => {
         controlBar: 'unblock',
         composerWait: 'timeout',
         pageErrorsSinceSelection: 1,
-        consoleErrorsSinceSelection: 1
+        consoleErrorsSinceSelection: 1,
+        rpcErrorsSinceSelection: 2,
+        rpcErrorTypesSinceSelection: {PEER_ID_INVALID: 1}
       });
+      expect(parseCenterColumnState(state)).toEqual(state);
       expectNoHostileLeak(state);
     } finally {
       await page.close();
@@ -3632,7 +3655,9 @@ describe('real client centre-column failure state', () => {
       selectedPeerId: '1000002',
       composerWait: 'timeout',
       pageErrorsSinceSelection: 0,
-      consoleErrorsSinceSelection: 2
+      consoleErrorsSinceSelection: 2,
+      rpcErrorsSinceSelection: 3,
+      rpcErrorTypesSinceSelection: {PEER_ID_INVALID: 2}
     };
     expect(formatBrowserFailureMessage({
       status: 'failed',
@@ -3648,6 +3673,10 @@ describe('real client centre-column failure state', () => {
       {...state, activePeerId: HOSTILE.username},
       {...state, controlBar: HOSTILE.phrase},
       {...state, composerMatches: -1},
+      {...state, rpcErrorTypesSinceSelection: {[HOSTILE.phrase]: 1}},
+      {...state, rpcErrorTypesSinceSelection: Object.fromEntries(Array.from({length: 17}, (_, index) => [`ERROR_${index}`, 1]))},
+      {...state, rpcErrorTypesSinceSelection: {PEER_ID_INVALID: 0}},
+      {...state, rpcErrorTypesSinceSelection: null},
       HOSTILE.phrase,
       null
     ]) {

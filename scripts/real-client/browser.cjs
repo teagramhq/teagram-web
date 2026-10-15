@@ -13,6 +13,8 @@ const PASSWORD_FIELD_SELECTOR = '#auth-pages input[name="notsearch_password"]';
 const PASSWORD_FIELD_TIMEOUT_MS = 30_000;
 const COMPOSER_SELECTOR = '#column-center .input-message-input[contenteditable="true"]';
 const CENTER_COLUMN_CAPTURE_TIMEOUT_MS = 5_000;
+const RPC_ERROR_TYPE_LIMIT = 16;
+const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 // Bottom-bar buttons that replace the composer, keyed by their English label.
 // Only the key is reported; the label never leaves the page.
 const CONTROL_BAR_LABELS = Object.freeze({
@@ -1185,7 +1187,7 @@ async function selectUniquePeer(page, inputSelector, resultsSelector, username, 
     ...createCenterColumnTrace(),
     page,
     selectedPeerId: peerId,
-    errorsAtSelection: {...clientErrorCounts.get(page)}
+    errorsAtSelection: {...clientErrorCounts.get(page), rpc: await readRpcErrorCounts(page)}
   };
   await selectedRow.click();
   return peerId;
@@ -1209,13 +1211,71 @@ function classifyLocatorError(error) {
 
 // Counts only: neither an exception message nor console text is read.
 const clientErrorCounts = new WeakMap();
-function countClientErrors(page) {
+async function countClientErrors(page) {
   const counts = {pageErrors: 0, consoleErrors: 0};
   clientErrorCounts.set(page, counts);
   page.on('pageerror', () => counts.pageErrors++);
   page.on('console', (message) => {
     if(message.type() === 'error') counts.consoleErrors++;
   });
+  await page.addInitScript(installRpcErrorCounter, {limit: RPC_ERROR_TYPE_LIMIT, pattern: RPC_ERROR_TYPE_PATTERN.source});
+}
+
+// Runs in the page before the app. Handled RPC failures reach the page as
+// `result`/`ack` tasks with an `error` on the worker's MessagePort; a passive
+// listener counts them and keeps only an error type that matches the fixed
+// pattern, up to `limit` types. Messages, results and arguments are not read.
+function installRpcErrorCounter({limit, pattern}) {
+  const typePattern = new RegExp(pattern);
+  const byType = new Map();
+  let total = 0;
+  const listened = new WeakSet();
+  const record = (data) => {
+    const tasks = data?.type === 'batch' && Array.isArray(data.payload) ? data.payload : [data];
+    for(const task of tasks) {
+      if((task?.type !== 'result' && task?.type !== 'ack') || !task.payload || !('error' in task.payload)) continue;
+      total = Math.min(total + 1, 1_000_000);
+      const type = task.payload.error?.type;
+      if(typeof type === 'string' && typePattern.test(type) && (byType.has(type) || byType.size < limit)) {
+        byType.set(type, Math.min((byType.get(type) || 0) + 1, 1_000_000));
+      }
+    }
+  };
+  const addEventListener = MessagePort.prototype.addEventListener;
+  MessagePort.prototype.addEventListener = function(type, ...rest) {
+    if(type === 'message' && !listened.has(this)) {
+      listened.add(this);
+      addEventListener.call(this, 'message', (event) => {
+        try {
+          record(event.data);
+        } catch {}
+      });
+    }
+    return addEventListener.call(this, type, ...rest);
+  };
+  Object.defineProperty(window, '__realClientRpcErrors', {
+    value: () => ({total, byType: Object.fromEntries(byType)})
+  });
+}
+
+async function readRpcErrorCounts(page) {
+  const counts = await page.evaluate(() => window.__realClientRpcErrors?.()).catch(() => undefined);
+  if(!counts || !Number.isSafeInteger(counts.total) || !counts.byType || typeof counts.byType !== 'object') return undefined;
+  const byType = Object.entries(counts.byType)
+  .filter(([type, count]) => RPC_ERROR_TYPE_PATTERN.test(type) && Number.isSafeInteger(count) && count > 0)
+  .slice(0, RPC_ERROR_TYPE_LIMIT);
+  return {total: counts.total, byType: Object.fromEntries(byType)};
+}
+
+function rpcErrorsSince(before, after) {
+  if(!before || !after) return {rpcErrorsSinceSelection: null, rpcErrorTypesSinceSelection: null};
+  const types = Object.entries(after.byType)
+  .map(([type, count]) => [type, count - (before.byType[type] || 0)])
+  .filter(([, count]) => count > 0);
+  return {
+    rpcErrorsSinceSelection: Math.max(after.total - before.total, 0),
+    rpcErrorTypesSinceSelection: Object.fromEntries(types)
+  };
 }
 
 // Runs in the page. Reads fixed selectors, classes and the composer's
@@ -1275,7 +1335,8 @@ async function captureCenterColumnState(trace = centerColumnTrace, timeoutMs = C
       selectedPeerId: /^-?[0-9]{1,20}$/.test(trace.selectedPeerId || '') ? trace.selectedPeerId : null,
       composerWait: trace.composerWait,
       pageErrorsSinceSelection: since('pageErrors'),
-      consoleErrorsSinceSelection: since('consoleErrors')
+      consoleErrorsSinceSelection: since('consoleErrors'),
+      ...rpcErrorsSince(trace.errorsAtSelection?.rpc, await readRpcErrorCounts(trace.page))
     };
   } catch {
     return 'unavailable';
@@ -1724,7 +1785,7 @@ async function main(dependencies = {}) {
 
     const pageErrors = [];
     alice.page.on('pageerror', () => pageErrors.push('pageerror'));
-    countClientErrors(alice.page);
+    await countClientErrors(alice.page);
 
     currentStage = 'bob_context';
     const bob = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
@@ -1738,7 +1799,7 @@ async function main(dependencies = {}) {
     await bob.networkObserver.start(registry);
 
     bob.page.on('pageerror', () => pageErrors.push('pageerror'));
-    countClientErrors(bob.page);
+    await countClientErrors(bob.page);
 
     currentScenario = 'sign-in';
     await signIn(alice.page, accounts[0], 'alice', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);

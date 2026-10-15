@@ -472,20 +472,26 @@ const CENTER_COLUMN_ENUMS = Object.freeze({
   composerWait: ['none', 'timeout', 'strict_mode_violation', 'other']
 });
 const CENTER_COLUMN_PEER_KEYS = ['activePeerId', 'selectedPeerId'];
-const CENTER_COLUMN_ERROR_KEYS = ['pageErrorsSinceSelection', 'consoleErrorsSinceSelection'];
+const CENTER_COLUMN_ERROR_KEYS = ['pageErrorsSinceSelection', 'consoleErrorsSinceSelection', 'rpcErrorsSinceSelection'];
+const RPC_ERROR_TYPE_LIMIT = 16;
 
 // Closed schema: fixed counts, enums and numeric peer ids. Anything else is
 // reported as `unclassified` rather than passed through.
 export function parseCenterColumnState(state) {
   if(state === 'unavailable') return state;
-  const keys = [...CENTER_COLUMN_COUNT_KEYS, ...Object.keys(CENTER_COLUMN_ENUMS), ...CENTER_COLUMN_PEER_KEYS, ...CENTER_COLUMN_ERROR_KEYS];
+  const keys = [...CENTER_COLUMN_COUNT_KEYS, ...Object.keys(CENTER_COLUMN_ENUMS), ...CENTER_COLUMN_PEER_KEYS, ...CENTER_COLUMN_ERROR_KEYS, 'rpcErrorTypesSinceSelection'];
   const isCount = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000;
+  const rpcTypes = state?.rpcErrorTypesSinceSelection;
+  const isRpcTypes = rpcTypes === null || (!!rpcTypes && typeof rpcTypes === 'object' && !Array.isArray(rpcTypes) &&
+    Object.keys(rpcTypes).length <= RPC_ERROR_TYPE_LIMIT &&
+    Object.entries(rpcTypes).every(([type, count]) => /^[A-Z][A-Z0-9_]{1,63}$/.test(type) && isCount(count) && count > 0));
   if(!state || typeof state !== 'object' || Array.isArray(state) ||
       JSON.stringify(Object.keys(state).sort()) !== JSON.stringify([...keys].sort()) ||
       !CENTER_COLUMN_COUNT_KEYS.every((key) => isCount(state[key])) ||
       !Object.entries(CENTER_COLUMN_ENUMS).every(([key, values]) => values.includes(state[key])) ||
       !CENTER_COLUMN_PEER_KEYS.every((key) => state[key] === null || (typeof state[key] === 'string' && /^-?[0-9]{1,20}$/.test(state[key]))) ||
-      !CENTER_COLUMN_ERROR_KEYS.every((key) => state[key] === null || isCount(state[key]))) {
+      !CENTER_COLUMN_ERROR_KEYS.every((key) => state[key] === null || isCount(state[key])) ||
+      !isRpcTypes || (rpcTypes === null) !== (state.rpcErrorsSinceSelection === null)) {
     return 'unclassified';
   }
   return Object.fromEntries(keys.map((key) => [key, state[key]]));
