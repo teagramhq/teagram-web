@@ -14,6 +14,7 @@ import {
   parseAuthProgressReport,
   parseCenterColumnState,
   parseFixtureReadiness,
+  parseGroupCreatedState,
   parseGroupNameFormState,
   parseObserverControls,
   parseRealClientArgs,
@@ -25,7 +26,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
-const {captureCenterColumnState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
+const {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -3907,6 +3908,128 @@ describe('real client group name form', () => {
     ]) {
       expect(formatBrowserFailureMessage({status: 'failed', stage: 'alice_group_name_fill', groupNameForm: hostile}))
       .toBe('real client scenario failed at alice_group_name_fill; group name form "unclassified"');
+    }
+  });
+});
+
+describe('real client group created', () => {
+  const GROUP_NAME = 'browser-ci-group-0123abcd';
+  let browser: any;
+  let screenshotDirectory: string;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+    screenshotDirectory = mkdtempSync(join(tmpdir(), 'real-client-group-created-'));
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+    rmSync(screenshotDirectory, {recursive: true, force: true});
+  }, 15_000);
+
+  // The centre column as tweb leaves it after the confirm: Bob's direct chat
+  // and the new group's chat side by side, only one of them active. Like the
+  // client, an inactive chat stays rendered and is hidden by opacity.
+  function chatMarkup({peerId, title, active}: {peerId: string, title: string, active: boolean}) {
+    return `<div class="chat tabs-tab${active ? ' active' : ''}" style="position:absolute;inset:0;opacity:${active ? 1 : 0}">
+      <div class="topbar"><div class="chat-info"><div class="avatar" data-peer-id="${peerId}"></div><span class="peer-title">${title}</span></div></div>
+      <div class="bubbles"><div class="bubble"><div class="message">${HOSTILE.phrase}</div></div></div>
+      <div class="chat-input"><div class="input-message-container">
+        <div class="input-message-input" contenteditable="true"></div>
+        <div class="input-message-input input-field-input-fake" contenteditable="true" style="opacity:0;position:absolute;top:0;z-index:-3"></div>
+      </div></div>
+    </div>`;
+  }
+
+  function centerMarkup({groupActive = true, groupTitle = GROUP_NAME} = {}) {
+    return `<div id="column-center"><div class="chats-container">
+      ${chatMarkup({peerId: '1000002', title: HOSTILE.username, active: !groupActive})}
+      ${chatMarkup({peerId: '-1000003', title: groupTitle, active: groupActive})}
+    </div></div>`;
+  }
+
+  it('passes once the new group is the active chat', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(centerMarkup());
+      const capturedScreenshots = {count: 0};
+      await waitForGroupCreated(page, GROUP_NAME, screenshotDirectory, capturedScreenshots, 2_000);
+      expect(capturedScreenshots.count).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('is not satisfied by the direct chat still active next to the inactive group chat', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(centerMarkup({groupActive: false}));
+      await expect(waitForGroupCreated(page, GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      .rejects.toThrow('alice_group_created_chat');
+      const state = await captureGroupCreatedState();
+      expect(state).toEqual({activeChat: 'user', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'});
+      expect(parseGroupCreatedState(state)).toEqual(state);
+      expectNoHostileLeak(state);
+      expect(JSON.stringify(state)).not.toContain('browser-ci-group');
+      expect(JSON.stringify(state)).not.toContain('1000002');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('names the title step when the active group carries another name', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(centerMarkup({groupTitle: 'another-group'}));
+      await expect(waitForGroupCreated(page, GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      .rejects.toThrow('alice_group_created_title');
+      expect(await captureGroupCreatedState()).toEqual({activeChat: 'group', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'});
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('names the screenshot step when the capture throws', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(centerMarkup());
+      // A file where the screenshot directory should be: the capture cannot be written.
+      const blocked = join(screenshotDirectory, 'blocked');
+      writeFileSync(blocked, '');
+      const capturedScreenshots = {count: 0};
+      await expect(waitForGroupCreated(page, GROUP_NAME, blocked, capturedScreenshots, 2_000))
+      .rejects.toThrow('alice_group_created_screenshot');
+      expect(capturedScreenshots.count).toBe(0);
+      expect(await captureGroupCreatedState()).toEqual({activeChat: 'group', chatCount: 2, groupHeaderVisible: true, stepWait: 'other'});
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('reports an unreadable page as unavailable', async() => {
+    const page = await browser.newPage();
+    await page.close();
+    expect(await captureGroupCreatedState({page, groupName: GROUP_NAME, stepWait: 'timeout'})).toBe('unavailable');
+    expect(await captureGroupCreatedState({groupName: GROUP_NAME, stepWait: 'none'})).toBe('unavailable');
+  });
+
+  it('keeps only the closed schema in the failure message', () => {
+    const state: any = {activeChat: 'user', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'};
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'alice_group_created_chat', centerColumn: 'unavailable', groupCreated: state}))
+    .toBe(`real client scenario failed at alice_group_created_chat; centre column "unavailable"; group created ${JSON.stringify(state)}`);
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'alice_group_created_chat', groupCreated: 'unavailable'}))
+    .toBe('real client scenario failed at alice_group_created_chat; group created "unavailable"');
+    for(const hostile of [
+      {...state, groupName: HOSTILE.phrase},
+      {...state, activeChat: '1000002'},
+      {...state, groupHeaderVisible: HOSTILE.phrase},
+      {...state, stepWait: HOSTILE.phrase},
+      {...state, chatCount: -1},
+      HOSTILE.phrase,
+      null
+    ]) {
+      expect(formatBrowserFailureMessage({status: 'failed', stage: 'alice_group_created_chat', groupCreated: hostile}))
+      .toBe('real client scenario failed at alice_group_created_chat; group created "unclassified"');
     }
   });
 });
