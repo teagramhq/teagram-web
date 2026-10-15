@@ -182,6 +182,7 @@ if(args?.help) {
       fingerprint: serverReady.fingerprint,
       publicKeySHA256: serverReady.publicKeySHA256,
       artifactDigest: controlsOnly ? null : artifactReady.artifactDigest,
+      manifestArtifactDigest: controlsOnly ? null : artifactReady.manifestArtifactDigest,
       leafSPKI: serverReady.leafSPKI,
       webRevision: args.webRevision,
       frontIp,

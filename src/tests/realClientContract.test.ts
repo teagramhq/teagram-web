@@ -166,6 +166,7 @@ async function runDiscoveryAccountingGate(events: any[], fault?: string) {
     fingerprint: '1234567890abcdef',
     publicKeySHA256: 'a'.repeat(64),
     artifactDigest: `sha256:${'b'.repeat(64)}`,
+    manifestArtifactDigest: `sha256:${'d'.repeat(64)}`,
     webRevision: READINESS_PINS.webRevision,
     leafSPKI: Buffer.alloc(32, 1).toString('base64'),
     frontIp: '127.0.0.1',
@@ -282,6 +283,7 @@ function buildArtifactReady(serverReady: any): any {
     wssEndpoint: serverReady.wssEndpoint,
     fingerprint: serverReady.fingerprint,
     artifactDigest: `sha256:${'c'.repeat(64)}`,
+    manifestArtifactDigest: `sha256:${'f'.repeat(64)}`,
     manifestSHA256: 'd'.repeat(64),
     indexSHA256: 'e'.repeat(64),
     auditChecks: {
@@ -2072,14 +2074,15 @@ describe('real client scenario contract', () => {
       fingerprint: '1234567890abcdef',
       publicKeySHA256: 'a'.repeat(64),
       webRevision: 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
-      artifactDigest: `sha256:${'c'.repeat(64)}`
+      artifactDigest: `sha256:${'c'.repeat(64)}`,
+      manifestArtifactDigest: `sha256:${'f'.repeat(64)}`
     };
     const manifest = {
       mode: 'private',
       endpoint: expected.wssEndpoint,
       fingerprint: expected.fingerprint,
       sourceCommit: expected.webRevision,
-      artifactDigest: expected.artifactDigest
+      artifactDigest: expected.manifestArtifactDigest
     };
 
     expect(matchesPrivateArtifactManifest(manifest, expected)).toBe(true);
@@ -2087,6 +2090,8 @@ describe('real client scenario contract', () => {
     expect(matchesPrivateArtifactManifest({...manifest, fingerprint: '0'.repeat(16)}, expected)).toBe(false);
     expect(matchesPrivateArtifactManifest({...manifest, sourceCommit: '0'.repeat(40)}, expected)).toBe(false);
     expect(matchesPrivateArtifactManifest({...manifest, artifactDigest: `sha256:${'0'.repeat(64)}`}, expected)).toBe(false);
+    expect(matchesPrivateArtifactManifest({...manifest, artifactDigest: expected.artifactDigest}, expected)).toBe(false);
+    expect(matchesPrivateArtifactManifest(manifest, {...expected, manifestArtifactDigest: undefined})).toBe(false);
     expect(matchesPrivateArtifactManifest({...manifest, publicKeySHA256: expected.publicKeySHA256}, expected)).toBe(false);
   });
 
@@ -2106,6 +2111,20 @@ describe('real client scenario contract', () => {
       .map((event) => JSON.stringify(event)).join('\n'), pins)).toThrow('server-ready security evidence is incomplete');
     expect(() => parseFixtureReadiness([expected, {...artifactReady, auditChecks: {manifestMode: true}}]
       .map((event) => JSON.stringify(event)).join('\n'), pins)).toThrow('artifact-ready audit or browser evidence is incomplete');
+  });
+
+  it('requires the manifest payload digest beside the staged artifact digest', () => {
+    const serverReady = buildServerReady();
+    const artifactReady = buildArtifactReady(serverReady);
+    const parse = (event: any) => parseFixtureReadiness([serverReady, event].map((value) => JSON.stringify(value)).join('\n'), READINESS_PINS);
+
+    expect(artifactReady.manifestArtifactDigest).not.toBe(artifactReady.artifactDigest);
+    expect(parse(artifactReady).artifactReady.artifactDigest).toBe(artifactReady.artifactDigest);
+    const {manifestArtifactDigest: _omitted, ...missing} = artifactReady;
+    expect(() => parse(missing)).toThrow('fixture artifact identity is invalid');
+    for(const malformed of [null, 7, 'f'.repeat(64), `sha256:${'f'.repeat(63)}`, `sha256:${'F'.repeat(64)}`, `sha512:${'f'.repeat(64)}`]) {
+      expect(() => parse({...artifactReady, manifestArtifactDigest: malformed})).toThrow('fixture artifact identity is invalid');
+    }
   });
 
   it('reads only the fixture-owned mode-0400 synthetic password files', () => {
@@ -2575,13 +2594,14 @@ const USERNAME_ENTRY_RUNTIME = Object.freeze({
   wssEndpoint: 'wss://telegramd.test/apiws',
   fingerprint: '1234567890abcdef',
   webRevision: READINESS_PINS.webRevision,
-  artifactDigest: `sha256:${'c'.repeat(64)}`
+  artifactDigest: `sha256:${'c'.repeat(64)}`,
+  manifestArtifactDigest: `sha256:${'f'.repeat(64)}`
 });
 const DUMMY_USERNAME = 'runner-contract-user';
 
 function usernameEntryManifest() {
   return {
-    artifactDigest: USERNAME_ENTRY_RUNTIME.artifactDigest,
+    artifactDigest: USERNAME_ENTRY_RUNTIME.manifestArtifactDigest,
     endpoint: USERNAME_ENTRY_RUNTIME.wssEndpoint,
     fingerprint: USERNAME_ENTRY_RUNTIME.fingerprint,
     mode: 'private',
@@ -2766,6 +2786,7 @@ describe('real client username field readiness', () => {
         fingerprint: USERNAME_ENTRY_RUNTIME.fingerprint,
         publicKeySHA256: 'a'.repeat(64),
         artifactDigest: USERNAME_ENTRY_RUNTIME.artifactDigest,
+        manifestArtifactDigest: USERNAME_ENTRY_RUNTIME.manifestArtifactDigest,
         webRevision: USERNAME_ENTRY_RUNTIME.webRevision,
         leafSPKI: Buffer.alloc(32, 1).toString('base64'),
         frontIp: '127.0.0.1',
@@ -2830,6 +2851,7 @@ describe('real client username field readiness', () => {
     const readinessPath = join(fixtureDirectory, 'readiness.jsonl');
     const browserOutputPath = join(fixtureDirectory, 'browser-output.jsonl');
     const cleanupPath = join(fixtureDirectory, 'cleanup.log');
+    const browserInputPath = join(fixtureDirectory, 'browser-input.json');
     const runLabel = 'org.teagram.fixture.run';
     const browserName = `telegram-fixture-${READINESS_PINS.runId}browser`;
     const edgeName = `telegram-fixture-${READINESS_PINS.runId}edge`;
@@ -2883,7 +2905,7 @@ describe('real client username field readiness', () => {
       'else if(args[0] === \'exec\') {',
       '  if(args.includes(\'/proc/net/route\')) write(\'Iface Destination Gateway\\n\');',
       '  else if(args.includes(\'/proc/net/ipv6_route\')) {}',
-      '  else if(args.includes(\'node\')) { write(readFileSync(state.browserOutputPath, \'utf8\')); if(state.browserExitCode) process.exitCode = state.browserExitCode; }',
+      '  else if(args.includes(\'node\')) { appendFileSync(state.browserInputPath, readFileSync(0, \'utf8\')); write(readFileSync(state.browserOutputPath, \'utf8\')); if(state.browserExitCode) process.exitCode = state.browserExitCode; }',
       '  else if(args.includes(\'rm\')) { appendFileSync(state.cleanupPath, `${args.at(-1)}\\n`); if(state.failRunnerCleanup && args.at(-1).endsWith(\'-runner\')) process.exitCode = 1; }',
       '}'
     ].join('\n');
@@ -2904,6 +2926,7 @@ describe('real client username field readiness', () => {
         network,
         browserOutputPath,
         browserExitCode,
+        browserInputPath,
         cleanupPath,
         failRunnerCleanup
       }));
@@ -2927,7 +2950,9 @@ describe('real client username field readiness', () => {
       });
       return {
         ...result,
-        cleanup: existsSync(cleanupPath) ? readFileSync(cleanupPath, 'utf8').trim().split('\n') : []
+        cleanup: existsSync(cleanupPath) ? readFileSync(cleanupPath, 'utf8').trim().split('\n') : [],
+        artifactReady,
+        browserInput: existsSync(browserInputPath) ? JSON.parse(readFileSync(browserInputPath, 'utf8')) : undefined
       };
     } finally {
       rmSync(fixtureDirectory, {recursive: true, force: true});
@@ -3032,6 +3057,11 @@ describe('real client username field readiness', () => {
     expect(finalReport).toMatchObject(result.report);
     expect(finalReport.network).toEqual(result.report.network);
     expect(finalReport.network.contexts.alice.workerTargets).toEqual({shared_worker: 1, service_worker: 1});
+    expect(finalReport.artifactDigest).toBe(outer.artifactReady.artifactDigest);
+    expect(outer.browserInput).toMatchObject({
+      artifactDigest: outer.artifactReady.artifactDigest,
+      manifestArtifactDigest: outer.artifactReady.manifestArtifactDigest
+    });
 
     const cleanupFailure = runOuterAuthProgressRunner(result.output, {failRunnerCleanup: true});
     expect(cleanupFailure.status).toBe(1);
@@ -3242,6 +3272,16 @@ describe('real client username field readiness', () => {
     try {
       await expect(prepareUsernameEntry(page, 'alice', USERNAME_ENTRY_RUNTIME)).rejects.toThrow('alice_manifest_mismatch');
       expect(fixtureRequests.slice(0, 2)).toEqual(['/', '/mtproto-target.json']);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('rejects a served manifest that carries the staged artifact digest instead of its own', async() => {
+    setFixture(usernameReadinessMarkup(), {...usernameEntryManifest(), artifactDigest: USERNAME_ENTRY_RUNTIME.artifactDigest});
+    const page = await createRunnerPage();
+    try {
+      await expect(prepareUsernameEntry(page, 'alice', USERNAME_ENTRY_RUNTIME)).rejects.toThrow('alice_manifest_mismatch');
     } finally {
       await page.close();
     }
