@@ -77,6 +77,21 @@ function getSingleExactMessageFailure(messages, expected) {
   return null;
 }
 
+// A tweb `.message` also holds the bubble's time, delivery status and
+// reactions, so the message's own text is what is left outside them. Emoji
+// drawn as custom emoji or images keep their characters in
+// `data-sticker-emoji` and `alt`, so they are put back as text first.
+async function getSingleExactMessageTextFailure(messages, expected) {
+  const texts = await messages.evaluateAll((elements) => elements.map((element) => {
+    const text = element.cloneNode(true);
+    text.querySelectorAll('.time, .reactions').forEach((chrome) => chrome.remove());
+    text.querySelectorAll('[data-sticker-emoji]').forEach((emoji) => emoji.replaceWith(emoji.dataset.stickerEmoji));
+    text.querySelectorAll('img[alt]').forEach((emoji) => emoji.replaceWith(emoji.alt));
+    return text.textContent;
+  }));
+  return getSingleExactMessageFailure(texts, expected);
+}
+
 function withCommandTimeout(operation) {
   let timer;
   const command = Promise.resolve().then(operation);
@@ -1849,7 +1864,7 @@ async function main(dependencies = {}) {
     const bobDirectMessages = bob.page.locator('#column-center .bubble .message').filter({hasText: MESSAGE});
     await bobDirectMessages.first().waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_direct_message_visible'));
     await bob.page.waitForTimeout(600);
-    const directMessageFailure = getSingleExactMessageFailure(await bobDirectMessages.allInnerTexts(), MESSAGE);
+    const directMessageFailure = await getSingleExactMessageTextFailure(bobDirectMessages, MESSAGE);
     if(directMessageFailure) failStage(`bob_direct_message_${directMessageFailure}`);
     await captureState(bob.page, runtime.screenshotDirectory, 'bob-direct-message', capturedScreenshots);
     report.push({name: 'message', status: 'passed'});
@@ -2042,7 +2057,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main, matchesPrivateArtifactManifest, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
