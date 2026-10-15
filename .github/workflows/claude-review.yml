@@ -1,0 +1,88 @@
+name: Claude review.
+
+# Advisory deep review of changes to risky code. Only BLOCKING turns the check
+# red; a missing verdict, timeout, auth or quota error passes with a warning.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/**'
+      - '.github/claude-review.md'
+      - 'scripts/claude-review-verdict.mjs'
+      - 'deploy/**'
+      - 'ci/private-mtproto-target*'
+      - 'scripts/mtproto-target.mjs'
+      - 'src/lib/mtproto/**'
+      - 'src/lib/crypto/**'
+      - 'src/lib/passcode/**'
+      - 'src/lib/encryptedStorageLayer.ts'
+      - 'src/pages/authFlow.tsx'
+      - 'src/pages/privateUsername*'
+      - '!**/*.test.*'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Claude review
+    # Fork PRs get no secrets; drafts are reviewed once marked ready.
+    if: github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Review the diff
+        id: claude
+        # Leaves headroom under the job timeout so a slow review is neutral.
+        timeout-minutes: 16
+        continue-on-error: true
+        uses: anthropics/claude-code-action@374f254f5efaf968abfe15d399fd90972e8138b9 # v1.0.251
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            Follow the instructions in .github/claude-review.md.
+            Repository: ${{ github.repository }}
+            Pull request: #${{ github.event.pull_request.number }}
+            Base commit: ${{ github.event.pull_request.base.sha }}
+            Head commit: ${{ github.event.pull_request.head.sha }}
+          claude_args: >-
+            --model claude-opus-5-5
+            --max-turns 40
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*)"
+            --disallowedTools "Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch"
+
+      - name: Read the verdict
+        id: verdict
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/claude-review-verdict.mjs "$EXECUTION_FILE" "$RUNNER_TEMP/claude-review.md"
+
+      - name: Post the review
+        if: steps.verdict.outputs.verdict != 'none'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr review "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --comment --body-file "$RUNNER_TEMP/claude-review.md" \
+            || echo "::warning::Could not post the Claude review comment."
+
+      - name: Fail on blocking findings
+        if: steps.verdict.outputs.verdict == 'blocking'
+        run: |
+          cat "$RUNNER_TEMP/claude-review.md"
+          echo "::error::Claude review found blocking defects."
+          exit 1
