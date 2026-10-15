@@ -11,6 +11,18 @@ const MESSAGE = 'browser-ci-hello';
 const GROUP_MESSAGE = 'browser-ci-group-hello';
 const PASSWORD_FIELD_SELECTOR = '#auth-pages input[name="notsearch_password"]';
 const PASSWORD_FIELD_TIMEOUT_MS = 30_000;
+const COMPOSER_SELECTOR = '#column-center .input-message-input[contenteditable="true"]';
+const CENTER_COLUMN_CAPTURE_TIMEOUT_MS = 5_000;
+// Bottom-bar buttons that replace the composer, keyed by their English label.
+// Only the key is reported; the label never leaves the page.
+const CONTROL_BAR_LABELS = Object.freeze({
+  'START': 'start',
+  'Unblock': 'unblock',
+  'JOIN': 'join',
+  'Mute': 'mute',
+  'Unmute': 'unmute',
+  'Open Chat': 'open_chat'
+});
 const PASSWORD_FAILURE_STAGES = new Set([
   'password_field_absent',
   'password_field_not_unique',
@@ -34,6 +46,13 @@ const CONTROL_PLAN = Object.freeze([
 
 let currentStage = 'runtime_inputs';
 let currentScenario;
+// The chat that the scenario last selected and the page it waits on, kept so a
+// failing chat stage can describe the centre column it gave up on.
+let centerColumnTrace = createCenterColumnTrace();
+
+function createCenterColumnTrace() {
+  return {page: undefined, selectedPeerId: undefined, errorsAtSelection: undefined, composerWait: 'none'};
+}
 
 function failStage(stage) {
   currentStage = stage;
@@ -1162,14 +1181,107 @@ async function selectUniquePeer(page, inputSelector, resultsSelector, username, 
   }
   const peerId = await selectedRow.getAttribute('data-peer-id');
   if(!peerId) failStage(`${stage}_peer_identity`);
+  centerColumnTrace = {
+    ...createCenterColumnTrace(),
+    page,
+    selectedPeerId: peerId,
+    errorsAtSelection: {...clientErrorCounts.get(page)}
+  };
   await selectedRow.click();
   return peerId;
 }
 
 async function openComposer(page, stage) {
-  const input = page.locator('#column-center .input-message-input[contenteditable="true"]');
-  await input.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`${stage}_composer`));
+  if(centerColumnTrace.page !== page) centerColumnTrace = {...createCenterColumnTrace(), page};
+  const input = page.locator(COMPOSER_SELECTOR);
+  await input.waitFor({state: 'visible', timeout: 30_000}).catch((error) => {
+    centerColumnTrace.composerWait = classifyLocatorError(error);
+    failStage(`${stage}_composer`);
+  });
   return input;
+}
+
+function classifyLocatorError(error) {
+  if(error?.name === 'TimeoutError') return 'timeout';
+  if(typeof error?.message === 'string' && error.message.includes('strict mode violation')) return 'strict_mode_violation';
+  return 'other';
+}
+
+// Counts only: neither an exception message nor console text is read.
+const clientErrorCounts = new WeakMap();
+function countClientErrors(page) {
+  const counts = {pageErrors: 0, consoleErrors: 0};
+  clientErrorCounts.set(page, counts);
+  page.on('pageerror', () => counts.pageErrors++);
+  page.on('console', (message) => {
+    if(message.type() === 'error') counts.consoleErrors++;
+  });
+}
+
+// Runs in the page. Reads fixed selectors, classes and the composer's
+// editability; a bottom-bar label is only compared against the fixed table.
+function centerColumnProbe({composerSelector, controlBarLabels}) {
+  const center = document.getElementById('column-center');
+  const isVisible = (element) => {
+    if(!element || !element.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+  };
+  const chats = center ? Array.from(center.querySelectorAll('.chat')) : [];
+  const active = chats.filter((chat) => chat.classList.contains('active'));
+  const chat = active.length === 1 ? active[0] : undefined;
+  const peerId = chat?.querySelector('.topbar .avatar[data-peer-id]')?.getAttribute('data-peer-id') || '';
+  const inputs = chat ? Array.from(chat.querySelectorAll('.input-message-input:not(.input-field-input-fake)')) : [];
+  const chatInput = chat?.querySelector('.chat-input');
+  const buttons = chat ? Array.from(chat.querySelectorAll('.chat-input-control-button')).filter(isVisible) : [];
+  let controlBar = 'none';
+  if(buttons.length > 1) {
+    controlBar = 'multiple';
+  } else if(buttons.length === 1) {
+    const label = (buttons[0].textContent || '').trim();
+    controlBar = buttons[0].querySelector('.chat-input-frozen-text') ? 'frozen' :
+      Object.prototype.hasOwnProperty.call(controlBarLabels, label) ? controlBarLabels[label] : 'other';
+  }
+  return {
+    chatCount: chats.length,
+    activeChatCount: active.length,
+    activePeerId: /^-?[0-9]{1,20}$/.test(peerId) ? peerId : null,
+    composerMatches: center ? center.querySelectorAll(composerSelector).length : 0,
+    composerInputs: inputs.length,
+    composerFakeInputs: chat ? chat.querySelectorAll('.input-field-input-fake').length : 0,
+    composerVisible: inputs.filter(isVisible).length,
+    composerEditable: inputs.filter((input) => input.isContentEditable).length,
+    chatInput: !chatInput ? 'absent' : chatInput.classList.contains('is-hidden') || !isVisible(chatInput) ? 'hidden' : 'visible',
+    controlBar
+  };
+}
+
+// Written only when a message or group stage fails: what the centre column
+// showed, how the composer wait ended, and the client errors since selection.
+async function captureCenterColumnState(trace = centerColumnTrace, timeoutMs = CENTER_COLUMN_CAPTURE_TIMEOUT_MS) {
+  if(!trace.page) return 'unavailable';
+  let timer;
+  try {
+    const probe = await Promise.race([
+      trace.page.evaluate(centerColumnProbe, {composerSelector: COMPOSER_SELECTOR, controlBarLabels: CONTROL_BAR_LABELS}),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('center_column_capture_timeout')), timeoutMs);
+      })
+    ]);
+    const counts = clientErrorCounts.get(trace.page);
+    const since = (key) => counts && trace.errorsAtSelection ? counts[key] - trace.errorsAtSelection[key] : null;
+    return {
+      ...probe,
+      selectedPeerId: /^-?[0-9]{1,20}$/.test(trace.selectedPeerId || '') ? trace.selectedPeerId : null,
+      composerWait: trace.composerWait,
+      pageErrorsSinceSelection: since('pageErrors'),
+      consoleErrorsSinceSelection: since('consoleErrors')
+    };
+  } catch {
+    return 'unavailable';
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function sendText(page, text, stage) {
@@ -1536,6 +1648,7 @@ async function main(dependencies = {}) {
   let controls = {};
   let webSocket101Phase;
   let controlWebSocket101ByContextPhase;
+  centerColumnTrace = createCenterColumnTrace();
   try {
     runtime = Object.prototype.hasOwnProperty.call(dependencies, 'runtimeConfig')
       ? dependencies.runtimeConfig
@@ -1611,6 +1724,7 @@ async function main(dependencies = {}) {
 
     const pageErrors = [];
     alice.page.on('pageerror', () => pageErrors.push('pageerror'));
+    countClientErrors(alice.page);
 
     currentStage = 'bob_context';
     const bob = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
@@ -1624,6 +1738,7 @@ async function main(dependencies = {}) {
     await bob.networkObserver.start(registry);
 
     bob.page.on('pageerror', () => pageErrors.push('pageerror'));
+    countClientErrors(bob.page);
 
     currentScenario = 'sign-in';
     await signIn(alice.page, accounts[0], 'alice', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
@@ -1790,6 +1905,7 @@ async function main(dependencies = {}) {
       // so the failure report states what the observer established, not a blank.
       for(const observer of Object.values(appObservers)) observer.state.windowElapsed = true;
       const failureBlock = buildObservationBlock(registry, appObservers, controls, egress);
+      const centerColumn = ['message', 'group'].includes(currentScenario) ? await captureCenterColumnState() : undefined;
       report = {
         status: 'failed',
         stage: currentStage,
@@ -1800,6 +1916,7 @@ async function main(dependencies = {}) {
         controlContextCount: CONTROL_PLAN.length,
         screenshotsCaptured: capturedScreenshots.count,
         passwordEvidence,
+        ...(centerColumn ? {centerColumn} : {}),
         // On failure the closed-schema evidence is still the point, validated the
         // same way: any schema violation collapses it to `unclassified`.
         ...(registry ? {
@@ -1848,7 +1965,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main, matchesPrivateArtifactManifest, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

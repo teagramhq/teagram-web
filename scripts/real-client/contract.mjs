@@ -465,6 +465,32 @@ export function parsePasswordEvidence(evidence) {
   });
 }
 
+const CENTER_COLUMN_COUNT_KEYS = ['chatCount', 'activeChatCount', 'composerMatches', 'composerInputs', 'composerFakeInputs', 'composerVisible', 'composerEditable'];
+const CENTER_COLUMN_ENUMS = Object.freeze({
+  chatInput: ['absent', 'hidden', 'visible'],
+  controlBar: ['none', 'multiple', 'frozen', 'start', 'unblock', 'join', 'mute', 'unmute', 'open_chat', 'other'],
+  composerWait: ['none', 'timeout', 'strict_mode_violation', 'other']
+});
+const CENTER_COLUMN_PEER_KEYS = ['activePeerId', 'selectedPeerId'];
+const CENTER_COLUMN_ERROR_KEYS = ['pageErrorsSinceSelection', 'consoleErrorsSinceSelection'];
+
+// Closed schema: fixed counts, enums and numeric peer ids. Anything else is
+// reported as `unclassified` rather than passed through.
+export function parseCenterColumnState(state) {
+  if(state === 'unavailable') return state;
+  const keys = [...CENTER_COLUMN_COUNT_KEYS, ...Object.keys(CENTER_COLUMN_ENUMS), ...CENTER_COLUMN_PEER_KEYS, ...CENTER_COLUMN_ERROR_KEYS];
+  const isCount = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000;
+  if(!state || typeof state !== 'object' || Array.isArray(state) ||
+      JSON.stringify(Object.keys(state).sort()) !== JSON.stringify([...keys].sort()) ||
+      !CENTER_COLUMN_COUNT_KEYS.every((key) => isCount(state[key])) ||
+      !Object.entries(CENTER_COLUMN_ENUMS).every(([key, values]) => values.includes(state[key])) ||
+      !CENTER_COLUMN_PEER_KEYS.every((key) => state[key] === null || (typeof state[key] === 'string' && /^-?[0-9]{1,20}$/.test(state[key]))) ||
+      !CENTER_COLUMN_ERROR_KEYS.every((key) => state[key] === null || isCount(state[key]))) {
+    return 'unclassified';
+  }
+  return Object.fromEntries(keys.map((key) => [key, state[key]]));
+}
+
 export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const hasPasswordEvidence = report.passwordEvidence !== undefined;
   const failedPasswordEvidence = controlsOnly || !hasPasswordEvidence
@@ -473,7 +499,10 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const evidenceSummary = controlsOnly || !hasPasswordEvidence
     ? ''
     : `; password evidence ${JSON.stringify(failedPasswordEvidence)}`;
-  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}`;
+  const centerColumnSummary = controlsOnly || report.centerColumn === undefined
+    ? ''
+    : `; centre column ${JSON.stringify(parseCenterColumnState(report.centerColumn))}`;
+  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}`;
 }
 
 export function parseAuthProgressReport(report) {

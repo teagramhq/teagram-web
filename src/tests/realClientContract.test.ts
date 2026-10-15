@@ -10,7 +10,9 @@ import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
 
 import {
   assertAllScenariosPassed,
+  formatBrowserFailureMessage,
   parseAuthProgressReport,
+  parseCenterColumnState,
   parseFixtureReadiness,
   parseObserverControls,
   parseRealClientArgs,
@@ -22,7 +24,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
-const {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main: runRealClient, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
+const {captureCenterColumnState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main: runRealClient, matchesPrivateArtifactManifest, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -3510,5 +3512,148 @@ describe('real client username field readiness', () => {
       await usernameField?.dispose();
       await page.close();
     }
+  });
+});
+
+describe('real client centre-column failure state', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  // The production chat keeps the composer and its height mirror side by side,
+  // both `.input-message-input` and both contenteditable.
+  function chatMarkup({editable = 'true', chatInput = 'chat-input', control = ''} = {}) {
+    return `<div id="column-center"><div class="chats-container">
+      <div class="chat tabs-tab active">
+        <div class="topbar"><div class="chat-info"><div class="avatar" data-peer-id="1000002"></div>${HOSTILE.username}</div></div>
+        <div class="bubbles"><div class="bubble"><div class="message">${HOSTILE.phrase}</div></div></div>
+        <div class="${chatInput}"><div class="input-message-container">
+          <div class="input-message-input" contenteditable="${editable}">${HOSTILE.password}</div>
+          <div class="input-message-input input-field-input-fake" contenteditable="true" style="opacity:0;position:absolute;top:0;z-index:-3"></div>
+        </div></div>
+        <div class="chat-input-control">${control}</div>
+      </div>
+    </div></div>`;
+  }
+
+  it('records a composer wait that two matching inputs end, without page text', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(chatMarkup());
+      await expect(openComposer(page, 'alice_direct_chat')).rejects.toThrow('alice_direct_chat_composer');
+      const state = await captureCenterColumnState();
+      expect(state).toEqual({
+        chatCount: 1,
+        activeChatCount: 1,
+        activePeerId: '1000002',
+        composerMatches: 2,
+        composerInputs: 1,
+        composerFakeInputs: 1,
+        composerVisible: 1,
+        composerEditable: 1,
+        chatInput: 'visible',
+        controlBar: 'none',
+        selectedPeerId: null,
+        composerWait: 'strict_mode_violation',
+        pageErrorsSinceSelection: null,
+        consoleErrorsSinceSelection: null
+      });
+      expect(parseCenterColumnState(state)).toEqual(state);
+      expectNoHostileLeak(state);
+      expect(JSON.stringify(state)).not.toContain('Unblock');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('names a bottom bar that replaced the composer and counts client errors since selection', async() => {
+    const page = await browser.newPage();
+    try {
+      countClientErrors(page);
+      await page.setContent(chatMarkup({
+        editable: 'false',
+        chatInput: 'chat-input is-hidden',
+        control: '<button class="btn-primary chat-input-control-button">Unblock</button>'
+      }));
+      await page.evaluate((text: string) => {
+        console.error(text);
+        setTimeout(() => {
+          throw new Error(text);
+        });
+      }, HOSTILE.phrase);
+      await page.waitForTimeout(100);
+      const state = await captureCenterColumnState({
+        page,
+        selectedPeerId: '1000002',
+        errorsAtSelection: {pageErrors: 0, consoleErrors: 0},
+        composerWait: 'timeout'
+      });
+      expect(state).toMatchObject({
+        activePeerId: '1000002',
+        selectedPeerId: '1000002',
+        composerEditable: 0,
+        chatInput: 'hidden',
+        controlBar: 'unblock',
+        composerWait: 'timeout',
+        pageErrorsSinceSelection: 1,
+        consoleErrorsSinceSelection: 1
+      });
+      expectNoHostileLeak(state);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('reports an unreadable page as unavailable', async() => {
+    const page = await browser.newPage();
+    await page.close();
+    expect(await captureCenterColumnState({page, composerWait: 'timeout'})).toBe('unavailable');
+    expect(await captureCenterColumnState({composerWait: 'none'})).toBe('unavailable');
+  });
+
+  it('keeps only the closed schema in the failure message', () => {
+    const state: any = {
+      chatCount: 1,
+      activeChatCount: 0,
+      activePeerId: null,
+      composerMatches: 0,
+      composerInputs: 0,
+      composerFakeInputs: 0,
+      composerVisible: 0,
+      composerEditable: 0,
+      chatInput: 'absent',
+      controlBar: 'none',
+      selectedPeerId: '1000002',
+      composerWait: 'timeout',
+      pageErrorsSinceSelection: 0,
+      consoleErrorsSinceSelection: 2
+    };
+    expect(formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'alice_direct_chat_composer',
+      passwordEvidence: [],
+      centerColumn: state
+    })).toBe(`real client scenario failed at alice_direct_chat_composer; password evidence []; centre column ${JSON.stringify(parseCenterColumnState(state))}`);
+    expect(parseCenterColumnState(state)).toEqual(state);
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'alice_direct_chat_composer', centerColumn: 'unavailable'}))
+    .toBe('real client scenario failed at alice_direct_chat_composer; centre column "unavailable"');
+    for(const hostile of [
+      {...state, hint: HOSTILE.phrase},
+      {...state, activePeerId: HOSTILE.username},
+      {...state, controlBar: HOSTILE.phrase},
+      {...state, composerMatches: -1},
+      HOSTILE.phrase,
+      null
+    ]) {
+      const message = formatBrowserFailureMessage({status: 'failed', stage: 'alice_direct_chat_composer', centerColumn: hostile});
+      expect(message).toBe('real client scenario failed at alice_direct_chat_composer; centre column "unclassified"');
+    }
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_chats_list'})).toBe('real client scenario failed at bob_chats_list');
   });
 });
