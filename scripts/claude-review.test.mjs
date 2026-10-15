@@ -6,6 +6,7 @@ import {main} from './claude-review-verdict.mjs';
 
 const WORKFLOW = resolve('.github/workflows/claude-review.yml');
 const SAME_REPO = 'github.event.pull_request.head.repo.full_name == github.repository';
+const ENABLED = 'vars.CLAUDE_REVIEW_ENABLED == \'true\'';
 const ACTION_PIN = /^\s*(?:-\s+)?uses:\s*anthropics\/claude-code-action@[0-9a-f]{40}(\s|$)/;
 
 const indentOf = (line) => line.length - line.trimStart().length;
@@ -43,6 +44,9 @@ function contractErrors(text) {
   if(!conditions.some((line) => line.includes(SAME_REPO) && line.includes('!github.event.pull_request.draft'))) {
     errors.push('job must skip fork and draft pull requests');
   }
+  if(!conditions.some((line) => line.trim().startsWith(`if: ${ENABLED} && `))) {
+    errors.push('job must be gated on vars.CLAUDE_REVIEW_ENABLED');
+  }
   const uses = lines.filter((line) => line.includes('anthropics/claude-code-action@'));
   if(!uses.length || !uses.every((line) => ACTION_PIN.test(line))) {
     errors.push('claude-code-action must be pinned by full commit SHA');
@@ -79,6 +83,11 @@ describe('Claude review workflow contract', () => {
 
   it('rejects a missing same-repository condition', () => {
     expectBroken(text.replace(`${SAME_REPO} && `, ''));
+  });
+
+  it('rejects a missing enabled switch', () => {
+    expectBroken(text.replace(`${ENABLED} && `, ''));
+    expectBroken(text.replace(ENABLED, ENABLED.replace('==', '!=').replace('true', 'false')));
   });
 
   it('rejects a missing path filter', () => {
