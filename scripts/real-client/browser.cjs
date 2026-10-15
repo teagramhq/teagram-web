@@ -14,6 +14,10 @@ const PASSWORD_FIELD_TIMEOUT_MS = 30_000;
 // The height mirror next to the composer shares its class and editability.
 const COMPOSER_SELECTOR = '#column-center .input-message-input:not(.input-field-input-fake)[contenteditable="true"]';
 const CENTER_COLUMN_CAPTURE_TIMEOUT_MS = 5_000;
+const GROUP_NAME_FORM_SELECTOR = '.new-group-container';
+// The group name is an InputField: a contenteditable div, not an <input>.
+const GROUP_NAME_FIELD_SELECTOR = '.input-field-input:not(.input-field-input-fake)[contenteditable="true"]';
+const GROUP_NAME_STEP_TIMEOUT_MS = 15_000;
 const RPC_ERROR_TYPE_LIMIT = 16;
 const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 // Bottom-bar buttons that replace the composer, keyed by their English label.
@@ -52,6 +56,10 @@ let currentScenario;
 // The chat that the scenario last selected and the page it waits on, kept so a
 // failing chat stage can describe the centre column it gave up on.
 let centerColumnTrace = createCenterColumnTrace();
+
+// The page whose new-group name form the scenario last waited on, and how
+// that step's wait ended.
+let groupNameFormTrace = {page: undefined, stepWait: 'none'};
 
 function createCenterColumnTrace() {
   return {page: undefined, selectedPeerId: undefined, errorsAtSelection: undefined, composerWait: 'none'};
@@ -1219,6 +1227,27 @@ async function openComposer(page, stage) {
   return input;
 }
 
+// Each step of the new-group name form fails under its own stage, so a
+// failure names the step and the form summary describes what it waited on.
+async function nameNewGroup(page, groupName, screenshotDirectory, capturedScreenshots, timeoutMs = GROUP_NAME_STEP_TIMEOUT_MS) {
+  groupNameFormTrace = {page, stepWait: 'none'};
+  const step = (stage) => (error) => {
+    groupNameFormTrace.stepWait = classifyLocatorError(error);
+    failStage(stage);
+  };
+  currentStage = 'alice_group_name_form';
+  const groupForm = page.locator(GROUP_NAME_FORM_SELECTOR);
+  await groupForm.waitFor({state: 'visible', timeout: timeoutMs}).catch(step('alice_group_name_form'));
+  currentStage = 'alice_group_name_screenshot';
+  await captureState(page, screenshotDirectory, 'alice-group-name', capturedScreenshots).catch(step('alice_group_name_screenshot'));
+  currentStage = 'alice_group_name_fill';
+  await groupForm.locator(GROUP_NAME_FIELD_SELECTOR).fill(groupName, {timeout: timeoutMs}).catch(step('alice_group_name_fill'));
+  currentStage = 'alice_group_name_confirm';
+  // The corner button stays translated out of view until the name's input
+  // event marks it visible.
+  await groupForm.locator('.btn-corner.is-visible').click({timeout: timeoutMs}).catch(step('alice_group_name_confirm'));
+}
+
 function classifyLocatorError(error) {
   if(error?.name === 'TimeoutError') return 'timeout';
   if(typeof error?.message === 'string' && error.message.includes('strict mode violation')) return 'strict_mode_violation';
@@ -1371,6 +1400,47 @@ async function captureCenterColumnState(trace = centerColumnTrace, timeoutMs = C
       consoleErrorsSinceSelection: since('consoleErrors'),
       ...rpcErrorsSince(trace.errorsAtSelection?.rpc, sanitizeRpcErrorCounts(rpc))
     };
+  } catch {
+    return 'unavailable';
+  }
+}
+
+// Runs in the page. Counts and booleans only: the name field's content is
+// reduced to whether it holds anything.
+function groupNameFormProbe({formSelector, nameFieldSelector}) {
+  const isVisible = (element) => {
+    if(!element || !element.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+  };
+  const forms = Array.from(document.querySelectorAll(formSelector));
+  const form = forms.length === 1 ? forms[0] : undefined;
+  const nameFields = form ? Array.from(form.querySelectorAll(nameFieldSelector)) : [];
+  const confirms = form ? Array.from(form.querySelectorAll('.btn-corner')) : [];
+  const confirm = confirms.length === 1 ? confirms[0] : undefined;
+  return {
+    formCount: forms.length,
+    formVisible: isVisible(form),
+    visibleInputs: form ? Array.from(form.querySelectorAll('input')).filter(isVisible).length : 0,
+    visibleEditables: form ? Array.from(form.querySelectorAll('[contenteditable="true"]')).filter(isVisible).length : 0,
+    nameFieldMatches: nameFields.length,
+    nameFieldVisible: nameFields.filter(isVisible).length,
+    nameHasValue: nameFields.length === 1 && (nameFields[0].textContent || '').trim().length > 0,
+    confirmCount: confirms.length,
+    confirmShown: !!confirm && confirm.classList.contains('is-visible') && isVisible(confirm),
+    confirmEnabled: !!confirm && !confirm.hasAttribute('disabled')
+  };
+}
+
+// Written only when a group-name step fails, next to the centre-column summary.
+async function captureGroupNameFormState(trace = groupNameFormTrace, timeoutMs = CENTER_COLUMN_CAPTURE_TIMEOUT_MS) {
+  if(!trace.page) return 'unavailable';
+  try {
+    const probe = await withDeadline(trace.page.evaluate(groupNameFormProbe, {
+      formSelector: GROUP_NAME_FORM_SELECTOR,
+      nameFieldSelector: GROUP_NAME_FIELD_SELECTOR
+    }), timeoutMs);
+    return {...probe, stepWait: trace.stepWait};
   } catch {
     return 'unavailable';
   }
@@ -1741,6 +1811,7 @@ async function main(dependencies = {}) {
   let webSocket101Phase;
   let controlWebSocket101ByContextPhase;
   centerColumnTrace = createCenterColumnTrace();
+  groupNameFormTrace = {page: undefined, stepWait: 'none'};
   try {
     runtime = Object.prototype.hasOwnProperty.call(dependencies, 'runtimeConfig')
       ? dependencies.runtimeConfig
@@ -1888,13 +1959,7 @@ async function main(dependencies = {}) {
     await continueGroup.click();
 
     const groupName = `browser-ci-group-${runtime.runId.slice(0, 8)}`;
-    currentStage = 'alice_group_name';
-    const groupForm = alice.page.locator('.new-group-container');
-    await groupForm.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_group_name_form'));
-    await captureState(alice.page, runtime.screenshotDirectory, 'alice-group-name', capturedScreenshots);
-    const groupNameInput = groupForm.locator('input:visible').first();
-    await groupNameInput.fill(groupName);
-    await groupForm.locator('.btn-corner').click();
+    await nameNewGroup(alice.page, groupName, runtime.screenshotDirectory, capturedScreenshots);
     await openComposer(alice.page, 'alice_group_created');
     const aliceGroupTitle = alice.page.locator('#column-center .topbar .chat-info');
     await aliceGroupTitle.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_group_header'));
@@ -1998,6 +2063,7 @@ async function main(dependencies = {}) {
       for(const observer of Object.values(appObservers)) observer.state.windowElapsed = true;
       const failureBlock = buildObservationBlock(registry, appObservers, controls, egress);
       const centerColumn = ['message', 'group'].includes(currentScenario) ? await captureCenterColumnState() : undefined;
+      const groupNameForm = currentStage.startsWith('alice_group_name_') ? await captureGroupNameFormState() : undefined;
       report = {
         status: 'failed',
         stage: currentStage,
@@ -2009,6 +2075,7 @@ async function main(dependencies = {}) {
         screenshotsCaptured: capturedScreenshots.count,
         passwordEvidence,
         ...(centerColumn ? {centerColumn} : {}),
+        ...(groupNameForm ? {groupNameForm} : {}),
         // On failure the closed-schema evidence is still the point, validated the
         // same way: any schema violation collapses it to `unclassified`.
         ...(registry ? {
@@ -2057,7 +2124,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

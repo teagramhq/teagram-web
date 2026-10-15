@@ -14,6 +14,7 @@ import {
   parseAuthProgressReport,
   parseCenterColumnState,
   parseFixtureReadiness,
+  parseGroupNameFormState,
   parseObserverControls,
   parseRealClientArgs,
   parseRequiredScenarios,
@@ -24,7 +25,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
-const {captureCenterColumnState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
+const {captureCenterColumnState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -3759,5 +3760,153 @@ describe('real client centre-column failure state', () => {
       expect(message).toBe('real client scenario failed at alice_direct_chat_composer; centre column "unclassified"');
     }
     expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_chats_list'})).toBe('real client scenario failed at bob_chats_list');
+  });
+});
+
+describe('real client group name form', () => {
+  let browser: any;
+  let screenshotDirectory: string;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+    screenshotDirectory = mkdtempSync(join(tmpdir(), 'real-client-group-name-'));
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+    rmSync(screenshotDirectory, {recursive: true, force: true});
+  }, 15_000);
+
+  // The new-group tab as tweb renders it: the avatar picker, the name as an
+  // InputField (a contenteditable div prefilled with the members' names), the
+  // hidden location field and the corner button the name's input event shows.
+  function groupFormMarkup({nameField = true} = {}) {
+    const name = nameField
+      ? `<div class="input-field"><div class="input-field-input" contenteditable="true">${HOSTILE.username} &amp; ${HOSTILE.phrase}</div><label>Group Name</label></div>`
+      : '';
+    return `<div class="tabs-tab sidebar-slider-item new-group-container active">
+      <div class="sidebar-content">
+        <div class="avatar-edit"><canvas class="avatar-edit-canvas"></canvas></div>
+        <div class="input-wrapper">${name}
+          <div class="input-field hide" style="display:none"><div class="input-field-input" contenteditable="false"></div></div>
+        </div>
+        <button class="btn-circle btn-corner z-depth-1" style="position:absolute;bottom:0;transform:translateY(200vh)"></button>
+      </div>
+    </div>
+    <script>
+      const button = document.querySelector('.btn-corner');
+      document.querySelector('.input-field-input[contenteditable="true"]')?.addEventListener('input', (event) => {
+        const filled = !!event.target.textContent.length;
+        button.classList.toggle('is-visible', filled);
+        button.style.transform = filled ? 'none' : 'translateY(200vh)';
+      });
+      button.addEventListener('click', () => {
+        window.createdTitle = document.querySelector('.input-field-input').textContent;
+      });
+    </script>`;
+  }
+
+  it('fills the contenteditable group name and clicks the button it shows', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(groupFormMarkup());
+      const capturedScreenshots = {count: 0};
+      await nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, capturedScreenshots, 2_000);
+      expect(await page.evaluate(() => (window as any).createdTitle)).toBe('browser-ci-group-0123abcd');
+      expect(capturedScreenshots.count).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('names the fill step and describes the form without page text', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(groupFormMarkup({nameField: false}));
+      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, {count: 0}, 200))
+      .rejects.toThrow('alice_group_name_fill');
+      const state = await captureGroupNameFormState();
+      expect(state).toEqual({
+        formCount: 1,
+        formVisible: true,
+        visibleInputs: 0,
+        visibleEditables: 0,
+        nameFieldMatches: 0,
+        nameFieldVisible: 0,
+        nameHasValue: false,
+        confirmCount: 1,
+        confirmShown: false,
+        confirmEnabled: true,
+        stepWait: 'timeout'
+      });
+      expect(parseGroupNameFormState(state)).toEqual(state);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('names the confirm step when the filled name never shows the button', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(groupFormMarkup().replace(/<script>[\s\S]*<\/script>/, ''));
+      await page.locator('.btn-corner').evaluate((button: HTMLElement) => button.setAttribute('disabled', 'true'));
+      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, {count: 0}, 200))
+      .rejects.toThrow('alice_group_name_confirm');
+      const state = await captureGroupNameFormState();
+      expect(state).toMatchObject({
+        nameFieldMatches: 1,
+        nameFieldVisible: 1,
+        visibleEditables: 1,
+        nameHasValue: true,
+        confirmCount: 1,
+        confirmShown: false,
+        confirmEnabled: false,
+        stepWait: 'timeout'
+      });
+      expectNoHostileLeak(state);
+      expect(JSON.stringify(state)).not.toContain('browser-ci-group');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('reports an unreadable form as unavailable', async() => {
+    const page = await browser.newPage();
+    await page.close();
+    expect(await captureGroupNameFormState({page, stepWait: 'timeout'})).toBe('unavailable');
+    expect(await captureGroupNameFormState({stepWait: 'none'})).toBe('unavailable');
+  });
+
+  it('keeps only the closed schema in the failure message', () => {
+    const state: any = {
+      formCount: 1,
+      formVisible: true,
+      visibleInputs: 0,
+      visibleEditables: 1,
+      nameFieldMatches: 1,
+      nameFieldVisible: 1,
+      nameHasValue: true,
+      confirmCount: 1,
+      confirmShown: true,
+      confirmEnabled: true,
+      stepWait: 'none'
+    };
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'alice_group_name_fill', centerColumn: 'unavailable', groupNameForm: state}))
+    .toBe(`real client scenario failed at alice_group_name_fill; centre column "unavailable"; group name form ${JSON.stringify(parseGroupNameFormState(state))}`);
+    expect(parseGroupNameFormState(state)).toEqual(state);
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'alice_group_name_fill', groupNameForm: 'unavailable'}))
+    .toBe('real client scenario failed at alice_group_name_fill; group name form "unavailable"');
+    for(const hostile of [
+      {...state, name: HOSTILE.phrase},
+      {...state, nameHasValue: HOSTILE.phrase},
+      {...state, stepWait: HOSTILE.phrase},
+      {...state, visibleInputs: -1},
+      {...state, confirmShown: undefined},
+      HOSTILE.phrase,
+      null
+    ]) {
+      expect(formatBrowserFailureMessage({status: 'failed', stage: 'alice_group_name_fill', groupNameForm: hostile}))
+      .toBe('real client scenario failed at alice_group_name_fill; group name form "unclassified"');
+    }
   });
 });
