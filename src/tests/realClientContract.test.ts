@@ -3640,6 +3640,18 @@ describe('real client centre-column failure state', () => {
     expect(await captureCenterColumnState({composerWait: 'none'})).toBe('unavailable');
   });
 
+  it('reports unavailable within the capture deadline when a page read never settles', async() => {
+    const probe: any = {chatCount: 0, activeChatCount: 0, activePeerId: null, composerMatches: 0, composerInputs: 0,
+      composerFakeInputs: 0, composerVisible: 0, composerEditable: 0, chatInput: 'absent', controlBar: 'none'};
+    for(const stalled of [0, 1]) {
+      let calls = 0;
+      const page = {evaluate: () => calls++ === stalled ? new Promise(() => {}) : Promise.resolve(probe)};
+      const started = Date.now();
+      expect(await captureCenterColumnState({page, composerWait: 'timeout'}, 50)).toBe('unavailable');
+      expect(Date.now() - started).toBeLessThan(1_000);
+    }
+  });
+
   it('keeps only the closed schema in the failure message', () => {
     const state: any = {
       chatCount: 1,

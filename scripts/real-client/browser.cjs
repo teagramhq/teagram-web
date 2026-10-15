@@ -1258,8 +1258,27 @@ function installRpcErrorCounter({limit, pattern}) {
   });
 }
 
+// Bounded so an unresponsive page cannot hold up the scenario or its report.
+async function withDeadline(promise, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('center_column_capture_timeout')), timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function readRpcErrorCounts(page) {
-  const counts = await page.evaluate(() => window.__realClientRpcErrors?.()).catch(() => undefined);
+  const counts = await withDeadline(page.evaluate(() => window.__realClientRpcErrors?.()), CENTER_COLUMN_CAPTURE_TIMEOUT_MS).catch(() => undefined);
+  return sanitizeRpcErrorCounts(counts);
+}
+
+function sanitizeRpcErrorCounts(counts) {
   if(!counts || !Number.isSafeInteger(counts.total) || !counts.byType || typeof counts.byType !== 'object') return undefined;
   const byType = Object.entries(counts.byType)
   .filter(([type, count]) => RPC_ERROR_TYPE_PATTERN.test(type) && Number.isSafeInteger(count) && count > 0)
@@ -1320,14 +1339,12 @@ function centerColumnProbe({composerSelector, controlBarLabels}) {
 // showed, how the composer wait ended, and the client errors since selection.
 async function captureCenterColumnState(trace = centerColumnTrace, timeoutMs = CENTER_COLUMN_CAPTURE_TIMEOUT_MS) {
   if(!trace.page) return 'unavailable';
-  let timer;
   try {
-    const probe = await Promise.race([
+    // One deadline covers both page reads.
+    const [probe, rpc] = await withDeadline(Promise.all([
       trace.page.evaluate(centerColumnProbe, {composerSelector: COMPOSER_SELECTOR, controlBarLabels: CONTROL_BAR_LABELS}),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('center_column_capture_timeout')), timeoutMs);
-      })
-    ]);
+      trace.page.evaluate(() => window.__realClientRpcErrors?.()).catch(() => undefined)
+    ]), timeoutMs);
     const counts = clientErrorCounts.get(trace.page);
     const since = (key) => counts && trace.errorsAtSelection ? counts[key] - trace.errorsAtSelection[key] : null;
     return {
@@ -1336,12 +1353,10 @@ async function captureCenterColumnState(trace = centerColumnTrace, timeoutMs = C
       composerWait: trace.composerWait,
       pageErrorsSinceSelection: since('pageErrors'),
       consoleErrorsSinceSelection: since('consoleErrors'),
-      ...rpcErrorsSince(trace.errorsAtSelection?.rpc, await readRpcErrorCounts(trace.page))
+      ...rpcErrorsSince(trace.errorsAtSelection?.rpc, sanitizeRpcErrorCounts(rpc))
     };
   } catch {
     return 'unavailable';
-  } finally {
-    clearTimeout(timer);
   }
 }
 
