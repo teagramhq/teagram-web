@@ -199,7 +199,9 @@ export function parseFixtureReadiness(text, expected, options = {}) {
       !SHA256.test(serverReady.publicKeySHA256 || '') ||
       (requireArtifact && (!SHA256.test(artifactReady.manifestSHA256 || '') ||
         !SHA256.test(artifactReady.indexSHA256 || '') ||
-        !/^sha256:[0-9a-f]{64}$/.test(artifactReady.artifactDigest || '')))) {
+        !/^sha256:[0-9a-f]{64}$/.test(artifactReady.artifactDigest || '') ||
+        typeof artifactReady.manifestArtifactDigest !== 'string' ||
+        !/^sha256:[0-9a-f]{64}$/.test(artifactReady.manifestArtifactDigest)))) {
     throw new Error('fixture artifact identity is invalid');
   }
 

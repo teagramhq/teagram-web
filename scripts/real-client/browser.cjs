@@ -46,7 +46,7 @@ function matchesPrivateArtifactManifest(manifest, expected) {
     JSON.stringify(Object.keys(manifest).sort()) === JSON.stringify(fields) &&
     manifest.mode === 'private' && manifest.endpoint === expected.wssEndpoint &&
     manifest.fingerprint === expected.fingerprint && manifest.sourceCommit === expected.webRevision &&
-    manifest.artifactDigest === expected.artifactDigest;
+    manifest.artifactDigest === expected.manifestArtifactDigest;
 }
 
 function getSingleExactMessageFailure(messages, expected) {
@@ -97,8 +97,10 @@ function validateRuntimeInput(config) {
       !/^[0-9a-f]{16}$/.test(config.fingerprint || '') ||
       !/^[0-9a-f]{64}$/.test(config.publicKeySHA256 || '') ||
       (config.observationOnly === true
-        ? config.artifactDigest !== null
-        : !/^sha256:[0-9a-f]{64}$/.test(config.artifactDigest || '')) ||
+        ? config.artifactDigest !== null || config.manifestArtifactDigest !== null
+        : !/^sha256:[0-9a-f]{64}$/.test(config.artifactDigest || '') ||
+          typeof config.manifestArtifactDigest !== 'string' ||
+          !/^sha256:[0-9a-f]{64}$/.test(config.manifestArtifactDigest)) ||
       !/^[0-9a-f]{40}$/.test(config.webRevision || '') ||
       !/^[A-Za-z0-9+/]{43}=$/.test(config.leafSPKI || '') ||
       Buffer.from(config.leafSPKI, 'base64').byteLength !== 32 ||
@@ -1846,7 +1848,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, waitForPasswordField, submitPassword};
+module.exports = {createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main, matchesPrivateArtifactManifest, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
