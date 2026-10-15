@@ -3577,6 +3577,22 @@ describe('real client centre-column failure state', () => {
     }
   });
 
+  // Emoji that `wrapRichText` draws as a custom emoji or an image keep their
+  // characters only in `data-sticker-emoji` and `alt`.
+  it('counts emoji drawn as custom emoji or images as message text', async() => {
+    const page = await browser.newPage();
+    try {
+      const customEmoji = '<custom-emoji-element class="custom-emoji" data-doc-id="1" data-sticker-emoji="\u{1F600}"></custom-emoji-element>';
+      const imageEmoji = '<img class="emoji emoji-image" src="assets/img/emoji/1f600.png" alt="\u{1F600}">';
+      expect(await getSingleExactMessageTextFailure(await receivedMessages(page, [`browser-ci-hello${customEmoji}`]), 'browser-ci-hello')).toBe('content');
+      expect(await getSingleExactMessageTextFailure(await receivedMessages(page, [`browser-ci-hello${imageEmoji}`]), 'browser-ci-hello')).toBe('content');
+      expect(await getSingleExactMessageTextFailure(await receivedMessages(page, [`browser-ci-hello${customEmoji}`]), 'browser-ci-hello\u{1F600}')).toBe(null);
+      expect(await getSingleExactMessageTextFailure(await receivedMessages(page, [`browser-ci-hello${imageEmoji}`]), 'browser-ci-hello\u{1F600}')).toBe(null);
+    } finally {
+      await page.close();
+    }
+  });
+
   it('waits for the editable composer and not its height mirror', async() => {
     const page = await browser.newPage();
     try {

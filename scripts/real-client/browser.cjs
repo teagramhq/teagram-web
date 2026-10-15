@@ -78,11 +78,15 @@ function getSingleExactMessageFailure(messages, expected) {
 }
 
 // A tweb `.message` also holds the bubble's time, delivery status and
-// reactions, so the message's own text is what is left outside them.
+// reactions, so the message's own text is what is left outside them. Emoji
+// drawn as custom emoji or images keep their characters in
+// `data-sticker-emoji` and `alt`, so they are put back as text first.
 async function getSingleExactMessageTextFailure(messages, expected) {
   const texts = await messages.evaluateAll((elements) => elements.map((element) => {
     const text = element.cloneNode(true);
     text.querySelectorAll('.time, .reactions').forEach((chrome) => chrome.remove());
+    text.querySelectorAll('[data-sticker-emoji]').forEach((emoji) => emoji.replaceWith(emoji.dataset.stickerEmoji));
+    text.querySelectorAll('img[alt]').forEach((emoji) => emoji.replaceWith(emoji.alt));
     return text.textContent;
   }));
   return getSingleExactMessageFailure(texts, expected);
