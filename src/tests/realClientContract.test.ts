@@ -26,7 +26,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
-const {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
+const {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -4011,6 +4011,83 @@ describe('real client group created', () => {
     await page.close();
     expect(await captureGroupCreatedState({page, groupName: GROUP_NAME, stepWait: 'timeout'})).toBe('unavailable');
     expect(await captureGroupCreatedState({groupName: GROUP_NAME, stepWait: 'none'})).toBe('unavailable');
+  });
+
+  // Bob's centre column with Alice's direct chat active and the group's row in
+  // the chat list. A row that opens the chat swaps which chat is active.
+  function bobMarkup({opens = true, groupTitle = GROUP_NAME} = {}) {
+    return `<div id="chatlist-container"><a class="chatlist-chat"${opens ? ' onclick="for(const chat of document.querySelectorAll(\'.chat\')){chat.classList.toggle(\'active\');chat.style.opacity=chat.classList.contains(\'active\')?1:0;}"' : ''}>${GROUP_NAME}</a></div>
+      <div style="position:relative;height:200px">${centerMarkup({groupActive: false, groupTitle})}</div>`;
+  }
+
+  it('passes Bob\'s group steps once the clicked group is the active chat', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(bobMarkup());
+      const capturedScreenshots = {count: 0};
+      const header = await openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, screenshotDirectory, capturedScreenshots, 2_000);
+      expect(await header.locator('.avatar').getAttribute('data-peer-id')).toBe('-1000003');
+      expect(capturedScreenshots.count).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('does not let Alice\'s still-active direct chat satisfy Bob\'s group steps', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(bobMarkup({opens: false}));
+      await expect(openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      .rejects.toThrow('bob_group_chat');
+      const state = await captureGroupCreatedState();
+      expect(state).toEqual({activeChat: 'user', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'});
+      expectNoHostileLeak(state);
+      expect(JSON.stringify(state)).not.toContain('browser-ci-group');
+      expect(JSON.stringify(state)).not.toContain('1000002');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('does not let Alice\'s direct chat satisfy Bob\'s group steps when the group chat is absent', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container"><a class="chatlist-chat">${GROUP_NAME}</a></div>
+        <div style="position:relative;height:200px"><div id="column-center"><div class="chats-container">${chatMarkup({peerId: '1000002', title: GROUP_NAME, active: true})}</div></div></div>`);
+      await expect(openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      .rejects.toThrow('bob_group_chat');
+      expect(await captureGroupCreatedState()).toEqual({activeChat: 'user', chatCount: 1, groupHeaderVisible: true, stepWait: 'timeout'});
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails Bob\'s title read under bob_group_title with the summary', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(bobMarkup({groupTitle: 'another-group'}));
+      await expect(openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      .rejects.toThrow('bob_group_title');
+      expect(await captureGroupCreatedState()).toEqual({activeChat: 'group', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'});
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('names Bob\'s row click and screenshot steps', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(bobMarkup());
+      await expect(openBobGroupChat(page, page.locator('#chatlist-container .missing-row'), GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      .rejects.toThrow('bob_group_open');
+      const blocked = join(screenshotDirectory, 'bob-blocked');
+      writeFileSync(blocked, '');
+      await expect(openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, blocked, {count: 0}, 2_000))
+      .rejects.toThrow('bob_group_screenshot');
+      expect(await captureGroupCreatedState()).toEqual({activeChat: 'group', chatCount: 2, groupHeaderVisible: true, stepWait: 'other'});
+    } finally {
+      await page.close();
+    }
   });
 
   it('keeps only the closed schema in the failure message', () => {
