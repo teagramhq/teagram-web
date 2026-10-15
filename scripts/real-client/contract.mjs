@@ -516,6 +516,24 @@ export function parseGroupNameFormState(state) {
   return Object.fromEntries(keys.map((key) => [key, state[key]]));
 }
 
+const GROUP_CREATED_ACTIVE_CHATS = ['group', 'user', 'none'];
+
+// Closed schema: the active chat's kind, the chat count, whether a header
+// carrying the group name is visible and the step wait's outcome.
+export function parseGroupCreatedState(state) {
+  if(state === 'unavailable') return state;
+  const keys = ['activeChat', 'chatCount', 'groupHeaderVisible', 'stepWait'];
+  if(!state || typeof state !== 'object' || Array.isArray(state) ||
+      JSON.stringify(Object.keys(state).sort()) !== JSON.stringify([...keys].sort()) ||
+      !GROUP_CREATED_ACTIVE_CHATS.includes(state.activeChat) ||
+      !Number.isSafeInteger(state.chatCount) || state.chatCount < 0 || state.chatCount > 1_000_000 ||
+      typeof state.groupHeaderVisible !== 'boolean' ||
+      !CENTER_COLUMN_ENUMS.composerWait.includes(state.stepWait)) {
+    return 'unclassified';
+  }
+  return Object.fromEntries(keys.map((key) => [key, state[key]]));
+}
+
 export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const hasPasswordEvidence = report.passwordEvidence !== undefined;
   const failedPasswordEvidence = controlsOnly || !hasPasswordEvidence
@@ -530,7 +548,10 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const groupNameFormSummary = controlsOnly || report.groupNameForm === undefined
     ? ''
     : `; group name form ${JSON.stringify(parseGroupNameFormState(report.groupNameForm))}`;
-  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}`;
+  const groupCreatedSummary = controlsOnly || report.groupCreated === undefined
+    ? ''
+    : `; group created ${JSON.stringify(parseGroupCreatedState(report.groupCreated))}`;
+  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}`;
 }
 
 export function parseAuthProgressReport(report) {

@@ -12,12 +12,16 @@ const GROUP_MESSAGE = 'browser-ci-group-hello';
 const PASSWORD_FIELD_SELECTOR = '#auth-pages input[name="notsearch_password"]';
 const PASSWORD_FIELD_TIMEOUT_MS = 30_000;
 // The height mirror next to the composer shares its class and editability.
-const COMPOSER_SELECTOR = '#column-center .input-message-input:not(.input-field-input-fake)[contenteditable="true"]';
+const COMPOSER_INPUT_SELECTOR = '.input-message-input:not(.input-field-input-fake)[contenteditable="true"]';
+const COMPOSER_SELECTOR = `#column-center ${COMPOSER_INPUT_SELECTOR}`;
 const CENTER_COLUMN_CAPTURE_TIMEOUT_MS = 5_000;
 const GROUP_NAME_FORM_SELECTOR = '.new-group-container';
 // The group name is an InputField: a contenteditable div, not an <input>.
 const GROUP_NAME_FIELD_SELECTOR = '.input-field-input:not(.input-field-input-fake)[contenteditable="true"]';
 const GROUP_NAME_STEP_TIMEOUT_MS = 15_000;
+// A basic group's peer id is negative, a user's positive.
+const GROUP_CHAT_SELECTOR = '.topbar .avatar[data-peer-id^="-"]';
+const GROUP_CREATED_STEP_TIMEOUT_MS = 30_000;
 const RPC_ERROR_TYPE_LIMIT = 16;
 const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 // Bottom-bar buttons that replace the composer, keyed by their English label.
@@ -60,6 +64,10 @@ let centerColumnTrace = createCenterColumnTrace();
 // The page whose new-group name form the scenario last waited on, and how
 // that step's wait ended.
 let groupNameFormTrace = {page: undefined, stepWait: 'none'};
+
+// The page and group name the group-created steps waited on, and how that
+// step's wait ended. The name is only compared inside the page.
+let groupCreatedTrace = {page: undefined, groupName: undefined, stepWait: 'none'};
 
 function createCenterColumnTrace() {
   return {page: undefined, selectedPeerId: undefined, errorsAtSelection: undefined, composerWait: 'none'};
@@ -1217,10 +1225,10 @@ async function selectUniquePeer(page, inputSelector, resultsSelector, username, 
   return peerId;
 }
 
-async function openComposer(page, stage) {
+async function openComposer(page, stage, chat = page.locator('#column-center'), timeoutMs = 30_000) {
   if(centerColumnTrace.page !== page) centerColumnTrace = {...createCenterColumnTrace(), page};
-  const input = page.locator(COMPOSER_SELECTOR);
-  await input.waitFor({state: 'visible', timeout: 30_000}).catch((error) => {
+  const input = chat.locator(COMPOSER_INPUT_SELECTOR);
+  await input.waitFor({state: 'visible', timeout: timeoutMs}).catch((error) => {
     centerColumnTrace.composerWait = classifyLocatorError(error);
     failStage(`${stage}_composer`);
   });
@@ -1246,6 +1254,32 @@ async function nameNewGroup(page, groupName, screenshotDirectory, capturedScreen
   // The corner button stays translated out of view until the name's input
   // event marks it visible.
   await groupForm.locator('.btn-corner.is-visible').click({timeout: timeoutMs}).catch(step('alice_group_name_confirm'));
+}
+
+// The group-created steps wait on the active centre-column chat only once it
+// is a group: the chat the scenario opened before, still active while the new
+// group's chat loads, never satisfies them. Each step fails under its own stage.
+async function waitForGroupCreated(page, groupName, screenshotDirectory, capturedScreenshots, timeoutMs = GROUP_CREATED_STEP_TIMEOUT_MS) {
+  groupCreatedTrace = {page, groupName, stepWait: 'none'};
+  const step = (stage) => (error) => {
+    groupCreatedTrace.stepWait = classifyLocatorError(error);
+    failStage(stage);
+  };
+  currentStage = 'alice_group_created_chat';
+  const groupChat = page.locator('#column-center .chat.active').filter({has: page.locator(GROUP_CHAT_SELECTOR)});
+  await groupChat.waitFor({state: 'visible', timeout: timeoutMs}).catch(step('alice_group_created_chat'));
+  currentStage = 'alice_group_created_composer';
+  await openComposer(page, 'alice_group_created', groupChat, timeoutMs).catch((error) => {
+    groupCreatedTrace.stepWait = centerColumnTrace.composerWait;
+    throw error;
+  });
+  currentStage = 'alice_group_created_header';
+  const header = groupChat.locator('.topbar .chat-info');
+  await header.waitFor({state: 'visible', timeout: timeoutMs}).catch(step('alice_group_created_header'));
+  currentStage = 'alice_group_created_title';
+  await header.filter({hasText: groupName}).waitFor({state: 'visible', timeout: timeoutMs}).catch(step('alice_group_created_title'));
+  currentStage = 'alice_group_created_screenshot';
+  await captureState(page, screenshotDirectory, 'alice-group-created', capturedScreenshots).catch(step('alice_group_created_screenshot'));
 }
 
 function classifyLocatorError(error) {
@@ -1440,6 +1474,37 @@ async function captureGroupNameFormState(trace = groupNameFormTrace, timeoutMs =
       formSelector: GROUP_NAME_FORM_SELECTOR,
       nameFieldSelector: GROUP_NAME_FIELD_SELECTOR
     }), timeoutMs);
+    return {...probe, stepWait: trace.stepWait};
+  } catch {
+    return 'unavailable';
+  }
+}
+
+// Runs in the page. Counts and booleans only: the group name is compared
+// against the headers here and never returned.
+function groupCreatedProbe({groupName}) {
+  const isVisible = (element) => {
+    if(!element || !element.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+  };
+  const center = document.getElementById('column-center');
+  const chats = center ? Array.from(center.querySelectorAll('.chat')) : [];
+  const active = chats.filter((chat) => chat.classList.contains('active'));
+  const peerId = active.length === 1 ? active[0].querySelector('.topbar .avatar[data-peer-id]')?.getAttribute('data-peer-id') || '' : '';
+  const headers = center ? Array.from(center.querySelectorAll('.chat .topbar .chat-info')) : [];
+  return {
+    activeChat: !/^-?[0-9]{1,20}$/.test(peerId) ? 'none' : peerId.startsWith('-') ? 'group' : 'user',
+    chatCount: chats.length,
+    groupHeaderVisible: !!groupName && headers.some((header) => isVisible(header) && (header.textContent || '').includes(groupName))
+  };
+}
+
+// Written only when a group-created step fails, next to the centre-column summary.
+async function captureGroupCreatedState(trace = groupCreatedTrace, timeoutMs = CENTER_COLUMN_CAPTURE_TIMEOUT_MS) {
+  if(!trace.page) return 'unavailable';
+  try {
+    const probe = await withDeadline(trace.page.evaluate(groupCreatedProbe, {groupName: trace.groupName}), timeoutMs);
     return {...probe, stepWait: trace.stepWait};
   } catch {
     return 'unavailable';
@@ -1812,6 +1877,7 @@ async function main(dependencies = {}) {
   let controlWebSocket101ByContextPhase;
   centerColumnTrace = createCenterColumnTrace();
   groupNameFormTrace = {page: undefined, stepWait: 'none'};
+  groupCreatedTrace = {page: undefined, groupName: undefined, stepWait: 'none'};
   try {
     runtime = Object.prototype.hasOwnProperty.call(dependencies, 'runtimeConfig')
       ? dependencies.runtimeConfig
@@ -1960,11 +2026,7 @@ async function main(dependencies = {}) {
 
     const groupName = `browser-ci-group-${runtime.runId.slice(0, 8)}`;
     await nameNewGroup(alice.page, groupName, runtime.screenshotDirectory, capturedScreenshots);
-    await openComposer(alice.page, 'alice_group_created');
-    const aliceGroupTitle = alice.page.locator('#column-center .topbar .chat-info');
-    await aliceGroupTitle.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_group_header'));
-    if(!(await aliceGroupTitle.innerText()).includes(groupName)) failStage('alice_group_title');
-    await captureState(alice.page, runtime.screenshotDirectory, 'alice-group-created', capturedScreenshots);
+    await waitForGroupCreated(alice.page, groupName, runtime.screenshotDirectory, capturedScreenshots);
 
     currentStage = 'bob_group_membership';
     const bobGroupRow = bob.page.locator('#chatlist-container .chatlist-chat').filter({hasText: groupName});
@@ -2064,6 +2126,7 @@ async function main(dependencies = {}) {
       const failureBlock = buildObservationBlock(registry, appObservers, controls, egress);
       const centerColumn = ['message', 'group'].includes(currentScenario) ? await captureCenterColumnState() : undefined;
       const groupNameForm = currentStage.startsWith('alice_group_name_') ? await captureGroupNameFormState() : undefined;
+      const groupCreated = currentStage.startsWith('alice_group_created_') ? await captureGroupCreatedState() : undefined;
       report = {
         status: 'failed',
         stage: currentStage,
@@ -2076,6 +2139,7 @@ async function main(dependencies = {}) {
         passwordEvidence,
         ...(centerColumn ? {centerColumn} : {}),
         ...(groupNameForm ? {groupNameForm} : {}),
+        ...(groupCreated ? {groupCreated} : {}),
         // On failure the closed-schema evidence is still the point, validated the
         // same way: any schema violation collapses it to `unclassified`.
         ...(registry ? {
@@ -2124,7 +2188,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
