@@ -24,7 +24,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
-const {captureCenterColumnState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, main: runRealClient, matchesPrivateArtifactManifest, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
+const {captureCenterColumnState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -3542,6 +3542,40 @@ describe('real client centre-column failure state', () => {
       </div>
     </div></div>`;
   }
+
+  // A delivered text bubble as tweb renders it: the text, then the time span
+  // with its time, its `.time-inner` copy and the delivery status icon.
+  function receivedMessageMarkup(texts: string[]) {
+    const time = '<span class="i18n" dir="auto">12:34</span>';
+    return `<div id="column-center"><div class="bubbles">${texts.map((text) => `<div class="bubble"><div class="message spoilers-container"><div>${text}</div><span class="time">${time}<div class="time-inner">${time}<span class="tgico time-sending-status">\uE900</span></div></span><div class="clearfix"></div></div></div>`).join('')}</div></div>`;
+  }
+
+  async function receivedMessages(page: any, texts: string[]) {
+    await page.setContent(receivedMessageMarkup(texts));
+    return page.locator('#column-center .bubble .message').filter({hasText: 'browser-ci-hello'});
+  }
+
+  it('matches the delivered message text and not the time and status beside it', async() => {
+    const page = await browser.newPage();
+    try {
+      const messages = await receivedMessages(page, ['browser-ci-hello']);
+      expect(getSingleExactMessageFailure(await messages.allInnerTexts(), 'browser-ci-hello')).toBe('content');
+      expect(await getSingleExactMessageTextFailure(messages, 'browser-ci-hello')).toBe(null);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('still rejects a near-miss message text or a second matching bubble', async() => {
+    const page = await browser.newPage();
+    try {
+      expect(await getSingleExactMessageTextFailure(await receivedMessages(page, ['browser-ci-hello!']), 'browser-ci-hello')).toBe('content');
+      expect(await getSingleExactMessageTextFailure(await receivedMessages(page, [' browser-ci-hello']), 'browser-ci-hello')).toBe('content');
+      expect(await getSingleExactMessageTextFailure(await receivedMessages(page, ['browser-ci-hello', 'browser-ci-hello']), 'browser-ci-hello')).toBe('count');
+    } finally {
+      await page.close();
+    }
+  });
 
   it('waits for the editable composer and not its height mirror', async() => {
     const page = await browser.newPage();
