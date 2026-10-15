@@ -65,9 +65,9 @@ let centerColumnTrace = createCenterColumnTrace();
 // that step's wait ended.
 let groupNameFormTrace = {page: undefined, stepWait: 'none'};
 
-// The page and group name the group-created steps waited on, and how that
-// step's wait ended. The name is only compared inside the page.
-let groupCreatedTrace = {page: undefined, groupName: undefined, stepWait: 'none'};
+// The page, group name and stages of the group chat steps that ran last, and
+// how that step's wait ended. The name is only compared inside the page.
+let groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
 
 function createCenterColumnTrace() {
   return {page: undefined, selectedPeerId: undefined, errorsAtSelection: undefined, composerWait: 'none'};
@@ -1256,30 +1256,62 @@ async function nameNewGroup(page, groupName, screenshotDirectory, capturedScreen
   await groupForm.locator('.btn-corner.is-visible').click({timeout: timeoutMs}).catch(step('alice_group_name_confirm'));
 }
 
-// The group-created steps wait on the active centre-column chat only once it
-// is a group: the chat the scenario opened before, still active while the new
-// group's chat loads, never satisfies them. Each step fails under its own stage.
-async function waitForGroupCreated(page, groupName, screenshotDirectory, capturedScreenshots, timeoutMs = GROUP_CREATED_STEP_TIMEOUT_MS) {
-  groupCreatedTrace = {page, groupName, stepWait: 'none'};
+const ALICE_GROUP_CREATED_STAGES = {
+  chat: 'alice_group_created_chat',
+  composer: 'alice_group_created',
+  header: 'alice_group_created_header',
+  title: 'alice_group_created_title',
+  screenshot: 'alice_group_created_screenshot'
+};
+const BOB_GROUP_CHAT_STAGES = {
+  open: 'bob_group_open',
+  chat: 'bob_group_chat',
+  composer: 'bob_group_chat',
+  header: 'bob_group_header',
+  title: 'bob_group_title',
+  screenshot: 'bob_group_screenshot'
+};
+
+// The group chat steps wait on the active centre-column chat only once it is
+// a group: the chat the scenario opened before, still active while the group's
+// chat loads, never satisfies them. Each step fails under its own stage, and a
+// failure in any of them adds the group created summary.
+async function waitForGroupChat(page, groupName, stages, screenshotName, screenshotDirectory, capturedScreenshots, timeoutMs, groupRow) {
+  const stageNames = Object.entries(stages).map(([key, stage]) => key === 'composer' ? `${stage}_composer` : stage);
+  groupCreatedTrace = {page, groupName, stages: stageNames, stepWait: 'none'};
   const step = (stage) => (error) => {
     groupCreatedTrace.stepWait = classifyLocatorError(error);
     failStage(stage);
   };
-  currentStage = 'alice_group_created_chat';
+  if(groupRow) {
+    currentStage = stages.open;
+    await groupRow.click({timeout: timeoutMs}).catch(step(stages.open));
+  }
+  currentStage = stages.chat;
   const groupChat = page.locator('#column-center .chat.active').filter({has: page.locator(GROUP_CHAT_SELECTOR)});
-  await groupChat.waitFor({state: 'visible', timeout: timeoutMs}).catch(step('alice_group_created_chat'));
-  currentStage = 'alice_group_created_composer';
-  await openComposer(page, 'alice_group_created', groupChat, timeoutMs).catch((error) => {
+  await groupChat.waitFor({state: 'visible', timeout: timeoutMs}).catch(step(stages.chat));
+  currentStage = `${stages.composer}_composer`;
+  await openComposer(page, stages.composer, groupChat, timeoutMs).catch((error) => {
     groupCreatedTrace.stepWait = centerColumnTrace.composerWait;
     throw error;
   });
-  currentStage = 'alice_group_created_header';
+  currentStage = stages.header;
   const header = groupChat.locator('.topbar .chat-info');
-  await header.waitFor({state: 'visible', timeout: timeoutMs}).catch(step('alice_group_created_header'));
-  currentStage = 'alice_group_created_title';
-  await header.filter({hasText: groupName}).waitFor({state: 'visible', timeout: timeoutMs}).catch(step('alice_group_created_title'));
-  currentStage = 'alice_group_created_screenshot';
-  await captureState(page, screenshotDirectory, 'alice-group-created', capturedScreenshots).catch(step('alice_group_created_screenshot'));
+  await header.waitFor({state: 'visible', timeout: timeoutMs}).catch(step(stages.header));
+  currentStage = stages.title;
+  await header.filter({hasText: groupName}).waitFor({state: 'visible', timeout: timeoutMs}).catch(step(stages.title));
+  currentStage = stages.screenshot;
+  await captureState(page, screenshotDirectory, screenshotName, capturedScreenshots).catch(step(stages.screenshot));
+  return header;
+}
+
+function waitForGroupCreated(page, groupName, screenshotDirectory, capturedScreenshots, timeoutMs = GROUP_CREATED_STEP_TIMEOUT_MS) {
+  return waitForGroupChat(page, groupName, ALICE_GROUP_CREATED_STAGES, 'alice-group-created', screenshotDirectory, capturedScreenshots, timeoutMs);
+}
+
+// From the click on the group's chat-list row to its title in Bob's header.
+function openBobGroupChat(page, groupRow, groupName, screenshotDirectory, capturedScreenshots, timeoutMs = GROUP_CREATED_STEP_TIMEOUT_MS) {
+  return waitForGroupChat(page, groupName, BOB_GROUP_CHAT_STAGES, 'bob-group-chat', screenshotDirectory, capturedScreenshots, timeoutMs, groupRow);
 }
 
 function classifyLocatorError(error) {
@@ -1879,7 +1911,7 @@ async function main(dependencies = {}) {
   let controlWebSocket101ByContextPhase;
   centerColumnTrace = createCenterColumnTrace();
   groupNameFormTrace = {page: undefined, stepWait: 'none'};
-  groupCreatedTrace = {page: undefined, groupName: undefined, stepWait: 'none'};
+  groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
   try {
     runtime = Object.prototype.hasOwnProperty.call(dependencies, 'runtimeConfig')
       ? dependencies.runtimeConfig
@@ -2033,12 +2065,7 @@ async function main(dependencies = {}) {
     currentStage = 'bob_group_membership';
     const bobGroupRow = bob.page.locator('#chatlist-container .chatlist-chat').filter({hasText: groupName});
     await bobGroupRow.waitFor({state: 'visible', timeout: 45_000}).catch(() => failStage('bob_group_chatlist_entry'));
-    await bobGroupRow.click();
-    await openComposer(bob.page, 'bob_group_chat');
-    const bobGroupTitle = bob.page.locator('#column-center .topbar .chat-info');
-    await bobGroupTitle.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_group_header'));
-    if(!(await bobGroupTitle.innerText()).includes(groupName)) failStage('bob_group_title');
-    await captureState(bob.page, runtime.screenshotDirectory, 'bob-group-chat', capturedScreenshots);
+    const bobGroupTitle = await openBobGroupChat(bob.page, bobGroupRow, groupName, runtime.screenshotDirectory, capturedScreenshots);
 
     currentStage = 'alice_group_message';
     await sendText(alice.page, GROUP_MESSAGE, 'alice_group_message');
@@ -2128,7 +2155,7 @@ async function main(dependencies = {}) {
       const failureBlock = buildObservationBlock(registry, appObservers, controls, egress);
       const centerColumn = ['message', 'group'].includes(currentScenario) ? await captureCenterColumnState() : undefined;
       const groupNameForm = currentStage.startsWith('alice_group_name_') ? await captureGroupNameFormState() : undefined;
-      const groupCreated = currentStage.startsWith('alice_group_created_') ? await captureGroupCreatedState() : undefined;
+      const groupCreated = groupCreatedTrace.stages?.includes(currentStage) ? await captureGroupCreatedState() : undefined;
       report = {
         status: 'failed',
         stage: currentStage,
@@ -2190,7 +2217,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
