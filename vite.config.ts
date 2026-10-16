@@ -53,8 +53,8 @@ if(isDEV) {
 
 const handlebarsPlugin = handlebars({
   context: {
-    title: 'Telegram Web',
-    description: 'Telegram is a cloud-based mobile and desktop messaging app with a focus on security and speed.',
+    title: 'Teagram Web',
+    description: 'Self-hosted messaging that speaks the Telegram protocol.',
     url: 'https://web.telegram.org/k/',
     origin: 'https://web.telegram.org/'
   }
