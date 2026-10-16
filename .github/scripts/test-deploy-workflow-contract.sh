@@ -19,7 +19,8 @@ check_target_selection() (
   set -euo pipefail
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  query '.jobs[].steps[] | select(.id == "target") | .run' >"$tmp/target.sh"
+  query '.jobs.resolve.steps[] | select(.id == "target") | .run' >"$tmp/target.sh"
+  query '.jobs.deploy.steps[] | select(.id == "refresh") | .run' >"$tmp/refresh.sh"
   cat >"$tmp/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -184,6 +185,42 @@ SH
   fi
   [[ "$pending_run" == "$TEST_PUBLISHED_RUN_ID" ]] || fail 'unpublished B must not replace pending publication A'
 
+  # A snapshots A before serialization; B publishes while A waits, so refresh must select B in the slot.
+  GITHUB_EVENT_NAME=workflow_run
+  RUN_ID=100
+  RUN_HEAD_SHA="$TEST_EVENT_SHA"
+  TEST_EVENT_RUN_ID=100
+  TEST_EVENT_PUBLICATION=true
+  TEST_LATEST_RUN_ID=100
+  TEST_LATEST_SHA="$TEST_EVENT_SHA"
+  TEST_LATEST_DIGEST="$TEST_EVENT_DIGEST"
+  TEST_LATEST_PUBLICATION=true
+  TEST_COMPARISON=identical
+  TEST_RUNS="$TEST_LATEST_RUN_ID"$'\t'"$TEST_LATEST_SHA"
+  : >"$GITHUB_OUTPUT"
+  bash -euo pipefail "$tmp/target.sh" >/dev/null
+  grep -Fxq "sha=$TEST_EVENT_SHA" "$GITHUB_OUTPUT" || fail 'the delayed resolver fixture must snapshot publication A'
+  grep -Fxq "run_id=$TEST_LATEST_RUN_ID" "$GITHUB_OUTPUT" || fail "the delayed resolver fixture must snapshot A's artifact run"
+
+  BASE_SHA="$TEST_EVENT_SHA"
+  BASE_RUN_ID="$TEST_LATEST_RUN_ID"
+  BASE_ARTIFACT_NAME="private-mtproto-$TEST_EVENT_SHA-$TEST_EVENT_DIGEST"
+  BASE_ARTIFACT_DIGEST="$TEST_EVENT_DIGEST"
+  export BASE_SHA BASE_RUN_ID BASE_ARTIFACT_NAME BASE_ARTIFACT_DIGEST
+  TEST_LATEST_RUN_ID=400
+  TEST_LATEST_SHA="$TEST_OTHER_SHA"
+  TEST_LATEST_DIGEST="$TEST_PUBLISHED_DIGEST"
+  TEST_LATEST_PUBLICATION=true
+  TEST_COMPARISON=ahead
+  TEST_RUNS="$TEST_LATEST_RUN_ID"$'\t'"$TEST_LATEST_SHA"$'\n'"$BASE_RUN_ID"$'\t'"$BASE_SHA"
+  : >"$GITHUB_OUTPUT"
+  bash -euo pipefail "$tmp/refresh.sh" >/dev/null
+  grep -Fxq "sha=$TEST_OTHER_SHA" "$GITHUB_OUTPUT" || fail 'the post-slot refresh must select descendant B published while A waited'
+  grep -Fxq "run_id=$TEST_LATEST_RUN_ID" "$GITHUB_OUTPUT" || fail "the post-slot refresh must use B's publication run"
+  expected_name="private-mtproto-$TEST_OTHER_SHA-$TEST_LATEST_DIGEST"
+  grep -Fxq "artifact_name=$expected_name" "$GITHUB_OUTPUT" || fail 'the post-slot refresh must download B’s artifact'
+  grep -Fxq "artifact_digest=$TEST_LATEST_DIGEST" "$GITHUB_OUTPUT" || fail 'the post-slot refresh must verify B’s artifact digest'
+
   GITHUB_EVENT_NAME=workflow_run
   RUN_ID=100
   RUN_HEAD_SHA=null
@@ -242,8 +279,16 @@ check_contract() {
   local checkout_count download_count ssh_count uses
   checkout_count="$(query '[.jobs[].steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
   [[ "$checkout_count" == 0 ]] || fail 'deploy workflow must not use actions/checkout'
-  download_count="$(query '[.jobs.deploy.steps[] | select((.uses // "" | test("^actions/download-artifact@")) and .with.name == "${{ needs.resolve.outputs.artifact_name }}" and .with."run-id" == "${{ needs.resolve.outputs.run_id }}" and .with."github-token" == "${{ github.token }}")] | length')"
-  [[ "$download_count" == 1 ]] || fail 'artifact download must use the selected artifact name, run and github token'
+  [[ "$(query '.jobs.deploy.steps[0].id')" == refresh ]] ||
+    fail 'deployment must refresh the selected publication after acquiring its concurrency slot'
+  download_count="$(query '[.jobs.deploy.steps[] | select((.uses // "" | test("^actions/download-artifact@")) and .with.name == "${{ steps.refresh.outputs.artifact_name }}" and .with."run-id" == "${{ steps.refresh.outputs.run_id }}" and .with."github-token" == "${{ github.token }}")] | length')"
+  [[ "$download_count" == 1 ]] || fail 'artifact download must use the refreshed artifact name, run and github token'
+  [[ "$(query '[.jobs.deploy.steps[] | select(.name == "Verify the artifact identity") | .env.DEPLOY_SHA][0]')" == '${{ steps.refresh.outputs.sha }}' ]] ||
+    fail 'artifact identity verification must use the refreshed SHA'
+  [[ "$(query '[.jobs.deploy.steps[] | select(.name == "Verify the artifact identity") | .env.ARTIFACT_DIGEST][0]')" == '${{ steps.refresh.outputs.artifact_digest }}' ]] ||
+    fail 'artifact identity verification must use the refreshed digest'
+  [[ "$(query '[.jobs.deploy.steps[] | select(.name == "Deploy the published artifact") | .env.DEPLOY_SHA][0]')" == '${{ steps.refresh.outputs.sha }}' ]] ||
+    fail 'the forced command must receive the refreshed SHA'
   cleanup_condition="$(query '[.jobs.deploy.steps[] | select(.name == "Remove the deploy key") | .if][0]')"
   [[ "$cleanup_condition" == '${{ always() }}' ]] || fail 'deploy-key cleanup must run after deployment attempts'
   ssh_count="$(query '[.jobs.deploy.steps[] | select(.run // "" | test("(^|\\s)ssh\\s"))] | length')"
@@ -288,6 +333,8 @@ self_test() {
     '.jobs.deploy.concurrency."cancel-in-progress" = true'
     '.jobs.deploy.steps = [{"uses": "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"}] + .jobs.deploy.steps'
     '(.jobs.deploy.steps[] | select(.uses | test("^actions/download-artifact@")) | .with."run-id") = "${{ github.run_id }}"'
+    '(.jobs.deploy.steps[] | select(.uses | test("^actions/download-artifact@")) | .with.name) = "${{ needs.resolve.outputs.artifact_name }}"'
+    '.jobs.deploy.steps[0].id = "wrong"'
     '(.jobs.deploy.steps[] | select(.uses | test("^tailscale/github-action@")) | .uses) = "tailscale/github-action@v4"'
     '.permissions.contents = "write"'
     'del(.jobs.deploy.permissions.actions)'
