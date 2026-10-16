@@ -169,7 +169,6 @@ PREVIOUS_SHA=$LIVE_SHA
 BACKUP_DIR="$BACKUP_ROOT/pre-${PREVIOUS_SHA:0:7}-$TS"
 mkdir -m 700 "$BACKUP_DIR"
 cp -a "$ROOT/dist-private" "$BACKUP_DIR/dist-private"
-chmod -R go-rwx "$BACKUP_DIR/dist-private"
 OLD_IMAGE_ID=$(docker image inspect telegram-web:local --format '{{.Id}}')
 BACKUP_IMAGE="telegram-web:rollback-${PREVIOUS_SHA:0:12}-${TS}"
 docker image tag "$OLD_IMAGE_ID" "$BACKUP_IMAGE"

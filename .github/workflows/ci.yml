@@ -113,3 +113,6 @@ jobs:
 
       - name: Check deployment script syntax
         run: bash -n deploy/telegram-web/deploy-main.sh
+
+      - name: Check rollback artifact modes
+        run: bash .github/scripts/test-deploy-backup-rollback.sh
