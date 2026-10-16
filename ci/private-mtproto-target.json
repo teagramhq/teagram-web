@@ -1,6 +1,6 @@
 {
   "MTPROTO_TARGET_MODE": "private",
-  "MTPROTO_PRIVATE_ENDPOINT": "wss://telegram-server.tailaa4918.ts.net/apiws",
+  "MTPROTO_PRIVATE_ENDPOINT": "wss://teagram.tailaa4918.ts.net/apiws",
   "MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE": "ci/private-mtproto-server-public.pem",
   "publicKeySha256": "0250125c307c07c67bfec44343e4c80a8489050e2f7d21b863f2c00661c31c7f",
   "fingerprint": "fbb62871f07fae2a"
