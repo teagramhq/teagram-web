@@ -163,7 +163,6 @@ jobs:
           PRIVATE_ARTIFACT_WORKFLOW_NAME: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.name || '' }}
           PRIVATE_ARTIFACT_WORKFLOW_COMMIT: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           PRIVATE_ARTIFACT_TARGET_REF: ${{ github.event_name == 'push' && 'refs/heads/master' || '' }}
-          PRIVATE_ARTIFACT_PREVIOUS_COMMIT: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: |
           test "$(node --version)" = 'v24.18.0' || { echo "::error::expected Node v24.18.0, got $(node --version)"; exit 1; }
           node scripts/private-artifact-release.mjs prepare \
@@ -174,7 +173,6 @@ jobs:
             --request "$RUNNER_TEMP/private-artifact-request/request.json" \
             --target-ref "$PRIVATE_ARTIFACT_TARGET_REF" \
             --workflow-commit "$PRIVATE_ARTIFACT_WORKFLOW_COMMIT" \
-            --previous-commit "$PRIVATE_ARTIFACT_PREVIOUS_COMMIT" \
             --output "$RUNNER_TEMP/private-target-snapshot"
 
       - name: Stage immutable target attestation and publisher verifier

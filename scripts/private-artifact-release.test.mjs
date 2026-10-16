@@ -997,7 +997,7 @@ describe('private artifact publication attestation', () => {
     expect(() => loadPublicationRequest(requestPath)).toThrow(/fields/i);
   });
 
-  it('skips publication on a master push when the reviewed target is unchanged', () => {
+  it('prepares publication on a master push when the reviewed target is unchanged', () => {
     const directory = mkdtempSync(join(tmpdir(), 'private-artifact-push-'));
     temporaryDirectories.push(directory);
     const outputDirectory = join(directory, 'snapshot');
@@ -1014,50 +1014,10 @@ describe('private artifact publication attestation', () => {
       '--request', join(directory, 'request.json'),
       '--target-ref', 'refs/heads/master',
       '--workflow-commit', commit,
-      '--previous-commit', commit,
       '--output', outputDirectory
     ], {
       cwd: repositoryRoot,
       env: {...process.env, GITHUB_OUTPUT: outputPath},
-      encoding: 'utf8'
-    });
-
-    expect(readFileSync(outputPath, 'utf8')).toContain('publish_private_artifact=false');
-    expect(existsSync(join(outputDirectory, 'snapshot.json'))).toBe(false);
-    const publisherWorkflow = readFileSync(join(repositoryRoot, '.github/workflows/private-artifact.yml'), 'utf8');
-    expect(publisherWorkflow).toContain("needs.publication-prepare.outputs.publish_private_artifact == 'true'");
-    expect(publisherWorkflow).toContain("steps.prepare.outputs.publish_private_artifact == 'true'");
-  });
-
-  it('prepares publication when a master push changes the reviewed target', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-push-target-change-'));
-    temporaryDirectories.push(directory);
-    const outputDirectory = join(directory, 'snapshot');
-    const outputPath = join(directory, 'github-output');
-    const commit = currentCommit();
-    // Supply the prior target tree directly so this case does not depend on local commit history.
-    const {tree: previousCommit, objectDirectory, alternateObjectDirectory} = previousTargetTree(directory);
-
-    execFileSync(process.execPath, [
-      'scripts/private-artifact-release.mjs',
-      'prepare',
-      '--event', 'push',
-      '--head-branch', 'master',
-      '--conclusion', 'success',
-      '--workflow-name', '',
-      '--request', join(directory, 'request.json'),
-      '--target-ref', 'refs/heads/master',
-      '--workflow-commit', commit,
-      '--previous-commit', previousCommit,
-      '--output', outputDirectory
-    ], {
-      cwd: repositoryRoot,
-      env: {
-        ...process.env,
-        GITHUB_OUTPUT: outputPath,
-        GIT_OBJECT_DIRECTORY: objectDirectory,
-        GIT_ALTERNATE_OBJECT_DIRECTORIES: alternateObjectDirectory
-      },
       encoding: 'utf8'
     });
 
@@ -1066,6 +1026,9 @@ describe('private artifact publication attestation', () => {
       sourceRef: 'refs/heads/master',
       sourceCommit: commit
     });
+    const publisherWorkflow = readFileSync(join(repositoryRoot, '.github/workflows/private-artifact.yml'), 'utf8');
+    expect(publisherWorkflow).toContain("needs.publication-prepare.outputs.publish_private_artifact == 'true'");
+    expect(publisherWorkflow).toContain("steps.prepare.outputs.publish_private_artifact == 'true'");
   });
 
   it('loads a data-only request when workflow_run passes an empty target ref', () => {
@@ -2376,35 +2339,6 @@ function expectDiagnosticSourceProvenance(source) {
   }).toString().trim()).toBe(source.keyFileBlob);
 }
 
-function previousTargetTree(directory) {
-  const gitDirectory = join(directory, 'previous-target.git');
-  execFileSync('git', ['init', '--bare', '--quiet', gitDirectory], {cwd: repositoryRoot});
-
-  const previousTarget = JSON.parse(readFileSync(join(repositoryRoot, REVIEWED_PRIVATE_TARGET), 'utf8'));
-  previousTarget.MTPROTO_PRIVATE_ENDPOINT = 'wss://previous.example.test:2443/apiws';
-  const blob = execFileSync('git', ['--git-dir', gitDirectory, 'hash-object', '-w', '--stdin'], {
-    input: JSON.stringify(previousTarget, null, 2) + '\n',
-    encoding: 'utf8'
-  }).trim();
-  const targetTree = execFileSync('git', ['--git-dir', gitDirectory, 'mktree'], {
-    input: `100644 blob ${blob}\tprivate-mtproto-target.json\n`,
-    encoding: 'utf8'
-  }).trim();
-  const tree = execFileSync('git', ['--git-dir', gitDirectory, 'mktree'], {
-    input: `040000 tree ${targetTree}\tci\n`,
-    encoding: 'utf8'
-  }).trim();
-  const repositoryObjectDirectory = execFileSync('git', ['rev-parse', '--git-path', 'objects'], {
-    cwd: repositoryRoot,
-    encoding: 'utf8'
-  }).trim();
-
-  return {
-    tree,
-    objectDirectory: join(gitDirectory, 'objects'),
-    alternateObjectDirectory: resolve(repositoryRoot, repositoryObjectDirectory)
-  };
-}
 
 function privateTargetTreeWithOverrides(directory, endpoint, keyContents, {
   baseCommit = currentCommit(),

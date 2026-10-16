@@ -754,19 +754,6 @@ function diagnoseTarget(args) {
   }
 }
 
-function reviewedTargetChanged(rootDirectory, previousCommit, targetCommit) {
-  assertCommitId(previousCommit, 'push before commit');
-  try {
-    execFileSync('git', ['diff', '--quiet', previousCommit, targetCommit, '--', REVIEWED_PRIVATE_TARGET], {
-      cwd: rootDirectory
-    });
-    return false;
-  } catch(cause) {
-    if(cause.status === 1) return true;
-    throw new Error('[MT] private artifact release cannot compare reviewed target commits', {cause});
-  }
-}
-
 function preparePublication(args) {
   const eventName = option(args, '--event', process.env.PRIVATE_ARTIFACT_EVENT || process.env.GITHUB_EVENT_NAME);
   const headBranch = option(args, '--head-branch', process.env.PRIVATE_ARTIFACT_HEAD_BRANCH);
@@ -787,15 +774,6 @@ function preparePublication(args) {
     targetRef,
     workflowCommit
   });
-  if(eventName === 'push' && !reviewedTargetChanged(
-    ROOT_DIRECTORY,
-    optionalOption(args, '--previous-commit', process.env.PRIVATE_ARTIFACT_PREVIOUS_COMMIT),
-    target.commit
-  )) {
-    writeGithubOutputs({publish_private_artifact: false});
-    console.log('[private-artifact] publication skipped: reviewed target unchanged');
-    return;
-  }
 
   const outputDirectory = option(args, '--output', 'private-target-snapshot');
   const snapshot = snapshotReviewedPrivateTarget({
