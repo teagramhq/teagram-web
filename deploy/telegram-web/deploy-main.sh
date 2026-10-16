@@ -77,7 +77,7 @@ rollback_on_error() {
   if [[ "$DEPLOYMENT_STARTED" == true ]]; then
     printf 'deploy failed; rolling back to %s\n' "$LIVE_SHA" >&2
     if [[ -d "$ROOT/deploy/telegram-web" ]]; then
-      (cd "$ROOT/deploy/telegram-web" && docker compose ps && docker compose logs --tail=50 web) >&2 || true
+      (cd "$ROOT/deploy/telegram-web" && PRIVATE_ARTIFACT_COMMIT="$SHA" docker compose ps && PRIVATE_ARTIFACT_COMMIT="$SHA" docker compose logs --tail=50 web) >&2 || true
     fi
     if ! "$BACKUP_DIR/rollback.sh"; then
       printf 'rollback failed; run bash %s/rollback.sh\n' "$BACKUP_DIR" >&2

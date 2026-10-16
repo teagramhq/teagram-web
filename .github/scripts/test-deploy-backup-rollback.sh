@@ -16,6 +16,10 @@ grep -Fq 'cp -a "$ROOT/dist-private" "$BACKUP_DIR/dist-private"' "$deploy_script
   fail 'deployment must preserve artifact modes in the backup'
 grep -Fq 'cp -a "$BACKUP_DIR/dist-private" "$ROOT/dist-private"' "$deploy_script" ||
   fail 'rollback must restore the backed-up artifact with preserved modes'
+grep -Fq 'PRIVATE_ARTIFACT_COMMIT="$SHA" docker compose ps' "$deploy_script" ||
+  fail 'failure diagnostics must pass the attempted commit to docker compose ps'
+grep -Fq 'PRIVATE_ARTIFACT_COMMIT="$SHA" docker compose logs --tail=50 web' "$deploy_script" ||
+  fail 'failure diagnostics must pass the attempted commit to docker compose logs'
 grep -Fq 'COPY --from=artifact-verification /workspace/dist-private/ /usr/share/nginx/html/' "$dockerfile" ||
   fail 'serving image must copy the restored artifact into the Nginx document root'
 if grep -Eq 'chmod[^#]*"\$BACKUP_DIR/dist-private"' "$deploy_script"; then
