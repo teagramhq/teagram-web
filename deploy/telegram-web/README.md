@@ -16,6 +16,26 @@ docker compose up -d --build
 docker compose ps
 ```
 
+## Deploys
+
+Successful push runs of `Private MTProto Artifact Publication` trigger the
+`Deploy.` workflow. It resolves the tested commit, downloads that run's
+`private-mtproto-<commit>-<digest>` artifact, packages it for the host, and
+sends it over the tailnet to the forced-command deploy key. The host runs that
+commit's `deploy/telegram-web/deploy-main.sh`; the workflow does not check out
+or execute repository code itself.
+
+To redeploy manually, run `Deploy.` from the GitHub Actions tab. It takes no
+inputs and selects the newest successful push publication on `master`.
+
+The host script verifies the artifact manifest and content digest using the
+Dockerfile's `artifact-verification` stage before changing the live checkout.
+It keeps the prior artifact and a `rollback.sh` under
+`/opt/telegram-web/backups/`, checks `/`, `/healthz`, and the served artifact
+manifest after Compose starts, and runs the rollback script if deployment
+fails. The release record is written root-owned and read-only under
+`/root/telegram-web-<commit>-<timestamp>/release-record.json`.
+
 The SPA listens on `127.0.0.1:8080` for host-local proxies such as Serve. Keep
 this port loopback-only; the existing HTTPS Serve route remains the external
 entry point, and the Web container must not create direct tailnet ingress.

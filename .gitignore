@@ -3,6 +3,7 @@ coverage
 __pycache__
 /dist
 /dist-private
+/backups/
 **/.DS_Store
 stats.json
 certs

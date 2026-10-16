@@ -81,3 +81,34 @@ jobs:
 
       - name: Run private username auth browser smoke
         run: pnpm run test:private-auth
+
+  deployment-workflow:
+    name: Deployment workflow contract and actionlint
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.27.2'
+
+      - name: Install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Install yq
+        run: go install github.com/mikefarah/yq/v4@v4.54.1
+
+      - name: Lint the production deploy workflow
+        run: "$(go env GOPATH)/bin/actionlint" .github/workflows/deploy.yml
+
+      - name: Check the deploy workflow contract
+        run: PATH="$(go env GOPATH)/bin:$PATH" bash .github/scripts/test-deploy-workflow-contract.sh
+
+      - name: Check deployment script syntax
+        run: bash -n deploy/telegram-web/deploy-main.sh
