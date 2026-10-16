@@ -3,6 +3,7 @@ name: Deploy.
 # Deploys the published private artifact from a successful push publication
 # run. The workflow never checks out source: the LXC forced command validates
 # the SHA and runs that commit's deploy/telegram-web/deploy-main.sh.
+# Resolve publications before they enter the serialized production deploy job.
 on:
   workflow_run:
     workflows: [Private MTProto Artifact Publication]
@@ -14,20 +15,21 @@ permissions:
   contents: read
   actions: read
 
-concurrency:
-  group: deploy-telegram-web
-  cancel-in-progress: false
-
 jobs:
-  deploy:
-    name: deploy telegram-web
+  resolve:
+    name: resolve published artifact
     if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    environment: production
     permissions:
       contents: read
       actions: read
+    outputs:
+      skip: ${{ steps.target.outputs.skip }}
+      sha: ${{ steps.target.outputs.sha }}
+      run_id: ${{ steps.target.outputs.run_id }}
+      artifact_name: ${{ steps.target.outputs.artifact_name }}
+      artifact_digest: ${{ steps.target.outputs.artifact_digest }}
 
     steps:
       - name: Resolve the published artifact
@@ -130,26 +132,40 @@ jobs:
           }
           echo "deploying $sha from publication run $run_id"
           {
+            printf 'skip=false\n'
             printf 'sha=%s\n' "$sha"
             printf 'run_id=%s\n' "$run_id"
             printf 'artifact_name=%s\n' "$artifact_name"
             printf 'artifact_digest=%s\n' "$artifact_digest"
           } > "$GITHUB_OUTPUT"
 
+  deploy:
+    name: deploy telegram-web
+    needs: resolve
+    if: ${{ needs.resolve.outputs.skip == 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    concurrency:
+      group: deploy-telegram-web
+      cancel-in-progress: false
+    environment: production
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
       - name: Download the published artifact
-        if: ${{ steps.target.outputs.skip != 'true' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ${{ steps.target.outputs.artifact_name }}
+          name: ${{ needs.resolve.outputs.artifact_name }}
           path: ${{ runner.temp }}/private-artifact
-          run-id: ${{ steps.target.outputs.run_id }}
+          run-id: ${{ needs.resolve.outputs.run_id }}
           github-token: ${{ github.token }}
 
       - name: Verify the artifact identity
-        if: ${{ steps.target.outputs.skip != 'true' }}
         env:
-          DEPLOY_SHA: ${{ steps.target.outputs.sha }}
-          ARTIFACT_DIGEST: ${{ steps.target.outputs.artifact_digest }}
+          DEPLOY_SHA: ${{ needs.resolve.outputs.sha }}
+          ARTIFACT_DIGEST: ${{ needs.resolve.outputs.artifact_digest }}
         run: |
           manifest="$RUNNER_TEMP/private-artifact/mtproto-target.json"
           test -f "$manifest" && test ! -L "$manifest"
@@ -157,7 +173,6 @@ jobs:
             '.sourceCommit == $sha and .artifactDigest == $digest' "$manifest" >/dev/null
 
       - name: Package the artifact for the LXC
-        if: ${{ steps.target.outputs.skip != 'true' }}
         env:
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
@@ -166,7 +181,6 @@ jobs:
           test -s "$RUNNER_TEMP/private-artifact.zip"
 
       - name: Join the tailnet
-        if: ${{ steps.target.outputs.skip != 'true' }}
         uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
@@ -175,7 +189,6 @@ jobs:
           ping: 100.124.236.66
 
       - name: Install the deploy key
-        if: ${{ steps.target.outputs.skip != 'true' }}
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
@@ -185,9 +198,8 @@ jobs:
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
 
       - name: Deploy the published artifact
-        if: ${{ steps.target.outputs.skip != 'true' }}
         env:
-          DEPLOY_SHA: ${{ steps.target.outputs.sha }}
+          DEPLOY_SHA: ${{ needs.resolve.outputs.sha }}
         run: |
           ssh -T -i "$RUNNER_TEMP/ssh/id_deploy" \
             -o IdentitiesOnly=yes -o BatchMode=yes \
@@ -196,5 +208,5 @@ jobs:
             root@100.124.236.66 "$DEPLOY_SHA" < "$RUNNER_TEMP/private-artifact.zip"
 
       - name: Remove the deploy key
-        if: ${{ always() && steps.target.outputs.skip != 'true' }}
+        if: ${{ always() }}
         run: rm -rf "$RUNNER_TEMP/ssh"

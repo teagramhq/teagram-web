@@ -4,6 +4,7 @@ set -euo pipefail
 
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 expected_if="\${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
+expected_deploy_if="\${{ needs.resolve.outputs.skip == 'false' }}"
 
 fail() {
   printf '%s: %s\n' "$workflow" "$1" >&2
@@ -156,6 +157,33 @@ SH
   grep -Fxq "sha=$TEST_EVENT_SHA" "$GITHUB_OUTPUT" || fail 'published A must remain selected when newer B did not publish'
   grep -Fxq "run_id=$TEST_PUBLISHED_RUN_ID" "$GITHUB_OUTPUT" || fail 'published A event must retain a run containing its artifact'
 
+  # A is eligible to wait for the deploy slot; later unpublished B must skip before that slot.
+  RUN_ID="$TEST_PUBLISHED_RUN_ID"
+  RUN_HEAD_SHA="$TEST_EVENT_SHA"
+  TEST_EVENT_RUN_ID="$TEST_PUBLISHED_RUN_ID"
+  TEST_EVENT_PUBLICATION=true
+  TEST_COMPARISON=identical
+  TEST_RUNS="$TEST_UNPUBLISHED_RUN_ID"$'\t'"$TEST_OTHER_SHA"$'\n'"$TEST_PUBLISHED_RUN_ID"$'\t'"$TEST_EVENT_SHA"
+  : >"$GITHUB_OUTPUT"
+  bash -euo pipefail "$tmp/target.sh" >/dev/null
+  grep -Fxq 'skip=false' "$GITHUB_OUTPUT" || fail 'published A must mark itself eligible for deployment'
+  grep -Fxq "run_id=$TEST_PUBLISHED_RUN_ID" "$GITHUB_OUTPUT" || fail 'published A must remain eligible while waiting for deployment'
+  if grep -q '^skip=true$' "$GITHUB_OUTPUT"; then
+    fail 'published A must not be skipped before entering the deployment queue'
+  fi
+  pending_run="$TEST_PUBLISHED_RUN_ID"
+
+  RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
+  RUN_HEAD_SHA="$TEST_OTHER_SHA"
+  TEST_EVENT_RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
+  : >"$GITHUB_OUTPUT"
+  bash -euo pipefail "$tmp/target.sh" >/dev/null
+  grep -Fxq 'skip=true' "$GITHUB_OUTPUT" || fail 'later unpublished B must skip before deployment is queued'
+  if ! grep -q '^skip=true$' "$GITHUB_OUTPUT"; then
+    pending_run="$TEST_UNPUBLISHED_RUN_ID"
+  fi
+  [[ "$pending_run" == "$TEST_PUBLISHED_RUN_ID" ]] || fail 'unpublished B must not replace pending publication A'
+
   GITHUB_EVENT_NAME=workflow_run
   RUN_ID=100
   RUN_HEAD_SHA=null
@@ -175,17 +203,35 @@ check_contract() {
     fail 'workflow_run must fire only on completion'
   [[ "$(query '.on.workflow_run.branches | join(",")')" == 'master' ]] ||
     fail 'workflow_run must be limited to branches: [master]'
-  [[ "$(query '.concurrency.group')" == 'deploy-telegram-web' ]] ||
-    fail 'concurrency group must be deploy-telegram-web'
-  [[ "$(query '.concurrency."cancel-in-progress"')" == 'false' ]] ||
-    fail 'concurrency must not cancel a deploy in progress'
   [[ "$(query '.permissions | to_entries | map(.key + "=" + .value) | sort | join(",")')" == 'actions=read,contents=read' ]] ||
     fail 'workflow permissions must be contents: read and actions: read'
-  [[ "$(query '.jobs | keys | join(",")')" == 'deploy' ]] || fail 'workflow must define one deploy job'
-  [[ "$(query '.jobs.deploy.if')" == "$expected_if" ]] ||
-    fail 'deploy must run only on a master dispatch or a successful push publication'
+  [[ "$(query '.jobs | keys | sort | join(",")')" == 'deploy,resolve' ]] || fail 'workflow must define resolve and deploy jobs'
+  [[ "$(query '.jobs.resolve.if')" == "$expected_if" ]] ||
+    fail 'resolve must run only on a master dispatch or a successful push publication'
+  [[ "$(query '.jobs.deploy.needs')" == 'resolve' ]] || fail 'deploy must wait for artifact resolution'
+  [[ "$(query '.jobs.deploy.if')" == "$expected_deploy_if" ]] ||
+    fail 'deploy must skip before concurrency when resolution finds no publication'
+  [[ "$(query '.jobs.resolve.outputs.skip')" == '${{ steps.target.outputs.skip }}' ]] ||
+    fail 'resolve must expose the non-publication skip result to the deploy job'
+  [[ "$(query '.jobs.resolve.outputs.sha')" == '${{ steps.target.outputs.sha }}' ]] ||
+    fail 'resolve must expose the selected artifact SHA'
+  [[ "$(query '.jobs.resolve.outputs.run_id')" == '${{ steps.target.outputs.run_id }}' ]] ||
+    fail 'resolve must expose the selected artifact run'
+  [[ "$(query '.jobs.resolve.outputs.artifact_name')" == '${{ steps.target.outputs.artifact_name }}' ]] ||
+    fail 'resolve must expose the selected artifact name'
+  [[ "$(query '.jobs.resolve.outputs.artifact_digest')" == '${{ steps.target.outputs.artifact_digest }}' ]] ||
+    fail 'resolve must expose the selected artifact digest'
+  [[ "$(query '.concurrency // {} | length')" == 0 ]] || fail 'workflow-level concurrency must not queue resolver jobs'
+  [[ "$(query '.jobs.resolve.concurrency // {} | length')" == 0 ]] || fail 'artifact resolution must run before deployment concurrency'
+  [[ "$(query '.jobs.deploy.concurrency.group')" == 'deploy-telegram-web' ]] ||
+    fail 'deploy concurrency group must be deploy-telegram-web'
+  [[ "$(query '.jobs.deploy.concurrency."cancel-in-progress"')" == 'false' ]] ||
+    fail 'deploy concurrency must not cancel the running deployment'
   [[ "$(query '.jobs.deploy.environment')" == 'production' ]] ||
     fail 'deploy must use environment: production'
+  [[ "$(query '.jobs.resolve.environment // ""')" == '' ]] || fail 'artifact resolution must not request production environment secrets'
+  [[ "$(query '.jobs.resolve.permissions.actions')" == 'read' ]] || fail 'resolve job must grant actions: read'
+  [[ "$(query '.jobs.resolve.permissions.contents')" == 'read' ]] || fail 'resolve job must grant contents: read'
   [[ "$(query '.jobs.deploy.permissions.actions')" == 'read' ]] ||
     fail 'deploy job must grant actions: read'
   [[ "$(query '.jobs.deploy.permissions.contents')" == 'read' ]] ||
@@ -194,15 +240,12 @@ check_contract() {
     fail 'deploy job must not request write permissions'
 
   local checkout_count download_count ssh_count uses
-  checkout_count="$(query '[.jobs.deploy.steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
+  checkout_count="$(query '[.jobs[].steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
   [[ "$checkout_count" == 0 ]] || fail 'deploy workflow must not use actions/checkout'
-  download_count="$(query '[.jobs.deploy.steps[] | select((.uses // "" | test("^actions/download-artifact@")) and .with.name == "${{ steps.target.outputs.artifact_name }}" and .with."run-id" == "${{ steps.target.outputs.run_id }}" and .with."github-token" == "${{ github.token }}")] | length')"
+  download_count="$(query '[.jobs.deploy.steps[] | select((.uses // "" | test("^actions/download-artifact@")) and .with.name == "${{ needs.resolve.outputs.artifact_name }}" and .with."run-id" == "${{ needs.resolve.outputs.run_id }}" and .with."github-token" == "${{ github.token }}")] | length')"
   [[ "$download_count" == 1 ]] || fail 'artifact download must use the selected artifact name, run and github token'
-  skip_guards="$(query '[.jobs.deploy.steps[1:][] | select(.name != "Remove the deploy key") | select(.if != "${{ steps.target.outputs.skip != '\''true'\'' }}")] | length')"
-  [[ "$skip_guards" == 0 ]] || fail 'all deployment steps must skip runs without a publication artifact'
   cleanup_condition="$(query '[.jobs.deploy.steps[] | select(.name == "Remove the deploy key") | .if][0]')"
-  [[ "$cleanup_condition" == '${{ always() && steps.target.outputs.skip != '\''true'\'' }}' ]] ||
-    fail 'deploy-key cleanup must run after deployment attempts and skip non-publications'
+  [[ "$cleanup_condition" == '${{ always() }}' ]] || fail 'deploy-key cleanup must run after deployment attempts'
   ssh_count="$(query '[.jobs.deploy.steps[] | select(.run // "" | test("(^|\\s)ssh\\s"))] | length')"
   [[ "$ssh_count" == 1 ]] || fail "expected one ssh step, found $ssh_count"
   query '.jobs.deploy.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run' |
@@ -215,7 +258,7 @@ check_contract() {
   while IFS= read -r uses; do
     [[ -n "$uses" ]] || continue
     [[ "$uses" =~ ^[^@]+@[0-9a-f]{40}$ ]] || fail "action not pinned to a commit SHA: $uses"
-  done < <(query '.jobs.deploy.steps[].uses // ""')
+  done < <(query '.jobs[].steps[].uses // ""')
   check_target_selection
 }
 
@@ -230,13 +273,19 @@ self_test() {
     '.on.workflow_dispatch.inputs = {"sha":{"type":"string"}}'
     'del(.on.workflow_run.branches)'
     '.on.workflow_run.branches = ["master", "dev"]'
+    '.jobs.resolve.if = "wrong"'
+    'del(.jobs.resolve.if)'
     '.jobs.deploy.if = "wrong"'
     'del(.jobs.deploy.if)'
+    'del(.jobs.deploy.needs)'
+    'del(.jobs.resolve.outputs.skip)'
     '.jobs.deploy.environment = "staging"'
     'del(.jobs.deploy.environment)'
-    'del(.concurrency)'
-    '.concurrency.group = "deploy"'
-    '.concurrency."cancel-in-progress" = true'
+    '.concurrency = {"group":"deploy-telegram-web","cancel-in-progress":false}'
+    '.jobs.resolve.concurrency.group = "deploy-telegram-web"'
+    'del(.jobs.deploy.concurrency)'
+    '.jobs.deploy.concurrency.group = "deploy"'
+    '.jobs.deploy.concurrency."cancel-in-progress" = true'
     '.jobs.deploy.steps = [{"uses": "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"}] + .jobs.deploy.steps'
     '(.jobs.deploy.steps[] | select(.uses | test("^actions/download-artifact@")) | .with."run-id") = "${{ github.run_id }}"'
     '(.jobs.deploy.steps[] | select(.uses | test("^tailscale/github-action@")) | .uses) = "tailscale/github-action@v4"'
