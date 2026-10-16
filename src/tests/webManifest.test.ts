@@ -2,20 +2,16 @@ import {readFileSync} from 'fs';
 import {resolve} from 'path';
 
 type WebManifest = {
+  name: string,
+  short_name: string,
+  description: string,
   id: string,
   start_url: string,
-  scope: string,
-  scope_extensions: Array<{
-    type: string,
-    origin: string
-  }>
+  scope: string
 };
 
-const EXPECTED_SCOPE_EXTENSIONS = [
-  {type: 'origin', origin: 'https://t.me'},
-  {type: 'origin', origin: 'https://telegram.me'}
-];
 const EXPECTED_MANIFEST_ID = 'https://web.telegram.org/k/';
+const EXPECTED_DESCRIPTION = 'Self-hosted messaging that speaks the Telegram protocol.';
 
 const manifests = [
   'site.webmanifest',
@@ -26,15 +22,15 @@ const manifests = [
 }));
 
 describe('PWA web manifests', () => {
-  test.each(manifests)('$fileName has a stable identity and Telegram link scopes', ({manifest}) => {
+  test.each(manifests)('$fileName identifies Teagram and stays in its own scope', ({manifest}) => {
+    expect(manifest.name).toBe('Teagram Web');
+    expect(manifest.short_name).toBe('Teagram');
+    expect(manifest.description).toBe(EXPECTED_DESCRIPTION);
     expect(manifest.id).toBe('/k/');
     expect(new URL(manifest.id, 'https://web.telegram.org/').href).toBe(EXPECTED_MANIFEST_ID);
     expect(manifest.start_url).toBe('./');
     expect(manifest.scope).toBe('./');
-    expect(manifest.scope_extensions).toEqual(EXPECTED_SCOPE_EXTENSIONS);
-  });
-
-  test('desktop variants keep the same scope extensions', () => {
-    expect(manifests[0].manifest.scope_extensions).toEqual(manifests[1].manifest.scope_extensions);
+    expect(manifest).not.toHaveProperty('scope_extensions');
+    expect(JSON.stringify(manifest)).not.toMatch(/https?:\/\/(?:t\.me|telegram\.me)/);
   });
 });
