@@ -28,6 +28,52 @@ or execute repository code itself.
 To redeploy manually, run `Deploy.` from the GitHub Actions tab. It takes no
 inputs and selects the newest successful push publication on `master`.
 
+## Threat model
+
+Automatic deployment accepts only a completed, successful `Private MTProto
+Artifact Publication` run for a push to `master`. Pull request artifact runs do
+not satisfy the deploy job condition. Manual dispatch selects the newest
+successful `master` publication, and both the job condition and production
+environment branch policy restrict dispatch runs to `master`.
+
+The workflow downloads the artifact from the selected publication run ID and
+requires its name and manifest to match the selected commit and SHA-256 digest.
+This prevents run mix-ups; the host verifier recomputes the bundle digest to
+detect corruption. The artifact name and manifest are not a signature. The
+runner packages artifact data but executes none of it. On the host, the
+verifier from the selected commit also checks the reviewed target, CSP, audited
+routes, and sign-in marker before activation. The trust root is GitHub Actions
+and the reviewed `master` source and publication workflow. A compromised
+publisher run or an authorized malicious commit can still produce harmful
+browser code.
+
+Only the `deploy` job uses the `production` environment and its workflow token
+has read-only `contents` and `actions` permissions. Keep `TS_OAUTH_CLIENT_ID`,
+`TS_OAUTH_SECRET`, and `DEPLOY_SSH_KEY` as production-environment secrets, with
+`DEPLOY_KNOWN_HOSTS` as an environment variable. The Tailscale identity must be
+limited to `tag:ci-deploy`, and tailnet ACLs must permit SSH to the deploy LXC
+only. The runner writes the key with restrictive permissions, checks the host
+against the pinned known-hosts value, and removes the temporary key in an
+always-run cleanup step.
+
+The SSH key grants a root operation, so the host's dedicated `authorized_keys`
+entry must use `restrict`, the Tailscale source range, and the fixed
+`/usr/local/sbin/teagram-web-deploy` forced command. That handler must accept
+only a 40-hex commit and a size-limited ZIP on stdin, verify the commit is an
+ancestor of `master`, and execute only that commit's deploy script. It must not
+offer a shell, PTY, or forwarding. A forced-command bypass would grant root on
+the host. These host-side controls are prerequisites and are not installed by
+this PR.
+
+At review time, GitHub's production environment policy permits `master`, but
+GitHub reports no branch protection or ruleset on `master`. The environment
+branch policy limits where secrets can be used; it does not require review.
+Until PR review and required checks are enforced on `master`, anyone with direct
+push access can change the privileged workflow, root deploy script, or served
+JavaScript. Resolve that release-authority gap before the first production
+deployment. Repository administrators, the publisher workflow, production
+secrets, and the runner remain trusted parts of the deployment chain.
+
 The host script verifies the artifact manifest and content digest using the
 Dockerfile's `artifact-verification` stage before changing the live checkout.
 It keeps the prior artifact and a `rollback.sh` under

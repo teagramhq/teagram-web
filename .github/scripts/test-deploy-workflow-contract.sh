@@ -3,7 +3,7 @@
 set -euo pipefail
 
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
-expected_if="\${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
+expected_if="\${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
 
 fail() {
   printf '%s: %s\n' "$workflow" "$1" >&2
@@ -99,7 +99,7 @@ check_contract() {
     fail 'workflow permissions must be contents: read and actions: read'
   [[ "$(query '.jobs | keys | join(",")')" == 'deploy' ]] || fail 'workflow must define one deploy job'
   [[ "$(query '.jobs.deploy.if')" == "$expected_if" ]] ||
-    fail 'deploy must run only on dispatch or a successful push publication'
+    fail 'deploy must run only on a master dispatch or a successful push publication'
   [[ "$(query '.jobs.deploy.environment')" == 'production' ]] ||
     fail 'deploy must use environment: production'
   [[ "$(query '.jobs.deploy.permissions.actions')" == 'read' ]] ||
