@@ -80,7 +80,7 @@ jobs:
               result=$?
               if [[ "$result" == 1 ]]; then
                 echo "::notice::publication run $RUN_ID produced no matching artifact; skipping deployment"
-                echo 'skip=true' >> "$GITHUB_OUTPUT"
+                printf 'skip=true\n' > "$GITHUB_OUTPUT"
                 exit 0
               fi
               echo "::error::could not verify artifact for publication run $RUN_ID"
@@ -129,10 +129,12 @@ jobs:
             exit 1
           }
           echo "deploying $sha from publication run $run_id"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
-          echo "artifact_digest=$artifact_digest" >> "$GITHUB_OUTPUT"
+          {
+            printf 'sha=%s\n' "$sha"
+            printf 'run_id=%s\n' "$run_id"
+            printf 'artifact_name=%s\n' "$artifact_name"
+            printf 'artifact_digest=%s\n' "$artifact_digest"
+          } > "$GITHUB_OUTPUT"
 
       - name: Download the published artifact
         if: ${{ steps.target.outputs.skip != 'true' }}
