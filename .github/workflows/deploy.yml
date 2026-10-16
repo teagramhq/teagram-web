@@ -1,0 +1,297 @@
+name: Deploy.
+
+# Deploys the published private artifact from a successful push publication
+# run. The workflow never checks out source: the LXC forced command validates
+# the SHA and runs that commit's deploy/telegram-web/deploy-main.sh.
+# Resolve publications before they enter the serialized production deploy job.
+on:
+  workflow_run:
+    workflows: [Private MTProto Artifact Publication]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resolve:
+    name: resolve published artifact
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      skip: ${{ steps.target.outputs.skip }}
+      sha: ${{ steps.target.outputs.sha }}
+      run_id: ${{ steps.target.outputs.run_id }}
+      artifact_name: ${{ steps.target.outputs.artifact_name }}
+      artifact_digest: ${{ steps.target.outputs.artifact_digest }}
+
+    steps:
+      - name: Resolve the published artifact
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          artifact_for_run() {
+            local candidate_run_id="$1" candidate_sha="$2" artifacts matches
+            artifacts=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id/artifacts?per_page=100") || return 2
+            matches=$(jq -r --arg sha "$candidate_sha" \
+              '[.artifacts[]? | select(.expired != true and (.name | test("^private-mtproto-" + $sha + "-[0-9a-f]{64}$"))) | .name] | .[]' \
+              <<<"$artifacts") || return 2
+            [[ -n "$matches" ]] || return 1
+            [[ "$matches" != *$'\n'* && "$matches" =~ ^private-mtproto-${candidate_sha}-([0-9a-f]{64})$ ]] || return 2
+            printf '%s\t%s\n' "$matches" "${BASH_REMATCH[1]}"
+          }
+
+          latest_publication() {
+            local runs candidate_run_id candidate_sha artifact artifact_name artifact_digest result
+            runs=$(gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/private-artifact.yml/runs?branch=master&event=push&status=success&per_page=100" \
+              --jq '.workflow_runs[] | [.id, .head_sha] | @tsv') || return 1
+            while IFS=$'\t' read -r candidate_run_id candidate_sha; do
+              [[ -n "$candidate_run_id" ]] || continue
+              [[ "$candidate_run_id" =~ ^[0-9]+$ && "$candidate_sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+              if artifact=$(artifact_for_run "$candidate_run_id" "$candidate_sha"); then
+                IFS=$'\t' read -r artifact_name artifact_digest <<<"$artifact"
+                printf '%s\t%s\t%s\t%s\n' "$candidate_run_id" "$candidate_sha" "$artifact_name" "$artifact_digest"
+                return 0
+              else
+                result=$?
+                [[ "$result" == 1 ]] || return 1
+              fi
+            done <<<"$runs"
+            return 1
+          }
+
+          if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch ]]; then
+            if [[ ! "$RUN_ID" =~ ^[0-9]+$ || ! "$RUN_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::invalid publication run metadata"
+              exit 1
+            fi
+
+            if event_artifact=$(artifact_for_run "$RUN_ID" "$RUN_HEAD_SHA"); then
+              IFS=$'\t' read -r event_artifact_name event_artifact_digest <<<"$event_artifact"
+            else
+              result=$?
+              if [[ "$result" == 1 ]]; then
+                echo "::notice::publication run $RUN_ID produced no matching artifact; skipping deployment"
+                printf 'skip=true\n' > "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "::error::could not verify artifact for publication run $RUN_ID"
+              exit 1
+            fi
+          fi
+
+          latest=$(latest_publication) || {
+            echo "::error::no successful private artifact publication found on master"
+            exit 1
+          }
+          IFS=$'\t' read -r latest_run_id latest_sha latest_artifact_name latest_artifact_digest <<<"$latest"
+
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            run_id="$latest_run_id"
+            sha="$latest_sha"
+            artifact_name="$latest_artifact_name"
+            artifact_digest="$latest_artifact_digest"
+          else
+            sha="$RUN_HEAD_SHA"
+            run_id="$RUN_ID"
+            artifact_name="$event_artifact_name"
+            artifact_digest="$event_artifact_digest"
+            comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...$latest_sha" --jq '.status') || {
+              echo "::error::could not compare publication commits"
+              exit 1
+            }
+            if [[ "$comparison" == ahead ]]; then
+              sha="$latest_sha"
+              run_id="$latest_run_id"
+              artifact_name="$latest_artifact_name"
+              artifact_digest="$latest_artifact_digest"
+            elif [[ "$comparison" == identical ]]; then
+              sha="$latest_sha"
+              run_id="$latest_run_id"
+              artifact_name="$latest_artifact_name"
+              artifact_digest="$latest_artifact_digest"
+            elif [[ "$comparison" != behind && "$comparison" != diverged ]]; then
+              echo "::error::unexpected publication comparison '$comparison'"
+              exit 1
+            fi
+          fi
+
+          [[ "$artifact_name" =~ ^private-mtproto-${sha}-([0-9a-f]{64})$ && "${BASH_REMATCH[1]}" == "$artifact_digest" ]] || {
+            echo "::error::selected artifact does not match commit $sha"
+            exit 1
+          }
+          echo "deploying $sha from publication run $run_id"
+          {
+            printf 'skip=false\n'
+            printf 'sha=%s\n' "$sha"
+            printf 'run_id=%s\n' "$run_id"
+            printf 'artifact_name=%s\n' "$artifact_name"
+            printf 'artifact_digest=%s\n' "$artifact_digest"
+          } > "$GITHUB_OUTPUT"
+
+  deploy:
+    name: deploy telegram-web
+    needs: resolve
+    if: ${{ needs.resolve.outputs.skip == 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    concurrency:
+      group: deploy-telegram-web
+      cancel-in-progress: false
+    environment: production
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - name: Refresh the published artifact after acquiring deployment slot
+        id: refresh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ needs.resolve.outputs.sha }}
+          BASE_RUN_ID: ${{ needs.resolve.outputs.run_id }}
+          BASE_ARTIFACT_NAME: ${{ needs.resolve.outputs.artifact_name }}
+          BASE_ARTIFACT_DIGEST: ${{ needs.resolve.outputs.artifact_digest }}
+        run: |
+          artifact_for_run() {
+            local candidate_run_id="$1" candidate_sha="$2" artifacts matches
+            artifacts=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id/artifacts?per_page=100") || return 2
+            matches=$(jq -r --arg sha "$candidate_sha" \
+              '[.artifacts[]? | select(.expired != true and (.name | test("^private-mtproto-" + $sha + "-[0-9a-f]{64}$"))) | .name] | .[]' \
+              <<<"$artifacts") || return 2
+            [[ -n "$matches" ]] || return 1
+            [[ "$matches" != *$'\n'* && "$matches" =~ ^private-mtproto-${candidate_sha}-([0-9a-f]{64})$ ]] || return 2
+            printf '%s\t%s\n' "$matches" "${BASH_REMATCH[1]}"
+          }
+
+          latest_publication() {
+            local runs candidate_run_id candidate_sha artifact artifact_name artifact_digest result
+            runs=$(gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/private-artifact.yml/runs?branch=master&event=push&status=success&per_page=100" \
+              --jq '.workflow_runs[] | [.id, .head_sha] | @tsv') || return 1
+            while IFS=$'\t' read -r candidate_run_id candidate_sha; do
+              [[ -n "$candidate_run_id" ]] || continue
+              [[ "$candidate_run_id" =~ ^[0-9]+$ && "$candidate_sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+              if artifact=$(artifact_for_run "$candidate_run_id" "$candidate_sha"); then
+                IFS=$'\t' read -r artifact_name artifact_digest <<<"$artifact"
+                printf '%s\t%s\t%s\t%s\n' "$candidate_run_id" "$candidate_sha" "$artifact_name" "$artifact_digest"
+                return 0
+              else
+                result=$?
+                [[ "$result" == 1 ]] || return 1
+              fi
+            done <<<"$runs"
+            return 1
+          }
+
+          [[ "$BASE_RUN_ID" =~ ^[0-9]+$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::invalid pre-resolved publication metadata"
+            exit 1
+          }
+          [[ "$BASE_ARTIFACT_NAME" =~ ^private-mtproto-${BASE_SHA}-([0-9a-f]{64})$ && "${BASH_REMATCH[1]}" == "$BASE_ARTIFACT_DIGEST" ]] || {
+            echo "::error::pre-resolved artifact does not match commit $BASE_SHA"
+            exit 1
+          }
+
+          latest=$(latest_publication) || {
+            echo "::error::no successful private artifact publication found on master"
+            exit 1
+          }
+          IFS=$'\t' read -r latest_run_id latest_sha latest_artifact_name latest_artifact_digest <<<"$latest"
+          comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_SHA...$latest_sha" --jq '.status') || {
+            echo "::error::could not compare publication commits after acquiring deployment slot"
+            exit 1
+          }
+
+          run_id="$BASE_RUN_ID"
+          sha="$BASE_SHA"
+          artifact_name="$BASE_ARTIFACT_NAME"
+          artifact_digest="$BASE_ARTIFACT_DIGEST"
+          if [[ "$comparison" == ahead || "$comparison" == identical ]]; then
+            run_id="$latest_run_id"
+            sha="$latest_sha"
+            artifact_name="$latest_artifact_name"
+            artifact_digest="$latest_artifact_digest"
+          elif [[ "$comparison" != behind && "$comparison" != diverged ]]; then
+            echo "::error::unexpected publication comparison '$comparison' after acquiring deployment slot"
+            exit 1
+          fi
+
+          [[ "$artifact_name" =~ ^private-mtproto-${sha}-([0-9a-f]{64})$ && "${BASH_REMATCH[1]}" == "$artifact_digest" ]] || {
+            echo "::error::refreshed artifact does not match commit $sha"
+            exit 1
+          }
+          echo "deploying refreshed publication $sha from run $run_id"
+          {
+            printf 'sha=%s\n' "$sha"
+            printf 'run_id=%s\n' "$run_id"
+            printf 'artifact_name=%s\n' "$artifact_name"
+            printf 'artifact_digest=%s\n' "$artifact_digest"
+          } > "$GITHUB_OUTPUT"
+
+      - name: Download the published artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ steps.refresh.outputs.artifact_name }}
+          path: ${{ runner.temp }}/private-artifact
+          run-id: ${{ steps.refresh.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify the artifact identity
+        env:
+          DEPLOY_SHA: ${{ steps.refresh.outputs.sha }}
+          ARTIFACT_DIGEST: ${{ steps.refresh.outputs.artifact_digest }}
+        run: |
+          manifest="$RUNNER_TEMP/private-artifact/mtproto-target.json"
+          test -f "$manifest" && test ! -L "$manifest"
+          jq -e --arg sha "$DEPLOY_SHA" --arg digest "sha256:$ARTIFACT_DIGEST" \
+            '.sourceCommit == $sha and .artifactDigest == $digest' "$manifest" >/dev/null
+
+      - name: Package the artifact for the LXC
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          test -n "$(find "$RUNNER_TEMP/private-artifact" -mindepth 1 -print -quit)"
+          (cd "$RUNNER_TEMP/private-artifact" && zip -q -r "$RUNNER_TEMP/private-artifact.zip" .)
+          test -s "$RUNNER_TEMP/private-artifact.zip"
+
+      - name: Join the tailnet
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-deploy
+          ping: 100.124.236.66
+
+      - name: Install the deploy key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 "$RUNNER_TEMP/ssh"
+          (umask 077 && printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh/id_deploy")
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+
+      - name: Deploy the published artifact
+        env:
+          DEPLOY_SHA: ${{ steps.refresh.outputs.sha }}
+        run: |
+          ssh -T -i "$RUNNER_TEMP/ssh/id_deploy" \
+            -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+            root@100.124.236.66 "$DEPLOY_SHA" < "$RUNNER_TEMP/private-artifact.zip"
+
+      - name: Remove the deploy key
+        if: ${{ always() }}
+        run: rm -rf "$RUNNER_TEMP/ssh"
