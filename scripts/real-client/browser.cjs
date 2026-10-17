@@ -227,7 +227,7 @@ function createGatedSender(scope, session, observer, getTargetId) {
 // announces a shared worker, so its zero counts cannot establish absence.
 // Discovery is turned on before this runner creates any context.
 function createWorkerDiscovery() {
-  const ATTRIBUTED_TYPES = ['page', 'shared_worker', 'service_worker', 'worker'];
+  const ATTRIBUTED_TYPES = ['page', 'iframe', 'shared_worker', 'service_worker', 'worker'];
   const targetDiagnostics = new Map();
   let targetDetailsOverflow = false;
   const contextObservers = new Map();
@@ -738,8 +738,12 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
   function recordError(category, eventCounted = false, targetId) {
     if(observerClosed()) return;
     if(errors.length < 8 && !errors.includes(category)) errors.push(category);
-    if(contextObserver && (eventCounted || contextObserver.noteEvent())) contextObserver.recordObserverError(targetId);
-    else if(observerClosed()) return;
+    if(contextObserver) {
+      const wasOverflowed = contextObserver.state.overflow;
+      if(eventCounted || contextObserver.noteEvent()) contextObserver.recordObserverError(targetId);
+      if(!wasOverflowed && contextObserver.state.overflow) targetRegistry?.noteTargetOverflow?.(targetId);
+    }
+    observerClosed();
   }
 
   function releaseRejectedTarget(sessionId) {

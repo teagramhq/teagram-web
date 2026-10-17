@@ -2099,6 +2099,62 @@ describe('discovery shared-worker network accounting', () => {
     }
   });
 
+  it('attributes page-session observer overflow to the target that crossed the event budget', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      harness.session.emit('Target.targetCreated', {
+        targetInfo: {targetId: 'alice-overflow-worker', type: 'service_worker', url: HOSTILE.blobUrl, browserContextId: 'alice'}
+      });
+      await harness.attach(alice, 'alice-overflow-worker', 'auto', 'service_worker');
+      for(let index = alice.observer.eventCount(); index < observation.LIMITS.countedEventsPerContext; index++) {
+        alice.observer.noteEvent();
+      }
+
+      alice.cdp.emit('Target.receivedMessageFromTarget', {
+        sessionId: 'auto-alice-overflow-worker',
+        message: '{'
+      });
+
+      expect(alice.observer.summary()).toMatchObject({observerOverflow: 1, countedEvents: observation.LIMITS.countedEventsPerContext});
+      expect(harness.registry.coverageTargets()).toContainEqual({
+        type: 'service_worker',
+        owningContext: 'alice',
+        scriptAsset: 'unknown',
+        causes: ['observer_overflow']
+      });
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('attributes iframe page-session observer errors to their owning context', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      harness.session.emit('Target.targetCreated', {
+        targetInfo: {targetId: 'alice-iframe', type: 'iframe', url: HOSTILE.url, browserContextId: 'alice'}
+      });
+      await harness.attach(alice, 'alice-iframe', 'auto', 'iframe');
+
+      alice.cdp.emit('Target.receivedMessageFromTarget', {
+        sessionId: 'auto-alice-iframe',
+        message: '{'
+      });
+
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 1, coverageComplete: 0});
+      expect(harness.registry.coverageTargets()).toContainEqual({
+        type: 'iframe',
+        owningContext: 'alice',
+        scriptAsset: 'unknown',
+        causes: ['observer_error']
+      });
+      expect(JSON.stringify(harness.registry.coverageTargets())).not.toContain(HOSTILE.url);
+    } finally {
+      await harness.stop();
+    }
+  });
+
   it('rejects malformed discovery payloads without throwing or leaking their text', async() => {
     const harness = await createDiscoveryNetworkHarness();
     const {alice} = harness;
