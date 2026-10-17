@@ -2162,10 +2162,20 @@ function recordPageError(pageErrors, contextName, error) {
   });
 }
 
+function sanitizePageError(error) {
+  return {
+    constructorName: PAGE_ERROR_CONSTRUCTORS.has(error?.constructorName) ? error.constructorName : 'Error',
+    scriptAsset: typeof error?.scriptAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(error.scriptAsset)
+      ? error.scriptAsset
+      : 'unknown'
+  };
+}
+
 function summarizeBrowserGateBreakdown({networkObservers = {}, pageErrors = {}} = {}) {
   const unexpectedEgressAttempts = {};
   const observerErrors = {};
   const sanitizedPageErrors = {};
+  const pageErrorOverflow = {};
   for(const contextName of APP_CONTEXTS) {
     const events = networkObservers[contextName]?.gateEvents || [];
     unexpectedEgressAttempts[contextName] = events.slice(0, 512).map((event) => {
@@ -2193,19 +2203,31 @@ function summarizeBrowserGateBreakdown({networkObservers = {}, pageErrors = {}} 
       errorCounts.set(normalized, (errorCounts.get(normalized) || 0) + 1);
     }
     observerErrors[contextName] = Object.fromEntries([...errorCounts.entries()].sort(([left], [right]) => left.localeCompare(right)));
-    sanitizedPageErrors[contextName] = (pageErrors[contextName] || []).slice(0, 512).map((error) => ({
-      constructorName: PAGE_ERROR_CONSTRUCTORS.has(error?.constructorName) ? error.constructorName : 'Error',
-      scriptAsset: typeof error?.scriptAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(error.scriptAsset)
-        ? error.scriptAsset
-        : 'unknown'
-    }));
+    const contextPageErrors = pageErrors[contextName] || [];
+    sanitizedPageErrors[contextName] = contextPageErrors.slice(0, 512).map(sanitizePageError);
+    const overflowCounts = new Map();
+    for(const error of contextPageErrors.slice(512)) {
+      const sanitized = sanitizePageError(error);
+      const key = `${sanitized.constructorName}\0${sanitized.scriptAsset}`;
+      overflowCounts.set(key, Math.min(1_000_000, (overflowCounts.get(key) || 0) + 1));
+    }
+    pageErrorOverflow[contextName] = [...overflowCounts.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, count]) => {
+        const separator = key.indexOf('\0');
+        return {
+          constructorName: key.slice(0, separator),
+          scriptAsset: key.slice(separator + 1),
+          count
+        };
+      });
   }
   const counters = {
     unexpectedEgressAttempts: Object.values(unexpectedEgressAttempts).reduce((sum, attempts) => sum + attempts.length, 0),
     observerErrors: Object.values(observerErrors).reduce((sum, errors) => sum + Object.values(errors).reduce((count, total) => count + total, 0), 0),
     pageErrors: Math.min(1_000_000, APP_CONTEXTS.reduce((sum, contextName) => sum + (pageErrors[contextName]?.length || 0), 0))
   };
-  return {counters, unexpectedEgressAttempts, observerErrors, pageErrors: sanitizedPageErrors};
+  return {counters, unexpectedEgressAttempts, observerErrors, pageErrors: sanitizedPageErrors, pageErrorOverflow};
 }
 
 function mergeWebSocket101ByContextPhase(grids) {

@@ -210,6 +210,15 @@ async function runDiscoveryAccountingGate(events: any[], fault?: string) {
           error.stack = `TypeError: ${HOSTILE.phrase}\n    at https://unannounced.invalid/assets/auth-client.js?token=${HOSTILE.token}:21:3`;
           page.emit('pageerror', error);
         }
+        if(fault === 'page_error_overflow') {
+          for(let index = 0; index < 515; index++) {
+            const isOtherAsset = index === 514;
+            const error = isOtherAsset ? new RangeError(HOSTILE.phrase) : new TypeError(HOSTILE.phrase);
+            const asset = isOtherAsset ? 'overflow-client.js' : 'auth-client.js';
+            error.stack = `${error.constructor.name}: ${HOSTILE.phrase}\n    at https://unannounced.invalid/assets/${asset}?token=${HOSTILE.token}:21:3`;
+            page.emit('pageerror', error);
+          }
+        }
       }
     }
   });
@@ -1916,10 +1925,31 @@ describe('discovery shared-worker network accounting', () => {
       pageErrors: {
         alice: [{constructorName: 'TypeError', scriptAsset: 'auth-client.js'}],
         bob: []
-      }
+      },
+      pageErrorOverflow: {alice: [], bob: []}
     });
     expect(parseAuthProgressReport(report).gateBreakdown).toEqual(report.gateBreakdown);
     expectNoGateSecretLeak(report.gateBreakdown);
+  });
+
+  it('summarizes attribution for page errors beyond the detail limit', async() => {
+    const report = await runDiscoveryAccountingGate([], 'page_error_overflow');
+    const breakdown = report.gateBreakdown;
+    expect(report).toMatchObject({status: 'failed', stage: 'browser_egress_or_page_errors'});
+    expect(breakdown.counters.pageErrors).toBe(515);
+    expect(breakdown.pageErrors.alice).toHaveLength(512);
+    expect(breakdown.pageErrors.alice[0]).toEqual({constructorName: 'TypeError', scriptAsset: 'auth-client.js'});
+    expect(breakdown.pageErrorOverflow).toEqual({
+      alice: [
+        {constructorName: 'RangeError', scriptAsset: 'overflow-client.js', count: 1},
+        {constructorName: 'TypeError', scriptAsset: 'auth-client.js', count: 2}
+      ],
+      bob: []
+    });
+    expect(parseAuthProgressReport(report).gateBreakdown).toEqual(breakdown);
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: breakdown}))
+    .toContain(`; browser egress/page errors ${JSON.stringify(breakdown)}`);
+    expectNoGateSecretLeak(breakdown);
   });
 
   it('breaks down the final gate by context and keeps error details private', async() => {
@@ -1977,7 +2007,8 @@ describe('discovery shared-worker network accounting', () => {
         pageErrors: {
           alice: [],
           bob: [{constructorName: 'TypeError', scriptAsset: 'bob-client.js'}]
-        }
+        },
+        pageErrorOverflow: {alice: [], bob: []}
       });
       const serialized = JSON.stringify(breakdown);
       expect(serialized).not.toContain(HOSTILE.password);

@@ -769,14 +769,15 @@ export function parseAuthProgressReport(report) {
 }
 
 function parseBrowserGateBreakdown(value) {
-  const keys = ['counters', 'unexpectedEgressAttempts', 'observerErrors', 'pageErrors'];
+  const keys = ['counters', 'unexpectedEgressAttempts', 'observerErrors', 'pageErrors', 'pageErrorOverflow'];
   const counterKeys = ['unexpectedEgressAttempts', 'observerErrors', 'pageErrors'];
   if(!hasExactOwnKeys(value, keys) ||
       !hasExactOwnKeys(value.counters, counterKeys) ||
       counterKeys.some((key) => !Number.isSafeInteger(value.counters[key]) || value.counters[key] < 0 || value.counters[key] > 1_000_000) ||
       !hasExactOwnKeys(value.unexpectedEgressAttempts, GATE_CONTEXTS) ||
       !hasExactOwnKeys(value.observerErrors, GATE_CONTEXTS) ||
-      !hasExactOwnKeys(value.pageErrors, GATE_CONTEXTS)) {
+      !hasExactOwnKeys(value.pageErrors, GATE_CONTEXTS) ||
+      !hasExactOwnKeys(value.pageErrorOverflow, GATE_CONTEXTS)) {
     throw new Error('browser egress/page error evidence is invalid');
   }
 
@@ -818,11 +819,21 @@ function parseBrowserGateBreakdown(value) {
       throw new Error('browser egress/page error evidence is invalid');
     }
     pageErrorCount += pageErrors.length;
+
+    const overflow = value.pageErrorOverflow[context];
+    if(!Array.isArray(overflow) || overflow.length > 1_000_000 || overflow.some((entry) =>
+      !hasExactOwnKeys(entry, ['constructorName', 'scriptAsset', 'count']) ||
+      !PAGE_ERROR_CONSTRUCTORS.includes(entry.constructorName) ||
+      typeof entry.scriptAsset !== 'string' || !SCRIPT_ASSET.test(entry.scriptAsset) ||
+      !Number.isSafeInteger(entry.count) || entry.count < 1 || entry.count > 1_000_000
+    ) || (overflow.length > 0 && pageErrors.length !== 512)) {
+      throw new Error('browser egress/page error evidence is invalid');
+    }
+    pageErrorCount += overflow.reduce((sum, entry) => sum + entry.count, 0);
   }
   if(value.counters.unexpectedEgressAttempts !== unexpectedAttemptCount ||
       value.counters.observerErrors !== observerErrorCount ||
-      value.counters.pageErrors < pageErrorCount ||
-      (pageErrorCount < 512 && value.counters.pageErrors !== pageErrorCount)) {
+      value.counters.pageErrors !== Math.min(1_000_000, pageErrorCount)) {
     throw new Error('browser egress/page error evidence is invalid');
   }
   return value;
