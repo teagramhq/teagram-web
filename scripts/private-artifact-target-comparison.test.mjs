@@ -327,7 +327,7 @@ describe('private artifact target comparison', () => {
       return start === -1 ? '' : lines.slice(start + 1).join('\n');
     };
 
-    expect(inputNames).toEqual(['request_run_id']);
+    expect(inputNames).toEqual(['request_run_id', 'issue']);
     expect(workflow).toContain('if: github.ref == \'refs/heads/master\'');
     expect(workflow).toContain('fail-fast: false');
     expect(workflow).toContain('runner: ubuntu-24.04');
