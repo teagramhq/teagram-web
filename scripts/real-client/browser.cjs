@@ -1573,8 +1573,8 @@ function groupMemberProbe({groupPeerId}) {
     : [];
   const panel = panels.length === 1 ? panels[0] : undefined;
   const profile = panel?.querySelector('.profile-content');
-  const profileAvatars = profile ? Array.from(profile.querySelectorAll('.profile-avatars-avatar-fake[data-peer-id]')) : [];
-  const profileMatchesActiveGroup = profileAvatars.some((avatar) => avatar.getAttribute('data-peer-id') === groupPeerId && isVisible(avatar));
+  const activeProfileAvatars = profile ? Array.from(profile.querySelectorAll('.profile-avatars-avatars > .profile-avatars-avatar.active > .avatar[data-peer-id]')) : [];
+  const profileMatchesActiveGroup = activeProfileAvatars.some((avatar) => avatar.getAttribute('data-peer-id') === groupPeerId && isVisible(avatar));
   const mediaTabs = panel?.querySelector('.search-super-tabs-container');
   const mediaPanels = mediaTabs ? Array.from(mediaTabs.children) : [];
   const membersPanel = mediaPanels.find((mediaPanel) => mediaPanel.classList.contains('search-super-container-members'));
@@ -1775,7 +1775,7 @@ async function openBobGroupMembers(page, groupHeader, groupName, selectedBobPeer
 
   await groupHeader.click({timeout: timeoutMs}).catch((error) => failGroupMemberStep('bob_group_member_profile', error));
   const activeRightPanel = page.locator('body.is-right-column-shown #column-right .sidebar-slider > .sidebar-slider-item.active');
-  const activeGroupProfileAvatar = activeRightPanel.locator(`.profile-content .profile-avatars-avatar-fake[data-peer-id="${groupMemberTrace.groupPeerId}"]`);
+  const activeGroupProfileAvatar = activeRightPanel.locator(`.profile-content .profile-avatars-avatars > .profile-avatars-avatar.active > .avatar[data-peer-id="${groupMemberTrace.groupPeerId}"]`);
   await activeGroupProfileAvatar.waitFor({state: 'visible', timeout: timeoutMs}).catch((error) => failGroupMemberStep('bob_group_member_profile', error));
 
   currentStage = 'bob_group_member_tab';

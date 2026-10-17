@@ -4114,9 +4114,14 @@ describe('real client group created', () => {
     const membersPanel = membersTab ? `<div class="search-super-tab-container search-super-container-members tabs-tab${membersTabActive ? ' active' : ''}" style="min-height:80px">
       <div class="search-super-content-container search-super-content-members"><ul class="chatlist">${memberIds.map((peerId) => `<li class="chatlist-chat" data-peer-id="${peerId}" style="height:40px">member</li>`).join('')}</ul></div>
     </div>` : '';
-    return `<div class="tabs-tab sidebar-slider-item active" style="min-height:200px">
+    return `<style>.profile-avatars-avatar-fake { visibility: hidden; }</style>
+    <div class="tabs-tab sidebar-slider-item active" style="min-height:200px">
       <div class="sidebar-content"><div class="profile-content">
-        <div class="profile-avatars-container"><div class="avatar profile-avatars-avatar-fake" data-peer-id="${groupPeerId}" style="width:120px;height:120px"></div><div class="profile-avatars-info">${GROUP_NAME}</div></div>
+        <div class="profile-avatars-container">
+          <div class="avatar profile-avatars-avatar-fake" data-peer-id="${groupPeerId}" style="width:120px;height:120px"></div>
+          <div class="profile-avatars-avatars"><div class="profile-avatars-avatar active" style="width:120px;height:120px"><div class="avatar" data-peer-id="${groupPeerId}" style="width:120px;height:120px"></div></div></div>
+          <div class="profile-avatars-info">${GROUP_NAME}</div>
+        </div>
         <div class="search-super"><nav class="search-super-tabs"><div class="menu-horizontal-div-item"><span>Media</span></div>${membersMenu}</nav>
           <div class="search-super-tabs-container"><div class="search-super-tab-container search-super-container-media tabs-tab"></div>${membersPanel}</div>
         </div>
@@ -4240,6 +4245,9 @@ describe('real client group created', () => {
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage();
     try {
       expect(await page.locator('#column-right .sidebar-slider-item.active .row').filter({hasText: /^Members/}).count()).toBe(0);
+      await groupHeader.click();
+      expect(await page.locator('#column-right .sidebar-slider-item.active .profile-avatars-avatar-fake').evaluate((avatar: Element) => getComputedStyle(avatar).visibility)).toBe('hidden');
+      expect(await page.locator('#column-right .sidebar-slider-item.active .profile-avatars-avatars > .profile-avatars-avatar.active .avatar[data-peer-id]').isVisible()).toBe(true);
       await openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 500);
       expect(capturedScreenshots.count).toBe(2);
     } finally {
