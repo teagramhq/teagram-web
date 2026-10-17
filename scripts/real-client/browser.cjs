@@ -2218,9 +2218,9 @@ function createPageErrorAssetResolver() {
   function pageErrorWorkerAsset(stack) {
     const hint = PAGE_ERROR_BLOB_ASSET_HINTS.find(({pattern}) => pattern.test(stack));
     const matchingCandidates = workerAssetCandidates.filter((candidate) =>
-      Date.now() - candidate.observedAt <= 30_000 && (!hint || candidate.workerLabel === hint.workerLabel)
+      hint ? candidate.workerLabel === hint.workerLabel : Date.now() - candidate.observedAt <= 30_000
     );
-    // Unmapped frames have no source ID, so only fresh fetches can identify them.
+    // A specific stack hint narrows lifetime evidence; otherwise require a fresh fetch.
     const assets = new Set(matchingCandidates.map((candidate) => candidate.asset));
     return assets.size === 1 ? assets.values().next().value : undefined;
   }

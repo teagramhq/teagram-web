@@ -2117,17 +2117,19 @@ describe('discovery shared-worker network accounting', () => {
     }
   });
 
-  it('does not use an unmatched worker asset after the fetch ages out', () => {
+  it('keeps lifetime attribution for hinted stacks and expires unhinted fallback', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
-    const blobUrl = 'blob:https://telegramd.test/dddddddd-dddd-dddd-dddd-dddddddddddd';
+    const hintedBlobUrl = 'blob:https://telegramd.test/dddddddd-dddd-dddd-dddd-dddddddddddd';
+    const unhintedBlobUrl = 'blob:https://telegramd.test/ffffffff-ffff-ffff-ffff-ffffffffffff';
 
     vi.useFakeTimers();
     try {
       resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'delayed-lottie-worker', 'dedicated_worker');
       vi.advanceTimersByTime(30_001);
 
-      expect(resolver.scriptAsset(`Error: failed\n    at TLottieWasm.createAnimation (${blobUrl}:1:183)`)).toBe('unknown');
+      expect(resolver.scriptAsset(`Error: failed\n    at TLottieWasm.createAnimation (${hintedBlobUrl}:1:183)`)).toBe('tlottie.worker-JkLmNoPq.js');
+      expect(resolver.scriptAsset(`Error: failed\n    at render (${unhintedBlobUrl}:1:183)`)).toBe('unknown');
     } finally {
       resolver.clear();
       vi.useRealTimers();
