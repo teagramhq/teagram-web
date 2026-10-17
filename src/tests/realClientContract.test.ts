@@ -4273,8 +4273,8 @@ describe('real client group created', () => {
       <div style="position:relative;height:200px">${centerMarkup({groupActive: false, groupTitle})}</div>`;
   }
 
-  function groupProfileMarkup({groupPeerId = '-1000003', memberIds = ['1000002', '1000003'], membersTab = true, membersTabActive = false} = {}) {
-    const membersMenu = membersTab ? `<div class="menu-horizontal-div-item${membersTabActive ? ' active' : ''}"><span>Members</span></div>` : '';
+  function groupProfileMarkup({groupPeerId = '-1000003', memberIds = ['1000002', '1000003'], membersTab = true, membersTabActive = false, membersTabVisible = true} = {}) {
+    const membersMenu = membersTab ? `<div class="menu-horizontal-div-item${membersTabActive ? ' active' : ''}"${membersTabVisible ? '' : ' style="display:none"'}><span>Members</span></div>` : '';
     const membersPanel = membersTab ? `<div class="search-super-tab-container search-super-container-members tabs-tab${membersTabActive ? ' active' : ''}" style="min-height:80px">
       <div class="search-super-content-container search-super-content-members"><ul class="chatlist">${memberIds.map((peerId) => `<li class="chatlist-chat" data-peer-id="${peerId}" style="height:40px">member</li>`).join('')}</ul></div>
     </div>` : '';
@@ -4496,6 +4496,40 @@ describe('real client group created', () => {
       await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
       .rejects.toThrow('bob_group_member_tab');
       expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'media', profileMatchesActiveGroup: true, membersTabExists: false, membersListExists: false, memberRowCount: 0});
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('reports an existing invisible Members tab in the failure summary', async() => {
+    const openBobGroupMembers = requireOpenBobGroupMembers();
+    const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({
+      profileMarkup: groupProfileMarkup({membersTabVisible: false})
+    });
+    try {
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      .rejects.toThrow('bob_group_member_tab');
+      const state = await realClientBrowser.captureGroupMemberState();
+      expect(state).toMatchObject({
+        activePanel: 'media',
+        profileMatchesActiveGroup: true,
+        membersTabExists: true,
+        membersTab: {
+          panelActiveBefore: false,
+          panelActiveAfter: false,
+          target: {index: 1, tag: 'div', classes: ['menu-horizontal-div-item']},
+          paired: true,
+          actionabilityReason: 'not_visible',
+          interceptedBy: null
+        }
+      });
+      expect(await page.evaluate(() => (window as any).memberTabClickCount)).toBe(0);
+      expect(realClientContract.parseGroupMemberState(state)).toEqual(state);
+      const summary = formatBrowserFailureMessage({status: 'failed', stage: 'bob_group_member_tab', groupMember: state});
+      expect(summary).toContain('"actionabilityReason":"not_visible"');
+      expectNoHostileLeak(summary);
+      expect(summary).not.toContain(GROUP_NAME);
+      expect(summary).not.toContain('1000002');
     } finally {
       await page.close();
     }

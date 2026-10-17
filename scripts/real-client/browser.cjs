@@ -1987,7 +1987,9 @@ async function openBobGroupMembers(page, groupHeader, groupName, selectedBobPeer
       }
     }
     groupMemberTrace.membersTab.paired = tabExists && membersPanelIndex < mediaPanelCount && mediaPanelCount === membersTabCount;
-    if(!groupMemberTrace.membersTab.paired || !await membersTab.isVisible()) {
+    const membersTabVisible = groupMemberTrace.membersTab.paired && await membersTab.isVisible();
+    if(!groupMemberTrace.membersTab.paired || !membersTabVisible) {
+      if(groupMemberTrace.membersTab.paired) groupMemberTrace.membersTab.actionabilityReason = 'not_visible';
       groupMemberTrace.membersTab.panelActiveAfter = await readMembersPanelActive(membersPanel).catch(() => null);
       failGroupMemberStep('bob_group_member_tab');
     }
