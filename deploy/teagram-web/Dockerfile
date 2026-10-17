@@ -5,6 +5,8 @@ WORKDIR /workspace
 COPY ci/private-mtproto-target.json ci/private-mtproto-server-public.pem ci/
 COPY scripts/mtproto-target.mjs scripts/private-artifact-csp.mjs scripts/private-artifact.mjs scripts/private-artifact-release.mjs scripts/verify-deployment-artifact.mjs scripts/
 COPY src/lib/lottie/lottieLoader.ts src/lib/lottie/lottieLoader.ts
+COPY public/assets/audio/ public/assets/audio/
+COPY public/assets/img/emoji/ public/assets/img/emoji/
 COPY dist-private/ dist-private/
 
 ARG PRIVATE_ARTIFACT_COMMIT
