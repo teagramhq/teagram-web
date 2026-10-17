@@ -127,7 +127,9 @@ async function createDiscoveryNetworkHarness(options: any = {}) {
   const contexts: any[] = [];
   async function startContext(name: string, control = false) {
     const observer = observation.createContextObserver(name, {control, observeWebSocket101: options.observeWebSocket101 !== false});
-    const {cdp, networkObserver} = createWorkerNetworkObserverHarness(observer, name);
+    const {cdp, networkObserver} = createWorkerNetworkObserverHarness(observer, name, {
+      pageErrorAssetResolver: options.pageErrorAssetResolver
+    });
     await networkObserver.start(discovery.registry);
     discovery.session.emit('Target.targetCreated', {targetInfo: pageTarget(`${name}-page`, name)});
     observer.state.windowElapsed = true;
@@ -2150,6 +2152,68 @@ describe('discovery shared-worker network accounting', () => {
         causes: ['observer_error']
       });
       expect(JSON.stringify(harness.registry.coverageTargets())).not.toContain(HOSTILE.url);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('resolves a worker asset fetched after its target notification in coverage details', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    const harness = await createDiscoveryNetworkHarness({pageErrorAssetResolver: resolver});
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'late-blob-worker');
+      harness.emit(alice, 'late-blob-worker', 'Network.requestWillBeSent', {
+        type: 'Script',
+        request: {url: MTPROTO_CHUNK_URL}
+      });
+      alice.observer.recordObserverError('late-blob-worker');
+
+      expect(harness.registry.coverageTargets()).toContainEqual({
+        type: 'shared_worker',
+        owningContext: 'alice',
+        scriptAsset: 'index.worker-AbCdEfGh.js',
+        causes: ['observer_error']
+      });
+    } finally {
+      resolver.clear();
+      await harness.stop();
+    }
+  });
+
+  it('associates an already mapped blob asset with a later worker target notification', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    const blobUrl = 'blob:https://telegramd.test/abababab-abab-abab-abab-abababababab';
+    try {
+      resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'source-worker', 'dedicated_worker');
+      resolver.observeRequest(blobUrl, {type: 'script'}, 'Script', 'source-worker', 'dedicated_worker');
+      resolver.observeWorkerTarget({targetId: 'late-target-notification', type: 'worker', parentId: 'source-worker', url: blobUrl});
+
+      expect(resolver.workerAsset('late-target-notification')).toBe('index.worker-AbCdEfGh.js');
+    } finally {
+      resolver.clear();
+    }
+  });
+
+  it('attributes event-budget overflow caused by target destruction', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'destroyed-at-cap');
+      for(let index = alice.observer.eventCount(); index < observation.LIMITS.countedEventsPerContext; index++) {
+        alice.observer.noteEvent();
+      }
+      harness.session.emit('Target.targetDestroyed', {targetId: 'destroyed-at-cap'});
+
+      expect(alice.observer.summary()).toMatchObject({observerOverflow: 1, countedEvents: observation.LIMITS.countedEventsPerContext});
+      expect(harness.registry.coverageTargets()).toContainEqual({
+        type: 'shared_worker',
+        owningContext: 'alice',
+        scriptAsset: 'unknown',
+        causes: ['observer_overflow']
+      });
     } finally {
       await harness.stop();
     }

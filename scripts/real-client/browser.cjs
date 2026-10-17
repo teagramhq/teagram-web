@@ -286,10 +286,13 @@ function createWorkerDiscovery() {
       if(record.observerOverflow && record.owningContext !== 'control') causes.push('observer_overflow');
       if(observer && !observer.control && observer.state.observerErrorTargetIds.has(record.targetId)) causes.push('observer_error');
       if(causes.length > 0) {
+        const resolvedAsset = networkSinks.get(observer)?.workerAsset?.(record.targetId);
         targets.push({
           type: record.type,
           owningContext: ['alice', 'bob', 'control'].includes(record.owningContext) ? record.owningContext : null,
-          scriptAsset: record.scriptAsset,
+          scriptAsset: typeof resolvedAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(resolvedAsset)
+            ? resolvedAsset
+            : record.scriptAsset,
           causes
         });
       }
@@ -570,7 +573,14 @@ function createWorkerDiscovery() {
         contextlessTargets.delete(targetId);
         appContextlessTargets.delete(targetId);
         const observer = ownerOf(targetId);
-        if(observer) observer.noteDestroyed(targetId);
+        if(observer) {
+          const observerWasOverflowed = observer.state.overflow;
+          observer.noteDestroyed(targetId);
+          if(!observerWasOverflowed && observer.state.overflow) {
+            const diagnostic = targetDiagnostics.get(targetId);
+            if(diagnostic) diagnostic.observerOverflow = true;
+          }
+        }
       });
       await send('Target.setDiscoverTargets', {discover: true});
       discoveryActive = true;
@@ -1013,6 +1023,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
         pageErrorAssetResolver?.observeWorkerTarget(targetInfo);
         return pageErrorAssetResolver?.workerAsset(targetInfo?.targetId);
       },
+      workerAsset: (targetId) => pageErrorAssetResolver?.workerAsset(targetId),
       release: () => { released = true; }
     });
     cdp.on('Network.requestWillBeSent', (event) => {
@@ -2365,13 +2376,13 @@ function createPageErrorAssetResolver() {
         return;
       }
       if(parsed.protocol === 'blob:' && parsed.origin === PRIVATE_CSP_ORIGIN) {
-        if(blobAssets.has(parsed.href)) return;
         if(typeof targetInfo.targetId === 'string') {
           if(workerBlobUrls.size >= PAGE_ERROR_BLOB_ASSET_LIMIT && !workerBlobUrls.has(targetInfo.targetId)) {
             workerBlobUrls.delete(workerBlobUrls.keys().next().value);
           }
           workerBlobUrls.set(targetInfo.targetId, parsed.href);
         }
+        if(blobAssets.has(parsed.href)) return;
         const directSource = sourceTargetId && directWorkerAssets.get(sourceTargetId);
         const source = directSource || takeWorkerAssetCandidate(sourceTargetId);
         if(source && blobAssets.size < PAGE_ERROR_BLOB_ASSET_LIMIT) blobAssets.set(parsed.href, source.asset);
