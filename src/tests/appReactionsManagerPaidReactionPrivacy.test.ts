@@ -24,6 +24,7 @@ describe('AppReactionsManager.getPaidReactionPrivacy', () => {
       appChatsManager: {saveApiChats: vi.fn()},
       log
     });
+    apiUpdatesManager.updatesState.syncLoading = new Promise(() => {});
     apiUpdatesManager.addEventListener('updatePaidReactionPrivacy', (manager as any).onUpdatePaidReactionPrivacy);
     const processUpdateMessage = vi.spyOn(apiUpdatesManager, 'processUpdateMessage');
     const invokeApiSingleProcess = vi.fn(({processResult}: {processResult?: (result: Updates) => unknown}) => {

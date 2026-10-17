@@ -1224,6 +1224,16 @@ export class AppReactionsManager extends AppManager {
         processResult: (response) => {
           if(!this.paidReactionPrivacy) {
             this.apiUpdatesManager.processUpdateMessage(response);
+            if(!this.paidReactionPrivacy) {
+              const privacyUpdate = response._ === 'updateShort' ?
+                response.update :
+                (response._ === 'updates' || response._ === 'updatesCombined') ?
+                  response.updates.find((update) => update._ === 'updatePaidReactionPrivacy') :
+                  undefined;
+              if(privacyUpdate?._ === 'updatePaidReactionPrivacy') {
+                this.onUpdatePaidReactionPrivacy(privacyUpdate);
+              }
+            }
           }
         }
       });
