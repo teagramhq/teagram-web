@@ -17,7 +17,7 @@ RUN rm -f /etc/nginx/conf.d/default.conf \
   && mkdir -p /var/cache/nginx \
   && chown -R nginx:nginx /var/cache/nginx
 
-COPY deploy/telegram-web/nginx.conf /etc/nginx/nginx.conf
+COPY deploy/teagram-web/nginx.conf /etc/nginx/nginx.conf
 COPY --from=artifact-verification /workspace/dist-private/ /usr/share/nginx/html/
 
 EXPOSE 8080

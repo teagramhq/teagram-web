@@ -2,7 +2,7 @@ name: Deploy.
 
 # Deploys the published private artifact from a successful push publication
 # run. The workflow never checks out source: the LXC forced command validates
-# the SHA and runs that commit's deploy/telegram-web/deploy-main.sh.
+# the SHA and runs that commit's deploy/teagram-web/deploy-main.sh.
 # Resolve publications before they enter the serialized production deploy job.
 on:
   workflow_run:
@@ -140,13 +140,13 @@ jobs:
           } > "$GITHUB_OUTPUT"
 
   deploy:
-    name: deploy telegram-web
+    name: deploy teagram-web
     needs: resolve
     if: ${{ needs.resolve.outputs.skip == 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     concurrency:
-      group: deploy-telegram-web
+      group: deploy-teagram-web
       cancel-in-progress: false
     environment: production
     permissions:

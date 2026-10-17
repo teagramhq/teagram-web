@@ -260,8 +260,8 @@ check_contract() {
     fail 'resolve must expose the selected artifact digest'
   [[ "$(query '.concurrency // {} | length')" == 0 ]] || fail 'workflow-level concurrency must not queue resolver jobs'
   [[ "$(query '.jobs.resolve.concurrency // {} | length')" == 0 ]] || fail 'artifact resolution must run before deployment concurrency'
-  [[ "$(query '.jobs.deploy.concurrency.group')" == 'deploy-telegram-web' ]] ||
-    fail 'deploy concurrency group must be deploy-telegram-web'
+  [[ "$(query '.jobs.deploy.concurrency.group')" == 'deploy-teagram-web' ]] ||
+    fail 'deploy concurrency group must be deploy-teagram-web'
   [[ "$(query '.jobs.deploy.concurrency."cancel-in-progress"')" == 'false' ]] ||
     fail 'deploy concurrency must not cancel the running deployment'
   [[ "$(query '.jobs.deploy.environment')" == 'production' ]] ||
@@ -326,8 +326,8 @@ self_test() {
     'del(.jobs.resolve.outputs.skip)'
     '.jobs.deploy.environment = "staging"'
     'del(.jobs.deploy.environment)'
-    '.concurrency = {"group":"deploy-telegram-web","cancel-in-progress":false}'
-    '.jobs.resolve.concurrency.group = "deploy-telegram-web"'
+    '.concurrency = {"group":"deploy-teagram-web","cancel-in-progress":false}'
+    '.jobs.resolve.concurrency.group = "deploy-teagram-web"'
     'del(.jobs.deploy.concurrency)'
     '.jobs.deploy.concurrency.group = "deploy"'
     '.jobs.deploy.concurrency."cancel-in-progress" = true'

@@ -2,8 +2,9 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-deploy_script="$repo_root/deploy/telegram-web/deploy-main.sh"
-dockerfile="$repo_root/deploy/telegram-web/Dockerfile"
+deploy_script="$repo_root/deploy/teagram-web/deploy-main.sh"
+dockerfile="$repo_root/deploy/teagram-web/Dockerfile"
+compatibility_launcher="$repo_root/deploy/telegram-web/deploy-main.sh"
 
 fail() {
   printf '%s\n' "$*" >&2
@@ -20,6 +21,24 @@ grep -Fq 'PRIVATE_ARTIFACT_COMMIT="$SHA" docker compose ps' "$deploy_script" ||
   fail 'failure diagnostics must pass the attempted commit to docker compose ps'
 grep -Fq 'PRIVATE_ARTIFACT_COMMIT="$SHA" docker compose logs --tail=50 web' "$deploy_script" ||
   fail 'failure diagnostics must pass the attempted commit to docker compose logs'
+grep -Fq 'git -C "$ROOT" show "$SHA:deploy/teagram-web/deploy-main.sh"' "$compatibility_launcher" ||
+  fail 'the existing forced-command entry point must dispatch the selected commit'
+grep -Fq 'docker compose stop --timeout 60 web' "$deploy_script" ||
+  fail 'rollback must stop the renamed project before restoring the previous stack'
+grep -Fq 'docker compose rm --force web' "$deploy_script" ||
+  fail 'rollback must remove the renamed project container before restoring the previous stack'
+grep -Fq 'docker image tag "$BACKUP_IMAGE" "$PREVIOUS_IMAGE"' "$deploy_script" ||
+  fail 'rollback must restore the image tag used by the previous project'
+grep -Fq 'if [[ "$CURRENT_PROJECT" != "teagram-web-edge" ]]; then' "$deploy_script" ||
+  fail 'the first renamed deployment must remove the old project container'
+
+build_line=$(grep -Fn 'docker compose build' "$deploy_script" | cut -d: -f1)
+stop_line=$(grep -Fn 'docker stop --time 60 "${previous_running_containers[@]}"' "$deploy_script" | cut -d: -f1)
+remove_line=$(grep -Fn 'docker rm "${previous_containers[@]}"' "$deploy_script" | cut -d: -f1)
+up_line=$(grep -Fn 'docker compose up --detach --no-build' "$deploy_script" | tail -n 1 | cut -d: -f1)
+[[ -n "$build_line" && -n "$stop_line" && -n "$remove_line" && -n "$up_line" ]] || fail 'deployment must build, stop and start the renamed stack'
+(( build_line < stop_line && stop_line < remove_line && remove_line < up_line )) ||
+  fail 'the new image must build before the old container stops and is removed, then start the new project'
 grep -Fq 'COPY --from=artifact-verification /workspace/dist-private/ /usr/share/nginx/html/' "$dockerfile" ||
   fail 'serving image must copy the restored artifact into the Nginx document root'
 if grep -Eq 'chmod[^#]*"\$BACKUP_DIR/dist-private"' "$deploy_script"; then

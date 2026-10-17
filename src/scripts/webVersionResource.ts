@@ -1,5 +1,7 @@
 import type {Plugin} from 'vite';
-import {WEB_VERSION_RESOURCE_PATH} from '../lib/webVersion';
+import {LEGACY_WEB_VERSION_RESOURCE_PATH, WEB_VERSION_RESOURCE_PATH} from '../lib/webVersion';
+
+const versionResourcePaths = [WEB_VERSION_RESOURCE_PATH, LEGACY_WEB_VERSION_RESOURCE_PATH];
 
 export default function webVersionResourcePlugin(): Plugin {
   let versionFull: string;
@@ -11,7 +13,7 @@ export default function webVersionResourcePlugin(): Plugin {
     },
     configureServer(server) {
       server.middlewares.use((request, response, next) => {
-        if(request.url?.split('?')[0] !== WEB_VERSION_RESOURCE_PATH) {
+        if(!versionResourcePaths.includes(request.url?.split('?')[0] ?? '')) {
           return next();
         }
 
@@ -22,11 +24,13 @@ export default function webVersionResourcePlugin(): Plugin {
       });
     },
     generateBundle() {
-      this.emitFile({
-        type: 'asset',
-        fileName: WEB_VERSION_RESOURCE_PATH.slice(1),
-        source: versionFull
-      });
+      for(const path of versionResourcePaths) {
+        this.emitFile({
+          type: 'asset',
+          fileName: path.slice(1),
+          source: versionFull
+        });
+      }
     }
   };
 }

@@ -11,5 +11,5 @@
 !scripts/private-artifact-release.mjs
 !scripts/verify-deployment-artifact.mjs
 !deploy/
-!deploy/telegram-web/
-!deploy/telegram-web/**
+!deploy/teagram-web/
+!deploy/teagram-web/**
