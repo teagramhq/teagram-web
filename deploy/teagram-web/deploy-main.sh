@@ -173,7 +173,7 @@ ARCHIVE_SHA256="sha256:$(sha256sum -- "$ARTIFACT" | awk '{print $1}')"
 git archive --format=tar "$SHA" \
   ci/private-mtproto-target.json \
   ci/private-mtproto-server-public.pem \
-  CHANGELOG*.md \
+  ':(glob)CHANGELOG*.md' \
   scripts/mtproto-target.mjs \
   scripts/private-artifact-csp.mjs \
   scripts/private-artifact.mjs \
