@@ -205,6 +205,7 @@ describe('deployment artifact verification', () => {
   it('verifies the artifact before copying it into the Node-free serving image', () => {
     const dockerfile = readFileSync(resolve('deploy/teagram-web/Dockerfile'), 'utf8');
     const dockerignore = readFileSync(resolve('deploy/teagram-web/Dockerfile.dockerignore'), 'utf8');
+    const deployScript = readFileSync(resolve('deploy/teagram-web/deploy-main.sh'), 'utf8');
     const verifyStep = dockerfile.indexOf('RUN node scripts/verify-deployment-artifact.mjs');
     const servingStage = dockerfile.indexOf('FROM nginx:');
 
@@ -217,6 +218,14 @@ describe('deployment artifact verification', () => {
     expect(dockerfile).toContain('COPY --from=artifact-verification /workspace/dist-private/ /usr/share/nginx/html/');
     expect(dockerfile).not.toContain('COPY public/ ');
     expect(dockerfile).not.toContain('COPY public/assets/audio/');
+    for(const source of [
+      'CHANGELOG*.md',
+      'src/lib/lottie/lottieLoader.ts',
+      'src/config/emoji.ts',
+      'deploy/teagram-web/nginx.conf'
+    ]) {
+      expect(deployScript).toContain(source);
+    }
     expect(dockerignore).toContain('!CHANGELOG*.md');
     for(const path of [
       '!src/',

@@ -52,10 +52,15 @@ artifact_digest="sha256:$(printf '%064x' 7)"
 
 mkdir -p "$deploy_root/deploy/teagram-web" "$record_root" \
   "$deploy_root/dist-private" "$mock_bin" "$archive_root/ci" \
-  "$archive_root/scripts" "$archive_root/deploy/teagram-web" "$state_root"
+  "$archive_root/scripts" "$archive_root/src/lib/lottie" \
+  "$archive_root/src/config" "$archive_root/deploy/teagram-web" "$state_root"
 printf 'old release\n' >"$deploy_root/dist-private/index.html"
 printf 'name: teagram-web-edge\n' >"$deploy_root/deploy/teagram-web/compose.yaml"
 cp "$repo_root/deploy/teagram-web/Dockerfile" "$archive_root/deploy/teagram-web/Dockerfile"
+cp "$repo_root/deploy/teagram-web/nginx.conf" "$archive_root/deploy/teagram-web/nginx.conf"
+printf 'checkout changelog\n' >"$deploy_root/CHANGELOG.md"
+printf 'target changelog\n' >"$archive_root/CHANGELOG.md"
+printf 'target-only changelog\n' >"$archive_root/CHANGELOG_ru.md"
 for path in \
   ci/private-mtproto-target.json \
   ci/private-mtproto-server-public.pem \
@@ -63,7 +68,9 @@ for path in \
   scripts/private-artifact-csp.mjs \
   scripts/private-artifact.mjs \
   scripts/private-artifact-release.mjs \
-  scripts/verify-deployment-artifact.mjs; do
+  scripts/verify-deployment-artifact.mjs \
+  src/lib/lottie/lottieLoader.ts \
+  src/config/emoji.ts; do
   : >"$archive_root/$path"
 done
 
@@ -92,7 +99,19 @@ case "${1:-}" in
     ;;
   archive)
     shift 3
-    tar -C "$TEST_ARCHIVE_ROOT" -cf - "$@"
+    archive_paths=()
+    for path in "$@"; do
+      if [[ "$path" == ':(glob)CHANGELOG*.md' ]]; then
+        shopt -s nullglob
+        for changelog in "$TEST_ARCHIVE_ROOT"/CHANGELOG*.md; do
+          archive_paths+=("${changelog#"$TEST_ARCHIVE_ROOT"/}")
+        done
+        shopt -u nullglob
+      else
+        archive_paths+=("$path")
+      fi
+    done
+    tar -C "$TEST_ARCHIVE_ROOT" -cf - "${archive_paths[@]}"
     ;;
   checkout)
     target_sha=${@: -1}
@@ -128,6 +147,17 @@ set_state() {
 record "$*"
 case "${1:-}" in
   build)
+    if [[ "$*" == *'--target artifact-verification'* ]]; then
+      verify_context=${@: -1}
+      [[ -f "$verify_context/CHANGELOG_ru.md" ]] || {
+        printf 'target-only changelog was omitted from the verifier archive\n' >&2
+        exit 2
+      }
+      [[ "$(cat "$verify_context/CHANGELOG_ru.md")" == 'target-only changelog' ]] || {
+        printf 'verifier archive used the checkout changelog instead of the target tree\n' >&2
+        exit 2
+      }
+    fi
     ;;
   image)
     ;;

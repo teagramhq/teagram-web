@@ -173,12 +173,16 @@ ARCHIVE_SHA256="sha256:$(sha256sum -- "$ARTIFACT" | awk '{print $1}')"
 git archive --format=tar "$SHA" \
   ci/private-mtproto-target.json \
   ci/private-mtproto-server-public.pem \
+  ':(glob)CHANGELOG*.md' \
   scripts/mtproto-target.mjs \
   scripts/private-artifact-csp.mjs \
   scripts/private-artifact.mjs \
   scripts/private-artifact-release.mjs \
   scripts/verify-deployment-artifact.mjs \
-  deploy/teagram-web/Dockerfile |
+  src/lib/lottie/lottieLoader.ts \
+  src/config/emoji.ts \
+  deploy/teagram-web/Dockerfile \
+  deploy/teagram-web/nginx.conf |
   tar -xf - -C "$VERIFY_CONTEXT"
 mkdir -p "$VERIFY_CONTEXT/dist-private"
 cp -a "$WORK_DIR/dist-private/." "$VERIFY_CONTEXT/dist-private/"
