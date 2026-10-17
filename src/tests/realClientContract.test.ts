@@ -26,7 +26,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
-const {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
+const {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -3914,6 +3914,7 @@ describe('real client group name form', () => {
 
 describe('real client group created', () => {
   const GROUP_NAME = 'browser-ci-group-0123abcd';
+  const GROUP_MESSAGE = 'browser-ci-group-hello';
   let browser: any;
   let screenshotDirectory: string;
 
@@ -3947,6 +3948,93 @@ describe('real client group created', () => {
       ${chatMarkup({peerId: '-1000003', title: groupTitle, active: groupActive})}
     </div></div>`;
   }
+
+  it('resolves the active group chat and matching title beside a mounted direct chat', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(centerMarkup());
+      const {chat, header, title} = resolveActiveGroupChat(page, GROUP_NAME);
+      expect(await chat.count()).toBe(1);
+      expect(await header.count()).toBe(1);
+      expect(await title.count()).toBe(1);
+      expect(await chat.locator('.avatar').getAttribute('data-peer-id')).toBe('-1000003');
+    } finally {
+      await page.close();
+    }
+  });
+
+  function messageChatMarkup({peerId, title, active, message = ''}: {peerId: string, title: string, active: boolean, message?: string}) {
+    return `<div class="chat tabs-tab${active ? ' active' : ''}" style="position:absolute;inset:0;opacity:${active ? 1 : 0}">
+      <div class="topbar"><div class="chat-info"><div class="avatar" data-peer-id="${peerId}"></div><span class="peer-title">${title}</span></div></div>
+      <div class="bubbles">${message ? `<div class="bubble"><div class="message">${message}</div></div>` : ''}</div>
+      <div class="chat-input"><div class="input-message-container">
+        <div class="input-message-input" contenteditable="true"></div>
+        <div class="input-message-input input-field-input-fake" contenteditable="true" style="opacity:0;position:absolute;top:0;z-index:-3"></div>
+      </div></div>
+    </div>`;
+  }
+
+  function messageCenterMarkup({groupActive = true} = {}) {
+    return `<div id="column-center"><div class="chats-container">
+      ${messageChatMarkup({peerId: '1000002', title: HOSTILE.username, active: !groupActive, message: GROUP_MESSAGE})}
+      ${messageChatMarkup({peerId: '-1000003', title: GROUP_NAME, active: groupActive})}
+    </div></div>`;
+  }
+
+  async function installMessageSender(page: any) {
+    await page.evaluate(() => {
+      document.addEventListener('keydown', (event) => {
+        const input = event.target as HTMLElement;
+        if(event.key !== 'Enter' || !input.matches('.input-message-input:not(.input-field-input-fake)')) return;
+        event.preventDefault();
+        const chat = input.closest('.chat');
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        const message = document.createElement('div');
+        message.className = 'message';
+        message.textContent = input.textContent;
+        bubble.appendChild(message);
+        chat?.querySelector('.bubbles')?.appendChild(bubble);
+      });
+    });
+  }
+
+  it('sends Alice\'s group message only through the active group chat', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(messageCenterMarkup());
+      await installMessageSender(page);
+      await sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 2_000);
+      expect(await page.locator('#column-center .chat.active .bubble .message').filter({hasText: GROUP_MESSAGE}).count()).toBe(1);
+      expect(await page.locator('#column-center .chat:not(.active) .bubble .message').filter({hasText: GROUP_MESSAGE}).count()).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails Alice\'s group message stage when the new group is not active', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(messageCenterMarkup({groupActive: false}));
+      await installMessageSender(page);
+      await expect(sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 100))
+      .rejects.toThrow('alice_group_message_chat');
+      const state = await captureGroupCreatedState();
+      expect(state).toEqual({activeChat: 'user', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'});
+      const summary = formatBrowserFailureMessage({
+        status: 'failed',
+        stage: 'alice_group_message_chat',
+        centerColumn: await captureCenterColumnState(),
+        groupCreated: state
+      });
+      expect(summary).toContain('; centre column ');
+      expect(summary).toContain('; group created ');
+      expectNoHostileLeak(summary);
+      expect(summary).not.toContain(GROUP_NAME);
+    } finally {
+      await page.close();
+    }
+  });
 
   it('passes once the new group is the active chat', async() => {
     const page = await browser.newPage();
@@ -4037,7 +4125,7 @@ describe('real client group created', () => {
     const page = await browser.newPage();
     try {
       await page.setContent(bobMarkup({opens: false}));
-      await expect(openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      await expect(openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, screenshotDirectory, {count: 0}, 2_000))
       .rejects.toThrow('bob_group_chat');
       const state = await captureGroupCreatedState();
       expect(state).toEqual({activeChat: 'user', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'});
@@ -4066,7 +4154,7 @@ describe('real client group created', () => {
     const page = await browser.newPage();
     try {
       await page.setContent(bobMarkup({groupTitle: 'another-group'}));
-      await expect(openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      await expect(openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, screenshotDirectory, {count: 0}, 2_000))
       .rejects.toThrow('bob_group_title');
       expect(await captureGroupCreatedState()).toEqual({activeChat: 'group', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'});
     } finally {
