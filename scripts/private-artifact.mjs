@@ -13,6 +13,7 @@ import {
   writeFileSync
 } from 'node:fs';
 import {dirname, extname, relative, resolve, sep} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {readHeadContentSecurityPolicies} from './private-artifact-csp.mjs';
 
 export const PRIVATE_ARTIFACT_MANIFEST = 'mtproto-target.json';
@@ -64,12 +65,14 @@ export const PRIVATE_BACKGROUND_ASSETS = Object.freeze([
 const PRIVATE_BACKGROUND_ASSET_SET = new Set(PRIVATE_BACKGROUND_ASSETS.map(({name}) => name));
 const PRIVATE_BACKGROUND_SOURCE_DIRECTORY = 'public/assets/img';
 const PRIVATE_RUNTIME_ASSET_SOURCE_DIRECTORY = 'public/assets';
+const PRIVATE_ARTIFACT_REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PRIVATE_ROOT_RUNTIME_ASSETS = Object.freeze([
   'browserconfig.xml',
   'decoderWorker.min.js',
   'decoderWorker.min.wasm',
   'encoderWorker.min.js',
   'encoderWorker.min.wasm',
+  'waveWorker.min.js',
   'site.webmanifest',
   'site_apple.webmanifest'
 ]);
@@ -165,7 +168,13 @@ const PRIVATE_RUNTIME_ASSET_EXTENSIONS = new Set([
 ]);
 const PRIVATE_EXCLUDED_PUBLIC_ASSET_EXTENSIONS = new Set(['.css', '.html', '.js', '.map', '.mjs']);
 const PRIVATE_RUNTIME_ASSET_REFERENCE_PATTERN = /(?:["'`])\/?(assets\/[^"'`?#\r\n]+)|url\(\s*["']?\/?(assets\/[^"'`\s)?#]+)["']?\s*\)/g;
-const PRIVATE_ROOT_RUNTIME_ASSET_REFERENCE_PATTERN = /["'`](browserconfig\.xml|decoderWorker\.min\.js|decoderWorker\.min\.wasm|encoderWorker\.min\.js|encoderWorker\.min\.wasm|site(?:_apple)?\.webmanifest)(?:[?#][^"'`\s]*)?["'`]/g;
+const PRIVATE_ROOT_RUNTIME_ASSET_REFERENCE_PATTERN = /["'`](browserconfig\.xml|decoderWorker\.min\.js|decoderWorker\.min\.wasm|encoderWorker\.min\.js|encoderWorker\.min\.wasm|waveWorker\.min\.js|site(?:_apple)?\.webmanifest)(?:[?#][^"'`\s]*)?["'`]/g;
+const PRIVATE_DYNAMIC_RUNTIME_ASSET_REFERENCE_PATTERNS = Object.freeze([
+  Object.freeze({name: 'lottie', pattern: /["'`]assets\/tgs\/(?=["'`]|\$\{)/}),
+  Object.freeze({name: 'audio', pattern: /["'`]assets\/audio\/(?=["'`]|\$\{)/}),
+  Object.freeze({name: 'emoji', pattern: /["'`]assets\/img\/emoji\/(?=["'`]|\$\{)/}),
+  Object.freeze({name: 'images', pattern: /["'`]assets\/img\/(?=["'`]|\$\{)/})
+]);
 
 const PRIVATE_ROUTE_LOCK = {
   mode: 'private',
@@ -691,10 +700,80 @@ function assertPrivateRuntimeAssetExists(directory, relativePath) {
   }
 }
 
+function privateLottieAssetNames() {
+  let source;
+  try {
+    source = readFileSync(resolve(PRIVATE_ARTIFACT_REPOSITORY_ROOT, 'src/lib/lottie/lottieLoader.ts'), 'utf8');
+  } catch{
+    invalidArtifact('typed Lottie asset names are missing or invalid');
+  }
+
+  const match = source.match(/export\s+type\s+LottieAssetName\s*=\s*((?:\s*\|\s*'[A-Za-z0-9_-]+')+)\s*;/);
+  if(!match) {
+    invalidArtifact('typed Lottie asset names are missing or invalid');
+  }
+  const names = [...match[1].matchAll(/'([A-Za-z0-9_-]+)'/g)].map(([, name]) => name);
+  if(!names.length || new Set(names).size !== names.length) {
+    invalidArtifact('typed Lottie asset names are missing or invalid');
+  }
+  return names;
+}
+
+function privateRuntimeSourceAssetNames(relativeDirectory) {
+  const sourceDirectory = resolve(PRIVATE_ARTIFACT_REPOSITORY_ROOT, 'public/assets', relativeDirectory);
+  let stats;
+  try {
+    stats = lstatSync(sourceDirectory);
+  } catch(cause) {
+    if(cause?.code === 'ENOENT') {
+      invalidArtifact(`dynamic runtime public asset source ${relativeDirectory} is missing or invalid`);
+    }
+    throw cause;
+  }
+  if(stats.isSymbolicLink() || !stats.isDirectory() ||
+    realpathSync(sourceDirectory) !== sourceDirectory) {
+    invalidArtifact(`dynamic runtime public asset source ${relativeDirectory} is missing or invalid`);
+  }
+
+  const names = [];
+  for(const entry of readdirSync(sourceDirectory, {withFileTypes: true})) {
+    if(entry.isSymbolicLink() || !entry.isFile() ||
+      !isPrivateRuntimeAssetPath(`assets/${relativeDirectory}/${entry.name}`)) {
+      invalidArtifact(`dynamic runtime public asset source ${relativeDirectory} contains an unreviewed entry`);
+    }
+    const sourcePath = resolve(sourceDirectory, entry.name);
+    const fileStats = lstatSync(sourcePath);
+    if(fileStats.isSymbolicLink() || !fileStats.isFile() || fileStats.size === 0) {
+      invalidArtifact(`dynamic runtime public asset source ${relativeDirectory} contains an invalid file`);
+    }
+    names.push(entry.name);
+  }
+  if(!names.length) {
+    invalidArtifact(`dynamic runtime public asset source ${relativeDirectory} contains no files`);
+  }
+  return names.sort();
+}
+
+function privateDynamicRuntimeAssetPaths(name) {
+  switch(name) {
+    case 'lottie':
+      return privateLottieAssetNames().map((assetName) => `assets/tgs/${assetName}.json`);
+    case 'audio':
+      return privateRuntimeSourceAssetNames('audio').map((assetName) => `assets/audio/${assetName}`);
+    case 'emoji':
+      return privateRuntimeSourceAssetNames('img/emoji').map((assetName) => `assets/img/emoji/${assetName}`);
+    case 'images':
+      return [...PRIVATE_RUNTIME_IMAGE_ASSETS].map((assetName) => `assets/img/${assetName}`);
+    default:
+      invalidArtifact('dynamic runtime public asset reference is unreviewed');
+  }
+}
+
 export function auditPrivateArtifactRuntimeAssets(directory) {
   const files = artifactFiles(directory);
   const sourceExtensions = new Set(['.css', '.html', '.js', '.json', '.mjs', '.svg', '.webmanifest', '.xml']);
   let referenceCount = 0;
+  const dynamicAssetFamilies = new Set();
   for(const file of files) {
     const relativePath = relative(directory, file).split(sep).join('/');
     if(isPrivateRuntimePublicAssetPath(relativePath) && !isPrivateRuntimeAssetPath(relativePath)) {
@@ -704,6 +783,9 @@ export function auditPrivateArtifactRuntimeAssets(directory) {
     const extension = extname(relativePath).toLowerCase();
     if(!sourceExtensions.has(extension)) continue;
     const contents = readFileSync(file, 'utf8');
+    for(const {name, pattern} of PRIVATE_DYNAMIC_RUNTIME_ASSET_REFERENCE_PATTERNS) {
+      if(pattern.test(contents)) dynamicAssetFamilies.add(name);
+    }
     PRIVATE_RUNTIME_ASSET_REFERENCE_PATTERN.lastIndex = 0;
     for(const match of contents.matchAll(PRIVATE_RUNTIME_ASSET_REFERENCE_PATTERN)) {
       const pathname = checkedPrivateRuntimeAssetPath(match[1] || match[2]);
@@ -718,6 +800,13 @@ export function auditPrivateArtifactRuntimeAssets(directory) {
         invalidArtifact(`references an unreviewed runtime public asset ${match[1]}`);
       }
       assertPrivateRuntimeAssetExists(directory, match[1]);
+      ++referenceCount;
+    }
+  }
+
+  for(const name of dynamicAssetFamilies) {
+    for(const pathname of privateDynamicRuntimeAssetPaths(name)) {
+      assertPrivateRuntimeAssetExists(directory, pathname);
       ++referenceCount;
     }
   }

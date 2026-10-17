@@ -37,6 +37,7 @@ import {
   PRIVATE_BACKGROUND_ASSETS,
   PRIVATE_FONT_ASSETS,
   auditPrivateArtifact,
+  auditPrivateArtifactRuntimeAssets,
   assertPrivateFontAssetName,
   createPrivateArtifactPlugin,
   includePrivateArtifactBackground,
@@ -504,6 +505,7 @@ describe('private artifact runtime public assets', () => {
       'decoderWorker.min.wasm',
       'encoderWorker.min.js',
       'encoderWorker.min.wasm',
+      'waveWorker.min.js',
       'site.webmanifest',
       'site_apple.webmanifest'
     ]) {
@@ -526,6 +528,53 @@ describe('private artifact runtime public assets', () => {
 
     expect(() => auditPrivateArtifact(directory, privateTarget))
     .toThrow(/runtime public asset.*assets\/tgs\/UtyanSearch\.json/i);
+  });
+
+  it('copies the wave worker and rejects a missing root worker reference', () => {
+    const directory = temporaryArtifact();
+    writeFileSync(join(directory, 'client.js'), `new Worker('waveWorker.min.js');`);
+
+    expect(() => auditPrivateArtifactRuntimeAssets(directory))
+    .toThrow(/references a missing runtime public asset waveWorker\.min\.js/i);
+  });
+
+  it('rejects a missing typed Lottie asset referenced through a dynamic prefix', () => {
+    const directory = temporaryArtifact();
+    const outputDirectory = join(directory, 'assets/tgs');
+    mkdirSync(outputDirectory, {recursive: true});
+    cpSync(join(repositoryRoot, 'public/assets/tgs'), outputDirectory, {recursive: true});
+    rmSync(join(outputDirectory, 'UtyanSearch.json'));
+    writeFileSync(join(directory, 'client.js'), `const tgsPath = 'assets/tgs/';`);
+
+    expect(() => auditPrivateArtifactRuntimeAssets(directory))
+    .toThrow(/references a missing runtime public asset assets\/tgs\/UtyanSearch\.json/i);
+  });
+
+  it.each([
+    {
+      label: 'audio',
+      prefix: `const audioPath = 'assets/audio/';`,
+      assetDirectory: 'audio',
+      asset: readdirSync(join(repositoryRoot, 'public/assets/audio')).sort()[0]
+    },
+    {
+      label: 'emoji',
+      prefix: 'const emojiPath = `assets/img/emoji/${unicode}.png`;',
+      assetDirectory: 'img/emoji',
+      asset: readdirSync(join(repositoryRoot, 'public/assets/img/emoji')).sort()[0]
+    },
+    {
+      label: 'runtime image',
+      prefix: `const imagePath = 'assets/img/';`,
+      assetDirectory: 'img',
+      asset: 'EmptyChats.svg'
+    }
+  ])('rejects a missing member of the dynamic $label asset set', ({prefix, assetDirectory, asset}) => {
+    const directory = temporaryArtifact();
+    writeFileSync(join(directory, 'client.js'), prefix);
+
+    expect(() => auditPrivateArtifactRuntimeAssets(directory))
+    .toThrow(new RegExp(`references a missing runtime public asset assets/${assetDirectory}/${asset}`));
   });
 
   it('accepts pnpm’s argument separator before the output directory', () => {
