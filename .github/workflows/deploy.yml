@@ -1,6 +1,6 @@
 name: Deploy.
 
-run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || github.workflow }}
+run-name: ${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}
 
 # Deploys the published private artifact from a successful push publication
 # run. The workflow never checks out source: the LXC forced command validates

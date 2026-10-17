@@ -5,7 +5,7 @@ set -euo pipefail
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 expected_if="\${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
 expected_deploy_if="\${{ needs.resolve.outputs.skip == 'false' }}"
-expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || github.workflow }}"
+expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
 expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Leave empty for no report.'
 
 fail() {
