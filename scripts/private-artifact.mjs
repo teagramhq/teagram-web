@@ -169,6 +169,7 @@ const PRIVATE_RUNTIME_ASSET_EXTENSIONS = new Set([
 const PRIVATE_EXCLUDED_PUBLIC_ASSET_EXTENSIONS = new Set(['.css', '.html', '.js', '.map', '.mjs']);
 const PRIVATE_RUNTIME_ASSET_REFERENCE_PATTERN = /(?:["'`])\/?(assets\/[^"'`?#\r\n]+)|url\(\s*["']?\/?(assets\/[^"'`\s)?#]+)["']?\s*\)/g;
 const PRIVATE_ROOT_RUNTIME_ASSET_REFERENCE_PATTERN = /["'`](browserconfig\.xml|decoderWorker\.min\.js|decoderWorker\.min\.wasm|encoderWorker\.min\.js|encoderWorker\.min\.wasm|waveWorker\.min\.js|site(?:_apple)?\.webmanifest)(?:[?#][^"'`\s]*)?["'`]/g;
+const PRIVATE_RUNTIME_AUDIO_ASSET_NAME_PATTERN = /(['"`])([A-Za-z0-9_-]+\.mp3)\1/g;
 const PRIVATE_DYNAMIC_RUNTIME_ASSET_REFERENCE_PATTERNS = Object.freeze([
   Object.freeze({name: 'lottie', pattern: /["'`]assets\/tgs\/(?=["'`]|\$\{)/}),
   Object.freeze({name: 'audio', pattern: /["'`]assets\/audio\/(?=["'`]|\$\{)/}),
@@ -700,10 +701,10 @@ function assertPrivateRuntimeAssetExists(directory, relativePath) {
   }
 }
 
-function privateLottieAssetNames() {
+function privateLottieAssetNames(rootDirectory = PRIVATE_ARTIFACT_REPOSITORY_ROOT) {
   let source;
   try {
-    source = readFileSync(resolve(PRIVATE_ARTIFACT_REPOSITORY_ROOT, 'src/lib/lottie/lottieLoader.ts'), 'utf8');
+    source = readFileSync(resolve(rootDirectory, 'src/lib/lottie/lottieLoader.ts'), 'utf8');
   } catch{
     invalidArtifact('typed Lottie asset names are missing or invalid');
   }
@@ -719,8 +720,8 @@ function privateLottieAssetNames() {
   return names;
 }
 
-function privateRuntimeSourceAssetNames(relativeDirectory) {
-  const sourceDirectory = resolve(PRIVATE_ARTIFACT_REPOSITORY_ROOT, 'public/assets', relativeDirectory);
+function privateRuntimeSourceAssetNames(relativeDirectory, rootDirectory = PRIVATE_ARTIFACT_REPOSITORY_ROOT) {
+  const sourceDirectory = resolve(rootDirectory, 'public/assets', relativeDirectory);
   let stats;
   try {
     stats = lstatSync(sourceDirectory);
@@ -754,14 +755,17 @@ function privateRuntimeSourceAssetNames(relativeDirectory) {
   return names.sort();
 }
 
-function privateDynamicRuntimeAssetPaths(name) {
+function privateDynamicRuntimeAssetPaths(name, rootDirectory, audioAssetNames) {
   switch(name) {
     case 'lottie':
-      return privateLottieAssetNames().map((assetName) => `assets/tgs/${assetName}.json`);
+      return privateLottieAssetNames(rootDirectory).map((assetName) => `assets/tgs/${assetName}.json`);
     case 'audio':
-      return privateRuntimeSourceAssetNames('audio').map((assetName) => `assets/audio/${assetName}`);
+      if(!audioAssetNames.size) {
+        invalidArtifact('contains a dynamic audio path without client audio asset names');
+      }
+      return [...audioAssetNames].sort().map((assetName) => `assets/audio/${assetName}`);
     case 'emoji':
-      return privateRuntimeSourceAssetNames('img/emoji').map((assetName) => `assets/img/emoji/${assetName}`);
+      return privateRuntimeSourceAssetNames('img/emoji', rootDirectory).map((assetName) => `assets/img/emoji/${assetName}`);
     case 'images':
       return [...PRIVATE_RUNTIME_IMAGE_ASSETS].map((assetName) => `assets/img/${assetName}`);
     default:
@@ -769,11 +773,12 @@ function privateDynamicRuntimeAssetPaths(name) {
   }
 }
 
-export function auditPrivateArtifactRuntimeAssets(directory) {
+export function auditPrivateArtifactRuntimeAssets(directory, rootDirectory = PRIVATE_ARTIFACT_REPOSITORY_ROOT) {
   const files = artifactFiles(directory);
   const sourceExtensions = new Set(['.css', '.html', '.js', '.json', '.mjs', '.svg', '.webmanifest', '.xml']);
   let referenceCount = 0;
   const dynamicAssetFamilies = new Set();
+  const audioAssetNames = new Set();
   for(const file of files) {
     const relativePath = relative(directory, file).split(sep).join('/');
     if(isPrivateRuntimePublicAssetPath(relativePath) && !isPrivateRuntimeAssetPath(relativePath)) {
@@ -783,6 +788,12 @@ export function auditPrivateArtifactRuntimeAssets(directory) {
     const extension = extname(relativePath).toLowerCase();
     if(!sourceExtensions.has(extension)) continue;
     const contents = readFileSync(file, 'utf8');
+    if(extension === '.js' || extension === '.mjs') {
+      PRIVATE_RUNTIME_AUDIO_ASSET_NAME_PATTERN.lastIndex = 0;
+      for(const match of contents.matchAll(PRIVATE_RUNTIME_AUDIO_ASSET_NAME_PATTERN)) {
+        audioAssetNames.add(match[2]);
+      }
+    }
     for(const {name, pattern} of PRIVATE_DYNAMIC_RUNTIME_ASSET_REFERENCE_PATTERNS) {
       if(pattern.test(contents)) dynamicAssetFamilies.add(name);
     }
@@ -805,7 +816,7 @@ export function auditPrivateArtifactRuntimeAssets(directory) {
   }
 
   for(const name of dynamicAssetFamilies) {
-    for(const pathname of privateDynamicRuntimeAssetPaths(name)) {
+    for(const pathname of privateDynamicRuntimeAssetPaths(name, rootDirectory, audioAssetNames)) {
       assertPrivateRuntimeAssetExists(directory, pathname);
       ++referenceCount;
     }

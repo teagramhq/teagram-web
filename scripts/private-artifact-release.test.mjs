@@ -553,9 +553,9 @@ describe('private artifact runtime public assets', () => {
   it.each([
     {
       label: 'audio',
-      prefix: `const audioPath = 'assets/audio/';`,
+      prefix: `const audioPath = 'assets/audio/'; const busyAsset = 'call_busy.mp3';`,
       assetDirectory: 'audio',
-      asset: readdirSync(join(repositoryRoot, 'public/assets/audio')).sort()[0]
+      asset: 'call_busy.mp3'
     },
     {
       label: 'emoji',
@@ -575,6 +575,27 @@ describe('private artifact runtime public assets', () => {
 
     expect(() => auditPrivateArtifactRuntimeAssets(directory))
     .toThrow(new RegExp(`references a missing runtime public asset assets/${assetDirectory}/${asset}`));
+  });
+
+  it('rejects a missing audio asset that remains in the client map', () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), 'private-artifact-missing-audio-source-'));
+    temporaryDirectories.push(sourceRoot);
+    const sourceAudioDirectory = join(sourceRoot, 'public/assets/audio');
+    mkdirSync(sourceAudioDirectory, {recursive: true});
+    cpSync(join(repositoryRoot, 'public/assets/audio'), sourceAudioDirectory, {recursive: true});
+    rmSync(join(sourceAudioDirectory, 'call_busy.mp3'));
+
+    const directory = temporaryArtifact();
+    const outputAudioDirectory = join(directory, 'assets/audio');
+    mkdirSync(outputAudioDirectory, {recursive: true});
+    cpSync(sourceAudioDirectory, outputAudioDirectory, {recursive: true});
+    writeFileSync(join(directory, 'client.js'), [
+      readFileSync(join(repositoryRoot, 'src/components/call/getAudioAsset.ts'), 'utf8'),
+      readFileSync(join(repositoryRoot, 'src/helpers/audioAssetPlayer.ts'), 'utf8')
+    ].join('\n'));
+
+    expect(() => auditPrivateArtifactRuntimeAssets(directory, sourceRoot))
+    .toThrow(/references a missing runtime public asset assets\/audio\/call_busy\.mp3/i);
   });
 
   it('accepts pnpm’s argument separator before the output directory', () => {
