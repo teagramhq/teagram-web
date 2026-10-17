@@ -204,13 +204,31 @@ describe('deployment artifact verification', () => {
 
   it('verifies the artifact before copying it into the Node-free serving image', () => {
     const dockerfile = readFileSync(resolve('deploy/teagram-web/Dockerfile'), 'utf8');
+    const dockerignore = readFileSync(resolve('deploy/teagram-web/Dockerfile.dockerignore'), 'utf8');
     const verifyStep = dockerfile.indexOf('RUN node scripts/verify-deployment-artifact.mjs');
     const servingStage = dockerfile.indexOf('FROM nginx:');
 
     expect(verifyStep).toBeGreaterThanOrEqual(0);
     expect(servingStage).toBeGreaterThan(verifyStep);
+    expect(dockerfile).toContain('COPY CHANGELOG*.md ./');
+    expect(dockerfile).toContain('COPY src/lib/lottie/lottieLoader.ts src/lib/lottie/lottieLoader.ts');
+    expect(dockerfile).toContain('COPY src/config/emoji.ts src/config/emoji.ts');
+    expect(dockerfile).not.toContain('COPY public/assets/img/emoji/');
     expect(dockerfile).toContain('COPY --from=artifact-verification /workspace/dist-private/ /usr/share/nginx/html/');
-    expect(dockerfile).not.toContain('COPY public/');
+    expect(dockerfile).not.toContain('COPY public/ ');
+    expect(dockerfile).not.toContain('COPY public/assets/audio/');
+    expect(dockerignore).toContain('!CHANGELOG*.md');
+    for(const path of [
+      '!src/',
+      '!src/lib/',
+      '!src/lib/lottie/',
+      '!src/lib/lottie/lottieLoader.ts',
+      '!src/config/',
+      '!src/config/emoji.ts'
+    ]) {
+      expect(dockerignore).toContain(path);
+    }
+    expect(dockerignore).not.toContain('!public/assets/**');
     expect(readFileSync(resolve('.github/workflows/deployment-stack-checks.yml'), 'utf8'))
     .toContain('docker exec "$container_name" node --version');
   });

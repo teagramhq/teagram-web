@@ -36,7 +36,10 @@ import {verifyPublishedArtifact} from './private-artifact-publish-verify.mjs';
 import {
   PRIVATE_BACKGROUND_ASSETS,
   PRIVATE_FONT_ASSETS,
+  auditPrivateArtifact,
+  auditPrivateArtifactRuntimeAssets,
   assertPrivateFontAssetName,
+  createPrivateArtifactPlugin,
   includePrivateArtifactBackground,
   includePrivateArtifactFonts,
   privateContentSecurityPolicy,
@@ -477,6 +480,190 @@ function temporaryArtifact(indexDocument) {
   return directory;
 }
 
+describe('private artifact runtime public assets', () => {
+  it('copies runtime assets from public/assets without shipping public build output', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-public-assets-'));
+    temporaryDirectories.push(directory);
+    createArtifactShell(directory);
+
+    const plugin = createPrivateArtifactPlugin(repositoryRoot, privateTarget);
+    plugin.writeBundle({dir: directory});
+
+    for(const name of ['TwoFactorSetupMonkeyPeek.json', 'UtyanSearch.json']) {
+      expect(readFileSync(join(directory, 'assets/tgs', name)))
+      .toEqual(readFileSync(join(repositoryRoot, 'public/assets/tgs', name)));
+    }
+    expect(readdirSync(join(directory, 'assets/tgs')).sort())
+    .toEqual(readdirSync(join(repositoryRoot, 'public/assets/tgs')).sort());
+    expect(readdirSync(join(directory, 'assets/audio')).sort())
+    .toEqual(readdirSync(join(repositoryRoot, 'public/assets/audio')).sort());
+    expect(readdirSync(join(directory, 'changelogs')).sort())
+    .toEqual(readdirSync(join(repositoryRoot, 'public/changelogs')).sort());
+    for(const name of ['en_2.1.0.md', 'ru_2.1.0.md']) {
+      expect(readFileSync(join(directory, 'changelogs', name)))
+      .toEqual(readFileSync(join(repositoryRoot, 'public/changelogs', name)));
+    }
+    expect(readdirSync(join(directory, 'assets/img/emoji')))
+    .toHaveLength(readdirSync(join(repositoryRoot, 'public/assets/img/emoji')).length);
+    for(const name of [
+      'browserconfig.xml',
+      'decoderWorker.min.js',
+      'decoderWorker.min.wasm',
+      'encoderWorker.min.js',
+      'encoderWorker.min.wasm',
+      'waveWorker.min.js',
+      'site.webmanifest',
+      'site_apple.webmanifest'
+    ]) {
+      expect(readFileSync(join(directory, name)))
+      .toEqual(readFileSync(join(repositoryRoot, 'public', name)));
+    }
+    expect(existsSync(join(directory, '2fa-BUUOUtCK.js'))).toBe(false);
+    expect(existsSync(join(directory, '2fa-BUUOUtCK.js.map'))).toBe(false);
+    expect(existsSync(join(directory, 'snapshot.html'))).toBe(false);
+    expect(readdirSync(directory).filter((name) => name.endsWith('.map'))).toEqual([]);
+  });
+
+  it('rejects an artifact whose client references a missing public asset', () => {
+    const directory = temporaryArtifact();
+    writeFileSync(join(directory, 'client.js'), [
+      `const endpoint = ${JSON.stringify(privateTarget.endpoint)};`,
+      `const fingerprint = ${JSON.stringify(privateTarget.fingerprint)};`,
+      `fetch('assets/tgs/UtyanSearch.json');`
+    ].join('\n'));
+
+    expect(() => auditPrivateArtifact(directory, privateTarget))
+    .toThrow(/runtime public asset.*assets\/tgs\/UtyanSearch\.json/i);
+  });
+
+  it('copies the wave worker and rejects a missing root worker reference', () => {
+    const directory = temporaryArtifact();
+    writeFileSync(join(directory, 'client.js'), `new Worker('waveWorker.min.js');`);
+
+    expect(() => auditPrivateArtifactRuntimeAssets(directory))
+    .toThrow(/references a missing runtime public asset waveWorker\.min\.js/i);
+  });
+
+  it('rejects a missing typed Lottie asset referenced through a dynamic prefix', () => {
+    const directory = temporaryArtifact();
+    const outputDirectory = join(directory, 'assets/tgs');
+    mkdirSync(outputDirectory, {recursive: true});
+    cpSync(join(repositoryRoot, 'public/assets/tgs'), outputDirectory, {recursive: true});
+    rmSync(join(outputDirectory, 'UtyanSearch.json'));
+    writeFileSync(join(directory, 'client.js'), `const tgsPath = 'assets/tgs/';`);
+
+    expect(() => auditPrivateArtifactRuntimeAssets(directory))
+    .toThrow(/references a missing runtime public asset assets\/tgs\/UtyanSearch\.json/i);
+  });
+
+  it.each([
+    {
+      label: 'audio',
+      prefix: `const audioPath = 'assets/audio/'; const busyAsset = 'call_busy.mp3';`,
+      assetDirectory: 'audio',
+      asset: 'call_busy.mp3'
+    },
+    {
+      label: 'emoji',
+      prefix: 'const emojiPath = `assets/img/emoji/${unicode}.png`;',
+      assetDirectory: 'img/emoji',
+      asset: readdirSync(join(repositoryRoot, 'public/assets/img/emoji')).sort()[0]
+    },
+    {
+      label: 'runtime image',
+      prefix: `const imagePath = 'assets/img/';`,
+      assetDirectory: 'img',
+      asset: 'EmptyChats.svg'
+    }
+  ])('rejects a missing member of the dynamic $label asset set', ({prefix, assetDirectory, asset}) => {
+    const directory = temporaryArtifact();
+    writeFileSync(join(directory, 'client.js'), prefix);
+
+    expect(() => auditPrivateArtifactRuntimeAssets(directory))
+    .toThrow(new RegExp(`references a missing runtime public asset assets/${assetDirectory}/${asset}`));
+  });
+
+  it('rejects a missing audio asset that remains in the client map', () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), 'private-artifact-missing-audio-source-'));
+    temporaryDirectories.push(sourceRoot);
+    const sourceAudioDirectory = join(sourceRoot, 'public/assets/audio');
+    mkdirSync(sourceAudioDirectory, {recursive: true});
+    cpSync(join(repositoryRoot, 'public/assets/audio'), sourceAudioDirectory, {recursive: true});
+    rmSync(join(sourceAudioDirectory, 'call_busy.mp3'));
+
+    const directory = temporaryArtifact();
+    const outputAudioDirectory = join(directory, 'assets/audio');
+    mkdirSync(outputAudioDirectory, {recursive: true});
+    cpSync(sourceAudioDirectory, outputAudioDirectory, {recursive: true});
+    writeFileSync(join(directory, 'client.js'), [
+      readFileSync(join(repositoryRoot, 'src/components/call/getAudioAsset.ts'), 'utf8'),
+      readFileSync(join(repositoryRoot, 'src/helpers/audioAssetPlayer.ts'), 'utf8')
+    ].join('\n'));
+
+    expect(() => auditPrivateArtifactRuntimeAssets(directory, sourceRoot))
+    .toThrow(/references a missing runtime public asset assets\/audio\/call_busy\.mp3/i);
+  });
+
+  it('rejects an emoji image removed from source and output while the client map still requests it', () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), 'private-artifact-missing-emoji-source-'));
+    temporaryDirectories.push(sourceRoot);
+    const sourceEmojiDirectory = join(sourceRoot, 'public/assets/img/emoji');
+    mkdirSync(sourceEmojiDirectory, {recursive: true});
+    writeFileSync(join(sourceEmojiDirectory, '1f601.png'), 'remaining source emoji');
+    const emojiConfigDirectory = join(sourceRoot, 'src/config');
+    mkdirSync(emojiConfigDirectory, {recursive: true});
+    writeFileSync(join(emojiConfigDirectory, 'emoji.ts'),
+      'export const EmojiVersions: Record<string, Record<string, number>> = {"":{"1f600":0}};\n');
+
+    const directory = temporaryArtifact();
+    const outputEmojiDirectory = join(directory, 'assets/img/emoji');
+    mkdirSync(outputEmojiDirectory, {recursive: true});
+    cpSync(sourceEmojiDirectory, outputEmojiDirectory, {recursive: true});
+    writeFileSync(join(directory, 'client.js'), 'const emojiPath = `assets/img/emoji/${unicode}.png`;');
+
+    expect(existsSync(join(sourceEmojiDirectory, '1f600.png'))).toBe(false);
+    expect(existsSync(join(outputEmojiDirectory, '1f600.png'))).toBe(false);
+    expect(() => auditPrivateArtifactRuntimeAssets(directory, sourceRoot))
+    .toThrow(/references a missing runtime public asset assets\/img\/emoji\/1f600\.png/i);
+  });
+
+  it('rejects a missing generated changelog referenced through a dynamic prefix', () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), 'private-artifact-missing-changelog-source-'));
+    temporaryDirectories.push(sourceRoot);
+    writeFileSync(join(sourceRoot, 'CHANGELOG.md'), '### 2.1.0 (491)\nUpdate details.\n');
+
+    const directory = temporaryArtifact();
+    writeFileSync(join(directory, 'client.js'), 'fetch(`changelogs/${lang}_${version}.md`);');
+
+    expect(() => auditPrivateArtifactRuntimeAssets(directory, sourceRoot))
+    .toThrow(/references a missing runtime public asset changelogs\/en_2\.1\.0\.md/i);
+  });
+
+  it('accepts pnpm’s argument separator before the output directory', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-runtime-assets-'));
+    temporaryDirectories.push(directory);
+    writeFileSync(join(directory, 'client.js'), `fetch('assets/tgs/UtyanSearch.json');`);
+
+    const result = spawnSync(process.execPath, [
+      join(repositoryRoot, 'scripts/check-private-artifact-assets.mjs'),
+      '--',
+      directory
+    ], {cwd: repositoryRoot, encoding: 'utf8'});
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/references a missing runtime public asset assets\/tgs\/UtyanSearch\.json/);
+  });
+
+  it('runs the runtime public asset audit in both private artifact workflows', () => {
+    const workflow = readFileSync(privateArtifactWorkflowPath, 'utf8');
+    for(const jobName of ['private-pull-request', 'private-build']) {
+      const job = privateWorkflowJob(workflow, jobName);
+      expect(privateWorkflowStep(job, 'Audit runtime public assets'))
+      .toContain('pnpm run check:private-artifact-assets -- dist-private');
+    }
+  });
+});
+
 function temporaryOutputPath() {
   const directory = mkdtempSync(join(tmpdir(), 'private-artifact-release-output-'));
   temporaryDirectories.push(directory);
@@ -884,7 +1071,7 @@ describe('private artifact background', () => {
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
 
     expect(() => verifyPrivateArtifactManifest(directory, privateTarget))
-    .toThrow(/background image output does not match the reviewed allowlist/i);
+    .toThrow(/unreviewed or non-static runtime asset assets\/img\/x\.svg/i);
   });
 });
 

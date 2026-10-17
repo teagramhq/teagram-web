@@ -91,6 +91,9 @@ jobs:
           MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}
         run: pnpm run check-bundle -- dist-private
 
+      - name: Audit runtime public assets
+        run: pnpm run check:private-artifact-assets -- dist-private
+
       - name: Verify private manifest, CSP, digest, and PR head
         run: |
           node --input-type=module <<'NODE'
@@ -301,6 +304,9 @@ jobs:
           MTPROTO_PRIVATE_ENDPOINT: ${{ needs.publication-prepare.outputs.private_endpoint }}
           MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.publication-prepare.outputs.private_key_file }}
         run: pnpm run check-bundle -- dist-private
+
+      - name: Audit runtime public assets
+        run: pnpm run check:private-artifact-assets -- dist-private
 
       - name: Verify CSP, manifest, digest, and source commit
         id: verify
