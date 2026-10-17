@@ -52,10 +52,16 @@ artifact_digest="sha256:$(printf '%064x' 7)"
 
 mkdir -p "$deploy_root/deploy/teagram-web" "$record_root" \
   "$deploy_root/dist-private" "$mock_bin" "$archive_root/ci" \
-  "$archive_root/scripts" "$archive_root/deploy/teagram-web" "$state_root"
+  "$archive_root/scripts" "$archive_root/src/lib/lottie" \
+  "$archive_root/src/config" "$archive_root/deploy/teagram-web" "$state_root"
 printf 'old release\n' >"$deploy_root/dist-private/index.html"
 printf 'name: teagram-web-edge\n' >"$deploy_root/deploy/teagram-web/compose.yaml"
 cp "$repo_root/deploy/teagram-web/Dockerfile" "$archive_root/deploy/teagram-web/Dockerfile"
+cp "$repo_root/deploy/teagram-web/nginx.conf" "$archive_root/deploy/teagram-web/nginx.conf"
+for changelog in CHANGELOG.md CHANGELOG_ru.md; do
+  : >"$deploy_root/$changelog"
+  : >"$archive_root/$changelog"
+done
 for path in \
   ci/private-mtproto-target.json \
   ci/private-mtproto-server-public.pem \
@@ -63,7 +69,9 @@ for path in \
   scripts/private-artifact-csp.mjs \
   scripts/private-artifact.mjs \
   scripts/private-artifact-release.mjs \
-  scripts/verify-deployment-artifact.mjs; do
+  scripts/verify-deployment-artifact.mjs \
+  src/lib/lottie/lottieLoader.ts \
+  src/config/emoji.ts; do
   : >"$archive_root/$path"
 done
 
