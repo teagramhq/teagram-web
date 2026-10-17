@@ -1287,8 +1287,9 @@ async function waitForGroupChat(page, groupName, stages, screenshotName, screens
     currentStage = stages.open;
     await groupRow.click({timeout: timeoutMs}).catch(step(stages.open));
   }
+  const activeGroup = resolveActiveGroupChat(page, groupName);
   currentStage = stages.chat;
-  const groupChat = page.locator('#column-center .chat.active').filter({has: page.locator(GROUP_CHAT_SELECTOR)});
+  const groupChat = activeGroup.chat;
   await groupChat.waitFor({state: 'visible', timeout: timeoutMs}).catch(step(stages.chat));
   currentStage = `${stages.composer}_composer`;
   await openComposer(page, stages.composer, groupChat, timeoutMs).catch((error) => {
@@ -1296,10 +1297,10 @@ async function waitForGroupChat(page, groupName, stages, screenshotName, screens
     throw error;
   });
   currentStage = stages.header;
-  const header = groupChat.locator('.topbar .chat-info');
+  const header = activeGroup.header;
   await header.waitFor({state: 'visible', timeout: timeoutMs}).catch(step(stages.header));
   currentStage = stages.title;
-  await header.filter({hasText: groupName}).waitFor({state: 'visible', timeout: timeoutMs}).catch(step(stages.title));
+  await activeGroup.title.waitFor({state: 'visible', timeout: timeoutMs}).catch(step(stages.title));
   currentStage = stages.screenshot;
   await captureState(page, screenshotDirectory, screenshotName, capturedScreenshots).catch(step(stages.screenshot));
   return header;
@@ -1545,16 +1546,94 @@ async function captureGroupCreatedState(trace = groupCreatedTrace, timeoutMs = C
   }
 }
 
-async function sendText(page, text, stage) {
+function failGroupMessageStep(stage, error) {
+  groupCreatedTrace.stepWait = error ? classifyLocatorError(error) : 'other';
+  failStage(stage);
+}
+
+function resolveActiveGroupChat(page, groupName) {
+  const activeChats = page.locator('#column-center .chat.active');
+  const chat = activeChats.filter({has: page.locator(GROUP_CHAT_SELECTOR)});
+  const header = chat.locator('.topbar .chat-info');
+  return {activeChats, chat, header, title: header.filter({hasText: groupName})};
+}
+
+async function sendText(page, text, stage, chat, timeoutMs = 30_000) {
   currentStage = stage;
-  const input = await openComposer(page, stage);
-  await input.fill(text);
-  await input.press('Enter');
-  const message = page.locator('#column-center .bubble .message').filter({hasText: text});
-  await message.first().waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`${stage}_visible_message`));
+  const input = chat ? await openComposer(page, stage, chat, timeoutMs) : await openComposer(page, stage);
+  if(chat) {
+    currentStage = `${stage}_fill`;
+    await input.fill(text, {timeout: timeoutMs}).catch((error) => failGroupMessageStep(`${stage}_fill`, error));
+    currentStage = `${stage}_send`;
+    await input.press('Enter', {timeout: timeoutMs}).catch((error) => failGroupMessageStep(`${stage}_send`, error));
+  } else {
+    await input.fill(text);
+    await input.press('Enter');
+  }
+  const message = (chat ? chat.locator('.bubble .message') : page.locator('#column-center .bubble .message')).filter({hasText: text});
+  currentStage = chat ? `${stage}_visible_message` : stage;
+  await message.first().waitFor({state: 'visible', timeout: chat ? timeoutMs : 30_000}).catch((error) => {
+    if(chat) failGroupMessageStep(`${stage}_visible_message`, error);
+    failStage(`${stage}_visible_message`);
+  });
   await page.waitForTimeout(600);
+  currentStage = chat ? `${stage}_message_count` : stage;
   const count = await message.count();
-  if(count !== 1) failStage(`${stage}_message_count`);
+  if(count !== 1) {
+    if(chat) failGroupMessageStep(`${stage}_message_count`);
+    failStage(`${stage}_message_count`);
+  }
+}
+
+async function sendGroupText(page, text, groupName, stage, timeoutMs = 30_000) {
+  const messageStages = [
+    `${stage}_chat`,
+    `${stage}_composer`,
+    `${stage}_fill`,
+    `${stage}_send`,
+    `${stage}_visible_message`,
+    `${stage}_message_count`
+  ];
+  groupCreatedTrace = {page, groupName, stages: messageStages, stepWait: 'none'};
+  centerColumnTrace = {...createCenterColumnTrace(), page};
+  const activeGroup = resolveActiveGroupChat(page, groupName);
+
+  const failChat = (error) => {
+    groupCreatedTrace.stepWait = classifyLocatorError(error);
+    failStage(`${stage}_chat`);
+  };
+  currentStage = `${stage}_chat`;
+  const activeChats = activeGroup.activeChats;
+  await activeChats.first().waitFor({state: 'visible', timeout: timeoutMs}).catch(failChat);
+  if(await activeChats.count() !== 1) failGroupMessageStep(`${stage}_chat`);
+
+  const activeGroupChat = activeGroup.chat;
+  await activeGroupChat.first().waitFor({state: 'visible', timeout: timeoutMs}).catch(failChat);
+  if(await activeGroupChat.count() !== 1) failGroupMessageStep(`${stage}_chat`);
+
+  const groupHeader = activeGroup.title;
+  await groupHeader.first().waitFor({state: 'visible', timeout: timeoutMs}).catch(failChat);
+  if(await groupHeader.count() !== 1) failGroupMessageStep(`${stage}_chat`);
+
+  const peerId = await activeGroupChat.locator('.topbar .avatar[data-peer-id]').getAttribute('data-peer-id');
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '') || !peerId.startsWith('-')) failGroupMessageStep(`${stage}_chat`);
+  centerColumnTrace.selectedPeerId = peerId;
+  centerColumnTrace.errorsAtSelection = {
+    ...clientErrorCounts.get(page),
+    rpc: await readRpcErrorCounts(page)
+  };
+
+  try {
+    await sendText(page, text, stage, activeGroupChat, timeoutMs);
+  } catch(error) {
+    if(groupCreatedTrace.stepWait === 'none') {
+      groupCreatedTrace.stepWait = centerColumnTrace.composerWait === 'none'
+        ? classifyLocatorError(error)
+        : centerColumnTrace.composerWait;
+    }
+    throw error;
+  }
+  currentStage = stage;
 }
 
 async function waitForMembers(page, memberRows) {
@@ -2067,8 +2146,7 @@ async function main(dependencies = {}) {
     await bobGroupRow.waitFor({state: 'visible', timeout: 45_000}).catch(() => failStage('bob_group_chatlist_entry'));
     const bobGroupTitle = await openBobGroupChat(bob.page, bobGroupRow, groupName, runtime.screenshotDirectory, capturedScreenshots);
 
-    currentStage = 'alice_group_message';
-    await sendText(alice.page, GROUP_MESSAGE, 'alice_group_message');
+    await sendGroupText(alice.page, GROUP_MESSAGE, groupName, 'alice_group_message');
     await captureState(alice.page, runtime.screenshotDirectory, 'alice-group-message', capturedScreenshots);
 
     currentStage = 'bob_group_message';
@@ -2217,7 +2295,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
