@@ -211,7 +211,8 @@ describe('deployment artifact verification', () => {
     expect(verifyStep).toBeGreaterThanOrEqual(0);
     expect(servingStage).toBeGreaterThan(verifyStep);
     expect(dockerfile).toContain('COPY src/lib/lottie/lottieLoader.ts src/lib/lottie/lottieLoader.ts');
-    expect(dockerfile).toContain('COPY public/assets/img/emoji/ public/assets/img/emoji/');
+    expect(dockerfile).toContain('COPY src/config/emoji.ts src/config/emoji.ts');
+    expect(dockerfile).not.toContain('COPY public/assets/img/emoji/');
     expect(dockerfile).toContain('COPY --from=artifact-verification /workspace/dist-private/ /usr/share/nginx/html/');
     expect(dockerfile).not.toContain('COPY public/ ');
     expect(dockerfile).not.toContain('COPY public/assets/audio/');
@@ -220,11 +221,8 @@ describe('deployment artifact verification', () => {
       '!src/lib/',
       '!src/lib/lottie/',
       '!src/lib/lottie/lottieLoader.ts',
-      '!public/',
-      '!public/assets/',
-      '!public/assets/img/',
-      '!public/assets/img/emoji/',
-      '!public/assets/img/emoji/**'
+      '!src/config/',
+      '!src/config/emoji.ts'
     ]) {
       expect(dockerignore).toContain(path);
     }

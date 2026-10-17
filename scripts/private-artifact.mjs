@@ -720,39 +720,47 @@ function privateLottieAssetNames(rootDirectory = PRIVATE_ARTIFACT_REPOSITORY_ROO
   return names;
 }
 
-function privateRuntimeSourceAssetNames(relativeDirectory, rootDirectory = PRIVATE_ARTIFACT_REPOSITORY_ROOT) {
-  const sourceDirectory = resolve(rootDirectory, 'public/assets', relativeDirectory);
-  let stats;
+function privateEmojiAssetNames(rootDirectory = PRIVATE_ARTIFACT_REPOSITORY_ROOT) {
+  let source;
   try {
-    stats = lstatSync(sourceDirectory);
-  } catch(cause) {
-    if(cause?.code === 'ENOENT') {
-      invalidArtifact(`dynamic runtime public asset source ${relativeDirectory} is missing or invalid`);
-    }
-    throw cause;
-  }
-  if(stats.isSymbolicLink() || !stats.isDirectory() ||
-    realpathSync(sourceDirectory) !== sourceDirectory) {
-    invalidArtifact(`dynamic runtime public asset source ${relativeDirectory} is missing or invalid`);
+    source = readFileSync(resolve(rootDirectory, 'src/config/emoji.ts'), 'utf8');
+  } catch{
+    invalidArtifact('client emoji asset names are missing or invalid');
   }
 
-  const names = [];
-  for(const entry of readdirSync(sourceDirectory, {withFileTypes: true})) {
-    if(entry.isSymbolicLink() || !entry.isFile() ||
-      !isPrivateRuntimeAssetPath(`assets/${relativeDirectory}/${entry.name}`)) {
-      invalidArtifact(`dynamic runtime public asset source ${relativeDirectory} contains an unreviewed entry`);
-    }
-    const sourcePath = resolve(sourceDirectory, entry.name);
-    const fileStats = lstatSync(sourcePath);
-    if(fileStats.isSymbolicLink() || !fileStats.isFile() || fileStats.size === 0) {
-      invalidArtifact(`dynamic runtime public asset source ${relativeDirectory} contains an invalid file`);
-    }
-    names.push(entry.name);
+  const declarationStart = source.indexOf('export const EmojiVersions');
+  const assignmentStart = source.indexOf(' = ', declarationStart);
+  const declarationEnd = source.indexOf(';', assignmentStart);
+  if(declarationStart === -1 || assignmentStart === -1 || declarationEnd === -1) {
+    invalidArtifact('client emoji asset names are missing or invalid');
   }
-  if(!names.length) {
-    invalidArtifact(`dynamic runtime public asset source ${relativeDirectory} contains no files`);
+
+  let versions;
+  try {
+    versions = JSON.parse(source.slice(assignmentStart + 3, declarationEnd));
+  } catch{
+    invalidArtifact('client emoji asset names are missing or invalid');
   }
-  return names.sort();
+  if(!versions || typeof versions !== 'object' || Array.isArray(versions)) {
+    invalidArtifact('client emoji asset names are missing or invalid');
+  }
+
+  const names = new Set();
+  for(const entries of Object.values(versions)) {
+    if(!entries || typeof entries !== 'object' || Array.isArray(entries)) {
+      invalidArtifact('client emoji asset names are missing or invalid');
+    }
+    for(const [name, code] of Object.entries(entries)) {
+      if(!/^[0-9a-f]+(?:-[0-9a-f]+)*$/i.test(name) || !Number.isSafeInteger(code) || code < 0) {
+        invalidArtifact('client emoji asset names are missing or invalid');
+      }
+      names.add(`${name}.png`);
+    }
+  }
+  if(!names.size) {
+    invalidArtifact('client emoji asset names are missing or invalid');
+  }
+  return [...names].sort();
 }
 
 function privateDynamicRuntimeAssetPaths(name, rootDirectory, audioAssetNames) {
@@ -765,7 +773,7 @@ function privateDynamicRuntimeAssetPaths(name, rootDirectory, audioAssetNames) {
       }
       return [...audioAssetNames].sort().map((assetName) => `assets/audio/${assetName}`);
     case 'emoji':
-      return privateRuntimeSourceAssetNames('img/emoji', rootDirectory).map((assetName) => `assets/img/emoji/${assetName}`);
+      return privateEmojiAssetNames(rootDirectory).map((assetName) => `assets/img/emoji/${assetName}`);
     case 'images':
       return [...PRIVATE_RUNTIME_IMAGE_ASSETS].map((assetName) => `assets/img/${assetName}`);
     default:

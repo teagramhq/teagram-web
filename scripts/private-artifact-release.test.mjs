@@ -598,6 +598,29 @@ describe('private artifact runtime public assets', () => {
     .toThrow(/references a missing runtime public asset assets\/audio\/call_busy\.mp3/i);
   });
 
+  it('rejects an emoji image removed from source and output while the client map still requests it', () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), 'private-artifact-missing-emoji-source-'));
+    temporaryDirectories.push(sourceRoot);
+    const sourceEmojiDirectory = join(sourceRoot, 'public/assets/img/emoji');
+    mkdirSync(sourceEmojiDirectory, {recursive: true});
+    writeFileSync(join(sourceEmojiDirectory, '1f601.png'), 'remaining source emoji');
+    const emojiConfigDirectory = join(sourceRoot, 'src/config');
+    mkdirSync(emojiConfigDirectory, {recursive: true});
+    writeFileSync(join(emojiConfigDirectory, 'emoji.ts'),
+      'export const EmojiVersions: Record<string, Record<string, number>> = {"":{"1f600":0}};\n');
+
+    const directory = temporaryArtifact();
+    const outputEmojiDirectory = join(directory, 'assets/img/emoji');
+    mkdirSync(outputEmojiDirectory, {recursive: true});
+    cpSync(sourceEmojiDirectory, outputEmojiDirectory, {recursive: true});
+    writeFileSync(join(directory, 'client.js'), 'const emojiPath = `assets/img/emoji/${unicode}.png`;');
+
+    expect(existsSync(join(sourceEmojiDirectory, '1f600.png'))).toBe(false);
+    expect(existsSync(join(outputEmojiDirectory, '1f600.png'))).toBe(false);
+    expect(() => auditPrivateArtifactRuntimeAssets(directory, sourceRoot))
+    .toThrow(/references a missing runtime public asset assets\/img\/emoji\/1f600\.png/i);
+  });
+
   it('accepts pnpm’s argument separator before the output directory', () => {
     const directory = mkdtempSync(join(tmpdir(), 'private-artifact-runtime-assets-'));
     temporaryDirectories.push(directory);

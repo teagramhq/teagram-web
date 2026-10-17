@@ -14,11 +14,8 @@
 !src/lib/
 !src/lib/lottie/
 !src/lib/lottie/lottieLoader.ts
-!public/
-!public/assets/
-!public/assets/img/
-!public/assets/img/emoji/
-!public/assets/img/emoji/**
+!src/config/
+!src/config/emoji.ts
 !deploy/
 !deploy/teagram-web/
 !deploy/teagram-web/**
