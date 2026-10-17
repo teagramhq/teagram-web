@@ -1,7 +1,11 @@
 import {readFileSync} from 'node:fs';
 import {describe, expect, it, vi} from 'vitest';
 import webVersionResourcePlugin from '@/scripts/webVersionResource';
-import {hasWebVersionUpdate, WEB_VERSION_RESOURCE_PATH} from '@lib/webVersion';
+import {
+  hasWebVersionUpdate,
+  LEGACY_WEB_VERSION_RESOURCE_PATH,
+  WEB_VERSION_RESOURCE_PATH
+} from '@lib/webVersion';
 
 const fullVersion = '2.2 (676)';
 
@@ -20,7 +24,12 @@ describe('Web version resource', () => {
 
     generateBundle.call({emitFile});
 
-    expect(emitFile).toHaveBeenCalledOnce();
+    expect(emitFile).toHaveBeenCalledTimes(2);
+    expect(emitFile).toHaveBeenCalledWith({
+      type: 'asset',
+      fileName: '.well-known/teagram-web/version.txt',
+      source: fullVersion
+    });
     expect(emitFile).toHaveBeenCalledWith({
       type: 'asset',
       fileName: '.well-known/telegram-web/version.txt',
@@ -46,13 +55,14 @@ describe('Web version resource', () => {
     };
     const next = vi.fn();
 
-    middleware({url: `${WEB_VERSION_RESOURCE_PATH}?cache-bust=1`}, response, next);
-
+    for(const path of [WEB_VERSION_RESOURCE_PATH, LEGACY_WEB_VERSION_RESOURCE_PATH]) {
+      middleware({url: `${path}?cache-bust=1`}, response, next);
+      expect(response.statusCode).toBe(200);
+      expect(response.setHeader).toHaveBeenCalledWith('Content-Type', 'text/plain; charset=utf-8');
+      expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store');
+      expect(response.end).toHaveBeenCalledWith(fullVersion);
+    }
     expect(next).not.toHaveBeenCalled();
-    expect(response.statusCode).toBe(200);
-    expect(response.setHeader).toHaveBeenCalledWith('Content-Type', 'text/plain; charset=utf-8');
-    expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store');
-    expect(response.end).toHaveBeenCalledWith(fullVersion);
   });
 
   it('requests the absolute same-origin resource and stays quiet for an unchanged version', async() => {

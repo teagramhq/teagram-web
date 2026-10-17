@@ -79,6 +79,15 @@ afterAll(() => {
 });
 
 describe('deployment artifact verification', () => {
+  it('uses the Teagram stack names and keeps its legacy link-edge network attachment', () => {
+    const compose = readFileSync(resolve('deploy/teagram-web/compose.yaml'), 'utf8');
+
+    expect(compose).toMatch(/^name: teagram-web-edge$/m);
+    expect(compose).toMatch(/^    image: teagram-web:local$/m);
+    expect(compose).toMatch(/^    name: teagram-web-edge-nginx-cache$/m);
+    expect(compose).toMatch(/^    name: teagram-web-edge-net$/m);
+  });
+
   it('only records HEAD as the source commit when the build tree is clean', () => {
     const rootDirectory = temporaryDirectory();
     execFileSync('git', ['init', '--quiet'], {cwd: rootDirectory});
@@ -194,7 +203,7 @@ describe('deployment artifact verification', () => {
   });
 
   it('verifies the artifact before copying it into the Node-free serving image', () => {
-    const dockerfile = readFileSync(resolve('deploy/telegram-web/Dockerfile'), 'utf8');
+    const dockerfile = readFileSync(resolve('deploy/teagram-web/Dockerfile'), 'utf8');
     const verifyStep = dockerfile.indexOf('RUN node scripts/verify-deployment-artifact.mjs');
     const servingStage = dockerfile.indexOf('FROM nginx:');
 

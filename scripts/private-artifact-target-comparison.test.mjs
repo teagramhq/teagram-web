@@ -19,7 +19,7 @@ import {
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workflowPath = '.github/workflows/private-artifact-request.yml';
-const repository = 'teagramhq/telegram-web';
+const repository = 'teagramhq/teagram-web';
 const requestRunId = '37141749542';
 const requestWorkflowCommit = '3ea229385f56f87d4b672423aee509f1ba3fc55b';
 const diagnosticWorkflowCommit = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {

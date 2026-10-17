@@ -112,7 +112,7 @@ jobs:
         run: PATH="$(go env GOPATH)/bin:$PATH" bash .github/scripts/test-deploy-workflow-contract.sh
 
       - name: Check deployment script syntax
-        run: bash -n deploy/telegram-web/deploy-main.sh
+        run: bash -n deploy/teagram-web/deploy-main.sh && bash -n deploy/telegram-web/deploy-main.sh
 
       - name: Check rollback artifact modes
         run: bash .github/scripts/test-deploy-backup-rollback.sh

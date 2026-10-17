@@ -1,17 +1,19 @@
-## Telegram Web loopback stack
+## Teagram Web loopback stack
 
-This is the deployment-only Compose project for the Telegram Web K static
+This is the deployment-only Compose project for the Teagram Web K static
 artifact. It is intentionally separate from the development Compose file at
 the repository root and from `/opt/telegram-server`. Its explicit
-`telegram-web-edge` project, `telegram-web-edge-net` network, and
-`telegram-web-edge-nginx-cache` volume names keep a root-directory Compose
-invocation from selecting this stack by basename.
+`teagram-web-edge` project, `teagram-web-edge-net` network, and
+`teagram-web-edge-nginx-cache` volume names keep a root-directory Compose
+invocation from selecting this stack by basename. The web service also joins
+the existing `telegram-web-edge-net` network until MAIN-1980 removes that
+compatibility attachment.
 
 The target checkout is `/opt/telegram-web`. Run the commands below from this
 directory:
 
 ```sh
-cd /opt/telegram-web/deploy/telegram-web
+cd /opt/telegram-web/deploy/teagram-web
 docker compose up -d --build
 docker compose ps
 ```
@@ -22,8 +24,9 @@ Successful push runs of `Private MTProto Artifact Publication` trigger the
 `Deploy.` workflow. It resolves the tested commit, downloads that run's
 `private-mtproto-<commit>-<digest>` artifact, packages it for the host, and
 sends it over the tailnet to the forced-command deploy key. The host runs that
-commit's `deploy/telegram-web/deploy-main.sh`; the workflow does not check out
-or execute repository code itself.
+commit's `deploy/teagram-web/deploy-main.sh`; the workflow does not check out
+or execute repository code itself. A compatibility launcher remains at the
+previous script entry point used by the installed forced command.
 
 To redeploy manually, run `Deploy.` from the GitHub Actions tab. It takes no
 inputs and selects the newest successful push publication on `master`.
@@ -78,8 +81,12 @@ Dockerfile's `artifact-verification` stage before changing the live checkout.
 It keeps the prior artifact and a `rollback.sh` under
 `/opt/telegram-web/backups/`, checks `/`, `/healthz`, and the served artifact
 manifest after Compose starts, and runs the rollback script if deployment
-fails. The release record is written root-owned and read-only under
-`/root/telegram-web-<commit>-<timestamp>/release-record.json`.
+fails. The first deploy under the renamed project builds the image before it
+stops and removes the old web container, preserving the old external network
+for link-edge. Rollback stops the new web container, restores the saved image
+and artifact, then starts the previous Compose project. The release record is
+written root-owned and read-only under
+`/root/teagram-web-<commit>-<timestamp>/release-record.json`.
 
 The SPA listens on `127.0.0.1:8080` for host-local proxies such as Serve. Keep
 this port loopback-only; the existing HTTPS Serve route remains the external
@@ -108,11 +115,15 @@ The Nginx response CSP remains `connect-src 'self'`. The verified private
 artifact also carries its audited target metadata and CSP; this change leaves
 the existing Nginx policy and serving layout intact.
 
-The only persistent volume is `telegram-web-edge-nginx-cache`, owned by this Compose
+The only persistent volume is `teagram-web-edge-nginx-cache`, owned by this Compose
 project. `docker compose down` is safe and leaves that cache intact; never use
-`docker compose down -v` on this host.
+`docker compose down -v` on this host. The web build emits the version file at
+`/.well-known/teagram-web/version.txt` and keeps
+`/.well-known/telegram-web/version.txt` as a compatibility alias until
+MAIN-1980.
 
-Rollback is the code revert followed by `docker compose up -d --build` from this
-directory. Verify success with `docker compose ps`,
+Each deployment records a private `rollback.sh` in the printed backup
+directory and invokes it automatically on failure. To restore manually, run
+`bash <printed-backup-directory>/rollback.sh`. Verify success with `docker compose ps`,
 `curl -fsS http://127.0.0.1:8080/healthz`, and a tailnet browser loading the
 SPA through the existing HTTPS Serve route.

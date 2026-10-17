@@ -1,13 +1,13 @@
-name: telegram-web-edge
+name: teagram-web-edge
 
 services:
   web:
     build:
       context: ../..
-      dockerfile: deploy/telegram-web/Dockerfile
+      dockerfile: deploy/teagram-web/Dockerfile
       args:
         PRIVATE_ARTIFACT_COMMIT: "${PRIVATE_ARTIFACT_COMMIT:?set this to the private artifact source commit}"
-    image: telegram-web:local
+    image: teagram-web:local
     restart: unless-stopped
     init: true
     read_only: true
@@ -31,6 +31,7 @@ services:
       - /tmp:rw,noexec,nosuid,size=16m
     networks:
       - web
+      - legacy_link_edge
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
       interval: 10s
@@ -40,8 +41,11 @@ services:
 
 volumes:
   nginx_cache:
-    name: telegram-web-edge-nginx-cache
+    name: teagram-web-edge-nginx-cache
 
 networks:
   web:
+    name: teagram-web-edge-net
+  legacy_link_edge:
+    external: true
     name: telegram-web-edge-net

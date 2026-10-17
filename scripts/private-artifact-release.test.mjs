@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import {createServer} from 'node:http';
 import {tmpdir} from 'node:os';
-import {join, relative, resolve, sep} from 'node:path';
+import {dirname, join, relative, resolve, sep} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import express from 'express';
 import {afterAll, describe, expect, it} from 'vitest';
@@ -1471,10 +1471,16 @@ describe('private artifact publication attestation', () => {
 
   it('preserves the hidden version resource through the isolated publisher transfer', () => {
     const directory = temporaryArtifact();
-    const versionResource = '.well-known/telegram-web/version.txt';
+    const versionResources = [
+      '.well-known/teagram-web/version.txt',
+      '.well-known/telegram-web/version.txt'
+    ];
     const versionContents = '2.2 (676)\n';
-    mkdirSync(join(directory, '.well-known/telegram-web'), {recursive: true});
-    writeFileSync(join(directory, versionResource), versionContents);
+    for(const versionResource of versionResources) {
+      const resourcePath = join(directory, versionResource);
+      mkdirSync(dirname(resourcePath), {recursive: true});
+      writeFileSync(resourcePath, versionContents);
+    }
     const {target} = loadReviewedPrivateTarget();
     const manifest = writePrivateArtifactManifest(directory, target, repositoryRoot);
     const commit = currentCommit();
@@ -1509,7 +1515,9 @@ describe('private artifact publication attestation', () => {
     }
 
     cpSync(directory, downloadedDirectory, {recursive: true});
-    expect(readFileSync(join(downloadedDirectory, versionResource), 'utf8')).toBe(versionContents);
+    for(const versionResource of versionResources) {
+      expect(readFileSync(join(downloadedDirectory, versionResource), 'utf8')).toBe(versionContents);
+    }
     expect(verifyPublishedArtifact({
       directory: downloadedDirectory,
       snapshotDirectory,
