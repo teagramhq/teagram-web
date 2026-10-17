@@ -621,7 +621,7 @@ function createWorkerDiscovery() {
           await send('Target.detachFromTarget', {sessionId});
         } catch {
           orphanDetachFailures++;
-          observer.recordObserverError(targetId);
+          observer.recordObserverError(INJECTED_TARGET_ID);
         }
       })
       .catch(() => observer.noteAttachFailure());

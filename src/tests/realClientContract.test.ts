@@ -1751,6 +1751,31 @@ describe('confined runner shared-worker observation contract', () => {
 
 
 describe('discovery shared-worker network accounting', () => {
+  it('counts the injected attach and rejected detach once each', async() => {
+    const calls: any[] = [];
+    const discovery = createDiscoveryHarness(async(method, params) => {
+      calls.push({method, params});
+      if(method === 'Target.attachToTarget') return {sessionId: 'injected-session'};
+      if(method === 'Target.detachFromTarget') throw new Error(HOSTILE.phrase);
+      return {};
+    });
+    const observer = observation.createContextObserver('c4_attach_failure', {control: true});
+    let stopResult: any;
+    try {
+      await discovery.registry.launch(discovery.browser);
+      await discovery.registry.simulateAttachFailure(observer);
+
+      expect(observer.state.attachFailures).toBe(1);
+      expect(observer.state.observerErrors).toBe(2);
+      expect(calls.filter(({method}) => method === 'Target.attachToTarget')).toHaveLength(1);
+      expect(calls.filter(({method}) => method === 'Target.detachFromTarget')).toHaveLength(1);
+    } finally {
+      stopResult = await discovery.registry.stop();
+    }
+
+    expect(stopResult).toMatchObject({detachFailures: 1, discoveryDisabled: true});
+  });
+
   it('counts one observed allowed creation without creating an upgrade or charging twice', async() => {
     const harness = await createDiscoveryNetworkHarness();
     const {alice} = harness;
