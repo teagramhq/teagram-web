@@ -568,7 +568,7 @@ export function parseGroupMessageState(state) {
         typeof sample.distinctIds !== 'boolean' || typeof sample.distinctServerIds !== 'boolean') return false;
     if(!sample.bubbles.every((bubble) => bubble && typeof bubble === 'object' && !Array.isArray(bubble) &&
         JSON.stringify(Object.keys(bubble).sort()) === JSON.stringify(['messageId', 'sendState'].sort()) &&
-        (bubble.messageId === null || typeof bubble.messageId === 'string' && /^-?[0-9]{1,20}$/.test(bubble.messageId)) &&
+        (bubble.messageId === null || typeof bubble.messageId === 'string' && /^-?[0-9]{1,20}(\.[0-9]{1,4})?$/.test(bubble.messageId)) &&
         GROUP_MESSAGE_SEND_STATES.includes(bubble.sendState))) return false;
     const ids = sample.bubbles.map((bubble) => bubble.messageId).filter((id) => id !== null);
     const serverIds = sample.bubbles.filter((bubble) => bubble.sendState === 'sent').map((bubble) => bubble.messageId).filter((id) => id !== null);

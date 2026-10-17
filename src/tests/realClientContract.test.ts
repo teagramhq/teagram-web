@@ -4005,7 +4005,7 @@ describe('real client group created', () => {
           addBubble('9001', 'is-sent');
           setTimeout(() => pending.remove(), 700);
         } else if(mode === 'transient-temporary-server') {
-          const pending = addBubble('-9001', 'is-sending');
+          const pending = addBubble('9000.0001', 'is-sending');
           addBubble('9001', 'is-sent');
           setTimeout(() => pending.remove(), 700);
         } else if(mode === 'distinct-sent') {
@@ -4066,7 +4066,7 @@ describe('real client group created', () => {
         expect.objectContaining({
           count: 2,
           bubbles: [
-            {messageId: '-9001', sendState: 'pending'},
+            {messageId: '9000.0001', sendState: 'pending'},
             {messageId: '9001', sendState: 'sent'}
           ],
           distinctIds: true,

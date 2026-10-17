@@ -1691,7 +1691,7 @@ async function waitForGroupMessageCount(page, chat, groupTitle, message, stage, 
           const sendState = bubble?.classList.contains('is-error') ? 'failed' :
             bubble?.classList.contains('is-sending') ? 'pending' : 'sent';
           return {
-            messageId: /^-?[0-9]{1,20}$/.test(id) ? id : null,
+            messageId: /^-?[0-9]{1,20}(\.[0-9]{1,4})?$/.test(id) ? id : null,
             sendState
           };
         });
