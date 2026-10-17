@@ -2096,6 +2096,41 @@ describe('discovery shared-worker network accounting', () => {
     }
   });
 
+  it('prefers a correlated worker bundle over its main-bundle initiator', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    const blobUrl = 'blob:https://telegramd.test/cccccccc-cccc-cccc-cccc-cccccccccccc';
+
+    try {
+      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'lottie-worker', 'dedicated_worker');
+      resolver.observeRequest(blobUrl, {
+        type: 'script',
+        stack: {callFrames: [{url: `${APP_ORIGIN}/main-QqRrSsTt.js`}]}
+      }, 'Script', 'lottie-worker', 'dedicated_worker');
+
+      expect(resolver.scriptAsset(`Error: failed\n    at render (${blobUrl}:1:183)`)).toBe('tlottie.worker-JkLmNoPq.js');
+    } finally {
+      resolver.clear();
+    }
+  });
+
+  it('keeps an unambiguous worker asset available after the fetch ages out', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    const blobUrl = 'blob:https://telegramd.test/dddddddd-dddd-dddd-dddd-dddddddddddd';
+
+    vi.useFakeTimers();
+    try {
+      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'delayed-lottie-worker', 'dedicated_worker');
+      vi.advanceTimersByTime(30_001);
+
+      expect(resolver.scriptAsset(`Error: failed\n    at TLottieWasm.createAnimation (${blobUrl}:1:183)`)).toBe('tlottie.worker-JkLmNoPq.js');
+    } finally {
+      resolver.clear();
+      vi.useRealTimers();
+    }
+  });
+
   it('attributes a blob worker from its fetched bundle through browser discovery', async() => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const recordPageError = (realClientBrowser as any).recordPageError;

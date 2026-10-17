@@ -2217,22 +2217,18 @@ function createPageErrorAssetResolver() {
   const workerBlobUrls = new Map();
   function pageErrorWorkerAsset(stack) {
     const hint = PAGE_ERROR_BLOB_ASSET_HINTS.find(({pattern}) => pattern.test(stack));
-    const freshCandidates = workerAssetCandidates.filter((candidate) =>
-      Date.now() - candidate.observedAt <= 30_000 && (!hint || candidate.workerLabel === hint.workerLabel)
+    const matchingCandidates = workerAssetCandidates.filter((candidate) =>
+      !hint || candidate.workerLabel === hint.workerLabel
     );
-    // Unmapped blob frames are attributable only when all matching fetches agree.
-    const assets = new Set(freshCandidates.map((candidate) => candidate.asset));
+    // Unmapped blob frames remain attributable for the resolver's lifetime only
+    // when every matching fetch agrees.
+    const assets = new Set(matchingCandidates.map((candidate) => candidate.asset));
     return assets.size === 1 ? assets.values().next().value : undefined;
   }
   function takeWorkerAssetCandidate(sourceTargetId) {
-    const freshCandidates = workerAssetCandidates.filter((candidate) =>
-      !candidate.consumed && Date.now() - candidate.observedAt <= 30_000
-    );
-    const sourceCandidates = sourceTargetId ? freshCandidates.filter((candidate) => candidate.sourceTargetId === sourceTargetId) : [];
-    const pageCandidates = freshCandidates.filter((candidate) => candidate.sourceType === 'page');
-    const candidates = sourceCandidates.length ? sourceCandidates :
-      pageCandidates.length ? pageCandidates :
-        freshCandidates.filter((candidate) => candidate.sourceType !== 'page');
+    const availableCandidates = workerAssetCandidates.filter((candidate) => !candidate.consumed);
+    const sourceCandidates = sourceTargetId ? availableCandidates.filter((candidate) => candidate.sourceTargetId === sourceTargetId) : [];
+    const candidates = sourceCandidates.length ? sourceCandidates : availableCandidates;
     const assets = new Set(candidates.map((candidate) => candidate.asset));
     if(assets.size !== 1) return;
     const source = candidates[0];
@@ -2261,15 +2257,16 @@ function createPageErrorAssetResolver() {
           }
           if(requestType === 'Fetch' && typeof sourceTargetId === 'string' && observation.SCRIPT_ASSET_PATTERN.test(asset)) {
             if(workerAssetCandidates.length >= PAGE_ERROR_BLOB_ASSET_LIMIT) workerAssetCandidates.shift();
-            workerAssetCandidates.push({sourceTargetId, sourceType, asset, workerLabel, observedAt: Date.now(), consumed: false});
+            workerAssetCandidates.push({sourceTargetId, asset, workerLabel, consumed: false});
           }
         }
         return;
       }
       if(parsed.origin !== PRIVATE_CSP_ORIGIN || blobAssets.has(parsed.href)) return;
       const directWorkerAsset = sourceType !== 'page' && directWorkerAssets.get(sourceTargetId)?.asset;
-      const asset = firstInitiatorAsset(initiator?.stack, blobAssets) || pageErrorAssetFromUrl(initiator?.url, blobAssets) || directWorkerAsset ||
-        (requestType === 'Script' ? takeWorkerAssetCandidate(sourceTargetId)?.asset : undefined);
+      const fetchedWorkerAsset = !directWorkerAsset && requestType === 'Script' ? takeWorkerAssetCandidate(sourceTargetId)?.asset : undefined;
+      const asset = directWorkerAsset || fetchedWorkerAsset || firstInitiatorAsset(initiator?.stack, blobAssets) ||
+        pageErrorAssetFromUrl(initiator?.url, blobAssets);
       if(!asset || blobAssets.size >= PAGE_ERROR_BLOB_ASSET_LIMIT) return;
       blobAssets.set(parsed.href, asset);
     },
