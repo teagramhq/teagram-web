@@ -32,6 +32,7 @@ const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
 const MTPROTO_CHUNK_URL = `${APP_ORIGIN}/index.worker-AbCdEfGh.js?x-protocol-version=4`;
+const LOTTIE_WORKER_CHUNK_URL = `${APP_ORIGIN}/tlottie.worker-JkLmNoPq.js`;
 const PROBE_WORKER_URL = `${APP_ORIGIN}/_fixture_probe/shared-worker.js`;
 const PROBE_MISSING_URL = `${APP_ORIGIN}/_fixture_probe/missing.js`;
 const HOSTILE_PASSWORD = 'f4ce'.repeat(16);
@@ -55,12 +56,12 @@ function createPlaywrightWrappedPageError(name: 'TypeError' | 'RangeError', asse
 function createNetworkObserverHarness(observer: any, options: any = {}) {
   const cdp: any = new EventEmitter();
   cdp.send = options.send || (async(method: string) => method === 'Target.getTargetInfo'
-    ? {targetInfo: {browserContextId: 'contract-test'}}
+    ? {targetInfo: {targetId: 'contract-test-page', browserContextId: 'contract-test'}}
     : {});
   cdp.detach = options.detach || (async() => {});
   const context = {newCDPSession: async() => cdp, close: options.closeContext || (async() => {})};
   const page: any = {context: () => context};
-  return {cdp, networkObserver: createNetworkObserver(page, 'contract-test', observer)};
+  return {cdp, networkObserver: createNetworkObserver(page, 'contract-test', observer, options.pageErrorAssetResolver)};
 }
 
 function emptyWebSocket101Grid() {
@@ -94,11 +95,12 @@ function acknowledgeCdpCommand(session: any, params: any, error = false) {
   }));
 }
 
-function createWorkerNetworkObserverHarness(observer: any, browserContextId: string) {
+function createWorkerNetworkObserverHarness(observer: any, browserContextId: string, options: any = {}) {
   const harness = createNetworkObserverHarness(observer, {
+    ...options,
     send: async(method: string, params: any) => {
       if(method === 'Target.sendMessageToTarget') acknowledgeCdpCommand(harness.cdp, params);
-      return method === 'Target.getTargetInfo' ? {targetInfo: {browserContextId}} : {};
+      return method === 'Target.getTargetInfo' ? {targetInfo: {targetId: 'contract-test-page', browserContextId}} : {};
     }
   });
   return harness;
@@ -1933,6 +1935,298 @@ describe('discovery shared-worker network accounting', () => {
     });
     expect(parseAuthProgressReport(report).gateBreakdown).toEqual(report.gateBreakdown);
     expectNoGateSecretLeak(report.gateBreakdown);
+  });
+
+  it('attributes blob stack frames from correlated worker evidence without persisting blob identifiers', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
+    expect(typeof createPageErrorAssetResolver).toBe('function');
+    expect(typeof recordPageError).toBe('function');
+    expect(typeof summarizeGateBreakdown).toBe('function');
+
+    const resolver = createPageErrorAssetResolver();
+    const observer = observation.createContextObserver('alice');
+    const {cdp, networkObserver} = createWorkerNetworkObserverHarness(observer, 'contract-test', {pageErrorAssetResolver: resolver});
+    const pageErrors = {alice: [], bob: []} as any;
+    await networkObserver.start();
+
+    try {
+      cdp.emit('Network.requestWillBeSent', {
+        type: 'Script',
+        request: {url: HOSTILE.blobUrl},
+        initiator: {type: 'script', stack: {callFrames: [{url: MTPROTO_CHUNK_URL}]}}
+      });
+      const blobFromUrl = 'blob:https://telegramd.test/22222222-2222-2222-2222-222222222222';
+      cdp.emit('Network.requestWillBeSent', {
+        type: 'Script',
+        request: {url: blobFromUrl},
+        initiator: {type: 'other', url: MTPROTO_CHUNK_URL}
+      });
+      const blobWithoutInitiator = 'blob:https://telegramd.test/33333333-3333-3333-3333-333333333333';
+      cdp.emit('Network.requestWillBeSent', {
+        type: 'Fetch',
+        request: {url: MTPROTO_CHUNK_URL},
+        initiator: {type: 'script'}
+      });
+      cdp.emit('Target.attachedToTarget', {
+        sessionId: 'rival-worker-session',
+        targetInfo: {
+          targetId: 'rival-worker-target',
+          type: 'shared_worker',
+          url: `${APP_ORIGIN}/rival.worker-ZzYyXxWw.js`
+        }
+      });
+      await networkObserver.waitForSetup();
+      cdp.emit('Target.receivedMessageFromTarget', {
+        sessionId: 'rival-worker-session',
+        message: JSON.stringify({
+          method: 'Network.requestWillBeSent',
+          params: {type: 'Fetch', request: {url: LOTTIE_WORKER_CHUNK_URL}}
+        })
+      });
+      cdp.emit('Target.attachedToTarget', {
+        sessionId: 'worker-session',
+        targetInfo: {
+          targetId: 'mtproto-worker-target',
+          type: 'shared_worker',
+          url: blobWithoutInitiator,
+          browserContextId: 'contract-test'
+        }
+      });
+      await networkObserver.waitForSetup();
+      cdp.emit('Network.requestWillBeSent', {
+        type: 'Script',
+        request: {url: blobWithoutInitiator},
+        initiator: {type: 'other'}
+      });
+      const error = new TypeError(HOSTILE.phrase);
+      error.stack = `TypeError: ${HOSTILE.phrase}\n    at t (${HOSTILE.blobUrl}:1:183)\n    at r (${blobFromUrl}:2:12)`;
+      recordPageError(pageErrors, 'alice', error, resolver);
+
+      const pageErrorsFromUrl = {alice: [], bob: []} as any;
+      const urlOnlyError = new TypeError(HOSTILE.phrase);
+      urlOnlyError.stack = `TypeError: ${HOSTILE.phrase}\n    at r (${blobFromUrl}:2:12)`;
+      recordPageError(pageErrorsFromUrl, 'alice', urlOnlyError, resolver);
+
+      const breakdown = summarizeGateBreakdown({pageErrors});
+      const breakdownFromUrl = summarizeGateBreakdown({pageErrors: pageErrorsFromUrl});
+      expect(breakdown.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'unknown'}]);
+      expect(breakdownFromUrl.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'unknown'}]);
+      expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.blobUrl);
+      expect(JSON.stringify(breakdown)).not.toContain(blobFromUrl);
+      expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.phrase);
+      expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.token);
+      expect(JSON.stringify(breakdownFromUrl)).not.toContain(blobFromUrl);
+
+      const pageErrorsFromFetch = {alice: [], bob: []} as any;
+      const fetchOnlyError = new TypeError(HOSTILE.phrase);
+      fetchOnlyError.stack = `TypeError: ${HOSTILE.phrase}\n    at r (${blobWithoutInitiator}:2:12)`;
+      recordPageError(pageErrorsFromFetch, 'alice', fetchOnlyError, resolver);
+      const breakdownFromFetch = summarizeGateBreakdown({pageErrors: pageErrorsFromFetch});
+      expect(breakdownFromFetch.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'index.worker-AbCdEfGh.js'}]);
+      expect(JSON.stringify(breakdownFromFetch)).not.toContain(blobWithoutInitiator);
+
+      const blobFromScriptRequest = 'blob:https://telegramd.test/66666666-6666-6666-6666-666666666666';
+      cdp.emit('Network.requestWillBeSent', {
+        type: 'Fetch',
+        request: {url: MTPROTO_CHUNK_URL},
+        initiator: {type: 'script'}
+      });
+      cdp.emit('Network.requestWillBeSent', {
+        type: 'Script',
+        request: {url: blobFromScriptRequest},
+        initiator: {type: 'other'}
+      });
+      const scriptRequestError = new TypeError(HOSTILE.phrase);
+      scriptRequestError.stack = `TypeError: ${HOSTILE.phrase}\n    at t (${blobFromScriptRequest}:1:183)`;
+      const pageErrorsFromScriptRequest = {alice: [], bob: []} as any;
+      recordPageError(pageErrorsFromScriptRequest, 'alice', scriptRequestError, resolver);
+      const breakdownFromScriptRequest = summarizeGateBreakdown({pageErrors: pageErrorsFromScriptRequest});
+      expect(breakdownFromScriptRequest.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'index.worker-AbCdEfGh.js'}]);
+      expect(JSON.stringify(breakdownFromScriptRequest)).not.toContain(blobFromScriptRequest);
+
+      const lottieBlobUrl = 'blob:https://telegramd.test/55555555-5555-5555-5555-555555555555';
+      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'lottie-error-target');
+      const lottiePageErrors = {alice: [], bob: []} as any;
+      const lottieError = new Error(HOSTILE.phrase);
+      lottieError.stack = `Error: ${HOSTILE.phrase}\n    at TLottieWasm.createAnimation (${lottieBlobUrl}:1197:23)\n    at TLottieItem.init (${lottieBlobUrl}:1328:35)\n    at Object.loadFromData [as callback] (${lottieBlobUrl}:1580:16)\n    at async SuperMessagePort.processInvokeTask [as invoke] (${lottieBlobUrl}:804:29)`;
+      recordPageError(lottiePageErrors, 'alice', lottieError, resolver);
+      const lottieBreakdown = summarizeGateBreakdown({pageErrors: lottiePageErrors});
+      expect(lottieBreakdown.counters.pageErrors).toBe(1);
+      expect(lottieBreakdown.pageErrors.alice).toEqual([{constructorName: 'Error', scriptAsset: 'tlottie.worker-JkLmNoPq.js'}]);
+      expect(JSON.stringify(lottieBreakdown)).not.toContain(lottieBlobUrl);
+    } finally {
+      resolver.clear();
+      await networkObserver.stop();
+    }
+  });
+
+  it('resolves unmapped blob script frames from fetched bundles and keeps unknown for frameless stacks', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'contract-test-page');
+
+    const firstBlobUrl = 'blob:https://telegramd.test/77777777-7777-7777-7777-777777777777';
+    const secondBlobUrl = 'blob:https://telegramd.test/88888888-8888-8888-8888-888888888888';
+    expect(resolver.scriptAsset(`Error: failed\n    at render (${firstBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
+    expect(resolver.scriptAsset(`Error: failed\n    at render (${secondBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
+    expect(resolver.scriptAsset('Error: failed')).toBe('unknown');
+    resolver.clear();
+  });
+
+  it('correlates interleaved worker blobs by source and rejects ambiguous fallback', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    const firstBlobUrl = 'blob:https://telegramd.test/99999999-9999-9999-9999-999999999999';
+    const secondBlobUrl = 'blob:https://telegramd.test/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const uncorrelatedBlobUrl = 'blob:https://telegramd.test/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+
+    try {
+      resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'worker-a', 'dedicated_worker');
+      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'worker-b', 'dedicated_worker');
+      resolver.observeWorkerTarget({type: 'worker', targetId: 'worker-b-blob', parentId: 'worker-b', url: secondBlobUrl});
+      resolver.observeWorkerTarget({type: 'worker', targetId: 'worker-a-blob', parentId: 'worker-a', url: firstBlobUrl});
+
+      expect(resolver.scriptAsset(`Error: failed\n    at render (${firstBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
+      expect(resolver.scriptAsset(`Error: failed\n    at render (${secondBlobUrl}:1:183)`)).toBe('tlottie.worker-JkLmNoPq.js');
+      expect(resolver.scriptAsset(`Error: failed\n    at render (${uncorrelatedBlobUrl}:1:183)`)).toBe('unknown');
+    } finally {
+      resolver.clear();
+    }
+  });
+
+  it('prefers a correlated worker bundle over its main-bundle initiator', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    const blobUrl = 'blob:https://telegramd.test/cccccccc-cccc-cccc-cccc-cccccccccccc';
+
+    vi.useFakeTimers();
+    try {
+      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'lottie-worker', 'dedicated_worker');
+      vi.advanceTimersByTime(30_001);
+      resolver.observeRequest(blobUrl, {
+        type: 'script',
+        stack: {callFrames: [{url: `${APP_ORIGIN}/main-QqRrSsTt.js`}]}
+      }, 'Script', 'lottie-worker', 'dedicated_worker');
+
+      expect(resolver.scriptAsset(`Error: failed\n    at render (${blobUrl}:1:183)`)).toBe('tlottie.worker-JkLmNoPq.js');
+    } finally {
+      resolver.clear();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not cache a main-bundle initiator when page worker fetches are ambiguous', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    const pageTargetId = 'shared-page-target';
+    const blobUrl = 'blob:https://telegramd.test/12121212-1212-1212-1212-121212121212';
+
+    try {
+      resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', pageTargetId);
+      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', pageTargetId);
+      resolver.observeRequest(blobUrl, {
+        type: 'script',
+        stack: {callFrames: [{url: `${APP_ORIGIN}/main-QqRrSsTt.js`}]}
+      }, 'Script', pageTargetId);
+
+      const lottieStack = `Error: failed\n    at TLottieWasm.createAnimation (${blobUrl}:1197:23)\n    at TLottieItem.init (${blobUrl}:1328:35)`;
+      expect(resolver.scriptAsset(lottieStack)).toBe('tlottie.worker-JkLmNoPq.js');
+    } finally {
+      resolver.clear();
+    }
+  });
+
+  it('keeps lifetime attribution for hinted stacks and expires unhinted fallback', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    const hintedBlobUrl = 'blob:https://telegramd.test/dddddddd-dddd-dddd-dddd-dddddddddddd';
+    const unhintedBlobUrl = 'blob:https://telegramd.test/ffffffff-ffff-ffff-ffff-ffffffffffff';
+
+    vi.useFakeTimers();
+    try {
+      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'delayed-lottie-worker', 'dedicated_worker');
+      vi.advanceTimersByTime(30_001);
+
+      expect(resolver.scriptAsset(`Error: failed\n    at TLottieWasm.createAnimation (${hintedBlobUrl}:1:183)`)).toBe('tlottie.worker-JkLmNoPq.js');
+      expect(resolver.scriptAsset(`Error: failed\n    at render (${unhintedBlobUrl}:1:183)`)).toBe('unknown');
+    } finally {
+      resolver.clear();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not map an unmatched blob from stale worker or loader evidence', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    const blobUrl = 'blob:https://telegramd.test/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
+
+    vi.useFakeTimers();
+    try {
+      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'other-worker', 'dedicated_worker');
+      vi.advanceTimersByTime(30_001);
+      resolver.observeRequest(blobUrl, {
+        type: 'script',
+        stack: {callFrames: [{url: `${APP_ORIGIN}/main-QqRrSsTt.js`}]}
+      }, 'Script', 'unmatched-worker', 'dedicated_worker');
+
+      expect(resolver.scriptAsset(`Error: failed\n    at render (${blobUrl}:1:183)`)).toBe('unknown');
+    } finally {
+      resolver.clear();
+      vi.useRealTimers();
+    }
+  });
+
+  it('attributes a blob worker from its fetched bundle through browser discovery', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
+    const resolver = createPageErrorAssetResolver();
+    const observer = observation.createContextObserver('alice');
+    const discovery = createDiscoveryHarness();
+    discovery.session.send = async(method: string, params: any) => {
+      if(method === 'Target.attachToTarget') return {sessionId: 'worker-session'};
+      if(method === 'Target.sendMessageToTarget') {
+        const {id} = JSON.parse(params.message);
+        queueMicrotask(() => discovery.session.emit('Target.receivedMessageFromTarget', {
+          sessionId: params.sessionId,
+          message: JSON.stringify({id, result: {}})
+        }));
+      }
+      return {};
+    };
+    const {networkObserver} = createWorkerNetworkObserverHarness(observer, 'contract-test', {pageErrorAssetResolver: resolver});
+    const blobUrl = 'blob:https://telegramd.test/44444444-4444-4444-4444-444444444444';
+    const pageErrors = {alice: [], bob: []} as any;
+    await discovery.registry.launch(discovery.browser);
+    await networkObserver.start(discovery.registry);
+
+    try {
+      resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'contract-test-page');
+      discovery.session.emit('Target.targetCreated', {
+        targetInfo: {
+          targetId: 'mtproto-worker-target',
+          type: 'shared_worker',
+          url: blobUrl,
+          parentId: 'contract-test-page',
+          browserContextId: 'contract-test'
+        }
+      });
+      await discovery.registry.waitForSetup();
+
+      const error = new TypeError(HOSTILE.phrase);
+      error.stack = `TypeError: ${HOSTILE.phrase}\n    at t (${blobUrl}:1:183)`;
+      recordPageError(pageErrors, 'alice', error, resolver);
+      const breakdown = summarizeGateBreakdown({pageErrors});
+      expect(breakdown.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'index.worker-AbCdEfGh.js'}]);
+      expect(JSON.stringify(breakdown)).not.toContain(blobUrl);
+      expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.phrase);
+    } finally {
+      await discovery.registry.stop();
+      await networkObserver.stop();
+      resolver.clear();
+    }
   });
 
   it('summarizes attribution for page errors beyond the detail limit', async() => {

@@ -31,6 +31,10 @@ const APP_CONTEXTS = observation.GATE_CONTEXTS;
 const NETWORK_RESOURCE_TYPES = observation.GATE_RESOURCE_TYPES;
 const NETWORK_OBSERVER_ERROR_KINDS = new Set(observation.GATE_OBSERVER_ERROR_KINDS);
 const PAGE_ERROR_CONSTRUCTORS = new Set(observation.GATE_PAGE_ERROR_CONSTRUCTORS);
+const PAGE_ERROR_BLOB_ASSET_LIMIT = 512;
+const PAGE_ERROR_BLOB_ASSET_HINTS = Object.freeze([
+  {pattern: /\bTLottieWasm\.createAnimation\b/, workerLabel: 'lottie_worker'}
+]);
 // Bottom-bar buttons that replace the composer, keyed by their English label.
 // Only the key is reported; the label never leaves the page.
 const CONTROL_BAR_LABELS = Object.freeze({
@@ -393,6 +397,7 @@ function createWorkerDiscovery() {
     if(!observer || retiredObservers.has(observer)) return;
     observer.registerTarget(targetInfo);
     if(observer.state.overflow) return;
+    networkSinks.get(observer)?.observeTarget?.(targetInfo);
     if(!currentOwner) {
       targetOwners.set(targetId, observer);
       unattributedTargets.delete(targetId);
@@ -524,6 +529,7 @@ function createWorkerDiscovery() {
         observer.registerTarget(targetInfo);
         unattributedTargets.delete(targetInfo.targetId);
         if(observer.state.overflow) continue;
+        networkSink?.observeTarget?.(targetInfo);
         targetOwners.set(targetInfo.targetId, observer);
         if(targetInfo.type === 'shared_worker') attachSharedWorker(observer, targetInfo);
       }
@@ -600,7 +606,7 @@ function createWorkerDiscovery() {
   };
 }
 
-function createNetworkObserver(page, contextName, contextObserver) {
+function createNetworkObserver(page, contextName, contextObserver, pageErrorAssetResolver) {
   const events = [];
   const gateEvents = [];
   const eventKeys = new Set();
@@ -768,6 +774,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
       releaseRejectedTarget(sessionId);
       return;
     }
+    pageErrorAssetResolver?.observeWorkerTarget(targetInfo);
     targets.set(sessionId, targetInfo);
     claimTarget(targetInfo.targetId, targetInfo.type, sessionId);
     const setup = (async() => {
@@ -831,6 +838,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
         recordError('invalid_worker_cdp_message', true);
         return;
       }
+      pageErrorAssetResolver?.observeRequest(params.request.url, params.initiator, params.type, targetId, source);
       record(targetId, source, params.type === 'WebSocket' ? 'websocket' : 'fetch', params.request.url, method, params.type);
     } else if(method === 'Network.webSocketCreated') {
       if(typeof params.url !== 'string') {
@@ -908,9 +916,11 @@ function createNetworkObserver(page, contextName, contextObserver) {
     // Page-session identity mapping only: the browser context this page lives
     // in is what attributes every browser-level shared worker to it.
     const info = await send('Target.getTargetInfo');
+    const pageTargetId = info?.targetInfo?.targetId;
     registry?.registerContext(info?.targetInfo?.browserContextId, contextObserver, {
       claimTarget,
       recordWorkerEvent,
+      observeTarget: (targetInfo) => pageErrorAssetResolver?.observeWorkerTarget(targetInfo),
       release: () => { released = true; }
     });
     cdp.on('Network.requestWillBeSent', (event) => {
@@ -918,6 +928,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
       const kind = event.type === 'WebSocket' ? 'websocket' : 'fetch';
       notePageEvent('Network.requestWillBeSent', event);
       if(observerClosed()) return;
+      pageErrorAssetResolver?.observeRequest(event.request.url, event.initiator, event.type, pageTargetId);
       record('page', 'page', kind, event.request.url, 'Network.requestWillBeSent', event.type);
     });
     cdp.on('Network.responseReceived', (event) => {
@@ -2141,7 +2152,7 @@ function pageErrorConstructorName(error) {
   return PAGE_ERROR_CONSTRUCTORS.has(name) ? name : 'Error';
 }
 
-function pageErrorScriptAsset(stack) {
+function pageErrorScriptAsset(stack, blobAssets = new Map(), resolveBlobAsset) {
   if(typeof stack !== 'string') return 'unknown';
   for(const line of stack.split('\n').slice(1)) {
     const match = /(?:\(|\s)(https?:\/\/[^\s)]+|blob:[^\s)]+)/.exec(line);
@@ -2154,17 +2165,136 @@ function pageErrorScriptAsset(stack) {
       continue;
     }
     if(!['http:', 'https:', 'blob:'].includes(parsed.protocol)) continue;
+    if(parsed.protocol === 'blob:') {
+      const mappedAsset = blobAssets.get(parsed.href);
+      if(typeof mappedAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(mappedAsset)) return mappedAsset;
+      if(parsed.origin === PRIVATE_CSP_ORIGIN && typeof resolveBlobAsset === 'function') {
+        const resolvedAsset = resolveBlobAsset(stack);
+        if(typeof resolvedAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(resolvedAsset)) {
+          blobAssets.set(parsed.href, resolvedAsset);
+          return resolvedAsset;
+        }
+      }
+      continue;
+    }
     const asset = path.posix.basename(parsed.pathname);
     if(observation.SCRIPT_ASSET_PATTERN.test(asset)) return asset;
   }
   return 'unknown';
 }
 
-function recordPageError(pageErrors, contextName, error) {
+function createPageErrorAssetResolver() {
+  const blobAssets = new Map();
+  const workerAssetCandidates = [];
+  const directWorkerAssets = new Map();
+  const workerBlobUrls = new Map();
+  function pageErrorWorkerAsset(stack) {
+    const hint = PAGE_ERROR_BLOB_ASSET_HINTS.find(({pattern}) => pattern.test(stack));
+    const matchingCandidates = workerAssetCandidates.filter((candidate) =>
+      hint ? candidate.workerLabel === hint.workerLabel : Date.now() - candidate.observedAt <= 30_000
+    );
+    // A specific stack hint narrows lifetime evidence; otherwise require a fresh fetch.
+    const assets = new Set(matchingCandidates.map((candidate) => candidate.asset));
+    return assets.size === 1 ? assets.values().next().value : undefined;
+  }
+  function takeWorkerAssetCandidate(sourceTargetId) {
+    const sourceCandidates = typeof sourceTargetId === 'string'
+      ? workerAssetCandidates.filter((candidate) => candidate.sourceTargetId === sourceTargetId)
+      : [];
+    const sourceCorrelated = sourceCandidates.length > 0;
+    const candidates = sourceCorrelated ? sourceCandidates : workerAssetCandidates.filter((candidate) =>
+      !candidate.consumed && Date.now() - candidate.observedAt <= 30_000
+    );
+    const assets = new Set(candidates.map((candidate) => candidate.asset));
+    if(assets.size !== 1) return;
+    const source = candidates[0];
+    if(!sourceCorrelated) source.consumed = true;
+    return source;
+  }
+  return {
+    observeRequest(url, _initiator, requestType, sourceTargetId, sourceType = 'page') {
+      let parsed;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return;
+      }
+      if(parsed.protocol !== 'blob:') {
+        const workerLabel = observation.labelForPathname(parsed.pathname);
+        const asset = path.posix.basename(parsed.pathname);
+        if(parsed.origin === PRIVATE_CSP_ORIGIN && workerLabel && workerLabel !== 'service_worker' && !workerLabel.startsWith('probe_')) {
+          if(sourceType !== 'page' && typeof sourceTargetId === 'string' && observation.SCRIPT_ASSET_PATTERN.test(asset)) {
+            if(directWorkerAssets.size >= PAGE_ERROR_BLOB_ASSET_LIMIT && !directWorkerAssets.has(sourceTargetId)) {
+              directWorkerAssets.delete(directWorkerAssets.keys().next().value);
+            }
+            directWorkerAssets.set(sourceTargetId, {asset, observedAt: Date.now()});
+            const targetBlobUrl = workerBlobUrls.get(sourceTargetId);
+            if(targetBlobUrl) blobAssets.set(targetBlobUrl, asset);
+          }
+          if(requestType === 'Fetch' && typeof sourceTargetId === 'string' && observation.SCRIPT_ASSET_PATTERN.test(asset)) {
+            if(workerAssetCandidates.length >= PAGE_ERROR_BLOB_ASSET_LIMIT) workerAssetCandidates.shift();
+            workerAssetCandidates.push({sourceTargetId, asset, workerLabel, observedAt: Date.now(), consumed: false});
+          }
+        }
+        return;
+      }
+      if(parsed.origin !== PRIVATE_CSP_ORIGIN || blobAssets.has(parsed.href)) return;
+      const directWorkerAsset = sourceType !== 'page' && directWorkerAssets.get(sourceTargetId)?.asset;
+      const fetchedWorkerAsset = !directWorkerAsset && requestType === 'Script' ? takeWorkerAssetCandidate(sourceTargetId)?.asset : undefined;
+      // Initiator frames identify the loader, not the script stored in the blob.
+      const asset = directWorkerAsset || fetchedWorkerAsset;
+      if(!asset || blobAssets.size >= PAGE_ERROR_BLOB_ASSET_LIMIT) return;
+      blobAssets.set(parsed.href, asset);
+    },
+    observeWorkerTarget(targetInfo) {
+      const targetType = targetInfo?.type;
+      const sourceTargetId = targetInfo?.parentId || targetInfo?.openerId;
+      if(!['shared_worker', 'worker'].includes(targetType) || typeof targetInfo?.url !== 'string') return;
+      let parsed;
+      try {
+        parsed = new URL(targetInfo.url);
+      } catch {
+        return;
+      }
+      if(['http:', 'https:'].includes(parsed.protocol) && parsed.origin === PRIVATE_CSP_ORIGIN &&
+          observation.labelForPathname(parsed.pathname) && observation.SCRIPT_ASSET_PATTERN.test(path.posix.basename(parsed.pathname)) &&
+          typeof targetInfo.targetId === 'string') {
+        if(directWorkerAssets.size >= PAGE_ERROR_BLOB_ASSET_LIMIT && !directWorkerAssets.has(targetInfo.targetId)) {
+          directWorkerAssets.delete(directWorkerAssets.keys().next().value);
+        }
+        directWorkerAssets.set(targetInfo.targetId, {asset: path.posix.basename(parsed.pathname), observedAt: Date.now()});
+        return;
+      }
+      if(parsed.protocol === 'blob:' && parsed.origin === PRIVATE_CSP_ORIGIN) {
+        if(blobAssets.has(parsed.href)) return;
+        if(typeof targetInfo.targetId === 'string') {
+          if(workerBlobUrls.size >= PAGE_ERROR_BLOB_ASSET_LIMIT && !workerBlobUrls.has(targetInfo.targetId)) {
+            workerBlobUrls.delete(workerBlobUrls.keys().next().value);
+          }
+          workerBlobUrls.set(targetInfo.targetId, parsed.href);
+        }
+        const directSource = sourceTargetId && directWorkerAssets.get(sourceTargetId);
+        const source = directSource || takeWorkerAssetCandidate(sourceTargetId);
+        if(source && blobAssets.size < PAGE_ERROR_BLOB_ASSET_LIMIT) blobAssets.set(parsed.href, source.asset);
+      }
+    },
+    scriptAsset(stack) {
+      return pageErrorScriptAsset(stack, blobAssets, pageErrorWorkerAsset);
+    },
+    clear() {
+      blobAssets.clear();
+      workerAssetCandidates.length = 0;
+      directWorkerAssets.clear();
+      workerBlobUrls.clear();
+    }
+  };
+}
+
+function recordPageError(pageErrors, contextName, error, pageErrorAssetResolver) {
   if(!APP_CONTEXTS.includes(contextName) || !Array.isArray(pageErrors?.[contextName])) return;
   pageErrors[contextName].push({
     constructorName: pageErrorConstructorName(error),
-    scriptAsset: pageErrorScriptAsset(error?.stack)
+    scriptAsset: pageErrorAssetResolver?.scriptAsset(error?.stack) || pageErrorScriptAsset(error?.stack)
   });
 }
 
@@ -2396,6 +2526,7 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
   const actionCounts = {usernameSubmissions: 0};
   const passwordEvidence = [];
   const pageErrors = {alice: [], bob: []};
+  const pageErrorAssets = {alice: createPageErrorAssetResolver()};
   const createContextObserver = dependencies.createContextObserver || observation.createContextObserver;
   const createAppNetworkObserver = dependencies.createNetworkObserver || createNetworkObserver;
   const submitUsername = dependencies.submitUsernameOnceAndWaitForPassword || submitUsernameOnceAndWaitForPassword;
@@ -2410,12 +2541,12 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
     alice.page = await alice.context.newPage();
     alice.observer = createContextObserver('alice', {observeWebSocket101: true, webSocket101Phase});
     appObservers.alice = alice.observer;
-    alice.networkObserver = createAppNetworkObserver(alice.page, 'alice', alice.observer);
+    alice.networkObserver = createAppNetworkObserver(alice.page, 'alice', alice.observer, pageErrorAssets.alice);
     appNetworkObservers.alice = alice.networkObserver;
     observers.push(alice.networkObserver);
     await alice.networkObserver.start(registry);
 
-    alice.page.on('pageerror', (error) => recordPageError(pageErrors, 'alice', error));
+    alice.page.on('pageerror', (error) => recordPageError(pageErrors, 'alice', error, pageErrorAssets.alice));
     await submitUsername(
       alice.page,
       runtimeConfig.accounts[0],
@@ -2490,6 +2621,7 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
       screenshotDirectory: runtimeConfig.screenshotDirectory,
       cleanupIssues
     });
+    Object.values(pageErrorAssets).forEach((resolver) => resolver.clear());
   }
 
   return {report, cleanupFailed};
@@ -2506,6 +2638,7 @@ async function main(dependencies = {}) {
   const actionCounts = {usernameSubmissions: 0};
   const passwordEvidence = [];
   const pageErrors = {alice: [], bob: []};
+  const pageErrorAssets = Object.fromEntries(APP_CONTEXTS.map((name) => [name, createPageErrorAssetResolver()]));
   const cleanupIssues = [];
   let cleanupFailed = false;
   let authProgressCleanupHandled = false;
@@ -2587,12 +2720,12 @@ async function main(dependencies = {}) {
     alice.page = await alice.context.newPage();
     alice.observer = observation.createContextObserver('alice');
     appObservers.alice = alice.observer;
-    alice.networkObserver = createNetworkObserver(alice.page, 'alice', alice.observer);
+    alice.networkObserver = createNetworkObserver(alice.page, 'alice', alice.observer, pageErrorAssets.alice);
     appNetworkObservers.alice = alice.networkObserver;
     observers.push(alice.networkObserver);
     await alice.networkObserver.start(registry);
 
-    alice.page.on('pageerror', (error) => recordPageError(pageErrors, 'alice', error));
+    alice.page.on('pageerror', (error) => recordPageError(pageErrors, 'alice', error, pageErrorAssets.alice));
     await countClientErrors(alice.page);
 
     currentStage = 'bob_context';
@@ -2601,12 +2734,12 @@ async function main(dependencies = {}) {
     bob.page = await bob.context.newPage();
     bob.observer = observation.createContextObserver('bob');
     appObservers.bob = bob.observer;
-    bob.networkObserver = createNetworkObserver(bob.page, 'bob', bob.observer);
+    bob.networkObserver = createNetworkObserver(bob.page, 'bob', bob.observer, pageErrorAssets.bob);
     appNetworkObservers.bob = bob.networkObserver;
     observers.push(bob.networkObserver);
     await bob.networkObserver.start(registry);
 
-    bob.page.on('pageerror', (error) => recordPageError(pageErrors, 'bob', error));
+    bob.page.on('pageerror', (error) => recordPageError(pageErrors, 'bob', error, pageErrorAssets.bob));
     await countClientErrors(bob.page);
 
     currentScenario = 'sign-in';
@@ -2774,7 +2907,9 @@ async function main(dependencies = {}) {
         ...(groupMember ? {groupMember} : {}),
         ...(groupMessage ? {groupMessage} : {}),
         ...(currentStage === 'browser_egress_or_page_errors'
-          ? {gateBreakdown: gateBreakdown || summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors})}
+          ? {
+            gateBreakdown: gateBreakdown || summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors}),
+          }
           : {}),
         // On failure the closed-schema evidence is still the point, validated the
         // same way: any schema violation collapses it to `unclassified`.
@@ -2795,6 +2930,7 @@ async function main(dependencies = {}) {
         cleanupIssues
       });
     }
+    Object.values(pageErrorAssets).forEach((resolver) => resolver.clear());
     if(runtime?.authProgressOneSubmission === true) {
       (dependencies.emitAuthProgressReport || emitAuthProgressReport)(report, cleanupFailed);
     } else {
@@ -2828,7 +2964,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
