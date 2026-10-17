@@ -204,6 +204,7 @@ describe('deployment artifact verification', () => {
 
   it('verifies the artifact before copying it into the Node-free serving image', () => {
     const dockerfile = readFileSync(resolve('deploy/teagram-web/Dockerfile'), 'utf8');
+    const dockerignore = readFileSync(resolve('deploy/teagram-web/Dockerfile.dockerignore'), 'utf8');
     const verifyStep = dockerfile.indexOf('RUN node scripts/verify-deployment-artifact.mjs');
     const servingStage = dockerfile.indexOf('FROM nginx:');
 
@@ -214,6 +215,22 @@ describe('deployment artifact verification', () => {
     expect(dockerfile).toContain('COPY public/assets/img/emoji/ public/assets/img/emoji/');
     expect(dockerfile).toContain('COPY --from=artifact-verification /workspace/dist-private/ /usr/share/nginx/html/');
     expect(dockerfile).not.toContain('COPY public/ ');
+    for(const path of [
+      '!src/',
+      '!src/lib/',
+      '!src/lib/lottie/',
+      '!src/lib/lottie/lottieLoader.ts',
+      '!public/',
+      '!public/assets/',
+      '!public/assets/audio/',
+      '!public/assets/audio/**',
+      '!public/assets/img/',
+      '!public/assets/img/emoji/',
+      '!public/assets/img/emoji/**'
+    ]) {
+      expect(dockerignore).toContain(path);
+    }
+    expect(dockerignore).not.toContain('!public/assets/**');
     expect(readFileSync(resolve('.github/workflows/deployment-stack-checks.yml'), 'utf8'))
     .toContain('docker exec "$container_name" node --version');
   });
