@@ -4,7 +4,22 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 deploy_script="$repo_root/deploy/teagram-web/deploy-main.sh"
 tmp="$(mktemp -d)"
-trap 'rm -rf -- "$tmp"' EXIT
+lock_file="$tmp/telegram-web-deploy.lock"
+real_flock="$(command -v flock)"
+real_sleep="$(command -v sleep)"
+deploy_pid=
+lock_held=false
+
+cleanup() {
+  if [[ "$lock_held" == true ]]; then
+    "$real_flock" -u 8 || true
+  fi
+  if [[ -n "$deploy_pid" ]]; then
+    wait "$deploy_pid" || true
+  fi
+  rm -rf -- "$tmp"
+}
+trap cleanup EXIT
 
 fail() {
   printf '%s\n' "$*" >&2
@@ -18,7 +33,8 @@ fail() {
   fail 'expected one fixed deployment root in deploy-main.sh'
 [[ "$(grep -Fxc 'RECORD_ROOT=/root' "$deploy_script")" == 1 ]] ||
   fail 'expected one fixed release-record root in deploy-main.sh'
-[[ "$(grep -Fxc 'LOCK_FILE=/tmp/teagram-web-deploy.lock' "$deploy_script")" == 1 ]] ||
+[[ -n "$real_flock" && -n "$real_sleep" ]] || fail 'flock and sleep are required for the lock test'
+[[ "$(grep -Fxc 'LOCK_FILE=/tmp/telegram-web-deploy.lock' "$deploy_script")" == 1 ]] ||
   fail 'expected one fixed deployment lock path in deploy-main.sh'
 
 deploy_root="$tmp/root"
@@ -27,6 +43,8 @@ mock_bin="$tmp/bin"
 archive_root="$tmp/archive"
 state_root="$tmp/state"
 docker_log="$tmp/docker.log"
+git_log="$tmp/git.log"
+flock_entered="$tmp/flock-entered"
 deploy_sha=1111111111111111111111111111111111111111
 live_sha=2222222222222222222222222222222222222222
 live_project=telegram-web-edge
@@ -52,6 +70,7 @@ done
 cat >"$mock_bin/git" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >>"$TEST_GIT_LOG"
 
 if [[ "${1:-}" == -C ]]; then
   checkout_root=$2
@@ -223,6 +242,12 @@ cat >"$mock_bin/sleep" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
+cat >"$mock_bin/flock" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+: >"$TEST_FLOCK_ENTERED"
+exec "$TEST_REAL_FLOCK" "$@"
+SH
 cat >"$mock_bin/unzip" <<'PY'
 #!/usr/bin/env python3
 import sys
@@ -239,7 +264,7 @@ else:
     sys.exit(2)
 PY
 chmod +x "$mock_bin/git" "$mock_bin/docker" "$mock_bin/curl" "$mock_bin/id" \
-  "$mock_bin/sleep" "$mock_bin/unzip"
+  "$mock_bin/sleep" "$mock_bin/flock" "$mock_bin/unzip"
 
 printf 'true\n' >"$state_root/old-exists"
 printf 'true\n' >"$state_root/old-running"
@@ -247,6 +272,7 @@ printf 'false\n' >"$state_root/new-exists"
 printf 'false\n' >"$state_root/new-running"
 printf '%s\n' "$live_project" >"$state_root/active-project"
 : >"$docker_log"
+: >"$git_log"
 
 artifact_dir="$tmp/artifact"
 mkdir -p "$artifact_dir"
@@ -265,20 +291,43 @@ test_script="$tmp/deploy-main.sh"
 sed \
   -e "s|^ROOT=/opt/telegram-web$|ROOT=$deploy_root|" \
   -e "s|^RECORD_ROOT=/root$|RECORD_ROOT=$record_root|" \
-  -e "s|^LOCK_FILE=/tmp/teagram-web-deploy.lock$|LOCK_FILE=$tmp/deploy.lock|" \
+  -e "s|^LOCK_FILE=/tmp/telegram-web-deploy.lock$|LOCK_FILE=$lock_file|" \
   "$deploy_script" >"$test_script"
 chmod +x "$test_script"
 
 export PATH="$mock_bin:$PATH"
 export TEST_DEPLOY_ROOT="$deploy_root" TEST_STATE_ROOT="$state_root" TEST_DOCKER_LOG="$docker_log"
+export TEST_GIT_LOG="$git_log" TEST_FLOCK_ENTERED="$flock_entered" TEST_REAL_FLOCK="$real_flock"
 export TEST_ARCHIVE_ROOT="$archive_root" TEST_DEPLOY_SHA="$deploy_sha" TEST_LIVE_SHA="$live_sha"
 export TEST_LIVE_PROJECT="$live_project"
 export TEST_ARTIFACT_DIGEST="$artifact_digest"
 export DEPLOY_SHA="$deploy_sha" DEPLOY_ARTIFACT="$artifact"
 
-if bash "$test_script" >"$tmp/deploy.log" 2>&1; then
+exec 8>"$lock_file"
+"$real_flock" -x 8
+lock_held=true
+bash "$test_script" >"$tmp/deploy.log" 2>&1 &
+deploy_pid=$!
+
+for attempt in {1..100}; do
+  [[ -e "$flock_entered" ]] && break
+  "$real_sleep" 0.01
+done
+[[ -e "$flock_entered" ]] || fail 'deployment did not reach flock'
+"$real_sleep" 0.1
+kill -0 "$deploy_pid" 2>/dev/null || fail 'deployment exited while the legacy lock was held'
+[[ ! -s "$git_log" && ! -s "$docker_log" ]] ||
+  fail 'deployment progressed past the legacy lock while it was held'
+
+"$real_flock" -u 8
+lock_held=false
+if wait "$deploy_pid"; then
   fail 'the simulated new project unexpectedly became healthy'
+else
+  deploy_status=$?
 fi
+deploy_pid=
+[[ "$deploy_status" != 0 ]] || fail 'the deployment unexpectedly succeeded'
 grep -Fq "deploy failed; rolling back to $live_sha" "$tmp/deploy.log" ||
   fail 'the deployment failure did not start rollback'
 grep -Fq "rollback restored $live_sha" "$tmp/deploy.log" ||

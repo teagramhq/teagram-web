@@ -7,7 +7,8 @@ SHA=${DEPLOY_SHA:-}
 ARTIFACT=${DEPLOY_ARTIFACT:-}
 ROOT=/opt/telegram-web
 RECORD_ROOT=/root
-LOCK_FILE=/tmp/teagram-web-deploy.lock
+# Keep the pre-rename lock path so in-flight old deploys stay serialized.
+LOCK_FILE=/tmp/telegram-web-deploy.lock
 BASE_URL=http://127.0.0.1:8080
 BACKUP_ROOT="$ROOT/backups"
 WORK_DIR=
