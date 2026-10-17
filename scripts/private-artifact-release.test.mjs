@@ -36,7 +36,9 @@ import {verifyPublishedArtifact} from './private-artifact-publish-verify.mjs';
 import {
   PRIVATE_BACKGROUND_ASSETS,
   PRIVATE_FONT_ASSETS,
+  auditPrivateArtifact,
   assertPrivateFontAssetName,
+  createPrivateArtifactPlugin,
   includePrivateArtifactBackground,
   includePrivateArtifactFonts,
   privateContentSecurityPolicy,
@@ -477,6 +479,65 @@ function temporaryArtifact(indexDocument) {
   return directory;
 }
 
+describe('private artifact runtime public assets', () => {
+  it('copies runtime assets from public/assets without shipping public build output', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-public-assets-'));
+    temporaryDirectories.push(directory);
+    createArtifactShell(directory);
+
+    const plugin = createPrivateArtifactPlugin(repositoryRoot, privateTarget);
+    plugin.writeBundle({dir: directory});
+
+    for(const name of ['TwoFactorSetupMonkeyPeek.json', 'UtyanSearch.json']) {
+      expect(readFileSync(join(directory, 'assets/tgs', name)))
+      .toEqual(readFileSync(join(repositoryRoot, 'public/assets/tgs', name)));
+    }
+    expect(readdirSync(join(directory, 'assets/tgs')).sort())
+    .toEqual(readdirSync(join(repositoryRoot, 'public/assets/tgs')).sort());
+    expect(readdirSync(join(directory, 'assets/audio')).sort())
+    .toEqual(readdirSync(join(repositoryRoot, 'public/assets/audio')).sort());
+    expect(readdirSync(join(directory, 'assets/img/emoji')))
+    .toHaveLength(readdirSync(join(repositoryRoot, 'public/assets/img/emoji')).length);
+    for(const name of [
+      'browserconfig.xml',
+      'decoderWorker.min.js',
+      'decoderWorker.min.wasm',
+      'encoderWorker.min.js',
+      'encoderWorker.min.wasm',
+      'site.webmanifest',
+      'site_apple.webmanifest'
+    ]) {
+      expect(readFileSync(join(directory, name)))
+      .toEqual(readFileSync(join(repositoryRoot, 'public', name)));
+    }
+    expect(existsSync(join(directory, '2fa-BUUOUtCK.js'))).toBe(false);
+    expect(existsSync(join(directory, '2fa-BUUOUtCK.js.map'))).toBe(false);
+    expect(existsSync(join(directory, 'snapshot.html'))).toBe(false);
+    expect(readdirSync(directory).filter((name) => name.endsWith('.map'))).toEqual([]);
+  });
+
+  it('rejects an artifact whose client references a missing public asset', () => {
+    const directory = temporaryArtifact();
+    writeFileSync(join(directory, 'client.js'), [
+      `const endpoint = ${JSON.stringify(privateTarget.endpoint)};`,
+      `const fingerprint = ${JSON.stringify(privateTarget.fingerprint)};`,
+      `fetch('assets/tgs/UtyanSearch.json');`
+    ].join('\n'));
+
+    expect(() => auditPrivateArtifact(directory, privateTarget))
+    .toThrow(/runtime public asset.*assets\/tgs\/UtyanSearch\.json/i);
+  });
+
+  it('runs the runtime public asset audit in both private artifact workflows', () => {
+    const workflow = readFileSync(privateArtifactWorkflowPath, 'utf8');
+    for(const jobName of ['private-pull-request', 'private-build']) {
+      const job = privateWorkflowJob(workflow, jobName);
+      expect(privateWorkflowStep(job, 'Audit runtime public assets'))
+      .toContain('pnpm run check:private-artifact-assets -- dist-private');
+    }
+  });
+});
+
 function temporaryOutputPath() {
   const directory = mkdtempSync(join(tmpdir(), 'private-artifact-release-output-'));
   temporaryDirectories.push(directory);
@@ -884,7 +945,7 @@ describe('private artifact background', () => {
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
 
     expect(() => verifyPrivateArtifactManifest(directory, privateTarget))
-    .toThrow(/background image output does not match the reviewed allowlist/i);
+    .toThrow(/unreviewed or non-static runtime asset assets\/img\/x\.svg/i);
   });
 });
 

@@ -54,6 +54,10 @@ try {
     resolve(ROOT_DIRECTORY, 'scripts/check-bundle-mangling.mjs'),
     outputDirectory
   ], builderEnvironment());
+  const runtimeAssetsOutput = run(process.execPath, [
+    resolve(ROOT_DIRECTORY, 'scripts/check-private-artifact-assets.mjs'),
+    outputDirectory
+  ], builderEnvironment());
   const manifest = verifyPrivateArtifactManifest(outputDirectory, target);
   verifyPrivateArtifactCsp(outputDirectory, target.endpoint);
   const head = execFileSync('git', ['rev-parse', 'HEAD'], {
@@ -72,7 +76,8 @@ try {
     `[private-artifact] sourceCommit=${manifest.sourceCommit}`,
     `[private-artifact] artifactDigest=${manifest.artifactDigest}`,
     '[private-artifact] audit=source maps and directives, alternate WSS and cleartext WS, official MTProto routes and IPv4/IPv6 DC addresses, official RSA fingerprints and moduli, private-key blocks',
-    auditOutput.trimEnd()
+    auditOutput.trimEnd(),
+    runtimeAssetsOutput.trimEnd()
   ].join('\n') + '\n');
 } catch(error) {
   process.stderr.write((error instanceof Error ? error.message : String(error)) + '\n');
