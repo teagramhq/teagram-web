@@ -1864,16 +1864,18 @@ function failGroupMemberStep(stage, error) {
 }
 
 function safeActionabilityElement(markup) {
-  const tag = typeof markup === 'string' ? markup.match(/^<([a-z][a-z0-9-]*)\b/i)?.[1]?.toLowerCase() : undefined;
+  const openingTag = typeof markup === 'string' ? markup.match(/^<([a-z][a-z0-9-]*)\b([^>]*)>/i) : undefined;
+  const tag = openingTag?.[1]?.toLowerCase();
   if(!tag) return null;
-  const className = markup.match(/\bclass=(['"])(.*?)\1/i)?.[2] || '';
+  const className = openingTag[2].match(/\bclass=(['"])(.*?)\1/i)?.[2] || '';
   const classes = className.split(/\s+/).filter((name) => /^[A-Za-z0-9_-]{1,80}$/.test(name)).slice(0, 16);
   return {tag, classes};
 }
 
 function readMembersTabActionability(error) {
   const message = typeof error?.message === 'string' ? error.message : '';
-  const interception = message.match(/(<[a-z][^>]*>(?:<\/[a-z][^>]*>)?)(?: from <[a-z][^>]*> subtree)? intercepts pointer events/i);
+  const plainMessage = message.replace(/\u001b\[[0-9;]*m/g, '');
+  const interception = plainMessage.match(/(?:^|\n)[ \t]*(?:-[ \t]*)?(<[a-z][^>]*>(?:.*?<\/[a-z][^>]*>)?)(?: from <[a-z][^>]*>(?:.*?<\/[a-z][^>]*>)? subtree)? intercepts pointer events/im);
   if(interception) {
     return {reason: 'intercepted', interceptedBy: safeActionabilityElement(interception[1])};
   }

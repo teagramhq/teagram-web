@@ -4329,6 +4329,7 @@ describe('real client group created', () => {
           const interceptor = document.createElement('div');
           interceptor.className = 'member-tab-click-interceptor';
           interceptor.style.cssText = 'position:fixed;inset:0;z-index:9999';
+          interceptor.innerHTML = '<span class="member-tab-interceptor-child" style="display:block;position:fixed;inset:0">Loading</span>';
           document.body.append(interceptor);
         }
       });
@@ -4568,13 +4569,15 @@ describe('real client group created', () => {
           target: {index: 1, tag: 'div', classes: ['menu-horizontal-div-item']},
           paired: true,
           actionabilityReason: 'intercepted',
-          interceptedBy: {tag: 'div', classes: ['member-tab-click-interceptor']}
+          interceptedBy: {tag: 'span', classes: ['member-tab-interceptor-child']}
         }
       });
       expect(realClientContract.parseGroupMemberState(state)).toEqual(state);
       const summary = formatBrowserFailureMessage({status: 'failed', stage: 'bob_group_member_tab', groupMember: state});
       expect(summary).toContain('"actionabilityReason":"intercepted"');
-      expect(summary).toContain('"member-tab-click-interceptor"');
+      expect(summary).toContain('"member-tab-interceptor-child"');
+      expect(summary).not.toContain('member-tab-click-interceptor');
+      expect(summary).not.toContain('Loading');
       expectNoHostileLeak(summary);
       expect(summary).not.toContain(GROUP_NAME);
       expect(summary).not.toContain('1000002');
