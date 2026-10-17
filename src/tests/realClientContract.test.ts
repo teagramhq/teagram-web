@@ -1937,7 +1937,7 @@ describe('discovery shared-worker network accounting', () => {
     expectNoGateSecretLeak(report.gateBreakdown);
   });
 
-  it('attributes blob stack frames from their request initiator without persisting blob identifiers', async() => {
+  it('attributes blob stack frames from correlated worker evidence without persisting blob identifiers', async() => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const recordPageError = (realClientBrowser as any).recordPageError;
     const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
@@ -2011,8 +2011,8 @@ describe('discovery shared-worker network accounting', () => {
 
       const breakdown = summarizeGateBreakdown({pageErrors});
       const breakdownFromUrl = summarizeGateBreakdown({pageErrors: pageErrorsFromUrl});
-      expect(breakdown.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'index.worker-AbCdEfGh.js'}]);
-      expect(breakdownFromUrl.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'index.worker-AbCdEfGh.js'}]);
+      expect(breakdown.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'unknown'}]);
+      expect(breakdownFromUrl.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'unknown'}]);
       expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.blobUrl);
       expect(JSON.stringify(breakdown)).not.toContain(blobFromUrl);
       expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.phrase);
@@ -2117,6 +2117,27 @@ describe('discovery shared-worker network accounting', () => {
     }
   });
 
+  it('does not cache a main-bundle initiator when page worker fetches are ambiguous', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    const pageTargetId = 'shared-page-target';
+    const blobUrl = 'blob:https://telegramd.test/12121212-1212-1212-1212-121212121212';
+
+    try {
+      resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', pageTargetId);
+      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', pageTargetId);
+      resolver.observeRequest(blobUrl, {
+        type: 'script',
+        stack: {callFrames: [{url: `${APP_ORIGIN}/main-QqRrSsTt.js`}]}
+      }, 'Script', pageTargetId);
+
+      const lottieStack = `Error: failed\n    at TLottieWasm.createAnimation (${blobUrl}:1197:23)\n    at TLottieItem.init (${blobUrl}:1328:35)`;
+      expect(resolver.scriptAsset(lottieStack)).toBe('tlottie.worker-JkLmNoPq.js');
+    } finally {
+      resolver.clear();
+    }
+  });
+
   it('keeps lifetime attribution for hinted stacks and expires unhinted fallback', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
@@ -2136,7 +2157,7 @@ describe('discovery shared-worker network accounting', () => {
     }
   });
 
-  it('uses the initiator when an unmatched blob only has stale worker evidence', () => {
+  it('does not map an unmatched blob from stale worker or loader evidence', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
     const blobUrl = 'blob:https://telegramd.test/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
@@ -2150,7 +2171,7 @@ describe('discovery shared-worker network accounting', () => {
         stack: {callFrames: [{url: `${APP_ORIGIN}/main-QqRrSsTt.js`}]}
       }, 'Script', 'unmatched-worker', 'dedicated_worker');
 
-      expect(resolver.scriptAsset(`Error: failed\n    at render (${blobUrl}:1:183)`)).toBe('main-QqRrSsTt.js');
+      expect(resolver.scriptAsset(`Error: failed\n    at render (${blobUrl}:1:183)`)).toBe('unknown');
     } finally {
       resolver.clear();
       vi.useRealTimers();

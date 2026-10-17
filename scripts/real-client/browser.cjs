@@ -2183,33 +2183,6 @@ function pageErrorScriptAsset(stack, blobAssets = new Map(), resolveBlobAsset) {
   return 'unknown';
 }
 
-function pageErrorAssetFromUrl(value, blobAssets) {
-  if(typeof value !== 'string') return undefined;
-  let parsed;
-  try {
-    parsed = new URL(value);
-  } catch {
-    return undefined;
-  }
-  if(parsed.protocol === 'blob:') return blobAssets.get(parsed.href);
-  if(!['http:', 'https:'].includes(parsed.protocol)) return undefined;
-  const asset = path.posix.basename(parsed.pathname);
-  return observation.SCRIPT_ASSET_PATTERN.test(asset) ? asset : undefined;
-}
-
-function firstInitiatorAsset(stack, blobAssets) {
-  let current = stack;
-  let depth = 0;
-  while(current && typeof current === 'object' && depth++ < 32) {
-    for(const frame of (Array.isArray(current.callFrames) ? current.callFrames : []).slice(0, 128)) {
-      const asset = pageErrorAssetFromUrl(frame?.url, blobAssets);
-      if(asset) return asset;
-    }
-    current = current.parent;
-  }
-  return undefined;
-}
-
 function createPageErrorAssetResolver() {
   const blobAssets = new Map();
   const workerAssetCandidates = [];
@@ -2239,7 +2212,7 @@ function createPageErrorAssetResolver() {
     return source;
   }
   return {
-    observeRequest(url, initiator, requestType, sourceTargetId, sourceType = 'page') {
+    observeRequest(url, _initiator, requestType, sourceTargetId, sourceType = 'page') {
       let parsed;
       try {
         parsed = new URL(url);
@@ -2268,8 +2241,8 @@ function createPageErrorAssetResolver() {
       if(parsed.origin !== PRIVATE_CSP_ORIGIN || blobAssets.has(parsed.href)) return;
       const directWorkerAsset = sourceType !== 'page' && directWorkerAssets.get(sourceTargetId)?.asset;
       const fetchedWorkerAsset = !directWorkerAsset && requestType === 'Script' ? takeWorkerAssetCandidate(sourceTargetId)?.asset : undefined;
-      const asset = directWorkerAsset || fetchedWorkerAsset || firstInitiatorAsset(initiator?.stack, blobAssets) ||
-        pageErrorAssetFromUrl(initiator?.url, blobAssets);
+      // Initiator frames identify the loader, not the script stored in the blob.
+      const asset = directWorkerAsset || fetchedWorkerAsset;
       if(!asset || blobAssets.size >= PAGE_ERROR_BLOB_ASSET_LIMIT) return;
       blobAssets.set(parsed.href, asset);
     },
