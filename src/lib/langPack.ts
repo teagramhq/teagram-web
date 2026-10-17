@@ -805,7 +805,14 @@ export function handleStateCleared() {
 
 export async function checkLangPackForUpdates() {
   const storedLangPack = await I18n.getCacheLangPack();
-  const difference = await rootScope.managers.appLangPackManager.getDifference(storedLangPack.lang_code, storedLangPack.version);
+  let difference: LangPackDifference;
+  try {
+    difference = await rootScope.managers.appLangPackManager.getDifference(storedLangPack.lang_code, storedLangPack.version);
+  } catch(error) {
+    console.warn('Could not check for language pack updates', error);
+    return;
+  }
+
   if(difference.version > storedLangPack.version) {
     return handleUpdateLangPack({difference});
   }
