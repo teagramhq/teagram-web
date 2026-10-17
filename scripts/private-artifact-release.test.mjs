@@ -497,6 +497,12 @@ describe('private artifact runtime public assets', () => {
     .toEqual(readdirSync(join(repositoryRoot, 'public/assets/tgs')).sort());
     expect(readdirSync(join(directory, 'assets/audio')).sort())
     .toEqual(readdirSync(join(repositoryRoot, 'public/assets/audio')).sort());
+    expect(readdirSync(join(directory, 'changelogs')).sort())
+    .toEqual(readdirSync(join(repositoryRoot, 'public/changelogs')).sort());
+    for(const name of ['en_2.1.0.md', 'ru_2.1.0.md']) {
+      expect(readFileSync(join(directory, 'changelogs', name)))
+      .toEqual(readFileSync(join(repositoryRoot, 'public/changelogs', name)));
+    }
     expect(readdirSync(join(directory, 'assets/img/emoji')))
     .toHaveLength(readdirSync(join(repositoryRoot, 'public/assets/img/emoji')).length);
     for(const name of [
@@ -619,6 +625,18 @@ describe('private artifact runtime public assets', () => {
     expect(existsSync(join(outputEmojiDirectory, '1f600.png'))).toBe(false);
     expect(() => auditPrivateArtifactRuntimeAssets(directory, sourceRoot))
     .toThrow(/references a missing runtime public asset assets\/img\/emoji\/1f600\.png/i);
+  });
+
+  it('rejects a missing generated changelog referenced through a dynamic prefix', () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), 'private-artifact-missing-changelog-source-'));
+    temporaryDirectories.push(sourceRoot);
+    writeFileSync(join(sourceRoot, 'CHANGELOG.md'), '### 2.1.0 (491)\nUpdate details.\n');
+
+    const directory = temporaryArtifact();
+    writeFileSync(join(directory, 'client.js'), 'fetch(`changelogs/${lang}_${version}.md`);');
+
+    expect(() => auditPrivateArtifactRuntimeAssets(directory, sourceRoot))
+    .toThrow(/references a missing runtime public asset changelogs\/en_2\.1\.0\.md/i);
   });
 
   it('accepts pnpm’s argument separator before the output directory', () => {

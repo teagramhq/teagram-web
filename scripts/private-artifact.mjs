@@ -159,6 +159,7 @@ const PRIVATE_RUNTIME_ASSET_EXTENSIONS = new Set([
   '.jpeg',
   '.jpg',
   '.json',
+  '.md',
   '.mp3',
   '.png',
   '.svg',
@@ -167,10 +168,11 @@ const PRIVATE_RUNTIME_ASSET_EXTENSIONS = new Set([
   '.woff2'
 ]);
 const PRIVATE_EXCLUDED_PUBLIC_ASSET_EXTENSIONS = new Set(['.css', '.html', '.js', '.map', '.mjs']);
-const PRIVATE_RUNTIME_ASSET_REFERENCE_PATTERN = /(?:["'`])\/?(assets\/[^"'`?#\r\n]+)|url\(\s*["']?\/?(assets\/[^"'`\s)?#]+)["']?\s*\)/g;
+const PRIVATE_RUNTIME_ASSET_REFERENCE_PATTERN = /(?:["'`])\/?((?:assets|changelogs)\/[^"'`?#\r\n]+)|url\(\s*["']?\/?(assets\/[^"'`\s)?#]+)["']?\s*\)/g;
 const PRIVATE_ROOT_RUNTIME_ASSET_REFERENCE_PATTERN = /["'`](browserconfig\.xml|decoderWorker\.min\.js|decoderWorker\.min\.wasm|encoderWorker\.min\.js|encoderWorker\.min\.wasm|waveWorker\.min\.js|site(?:_apple)?\.webmanifest)(?:[?#][^"'`\s]*)?["'`]/g;
 const PRIVATE_RUNTIME_AUDIO_ASSET_NAME_PATTERN = /(['"`])([A-Za-z0-9_-]+\.mp3)\1/g;
 const PRIVATE_DYNAMIC_RUNTIME_ASSET_REFERENCE_PATTERNS = Object.freeze([
+  Object.freeze({name: 'changelogs', pattern: /["'`]changelogs\/(?=["'`]|\$\{)/}),
   Object.freeze({name: 'lottie', pattern: /["'`]assets\/tgs\/(?=["'`]|\$\{)/}),
   Object.freeze({name: 'audio', pattern: /["'`]assets\/audio\/(?=["'`]|\$\{)/}),
   Object.freeze({name: 'emoji', pattern: /["'`]assets\/img\/emoji\/(?=["'`]|\$\{)/}),
@@ -334,6 +336,9 @@ function isPrivateRuntimeAssetPath(relativePath) {
   if(!segments.every((segment) => segment && segment !== '.' && segment !== '..' && !segment.includes('\\'))) {
     return false;
   }
+  if(relativePath.startsWith('changelogs/')) {
+    return /^changelogs\/[A-Za-z0-9-]+_[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(relativePath);
+  }
   if(!relativePath.startsWith('assets/')) return PRIVATE_ROOT_RUNTIME_ASSETS.includes(relativePath);
 
   const assetPath = relativePath.slice('assets/'.length);
@@ -348,7 +353,7 @@ function isPrivateRuntimeAssetPath(relativePath) {
 }
 
 function isPrivateRuntimePublicAssetPath(relativePath) {
-  return /^assets\/(?:audio|fonts|img|tgs)\//.test(relativePath);
+  return /^(?:assets\/(?:audio|fonts|img|tgs)|changelogs)\//.test(relativePath);
 }
 
 function privateRuntimeAssetSourceFiles(rootDirectory) {
@@ -426,10 +431,100 @@ function privateRuntimeAssetSourceFiles(rootDirectory) {
     files.push([name, readFileSync(sourcePath)]);
   }
 
+  files.push(...privateChangelogSourceFiles(rootDirectory));
+
   if(!files.length) {
     invalidArtifact('runtime public asset source contains no supported files');
   }
   return files.sort(([left], [right]) => left.localeCompare(right));
+}
+
+function privateChangelogAssetNames(rootDirectory) {
+  let entries;
+  try {
+    entries = readdirSync(rootDirectory, {withFileTypes: true});
+  } catch{
+    invalidArtifact('CHANGELOG sources for runtime assets are missing or invalid');
+  }
+
+  const sources = entries.filter(({name}) => name.startsWith('CHANGELOG') && name.endsWith('.md'));
+  if(!sources.length) {
+    invalidArtifact('CHANGELOG sources for runtime assets are missing or invalid');
+  }
+
+  const names = new Set();
+  for(const entry of sources) {
+    if(entry.isSymbolicLink() || !entry.isFile()) {
+      invalidArtifact('CHANGELOG sources for runtime assets are missing or invalid');
+    }
+    const language = (entry.name.split('_')[1] || 'en').split('.')[0];
+    if(!/^[A-Za-z0-9-]+$/.test(language)) {
+      invalidArtifact('CHANGELOG sources for runtime assets are missing or invalid');
+    }
+
+    let contents;
+    try {
+      contents = readFileSync(resolve(rootDirectory, entry.name), 'utf8');
+    } catch{
+      invalidArtifact('CHANGELOG sources for runtime assets are missing or invalid');
+    }
+    const versions = [...contents.matchAll(/^### (\S+)/gm)].map(([, version]) => version);
+    if(!versions.length || versions.some((version) => !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(version))) {
+      invalidArtifact('CHANGELOG sources for runtime assets are missing or invalid');
+    }
+    for(const version of versions) names.add(`${language}_${version}.md`);
+  }
+
+  return [...names].sort();
+}
+
+function privateChangelogSourceFiles(rootDirectory) {
+  const sourceDirectory = resolve(rootDirectory, 'public/changelogs');
+  let stats;
+  try {
+    stats = lstatSync(sourceDirectory);
+  } catch(cause) {
+    if(cause?.code === 'ENOENT') {
+      invalidArtifact('generated changelog source directory is missing or invalid');
+    }
+    throw cause;
+  }
+  if(stats.isSymbolicLink() || !stats.isDirectory()) {
+    invalidArtifact('generated changelog source directory is missing or invalid');
+  }
+
+  const canonicalRootDirectory = realpathSync(rootDirectory);
+  const canonicalSourceDirectory = realpathSync(sourceDirectory);
+  if(canonicalSourceDirectory !== resolve(canonicalRootDirectory, 'public/changelogs')) {
+    invalidArtifact('generated changelog source directory escapes the repository root');
+  }
+
+  const names = privateChangelogAssetNames(rootDirectory);
+  const expectedNames = new Set(names);
+  const entries = readdirSync(sourceDirectory, {withFileTypes: true});
+  if(entries.length !== names.length || entries.some((entry) =>
+    !expectedNames.has(entry.name) || entry.isSymbolicLink() || !entry.isFile()
+  )) {
+    invalidArtifact('generated changelog output does not match its CHANGELOG sources');
+  }
+
+  return names.map((name) => {
+    const file = resolve(sourceDirectory, name);
+    const fileStats = lstatSync(file);
+    if(fileStats.isSymbolicLink() || !fileStats.isFile() || fileStats.size === 0) {
+      invalidArtifact(`generated changelog ${name} is missing, empty, or not a regular file`);
+    }
+    accessSync(file, constants.R_OK);
+    const canonicalFile = realpathSync(file);
+    if(dirname(canonicalFile) !== canonicalSourceDirectory || canonicalFile !== resolve(canonicalSourceDirectory, name)) {
+      invalidArtifact('generated changelog path escapes the approved directory');
+    }
+    const contents = readFileSync(file);
+    if(contents.length === 0) {
+      invalidArtifact(`generated changelog ${name} is empty`);
+    }
+    return [`changelogs/${name}`, contents];
+  });
 }
 
 function ensurePrivateRuntimeAssetOutputDirectory(artifactDirectory, relativeDirectory) {
@@ -662,7 +757,7 @@ function checkedPrivateRuntimeAssetPath(reference) {
     invalidArtifact('contains an invalid encoded runtime public asset reference');
   }
   pathname = pathname.replace(/^\/+/, '').replace(/^\.\//, '');
-  if(!pathname.startsWith('assets/')) return;
+  if(!pathname.startsWith('assets/') && !pathname.startsWith('changelogs/')) return;
   if(!extname(pathname)) return;
 
   const segments = pathname.split('/');
@@ -765,6 +860,8 @@ function privateEmojiAssetNames(rootDirectory = PRIVATE_ARTIFACT_REPOSITORY_ROOT
 
 function privateDynamicRuntimeAssetPaths(name, rootDirectory, audioAssetNames) {
   switch(name) {
+    case 'changelogs':
+      return privateChangelogAssetNames(rootDirectory).map((assetName) => `changelogs/${assetName}`);
     case 'lottie':
       return privateLottieAssetNames(rootDirectory).map((assetName) => `assets/tgs/${assetName}.json`);
     case 'audio':
@@ -787,8 +884,15 @@ export function auditPrivateArtifactRuntimeAssets(directory, rootDirectory = PRI
   let referenceCount = 0;
   const dynamicAssetFamilies = new Set();
   const audioAssetNames = new Set();
+  let expectedChangelogAssetPaths;
   for(const file of files) {
     const relativePath = relative(directory, file).split(sep).join('/');
+    if(relativePath.startsWith('changelogs/')) {
+      expectedChangelogAssetPaths ||= new Set(privateChangelogAssetNames(rootDirectory).map((name) => `changelogs/${name}`));
+      if(!expectedChangelogAssetPaths.has(relativePath)) {
+        invalidArtifact(`contains an unreviewed runtime changelog ${relativePath}`);
+      }
+    }
     if(isPrivateRuntimePublicAssetPath(relativePath) && !isPrivateRuntimeAssetPath(relativePath)) {
       invalidArtifact(`contains an unreviewed or non-static runtime asset ${relativePath}`);
     }

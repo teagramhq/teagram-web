@@ -1,4 +1,5 @@
 *
+!CHANGELOG*.md
 !dist-private/
 !dist-private/**
 !ci/
