@@ -2101,8 +2101,10 @@ describe('discovery shared-worker network accounting', () => {
     const resolver = createPageErrorAssetResolver();
     const blobUrl = 'blob:https://telegramd.test/cccccccc-cccc-cccc-cccc-cccccccccccc';
 
+    vi.useFakeTimers();
     try {
       resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'lottie-worker', 'dedicated_worker');
+      vi.advanceTimersByTime(30_001);
       resolver.observeRequest(blobUrl, {
         type: 'script',
         stack: {callFrames: [{url: `${APP_ORIGIN}/main-QqRrSsTt.js`}]}
@@ -2111,10 +2113,11 @@ describe('discovery shared-worker network accounting', () => {
       expect(resolver.scriptAsset(`Error: failed\n    at render (${blobUrl}:1:183)`)).toBe('tlottie.worker-JkLmNoPq.js');
     } finally {
       resolver.clear();
+      vi.useRealTimers();
     }
   });
 
-  it('keeps an unambiguous worker asset available after the fetch ages out', () => {
+  it('does not use an unmatched worker asset after the fetch ages out', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
     const blobUrl = 'blob:https://telegramd.test/dddddddd-dddd-dddd-dddd-dddddddddddd';
@@ -2124,7 +2127,28 @@ describe('discovery shared-worker network accounting', () => {
       resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'delayed-lottie-worker', 'dedicated_worker');
       vi.advanceTimersByTime(30_001);
 
-      expect(resolver.scriptAsset(`Error: failed\n    at TLottieWasm.createAnimation (${blobUrl}:1:183)`)).toBe('tlottie.worker-JkLmNoPq.js');
+      expect(resolver.scriptAsset(`Error: failed\n    at TLottieWasm.createAnimation (${blobUrl}:1:183)`)).toBe('unknown');
+    } finally {
+      resolver.clear();
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses the initiator when an unmatched blob only has stale worker evidence', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    const blobUrl = 'blob:https://telegramd.test/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
+
+    vi.useFakeTimers();
+    try {
+      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'other-worker', 'dedicated_worker');
+      vi.advanceTimersByTime(30_001);
+      resolver.observeRequest(blobUrl, {
+        type: 'script',
+        stack: {callFrames: [{url: `${APP_ORIGIN}/main-QqRrSsTt.js`}]}
+      }, 'Script', 'unmatched-worker', 'dedicated_worker');
+
+      expect(resolver.scriptAsset(`Error: failed\n    at render (${blobUrl}:1:183)`)).toBe('main-QqRrSsTt.js');
     } finally {
       resolver.clear();
       vi.useRealTimers();

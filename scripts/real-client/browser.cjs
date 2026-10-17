@@ -2218,21 +2218,24 @@ function createPageErrorAssetResolver() {
   function pageErrorWorkerAsset(stack) {
     const hint = PAGE_ERROR_BLOB_ASSET_HINTS.find(({pattern}) => pattern.test(stack));
     const matchingCandidates = workerAssetCandidates.filter((candidate) =>
-      !hint || candidate.workerLabel === hint.workerLabel
+      Date.now() - candidate.observedAt <= 30_000 && (!hint || candidate.workerLabel === hint.workerLabel)
     );
-    // Unmapped blob frames remain attributable for the resolver's lifetime only
-    // when every matching fetch agrees.
+    // Unmapped frames have no source ID, so only fresh fetches can identify them.
     const assets = new Set(matchingCandidates.map((candidate) => candidate.asset));
     return assets.size === 1 ? assets.values().next().value : undefined;
   }
   function takeWorkerAssetCandidate(sourceTargetId) {
-    const availableCandidates = workerAssetCandidates.filter((candidate) => !candidate.consumed);
-    const sourceCandidates = sourceTargetId ? availableCandidates.filter((candidate) => candidate.sourceTargetId === sourceTargetId) : [];
-    const candidates = sourceCandidates.length ? sourceCandidates : availableCandidates;
+    const sourceCandidates = typeof sourceTargetId === 'string'
+      ? workerAssetCandidates.filter((candidate) => candidate.sourceTargetId === sourceTargetId)
+      : [];
+    const sourceCorrelated = sourceCandidates.length > 0;
+    const candidates = sourceCorrelated ? sourceCandidates : workerAssetCandidates.filter((candidate) =>
+      !candidate.consumed && Date.now() - candidate.observedAt <= 30_000
+    );
     const assets = new Set(candidates.map((candidate) => candidate.asset));
     if(assets.size !== 1) return;
     const source = candidates[0];
-    source.consumed = true;
+    if(!sourceCorrelated) source.consumed = true;
     return source;
   }
   return {
@@ -2257,7 +2260,7 @@ function createPageErrorAssetResolver() {
           }
           if(requestType === 'Fetch' && typeof sourceTargetId === 'string' && observation.SCRIPT_ASSET_PATTERN.test(asset)) {
             if(workerAssetCandidates.length >= PAGE_ERROR_BLOB_ASSET_LIMIT) workerAssetCandidates.shift();
-            workerAssetCandidates.push({sourceTargetId, asset, workerLabel, consumed: false});
+            workerAssetCandidates.push({sourceTargetId, asset, workerLabel, observedAt: Date.now(), consumed: false});
           }
         }
         return;
