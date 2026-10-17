@@ -528,6 +528,21 @@ describe('private artifact runtime public assets', () => {
     .toThrow(/runtime public asset.*assets\/tgs\/UtyanSearch\.json/i);
   });
 
+  it('accepts pnpm’s argument separator before the output directory', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'private-artifact-runtime-assets-'));
+    temporaryDirectories.push(directory);
+    writeFileSync(join(directory, 'client.js'), `fetch('assets/tgs/UtyanSearch.json');`);
+
+    const result = spawnSync(process.execPath, [
+      join(repositoryRoot, 'scripts/check-private-artifact-assets.mjs'),
+      '--',
+      directory
+    ], {cwd: repositoryRoot, encoding: 'utf8'});
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/references a missing runtime public asset assets\/tgs\/UtyanSearch\.json/);
+  });
+
   it('runs the runtime public asset audit in both private artifact workflows', () => {
     const workflow = readFileSync(privateArtifactWorkflowPath, 'utf8');
     for(const jobName of ['private-pull-request', 'private-build']) {
