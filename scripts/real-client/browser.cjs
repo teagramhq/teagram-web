@@ -27,6 +27,10 @@ const GROUP_MESSAGE_SAMPLE_INTERVAL_MS = 100;
 const GROUP_MESSAGE_SETTLE_TIMEOUT_MS = 10_000;
 const RPC_ERROR_TYPE_LIMIT = 16;
 const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
+const APP_CONTEXTS = observation.GATE_CONTEXTS;
+const NETWORK_RESOURCE_TYPES = observation.GATE_RESOURCE_TYPES;
+const NETWORK_OBSERVER_ERROR_KINDS = new Set(observation.GATE_OBSERVER_ERROR_KINDS);
+const PAGE_ERROR_CONSTRUCTORS = new Set(observation.GATE_PAGE_ERROR_CONSTRUCTORS);
 // Bottom-bar buttons that replace the composer, keyed by their English label.
 // Only the key is reported; the label never leaves the page.
 const CONTROL_BAR_LABELS = Object.freeze({
@@ -598,6 +602,7 @@ function createWorkerDiscovery() {
 
 function createNetworkObserver(page, contextName, contextObserver) {
   const events = [];
+  const gateEvents = [];
   const eventKeys = new Set();
   const targets = new Map();
   const observedWorkerTargets = {shared_worker: new Set(), service_worker: new Set()};
@@ -683,7 +688,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
     }
   }
 
-  function record(targetId, source, kind, url, eventName) {
+  function record(targetId, source, kind, url, eventName, resourceType = 'Other') {
     if(observerClosed()) return;
     const parsed = parseNetworkUrl(url);
     if(!parsed) {
@@ -711,6 +716,12 @@ function createNetworkObserver(page, contextName, contextObserver) {
       allowed,
       allowedWebSocket: kind === 'websocket' && url === PRIVATE_CSP_WSS,
       event: eventName
+    });
+    if(!allowed) gateEvents.push({
+      source,
+      scheme: parsed.protocol.slice(0, -1),
+      host: parsed.host,
+      resourceType: NETWORK_RESOURCE_TYPES.includes(resourceType) ? resourceType : 'Other'
     });
   }
 
@@ -820,13 +831,13 @@ function createNetworkObserver(page, contextName, contextObserver) {
         recordError('invalid_worker_cdp_message', true);
         return;
       }
-      record(targetId, source, params.type === 'WebSocket' ? 'websocket' : 'fetch', params.request.url, method);
+      record(targetId, source, params.type === 'WebSocket' ? 'websocket' : 'fetch', params.request.url, method, params.type);
     } else if(method === 'Network.webSocketCreated') {
       if(typeof params.url !== 'string') {
         recordError('invalid_worker_cdp_message', true);
         return;
       }
-      record(targetId, source, 'websocket', params.url, method);
+      record(targetId, source, 'websocket', params.url, method, 'WebSocket');
     } else if(method === 'Audits.issueAdded') {
       const issue = params.issue;
       const details = issue?.details?.contentSecurityPolicyIssueDetails;
@@ -907,7 +918,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
       const kind = event.type === 'WebSocket' ? 'websocket' : 'fetch';
       notePageEvent('Network.requestWillBeSent', event);
       if(observerClosed()) return;
-      record('page', 'page', kind, event.request.url, 'Network.requestWillBeSent');
+      record('page', 'page', kind, event.request.url, 'Network.requestWillBeSent', event.type);
     });
     cdp.on('Network.responseReceived', (event) => {
       if(observerClosed()) return;
@@ -921,7 +932,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
       if(observerClosed()) return;
       notePageEvent('Network.webSocketCreated', event);
       if(observerClosed()) return;
-      record('page', 'page', 'websocket', event.url, 'Network.webSocketCreated');
+      record('page', 'page', 'websocket', event.url, 'Network.webSocketCreated', 'WebSocket');
     });
     if(contextObserver?.observeWebSocket101) {
       cdp.on('Network.webSocketHandshakeResponseReceived', (event) => {
@@ -969,6 +980,7 @@ function createNetworkObserver(page, contextName, contextObserver) {
 
   return {
     events,
+    gateEvents,
     errors,
     async start(registry) {
       await start(registry);
@@ -2113,6 +2125,117 @@ function summarizeEgress(observers) {
   };
 }
 
+function pageErrorConstructorName(error) {
+  let name;
+  try {
+    name = error?.name;
+  } catch {
+    name = undefined;
+  }
+  if(PAGE_ERROR_CONSTRUCTORS.has(name)) return name;
+  try {
+    name = error?.constructor?.name;
+  } catch {
+    return 'Error';
+  }
+  return PAGE_ERROR_CONSTRUCTORS.has(name) ? name : 'Error';
+}
+
+function pageErrorScriptAsset(stack) {
+  if(typeof stack !== 'string') return 'unknown';
+  for(const line of stack.split('\n').slice(1)) {
+    const match = /(?:\(|\s)(https?:\/\/[^\s)]+|blob:[^\s)]+)/.exec(line);
+    if(!match) continue;
+    const candidate = match[1].replace(/:\d+(?::\d+)?$/, '');
+    let parsed;
+    try {
+      parsed = new URL(candidate);
+    } catch {
+      continue;
+    }
+    if(!['http:', 'https:', 'blob:'].includes(parsed.protocol)) continue;
+    const asset = path.posix.basename(parsed.pathname);
+    if(observation.SCRIPT_ASSET_PATTERN.test(asset)) return asset;
+  }
+  return 'unknown';
+}
+
+function recordPageError(pageErrors, contextName, error) {
+  if(!APP_CONTEXTS.includes(contextName) || !Array.isArray(pageErrors?.[contextName])) return;
+  pageErrors[contextName].push({
+    constructorName: pageErrorConstructorName(error),
+    scriptAsset: pageErrorScriptAsset(error?.stack)
+  });
+}
+
+function sanitizePageError(error) {
+  return {
+    constructorName: PAGE_ERROR_CONSTRUCTORS.has(error?.constructorName) ? error.constructorName : 'Error',
+    scriptAsset: typeof error?.scriptAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(error.scriptAsset)
+      ? error.scriptAsset
+      : 'unknown'
+  };
+}
+
+function summarizeBrowserGateBreakdown({networkObservers = {}, pageErrors = {}} = {}) {
+  const unexpectedEgressAttempts = {};
+  const observerErrors = {};
+  const sanitizedPageErrors = {};
+  const pageErrorOverflow = {};
+  for(const contextName of APP_CONTEXTS) {
+    const events = networkObservers[contextName]?.gateEvents || [];
+    unexpectedEgressAttempts[contextName] = events.slice(0, 512).map((event) => {
+      const source = event.source === 'worker' ? 'dedicated_worker' : event.source;
+      const scheme = observation.GATE_SCHEMES.includes(event.scheme) ? event.scheme : 'unknown';
+      let host = 'unknown';
+      try {
+        const parsed = new URL(`${scheme}://${event.host}`);
+        if(parsed.host === event.host && !parsed.username && !parsed.password && parsed.pathname === '/' && !parsed.search && !parsed.hash) {
+          host = parsed.host.slice(0, 255);
+        }
+      } catch {
+        // Keep malformed observer data out of the failure report.
+      }
+      return {
+        source: observation.GATE_EGRESS_SOURCES.includes(source) ? source : 'dedicated_worker',
+        scheme,
+        host,
+        resourceType: NETWORK_RESOURCE_TYPES.includes(event.resourceType) ? event.resourceType : 'Other'
+      };
+    });
+    const errorCounts = new Map();
+    for(const kind of (networkObservers[contextName]?.errors || []).slice(0, 8)) {
+      const normalized = NETWORK_OBSERVER_ERROR_KINDS.has(kind) ? kind : 'unknown';
+      errorCounts.set(normalized, (errorCounts.get(normalized) || 0) + 1);
+    }
+    observerErrors[contextName] = Object.fromEntries([...errorCounts.entries()].sort(([left], [right]) => left.localeCompare(right)));
+    const contextPageErrors = pageErrors[contextName] || [];
+    sanitizedPageErrors[contextName] = contextPageErrors.slice(0, 512).map(sanitizePageError);
+    const overflowCounts = new Map();
+    for(const error of contextPageErrors.slice(512)) {
+      const sanitized = sanitizePageError(error);
+      const key = `${sanitized.constructorName}\0${sanitized.scriptAsset}`;
+      overflowCounts.set(key, Math.min(1_000_000, (overflowCounts.get(key) || 0) + 1));
+    }
+    pageErrorOverflow[contextName] = [...overflowCounts.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, count]) => {
+        const separator = key.indexOf('\0');
+        return {
+          constructorName: key.slice(0, separator),
+          scriptAsset: key.slice(separator + 1),
+          count
+        };
+      });
+  }
+  const counters = {
+    unexpectedEgressAttempts: Object.values(unexpectedEgressAttempts).reduce((sum, attempts) => sum + attempts.length, 0),
+    observerErrors: Object.values(observerErrors).reduce((sum, errors) => sum + Object.values(errors).reduce((count, total) => count + total, 0), 0),
+    pageErrors: Math.min(1_000_000, APP_CONTEXTS.reduce((sum, contextName) => sum + (pageErrors[contextName]?.length || 0), 0))
+  };
+  return {counters, unexpectedEgressAttempts, observerErrors, pageErrors: sanitizedPageErrors, pageErrorOverflow};
+}
+
 function mergeWebSocket101ByContextPhase(grids) {
   const merged = observation.createWebSocket101Grid();
   for(const grid of grids) {
@@ -2186,7 +2309,7 @@ function buildObserverOnlyReport(registry, controls) {
   };
 }
 
-function buildAuthProgressReport(status, stage, contexts, controlCount, passwordEvidence, registry, appObservers, appNetworkObservers, controls, egress, controlWebSocket101ByContextPhase) {
+function buildAuthProgressReport(status, stage, contexts, controlCount, passwordEvidence, registry, appObservers, appNetworkObservers, controls, egress, controlWebSocket101ByContextPhase, gateBreakdown) {
   const networkContexts = Object.fromEntries(Object.entries(appNetworkObservers).map(([name, observer]) => {
     const summary = observer.summary();
     return [name, {
@@ -2222,6 +2345,7 @@ function buildAuthProgressReport(status, stage, contexts, controlCount, password
         ...Object.values(appObservers).map((observer) => observer.webSocket101ByContextPhase())
       ])
     },
+    ...(gateBreakdown ? {gateBreakdown} : {}),
     workerObservation: observationBlock && !observation.validateNetworkBlock(observationBlock)
       ? observationBlock
       : observationBlock ? observation.UNCLASSIFIED_NETWORK_BLOCK : null
@@ -2271,11 +2395,13 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
   const appNetworkObservers = {};
   const actionCounts = {usernameSubmissions: 0};
   const passwordEvidence = [];
+  const pageErrors = {alice: [], bob: []};
   const createContextObserver = dependencies.createContextObserver || observation.createContextObserver;
   const createAppNetworkObserver = dependencies.createNetworkObserver || createNetworkObserver;
   const submitUsername = dependencies.submitUsernameOnceAndWaitForPassword || submitUsernameOnceAndWaitForPassword;
   let report;
   let cleanupFailed = false;
+  let gateBreakdown;
 
   try {
     currentStage = 'alice_context';
@@ -2289,8 +2415,7 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
     observers.push(alice.networkObserver);
     await alice.networkObserver.start(registry);
 
-    const pageErrors = [];
-    alice.page.on('pageerror', () => pageErrors.push('pageerror'));
+    alice.page.on('pageerror', (error) => recordPageError(pageErrors, 'alice', error));
     await submitUsername(
       alice.page,
       runtimeConfig.accounts[0],
@@ -2308,7 +2433,8 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
     const egress = summarizeEgress(observers);
     const workerBlock = buildObservationBlock(registry, appObservers, controls, egress);
     const network = alice.networkObserver.summary();
-    if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.length !== 0) {
+    gateBreakdown = summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors});
+    if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.alice.length + pageErrors.bob.length !== 0) {
       failStage('browser_egress_or_page_errors');
     }
     if(registry.foreignTargets !== 0 || registry.appContextlessTargets !== 0 || workerBlock.discoveryActive !== 1 ||
@@ -2332,7 +2458,8 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
       appNetworkObservers,
       controls,
       egress,
-      controlWebSocket101ByContextPhase
+      controlWebSocket101ByContextPhase,
+      undefined
     );
   } catch(error) {
     await Promise.all(observers.map((observer) => observer.waitForSetup().catch(() => {})));
@@ -2350,7 +2477,8 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
       appNetworkObservers,
       controls,
       egress,
-      controlWebSocket101ByContextPhase
+      controlWebSocket101ByContextPhase,
+      currentStage === 'browser_egress_or_page_errors' ? gateBreakdown : undefined
     );
   } finally {
     currentStage = 'cleanup';
@@ -2377,6 +2505,7 @@ async function main(dependencies = {}) {
   const capturedScreenshots = {count: 0};
   const actionCounts = {usernameSubmissions: 0};
   const passwordEvidence = [];
+  const pageErrors = {alice: [], bob: []};
   const cleanupIssues = [];
   let cleanupFailed = false;
   let authProgressCleanupHandled = false;
@@ -2384,6 +2513,7 @@ async function main(dependencies = {}) {
   let controls = {};
   let webSocket101Phase;
   let controlWebSocket101ByContextPhase;
+  let gateBreakdown;
   centerColumnTrace = createCenterColumnTrace();
   groupNameFormTrace = {page: undefined, stepWait: 'none'};
   groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
@@ -2462,8 +2592,7 @@ async function main(dependencies = {}) {
     observers.push(alice.networkObserver);
     await alice.networkObserver.start(registry);
 
-    const pageErrors = [];
-    alice.page.on('pageerror', () => pageErrors.push('pageerror'));
+    alice.page.on('pageerror', (error) => recordPageError(pageErrors, 'alice', error));
     await countClientErrors(alice.page);
 
     currentStage = 'bob_context';
@@ -2477,7 +2606,7 @@ async function main(dependencies = {}) {
     observers.push(bob.networkObserver);
     await bob.networkObserver.start(registry);
 
-    bob.page.on('pageerror', () => pageErrors.push('pageerror'));
+    bob.page.on('pageerror', (error) => recordPageError(pageErrors, 'bob', error));
     await countClientErrors(bob.page);
 
     currentScenario = 'sign-in';
@@ -2574,7 +2703,10 @@ async function main(dependencies = {}) {
     }));
     const egress = summarizeEgress(observers);
     const observationBlock = buildObservationBlock(registry, appObservers, controls, egress);
-    if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.length !== 0) failStage('browser_egress_or_page_errors');
+    gateBreakdown = summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors});
+    if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.alice.length + pageErrors.bob.length !== 0) {
+      failStage('browser_egress_or_page_errors');
+    }
     if(registry.foreignTargets !== 0 || registry.appContextlessTargets !== 0) failStage('browser_worker_observation_incomplete');
     if(['alice', 'bob'].some((name) => observationBlock.contexts[name].coverageComplete !== 1)) failStage('browser_worker_observation_incomplete');
     if(['alice', 'bob'].some((name) => observationBlock.contexts[name].sharedWorkerState !== 'created')) failStage('browser_worker_or_websocket_evidence');
@@ -2641,6 +2773,9 @@ async function main(dependencies = {}) {
         ...(groupCreated ? {groupCreated} : {}),
         ...(groupMember ? {groupMember} : {}),
         ...(groupMessage ? {groupMessage} : {}),
+        ...(currentStage === 'browser_egress_or_page_errors'
+          ? {gateBreakdown: gateBreakdown || summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors})}
+          : {}),
         // On failure the closed-schema evidence is still the point, validated the
         // same way: any schema violation collapses it to `unclassified`.
         ...(registry ? {
@@ -2672,7 +2807,11 @@ async function main(dependencies = {}) {
 // early and the scenario path that runs to completion report identically.
 function emitReport(report, cleanupFailed) {
   if(cleanupFailed) {
-    process.stdout.write(`${JSON.stringify({status: 'failed', stage: 'cleanup'})}\n`);
+    process.stdout.write(`${JSON.stringify({
+      status: 'failed',
+      stage: 'cleanup',
+      ...(report?.gateBreakdown ? {gateBreakdown: report.gateBreakdown} : {})
+    })}\n`);
     process.exitCode = 1;
     return;
   }
@@ -2689,7 +2828,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

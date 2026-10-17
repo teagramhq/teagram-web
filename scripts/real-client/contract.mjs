@@ -10,6 +10,13 @@ const REQUIRED_OBSERVATION_CONTEXTS = Object.freeze(['alice', 'bob']);
 const AUTH_PROGRESS_OBSERVATION_CONTEXTS = Object.freeze(['alice']);
 const AUTH_PROGRESS_WEBSOCKET_101_CONTEXTS = Object.freeze(['alice', 'control', 'other']);
 const AUTH_PROGRESS_WEBSOCKET_101_PHASES = Object.freeze(['pre_submit', 'post_submit', 'unknown']);
+const GATE_CONTEXTS = observation.GATE_CONTEXTS;
+const GATE_EGRESS_SOURCES = observation.GATE_EGRESS_SOURCES;
+const GATE_SCHEMES = observation.GATE_SCHEMES;
+const GATE_RESOURCE_TYPES = observation.GATE_RESOURCE_TYPES;
+const GATE_OBSERVER_ERROR_KINDS = observation.GATE_OBSERVER_ERROR_KINDS;
+const PAGE_ERROR_CONSTRUCTORS = observation.GATE_PAGE_ERROR_CONSTRUCTORS;
+const SCRIPT_ASSET = observation.SCRIPT_ASSET_PATTERN;
 const AUTH_PROGRESS_REPORT_STAGES = Object.freeze([
   'runtime_inputs',
   'runtime_input_validation',
@@ -653,7 +660,13 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const groupMessageSummary = controlsOnly || report.groupMessage === undefined
     ? ''
     : `; group message ${JSON.stringify(parseGroupMessageState(report.groupMessage))}`;
-  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}${groupMemberSummary}${groupMessageSummary}`;
+  if(report.stage === 'browser_egress_or_page_errors' && report.status === 'failed' && report.gateBreakdown === undefined) {
+    throw new Error('browser egress/page error evidence is invalid');
+  }
+  const gateBreakdownSummary = report.gateBreakdown === undefined
+    ? ''
+    : `; browser egress/page errors ${JSON.stringify(parseBrowserGateBreakdown(report.gateBreakdown))}`;
+  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}${groupMemberSummary}${groupMessageSummary}${gateBreakdownSummary}`;
 }
 
 export function parseAuthProgressReport(report) {
@@ -673,8 +686,10 @@ export function parseAuthProgressReport(report) {
     'network',
     'workerObservation'
   ];
+  const hasGateBreakdown = Object.hasOwn(report || {}, 'gateBreakdown');
+  const reportKeys = hasGateBreakdown ? [...keys, 'gateBreakdown'] : keys;
   if(!report || typeof report !== 'object' || Array.isArray(report) ||
-      JSON.stringify(Object.keys(report).sort()) !== JSON.stringify([...keys].sort()) ||
+      JSON.stringify(Object.keys(report).sort()) !== JSON.stringify([...reportKeys].sort()) ||
       report.mode !== 'auth_progress_one_submission' ||
       !['passed', 'failed'].includes(report.status) ||
       !AUTH_PROGRESS_REPORT_STAGES.includes(report.stage) ||
@@ -687,10 +702,25 @@ export function parseAuthProgressReport(report) {
     throw new Error('auth progress report is invalid');
   }
 
+  let gateBreakdown;
+  if(hasGateBreakdown || (report.status === 'failed' && report.stage === 'browser_egress_or_page_errors')) {
+    try {
+      gateBreakdown = parseBrowserGateBreakdown(report.gateBreakdown);
+    } catch {
+      throw new Error('auth progress report is invalid');
+    }
+  }
+
   let network;
   try {
     network = parseAuthProgressNetwork(report.network);
   } catch {
+    throw new Error('auth progress report is invalid');
+  }
+  if(report.status === 'failed' && report.stage === 'browser_egress_or_page_errors' &&
+      (gateBreakdown.counters.unexpectedEgressAttempts !== network.unexpectedAttempts ||
+        gateBreakdown.counters.observerErrors !== network.observerErrors ||
+        gateBreakdown.counters.unexpectedEgressAttempts + gateBreakdown.counters.observerErrors + gateBreakdown.counters.pageErrors === 0)) {
     throw new Error('auth progress report is invalid');
   }
   let workerObservation = report.workerObservation;
@@ -735,7 +765,78 @@ export function parseAuthProgressReport(report) {
     throw new Error('auth progress report is invalid');
   }
 
-  return {...report, passwordEvidence, network, workerObservation};
+  return {...report, ...(hasGateBreakdown ? {gateBreakdown} : {}), passwordEvidence, network, workerObservation};
+}
+
+function parseBrowserGateBreakdown(value) {
+  const keys = ['counters', 'unexpectedEgressAttempts', 'observerErrors', 'pageErrors', 'pageErrorOverflow'];
+  const counterKeys = ['unexpectedEgressAttempts', 'observerErrors', 'pageErrors'];
+  if(!hasExactOwnKeys(value, keys) ||
+      !hasExactOwnKeys(value.counters, counterKeys) ||
+      counterKeys.some((key) => !Number.isSafeInteger(value.counters[key]) || value.counters[key] < 0 || value.counters[key] > 1_000_000) ||
+      !hasExactOwnKeys(value.unexpectedEgressAttempts, GATE_CONTEXTS) ||
+      !hasExactOwnKeys(value.observerErrors, GATE_CONTEXTS) ||
+      !hasExactOwnKeys(value.pageErrors, GATE_CONTEXTS) ||
+      !hasExactOwnKeys(value.pageErrorOverflow, GATE_CONTEXTS)) {
+    throw new Error('browser egress/page error evidence is invalid');
+  }
+
+  let unexpectedAttemptCount = 0;
+  let observerErrorCount = 0;
+  let pageErrorCount = 0;
+  for(const context of GATE_CONTEXTS) {
+    const attempts = value.unexpectedEgressAttempts[context];
+    if(!Array.isArray(attempts) || attempts.length > 512 || attempts.some((attempt) => {
+      if(!hasExactOwnKeys(attempt, ['source', 'scheme', 'host', 'resourceType']) ||
+          !GATE_EGRESS_SOURCES.includes(attempt.source) || !GATE_SCHEMES.includes(attempt.scheme) ||
+          !GATE_RESOURCE_TYPES.includes(attempt.resourceType) || typeof attempt.host !== 'string' ||
+          !attempt.host || attempt.host.length > 255 || /[\s/?#@\\]/.test(attempt.host)) return true;
+      try {
+        const parsed = new URL(`${attempt.scheme}://${attempt.host}`);
+        return parsed.host !== attempt.host || Boolean(parsed.username || parsed.password || parsed.search || parsed.hash) || parsed.pathname !== '/';
+      } catch {
+        return true;
+      }
+    })) {
+      throw new Error('browser egress/page error evidence is invalid');
+    }
+    unexpectedAttemptCount += attempts.length;
+
+    const errors = value.observerErrors[context];
+    if(!errors || typeof errors !== 'object' || Array.isArray(errors) ||
+        Object.keys(errors).some((kind) => !GATE_OBSERVER_ERROR_KINDS.includes(kind)) ||
+        Object.values(errors).some((count) => !Number.isSafeInteger(count) || count < 1 || count > 8)) {
+      throw new Error('browser egress/page error evidence is invalid');
+    }
+    observerErrorCount += Object.values(errors).reduce((sum, count) => sum + count, 0);
+
+    const pageErrors = value.pageErrors[context];
+    if(!Array.isArray(pageErrors) || pageErrors.length > 512 || pageErrors.some((error) =>
+      !hasExactOwnKeys(error, ['constructorName', 'scriptAsset']) ||
+      !PAGE_ERROR_CONSTRUCTORS.includes(error.constructorName) ||
+      typeof error.scriptAsset !== 'string' || !SCRIPT_ASSET.test(error.scriptAsset)
+    )) {
+      throw new Error('browser egress/page error evidence is invalid');
+    }
+    pageErrorCount += pageErrors.length;
+
+    const overflow = value.pageErrorOverflow[context];
+    if(!Array.isArray(overflow) || overflow.length > 1_000_000 || overflow.some((entry) =>
+      !hasExactOwnKeys(entry, ['constructorName', 'scriptAsset', 'count']) ||
+      !PAGE_ERROR_CONSTRUCTORS.includes(entry.constructorName) ||
+      typeof entry.scriptAsset !== 'string' || !SCRIPT_ASSET.test(entry.scriptAsset) ||
+      !Number.isSafeInteger(entry.count) || entry.count < 1 || entry.count > 1_000_000
+    ) || (overflow.length > 0 && pageErrors.length !== 512)) {
+      throw new Error('browser egress/page error evidence is invalid');
+    }
+    pageErrorCount += overflow.reduce((sum, entry) => sum + entry.count, 0);
+  }
+  if(value.counters.unexpectedEgressAttempts !== unexpectedAttemptCount ||
+      value.counters.observerErrors !== observerErrorCount ||
+      value.counters.pageErrors !== Math.min(1_000_000, pageErrorCount)) {
+    throw new Error('browser egress/page error evidence is invalid');
+  }
+  return value;
 }
 
 function parseAuthProgressNetwork(network) {

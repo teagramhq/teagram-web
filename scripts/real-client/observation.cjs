@@ -99,6 +99,48 @@ const ORIGIN_CLASSES = Object.freeze(['blob_same_origin', 'other_same_origin', '
 const WORKER_SOURCE_LABELS = Object.freeze([...new Set([...WORKER_CHUNK_PATTERNS.map((entry) => entry.label), ...ORIGIN_CLASSES])]);
 const WEBSOCKET_101_CONTEXTS = Object.freeze(['alice', 'control', 'other']);
 const WEBSOCKET_101_PHASES = Object.freeze(['pre_submit', 'post_submit', 'unknown']);
+const GATE_CONTEXTS = Object.freeze(['alice', 'bob']);
+const GATE_EGRESS_SOURCES = Object.freeze(['page', 'service_worker', 'shared_worker', 'dedicated_worker']);
+const GATE_SCHEMES = Object.freeze(['http', 'https', 'ws', 'wss']);
+const GATE_RESOURCE_TYPES = Object.freeze([
+  'CSPViolationReport',
+  'Document',
+  'EventSource',
+  'Fetch',
+  'Font',
+  'Image',
+  'Manifest',
+  'Media',
+  'Other',
+  'Ping',
+  'Prefetch',
+  'Script',
+  'SignedExchange',
+  'Stylesheet',
+  'TextTrack',
+  'WebSocket',
+  'XHR'
+]);
+const GATE_OBSERVER_ERROR_KINDS = Object.freeze([
+  'cdp_message_overflow',
+  'cdp_method_not_allowed',
+  'invalid_worker_cdp_message',
+  'unknown',
+  'worker_target_setup'
+]);
+const GATE_PAGE_ERROR_CONSTRUCTORS = Object.freeze([
+  'AbortError',
+  'AggregateError',
+  'DOMException',
+  'Error',
+  'EvalError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'TypeError',
+  'URIError'
+]);
+const SCRIPT_ASSET_PATTERN = /^(?:unknown|[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(?:c|m)?js)$/;
 
 const UNCLASSIFIED_NETWORK_BLOCK = Object.freeze({classification: 'unclassified'});
 
@@ -822,6 +864,12 @@ module.exports = {
   CONTROL_EXPECTATIONS,
   CONTROL_KEYS,
   CONTROL_SCHEMA,
+  GATE_CONTEXTS,
+  GATE_EGRESS_SOURCES,
+  GATE_OBSERVER_ERROR_KINDS,
+  GATE_PAGE_ERROR_CONSTRUCTORS,
+  GATE_RESOURCE_TYPES,
+  GATE_SCHEMES,
   LIMITS,
   MTPROTO_STATES,
   NETWORK_KEYS,
@@ -829,6 +877,7 @@ module.exports = {
   PAGE_CDP_METHODS,
   PRIVATE_CSP_ORIGIN,
   SHARED_WORKER_STATES,
+  SCRIPT_ASSET_PATTERN,
   SOURCE_FETCH_STATES,
   UNCLASSIFIED_NETWORK_BLOCK,
   VALIDATION_STATES,
