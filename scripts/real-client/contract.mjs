@@ -693,10 +693,10 @@ function parseWorkerCoverageBreakdown(value) {
     'coverageComplete'
   ];
   const targetTypes = ['page', 'iframe', 'service_worker', 'shared_worker', 'dedicated_worker', 'other'];
-  const causes = ['multiple_pages', 'foreign', 'contextless', 'observer_overflow'];
+  const causes = ['multiple_pages', 'foreign', 'contextless', 'observer_overflow', 'observer_error'];
   if(!hasExactOwnKeys(value, ['registry', 'contexts', 'targets']) ||
       !hasExactOwnKeys(value.registry, registryKeys) ||
-      !hasExactOwnKeys(value.contexts, ['alice', 'bob']) ||
+      !(hasExactOwnKeys(value.contexts, ['alice']) || hasExactOwnKeys(value.contexts, ['alice', 'bob'])) ||
       !Array.isArray(value.targets) || value.targets.length > 1024) {
     throw new Error('worker coverage evidence is invalid');
   }
@@ -753,11 +753,17 @@ export function parseAuthProgressReport(report) {
     'workerObservation'
   ];
   const hasGateBreakdown = Object.hasOwn(report || {}, 'gateBreakdown');
-  const reportKeys = hasGateBreakdown ? [...keys, 'gateBreakdown'] : keys;
+  const hasWorkerCoverageBreakdown = Object.hasOwn(report || {}, 'workerCoverageBreakdown');
+  const reportKeys = [
+    ...keys,
+    ...(hasGateBreakdown ? ['gateBreakdown'] : []),
+    ...(hasWorkerCoverageBreakdown ? ['workerCoverageBreakdown'] : [])
+  ];
   if(!report || typeof report !== 'object' || Array.isArray(report) ||
       JSON.stringify(Object.keys(report).sort()) !== JSON.stringify([...reportKeys].sort()) ||
       report.mode !== 'auth_progress_one_submission' ||
       !['passed', 'failed'].includes(report.status) ||
+      (hasWorkerCoverageBreakdown && report.status !== 'failed') ||
       !AUTH_PROGRESS_REPORT_STAGES.includes(report.stage) ||
       !Number.isSafeInteger(report.usernameSubmissions) || report.usernameSubmissions < 0 || report.usernameSubmissions > 1 ||
       report.passwordFills !== 0 || report.passwordSubmissions !== 0 ||
@@ -772,6 +778,15 @@ export function parseAuthProgressReport(report) {
   if(hasGateBreakdown || (report.status === 'failed' && report.stage === 'browser_egress_or_page_errors')) {
     try {
       gateBreakdown = parseBrowserGateBreakdown(report.gateBreakdown);
+    } catch {
+      throw new Error('auth progress report is invalid');
+    }
+  }
+
+  let workerCoverageBreakdown;
+  if(hasWorkerCoverageBreakdown) {
+    try {
+      workerCoverageBreakdown = parseWorkerCoverageBreakdown(report.workerCoverageBreakdown);
     } catch {
       throw new Error('auth progress report is invalid');
     }
@@ -831,7 +846,14 @@ export function parseAuthProgressReport(report) {
     throw new Error('auth progress report is invalid');
   }
 
-  return {...report, ...(hasGateBreakdown ? {gateBreakdown} : {}), passwordEvidence, network, workerObservation};
+  return {
+    ...report,
+    ...(hasGateBreakdown ? {gateBreakdown} : {}),
+    ...(hasWorkerCoverageBreakdown ? {workerCoverageBreakdown} : {}),
+    passwordEvidence,
+    network,
+    workerObservation
+  };
 }
 
 function parseBrowserGateBreakdown(value) {

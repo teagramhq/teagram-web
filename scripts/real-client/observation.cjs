@@ -101,7 +101,7 @@ const WEBSOCKET_101_CONTEXTS = Object.freeze(['alice', 'control', 'other']);
 const WEBSOCKET_101_PHASES = Object.freeze(['pre_submit', 'post_submit', 'unknown']);
 const GATE_CONTEXTS = Object.freeze(['alice', 'bob']);
 const COVERAGE_TARGET_TYPES = Object.freeze(['page', 'iframe', 'service_worker', 'shared_worker', 'dedicated_worker', 'other']);
-const COVERAGE_TARGET_CAUSES = Object.freeze(['multiple_pages', 'foreign', 'contextless', 'observer_overflow']);
+const COVERAGE_TARGET_CAUSES = Object.freeze(['multiple_pages', 'foreign', 'contextless', 'observer_overflow', 'observer_error']);
 const COVERAGE_TARGET_DETAILS_LIMIT = 1024;
 const GATE_EGRESS_SOURCES = Object.freeze(['page', 'service_worker', 'shared_worker', 'dedicated_worker']);
 const GATE_SCHEMES = Object.freeze(['http', 'https', 'ws', 'wss']);
@@ -285,6 +285,7 @@ function createContextObserver(name, options = {}) {
     countedEvents: 0,
     attachedTargets: 0,
     observerErrors: 0,
+    observerErrorTargetIds: new Set(),
     foreignTargets: 0,
     overflow: false,
     discoveryActive: false,
@@ -328,9 +329,13 @@ function createContextObserver(name, options = {}) {
     return true;
   }
 
-  function recordObserverError() {
+  function recordObserverError(targetId) {
     if(closed()) return;
     state.observerErrors++;
+    if(!control && typeof targetId === 'string' && targetId &&
+        (state.observerErrorTargetIds.has(targetId) || state.observerErrorTargetIds.size < COVERAGE_TARGET_DETAILS_LIMIT)) {
+      state.observerErrorTargetIds.add(targetId);
+    }
   }
 
   function webSocket101RequestState(sessionId, requestId) {
@@ -353,12 +358,12 @@ function createContextObserver(name, options = {}) {
     return true;
   }
 
-  function noteWebSocket101Event(sessionId, method, params) {
+  function noteWebSocket101Event(sessionId, method, params, targetId) {
     if(!observeWebSocket101 || closed()) return;
     if(method === 'Network.webSocketCreated') {
       const requestId = params?.requestId;
       if(typeof sessionId !== 'string' || !sessionId || typeof requestId !== 'string' || !requestId) {
-        recordObserverError();
+        recordObserverError(targetId);
         return;
       }
       if(webSocket101RequestState(sessionId, requestId)) return;
@@ -374,7 +379,7 @@ function createContextObserver(name, options = {}) {
     if(typeof status !== 'number' || status !== 101) return;
     const requestId = params?.requestId;
     if(typeof sessionId !== 'string' || !sessionId || typeof requestId !== 'string' || !requestId) {
-      recordObserverError();
+      recordObserverError(targetId);
       return;
     }
     let requestState = webSocket101RequestState(sessionId, requestId);
@@ -485,16 +490,16 @@ function createContextObserver(name, options = {}) {
     }
   }
 
-  function noteAttachFailure() {
+  function noteAttachFailure(targetId) {
     if(closed()) return;
     state.attachFailures++;
-    state.observerErrors++;
+    recordObserverError(targetId);
   }
 
-  function noteDetachBeforeSetup() {
+  function noteDetachBeforeSetup(targetId) {
     if(closed()) return;
     state.detachBeforeSetup++;
-    state.observerErrors++;
+    recordObserverError(targetId);
   }
 
   // Synthetic controls only: drive the real overflow and attach-failure
@@ -511,7 +516,7 @@ function createContextObserver(name, options = {}) {
   function noteWorkerEvent(targetId, method, params, sessionId = targetId) {
     if(!countEvent()) return;
     if(method === 'Network.webSocketCreated' || method === 'Network.webSocketHandshakeResponseReceived') {
-      noteWebSocket101Event(sessionId, method, params);
+      noteWebSocket101Event(sessionId, method, params, targetId);
     }
     const record = targets.get(targetId);
     if(!record) return;
@@ -563,10 +568,10 @@ function createContextObserver(name, options = {}) {
 
   // Page-session coverage. The page session is enabled before navigation, so
   // the source fetch of the allowlisted MTProto chunk is observed completely.
-  function notePageEvent(method, params) {
+  function notePageEvent(method, params, targetId) {
     if(!countEvent()) return;
     if(method === 'Network.webSocketCreated' || method === 'Network.webSocketHandshakeResponseReceived') {
-      noteWebSocket101Event('page', method, params);
+      noteWebSocket101Event('page', method, params, targetId);
       return;
     }
     if(method === 'Network.requestWillBeSent') {
@@ -883,7 +888,10 @@ function buildWorkerCoverageBreakdown({registry, contexts, targets}) {
     };
   }).filter((target) => target.causes.length > 0);
   const contextBreakdown = {};
-  for(const name of GATE_CONTEXTS) {
+  const contextNames = Object.keys(sourceContexts).length === 0
+    ? GATE_CONTEXTS
+    : GATE_CONTEXTS.filter((name) => Object.hasOwn(sourceContexts, name));
+  for(const name of contextNames) {
     const context = sourceContexts[name] || {};
     const pageTargets = Number.isSafeInteger(context.pageTargets) && context.pageTargets >= 0 && context.pageTargets <= 1_000_000
       ? context.pageTargets

@@ -212,10 +212,10 @@ function validateRuntimeInput(config) {
 // Every CDP send is gated by session scope. A method outside the accepted scope
 // fails the run, and the nested worker channel carried by
 // Target.sendMessageToTarget is gated by the worker scope as well.
-function createGatedSender(scope, session, observer) {
+function createGatedSender(scope, session, observer, getTargetId) {
   return function send(method, params = {}) {
     if(!observation.allowCdpMethod(scope, method)) {
-      observer?.recordObserverError();
+      observer?.recordObserverError(getTargetId?.());
       return Promise.reject(new Error('cdp_method_not_allowed'));
     }
     return sendCdpCommand(session, method, params);
@@ -284,6 +284,7 @@ function createWorkerDiscovery() {
       const observer = ownerOf(record.targetId);
       if(record.type === 'page' && observer && !observer.control && observer.pageTargetIds.size > 1) causes.push('multiple_pages');
       if(record.observerOverflow && record.owningContext !== 'control') causes.push('observer_overflow');
+      if(observer && !observer.control && observer.state.observerErrorTargetIds.has(record.targetId)) causes.push('observer_error');
       if(causes.length > 0) {
         targets.push({
           type: record.type,
@@ -299,7 +300,7 @@ function createWorkerDiscovery() {
   function sendNested(sessionId, method, params = {}) {
     const observer = ownerOf(sessionTargets.get(sessionId));
     if(!observation.allowCdpMethod('worker', method)) {
-      observer?.recordObserverError();
+      observer?.recordObserverError(sessionTargets.get(sessionId));
       return Promise.reject(new Error('cdp_method_not_allowed'));
     }
     const id = ++nextCommandId;
@@ -343,7 +344,7 @@ function createWorkerDiscovery() {
       await sendNested(sessionId, 'Runtime.runIfWaitingForDebugger');
       observer.noteSetupComplete(targetId);
     })().catch(() => {
-      observer.recordObserverError();
+      observer.recordObserverError(targetId);
     }).finally(() => setupPromises.delete(setup));
     setupPromises.add(setup);
   }
@@ -392,7 +393,7 @@ function createWorkerDiscovery() {
     })
     .catch(() => {
       attachingTargets.delete(targetId);
-      if(!targetSessions.has(targetId)) observer.noteAttachFailure();
+      if(!targetSessions.has(targetId)) observer.noteAttachFailure(targetId);
     })
     .finally(() => pendingAttachments.delete(targetId));
     pendingAttachments.set(targetId, attachment);
@@ -459,18 +460,18 @@ function createWorkerDiscovery() {
     if(!observer) return;
     const retired = retiredObservers.has(observer);
     if(typeof event.message !== 'string' || Buffer.byteLength(event.message, 'utf8') > observation.LIMITS.cdpMessageBytes) {
-      if(!retired) observer.recordObserverError();
+      if(!retired) observer.recordObserverError(targetId);
       return;
     }
     let payload;
     try {
       payload = JSON.parse(event.message);
     } catch {
-      if(!retired) observer.recordObserverError();
+      if(!retired) observer.recordObserverError(targetId);
       return;
     }
     if(!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      if(!retired) observer.recordObserverError();
+      if(!retired) observer.recordObserverError(targetId);
       return;
     }
     if(typeof payload.id === 'number') {
@@ -484,7 +485,7 @@ function createWorkerDiscovery() {
     }
     if(retired || observer.state.overflow) return;
     if(typeof payload.method !== 'string') {
-      observer.recordObserverError();
+      observer.recordObserverError(targetId);
       return;
     }
     const wasOverflowed = observer.state.overflow;
@@ -496,7 +497,7 @@ function createWorkerDiscovery() {
     if(observer.state.overflow) return;
     const sink = networkSinks.get(observer);
     if(!sink) {
-      observer.recordObserverError();
+      observer.recordObserverError(targetId);
       return;
     }
     sink.recordWorkerEvent(targetId, 'shared_worker', event.sessionId, payload.method, payload.params);
@@ -563,7 +564,7 @@ function createWorkerDiscovery() {
         if(!targetId) return;
         targetSessions.delete(targetId);
         const observer = ownerOf(targetId);
-        if(observer && !observer.targets.get(targetId)?.setupComplete) observer.noteDetachBeforeSetup();
+        if(observer && !observer.targets.get(targetId)?.setupComplete) observer.noteDetachBeforeSetup(targetId);
       });
       session.on('Target.targetDestroyed', ({targetId}) => {
         contextlessTargets.delete(targetId);
@@ -610,7 +611,7 @@ function createWorkerDiscovery() {
           await send('Target.detachFromTarget', {sessionId});
         } catch {
           orphanDetachFailures++;
-          observer.recordObserverError();
+          observer.recordObserverError(targetId);
         }
       })
       .catch(() => observer.noteAttachFailure());
@@ -637,7 +638,7 @@ function createWorkerDiscovery() {
           await send('Target.detachFromTarget', {sessionId});
         } catch {
           detachFailures++;
-          observer.recordObserverError();
+          observer.recordObserverError(targetId);
         }
       }
       return {detachFailures};
@@ -727,17 +728,17 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
 
   function notePageEvent(method, params) {
     const wasOverflowed = contextObserver?.state.overflow === true;
-    contextObserver?.notePageEvent(method, params);
+    contextObserver?.notePageEvent(method, params, pageTargetId);
     if(!wasOverflowed && contextObserver?.state.overflow) targetRegistry?.noteTargetOverflow?.(pageTargetId);
     observerClosed();
   }
 
   // Coalesce fixed error classes, charging failures only when their message
   // has not already consumed the context event budget.
-  function recordError(category, eventCounted = false) {
+  function recordError(category, eventCounted = false, targetId) {
     if(observerClosed()) return;
     if(errors.length < 8 && !errors.includes(category)) errors.push(category);
-    if(contextObserver && (eventCounted || contextObserver.noteEvent())) contextObserver.recordObserverError();
+    if(contextObserver && (eventCounted || contextObserver.noteEvent())) contextObserver.recordObserverError(targetId);
     else if(observerClosed()) return;
   }
 
@@ -769,7 +770,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     if(observerClosed()) return;
     const parsed = parseNetworkUrl(url);
     if(!parsed) {
-      recordError('invalid_worker_cdp_message', true);
+      recordError('invalid_worker_cdp_message', true, targetId);
       return;
     }
 
@@ -804,7 +805,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
 
   function sendTargetCommand(sessionId, method, params = {}) {
     if(!observation.allowCdpMethod('worker', method)) {
-      recordError('cdp_method_not_allowed');
+      recordError('cdp_method_not_allowed', false, targets.get(sessionId)?.targetId);
       return Promise.reject(new Error('cdp_method_not_allowed'));
     }
     const id = ++nextCommandId;
@@ -859,7 +860,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
       await sendTargetCommand(sessionId, 'Runtime.runIfWaitingForDebugger');
       contextObserver?.noteSetupComplete(targetInfo.targetId);
     })().catch(() => {
-      recordError('worker_target_setup');
+      recordError('worker_target_setup', false, targetInfo.targetId);
     }).finally(() => setupPromises.delete(setup));
     setupPromises.add(setup);
   }
@@ -901,20 +902,20 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     if(observerClosed() || workerSessions.get(targetId) !== sessionId) return;
     if(!['Network.requestWillBeSent', 'Network.webSocketCreated', 'Audits.issueAdded', 'Log.entryAdded'].includes(method)) return;
     if(!params || typeof params !== 'object' || Array.isArray(params)) {
-      recordError('invalid_worker_cdp_message', true);
+      recordError('invalid_worker_cdp_message', true, targetId);
       return;
     }
     if(method === 'Network.requestWillBeSent') {
       if((params.type !== undefined && typeof params.type !== 'string') || !params.request || typeof params.request !== 'object' ||
           Array.isArray(params.request) || typeof params.request.url !== 'string') {
-        recordError('invalid_worker_cdp_message', true);
+        recordError('invalid_worker_cdp_message', true, targetId);
         return;
       }
       pageErrorAssetResolver?.observeRequest(params.request.url, params.initiator, params.type, targetId, source);
       record(targetId, source, params.type === 'WebSocket' ? 'websocket' : 'fetch', params.request.url, method, params.type);
     } else if(method === 'Network.webSocketCreated') {
       if(typeof params.url !== 'string') {
-        recordError('invalid_worker_cdp_message', true);
+        recordError('invalid_worker_cdp_message', true, targetId);
         return;
       }
       record(targetId, source, 'websocket', params.url, method, 'WebSocket');
@@ -926,14 +927,14 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
           (details !== undefined && (!details || typeof details !== 'object' || Array.isArray(details) ||
             (details.blockedURL !== undefined && typeof details.blockedURL !== 'string') ||
             (details.isReportOnly !== undefined && typeof details.isReportOnly !== 'boolean')))) {
-        recordError('invalid_worker_cdp_message', true);
+        recordError('invalid_worker_cdp_message', true, targetId);
         return;
       }
       recordCspIssue(source, targetId, issue);
     } else if(method === 'Log.entryAdded') {
       const entry = params.entry;
       if(!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.source !== 'string' || typeof entry.text !== 'string') {
-        recordError('invalid_worker_cdp_message', true);
+        recordError('invalid_worker_cdp_message', true, targetId);
         return;
       }
       recordLogViolation(source, targetId, entry);
@@ -941,23 +942,24 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
   }
 
   function dispatchTargetMessage(sessionId, message) {
+    const targetId = targets.get(sessionId)?.targetId;
     if(contextObserver?.state.overflow) {
       observerClosed();
       return;
     }
     if(typeof message !== 'string' || Buffer.byteLength(message, 'utf8') > observation.LIMITS.cdpMessageBytes) {
-      recordError('cdp_message_overflow');
+      recordError('cdp_message_overflow', false, targetId);
       return;
     }
     let payload;
     try {
       payload = JSON.parse(message);
     } catch {
-      recordError('invalid_worker_cdp_message');
+      recordError('invalid_worker_cdp_message', false, targetId);
       return;
     }
     if(!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      recordError('invalid_worker_cdp_message');
+      recordError('invalid_worker_cdp_message', false, targetId);
       return;
     }
     if(payload.id !== undefined) {
@@ -971,6 +973,11 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     }
     if(observerClosed()) return;
     if(payload.method === 'Target.attachedToTarget') {
+      if(!payload.params || typeof payload.params !== 'object' || Array.isArray(payload.params) ||
+          typeof payload.params.sessionId !== 'string' || !payload.params.targetInfo || typeof payload.params.targetInfo !== 'object') {
+        recordError('invalid_worker_cdp_message', false, targetId);
+        return;
+      }
       addTarget(payload.params.sessionId, payload.params.targetInfo);
       return;
     }
@@ -981,12 +988,16 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     contextObserver?.noteWorkerEvent(targetInfo.targetId, payload.method, payload.params, sessionId);
     if(!wasOverflowed && contextObserver?.state.overflow) targetRegistry?.noteTargetOverflow?.(targetInfo.targetId);
     if(observerClosed()) return;
+    if(typeof payload.method !== 'string') {
+      recordError('invalid_worker_cdp_message', true, targetInfo.targetId);
+      return;
+    }
     recordWorkerEvent(targetInfo.targetId, targetInfo.type, sessionId, payload.method, payload.params);
   }
 
   async function start(registry) {
     cdp = await withCommandTimeout(() => page.context().newCDPSession(page));
-    send = createGatedSender('page', cdp, contextObserver);
+    send = createGatedSender('page', cdp, contextObserver, () => pageTargetId);
     // Page-session identity mapping only: the browser context this page lives
     // in is what attributes every browser-level shared worker to it.
     const info = await send('Target.getTargetInfo');
@@ -1006,7 +1017,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
       notePageEvent('Network.requestWillBeSent', event);
       if(observerClosed()) return;
       pageErrorAssetResolver?.observeRequest(event.request.url, event.initiator, event.type, pageTargetId);
-      record('page', 'page', kind, event.request.url, 'Network.requestWillBeSent', event.type);
+      record(pageTargetId, 'page', kind, event.request.url, 'Network.requestWillBeSent', event.type);
     });
     cdp.on('Network.responseReceived', (event) => {
       if(observerClosed()) return;
@@ -1020,7 +1031,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
       if(observerClosed()) return;
       notePageEvent('Network.webSocketCreated', event);
       if(observerClosed()) return;
-      record('page', 'page', 'websocket', event.url, 'Network.webSocketCreated', 'WebSocket');
+      record(pageTargetId, 'page', 'websocket', event.url, 'Network.webSocketCreated', 'WebSocket');
     });
     if(contextObserver?.observeWebSocket101) {
       cdp.on('Network.webSocketHandshakeResponseReceived', (event) => {
@@ -1033,14 +1044,14 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
       const issue = event.issue;
       notePageEvent('Audits.issueAdded', {issue});
       if(observerClosed()) return;
-      recordCspIssue('page', 'page', issue);
+      recordCspIssue('page', pageTargetId, issue);
     });
     cdp.on('Log.entryAdded', (event) => {
       if(observerClosed()) return;
       const entry = event.entry;
       notePageEvent('Log.entryAdded', {entry});
       if(observerClosed()) return;
-      recordLogViolation('page', 'page', entry);
+      recordLogViolation('page', pageTargetId, entry);
     });
     cdp.on('Target.attachedToTarget', ({sessionId, targetInfo}) => addTarget(sessionId, targetInfo));
     cdp.on('Target.receivedMessageFromTarget', ({sessionId, message}) => dispatchTargetMessage(sessionId, message));
@@ -1108,7 +1119,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
         await waitForOverflowCleanup();
         if(cdp && !overflowContextClosed) await withCommandTimeout(() => cdp.detach());
       } catch(error) {
-        contextObserver?.recordObserverError();
+        contextObserver?.recordObserverError(pageTargetId);
         throw error;
       }
     }
@@ -2498,7 +2509,7 @@ function buildObservationBlock(registry, appObservers, controls, egress) {
 }
 
 function buildWorkerCoverageFailureBreakdown(registry, appObservers) {
-  const contexts = Object.fromEntries(APP_CONTEXTS.map((name) => {
+  const contexts = Object.fromEntries(Object.keys(appObservers).filter((name) => APP_CONTEXTS.includes(name)).map((name) => {
     const observer = appObservers[name];
     const summary = observer.summary();
     return [name, {
@@ -2591,6 +2602,9 @@ function buildAuthProgressReport(status, stage, contexts, controlCount, password
       ])
     },
     ...(gateBreakdown ? {gateBreakdown} : {}),
+    ...(status === 'failed' && stage === 'browser_worker_observation_incomplete' && registry
+      ? {workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers)}
+      : {}),
     workerObservation: observationBlock && !observation.validateNetworkBlock(observationBlock)
       ? observationBlock
       : observationBlock ? observation.UNCLASSIFIED_NETWORK_BLOCK : null

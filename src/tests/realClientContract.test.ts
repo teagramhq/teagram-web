@@ -213,6 +213,9 @@ async function runDiscoveryAccountingGate(events: any[], fault?: string) {
         harness.emit(app, 'service-worker', 'Network.webSocketCreated', {requestId: 'service-allowed', url: 'wss://telegramd.test/apiws'}, 'auto');
         harness.emit(app, 'alice-worker', 'Network.webSocketCreated', {requestId: 'allowed', url: 'wss://telegramd.test/apiws'});
         if(fault === 'overflow') app.observer.noteInjectedControlFault('overflow');
+        if(fault === 'malformed_discovery') harness.session.emit('Target.receivedMessageFromTarget', {
+          sessionId: 'discovery-alice-worker', message: HOSTILE.phrase
+        });
         for(const event of events) harness.emit(app, 'alice-worker', event.method, event.params);
         if(fault === 'page_error') {
           page.emit('pageerror', createPlaywrightWrappedPageError('TypeError', 'auth-client.js'));
@@ -622,6 +625,7 @@ describe('worker coverage failure diagnostics', () => {
       {targetType: 'iframe', owningContext: 'alice', scriptAsset: 'unknown', causes: ['contextless']},
       {targetType: 'service_worker', owningContext: null, scriptAsset: 'sw-01234567.js', causes: ['foreign']},
       {targetType: 'service_worker', owningContext: 'alice', scriptAsset: 'unknown', causes: ['observer_overflow']},
+      {targetType: 'service_worker', owningContext: 'bob', scriptAsset: 'unknown', causes: ['observer_error']},
       {targetType: 'shared_worker', owningContext: 'alice', scriptAsset: 'index.worker-AbCdEfGh.js', causes: ['contextless']},
       {targetType: 'dedicated_worker', owningContext: 'bob', scriptAsset: 'tlottie.worker-JkLmNoPq.js', causes: ['multiple_pages']},
       {targetType: 'other', owningContext: null, scriptAsset: 'unknown', causes: ['foreign']}
@@ -2059,6 +2063,37 @@ describe('discovery shared-worker network accounting', () => {
       harness.emit(alice, 'alice-worker', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}});
       expect(alice.observer.summary()).toMatchObject({observerErrors: 1, coverageComplete: 0});
       expect(alice.networkObserver.events).toHaveLength(0);
+      expect(harness.registry.coverageTargets()).toContainEqual({
+        type: 'shared_worker',
+        owningContext: 'alice',
+        scriptAsset: 'unknown',
+        causes: ['observer_error']
+      });
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('attributes malformed page-session worker events to their target', async() => {
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    try {
+      harness.session.emit('Target.targetCreated', {
+        targetInfo: {targetId: 'alice-auto-worker', type: 'service_worker', url: HOSTILE.blobUrl, browserContextId: 'alice'}
+      });
+      await harness.attach(alice, 'alice-auto-worker', 'auto', 'service_worker');
+      harness.emit(alice, 'alice-auto-worker', 'Network.requestWillBeSent', {
+        type: 'Fetch', request: {url: 42, initiator: HOSTILE.url}
+      }, 'auto');
+
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 1, coverageComplete: 0});
+      expect(harness.registry.coverageTargets()).toContainEqual({
+        type: 'service_worker',
+        owningContext: 'alice',
+        scriptAsset: 'unknown',
+        causes: ['observer_error']
+      });
+      expect(JSON.stringify(harness.registry.coverageTargets())).not.toContain(HOSTILE.url);
     } finally {
       await harness.stop();
     }
@@ -2076,6 +2111,12 @@ describe('discovery shared-worker network accounting', () => {
         })).not.toThrow();
       }
       expect(alice.observer.summary()).toMatchObject({observerErrors: 6, coverageComplete: 0});
+      expect(harness.registry.coverageTargets()).toContainEqual({
+        type: 'shared_worker',
+        owningContext: 'alice',
+        scriptAsset: 'unknown',
+        causes: ['observer_error']
+      });
       expect(alice.networkObserver.events).toHaveLength(0);
       expectNoHostileLeak(alice.observer.summary());
     } finally {
@@ -2518,6 +2559,39 @@ describe('discovery shared-worker network accounting', () => {
     const report = await runDiscoveryAccountingGate([], fault);
     expect(report.status).toBe('failed');
     expect(report.workerObservation.contexts.alice.coverageComplete).toBe(0);
+  });
+
+  it.each(['attach', 'setup'])('attributes a discovery %s failure to its worker', async(fault) => {
+    const harness = await createDiscoveryNetworkHarness(fault === 'attach' ? {attachFailure: true} : {setupFailure: true});
+    const {alice} = harness;
+    try {
+      await harness.attach(alice, 'alice-worker');
+
+      expect(alice.observer.summary()).toMatchObject({observerErrors: 1, coverageComplete: 0});
+      expect(harness.registry.coverageTargets()).toContainEqual({
+        type: 'shared_worker',
+        owningContext: 'alice',
+        scriptAsset: 'unknown',
+        causes: ['observer_error']
+      });
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  it('includes observer-error target diagnostics in worker coverage failure output', async() => {
+    const report = await runDiscoveryAccountingGate([], 'malformed_discovery');
+
+    expect(report).toMatchObject({status: 'failed', stage: 'browser_worker_observation_incomplete'});
+    expect(report.workerCoverageBreakdown.targets).toContainEqual({
+      targetType: 'shared_worker',
+      owningContext: 'alice',
+      scriptAsset: 'unknown',
+      causes: ['observer_error']
+    });
+    expect(parseAuthProgressReport(report).workerCoverageBreakdown).toEqual(report.workerCoverageBreakdown);
+    expect(formatBrowserFailureMessage(report)).toContain('"causes":["observer_error"]');
+    expectNoHostileLeak(report);
   });
 
   it('drains a discovery detach before setup and rejects a passing verdict', async() => {
