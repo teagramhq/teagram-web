@@ -33,7 +33,7 @@ const NETWORK_OBSERVER_ERROR_KINDS = new Set(observation.GATE_OBSERVER_ERROR_KIN
 const PAGE_ERROR_CONSTRUCTORS = new Set(observation.GATE_PAGE_ERROR_CONSTRUCTORS);
 const PAGE_ERROR_BLOB_ASSET_LIMIT = 512;
 const PAGE_ERROR_BLOB_ASSET_HINTS = Object.freeze([
-  {pattern: /\bTLottieWasm\.createAnimation\b/, asset: 'tlottie.worker.js'}
+  {pattern: /\bTLottieWasm\.createAnimation\b/, workerLabel: 'lottie_worker'}
 ]);
 // Bottom-bar buttons that replace the composer, keyed by their English label.
 // Only the key is reported; the label never leaves the page.
@@ -2152,7 +2152,7 @@ function pageErrorConstructorName(error) {
   return PAGE_ERROR_CONSTRUCTORS.has(name) ? name : 'Error';
 }
 
-function pageErrorScriptAsset(stack, blobAssets = new Map()) {
+function pageErrorScriptAsset(stack, blobAssets = new Map(), resolveBlobAsset) {
   if(typeof stack !== 'string') return 'unknown';
   for(const line of stack.split('\n').slice(1)) {
     const match = /(?:\(|\s)(https?:\/\/[^\s)]+|blob:[^\s)]+)/.exec(line);
@@ -2168,13 +2168,17 @@ function pageErrorScriptAsset(stack, blobAssets = new Map()) {
     if(parsed.protocol === 'blob:') {
       const mappedAsset = blobAssets.get(parsed.href);
       if(typeof mappedAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(mappedAsset)) return mappedAsset;
+      if(parsed.origin === PRIVATE_CSP_ORIGIN && typeof resolveBlobAsset === 'function') {
+        const resolvedAsset = resolveBlobAsset(parsed.href, stack);
+        if(typeof resolvedAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(resolvedAsset)) {
+          blobAssets.set(parsed.href, resolvedAsset);
+          return resolvedAsset;
+        }
+      }
       continue;
     }
     const asset = path.posix.basename(parsed.pathname);
     if(observation.SCRIPT_ASSET_PATTERN.test(asset)) return asset;
-  }
-  for(const hint of PAGE_ERROR_BLOB_ASSET_HINTS) {
-    if(hint.pattern.test(stack)) return hint.asset;
   }
   return 'unknown';
 }
@@ -2211,6 +2215,14 @@ function createPageErrorAssetResolver() {
   const workerAssetCandidates = [];
   const directWorkerAssets = new Map();
   const workerBlobUrls = new Map();
+  function pageErrorWorkerAsset(stack) {
+    const hint = PAGE_ERROR_BLOB_ASSET_HINTS.find(({pattern}) => pattern.test(stack));
+    const freshCandidates = workerAssetCandidates.filter((candidate) =>
+      Date.now() - candidate.observedAt <= 30_000 && (!hint || candidate.workerLabel === hint.workerLabel)
+    );
+    const candidate = freshCandidates[freshCandidates.length - 1];
+    return candidate?.asset;
+  }
   function takeWorkerAssetCandidate(sourceTargetId) {
     const freshCandidates = workerAssetCandidates.filter((candidate) =>
       !candidate.consumed && Date.now() - candidate.observedAt <= 30_000
@@ -2243,7 +2255,7 @@ function createPageErrorAssetResolver() {
           }
           if(requestType === 'Fetch' && typeof sourceTargetId === 'string' && observation.SCRIPT_ASSET_PATTERN.test(asset)) {
             if(workerAssetCandidates.length >= PAGE_ERROR_BLOB_ASSET_LIMIT) workerAssetCandidates.shift();
-            workerAssetCandidates.push({sourceTargetId, sourceType, asset, observedAt: Date.now(), consumed: false});
+            workerAssetCandidates.push({sourceTargetId, sourceType, asset, workerLabel, observedAt: Date.now(), consumed: false});
           }
         }
         return;
@@ -2288,7 +2300,7 @@ function createPageErrorAssetResolver() {
       }
     },
     scriptAsset(stack) {
-      return pageErrorScriptAsset(stack, blobAssets);
+      return pageErrorScriptAsset(stack, blobAssets, pageErrorWorkerAsset);
     },
     clear() {
       blobAssets.clear();

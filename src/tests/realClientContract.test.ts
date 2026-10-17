@@ -2047,18 +2047,32 @@ describe('discovery shared-worker network accounting', () => {
       expect(JSON.stringify(breakdownFromScriptRequest)).not.toContain(blobFromScriptRequest);
 
       const lottieBlobUrl = 'blob:https://telegramd.test/55555555-5555-5555-5555-555555555555';
+      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'lottie-error-target');
       const lottiePageErrors = {alice: [], bob: []} as any;
       const lottieError = new Error(HOSTILE.phrase);
       lottieError.stack = `Error: ${HOSTILE.phrase}\n    at TLottieWasm.createAnimation (${lottieBlobUrl}:1197:23)\n    at TLottieItem.init (${lottieBlobUrl}:1328:35)\n    at Object.loadFromData [as callback] (${lottieBlobUrl}:1580:16)\n    at async SuperMessagePort.processInvokeTask [as invoke] (${lottieBlobUrl}:804:29)`;
       recordPageError(lottiePageErrors, 'alice', lottieError, resolver);
       const lottieBreakdown = summarizeGateBreakdown({pageErrors: lottiePageErrors});
       expect(lottieBreakdown.counters.pageErrors).toBe(1);
-      expect(lottieBreakdown.pageErrors.alice).toEqual([{constructorName: 'Error', scriptAsset: 'tlottie.worker.js'}]);
+      expect(lottieBreakdown.pageErrors.alice).toEqual([{constructorName: 'Error', scriptAsset: 'tlottie.worker-JkLmNoPq.js'}]);
       expect(JSON.stringify(lottieBreakdown)).not.toContain(lottieBlobUrl);
     } finally {
       resolver.clear();
       await networkObserver.stop();
     }
+  });
+
+  it('resolves unmapped blob script frames from fetched bundles and keeps unknown for frameless stacks', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'contract-test-page');
+
+    const firstBlobUrl = 'blob:https://telegramd.test/77777777-7777-7777-7777-777777777777';
+    const secondBlobUrl = 'blob:https://telegramd.test/88888888-8888-8888-8888-888888888888';
+    expect(resolver.scriptAsset(`Error: failed\n    at render (${firstBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
+    expect(resolver.scriptAsset(`Error: failed\n    at render (${secondBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
+    expect(resolver.scriptAsset('Error: failed')).toBe('unknown');
+    resolver.clear();
   });
 
   it('attributes a blob worker from its fetched bundle through browser discovery', async() => {
