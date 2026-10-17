@@ -2128,6 +2128,12 @@ function summarizeEgress(observers) {
 function pageErrorConstructorName(error) {
   let name;
   try {
+    name = error?.name;
+  } catch {
+    name = undefined;
+  }
+  if(PAGE_ERROR_CONSTRUCTORS.has(name)) return name;
+  try {
     name = error?.constructor?.name;
   } catch {
     return 'Error';

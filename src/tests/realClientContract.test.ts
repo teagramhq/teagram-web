@@ -45,6 +45,13 @@ const HOSTILE = Object.freeze({
   frame: `at ${APP_ORIGIN}/index.worker-AbCdEfGh.js:1:7 (${HOSTILE_PASSWORD})`
 });
 
+function createPlaywrightWrappedPageError(name: 'TypeError' | 'RangeError', asset: string) {
+  const error = new Error(HOSTILE.phrase);
+  error.name = name;
+  error.stack = `${name}: ${HOSTILE.phrase}\n    at https://unannounced.invalid/assets/${asset}?token=${HOSTILE.token}:21:3`;
+  return error;
+}
+
 function createNetworkObserverHarness(observer: any, options: any = {}) {
   const cdp: any = new EventEmitter();
   cdp.send = options.send || (async(method: string) => method === 'Target.getTargetInfo'
@@ -206,17 +213,13 @@ async function runDiscoveryAccountingGate(events: any[], fault?: string) {
         if(fault === 'overflow') app.observer.noteInjectedControlFault('overflow');
         for(const event of events) harness.emit(app, 'alice-worker', event.method, event.params);
         if(fault === 'page_error') {
-          const error = new TypeError(HOSTILE.phrase);
-          error.stack = `TypeError: ${HOSTILE.phrase}\n    at https://unannounced.invalid/assets/auth-client.js?token=${HOSTILE.token}:21:3`;
-          page.emit('pageerror', error);
+          page.emit('pageerror', createPlaywrightWrappedPageError('TypeError', 'auth-client.js'));
         }
         if(fault === 'page_error_overflow') {
           for(let index = 0; index < 515; index++) {
             const isOtherAsset = index === 514;
-            const error = isOtherAsset ? new RangeError(HOSTILE.phrase) : new TypeError(HOSTILE.phrase);
             const asset = isOtherAsset ? 'overflow-client.js' : 'auth-client.js';
-            error.stack = `${error.constructor.name}: ${HOSTILE.phrase}\n    at https://unannounced.invalid/assets/${asset}?token=${HOSTILE.token}:21:3`;
-            page.emit('pageerror', error);
+            page.emit('pageerror', createPlaywrightWrappedPageError(isOtherAsset ? 'RangeError' : 'TypeError', asset));
           }
         }
       }
