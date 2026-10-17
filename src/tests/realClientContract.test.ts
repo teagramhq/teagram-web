@@ -4004,6 +4004,10 @@ describe('real client group created', () => {
           const pending = addBubble('9001', 'is-sending');
           addBubble('9001', 'is-sent');
           setTimeout(() => pending.remove(), 700);
+        } else if(mode === 'transient-temporary-server') {
+          const pending = addBubble('-9001', 'is-sending');
+          addBubble('9001', 'is-sent');
+          setTimeout(() => pending.remove(), 700);
         } else if(mode === 'distinct-sent') {
           addBubble('9101', 'is-sent');
           addBubble('9102', 'is-sent');
@@ -4043,6 +4047,32 @@ describe('real client group created', () => {
       await installMessageSender(page, 'transient-pending-sent');
       await sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 2_000);
       expect(await page.locator('#column-center .chat.active .bubble .message').filter({hasText: GROUP_MESSAGE}).count()).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('accepts a pending temporary id beside its sent server id', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(messageCenterMarkup());
+      await installMessageSender(page, 'transient-temporary-server');
+      await sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 2_000);
+      const state = await realClientBrowser.captureGroupMessageState();
+      expect(state.result).toBe('settled');
+      expect(state.distinctIds).toBe(true);
+      expect(state.distinctServerIds).toBe(false);
+      expect(state.samples).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          count: 2,
+          bubbles: [
+            {messageId: '-9001', sendState: 'pending'},
+            {messageId: '9001', sendState: 'sent'}
+          ],
+          distinctIds: true,
+          distinctServerIds: false
+        })
+      ]));
     } finally {
       await page.close();
     }

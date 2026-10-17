@@ -558,25 +558,27 @@ const GROUP_MESSAGE_RESULTS = [
 // content stay out of the report.
 export function parseGroupMessageState(state) {
   if(state === 'unavailable') return state;
-  const keys = ['samples', 'distinctIds', 'pageErrorsSinceStep', 'consoleErrorsSinceStep', 'rpcErrorsSinceStep', 'result'];
+  const keys = ['samples', 'distinctIds', 'distinctServerIds', 'pageErrorsSinceStep', 'consoleErrorsSinceStep', 'rpcErrorsSinceStep', 'result'];
   const isCount = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000;
   const isNullableCount = (value) => value === null || isCount(value);
   const isSample = (sample) => {
     if(!sample || typeof sample !== 'object' || Array.isArray(sample) ||
-        JSON.stringify(Object.keys(sample).sort()) !== JSON.stringify(['count', 'bubbles', 'distinctIds'].sort()) ||
+        JSON.stringify(Object.keys(sample).sort()) !== JSON.stringify(['count', 'bubbles', 'distinctIds', 'distinctServerIds'].sort()) ||
         !isCount(sample.count) || !Array.isArray(sample.bubbles) || sample.bubbles.length !== sample.count ||
-        typeof sample.distinctIds !== 'boolean') return false;
+        typeof sample.distinctIds !== 'boolean' || typeof sample.distinctServerIds !== 'boolean') return false;
     if(!sample.bubbles.every((bubble) => bubble && typeof bubble === 'object' && !Array.isArray(bubble) &&
         JSON.stringify(Object.keys(bubble).sort()) === JSON.stringify(['messageId', 'sendState'].sort()) &&
         (bubble.messageId === null || typeof bubble.messageId === 'string' && /^-?[0-9]{1,20}$/.test(bubble.messageId)) &&
         GROUP_MESSAGE_SEND_STATES.includes(bubble.sendState))) return false;
     const ids = sample.bubbles.map((bubble) => bubble.messageId).filter((id) => id !== null);
-    return sample.distinctIds === (new Set(ids).size > 1);
+    const serverIds = sample.bubbles.filter((bubble) => bubble.sendState === 'sent').map((bubble) => bubble.messageId).filter((id) => id !== null);
+    return sample.distinctIds === (new Set(ids).size > 1) && sample.distinctServerIds === (new Set(serverIds).size > 1);
   };
   if(!state || typeof state !== 'object' || Array.isArray(state) ||
       JSON.stringify(Object.keys(state).sort()) !== JSON.stringify([...keys].sort()) ||
       !Array.isArray(state.samples) || state.samples.length > 128 || !state.samples.every(isSample) ||
       typeof state.distinctIds !== 'boolean' || state.distinctIds !== state.samples.some((sample) => sample.distinctIds) ||
+      typeof state.distinctServerIds !== 'boolean' || state.distinctServerIds !== state.samples.some((sample) => sample.distinctServerIds) ||
       !GROUP_MESSAGE_RESULTS.includes(state.result) ||
       !['pageErrorsSinceStep', 'consoleErrorsSinceStep', 'rpcErrorsSinceStep'].every((key) => isNullableCount(state[key]))) {
     return 'unclassified';

@@ -1661,10 +1661,9 @@ function groupMessageSampleResult(sample) {
   if(sample.count === 0) return 'disappeared';
   if(sample.bubbles.some((bubble) => !bubble.messageId)) return 'missing_message_id';
   if(sample.bubbles.some((bubble) => bubble.sendState === 'failed')) return 'failed_bubble';
-  if(sample.distinctIds) return 'multiple_ids';
+  if(sample.distinctServerIds) return 'multiple_ids';
   if(sample.count === 1) return sample.bubbles[0].sendState === 'pending' ? 'pending' : 'sent';
-  if(sample.count === 2 && sample.bubbles[0].messageId === sample.bubbles[1].messageId &&
-      new Set(sample.bubbles.map((bubble) => bubble.sendState)).size === 2 &&
+  if(sample.count === 2 && new Set(sample.bubbles.map((bubble) => bubble.sendState)).size === 2 &&
       sample.bubbles.some((bubble) => bubble.sendState === 'pending') &&
       sample.bubbles.some((bubble) => bubble.sendState === 'sent')) {
     return 'transient_pair';
@@ -1685,7 +1684,7 @@ async function waitForGroupMessageCount(page, chat, groupTitle, message, stage, 
     let sample;
     try {
       const [chatCount, titleCount] = await Promise.all([chat.count(), groupTitle.count()]);
-      sample = chatCount !== 1 || titleCount !== 1 ? {count: 0, bubbles: [], distinctIds: false} : await message.evaluateAll((elements) => {
+      sample = chatCount !== 1 || titleCount !== 1 ? {count: 0, bubbles: [], distinctIds: false, distinctServerIds: false} : await message.evaluateAll((elements) => {
         const bubbles = elements.map((element) => {
           const bubble = element.closest('.bubble');
           const id = bubble?.getAttribute('data-mid') || '';
@@ -1696,10 +1695,13 @@ async function waitForGroupMessageCount(page, chat, groupTitle, message, stage, 
             sendState
           };
         });
+        // Pending bubbles can retain a temporary negative id beside their sent server-id copy.
+        const serverIds = bubbles.filter((bubble) => bubble.sendState === 'sent').map((bubble) => bubble.messageId).filter(Boolean);
         return {
           count: bubbles.length,
           bubbles,
-          distinctIds: new Set(bubbles.map((bubble) => bubble.messageId).filter(Boolean)).size > 1
+          distinctIds: new Set(bubbles.map((bubble) => bubble.messageId).filter(Boolean)).size > 1,
+          distinctServerIds: new Set(serverIds).size > 1
         };
       });
     } catch(error) {
@@ -1746,6 +1748,7 @@ async function captureGroupMessageState(trace = groupMessageTrace) {
     return {
       samples: trace.samples,
       distinctIds: trace.samples.some((sample) => sample.distinctIds),
+      distinctServerIds: trace.samples.some((sample) => sample.distinctServerIds),
       pageErrorsSinceStep: since('pageErrors'),
       consoleErrorsSinceStep: since('consoleErrors'),
       rpcErrorsSinceStep,
