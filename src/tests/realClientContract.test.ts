@@ -579,6 +579,183 @@ async function authProgressNetwork(): Promise<any> {
   }
 }
 
+describe('worker coverage failure diagnostics', () => {
+  const breakdown = {
+    registry: {
+      discoveryInactive: 1,
+      foreignTargets: 1,
+      contextlessTargets: 2,
+      appContextlessTargets: 1,
+      targetDetailsOverflow: 0
+    },
+    contexts: {
+      alice: {
+        discoveryInactive: 1,
+        pageCoverageIncomplete: 1,
+        windowNotElapsed: 1,
+        observerOverflow: 1,
+        observerErrors: 2,
+        foreignTargets: 1,
+        countedEvents: 4096,
+        attachedTargets: 6,
+        pageTargets: 2,
+        multiplePageTargets: 1,
+        coverageComplete: 0
+      },
+      bob: {
+        discoveryInactive: 0,
+        pageCoverageIncomplete: 0,
+        windowNotElapsed: 0,
+        observerOverflow: 0,
+        observerErrors: 0,
+        foreignTargets: 0,
+        countedEvents: 12,
+        attachedTargets: 3,
+        pageTargets: 1,
+        multiplePageTargets: 0,
+        coverageComplete: 1
+      }
+    },
+    targets: [
+      {targetType: 'page', owningContext: 'alice', scriptAsset: 'unknown', causes: ['multiple_pages']},
+      {targetType: 'page', owningContext: 'alice', scriptAsset: 'unknown', causes: ['observer_overflow']},
+      {targetType: 'iframe', owningContext: 'alice', scriptAsset: 'unknown', causes: ['contextless']},
+      {targetType: 'service_worker', owningContext: null, scriptAsset: 'sw-01234567.js', causes: ['foreign']},
+      {targetType: 'service_worker', owningContext: 'alice', scriptAsset: 'unknown', causes: ['observer_overflow']},
+      {targetType: 'shared_worker', owningContext: 'alice', scriptAsset: 'index.worker-AbCdEfGh.js', causes: ['contextless']},
+      {targetType: 'dedicated_worker', owningContext: 'bob', scriptAsset: 'tlottie.worker-JkLmNoPq.js', causes: ['multiple_pages']},
+      {targetType: 'other', owningContext: null, scriptAsset: 'unknown', causes: ['foreign']}
+    ]
+  };
+
+  it('builds a bounded breakdown for every coverage condition and target type', () => {
+    const coverage = observation.buildWorkerCoverageBreakdown({
+      registry: {discoveryActive: 0, foreignTargets: 1, contextlessTargets: 2, appContextlessTargets: 1, targetDetailsOverflow: 0},
+      contexts: {
+        alice: {
+          discoveryActive: 0,
+          pageCoverageComplete: 0,
+          windowElapsed: 0,
+          observerOverflow: 1,
+          observerErrors: 2,
+          foreignTargets: 1,
+          countedEvents: 4096,
+          attachedTargets: 6,
+          pageTargets: 2,
+          coverageComplete: 0
+        },
+        bob: {
+          discoveryActive: 1,
+          pageCoverageComplete: 1,
+          windowElapsed: 1,
+          observerOverflow: 0,
+          observerErrors: 0,
+          foreignTargets: 0,
+          countedEvents: 12,
+          attachedTargets: 3,
+          pageTargets: 1,
+          coverageComplete: 1
+        }
+      },
+      targets: breakdown.targets.map((target) => ({
+        type: target.targetType === 'dedicated_worker' ? 'worker' : target.targetType,
+        owningContext: target.owningContext,
+        scriptAsset: target.scriptAsset,
+        causes: target.causes
+      }))
+    });
+
+    expect(coverage).toEqual(breakdown);
+    const redacted = observation.buildWorkerCoverageBreakdown({
+      registry: {discoveryActive: 1, foreignTargets: 0, contextlessTargets: 0, appContextlessTargets: 0, targetDetailsOverflow: 0},
+      contexts: {},
+      targets: [{type: 'shared_worker', owningContext: null, scriptAsset: HOSTILE.url, causes: ['foreign']}]
+    });
+    expect(redacted.targets[0].scriptAsset).toBe('unknown');
+    expect(JSON.stringify(redacted)).not.toContain(HOSTILE.url);
+  });
+
+  it('keeps coverage complete across a bounded page request window above the old cap', () => {
+    const requests = Array.from({length: 1024}, () => ({
+      kind: 'page',
+      method: 'Network.requestWillBeSent',
+      params: {type: 'Fetch', request: {url: `${APP_ORIGIN}/fixture-resource`}}
+    }));
+    const summary = replayContext([{kind: 'target', target: pageTarget()}, ...requests]);
+
+    expect(summary).toMatchObject({
+      countedEvents: 1025,
+      observerOverflow: 0,
+      coverageComplete: 1
+    });
+  });
+
+  it('attributes a page event budget overflow to the page target', async() => {
+    const contextObserver = observation.createContextObserver('alice');
+    const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver);
+    const overflowedTargets: string[] = [];
+    await networkObserver.start({
+      registerContext() {},
+      noteTargetOverflow(targetId: string) {
+        overflowedTargets.push(targetId);
+      }
+    });
+
+    try {
+      for(let index = 0; index <= observation.LIMITS.countedEventsPerContext; index++) {
+        cdp.emit('Network.requestWillBeSent', {
+          requestId: `request-${index}`,
+          type: 'Fetch',
+          request: {url: `${APP_ORIGIN}/fixture-resource`}
+        });
+      }
+
+      expect(contextObserver.summary()).toMatchObject({
+        countedEvents: observation.LIMITS.countedEventsPerContext,
+        observerOverflow: 1,
+        coverageComplete: 0
+      });
+      expect(overflowedTargets).toEqual(['contract-test-page']);
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
+  it('formats each registry and context condition with typed, attributed targets', () => {
+    const message = formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'browser_worker_observation_incomplete',
+      workerCoverageBreakdown: breakdown
+    });
+
+    expect(message).toContain(`; worker coverage ${JSON.stringify(breakdown)}`);
+    expect(message).toContain('"pageCoverageIncomplete":1');
+    expect(message).toContain('"windowNotElapsed":1');
+    expect(message).toContain('"observerOverflow":1');
+    expect(message).toContain('"observerErrors":2');
+    expect(message).toContain('"foreignTargets":1');
+    expect(message).toContain('"countedEvents":4096');
+    expect(message).toContain('"attachedTargets":6');
+    expect(message).toContain('"contextlessTargets":2');
+    expect(message).toContain('"targetType":"dedicated_worker"');
+    expect(message).toContain('"causes":["observer_overflow"]');
+    expect(message).toContain('"targetType":"service_worker","owningContext":"alice","scriptAsset":"unknown","causes":["observer_overflow"]');
+    expect(message).toContain('"owningContext":"bob"');
+    expect(message).toContain('"scriptAsset":"index.worker-AbCdEfGh.js"');
+  });
+
+  it('rejects unclassified target details instead of echoing URLs or paths', () => {
+    const hostile = structuredClone(breakdown);
+    hostile.targets[0].scriptAsset = HOSTILE.url;
+
+    expect(() => formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'browser_worker_observation_incomplete',
+      workerCoverageBreakdown: hostile
+    })).toThrow('worker coverage evidence is invalid');
+  });
+});
+
 describe('confined runner shared-worker observation contract', () => {
   it('reports a fetched allowlisted source with one same-origin blob worker as a candidate', () => {
     const summary = replayContext(appContextEvents());
@@ -1547,7 +1724,7 @@ describe('confined runner shared-worker observation contract', () => {
   });
 
   it('keeps the resource bounds and page count that the report depends on', () => {
-    expect(observation.LIMITS).toEqual({attachedTargets: 16, countedEventsPerContext: 512, cdpMessageBytes: 262_144, commandTimeoutMs: 5000});
+    expect(observation.LIMITS).toEqual({attachedTargets: 16, countedEventsPerContext: 4096, cdpMessageBytes: 262_144, commandTimeoutMs: 5000});
 
     const twoPages = replayContext([
       {kind: 'target', target: pageTarget()},
@@ -2438,11 +2615,12 @@ describe('discovery shared-worker network accounting', () => {
     try {
       for(let index = 0; index < observation.LIMITS.attachedTargets; index++) await harness.attach(alice, `bounded-${index}`);
       expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(16);
+      const eventsBeforeFlood = alice.observer.eventCount();
       for(let index = 0; index < observation.LIMITS.countedEventsPerContext + 20; index++) {
         harness.emit(alice, 'bounded-0', 'Network.webSocketCreated', {requestId: `socket-${index}`, url: `wss://unannounced.invalid/${index}`});
       }
-      expect(alice.observer.summary()).toMatchObject({countedEvents: 512, observerOverflow: 1, coverageComplete: 0});
-      expect(alice.networkObserver.events).toHaveLength(479);
+      expect(alice.observer.summary()).toMatchObject({countedEvents: observation.LIMITS.countedEventsPerContext, observerOverflow: 1, coverageComplete: 0});
+      expect(alice.networkObserver.events).toHaveLength(observation.LIMITS.countedEventsPerContext - eventsBeforeFlood);
       const retained = alice.networkObserver.events.length;
       await harness.attach(alice, 'over-budget-target');
       harness.emit(alice, 'bounded-0', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}});

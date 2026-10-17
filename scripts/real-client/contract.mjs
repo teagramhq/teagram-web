@@ -666,7 +666,73 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const gateBreakdownSummary = report.gateBreakdown === undefined
     ? ''
     : `; browser egress/page errors ${JSON.stringify(parseBrowserGateBreakdown(report.gateBreakdown))}`;
-  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}${groupMemberSummary}${groupMessageSummary}${gateBreakdownSummary}`;
+  let workerCoverageSummary = '';
+  if(report.stage === 'browser_worker_observation_incomplete' && report.status === 'failed') {
+    try {
+      workerCoverageSummary = `; worker coverage ${JSON.stringify(parseWorkerCoverageBreakdown(report.workerCoverageBreakdown))}`;
+    } catch{
+      throw new Error('worker coverage evidence is invalid');
+    }
+  }
+  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}${groupMemberSummary}${groupMessageSummary}${gateBreakdownSummary}${workerCoverageSummary}`;
+}
+
+function parseWorkerCoverageBreakdown(value) {
+  const registryKeys = ['discoveryInactive', 'foreignTargets', 'contextlessTargets', 'appContextlessTargets', 'targetDetailsOverflow'];
+  const contextKeys = [
+    'discoveryInactive',
+    'pageCoverageIncomplete',
+    'windowNotElapsed',
+    'observerOverflow',
+    'observerErrors',
+    'foreignTargets',
+    'countedEvents',
+    'attachedTargets',
+    'pageTargets',
+    'multiplePageTargets',
+    'coverageComplete'
+  ];
+  const targetTypes = ['page', 'iframe', 'service_worker', 'shared_worker', 'dedicated_worker', 'other'];
+  const causes = ['multiple_pages', 'foreign', 'contextless', 'observer_overflow'];
+  if(!hasExactOwnKeys(value, ['registry', 'contexts', 'targets']) ||
+      !hasExactOwnKeys(value.registry, registryKeys) ||
+      !hasExactOwnKeys(value.contexts, ['alice', 'bob']) ||
+      !Array.isArray(value.targets) || value.targets.length > 1024) {
+    throw new Error('worker coverage evidence is invalid');
+  }
+
+  for(const key of ['discoveryInactive']) {
+    if(![0, 1].includes(value.registry[key])) throw new Error('worker coverage evidence is invalid');
+  }
+  if(![0, 1].includes(value.registry.targetDetailsOverflow)) throw new Error('worker coverage evidence is invalid');
+  for(const key of ['foreignTargets', 'contextlessTargets', 'appContextlessTargets']) {
+    if(!Number.isSafeInteger(value.registry[key]) || value.registry[key] < 0 || value.registry[key] > 1_000_000) {
+      throw new Error('worker coverage evidence is invalid');
+    }
+  }
+  for(const context of Object.values(value.contexts)) {
+    if(!hasExactOwnKeys(context, contextKeys) ||
+        ['discoveryInactive', 'pageCoverageIncomplete', 'windowNotElapsed', 'observerOverflow', 'multiplePageTargets', 'coverageComplete']
+          .some((key) => ![0, 1].includes(context[key])) ||
+        ['observerErrors', 'foreignTargets', 'countedEvents', 'attachedTargets', 'pageTargets'].some((key) =>
+          !Number.isSafeInteger(context[key]) || context[key] < 0 || context[key] > 1_000_000)) {
+      throw new Error('worker coverage evidence is invalid');
+    }
+    if(context.countedEvents > observation.LIMITS.countedEventsPerContext || context.attachedTargets > observation.LIMITS.attachedTargets) {
+      throw new Error('worker coverage evidence is invalid');
+    }
+  }
+  for(const target of value.targets) {
+    if(!hasExactOwnKeys(target, ['targetType', 'owningContext', 'scriptAsset', 'causes']) ||
+        !targetTypes.includes(target.targetType) ||
+        !(target.owningContext === null || ['alice', 'bob', 'control'].includes(target.owningContext)) ||
+        typeof target.scriptAsset !== 'string' || !SCRIPT_ASSET.test(target.scriptAsset) ||
+        !Array.isArray(target.causes) || target.causes.length < 1 || target.causes.length > causes.length ||
+        target.causes.some((cause) => !causes.includes(cause)) || new Set(target.causes).size !== target.causes.length) {
+      throw new Error('worker coverage evidence is invalid');
+    }
+  }
+  return value;
 }
 
 export function parseAuthProgressReport(report) {

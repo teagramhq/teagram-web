@@ -228,6 +228,8 @@ function createGatedSender(scope, session, observer) {
 // Discovery is turned on before this runner creates any context.
 function createWorkerDiscovery() {
   const ATTRIBUTED_TYPES = ['page', 'shared_worker', 'service_worker', 'worker'];
+  const targetDiagnostics = new Map();
+  let targetDetailsOverflow = false;
   const contextObservers = new Map();
   const networkSinks = new Map();
   const targetOwners = new Map();
@@ -254,6 +256,44 @@ function createWorkerDiscovery() {
 
   function ownerOf(targetId) {
     return targetOwners.get(targetId);
+  }
+
+  function recordTargetDiagnostic(targetInfo, observer) {
+    const targetId = targetInfo?.targetId;
+    if(typeof targetId !== 'string') return null;
+    let record = targetDiagnostics.get(targetId);
+    if(!record) {
+      if(targetDiagnostics.size >= observation.COVERAGE_TARGET_DETAILS_LIMIT) {
+        targetDetailsOverflow = true;
+        return null;
+      }
+      record = {targetId, type: 'other', owningContext: null, scriptAsset: 'unknown', observerOverflow: false};
+      targetDiagnostics.set(targetId, record);
+    }
+    if(typeof targetInfo.type === 'string') record.type = targetInfo.type;
+    if(observer) record.owningContext = observer.control ? 'control' : observer.name;
+    return record;
+  }
+
+  function coverageTargets() {
+    const targets = [];
+    for(const record of targetDiagnostics.values()) {
+      const causes = [];
+      if(unattributedTargets.has(record.targetId)) causes.push('foreign');
+      if(contextlessTargets.has(record.targetId)) causes.push('contextless');
+      const observer = ownerOf(record.targetId);
+      if(record.type === 'page' && observer && !observer.control && observer.pageTargetIds.size > 1) causes.push('multiple_pages');
+      if(record.observerOverflow && record.owningContext !== 'control') causes.push('observer_overflow');
+      if(causes.length > 0) {
+        targets.push({
+          type: record.type,
+          owningContext: ['alice', 'bob', 'control'].includes(record.owningContext) ? record.owningContext : null,
+          scriptAsset: record.scriptAsset,
+          causes
+        });
+      }
+    }
+    return targets;
   }
 
   function sendNested(sessionId, method, params = {}) {
@@ -332,6 +372,8 @@ function createWorkerDiscovery() {
     if(stopping || retiredObservers.has(observer) || targetSessions.has(targetId) || attachingTargets.has(targetId)) return;
     attachingTargets.add(targetId);
     if(!observer.noteAttached(targetId)) {
+      const diagnostic = targetDiagnostics.get(targetId);
+      if(observer.state.overflow && diagnostic) diagnostic.observerOverflow = true;
       attachingTargets.delete(targetId);
       return;
     }
@@ -394,10 +436,16 @@ function createWorkerDiscovery() {
     const targetId = targetInfo?.targetId;
     const currentOwner = typeof targetId === 'string' ? ownerOf(targetId) : null;
     const observer = currentOwner || attribute(targetInfo);
+    const diagnostic = recordTargetDiagnostic(targetInfo, observer);
     if(!observer || retiredObservers.has(observer)) return;
+    const observerWasOverflowed = observer.state.overflow;
     observer.registerTarget(targetInfo);
+    if(!observerWasOverflowed && observer.state.overflow && diagnostic) diagnostic.observerOverflow = true;
     if(observer.state.overflow) return;
-    networkSinks.get(observer)?.observeTarget?.(targetInfo);
+    const scriptAsset = networkSinks.get(observer)?.observeTarget?.(targetInfo);
+    if(typeof scriptAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(scriptAsset) && diagnostic) {
+      diagnostic.scriptAsset = scriptAsset;
+    }
     if(!currentOwner) {
       targetOwners.set(targetId, observer);
       unattributedTargets.delete(targetId);
@@ -439,7 +487,12 @@ function createWorkerDiscovery() {
       observer.recordObserverError();
       return;
     }
+    const wasOverflowed = observer.state.overflow;
     observer.noteWorkerEvent(targetId, payload.method, payload.params, event.sessionId);
+    if(!wasOverflowed && observer.state.overflow) {
+      const diagnostic = targetDiagnostics.get(targetId);
+      if(diagnostic && diagnostic.owningContext !== 'control') diagnostic.observerOverflow = true;
+    }
     if(observer.state.overflow) return;
     const sink = networkSinks.get(observer);
     if(!sink) {
@@ -468,8 +521,16 @@ function createWorkerDiscovery() {
     get appContextlessTargets() {
       return appContextlessTargets.size;
     },
+    get targetDetailsOverflow() {
+      return targetDetailsOverflow;
+    },
     get ownedTargetCount() {
       return targetOwners.size;
+    },
+    coverageTargets,
+    noteTargetOverflow(targetId) {
+      const diagnostic = targetDiagnostics.get(targetId);
+      if(diagnostic) diagnostic.observerOverflow = true;
     },
     async launch(browser) {
       session = await withCommandTimeout(() => browser.newBrowserCDPSession());
@@ -526,10 +587,16 @@ function createWorkerDiscovery() {
       const pending = pendingByContext.get(browserContextId) || [];
       pendingByContext.delete(browserContextId);
       for(const targetInfo of pending) {
+        const diagnostic = recordTargetDiagnostic(targetInfo, observer);
+        const observerWasOverflowed = observer.state.overflow;
         observer.registerTarget(targetInfo);
+        if(!observerWasOverflowed && observer.state.overflow && diagnostic) diagnostic.observerOverflow = true;
         unattributedTargets.delete(targetInfo.targetId);
         if(observer.state.overflow) continue;
-        networkSink?.observeTarget?.(targetInfo);
+        const scriptAsset = networkSink?.observeTarget?.(targetInfo);
+        if(typeof scriptAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(scriptAsset) && diagnostic) {
+          diagnostic.scriptAsset = scriptAsset;
+        }
         targetOwners.set(targetInfo.targetId, observer);
         if(targetInfo.type === 'shared_worker') attachSharedWorker(observer, targetInfo);
       }
@@ -622,6 +689,8 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
   const maxPendingReleases = observation.LIMITS.attachedTargets;
   let nextCommandId = 0;
   let cdp;
+  let pageTargetId;
+  let targetRegistry;
   let send;
   let autoAttachDisablePromise;
   let overflowContextClosePromise;
@@ -657,7 +726,9 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
   }
 
   function notePageEvent(method, params) {
+    const wasOverflowed = contextObserver?.state.overflow === true;
     contextObserver?.notePageEvent(method, params);
+    if(!wasOverflowed && contextObserver?.state.overflow) targetRegistry?.noteTargetOverflow?.(pageTargetId);
     observerClosed();
   }
 
@@ -771,6 +842,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     // The attached-target budget bounds protocol setup, not just a counter: a
     // target that cannot be counted gets no enables and is released at once.
     if(contextObserver && !contextObserver.noteAttached(targetInfo.targetId)) {
+      targetRegistry?.noteTargetOverflow(targetInfo.targetId);
       releaseRejectedTarget(sessionId);
       return;
     }
@@ -905,7 +977,9 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
 
     const targetInfo = targets.get(sessionId);
     if(!targetInfo) return;
+    const wasOverflowed = contextObserver?.state.overflow === true;
     contextObserver?.noteWorkerEvent(targetInfo.targetId, payload.method, payload.params, sessionId);
+    if(!wasOverflowed && contextObserver?.state.overflow) targetRegistry?.noteTargetOverflow?.(targetInfo.targetId);
     if(observerClosed()) return;
     recordWorkerEvent(targetInfo.targetId, targetInfo.type, sessionId, payload.method, payload.params);
   }
@@ -916,11 +990,14 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     // Page-session identity mapping only: the browser context this page lives
     // in is what attributes every browser-level shared worker to it.
     const info = await send('Target.getTargetInfo');
-    const pageTargetId = info?.targetInfo?.targetId;
+    pageTargetId = info?.targetInfo?.targetId;
     registry?.registerContext(info?.targetInfo?.browserContextId, contextObserver, {
       claimTarget,
       recordWorkerEvent,
-      observeTarget: (targetInfo) => pageErrorAssetResolver?.observeWorkerTarget(targetInfo),
+      observeTarget: (targetInfo) => {
+        pageErrorAssetResolver?.observeWorkerTarget(targetInfo);
+        return pageErrorAssetResolver?.workerAsset(targetInfo?.targetId);
+      },
       release: () => { released = true; }
     });
     cdp.on('Network.requestWillBeSent', (event) => {
@@ -994,6 +1071,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     gateEvents,
     errors,
     async start(registry) {
+      targetRegistry = registry;
       await start(registry);
     },
     async waitForSetup() {
@@ -2211,6 +2289,12 @@ function createPageErrorAssetResolver() {
     if(!sourceCorrelated) source.consumed = true;
     return source;
   }
+  function workerAsset(targetId) {
+    const directAsset = directWorkerAssets.get(targetId)?.asset;
+    if(directAsset) return directAsset;
+    const blobUrl = workerBlobUrls.get(targetId);
+    return blobUrl ? blobAssets.get(blobUrl) : undefined;
+  }
   return {
     observeRequest(url, _initiator, requestType, sourceTargetId, sourceType = 'page') {
       let parsed;
@@ -2281,6 +2365,7 @@ function createPageErrorAssetResolver() {
     scriptAsset(stack) {
       return pageErrorScriptAsset(stack, blobAssets, pageErrorWorkerAsset);
     },
+    workerAsset,
     clear() {
       blobAssets.clear();
       workerAssetCandidates.length = 0;
@@ -2410,6 +2495,36 @@ function buildObservationBlock(registry, appObservers, controls, egress) {
     contexts,
     controls: controlBlocks
   };
+}
+
+function buildWorkerCoverageFailureBreakdown(registry, appObservers) {
+  const contexts = Object.fromEntries(APP_CONTEXTS.map((name) => {
+    const observer = appObservers[name];
+    const summary = observer.summary();
+    return [name, {
+      discoveryActive: summary.discoveryActive,
+      pageCoverageComplete: summary.pageCoverageComplete,
+      windowElapsed: observer.state.windowElapsed ? 1 : 0,
+      observerOverflow: summary.observerOverflow,
+      observerErrors: summary.observerErrors,
+      foreignTargets: observer.state.foreignTargets,
+      countedEvents: summary.countedEvents,
+      attachedTargets: summary.attachedTargets,
+      pageTargets: summary.pageTargets,
+      coverageComplete: summary.coverageComplete
+    }];
+  }));
+  return observation.buildWorkerCoverageBreakdown({
+    registry: {
+      discoveryActive: registry.discoveryActive ? 1 : 0,
+      foreignTargets: registry.foreignTargets,
+      contextlessTargets: registry.contextlessTargets,
+      appContextlessTargets: registry.appContextlessTargets,
+      targetDetailsOverflow: registry.targetDetailsOverflow ? 1 : 0
+    },
+    contexts,
+    targets: registry.coverageTargets()
+  });
 }
 
 function buildObserverOnlyReport(registry, controls) {
@@ -2906,6 +3021,9 @@ async function main(dependencies = {}) {
         ...(groupCreated ? {groupCreated} : {}),
         ...(groupMember ? {groupMember} : {}),
         ...(groupMessage ? {groupMessage} : {}),
+        ...(currentStage === 'browser_worker_observation_incomplete' && registry
+          ? {workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers)}
+          : {}),
         ...(currentStage === 'browser_egress_or_page_errors'
           ? {
             gateBreakdown: gateBreakdown || summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors}),

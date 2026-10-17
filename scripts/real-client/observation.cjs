@@ -19,7 +19,7 @@ const PRIVATE_CSP_ORIGIN = 'https://telegramd.test';
 
 const LIMITS = Object.freeze({
   attachedTargets: 16,
-  countedEventsPerContext: 512,
+  countedEventsPerContext: 4096,
   cdpMessageBytes: 256 * 1024,
   commandTimeoutMs: 5000
 });
@@ -100,6 +100,9 @@ const WORKER_SOURCE_LABELS = Object.freeze([...new Set([...WORKER_CHUNK_PATTERNS
 const WEBSOCKET_101_CONTEXTS = Object.freeze(['alice', 'control', 'other']);
 const WEBSOCKET_101_PHASES = Object.freeze(['pre_submit', 'post_submit', 'unknown']);
 const GATE_CONTEXTS = Object.freeze(['alice', 'bob']);
+const COVERAGE_TARGET_TYPES = Object.freeze(['page', 'iframe', 'service_worker', 'shared_worker', 'dedicated_worker', 'other']);
+const COVERAGE_TARGET_CAUSES = Object.freeze(['multiple_pages', 'foreign', 'contextless', 'observer_overflow']);
+const COVERAGE_TARGET_DETAILS_LIMIT = 1024;
 const GATE_EGRESS_SOURCES = Object.freeze(['page', 'service_worker', 'shared_worker', 'dedicated_worker']);
 const GATE_SCHEMES = Object.freeze(['http', 'https', 'ws', 'wss']);
 const GATE_RESOURCE_TYPES = Object.freeze([
@@ -857,8 +860,81 @@ function evaluateControl(name, block) {
   }
 }
 
+function coverageTargetType(type) {
+  if(COVERAGE_TARGET_TYPES.includes(type)) return type;
+  if(type === 'worker') return 'dedicated_worker';
+  return 'other';
+}
+
+function buildWorkerCoverageBreakdown({registry, contexts, targets}) {
+  const sourceRegistry = registry || {};
+  const sourceContexts = contexts || {};
+  const sourceTargets = Array.isArray(targets) ? targets : [];
+  const targetDetailsOverflow = sourceRegistry.targetDetailsOverflow === 1 || sourceTargets.length > COVERAGE_TARGET_DETAILS_LIMIT ? 1 : 0;
+  const targetBreakdown = sourceTargets.slice(0, COVERAGE_TARGET_DETAILS_LIMIT).map((target) => {
+    const causes = COVERAGE_TARGET_CAUSES.filter((cause) => Array.isArray(target?.causes) && target.causes.includes(cause));
+    return {
+      targetType: coverageTargetType(target?.type),
+      owningContext: ['alice', 'bob', 'control'].includes(target?.owningContext) ? target.owningContext : null,
+      scriptAsset: typeof target?.scriptAsset === 'string' && SCRIPT_ASSET_PATTERN.test(target.scriptAsset)
+        ? target.scriptAsset
+        : 'unknown',
+      causes
+    };
+  }).filter((target) => target.causes.length > 0);
+  const contextBreakdown = {};
+  for(const name of GATE_CONTEXTS) {
+    const context = sourceContexts[name] || {};
+    const pageTargets = Number.isSafeInteger(context.pageTargets) && context.pageTargets >= 0 && context.pageTargets <= 1_000_000
+      ? context.pageTargets
+      : 0;
+    contextBreakdown[name] = {
+      discoveryInactive: context.discoveryActive === 1 ? 0 : 1,
+      pageCoverageIncomplete: context.pageCoverageComplete === 1 ? 0 : 1,
+      windowNotElapsed: context.windowElapsed === 1 ? 0 : 1,
+      observerOverflow: context.observerOverflow === 1 ? 1 : 0,
+      observerErrors: Number.isSafeInteger(context.observerErrors) && context.observerErrors >= 0 && context.observerErrors <= 1_000_000
+        ? context.observerErrors
+        : 0,
+      foreignTargets: Number.isSafeInteger(context.foreignTargets) && context.foreignTargets >= 0 && context.foreignTargets <= 1_000_000
+        ? context.foreignTargets
+        : 0,
+      countedEvents: Number.isSafeInteger(context.countedEvents) && context.countedEvents >= 0 && context.countedEvents <= LIMITS.countedEventsPerContext
+        ? context.countedEvents
+        : 0,
+      attachedTargets: Number.isSafeInteger(context.attachedTargets) && context.attachedTargets >= 0 && context.attachedTargets <= LIMITS.attachedTargets
+        ? context.attachedTargets
+        : 0,
+      pageTargets,
+      multiplePageTargets: pageTargets > 1 ? 1 : 0,
+      coverageComplete: context.coverageComplete === 1 ? 1 : 0
+    };
+  }
+
+  return {
+    registry: {
+      discoveryInactive: sourceRegistry.discoveryActive === 1 ? 0 : 1,
+      foreignTargets: Number.isSafeInteger(sourceRegistry.foreignTargets) && sourceRegistry.foreignTargets >= 0 && sourceRegistry.foreignTargets <= 1_000_000
+        ? sourceRegistry.foreignTargets
+        : 0,
+      contextlessTargets: Number.isSafeInteger(sourceRegistry.contextlessTargets) && sourceRegistry.contextlessTargets >= 0 && sourceRegistry.contextlessTargets <= 1_000_000
+        ? sourceRegistry.contextlessTargets
+        : 0,
+      appContextlessTargets: Number.isSafeInteger(sourceRegistry.appContextlessTargets) && sourceRegistry.appContextlessTargets >= 0 && sourceRegistry.appContextlessTargets <= 1_000_000
+        ? sourceRegistry.appContextlessTargets
+        : 0,
+      targetDetailsOverflow
+    },
+    contexts: contextBreakdown,
+    targets: targetBreakdown
+  };
+}
+
 module.exports = {
   BROWSER_CDP_METHODS,
+  COVERAGE_TARGET_CAUSES,
+  COVERAGE_TARGET_DETAILS_LIMIT,
+  COVERAGE_TARGET_TYPES,
   CONTEXT_KEYS,
   CONTEXT_SCHEMA,
   CONTROL_EXPECTATIONS,
@@ -888,6 +964,7 @@ module.exports = {
   WEBSOCKET_101_CONTEXTS,
   WEBSOCKET_101_PHASES,
   allowCdpMethod,
+  buildWorkerCoverageBreakdown,
   classifyWorkerLogEntry,
   classifyWorkerSource,
   createContextObserver,
