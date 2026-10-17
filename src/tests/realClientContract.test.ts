@@ -2075,6 +2075,27 @@ describe('discovery shared-worker network accounting', () => {
     resolver.clear();
   });
 
+  it('correlates interleaved worker blobs by source and rejects ambiguous fallback', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    const firstBlobUrl = 'blob:https://telegramd.test/99999999-9999-9999-9999-999999999999';
+    const secondBlobUrl = 'blob:https://telegramd.test/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const uncorrelatedBlobUrl = 'blob:https://telegramd.test/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+
+    try {
+      resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'worker-a', 'dedicated_worker');
+      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'worker-b', 'dedicated_worker');
+      resolver.observeWorkerTarget({type: 'worker', targetId: 'worker-b-blob', parentId: 'worker-b', url: secondBlobUrl});
+      resolver.observeWorkerTarget({type: 'worker', targetId: 'worker-a-blob', parentId: 'worker-a', url: firstBlobUrl});
+
+      expect(resolver.scriptAsset(`Error: failed\n    at render (${firstBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
+      expect(resolver.scriptAsset(`Error: failed\n    at render (${secondBlobUrl}:1:183)`)).toBe('tlottie.worker-JkLmNoPq.js');
+      expect(resolver.scriptAsset(`Error: failed\n    at render (${uncorrelatedBlobUrl}:1:183)`)).toBe('unknown');
+    } finally {
+      resolver.clear();
+    }
+  });
+
   it('attributes a blob worker from its fetched bundle through browser discovery', async() => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const recordPageError = (realClientBrowser as any).recordPageError;

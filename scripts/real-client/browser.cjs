@@ -2169,7 +2169,7 @@ function pageErrorScriptAsset(stack, blobAssets = new Map(), resolveBlobAsset) {
       const mappedAsset = blobAssets.get(parsed.href);
       if(typeof mappedAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(mappedAsset)) return mappedAsset;
       if(parsed.origin === PRIVATE_CSP_ORIGIN && typeof resolveBlobAsset === 'function') {
-        const resolvedAsset = resolveBlobAsset(parsed.href, stack);
+        const resolvedAsset = resolveBlobAsset(stack);
         if(typeof resolvedAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(resolvedAsset)) {
           blobAssets.set(parsed.href, resolvedAsset);
           return resolvedAsset;
@@ -2220,17 +2220,23 @@ function createPageErrorAssetResolver() {
     const freshCandidates = workerAssetCandidates.filter((candidate) =>
       Date.now() - candidate.observedAt <= 30_000 && (!hint || candidate.workerLabel === hint.workerLabel)
     );
-    const candidate = freshCandidates[freshCandidates.length - 1];
-    return candidate?.asset;
+    // Unmapped blob frames are attributable only when all matching fetches agree.
+    const assets = new Set(freshCandidates.map((candidate) => candidate.asset));
+    return assets.size === 1 ? assets.values().next().value : undefined;
   }
   function takeWorkerAssetCandidate(sourceTargetId) {
     const freshCandidates = workerAssetCandidates.filter((candidate) =>
       !candidate.consumed && Date.now() - candidate.observedAt <= 30_000
     );
-    const source = (sourceTargetId && freshCandidates.find((candidate) => candidate.sourceTargetId === sourceTargetId)) ||
-      freshCandidates.find((candidate) => candidate.sourceType === 'page') ||
-      freshCandidates.find((candidate) => candidate.sourceType !== 'page');
-    if(source) source.consumed = true;
+    const sourceCandidates = sourceTargetId ? freshCandidates.filter((candidate) => candidate.sourceTargetId === sourceTargetId) : [];
+    const pageCandidates = freshCandidates.filter((candidate) => candidate.sourceType === 'page');
+    const candidates = sourceCandidates.length ? sourceCandidates :
+      pageCandidates.length ? pageCandidates :
+        freshCandidates.filter((candidate) => candidate.sourceType !== 'page');
+    const assets = new Set(candidates.map((candidate) => candidate.asset));
+    if(assets.size !== 1) return;
+    const source = candidates[0];
+    source.consumed = true;
     return source;
   }
   return {
