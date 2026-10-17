@@ -3982,22 +3982,49 @@ describe('real client group created', () => {
     </div></div>`;
   }
 
-  async function installMessageSender(page: any) {
-    await page.evaluate(() => {
+  async function installMessageSender(page: any, mode = 'single') {
+    await page.evaluate((mode: string) => {
       document.addEventListener('keydown', (event) => {
         const input = event.target as HTMLElement;
         if(event.key !== 'Enter' || !input.matches('.input-message-input:not(.input-field-input-fake)')) return;
         event.preventDefault();
         const chat = input.closest('.chat');
-        const bubble = document.createElement('div');
-        bubble.className = 'bubble';
-        const message = document.createElement('div');
-        message.className = 'message';
-        message.textContent = input.textContent;
-        bubble.appendChild(message);
-        chat?.querySelector('.bubbles')?.appendChild(bubble);
+        const addBubble = (mid: string, status: string) => {
+          const bubble = document.createElement('div');
+          bubble.className = `bubble ${status}`;
+          bubble.dataset.mid = mid;
+          const message = document.createElement('div');
+          message.className = 'message';
+          message.textContent = input.textContent;
+          bubble.appendChild(message);
+          chat?.querySelector('.bubbles')?.appendChild(bubble);
+          return bubble;
+        };
+        if(mode === 'transient-pending-sent') {
+          const pending = addBubble('9001', 'is-sending');
+          addBubble('9001', 'is-sent');
+          setTimeout(() => pending.remove(), 700);
+        } else if(mode === 'transient-temporary-server') {
+          const pending = addBubble('9000.0001', 'is-sending');
+          addBubble('9001', 'is-sent');
+          setTimeout(() => pending.remove(), 700);
+        } else if(mode === 'distinct-sent') {
+          addBubble('9101', 'is-sent');
+          addBubble('9102', 'is-sent');
+          console.error('group message diagnostic secret');
+          setTimeout(() => {throw new Error('group message diagnostic secret')}, 0);
+          const channel = new MessageChannel();
+          channel.port2.addEventListener('message', () => {});
+          channel.port2.start();
+          channel.port1.postMessage({type: 'result', payload: {taskId: 1, error: {type: 'GROUP_TEST_ERROR', message: 'group message diagnostic secret'}}});
+        } else if(mode === 'disappears') {
+          const bubble = addBubble('9201', 'is-sent');
+          setTimeout(() => bubble.remove(), 200);
+        } else {
+          addBubble('9000', 'is-sent');
+        }
       });
-    });
+    }, mode);
   }
 
   it('sends Alice\'s group message only through the active group chat', async() => {
@@ -4008,6 +4035,143 @@ describe('real client group created', () => {
       await sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 2_000);
       expect(await page.locator('#column-center .chat.active .bubble .message').filter({hasText: GROUP_MESSAGE}).count()).toBe(1);
       expect(await page.locator('#column-center .chat:not(.active) .bubble .message').filter({hasText: GROUP_MESSAGE}).count()).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('accepts a transient pending and sent pair for the same group message id', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(messageCenterMarkup());
+      await installMessageSender(page, 'transient-pending-sent');
+      await sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 2_000);
+      expect(await page.locator('#column-center .chat.active .bubble .message').filter({hasText: GROUP_MESSAGE}).count()).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('accepts a pending temporary id beside its sent server id', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(messageCenterMarkup());
+      await installMessageSender(page, 'transient-temporary-server');
+      await sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 2_000);
+      const state = await realClientBrowser.captureGroupMessageState();
+      expect(state.result).toBe('settled');
+      expect(state.distinctIds).toBe(true);
+      expect(state.distinctServerIds).toBe(false);
+      expect(state.samples).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          count: 2,
+          bubbles: [
+            {messageId: '9000.0001', sendState: 'pending'},
+            {messageId: '9001', sendState: 'sent'}
+          ],
+          distinctIds: true,
+          distinctServerIds: false
+        })
+      ]));
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('summarizes distinct sent ids and safe error deltas when Alice\'s group count fails', async() => {
+    const page = await browser.newPage();
+    try {
+      await countClientErrors(page);
+      await page.goto('data:text/html,');
+      await page.setContent(messageCenterMarkup());
+      await installMessageSender(page, 'distinct-sent');
+      await expect(sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 2_000))
+      .rejects.toThrow('alice_group_message_message_count');
+      const capture = realClientBrowser.captureGroupMessageState;
+      const state = typeof capture === 'function' ? await capture() : undefined;
+      expect(state).toMatchObject({
+        distinctIds: true,
+        samples: expect.arrayContaining([
+          expect.objectContaining({
+            count: 2,
+            distinctIds: true,
+            bubbles: [
+              {messageId: '9101', sendState: 'sent'},
+              {messageId: '9102', sendState: 'sent'}
+            ]
+          })
+        ])
+      });
+      expect(state.pageErrorsSinceStep).toBeGreaterThan(0);
+      expect(state.consoleErrorsSinceStep).toBeGreaterThan(0);
+      expect(state.rpcErrorsSinceStep).toBeGreaterThan(0);
+      const summary = formatBrowserFailureMessage({status: 'failed', stage: 'alice_group_message_message_count', groupMessage: state});
+      expect(summary).toContain('9101');
+      expect(summary).toContain('9102');
+      expect(summary).toContain('pageErrorsSinceStep');
+      expect(summary).toContain('consoleErrorsSinceStep');
+      expect(summary).toContain('rpcErrorsSinceStep');
+      expect(summary).not.toContain(GROUP_MESSAGE);
+      expect(summary).not.toContain('group message diagnostic secret');
+      expectNoHostileLeak(summary);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails with a count-window summary when a visible group bubble disappears', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(messageCenterMarkup());
+      await installMessageSender(page, 'disappears');
+      await expect(sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 2_000))
+      .rejects.toThrow('alice_group_message_message_count');
+      const capture = realClientBrowser.captureGroupMessageState;
+      const state = typeof capture === 'function' ? await capture() : undefined;
+      expect(state).toBeDefined();
+      expect(state.samples.map((sample: any) => sample.count)).toEqual(expect.arrayContaining([1, 0]));
+      expect(state.result).toBe('disappeared');
+      const summary = formatBrowserFailureMessage({status: 'failed', stage: 'alice_group_message_message_count', groupMessage: state});
+      expect(summary).toContain('alice_group_message_message_count');
+      expect(summary).toContain('"count":1');
+      expect(summary).toContain('"count":0');
+      expect(summary).not.toContain(GROUP_MESSAGE);
+      expectNoHostileLeak(summary);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('keeps Bob\'s group message count stage on a distinct-id failure', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(messageCenterMarkup());
+      await page.locator('#column-center .chat.active .bubbles').evaluate((bubbles: Element) => {
+        for(const mid of ['9301', '9302']) {
+          const bubble = document.createElement('div');
+          bubble.className = 'bubble is-sent';
+          bubble.dataset.mid = mid;
+          bubble.innerHTML = '<div class="message">browser-ci-group-hello</div>';
+          bubbles.appendChild(bubble);
+        }
+      });
+      const waitForGroupMessageCount = realClientBrowser.waitForGroupMessageCount;
+      if(typeof waitForGroupMessageCount === 'function') {
+        const activeGroup = resolveActiveGroupChat(page, GROUP_NAME);
+        await expect(waitForGroupMessageCount(
+          page,
+          activeGroup.chat,
+          activeGroup.title,
+          activeGroup.chat.locator('.bubble .message').filter({hasText: GROUP_MESSAGE}),
+          'bob_group_message_count',
+          2_000
+        )).rejects.toThrow('bob_group_message_count');
+      }
+      const capture = realClientBrowser.captureGroupMessageState;
+      const state = typeof capture === 'function' ? await capture() : undefined;
+      expect(state).toMatchObject({distinctIds: true, result: 'multiple_ids'});
+      const summary = formatBrowserFailureMessage({status: 'failed', stage: 'bob_group_message_count', groupMessage: state});
+      expect(summary).toContain('bob_group_message_count');
     } finally {
       await page.close();
     }

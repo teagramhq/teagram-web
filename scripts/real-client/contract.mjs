@@ -538,6 +538,54 @@ const GROUP_MEMBER_ACTIVE_PANELS = ['none', 'profile', 'media', 'members', 'edit
 const GROUP_MEMBER_STEP_WAITS = ['none', 'timeout', 'strict_mode_violation', 'other'];
 const GROUP_MEMBER_ERROR_KEYS = ['pageErrorsSinceStep', 'consoleErrorsSinceStep', 'rpcErrorsSinceStep'];
 
+const GROUP_MESSAGE_SEND_STATES = ['pending', 'sent', 'failed'];
+const GROUP_MESSAGE_RESULTS = [
+  'pending',
+  'transient_pair',
+  'sent',
+  'settled',
+  'disappeared',
+  'missing_message_id',
+  'failed_bubble',
+  'multiple_ids',
+  'duplicate_bubbles',
+  'settle_timeout',
+  'stability_timeout',
+  'read_error'
+];
+
+// Counts and numeric message ids only; the message text and any page error
+// content stay out of the report.
+export function parseGroupMessageState(state) {
+  if(state === 'unavailable') return state;
+  const keys = ['samples', 'distinctIds', 'distinctServerIds', 'pageErrorsSinceStep', 'consoleErrorsSinceStep', 'rpcErrorsSinceStep', 'result'];
+  const isCount = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000;
+  const isNullableCount = (value) => value === null || isCount(value);
+  const isSample = (sample) => {
+    if(!sample || typeof sample !== 'object' || Array.isArray(sample) ||
+        JSON.stringify(Object.keys(sample).sort()) !== JSON.stringify(['count', 'bubbles', 'distinctIds', 'distinctServerIds'].sort()) ||
+        !isCount(sample.count) || !Array.isArray(sample.bubbles) || sample.bubbles.length !== sample.count ||
+        typeof sample.distinctIds !== 'boolean' || typeof sample.distinctServerIds !== 'boolean') return false;
+    if(!sample.bubbles.every((bubble) => bubble && typeof bubble === 'object' && !Array.isArray(bubble) &&
+        JSON.stringify(Object.keys(bubble).sort()) === JSON.stringify(['messageId', 'sendState'].sort()) &&
+        (bubble.messageId === null || typeof bubble.messageId === 'string' && /^-?[0-9]{1,20}(\.[0-9]{1,4})?$/.test(bubble.messageId)) &&
+        GROUP_MESSAGE_SEND_STATES.includes(bubble.sendState))) return false;
+    const ids = sample.bubbles.map((bubble) => bubble.messageId).filter((id) => id !== null);
+    const serverIds = sample.bubbles.filter((bubble) => bubble.sendState === 'sent').map((bubble) => bubble.messageId).filter((id) => id !== null);
+    return sample.distinctIds === (new Set(ids).size > 1) && sample.distinctServerIds === (new Set(serverIds).size > 1);
+  };
+  if(!state || typeof state !== 'object' || Array.isArray(state) ||
+      JSON.stringify(Object.keys(state).sort()) !== JSON.stringify([...keys].sort()) ||
+      !Array.isArray(state.samples) || state.samples.length > 128 || !state.samples.every(isSample) ||
+      typeof state.distinctIds !== 'boolean' || state.distinctIds !== state.samples.some((sample) => sample.distinctIds) ||
+      typeof state.distinctServerIds !== 'boolean' || state.distinctServerIds !== state.samples.some((sample) => sample.distinctServerIds) ||
+      !GROUP_MESSAGE_RESULTS.includes(state.result) ||
+      !['pageErrorsSinceStep', 'consoleErrorsSinceStep', 'rpcErrorsSinceStep'].every((key) => isNullableCount(state[key]))) {
+    return 'unclassified';
+  }
+  return Object.fromEntries(keys.map((key) => [key, state[key]]));
+}
+
 // Closed schema: identifies the active right-column panel and exposes counts
 // only. Peer ids, titles, messages and exception text never enter the report.
 export function parseGroupMemberState(state) {
@@ -578,7 +626,10 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const groupMemberSummary = controlsOnly || report.groupMember === undefined
     ? ''
     : `; group members ${JSON.stringify(parseGroupMemberState(report.groupMember))}`;
-  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}${groupMemberSummary}`;
+  const groupMessageSummary = controlsOnly || report.groupMessage === undefined
+    ? ''
+    : `; group message ${JSON.stringify(parseGroupMessageState(report.groupMessage))}`;
+  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}${groupMemberSummary}${groupMessageSummary}`;
 }
 
 export function parseAuthProgressReport(report) {

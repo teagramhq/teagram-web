@@ -22,6 +22,9 @@ const GROUP_NAME_STEP_TIMEOUT_MS = 15_000;
 // A basic group's peer id is negative, a user's positive.
 const GROUP_CHAT_SELECTOR = '.topbar .avatar[data-peer-id^="-"]';
 const GROUP_CREATED_STEP_TIMEOUT_MS = 30_000;
+const GROUP_MESSAGE_STABLE_WINDOW_MS = 600;
+const GROUP_MESSAGE_SAMPLE_INTERVAL_MS = 100;
+const GROUP_MESSAGE_SETTLE_TIMEOUT_MS = 10_000;
 const RPC_ERROR_TYPE_LIMIT = 16;
 const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 // Bottom-bar buttons that replace the composer, keyed by their English label.
@@ -69,9 +72,14 @@ let groupNameFormTrace = {page: undefined, stepWait: 'none'};
 // how that step's wait ended. The name is only compared inside the page.
 let groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
 let groupMemberTrace = createGroupMemberTrace();
+let groupMessageTrace = createGroupMessageTrace();
 
 function createGroupMemberTrace() {
   return {page: undefined, groupPeerId: undefined, stages: [], stepWait: 'none', errorsAtStep: undefined};
+}
+
+function createGroupMessageTrace() {
+  return {page: undefined, stage: undefined, errorsAtStep: undefined, samples: [], result: 'pending'};
 }
 
 function createCenterColumnTrace() {
@@ -1639,6 +1647,118 @@ function failGroupMessageStep(stage, error) {
   failStage(stage);
 }
 
+async function startGroupMessageTrace(page, stage) {
+  const counts = clientErrorCounts.get(page);
+  groupMessageTrace = {
+    ...createGroupMessageTrace(),
+    page,
+    stage,
+    errorsAtStep: counts ? {...counts, rpc: await readRpcErrorCounts(page)} : undefined
+  };
+}
+
+function groupMessageSampleResult(sample) {
+  if(sample.count === 0) return 'disappeared';
+  if(sample.bubbles.some((bubble) => !bubble.messageId)) return 'missing_message_id';
+  if(sample.bubbles.some((bubble) => bubble.sendState === 'failed')) return 'failed_bubble';
+  if(sample.distinctServerIds) return 'multiple_ids';
+  if(sample.count === 1) return sample.bubbles[0].sendState === 'pending' ? 'pending' : 'sent';
+  if(sample.count === 2 && new Set(sample.bubbles.map((bubble) => bubble.sendState)).size === 2 &&
+      sample.bubbles.some((bubble) => bubble.sendState === 'pending') &&
+      sample.bubbles.some((bubble) => bubble.sendState === 'sent')) {
+    return 'transient_pair';
+  }
+  return 'duplicate_bubbles';
+}
+
+async function waitForGroupMessageCount(page, chat, groupTitle, message, stage, timeoutMs = GROUP_CREATED_STEP_TIMEOUT_MS) {
+  currentStage = stage;
+  if(groupMessageTrace.page !== page || groupMessageTrace.stage !== stage) {
+    await startGroupMessageTrace(page, stage);
+  }
+
+  const deadline = Date.now() + Math.min(timeoutMs, GROUP_MESSAGE_SETTLE_TIMEOUT_MS);
+  let stableSince;
+  let lastResult = 'pending';
+  while(Date.now() <= deadline) {
+    let sample;
+    try {
+      const [chatCount, titleCount] = await Promise.all([chat.count(), groupTitle.count()]);
+      sample = chatCount !== 1 || titleCount !== 1 ? {count: 0, bubbles: [], distinctIds: false, distinctServerIds: false} : await message.evaluateAll((elements) => {
+        const bubbles = elements.map((element) => {
+          const bubble = element.closest('.bubble');
+          const id = bubble?.getAttribute('data-mid') || '';
+          const sendState = bubble?.classList.contains('is-error') ? 'failed' :
+            bubble?.classList.contains('is-sending') ? 'pending' : 'sent';
+          return {
+            messageId: /^-?[0-9]{1,20}(\.[0-9]{1,4})?$/.test(id) ? id : null,
+            sendState
+          };
+        });
+        // Pending bubbles can retain a temporary negative id beside their sent server-id copy.
+        const serverIds = bubbles.filter((bubble) => bubble.sendState === 'sent').map((bubble) => bubble.messageId).filter(Boolean);
+        return {
+          count: bubbles.length,
+          bubbles,
+          distinctIds: new Set(bubbles.map((bubble) => bubble.messageId).filter(Boolean)).size > 1,
+          distinctServerIds: new Set(serverIds).size > 1
+        };
+      });
+    } catch(error) {
+      groupMessageTrace.result = 'read_error';
+      failGroupMessageStep(stage, error);
+    }
+    groupMessageTrace.samples.push(sample);
+    lastResult = groupMessageSampleResult(sample);
+    if(['disappeared', 'missing_message_id', 'failed_bubble', 'multiple_ids', 'duplicate_bubbles'].includes(lastResult)) {
+      groupMessageTrace.result = lastResult;
+      failGroupMessageStep(stage);
+    }
+    if(lastResult === 'sent') {
+      if(stableSince === undefined) stableSince = Date.now();
+      else if(Date.now() - stableSince >= GROUP_MESSAGE_STABLE_WINDOW_MS) {
+        groupMessageTrace.result = 'settled';
+        return;
+      }
+    } else {
+      stableSince = undefined;
+    }
+
+    const remaining = deadline - Date.now();
+    if(remaining <= 0) break;
+    try {
+      await page.waitForTimeout(Math.min(GROUP_MESSAGE_SAMPLE_INTERVAL_MS, remaining));
+    } catch(error) {
+      groupMessageTrace.result = 'read_error';
+      failGroupMessageStep(stage, error);
+    }
+  }
+
+  groupMessageTrace.result = lastResult === 'pending' || lastResult === 'transient_pair' ? 'settle_timeout' : 'stability_timeout';
+  failGroupMessageStep(stage);
+}
+
+async function captureGroupMessageState(trace = groupMessageTrace) {
+  if(!trace.page) return 'unavailable';
+  try {
+    const rpc = await readRpcErrorCounts(trace.page);
+    const counts = clientErrorCounts.get(trace.page);
+    const since = (key) => counts && trace.errorsAtStep ? Math.max(counts[key] - trace.errorsAtStep[key], 0) : null;
+    const rpcErrorsSinceStep = trace.errorsAtStep?.rpc && rpc ? Math.max(rpc.total - trace.errorsAtStep.rpc.total, 0) : null;
+    return {
+      samples: trace.samples,
+      distinctIds: trace.samples.some((sample) => sample.distinctIds),
+      distinctServerIds: trace.samples.some((sample) => sample.distinctServerIds),
+      pageErrorsSinceStep: since('pageErrors'),
+      consoleErrorsSinceStep: since('consoleErrors'),
+      rpcErrorsSinceStep,
+      result: trace.result
+    };
+  } catch{
+    return 'unavailable';
+  }
+}
+
 function resolveActiveGroupChat(page, groupName) {
   const activeChats = page.locator('#column-center .chat.active');
   const chat = activeChats.filter({has: page.locator(GROUP_CHAT_SELECTOR)});
@@ -1646,7 +1766,7 @@ function resolveActiveGroupChat(page, groupName) {
   return {activeChats, chat, header, title: header.filter({hasText: groupName})};
 }
 
-async function sendText(page, text, stage, chat, timeoutMs = 30_000) {
+async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {
   currentStage = stage;
   const input = chat ? await openComposer(page, stage, chat, timeoutMs) : await openComposer(page, stage);
   if(chat) {
@@ -1664,12 +1784,13 @@ async function sendText(page, text, stage, chat, timeoutMs = 30_000) {
     if(chat) failGroupMessageStep(`${stage}_visible_message`, error);
     failStage(`${stage}_visible_message`);
   });
-  await page.waitForTimeout(600);
-  currentStage = chat ? `${stage}_message_count` : stage;
-  const count = await message.count();
-  if(count !== 1) {
-    if(chat) failGroupMessageStep(`${stage}_message_count`);
-    failStage(`${stage}_message_count`);
+  if(chat) {
+    await waitForGroupMessageCount(page, chat, groupTitle, message, `${stage}_message_count`, timeoutMs);
+  } else {
+    await page.waitForTimeout(600);
+    currentStage = stage;
+    const count = await message.count();
+    if(count !== 1) failStage(`${stage}_message_count`);
   }
 }
 
@@ -1710,9 +1831,10 @@ async function sendGroupText(page, text, groupName, stage, timeoutMs = 30_000) {
     ...clientErrorCounts.get(page),
     rpc: await readRpcErrorCounts(page)
   };
+  await startGroupMessageTrace(page, `${stage}_message_count`);
 
   try {
-    await sendText(page, text, stage, activeGroupChat, timeoutMs);
+    await sendText(page, text, stage, activeGroupChat, timeoutMs, activeGroup.title);
   } catch(error) {
     if(groupCreatedTrace.stepWait === 'none') {
       groupCreatedTrace.stepWait = centerColumnTrace.composerWait === 'none'
@@ -2160,6 +2282,7 @@ async function main(dependencies = {}) {
   groupNameFormTrace = {page: undefined, stepWait: 'none'};
   groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
   groupMemberTrace = createGroupMemberTrace();
+  groupMessageTrace = createGroupMessageTrace();
   try {
     runtime = Object.prototype.hasOwnProperty.call(dependencies, 'runtimeConfig')
       ? dependencies.runtimeConfig
@@ -2319,10 +2442,12 @@ async function main(dependencies = {}) {
     await captureState(alice.page, runtime.screenshotDirectory, 'alice-group-message', capturedScreenshots);
 
     currentStage = 'bob_group_message';
-    const bobGroupMessage = bob.page.locator('#column-center .bubble .message').filter({hasText: GROUP_MESSAGE});
+    const bobActiveGroup = resolveActiveGroupChat(bob.page, groupName);
+    const bobGroupMessage = bobActiveGroup.chat.locator('.bubble .message').filter({hasText: GROUP_MESSAGE});
+    await startGroupMessageTrace(bob.page, 'bob_group_message_count');
     await bobGroupMessage.first().waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_group_message_visible'));
-    await bob.page.waitForTimeout(600);
-    if(await bobGroupMessage.count() !== 1) failStage('bob_group_message_count');
+    await waitForGroupMessageCount(bob.page, bobActiveGroup.chat, bobActiveGroup.title, bobGroupMessage, 'bob_group_message_count');
+    currentStage = 'bob_group_message';
     await captureState(bob.page, runtime.screenshotDirectory, 'bob-group-message', capturedScreenshots);
 
     await openBobGroupMembers(bob.page, bobGroupHeader, groupName, selectedBobPeerId, runtime.screenshotDirectory, capturedScreenshots);
@@ -2394,6 +2519,7 @@ async function main(dependencies = {}) {
       const groupNameForm = currentStage.startsWith('alice_group_name_') ? await captureGroupNameFormState() : undefined;
       const groupCreated = groupCreatedTrace.stages?.includes(currentStage) ? await captureGroupCreatedState() : undefined;
       const groupMember = groupMemberTrace.stages?.includes(currentStage) ? await captureGroupMemberState() : undefined;
+      const groupMessage = groupMessageTrace.stage === currentStage ? await captureGroupMessageState() : undefined;
       report = {
         status: 'failed',
         stage: currentStage,
@@ -2408,6 +2534,7 @@ async function main(dependencies = {}) {
         ...(groupNameForm ? {groupNameForm} : {}),
         ...(groupCreated ? {groupCreated} : {}),
         ...(groupMember ? {groupMember} : {}),
+        ...(groupMessage ? {groupMessage} : {}),
         // On failure the closed-schema evidence is still the point, validated the
         // same way: any schema violation collapses it to `unclassified`.
         ...(registry ? {
@@ -2456,7 +2583,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupMemberState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
