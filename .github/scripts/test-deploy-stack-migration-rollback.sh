@@ -29,6 +29,7 @@ state_root="$tmp/state"
 docker_log="$tmp/docker.log"
 deploy_sha=1111111111111111111111111111111111111111
 live_sha=2222222222222222222222222222222222222222
+live_project=telegram-web-edge
 artifact_digest="sha256:$(printf '%064x' 7)"
 
 mkdir -p "$deploy_root/deploy/teagram-web" "$record_root" \
@@ -79,7 +80,7 @@ case "${1:-}" in
     if [[ "$target_sha" == "$TEST_LIVE_SHA" ]]; then
       rm -rf -- "$checkout_root/deploy/teagram-web"
       mkdir -p "$checkout_root/deploy/telegram-web"
-      printf 'name: telegram-web\n' >"$checkout_root/deploy/telegram-web/compose.yaml"
+      printf 'name: %s\n' "$TEST_LIVE_PROJECT" >"$checkout_root/deploy/telegram-web/compose.yaml"
     fi
     ;;
   *)
@@ -113,7 +114,7 @@ case "${1:-}" in
     ;;
   inspect)
     case "${3:-}" in
-      *com.docker.compose.project*) printf 'telegram-web\n' ;;
+      *com.docker.compose.project*) printf '%s\n' "$TEST_LIVE_PROJECT" ;;
       *Config.Image*) printf 'telegram-web:local\n' ;;
       *.Image*) printf 'sha256:old-image\n' ;;
       *) printf 'unexpected docker inspect format: %s\n' "${3:-}" >&2; exit 2 ;;
@@ -122,9 +123,9 @@ case "${1:-}" in
   ps)
     if [[ "$*" == *publish=8080* ]]; then
       printf 'old-web\n'
-    elif [[ "$*" == *project=telegram-web* && "$(get_state old-running)" == true ]]; then
+    elif [[ "$*" == *"project=$TEST_LIVE_PROJECT"* && "$(get_state old-running)" == true ]]; then
       printf 'old-web\n'
-    elif [[ "$*" == *project=telegram-web* && "$*" == *--all* && "$(get_state old-exists)" == true ]]; then
+    elif [[ "$*" == *"project=$TEST_LIVE_PROJECT"* && "$*" == *--all* && "$(get_state old-exists)" == true ]]; then
       printf 'old-web\n'
     fi
     ;;
@@ -244,7 +245,7 @@ printf 'true\n' >"$state_root/old-exists"
 printf 'true\n' >"$state_root/old-running"
 printf 'false\n' >"$state_root/new-exists"
 printf 'false\n' >"$state_root/new-running"
-printf 'telegram-web\n' >"$state_root/active-project"
+printf '%s\n' "$live_project" >"$state_root/active-project"
 : >"$docker_log"
 
 artifact_dir="$tmp/artifact"
@@ -271,6 +272,7 @@ chmod +x "$test_script"
 export PATH="$mock_bin:$PATH"
 export TEST_DEPLOY_ROOT="$deploy_root" TEST_STATE_ROOT="$state_root" TEST_DOCKER_LOG="$docker_log"
 export TEST_ARCHIVE_ROOT="$archive_root" TEST_DEPLOY_SHA="$deploy_sha" TEST_LIVE_SHA="$live_sha"
+export TEST_LIVE_PROJECT="$live_project"
 export TEST_ARTIFACT_DIGEST="$artifact_digest"
 export DEPLOY_SHA="$deploy_sha" DEPLOY_ARTIFACT="$artifact"
 
@@ -291,7 +293,8 @@ line_new_start=$(grep -nF "$deploy_root/deploy/teagram-web"$'\tcompose up --deta
 line_new_stop=$(grep -nF "$deploy_root/deploy/teagram-web"$'\tcompose stop --timeout 60 web' "$docker_log" | head -n 1 | cut -d: -f1)
 line_new_remove=$(grep -nF "$deploy_root/deploy/teagram-web"$'\tcompose rm --force web' "$docker_log" | head -n 1 | cut -d: -f1)
 line_old_start=$(grep -nF "$deploy_root/deploy/telegram-web"$'\tcompose up --detach --no-build' "$docker_log" | head -n 1 | cut -d: -f1)
-grep -Fq "$deploy_root"$'\tps --quiet --filter label=com.docker.compose.project=telegram-web --filter label=com.docker.compose.service=web' "$docker_log" ||
+old_project_lookup="$deploy_root"$'\tps --quiet --filter label=com.docker.compose.project='"$live_project"' --filter label=com.docker.compose.service=web'
+grep -Fq "$old_project_lookup" "$docker_log" ||
   fail 'the old project container lookup did not target the inspected Compose project'
 [[ -n "$line_old_stop" && -n "$line_old_remove" && -n "$line_new_start" && -n "$line_new_stop" &&
   -n "$line_new_remove" && -n "$line_old_start" ]] || fail 'Docker did not record each migration and rollback operation'
@@ -299,7 +302,7 @@ grep -Fq "$deploy_root"$'\tps --quiet --filter label=com.docker.compose.project=
   line_new_stop < line_new_remove && line_new_remove < line_old_start )) ||
   fail 'Docker operations did not remove the old project, start the new project, then restore the old project'
 
-[[ "$(cat "$state_root/active-project")" == telegram-web ]] || fail 'rollback did not select the previous Compose project'
+[[ "$(cat "$state_root/active-project")" == "$live_project" ]] || fail 'rollback did not select the previous Compose project'
 [[ "$(cat "$state_root/old-exists")" == true && "$(cat "$state_root/old-running")" == true ]] ||
   fail 'rollback did not restart the old web container'
 [[ "$(cat "$state_root/new-exists")" == false && "$(cat "$state_root/new-running")" == false ]] ||
