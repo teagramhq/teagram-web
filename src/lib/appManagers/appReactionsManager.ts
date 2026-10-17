@@ -1218,15 +1218,25 @@ export class AppReactionsManager extends AppManager {
 
   public async getPaidReactionPrivacy() {
     if(!this.paidReactionPrivacy) {
-      const response = await this.apiManager.invokeApiSingleProcess({
+      await this.apiManager.invokeApiSingleProcess({
         method: 'messages.getPaidReactionPrivacy',
-        params: {}
+        params: {},
+        processResult: (response) => {
+          if(!this.paidReactionPrivacy) {
+            this.apiUpdatesManager.processUpdateMessage(response);
+            if(!this.paidReactionPrivacy) {
+              const privacyUpdate = response._ === 'updateShort' ?
+                response.update :
+                (response._ === 'updates' || response._ === 'updatesCombined') ?
+                  response.updates.find((update) => update._ === 'updatePaidReactionPrivacy') :
+                  undefined;
+              if(privacyUpdate?._ === 'updatePaidReactionPrivacy') {
+                this.onUpdatePaidReactionPrivacy(privacyUpdate);
+              }
+            }
+          }
+        }
       });
-
-      if(!this.paidReactionPrivacy) { // (good) if not set in another request or update
-        const update = (response as Updates.updates).updates[0] as Update.updatePaidReactionPrivacy;
-        this.onUpdatePaidReactionPrivacy(update);
-      }
     }
 
     return this.paidReactionPrivacy;
