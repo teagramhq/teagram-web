@@ -205,6 +205,11 @@ async function runDiscoveryAccountingGate(events: any[], fault?: string) {
         harness.emit(app, 'alice-worker', 'Network.webSocketCreated', {requestId: 'allowed', url: 'wss://telegramd.test/apiws'});
         if(fault === 'overflow') app.observer.noteInjectedControlFault('overflow');
         for(const event of events) harness.emit(app, 'alice-worker', event.method, event.params);
+        if(fault === 'page_error') {
+          const error = new TypeError(HOSTILE.phrase);
+          error.stack = `TypeError: ${HOSTILE.phrase}\n    at https://unannounced.invalid/assets/auth-client.js?token=${HOSTILE.token}:21:3`;
+          page.emit('pageerror', error);
+        }
       }
     }
   });
@@ -394,6 +399,17 @@ function expectNoHostileLeak(summary: any) {
   expect(serialized).not.toContain('AbCdEfGh');
   expect(serialized).not.toMatch(/https?:/);
   expect(serialized).not.toMatch(/wss?:/);
+}
+
+function expectNoGateSecretLeak(summary: any) {
+  const serialized = JSON.stringify(summary);
+  expect(serialized).not.toContain(HOSTILE.username);
+  expect(serialized).not.toContain(HOSTILE.password);
+  expect(serialized).not.toContain(HOSTILE.token);
+  expect(serialized).not.toContain(HOSTILE.phrase);
+  expect(serialized).not.toContain(HOSTILE.url);
+  expect(serialized).not.toContain('/exfiltrate');
+  expect(serialized).not.toContain('?token=');
 }
 
 function overBudgetAttachEvents(): any[] {
@@ -1877,13 +1893,104 @@ describe('discovery shared-worker network accounting', () => {
   });
 
   it.each([
-    {method: 'Network.requestWillBeSent', params: {type: 'Fetch', request: {url: HOSTILE.url}}},
-    {method: 'Audits.issueAdded', params: {issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: HOSTILE.url, isReportOnly: false}}}}}
+    {method: 'Network.requestWillBeSent', resourceType: 'Fetch', params: {type: 'Fetch', request: {url: HOSTILE.url}}},
+    {method: 'Audits.issueAdded', resourceType: 'Other', params: {issue: {details: {contentSecurityPolicyIssueDetails: {blockedURL: HOSTILE.url, isReportOnly: false}}}}}
   ])('fails the existing egress gate on discovery-only $method', async(event) => {
     const report = await runDiscoveryAccountingGate([event]);
     expect(report).toMatchObject({status: 'failed', stage: 'browser_egress_or_page_errors', network: {unexpectedAttempts: 1}});
     expect(report.network.contexts.alice.unexpectedAttemptsBySource).toEqual({page: 0, shared_worker: 1, service_worker: 0, worker: 0});
-    expectNoHostileLeak(report);
+    expect(report.gateBreakdown.unexpectedEgressAttempts.alice).toEqual([{
+      source: 'shared_worker', scheme: 'https', host: 'unannounced.invalid', resourceType: event.resourceType
+    }]);
+    expect(parseAuthProgressReport(report).gateBreakdown).toEqual(report.gateBreakdown);
+    expectNoGateSecretLeak(report.gateBreakdown);
+  });
+
+  it('reports auth-progress page errors by context and script asset', async() => {
+    const report = await runDiscoveryAccountingGate([], 'page_error');
+    expect(report).toMatchObject({status: 'failed', stage: 'browser_egress_or_page_errors'});
+    expect(report.gateBreakdown).toEqual({
+      counters: {unexpectedEgressAttempts: 0, observerErrors: 0, pageErrors: 1},
+      unexpectedEgressAttempts: {alice: [], bob: []},
+      observerErrors: {alice: {}, bob: {}},
+      pageErrors: {
+        alice: [{constructorName: 'TypeError', scriptAsset: 'auth-client.js'}],
+        bob: []
+      }
+    });
+    expect(parseAuthProgressReport(report).gateBreakdown).toEqual(report.gateBreakdown);
+    expectNoGateSecretLeak(report.gateBreakdown);
+  });
+
+  it('breaks down the final gate by context and keeps error details private', async() => {
+    const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    expect(typeof summarizeGateBreakdown).toBe('function');
+    expect(typeof recordPageError).toBe('function');
+
+    const harness = await createDiscoveryNetworkHarness();
+    const {alice} = harness;
+    const bob = await harness.startContext('bob');
+    const pageErrors = {alice: [], bob: []} as any;
+    try {
+      alice.cdp.emit('Network.requestWillBeSent', {type: 'Image', request: {url: HOSTILE.url}});
+      await harness.attach(alice, 'alice-unexpected-worker');
+      harness.emit(alice, 'alice-unexpected-worker', 'Network.requestWillBeSent', {
+        type: 'Fetch', request: {url: HOSTILE.url}
+      });
+      await harness.attach(alice, 'alice-service-worker', 'auto', 'service_worker');
+      harness.emit(alice, 'alice-service-worker', 'Network.requestWillBeSent', {
+        type: 'Script', request: {url: HOSTILE.url}
+      }, 'auto');
+      await harness.attach(alice, 'alice-dedicated-worker', 'auto', 'worker');
+      harness.emit(alice, 'alice-dedicated-worker', 'Network.requestWillBeSent', {
+        type: 'XHR', request: {url: HOSTILE.url}
+      }, 'auto');
+
+      await harness.attach(bob, 'bob-invalid-worker');
+      harness.emit(bob, 'bob-invalid-worker', 'Network.requestWillBeSent', {
+        type: 'Fetch', request: {url: ''}
+      });
+      const error = new TypeError(HOSTILE.phrase);
+      error.stack = `TypeError: ${HOSTILE.phrase}\n    at https://unannounced.invalid/assets/bob-client.js?token=${HOSTILE.token}:21:3`;
+      recordPageError(pageErrors, 'bob', error);
+
+      const breakdown = summarizeGateBreakdown({
+        networkObservers: {alice: alice.networkObserver, bob: bob.networkObserver},
+        pageErrors
+      });
+      expect(breakdown).toEqual({
+        counters: {unexpectedEgressAttempts: 4, observerErrors: 1, pageErrors: 1},
+        unexpectedEgressAttempts: {
+          alice: [
+            {source: 'page', scheme: 'https', host: 'unannounced.invalid', resourceType: 'Image'},
+            {source: 'shared_worker', scheme: 'https', host: 'unannounced.invalid', resourceType: 'Fetch'},
+            {source: 'service_worker', scheme: 'https', host: 'unannounced.invalid', resourceType: 'Script'},
+            {source: 'dedicated_worker', scheme: 'https', host: 'unannounced.invalid', resourceType: 'XHR'}
+          ],
+          bob: []
+        },
+        observerErrors: {
+          alice: {},
+          bob: {invalid_worker_cdp_message: 1}
+        },
+        pageErrors: {
+          alice: [],
+          bob: [{constructorName: 'TypeError', scriptAsset: 'bob-client.js'}]
+        }
+      });
+      const serialized = JSON.stringify(breakdown);
+      expect(serialized).not.toContain(HOSTILE.password);
+      expect(serialized).not.toContain(HOSTILE.token);
+      expect(serialized).not.toContain(HOSTILE.phrase);
+      expect(serialized).not.toContain(HOSTILE.url);
+      expect(serialized).not.toContain('/assets/');
+      expect(serialized).not.toMatch(/https?:|wss?:/);
+      expect(formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: breakdown}))
+      .toContain(`; browser egress/page errors ${serialized}`);
+    } finally {
+      await harness.stop();
+    }
   });
 
   it('keeps the successful paired report compatible with the existing parser and controls', async() => {
@@ -1936,6 +2043,7 @@ describe('discovery shared-worker network accounting', () => {
     expect(report).toMatchObject({
       status: 'failed', stage: 'browser_egress_or_page_errors', network: {unexpectedAttempts: 0, observerErrors: 1}
     });
+    expect(report.gateBreakdown.observerErrors.alice).toEqual({invalid_worker_cdp_message: 1});
     expect(report.workerObservation.contexts.alice.coverageComplete).toBe(0);
     expect(report.network.websocket_101_by_context_phase).toEqual(emptyWebSocket101Grid());
     expectNoHostileLeak(report);
