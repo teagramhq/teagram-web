@@ -4268,7 +4268,24 @@ describe('real client group created', () => {
     try {
       await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
       .rejects.toThrow('bob_group_member_profile');
-      expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'members', profileMatchesActiveGroup: false, membersTabExists: true, membersListExists: true, memberRowCount: 0});
+      expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'members', profileMatchesActiveGroup: false, membersTabExists: true, membersListExists: true, memberRowCount: 2});
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('captures client error baselines before Bob\'s active-chat prechecks', async() => {
+    const openBobGroupMembers = requireOpenBobGroupMembers();
+    const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage();
+    try {
+      await page.locator('#column-center .chat.active').evaluate((chat: Element) => chat.classList.remove('active'));
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      .rejects.toThrow('bob_group_member_profile');
+      expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({
+        pageErrorsSinceStep: 0,
+        consoleErrorsSinceStep: 0,
+        rpcErrorsSinceStep: 0
+      });
     } finally {
       await page.close();
     }

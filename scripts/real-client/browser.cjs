@@ -1583,7 +1583,6 @@ function groupMemberProbe({groupPeerId}) {
   const membersTabExists = Boolean(membersPanel && membersPanelIndex >= 0 && menuTabs?.[membersPanelIndex]);
   const membersList = membersPanel?.querySelector('.chatlist');
   const membersPanelActive = Boolean(membersPanel?.classList.contains('active') && isVisible(membersPanel));
-  const activeMembersPanel = profileMatchesActiveGroup && membersPanelActive;
   const activeMediaPanel = mediaPanels.find((mediaPanel) => mediaPanel.classList.contains('active') && isVisible(mediaPanel));
 
   let activePanel = 'none';
@@ -1606,7 +1605,7 @@ function groupMemberProbe({groupPeerId}) {
     profileMatchesActiveGroup,
     membersTabExists,
     membersListExists: Boolean(membersList),
-    memberRowCount: activeMembersPanel ? membersPanel.querySelectorAll('.chatlist-chat[data-peer-id]').length : 0
+    memberRowCount: membersPanelActive ? membersPanel.querySelectorAll('.chatlist-chat[data-peer-id]').length : 0
   };
 }
 
@@ -1749,6 +1748,12 @@ async function openBobGroupMembers(page, groupHeader, groupName, selectedBobPeer
     page,
     stages: BOB_GROUP_MEMBER_STAGES
   };
+  const errorCounts = clientErrorCounts.get(page);
+  groupMemberTrace.errorsAtStep = errorCounts ? {
+    ...errorCounts,
+    rpc: await readRpcErrorCounts(page)
+  } : undefined;
+
   currentStage = 'bob_group_member_profile';
   const activeGroup = resolveActiveGroupChat(page, groupName);
   try {
@@ -1767,12 +1772,6 @@ async function openBobGroupMembers(page, groupHeader, groupName, selectedBobPeer
   if(!/^-?[0-9]{1,20}$/.test(groupMemberTrace.groupPeerId || '') || !groupMemberTrace.groupPeerId.startsWith('-')) {
     failGroupMemberStep('bob_group_member_profile');
   }
-
-  const errorCounts = clientErrorCounts.get(page);
-  groupMemberTrace.errorsAtStep = errorCounts ? {
-    ...errorCounts,
-    rpc: await readRpcErrorCounts(page)
-  } : undefined;
 
   await groupHeader.click({timeout: timeoutMs}).catch((error) => failGroupMemberStep('bob_group_member_profile', error));
   const activeRightPanel = page.locator('body.is-right-column-shown #column-right .sidebar-slider > .sidebar-slider-item.active');
