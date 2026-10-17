@@ -534,6 +534,30 @@ export function parseGroupCreatedState(state) {
   return Object.fromEntries(keys.map((key) => [key, state[key]]));
 }
 
+const GROUP_MEMBER_ACTIVE_PANELS = ['none', 'profile', 'media', 'members', 'edit', 'other'];
+const GROUP_MEMBER_STEP_WAITS = ['none', 'timeout', 'strict_mode_violation', 'other'];
+const GROUP_MEMBER_ERROR_KEYS = ['pageErrorsSinceStep', 'consoleErrorsSinceStep', 'rpcErrorsSinceStep'];
+
+// Closed schema: identifies the active right-column panel and exposes counts
+// only. Peer ids, titles, messages and exception text never enter the report.
+export function parseGroupMemberState(state) {
+  if(state === 'unavailable') return state;
+  const keys = ['activePanel', 'profileMatchesActiveGroup', 'membersTabExists', 'membersListExists', 'memberRowCount', ...GROUP_MEMBER_ERROR_KEYS, 'stepWait'];
+  const isCount = (value) => value === null || Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000;
+  if(!state || typeof state !== 'object' || Array.isArray(state) ||
+      JSON.stringify(Object.keys(state).sort()) !== JSON.stringify([...keys].sort()) ||
+      !GROUP_MEMBER_ACTIVE_PANELS.includes(state.activePanel) ||
+      typeof state.profileMatchesActiveGroup !== 'boolean' ||
+      typeof state.membersTabExists !== 'boolean' ||
+      typeof state.membersListExists !== 'boolean' ||
+      !Number.isSafeInteger(state.memberRowCount) || state.memberRowCount < 0 || state.memberRowCount > 1_000_000 ||
+      !GROUP_MEMBER_ERROR_KEYS.every((key) => isCount(state[key])) ||
+      !GROUP_MEMBER_STEP_WAITS.includes(state.stepWait)) {
+    return 'unclassified';
+  }
+  return Object.fromEntries(keys.map((key) => [key, state[key]]));
+}
+
 export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const hasPasswordEvidence = report.passwordEvidence !== undefined;
   const failedPasswordEvidence = controlsOnly || !hasPasswordEvidence
@@ -551,7 +575,10 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const groupCreatedSummary = controlsOnly || report.groupCreated === undefined
     ? ''
     : `; group created ${JSON.stringify(parseGroupCreatedState(report.groupCreated))}`;
-  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}`;
+  const groupMemberSummary = controlsOnly || report.groupMember === undefined
+    ? ''
+    : `; group members ${JSON.stringify(parseGroupMemberState(report.groupMember))}`;
+  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}${groupMemberSummary}`;
 }
 
 export function parseAuthProgressReport(report) {

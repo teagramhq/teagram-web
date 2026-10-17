@@ -26,7 +26,8 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
-const {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword} = require('../../scripts/real-client/browser.cjs');
+const realClientBrowser = require('../../scripts/real-client/browser.cjs');
+const {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -4108,6 +4109,67 @@ describe('real client group created', () => {
       <div style="position:relative;height:200px">${centerMarkup({groupActive: false, groupTitle})}</div>`;
   }
 
+  function groupProfileMarkup({groupPeerId = '-1000003', memberIds = ['1000002', '1000003'], membersTab = true, membersTabActive = false} = {}) {
+    const membersMenu = membersTab ? '<div class="menu-horizontal-div-item"><span>Members</span></div>' : '';
+    const membersPanel = membersTab ? `<div class="search-super-tab-container search-super-container-members tabs-tab${membersTabActive ? ' active' : ''}" style="min-height:80px">
+      <div class="search-super-content-container search-super-content-members"><ul class="chatlist">${memberIds.map((peerId) => `<li class="chatlist-chat" data-peer-id="${peerId}" style="height:40px">member</li>`).join('')}</ul></div>
+    </div>` : '';
+    return `<style>.profile-avatars-avatar-fake { visibility: hidden; }</style>
+    <div class="tabs-tab sidebar-slider-item active" style="min-height:200px">
+      <div class="sidebar-content"><div class="profile-content">
+        <div class="profile-avatars-container">
+          <div class="avatar profile-avatars-avatar-fake" data-peer-id="${groupPeerId}" style="width:120px;height:120px"></div>
+          <div class="profile-avatars-avatars"><div class="profile-avatars-avatar active" style="width:120px;height:120px"><div class="avatar" data-peer-id="${groupPeerId}" style="width:120px;height:120px"></div></div></div>
+          <div class="profile-avatars-info">${GROUP_NAME}</div>
+        </div>
+        <div class="search-super"><nav class="search-super-tabs"><div class="menu-horizontal-div-item"><span>Media</span></div>${membersMenu}</nav>
+          <div class="search-super-tabs-container"><div class="search-super-tab-container search-super-container-media tabs-tab"></div>${membersPanel}</div>
+        </div>
+      </div></div>
+    </div>`;
+  }
+
+  async function prepareBobGroupMemberPage({profileMarkup = groupProfileMarkup(), openProfile = true, activateMembers = true, reportErrorsOnMembersClick = false} = {}) {
+    const page = await browser.newPage();
+    await countClientErrors(page);
+    await page.goto('data:text/html,');
+    await page.setContent(`${bobMarkup()}<div id="column-right"><div class="sidebar-slider"></div></div>`);
+    await page.evaluate(({profileMarkup, openProfile, activateMembers, reportErrorsOnMembersClick}: {profileMarkup: string, openProfile: boolean, activateMembers: boolean, reportErrorsOnMembersClick: boolean}) => {
+      const group = document.querySelector('#column-center .chat .avatar[data-peer-id="-1000003"]')?.closest('.chat');
+      group?.querySelector('.topbar .chat-info')?.addEventListener('click', () => {
+        if(!openProfile) return;
+        const slider = document.querySelector('#column-right .sidebar-slider');
+        document.body.classList.add('is-right-column-shown');
+        slider.innerHTML = profileMarkup;
+        const activeProfile = slider.querySelector('.sidebar-slider-item.active');
+        const membersMenu = activeProfile?.querySelectorAll('.search-super-tabs .menu-horizontal-div-item')[1];
+        const membersPanel = activeProfile?.querySelector('.search-super-container-members');
+        membersMenu?.addEventListener('click', () => {
+          if(reportErrorsOnMembersClick) {
+            console.error('hunter2 secret passphrase');
+            setTimeout(() => {throw new Error('hunter2 secret passphrase')}, 0);
+            const channel = new MessageChannel();
+            channel.port2.addEventListener('message', () => {});
+            channel.port2.start();
+            channel.port1.postMessage({type: 'result', payload: {taskId: 1, error: {type: 'PROFILE_RPC_ERROR'}}});
+          }
+          if(!activateMembers) return;
+          activeProfile.querySelectorAll('.search-super-tab-container').forEach((panel) => panel.classList.remove('active'));
+          membersPanel?.classList.add('active');
+        });
+      });
+    }, {profileMarkup, openProfile, activateMembers, reportErrorsOnMembersClick});
+    const capturedScreenshots = {count: 0};
+    const groupHeader = await openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, screenshotDirectory, capturedScreenshots, 2_000);
+    return {page, groupHeader, capturedScreenshots};
+  }
+
+  function requireOpenBobGroupMembers() {
+    const open = realClientBrowser.openBobGroupMembers;
+    expect(typeof open).toBe('function');
+    return open;
+  }
+
   it('passes Bob\'s group steps once the clicked group is the active chat', async() => {
     const page = await browser.newPage();
     try {
@@ -4175,6 +4237,166 @@ describe('real client group created', () => {
       expect(await captureGroupCreatedState()).toEqual({activeChat: 'group', chatCount: 2, groupHeaderVisible: true, stepWait: 'other'});
     } finally {
       await page.close();
+    }
+  });
+
+  it('reads the exact two members from Bob\'s active group profile Members tab', async() => {
+    const openBobGroupMembers = requireOpenBobGroupMembers();
+    const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage();
+    try {
+      expect(await page.locator('#column-right .sidebar-slider-item.active .row').filter({hasText: /^Members/}).count()).toBe(0);
+      await groupHeader.click();
+      expect(await page.locator('#column-right .sidebar-slider-item.active .profile-avatars-avatar-fake').evaluate((avatar: Element) => getComputedStyle(avatar).visibility)).toBe('hidden');
+      expect(await page.locator('#column-right .sidebar-slider-item.active .profile-avatars-avatars > .profile-avatars-avatar.active .avatar[data-peer-id]').isVisible()).toBe(true);
+      await openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 500);
+      expect(capturedScreenshots.count).toBe(2);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails Bob\'s member profile step when the group profile did not open', async() => {
+    const openBobGroupMembers = requireOpenBobGroupMembers();
+    const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({openProfile: false});
+    try {
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      .rejects.toThrow('bob_group_member_profile');
+      const state = await realClientBrowser.captureGroupMemberState();
+      expect(state).toMatchObject({activePanel: 'none', profileMatchesActiveGroup: false, membersTabExists: false, membersListExists: false, memberRowCount: 0});
+      expect(realClientContract.parseGroupMemberState(state)).toEqual(state);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('does not read members from a stale right-column profile for another group', async() => {
+    const openBobGroupMembers = requireOpenBobGroupMembers();
+    const staleProfile = groupProfileMarkup({groupPeerId: '-1000004', membersTabActive: true});
+    const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({profileMarkup: staleProfile});
+    try {
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      .rejects.toThrow('bob_group_member_profile');
+      expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'members', profileMatchesActiveGroup: false, membersTabExists: true, membersListExists: true, memberRowCount: 2});
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('captures client error baselines before Bob\'s active-chat prechecks', async() => {
+    const openBobGroupMembers = requireOpenBobGroupMembers();
+    const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage();
+    try {
+      await page.locator('#column-center .chat.active').evaluate((chat: Element) => chat.classList.remove('active'));
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      .rejects.toThrow('bob_group_member_profile');
+      expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({
+        pageErrorsSinceStep: 0,
+        consoleErrorsSinceStep: 0,
+        rpcErrorsSinceStep: 0
+      });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails Bob\'s Members tab step when the profile has no Members tab', async() => {
+    const openBobGroupMembers = requireOpenBobGroupMembers();
+    const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({profileMarkup: groupProfileMarkup({membersTab: false})});
+    try {
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      .rejects.toThrow('bob_group_member_tab');
+      expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'profile', profileMatchesActiveGroup: true, membersTabExists: false, membersListExists: false, memberRowCount: 0});
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails Bob\'s member list step when the Members panel does not become active', async() => {
+    const openBobGroupMembers = requireOpenBobGroupMembers();
+    const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({activateMembers: false});
+    try {
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      .rejects.toThrow('bob_group_member_list');
+      expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'profile', profileMatchesActiveGroup: true, membersTabExists: true, membersListExists: true, memberRowCount: 0});
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails Bob\'s member row wait with the active Members panel row count', async() => {
+    const openBobGroupMembers = requireOpenBobGroupMembers();
+    const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({profileMarkup: groupProfileMarkup({memberIds: ['1000002']})});
+    try {
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      .rejects.toThrow('bob_group_member_count');
+      expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'members', membersTabExists: true, membersListExists: true, memberRowCount: 1});
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('requires exactly two member peer ids including the selected Bob', async() => {
+    const openBobGroupMembers = requireOpenBobGroupMembers();
+    for(const memberIds of [['1000003', '1000004'], ['1000002', '1000003', '1000004']]) {
+      const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({profileMarkup: groupProfileMarkup({memberIds})});
+      try {
+        await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 500))
+        .rejects.toThrow('bob_group_member_identity');
+        expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'members', memberRowCount: memberIds.length});
+      } finally {
+        await page.close();
+      }
+    }
+  });
+
+  it('summarizes only the active right-column state and safe error deltas on failure', async() => {
+    const openBobGroupMembers = requireOpenBobGroupMembers();
+    const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({activateMembers: false, reportErrorsOnMembersClick: true});
+    try {
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      .rejects.toThrow('bob_group_member_list');
+      const state = await realClientBrowser.captureGroupMemberState();
+      expect(state).toMatchObject({activePanel: 'profile', profileMatchesActiveGroup: true, membersTabExists: true, membersListExists: true, memberRowCount: 0});
+      expect(state.pageErrorsSinceStep).toBeGreaterThan(0);
+      expect(state.consoleErrorsSinceStep).toBeGreaterThan(0);
+      expect(state.rpcErrorsSinceStep).toBeGreaterThan(0);
+      expect(realClientContract.parseGroupMemberState(state)).toEqual(state);
+      const summary = formatBrowserFailureMessage({status: 'failed', stage: 'bob_group_member_list', groupMember: state});
+      expect(summary).toContain('; group members ');
+      expectNoHostileLeak(summary);
+      expect(summary).not.toContain(GROUP_NAME);
+      expect(summary).not.toContain('1000002');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('rejects unsafe member diagnostics from the failure summary', () => {
+    const parseGroupMemberState = (realClientContract as any).parseGroupMemberState;
+    expect(typeof parseGroupMemberState).toBe('function');
+    const state = {
+      activePanel: 'members',
+      profileMatchesActiveGroup: true,
+      membersTabExists: true,
+      membersListExists: true,
+      memberRowCount: 2,
+      pageErrorsSinceStep: 0,
+      consoleErrorsSinceStep: 0,
+      rpcErrorsSinceStep: 0,
+      stepWait: 'timeout'
+    };
+    expect(parseGroupMemberState(state)).toEqual(state);
+    for(const hostile of [
+      {...state, groupName: HOSTILE.phrase},
+      {...state, activePanel: HOSTILE.phrase},
+      {...state, memberPeerIds: ['1000002']},
+      {...state, memberRowCount: -1},
+      {...state, pageErrorsSinceStep: HOSTILE.phrase},
+      {...state, stepWait: HOSTILE.phrase},
+      null
+    ]) {
+      expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_group_member_identity', groupMember: hostile}))
+      .toBe('real client scenario failed at bob_group_member_identity; group members "unclassified"');
     }
   });
 
