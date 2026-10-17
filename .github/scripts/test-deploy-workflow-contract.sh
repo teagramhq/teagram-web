@@ -5,6 +5,8 @@ set -euo pipefail
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 expected_if="\${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
 expected_deploy_if="\${{ needs.resolve.outputs.skip == 'false' }}"
+expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || github.workflow }}"
+expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Leave empty for no report.'
 
 fail() {
   printf '%s: %s\n' "$workflow" "$1" >&2
@@ -232,8 +234,18 @@ SH
 check_contract() {
   [[ "$(query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
     fail 'triggers must be exactly workflow_run and workflow_dispatch'
-  [[ "$(query '.on.workflow_dispatch // {} | length')" == 0 ]] ||
-    fail 'workflow_dispatch must take no inputs'
+  [[ "$(query '.on.workflow_dispatch.inputs | keys | join(",")')" == 'issue' ]] ||
+    fail 'workflow_dispatch must take only the optional issue input'
+  [[ "$(query '.on.workflow_dispatch.inputs.issue.description')" == "$expected_issue_description" ]] ||
+    fail 'the issue input description must explain optional reporting'
+  [[ "$(query '.on.workflow_dispatch.inputs.issue.required')" == 'false' ]] ||
+    fail 'the issue input must be optional'
+  [[ "$(query '.on.workflow_dispatch.inputs.issue.type')" == 'string' ]] ||
+    fail 'the issue input must be a string'
+  [[ -z "$(query '.on.workflow_dispatch.inputs.issue.default')" ]] ||
+    fail 'the issue input must default to empty'
+  [[ "$(query '."run-name"')" == "$expected_run_name" ]] ||
+    fail 'run names must include only non-empty issue keys'
   [[ "$(query '.on.workflow_run.workflows | join(",")')" == 'Private MTProto Artifact Publication' ]] ||
     fail 'workflow_run must follow only Private MTProto Artifact Publication'
   [[ "$(query '.on.workflow_run.types | join(",")')" == 'completed' ]] ||
@@ -316,6 +328,8 @@ self_test() {
     '.on.pull_request_target = {}'
     '.on.push = {"branches": ["master"]}'
     '.on.workflow_dispatch.inputs = {"sha":{"type":"string"}}'
+    '.on.workflow_dispatch.inputs.issue.required = true'
+    'del(."run-name")'
     'del(.on.workflow_run.branches)'
     '.on.workflow_run.branches = ["master", "dev"]'
     '.jobs.resolve.if = "wrong"'
