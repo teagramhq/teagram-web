@@ -116,3 +116,6 @@ jobs:
 
       - name: Check rollback artifact modes
         run: bash .github/scripts/test-deploy-backup-rollback.sh
+
+      - name: Exercise deployment stack migration and rollback
+        run: bash .github/scripts/test-deploy-stack-migration-rollback.sh
