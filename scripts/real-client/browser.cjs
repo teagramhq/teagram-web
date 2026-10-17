@@ -68,6 +68,11 @@ let groupNameFormTrace = {page: undefined, stepWait: 'none'};
 // The page, group name and stages of the group chat steps that ran last, and
 // how that step's wait ended. The name is only compared inside the page.
 let groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
+let groupMemberTrace = createGroupMemberTrace();
+
+function createGroupMemberTrace() {
+  return {page: undefined, groupPeerId: undefined, stages: [], stepWait: 'none', errorsAtStep: undefined};
+}
 
 function createCenterColumnTrace() {
   return {page: undefined, selectedPeerId: undefined, errorsAtSelection: undefined, composerWait: 'none'};
@@ -1271,6 +1276,14 @@ const BOB_GROUP_CHAT_STAGES = {
   title: 'bob_group_title',
   screenshot: 'bob_group_screenshot'
 };
+const BOB_GROUP_MEMBER_STAGES = [
+  'bob_group_member_profile',
+  'bob_group_member_tab',
+  'bob_group_member_list',
+  'bob_group_member_count',
+  'bob_group_member_identity',
+  'bob_group_member_screenshot'
+];
 
 // The group chat steps wait on the active centre-column chat only once it is
 // a group: the chat the scenario opened before, still active while the group's
@@ -1546,6 +1559,82 @@ async function captureGroupCreatedState(trace = groupCreatedTrace, timeoutMs = C
   }
 }
 
+// Reads only the active right-column panel. Member peer ids stay in the page
+// interaction and are never included in diagnostic state.
+function groupMemberProbe({groupPeerId}) {
+  const isVisible = (element) => {
+    if(!element || !element.isConnected) return false;
+    const style = window.getComputedStyle(element);
+    return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+  };
+  const column = document.getElementById('column-right');
+  const panels = document.body.classList.contains('is-right-column-shown') && column
+    ? Array.from(column.querySelectorAll('.sidebar-slider > .sidebar-slider-item.active')).filter(isVisible)
+    : [];
+  const panel = panels.length === 1 ? panels[0] : undefined;
+  const profile = panel?.querySelector('.profile-content');
+  const profileAvatars = profile ? Array.from(profile.querySelectorAll('.profile-avatars-avatar-fake[data-peer-id]')) : [];
+  const profileMatchesActiveGroup = profileAvatars.some((avatar) => avatar.getAttribute('data-peer-id') === groupPeerId && isVisible(avatar));
+  const mediaTabs = panel?.querySelector('.search-super-tabs-container');
+  const mediaPanels = mediaTabs ? Array.from(mediaTabs.children) : [];
+  const membersPanel = mediaPanels.find((mediaPanel) => mediaPanel.classList.contains('search-super-container-members'));
+  const membersPanelIndex = membersPanel ? mediaPanels.indexOf(membersPanel) : -1;
+  const menuTabs = panel?.querySelectorAll('.search-super-tabs .menu-horizontal-div-item');
+  const membersTabExists = Boolean(membersPanel && membersPanelIndex >= 0 && menuTabs?.[membersPanelIndex]);
+  const membersList = membersPanel?.querySelector('.chatlist');
+  const membersPanelActive = Boolean(membersPanel?.classList.contains('active') && isVisible(membersPanel));
+  const activeMembersPanel = profileMatchesActiveGroup && membersPanelActive;
+  const activeMediaPanel = mediaPanels.find((mediaPanel) => mediaPanel.classList.contains('active') && isVisible(mediaPanel));
+
+  let activePanel = 'none';
+  if(panels.length > 1) {
+    activePanel = 'other';
+  } else if(panel) {
+    if(membersPanelActive) {
+      activePanel = 'members';
+    } else if(profile) {
+      activePanel = !activeMediaPanel ? 'profile' : activeMediaPanel.classList.contains('search-super-container-media') ? 'media' : 'other';
+    } else if(panel.querySelector('.edit-peer-container')) {
+      activePanel = 'edit';
+    } else {
+      activePanel = 'other';
+    }
+  }
+
+  return {
+    activePanel,
+    profileMatchesActiveGroup,
+    membersTabExists,
+    membersListExists: Boolean(membersList),
+    memberRowCount: activeMembersPanel ? membersPanel.querySelectorAll('.chatlist-chat[data-peer-id]').length : 0
+  };
+}
+
+async function captureGroupMemberState(trace = groupMemberTrace, timeoutMs = CENTER_COLUMN_CAPTURE_TIMEOUT_MS) {
+  if(!trace.page) return 'unavailable';
+  try {
+    const [probe, rpc] = await withDeadline(Promise.all([
+      trace.page.evaluate(groupMemberProbe, {groupPeerId: trace.groupPeerId}),
+      trace.page.evaluate(() => window.__realClientRpcErrors?.()).catch(() => undefined)
+    ]), timeoutMs);
+    const counts = clientErrorCounts.get(trace.page);
+    const since = (key) => counts && trace.errorsAtStep ? Math.max(counts[key] - trace.errorsAtStep[key], 0) : null;
+    const rpcCounts = sanitizeRpcErrorCounts(rpc);
+    const rpcErrorsSinceStep = trace.errorsAtStep?.rpc && rpcCounts
+      ? Math.max(rpcCounts.total - trace.errorsAtStep.rpc.total, 0)
+      : null;
+    return {
+      ...probe,
+      pageErrorsSinceStep: since('pageErrors'),
+      consoleErrorsSinceStep: since('consoleErrors'),
+      rpcErrorsSinceStep,
+      stepWait: trace.stepWait
+    };
+  } catch {
+    return 'unavailable';
+  }
+}
+
 function failGroupMessageStep(stage, error) {
   groupCreatedTrace.stepWait = error ? classifyLocatorError(error) : 'other';
   failStage(stage);
@@ -1636,13 +1725,93 @@ async function sendGroupText(page, text, groupName, stage, timeoutMs = 30_000) {
   currentStage = stage;
 }
 
-async function waitForMembers(page, memberRows) {
-  const deadline = Date.now() + 20_000;
+function failGroupMemberStep(stage, error) {
+  groupMemberTrace.stepWait = error ? classifyLocatorError(error) : 'other';
+  failStage(stage);
+}
+
+async function waitForMembers(page, memberRows, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
   while(Date.now() < deadline) {
-    if(await memberRows.count() >= 2) return;
+    try {
+      if(await memberRows.count() >= 2) return;
+    } catch(error) {
+      failGroupMemberStep('bob_group_member_count', error);
+    }
     await page.waitForTimeout(100);
   }
-  failStage('bob_group_member_count');
+  failGroupMemberStep('bob_group_member_count');
+}
+
+async function openBobGroupMembers(page, groupHeader, groupName, selectedBobPeerId, screenshotDirectory, capturedScreenshots, timeoutMs = 20_000) {
+  groupMemberTrace = {
+    ...createGroupMemberTrace(),
+    page,
+    stages: BOB_GROUP_MEMBER_STAGES
+  };
+  currentStage = 'bob_group_member_profile';
+  const activeGroup = resolveActiveGroupChat(page, groupName);
+  try {
+    if(await activeGroup.activeChats.count() !== 1 || await activeGroup.chat.count() !== 1 || await activeGroup.header.count() !== 1 ||
+        await activeGroup.title.count() !== 1 || await groupHeader.count() !== 1) {
+      failGroupMemberStep('bob_group_member_profile');
+    }
+    groupMemberTrace.groupPeerId = await activeGroup.chat.locator('.topbar .avatar[data-peer-id]').getAttribute('data-peer-id');
+    if(await groupHeader.locator('.avatar[data-peer-id]').getAttribute('data-peer-id') !== groupMemberTrace.groupPeerId) {
+      failGroupMemberStep('bob_group_member_profile');
+    }
+  } catch(error) {
+    if(error?.message === 'bob_group_member_profile') throw error;
+    failGroupMemberStep('bob_group_member_profile', error);
+  }
+  if(!/^-?[0-9]{1,20}$/.test(groupMemberTrace.groupPeerId || '') || !groupMemberTrace.groupPeerId.startsWith('-')) {
+    failGroupMemberStep('bob_group_member_profile');
+  }
+
+  const errorCounts = clientErrorCounts.get(page);
+  groupMemberTrace.errorsAtStep = errorCounts ? {
+    ...errorCounts,
+    rpc: await readRpcErrorCounts(page)
+  } : undefined;
+
+  await groupHeader.click({timeout: timeoutMs}).catch((error) => failGroupMemberStep('bob_group_member_profile', error));
+  const activeRightPanel = page.locator('body.is-right-column-shown #column-right .sidebar-slider > .sidebar-slider-item.active');
+  const activeGroupProfileAvatar = activeRightPanel.locator(`.profile-content .profile-avatars-avatar-fake[data-peer-id="${groupMemberTrace.groupPeerId}"]`);
+  await activeGroupProfileAvatar.waitFor({state: 'visible', timeout: timeoutMs}).catch((error) => failGroupMemberStep('bob_group_member_profile', error));
+
+  currentStage = 'bob_group_member_tab';
+  const membersPanel = activeRightPanel.locator('.search-super-tabs-container > .search-super-container-members');
+  if(await membersPanel.count() !== 1) failGroupMemberStep('bob_group_member_tab');
+  const membersPanelIndex = await membersPanel.evaluate((panel) => Array.prototype.indexOf.call(panel.parentElement.children, panel));
+  const membersTab = activeRightPanel.locator('.search-super-tabs > .menu-horizontal-div-item').nth(membersPanelIndex);
+  if(await membersTab.count() !== 1 || !await membersTab.isVisible()) failGroupMemberStep('bob_group_member_tab');
+  await membersTab.click({timeout: timeoutMs}).catch((error) => failGroupMemberStep('bob_group_member_tab', error));
+
+  currentStage = 'bob_group_member_list';
+  const activeMembersPanel = activeRightPanel.locator('.search-super-tabs-container > .search-super-container-members.active');
+  await activeMembersPanel.waitFor({state: 'visible', timeout: timeoutMs}).catch((error) => failGroupMemberStep('bob_group_member_list', error));
+  const memberList = activeMembersPanel.locator('.chatlist');
+  await memberList.waitFor({state: 'visible', timeout: timeoutMs}).catch((error) => failGroupMemberStep('bob_group_member_list', error));
+  const memberRows = memberList.locator('.chatlist-chat[data-peer-id]');
+
+  currentStage = 'bob_group_member_count';
+  await waitForMembers(page, memberRows, timeoutMs);
+
+  currentStage = 'bob_group_member_identity';
+  let memberPeerIds;
+  try {
+    memberPeerIds = await memberRows.evaluateAll((rows) => rows.map((row) => row.getAttribute('data-peer-id')));
+  } catch(error) {
+    failGroupMemberStep('bob_group_member_identity', error);
+  }
+  if(memberPeerIds.length !== 2 || !memberPeerIds.every((peerId) => /^[0-9]{1,20}$/.test(peerId || '')) ||
+      !/^[0-9]{1,20}$/.test(selectedBobPeerId || '') || !memberPeerIds.includes(selectedBobPeerId)) {
+    failGroupMemberStep('bob_group_member_identity');
+  }
+
+  currentStage = 'bob_group_member_screenshot';
+  await captureState(page, screenshotDirectory, 'bob-group-members', capturedScreenshots)
+  .catch((error) => failGroupMemberStep('bob_group_member_screenshot', error));
 }
 
 // The accepted fixture's synthetic controls, run before any app context exists.
@@ -1991,6 +2160,7 @@ async function main(dependencies = {}) {
   centerColumnTrace = createCenterColumnTrace();
   groupNameFormTrace = {page: undefined, stepWait: 'none'};
   groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
+  groupMemberTrace = createGroupMemberTrace();
   try {
     runtime = Object.prototype.hasOwnProperty.call(dependencies, 'runtimeConfig')
       ? dependencies.runtimeConfig
@@ -2144,7 +2314,7 @@ async function main(dependencies = {}) {
     currentStage = 'bob_group_membership';
     const bobGroupRow = bob.page.locator('#chatlist-container .chatlist-chat').filter({hasText: groupName});
     await bobGroupRow.waitFor({state: 'visible', timeout: 45_000}).catch(() => failStage('bob_group_chatlist_entry'));
-    const bobGroupTitle = await openBobGroupChat(bob.page, bobGroupRow, groupName, runtime.screenshotDirectory, capturedScreenshots);
+    const bobGroupHeader = await openBobGroupChat(bob.page, bobGroupRow, groupName, runtime.screenshotDirectory, capturedScreenshots);
 
     await sendGroupText(alice.page, GROUP_MESSAGE, groupName, 'alice_group_message');
     await captureState(alice.page, runtime.screenshotDirectory, 'alice-group-message', capturedScreenshots);
@@ -2156,17 +2326,7 @@ async function main(dependencies = {}) {
     if(await bobGroupMessage.count() !== 1) failStage('bob_group_message_count');
     await captureState(bob.page, runtime.screenshotDirectory, 'bob-group-message', capturedScreenshots);
 
-    currentStage = 'bob_group_member_list';
-    await bobGroupTitle.click();
-    const membersRow = bob.page.locator('#column-right .row').filter({hasText: /^Members/});
-    await membersRow.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('bob_group_members_row'));
-    await membersRow.click();
-    const memberRows = bob.page.locator('#column-right .chat-members-container .row[data-peer-id]');
-    await memberRows.first().waitFor({state: 'visible', timeout: 20_000}).catch(() => failStage('bob_group_member_list'));
-    await waitForMembers(bob.page, memberRows);
-    const memberPeerIds = await memberRows.evaluateAll((rows) => rows.map((row) => row.getAttribute('data-peer-id')));
-    if(memberPeerIds.length !== 2 || !memberPeerIds.includes(selectedBobPeerId)) failStage('bob_group_member_identity');
-    await captureState(bob.page, runtime.screenshotDirectory, 'bob-group-members', capturedScreenshots);
+    await openBobGroupMembers(bob.page, bobGroupHeader, groupName, selectedBobPeerId, runtime.screenshotDirectory, capturedScreenshots);
     report.push({name: 'group', status: 'passed'});
 
     await Promise.all(observers.map((observer) => observer.waitForSetup()));
@@ -2234,6 +2394,7 @@ async function main(dependencies = {}) {
       const centerColumn = ['message', 'group'].includes(currentScenario) ? await captureCenterColumnState() : undefined;
       const groupNameForm = currentStage.startsWith('alice_group_name_') ? await captureGroupNameFormState() : undefined;
       const groupCreated = groupCreatedTrace.stages?.includes(currentStage) ? await captureGroupCreatedState() : undefined;
+      const groupMember = groupMemberTrace.stages?.includes(currentStage) ? await captureGroupMemberState() : undefined;
       report = {
         status: 'failed',
         stage: currentStage,
@@ -2247,6 +2408,7 @@ async function main(dependencies = {}) {
         ...(centerColumn ? {centerColumn} : {}),
         ...(groupNameForm ? {groupNameForm} : {}),
         ...(groupCreated ? {groupCreated} : {}),
+        ...(groupMember ? {groupMember} : {}),
         // On failure the closed-schema evidence is still the point, validated the
         // same way: any schema violation collapses it to `unclassified`.
         ...(registry ? {
@@ -2295,7 +2457,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupMemberState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
