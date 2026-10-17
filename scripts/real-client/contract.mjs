@@ -537,6 +537,7 @@ export function parseGroupCreatedState(state) {
 const GROUP_MEMBER_ACTIVE_PANELS = ['none', 'profile', 'media', 'members', 'edit', 'other'];
 const GROUP_MEMBER_STEP_WAITS = ['none', 'timeout', 'strict_mode_violation', 'other'];
 const GROUP_MEMBER_ERROR_KEYS = ['pageErrorsSinceStep', 'consoleErrorsSinceStep', 'rpcErrorsSinceStep'];
+const GROUP_MEMBER_TAB_ACTIONABILITY_REASONS = ['none', 'intercepted', 'not_stable', 'not_visible', 'not_enabled', 'not_attached', 'outside_viewport', 'timeout', 'other'];
 
 const GROUP_MESSAGE_SEND_STATES = ['pending', 'sent', 'failed'];
 const GROUP_MESSAGE_RESULTS = [
@@ -590,8 +591,22 @@ export function parseGroupMessageState(state) {
 // only. Peer ids, titles, messages and exception text never enter the report.
 export function parseGroupMemberState(state) {
   if(state === 'unavailable') return state;
-  const keys = ['activePanel', 'profileMatchesActiveGroup', 'membersTabExists', 'membersListExists', 'memberRowCount', ...GROUP_MEMBER_ERROR_KEYS, 'stepWait'];
+  const keys = ['activePanel', 'profileMatchesActiveGroup', 'membersTabExists', 'membersListExists', 'memberRowCount', 'membersTab', ...GROUP_MEMBER_ERROR_KEYS, 'stepWait'];
   const isCount = (value) => value === null || Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000;
+  const isDomElement = (value, expectedKeys) => value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expectedKeys].sort()) &&
+    typeof value.tag === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(value.tag) &&
+    Array.isArray(value.classes) && value.classes.length <= 16 && value.classes.every((name) => typeof name === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(name));
+  const tab = state?.membersTab;
+  const validMembersTab = tab !== null && typeof tab === 'object' && !Array.isArray(tab) &&
+    JSON.stringify(Object.keys(tab).sort()) === JSON.stringify(['panelActiveBefore', 'panelActiveAfter', 'target', 'paired', 'actionabilityReason', 'interceptedBy'].sort()) &&
+    (tab.panelActiveBefore === null || typeof tab.panelActiveBefore === 'boolean') &&
+    (tab.panelActiveAfter === null || typeof tab.panelActiveAfter === 'boolean') &&
+    (tab.target === null || isDomElement(tab.target, ['index', 'tag', 'classes']) && Number.isSafeInteger(tab.target.index) && tab.target.index >= 0 && tab.target.index <= 10_000) &&
+    (tab.paired === null || typeof tab.paired === 'boolean') &&
+    GROUP_MEMBER_TAB_ACTIONABILITY_REASONS.includes(tab.actionabilityReason) &&
+    (tab.interceptedBy === null || isDomElement(tab.interceptedBy, ['tag', 'classes'])) &&
+    (tab.actionabilityReason === 'intercepted' || tab.interceptedBy === null);
   if(!state || typeof state !== 'object' || Array.isArray(state) ||
       JSON.stringify(Object.keys(state).sort()) !== JSON.stringify([...keys].sort()) ||
       !GROUP_MEMBER_ACTIVE_PANELS.includes(state.activePanel) ||
@@ -599,11 +614,20 @@ export function parseGroupMemberState(state) {
       typeof state.membersTabExists !== 'boolean' ||
       typeof state.membersListExists !== 'boolean' ||
       !Number.isSafeInteger(state.memberRowCount) || state.memberRowCount < 0 || state.memberRowCount > 1_000_000 ||
+      !validMembersTab ||
       !GROUP_MEMBER_ERROR_KEYS.every((key) => isCount(state[key])) ||
       !GROUP_MEMBER_STEP_WAITS.includes(state.stepWait)) {
     return 'unclassified';
   }
-  return Object.fromEntries(keys.map((key) => [key, state[key]]));
+  const membersTab = {
+    panelActiveBefore: tab.panelActiveBefore,
+    panelActiveAfter: tab.panelActiveAfter,
+    target: tab.target === null ? null : {index: tab.target.index, tag: tab.target.tag, classes: [...tab.target.classes]},
+    paired: tab.paired,
+    actionabilityReason: tab.actionabilityReason,
+    interceptedBy: tab.interceptedBy === null ? null : {tag: tab.interceptedBy.tag, classes: [...tab.interceptedBy.classes]}
+  };
+  return Object.fromEntries(keys.map((key) => [key, key === 'membersTab' ? membersTab : state[key]]));
 }
 
 export function formatBrowserFailureMessage(report, controlsOnly = false) {

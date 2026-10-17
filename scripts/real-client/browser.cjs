@@ -75,7 +75,18 @@ let groupMemberTrace = createGroupMemberTrace();
 let groupMessageTrace = createGroupMessageTrace();
 
 function createGroupMemberTrace() {
-  return {page: undefined, groupPeerId: undefined, stages: [], stepWait: 'none', errorsAtStep: undefined};
+  return {page: undefined, groupPeerId: undefined, stages: [], stepWait: 'none', errorsAtStep: undefined, membersTab: createMembersTabTrace()};
+}
+
+function createMembersTabTrace() {
+  return {
+    panelActiveBefore: null,
+    panelActiveAfter: null,
+    target: null,
+    paired: null,
+    actionabilityReason: 'none',
+    interceptedBy: null
+  };
 }
 
 function createGroupMessageTrace() {
@@ -1632,6 +1643,7 @@ async function captureGroupMemberState(trace = groupMemberTrace, timeoutMs = CEN
       : null;
     return {
       ...probe,
+      membersTab: trace.membersTab,
       pageErrorsSinceStep: since('pageErrors'),
       consoleErrorsSinceStep: since('consoleErrors'),
       rpcErrorsSinceStep,
@@ -1851,6 +1863,38 @@ function failGroupMemberStep(stage, error) {
   failStage(stage);
 }
 
+function safeActionabilityElement(markup) {
+  const openingTag = typeof markup === 'string' ? markup.match(/^<([a-z][a-z0-9-]*)\b([^>]*)>/i) : undefined;
+  const tag = openingTag?.[1]?.toLowerCase();
+  if(!tag) return null;
+  const className = openingTag[2].match(/\bclass=(['"])(.*?)\1/i)?.[2] || '';
+  const classes = className.split(/\s+/).filter((name) => /^[A-Za-z0-9_-]{1,80}$/.test(name)).slice(0, 16);
+  return {tag, classes};
+}
+
+function readMembersTabActionability(error) {
+  const message = typeof error?.message === 'string' ? error.message : '';
+  const plainMessage = message.replace(/\u001b\[[0-9;]*m/g, '');
+  const interception = plainMessage.match(/(?:^|\n)[ \t]*(?:-[ \t]*)?(<[a-z][^>]*>(?:.*?<\/[a-z][^>]*>)?)(?: from <[a-z][^>]*>(?:.*?<\/[a-z][^>]*>)? subtree)? intercepts pointer events/im);
+  if(interception) {
+    return {reason: 'intercepted', interceptedBy: safeActionabilityElement(interception[1])};
+  }
+  if(/element is not stable/i.test(message)) return {reason: 'not_stable', interceptedBy: null};
+  if(/element is not visible/i.test(message)) return {reason: 'not_visible', interceptedBy: null};
+  if(/element is not enabled/i.test(message)) return {reason: 'not_enabled', interceptedBy: null};
+  if(/element was detached|not attached to the DOM/i.test(message)) return {reason: 'not_attached', interceptedBy: null};
+  if(/outside of the viewport/i.test(message)) return {reason: 'outside_viewport', interceptedBy: null};
+  if(error?.name === 'TimeoutError') return {reason: 'timeout', interceptedBy: null};
+  return {reason: 'other', interceptedBy: null};
+}
+
+async function readMembersPanelActive(membersPanel) {
+  return membersPanel.evaluate((panel) => {
+    const style = window.getComputedStyle(panel);
+    return panel.classList.contains('active') && style.display !== 'none' && style.visibility !== 'hidden' && panel.getClientRects().length > 0;
+  });
+}
+
 async function waitForMembers(page, memberRows, timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
   while(Date.now() < deadline) {
@@ -1902,11 +1946,73 @@ async function openBobGroupMembers(page, groupHeader, groupName, selectedBobPeer
 
   currentStage = 'bob_group_member_tab';
   const membersPanel = activeRightPanel.locator('.search-super-tabs-container > .search-super-container-members');
-  if(await membersPanel.count() !== 1) failGroupMemberStep('bob_group_member_tab');
-  const membersPanelIndex = await membersPanel.evaluate((panel) => Array.prototype.indexOf.call(panel.parentElement.children, panel));
-  const membersTab = activeRightPanel.locator('.search-super-tabs > .menu-horizontal-div-item').nth(membersPanelIndex);
-  if(await membersTab.count() !== 1 || !await membersTab.isVisible()) failGroupMemberStep('bob_group_member_tab');
-  await membersTab.click({timeout: timeoutMs}).catch((error) => failGroupMemberStep('bob_group_member_tab', error));
+  const membersPanelCount = await membersPanel.count();
+  if(membersPanelCount !== 1) {
+    groupMemberTrace.membersTab.panelActiveBefore = membersPanelCount === 0 ? false : null;
+    groupMemberTrace.membersTab.panelActiveAfter = groupMemberTrace.membersTab.panelActiveBefore;
+    groupMemberTrace.membersTab.paired = false;
+    failGroupMemberStep('bob_group_member_tab');
+  }
+
+  try {
+    groupMemberTrace.membersTab.panelActiveBefore = await readMembersPanelActive(membersPanel);
+  } catch(error) {
+    failGroupMemberStep('bob_group_member_tab', error);
+  }
+
+  if(groupMemberTrace.membersTab.panelActiveBefore) {
+    groupMemberTrace.membersTab.panelActiveAfter = true;
+  } else {
+    let membersPanelIndex;
+    let mediaPanelCount;
+    let membersTabCount;
+    const membersTabs = activeRightPanel.locator('.search-super-tabs > .menu-horizontal-div-item');
+    try {
+      membersPanelIndex = await membersPanel.evaluate((panel) => Array.prototype.indexOf.call(panel.parentElement.children, panel));
+      mediaPanelCount = await activeRightPanel.locator('.search-super-tabs-container > .search-super-tab-container').count();
+      membersTabCount = await membersTabs.count();
+    } catch(error) {
+      failGroupMemberStep('bob_group_member_tab', error);
+    }
+    const membersTab = membersTabs.nth(membersPanelIndex);
+    const tabExists = membersPanelIndex >= 0 && membersPanelIndex < membersTabCount;
+    if(tabExists) {
+      try {
+        const target = await membersTab.evaluate((tab, index) => ({
+          index,
+          tag: tab.tagName.toLowerCase(),
+          classes: Array.from(tab.classList).filter((name) => /^[A-Za-z0-9_-]{1,80}$/.test(name)).slice(0, 16)
+        }), membersPanelIndex);
+        groupMemberTrace.membersTab.target = target;
+      } catch(error) {
+        failGroupMemberStep('bob_group_member_tab', error);
+      }
+    }
+    groupMemberTrace.membersTab.paired = tabExists && membersPanelIndex < mediaPanelCount && mediaPanelCount === membersTabCount;
+    const membersTabVisible = groupMemberTrace.membersTab.paired && await membersTab.isVisible();
+    if(!groupMemberTrace.membersTab.paired || !membersTabVisible) {
+      if(groupMemberTrace.membersTab.paired) groupMemberTrace.membersTab.actionabilityReason = 'not_visible';
+      groupMemberTrace.membersTab.panelActiveAfter = await readMembersPanelActive(membersPanel).catch(() => null);
+      failGroupMemberStep('bob_group_member_tab');
+    }
+
+    try {
+      await membersTab.click({timeout: timeoutMs});
+    } catch(error) {
+      const actionability = readMembersTabActionability(error);
+      groupMemberTrace.membersTab.actionabilityReason = actionability.reason;
+      groupMemberTrace.membersTab.interceptedBy = actionability.interceptedBy;
+      groupMemberTrace.membersTab.panelActiveAfter = await readMembersPanelActive(membersPanel).catch(() => null);
+      failGroupMemberStep('bob_group_member_tab', error);
+    }
+
+    const activeMembersPanel = activeRightPanel.locator('.search-super-tabs-container > .search-super-container-members.active');
+    await activeMembersPanel.waitFor({state: 'visible', timeout: timeoutMs}).catch(async(error) => {
+      groupMemberTrace.membersTab.panelActiveAfter = await readMembersPanelActive(membersPanel).catch(() => null);
+      failGroupMemberStep('bob_group_member_tab', error);
+    });
+    groupMemberTrace.membersTab.panelActiveAfter = true;
+  }
 
   currentStage = 'bob_group_member_list';
   const activeMembersPanel = activeRightPanel.locator('.search-super-tabs-container > .search-super-container-members.active');
