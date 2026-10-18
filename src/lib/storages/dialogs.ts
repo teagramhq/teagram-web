@@ -1387,7 +1387,9 @@ export default class DialogsStorage extends AppManager {
         }
       }
 
-      if(topMid || (dialog as Dialog | ForumTopic).draft?._ === 'draftMessage') {
+      const hasDraft = (dialog as Dialog | ForumTopic).draft?._ === 'draftMessage';
+      const isEmptyChannelDialog = isDialog && this.canSaveEmptyChannelDialog(peerId, dialog as Dialog);
+      if(topMid || hasDraft || isEmptyChannelDialog) {
         if(this.saveDialog({dialog})) {
           const cache = getUpdateCache(peerId);
 
@@ -1404,6 +1406,8 @@ export default class DialogsStorage extends AppManager {
           } else {
             cache.dialog = dialog as Dialog;
           }
+        } else if(isEmptyChannelDialog) {
+          this.dropDialogWithEvent(peerId, dialogKey);
         }
       } else {
         this.dropDialogWithEvent(peerId, dialogKey);
@@ -1507,6 +1511,10 @@ export default class DialogsStorage extends AppManager {
     }
 
     return true;
+  }
+
+  public canSaveEmptyChannelDialog(peerId: PeerId, dialog: Dialog) {
+    return this.appPeersManager.isChannel(peerId) && this.canSaveDialog(peerId, dialog);
   }
 
   public getDialogPeerId(dialog: AnyDialog) {

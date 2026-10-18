@@ -4861,7 +4861,10 @@ export class AppMessagesManager extends AppManager {
       let dialogsLength = 0;
       if(!isSearch) for(let i = 0, length = folderDialogs.length; i < length; ++i) {
         const dialog = folderDialogs[i];
-        if(getServerMessageId(dialog.top_message) || (dialog as Dialog).draft) {
+        const peerId = isDialog(dialog) ? dialog.peerId : undefined;
+        const isEmptyChannelDialog = peerId !== undefined &&
+          this.dialogsStorage.canSaveEmptyChannelDialog(peerId, dialog as Dialog);
+        if(getServerMessageId(dialog.top_message) || (dialog as Dialog).draft || isEmptyChannelDialog) {
           ++dialogsLength;
         } else {
           this.log.error('something strange with dialog', dialog);
