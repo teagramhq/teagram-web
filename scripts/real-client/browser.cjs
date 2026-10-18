@@ -74,7 +74,7 @@ const CONTROL_PLAN = Object.freeze([
   // More distinct shared workers than the attached-target budget: the observer
   // must stop attaching, release the rejected targets and stay bounded.
   Object.freeze({name: 'c5_attach_budget', windowMs: 6000,
-    expression: "for(let index = 0; index < 20; index++) new SharedWorker('/_fixture_probe/shared-worker.js', 'budget' + index)"})
+    expression: `for(let index = 0; index < ${observation.LIMITS.attachedTargets + 4}; index++) new SharedWorker('/_fixture_probe/shared-worker.js', 'budget' + index)`})
 ]);
 
 let currentStage = 'runtime_inputs';

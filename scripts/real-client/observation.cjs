@@ -18,7 +18,7 @@
 const PRIVATE_CSP_ORIGIN = 'https://teagramd.test';
 
 const LIMITS = Object.freeze({
-  attachedTargets: 16,
+  attachedTargets: 32,
   countedEventsPerContext: 4096,
   cdpMessageBytes: 256 * 1024,
   commandTimeoutMs: 5000

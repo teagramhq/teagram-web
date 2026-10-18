@@ -1299,6 +1299,22 @@ describe('confined runner shared-worker observation contract', () => {
     expect(summary.coverageComplete).toBe(1);
   });
 
+  it('keeps coverage complete for a 32-target worker burst', () => {
+    const events: any[] = [{kind: 'target', target: pageTarget()}];
+    for(let index = 0; index < 32; index++) {
+      const targetId = `burst-worker-${index}`;
+      events.push({kind: 'target', target: sharedWorker(targetId, HOSTILE.blobUrl)});
+      events.push({kind: 'attach', targetId});
+      events.push({kind: 'setup', targetId});
+    }
+
+    const summary = replayContext(events);
+
+    expect(summary.observerOverflow).toBe(0);
+    expect(summary.attachedTargets).toBe(32);
+    expect(summary.coverageComplete).toBe(1);
+  });
+
   it('skips page URL classifiers after observer overflow', async() => {
     const contextObserver = observation.createContextObserver('page-handler-overflow');
     const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver);
@@ -1758,7 +1774,7 @@ describe('confined runner shared-worker observation contract', () => {
   });
 
   it('keeps the resource bounds and page count that the report depends on', () => {
-    expect(observation.LIMITS).toEqual({attachedTargets: 16, countedEventsPerContext: 4096, cdpMessageBytes: 262_144, commandTimeoutMs: 5000});
+    expect(observation.LIMITS).toEqual({attachedTargets: 32, countedEventsPerContext: 4096, cdpMessageBytes: 262_144, commandTimeoutMs: 5000});
 
     const twoPages = replayContext([
       {kind: 'target', target: pageTarget()},
@@ -3031,7 +3047,7 @@ describe('discovery shared-worker network accounting', () => {
     const {alice} = harness;
     try {
       for(let index = 0; index < observation.LIMITS.attachedTargets; index++) await harness.attach(alice, `bounded-${index}`);
-      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(16);
+      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(observation.LIMITS.attachedTargets);
       const eventsBeforeFlood = alice.observer.eventCount();
       for(let index = 0; index < observation.LIMITS.countedEventsPerContext + 20; index++) {
         harness.emit(alice, 'bounded-0', 'Network.webSocketCreated', {requestId: `socket-${index}`, url: `wss://unannounced.invalid/${index}`});
@@ -3042,7 +3058,7 @@ describe('discovery shared-worker network accounting', () => {
       await harness.attach(alice, 'over-budget-target');
       harness.emit(alice, 'bounded-0', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}});
       expect(alice.networkObserver.events).toHaveLength(retained);
-      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(16);
+      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(observation.LIMITS.attachedTargets);
     } finally {
       await harness.stop();
     }
@@ -3052,10 +3068,10 @@ describe('discovery shared-worker network accounting', () => {
     const harness = await createDiscoveryNetworkHarness();
     const {alice} = harness;
     try {
-      for(let index = 0; index < 20; index++) await harness.attach(alice, `bounded-${index}`);
-      expect(alice.networkObserver.summary().workerTargets).toEqual({shared_worker: 16, service_worker: 0});
-      expect(harness.calls.filter((call) => call.method === 'Target.attachToTarget')).toHaveLength(16);
-      expect(alice.observer.summary()).toMatchObject({attachedTargets: 16, observerOverflow: 1, coverageComplete: 0});
+      for(let index = 0; index < observation.LIMITS.attachedTargets + 4; index++) await harness.attach(alice, `bounded-${index}`);
+      expect(alice.networkObserver.summary().workerTargets).toEqual({shared_worker: observation.LIMITS.attachedTargets, service_worker: 0});
+      expect(harness.calls.filter((call) => call.method === 'Target.attachToTarget')).toHaveLength(observation.LIMITS.attachedTargets);
+      expect(alice.observer.summary()).toMatchObject({attachedTargets: observation.LIMITS.attachedTargets, observerOverflow: 1, coverageComplete: 0});
     } finally {
       await harness.stop();
     }
