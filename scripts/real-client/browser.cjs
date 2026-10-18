@@ -121,6 +121,27 @@ async function waitForActiveChannel(page, channelName, timeoutMs = 30_000) {
   return channelPeerId;
 }
 
+async function waitForChannelInviteCompletion(page, addMembers, channelName, timeoutMs = 30_000, popupTimeoutMs = 3_000) {
+  currentStage = 'alice_channel_add_members_close';
+  await addMembers.waitFor({state: 'hidden', timeout: timeoutMs})
+  .catch(() => failStage('alice_channel_add_members_close'));
+
+  const invitePopup = page.locator('.popup-add-members');
+  const popupVisible = await invitePopup.waitFor({state: 'visible', timeout: popupTimeoutMs})
+  .then(() => true, () => false);
+  if(popupVisible) {
+    currentStage = 'alice_channel_invite_confirm';
+    await invitePopup.getByRole('button', {name: 'Add', exact: true}).click({timeout: 15_000})
+    .catch(() => failStage('alice_channel_invite_confirm'));
+    currentStage = 'alice_channel_invite_popup_close';
+    await invitePopup.waitFor({state: 'hidden', timeout: 30_000})
+    .catch(() => failStage('alice_channel_invite_popup_close'));
+  }
+
+  currentStage = 'alice_channel_active_channel';
+  return waitForActiveChannel(page, channelName);
+}
+
 function matchesPrivateArtifactManifest(manifest, expected) {
   const fields = ['artifactDigest', 'endpoint', 'fingerprint', 'mode', 'sourceCommit'];
   return manifest !== null && typeof manifest === 'object' && !Array.isArray(manifest) &&
@@ -3041,8 +3062,7 @@ async function main(dependencies = {}) {
       currentStage = 'alice_channel_invite_button';
       await addMembers.locator('.btn-corner.is-visible').click({timeout: 30_000})
       .catch(() => failStage('alice_channel_invite_button'));
-      currentStage = 'alice_channel_active_channel';
-      const channelPeerId = await waitForActiveChannel(alice.page, channelName);
+      const channelPeerId = await waitForChannelInviteCompletion(alice.page, addMembers, channelName);
 
       currentStage = 'bob_channel_reload';
       await bob.page.reload({waitUntil: 'domcontentloaded'}).catch(() => failStage('bob_channel_reload'));
@@ -3212,7 +3232,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForActiveChannel, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

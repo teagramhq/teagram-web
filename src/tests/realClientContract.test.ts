@@ -28,7 +28,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
-const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForActiveChannel, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
+const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -3812,13 +3812,14 @@ describe('real client username field readiness', () => {
       'const {appendFileSync, readFileSync} = require(\'node:fs\');',
       'const args = process.argv.slice(2);',
       'const state = JSON.parse(readFileSync(process.env.REAL_CLIENT_DOCKER_FIXTURE_STATE, \'utf8\'));',
+      'const input = args.includes(\'-i\') ? readFileSync(0, \'utf8\') : \'\';',
       'const write = (value) => process.stdout.write(typeof value === \'string\' ? value : JSON.stringify(value));',
       'if(args[0] === \'inspect\') write(args.at(-1) === state.browserName ? state.browser : state.front);',
       'else if(args[0] === \'network\') write(state.network);',
       'else if(args[0] === \'exec\') {',
       '  if(args.includes(\'/proc/net/route\')) write(\'Iface Destination Gateway\\n\');',
       '  else if(args.includes(\'/proc/net/ipv6_route\')) {}',
-      '  else if(args.includes(\'node\')) { appendFileSync(state.browserInputPath, readFileSync(0, \'utf8\')); write(readFileSync(state.browserOutputPath, \'utf8\')); if(state.browserExitCode) process.exitCode = state.browserExitCode; }',
+      '  else if(args.includes(\'node\')) { appendFileSync(state.browserInputPath, input); write(readFileSync(state.browserOutputPath, \'utf8\')); if(state.browserExitCode) process.exitCode = state.browserExitCode; }',
       '  else if(args.includes(\'rm\')) { appendFileSync(state.cleanupPath, `${args.at(-1)}\\n`); if(state.failRunnerCleanup && args.at(-1).endsWith(\'-runner\')) process.exitCode = 1; }',
       '}'
     ].join('\n');
@@ -4409,14 +4410,30 @@ describe('real client channel invite completion', () => {
     await browser?.close();
   }, 15_000);
 
-  it('waits for the active channel when the add-members flow has no confirmation popup', async() => {
+  it('waits for the active channel after the add-members tab closes without a popup', async() => {
     const page = await browser.newPage();
     try {
       const channelName = 'browser-ci-channel-abc123';
-      await page.setContent(`<div id="column-center"><div class="chat active"><div class="topbar"><div class="chat-info">${channelName}</div><div class="avatar" data-peer-id="-10012345"></div></div></div></div>`);
+      await page.setContent(`<div class="add-members-container"></div><div id="column-center"><div class="chat active"><div class="topbar"><div class="chat-info">${channelName}</div><div class="avatar" data-peer-id="-10012345"></div></div></div></div>`);
+      const addMembers = page.locator('.add-members-container');
+      await page.evaluate(() => setTimeout(() => document.querySelector('.add-members-container')?.remove(), 20));
 
+      await expect(waitForChannelInviteCompletion(page, addMembers, channelName, 500)).resolves.toBe('-10012345');
       expect(await page.locator('.popup-add-members').count()).toBe(0);
-      await expect(waitForActiveChannel(page, channelName)).resolves.toBe('-10012345');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('confirms Add when the channel flow shows an invite popup', async() => {
+    const page = await browser.newPage();
+    try {
+      const channelName = 'browser-ci-channel-def456';
+      await page.setContent(`<div class="add-members-container"></div><div class="popup-add-members" style="display:none"><button class="popup-button btn primary" aria-label="Add">Add</button><button class="popup-button btn primary">Cancel</button></div><div id="column-center"><div class="chat active"><div class="topbar"><div class="chat-info">${channelName}</div><div class="avatar" data-peer-id="-10012346"></div></div></div></div><script>window.inviteResult = ''; document.querySelector('.popup-button[aria-label="Add"]').addEventListener('click', () => {window.inviteResult = 'add'; document.querySelector('.popup-add-members').remove()}); document.querySelector('.popup-button:not([aria-label="Add"])').addEventListener('click', () => {window.inviteResult = 'cancel'}); setTimeout(() => {document.querySelector('.add-members-container').remove(); document.querySelector('.popup-add-members').style.display = ''}, 20)</script>`);
+      const addMembers = page.locator('.add-members-container');
+
+      await expect(waitForChannelInviteCompletion(page, addMembers, channelName, 500)).resolves.toBe('-10012346');
+      expect(await page.evaluate(() => (window as any).inviteResult)).toBe('add');
     } finally {
       await page.close();
     }
