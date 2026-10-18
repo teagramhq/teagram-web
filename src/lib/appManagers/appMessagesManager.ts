@@ -8062,6 +8062,10 @@ export class AppMessagesManager extends AppManager {
 
     const processDialog = (dialog: AnyDialog) => {
       const {peerId} = dialog;
+      if(isDialog(dialog) && this.dialogsStorage.dropIfCannotSaveDialog(peerId, dialog)) {
+        return;
+      }
+
       this.dialogsStorage.pushDialog({dialog});
       if(!this.appPeersManager.isChannel(peerId)) {
         newMaxSeenId = Math.max(newMaxSeenId, dialog.top_message || 0);
@@ -10776,7 +10780,13 @@ export class AppMessagesManager extends AppManager {
     const channelId = update.channel_id;
     const peerId = channelId.toPeerId(true);
     const channel = this.appChatsManager.getChat(channelId);
-    if(channel?._ !== 'channel') {
+    if(channel?._ === 'channelForbidden') {
+      const dialog = this.dialogsStorage.getDialogOnly(peerId);
+      if(dialog) {
+        this.dialogsStorage.dropIfCannotSaveDialog(peerId, dialog);
+      }
+      return;
+    } else if(channel?._ !== 'channel') {
       return;
     }
 
@@ -12514,23 +12524,7 @@ export class AppMessagesManager extends AppManager {
               break;
             }
 
-            let channel = this.appChatsManager.getChat(peerId.toChatId());
-            if(channel._ === 'channel') {
-              channel = {
-                _: 'channelForbidden',
-                id: channel.id,
-                access_hash: channel.access_hash,
-                title: channel.title,
-                pFlags: channel.pFlags
-              };
-            }
-
-            this.appChatsManager.saveApiChats([channel]);
-
-            this.apiUpdatesManager.processLocalUpdate({
-              _: 'updateChannel',
-              channel_id: channel.id
-            });
+            this.appChatsManager.forbidChannel(peerId.toChatId());
             break;
         }
 

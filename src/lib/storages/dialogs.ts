@@ -178,8 +178,8 @@ export default class DialogsStorage extends AppManager {
     this.rootScope.addEventListener('chat_update', (chatId) => {
       const peerId = chatId.toPeerId(true);
       const dialog = this.getDialogOnly(peerId);
-      if(dialog && !this.canSaveDialog(peerId, dialog)) {
-        this.dropDialogOnDeletion(peerId);
+      if(dialog) {
+        this.dropIfCannotSaveDialog(peerId, dialog);
       }
     });
 
@@ -1131,6 +1131,10 @@ export default class DialogsStorage extends AppManager {
     }
 
     const {peerId, pts} = dialog;
+    if(this.dropIfCannotSaveDialog(peerId, dialog)) {
+      return;
+    }
+
     const incomingMessage = this.getDialogMessageForState(dialog);
     if(incomingMessage) {
       const peerIds = getPeerIdsFromMessage(incomingMessage);
@@ -1178,6 +1182,10 @@ export default class DialogsStorage extends AppManager {
     const _isDialog = isDialog(dialog);
     const {peerId} = dialog;
     const key = getDialogKey(dialog);
+
+    if(_isDialog && this.dropIfCannotSaveDialog(peerId, dialog as Dialog)) {
+      return;
+    }
 
     if(_isDialog) {
       this.dialogs[key] = dialog;
@@ -1497,18 +1505,34 @@ export default class DialogsStorage extends AppManager {
   public canSaveDialog(peerId: PeerId, dialog: Dialog) {
     if(peerId.isAnyChat()) {
       const chat: Chat = this.appChatsManager.getChat(peerId.toChatId());
-      // ! chatForbidden stays for chat where you're kicked
-      if(
-        chat._ === 'channelForbidden' ||
-        // (chat as Chat.chat).pFlags.deactivated || // ! deactivated means migrated, must save them
-        // || chat._ === 'chatForbidden'
-        (chat as Chat.chat).pFlags.left
-        // || (chat as any).pFlags.kicked
-      ) {
+      const isChannel = this.appPeersManager.isChannel(peerId) || dialog.peer?._ === 'peerChannel';
+      if(isChannel && (
+        chat?._ !== 'channel' ||
+        chat.pFlags?.left ||
+        (chat as any).pFlags?.kicked
+      )) {
+        return false;
+      }
+
+      if(!isChannel && chat && (chat._ === 'chatForbidden' || (chat as Chat.chat).pFlags?.left)) {
         return false;
       }
     } else if(this.appUsersManager.isDeleted(peerId.toUserId()) && !getServerMessageId(dialog.top_message)) {
       return false;
+    }
+
+    return true;
+  }
+
+  public dropIfCannotSaveDialog(peerId: PeerId, dialog: Dialog) {
+    if(this.canSaveDialog(peerId, dialog)) {
+      return false;
+    }
+
+    if(this.getDialogOnly(peerId)) {
+      this.dropDialogOnDeletion(peerId);
+    } else {
+      this.storage.delete(peerId);
     }
 
     return true;
@@ -1583,7 +1607,7 @@ export default class DialogsStorage extends AppManager {
       }
     }
 
-    if(_isDialog && !this.canSaveDialog(peerId, dialog)) {
+    if(_isDialog && this.dropIfCannotSaveDialog(peerId, dialog as Dialog)) {
       return false;
     }
 
