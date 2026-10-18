@@ -28,7 +28,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
-const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
+const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createPageErrorExceptionEvent, createWorkerDiscovery, emitAuthProgressReport, enrichPageErrorDetails, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPageErrorEventCapture, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, singleRpcErrorTypeSince, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://teagramd.test';
@@ -62,7 +62,7 @@ function createNetworkObserverHarness(observer: any, options: any = {}) {
   cdp.detach = options.detach || (async() => {});
   const context = {newCDPSession: async() => cdp, close: options.closeContext || (async() => {})};
   const page: any = {context: () => context};
-  return {cdp, networkObserver: createNetworkObserver(page, 'contract-test', observer, options.pageErrorAssetResolver)};
+  return {cdp, networkObserver: createNetworkObserver(page, 'contract-test', observer, options.pageErrorAssetResolver, options.onPageException)};
 }
 
 function emptyWebSocket101Grid() {
@@ -935,6 +935,39 @@ describe('confined runner shared-worker observation contract', () => {
     }
   });
 
+  it('captures page exception details through the existing CDP observer when requested', async() => {
+    const contextObserver = observation.createContextObserver('page-error-diagnostics');
+    const onPageException = vi.fn();
+    const commands: string[] = [];
+    const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver, {
+      onPageException,
+      send: async(method: string) => {
+        commands.push(method);
+        return method === 'Target.getTargetInfo'
+          ? {targetInfo: {targetId: 'contract-test-page', browserContextId: 'contract-test'}}
+          : {};
+      }
+    });
+    const exceptionDetails = {
+      text: 'Uncaught Error: Object',
+      exception: {className: 'Error', description: 'Error: Object'},
+      url: `${APP_ORIGIN}/index-XYZ.js`,
+      lineNumber: 90,
+      columnNumber: 6,
+      stackTrace: {callFrames: [{url: `${APP_ORIGIN}/index-XYZ.js`, functionName: 'inviteToChannel', lineNumber: 90, columnNumber: 6}]}
+    };
+
+    await networkObserver.start();
+    try {
+      cdp.emit('Runtime.exceptionThrown', {exceptionDetails});
+
+      expect(commands).toContain('Runtime.enable');
+      expect(onPageException).toHaveBeenCalledWith(exceptionDetails);
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
   it('populates all websocket 101 context and submission phase cells', () => {
     const phase = observation.createWebSocket101Phase();
     const alice = observation.createContextObserver('alice', {observeWebSocket101: true, webSocket101Phase: phase});
@@ -1580,10 +1613,10 @@ describe('confined runner shared-worker observation contract', () => {
     }
 
     expect(observation.BROWSER_CDP_METHODS).toEqual(['Target.setDiscoverTargets', 'Target.attachToTarget', 'Target.detachFromTarget', 'Target.sendMessageToTarget']);
-    expect(observation.PAGE_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.sendMessageToTarget', 'Target.detachFromTarget']);
+    expect(observation.PAGE_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.sendMessageToTarget', 'Target.detachFromTarget', 'Runtime.enable']);
     expect(observation.WORKER_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable', 'Runtime.runIfWaitingForDebugger']);
     expect(observation.allowCdpMethod('page', 'Target.getTargetInfo')).toBe(true);
-    expect(observation.allowCdpMethod('page', 'Runtime.enable')).toBe(false);
+    expect(observation.allowCdpMethod('page', 'Runtime.enable')).toBe(true);
     expect(observation.allowCdpMethod('page', 'Target.setAutoAttach')).toBe(true);
     expect(observation.allowCdpMethod('browser', 'Target.setDiscoverTargets')).toBe(true);
     expect(observation.allowCdpMethod('worker', 'Runtime.enable')).toBe(true);
@@ -2439,6 +2472,268 @@ describe('discovery shared-worker network accounting', () => {
     resolver.clear();
   });
 
+  it('captures sanitized unknown-source page-error details only when diagnostics are enabled', () => {
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
+    const error = new Error(HOSTILE.phrase);
+    error.stack = `Error: ${HOSTILE.phrase}\n    at throwFailure (${APP_ORIGIN}/index.js?token=${HOSTILE.token}:21:3)\nAuthorization: Bearer untracked-secret`;
+    const pageErrors = {alice: [], bob: []} as any;
+    const unknownAssetResolver = {scriptAsset: () => 'unknown'};
+
+    recordPageError(pageErrors, 'alice', error, unknownAssetResolver, {
+      captureDetails: true,
+      pageUrl: `${APP_ORIGIN}/messages?token=${HOSTILE.token}#private`,
+      scenario: 'channel',
+      stage: 'alice_channel_create',
+      redactValues: [HOSTILE.phrase, HOSTILE.token, HOSTILE.password]
+    });
+
+    const breakdown = summarizeGateBreakdown({pageErrors});
+    expect(breakdown.pageErrors.alice).toEqual([{
+      constructorName: 'Error',
+      scriptAsset: 'unknown',
+      diagnostic: {
+        message: '[redacted]',
+        stack: `Error: [redacted]\n    at throwFailure (${APP_ORIGIN}/index.js:21:3)\nAuthorization: [redacted]`,
+        pageUrl: `${APP_ORIGIN}/messages`,
+        scenario: 'channel',
+        stage: 'alice_channel_create'
+      }
+    }]);
+    expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.token);
+    expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.password);
+    expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.phrase);
+    expect(JSON.stringify(breakdown)).not.toContain('untracked-secret');
+    expect(JSON.stringify(breakdown)).not.toContain('#private');
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: breakdown}))
+    .toContain(`; browser egress/page errors ${JSON.stringify(breakdown)}`);
+    const unsafeBreakdown = structuredClone(breakdown);
+    unsafeBreakdown.pageErrors.alice[0].diagnostic.pageUrl += `?token=${HOSTILE.token}`;
+    expect(() => formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: unsafeBreakdown}))
+    .toThrow('browser egress/page error evidence is invalid');
+  });
+
+  it('preserves allowlisted RPC hints in sanitized page-error diagnostics', () => {
+    const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
+    const pageErrors = {alice: [{
+      constructorName: 'Error',
+      scriptAsset: 'unknown',
+      diagnostic: {
+        message: 'Object',
+        stack: '',
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'alice_add_bob_to_channel',
+        rpcErrorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
+        rpcErrorCode: 400
+      }
+    }], bob: []} as any;
+
+    expect(summarizeGateBreakdown({pageErrors}).pageErrors.alice[0].diagnostic).toEqual({
+      message: 'Object',
+      stack: '',
+      pageUrl: `${APP_ORIGIN}/`,
+      scenario: 'channel',
+      stage: 'alice_add_bob_to_channel',
+      rpcErrorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
+      rpcErrorCode: 400
+    });
+  });
+
+  it('caps unknown-source page-error diagnostics per browser context', () => {
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
+    const pageErrors = {alice: [], bob: []} as any;
+    const unknownAssetResolver = {scriptAsset: () => 'unknown'};
+    for(let index = 0; index < 18; index++) {
+      recordPageError(pageErrors, 'alice', new Error(`failure ${index}`), unknownAssetResolver, {
+        captureDetails: true,
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'alice_channel_create'
+      });
+    }
+
+    const diagnostics = summarizeGateBreakdown({pageErrors}).pageErrors.alice;
+    expect(diagnostics).toHaveLength(18);
+    expect(diagnostics.slice(0, 16).every((error: any) => error.diagnostic)).toBe(true);
+    expect(diagnostics.slice(16).every((error: any) => !error.diagnostic)).toBe(true);
+  });
+
+  it('normalizes CDP exception stack frames with one-based source coordinates', () => {
+    const event = createPageErrorExceptionEvent({
+      text: 'Uncaught Error: Object',
+      exception: {className: 'Error', description: 'Error: Object'},
+      url: `${APP_ORIGIN}/index-XYZ.js?token=${HOSTILE.token}`,
+      lineNumber: 90,
+      columnNumber: 6,
+      stackTrace: {callFrames: [{url: `${APP_ORIGIN}/index-XYZ.js?token=${HOSTILE.token}`, functionName: 'inviteToChannel', lineNumber: 90, columnNumber: 6}]}
+    }, `${APP_ORIGIN}/?token=${HOSTILE.token}`, [HOSTILE.token]);
+
+    expect(event).toEqual({
+      message: 'Error: Object',
+      stack: `Error: Object\n    at inviteToChannel (${APP_ORIGIN}/index-XYZ.js:91:7)`,
+      filename: `${APP_ORIGIN}/index-XYZ.js`,
+      lineNumber: 91,
+      columnNumber: 7,
+      pageUrl: `${APP_ORIGIN}/`
+    });
+    expect(JSON.stringify(event)).not.toContain(HOSTILE.token);
+  });
+
+  it('uses the browser ErrorEvent location when a page error has no stack', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [{
+      constructorName: 'Error',
+      scriptAsset: 'unknown',
+      diagnostic: {
+        message: 'Object',
+        stack: '',
+        pageUrl: APP_ORIGIN,
+        scenario: 'channel',
+        stage: 'alice_add_bob_to_channel'
+      }
+    }], bob: []} as any;
+    const page = {evaluate: async(): Promise<unknown[]> => [{
+      message: 'Object',
+      stack: '',
+      filename: `${APP_ORIGIN}/index-ABC.js?token=${HOSTILE.token}`,
+      lineNumber: 327,
+      columnNumber: 11,
+      pageUrl: `${APP_ORIGIN}/?token=${HOSTILE.token}`
+    }]} as any;
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver, [HOSTILE.token]);
+
+    expect(pageErrors.alice[0]).toEqual({
+      constructorName: 'Error',
+      scriptAsset: 'index-ABC.js',
+      diagnostic: {
+        message: 'Object',
+        stack: `Object\n    at ${APP_ORIGIN}/index-ABC.js:327:11`,
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'alice_add_bob_to_channel'
+      }
+    });
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: {
+      counters: {unexpectedEgressAttempts: 0, observerErrors: 0, pageErrors: 1},
+      unexpectedEgressAttempts: {alice: [], bob: []},
+      observerErrors: {alice: {}, bob: {}},
+      pageErrors,
+      pageErrorOverflow: {alice: [], bob: []}
+    }})).toContain('index-ABC.js');
+    expect(JSON.stringify(pageErrors)).not.toContain(HOSTILE.token);
+    resolver.clear();
+  });
+
+  it('identifies one RPC error type within a measured channel window', () => {
+    const before = {total: 3, byType: {USER_NOT_FOUND: 1}};
+    const after = {total: 4, byType: {USER_NOT_FOUND: 1, CHANNELS_ADMIN_PUBLIC_TOO_MUCH: 1}};
+    expect(singleRpcErrorTypeSince(before, after)).toBe('CHANNELS_ADMIN_PUBLIC_TOO_MUCH');
+    expect(singleRpcErrorTypeSince(before, {...after, total: 5, byType: {...after.byType, USER_ID_INVALID: 1}})).toBeUndefined();
+  });
+
+  it('records only allowlisted RPC error type and code from a rejected object', async() => {
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [{
+      constructorName: 'Error',
+      scriptAsset: 'unknown',
+      diagnostic: {
+        message: 'Object',
+        stack: '',
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'alice_channel_invite_button'
+      }
+    }], bob: []} as any;
+    const page = {evaluate: async(): Promise<unknown[]> => [{
+      message: 'Object',
+      stack: '',
+      filename: '',
+      lineNumber: 0,
+      columnNumber: 0,
+      pageUrl: `${APP_ORIGIN}/?token=${HOSTILE.token}`,
+      errorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
+      errorCode: 400
+    }]} as any;
+    const protocolEvents = [{
+      message: 'Object',
+      stack: `Object\n    at inviteToChannel (${APP_ORIGIN}/index-XYZ.js:91:7)`,
+      filename: `${APP_ORIGIN}/index-XYZ.js`,
+      lineNumber: 91,
+      columnNumber: 7,
+      pageUrl: `${APP_ORIGIN}/?token=${HOSTILE.token}`
+    }];
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver, [HOSTILE.token], protocolEvents);
+
+    expect(pageErrors.alice[0].scriptAsset).toBe('index-XYZ.js');
+    expect(pageErrors.alice[0].diagnostic).toEqual({
+      message: 'Object',
+      stack: `Object\n    at inviteToChannel (${APP_ORIGIN}/index-XYZ.js:91:7)`,
+      pageUrl: `${APP_ORIGIN}/`,
+      scenario: 'channel',
+      stage: 'alice_channel_invite_button',
+      rpcErrorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
+      rpcErrorCode: 400
+    });
+    const report: any = {status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: {
+      counters: {unexpectedEgressAttempts: 0, observerErrors: 0, pageErrors: 1},
+      unexpectedEgressAttempts: {alice: [], bob: []},
+      observerErrors: {alice: {}, bob: {}},
+      pageErrors,
+      pageErrorOverflow: {alice: [], bob: []}
+    }};
+    expect(formatBrowserFailureMessage(report)).toContain('CHANNELS_ADMIN_PUBLIC_TOO_MUCH');
+    const unsafeReport = structuredClone(report);
+    unsafeReport.gateBreakdown.pageErrors.alice[0].diagnostic.rpcErrorType = HOSTILE.token;
+    expect(() => formatBrowserFailureMessage(unsafeReport)).toThrow('browser egress/page error evidence is invalid');
+    expect(JSON.stringify(report)).not.toContain(HOSTILE.token);
+    resolver.clear();
+  });
+
+  it('uses a browser console location when a page error has no stack or ErrorEvent', async() => {
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [{
+      constructorName: 'Error',
+      scriptAsset: 'unknown',
+      diagnostic: {
+        message: 'Object',
+        stack: '',
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'alice_add_bob_to_channel'
+      }
+    }], bob: []} as any;
+    const page = {evaluate: async(): Promise<unknown[]> => []} as any;
+    const consoleErrors = [{
+      message: 'Uncaught (in promise) Object',
+      filename: `${APP_ORIGIN}/index-XYZ.js?token=${HOSTILE.token}`,
+      lineNumber: 91,
+      columnNumber: 7,
+      pageUrl: `${APP_ORIGIN}/?token=${HOSTILE.token}`
+    }];
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver, [HOSTILE.token], consoleErrors);
+
+    expect(pageErrors.alice[0]).toEqual({
+      constructorName: 'Error',
+      scriptAsset: 'index-XYZ.js',
+      diagnostic: {
+        message: 'Object',
+        stack: `Object\n    at ${APP_ORIGIN}/index-XYZ.js:91:7`,
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'alice_add_bob_to_channel'
+      }
+    });
+    expect(JSON.stringify(pageErrors)).not.toContain(HOSTILE.token);
+    resolver.clear();
+  });
+
   it('correlates interleaved worker blobs by source and rejects ambiguous fallback', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
@@ -3034,6 +3329,10 @@ describe('real client scenario contract', () => {
 
     expect(() => validateRuntimeInput(runtime)).not.toThrow();
     expect(() => validateRuntimeInput({...runtime, observationOnly: true, artifactDigest: null, manifestArtifactDigest: null})).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, pageErrorDiagnostics: true})).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, pageErrorDiagnostics: 'true'})).toThrow('runtime_input_validation');
+    expect(() => validateRuntimeInput({...runtime, observationOnly: true, artifactDigest: null, manifestArtifactDigest: null, pageErrorDiagnostics: true}))
+    .toThrow('runtime_input_validation');
     for(const malformed of [undefined, null, [runtime.manifestArtifactDigest], `sha256:${'f'.repeat(63)}`]) {
       expect(() => validateRuntimeInput({...runtime, manifestArtifactDigest: malformed})).toThrow('runtime_input_validation');
     }
@@ -3097,10 +3396,12 @@ describe('real client scenario contract', () => {
       runId: 'a'.repeat(32),
       scenarios: ['sign-in', 'message', 'group']
     });
+    expect(parseRealClientArgs([...args, '--page-error-diagnostics'])).toMatchObject({pageErrorDiagnostics: true});
     expect(parseRealClientArgs(['--', ...args])).toEqual(parseRealClientArgs(args));
     expect(() => parseRealClientArgs([])).toThrow('missing required options');
     expect(() => parseRealClientArgs(args.slice(0, -2))).toThrow('scenario selection is required');
     expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message'])).toThrow('option was provided more than once');
+    expect(() => parseRealClientArgs([...args, '--page-error-diagnostics', '--page-error-diagnostics'])).toThrow('option was provided more than once');
     expect(() => parseRealClientArgs([...args, '--source-sha', 'a'.repeat(40)])).toThrow('unknown option');
   });
 
@@ -3756,7 +4057,11 @@ describe('real client username field readiness', () => {
     }
   }
 
-  function runOuterAuthProgressRunner(browserOutput: string, {browserExitCode = 0, failRunnerCleanup = false}: {browserExitCode?: number, failRunnerCleanup?: boolean} = {}) {
+  function runOuterAuthProgressRunner(browserOutput: string, {browserExitCode = 0, failRunnerCleanup = false, pageErrorDiagnostics = false}: {
+    browserExitCode?: number,
+    failRunnerCleanup?: boolean,
+    pageErrorDiagnostics?: boolean
+  } = {}) {
     const fixtureDirectory = mkdtempSync(join(tmpdir(), 'real-client-runner-contract-'));
     const secretDirectory = mkdtempSync(join(tmpdir(), `teagram-fixture-${READINESS_PINS.runId}.`));
     const passwordFiles = [join(secretDirectory, 'a-password'), join(secretDirectory, 'b-password')];
@@ -3853,7 +4158,8 @@ describe('real client username field readiness', () => {
         '--server-revision', READINESS_PINS.serverRevision,
         '--web-revision', READINESS_PINS.webRevision,
         '--run-id', READINESS_PINS.runId,
-        '--auth-progress-one-submission'
+        '--auth-progress-one-submission',
+        ...(pageErrorDiagnostics ? ['--page-error-diagnostics'] : [])
       ], {
         encoding: 'utf8',
         env: {
@@ -3976,6 +4282,9 @@ describe('real client username field readiness', () => {
       artifactDigest: outer.artifactReady.artifactDigest,
       manifestArtifactDigest: outer.artifactReady.manifestArtifactDigest
     });
+    const diagnosticOuter = runOuterAuthProgressRunner(result.output, {pageErrorDiagnostics: true});
+    expect(diagnosticOuter.status).toBe(0);
+    expect(diagnosticOuter.browserInput).toMatchObject({pageErrorDiagnostics: true});
 
     const cleanupFailure = runOuterAuthProgressRunner(result.output, {failRunnerCleanup: true});
     expect(cleanupFailure.status).toBe(1);

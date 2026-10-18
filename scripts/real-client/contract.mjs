@@ -18,6 +18,8 @@ const GATE_SCHEMES = observation.GATE_SCHEMES;
 const GATE_RESOURCE_TYPES = observation.GATE_RESOURCE_TYPES;
 const GATE_OBSERVER_ERROR_KINDS = observation.GATE_OBSERVER_ERROR_KINDS;
 const PAGE_ERROR_CONSTRUCTORS = observation.GATE_PAGE_ERROR_CONSTRUCTORS;
+const PAGE_ERROR_DIAGNOSTIC_LIMITS = observation.GATE_PAGE_ERROR_DIAGNOSTIC_LIMITS;
+const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
 const SCRIPT_ASSET = observation.SCRIPT_ASSET_PATTERN;
 const AUTH_PROGRESS_REPORT_STAGES = Object.freeze([
   'runtime_inputs',
@@ -51,6 +53,7 @@ const AUTH_PROGRESS_REPORT_STAGES = Object.freeze([
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
 const RUN_ID = /^[0-9a-f]{32}$/;
+const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const REQUIRED_ARTIFACT_AUDIT_CHECKS = Object.freeze([
   'manifestMode',
@@ -113,7 +116,8 @@ export function parseRealClientArgs(argv) {
     ['--run-id', 'runId'],
     ['--scenarios', 'scenarioSelection'],
     ['--observer-controls-only', 'observerControlsOnly'],
-    ['--auth-progress-one-submission', 'authProgressOneSubmission']
+    ['--auth-progress-one-submission', 'authProgressOneSubmission'],
+    ['--page-error-diagnostics', 'pageErrorDiagnostics']
   ]);
   const options = new Map();
   for(let index = 0; index < argumentsList.length; index++) {
@@ -124,7 +128,7 @@ export function parseRealClientArgs(argv) {
     if(options.has(name)) {
       throw new Error(`option was provided more than once: ${name}`);
     }
-    if(name === '--observer-controls-only' || name === '--auth-progress-one-submission') {
+    if(name === '--observer-controls-only' || name === '--auth-progress-one-submission' || name === '--page-error-diagnostics') {
       options.set(name, true);
       continue;
     }
@@ -139,14 +143,18 @@ export function parseRealClientArgs(argv) {
 
   const controlsOnly = options.get('--observer-controls-only') === true;
   const authProgress = options.get('--auth-progress-one-submission') === true;
+  const pageErrorDiagnostics = options.get('--page-error-diagnostics') === true;
   if(authProgress && (controlsOnly || options.has('--scenarios'))) {
     throw new Error('--auth-progress-one-submission cannot be combined with --scenarios or --observer-controls-only');
+  }
+  if(controlsOnly && pageErrorDiagnostics) {
+    throw new Error('--page-error-diagnostics cannot be combined with --observer-controls-only');
   }
   if(!controlsOnly && !authProgress && !options.has('--scenarios')) {
     throw new Error('scenario selection is required');
   }
 
-  const optional = new Set(['--scenarios', '--observer-controls-only', '--auth-progress-one-submission']);
+  const optional = new Set(['--scenarios', '--observer-controls-only', '--auth-progress-one-submission', '--page-error-diagnostics']);
   const missing = [...names.keys()].filter((name) => !optional.has(name) && !options.has(name));
   if(missing.length) {
     throw new Error(`missing required options: ${missing.join(',')}`);
@@ -923,11 +931,39 @@ function parseBrowserGateBreakdown(value) {
     observerErrorCount += Object.values(errors).reduce((sum, count) => sum + count, 0);
 
     const pageErrors = value.pageErrors[context];
-    if(!Array.isArray(pageErrors) || pageErrors.length > 512 || pageErrors.some((error) =>
-      !hasExactOwnKeys(error, ['constructorName', 'scriptAsset']) ||
-      !PAGE_ERROR_CONSTRUCTORS.includes(error.constructorName) ||
-      typeof error.scriptAsset !== 'string' || !SCRIPT_ASSET.test(error.scriptAsset)
-    )) {
+    if(!Array.isArray(pageErrors) || pageErrors.length > 512 || pageErrors.some((error) => {
+      const baseKeys = ['constructorName', 'scriptAsset'];
+      const hasDiagnostic = hasExactOwnKeys(error, [...baseKeys, 'diagnostic']);
+      if((!hasDiagnostic && !hasExactOwnKeys(error, baseKeys)) ||
+          !PAGE_ERROR_CONSTRUCTORS.includes(error.constructorName) ||
+          typeof error.scriptAsset !== 'string' || !SCRIPT_ASSET.test(error.scriptAsset)) return true;
+      if(!hasDiagnostic) return false;
+      const diagnostic = error.diagnostic;
+      const hasRpcErrorType = Object.hasOwn(diagnostic, 'rpcErrorType');
+      const hasRpcErrorCode = Object.hasOwn(diagnostic, 'rpcErrorCode');
+      const diagnosticKeys = ['message', 'stack', 'pageUrl', 'scenario', 'stage',
+        ...(hasRpcErrorType ? ['rpcErrorType'] : []), ...(hasRpcErrorCode ? ['rpcErrorCode'] : [])];
+      if(!hasExactOwnKeys(diagnostic, diagnosticKeys) ||
+          typeof diagnostic.message !== 'string' || diagnostic.message.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength ||
+          typeof diagnostic.stack !== 'string' || diagnostic.stack.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.stackLength ||
+          !['sign-in', 'message', 'group', 'channel', 'unknown'].includes(diagnostic.scenario) ||
+          typeof diagnostic.stage !== 'string' || !/^(?:unknown|[a-z][a-z0-9_]{0,63})$/.test(diagnostic.stage) ||
+          (hasRpcErrorType && (typeof diagnostic.rpcErrorType !== 'string' || !RPC_ERROR_TYPE_PATTERN.test(diagnostic.rpcErrorType))) ||
+          (hasRpcErrorCode && (!Number.isSafeInteger(diagnostic.rpcErrorCode) || diagnostic.rpcErrorCode < 0 || diagnostic.rpcErrorCode > 999_999))) return true;
+      const diagnosticTextIsUnsafe = (text) => /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text) ||
+        /(?:https?:\/\/|blob:)[^\s)]*[?#]/i.test(text) || /https?:\/\/(?!teagramd\.test(?:\/|:|\b))/i.test(text);
+      if(diagnosticTextIsUnsafe(diagnostic.message) || diagnosticTextIsUnsafe(diagnostic.stack)) return true;
+      if(diagnostic.pageUrl === 'unknown') return false;
+      if(typeof diagnostic.pageUrl !== 'string' || diagnostic.pageUrl.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength ||
+          /[\s?#]/.test(diagnostic.pageUrl)) return true;
+      try {
+        const parsedPageUrl = new URL(diagnostic.pageUrl);
+        return parsedPageUrl.origin !== PRIVATE_CSP_ORIGIN || parsedPageUrl.search !== '' || parsedPageUrl.hash !== '' ||
+          Boolean(parsedPageUrl.username || parsedPageUrl.password) || `${parsedPageUrl.origin}${parsedPageUrl.pathname}` !== diagnostic.pageUrl;
+      } catch {
+        return true;
+      }
+    })) {
       throw new Error('browser egress/page error evidence is invalid');
     }
     pageErrorCount += pageErrors.length;
