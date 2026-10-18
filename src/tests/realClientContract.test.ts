@@ -28,7 +28,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
-const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
+const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getChannelInviteConfirmButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -4393,6 +4393,33 @@ describe('real client username field readiness', () => {
       expect(await passwordInputValues(page)).toEqual(['', '', '']);
     } finally {
       await usernameField?.dispose();
+      await page.close();
+    }
+  });
+});
+
+describe('real client channel invite confirmation', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  it('selects Add uniquely when Add and Cancel share primary button classes', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent('<div class="popup-add-members"><button class="popup-button btn primary">Add</button><button class="popup-button btn primary">Cancel</button></div>');
+      const popup = page.locator('.popup-add-members');
+
+      expect(await popup.locator('.popup-button.btn.primary').count()).toBe(2);
+      const confirmButton = getChannelInviteConfirmButton(popup);
+      expect(await confirmButton.count()).toBe(1);
+      expect(await confirmButton.textContent()).toBe('Add');
+    } finally {
       await page.close();
     }
   });
