@@ -101,8 +101,12 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     );
   }
 
-  const onInput = () => {
+  function updateSignInValidity() {
     setHasValidInput(isPrivateUsername(usernameField.value));
+  }
+
+  const onInput = () => {
+    updateSignInValidity();
     setError(undefined);
     usernameInput.classList.remove('error');
     usernameInput.removeAttribute('aria-invalid');
@@ -261,6 +265,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         case 'registrationClosed':
           setRegistrationMode('closed');
           setCreatingAccount(false);
+          updateSignInValidity();
           showError('registrationClosed');
           break;
         case 'weakPassword':
@@ -304,6 +309,9 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     if(pendingPasswordUser()) return;
     setCreatingAccount(false);
     setError(undefined);
+    updateSignInValidity();
+    usernameInput.classList.remove('error');
+    usernameInput.removeAttribute('aria-invalid');
     usernameInput.disabled = false;
     displayNameInput.disabled = false;
     inviteSecretInput.disabled = false;

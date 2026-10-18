@@ -233,6 +233,74 @@ describe('private username sign-in card', () => {
     expect(document.querySelector('input[aria-label="Invite secret"]')).not.toBeNull();
   });
 
+  it('lets the user sign in with the same username after registration reports it is taken', async() => {
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'open'});
+    mocks.invokeApi
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockRejectedValueOnce({type: 'USERNAME_OCCUPIED'})
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'});
+    const input = mount();
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Create account')).toBe(true));
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+
+    const fill = (label: string, value: string) => {
+      const field = document.querySelector(`input[aria-label="${label}"]`) as HTMLInputElement;
+      field.value = value;
+      field.dispatchEvent(new Event('input', {bubbles: true}));
+    };
+    fill('Username', USERNAME);
+    fill('Display name', 'Alice Example');
+    fill('Password', 'StrongPassword123');
+    fill('Confirm password', 'StrongPassword123');
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toBe('That username is taken.'));
+
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Sign in') as HTMLButtonElement).click();
+    const next = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Next') as HTMLButtonElement;
+    expect(input.value).toBe(USERNAME);
+    expect(next.disabled).toBe(false);
+    next.click();
+    await vi.waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith({name: 'password'}));
+
+    expect(mocks.invokeApi.mock.calls.map(([method]) => method)).toEqual([
+      'auth.sendCode',
+      'auth.signIn',
+      'auth.signUp',
+      'auth.sendCode',
+      'auth.signIn'
+    ]);
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(4, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}));
+  });
+
+  it('re-enables sign-in when the server closes registration during sign-up', async() => {
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'open'});
+    mocks.invokeApi
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockRejectedValueOnce({type: 'INPUT_REQUEST_INVALID'});
+    const input = mount();
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Create account')).toBe(true));
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+
+    const fill = (label: string, value: string) => {
+      const field = document.querySelector(`input[aria-label="${label}"]`) as HTMLInputElement;
+      field.value = value;
+      field.dispatchEvent(new Event('input', {bubbles: true}));
+    };
+    fill('Username', USERNAME);
+    fill('Display name', 'Alice Example');
+    fill('Password', 'StrongPassword123');
+    fill('Confirm password', 'StrongPassword123');
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toBe('Account creation is closed on this server.'));
+
+    const next = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Next') as HTMLButtonElement;
+    expect(input.value).toBe(USERNAME);
+    expect(next.disabled).toBe(false);
+  });
+
   it('sets the password before opening the new account', async() => {
     const user = {_: 'user', id: 42};
     mocks.getAppConfig.mockResolvedValue({registration_mode: 'open'});
