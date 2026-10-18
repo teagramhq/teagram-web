@@ -170,6 +170,7 @@ export interface MTAppConfig {
   aicompose_tone_saved_limit_premium?:        number;
   community_peers_limit?:                     number;
   community_bot_peers_limit?:                 number;
+  registration_mode?:                         'closed' | 'invite' | 'open';
 }
 
 export interface EmojiesSendDiceSuccess {
