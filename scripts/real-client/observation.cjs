@@ -283,6 +283,8 @@ function createContextObserver(name, options = {}) {
   const dedicatedWorkerTargetIds = new Set();
   const workerSourceLabels = new Set();
   const requestLabels = new Map();
+  const attachedTargetIds = new Set();
+  let anonymousAttachedTargets = 0;
 
   const state = {
     countedEvents: 0,
@@ -465,13 +467,15 @@ function createContextObserver(name, options = {}) {
 
   function noteAttached(targetId = null) {
     if(!countEvent()) return false;
-    const record = targetId ? targets.get(targetId) : null;
-    if(record?.attached) return true;
-    if(state.attachedTargets >= LIMITS.attachedTargets) {
+    if(typeof targetId === 'string' && attachedTargetIds.has(targetId)) return true;
+    if(attachedTargetIds.size + anonymousAttachedTargets >= LIMITS.attachedTargets) {
       recordOverflow();
       return false;
     }
-    state.attachedTargets++;
+    if(typeof targetId === 'string') attachedTargetIds.add(targetId);
+    else anonymousAttachedTargets++;
+    const record = targetId ? targets.get(targetId) : null;
+    state.attachedTargets = Math.max(state.attachedTargets, attachedTargetIds.size + anonymousAttachedTargets);
     if(record) record.attached = true;
     return true;
   }
@@ -485,6 +489,7 @@ function createContextObserver(name, options = {}) {
   function noteDestroyed(targetId) {
     if(!countEvent()) return;
     const record = targets.get(targetId);
+    if(attachedTargetIds.delete(targetId) && record) record.attached = false;
     if(!record) return;
     record.destroyed = true;
     if(!record.setupComplete) {

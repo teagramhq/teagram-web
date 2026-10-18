@@ -1282,6 +1282,23 @@ describe('confined runner shared-worker observation contract', () => {
     await networkObserver.stop();
   });
 
+  it('reuses the worker attachment budget after targets are destroyed', () => {
+    const events: any[] = [{kind: 'target', target: pageTarget()}];
+    for(let index = 0; index < observation.LIMITS.attachedTargets * 2; index++) {
+      const targetId = `reused-worker-${index}`;
+      events.push({kind: 'target', target: sharedWorker(targetId, HOSTILE.blobUrl)});
+      events.push({kind: 'attach', targetId});
+      events.push({kind: 'setup', targetId});
+      events.push({kind: 'destroy', targetId});
+    }
+
+    const summary = replayContext(events);
+
+    expect(summary.observerOverflow).toBe(0);
+    expect(summary.attachedTargets).toBe(1);
+    expect(summary.coverageComplete).toBe(1);
+  });
+
   it('skips page URL classifiers after observer overflow', async() => {
     const contextObserver = observation.createContextObserver('page-handler-overflow');
     const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver);
