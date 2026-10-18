@@ -122,6 +122,42 @@ describe('invited channel dialogs', () => {
     }
   });
 
+  test('reloads an invited channel when its metadata arrives after the channel update', async() => {
+    const channelId = 990019;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    const appMessagesManager: any = client.managers.appMessagesManager;
+    const apiManager: any = appMessagesManager.apiManager;
+    const originalInvoke = apiManager.invokeApi;
+    const response = makeEmptyChannelDialogResult(makeChannel(channelId), 'messages.peerDialogs');
+    let peerDialogsRequestCount = 0;
+    apiManager.invokeApi = (method: string, ...args: any[]) => {
+      if(method !== 'messages.getPeerDialogs') {
+        return originalInvoke.apply(apiManager, [method, ...args]);
+      }
+
+      ++peerDialogsRequestCount;
+      return Promise.resolve(response);
+    };
+
+    try {
+      client.managers.apiUpdatesManager.processLocalUpdate({_: 'updateChannel', channel_id: channelId} as any);
+      expect(client.managers.appChatsManager.getChat(channelId)).toBeUndefined();
+      expect(peerDialogsRequestCount).toBe(0);
+
+      client.managers.appChatsManager.saveApiChats([makeChannel(channelId)]);
+
+      await vi.waitFor(() => expect(peerDialogsRequestCount).toBe(1));
+      await vi.waitFor(() => {
+        expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toMatchObject({
+          peerId,
+          top_message: 0
+        });
+      });
+    } finally {
+      apiManager.invokeApi = originalInvoke;
+    }
+  });
+
   test('stores the first post received while the invited-channel dialog reload is pending', async() => {
     const channelId = 990012;
     const peerId = (channelId as ChatId).toPeerId(true);

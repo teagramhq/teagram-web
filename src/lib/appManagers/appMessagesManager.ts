@@ -657,6 +657,8 @@ export class AppMessagesManager extends AppManager {
 
   private reloadConversationsPromise: Promise<void>;
   private reloadConversationsPeers: Map<PeerId, {inputDialogPeer: InputDialogPeer, promise: CancellablePromise<Dialog>, sentRequest?: boolean}> = new Map();
+  // updateChannel can arrive before the chat metadata needed to reload its dialog.
+  private pendingChannelUpdates = new Set<ChatId>();
 
   private groupedTempId = 0;
   private mediaTempId = 0;
@@ -723,6 +725,7 @@ export class AppMessagesManager extends AppManager {
     this.clear(true);
 
     this.rootScope.addEventListener('app_config', this.setStreamedMessageDraftTtl);
+    this.rootScope.addEventListener('chat_update', this.onChatMetadataUpdate);
     Promise.resolve(this.apiManager.getAppConfig()).then(this.setStreamedMessageDraftTtl, noop);
 
     this.repayRequestHandler = new RepayRequestHandler({
@@ -978,6 +981,7 @@ export class AppMessagesManager extends AppManager {
     this.channelAvailableMinIds.clear();
     this.channelAvailableMinIdGenerations.clear();
     this.channelAvailableMinIdRequestGenerations.clear();
+    this.pendingChannelUpdates.clear();
     ++this.channelAvailableMinIdsEpoch;
     ++this.channelAvailableMinIdsGeneration;
     this.missingMessages.clear();
@@ -10806,6 +10810,9 @@ export class AppMessagesManager extends AppManager {
       }
       return;
     } else if(channel?._ !== 'channel') {
+      if(!channel) {
+        this.pendingChannelUpdates.add(channelId);
+      }
       return;
     }
 
@@ -10838,6 +10845,19 @@ export class AppMessagesManager extends AppManager {
     }
 
     this.rootScope.dispatchEvent('channel_update', channelId);
+  };
+
+  private onChatMetadataUpdate = (chatId: ChatId) => {
+    if(!this.pendingChannelUpdates.delete(chatId) || !this.appChatsManager.isInChat(chatId)) {
+      return;
+    }
+
+    const peerId = chatId.toPeerId(true);
+    pause(0).then(() => {
+      if(this.appChatsManager.isInChat(chatId) && !this.getDialogOnly(peerId)) {
+        this.reloadConversation(peerId);
+      }
+    });
   };
 
   private onUpdateChannelReload = (update: Update.updateChannelReload) => {
