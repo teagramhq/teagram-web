@@ -7,6 +7,7 @@ import {isIPv4} from 'node:net';
 import {
   assertAllScenariosPassed,
   formatBrowserFailureMessage,
+  parsePassedBrowserGateBreakdown,
   parseChannelMembershipState,
   REQUIRED_CONTROLS,
   parseFixtureReadiness,
@@ -277,12 +278,14 @@ if(args?.help) {
       if(args.scenarios.includes('channel')) {
         const channelMembership = parseChannelMembershipState(browserResult.channelMembership);
         if(channelMembership === 'unavailable' || channelMembership === 'unclassified' ||
-            channelMembership.peerRowCount !== 1 || !channelMembership.peerRowHasTitle) {
+            channelMembership.bob.channelRowCount !== 1 || channelMembership.bob.channelTitleMatches !== 1) {
           throw new Error('channel membership evidence is incomplete');
         }
         browserResult.channelMembership = channelMembership;
       }
-      if(browserResult.contextCount !== 2 || browserResult.screenshotsCaptured !== 16 ||
+      browserResult.gateBreakdown = parsePassedBrowserGateBreakdown(browserResult);
+      const expectedScreenshots = args.scenarios.includes('channel') ? 26 : 16;
+      if(browserResult.contextCount !== 2 || browserResult.screenshotsCaptured !== expectedScreenshots ||
           browserResult.network?.unexpectedAttempts !== 0 || browserResult.network?.observerErrors !== 0 ||
           ['alice', 'bob'].some((account) => {
             const context = browserResult.network?.contexts?.[account];
@@ -355,6 +358,7 @@ if(args?.help) {
       },
       scenarios: browserResult.scenarios,
       ...(browserResult.channelMembership ? {channelMembership: browserResult.channelMembership} : {}),
+      ...(browserResult.gateBreakdown ? {gateBreakdown: browserResult.gateBreakdown} : {}),
       contextCount: browserResult.contextCount,
       screenshotsCaptured: browserResult.screenshotsCaptured,
       passwordEvidence,
