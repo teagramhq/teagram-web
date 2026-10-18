@@ -921,7 +921,7 @@ export function parseAuthProgressReport(report) {
   };
 }
 
-function parseBrowserGateBreakdown(value) {
+export function parseBrowserGateBreakdown(value) {
   const keys = ['counters', 'unexpectedEgressAttempts', 'observerErrors', 'pageErrors', 'pageErrorOverflow'];
   const counterKeys = ['unexpectedEgressAttempts', 'observerErrors', 'pageErrors'];
   const hasStepDiagnostics = Object.hasOwn(value || {}, 'stepDiagnostics');

@@ -11,6 +11,7 @@ import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
 import {
   assertAllScenariosPassed,
   formatBrowserFailureMessage,
+  parseBrowserGateBreakdown,
   parseAuthProgressReport,
   parseChannelMembershipState,
   parseCenterColumnState,
@@ -2355,6 +2356,36 @@ describe('discovery shared-worker network accounting', () => {
     });
     expect(parseAuthProgressReport(report).gateBreakdown).toEqual(report.gateBreakdown);
     expectNoGateSecretLeak(report.gateBreakdown);
+  });
+
+  it('rejects unsafe gate diagnostics on a passing browser report', () => {
+    const passingReport: any = {
+      status: 'passed',
+      gateBreakdown: {
+        counters: {unexpectedEgressAttempts: 0, observerErrors: 0, pageErrors: 0},
+        unexpectedEgressAttempts: {alice: [], bob: []},
+        observerErrors: {alice: {}, bob: {}},
+        pageErrors: {alice: [], bob: []},
+        pageErrorOverflow: {alice: [], bob: []},
+        stepDiagnostics: {alice: [], bob: []}
+      }
+    };
+
+    expect(parseBrowserGateBreakdown(passingReport.gateBreakdown)).toEqual(passingReport.gateBreakdown);
+    expect(() => parseBrowserGateBreakdown({
+      ...passingReport.gateBreakdown,
+      stepDiagnostics: {
+        alice: [{scenarioStep: {scenario: 'message', step: 'alice_message_send'}, thrownValues: [], rpcFailures: [], consoleErrors: [], raw: HOSTILE.phrase}],
+        bob: []
+      }
+    })).toThrow('browser egress/page error evidence is invalid');
+    expect(() => parseBrowserGateBreakdown({
+      ...passingReport.gateBreakdown,
+      stepDiagnostics: {
+        alice: [{scenarioStep: {scenario: 'message', step: 'alice_message_send'}, thrownValues: [], rpcFailures: [], consoleErrors: [{message: HOSTILE.url}]}],
+        bob: []
+      }
+    })).toThrow('browser egress/page error evidence is invalid');
   });
 
   it('records bounded page error message, stack frames and scenario step', () => {
