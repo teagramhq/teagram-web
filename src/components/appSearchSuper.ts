@@ -39,6 +39,7 @@ import findAndSplice from '@helpers/array/findAndSplice';
 import {ScrollStartCallbackDimensions} from '@helpers/fastSmoothScroll';
 import setInnerHTML from '@helpers/dom/setInnerHTML';
 import {AppManagers} from '@lib/managers';
+import {FilterType} from '@lib/storages/dialogs';
 import choosePhotoSize from '@appManagers/utils/photos/choosePhotoSize';
 import wrapWebPageDescription from '@components/wrappers/webPageDescription';
 import wrapWebPageTitle from '@components/wrappers/webPageTitle';
@@ -2237,7 +2238,10 @@ export default class AppSearchSuper {
     });
 
     const getCount = async() => {
-      const result = await this.managers.dialogsStorage.getDialogs({filterId: rootScope.myId});
+      const result = await this.managers.dialogsStorage.getDialogs({
+        filterId: rootScope.myId,
+        filterType: FilterType.Saved
+      });
       return result.count;
     };
 
@@ -2961,7 +2965,8 @@ export default class AppSearchSuper {
 
     try {
       await this.managers.dialogsStorage.getDialogs({
-        filterId: rootScope.myId
+        filterId: rootScope.myId,
+        filterType: FilterType.Saved
       });
 
       return true;

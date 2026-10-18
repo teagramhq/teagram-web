@@ -29,6 +29,7 @@ import {AppDialogsManager, DialogDom} from '@lib/appDialogsManager';
 import rootScope from '@lib/rootScope';
 import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
 import {runWithHotReloadGuard} from '@lib/solidjs/runWithHotReloadGuard';
+import {FilterType} from '@lib/storages/dialogs';
 import {useCommunityDialogs} from '@stores/communities';
 import {usePeers} from '@stores/peers';
 
@@ -306,6 +307,10 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
 
   protected getFilterId() {
     return this.filterId;
+  }
+
+  protected getFilterType() {
+    return FilterType.Folder;
   }
 
   public setOnlineStatus(element: HTMLElement, online: boolean) {
