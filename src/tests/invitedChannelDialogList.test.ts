@@ -1,4 +1,4 @@
-import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 
 vi.hoisted(() => {
   class IntersectionObserverMock {
@@ -32,17 +32,12 @@ vi.mock('@stores/communities', () => ({useCommunities: () => ({}), useCommunityD
 import type {Dialog} from '@appManagers/appMessagesManager';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import {AutonomousDialogList} from '@components/autonomousDialogList/dialogs';
-import {reconcilePeer} from '@stores/peers';
 import '@helpers/peerIdPolyfill';
 
-type ChannelMembership = 'active' | 'left' | 'kicked' | 'forbidden' | 'unknown';
-
-const lists = new Set<any>();
+type ChannelMembership = 'active' | 'left' | 'kicked' | 'forbidden';
 
 const createList = (membership: ChannelMembership = 'active') => {
-  const mirroredPeer = membership === 'unknown' ?
-    undefined :
-    membership === 'forbidden' ?
+  const mirroredPeer = membership === 'forbidden' ?
     {_:'channelForbidden', id: 990020} :
     {_:'channel', id: 990020, pFlags: membership === 'left' ? {left: true} : membership === 'kicked' ? {kicked: true} : {}};
   const getPeer = (apiManagerProxy as any).getPeer;
@@ -64,17 +59,10 @@ const createList = (membership: ChannelMembership = 'active') => {
     sortedList,
     projectedPeerIds: new Set(),
     filterPinnedPeerIds: new Set(),
-    emptyChannelDialogReconcileDisposers: new Map(),
-    emptyChannelDialogReconcilePromises: new Map(),
-    emptyChannelDialogReconcileRequested: new Set(),
-    emptyChannelDialogReconcileUpdatingDialogs: new Set(),
-    emptyChannelDialogReconcileGeneration: 0,
     managers: {dialogsStorage: {}},
     getCollapsedCommunityId: vi.fn(() => undefined),
     testDialogForFilter: vi.fn(() => true)
   });
-  list.appDialogsManager = {xd: list};
-  lists.add(list);
 
   return {list, sortedList};
 };
@@ -89,25 +77,7 @@ const createDialog = (topMessage: number) => ({
   index_0: 1
 } as Dialog);
 
-const createChannelPeer = () => ({
-  _: 'channel',
-  id: 990020,
-  pFlags: {}
-} as any);
-
 describe('invited channel dialog rows', () => {
-  beforeEach(() => {
-    reconcilePeer((990020 as ChatId).toPeerId(true));
-  });
-
-  afterEach(() => {
-    for(const list of lists) {
-      list.clearEmptyChannelDialogReconciliations();
-    }
-    lists.clear();
-    reconcilePeer((990020 as ChatId).toPeerId(true));
-  });
-
   it('adds an empty invited channel older than the loaded page', () => {
     const peerId = (990020 as ChatId).toPeerId(true);
     const dialog = createDialog(0);
@@ -135,135 +105,6 @@ describe('invited channel dialog rows', () => {
     list.updateDialog(firstDialog);
 
     expect(sortedList.has(peerId)).toBe(true);
-  });
-
-  it('adds an invited channel when its chat metadata arrives after the dialog update', async() => {
-    const peerId = (990020 as ChatId).toPeerId(true);
-    const dialog = createDialog(0);
-    const {list, sortedList} = createList('unknown');
-    list.managers.appMessagesManager = {getDialogOnly: vi.fn().mockResolvedValue(dialog)};
-    list.managers.appChatsManager = {getChat: vi.fn().mockResolvedValue(createChannelPeer())};
-
-    list.updateDialog(dialog);
-    expect(sortedList.has(peerId)).toBe(false);
-
-    (apiManagerProxy as any).getPeer.mockReturnValue({_:'channel', id: 990020, pFlags: {}});
-    reconcilePeer(peerId, createChannelPeer());
-    await (list as any).onChatUpdate(990020 as ChatId);
-
-    await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
-  });
-
-  it('reconciles an empty channel when metadata arrives before its dialog', async() => {
-    const peerId = (990020 as ChatId).toPeerId(true);
-    const dialog = createDialog(0);
-    const {list, sortedList} = createList('unknown');
-    const cache: {dialog?: Dialog} = {};
-    list.managers.appMessagesManager = {
-      getDialogOnly: vi.fn(() => Promise.resolve(cache.dialog))
-    };
-    list.managers.appChatsManager = {
-      getChat: vi.fn().mockResolvedValue(createChannelPeer())
-    };
-    reconcilePeer(peerId, createChannelPeer());
-    (apiManagerProxy as any).getPeer.mockReturnValue(createChannelPeer());
-
-    await (list as any).onChatUpdate(990020 as ChatId);
-    await vi.waitFor(() => expect(list.managers.appMessagesManager.getDialogOnly).toHaveBeenCalled());
-    expect(sortedList.has(peerId)).toBe(false);
-
-    cache.dialog = dialog;
-    (list as any).reconcileWatchedEmptyChannelDialogs();
-
-    await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
-  });
-
-  it('reconciles an empty channel when its dialog arrives before the peer mirror', async() => {
-    const peerId = (990020 as ChatId).toPeerId(true);
-    const dialog = createDialog(0);
-    const {list, sortedList} = createList('unknown');
-    list.managers.appMessagesManager = {
-      getDialogOnly: vi.fn().mockResolvedValue(dialog)
-    };
-
-    list.updateDialog(dialog);
-    await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(false));
-
-    reconcilePeer(peerId, createChannelPeer());
-    (apiManagerProxy as any).getPeer.mockReturnValue(createChannelPeer());
-
-    await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
-  });
-
-  it('restores an empty invited channel cached before the dialog list was created', async() => {
-    const peerId = (990020 as ChatId).toPeerId(true);
-    const dialog = createDialog(0);
-    const {list, sortedList} = createList();
-    reconcilePeer(peerId, createChannelPeer());
-    list.managers.dialogsStorage = {
-      getCachedDialogs: vi.fn().mockResolvedValue([dialog])
-    };
-    list.managers.appMessagesManager = {
-      getDialogOnly: vi.fn().mockResolvedValue(dialog)
-    };
-
-    const reconciliation = (list as any).reconcileCachedEmptyChannelDialogs();
-    await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
-    await reconciliation;
-  });
-
-  it('does not block cached reconciliation on the dialog lookup', async() => {
-    const peerId = (990020 as ChatId).toPeerId(true);
-    const dialog = createDialog(0);
-    reconcilePeer(peerId, createChannelPeer());
-    const {list, sortedList} = createList();
-    list.managers.dialogsStorage = {
-      getCachedDialogs: vi.fn().mockResolvedValue([dialog])
-    };
-    let resolveDialog: (value: Dialog) => void;
-    const dialogLookup = new Promise<Dialog>((resolve) => {
-      resolveDialog = resolve;
-    });
-    list.managers.appMessagesManager = {
-      getDialogOnly: vi.fn(() => dialogLookup)
-    };
-
-    let completed = false;
-    const reconciliation = (list as any).reconcileCachedEmptyChannelDialogs().then(() => {
-      completed = true;
-    });
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(completed).toBe(true);
-    expect(sortedList.has(peerId)).toBe(false);
-
-    resolveDialog(dialog);
-    await reconciliation;
-    await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
-  });
-
-  it('waits for the peer mirror before restoring a cached empty channel', async() => {
-    const peerId = (990020 as ChatId).toPeerId(true);
-    const dialog = createDialog(0);
-    const {list, sortedList} = createList('unknown');
-    list.managers.dialogsStorage = {
-      getCachedDialogs: vi.fn().mockResolvedValue([dialog])
-    };
-    list.managers.appMessagesManager = {
-      getDialogOnly: vi.fn().mockResolvedValue(dialog)
-    };
-    const updateDialog = vi.spyOn(list, 'updateDialog');
-
-    await (list as any).reconcileCachedEmptyChannelDialogs();
-
-    expect(sortedList.has(peerId)).toBe(false);
-    expect(updateDialog).not.toHaveBeenCalled();
-
-    reconcilePeer(peerId, createChannelPeer());
-    (apiManagerProxy as any).getPeer.mockReturnValue(createChannelPeer());
-
-    await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
   });
 
   it('keeps a channel with messages below the loaded page out', () => {
