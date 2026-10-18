@@ -37,11 +37,12 @@ import '@helpers/peerIdPolyfill';
 type ChannelMembership = 'active' | 'left' | 'kicked' | 'forbidden';
 
 const createList = (membership: ChannelMembership = 'active') => {
-  const canSaveEmptyChannelDialog = vi.fn(async(_peerId: PeerId, _dialog: Dialog) => membership === 'active');
   const mirroredPeer = membership === 'forbidden' ?
     {_:'channelForbidden', id: 990020} :
     {_:'channel', id: 990020, pFlags: membership === 'left' ? {left: true} : membership === 'kicked' ? {kicked: true} : {}};
-  (apiManagerProxy as any).getPeer.mockReturnValue(mirroredPeer);
+  const getPeer = (apiManagerProxy as any).getPeer;
+  getPeer.mockReset();
+  getPeer.mockReturnValue(mirroredPeer);
   const renderedPeerIds = new Set<PeerId>();
   const sortedList = {
     add: (key: PeerId) => renderedPeerIds.add(key),
@@ -58,12 +59,12 @@ const createList = (membership: ChannelMembership = 'active') => {
     sortedList,
     projectedPeerIds: new Set(),
     filterPinnedPeerIds: new Set(),
-    managers: {dialogsStorage: {canSaveEmptyChannelDialog}},
+    managers: {dialogsStorage: {}},
     getCollapsedCommunityId: vi.fn(() => undefined),
     testDialogForFilter: vi.fn(() => true)
   });
 
-  return {list, sortedList, canSaveEmptyChannelDialog};
+  return {list, sortedList};
 };
 
 const createDialog = (topMessage: number) => ({
@@ -87,6 +88,25 @@ describe('invited channel dialog rows', () => {
     expect(sortedList.has(peerId)).toBe(true);
   });
 
+  it('keeps a channel visible when its first dialog arrives after an empty manager cache', () => {
+    const peerId = (990020 as ChatId).toPeerId(true);
+    const {list, sortedList} = createList();
+    const managerDialogs = new Map<PeerId, Dialog>();
+
+    expect(managerDialogs.get(peerId)).toBeUndefined();
+    const firstDialog = createDialog(0);
+    managerDialogs.set(peerId, firstDialog);
+    list.updateDialog(managerDialogs.get(peerId));
+
+    expect(sortedList.has(peerId)).toBe(true);
+
+    firstDialog.top_message = 1;
+    firstDialog.index_0 = 101;
+    list.updateDialog(firstDialog);
+
+    expect(sortedList.has(peerId)).toBe(true);
+  });
+
   it('keeps a channel with messages below the loaded page out', () => {
     const peerId = (990020 as ChatId).toPeerId(true);
     const {list, sortedList} = createList();
@@ -101,15 +121,14 @@ describe('invited channel dialog rows', () => {
     {membership: 'kicked' as const},
     {membership: 'forbidden' as const}
   ])(
-    'does not restore a stale empty dialog after the user is $membership', async({membership}) => {
+    'does not restore a stale empty dialog after the user is $membership', ({membership}) => {
       const dialog = createDialog(0);
-      const {list, sortedList, canSaveEmptyChannelDialog} = createList(membership);
+      const {list, sortedList} = createList(membership);
 
-      await expect(canSaveEmptyChannelDialog(dialog.peerId, dialog)).resolves.toBe(false);
       list.updateDialog(dialog);
 
-      expect(canSaveEmptyChannelDialog).toHaveBeenCalledTimes(1);
       expect(sortedList.has(dialog.peerId)).toBe(false);
+      expect((apiManagerProxy as any).getPeer).toHaveBeenCalledWith(dialog.peerId);
     }
   );
 });

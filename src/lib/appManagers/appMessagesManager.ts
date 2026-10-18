@@ -5810,9 +5810,27 @@ export class AppMessagesManager extends AppManager {
             }
           }
 
-          this.dialogsStorage.applyDialogs(result);
+          const dialogs = [...result.dialogs];
+          for(const peerId of reloadConversationsPeers.keys()) {
+            const updates = this.newUpdatesAfterReloadToHandle[this.getUpdateAfterReloadKey(peerId)];
+            const hasNewChannelMessage = updates && [...updates].some((update) => update._ === 'updateNewChannelMessage');
+            // A queued post can fill a missing dialog only while cached membership is still active.
+            if(
+              !hasNewChannelMessage ||
+              !this.appPeersManager.isChannel(peerId) ||
+              !this.appChatsManager.isInChat(peerId.toChatId()) ||
+              dialogs.some((dialog) => dialog._ === 'dialog' && this.dialogsStorage.getDialogPeerId(dialog) === peerId)
+            ) {
+              continue;
+            }
 
-          result.dialogs.forEach((dialog) => {
+            dialogs.push(this.dialogsStorage.generateDialog(peerId));
+          }
+
+          const resultToApply = dialogs.length === result.dialogs.length ? result : {...result, dialogs};
+          this.dialogsStorage.applyDialogs(resultToApply);
+
+          resultToApply.dialogs.forEach((dialog) => {
             if(dialog._ !== 'dialog') {
               return;
             }
