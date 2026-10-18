@@ -207,9 +207,40 @@ describe('invited channel dialog rows', () => {
       getDialogOnly: vi.fn().mockResolvedValue(dialog)
     };
 
-    await (list as any).reconcileCachedEmptyChannelDialogs();
+    const reconciliation = (list as any).reconcileCachedEmptyChannelDialogs();
+    await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
+    await reconciliation;
+  });
 
-    expect(sortedList.has(peerId)).toBe(true);
+  it('does not block cached reconciliation on the dialog lookup', async() => {
+    const peerId = (990020 as ChatId).toPeerId(true);
+    const dialog = createDialog(0);
+    reconcilePeer(peerId, createChannelPeer());
+    const {list, sortedList} = createList();
+    list.managers.dialogsStorage = {
+      getCachedDialogs: vi.fn().mockResolvedValue([dialog])
+    };
+    let resolveDialog: (value: Dialog) => void;
+    const dialogLookup = new Promise<Dialog>((resolve) => {
+      resolveDialog = resolve;
+    });
+    list.managers.appMessagesManager = {
+      getDialogOnly: vi.fn(() => dialogLookup)
+    };
+
+    let completed = false;
+    const reconciliation = (list as any).reconcileCachedEmptyChannelDialogs().then(() => {
+      completed = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(completed).toBe(true);
+    expect(sortedList.has(peerId)).toBe(false);
+
+    resolveDialog(dialog);
+    await reconciliation;
+    await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
   });
 
   it('waits for the peer mirror before restoring a cached empty channel', async() => {

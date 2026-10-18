@@ -841,7 +841,6 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
         !this.sortedList.has(dialog.peerId)
       ) {
         this.watchForEmptyChannelDialog(dialog.peerId);
-        await this.reconcileEmptyChannelDialog(dialog.peerId);
       }
     }
   }
