@@ -1388,7 +1388,8 @@ export default class DialogsStorage extends AppManager {
       }
 
       const hasDraft = (dialog as Dialog | ForumTopic).draft?._ === 'draftMessage';
-      const isEmptyChannelDialog = isDialog && this.canSaveEmptyChannelDialog(peerId, dialog as Dialog);
+      const isEmptyChannelDialog = isDialog && !topMid && !hasDraft &&
+        this.canSaveEmptyChannelDialog(peerId, dialog as Dialog);
       if(topMid || hasDraft || isEmptyChannelDialog) {
         if(this.saveDialog({dialog})) {
           const cache = getUpdateCache(peerId);
