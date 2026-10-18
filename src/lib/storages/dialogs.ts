@@ -1088,7 +1088,7 @@ export default class DialogsStorage extends AppManager {
     return this.generateDialogPinnedDateByIndex(order.length - 1 - pinnedIndex);
   }
 
-  /* public generateDialog(peerId: PeerId) {
+  public generateDialog(peerId: PeerId) {
     const dialog: Dialog = {
       _: 'dialog',
       pFlags: {},
@@ -1098,13 +1098,13 @@ export default class DialogsStorage extends AppManager {
       read_outbox_max_id: 0,
       unread_count: 0,
       unread_mentions_count: 0,
-      notify_settings: {
-        _: 'peerNotifySettings',
-      },
+      unread_reactions_count: 0,
+      unread_poll_votes_count: 0,
+      notify_settings: {_: 'peerNotifySettings'}
     };
 
     return dialog;
-  } */
+  }
 
   private getDialogMessageForState(dialog: AnyDialog) {
     const {peerId} = dialog;

@@ -1,4 +1,5 @@
 import {createTestClient} from './api/harness';
+import type {Message} from '@layer';
 
 describe('invited channel dialogs', () => {
   let client: Awaited<ReturnType<typeof createTestClient>>;
@@ -117,6 +118,245 @@ describe('invited channel dialogs', () => {
       expect(updates.some((dialogs) => dialogs.get(peerId)?.dialog?.peerId === peerId)).toBe(true);
     } finally {
       client.managers.rootScope.removeEventListener('dialogs_multiupdate', onDialogsUpdate);
+      apiManager.invokeApi = originalInvoke;
+    }
+  });
+
+  test('stores the first post received while the invited-channel dialog reload is pending', async() => {
+    const channelId = 990012;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    const appMessagesManager: any = client.managers.appMessagesManager;
+    const apiManager: any = appMessagesManager.apiManager;
+    const originalInvoke = apiManager.invokeApi;
+    let resolvePeerDialogs: ((result: any) => void) | undefined;
+    apiManager.invokeApi = (method: string) => {
+      expect(method).toBe('messages.getPeerDialogs');
+      return new Promise((resolve) => {
+        resolvePeerDialogs = resolve;
+      });
+    };
+
+    client.managers.appChatsManager.saveApiChats([makeChannel(channelId)]);
+    expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeUndefined();
+    const reload = appMessagesManager.reloadConversation(peerId);
+
+    try {
+      await vi.waitFor(() => expect(resolvePeerDialogs).toBeTypeOf('function'));
+      expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeUndefined();
+      client.managers.apiUpdatesManager.saveUpdate({
+        _: 'updateNewChannelMessage',
+        message: {
+          _: 'message',
+          id: 1,
+          peer_id: {_: 'peerChannel', channel_id: channelId},
+          date: 2,
+          message: 'First channel post',
+          pFlags: {post: true}
+        }
+      } as any);
+      expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeUndefined();
+
+      if(!resolvePeerDialogs) {
+        throw new Error('messages.getPeerDialogs was not requested');
+      }
+
+      resolvePeerDialogs(makeEmptyChannelDialogResult(makeChannel(channelId), 'messages.peerDialogs'));
+      await reload;
+      await vi.waitFor(() => {
+        expect(client.managers.dialogsStorage.getDialogOnly(peerId)?.top_message).not.toBe(0);
+      });
+
+      const dialog = client.managers.dialogsStorage.getDialogOnly(peerId);
+      const firstPost = client.managers.appMessagesManager.getMessageByPeer(peerId, dialog.top_message) as Message.message;
+      expect(firstPost?.message).toBe('First channel post');
+    } finally {
+      apiManager.invokeApi = originalInvoke;
+    }
+  });
+
+  test('stores the first post when the dialog reload response omits the channel', async() => {
+    const channelId = 990013;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    const appMessagesManager: any = client.managers.appMessagesManager;
+    const apiManager: any = appMessagesManager.apiManager;
+    const originalInvoke = apiManager.invokeApi;
+    const response = makeEmptyChannelDialogResult(makeChannel(channelId), 'messages.peerDialogs');
+    response.dialogs = [];
+    let peerDialogsRequestCount = 0;
+    apiManager.invokeApi = (method: string, ...args: any[]) => {
+      if(method !== 'messages.getPeerDialogs') {
+        return originalInvoke.apply(apiManager, [method, ...args]);
+      }
+
+      ++peerDialogsRequestCount;
+      return Promise.resolve(response);
+    };
+
+    client.managers.appChatsManager.saveApiChats([makeChannel(channelId)]);
+
+    try {
+      client.managers.apiUpdatesManager.saveUpdate({
+        _: 'updateNewChannelMessage',
+        message: {
+          _: 'message',
+          id: 1,
+          peer_id: {_: 'peerChannel', channel_id: channelId},
+          date: 3,
+          message: 'First channel post',
+          pFlags: {post: true}
+        }
+      } as any);
+
+      await vi.waitFor(() => expect(peerDialogsRequestCount).toBeGreaterThan(0));
+      await vi.waitFor(() => {
+        expect(client.managers.dialogsStorage.getDialogOnly(peerId)?.top_message).not.toBe(0);
+      });
+
+      const dialog = client.managers.dialogsStorage.getDialogOnly(peerId);
+      expect(dialog).toBeDefined();
+      expect(dialog?.top_message).not.toBe(0);
+      const firstPost = client.managers.appMessagesManager.getMessageByPeer(peerId, dialog.top_message) as Message.message;
+      expect(firstPost?.message).toBe('First channel post');
+    } finally {
+      apiManager.invokeApi = originalInvoke;
+    }
+  });
+
+  test('preserves cached dialog state when replaying a post after an omitted dialog response', async() => {
+    const channelId = 990017;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    const appMessagesManager: any = client.managers.appMessagesManager;
+    const apiManager: any = appMessagesManager.apiManager;
+    const originalInvoke = apiManager.invokeApi;
+    const cachedResponse = makeEmptyChannelDialogResult(makeChannel(channelId), 'messages.peerDialogs');
+    Object.assign(cachedResponse.dialogs[0], {
+      folder_id: 1,
+      read_inbox_max_id: 9,
+      read_outbox_max_id: 8,
+      unread_count: 4,
+      unread_mentions_count: 2,
+      unread_reactions_count: 3,
+      unread_poll_votes_count: 1
+    });
+    cachedResponse.dialogs[0].pFlags = {pinned: true};
+
+    const response = makeEmptyChannelDialogResult(makeChannel(channelId), 'messages.peerDialogs');
+    response.dialogs = [];
+    response.chats = [];
+    let resolvePeerDialogs: ((result: any) => void) | undefined;
+    apiManager.invokeApi = (method: string, ...args: any[]) => {
+      if(method !== 'messages.getPeerDialogs') {
+        return originalInvoke.apply(apiManager, [method, ...args]);
+      }
+
+      return new Promise((resolve) => {
+        resolvePeerDialogs = resolve;
+      });
+    };
+
+    try {
+      client.managers.appChatsManager.saveApiChats([makeChannel(channelId)]);
+      client.managers.dialogsStorage.applyDialogs(cachedResponse);
+      const reload = appMessagesManager.reloadConversation(peerId);
+      await vi.waitFor(() => expect(resolvePeerDialogs).toBeTypeOf('function'));
+
+      client.managers.apiUpdatesManager.saveUpdate({
+        _: 'updateNewChannelMessage',
+        message: {
+          _: 'message',
+          id: 1,
+          peer_id: {_: 'peerChannel', channel_id: channelId},
+          date: 5,
+          message: 'First channel post',
+          pFlags: {post: true}
+        }
+      } as any);
+      expect(appMessagesManager.newUpdatesAfterReloadToHandle[appMessagesManager.getUpdateAfterReloadKey(peerId)]?.size).toBe(1);
+
+      if(!resolvePeerDialogs) {
+        throw new Error('messages.getPeerDialogs was not requested');
+      }
+
+      resolvePeerDialogs(response);
+      await reload;
+
+      const dialog = client.managers.dialogsStorage.getDialogOnly(peerId);
+      expect(dialog).toMatchObject({
+        peerId,
+        folder_id: 1,
+        pFlags: {pinned: true},
+        read_inbox_max_id: expect.any(Number),
+        read_outbox_max_id: expect.any(Number)
+      });
+      expect(dialog?.read_inbox_max_id).toBeGreaterThanOrEqual(9);
+      expect(dialog?.read_outbox_max_id).toBeGreaterThanOrEqual(8);
+      expect(dialog?.unread_count).toBeGreaterThanOrEqual(4);
+      expect(dialog?.unread_mentions_count).toBeGreaterThanOrEqual(2);
+      expect(dialog?.unread_reactions_count).toBeGreaterThanOrEqual(3);
+      expect(dialog?.unread_poll_votes_count).toBeGreaterThanOrEqual(1);
+      expect(dialog?.top_message).not.toBe(0);
+      const firstPost = client.managers.appMessagesManager.getMessageByPeer(peerId, dialog.top_message) as Message.message;
+      expect(firstPost?.message).toBe('First channel post');
+    } finally {
+      apiManager.invokeApi = originalInvoke;
+    }
+  });
+
+  test.each([
+    ['left', 990014, (id: number) => makeChannel(id, {left: true})],
+    ['kicked', 990015, (id: number) => makeChannel(id, {kicked: true})],
+    ['forbidden', 990016, makeForbiddenChannel]
+  ])('does not synthesize a dialog if membership becomes %s during reload', async(_membership, channelId, makeRemovedChannel) => {
+    const testChannelId = channelId as number;
+    const peerId = (testChannelId as ChatId).toPeerId(true);
+    const appChatsManager: any = client.managers.appChatsManager;
+    const appMessagesManager: any = client.managers.appMessagesManager;
+    const apiManager: any = appMessagesManager.apiManager;
+    const originalInvoke = apiManager.invokeApi;
+    const response = makeEmptyChannelDialogResult(makeChannel(testChannelId), 'messages.peerDialogs');
+    response.dialogs = [];
+    response.chats = [];
+    let resolvePeerDialogs: ((result: any) => void) | undefined;
+    apiManager.invokeApi = (method: string, ...args: any[]) => {
+      if(method !== 'messages.getPeerDialogs') {
+        return originalInvoke.apply(apiManager, [method, ...args]);
+      }
+
+      return new Promise((resolve) => {
+        resolvePeerDialogs = resolve;
+      });
+    };
+
+    appChatsManager.saveApiChats([makeChannel(testChannelId)]);
+
+    try {
+      client.managers.apiUpdatesManager.saveUpdate({
+        _: 'updateNewChannelMessage',
+        message: {
+          _: 'message',
+          id: 1,
+          peer_id: {_: 'peerChannel', channel_id: testChannelId},
+          date: 4,
+          message: 'First channel post',
+          pFlags: {post: true}
+        }
+      } as any);
+
+      await vi.waitFor(() => expect(resolvePeerDialogs).toBeTypeOf('function'));
+      expect(appMessagesManager.newUpdatesAfterReloadToHandle[appMessagesManager.getUpdateAfterReloadKey(peerId)]?.size).toBe(1);
+      appChatsManager.saveApiChats([(makeRemovedChannel as (id: number) => any)(testChannelId)]);
+      expect(appChatsManager.isInChat(testChannelId)).toBe(false);
+      const reload = appMessagesManager.reloadConversationsPeers.get(peerId).promise;
+
+      if(!resolvePeerDialogs) {
+        throw new Error('messages.getPeerDialogs was not requested');
+      }
+
+      resolvePeerDialogs(response);
+      await reload;
+
+      expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeUndefined();
+    } finally {
       apiManager.invokeApi = originalInvoke;
     }
   });

@@ -6,6 +6,7 @@ import isCollapsedCommunity from '@appManagers/utils/communities/isCollapsedComm
 import getDialogIndex from '@appManagers/utils/dialogs/getDialogIndex';
 import getDialogIndexKey from '@appManagers/utils/dialogs/getDialogIndexKey';
 import {isDialog, isForumTopic} from '@appManagers/utils/dialogs/isDialog';
+import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
 import ArchiveDialog, {createArchiveDialogState, DisposableArchiveDialogState} from '@components/archiveDialog';
 import {AutonomousDialogListBase, BaseConstructorArgs, LoadDialogsInnerArgs} from '@components/autonomousDialogList/base';
 import {BADGE_TRANSITION_TIME} from '@components/autonomousDialogList/constants';
@@ -815,6 +816,23 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
 
   protected canUpdateDialog(dialog: Dialog): boolean {
     if(dialog.migratedTo !== undefined || !this.testDialogForFilter(dialog)) return false;
+
+    const channel = dialog.peer?._ === 'peerChannel' ?
+      apiManagerProxy.getPeer(dialog.peerId) as Chat :
+      undefined;
+    if(
+      !this.sortedList.has(dialog.peerId) &&
+      dialog.peer?._ === 'peerChannel' &&
+      !getServerMessageId(dialog.top_message) &&
+      !dialog.draft &&
+      // Manager proxies return promises, so check the mirrored membership snapshot synchronously.
+      channel?._ === 'channel' &&
+      !channel.pFlags?.left &&
+      !(channel as any).pFlags?.kicked
+    ) {
+      return true;
+    }
+
     return super.canUpdateDialog(dialog);
   }
 
