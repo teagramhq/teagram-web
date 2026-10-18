@@ -399,6 +399,9 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
         _ignore: this.ensureArchiveDialogHydrated()
       });
 
+      if(isFirstLoad) {
+        await this.reconcileCachedEmptyChannelDialogs();
+      }
       await this.scheduleCommunityProjection();
       this.placeholder?.detach(this.sortedList.itemsLength());
 
@@ -817,6 +820,28 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
   private reconcileWatchedEmptyChannelDialogs() {
     for(const peerId of this.emptyChannelDialogReconcileDisposers.keys()) {
       void this.reconcileEmptyChannelDialog(peerId);
+    }
+  }
+
+  private async reconcileCachedEmptyChannelDialogs() {
+    if(!this.isActive) {
+      return;
+    }
+
+    const dialogs = await this.managers.dialogsStorage.getCachedDialogs(true);
+    if(!this.isActive) {
+      return;
+    }
+
+    for(const dialog of dialogs) {
+      if(
+        dialog.peer?._ === 'peerChannel' &&
+        !getServerMessageId(dialog.top_message) &&
+        !dialog.draft &&
+        !this.sortedList.has(dialog.peerId)
+      ) {
+        this.updateDialog(dialog);
+      }
     }
   }
 

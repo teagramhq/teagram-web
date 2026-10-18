@@ -195,6 +195,19 @@ describe('invited channel dialog rows', () => {
     await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
   });
 
+  it('restores an empty invited channel cached before the dialog list was created', async() => {
+    const peerId = (990020 as ChatId).toPeerId(true);
+    const dialog = createDialog(0);
+    const {list, sortedList} = createList();
+    list.managers.dialogsStorage = {
+      getCachedDialogs: vi.fn().mockResolvedValue([dialog])
+    };
+
+    await (list as any).reconcileCachedEmptyChannelDialogs();
+
+    expect(sortedList.has(peerId)).toBe(true);
+  });
+
   it('keeps a channel with messages below the loaded page out', () => {
     const peerId = (990020 as ChatId).toPeerId(true);
     const {list, sortedList} = createList();
