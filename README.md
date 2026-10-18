@@ -1,6 +1,12 @@
 # Teagram Web
 
-Teagram Web is a web client that supports private builds for the Teagram server. Accounts use a username and password only; phone and QR sign-in are not supported. Username/password sign-in is in progress (MAIN-1541), and web sign-in does not work yet.
+Teagram Web is a web client that supports private builds for the Teagram server. Accounts use a username and password only; phone and QR sign-in are not supported.
+
+### Creating an account
+
+On a private Teagram Web build, start at the sign-in page and choose **Create account**. Enter a username, display name, password, and password confirmation. On an invite-only server, enter the invite secret as well. Choose **Create account** to submit; the account is signed in when setup completes, and the username and password are used for future sign-ins.
+
+Account creation depends on the server's `TG_REGISTRATION` setting. `closed` disables sign-up, `invite` requires an invite secret, and `open` allows sign-up without one. The development server keeps `TG_REGISTRATION` set to `open`.
 
 
 ### Developing
