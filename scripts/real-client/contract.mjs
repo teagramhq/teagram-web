@@ -195,8 +195,8 @@ export function parseFixtureReadiness(text, expected, options = {}) {
   if(requireArtifact) {
     assertEventPins(artifactReady, 'artifact-ready', expected);
   }
-  if(serverReady.endpoint !== 'https://telegramd.test' ||
-      serverReady.wssEndpoint !== 'wss://telegramd.test/apiws' ||
+  if(serverReady.endpoint !== 'https://teagramd.test' ||
+      serverReady.wssEndpoint !== 'wss://teagramd.test/apiws' ||
       serverReady.mode !== 'private' ||
       (requireArtifact && (artifactReady.endpoint !== serverReady.endpoint ||
         artifactReady.wssEndpoint !== serverReady.wssEndpoint ||
@@ -255,7 +255,7 @@ export function readSyntheticCredentials(credentials, runId, count = 2) {
     if(!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() ||
         (directoryInfo.mode & 0o077) !== 0 ||
         (typeof process.getuid === 'function' && directoryInfo.uid !== process.getuid()) ||
-        !basename(dirname(filePath)).startsWith(`telegram-fixture-${runId}.`) ||
+        !basename(dirname(filePath)).startsWith(`teagram-fixture-${runId}.`) ||
         !fileInfo.isFile() || fileInfo.isSymbolicLink() || fileInfo.nlink !== 1 ||
         (typeof process.getuid === 'function' && fileInfo.uid !== process.getuid()) ||
         (fileInfo.mode & 0o777) !== 0o400 || !/^[0-9a-f]{64}\n?$/.test(content)) {
@@ -290,7 +290,7 @@ function assertServerReadyEvidence(ready) {
       evidence?.httpStatus !== 200 || evidence.wssUpgradeStatus !== 101 || evidence.allowedWssObserved !== 1 ||
       evidence.unexpectedAttempts !== 0 || evidence.unexpectedDetectionVerified !== true ||
       evidence.directTCP?.attempted !== 5 || evidence.directTCP.blocked !== 5 ||
-      ready.evidenceClass !== 'production-telegramd' ||
+      ready.evidenceClass !== 'production-teagramd' ||
       !/^[A-Za-z0-9+/]{43}=$/.test(ready.leafSPKI || '') ||
       Buffer.from(ready.leafSPKI, 'base64').byteLength !== 32 ||
       typeof ready.mtprotoPublicKeyPEM !== 'string' ||
