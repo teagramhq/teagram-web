@@ -154,10 +154,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       this.setOnlineStatus(dom.avatarEl.node, online);
     });
 
-    this.listenerSetter.add(rootScope)('chat_update', async(chatId) => {
-      const peerId = chatId.toPeerId(true);
-      this.processDialogForCallStatus(peerId);
-    });
+    this.listenerSetter.add(rootScope)('chat_update', (chatId) => this.handleChatUpdate(chatId));
 
     this.listenerSetter.add(rootScope)('dialog_flush', ({dialog}) => {
       if(!this.isActive || !dialog) {
@@ -299,6 +296,25 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
 
   private get isActive() {
     return this.appDialogsManager.xd === this;
+  }
+
+  public async handleChatUpdate(chatId: ChatId) {
+    const peerId = chatId.toPeerId(true);
+    if(this.isActive && !this.sortedList.has(peerId)) {
+      const channel = apiManagerProxy.getPeer(peerId) as Chat;
+      if(
+        channel?._ === 'channel' &&
+        !channel.pFlags?.left &&
+        !(channel as any).pFlags?.kicked
+      ) {
+        const dialog = await this.managers.appMessagesManager.getDialogOnly(peerId);
+        if(dialog && this.isActive && !this.sortedList.has(peerId)) {
+          this.updateDialog(dialog);
+        }
+      }
+    }
+
+    this.processDialogForCallStatus(peerId);
   }
 
   public getRectFromForPlaceholder() {

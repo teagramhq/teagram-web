@@ -84,6 +84,7 @@ import {
   AutonomousDialogList,
   getCommunityProjectionFolderCountDelta
 } from '@components/autonomousDialogList/dialogs';
+import apiManagerProxy from '@lib/apiManagerProxy';
 import {FilterType} from '@lib/storages/dialogs';
 import DialogsStorage from '@lib/storages/dialogs';
 import '@helpers/peerIdPolyfill';
@@ -131,6 +132,55 @@ describe('Community dialog projection counts', () => {
       ]);
     } finally {
       baseLoad.mockRestore();
+    }
+  });
+
+  test('retries an empty channel row when its peer mirror arrives after the dialog update', async() => {
+    const channelId = 12345 as ChatId;
+    const peerId = channelId.toPeerId(true);
+    const channel = {
+      _: 'channel',
+      id: channelId,
+      pFlags: {megagroup: true}
+    };
+    const dialog = {
+      _: 'dialog',
+      peer: {_: 'peerChannel', channel_id: channelId},
+      peerId,
+      top_message: 0,
+      folder_id: 0,
+      pFlags: {}
+    } as Dialog;
+    const list = Object.create(AutonomousDialogList.prototype) as any;
+    Object.assign(list, {
+      appDialogsManager: {},
+      managers: {
+        appMessagesManager: {
+          getDialogOnly: vi.fn().mockResolvedValue(dialog)
+        }
+      },
+      sortedList: {has: vi.fn().mockReturnValue(false)},
+      updateDialog: vi.fn(),
+      processDialogForCallStatus: vi.fn()
+    });
+    list.appDialogsManager.xd = list;
+    const proxy = apiManagerProxy as any;
+    const originalGetPeer = proxy.getPeer;
+    proxy.getPeer = vi.fn().mockReturnValue(channel);
+
+    try {
+      const handleChatUpdate = list.handleChatUpdate;
+      expect(handleChatUpdate).toBeTypeOf('function');
+      await handleChatUpdate.call(list, channelId);
+
+      expect(list.managers.appMessagesManager.getDialogOnly).toHaveBeenCalledWith(peerId);
+      expect(list.updateDialog).toHaveBeenCalledWith(dialog);
+    } finally {
+      if(originalGetPeer === undefined) {
+        delete proxy.getPeer;
+      } else {
+        proxy.getPeer = originalGetPeer;
+      }
     }
   });
 
