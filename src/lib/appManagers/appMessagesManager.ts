@@ -5824,7 +5824,8 @@ export class AppMessagesManager extends AppManager {
               continue;
             }
 
-            dialogs.push(this.dialogsStorage.generateDialog(peerId));
+            const cachedDialog = this.dialogsStorage.getDialogOnly(peerId);
+            dialogs.push(cachedDialog ? copy(cachedDialog) : this.dialogsStorage.generateDialog(peerId));
           }
 
           const resultToApply = dialogs.length === result.dialogs.length ? result : {...result, dialogs};
