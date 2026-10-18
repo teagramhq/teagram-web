@@ -19,9 +19,9 @@ export default defineConfig({
     url: `http://localhost:${PORT}/`,
     env: {
       TWEB_PREVIEW: '1',
-      MTPROTO_TARGET_MODE: 'private',
-      MTPROTO_PRIVATE_ENDPOINT: 'wss://private.example.test/apiws',
-      MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: 'scripts/fixtures/private-mtproto-public.pem'
+      MTPROTO_TARGET_MODE: process.env.MTPROTO_TARGET_MODE || 'private',
+      MTPROTO_PRIVATE_ENDPOINT: process.env.MTPROTO_PRIVATE_ENDPOINT || 'wss://private.example.test/apiws',
+      MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: process.env.MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE || 'scripts/fixtures/private-mtproto-public.pem'
     },
     reuseExistingServer: false,
     timeout: 120_000

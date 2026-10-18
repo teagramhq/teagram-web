@@ -56,13 +56,91 @@ describe('private username sign-in', () => {
     await expect(authenticatePrivateUsername(USERNAME, invokeApi)).resolves.toEqual({kind: 'authorized', user});
   });
 
-  it('turns sign-up-required into the generic credential failure without a registration RPC', async() => {
+  it('keeps closed registration as a generic credential failure without a registration RPC', async() => {
     const invokeApi = vi.fn()
     .mockResolvedValueOnce(SENT_CODE)
     .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}});
 
     await expect(authenticatePrivateUsername(USERNAME, invokeApi)).resolves.toEqual({kind: 'invalidCredentials'});
     expect(invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
+  });
+
+  it('creates an account and sets its password when registration is open', async() => {
+    const user = {_: 'user', id: 42};
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockResolvedValueOnce({_: 'auth.authorization', user});
+    const updatePasswordSettings = vi.fn().mockResolvedValue(true);
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings
+    })).resolves.toEqual({kind: 'authorized', user});
+
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual([
+      'auth.sendCode',
+      'auth.signIn',
+      'auth.signUp'
+    ]);
+    expect(invokeApi).toHaveBeenNthCalledWith(2, 'auth.signIn', {
+      phone_number: USERNAME,
+      phone_code_hash: 'mock-code-hash',
+      phone_code: ''
+    }, {ignoreErrors: true});
+    expect(invokeApi).toHaveBeenNthCalledWith(3, 'auth.signUp', {
+      phone_number: USERNAME,
+      phone_code_hash: 'mock-code-hash',
+      first_name: 'Alice Example',
+      last_name: ''
+    });
+    expect(updatePasswordSettings).toHaveBeenCalledWith('StrongPassword123');
+  });
+
+  it('sends the invite secret in sign-in phone_code before creating an invited account', async() => {
+    const user = {_: 'user', id: 43};
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockResolvedValueOnce({_: 'auth.authorization', user});
+    const updatePasswordSettings = vi.fn().mockResolvedValue(true);
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'invite',
+      inviteSecret: 'invite-secret',
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings
+    })).resolves.toEqual({kind: 'authorized', user});
+
+    expect(invokeApi).toHaveBeenNthCalledWith(2, 'auth.signIn', {
+      phone_number: USERNAME,
+      phone_code_hash: 'mock-code-hash',
+      phone_code: 'invite-secret'
+    }, {ignoreErrors: true});
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual([
+      'auth.sendCode',
+      'auth.signIn',
+      'auth.signUp'
+    ]);
+  });
+
+  it('does not authorize an account when password setup fails', async() => {
+    const user = {_: 'user', id: 44};
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockResolvedValueOnce({_: 'auth.authorization', user});
+    const updatePasswordSettings = vi.fn().mockRejectedValue({type: 'PASSWORD_TOO_WEAK'});
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Alice Example',
+      password: 'weak',
+      updatePasswordSettings
+    })).resolves.toEqual({kind: 'weakPassword', user});
   });
 
   it.each(['PHONE_NUMBER_INVALID', 'INPUT_REQUEST_INVALID', 'PASSWORD_HASH_INVALID'])(

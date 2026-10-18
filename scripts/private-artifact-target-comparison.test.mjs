@@ -394,8 +394,15 @@ describe('private artifact target comparison', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
     const packageJson = readFileSync(join(repositoryRoot, 'package.json'), 'utf8');
 
-    expect(packageJson).toContain('"test:private-auth": "playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts"');
+    expect(packageJson).toContain('"test:private-auth": "playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameRegistration.spec.ts"');
     expect(workflow).toContain('pnpm exec playwright install --with-deps chromium');
     expect(workflow).toContain('pnpm run test:private-auth');
+
+    const smokeStep = workflow.split('      - name: Run private username auth browser smoke\n')[1]
+    ?.split('\n      - name: ')[0];
+    expect(smokeStep).toContain('MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}');
+    expect(smokeStep).toContain('MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}');
+    expect(smokeStep).toContain('MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}');
+    expect(smokeStep).toContain("TWEB_REGISTRATION_E2E: '1'");
   });
 });

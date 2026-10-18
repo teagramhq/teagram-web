@@ -3,6 +3,8 @@ import {render} from 'solid-js/web';
 
 const mocks = vi.hoisted(() => ({
   invokeApi: vi.fn(),
+  getAppConfig: vi.fn(),
+  updatePasswordSettings: vi.fn(),
   setUser: vi.fn(),
   pushToState: vi.fn(),
   navigate: vi.fn(),
@@ -12,7 +14,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/pages/authFlow', () => ({
   useAuthFlow: () => ({
     managers: {
-      apiManager: {invokeApi: mocks.invokeApi, setUser: mocks.setUser},
+      apiManager: {invokeApi: mocks.invokeApi, getAppConfig: mocks.getAppConfig, setUser: mocks.setUser},
+      passwordManager: {updateSettings: mocks.updatePasswordSettings},
       appStateManager: {pushToState: mocks.pushToState}
     },
     navigate: mocks.navigate,
@@ -37,6 +40,36 @@ vi.mock('@components/mediaHeader', () => {
 });
 
 vi.mock('@components/languageChangeButton', () => ({default: (): null => null}));
+vi.mock('@lib/langPack', async(importOriginal) => {
+  const actual = await importOriginal<typeof import('@lib/langPack')>();
+  return {
+    ...actual,
+    i18n: (key: string) => {
+    const copy: Record<string, string> = {
+      'Teagram.Registration.CreateAccount': 'Create account',
+      'Teagram.Registration.SignIn': 'Sign in',
+      'Teagram.Registration.Subtitle': 'Create your account',
+      'Teagram.Registration.DisplayName': 'Display name',
+      'Teagram.Registration.Password': 'Password',
+      'Teagram.Registration.ConfirmPassword': 'Confirm password',
+      'Teagram.Registration.InviteSecret': 'Invite secret',
+      'Teagram.Registration.PasswordMismatch': 'Those passwords don\'t match.',
+      'Teagram.Registration.UsernameTaken': 'That username is taken.',
+      'Teagram.Registration.InvalidUsername': 'Choose a valid username.',
+      'Teagram.Registration.InvalidDisplayName': 'Enter a display name.',
+      'Teagram.Registration.InvalidInvite': 'That invite secret is invalid.',
+      'Teagram.Registration.Closed': 'Account creation is closed on this server.',
+      'Teagram.Registration.WeakPassword': 'Choose a stronger password.',
+      'Teagram.Registration.Network': 'Unable to create your account. Try again.',
+      'Teagram.Registration.PasswordNetwork': 'Unable to set your password. Try again.',
+      'Teagram.Registration.ConfigNetwork': 'Unable to check whether account creation is available.'
+    };
+    const span = document.createElement('span');
+    span.textContent = copy[key] || key;
+      return span;
+    }
+  };
+});
 vi.mock('@environment/touchSupport', () => ({default: true}));
 vi.mock('@helpers/dom/focusWhenConnected', () => ({default: vi.fn(() => () => {})}));
 vi.mock('@lib/accounts/getCurrentAccount', () => ({getCurrentAccount: () => 1}));
@@ -67,6 +100,8 @@ describe('private username sign-in card', () => {
 
   beforeEach(() => {
     mocks.invokeApi.mockReset();
+    mocks.getAppConfig.mockReset().mockResolvedValue({registration_mode: 'closed'});
+    mocks.updatePasswordSettings.mockReset();
     mocks.setUser.mockReset();
     mocks.pushToState.mockReset();
     mocks.navigate.mockReset();
@@ -173,5 +208,92 @@ describe('private username sign-in card', () => {
     expect(mocks.navigate).not.toHaveBeenCalled();
     expect(mocks.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
     expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('shows a create-account path when the server allows open registration', async() => {
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'open'});
+    mount();
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Create account')).toBe(true));
+
+    expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Create account')).toBe(true);
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+
+    expect(document.querySelector('input[aria-label="Display name"]')).not.toBeNull();
+    expect(document.querySelector('input[aria-label="Password"]')).not.toBeNull();
+    expect(document.querySelector('input[aria-label="Confirm password"]')).not.toBeNull();
+    expect(document.querySelector('input[aria-label="Invite secret"]')).toBeNull();
+  });
+
+  it('asks for an invite secret in invite registration mode', async() => {
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'invite'});
+    mount();
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Create account')).toBe(true));
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+
+    expect(document.querySelector('input[aria-label="Invite secret"]')).not.toBeNull();
+  });
+
+  it('sets the password before opening the new account', async() => {
+    const user = {_: 'user', id: 42};
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'open'});
+    mocks.invokeApi
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockResolvedValueOnce({_: 'auth.authorization', user});
+    mocks.updatePasswordSettings.mockResolvedValue(true);
+    mount();
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Create account')).toBe(true));
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+
+    const fill = (label: string, value: string) => {
+      const input = document.querySelector(`input[aria-label="${label}"]`) as HTMLInputElement;
+      input.value = value;
+      input.dispatchEvent(new Event('input', {bubbles: true}));
+    };
+    fill('Username', USERNAME);
+    fill('Display name', 'Alice Example');
+    fill('Password', 'StrongPassword123');
+    fill('Confirm password', 'StrongPassword123');
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
+
+    expect(mocks.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn', 'auth.signUp']);
+    expect(mocks.updatePasswordSettings).toHaveBeenCalledWith({newPassword: 'StrongPassword123'});
+    expect(mocks.setUser).toHaveBeenCalledWith(user);
+  });
+
+  it('keeps a provisional account in the registration form when password setup fails and lets the user retry', async() => {
+    const user = {_: 'user', id: 43};
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'open'});
+    mocks.invokeApi
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockResolvedValueOnce({_: 'auth.authorization', user});
+    mocks.updatePasswordSettings.mockRejectedValueOnce({type: 'NEW_PASSWORD_BAD'}).mockResolvedValueOnce(true);
+    mount();
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Create account')).toBe(true));
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+
+    const fill = (label: string, value: string) => {
+      const input = document.querySelector(`input[aria-label="${label}"]`) as HTMLInputElement;
+      input.value = value;
+      input.dispatchEvent(new Event('input', {bubbles: true}));
+    };
+    fill('Username', USERNAME);
+    fill('Display name', 'Alice Example');
+    fill('Password', 'StrongPassword123');
+    fill('Confirm password', 'StrongPassword123');
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toBe('Choose a stronger password.'));
+
+    expect(mocks.setUser).not.toHaveBeenCalled();
+    expect(mocks.toIm).not.toHaveBeenCalled();
+    expect(document.querySelector('input[aria-label="Password"]')).not.toBeNull();
+
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
+    expect(mocks.invokeApi).toHaveBeenCalledTimes(3);
+    expect(mocks.updatePasswordSettings).toHaveBeenCalledTimes(2);
+    expect(mocks.setUser).toHaveBeenCalledWith(user);
   });
 });
