@@ -421,6 +421,31 @@ describe('layer 228 migration', () => {
     expect(mirrorChat).toHaveBeenCalledWith(community);
   });
 
+  test('notifies dialog lists when new channel metadata arrives', () => {
+    const chat: Chat.channel = {
+      _: 'channel',
+      id: 102,
+      access_hash: '42',
+      title: 'Invited channel',
+      date: 0,
+      photo: {_: 'chatPhotoEmpty'},
+      pFlags: {megagroup: true}
+    };
+    const chats = {};
+    const dispatchEvent = vi.fn();
+
+    AppChatsManager.prototype.saveApiChat.call({
+      chats,
+      mirrorChat: vi.fn(),
+      appUsersManager: {setUsernameToCache: vi.fn()},
+      appCommunitiesManager: {handlePeerLinkedCommunityUpdate: vi.fn()},
+      rootScope: {dispatchEvent},
+      peersStorage: {isPeerNeeded: () => false}
+    } as unknown as AppChatsManager, chat);
+
+    expect(dispatchEvent).toHaveBeenCalledWith('chat_update', chat.id);
+  });
+
   test('uses the shared chat cache and channel input helpers for communities', async() => {
     const community: Chat.community = {
       _: 'community',

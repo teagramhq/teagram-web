@@ -327,6 +327,10 @@ export class AppChatsManager extends AppManager {
       this.rootScope.dispatchEvent('chat_update', chat.id);
     }
 
+    if(isNewChat && chat._ === 'channel' && !chat.pFlags.left && !(chat as any).pFlags.kicked) {
+      this.rootScope.dispatchEvent('chat_update', chat.id);
+    }
+
     const communityId = chat._ === 'channel' ? chat.linked_community_id?.toChatId() : undefined;
     if(String(previousCommunityId || '') !== String(communityId || '')) {
       this.appCommunitiesManager.handlePeerLinkedCommunityUpdate({
