@@ -2,7 +2,7 @@
 
 This is the deployment-only Compose project for the Teagram Web K static
 artifact. It is intentionally separate from the development Compose file at
-the repository root and from `/opt/telegram-server`. Its explicit
+the repository root and from `/opt/teagram`. Its explicit
 `teagram-web-edge` project, `teagram-web-edge-net` network, and
 `teagram-web-edge-nginx-cache` volume names keep a root-directory Compose
 invocation from selecting this stack by basename. The web service also joins
@@ -106,7 +106,7 @@ Node runtime. Keep the artifact's source commit and digest from the successful
 Private MTProto Artifact Publication run together when staging it.
 
 Resource isolation is provided by the target LXC's existing 2 vCPU and 4 GiB
-allocation, leaving the box's CPU and memory for Postgres and `telegramd`; the
+allocation, leaving the box's CPU and memory for Postgres and `teagramd`; the
 nested Docker cgroup exposes no controllers, so this Compose service
 deliberately requests no per-container memory, CPU, or PID limit. Nginx logs go
 to the container log with Docker's 10 MiB, three-file rotation.
