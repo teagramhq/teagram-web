@@ -3100,6 +3100,11 @@ describe('real client scenario contract', () => {
     expect(parseRequiredScenarios('channel,group,sign-in,message')).toEqual(['sign-in', 'message', 'group', 'channel']);
   });
 
+  it('runs the channel scenario only when selected', () => {
+    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'message', 'group']})).toBe(false);
+    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'message', 'group', 'channel']})).toBe(true);
+  });
+
   it('requires the selected optional channel scenario to pass', () => {
     const scenarios = ['sign-in', 'message', 'group', 'channel'];
     expect(() => assertAllScenariosPassed([

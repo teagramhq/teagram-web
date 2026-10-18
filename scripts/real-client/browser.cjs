@@ -3655,6 +3655,10 @@ async function runChannelScenario(alice, bob, runtimeConfig, capturedScreenshots
   await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-after-reload', capturedScreenshots);
 }
 
+function shouldRunChannelScenario(runtimeConfig) {
+  return runtimeConfig.scenarios.includes('channel');
+}
+
 async function main(dependencies = {}) {
   let report;
   let browser;
@@ -3857,9 +3861,11 @@ async function main(dependencies = {}) {
     await openBobGroupMembers(bob.page, bobGroupHeader, groupName, selectedBobPeerId, runtime.screenshotDirectory, capturedScreenshots);
     report.push({name: 'group', status: 'passed'});
 
-    currentScenario = 'channel';
-    await runChannelScenario(alice, bob, runtime, capturedScreenshots);
-    report.push({name: 'channel', status: 'passed'});
+    if(shouldRunChannelScenario(runtime)) {
+      currentScenario = 'channel';
+      await runChannelScenario(alice, bob, runtime, capturedScreenshots);
+      report.push({name: 'channel', status: 'passed'});
+    }
 
     await Promise.all(observers.map((observer) => observer.waitForSetup()));
     await registry.waitForSetup();
@@ -4019,7 +4025,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, getClientErrorDiagnostics, readSafeRpcArguments, createNetworkObserver, createPageErrorAssetResolver, createWorkerDiscovery, emitAuthProgressReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword, waitForUnreadCount};
+module.exports = {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, getClientErrorDiagnostics, readSafeRpcArguments, createNetworkObserver, createPageErrorAssetResolver, createWorkerDiscovery, emitAuthProgressReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, shouldRunChannelScenario, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
