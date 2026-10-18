@@ -41,7 +41,10 @@ const PAGE_CDP_METHODS = Object.freeze([
   'Target.getTargetInfo',
   'Target.sendMessageToTarget',
   'Target.detachFromTarget',
-  'Runtime.enable'
+  'Runtime.enable',
+  'Debugger.enable',
+  'Debugger.setPauseOnExceptions',
+  'Debugger.resume'
 ]);
 const WORKER_CDP_METHODS = Object.freeze([
   'Network.enable',

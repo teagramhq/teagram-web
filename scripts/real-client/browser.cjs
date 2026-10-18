@@ -740,6 +740,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
   const maxPendingReleases = observation.LIMITS.attachedTargets;
   let nextCommandId = 0;
   let cdp;
+  const pageScriptUrls = new Map();
   let pageTargetId;
   let targetRegistry;
   let send;
@@ -1067,6 +1068,12 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
       release: () => { released = true; }
     });
     if(typeof onPageException === 'function') {
+      cdp.on('Debugger.scriptParsed', (event) => {
+        if(typeof event?.scriptId === 'string' && event.scriptId.length <= 128 &&
+            typeof event.url === 'string' && event.url && event.url.length <= 8192 && pageScriptUrls.size < 4096) {
+          pageScriptUrls.set(event.scriptId, event.url);
+        }
+      });
       cdp.on('Runtime.exceptionThrown', (event) => {
         try {
           onPageException(event?.exceptionDetails);
@@ -1074,7 +1081,25 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
           // Page exception diagnostics must not interfere with browser observation.
         }
       });
+      cdp.on('Debugger.paused', (event) => {
+        try {
+          if(event?.reason === 'exception' || event?.reason === 'promiseRejection') {
+            const scriptUrls = {};
+            for(const frame of (Array.isArray(event.callFrames) ? event.callFrames : []).slice(0, PAGE_ERROR_DIAGNOSTIC_LIMITS.count)) {
+              const scriptId = frame?.location?.scriptId;
+              const url = typeof frame?.url === 'string' && frame.url ? frame.url : pageScriptUrls.get(scriptId);
+              if(typeof scriptId === 'string' && typeof url === 'string' && url) scriptUrls[scriptId] = url;
+            }
+            onPageException({...event, scriptUrls});
+          }
+        } catch {
+          // Page exception diagnostics must not interfere with browser observation.
+        }
+        send('Debugger.resume').catch(() => {});
+      });
       await send('Runtime.enable');
+      await send('Debugger.enable');
+      await send('Debugger.setPauseOnExceptions', {state: 'uncaught'});
     }
     cdp.on('Network.requestWillBeSent', (event) => {
       if(observerClosed()) return;
@@ -2512,22 +2537,36 @@ function pageErrorRedactValues() {
 
 function createPageErrorExceptionEvent(exceptionDetails, pageUrl, redactValues = []) {
   if(!exceptionDetails || typeof exceptionDetails !== 'object' || Array.isArray(exceptionDetails)) return;
-  const rawFrames = Array.isArray(exceptionDetails.stackTrace?.callFrames)
-    ? exceptionDetails.stackTrace.callFrames.slice(0, PAGE_ERROR_DIAGNOSTIC_LIMITS.count)
+  const exceptionFrames = Array.isArray(exceptionDetails.callFrames)
+    ? exceptionDetails.callFrames
+    : exceptionDetails.stackTrace?.callFrames;
+  const rawFrames = Array.isArray(exceptionFrames)
+    ? exceptionFrames.slice(0, PAGE_ERROR_DIAGNOSTIC_LIMITS.count)
     : [];
-  const frames = rawFrames.filter((frame) => frame && typeof frame === 'object' && typeof frame.url === 'string' && frame.url)
-  .map((frame) => ({
-    url: sanitizePageErrorDiagnosticText(frame.url, PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength, redactValues),
-    functionName: sanitizePageErrorDiagnosticText(frame.functionName || '', 128, redactValues),
-    lineNumber: Number.isSafeInteger(frame.lineNumber) && frame.lineNumber >= 0 ? frame.lineNumber + 1 : 0,
-    columnNumber: Number.isSafeInteger(frame.columnNumber) && frame.columnNumber >= 0 ? frame.columnNumber + 1 : 0
-  }));
+  const frames = rawFrames.map((frame) => {
+    if(!frame || typeof frame !== 'object') return;
+    const scriptId = frame.location?.scriptId;
+    const mappedUrl = typeof scriptId === 'string' ? exceptionDetails.scriptUrls?.[scriptId] : undefined;
+    const url = typeof frame.url === 'string' && frame.url ? frame.url : mappedUrl;
+    if(typeof url !== 'string' || !url) return;
+    return {
+      url: sanitizePageErrorDiagnosticText(url, PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength, redactValues),
+      functionName: sanitizePageErrorDiagnosticText(frame.functionName || '', 128, redactValues),
+      lineNumber: Number.isSafeInteger(frame.lineNumber) && frame.lineNumber >= 0
+        ? frame.lineNumber + 1
+        : Number.isSafeInteger(frame.location?.lineNumber) && frame.location.lineNumber >= 0 ? frame.location.lineNumber + 1 : 0,
+      columnNumber: Number.isSafeInteger(frame.columnNumber) && frame.columnNumber >= 0
+        ? frame.columnNumber + 1
+        : Number.isSafeInteger(frame.location?.columnNumber) && frame.location.columnNumber >= 0 ? frame.location.columnNumber + 1 : 0
+    };
+  }).filter(Boolean);
   const firstFrame = frames[0];
-  const exceptionDescription = typeof exceptionDetails.exception?.description === 'string'
-    ? exceptionDetails.exception.description.split('\n', 1)[0]
+  const exception = exceptionDetails.exception || exceptionDetails.data;
+  const exceptionDescription = typeof exception?.description === 'string'
+    ? exception.description.split('\n', 1)[0]
     : '';
   const message = sanitizePageErrorDiagnosticText(exceptionDescription || exceptionDetails.text || '', PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength, redactValues);
-  const fallbackUrl = typeof exceptionDetails.url === 'string' ? exceptionDetails.url : '';
+  const fallbackUrl = typeof exceptionDetails.url === 'string' ? exceptionDetails.url : firstFrame?.url || '';
   const filename = firstFrame?.url || sanitizePageErrorDiagnosticText(fallbackUrl, PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength, redactValues);
   const lineNumber = firstFrame?.lineNumber || (Number.isSafeInteger(exceptionDetails.lineNumber) && exceptionDetails.lineNumber >= 0 ? exceptionDetails.lineNumber + 1 : 0);
   const columnNumber = firstFrame?.columnNumber || (Number.isSafeInteger(exceptionDetails.columnNumber) && exceptionDetails.columnNumber >= 0 ? exceptionDetails.columnNumber + 1 : 0);

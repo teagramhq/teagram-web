@@ -1602,7 +1602,7 @@ describe('confined runner shared-worker observation contract', () => {
 
   it('rejects every CDP method outside the accepted scope, including nested sends', () => {
     const forbidden = ['Runtime.evaluate', 'Runtime.callFunctionOn', 'Runtime.getProperties', 'Runtime.addBinding',
-      'Debugger.enable', 'Debugger.setBreakpoint', 'Fetch.enable', 'Network.setBlockedFrequencies',
+      'Debugger.setBreakpoint', 'Fetch.enable', 'Network.setBlockedFrequencies',
       'Page.addScriptToEvaluateOnNewDocument', 'Page.setBypassCSP', 'Page.captureScreenshot',
       'Target.createTarget', 'Target.exposeFunction', 'Network.setRequestInterception'];
 
@@ -1613,10 +1613,15 @@ describe('confined runner shared-worker observation contract', () => {
     }
 
     expect(observation.BROWSER_CDP_METHODS).toEqual(['Target.setDiscoverTargets', 'Target.attachToTarget', 'Target.detachFromTarget', 'Target.sendMessageToTarget']);
-    expect(observation.PAGE_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.sendMessageToTarget', 'Target.detachFromTarget', 'Runtime.enable']);
+    expect(observation.PAGE_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.sendMessageToTarget', 'Target.detachFromTarget', 'Runtime.enable', 'Debugger.enable', 'Debugger.setPauseOnExceptions', 'Debugger.resume']);
     expect(observation.WORKER_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable', 'Runtime.runIfWaitingForDebugger']);
     expect(observation.allowCdpMethod('page', 'Target.getTargetInfo')).toBe(true);
     expect(observation.allowCdpMethod('page', 'Runtime.enable')).toBe(true);
+    expect(observation.allowCdpMethod('page', 'Debugger.enable')).toBe(true);
+    expect(observation.allowCdpMethod('page', 'Debugger.setPauseOnExceptions')).toBe(true);
+    expect(observation.allowCdpMethod('page', 'Debugger.resume')).toBe(true);
+    expect(observation.allowCdpMethod('browser', 'Debugger.enable')).toBe(false);
+    expect(observation.allowCdpMethod('worker', 'Debugger.enable')).toBe(false);
     expect(observation.allowCdpMethod('page', 'Target.setAutoAttach')).toBe(true);
     expect(observation.allowCdpMethod('browser', 'Target.setDiscoverTargets')).toBe(true);
     expect(observation.allowCdpMethod('worker', 'Runtime.enable')).toBe(true);
@@ -2576,6 +2581,29 @@ describe('discovery shared-worker network accounting', () => {
       filename: `${APP_ORIGIN}/index-XYZ.js`,
       lineNumber: 91,
       columnNumber: 7,
+      pageUrl: `${APP_ORIGIN}/`
+    });
+    expect(JSON.stringify(event)).not.toContain(HOSTILE.token);
+  });
+
+  it('normalizes debugger pause frames for uncaught object rejections', () => {
+    const event = createPageErrorExceptionEvent({
+      reason: 'promiseRejection',
+      data: {type: 'object', description: 'Object'},
+      callFrames: [{
+        functionName: 'searchContacts',
+        url: '',
+        location: {scriptId: '7', lineNumber: 41, columnNumber: 8}
+      }],
+      scriptUrls: {'7': `${APP_ORIGIN}/appSelectPeers-XYZ.js?token=${HOSTILE.token}`}
+    }, `${APP_ORIGIN}/?token=${HOSTILE.token}`, [HOSTILE.token]);
+
+    expect(event).toEqual({
+      message: 'Object',
+      stack: `Object\n    at searchContacts (${APP_ORIGIN}/appSelectPeers-XYZ.js:42:9)`,
+      filename: `${APP_ORIGIN}/appSelectPeers-XYZ.js`,
+      lineNumber: 42,
+      columnNumber: 9,
       pageUrl: `${APP_ORIGIN}/`
     });
     expect(JSON.stringify(event)).not.toContain(HOSTILE.token);
