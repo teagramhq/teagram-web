@@ -37,6 +37,8 @@ const PAGE_CDP_METHODS = Object.freeze([
   'Network.enable',
   'Audits.enable',
   'Log.enable',
+  'Runtime.enable',
+  'Runtime.callFunctionOn',
   'Target.setAutoAttach',
   'Target.getTargetInfo',
   'Target.sendMessageToTarget',
@@ -47,6 +49,7 @@ const WORKER_CDP_METHODS = Object.freeze([
   'Audits.enable',
   'Log.enable',
   'Runtime.enable',
+  'Runtime.callFunctionOn',
   'Runtime.runIfWaitingForDebugger'
 ]);
 
@@ -462,12 +465,13 @@ function createContextObserver(name, options = {}) {
 
   function noteAttached(targetId = null) {
     if(!countEvent()) return false;
+    const record = targetId ? targets.get(targetId) : null;
+    if(record?.attached) return true;
     if(state.attachedTargets >= LIMITS.attachedTargets) {
       recordOverflow();
       return false;
     }
     state.attachedTargets++;
-    const record = targetId ? targets.get(targetId) : null;
     if(record) record.attached = true;
     return true;
   }
@@ -514,6 +518,8 @@ function createContextObserver(name, options = {}) {
   }
 
   function noteWorkerEvent(targetId, method, params, sessionId = targetId) {
+    // Console payloads use a separate bounded reader for synthetic API error diagnostics.
+    if(method === 'Runtime.consoleAPICalled') return;
     if(!countEvent()) return;
     if(method === 'Network.webSocketCreated' || method === 'Network.webSocketHandshakeResponseReceived') {
       noteWebSocket101Event(sessionId, method, params, targetId);
