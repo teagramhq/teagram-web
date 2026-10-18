@@ -2,6 +2,7 @@ import appDialogsManager from '@lib/appDialogsManager';
 import {SavedDialog} from '@appManagers/appMessagesManager';
 import {isSavedDialog} from '@appManagers/utils/dialogs/isDialog';
 import rootScope from '@lib/rootScope';
+import {FilterType} from '@lib/storages/dialogs';
 import {AutonomousDialogListBase, BaseConstructorArgs} from '@components/autonomousDialogList/base';
 
 
@@ -49,6 +50,10 @@ export class AutonomousSavedDialogList extends AutonomousDialogListBase<SavedDia
 
   protected getFilterId() {
     return rootScope.myId;
+  }
+
+  protected getFilterType() {
+    return FilterType.Saved;
   }
 
   public getDialogKey(dialog: SavedDialog) {

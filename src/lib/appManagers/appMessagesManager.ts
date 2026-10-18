@@ -4685,7 +4685,7 @@ export class AppMessagesManager extends AppManager {
     let offsetIndex = 0;
     query ||= undefined;
 
-    let offsetDate = this.dialogsStorage.getOffsetDate(folderId);
+    let offsetDate = this.dialogsStorage.getOffsetDate(folderId, filterType);
     if(offsetDate) {
       offsetIndex = offsetDate * 0x10000;
       offsetDate += this.timeManager.getServerTimeOffset();
@@ -4694,7 +4694,7 @@ export class AppMessagesManager extends AppManager {
     const useLimit = 100;
     const middleware = this.middleware.get();
     const isSearch = !!query;
-    const peerId = this.dialogsStorage.isVirtualFilter(folderId) ? folderId : undefined;
+    const peerId = this.dialogsStorage.isVirtualFilter(folderId, filterType) ? folderId : undefined;
     const cutoffGeneration = filterType === FilterType.Saved ?
       undefined :
       this.getChannelAvailableMinIdGeneration();
@@ -4735,7 +4735,7 @@ export class AppMessagesManager extends AppManager {
         folderId !== GLOBAL_FOLDER_ID;
       if(shouldResetPinnedOrder && folderId !== FOLDER_ID_ALL) {
         log('resetting pinned order', folderId);
-        this.dialogsStorage.resetPinnedOrder(folderId);
+        this.dialogsStorage.resetPinnedOrder(folderId, filterType);
       }
 
       if(!peerId && !offsetDate) {
@@ -4761,7 +4761,7 @@ export class AppMessagesManager extends AppManager {
           result.dialogs,
           shouldResetPinnedOrder && folderId === FOLDER_ID_ALL ? (order) => {
             log('seeding pinned order', folderId, order);
-            this.dialogsStorage.handleDialogsPinned(folderId, order);
+            this.dialogsStorage.handleDialogsPinned(folderId, order, filterType);
             this.appCommunitiesManager.handlePinnedDialogsOrder(folderId);
           } : undefined
         );
@@ -4857,7 +4857,7 @@ export class AppMessagesManager extends AppManager {
         ) : rawCount;
 
       // exclude empty draft dialogs
-      const folderDialogs = this.dialogsStorage.getFolderDialogs(folderId, false);
+      const folderDialogs = this.dialogsStorage.getFolderDialogs(folderId, false, filterType);
       let dialogsLength = 0;
       if(!isSearch) for(let i = 0, length = folderDialogs.length; i < length; ++i) {
         const dialog = folderDialogs[i];
@@ -4884,7 +4884,7 @@ export class AppMessagesManager extends AppManager {
       }
 
       if(isEnd && !isSearch) {
-        this.dialogsStorage.setDialogsLoaded(folderId, true);
+        this.dialogsStorage.setDialogsLoaded(folderId, true, filterType);
       }
 
       if(hasPrepend) {
@@ -4893,7 +4893,7 @@ export class AppMessagesManager extends AppManager {
         this.rootScope.dispatchEvent('dialogs_multiupdate', new Map());
       }
 
-      log('end', {isEnd, hasPrepend, offsetDate: this.dialogsStorage.getOffsetDate(folderId)});
+      log('end', {isEnd, hasPrepend, offsetDate: this.dialogsStorage.getOffsetDate(folderId, filterType)});
 
       const dialogs = items;
       const slicedDialogs = limit === useLimit ? dialogs : dialogs.slice(0, limit);
