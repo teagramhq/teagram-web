@@ -9,6 +9,12 @@ invocation from selecting this stack by basename. The web service also joins
 the existing `telegram-web-edge-net` network until MAIN-1980 removes that
 compatibility attachment.
 
+The public browser URL is `https://web.teagram.io`. The tailnet URL
+`https://teagram.tailaa4918.ts.net/` remains available and serves the same
+artifact; its MTProto WebSocket endpoint is `wss://web.teagram.io/apiws`.
+Cloudflare exposes `/` and `/apiws` on the public hostname while `/admin`
+continues to return 404.
+
 The target checkout is `/opt/telegram-web`. Run the commands below from this
 directory:
 
@@ -125,5 +131,5 @@ MAIN-1980.
 Each deployment records a private `rollback.sh` in the printed backup
 directory and invokes it automatically on failure. To restore manually, run
 `bash <printed-backup-directory>/rollback.sh`. Verify success with `docker compose ps`,
-`curl -fsS http://127.0.0.1:8080/healthz`, and a tailnet browser loading the
-SPA through the existing HTTPS Serve route.
+`curl -fsS http://127.0.0.1:8080/healthz`, and a browser loading the SPA at
+`https://web.teagram.io`. The tailnet URL remains available as well.

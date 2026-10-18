@@ -107,7 +107,7 @@ describe('deployment artifact verification', () => {
       rootDirectory: repositoryRoot
     });
 
-    expect(result.target.endpoint).toBe('wss://teagram.tailaa4918.ts.net/apiws');
+    expect(result.target.endpoint).toBe('wss://web.teagram.io/apiws');
     expect(result.target.fingerprint).toBe('fbb62871f07fae2a');
     expect(result.manifest.sourceCommit).toBe(expectedCommit);
   });

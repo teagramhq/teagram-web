@@ -301,7 +301,7 @@ jq -n \
   --arg sourceCommit "$SHA" \
   --arg archiveSha256 "$ARCHIVE_SHA256" \
   --arg contentDigest "$CONTENT_DIGEST" \
-  --arg url "https://teagram.tailaa4918.ts.net/?v=$SHA" \
+  --arg url "https://web.teagram.io/?v=$SHA" \
   '{sourceCommit:$sourceCommit,archiveSha256:$archiveSha256,contentDigest:$contentDigest,url:$url}' \
   >"$RELEASE_DIR/release-record.json.tmp"
 install -o root -g root -m 0444 "$RELEASE_DIR/release-record.json.tmp" "$RELEASE_DIR/release-record.json"
