@@ -1,10 +1,10 @@
 # Real client fixture scenarios
 
-`pnpm run test:real-client` consumes a completed `server-ready` and `artifact-ready` pair from one foreground real-server fixture run. It checks the immutable harness, server and web pins, the fixture's protected synthetic credentials, isolation and audit evidence before driving the production UI. It requires all three scenarios: `sign-in,message,group`.
+`pnpm run test:real-client` consumes a completed `server-ready` and `artifact-ready` pair from one foreground real-server fixture run. It checks the immutable harness, server and web pins, the fixture's protected synthetic credentials, isolation and audit evidence before driving the production UI. It requires the baseline scenarios `sign-in,message,group`; the optional `channel` scenario runs after them when selected.
 
-The accepted positive inputs are harness `5f294c39abb32fc8ae15a4f7ccb085974098b320`, server `47daaaea5c71b859d9865c03cabb50da5a1a013b` and web artifact source `c88211e3985942343bf40dcbbcb8e8f5b4b7d364`. The scenario runner revision is recorded separately from the artifact source revision. Each run also has a fresh run ID, RSA public key and endpoint identity. Do not reuse readiness or artifacts from another run.
+The accepted positive inputs are teagram-server harness and server `465e6b246c636871ad3067c30b76a35e82081d80`, plus web artifact source `c88211e3985942343bf40dcbbcb8e8f5b4b7d364`. The scenario runner revision is recorded separately from the artifact source revision. Each run also has a fresh run ID, RSA public key and endpoint identity. Do not reuse readiness or artifacts from another run.
 
-The native arm64 fixture successor was accepted from server PR #499, merged as `b61fbe1a53348edd0039885fb4a4659e0dc455c0`. The executable harness pin remains the reviewed PR head `5f294c39abb32fc8ae15a4f7ccb085974098b320`; do not substitute the squash merge or moving main. The server-under-test and historical negative pair remain unchanged.
+The native arm64 fixture successor was accepted from server PR #499, merged as `b61fbe1a53348edd0039885fb4a4659e0dc455c0`. The compatible executable harness and server-under-test pin for this runner is teagram-server main `465e6b246c636871ad3067c30b76a35e82081d80`; use this exact commit for both roles because the runner requires its `manifestArtifactDigest` identity. Do not substitute a moving main revision.
 
 ## Run the fixture
 
@@ -16,10 +16,10 @@ RUN_ID="$(openssl rand -hex 16)"
 READINESS_FILE="$(mktemp /dev/shm/real-client-readiness.XXXXXX)"
 chmod 600 "$READINESS_FILE"
 printf 'READINESS_FILE=%s\n' "$READINESS_FILE"
-test "$(git rev-parse HEAD)" = 5f294c39abb32fc8ae15a4f7ccb085974098b320
+test "$(git rev-parse HEAD)" = 465e6b246c636871ad3067c30b76a35e82081d80
 test -z "$(git status --porcelain --untracked-files=all)"
 bash test/e2e/real_server_fixture/run.sh \
-  --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
+  --server-revision 465e6b246c636871ad3067c30b76a35e82081d80 \
   --web-revision c88211e3985942343bf40dcbbcb8e8f5b4b7d364 \
   --run-id "$RUN_ID" | tee "$READINESS_FILE"
 ```
@@ -63,14 +63,16 @@ Run from the checkout containing `test:real-client`, using the readiness file an
 ```sh
 corepack pnpm run test:real-client -- \
   --readiness-file "$READINESS_FILE" \
-  --harness-revision 5f294c39abb32fc8ae15a4f7ccb085974098b320 \
-  --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
+  --harness-revision 465e6b246c636871ad3067c30b76a35e82081d80 \
+  --server-revision 465e6b246c636871ad3067c30b76a35e82081d80 \
   --web-revision c88211e3985942343bf40dcbbcb8e8f5b4b7d364 \
   --run-id "$RUN_ID" \
-  --scenarios sign-in,message,group
+  --scenarios sign-in,message,group,channel
 ```
 
-The browser uses two new independent contexts and the actual username/password flow. It sends `browser-ci-hello` to the other account, creates a basic group through the UI with that account, then checks the received group message and member list. It captures each state inside the fixture browser's temporary directory, removes those screenshots and the runner on exit, and emits only scenario, fixed password-stage and network summaries. It does not import storage state, use test-only authentication, or export credentials, traces or captures.
+The browser uses two new independent contexts and the actual username/password flow. It sends `browser-ci-hello` to the other account, creates a basic group through the UI with that account, then checks the received group message and member list. With `channel` selected, Alice creates an empty broadcast channel through the UI and invites Bob; Bob reloads while viewing another conversation, and the runner checks that his chat list contains the channel row with the same peer id and title. It captures each state inside the fixture browser's temporary directory, removes those screenshots and the runner on exit, and emits only scenario, fixed password-stage and network summaries. It does not import storage state, use test-only authentication, or export credentials, traces or captures.
+
+If `bob_channel_membership` fails, the report adds the total chat-list row count, the number of rows matching the expected peer id and title, whether the peer-id row carries the expected title, and whether Bob's active chat is that channel. The title and peer id are compared inside the page and their values are never reported.
 
 When a message or group stage fails, the failure line adds one centre-column summary, read from the failing page before cleanup: the number of open and active chats, the active chat's numeric peer id and the one selected from search, how many elements the composer selector matched, how many composer inputs exist and how many are visible or editable, whether the chat input is absent, hidden or visible, which bottom bar replaced it (`start`, `unblock`, `join`, `mute`, `unmute`, `open_chat`, `frozen`, `multiple`, `other` or `none`), whether the composer wait ended on `timeout` or `strict_mode_violation`, the page exception and console-error counts since the peer was selected, and the handled RPC failures since then: their count and, for up to 16 types, the error types that match `^[A-Z][A-Z0-9_]{1,63}$` (such as `PEER_ID_INVALID`). The RPC count comes from a passive listener the runner adds to the page's worker message ports before the app loads. It reads only the error type of a failed result, never a request, result, argument or message. It is a closed schema of counts, fixed values, numeric ids and error-type identifiers: a field outside it is reported as `unclassified`, and no page text, message, label, console text or exception message is read. A page that cannot be read within 5 seconds is reported as `unavailable`. Screenshots are still removed and cleanup is unchanged.
 
@@ -91,13 +93,13 @@ rm -f -- "$KEY_FILE" "$READINESS_FILE"
 
 ## Check one Username submission
 
-For a bounded authentication-progress check, use the accepted completed `artifact-ready` pair for web source `569529c1f36923c098760ef727808254dcb6a662` and its matching immutable pins. Do not rebuild or modify that artifact. The runner creates Alice's ordinary browser context, fills and submits Username once, then stops when the masked password field is ready or the fixed password-card wait expires. It never creates Bob's context, fills or submits a password, retries Username, or enters the messaging and group scenarios. This mode cannot be combined with `--scenarios` or `--observer-controls-only`.
+For a bounded authentication-progress check, use an `artifact-ready` pair for web source `569529c1f36923c098760ef727808254dcb6a662`, produced with harness and server both pinned to `465e6b246c636871ad3067c30b76a35e82081d80`. The artifact and readiness record must come from the same fresh run; do not modify the artifact after attachment. The runner creates Alice's ordinary browser context, fills and submits Username once, then stops when the masked password field is ready or the fixed password-card wait expires. It never creates Bob's context, fills or submits a password, retries Username, or enters the messaging and group scenarios. This mode cannot be combined with `--scenarios` or `--observer-controls-only`.
 
 ```sh
 corepack pnpm run test:real-client -- \
   --readiness-file "$READINESS_FILE" \
-  --harness-revision 5f294c39abb32fc8ae15a4f7ccb085974098b320 \
-  --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
+  --harness-revision 465e6b246c636871ad3067c30b76a35e82081d80 \
+  --server-revision 465e6b246c636871ad3067c30b76a35e82081d80 \
   --web-revision 569529c1f36923c098760ef727808254dcb6a662 \
   --run-id "$RUN_ID" \
   --auth-progress-one-submission
@@ -122,8 +124,8 @@ The controls can be executed on their own, which is the only mode that does not 
 ```sh
 corepack pnpm run test:real-client -- \
   --readiness-file "$SERVER_READY_FILE" \
-  --harness-revision 5f294c39abb32fc8ae15a4f7ccb085974098b320 \
-  --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
+  --harness-revision 465e6b246c636871ad3067c30b76a35e82081d80 \
+  --server-revision 465e6b246c636871ad3067c30b76a35e82081d80 \
   --web-revision c88211e3985942343bf40dcbbcb8e8f5b4b7d364 \
   --run-id "$RUN_ID" \
   --observer-controls-only
@@ -133,4 +135,4 @@ That run touches no application context, captures no screenshot and reads no art
 
 ## Historical negative pair
 
-The original negative pair is web `09373cc2713d31e93664c38a4fd0335ea37a5f01` with server `6668a0a3519909ef512fdc59e4937975f108671d`, using the accepted harness `47daaaea5c71b859d9865c03cabb50da5a1a013b`. Its accepted CI evidence reaches `server-ready` and fails the independent artifact audit on worker source maps: `officialMtprotoDynamicRoutes`, `officialDcHosts`, `officialDcIpRanges` and `alternateWebSocketRoutes`. It has no `artifact-ready` event, so the UI sign-in scenario is unsupported for that pair. This audit rejection is not an SRP regression result; keep the original browser/SRP regression claim open until a supported negative control can reach the UI.
+The original historical negative-pair evidence is web `09373cc2713d31e93664c38a4fd0335ea37a5f01` with server `6668a0a3519909ef512fdc59e4937975f108671d`, using the legacy harness `47daaaea5c71b859d9865c03cabb50da5a1a013b`. Its accepted CI evidence reaches `server-ready` and fails the independent artifact audit on worker source maps: `officialMtprotoDynamicRoutes`, `officialDcHosts`, `officialDcIpRanges` and `alternateWebSocketRoutes`. It has no `artifact-ready` event, so the UI sign-in scenario is unsupported for that pair. This audit rejection is not an SRP regression result; keep the original browser/SRP regression claim open until a supported negative control can reach the UI.

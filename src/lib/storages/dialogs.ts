@@ -162,7 +162,7 @@ export default class DialogsStorage extends AppManager {
     this.rootScope.addEventListener('filter_delete', (filter) => {
       const dialogs = this.getCachedDialogs(false);
 
-      const indexKey = this.getDialogIndexKeyByFilterId(filter.id);
+      const indexKey = this.getDialogIndexKeyByFilter(filter);
       for(let i = 0; i < dialogs.length; ++i) {
         const dialog = dialogs[i];
         delete dialog[indexKey];
@@ -534,8 +534,13 @@ export default class DialogsStorage extends AppManager {
 
   public getDialogIndexKeyByFilterId(filterId: number) {
     if(this.isVirtualFilter(filterId)) return getDialogIndexKey();
-    if(REAL_FOLDERS.has(filterId)) return getDialogIndexKey(filterId as REAL_FOLDER_ID);
-    const filter = this.filtersStorage.getFilter(filterId);
+    return this.getDialogIndexKeyByFilter(this.filtersStorage.getFilter(filterId) ?? {id: filterId} as MyDialogFilter);
+  }
+
+  // * a folder id can equal the user's own peer id, which also names the Saved dialogs filter,
+  // * so a caller that holds the folder must not resolve its index key by id
+  public getDialogIndexKeyByFilter(filter: MyDialogFilter) {
+    if(REAL_FOLDERS.has(filter.id)) return getDialogIndexKey(filter.id as REAL_FOLDER_ID);
     return getDialogIndexKey(filter.localId);
   }
 
@@ -749,7 +754,7 @@ export default class DialogsStorage extends AppManager {
   ) {
     const folderId = filter?.id ?? this.getDialogFilterId(dialog);
 
-    const indexKey = this.getDialogIndexKeyByFilterId(folderId);
+    const indexKey = filter ? this.getDialogIndexKeyByFilter(filter) : this.getDialogIndexKeyByFilterId(folderId);
     const folder = this.getFolder(folderId);
     const dialogs = folder.dialogs;
 

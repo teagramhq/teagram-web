@@ -5,6 +5,8 @@ import {basename, dirname, isAbsolute} from 'node:path';
 import observation from './observation.cjs';
 
 export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'message', 'group']);
+export const OPTIONAL_SCENARIOS = Object.freeze(['channel']);
+const AVAILABLE_SCENARIOS = Object.freeze([...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS]);
 export const REQUIRED_CONTROLS = Object.freeze(Object.keys(observation.CONTROL_EXPECTATIONS));
 const REQUIRED_OBSERVATION_CONTEXTS = Object.freeze(['alice', 'bob']);
 const AUTH_PROGRESS_OBSERVATION_CONTEXTS = Object.freeze(['alice']);
@@ -77,7 +79,7 @@ export function parseRequiredScenarios(value) {
 
   const seen = new Set();
   for(const scenario of scenarios) {
-    if(!REQUIRED_SCENARIOS.includes(scenario)) {
+    if(!AVAILABLE_SCENARIOS.includes(scenario)) {
       throw new Error(`unknown scenario: ${scenario}`);
     }
     if(seen.has(scenario)) {
@@ -91,7 +93,7 @@ export function parseRequiredScenarios(value) {
     throw new Error(`required scenarios are missing: ${missing.join(',')}`);
   }
 
-  return [...REQUIRED_SCENARIOS];
+  return AVAILABLE_SCENARIOS.filter((scenario) => seen.has(scenario));
 }
 
 export function parseRealClientArgs(argv) {
@@ -541,6 +543,25 @@ export function parseGroupCreatedState(state) {
   return Object.fromEntries(keys.map((key) => [key, state[key]]));
 }
 
+const CHANNEL_MEMBERSHIP_STEP_WAITS = ['none', 'timeout', 'strict_mode_violation', 'other'];
+
+// The page compares the synthetic title and peer id locally, then reports only
+// counts and booleans so a failure distinguishes a missing row from a selector mismatch.
+export function parseChannelMembershipState(state) {
+  if(state === 'unavailable') return state;
+  const keys = ['chatListRowCount', 'peerRowCount', 'titleRowCount', 'peerRowHasTitle', 'activePeerMatches', 'stepWait'];
+  const isCount = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000;
+  if(!state || typeof state !== 'object' || Array.isArray(state) ||
+      JSON.stringify(Object.keys(state).sort()) !== JSON.stringify([...keys].sort()) ||
+      !['chatListRowCount', 'peerRowCount', 'titleRowCount'].every((key) => isCount(state[key])) ||
+      typeof state.peerRowHasTitle !== 'boolean' ||
+      typeof state.activePeerMatches !== 'boolean' ||
+      !CHANNEL_MEMBERSHIP_STEP_WAITS.includes(state.stepWait)) {
+    return 'unclassified';
+  }
+  return Object.fromEntries(keys.map((key) => [key, state[key]]));
+}
+
 const GROUP_MEMBER_ACTIVE_PANELS = ['none', 'profile', 'media', 'members', 'edit', 'other'];
 const GROUP_MEMBER_STEP_WAITS = ['none', 'timeout', 'strict_mode_violation', 'other'];
 const GROUP_MEMBER_ERROR_KEYS = ['pageErrorsSinceStep', 'consoleErrorsSinceStep', 'rpcErrorsSinceStep'];
@@ -660,6 +681,9 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const groupMessageSummary = controlsOnly || report.groupMessage === undefined
     ? ''
     : `; group message ${JSON.stringify(parseGroupMessageState(report.groupMessage))}`;
+  const channelMembershipSummary = controlsOnly || report.channelMembership === undefined
+    ? ''
+    : `; channel membership ${JSON.stringify(parseChannelMembershipState(report.channelMembership))}`;
   if(report.stage === 'browser_egress_or_page_errors' && report.status === 'failed' && report.gateBreakdown === undefined) {
     throw new Error('browser egress/page error evidence is invalid');
   }
@@ -674,7 +698,7 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
       throw new Error('worker coverage evidence is invalid');
     }
   }
-  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}${groupMemberSummary}${groupMessageSummary}${gateBreakdownSummary}${workerCoverageSummary}`;
+  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}${groupMemberSummary}${groupMessageSummary}${channelMembershipSummary}${gateBreakdownSummary}${workerCoverageSummary}`;
 }
 
 function parseWorkerCoverageBreakdown(value) {
@@ -1003,14 +1027,18 @@ function hasExactOwnKeys(value, keys) {
     ownKeys.every((key) => typeof key === 'string' && keys.includes(key));
 }
 
-export function assertAllScenariosPassed(results) {
+export function assertAllScenariosPassed(results, expectedScenarios = REQUIRED_SCENARIOS) {
   if(!Array.isArray(results)) {
     throw new Error('scenario results are required');
+  }
+  if(!Array.isArray(expectedScenarios) || expectedScenarios.some((scenario) => !AVAILABLE_SCENARIOS.includes(scenario)) ||
+      new Set(expectedScenarios).size !== expectedScenarios.length) {
+    throw new Error('expected scenarios are invalid');
   }
 
   const byName = new Map();
   for(const result of results) {
-    if(!result || typeof result.name !== 'string' || !REQUIRED_SCENARIOS.includes(result.name)) {
+    if(!result || typeof result.name !== 'string' || !AVAILABLE_SCENARIOS.includes(result.name)) {
       throw new Error('scenario result has an unknown name');
     }
     if(byName.has(result.name)) {
@@ -1019,7 +1047,7 @@ export function assertAllScenariosPassed(results) {
     byName.set(result.name, result.status);
   }
 
-  for(const scenario of REQUIRED_SCENARIOS) {
+  for(const scenario of expectedScenarios) {
     if(!byName.has(scenario)) {
       throw new Error(`${scenario} did not execute`);
     }
@@ -1032,5 +1060,5 @@ export function assertAllScenariosPassed(results) {
     }
   }
 
-  return [...REQUIRED_SCENARIOS];
+  return [...expectedScenarios];
 }
