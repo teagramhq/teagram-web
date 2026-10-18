@@ -1643,14 +1643,6 @@ function rpcErrorsSince(before, after) {
   };
 }
 
-function singleRpcErrorTypeSince(before, after) {
-  const delta = rpcErrorsSince(before, after);
-  if(delta.rpcErrorsSinceSelection !== 1 || !delta.rpcErrorTypesSinceSelection) return;
-  const types = Object.entries(delta.rpcErrorTypesSinceSelection);
-  if(types.length !== 1 || types[0][1] !== 1) return;
-  return sanitizePageErrorRpcErrorType(types[0][0]);
-}
-
 // Runs in the page. Reads fixed selectors, classes and the composer's
 // editability; a bottom-bar label is only compared against the fixed table.
 function centerColumnProbe({composerSelector, controlBarLabels}) {
@@ -2669,34 +2661,20 @@ async function enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAs
   const consumedEvents = new Set();
   for(const entry of entries) {
     const diagnostic = entry.diagnostic;
+    const diagnosticMessage = normalizePageErrorMessage(diagnostic.message, redactValues);
+    if(!diagnosticMessage) continue;
+    const matchingEntries = entries.filter((candidate) =>
+      normalizePageErrorMessage(candidate?.diagnostic?.message, redactValues) === diagnosticMessage
+    );
+    if(matchingEntries.length !== 1) continue;
     const matchingIndexes = events.flatMap((event, eventIndex) => {
       if(consumedEvents.has(eventIndex) || typeof event?.message !== 'string') return [];
-      const eventMessage = sanitizePageErrorDiagnosticText(event.message, PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength, redactValues);
-      return eventMessage === diagnostic.message || (diagnostic.message && eventMessage.includes(diagnostic.message)) ? [eventIndex] : [];
+      return normalizePageErrorMessage(event.message, redactValues) === diagnosticMessage ? [eventIndex] : [];
     });
-    const locationIndexes = events.flatMap((event, eventIndex) =>
-      !consumedEvents.has(eventIndex) && typeof event?.filename === 'string' && event.filename
-        ? [eventIndex]
-        : []
-    );
-    const indexes = matchingIndexes.length > 0
-      ? entries.length === 1 ? matchingIndexes : [matchingIndexes[0]]
-      : entries.length === 1 && locationIndexes.length === 1 ? locationIndexes : [];
-    if(indexes.length === 0) continue;
-    indexes.forEach((index) => consumedEvents.add(index));
-    const event = indexes.reduce((merged, index) => {
-      const candidate = events[index];
-      return {
-        message: typeof candidate?.message === 'string' && candidate.message ? candidate.message : merged.message,
-        stack: typeof candidate?.stack === 'string' && candidate.stack ? candidate.stack : merged.stack,
-        filename: typeof candidate?.filename === 'string' && candidate.filename ? candidate.filename : merged.filename,
-        lineNumber: Number.isSafeInteger(candidate?.lineNumber) && candidate.lineNumber > 0 ? candidate.lineNumber : merged.lineNumber,
-        columnNumber: Number.isSafeInteger(candidate?.columnNumber) && candidate.columnNumber > 0 ? candidate.columnNumber : merged.columnNumber,
-        pageUrl: typeof candidate?.pageUrl === 'string' && candidate.pageUrl ? candidate.pageUrl : merged.pageUrl,
-        errorType: candidate?.errorType || merged.errorType,
-        errorCode: Number.isSafeInteger(candidate?.errorCode) ? candidate.errorCode : merged.errorCode
-      };
-    }, {});
+    if(matchingIndexes.length !== 1) continue;
+    const [eventIndex] = matchingIndexes;
+    consumedEvents.add(eventIndex);
+    const event = events[eventIndex];
     const eventMessage = sanitizePageErrorDiagnosticText(event.message, PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength, redactValues);
     const eventStack = sanitizePageErrorDiagnosticText(event.stack, PAGE_ERROR_DIAGNOSTIC_LIMITS.stackLength, redactValues);
     const eventPageUrl = sanitizePageErrorPageUrl(event.pageUrl);
@@ -2716,6 +2694,25 @@ async function enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAs
       if(scriptAsset !== 'unknown') entry.scriptAsset = scriptAsset;
     }
   }
+}
+
+function normalizePageErrorMessage(value, redactValues) {
+  return sanitizePageErrorDiagnosticText(value, PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength, redactValues)
+  .replace(/^Uncaught(?:\s+\(in promise\))?\s*/i, '')
+  .trim();
+}
+
+async function enrichPageErrorReport(pageErrors, pages, pageErrorAssetResolvers, networkObservers = {}, redactValues = []) {
+  await Promise.all(APP_CONTEXTS.map(async(contextName) => {
+    const page = pages?.[contextName];
+    if(!page) return;
+    try {
+      await enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAssetResolvers?.[contextName], redactValues);
+    } catch {
+      // Diagnostics are best-effort and must not replace the scenario result.
+    }
+  }));
+  return summarizeBrowserGateBreakdown({networkObservers, pageErrors});
 }
 
 function sanitizePageErrorRpcErrorType(value) {
@@ -3087,6 +3084,7 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
   const passwordEvidence = [];
   const pageErrors = {alice: [], bob: []};
   const pageErrorAssets = {alice: createPageErrorAssetResolver()};
+  const pageErrorPages = {};
   const createContextObserver = dependencies.createContextObserver || observation.createContextObserver;
   const createAppNetworkObserver = dependencies.createNetworkObserver || createNetworkObserver;
   const submitUsername = dependencies.submitUsernameOnceAndWaitForPassword || submitUsernameOnceAndWaitForPassword;
@@ -3099,6 +3097,7 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
     const alice = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(alice.context);
     alice.page = await alice.context.newPage();
+    pageErrorPages.alice = alice.page;
     await installPageErrorEventCapture(alice.page);
     alice.observer = createContextObserver('alice', {observeWebSocket101: true, webSocket101Phase});
     appObservers.alice = alice.observer;
@@ -3131,10 +3130,9 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
     const egress = summarizeEgress(observers);
     const workerBlock = buildObservationBlock(registry, appObservers, controls, egress);
     const network = alice.networkObserver.summary();
-    if(runtimeConfig.pageErrorDiagnostics === true) {
-      await enrichPageErrorDetails(pageErrors, 'alice', alice.page, pageErrorAssets.alice, pageErrorRedactValues());
-    }
-    gateBreakdown = summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors});
+    gateBreakdown = runtimeConfig.pageErrorDiagnostics === true
+      ? await enrichPageErrorReport(pageErrors, pageErrorPages, pageErrorAssets, appNetworkObservers, pageErrorRedactValues())
+      : summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors});
     if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.alice.length + pageErrors.bob.length !== 0) {
       failStage('browser_egress_or_page_errors');
     }
@@ -3167,6 +3165,11 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
     await registry?.waitForSetup().catch(() => {});
     for(const observer of Object.values(appObservers)) observer.state.windowElapsed = true;
     const egress = summarizeEgress(observers);
+    if(runtimeConfig.pageErrorDiagnostics === true) {
+      gateBreakdown = await enrichPageErrorReport(pageErrors, pageErrorPages, pageErrorAssets, appNetworkObservers, pageErrorRedactValues());
+    }
+    const includeGateBreakdown = currentStage === 'browser_egress_or_page_errors' ||
+      (runtimeConfig.pageErrorDiagnostics === true && pageErrors.alice.length + pageErrors.bob.length > 0);
     report = buildAuthProgressReport(
       'failed',
       currentStage,
@@ -3179,7 +3182,7 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
       controls,
       egress,
       controlWebSocket101ByContextPhase,
-      currentStage === 'browser_egress_or_page_errors' ? gateBreakdown : undefined
+      includeGateBreakdown ? gateBreakdown || summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors}) : undefined
     );
   } finally {
     currentStage = 'cleanup';
@@ -3209,6 +3212,7 @@ async function main(dependencies = {}) {
   const passwordEvidence = [];
   const pageErrors = {alice: [], bob: []};
   const pageErrorAssets = Object.fromEntries(APP_CONTEXTS.map((name) => [name, createPageErrorAssetResolver()]));
+  const pageErrorPages = {};
   const cleanupIssues = [];
   let cleanupFailed = false;
   let authProgressCleanupHandled = false;
@@ -3217,7 +3221,6 @@ async function main(dependencies = {}) {
   let webSocket101Phase;
   let controlWebSocket101ByContextPhase;
   let gateBreakdown;
-  let channelRpcErrorBaseline;
   centerColumnTrace = createCenterColumnTrace();
   groupNameFormTrace = {page: undefined, stepWait: 'none'};
   groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
@@ -3289,6 +3292,7 @@ async function main(dependencies = {}) {
     const alice = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(alice.context);
     alice.page = await alice.context.newPage();
+    pageErrorPages.alice = alice.page;
     await installPageErrorEventCapture(alice.page);
     alice.observer = observation.createContextObserver('alice');
     appObservers.alice = alice.observer;
@@ -3310,6 +3314,7 @@ async function main(dependencies = {}) {
     const bob = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(bob.context);
     bob.page = await bob.context.newPage();
+    pageErrorPages.bob = bob.page;
     await installPageErrorEventCapture(bob.page);
     bob.observer = observation.createContextObserver('bob');
     appObservers.bob = bob.observer;
@@ -3409,7 +3414,6 @@ async function main(dependencies = {}) {
     if(runtime.scenarios?.includes('channel')) {
       currentScenario = 'channel';
       const channelName = `browser-ci-channel-${runtime.runId.slice(0, 8)}`;
-      if(runtime.pageErrorDiagnostics === true) channelRpcErrorBaseline = await readRpcErrorCounts(alice.page);
 
       currentStage = 'alice_new_channel_menu';
       await alice.page.locator('#new-menu').click().catch(() => failStage('alice_new_channel_menu'));
@@ -3477,19 +3481,9 @@ async function main(dependencies = {}) {
     }));
     const egress = summarizeEgress(observers);
     const observationBlock = buildObservationBlock(registry, appObservers, controls, egress);
-    if(runtime.pageErrorDiagnostics === true) {
-      await Promise.all([
-        enrichPageErrorDetails(pageErrors, 'alice', alice.page, pageErrorAssets.alice, pageErrorRedactValues()),
-        enrichPageErrorDetails(pageErrors, 'bob', bob.page, pageErrorAssets.bob, pageErrorRedactValues())
-      ]);
-      if(currentScenario === 'channel' && pageErrors.alice.length === 1) {
-        const rpcErrorType = singleRpcErrorTypeSince(channelRpcErrorBaseline, await readRpcErrorCounts(alice.page));
-        if(rpcErrorType && pageErrors.alice[0].diagnostic) {
-          pageErrors.alice[0].diagnostic.rpcErrorType ||= rpcErrorType;
-        }
-      }
-    }
-    gateBreakdown = summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors});
+    gateBreakdown = runtime.pageErrorDiagnostics === true
+      ? await enrichPageErrorReport(pageErrors, pageErrorPages, pageErrorAssets, appNetworkObservers, pageErrorRedactValues())
+      : summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors});
     if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.alice.length + pageErrors.bob.length !== 0) {
       failStage('browser_egress_or_page_errors');
     }
@@ -3536,6 +3530,11 @@ async function main(dependencies = {}) {
       await Promise.all(observers.map((observer) => observer.waitForSetup()));
       await registry?.waitForSetup();
       const egress = summarizeEgress(observers);
+      if(runtime?.pageErrorDiagnostics === true) {
+        gateBreakdown = await enrichPageErrorReport(pageErrors, pageErrorPages, pageErrorAssets, appNetworkObservers, pageErrorRedactValues());
+      }
+      const includeGateBreakdown = currentStage === 'browser_egress_or_page_errors' ||
+        (runtime?.pageErrorDiagnostics === true && pageErrors.alice.length + pageErrors.bob.length > 0);
       // The bounded sign-in window has ended by the time a sign-in stage fails,
       // so the failure report states what the observer established, not a blank.
       for(const observer of Object.values(appObservers)) observer.state.windowElapsed = true;
@@ -3565,10 +3564,8 @@ async function main(dependencies = {}) {
         ...(currentStage === 'browser_worker_observation_incomplete' && registry
           ? {workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers)}
           : {}),
-        ...(currentStage === 'browser_egress_or_page_errors'
-          ? {
-            gateBreakdown: gateBreakdown || summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors}),
-          }
+        ...(includeGateBreakdown
+          ? {gateBreakdown: gateBreakdown || summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors})}
           : {}),
         // On failure the closed-schema evidence is still the point, validated the
         // same way: any schema violation collapses it to `unclassified`.
@@ -3623,7 +3620,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createPageErrorExceptionEvent, createWorkerDiscovery, emitAuthProgressReport, enrichPageErrorDetails, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPageErrorEventCapture, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, singleRpcErrorTypeSince, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createPageErrorExceptionEvent, createWorkerDiscovery, emitAuthProgressReport, enrichPageErrorDetails, enrichPageErrorReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPageErrorEventCapture, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

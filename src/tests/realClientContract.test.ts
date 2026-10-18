@@ -28,7 +28,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
-const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createPageErrorExceptionEvent, createWorkerDiscovery, emitAuthProgressReport, enrichPageErrorDetails, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPageErrorEventCapture, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, singleRpcErrorTypeSince, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
+const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createPageErrorExceptionEvent, createWorkerDiscovery, emitAuthProgressReport, enrichPageErrorDetails, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPageErrorEventCapture, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://teagramd.test';
@@ -2657,13 +2657,6 @@ describe('discovery shared-worker network accounting', () => {
     resolver.clear();
   });
 
-  it('identifies one RPC error type within a measured channel window', () => {
-    const before = {total: 3, byType: {USER_NOT_FOUND: 1}};
-    const after = {total: 4, byType: {USER_NOT_FOUND: 1, CHANNELS_ADMIN_PUBLIC_TOO_MUCH: 1}};
-    expect(singleRpcErrorTypeSince(before, after)).toBe('CHANNELS_ADMIN_PUBLIC_TOO_MUCH');
-    expect(singleRpcErrorTypeSince(before, {...after, total: 5, byType: {...after.byType, USER_ID_INVALID: 1}})).toBeUndefined();
-  });
-
   it('records only allowlisted RPC error type and code from a rejected object', async() => {
     const resolver = createPageErrorAssetResolver();
     const pageErrors = {alice: [{
@@ -2677,23 +2670,16 @@ describe('discovery shared-worker network accounting', () => {
         stage: 'alice_channel_invite_button'
       }
     }], bob: []} as any;
-    const page = {evaluate: async(): Promise<unknown[]> => [{
-      message: 'Object',
-      stack: '',
-      filename: '',
-      lineNumber: 0,
-      columnNumber: 0,
-      pageUrl: `${APP_ORIGIN}/?token=${HOSTILE.token}`,
-      errorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
-      errorCode: 400
-    }]} as any;
+    const page = {evaluate: async(): Promise<unknown[]> => []} as any;
     const protocolEvents = [{
       message: 'Object',
       stack: `Object\n    at inviteToChannel (${APP_ORIGIN}/index-XYZ.js:91:7)`,
       filename: `${APP_ORIGIN}/index-XYZ.js`,
       lineNumber: 91,
       columnNumber: 7,
-      pageUrl: `${APP_ORIGIN}/?token=${HOSTILE.token}`
+      pageUrl: `${APP_ORIGIN}/?token=${HOSTILE.token}`,
+      errorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
+      errorCode: 400
     }];
 
     await enrichPageErrorDetails(pageErrors, 'alice', page, resolver, [HOSTILE.token], protocolEvents);
@@ -2759,6 +2745,93 @@ describe('discovery shared-worker network accounting', () => {
       }
     });
     expect(JSON.stringify(pageErrors)).not.toContain(HOSTILE.token);
+    resolver.clear();
+  });
+
+  it('leaves page-error attribution unknown when generic messages match multiple events', async() => {
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [{
+      constructorName: 'Error',
+      scriptAsset: 'unknown',
+      diagnostic: {
+        message: 'Object',
+        stack: 'Object',
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'alice_channel_invite_button'
+      }
+    }], bob: []} as any;
+    const page = {evaluate: async(): Promise<unknown[]> => []} as any;
+    const events = [{
+      message: 'Object',
+      stack: `Object\n    at inviteToChannel (${APP_ORIGIN}/index-Aaaa.js:91:7)`,
+      filename: `${APP_ORIGIN}/index-Aaaa.js`,
+      lineNumber: 91,
+      columnNumber: 7,
+      pageUrl: `${APP_ORIGIN}/`,
+      errorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH'
+    }, {
+      message: 'Object',
+      stack: `Object\n    at unrelatedHandler (${APP_ORIGIN}/index-Bbbb.js:4:2)`,
+      filename: `${APP_ORIGIN}/index-Bbbb.js`,
+      lineNumber: 4,
+      columnNumber: 2,
+      pageUrl: `${APP_ORIGIN}/other`,
+      errorCode: 400
+    }];
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver, [], events);
+
+    expect(pageErrors.alice[0]).toEqual({
+      constructorName: 'Error',
+      scriptAsset: 'unknown',
+      diagnostic: {
+        message: 'Object',
+        stack: 'Object',
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'alice_channel_invite_button'
+      }
+    });
+    resolver.clear();
+  });
+
+  it('enriches page-error evidence for failures before the final scenario gate', async() => {
+    const enrichPageErrorReport = (realClientBrowser as any).enrichPageErrorReport;
+    expect(enrichPageErrorReport).toBeTypeOf('function');
+    if(typeof enrichPageErrorReport !== 'function') return;
+
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [{
+      constructorName: 'Error',
+      scriptAsset: 'unknown',
+      diagnostic: {
+        message: 'invite failed',
+        stack: '',
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'alice_channel_invite_button'
+      }
+    }], bob: []} as any;
+    const page = {evaluate: async(): Promise<unknown[]> => [{
+      message: 'invite failed',
+      stack: `Error: invite failed\n    at inviteToChannel (${APP_ORIGIN}/index-XYZ.js?token=${HOSTILE.token}:91:7)`,
+      filename: `${APP_ORIGIN}/index-XYZ.js?token=${HOSTILE.token}`,
+      lineNumber: 91,
+      columnNumber: 7,
+      pageUrl: `${APP_ORIGIN}/?token=${HOSTILE.token}`
+    }]} as any;
+
+    const gateBreakdown = await enrichPageErrorReport(pageErrors, {alice: page}, {alice: resolver}, {}, [HOSTILE.token]);
+    const failureMessage = formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'alice_channel_invite_button',
+      gateBreakdown
+    });
+
+    expect(failureMessage).toContain('index-XYZ.js:91:7');
+    expect(failureMessage).toContain(`${APP_ORIGIN}/`);
+    expect(failureMessage).not.toContain(HOSTILE.token);
     resolver.clear();
   });
 
