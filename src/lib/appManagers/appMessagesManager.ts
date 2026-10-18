@@ -7429,7 +7429,8 @@ export class AppMessagesManager extends AppManager {
       }
 
       const max = await this.apiManager.getLimit(limitType);
-      if(this.dialogsStorage.getVisiblePinnedCount(filterId) >= max) {
+      const filterType = isSaved ? FilterType.Saved : this.dialogsStorage.getFilterType(filterId);
+      if(this.dialogsStorage.getVisiblePinnedCount(filterId, filterType) >= max) {
         throw makeError(!_isDialog ? 'PINNED_TOO_MUCH' : 'PINNED_DIALOGS_TOO_MUCH');
       }
     }

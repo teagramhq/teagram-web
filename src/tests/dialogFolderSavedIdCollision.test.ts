@@ -71,6 +71,45 @@ describe('folder and Saved dialogs with the same id', () => {
         pFlags: {}
       } as any;
       dialogsStorage.processDialogForFilter(savedDialog);
+      dialogsStorage.savedDialogs[savedPeerId] = savedDialog;
+
+      const originalGetLimit = client.apiManager.getLimit;
+      const originalInvokeApi = client.apiManager.invokeApi;
+      const originalGetInputDialogPeerById = appPeersManager.getInputDialogPeerById;
+      const originalGetDialogPeer = appPeersManager.getDialogPeer;
+      const apiUpdatesManager: any = client.managers.apiUpdatesManager;
+      const originalSaveUpdate = apiUpdatesManager.saveUpdate;
+      const invokeCalls: [string, any][] = [];
+      dialogsStorage.pinnedOrders[userId] = [folderPeerId];
+      dialogsStorage.savedDialogsPinnedOrder = [];
+      client.apiManager.getLimit = (() => Promise.resolve(1)) as any;
+      client.apiManager.invokeApi = ((method: string, params: any) => {
+        invokeCalls.push([method, params]);
+        return Promise.resolve(true);
+      }) as any;
+      appPeersManager.getInputDialogPeerById = (): any => ({
+        _: 'inputDialogPeer',
+        peer: {_: 'inputPeerUser', user_id: savedPeerId.toUserId()}
+      });
+      appPeersManager.getDialogPeer = () => savedDialog.peer;
+      apiUpdatesManager.saveUpdate = (): void => {};
+
+      try {
+        await client.managers.appMessagesManager.toggleDialogPin({
+          peerId: selfPeerId,
+          topicOrSavedId: savedPeerId
+        });
+        expect(invokeCalls).toContainEqual([
+          'messages.toggleSavedDialogPin',
+          expect.objectContaining({pinned: true})
+        ]);
+      } finally {
+        client.apiManager.getLimit = originalGetLimit;
+        client.apiManager.invokeApi = originalInvokeApi;
+        appPeersManager.getInputDialogPeerById = originalGetInputDialogPeerById;
+        appPeersManager.getDialogPeer = originalGetDialogPeer;
+        apiUpdatesManager.saveUpdate = originalSaveUpdate;
+      }
 
       expect(dialogsStorage.getFilterType(userId)).toBe(FilterType.Folder);
       expect(dialogsStorage.isVirtualFilter(userId)).toBe(false);
