@@ -20,7 +20,7 @@ export function rewritePrivateWorkerImports(source: string, base: string) {
     );
 }
 
-export async function createPrivateWorkerBlobURL(url: string | URL) {
+export async function createPrivateWorkerBlobURL(url: string | URL, serverId?: string, target?: unknown) {
   const response = await fetch(url);
   if(!response.ok) {
     throw new Error(`[MT] unable to load private MTProto worker (${response.status})`);
@@ -31,6 +31,9 @@ export async function createPrivateWorkerBlobURL(url: string | URL) {
   pathnameSplitted[pathnameSplitted.length - 1] = '';
   const base = location.origin + pathnameSplitted.join('/');
   source = rewritePrivateWorkerImports(source, base);
+  if(serverId && target) {
+    source = `globalThis.__TEAGRAM_ACTIVE_SERVER_ID__=${JSON.stringify(serverId)};globalThis.__TEAGRAM_ACTIVE_MTPROTO_TARGET__=JSON.parse(${JSON.stringify(JSON.stringify(target))});\n` + source;
+  }
 
   return URL.createObjectURL(new Blob([source], {type: 'application/javascript'}));
 }

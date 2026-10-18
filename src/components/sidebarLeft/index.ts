@@ -26,6 +26,7 @@ import App from '@config/app';
 import {hasWebVersionUpdate} from '@lib/webVersion';
 import ButtonMenuToggle from '@components/buttonMenuToggle';
 import sessionStorage from '@lib/sessionStorage';
+import {scopeServerStorageKey} from '@config/serverContext';
 import {attachClickEvent, CLICK_EVENT_NAME, simulateClickEvent} from '@helpers/dom/clickEvent';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import ButtonIcon from '@components/buttonIcon';
@@ -631,7 +632,7 @@ export class AppSidebarLeft extends SidebarSlider {
 
   public showCtrlFTip() {
     const DATE_KEY = 'ctrlf-toast-to-show-again';
-    const showAgain = parseInt(localStorage.getItem(DATE_KEY));
+    const showAgain = parseInt(localStorage.getItem(scopeServerStorageKey(DATE_KEY)));
     const now = tsNow(true);
 
     if(showAgain && now < showAgain) return;
@@ -641,7 +642,7 @@ export class AppSidebarLeft extends SidebarSlider {
     });
     // Show once between 1 week to 2 months
     const waitSeconds = (Math.round(Math.random() * 7 * 7) + 7) * 24 * 60 * 60;
-    localStorage.setItem(DATE_KEY, now + waitSeconds + '');
+    localStorage.setItem(scopeServerStorageKey(DATE_KEY), now + waitSeconds + '');
   }
 
   private initSidebarResize() {
@@ -1768,7 +1769,7 @@ export class AppSidebarLeft extends SidebarSlider {
       return;
     }
 
-    localStorage.setItem('previous-account', getCurrentAccount() + '');
+      localStorage.setItem(scopeServerStorageKey('previous-account'), getCurrentAccount() + '');
     const isUsingPasscode = await DeferredIsUsingPasscode.isUsingPasscode();
     const openTabs = apiManagerProxy.getOpenTabsCount();
 
@@ -1776,7 +1777,7 @@ export class AppSidebarLeft extends SidebarSlider {
     if(!newTab) {
       appImManager.goOffline();
 
-      localStorage.setItem('should-animate-auth', 'true');
+      localStorage.setItem(scopeServerStorageKey('should-animate-auth'), 'true');
 
       const chatsPageEl = document.querySelector('.page-chats');
       chatsPageEl.classList.add('main-screen-exit');

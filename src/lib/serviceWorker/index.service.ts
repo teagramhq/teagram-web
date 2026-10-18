@@ -23,6 +23,8 @@ import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 import {onBackgroundsFetch} from '@lib/serviceWorker/backgrounds';
 import {watchMtprotoOnDev} from '@lib/serviceWorker/watchMtprotoOnDev';
 import {watchCacheStoragesLifetime} from './clearOldCache';
+import {getActiveServerId} from '@config/serverContext';
+import {IDB} from '@lib/files/idb';
 
 // #if MTPROTO_SW
 // import '../mtproto/mtproto.worker';
@@ -47,6 +49,15 @@ export const invokeVoidAll: ServiceMessagePort['invokeVoid'] = (...args) => {
 };
 
 log('init');
+
+ctx.addEventListener('message', (event: ExtendableMessageEvent) => {
+  const data = event.data;
+  if(data?.type !== 'teagram:close-server-databases' || data.serverId !== getActiveServerId()) return;
+
+  event.waitUntil(IDB.closeDatabasesForServer(data.serverId).then(() => {
+    event.ports[0]?.postMessage({closed: true});
+  }));
+});
 
 // setTimeout(async() => {
 //   const salt = new Uint8Array([1, 2, 3]);

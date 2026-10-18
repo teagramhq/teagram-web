@@ -36,6 +36,7 @@ import {Middleware} from '@helpers/middleware';
 import readBlobAsText from '@helpers/blob/readBlobAsText';
 import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
 import {openMarkdownInstantView} from '@components/markdownInstantView';
+import createDocumentPreview from '@components/wrappers/documentPreview';
 
 rootScope.addEventListener('document_downloading', (docId) => {
   const elements = Array.from(document.querySelectorAll(`.document[data-doc-id="${docId}"]`)) as HTMLElement[];
@@ -177,8 +178,9 @@ export default async function wrapDocument({
     const imgs: (HTMLImageElement | HTMLCanvasElement | HTMLVideoElement)[] = [];
     // ! WARNING, use thumbs for check when thumb will be generated for media
     if(message.pFlags.is_outgoing && ['photo', 'video'].includes(doc.type) && cacheContext.url) {
-      icoDiv.innerHTML = `<img src="${cacheContext.url}">`;
-      imgs.push(icoDiv.firstElementChild as HTMLImageElement);
+      const image = createDocumentPreview(cacheContext.url);
+      icoDiv.append(image);
+      imgs.push(image);
     } else {
       const perf = performance.now();
       const wrapped = await wrapPhoto({

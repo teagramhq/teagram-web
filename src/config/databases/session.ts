@@ -1,7 +1,8 @@
 import {Database} from '.';
+import {scopeServerDatabaseName} from '@config/serverContext';
 
 const DATABASE_SESSION: Database<'session'> = {
-  name: 'telegram',
+  name: scopeServerDatabaseName('telegram'),
   version: 1,
   stores: [{
     name: 'session'

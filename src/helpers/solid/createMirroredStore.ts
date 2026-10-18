@@ -1,4 +1,5 @@
 import {createStore, unwrap} from 'solid-js/store';
+import {scopeServerStorageKey} from '@config/serverContext';
 
 type SetArgs = [...(string | number)[], any]; // path..., value
 type WireMsg =
@@ -28,7 +29,7 @@ export function createMirroredStore<T extends object>(
   initial: T
 ) {
   const originId = crypto.randomUUID();
-  const ch = new BroadcastChannel(channelName);
+  const ch = new BroadcastChannel(scopeServerStorageKey(channelName));
 
   const [store, _setStore] = createStore<T>(initial);
   let ready = false;

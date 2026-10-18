@@ -16,6 +16,7 @@ import type {ActiveAccountNumber} from '@lib/accounts/types';
 import {logger} from '@lib/logger';
 import rootScope from '@lib/rootScope';
 import sessionStorage from '@lib/sessionStorage';
+import {scopeServerStorageKey} from '@config/serverContext';
 import apiManagerProxy from '@lib/apiManagerProxy';
 
 export type AppInstance = {
@@ -80,7 +81,7 @@ export class SingleInstance extends EventListenerBase<{
       return;
     }
 
-    const channel = this.interclientBroadcastChannel = new BroadcastChannel(App.interclientBroadcastChannel);
+    const channel = this.interclientBroadcastChannel = new BroadcastChannel(scopeServerStorageKey(App.interclientBroadcastChannel));
     channel.addEventListener('message', (event) => {
       (event.data === App.suffix ? this.onMyClient : this.onOtherClient)();
     });

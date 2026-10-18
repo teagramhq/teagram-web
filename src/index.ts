@@ -48,6 +48,7 @@ import AccountController from '@lib/accounts/accountController';
 import {changeAccount} from '@lib/accounts/changeAccount';
 import {MAX_ACCOUNTS_FREE, MAX_ACCOUNTS_PREMIUM} from '@lib/accounts/constants';
 import sessionStorage from '@lib/sessionStorage';
+import {scopeServerStorageKey} from '@config/serverContext';
 import replaceChildrenPolyfill from '@helpers/dom/replaceChildrenPolyfill';
 import listenForWindowPrint from '@helpers/dom/windowPrint';
 import cancelImageEvents from '@helpers/dom/cancelImageEvents';
@@ -93,12 +94,12 @@ function randomlyChooseVersionFromSearch() {
       document.referrer &&
       /(^|\.)(google|bing|duckduckgo|ya|yandex)\./i.test(new URL(document.referrer).host)
     ) {
-      const version = localStorage.getItem('kz_version');
+      const version = localStorage.getItem(scopeServerStorageKey('kz_version'));
       if(version === 'Z' || nextRandomUint(8) > 127) {
-        localStorage.setItem('kz_version', 'Z');
+        localStorage.setItem(scopeServerStorageKey('kz_version'), 'Z');
         appNavigationController.navigateToUrl('https://web.telegram.org/a/');
       } else {
-        localStorage.setItem('kz_version', 'K');
+        localStorage.setItem(scopeServerStorageKey('kz_version'), 'K');
       }
     }
   } catch(err) {}
@@ -415,7 +416,7 @@ if(import.meta.env.DEV) {
   };
 }
 
-/* false &&  */document.addEventListener('DOMContentLoaded', async() => {
+const onDocumentReady = async() => {
   const perf = performance.now();
   randomlyChooseVersionFromSearch();
   setSidebarLeftWidth();
@@ -665,4 +666,10 @@ if(import.meta.env.DEV) {
       await bootstrapIm();
     }
   }
-});
+};
+
+if(document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', onDocumentReady, {once: true});
+} else {
+  void onDocumentReady();
+}

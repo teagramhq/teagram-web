@@ -22,6 +22,7 @@ import {createLiveManagers, LiveManagersController} from './liveManagers';
 import type {AppManagers} from '@lib/managers';
 import {setAppSettingsSilent} from '@stores/appSettings';
 import {AppTheme, SETTINGS_INIT} from '@config/state';
+import {scopeServerStorageKey} from '@config/serverContext';
 
 export function getMockManagers() {
   return mockManagers;
@@ -41,7 +42,7 @@ const isKnownTheme = (name: string): name is AppTheme['name'] =>
 
 export function setSandboxTheme(name: AppTheme['name']) {
   try {
-    localStorage.setItem(THEME_STORAGE_KEY, name);
+    localStorage.setItem(scopeServerStorageKey(THEME_STORAGE_KEY), name);
   } catch{}
 
   return themeController.switchTheme(name);
@@ -50,7 +51,7 @@ export function setSandboxTheme(name: AppTheme['name']) {
 function restoreSandboxTheme() {
   let stored: string;
   try {
-    stored = localStorage.getItem(THEME_STORAGE_KEY);
+    stored = localStorage.getItem(scopeServerStorageKey(THEME_STORAGE_KEY));
   } catch{}
 
   // Silent: applied before the theme controller reads it, and there is nowhere to persist it to.

@@ -9,7 +9,8 @@ export function makeWorkerURL(url: string | URL) {
   if(location.search && url.protocol !== 'blob:') {
     const params = new URLSearchParams(location.search);
     params.forEach((value, key) => {
-      if(key === CURRENT_ACCOUNT_QUERY_PARAM || key === THREADED_WORKER_PROTOCOL_QUERY_PARAM) return;
+      if(key === CURRENT_ACCOUNT_QUERY_PARAM || key === THREADED_WORKER_PROTOCOL_QUERY_PARAM ||
+        key === '__tg_server' || key === '__tg_target') return;
       (url as URL).searchParams.set(key, value);
     });
   }

@@ -74,7 +74,8 @@ import SlicedArray, {SliceEnd} from '@helpers/slicedArray';
 import {createHistoryStorageSearchSlicedArray} from '@appManagers/utils/messages/createHistoryStorage';
 import tabId from '@config/tabId';
 import Modes from '@config/modes';
-import {isPrivateMtprotoTarget} from '@config/mtprotoTarget';
+import {getMtprotoTarget, isPrivateMtprotoTarget} from '@config/mtprotoTarget';
+import {getActiveServerId} from '@config/serverContext';
 import {waitForMtprotoWorkerReady} from '@helpers/mtprotoWorkerReady';
 import {toast} from '@components/toast';
 import appNavigationController from '@components/appNavigationController';
@@ -88,6 +89,15 @@ import {
   reconcileObjectURLMirrorSnapshot,
   reconcileObjectURLMirrorValue
 } from './apiManagerProxyUtils';
+
+function withRuntimeMtprotoTarget(url: string | URL) {
+  const workerUrl = new URL(url + '', location.href);
+  const target = getMtprotoTarget();
+  const encodedTarget = btoa(JSON.stringify(target)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  workerUrl.searchParams.set('__tg_server', getActiveServerId());
+  workerUrl.searchParams.set('__tg_target', encodedTarget);
+  return workerUrl;
+}
 import {
   THREADED_WORKER_PROTOCOL_QUERY_PARAM,
   THREADED_WORKER_PROTOCOL_VERSION,
@@ -790,7 +800,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
       // * doesn't work
       // new URL('../../../sw.ts', import.meta.url),
       // '../../../sw',
-      ServiceWorkerURL,
+      withRuntimeMtprotoTarget(ServiceWorkerURL),
       {type: 'module', scope: './'}
     ).then((registration) => {
       if(TEST_NO_STREAMING) {
@@ -1035,7 +1045,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
     // Importing the worker URL keeps this entrypoint inside Vite's worker pipeline;
     // constructing a URL dynamically here would emit the source .ts file unchanged.
-    const workerUrl = makeWorkerURL(MainWorkerURL);
+    const workerUrl = withRuntimeMtprotoTarget(makeWorkerURL(MainWorkerURL));
     workerUrl.searchParams.set(THREADED_WORKER_PROTOCOL_QUERY_PARAM, THREADED_WORKER_PROTOCOL_VERSION + '');
     let privateWorkerUrl: string | undefined;
     try {
@@ -1043,7 +1053,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
       // not inherit the document policy container, so load the MTProto source
       // into a blob URL that does inherit it before constructing the worker.
       if(isPrivateMtprotoTarget()) {
-        privateWorkerUrl = await createPrivateWorkerBlobURL(workerUrl);
+        privateWorkerUrl = await createPrivateWorkerBlobURL(workerUrl, getActiveServerId(), getMtprotoTarget());
       }
 
       const workerSourceUrl = privateWorkerUrl || workerUrl;

@@ -65,6 +65,7 @@ import rootScope from '@lib/rootScope';
 import clamp from '@helpers/number/clamp';
 import throttle from '@helpers/schedulers/throttle';
 import {getAppWindow} from '@helpers/appWindow';
+import {scopeServerStorageKey} from '@config/serverContext';
 
 // Default and resize range for the left & right columns.
 export const DEFAULT_COLUMN_WIDTH = 360;
@@ -122,7 +123,7 @@ let openTabsLeftSidebar = false;
 let foldersSidebarShown = false;
 
 (function loadUserPreferences() {
-  const rawLeft = localStorage.getItem(STORAGE_KEY_LEFT);
+  const rawLeft = localStorage.getItem(scopeServerStorageKey(STORAGE_KEY_LEFT));
   if(rawLeft != null) {
     const n = parseInt(rawLeft);
     if(!isNaN(n)) {
@@ -130,7 +131,7 @@ let foldersSidebarShown = false;
       else userPreferredLeftWidth = clamp(n, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
     }
   }
-  const rawRight = localStorage.getItem(STORAGE_KEY_RIGHT);
+  const rawRight = localStorage.getItem(scopeServerStorageKey(STORAGE_KEY_RIGHT));
   if(rawRight != null) {
     const n = parseInt(rawRight);
     if(!isNaN(n)) userPreferredRightWidth = clamp(n, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
@@ -139,13 +140,13 @@ let foldersSidebarShown = false;
 
 const persistLeftPreference = throttle(() => {
   localStorage.setItem(
-    STORAGE_KEY_LEFT,
+    scopeServerStorageKey(STORAGE_KEY_LEFT),
     (userPreferredLeftCollapsed ? 0 : userPreferredLeftWidth) + ''
   );
 }, 200);
 
 const persistRightPreference = throttle(() => {
-  localStorage.setItem(STORAGE_KEY_RIGHT, userPreferredRightWidth + '');
+  localStorage.setItem(scopeServerStorageKey(STORAGE_KEY_RIGHT), userPreferredRightWidth + '');
 }, 200);
 
 /**

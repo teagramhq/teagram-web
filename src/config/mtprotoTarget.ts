@@ -1,3 +1,5 @@
+import {readWorkerMtprotoTarget} from '@config/serverContext';
+
 export type RSAPublicKeyHex = {
   modulus: string,
   exponent: string
@@ -144,7 +146,7 @@ function sameArray(left: unknown, right: readonly unknown[]) {
   return Array.isArray(left) && left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function validatePrivateEndpoint(endpointValue: unknown) {
+export function validatePrivateEndpoint(endpointValue: unknown) {
   if(typeof endpointValue !== 'string' || !endpointValue) {
     invalidTarget('is missing its private endpoint');
   }
@@ -244,12 +246,14 @@ export function validateMtprotoTarget(target: unknown): MtprotoTarget {
 const embeddedTarget = typeof __MTPROTO_TARGET__ === 'undefined' ?
   undefined : __MTPROTO_TARGET__;
 
-export const MTProtoTarget = validateMtprotoTarget(embeddedTarget);
+const initialTarget = readWorkerMtprotoTarget() || embeddedTarget;
+export const MTProtoTarget = validateMtprotoTarget(initialTarget);
 
 export function getMtprotoTarget() {
-  return MTProtoTarget;
+  const target = readWorkerMtprotoTarget();
+  return target ? validateMtprotoTarget(target) : MTProtoTarget;
 }
 
 export function isPrivateMtprotoTarget() {
-  return MTProtoTarget.mode === 'private';
+  return getMtprotoTarget().mode === 'private';
 }

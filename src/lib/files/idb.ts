@@ -212,6 +212,18 @@ export class IDB {
     });
   }
 
+  public static async closeDatabasesForServer(serverId: string) {
+    const names = [`tweb-${serverId}`, `telegram-${serverId}`];
+    const prefix = `tweb-${serverId}-`;
+    const instances = this.INSTANCES.filter((storage) =>
+      names.includes(storage.name) || storage.name.startsWith(prefix)
+    );
+    await Promise.all(instances.map(async(storage) => {
+      await Promise.resolve(storage.openDbPromise).catch((): undefined => undefined);
+      await storage.closeDatabase();
+    }));
+  }
+
   /**
    * ! WARNING ! function requires at least one opened connection
    */

@@ -28,9 +28,11 @@ export class RSAKeysManager {
   private preparePromise: Promise<void> = null;
 
   private async loadPublicKeys() {
-    if(__MTPROTO_PRIVATE__) {
-      return [this.target.mode === 'private' ? this.target.publicKeyHex : undefined];
+    if(this.target.mode === 'private') {
+      return [this.target.publicKeyHex];
     }
+
+    if(__MTPROTO_PRIVATE__) return [];
 
     const keys = await import('./rsaKeys');
     return Modes.test ? keys.testPublicKeysHex : keys.telegramPublicKeysHex;

@@ -121,6 +121,14 @@ $corner-button-size: 2.5rem;
   }
 }
 
+.activeServer {
+  margin: .25rem .75rem .75rem;
+  color: var(--secondary-text-color);
+  font-size: .875rem;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
 // Telegram logo SVG used by SignInCard inside <MediaHeader.Sticker element={...}>.
 .logo {
   width: 100%;
