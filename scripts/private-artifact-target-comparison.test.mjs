@@ -400,9 +400,7 @@ describe('private artifact target comparison', () => {
 
     const smokeStep = workflow.split('      - name: Run private username auth browser smoke\n')[1]
     ?.split('\n      - name: ')[0];
-    expect(smokeStep).toContain('MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}');
-    expect(smokeStep).toContain('MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}');
-    expect(smokeStep).toContain('MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}');
-    expect(smokeStep).toContain("TWEB_REGISTRATION_E2E: '1'");
+    expect(smokeStep).not.toContain('MTPROTO_');
+    expect(smokeStep).not.toContain('TWEB_REGISTRATION_E2E');
   });
 });

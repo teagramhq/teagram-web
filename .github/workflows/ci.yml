@@ -80,11 +80,6 @@ jobs:
         run: pnpm run lint
 
       - name: Run private username auth browser smoke
-        env:
-          MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}
-          MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}
-          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}
-          TWEB_REGISTRATION_E2E: '1'
         run: pnpm run test:private-auth
 
   deployment-workflow:

@@ -1,49 +1,122 @@
-import {randomBytes} from 'node:crypto';
 import {expect, test} from '@playwright/test';
 
-test.skip(process.env.TWEB_REGISTRATION_E2E !== '1', 'account registration runs against the CI server');
+for(const mode of ['open', 'invite'] as const) {
+  test(`registers a username account in ${mode} mode without a live server`, async({page}, testInfo) => {
+    const appOrigin = new URL(testInfo.project.use.baseURL as string).origin;
+    const username = mode === 'open' ? 'test_user_open' : 'test_user_invite';
+    const inviteSecret = 'test-invite-secret';
+    const password = 'Teagram-Test-Password-123!';
 
-test('registers a fresh username account and signs in again', async({browser, page}, testInfo) => {
-  test.setTimeout(120_000);
+    await page.context().route('**/*', async(route) => {
+      if(new URL(route.request().url()).origin === appOrigin) {
+        await route.continue();
+      } else {
+        await route.abort();
+      }
+    });
+    await page.context().routeWebSocket(/.*/, (socket) => {
+      const url = new URL(socket.url());
+      const origin = url.protocol === 'ws:' ? `http://${url.host}` : `https://${url.host}`;
+      if(origin === appOrigin && url.pathname === '/') {
+        socket.connectToServer();
+      } else {
+        socket.close();
+      }
+    });
+    await page.addInitScript((registrationMode) => {
+      Object.defineProperty(window, 'apiManagerProxy', {
+        configurable: true,
+        set(proxy: any) {
+          delete (window as any).apiManagerProxy;
+          (window as any).apiManagerProxy = proxy;
+          const invoke = proxy.invoke.bind(proxy);
+          const calls: Array<{method: string, params?: Record<string, unknown>}> =
+            ((window as any).__privateRegistrationCalls = []);
+          const user = {_ : 'user', id: 4242, first_name: 'CI Registration'};
 
-  const username = `qa${Date.now().toString(36)}${randomBytes(4).toString('hex')}`.toLowerCase();
-  const password = `Teagram-${randomBytes(24).toString('base64url')}!`;
-  const displayName = `CI user ${Date.now()}`;
-  const appURL = testInfo.project.use.baseURL as string;
+          proxy.invoke = (type: string, payload: any, ...args: any[]) => {
+            if(type === 'manager' && payload?.name === 'apiManager') {
+              if(payload.method === 'getAppConfig') {
+                calls.push({method: 'help.getAppConfig', params: {registration_mode: registrationMode}});
+                return Promise.resolve({registration_mode: registrationMode});
+              }
 
-  await page.goto('/?noWorker=1', {waitUntil: 'domcontentloaded'});
-  const registration = page.locator('#auth-pages');
-  await expect(registration.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
-  await expect(registration.getByRole('button', {name: 'Create account'})).toBeVisible({timeout: 30_000});
-  await registration.getByRole('button', {name: 'Create account'}).click();
+              if(payload.method === 'invokeApi') {
+                const [method, params] = payload.args;
+                calls.push({method, params});
+                switch(method) {
+                  case 'auth.sendCode':
+                    return Promise.resolve({
+                      _: 'auth.sentCode',
+                      phone_code_hash: 'mock-registration-code-hash',
+                      type: {_ : 'auth.sentCodeTypeApp', length: 5},
+                      timeout: 60
+                    });
+                  case 'auth.signIn':
+                    return Promise.resolve({_ : 'auth.authorizationSignUpRequired'});
+                  case 'auth.signUp':
+                    return Promise.resolve({_ : 'auth.authorization', user});
+                }
+              }
 
-  await registration.locator('input[aria-label="Username"]').fill(username);
-  await registration.locator('input[aria-label="Display name"]').fill(displayName);
-  await registration.locator('input[aria-label="Password"]').fill(password);
-  await registration.locator('input[aria-label="Confirm password"]').fill(password);
-  await expect(registration.locator('input[aria-label="Invite secret"]')).toHaveCount(0);
-  await registration.getByRole('button', {name: 'Create account'}).click();
-  await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
+              if(payload.method === 'setUser') {
+                calls.push({method: 'apiManager.setUser'});
+                return invoke(type, payload, ...args);
+              }
+            }
 
-  const signInContext = await browser.newContext({
-    baseURL: appURL,
-    viewport: {width: 320, height: 720}
+            if(type === 'manager' && payload?.name === 'passwordManager' && payload.method === 'updateSettings') {
+              calls.push({method: 'account.updatePasswordSettings', params: payload.args[0]});
+              return Promise.resolve(true);
+            }
+
+            return invoke(type, payload, ...args);
+          };
+        }
+      });
+    }, mode);
+
+    await page.goto('/?noWorker=1', {waitUntil: 'domcontentloaded'});
+    const registration = page.locator('#auth-pages');
+    await expect(registration.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
+    await expect(registration.getByRole('button', {name: 'Create account'})).toBeVisible({timeout: 30_000});
+    await registration.getByRole('button', {name: 'Create account'}).click();
+
+    await registration.locator('input[aria-label="Username"]').fill(username);
+    await registration.locator('input[aria-label="Display name"]').fill('CI Registration');
+    await registration.locator('input[aria-label="Password"]').fill(password);
+    await registration.locator('input[aria-label="Confirm password"]').fill(password);
+    if(mode === 'invite') {
+      await registration.locator('input[aria-label="Invite secret"]').fill(inviteSecret);
+    } else {
+      await expect(registration.locator('input[aria-label="Invite secret"]')).toHaveCount(0);
+    }
+
+    await registration.getByRole('button', {name: 'Create account'}).click();
+    await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
+
+    const calls = await page.evaluate(() => (window as any).__privateRegistrationCalls as Array<{
+      method: string,
+      params?: Record<string, unknown>
+    }>);
+    expect(calls.some((call) => call.method === 'help.getAppConfig' && call.params?.registration_mode === mode)).toBe(true);
+    expect(calls.filter((call) => call.method.startsWith('auth.')).map((call) => call.method)).toEqual([
+      'auth.sendCode',
+      'auth.signIn',
+      'auth.signUp'
+    ]);
+    expect(calls.find((call) => call.method === 'auth.signIn')?.params?.phone_code).toBe(mode === 'invite' ? inviteSecret : '');
+    expect(calls.find((call) => call.method === 'auth.signUp')?.params).toMatchObject({
+      phone_number: username,
+      first_name: 'CI Registration',
+      last_name: ''
+    });
+    expect(calls.find((call) => call.method === 'account.updatePasswordSettings')?.params).toEqual({newPassword: password});
+    expect(calls.some((call) => call.method === 'apiManager.setUser')).toBe(true);
+    await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(4242))).toMatchObject({
+      _: 'user',
+      id: 4242,
+      first_name: 'CI Registration'
+    });
   });
-  try {
-    const signInPage = await signInContext.newPage();
-    await signInPage.goto('/?noWorker=1', {waitUntil: 'domcontentloaded'});
-    const auth = signInPage.locator('#auth-pages');
-    const usernameInput = auth.getByRole('textbox', {name: 'Username'});
-    await expect(usernameInput).toBeVisible({timeout: 30_000});
-    await usernameInput.fill(username);
-    await auth.getByRole('button', {name: 'Next'}).click();
-
-    const passwordInput = auth.locator('input[aria-label="LoginPassword"]');
-    await expect(passwordInput).toBeVisible({timeout: 30_000});
-    await passwordInput.fill(password);
-    await auth.getByRole('button', {name: 'Next'}).click();
-    await expect(signInPage.locator('#page-chats')).toBeVisible({timeout: 60_000});
-  } finally {
-    await signInContext.close();
-  }
-});
+}
