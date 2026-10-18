@@ -1,6 +1,6 @@
 import {AppMessagesManager} from '@appManagers/appMessagesManager';
 import {AppNotificationsManager} from '@appManagers/appNotificationsManager';
-import DialogsStorage from '@lib/storages/dialogs';
+import DialogsStorage, {FilterType} from '@lib/storages/dialogs';
 import {Dialog, MessagesDialogs, MessagesPeerDialogs, PeerNotifySettings} from '@layer';
 import '@helpers/peerIdPolyfill';
 
@@ -334,6 +334,10 @@ describe('community pinned dialog order', () => {
         saveCommunityDialog: vi.fn()
       },
       appMessagesManager: {saveApiResult},
+      appPeersManager: {
+        isBotforum: () => false,
+        peerId: (1 as UserId).toPeerId(false)
+      },
       appNotificationsManager: {
         savePeerSettings: vi.fn()
       }
@@ -476,7 +480,7 @@ describe('community pinned dialog order', () => {
     const applied = applyDialogs.mock.calls[0][0] as MessagesPeerDialogs;
     expect(applied.dialogs).toEqual([makeDialog(100 as UserId)]);
     expect(applied.chats).toEqual([]);
-    expect(handleDialogsPinned).toHaveBeenCalledWith(0, [ordinaryA]);
+    expect(handleDialogsPinned).toHaveBeenCalledWith(0, [ordinaryA], FilterType.Folder);
   });
 
   test('preserves a Community pinned while getPinnedDialogs was pending', async() => {
@@ -565,6 +569,6 @@ describe('community pinned dialog order', () => {
     expect(handleDialogsPinned).toHaveBeenCalledWith(0, [
       communityPeerId,
       ordinaryA
-    ]);
+    ], FilterType.Folder);
   });
 });
