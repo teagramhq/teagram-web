@@ -153,10 +153,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       this.setOnlineStatus(dom.avatarEl.node, online);
     });
 
-    this.listenerSetter.add(rootScope)('chat_update', async(chatId) => {
-      const peerId = chatId.toPeerId(true);
-      this.processDialogForCallStatus(peerId);
-    });
+    this.listenerSetter.add(rootScope)('chat_update', (chatId) => this.onChatUpdate(chatId));
 
     this.listenerSetter.add(rootScope)('dialog_flush', ({dialog}) => {
       if(!this.isActive || !dialog) {
@@ -754,6 +751,27 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
 
     const chat = apiManagerProxy.getChat(peerId.toChatId()) as Chat.chat | Chat.channel;
     this.setCallStatus(dom, !!(chat.pFlags.call_active && chat.pFlags.call_not_empty));
+  }
+
+  private async onChatUpdate(chatId: ChatId) {
+    const peerId = chatId.toPeerId(true);
+    this.processDialogForCallStatus(peerId);
+    if(!this.isActive || this.sortedList.has(peerId)) {
+      return;
+    }
+
+    const dialog = await this.managers.appMessagesManager.getDialogOnly(peerId);
+    if(
+      !dialog ||
+      !this.isActive ||
+      dialog.peer?._ !== 'peerChannel' ||
+      getServerMessageId(dialog.top_message) ||
+      dialog.draft
+    ) {
+      return;
+    }
+
+    this.updateDialog(dialog);
   }
 
   protected onScrolledBottom() {

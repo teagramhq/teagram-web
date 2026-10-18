@@ -7,6 +7,7 @@ import {isIPv4} from 'node:net';
 import {
   assertAllScenariosPassed,
   formatBrowserFailureMessage,
+  parseChannelMembershipState,
   REQUIRED_CONTROLS,
   parseFixtureReadiness,
   parseAuthProgressReport,
@@ -17,11 +18,12 @@ import {
   readSyntheticCredentials
 } from './contract.mjs';
 
-const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> (--scenarios sign-in,message,group | --auth-progress-one-submission)
+const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> (--scenarios sign-in,message,group[,channel] | --auth-progress-one-submission)
 
 The fixture must remain running after artifact-ready. The command validates its immutable pins,
 protected synthetic credentials, internal browser network, audited artifact evidence, per-context
-shared-worker observation, and all three required UI scenarios or one bounded Username submission.
+shared-worker observation, the three required UI scenarios plus the optional channel scenario,
+or one bounded Username submission.
 The one-submission mode stops at password-field readiness without entering or submitting a password.`;
 const NETWORK_SOURCES = ['page', 'shared_worker', 'service_worker', 'worker'];
 
@@ -176,6 +178,7 @@ if(args?.help) {
     const browserInput = JSON.stringify({
       ...(controlsOnly ? {observationOnly: true} : {}),
       ...(authProgress ? {authProgressOneSubmission: true} : {}),
+      ...(Array.isArray(args.scenarios) ? {scenarios: args.scenarios} : {}),
       runId: args.runId,
       endpoint: serverReady.endpoint,
       wssEndpoint: serverReady.wssEndpoint,
@@ -270,7 +273,15 @@ if(args?.help) {
       ])) {
         throw new Error('password readiness evidence is incomplete');
       }
-      assertAllScenariosPassed(browserResult.scenarios);
+      assertAllScenariosPassed(browserResult.scenarios, args.scenarios);
+      if(args.scenarios.includes('channel')) {
+        const channelMembership = parseChannelMembershipState(browserResult.channelMembership);
+        if(channelMembership === 'unavailable' || channelMembership === 'unclassified' ||
+            channelMembership.peerRowCount !== 1 || !channelMembership.peerRowHasTitle) {
+          throw new Error('channel membership evidence is incomplete');
+        }
+        browserResult.channelMembership = channelMembership;
+      }
       if(browserResult.contextCount !== 2 || browserResult.screenshotsCaptured !== 16 ||
           browserResult.network?.unexpectedAttempts !== 0 || browserResult.network?.observerErrors !== 0 ||
           ['alice', 'bob'].some((account) => {
@@ -343,6 +354,7 @@ if(args?.help) {
         directTCP: readiness.serverReady.evidence.directTCP
       },
       scenarios: browserResult.scenarios,
+      ...(browserResult.channelMembership ? {channelMembership: browserResult.channelMembership} : {}),
       contextCount: browserResult.contextCount,
       screenshotsCaptured: browserResult.screenshotsCaptured,
       passwordEvidence,

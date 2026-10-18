@@ -12,6 +12,7 @@ import {
   assertAllScenariosPassed,
   formatBrowserFailureMessage,
   parseAuthProgressReport,
+  parseChannelMembershipState,
   parseCenterColumnState,
   parseFixtureReadiness,
   parseGroupCreatedState,
@@ -27,7 +28,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
-const {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
+const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -2880,8 +2881,54 @@ describe('real client scenario contract', () => {
   it('requires every scenario exactly once', () => {
     expect(() => parseRequiredScenarios('sign-in,message')).toThrow('required scenarios are missing');
     expect(() => parseRequiredScenarios('sign-in,message,group,group')).toThrow('duplicate scenario');
-    expect(() => parseRequiredScenarios('sign-in,message,group,channel')).toThrow('unknown scenario');
     expect(parseRequiredScenarios('sign-in,message,group')).toEqual(['sign-in', 'message', 'group']);
+    expect(parseRequiredScenarios('sign-in,message,group,channel')).toEqual(['sign-in', 'message', 'group', 'channel']);
+  });
+
+  it('requires the selected optional channel scenario to pass', () => {
+    const scenarios = ['sign-in', 'message', 'group', 'channel'];
+    expect(() => assertAllScenariosPassed([
+      {name: 'sign-in', status: 'passed'},
+      {name: 'message', status: 'passed'},
+      {name: 'group', status: 'passed'}
+    ], scenarios)).toThrow('channel did not execute');
+    expect(assertAllScenariosPassed([
+      {name: 'sign-in', status: 'passed'},
+      {name: 'message', status: 'passed'},
+      {name: 'group', status: 'passed'},
+      {name: 'channel', status: 'passed'}
+    ], scenarios)).toEqual(scenarios);
+  });
+
+  it('keeps only channel row counts and boolean matches in failure diagnostics', () => {
+    const state = {
+      chatListRowCount: 1,
+      peerRowCount: 0,
+      titleRowCount: 0,
+      peerRowHasTitle: false,
+      activePeerMatches: false,
+      stepWait: 'timeout'
+    };
+    expect(parseChannelMembershipState(state)).toEqual(state);
+    expect(formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'bob_channel_membership',
+      channelMembership: state
+    })).toBe(`real client scenario failed at bob_channel_membership; channel membership ${JSON.stringify(state)}`);
+    for(const hostile of [
+      {...state, title: HOSTILE.phrase},
+      {...state, peerRowHasTitle: HOSTILE.phrase},
+      {...state, peerRowCount: -1},
+      {...state, stepWait: HOSTILE.phrase},
+      HOSTILE.phrase,
+      null
+    ]) {
+      expect(formatBrowserFailureMessage({
+        status: 'failed',
+        stage: 'bob_channel_membership',
+        channelMembership: hostile
+      })).toBe('real client scenario failed at bob_channel_membership; channel membership "unclassified"');
+    }
   });
 
   it('fails if a required scenario was skipped or did not report success', () => {
@@ -4782,6 +4829,36 @@ describe('real client group created', () => {
       ${chatMarkup({peerId: '-1000003', title: groupTitle, active: groupActive})}
     </div></div>`;
   }
+
+  it('compares Bob\'s channel row id and title without returning the title', async() => {
+    const page = await browser.newPage();
+    const channelName = 'browser-ci-channel-0123abcd';
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat" data-peer-id="-990020"><span>${channelName}</span></div>
+      </div>
+      <div id="column-center"><div class="chat active"><div class="topbar"><div class="avatar" data-peer-id="-1000003"></div></div></div></div>`);
+      const state = await captureChannelMembershipState({
+        page,
+        channelName,
+        peerId: '-990020',
+        stepWait: 'timeout'
+      }, 2_000);
+
+      expect(state).toEqual({
+        chatListRowCount: 1,
+        peerRowCount: 1,
+        titleRowCount: 1,
+        peerRowHasTitle: true,
+        activePeerMatches: false,
+        stepWait: 'timeout'
+      });
+      expect(JSON.stringify(state)).not.toContain(channelName);
+      expect(parseChannelMembershipState(state)).toEqual(state);
+    } finally {
+      await page.close();
+    }
+  });
 
   it('resolves the active group chat and matching title beside a mounted direct chat', async() => {
     const page = await browser.newPage();

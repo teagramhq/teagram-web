@@ -34,10 +34,12 @@ import apiManagerProxy from '@lib/apiManagerProxy';
 import {AutonomousDialogList} from '@components/autonomousDialogList/dialogs';
 import '@helpers/peerIdPolyfill';
 
-type ChannelMembership = 'active' | 'left' | 'kicked' | 'forbidden';
+type ChannelMembership = 'active' | 'left' | 'kicked' | 'forbidden' | 'unknown';
 
 const createList = (membership: ChannelMembership = 'active') => {
-  const mirroredPeer = membership === 'forbidden' ?
+  const mirroredPeer = membership === 'unknown' ?
+    undefined :
+    membership === 'forbidden' ?
     {_:'channelForbidden', id: 990020} :
     {_:'channel', id: 990020, pFlags: membership === 'left' ? {left: true} : membership === 'kicked' ? {kicked: true} : {}};
   const getPeer = (apiManagerProxy as any).getPeer;
@@ -103,6 +105,22 @@ describe('invited channel dialog rows', () => {
     firstDialog.top_message = 1;
     firstDialog.index_0 = 101;
     list.updateDialog(firstDialog);
+
+    expect(sortedList.has(peerId)).toBe(true);
+  });
+
+  it('adds an invited channel when its chat metadata arrives after the dialog update', async() => {
+    const peerId = (990020 as ChatId).toPeerId(true);
+    const dialog = createDialog(0);
+    const {list, sortedList} = createList('unknown');
+    list.appDialogsManager = {xd: list};
+    list.managers.appMessagesManager = {getDialogOnly: vi.fn().mockResolvedValue(dialog)};
+
+    list.updateDialog(dialog);
+    expect(sortedList.has(peerId)).toBe(false);
+
+    (apiManagerProxy as any).getPeer.mockReturnValue({_:'channel', id: 990020, pFlags: {}});
+    await (list as any).onChatUpdate(990020 as ChatId);
 
     expect(sortedList.has(peerId)).toBe(true);
   });

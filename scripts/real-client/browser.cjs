@@ -22,6 +22,7 @@ const GROUP_NAME_STEP_TIMEOUT_MS = 15_000;
 // A basic group's peer id is negative, a user's positive.
 const GROUP_CHAT_SELECTOR = '.topbar .avatar[data-peer-id^="-"]';
 const GROUP_CREATED_STEP_TIMEOUT_MS = 30_000;
+const CHANNEL_MEMBERSHIP_STEP_TIMEOUT_MS = 45_000;
 const GROUP_MESSAGE_STABLE_WINDOW_MS = 600;
 const GROUP_MESSAGE_SAMPLE_INTERVAL_MS = 100;
 const GROUP_MESSAGE_SETTLE_TIMEOUT_MS = 10_000;
@@ -81,6 +82,7 @@ let groupNameFormTrace = {page: undefined, stepWait: 'none'};
 let groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
 let groupMemberTrace = createGroupMemberTrace();
 let groupMessageTrace = createGroupMessageTrace();
+let channelMembershipTrace = {page: undefined, channelName: undefined, peerId: undefined, stepWait: 'none'};
 
 function createGroupMemberTrace() {
   return {page: undefined, groupPeerId: undefined, stages: [], stepWait: 'none', errorsAtStep: undefined, membersTab: createMembersTabTrace()};
@@ -1705,6 +1707,37 @@ async function captureGroupCreatedState(trace = groupCreatedTrace, timeoutMs = C
   }
 }
 
+function channelMembershipProbe({channelName, peerId}) {
+  const rows = Array.from(document.querySelectorAll('#chatlist-container .chatlist-chat'));
+  const peerRows = rows.filter((row) => row.getAttribute('data-peer-id') === peerId);
+  const titleRows = rows.filter((row) => (row.textContent || '').includes(channelName));
+  const activeChats = Array.from(document.querySelectorAll('#column-center .chat.active'));
+  const activePeerId = activeChats.length === 1 ?
+    activeChats[0].querySelector('.topbar .avatar[data-peer-id]')?.getAttribute('data-peer-id') :
+    undefined;
+
+  return {
+    chatListRowCount: rows.length,
+    peerRowCount: peerRows.length,
+    titleRowCount: titleRows.length,
+    peerRowHasTitle: peerRows.some((row) => (row.textContent || '').includes(channelName)),
+    activePeerMatches: activePeerId === peerId
+  };
+}
+
+async function captureChannelMembershipState(trace = channelMembershipTrace, timeoutMs = CENTER_COLUMN_CAPTURE_TIMEOUT_MS) {
+  if(!trace.page) return 'unavailable';
+  try {
+    const probe = await withDeadline(trace.page.evaluate(channelMembershipProbe, {
+      channelName: trace.channelName,
+      peerId: trace.peerId
+    }), timeoutMs);
+    return {...probe, stepWait: trace.stepWait};
+  } catch {
+    return 'unavailable';
+  }
+}
+
 // Reads only the active right-column panel. Member peer ids stay in the page
 // interaction and are never included in diagnostic state.
 function groupMemberProbe({groupPeerId}) {
@@ -2965,6 +2998,71 @@ async function main(dependencies = {}) {
     await openBobGroupMembers(bob.page, bobGroupHeader, groupName, selectedBobPeerId, runtime.screenshotDirectory, capturedScreenshots);
     report.push({name: 'group', status: 'passed'});
 
+    if(runtime.scenarios?.includes('channel')) {
+      currentScenario = 'channel';
+      const channelName = `browser-ci-channel-${runtime.runId.slice(0, 8)}`;
+
+      currentStage = 'alice_new_channel_menu';
+      await alice.page.locator('#new-menu').click().catch(() => failStage('alice_new_channel_menu'));
+      await alice.page.getByText('New Channel', {exact: true}).click().catch(() => failStage('alice_new_channel_menu'));
+
+      currentStage = 'alice_channel_form';
+      const channelForm = alice.page.locator('.new-channel-container');
+      await channelForm.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_channel_form'));
+
+      currentStage = 'alice_channel_name';
+      await channelForm.locator('.input-field-input').first().fill(channelName, {timeout: 15_000})
+      .catch(() => failStage('alice_channel_name'));
+
+      currentStage = 'alice_channel_create';
+      await channelForm.locator('.btn-corner.is-visible').click({timeout: 15_000})
+      .catch(() => failStage('alice_channel_create'));
+
+      currentStage = 'alice_add_bob_to_channel';
+      const addMembers = alice.page.locator('.add-members-container');
+      await addMembers.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_add_bob_to_channel'));
+      await selectUniquePeer(
+        alice.page,
+        '.add-members-container .input-search-input',
+        '.add-members-container .row[data-peer-id]',
+        accounts[1].username,
+        'alice_add_bob_to_channel'
+      );
+
+      currentStage = 'alice_channel_invite';
+      await addMembers.locator('.btn-corner.is-visible').click({timeout: 30_000})
+      .catch(() => failStage('alice_channel_invite'));
+      const invitePopup = alice.page.locator('.popup-add-members');
+      await invitePopup.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_channel_invite'));
+      await invitePopup.locator('.popup-button.btn.primary').click({timeout: 15_000})
+      .catch(() => failStage('alice_channel_invite'));
+      await invitePopup.waitFor({state: 'hidden', timeout: 30_000}).catch(() => failStage('alice_channel_invite'));
+
+      currentStage = 'alice_channel_peer_identity';
+      const channelHeader = alice.page.locator('#column-center .chat.active .topbar .chat-info').filter({hasText: channelName});
+      await channelHeader.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_channel_peer_identity'));
+      const channelPeerId = await alice.page.locator('#column-center .chat.active .topbar .avatar[data-peer-id]').getAttribute('data-peer-id');
+      if(!/^-?[0-9]{1,20}$/.test(channelPeerId || '')) failStage('alice_channel_peer_identity');
+
+      currentStage = 'bob_channel_reload';
+      await bob.page.reload({waitUntil: 'domcontentloaded'}).catch(() => failStage('bob_channel_reload'));
+      await bob.page.locator('#chatlist-container').waitFor({state: 'visible', timeout: CHANNEL_MEMBERSHIP_STEP_TIMEOUT_MS})
+      .catch(() => failStage('bob_channel_reload'));
+
+      channelMembershipTrace = {page: bob.page, channelName, peerId: channelPeerId, stepWait: 'none'};
+      currentStage = 'bob_channel_membership';
+      const bobChannelRow = bob.page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${channelPeerId}"]`);
+      await bobChannelRow.waitFor({state: 'visible', timeout: CHANNEL_MEMBERSHIP_STEP_TIMEOUT_MS}).catch((error) => {
+        channelMembershipTrace.stepWait = classifyLocatorError(error);
+        failStage('bob_channel_membership');
+      });
+      const channelMembership = await captureChannelMembershipState();
+      if(channelMembership === 'unavailable' || channelMembership.peerRowCount !== 1 || !channelMembership.peerRowHasTitle) {
+        failStage('bob_channel_membership');
+      }
+      report.push({name: 'channel', status: 'passed'});
+    }
+
     await Promise.all(observers.map((observer) => observer.waitForSetup()));
     await registry.waitForSetup();
     const apps = {alice, bob};
@@ -3000,6 +3098,7 @@ async function main(dependencies = {}) {
       controlContextCount: CONTROL_PLAN.length,
       screenshotsCaptured: capturedScreenshots.count,
       passwordEvidence,
+      ...(runtime.scenarios?.includes('channel') ? {channelMembership: await captureChannelMembershipState()} : {}),
       network: {unexpectedAttempts: egress.unexpectedAttempts, observerErrors: egress.observerErrors, contexts: networkContexts},
       workerObservation: observationBlock
     };
@@ -3035,6 +3134,7 @@ async function main(dependencies = {}) {
       const groupCreated = groupCreatedTrace.stages?.includes(currentStage) ? await captureGroupCreatedState() : undefined;
       const groupMember = groupMemberTrace.stages?.includes(currentStage) ? await captureGroupMemberState() : undefined;
       const groupMessage = groupMessageTrace.stage === currentStage ? await captureGroupMessageState() : undefined;
+      const channelMembership = currentStage === 'bob_channel_membership' ? await captureChannelMembershipState() : undefined;
       report = {
         status: 'failed',
         stage: currentStage,
@@ -3050,6 +3150,7 @@ async function main(dependencies = {}) {
         ...(groupCreated ? {groupCreated} : {}),
         ...(groupMember ? {groupMember} : {}),
         ...(groupMessage ? {groupMessage} : {}),
+        ...(channelMembership ? {channelMembership} : {}),
         ...(currentStage === 'browser_worker_observation_incomplete' && registry
           ? {workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers)}
           : {}),
@@ -3111,7 +3212,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
