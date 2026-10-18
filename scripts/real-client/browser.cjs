@@ -112,8 +112,13 @@ function failStage(stage) {
   throw new Error(stage);
 }
 
-function getChannelInviteConfirmButton(invitePopup) {
-  return invitePopup.getByRole('button', {name: 'Add', exact: true});
+async function waitForActiveChannel(page, channelName, timeoutMs = 30_000) {
+  const channelHeader = page.locator('#column-center .chat.active .topbar .chat-info').filter({hasText: channelName});
+  await channelHeader.waitFor({state: 'visible', timeout: timeoutMs})
+  .catch(() => failStage('alice_channel_active_channel'));
+  const channelPeerId = await page.locator('#column-center .chat.active .topbar .avatar[data-peer-id]').getAttribute('data-peer-id');
+  if(!/^-?[0-9]{1,20}$/.test(channelPeerId || '')) failStage('alice_channel_peer_identity');
+  return channelPeerId;
 }
 
 function matchesPrivateArtifactManifest(manifest, expected) {
@@ -3036,20 +3041,8 @@ async function main(dependencies = {}) {
       currentStage = 'alice_channel_invite_button';
       await addMembers.locator('.btn-corner.is-visible').click({timeout: 30_000})
       .catch(() => failStage('alice_channel_invite_button'));
-      const invitePopup = alice.page.locator('.popup-add-members');
-      currentStage = 'alice_channel_invite_popup';
-      await invitePopup.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_channel_invite_popup'));
-      currentStage = 'alice_channel_invite_confirm';
-      await getChannelInviteConfirmButton(invitePopup).click({timeout: 15_000})
-      .catch(() => failStage('alice_channel_invite_confirm'));
-      currentStage = 'alice_channel_invite_popup_close';
-      await invitePopup.waitFor({state: 'hidden', timeout: 30_000}).catch(() => failStage('alice_channel_invite_popup_close'));
-
-      currentStage = 'alice_channel_peer_identity';
-      const channelHeader = alice.page.locator('#column-center .chat.active .topbar .chat-info').filter({hasText: channelName});
-      await channelHeader.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_channel_peer_identity'));
-      const channelPeerId = await alice.page.locator('#column-center .chat.active .topbar .avatar[data-peer-id]').getAttribute('data-peer-id');
-      if(!/^-?[0-9]{1,20}$/.test(channelPeerId || '')) failStage('alice_channel_peer_identity');
+      currentStage = 'alice_channel_active_channel';
+      const channelPeerId = await waitForActiveChannel(alice.page, channelName);
 
       currentStage = 'bob_channel_reload';
       await bob.page.reload({waitUntil: 'domcontentloaded'}).catch(() => failStage('bob_channel_reload'));
@@ -3219,7 +3212,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createWorkerDiscovery, emitAuthProgressReport, getChannelInviteConfirmButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForActiveChannel, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

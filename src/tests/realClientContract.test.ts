@@ -28,7 +28,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
-const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getChannelInviteConfirmButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
+const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForActiveChannel, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://telegramd.test';
@@ -4398,7 +4398,7 @@ describe('real client username field readiness', () => {
   });
 });
 
-describe('real client channel invite confirmation', () => {
+describe('real client channel invite completion', () => {
   let browser: any;
 
   beforeAll(async() => {
@@ -4409,16 +4409,14 @@ describe('real client channel invite confirmation', () => {
     await browser?.close();
   }, 15_000);
 
-  it('selects Add uniquely when Add and Cancel share primary button classes', async() => {
+  it('waits for the active channel when the add-members flow has no confirmation popup', async() => {
     const page = await browser.newPage();
     try {
-      await page.setContent('<div class="popup-add-members"><button class="popup-button btn primary">Add</button><button class="popup-button btn primary">Cancel</button></div>');
-      const popup = page.locator('.popup-add-members');
+      const channelName = 'browser-ci-channel-abc123';
+      await page.setContent(`<div id="column-center"><div class="chat active"><div class="topbar"><div class="chat-info">${channelName}</div><div class="avatar" data-peer-id="-10012345"></div></div></div></div>`);
 
-      expect(await popup.locator('.popup-button.btn.primary').count()).toBe(2);
-      const confirmButton = getChannelInviteConfirmButton(popup);
-      expect(await confirmButton.count()).toBe(1);
-      expect(await confirmButton.textContent()).toBe('Add');
+      expect(await page.locator('.popup-add-members').count()).toBe(0);
+      await expect(waitForActiveChannel(page, channelName)).resolves.toBe('-10012345');
     } finally {
       await page.close();
     }
