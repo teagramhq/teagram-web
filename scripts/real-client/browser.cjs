@@ -5,7 +5,7 @@ const observation = require('./observation.cjs');
 
 const REQUIRED_SCENARIOS = ['sign-in', 'message', 'group'];
 const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
-const PRIVATE_CSP_WSS = 'wss://telegramd.test/apiws';
+const PRIVATE_CSP_WSS = 'wss://teagramd.test/apiws';
 const PROBE_PATH = '/_fixture_probe/';
 const MESSAGE = 'browser-ci-hello';
 const GROUP_MESSAGE = 'browser-ci-group-hello';
@@ -2871,7 +2871,7 @@ async function main(dependencies = {}) {
       headless: true,
       chromiumSandbox: true,
       args: [
-        `--host-resolver-rules=MAP telegramd.test ${runtime.frontIp},MAP * ~NOTFOUND`,
+        `--host-resolver-rules=MAP teagramd.test ${runtime.frontIp},MAP * ~NOTFOUND`,
         `--ignore-certificate-errors-spki-list=${runtime.leafSPKI}`,
         '--disable-background-networking',
         '--disable-component-update',

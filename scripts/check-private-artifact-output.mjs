@@ -12,7 +12,7 @@ import {verifyPrivateArtifactCsp, verifyPrivateArtifactManifest} from './private
 import {resolveMtprotoTarget} from './mtproto-target.mjs';
 
 const ROOT_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const PRIVATE_ENDPOINT = 'wss://telegramd.test/apiws';
+const PRIVATE_ENDPOINT = 'wss://teagramd.test/apiws';
 const PUBLIC_KEY_FILE = resolve(ROOT_DIRECTORY, 'scripts/fixtures/private-mtproto-public.pem');
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'teagram-private-artifact-output-'));
 const outputDirectory = join(temporaryRoot, 'dist-private');

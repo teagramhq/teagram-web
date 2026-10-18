@@ -31,7 +31,7 @@ const realClientBrowser = require('../../scripts/real-client/browser.cjs');
 const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
-const APP_ORIGIN = 'https://telegramd.test';
+const APP_ORIGIN = 'https://teagramd.test';
 const MTPROTO_CHUNK_URL = `${APP_ORIGIN}/index.worker-AbCdEfGh.js?x-protocol-version=4`;
 const LOTTIE_WORKER_CHUNK_URL = `${APP_ORIGIN}/tlottie.worker-JkLmNoPq.js`;
 const PROBE_WORKER_URL = `${APP_ORIGIN}/_fixture_probe/shared-worker.js`;
@@ -42,7 +42,7 @@ const HOSTILE = Object.freeze({
   password: HOSTILE_PASSWORD,
   token: 'bearer-secret-value',
   url: 'https://unannounced.invalid/exfiltrate?token=bearer-secret-value',
-  blobUrl: 'blob:https://telegramd.test/0e4a2c1a-1111-2222-3333-444444444444',
+  blobUrl: 'blob:https://teagramd.test/0e4a2c1a-1111-2222-3333-444444444444',
   phrase: 'hunter2 secret passphrase',
   frame: `at ${APP_ORIGIN}/index.worker-AbCdEfGh.js:1:7 (${HOSTILE_PASSWORD})`
 });
@@ -179,7 +179,7 @@ async function runDiscoveryAccountingGate(events: any[], fault?: string) {
   const runtimeConfig = {
     runId,
     endpoint: APP_ORIGIN,
-    wssEndpoint: 'wss://telegramd.test/apiws',
+    wssEndpoint: 'wss://teagramd.test/apiws',
     fingerprint: '1234567890abcdef',
     publicKeySHA256: 'a'.repeat(64),
     artifactDigest: `sha256:${'b'.repeat(64)}`,
@@ -213,8 +213,8 @@ async function runDiscoveryAccountingGate(events: any[], fault?: string) {
         harness.session.emit('Target.targetCreated', {targetInfo: pageTarget('alice-page', 'alice')});
         await harness.attach(app, 'alice-worker');
         await harness.attach(app, 'service-worker', 'auto', 'service_worker');
-        harness.emit(app, 'service-worker', 'Network.webSocketCreated', {requestId: 'service-allowed', url: 'wss://telegramd.test/apiws'}, 'auto');
-        harness.emit(app, 'alice-worker', 'Network.webSocketCreated', {requestId: 'allowed', url: 'wss://telegramd.test/apiws'});
+        harness.emit(app, 'service-worker', 'Network.webSocketCreated', {requestId: 'service-allowed', url: 'wss://teagramd.test/apiws'}, 'auto');
+        harness.emit(app, 'alice-worker', 'Network.webSocketCreated', {requestId: 'allowed', url: 'wss://teagramd.test/apiws'});
         if(fault === 'overflow') app.observer.noteInjectedControlFault('overflow');
         if(fault === 'malformed_discovery') harness.session.emit('Target.receivedMessageFromTarget', {
           sessionId: 'discovery-alice-worker', message: HOSTILE.phrase
@@ -263,17 +263,17 @@ function buildServerReady(): any {
     event: 'server-ready',
     status: 'ready',
     ...READINESS_PINS,
-    evidenceClass: 'production-telegramd',
-    endpoint: 'https://telegramd.test',
-    wssEndpoint: 'wss://telegramd.test/apiws',
+    evidenceClass: 'production-teagramd',
+    endpoint: 'https://teagramd.test',
+    wssEndpoint: 'wss://teagramd.test/apiws',
     mode: 'private',
     mtprotoPublicKeyPEM,
     publicKeySHA256: createHash('sha256').update(mtprotoPublicKeyPEM).digest('hex'),
     fingerprint: '1234567890abcdef',
     leafSPKI: Buffer.from('a'.repeat(64), 'hex').toString('base64'),
     credentials: [
-      {username: `u${runId.slice(0, 30)}a`, passwordFile: `/dev/shm/telegram-fixture-${runId}.abc/a-password`},
-      {username: `u${runId.slice(0, 30)}b`, passwordFile: `/dev/shm/telegram-fixture-${runId}.abc/b-password`}
+      {username: `u${runId.slice(0, 30)}a`, passwordFile: `/dev/shm/teagram-fixture-${runId}.abc/a-password`},
+      {username: `u${runId.slice(0, 30)}b`, passwordFile: `/dev/shm/teagram-fixture-${runId}.abc/b-password`}
     ],
     security: {
       registrationClosed: true,
@@ -415,7 +415,7 @@ function expectNoHostileLeak(summary: any) {
   expect(serialized).not.toContain(HOSTILE.frame);
   expect(serialized).not.toContain('unannounced');
   expect(serialized).not.toContain('blob:');
-  expect(serialized).not.toContain('telegramd.test');
+  expect(serialized).not.toContain('teagramd.test');
   expect(serialized).not.toContain('AbCdEfGh');
   expect(serialized).not.toMatch(/https?:/);
   expect(serialized).not.toMatch(/wss?:/);
@@ -543,7 +543,7 @@ function createAuthProgressNetworkObserver(contextObserver: any, onStop: () => v
         sessionId: 'service-worker-session',
         message: JSON.stringify({
           method: 'Network.requestWillBeSent',
-          params: {type: 'WebSocket', request: {url: 'wss://telegramd.test/apiws'}}
+          params: {type: 'WebSocket', request: {url: 'wss://teagramd.test/apiws'}}
         })
       });
     },
@@ -782,7 +782,7 @@ describe('confined runner shared-worker observation contract', () => {
   it('reports two same-origin blob workers as ambiguous, never as one candidate', () => {
     const summary = replayContext([
       ...appContextEvents(),
-      {kind: 'target', target: sharedWorker('second-worker', 'blob:https://telegramd.test/11111111-2222-3333-4444-555555555555')},
+      {kind: 'target', target: sharedWorker('second-worker', 'blob:https://teagramd.test/11111111-2222-3333-4444-555555555555')},
       {kind: 'attach', targetId: 'second-worker'},
       {kind: 'setup', targetId: 'second-worker'}
     ]);
@@ -1032,7 +1032,7 @@ describe('confined runner shared-worker observation contract', () => {
     await networkObserver.start();
 
     try {
-      cdp.emit('Network.webSocketCreated', {requestId: 'page-socket', url: 'wss://telegramd.test/apiws'});
+      cdp.emit('Network.webSocketCreated', {requestId: 'page-socket', url: 'wss://teagramd.test/apiws'});
       cdp.emit('Network.webSocketHandshakeResponseReceived', {
         requestId: 'page-socket',
         response: {
@@ -1087,7 +1087,7 @@ describe('confined runner shared-worker observation contract', () => {
         sessionId: 'service-worker-session',
         message: JSON.stringify({method, params})
       });
-      emitWorkerEvent('Network.webSocketCreated', {requestId: 'service-socket', url: 'wss://telegramd.test/apiws'});
+      emitWorkerEvent('Network.webSocketCreated', {requestId: 'service-socket', url: 'wss://teagramd.test/apiws'});
       emitWorkerEvent('Network.webSocketHandshakeResponseReceived', {
         requestId: 'service-socket',
         response: {
@@ -1142,7 +1142,7 @@ describe('confined runner shared-worker observation contract', () => {
         sessionId: 'shared-worker-session',
         message: JSON.stringify({method, params})
       });
-      emitWorkerEvent('Network.webSocketCreated', {requestId: 'shared-socket', url: 'wss://telegramd.test/apiws'});
+      emitWorkerEvent('Network.webSocketCreated', {requestId: 'shared-socket', url: 'wss://teagramd.test/apiws'});
       emitWorkerEvent('Network.webSocketHandshakeResponseReceived', {
         requestId: 'shared-socket',
         response: {status: 101, url: HOSTILE.url, headers: {cookie: HOSTILE.password}, headersText: HOSTILE.token}
@@ -1615,7 +1615,7 @@ describe('confined runner shared-worker observation contract', () => {
       block.contexts.alice.workerFailure = HOSTILE.phrase;
     })).toContain('workerFailure');
     expect(tampered((block: any) => {
-      block.contexts.alice.workerSourceChunks = ['https://telegramd.test/index.worker-AbCdEfGh.js'];
+      block.contexts.alice.workerSourceChunks = ['https://teagramd.test/index.worker-AbCdEfGh.js'];
     })).toContain('workerSourceChunks');
     expect(tampered((block: any) => {
       block.contexts.alice.mtprotoSourceFetch = MTPROTO_CHUNK_URL;
@@ -1784,7 +1784,7 @@ describe('discovery shared-worker network accounting', () => {
       await harness.attach(alice, 'alice-worker');
       const before = alice.observer.eventCount();
       const workerEvents = vi.spyOn(alice.observer, 'noteWorkerEvent');
-      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'socket', url: 'wss://telegramd.test/apiws'});
+      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'socket', url: 'wss://teagramd.test/apiws'});
 
       expect(alice.observer.eventCount()).toBe(before + 1);
       expect(workerEvents).toHaveBeenCalledTimes(1);
@@ -1796,8 +1796,8 @@ describe('discovery shared-worker network accounting', () => {
         allowedWebSocketsBySource: {page: 0, shared_worker: 1, service_worker: 0, worker: 0}
       });
       expect(alice.observer.webSocket101ByContextPhase()).toEqual(emptyWebSocket101Grid());
-      harness.emit(alice, 'alice-worker', 'Network.requestWillBeSent', {type: 'WebSocket', request: {url: 'wss://telegramd.test/apiws'}});
-      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'repeat', url: 'wss://telegramd.test/apiws'});
+      harness.emit(alice, 'alice-worker', 'Network.requestWillBeSent', {type: 'WebSocket', request: {url: 'wss://teagramd.test/apiws'}});
+      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'repeat', url: 'wss://teagramd.test/apiws'});
       expect(alice.networkObserver.events).toHaveLength(1);
     } finally {
       await harness.stop();
@@ -1844,7 +1844,7 @@ describe('discovery shared-worker network accounting', () => {
       }
       expect(alice.observer.summary()).toMatchObject({observerErrors: 0, coverageComplete: 1});
       expect(alice.networkObserver.summary().unexpectedAttempts).toBe(0);
-      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'query-socket', url: 'wss://telegramd.test/apiws?extra=1'});
+      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'query-socket', url: 'wss://teagramd.test/apiws?extra=1'});
       expect(alice.networkObserver.summary()).toMatchObject({unexpectedAttempts: 1, allowedWebSockets: 0});
     } finally {
       await harness.stop();
@@ -1879,7 +1879,7 @@ describe('discovery shared-worker network accounting', () => {
       await harness.attach(alice, 'duplicate-worker', first);
       await harness.attach(alice, 'duplicate-worker', second);
       for(const via of [first, second]) {
-        harness.emit(alice, 'duplicate-worker', 'Network.webSocketCreated', {requestId: 'socket', url: 'wss://telegramd.test/apiws'}, via);
+        harness.emit(alice, 'duplicate-worker', 'Network.webSocketCreated', {requestId: 'socket', url: 'wss://teagramd.test/apiws'}, via);
         harness.emit(alice, 'duplicate-worker', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: `${APP_ORIGIN}/fetch`}}, via);
       }
       harness.emit(alice, 'duplicate-worker', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}}, second);
@@ -1890,7 +1890,7 @@ describe('discovery shared-worker network accounting', () => {
         workerTargets: {shared_worker: 1, service_worker: 0}
       });
       await harness.attach(alice, 'distinct-worker', second);
-      harness.emit(alice, 'distinct-worker', 'Network.webSocketCreated', {requestId: 'distinct-socket', url: 'wss://telegramd.test/apiws'}, second);
+      harness.emit(alice, 'distinct-worker', 'Network.webSocketCreated', {requestId: 'distinct-socket', url: 'wss://teagramd.test/apiws'}, second);
       expect(alice.networkObserver.summary()).toMatchObject({allowedWebSockets: 2, workerTargets: {shared_worker: 2, service_worker: 0}});
     } finally {
       await harness.stop();
@@ -1905,12 +1905,12 @@ describe('discovery shared-worker network accounting', () => {
     try {
       for(const context of [alice, bob, control]) await harness.attach(context, `${context.name}-worker`);
       harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {
-        requestId: 'alice-socket', url: 'wss://telegramd.test/apiws', targetId: 'bob-worker', type: 'service_worker', source: 'page'
+        requestId: 'alice-socket', url: 'wss://teagramd.test/apiws', targetId: 'bob-worker', type: 'service_worker', source: 'page'
       }, 'discovery', {targetId: 'bob-worker', type: 'service_worker', source: 'page'});
       expect(alice.networkObserver.summary().attemptsBySource).toEqual({page: 0, shared_worker: 1, service_worker: 0, worker: 0});
       expect(bob.networkObserver.events).toHaveLength(0);
       expect(control.networkObserver.events).toHaveLength(0);
-      harness.emit(bob, 'bob-worker', 'Network.webSocketCreated', {requestId: 'bob-socket', url: 'wss://telegramd.test/apiws'});
+      harness.emit(bob, 'bob-worker', 'Network.webSocketCreated', {requestId: 'bob-socket', url: 'wss://teagramd.test/apiws'});
       harness.emit(control, `${control.name}-worker`, 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}});
       expect(alice.networkObserver.summary().allowedWebSockets).toBe(1);
       expect(bob.networkObserver.summary().allowedWebSockets).toBe(1);
@@ -1930,13 +1930,13 @@ describe('discovery shared-worker network accounting', () => {
         harness.session.emit('Target.targetCreated', {targetInfo: sharedWorker(targetId, HOSTILE.blobUrl, targetId)});
       }
       for(const targetId of ['baseline', 'contextless', 'unattributed', 'pending']) {
-        harness.emit(alice, targetId, 'Network.webSocketCreated', {requestId: targetId, url: 'wss://telegramd.test/apiws'});
+        harness.emit(alice, targetId, 'Network.webSocketCreated', {requestId: targetId, url: 'wss://teagramd.test/apiws'});
       }
       expect(alice.networkObserver.summary()).toMatchObject({allowedWebSockets: 0, workerTargets: {shared_worker: 0, service_worker: 0}});
       expect(alice.networkObserver.events).toHaveLength(0);
       const pending = await harness.startContext('pending');
       await harness.registry.waitForSetup();
-      harness.emit(pending, 'pending', 'Network.webSocketCreated', {requestId: 'now-owned', url: 'wss://telegramd.test/apiws'});
+      harness.emit(pending, 'pending', 'Network.webSocketCreated', {requestId: 'now-owned', url: 'wss://teagramd.test/apiws'});
       expect(pending.networkObserver.summary()).toMatchObject({allowedWebSockets: 1, workerTargets: {shared_worker: 1, service_worker: 0}});
       expect(alice.networkObserver.events).toHaveLength(0);
     } finally {
@@ -1953,7 +1953,7 @@ describe('discovery shared-worker network accounting', () => {
       const before = alice.observer.eventCount();
       const errorsBefore = alice.observer.summary().observerErrors;
       const releasing = harness.registry.releaseContext(alice.observer);
-      harness.emit(alice, 'discovery-worker', 'Network.webSocketCreated', {requestId: 'late-discovery', url: 'wss://telegramd.test/apiws'});
+      harness.emit(alice, 'discovery-worker', 'Network.webSocketCreated', {requestId: 'late-discovery', url: 'wss://teagramd.test/apiws'});
       harness.emit(alice, 'auto-worker', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}}, 'auto');
       for(const [emitter, sessionId] of [[harness.session, 'discovery-discovery-worker'], [alice.cdp, 'auto-auto-worker']]) {
         expect(() => emitter.emit('Target.receivedMessageFromTarget', {sessionId, message: 'null'})).not.toThrow();
@@ -2211,7 +2211,7 @@ describe('discovery shared-worker network accounting', () => {
   it('associates an already mapped blob asset with a later worker target notification', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
-    const blobUrl = 'blob:https://telegramd.test/abababab-abab-abab-abab-abababababab';
+    const blobUrl = 'blob:https://teagramd.test/abababab-abab-abab-abab-abababababab';
     try {
       resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'source-worker', 'dedicated_worker');
       resolver.observeRequest(blobUrl, {type: 'script'}, 'Script', 'source-worker', 'dedicated_worker');
@@ -2321,13 +2321,13 @@ describe('discovery shared-worker network accounting', () => {
         request: {url: HOSTILE.blobUrl},
         initiator: {type: 'script', stack: {callFrames: [{url: MTPROTO_CHUNK_URL}]}}
       });
-      const blobFromUrl = 'blob:https://telegramd.test/22222222-2222-2222-2222-222222222222';
+      const blobFromUrl = 'blob:https://teagramd.test/22222222-2222-2222-2222-222222222222';
       cdp.emit('Network.requestWillBeSent', {
         type: 'Script',
         request: {url: blobFromUrl},
         initiator: {type: 'other', url: MTPROTO_CHUNK_URL}
       });
-      const blobWithoutInitiator = 'blob:https://telegramd.test/33333333-3333-3333-3333-333333333333';
+      const blobWithoutInitiator = 'blob:https://teagramd.test/33333333-3333-3333-3333-333333333333';
       cdp.emit('Network.requestWillBeSent', {
         type: 'Fetch',
         request: {url: MTPROTO_CHUNK_URL},
@@ -2391,7 +2391,7 @@ describe('discovery shared-worker network accounting', () => {
       expect(breakdownFromFetch.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'index.worker-AbCdEfGh.js'}]);
       expect(JSON.stringify(breakdownFromFetch)).not.toContain(blobWithoutInitiator);
 
-      const blobFromScriptRequest = 'blob:https://telegramd.test/66666666-6666-6666-6666-666666666666';
+      const blobFromScriptRequest = 'blob:https://teagramd.test/66666666-6666-6666-6666-666666666666';
       cdp.emit('Network.requestWillBeSent', {
         type: 'Fetch',
         request: {url: MTPROTO_CHUNK_URL},
@@ -2410,7 +2410,7 @@ describe('discovery shared-worker network accounting', () => {
       expect(breakdownFromScriptRequest.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'index.worker-AbCdEfGh.js'}]);
       expect(JSON.stringify(breakdownFromScriptRequest)).not.toContain(blobFromScriptRequest);
 
-      const lottieBlobUrl = 'blob:https://telegramd.test/55555555-5555-5555-5555-555555555555';
+      const lottieBlobUrl = 'blob:https://teagramd.test/55555555-5555-5555-5555-555555555555';
       resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'lottie-error-target');
       const lottiePageErrors = {alice: [], bob: []} as any;
       const lottieError = new Error(HOSTILE.phrase);
@@ -2431,8 +2431,8 @@ describe('discovery shared-worker network accounting', () => {
     const resolver = createPageErrorAssetResolver();
     resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'contract-test-page');
 
-    const firstBlobUrl = 'blob:https://telegramd.test/77777777-7777-7777-7777-777777777777';
-    const secondBlobUrl = 'blob:https://telegramd.test/88888888-8888-8888-8888-888888888888';
+    const firstBlobUrl = 'blob:https://teagramd.test/77777777-7777-7777-7777-777777777777';
+    const secondBlobUrl = 'blob:https://teagramd.test/88888888-8888-8888-8888-888888888888';
     expect(resolver.scriptAsset(`Error: failed\n    at render (${firstBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
     expect(resolver.scriptAsset(`Error: failed\n    at render (${secondBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
     expect(resolver.scriptAsset('Error: failed')).toBe('unknown');
@@ -2442,9 +2442,9 @@ describe('discovery shared-worker network accounting', () => {
   it('correlates interleaved worker blobs by source and rejects ambiguous fallback', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
-    const firstBlobUrl = 'blob:https://telegramd.test/99999999-9999-9999-9999-999999999999';
-    const secondBlobUrl = 'blob:https://telegramd.test/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-    const uncorrelatedBlobUrl = 'blob:https://telegramd.test/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+    const firstBlobUrl = 'blob:https://teagramd.test/99999999-9999-9999-9999-999999999999';
+    const secondBlobUrl = 'blob:https://teagramd.test/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const uncorrelatedBlobUrl = 'blob:https://teagramd.test/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
     try {
       resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'worker-a', 'dedicated_worker');
@@ -2463,7 +2463,7 @@ describe('discovery shared-worker network accounting', () => {
   it('prefers a correlated worker bundle over its main-bundle initiator', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
-    const blobUrl = 'blob:https://telegramd.test/cccccccc-cccc-cccc-cccc-cccccccccccc';
+    const blobUrl = 'blob:https://teagramd.test/cccccccc-cccc-cccc-cccc-cccccccccccc';
 
     vi.useFakeTimers();
     try {
@@ -2485,7 +2485,7 @@ describe('discovery shared-worker network accounting', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
     const pageTargetId = 'shared-page-target';
-    const blobUrl = 'blob:https://telegramd.test/12121212-1212-1212-1212-121212121212';
+    const blobUrl = 'blob:https://teagramd.test/12121212-1212-1212-1212-121212121212';
 
     try {
       resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', pageTargetId);
@@ -2505,8 +2505,8 @@ describe('discovery shared-worker network accounting', () => {
   it('keeps lifetime attribution for hinted stacks and expires unhinted fallback', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
-    const hintedBlobUrl = 'blob:https://telegramd.test/dddddddd-dddd-dddd-dddd-dddddddddddd';
-    const unhintedBlobUrl = 'blob:https://telegramd.test/ffffffff-ffff-ffff-ffff-ffffffffffff';
+    const hintedBlobUrl = 'blob:https://teagramd.test/dddddddd-dddd-dddd-dddd-dddddddddddd';
+    const unhintedBlobUrl = 'blob:https://teagramd.test/ffffffff-ffff-ffff-ffff-ffffffffffff';
 
     vi.useFakeTimers();
     try {
@@ -2524,7 +2524,7 @@ describe('discovery shared-worker network accounting', () => {
   it('does not map an unmatched blob from stale worker or loader evidence', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
-    const blobUrl = 'blob:https://telegramd.test/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
+    const blobUrl = 'blob:https://teagramd.test/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
 
     vi.useFakeTimers();
     try {
@@ -2561,7 +2561,7 @@ describe('discovery shared-worker network accounting', () => {
       return {};
     };
     const {networkObserver} = createWorkerNetworkObserverHarness(observer, 'contract-test', {pageErrorAssetResolver: resolver});
-    const blobUrl = 'blob:https://telegramd.test/44444444-4444-4444-4444-444444444444';
+    const blobUrl = 'blob:https://teagramd.test/44444444-4444-4444-4444-444444444444';
     const pageErrors = {alice: [], bob: []} as any;
     await discovery.registry.launch(discovery.browser);
     await networkObserver.start(discovery.registry);
@@ -2955,7 +2955,7 @@ describe('real client scenario contract', () => {
 
   it('matches the audited private manifest schema without requiring an absent public key hash field', () => {
     const expected = {
-      wssEndpoint: 'wss://telegramd.test/apiws',
+      wssEndpoint: 'wss://teagramd.test/apiws',
       fingerprint: '1234567890abcdef',
       publicKeySHA256: 'a'.repeat(64),
       webRevision: 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
@@ -3017,7 +3017,7 @@ describe('real client scenario contract', () => {
     const runtime = {
       runId,
       endpoint: APP_ORIGIN,
-      wssEndpoint: 'wss://telegramd.test/apiws',
+      wssEndpoint: 'wss://teagramd.test/apiws',
       fingerprint: '1234567890abcdef',
       publicKeySHA256: 'a'.repeat(64),
       artifactDigest: `sha256:${'c'.repeat(64)}`,
@@ -3042,7 +3042,7 @@ describe('real client scenario contract', () => {
 
   it('reads only the fixture-owned mode-0400 synthetic password files', () => {
     const runId = 'c'.repeat(32);
-    const secretDirectory = mkdtempSync(join(tmpdir(), `telegram-fixture-${runId}.`));
+    const secretDirectory = mkdtempSync(join(tmpdir(), `teagram-fixture-${runId}.`));
     chmodSync(secretDirectory, 0o700);
     const passwordFileA = join(secretDirectory, 'a-password');
     const passwordFileB = join(secretDirectory, 'b-password');
@@ -3504,7 +3504,7 @@ describe('real client password evidence contract', () => {
 });
 
 const USERNAME_ENTRY_RUNTIME = Object.freeze({
-  wssEndpoint: 'wss://telegramd.test/apiws',
+  wssEndpoint: 'wss://teagramd.test/apiws',
   fingerprint: '1234567890abcdef',
   webRevision: READINESS_PINS.webRevision,
   artifactDigest: `sha256:${'c'.repeat(64)}`,
@@ -3758,7 +3758,7 @@ describe('real client username field readiness', () => {
 
   function runOuterAuthProgressRunner(browserOutput: string, {browserExitCode = 0, failRunnerCleanup = false}: {browserExitCode?: number, failRunnerCleanup?: boolean} = {}) {
     const fixtureDirectory = mkdtempSync(join(tmpdir(), 'real-client-runner-contract-'));
-    const secretDirectory = mkdtempSync(join(tmpdir(), `telegram-fixture-${READINESS_PINS.runId}.`));
+    const secretDirectory = mkdtempSync(join(tmpdir(), `teagram-fixture-${READINESS_PINS.runId}.`));
     const passwordFiles = [join(secretDirectory, 'a-password'), join(secretDirectory, 'b-password')];
     const statePath = join(fixtureDirectory, 'docker-state.json');
     const readinessPath = join(fixtureDirectory, 'readiness.jsonl');
@@ -3766,9 +3766,9 @@ describe('real client username field readiness', () => {
     const cleanupPath = join(fixtureDirectory, 'cleanup.log');
     const browserInputPath = join(fixtureDirectory, 'browser-input.json');
     const runLabel = 'org.teagram.fixture.run';
-    const browserName = `telegram-fixture-${READINESS_PINS.runId}browser`;
-    const edgeName = `telegram-fixture-${READINESS_PINS.runId}edge`;
-    const serverName = `telegram-fixture-${READINESS_PINS.runId}server`;
+    const browserName = `teagram-fixture-${READINESS_PINS.runId}browser`;
+    const edgeName = `teagram-fixture-${READINESS_PINS.runId}edge`;
+    const serverName = `teagram-fixture-${READINESS_PINS.runId}server`;
     const browser = {
       NetworkSettings: {Networks: {[edgeName]: {IPAddress: '172.20.0.2'}}},
       Config: {Labels: {[runLabel]: READINESS_PINS.runId}, Env: [] as string[], User: '1001:1001'},

@@ -42,7 +42,7 @@ jq -er 'select(.event == "server-ready") | .mtprotoPublicKeyPEM' "$READINESS_FIL
 ARTIFACT_PARENT="$(mktemp -d)"
 ARTIFACT_DIR="$ARTIFACT_PARENT/dist-private"
 MTPROTO_TARGET_MODE=private \
-MTPROTO_PRIVATE_ENDPOINT=wss://telegramd.test/apiws \
+MTPROTO_PRIVATE_ENDPOINT=wss://teagramd.test/apiws \
 MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE="$KEY_FILE" \
   corepack pnpm exec vite build --outDir "$ARTIFACT_DIR"
 MTPROTO_TARGET_MODE=private node scripts/check-bundle-mangling.mjs "$ARTIFACT_DIR"

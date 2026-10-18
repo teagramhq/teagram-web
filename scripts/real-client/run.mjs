@@ -98,7 +98,7 @@ if(args?.help) {
       throw new Error('fixture TLS SPKI pin is invalid');
     }
 
-    const prefix = `telegram-fixture-${args.runId}`;
+    const prefix = `teagram-fixture-${args.runId}`;
     const browserName = `${prefix}browser`;
     const frontName = `${prefix}tls-front`;
     const edgeName = `${prefix}edge`;
@@ -301,7 +301,7 @@ if(args?.help) {
   } finally {
     if(browserContainerValidated) {
       try {
-        const browserName = `telegram-fixture-${args.runId}browser`;
+        const browserName = `teagram-fixture-${args.runId}browser`;
         docker(['exec', browserName, 'rm', '-rf', '--', `/tmp/real-client-${args.runId}`], undefined, 'screenshot cleanup');
       } catch {
         cleanupError = new Error('screenshot cleanup failed');
@@ -309,7 +309,7 @@ if(args?.help) {
     }
     if(browserScriptInstalled || observerScriptInstalled) {
       try {
-        const browserName = `telegram-fixture-${args.runId}browser`;
+        const browserName = `teagram-fixture-${args.runId}browser`;
         docker(['exec', browserName, 'rm', '-rf', '--', `/tmp/real-client-${args.runId}-runner`], undefined, 'browser runner cleanup');
       } catch {
         cleanupError ||= new Error('browser runner cleanup failed');

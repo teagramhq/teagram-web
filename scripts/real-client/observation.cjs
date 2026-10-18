@@ -15,7 +15,7 @@
 // state because the accepted harness owns no blob module probe able to confirm
 // them (MAIN-1483 precheck).
 
-const PRIVATE_CSP_ORIGIN = 'https://telegramd.test';
+const PRIVATE_CSP_ORIGIN = 'https://teagramd.test';
 
 const LIMITS = Object.freeze({
   attachedTargets: 16,
