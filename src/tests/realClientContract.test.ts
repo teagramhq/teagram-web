@@ -3881,21 +3881,26 @@ describe('real client username field readiness', () => {
       await countClientErrors(page, () => ({scenario: 'channel', step: 'bob_channel_other_conversation'}));
       await page.goto(`${APP_ORIGIN}/`);
 
-      const channelPeer = {_: 'inputPeerChannel', channel_id: 90210};
-      Object.defineProperty(channelPeer, 'access_hash', {
-        enumerable: true,
-        get() {
-          throw new Error('access_hash must not be read');
-        }
+      await page.evaluate((hostile: {token: string, password: string}) => {
+        const channelPeer: any = {_: 'inputPeerChannel', channel_id: 90210};
+        Object.defineProperty(channelPeer, 'access_hash', {
+          enumerable: true,
+          get() {
+            throw new Error('access_hash must not be read');
+          }
+        });
+        (window as any).__syntheticRpcParams = {
+          peer: channelPeer,
+          id: {_: 'inputUser', user_id: 70021, access_hash: hostile.token},
+          random_id: hostile.password
+        };
+      }, HOSTILE);
+      const cdp = await page.context().newCDPSession(page);
+      let readerResponse: any;
+      const paramsObject = await cdp.send('Runtime.evaluate', {
+        expression: 'window.__syntheticRpcParams',
+        returnByValue: false
       });
-      const user = {_: 'inputUser', user_id: 70021, access_hash: HOSTILE.token};
-      const params = {peer: channelPeer, id: user, random_id: HOSTILE.password};
-      const peerArguments = (realClientBrowser as any).readSafeRpcArguments.call(params);
-      expect(peerArguments).toEqual([
-        {argument: 'peer', constructor: 'inputPeerChannel', id: '90210'},
-        {argument: 'id', constructor: 'inputUser', id: '70021'}
-      ]);
-
       const captured = await (realClientBrowser as any).captureRpcFailureFromConsole(page, {
         type: 'error',
         args: [
@@ -3908,12 +3913,25 @@ describe('real client username field readiness', () => {
           {type: 'number', value: 1},
           {type: 'number', value: 1},
           {type: 'string', value: 'messages.getDialogs'},
-          {type: 'object', objectId: 'synthetic-rpc-params'}
+          {type: 'object', objectId: paramsObject.result.objectId}
         ]
       }, async(objectId: string) => {
-        expect(objectId).toBe('synthetic-rpc-params');
-        return {peerArguments};
+        expect(objectId).toBe(paramsObject.result.objectId);
+        readerResponse = await cdp.send('Runtime.callFunctionOn', {
+          objectId,
+          functionDeclaration: (realClientBrowser as any).readSafeRpcArguments.toString(),
+          arguments: [{value: 8}],
+          returnByValue: true,
+          silent: true
+        });
+        return readerResponse.result?.value;
       });
+      expect(readerResponse.exceptionDetails).toBeUndefined();
+      expect(readerResponse.result.value).toEqual({peerArguments: [
+        {argument: 'peer', constructor: 'inputPeerChannel', id: '90210'},
+        {argument: 'id', constructor: 'inputUser', id: '70021'}
+      ]});
+      const peerArguments = readerResponse.result.value.peerArguments;
       expect(captured).toBe(true);
 
       const diagnostics = (realClientBrowser as any).getClientErrorDiagnostics(page);
@@ -3952,6 +3970,7 @@ describe('real client username field readiness', () => {
       });
       await page.waitForTimeout(25);
       expect((realClientBrowser as any).getClientErrorDiagnostics(page)[0].rpcFailures).toHaveLength(1);
+      await cdp.detach();
     } finally {
       await page.close();
     }

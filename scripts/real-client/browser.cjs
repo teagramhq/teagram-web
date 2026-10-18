@@ -581,6 +581,7 @@ function createWorkerDiscovery() {
         const result = await sendNested(event.sessionId, 'Runtime.callFunctionOn', {
           objectId,
           functionDeclaration: readSafeRpcArguments.toString(),
+          arguments: [{value: RPC_PEER_ARGUMENT_LIMIT}],
           returnByValue: true,
           silent: true
         });
@@ -1089,6 +1090,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
         const result = await sendTargetCommand(sessionId, 'Runtime.callFunctionOn', {
           objectId,
           functionDeclaration: readSafeRpcArguments.toString(),
+          arguments: [{value: RPC_PEER_ARGUMENT_LIMIT}],
           returnByValue: true,
           silent: true
         });
@@ -1171,6 +1173,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
         const result = await send('Runtime.callFunctionOn', {
           objectId,
           functionDeclaration: readSafeRpcArguments.toString(),
+          arguments: [{value: RPC_PEER_ARGUMENT_LIMIT}],
           returnByValue: true,
           silent: true
         });
@@ -1771,7 +1774,7 @@ function scheduleRpcConsoleCapture(page, event, readPeerArguments) {
   void promise.finally(() => state.pendingCapturePromises.delete(promise));
 }
 
-function readSafeRpcArguments() {
+function readSafeRpcArguments(limit) {
   const idKeyByConstructor = {
     inputPeerUser: 'user_id',
     inputPeerChannel: 'channel_id',
@@ -1803,6 +1806,7 @@ function readSafeRpcArguments() {
     return 'unavailable';
   };
   const output = [];
+  const maxArguments = Number.isSafeInteger(limit) && limit > 0 ? limit : 0;
   const add = (argument, value) => {
     if(!value || typeof value !== 'object' || Array.isArray(value)) return;
     const constructor = own(value, '_');
@@ -1816,13 +1820,13 @@ function readSafeRpcArguments() {
       for(const key of Object.keys(this).slice(0, 64)) {
         if(!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)) continue;
         add(key, own(this, key));
-        if(output.length >= RPC_PEER_ARGUMENT_LIMIT) break;
+        if(output.length >= maxArguments) break;
       }
     }
   } catch {
-    return output.slice(0, RPC_PEER_ARGUMENT_LIMIT);
+    return {peerArguments: output.slice(0, maxArguments)};
   }
-  return output.slice(0, RPC_PEER_ARGUMENT_LIMIT);
+  return {peerArguments: output.slice(0, maxArguments)};
 }
 
 function sanitizeThrownValueFields(fields) {
