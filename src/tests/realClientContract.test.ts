@@ -962,7 +962,7 @@ describe('confined runner shared-worker observation contract', () => {
       cdp.emit('Runtime.exceptionThrown', {exceptionDetails});
 
       expect(commands).toContain('Runtime.enable');
-      expect(onPageException).toHaveBeenCalledWith(exceptionDetails);
+      expect(onPageException).toHaveBeenCalledWith(exceptionDetails, 'runtime');
     } finally {
       await networkObserver.stop();
     }
@@ -2793,6 +2793,139 @@ describe('discovery shared-worker network accounting', () => {
         stage: 'alice_channel_invite_button'
       }
     });
+    resolver.clear();
+  });
+
+  it('correlates simultaneous window, Runtime and debugger observations of one object rejection', async() => {
+    const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
+    expect(recordPageErrorProtocolEvent).toBeTypeOf('function');
+    if(typeof recordPageErrorProtocolEvent !== 'function') return;
+
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [{
+      constructorName: 'Error',
+      scriptAsset: 'unknown',
+      diagnostic: {
+        message: 'Object',
+        stack: '',
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'alice_channel_invite_button'
+      }
+    }], bob: []} as any;
+    const source = `${APP_ORIGIN}/index-XYZ.js`;
+    const page = {
+      url: () => `${APP_ORIGIN}/`,
+      evaluate: async(): Promise<unknown[]> => [{
+        message: 'Object',
+        stack: '',
+        filename: '',
+        lineNumber: 0,
+        columnNumber: 0,
+        pageUrl: `${APP_ORIGIN}/`,
+        errorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
+        errorCode: 400
+      }]
+    } as any;
+    recordPageErrorProtocolEvent(page, {
+      exceptionId: 11,
+      executionContextId: 3,
+      text: 'Uncaught (in promise)',
+      scriptId: '7',
+      lineNumber: 40,
+      columnNumber: 8,
+      exception: {
+        type: 'object',
+        description: 'Object',
+        objectId: 'runtime-object-11',
+        preview: {properties: [
+          {name: 'type', type: 'string', value: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH'},
+          {name: 'code', type: 'number', value: '400'}
+        ]}
+      },
+      stackTrace: {callFrames: [{
+        scriptId: '7',
+        url: source,
+        functionName: 'inviteToChannel',
+        lineNumber: 40,
+        columnNumber: 8
+      }]}
+    }, 'runtime');
+    recordPageErrorProtocolEvent(page, {
+      reason: 'promiseRejection',
+      data: {type: 'object', description: 'Object', objectId: 'debugger-object-11'},
+      callFrames: [{
+        functionName: 'inviteToChannel',
+        url: '',
+        location: {scriptId: '7', lineNumber: 40, columnNumber: 8}
+      }],
+      scriptUrls: {'7': source}
+    }, 'debugger');
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver);
+
+    expect(pageErrors.alice[0].scriptAsset).toBe('index-XYZ.js');
+    expect(pageErrors.alice[0].diagnostic).toMatchObject({
+      message: 'Object',
+      stack: `Object\n    at inviteToChannel (${source}:41:9)`,
+      rpcErrorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
+      rpcErrorCode: 400
+    });
+    resolver.clear();
+  });
+
+  it('keeps same-message exceptions separate when their protocol identities differ', async() => {
+    const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
+    expect(recordPageErrorProtocolEvent).toBeTypeOf('function');
+    if(typeof recordPageErrorProtocolEvent !== 'function') return;
+
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [{
+      constructorName: 'Error',
+      scriptAsset: 'unknown',
+      diagnostic: {
+        message: 'Object',
+        stack: '',
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'alice_channel_invite_button'
+      }
+    }], bob: []} as any;
+    const page = {url: () => `${APP_ORIGIN}/`, evaluate: async(): Promise<unknown[]> => []} as any;
+    const createRuntimeException = (exceptionId: number, scriptId: string, functionName: string) => ({
+      exceptionId,
+      executionContextId: 3,
+      text: 'Uncaught (in promise)',
+      scriptId,
+      lineNumber: 40,
+      columnNumber: 8,
+      exception: {type: 'object', description: 'Object', objectId: `runtime-object-${exceptionId}`},
+      stackTrace: {callFrames: [{
+        scriptId,
+        url: `${APP_ORIGIN}/index-${scriptId}.js`,
+        functionName,
+        lineNumber: 40,
+        columnNumber: 8
+      }]}
+    });
+    recordPageErrorProtocolEvent(page, createRuntimeException(11, '7', 'inviteToChannel'), 'runtime');
+    recordPageErrorProtocolEvent(page, {
+      reason: 'promiseRejection',
+      data: {type: 'object', description: 'Object'},
+      callFrames: [{
+        functionName: 'inviteToChannel',
+        url: '',
+        location: {scriptId: '7', lineNumber: 40, columnNumber: 8}
+      }],
+      scriptUrls: {'7': `${APP_ORIGIN}/index-7.js`}
+    }, 'debugger');
+    recordPageErrorProtocolEvent(page, createRuntimeException(12, '8', 'unrelatedHandler'), 'runtime');
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver);
+
+    expect(pageErrors.alice[0].scriptAsset).toBe('unknown');
+    expect(pageErrors.alice[0].diagnostic.stack).toBe('');
+    expect(pageErrors.alice[0].diagnostic.rpcErrorType).toBeUndefined();
     resolver.clear();
   });
 

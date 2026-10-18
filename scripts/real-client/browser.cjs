@@ -1076,7 +1076,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
       });
       cdp.on('Runtime.exceptionThrown', (event) => {
         try {
-          onPageException(event?.exceptionDetails);
+          onPageException(event?.exceptionDetails, 'runtime');
         } catch {
           // Page exception diagnostics must not interfere with browser observation.
         }
@@ -1090,7 +1090,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
               const url = typeof frame?.url === 'string' && frame.url ? frame.url : pageScriptUrls.get(scriptId);
               if(typeof scriptId === 'string' && typeof url === 'string' && url) scriptUrls[scriptId] = url;
             }
-            onPageException({...event, scriptUrls});
+            onPageException({...event, scriptUrls}, 'debugger');
           }
         } catch {
           // Page exception diagnostics must not interfere with browser observation.
@@ -2577,9 +2577,13 @@ function createPageErrorExceptionEvent(exceptionDetails, pageUrl, redactValues =
   };
 }
 
-function recordPageErrorProtocolEvent(page, exceptionDetails) {
-  const events = pageErrorProtocolEvents.get(page);
-  if(!Array.isArray(events) || events.length >= PAGE_ERROR_DIAGNOSTIC_LIMITS.count) return;
+function recordPageErrorProtocolEvent(page, exceptionDetails, captureSource) {
+  let events = pageErrorProtocolEvents.get(page);
+  if(!Array.isArray(events)) {
+    events = [];
+    pageErrorProtocolEvents.set(page, events);
+  }
+  if(events.length >= PAGE_ERROR_DIAGNOSTIC_LIMITS.count) return;
   let pageUrl = 'unknown';
   try {
     pageUrl = page.url();
@@ -2587,7 +2591,37 @@ function recordPageErrorProtocolEvent(page, exceptionDetails) {
     // An unavailable URL is reported as unknown by the diagnostic sanitizer.
   }
   const event = createPageErrorExceptionEvent(exceptionDetails, pageUrl, pageErrorRedactValues());
-  if(event) events.push(event);
+  if(!event) return;
+  const isRuntimeException = captureSource === 'runtime';
+  const firstFrame = (Array.isArray(exceptionDetails?.callFrames)
+    ? exceptionDetails.callFrames
+    : exceptionDetails?.stackTrace?.callFrames)?.[0];
+  const location = isRuntimeException
+    ? {
+      scriptId: exceptionDetails.scriptId || firstFrame?.scriptId,
+      lineNumber: Number.isSafeInteger(exceptionDetails.lineNumber) ? exceptionDetails.lineNumber : firstFrame?.lineNumber,
+      columnNumber: Number.isSafeInteger(exceptionDetails.columnNumber) ? exceptionDetails.columnNumber : firstFrame?.columnNumber
+    }
+    : firstFrame?.location || {};
+  const exception = exceptionDetails?.exception || exceptionDetails?.data;
+  const previewProperties = Array.isArray(exception?.preview?.properties) ? exception.preview.properties : [];
+  const errorTypePreview = previewProperties.find((property) => property?.name === 'type' && property?.type === 'string')?.value;
+  const errorCodePreview = previewProperties.find((property) => property?.name === 'code' && property?.type === 'number')?.value;
+  const errorCode = typeof errorCodePreview === 'string' && errorCodePreview.trim() !== ''
+    ? Number(errorCodePreview)
+    : errorCodePreview;
+  events.push({
+    ...event,
+    captureSource: ['runtime', 'debugger'].includes(captureSource) ? captureSource : 'unknown',
+    exceptionId: Number.isSafeInteger(exceptionDetails?.exceptionId) ? exceptionDetails.exceptionId : undefined,
+    executionContextId: Number.isSafeInteger(exceptionDetails?.executionContextId) ? exceptionDetails.executionContextId : undefined,
+    exceptionObjectId: typeof exception?.objectId === 'string' ? exception.objectId : undefined,
+    exceptionLocation: typeof location?.scriptId === 'string' && Number.isSafeInteger(location.lineNumber) && Number.isSafeInteger(location.columnNumber)
+      ? {scriptId: location.scriptId, lineNumber: location.lineNumber, columnNumber: location.columnNumber}
+      : undefined,
+    errorType: sanitizePageErrorRpcErrorType(errorTypePreview),
+    errorCode: sanitizePageErrorRpcErrorCode(errorCode)
+  });
 }
 
 async function installPageErrorEventCapture(page) {
@@ -2652,13 +2686,6 @@ async function enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAs
   } catch {
     // A navigated or closing page can make its in-page diagnostics unavailable.
   }
-  const events = [
-    ...(Array.isArray(windowEvents) ? windowEvents : []),
-    ...(pageErrorProtocolEvents.get(page) || []),
-    ...(Array.isArray(consoleEvents) ? consoleEvents : [])
-  ];
-  if(events.length === 0) return;
-  const consumedEvents = new Set();
   for(const entry of entries) {
     const diagnostic = entry.diagnostic;
     const diagnosticMessage = normalizePageErrorMessage(diagnostic.message, redactValues);
@@ -2667,14 +2694,12 @@ async function enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAs
       normalizePageErrorMessage(candidate?.diagnostic?.message, redactValues) === diagnosticMessage
     );
     if(matchingEntries.length !== 1) continue;
-    const matchingIndexes = events.flatMap((event, eventIndex) => {
-      if(consumedEvents.has(eventIndex) || typeof event?.message !== 'string') return [];
-      return normalizePageErrorMessage(event.message, redactValues) === diagnosticMessage ? [eventIndex] : [];
-    });
-    if(matchingIndexes.length !== 1) continue;
-    const [eventIndex] = matchingIndexes;
-    consumedEvents.add(eventIndex);
-    const event = events[eventIndex];
+    const event = correlatePageErrorDiagnosticEvents(diagnostic, {
+      windowEvents: Array.isArray(windowEvents) ? windowEvents : [],
+      protocolEvents: pageErrorProtocolEvents.get(page) || [],
+      consoleEvents: Array.isArray(consoleEvents) ? consoleEvents : []
+    }, redactValues);
+    if(!event) continue;
     const eventMessage = sanitizePageErrorDiagnosticText(event.message, PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength, redactValues);
     const eventStack = sanitizePageErrorDiagnosticText(event.stack, PAGE_ERROR_DIAGNOSTIC_LIMITS.stackLength, redactValues);
     const eventPageUrl = sanitizePageErrorPageUrl(event.pageUrl);
@@ -2694,6 +2719,114 @@ async function enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAs
       if(scriptAsset !== 'unknown') entry.scriptAsset = scriptAsset;
     }
   }
+}
+
+function correlatePageErrorDiagnosticEvents(diagnostic, {windowEvents = [], protocolEvents = [], consoleEvents = []} = {}, redactValues = []) {
+  const diagnosticMessage = normalizePageErrorMessage(diagnostic?.message, redactValues);
+  if(!diagnosticMessage) return;
+  const matchesMessage = (event) => normalizePageErrorMessage(event?.message, redactValues) === diagnosticMessage;
+  const matchingProtocolEvents = protocolEvents.filter(matchesMessage);
+  const runtimeGroups = [];
+  const debuggerEvents = [];
+  const otherProtocolEvents = [];
+
+  for(const event of matchingProtocolEvents) {
+    if(event.captureSource === 'debugger') {
+      debuggerEvents.push(event);
+      continue;
+    }
+    if(event.captureSource !== 'runtime') {
+      otherProtocolEvents.push(event);
+      continue;
+    }
+    const existing = Number.isSafeInteger(event.exceptionId)
+      ? runtimeGroups.find((group) => group.exceptionId === event.exceptionId && group.executionContextId === event.executionContextId)
+      : undefined;
+    if(existing) existing.events.push(event);
+    else runtimeGroups.push({
+      exceptionId: event.exceptionId,
+      executionContextId: event.executionContextId,
+      events: [event]
+    });
+  }
+
+  const protocolGroups = [...runtimeGroups];
+  for(const event of debuggerEvents) {
+    const matchingById = Number.isSafeInteger(event.exceptionId)
+      ? protocolGroups.filter((group) => group.exceptionId === event.exceptionId && group.executionContextId === event.executionContextId)
+      : [];
+    const locationKey = pageErrorExceptionLocationKey(event);
+    const matchingByLocation = locationKey
+      ? protocolGroups.filter((group) => group.events.some((candidate) => pageErrorExceptionLocationKey(candidate) === locationKey))
+      : [];
+    const matchingByObjectId = typeof event.exceptionObjectId === 'string'
+      ? protocolGroups.filter((group) => group.events.some((candidate) => candidate.exceptionObjectId === event.exceptionObjectId))
+      : [];
+    const matches = matchingById.length > 0 ? matchingById : matchingByObjectId.length > 0 ? matchingByObjectId : matchingByLocation;
+    if(matches.length === 1) {
+      matches[0].events.push(event);
+      continue;
+    }
+    protocolGroups.push({exceptionId: undefined, executionContextId: undefined, events: [event]});
+  }
+  for(const event of otherProtocolEvents) protocolGroups.push({exceptionId: undefined, executionContextId: undefined, events: [event]});
+
+  if(protocolGroups.length > 0) {
+    if(protocolGroups.length !== 1) return;
+    const groupEvents = [...protocolGroups[0].events];
+    const matchingWindowEvents = windowEvents.filter(matchesMessage);
+    if(matchingWindowEvents.length === 1 && canCorrelatePageErrorSupplement(groupEvents, matchingWindowEvents[0])) {
+      groupEvents.push({...matchingWindowEvents[0], captureSource: 'window'});
+    }
+    return mergePageErrorObservationGroup(groupEvents);
+  }
+
+  const fallbackEvents = [...windowEvents, ...consoleEvents].filter(matchesMessage);
+  if(fallbackEvents.length !== 1) return;
+  return fallbackEvents[0];
+}
+
+function canCorrelatePageErrorSupplement(groupEvents, supplement) {
+  const supplementLocation = pageErrorDiagnosticLocationKey(supplement);
+  if(supplementLocation && groupEvents.some((event) => pageErrorDiagnosticLocationKey(event) === supplementLocation)) return true;
+  const supplementType = sanitizePageErrorRpcErrorType(supplement?.errorType);
+  const supplementCode = sanitizePageErrorRpcErrorCode(supplement?.errorCode);
+  if(!supplementType && supplementCode === undefined) return false;
+  const groupTypes = [...new Set(groupEvents.map((event) => sanitizePageErrorRpcErrorType(event.errorType)).filter(Boolean))];
+  const groupCodes = [...new Set(groupEvents.map((event) => sanitizePageErrorRpcErrorCode(event.errorCode)).filter((value) => value !== undefined))];
+  return (!supplementType || groupTypes.length === 1 && groupTypes[0] === supplementType) &&
+    (supplementCode === undefined || groupCodes.length === 1 && groupCodes[0] === supplementCode);
+}
+
+function pageErrorDiagnosticLocationKey(event) {
+  const filename = typeof event?.filename === 'string' ? sanitizePageErrorStackUrl(event.filename) : '';
+  if(!filename || filename === '[redacted-url]' || !Number.isSafeInteger(event?.lineNumber) || event.lineNumber <= 0 ||
+      !Number.isSafeInteger(event?.columnNumber) || event.columnNumber <= 0) return;
+  return `${filename}:${event.lineNumber}:${event.columnNumber}`;
+}
+
+function pageErrorExceptionLocationKey(event) {
+  const location = event?.exceptionLocation;
+  if(typeof location?.scriptId !== 'string' || !Number.isSafeInteger(location.lineNumber) || !Number.isSafeInteger(location.columnNumber)) return;
+  return `${location.scriptId}:${location.lineNumber}:${location.columnNumber}`;
+}
+
+function mergePageErrorObservationGroup(events) {
+  const ranked = [...events].sort((first, second) => pageErrorObservationScore(second) - pageErrorObservationScore(first));
+  const merged = {...ranked[0]};
+  const errorTypes = [...new Set(events.map((event) => sanitizePageErrorRpcErrorType(event.errorType)).filter(Boolean))];
+  const errorCodes = [...new Set(events.map((event) => sanitizePageErrorRpcErrorCode(event.errorCode)).filter((value) => value !== undefined))];
+  if(errorTypes.length === 1) merged.errorType = errorTypes[0];
+  else delete merged.errorType;
+  if(errorCodes.length === 1) merged.errorCode = errorCodes[0];
+  else delete merged.errorCode;
+  return merged;
+}
+
+function pageErrorObservationScore(event) {
+  const stackLength = typeof event?.stack === 'string' ? event.stack.length : 0;
+  const hasLocation = pageErrorExceptionLocationKey(event) || (typeof event?.filename === 'string' && event.filename);
+  return stackLength + (hasLocation ? 256 : 0);
 }
 
 function normalizePageErrorMessage(value, redactValues) {
@@ -3106,7 +3239,7 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
       'alice',
       alice.observer,
       pageErrorAssets.alice,
-      runtimeConfig.pageErrorDiagnostics === true ? (details) => recordPageErrorProtocolEvent(alice.page, details) : undefined
+      runtimeConfig.pageErrorDiagnostics === true ? (details, source) => recordPageErrorProtocolEvent(alice.page, details, source) : undefined
     );
     appNetworkObservers.alice = alice.networkObserver;
     observers.push(alice.networkObserver);
@@ -3301,7 +3434,7 @@ async function main(dependencies = {}) {
       'alice',
       alice.observer,
       pageErrorAssets.alice,
-      runtime.pageErrorDiagnostics === true ? (details) => recordPageErrorProtocolEvent(alice.page, details) : undefined
+      runtime.pageErrorDiagnostics === true ? (details, source) => recordPageErrorProtocolEvent(alice.page, details, source) : undefined
     );
     appNetworkObservers.alice = alice.networkObserver;
     observers.push(alice.networkObserver);
@@ -3323,7 +3456,7 @@ async function main(dependencies = {}) {
       'bob',
       bob.observer,
       pageErrorAssets.bob,
-      runtime.pageErrorDiagnostics === true ? (details) => recordPageErrorProtocolEvent(bob.page, details) : undefined
+      runtime.pageErrorDiagnostics === true ? (details, source) => recordPageErrorProtocolEvent(bob.page, details, source) : undefined
     );
     appNetworkObservers.bob = bob.networkObserver;
     observers.push(bob.networkObserver);
@@ -3620,7 +3753,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createPageErrorExceptionEvent, createWorkerDiscovery, emitAuthProgressReport, enrichPageErrorDetails, enrichPageErrorReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPageErrorEventCapture, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
+module.exports = {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createPageErrorExceptionEvent, createWorkerDiscovery, emitAuthProgressReport, enrichPageErrorDetails, enrichPageErrorReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPageErrorEventCapture, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, recordPageErrorProtocolEvent, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
