@@ -173,6 +173,47 @@ describe('invited channel dialogs', () => {
     expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeUndefined();
   });
 
+  test('deletes a forbidden persisted dialog during startup hydration', async() => {
+    const channelId = 990011;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    const appChatsManager: any = client.managers.appChatsManager;
+    const appMessagesManager: any = client.managers.appMessagesManager;
+    const dialogsStorage: any = client.managers.dialogsStorage;
+    const storage: any = dialogsStorage.storage;
+    const staleDialog = makeNonEmptyChannelDialogResult(makeChannel(channelId)).dialogs[0];
+    staleDialog.peerId = peerId;
+    const storageKey = String(peerId);
+    const originalChat = appChatsManager.chats[channelId];
+    const originalReloadConversation = appMessagesManager.reloadConversation;
+
+    await storage.set({[storageKey]: staleDialog});
+    expect((await storage.getAllEntries()).some(([key]: [IDBValidKey, any]) => key === storageKey)).toBe(true);
+
+    // Startup reads the persisted snapshot while the in-memory dialog map is still empty.
+    delete dialogsStorage.dialogs[peerId];
+    appChatsManager.chats[channelId] = makeForbiddenChannel(channelId);
+    appMessagesManager.reloadConversation = () => Promise.resolve();
+
+    try {
+      dialogsStorage.setDialogsFromState([staleDialog]);
+
+      const deletion = storage.keysToDelete.has(storageKey) ? storage.deleteDeferred : undefined;
+      if(deletion) {
+        await deletion;
+      }
+
+      expect((await storage.getAllEntries()).some(([key]: [IDBValidKey, any]) => key === storageKey)).toBe(false);
+    } finally {
+      await storage.delete(peerId);
+      appMessagesManager.reloadConversation = originalReloadConversation;
+      if(originalChat) {
+        appChatsManager.chats[channelId] = originalChat;
+      } else {
+        delete appChatsManager.chats[channelId];
+      }
+    }
+  });
+
   test('does not restore a kicked channel dialog from an incoming channel message update', async() => {
     const channelId = 990006;
     const peerId = (channelId as ChatId).toPeerId(true);

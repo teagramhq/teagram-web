@@ -1531,6 +1531,8 @@ export default class DialogsStorage extends AppManager {
 
     if(this.getDialogOnly(peerId)) {
       this.dropDialogOnDeletion(peerId);
+    } else {
+      this.storage.delete(peerId);
     }
 
     return true;
