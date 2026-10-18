@@ -85,6 +85,12 @@ async function loadEditChatData(
     tab.managers.appReactionsManager.getAvailableReactions(),
     tab.managers.appCommunitiesManager.getJoinedCommunities()
   ]);
+  const removedUsersCount = chat._ === 'channel' ?
+    await loadRemovedUsersCount(
+      tab,
+      chatId,
+      (chatFull as ChatFull.channelFull).kicked_count ?? 0
+    ) : undefined;
 
   return {
     chatId,
@@ -92,8 +98,28 @@ async function loadEditChatData(
     chat,
     appConfig,
     availableReactions,
-    joinedCommunities
+    joinedCommunities,
+    removedUsersCount
   };
+}
+
+async function loadRemovedUsersCount(
+  tab: InstanceType<typeof AppEditChatTab>,
+  chatId: ChatId,
+  fallbackCount: number
+) {
+  try {
+    const participants = await tab.managers.appProfileManager.getChannelParticipants({
+      id: chatId,
+      filter: {_: 'channelParticipantsKicked', q: ''},
+      limit: 1,
+      offset: 0
+    });
+    return participants.count;
+  } catch(error) {
+    console.error('get removed users count error', error);
+    return fallbackCount;
+  }
 }
 
 type EditChatData = Awaited<ReturnType<typeof loadEditChatData>>;
@@ -155,6 +181,13 @@ function EditChatForm(props: {
   } = useHotReloadGuard();
   const [chat, setChat] = createSignal<EditChat>(props.data.chat);
   const [chatFull, setChatFull] = createSignal<EditChatFull>(props.data.chatFull);
+  const [removedUsersCount, setRemovedUsersCount] = createSignal(
+    props.data.removedUsersCount ?? (
+      props.data.chatFull._ === 'channelFull' ?
+        props.data.chatFull.kicked_count ?? 0 :
+        0
+    )
+  );
   const [title, setTitle] = createSignal(props.data.chat.title);
   const [about, setAbout] = createSignal(props.data.chatFull.about || '');
   const [saving, setSaving] = createSignal(false);
@@ -166,6 +199,7 @@ function EditChatForm(props: {
   const [deleting, setDeleting] = createSignal(false);
   let uploadAvatar: AvatarEditPayload;
   let alive = true;
+  let removedUsersCountRequest = 0;
 
   const chatId = () => props.data.chatId;
   const peerId = () => chatId().toPeerId(true);
@@ -315,9 +349,21 @@ function EditChatForm(props: {
     return numberThousandSplitter(getParticipantsCount(chatFull()));
   });
   const removedUsersSubtitle = createMemo(() => {
-    const count = channelFull()?.kicked_count || 0;
+    const count = removedUsersCount();
     return count ? numberThousandSplitter(count) : i18n('NoBlockedUsers');
   });
+
+  const refreshRemovedUsersCount = async() => {
+    const request = ++removedUsersCountRequest;
+    const count = await loadRemovedUsersCount(
+      tab,
+      chatId(),
+      removedUsersCount()
+    );
+    if(alive && request === removedUsersCountRequest) {
+      setRemovedUsersCount(count);
+    }
+  };
 
   const [topics, setTopics] = createSignal(isForum());
   const [autotranslation, setAutotranslation] = createSignal(!!channel()?.pFlags.autotranslation);
@@ -349,6 +395,11 @@ function EditChatForm(props: {
     }
   }));
 
+  subscribeOn(rootScope)('chat_participant', (update) => {
+    if(update.channel_id === chatId()) {
+      void refreshRemovedUsersCount();
+    }
+  });
   subscribeOn(rootScope)('chat_update', async(updatedChatId) => {
     if(updatedChatId !== chatId()) {
       return;
