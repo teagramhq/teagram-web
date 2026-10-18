@@ -76,7 +76,7 @@ for(const mode of ['open', 'invite'] as const) {
       });
     }, mode);
 
-    await page.goto('/?noWorker=1', {waitUntil: 'domcontentloaded'});
+    await page.goto('/?noWorker=1&noServiceWorker=1', {waitUntil: 'domcontentloaded'});
     const registration = page.locator('#auth-pages');
     await expect(registration.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
     await expect(registration.getByRole('button', {name: 'Create account'})).toBeVisible({timeout: 30_000});

@@ -112,8 +112,14 @@ async function unregisterServiceWorkers(serverId?: string): Promise<void> {
   }));
 }
 
-async function activateServer(host: string, id: string, target: MtprotoTarget, rememberChoice: string) {
-  if(target.mode === 'private') {
+async function activateServer(
+  host: string,
+  id: string,
+  target: MtprotoTarget,
+  rememberChoice: string,
+  probeConnection = false
+) {
+  if(probeConnection && target.mode === 'private') {
     const connected = await probeWebSocket(target.endpoint);
     if(!connected) {
       const {card} = showPanel('Could not connect to this server');
@@ -262,7 +268,7 @@ async function showServerPicker() {
     }
 
     if(pinState === 'match') {
-      await activateServer(host, discovered.id, discovered.target, host);
+      await activateServer(host, discovered.id, discovered.target, host, true);
       return;
     }
 
@@ -284,7 +290,7 @@ function showFirstUseConfirmation(discovered: DiscoveredServer) {
   card.append(createButton('Confirm and use this server', async() => {
     try {
       writeServerPin(discovered);
-      await activateServer(discovered.host, discovered.id, discovered.target, discovered.host);
+      await activateServer(discovered.host, discovered.id, discovered.target, discovered.host, true);
     } catch(error) {
       addError(card, error instanceof Error ? error.message : 'Could not save this server pin');
     }
