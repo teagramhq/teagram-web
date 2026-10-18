@@ -165,15 +165,15 @@ describe('invited channel dialog rows', () => {
     list.managers.appChatsManager = {
       getChat: vi.fn().mockResolvedValue(createChannelPeer())
     };
+    reconcilePeer(peerId, createChannelPeer());
+    (apiManagerProxy as any).getPeer.mockReturnValue(createChannelPeer());
 
     await (list as any).onChatUpdate(990020 as ChatId);
+    await vi.waitFor(() => expect(list.managers.appMessagesManager.getDialogOnly).toHaveBeenCalled());
     expect(sortedList.has(peerId)).toBe(false);
 
     cache.dialog = dialog;
-    list.updateDialog(dialog);
-    expect(sortedList.has(peerId)).toBe(false);
-    reconcilePeer(peerId, createChannelPeer());
-    (apiManagerProxy as any).getPeer.mockReturnValue(createChannelPeer());
+    (list as any).reconcileWatchedEmptyChannelDialogs();
 
     await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
   });

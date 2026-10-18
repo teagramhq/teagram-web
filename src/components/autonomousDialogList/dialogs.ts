@@ -224,6 +224,8 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
         this.updateDialog(dialog);
         this.appDialogsManager.processContact?.(peerId.toPeerId());
       }
+
+      this.reconcileWatchedEmptyChannelDialogs();
     });
 
     this.listenerSetter.add(rootScope)('dialog_drop', (dialog) => {
@@ -810,6 +812,12 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     }
 
     void this.reconcileEmptyChannelDialog(peerId);
+  }
+
+  private reconcileWatchedEmptyChannelDialogs() {
+    for(const peerId of this.emptyChannelDialogReconcileDisposers.keys()) {
+      void this.reconcileEmptyChannelDialog(peerId);
+    }
   }
 
   private reconcileEmptyChannelDialog(peerId: PeerId) {
