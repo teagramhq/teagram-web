@@ -394,7 +394,7 @@ describe('private artifact target comparison', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
     const packageJson = readFileSync(join(repositoryRoot, 'package.json'), 'utf8');
 
-    expect(packageJson).toContain('"test:private-auth": "playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameRegistration.spec.ts"');
+    expect(packageJson).toContain('"test:private-auth": "playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameRegistration.spec.ts e2e/customServerRegistration.spec.ts"');
     expect(workflow).toContain('pnpm exec playwright install --with-deps chromium');
     expect(workflow).toContain('pnpm run test:private-auth');
 
