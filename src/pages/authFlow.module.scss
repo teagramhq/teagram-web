@@ -121,11 +121,11 @@ $corner-button-size: 2.5rem;
   }
 }
 
-// Telegram logo SVG used by SignInCard inside <MediaHeader.Sticker element={...}>.
+// Teagram mark used by sign-in and private username auth cards.
 .logo {
-  width: 100%;
-  height: 100%;
-  fill: var(--primary-color);
+  width: 66.667%;
+  height: 66.667%;
+  object-fit: contain;
 }
 
 .logoContainer {
