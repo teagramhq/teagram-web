@@ -40,6 +40,12 @@ describe('invited channel dialogs', () => {
     } as any;
   }
 
+  function makeNonEmptyChannelDialogResult(channel: any) {
+    const result = makeEmptyChannelDialogResult(channel, 'messages.peerDialogs');
+    result.dialogs[0].top_message = 1;
+    return result;
+  }
+
   function makeChannel(id: number, pFlags: Record<string, true> = {}) {
     return {
       _: 'channel',
@@ -50,6 +56,16 @@ describe('invited channel dialogs', () => {
       version: 1,
       photo: {_: 'chatPhotoEmpty'},
       pFlags: {megagroup: true, ...pFlags}
+    };
+  }
+
+  function makeForbiddenChannel(id: number) {
+    return {
+      _: 'channelForbidden',
+      id,
+      access_hash: '1',
+      title: 'Invited channel',
+      pFlags: {megagroup: true}
     };
   }
 
@@ -107,13 +123,7 @@ describe('invited channel dialogs', () => {
 
   test.each([
     ['left channel', 990002, (id: number) => makeChannel(id, {left: true})],
-    ['kicked or banned channel', 990003, (id: number) => ({
-      _: 'channelForbidden',
-      id,
-      access_hash: '1',
-      title: 'Invited channel',
-      pFlags: {megagroup: true}
-    })]
+    ['kicked or banned channel', 990003, makeForbiddenChannel]
   ])('does not restore an empty channel after the user is %s', (_name, channelId, makeRemovedChannel) => {
     const peerId = (channelId as number).toPeerId(true);
 
@@ -123,5 +133,112 @@ describe('invited channel dialogs', () => {
     applyEmptyChannelDialog((makeRemovedChannel as (id: number) => any)(channelId as number));
 
     expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeUndefined();
+  });
+
+  test('drops a cached dialog when a chat vector marks the channel forbidden', () => {
+    const channelId = 990005;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    const appChatsManager: any = client.managers.appChatsManager;
+    const dialogsStorage: any = client.managers.dialogsStorage;
+
+    client.managers.dialogsStorage.applyDialogs(makeNonEmptyChannelDialogResult(makeChannel(channelId)));
+    expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeDefined();
+
+    // The persisted dialog can outlive the in-memory peer cache during startup.
+    delete appChatsManager.chats[channelId];
+    client.managers.dialogsStorage.applyDialogs({
+      _: 'messages.dialogs',
+      dialogs: [],
+      messages: [],
+      chats: [makeForbiddenChannel(channelId)],
+      users: []
+    } as any);
+
+    expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeUndefined();
+    expect(client.managers.dialogsStorage.getFolderDialogs(0, false).map((dialog) => dialog.peerId)).not.toContain(peerId);
+    expect(dialogsStorage.storage.getFromCache(peerId)).toBeUndefined();
+
+    const staleDialog = makeNonEmptyChannelDialogResult(makeChannel(channelId)).dialogs[0];
+    staleDialog.peerId = peerId;
+    dialogsStorage.dialogs[peerId] = staleDialog;
+    client.managers.dialogsStorage.applyDialogs({
+      _: 'messages.peerDialogs',
+      dialogs: [staleDialog],
+      messages: [],
+      chats: [],
+      users: [],
+      state: {_: 'updates.state', date: 0, pts: 0, qts: 0, seq: 0, unread_count: 0}
+    } as any);
+
+    expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeUndefined();
+  });
+
+  test('does not restore a kicked channel dialog from an incoming channel message update', async() => {
+    const channelId = 990006;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    const appChatsManager: any = client.managers.appChatsManager;
+    const dialogsStorage: any = client.managers.dialogsStorage;
+    const appMessagesManager: any = client.managers.appMessagesManager;
+
+    client.managers.dialogsStorage.applyDialogs(makeEmptyChannelDialogResult(makeChannel(channelId), 'messages.peerDialogs'));
+    const staleDialog = client.managers.dialogsStorage.getDialogOnly(peerId);
+    appChatsManager.chats[channelId] = makeChannel(channelId, {kicked: true});
+    dialogsStorage.dialogs[peerId] = staleDialog;
+
+    client.managers.apiUpdatesManager.saveUpdate({
+      _: 'updateNewChannelMessage',
+      message: {
+        _: 'message',
+        id: 1,
+        peer_id: {_: 'peerChannel', channel_id: channelId},
+        date: 1,
+        message: 'New post after removal',
+        pFlags: {post: true}
+      }
+    } as any);
+    await appMessagesManager.newDialogsHandlePromise;
+
+    expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeUndefined();
+    expect(client.managers.dialogsStorage.getFolderDialogs(0, false).map((dialog) => dialog.peerId)).not.toContain(peerId);
+  });
+
+  test('drops a cached dialog when an updateChannel refetch finds the channel forbidden', () => {
+    const channelId = 990010;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    const appChatsManager: any = client.managers.appChatsManager;
+
+    client.managers.dialogsStorage.applyDialogs(makeEmptyChannelDialogResult(makeChannel(channelId), 'messages.peerDialogs'));
+    appChatsManager.chats[channelId] = makeForbiddenChannel(channelId);
+
+    client.managers.apiUpdatesManager.processLocalUpdate({
+      _: 'updateChannel',
+      channel_id: channelId
+    } as any);
+
+    expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeUndefined();
+    expect(client.managers.dialogsStorage.getFolderDialogs(0, false).map((dialog) => dialog.peerId)).not.toContain(peerId);
+  });
+
+  test.each(['PEER_ID_INVALID', 'CHANNEL_PRIVATE', 'CHANNEL_INVALID'])('drops a channel dialog after getChannelDifference returns %s', async(errorType) => {
+    const channelId = 990007 + ['PEER_ID_INVALID', 'CHANNEL_PRIVATE', 'CHANNEL_INVALID'].indexOf(errorType);
+    const peerId = (channelId as ChatId).toPeerId(true);
+    const appMessagesManager: any = client.managers.appMessagesManager;
+    const apiUpdatesManager: any = client.managers.apiUpdatesManager;
+    const apiManager: any = appMessagesManager.apiManager;
+    const originalInvoke = apiManager.invokeApi;
+
+    client.managers.appChatsManager.saveApiChats([makeChannel(channelId)]);
+    client.managers.dialogsStorage.applyDialogs(makeEmptyChannelDialogResult(makeChannel(channelId), 'messages.peerDialogs'));
+    apiUpdatesManager.channelStates ??= {};
+    apiUpdatesManager.channelStates[channelId] = {pts: 1, pendingPtsUpdates: [], syncPending: null, syncLoading: null};
+    apiManager.invokeApi = () => Promise.reject(Object.assign(new Error(errorType), {type: errorType}));
+
+    try {
+      await expect(apiUpdatesManager.getChannelDifference(channelId)).rejects.toMatchObject({type: errorType});
+      expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeUndefined();
+      expect(client.managers.appChatsManager.getChat(channelId)._).toBe('channelForbidden');
+    } finally {
+      apiManager.invokeApi = originalInvoke;
+    }
   });
 });

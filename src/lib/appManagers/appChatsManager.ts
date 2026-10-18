@@ -216,6 +216,7 @@ export class AppChatsManager extends AppManager {
     // defineNotNumerableProperties(chat, ['rTitle', 'initials']);
 
     const oldChat = this.chats[chat.id];
+    const isNewChat = oldChat === undefined;
     const previousCommunityId = oldChat?._ === 'channel' ?
       oldChat.linked_community_id?.toChatId() :
       undefined;
@@ -317,6 +318,13 @@ export class AppChatsManager extends AppManager {
       this.storage.set({
         [chat.id]: chat
       });
+    }
+
+    if(isNewChat && (
+      chat._ === 'channelForbidden' ||
+      (chat._ === 'channel' && (chat.pFlags.left || (chat as any).pFlags.kicked))
+    )) {
+      this.rootScope.dispatchEvent('chat_update', chat.id);
     }
 
     const communityId = chat._ === 'channel' ? chat.linked_community_id?.toChatId() : undefined;
@@ -470,12 +478,30 @@ export class AppChatsManager extends AppManager {
       chat._ === 'communityForbidden' ||
       (chat as any as Chat.chatEmpty)._ === 'chatEmpty' ||
       (chat as Chat.chat).pFlags.left ||
-      // || (chat as any).pFlags.kicked
+      (chat as any).pFlags.kicked ||
       (chat as Chat.chat).pFlags.deactivated) {
       good = false;
     }
 
     return good;
+  }
+
+  public forbidChannel(id: ChatId) {
+    const channel = this.getChat(id);
+    if(channel?._ === 'channel') {
+      this.saveApiChats([{
+        _: 'channelForbidden',
+        id: channel.id,
+        access_hash: channel.access_hash,
+        title: channel.title,
+        pFlags: channel.pFlags
+      } as Chat]);
+    }
+
+    this.apiUpdatesManager.processLocalUpdate({
+      _: 'updateChannel',
+      channel_id: id
+    });
   }
 
   public canManageDirectMessages(chatId: ChatId) {
