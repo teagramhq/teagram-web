@@ -785,18 +785,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       return;
     }
 
-    const dialog = await this.managers.appMessagesManager.getDialogOnly(peerId);
-    if(
-      !dialog ||
-      !this.isActive ||
-      dialog.peer?._ !== 'peerChannel' ||
-      getServerMessageId(dialog.top_message) ||
-      dialog.draft
-    ) {
-      return;
-    }
-
-    this.updateDialog(dialog);
+    this.watchForEmptyChannelDialog(peerId);
   }
 
   private watchForEmptyChannelDialog(peerId: PeerId) {
