@@ -12,6 +12,14 @@ describe('new active channel mirror notifications', () => {
   });
 
   test.each([
+    ['forbidden', {_:'channelForbidden', id: 12350}],
+    ['left', activeChannel(12350, {left: true})],
+    ['kicked', activeChannel(12350, {kicked: true})]
+  ])('returns the channel id when a %s peer becomes active', (_name, previousPeer) => {
+    expect(getNewActiveChannelMirrorChatId(previousPeer as any, activeChannel(12350) as any)).toBe(12350);
+  });
+
+  test.each([
     ['left', activeChannel(12346, {left: true})],
     ['kicked', activeChannel(12347, {kicked: true})],
     ['forbidden', {_:'channelForbidden', id: 12348}]
