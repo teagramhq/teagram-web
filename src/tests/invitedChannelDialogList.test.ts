@@ -33,7 +33,10 @@ import type {Dialog} from '@appManagers/appMessagesManager';
 import {AutonomousDialogList} from '@components/autonomousDialogList/dialogs';
 import '@helpers/peerIdPolyfill';
 
-const createList = () => {
+type ChannelMembership = 'active' | 'left' | 'kicked' | 'forbidden';
+
+const createList = (membership: ChannelMembership = 'active') => {
+  const canSaveEmptyChannelDialog = vi.fn(() => membership === 'active');
   const renderedPeerIds = new Set<PeerId>();
   const sortedList = {
     add: (key: PeerId) => renderedPeerIds.add(key),
@@ -50,11 +53,12 @@ const createList = () => {
     sortedList,
     projectedPeerIds: new Set(),
     filterPinnedPeerIds: new Set(),
+    managers: {dialogsStorage: {canSaveEmptyChannelDialog}},
     getCollapsedCommunityId: vi.fn(() => undefined),
     testDialogForFilter: vi.fn(() => true)
   });
 
-  return {list, sortedList};
+  return {list, sortedList, canSaveEmptyChannelDialog};
 };
 
 const createDialog = (topMessage: number) => ({
@@ -86,4 +90,20 @@ describe('invited channel dialog rows', () => {
 
     expect(sortedList.has(peerId)).toBe(false);
   });
+
+  it.each([
+    {membership: 'left' as const},
+    {membership: 'kicked' as const},
+    {membership: 'forbidden' as const}
+  ])(
+    'does not restore a stale empty dialog after the user is $membership', ({membership}) => {
+      const dialog = createDialog(0);
+      const {list, sortedList, canSaveEmptyChannelDialog} = createList(membership);
+
+      list.updateDialog(dialog);
+
+      expect(canSaveEmptyChannelDialog).toHaveBeenCalledWith(dialog.peerId, dialog);
+      expect(sortedList.has(dialog.peerId)).toBe(false);
+    }
+  );
 });

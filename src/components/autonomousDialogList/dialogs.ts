@@ -821,7 +821,9 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       !this.sortedList.has(dialog.peerId) &&
       dialog.peer?._ === 'peerChannel' &&
       !getServerMessageId(dialog.top_message) &&
-      !dialog.draft
+      !dialog.draft &&
+      // Bypass only the page cutoff; storage still verifies current membership.
+      this.managers.dialogsStorage.canSaveEmptyChannelDialog(dialog.peerId, dialog)
     ) {
       return true;
     }
