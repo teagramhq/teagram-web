@@ -991,6 +991,13 @@ export function parseBrowserGateBreakdown(value) {
   return value;
 }
 
+export function parsePassedBrowserGateBreakdown(report) {
+  if(!report || typeof report !== 'object' || Array.isArray(report) || report.status !== 'passed') {
+    throw new Error('passing browser report is invalid');
+  }
+  return parseBrowserGateBreakdown(report.gateBreakdown);
+}
+
 function isSafeStepDiagnostics(value) {
   if(!hasExactOwnKeys(value, GATE_CONTEXTS)) return false;
   return GATE_CONTEXTS.every((context) => Array.isArray(value[context]) &&

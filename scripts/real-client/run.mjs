@@ -7,7 +7,7 @@ import {isIPv4} from 'node:net';
 import {
   assertAllScenariosPassed,
   formatBrowserFailureMessage,
-  parseBrowserGateBreakdown,
+  parsePassedBrowserGateBreakdown,
   parseChannelMembershipState,
   REQUIRED_CONTROLS,
   parseFixtureReadiness,
@@ -283,7 +283,7 @@ if(args?.help) {
         }
         browserResult.channelMembership = channelMembership;
       }
-      browserResult.gateBreakdown = parseBrowserGateBreakdown(browserResult.gateBreakdown);
+      browserResult.gateBreakdown = parsePassedBrowserGateBreakdown(browserResult);
       const expectedScreenshots = args.scenarios.includes('channel') ? 26 : 16;
       if(browserResult.contextCount !== 2 || browserResult.screenshotsCaptured !== expectedScreenshots ||
           browserResult.network?.unexpectedAttempts !== 0 || browserResult.network?.observerErrors !== 0 ||

@@ -11,7 +11,7 @@ import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
 import {
   assertAllScenariosPassed,
   formatBrowserFailureMessage,
-  parseBrowserGateBreakdown,
+  parsePassedBrowserGateBreakdown,
   parseAuthProgressReport,
   parseChannelMembershipState,
   parseCenterColumnState,
@@ -2371,19 +2371,25 @@ describe('discovery shared-worker network accounting', () => {
       }
     };
 
-    expect(parseBrowserGateBreakdown(passingReport.gateBreakdown)).toEqual(passingReport.gateBreakdown);
-    expect(() => parseBrowserGateBreakdown({
-      ...passingReport.gateBreakdown,
-      stepDiagnostics: {
-        alice: [{scenarioStep: {scenario: 'message', step: 'alice_message_send'}, thrownValues: [], rpcFailures: [], consoleErrors: [], raw: HOSTILE.phrase}],
-        bob: []
+    expect(parsePassedBrowserGateBreakdown(passingReport)).toEqual(passingReport.gateBreakdown);
+    expect(() => parsePassedBrowserGateBreakdown({
+      ...passingReport,
+      gateBreakdown: {
+        ...passingReport.gateBreakdown,
+        stepDiagnostics: {
+          alice: [{scenarioStep: {scenario: 'message', step: 'alice_message_send'}, thrownValues: [], rpcFailures: [], consoleErrors: [], raw: HOSTILE.phrase}],
+          bob: []
+        }
       }
     })).toThrow('browser egress/page error evidence is invalid');
-    expect(() => parseBrowserGateBreakdown({
-      ...passingReport.gateBreakdown,
-      stepDiagnostics: {
-        alice: [{scenarioStep: {scenario: 'message', step: 'alice_message_send'}, thrownValues: [], rpcFailures: [], consoleErrors: [{message: HOSTILE.url}]}],
-        bob: []
+    expect(() => parsePassedBrowserGateBreakdown({
+      ...passingReport,
+      gateBreakdown: {
+        ...passingReport.gateBreakdown,
+        stepDiagnostics: {
+          alice: [{scenarioStep: {scenario: 'message', step: 'alice_message_send'}, thrownValues: [], rpcFailures: [], consoleErrors: [{message: HOSTILE.url}]}],
+          bob: []
+        }
       }
     })).toThrow('browser egress/page error evidence is invalid');
   });
