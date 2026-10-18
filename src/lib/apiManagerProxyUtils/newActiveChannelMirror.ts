@@ -1,5 +1,7 @@
 import type {Chat, User} from '@layer';
 
+type PeerMirror = {[peerId: PeerId]: Exclude<Chat, Chat.chatEmpty> | User.user};
+
 export default function getNewActiveChannelMirrorChatId(
   previousPeer: Exclude<Chat, Chat.chatEmpty> | User.user | undefined,
   nextPeer: Exclude<Chat, Chat.chatEmpty> | User.user | undefined
@@ -13,4 +15,12 @@ export default function getNewActiveChannelMirrorChatId(
   }
 
   return nextPeer.id;
+}
+
+export function getNewActiveChannelMirrorChatIds(previousPeers: PeerMirror, nextPeers: PeerMirror) {
+  return Object.keys(nextPeers).flatMap((peerId) => {
+    const peerIdNumber = Number(peerId) as PeerId;
+    const chatId = getNewActiveChannelMirrorChatId(previousPeers[peerIdNumber], nextPeers[peerIdNumber]);
+    return chatId === undefined ? [] : [chatId];
+  });
 }

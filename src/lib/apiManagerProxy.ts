@@ -85,6 +85,7 @@ import {
   createCacheStorageThreadedControls,
   deleteObjectURLMirrorValue,
   getNewActiveChannelMirrorChatId,
+  getNewActiveChannelMirrorChatIds,
   reconcileObjectURLMirrorSnapshot,
   reconcileObjectURLMirrorValue
 } from './apiManagerProxyUtils';
@@ -1462,6 +1463,9 @@ class ApiManagerProxy extends MTProtoMessagePort {
     const newActiveChannelId = name === 'peers' && key ?
       getNewActiveChannelMirrorChatId(this.mirrors.peers[key.toPeerId()], value) :
       undefined;
+    const newActiveChannelIds = name === 'peers' && !key ?
+      getNewActiveChannelMirrorChatIds(this.mirrors.peers, value) :
+      [];
 
     const result = this.processMirrorTaskMap[name]?.(payload);
     if(result === false) {
@@ -1470,6 +1474,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
     if(!payload.hasOwnProperty('key')) {
       this.mirrors[name] = value;
+      newActiveChannelIds.forEach((chatId) => rootScope.dispatchEvent('chat_update', chatId));
       return;
     }
 
