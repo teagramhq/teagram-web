@@ -817,13 +817,18 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
   protected canUpdateDialog(dialog: Dialog): boolean {
     if(dialog.migratedTo !== undefined || !this.testDialogForFilter(dialog)) return false;
 
+    const channel = dialog.peer?._ === 'peerChannel' ?
+      apiManagerProxy.getPeer(dialog.peerId) as Chat :
+      undefined;
     if(
       !this.sortedList.has(dialog.peerId) &&
       dialog.peer?._ === 'peerChannel' &&
       !getServerMessageId(dialog.top_message) &&
       !dialog.draft &&
-      // Bypass only the page cutoff; storage still verifies current membership.
-      this.managers.dialogsStorage.canSaveEmptyChannelDialog(dialog.peerId, dialog)
+      // Manager proxies return promises, so check the mirrored membership snapshot synchronously.
+      channel?._ === 'channel' &&
+      !channel.pFlags?.left &&
+      !(channel as any).pFlags?.kicked
     ) {
       return true;
     }

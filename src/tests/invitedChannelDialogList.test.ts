@@ -23,20 +23,25 @@ vi.mock('@components/scrollable', () => ({default: class {}}));
 vi.mock('@components/singleTransition', () => ({default: vi.fn()}));
 vi.mock('@components/sortedDialogList', () => ({default: class {}, CustomPinnedDialog: class {}, CustomSortedDialog: class {}}));
 vi.mock('@environment/groupCallSupport', () => ({default: false}));
-vi.mock('@lib/apiManagerProxy', () => ({default: {}}));
+vi.mock('@lib/apiManagerProxy', () => ({default: {getPeer: vi.fn()}}));
 vi.mock('@lib/rootScope', () => ({default: {managers: {}, addEventListener: vi.fn(), dispatchEvent: vi.fn()}}));
 vi.mock('@lib/solidjs/hotReloadGuardProvider', () => ({default: class {}}));
 vi.mock('@lib/solidjs/runWithHotReloadGuard', () => ({runWithHotReloadGuard: (callback: () => unknown) => callback()}));
 vi.mock('@stores/communities', () => ({useCommunities: () => ({}), useCommunityDialogs: () => ({})}));
 
 import type {Dialog} from '@appManagers/appMessagesManager';
+import apiManagerProxy from '@lib/apiManagerProxy';
 import {AutonomousDialogList} from '@components/autonomousDialogList/dialogs';
 import '@helpers/peerIdPolyfill';
 
 type ChannelMembership = 'active' | 'left' | 'kicked' | 'forbidden';
 
 const createList = (membership: ChannelMembership = 'active') => {
-  const canSaveEmptyChannelDialog = vi.fn(() => membership === 'active');
+  const canSaveEmptyChannelDialog = vi.fn(async(_peerId: PeerId, _dialog: Dialog) => membership === 'active');
+  const mirroredPeer = membership === 'forbidden' ?
+    {_:'channelForbidden', id: 990020} :
+    {_:'channel', id: 990020, pFlags: membership === 'left' ? {left: true} : membership === 'kicked' ? {kicked: true} : {}};
+  (apiManagerProxy as any).getPeer.mockReturnValue(mirroredPeer);
   const renderedPeerIds = new Set<PeerId>();
   const sortedList = {
     add: (key: PeerId) => renderedPeerIds.add(key),
@@ -96,13 +101,14 @@ describe('invited channel dialog rows', () => {
     {membership: 'kicked' as const},
     {membership: 'forbidden' as const}
   ])(
-    'does not restore a stale empty dialog after the user is $membership', ({membership}) => {
+    'does not restore a stale empty dialog after the user is $membership', async({membership}) => {
       const dialog = createDialog(0);
       const {list, sortedList, canSaveEmptyChannelDialog} = createList(membership);
 
+      await expect(canSaveEmptyChannelDialog(dialog.peerId, dialog)).resolves.toBe(false);
       list.updateDialog(dialog);
 
-      expect(canSaveEmptyChannelDialog).toHaveBeenCalledWith(dialog.peerId, dialog);
+      expect(canSaveEmptyChannelDialog).toHaveBeenCalledTimes(1);
       expect(sortedList.has(dialog.peerId)).toBe(false);
     }
   );
