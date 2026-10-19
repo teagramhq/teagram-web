@@ -260,6 +260,8 @@ test('isolates two server tabs when a custom server worker takes control', async
       appDownloadManager.managers = {
         apiFileManager: {
           downloadMedia: async(options: {downloadId: string}) => {
+            // The fetch reaches the service worker before the MTProto worker can register its stream.
+            await new Promise<void>((resolve) => window.setTimeout(() => resolve(), 250));
             const download = await serviceMessagePort.invoke('download', {
               id: options.downloadId,
               headers: {'content-type': 'text/plain'}
