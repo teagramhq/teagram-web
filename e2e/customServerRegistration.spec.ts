@@ -22,11 +22,29 @@ test('registers on a second server selected from the web prompt', async({page}, 
 
   await page.context().route('**/*', async(route) => {
     const url = new URL(route.request().url());
-    if(url.origin === appOriginString) {
+    if(url.origin === appOriginString && url.pathname === '/private-worker-fixture.js') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/javascript',
+        body: 'import {captured} from "./private-worker-context.js";postMessage(captured);'
+      });
+    } else if(url.origin === appOriginString && url.pathname === '/private-worker-context.js') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/javascript',
+        body: 'import {getActiveServerId,readWorkerMtprotoTarget,scopeServerDatabaseName} from "/src/config/serverContext.ts";export const captured={serverId:getActiveServerId(),commonDatabase:scopeServerDatabaseName("tweb-common"),target:readWorkerMtprotoTarget()};'
+      });
+    } else if(url.origin === appOriginString) {
       url.protocol = 'http:';
       url.hostname = 'localhost';
       const response = await route.fetch({url: url.toString()});
-      await route.fulfill({response});
+      if(url.pathname === '/') {
+        const headers = await response.headers();
+        headers['content-security-policy'] = "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:";
+        await route.fulfill({response, headers});
+      } else {
+        await route.fulfill({response});
+      }
     } else if(url.hostname === SERVER_HOST && url.pathname === '/.well-known/telegramd/client') {
       await route.fulfill({
         status: 200,
@@ -104,6 +122,41 @@ test('registers on a second server selected from the web prompt', async({page}, 
 
   await page.goto(`${appOriginString}/?noWorker=1`, {waitUntil: 'domcontentloaded'});
   expect(await page.evaluate(() => isSecureContext && !!crypto.subtle)).toBe(true);
+  const workerContext = await page.evaluate(async({helperUrl, workerUrl, serverId, target}) => {
+    const {createPrivateWorkerBlobURL} = await import(helperUrl);
+    const blobUrl = await createPrivateWorkerBlobURL(workerUrl, serverId, target);
+    return await new Promise((resolve, reject) => {
+      const worker = new Worker(blobUrl, {type: 'module'});
+      const timeout = setTimeout(() => {
+        worker.terminate();
+        URL.revokeObjectURL(blobUrl);
+        reject(new Error('private worker did not report its startup context'));
+      }, 10_000);
+      worker.addEventListener('message', (event) => {
+        clearTimeout(timeout);
+        worker.terminate();
+        URL.revokeObjectURL(blobUrl);
+        resolve(event.data);
+      }, {once: true});
+      worker.addEventListener('error', (event) => {
+        clearTimeout(timeout);
+        worker.terminate();
+        URL.revokeObjectURL(blobUrl);
+        reject(new Error(event.message));
+      }, {once: true});
+    });
+  }, {
+    helperUrl: `${appOriginString}/src/helpers/createPrivateWorkerBlobURL.ts`,
+    workerUrl: `${appOriginString}/private-worker-fixture.js`,
+    serverId: 'custom-' + 'b'.repeat(64),
+    target: {mode: 'private', endpoint: `wss://${SERVER_HOST}:2443/apiws`}
+  });
+  expect(workerContext).toEqual({
+    serverId: 'custom-' + 'b'.repeat(64),
+    commonDatabase: 'tweb-custom-' + 'b'.repeat(64) + '-common',
+    target: {mode: 'private', endpoint: `wss://${SERVER_HOST}:2443/apiws`}
+  });
+
   const picker = page.getByRole('dialog');
   const hostInput = picker.getByRole('textbox', {name: 'Server host'});
   await expect(hostInput).toHaveValue('demo.teagram.io');
@@ -191,5 +244,5 @@ test('registers on a second server selected from the web prompt', async({page}, 
   expect(await page.evaluate(() => localStorage.getItem('teagram.active-server-id.v1'))).toBeNull();
   expect(await page.evaluate((id) => localStorage.getItem(`teagram-${id}:dc2_auth_key`), activeId)).toBeNull();
   await expect(page.getByRole('dialog').getByRole('textbox', {name: 'Server host'})).toHaveValue('demo.teagram.io');
-  await page.unrouteAll({behavior: 'ignoreErrors'});
+  await page.unrouteAll({behavior: 'wait'});
 });

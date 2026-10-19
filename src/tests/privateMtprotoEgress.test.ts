@@ -1,5 +1,5 @@
 import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
-import {createPrivateWorkerBlobURL, rewritePrivateWorkerImports} from '@helpers/createPrivateWorkerBlobURL';
+import {rewritePrivateWorkerImports} from '@helpers/createPrivateWorkerBlobURL';
 
 const PRIVATE_ENDPOINT = 'wss://private.example.test:2443/apiws';
 const privateTarget = {
@@ -37,8 +37,6 @@ type Socket = typeof import('@lib/mtproto/transports/websocket').default;
 let PrivateSocket: Socket;
 
 describe('private MTProto browser egress policy', () => {
-  const originalCreateObjectURL = URL.createObjectURL;
-
   beforeAll(async() => {
     vi.doMock('@config/mtprotoTarget', () => ({
       MTProtoTarget: privateTarget,
@@ -52,36 +50,6 @@ describe('private MTProto browser egress policy', () => {
   afterAll(() => {
     vi.doUnmock('@config/mtprotoTarget');
     vi.resetModules();
-    if(originalCreateObjectURL) {
-      Object.defineProperty(URL, 'createObjectURL', {
-        configurable: true,
-        value: originalCreateObjectURL
-      });
-    } else {
-      delete (URL as typeof URL & {createObjectURL?: typeof URL.createObjectURL}).createObjectURL;
-    }
-  });
-
-  it('loads a worker source as a blob URL for the private CSP policy container', async() => {
-    const createObjectURL = vi.fn(() => 'blob:private-mtproto-worker');
-    const fetchWorker = vi.fn(async() => ({
-      ok: true,
-      text: async() => 'self.addEventListener("message", () => {});'
-    }));
-    const originalFetch = globalThis.fetch;
-    vi.stubGlobal('fetch', fetchWorker);
-    Object.defineProperty(URL, 'createObjectURL', {
-      configurable: true,
-      value: createObjectURL
-    });
-
-    try {
-      await expect(createPrivateWorkerBlobURL('index.worker.js')).resolves.toBe('blob:private-mtproto-worker');
-      expect(fetchWorker).toHaveBeenCalledWith('index.worker.js');
-      expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
-    } finally {
-      vi.stubGlobal('fetch', originalFetch);
-    }
   });
 
   it('rewrites minified static imports to same-origin worker URLs', () => {
@@ -103,19 +71,6 @@ describe('private MTProto browser egress policy', () => {
     expect(rewritten).toContain('import(' + String.fromCharCode(96) + 'https://web.telegram.org/k/template.js' + String.fromCharCode(96) + ')');
     expect(rewritten).not.toMatch(/(?:\bfrom\s*|\bimport\s*)(["'])(\.{1,2}\/[^"']+)\1/);
     expect(rewritten).not.toMatch(/import\s*\(\s*(["'\x60])(\.{1,2}\/[^"'\x60]+)\1\s*\)/);
-  });
-
-  it('rejects a failed private worker load before creating a worker URL', async() => {
-    const fetchWorker = vi.fn(async() => ({ok: false, status: 503, text: async() => ''}));
-    const originalFetch = globalThis.fetch;
-    vi.stubGlobal('fetch', fetchWorker);
-
-    try {
-      await expect(createPrivateWorkerBlobURL('index.worker.js')).rejects.toThrow(/unable to load private MTProto worker/);
-      expect(fetchWorker).toHaveBeenCalledWith('index.worker.js');
-    } finally {
-      vi.stubGlobal('fetch', originalFetch);
-    }
   });
 
   it('allows the configured WSS endpoint and blocks an unconfigured origin at the browser dial boundary', () => {

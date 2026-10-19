@@ -289,7 +289,7 @@ function showFirstUseConfirmation(discovered: DiscoveredServer) {
   card.append(host, fingerprint);
   card.append(createButton('Confirm and use this server', async() => {
     try {
-      writeServerPin(discovered);
+      await writeServerPin(discovered);
       await activateServer(discovered.host, discovered.id, discovered.target, discovered.host, true);
     } catch(error) {
       addError(card, error instanceof Error ? error.message : 'Could not save this server pin');

@@ -11,6 +11,8 @@ export default defineConfig({
   use: {
     baseURL: `http://localhost:${PORT}/`,
     headless: true,
+    ignoreHTTPSErrors: true,
+    launchOptions: {args: ['--host-resolver-rules=MAP second-server.example.test 127.0.0.1']},
     viewport: {width: 320, height: 720}
   },
   projects: [{name: 'chromium', use: {...devices['Desktop Chrome']}}],

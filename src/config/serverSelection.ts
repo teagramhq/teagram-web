@@ -4,6 +4,7 @@ import {validatePrivateEndpoint, validateMtprotoTarget} from '@config/mtprotoTar
 export const SERVER_CHOICE_KEY = 'teagram.server-choice.v1';
 export const SERVER_PINS_KEY = 'teagram.server-pins.v1';
 export const ACTIVE_SERVER_ID_KEY = 'teagram.active-server-id.v1';
+const SERVER_PINS_LOCK = 'teagram.server-pins.v1';
 export const DEFAULT_SERVER_HOST = 'web.teagram.io';
 export const DEMO_SERVER_HOST = 'demo.teagram.io';
 export const DISCOVERY_MAX_BYTES = 16 * 1024;
@@ -241,6 +242,18 @@ export function readServerPins(): Record<string, ServerPin> {
   }
 }
 
+function updateServerPins(update: (pins: Record<string, ServerPin>) => void) {
+  if(typeof navigator === 'undefined' || !navigator.locks) {
+    return Promise.reject(new Error('This browser cannot safely confirm this server'));
+  }
+
+  return navigator.locks.request(SERVER_PINS_LOCK, () => {
+    const pins = readServerPins();
+    update(pins);
+    localStorage.setItem(SERVER_PINS_KEY, JSON.stringify(pins));
+  });
+}
+
 export function getServerPin(host: string) {
   return readServerPins()[host];
 }
@@ -256,12 +269,23 @@ export function getServerPinState(discovered: DiscoveredServer, pin?: ServerPin)
 }
 
 export function writeServerPin(discovered: DiscoveredServer) {
-  const pins = readServerPins();
-  pins[discovered.host] = discovered.pin;
-  localStorage.setItem(SERVER_PINS_KEY, JSON.stringify(pins));
+  if(discovered.pin.host !== discovered.host) {
+    return Promise.reject(new Error('The server identity does not match the confirmed host'));
+  }
+
+  return updateServerPins((pins) => {
+    const current = pins[discovered.host];
+    if(current && !pinMatches(discovered, current)) {
+      throw new Error('This server identity changed. Forget this server before confirming it again.');
+    }
+    if(!current) pins[discovered.host] = discovered.pin;
+  });
 }
 
 export async function forgetServer(hostInput: string) {
+  if(typeof navigator === 'undefined' || !navigator.locks) {
+    throw new Error('This browser cannot safely update server pins');
+  }
   const host = normalizeServerHost(hostInput);
   const id = 'custom-' + toHex(await sha256(new TextEncoder().encode(host)));
   for(const key of Object.keys(localStorage)) {
@@ -293,9 +317,7 @@ export async function forgetServer(hostInput: string) {
     await Promise.all(cacheNames.filter((name) => name.startsWith(`teagram-${id}-`)).map((name) => caches.delete(name)));
   }
 
-  const pins = readServerPins();
-  delete pins[host];
-  localStorage.setItem(SERVER_PINS_KEY, JSON.stringify(pins));
+  await updateServerPins((pins) => { delete pins[host]; });
   if(localStorage.getItem(SERVER_CHOICE_KEY) === host) localStorage.removeItem(SERVER_CHOICE_KEY);
   if(localStorage.getItem(ACTIVE_SERVER_ID_KEY) === id) localStorage.removeItem(ACTIVE_SERVER_ID_KEY);
 }
