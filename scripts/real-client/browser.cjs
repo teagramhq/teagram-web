@@ -3338,11 +3338,27 @@ async function enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAs
     const rpcErrorCode = sanitizePageErrorRpcErrorCode(event.errorCode);
     if(rpcErrorType) diagnostic.rpcErrorType = rpcErrorType;
     if(rpcErrorCode !== undefined) diagnostic.rpcErrorCode = rpcErrorCode;
+    const rpcMethod = uniquePageErrorRpcMethod(page, diagnostic, rpcErrorType, rpcErrorCode);
+    if(rpcMethod) diagnostic.rpcMethod = rpcMethod;
     if(entry.scriptAsset === 'unknown' && safeStack?.frames.length > 0) {
       const scriptAsset = safeStack.frames.find((frame) => frame.scriptAsset !== 'unknown')?.scriptAsset || 'unknown';
       if(scriptAsset !== 'unknown') entry.scriptAsset = scriptAsset;
     }
   }
+}
+
+function uniquePageErrorRpcMethod(page, diagnostic, rpcErrorType, rpcErrorCode) {
+  if(!rpcErrorType || rpcErrorCode === undefined) return;
+  const scenarioStep = {scenario: diagnostic.scenario, step: diagnostic.stage};
+  const methods = new Set();
+  for(const step of getClientErrorDiagnostics(page, scenarioStep)) {
+    for(const failure of step.rpcFailures) {
+      if(failure.type !== rpcErrorType || failure.code !== rpcErrorCode ||
+          typeof failure.method !== 'string' || !RPC_METHOD_PATTERN.test(failure.method)) continue;
+      methods.add(failure.method);
+    }
+  }
+  return methods.size === 1 ? [...methods][0] : undefined;
 }
 
 function correlatePageErrorDiagnosticEvents(diagnostic, {windowEvents = [], protocolEvents = [], consoleEvents = []} = {}, redactValues = []) {
@@ -3726,6 +3742,9 @@ function sanitizePageError(error) {
         : {}),
       ...(sanitizePageErrorRpcErrorCode(diagnostic.rpcErrorCode) !== undefined
         ? {rpcErrorCode: sanitizePageErrorRpcErrorCode(diagnostic.rpcErrorCode)}
+        : {}),
+      ...(typeof diagnostic.rpcMethod === 'string' && RPC_METHOD_PATTERN.test(diagnostic.rpcMethod)
+        ? {rpcMethod: diagnostic.rpcMethod}
         : {})
     };
   }

@@ -1066,13 +1066,16 @@ function isSafePageErrorDiagnostic(diagnostic) {
   if(!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) return false;
   const hasRpcErrorType = Object.hasOwn(diagnostic, 'rpcErrorType');
   const hasRpcErrorCode = Object.hasOwn(diagnostic, 'rpcErrorCode');
+  const hasRpcMethod = Object.hasOwn(diagnostic, 'rpcMethod');
   const keys = ['pageUrl', 'scenario', 'stage',
-    ...(hasRpcErrorType ? ['rpcErrorType'] : []), ...(hasRpcErrorCode ? ['rpcErrorCode'] : [])];
+    ...(hasRpcErrorType ? ['rpcErrorType'] : []), ...(hasRpcErrorCode ? ['rpcErrorCode'] : []),
+    ...(hasRpcMethod ? ['rpcMethod'] : [])];
   if(!hasExactOwnKeys(diagnostic, keys) ||
       !PAGE_ERROR_SCENARIOS.includes(diagnostic.scenario) ||
       typeof diagnostic.stage !== 'string' || !/^(?:unknown|[a-z][a-z0-9_]{0,63})$/.test(diagnostic.stage) ||
       (hasRpcErrorType && (typeof diagnostic.rpcErrorType !== 'string' || !RPC_ERROR_TYPE_PATTERN.test(diagnostic.rpcErrorType))) ||
-      (hasRpcErrorCode && (!Number.isSafeInteger(diagnostic.rpcErrorCode) || diagnostic.rpcErrorCode < 0 || diagnostic.rpcErrorCode > 999_999))) return false;
+      (hasRpcErrorCode && (!Number.isSafeInteger(diagnostic.rpcErrorCode) || diagnostic.rpcErrorCode < 0 || diagnostic.rpcErrorCode > 999_999)) ||
+      (hasRpcMethod && (typeof diagnostic.rpcMethod !== 'string' || !PAGE_DIAGNOSTIC_RPC_METHOD.test(diagnostic.rpcMethod)))) return false;
   if(diagnostic.pageUrl === 'unknown') return true;
   if(typeof diagnostic.pageUrl !== 'string' || diagnostic.pageUrl.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength ||
       /[\s?#]/.test(diagnostic.pageUrl)) return false;
