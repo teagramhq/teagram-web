@@ -391,12 +391,16 @@ if(args?.help) {
       }
     }
     if(browserContainerValidated) {
-      try {
-        const browserName = `teagram-fixture-${args.runId}browser`;
-        docker(['exec', browserName, 'rm', '-rf', '--', `/tmp/real-client-${args.runId}`], undefined, 'screenshot cleanup');
-        docker(['exec', browserName, 'rm', '-rf', '--', `/tmp/real-client-traces-${args.runId}`], undefined, 'trace cleanup');
-      } catch {
-        cleanupError = new Error('screenshot cleanup failed');
+      const browserName = `teagram-fixture-${args.runId}browser`;
+      for(const [directory, stage] of [
+        [`/tmp/real-client-${args.runId}`, 'screenshot cleanup'],
+        [`/tmp/real-client-traces-${args.runId}`, 'trace cleanup']
+      ]) {
+        try {
+          docker(['exec', browserName, 'rm', '-rf', '--', directory], undefined, stage);
+        } catch {
+          cleanupError ||= new Error(`${stage} failed`);
+        }
       }
     }
     if(browserScriptInstalled || observerScriptInstalled) {
