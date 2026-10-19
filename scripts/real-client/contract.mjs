@@ -4,9 +4,9 @@ import {basename, dirname, isAbsolute} from 'node:path';
 
 import observation from './observation.cjs';
 
-export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'poll']);
-export const OPTIONAL_SCENARIOS = Object.freeze(['channel']);
-const AVAILABLE_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'channel', 'poll']);
+export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'message', 'group']);
+export const OPTIONAL_SCENARIOS = Object.freeze(['channel', 'poll']);
+const AVAILABLE_SCENARIOS = Object.freeze([...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS]);
 export const POLL_NEGATIVE_CONTROL_SERVER_REVISION = '586403c1f4c92c09b006652278bdd02fd40ddf2d';
 export const POLL_NEGATIVE_CONTROL_EVIDENCE = Object.freeze([
   Object.freeze({shape: 'description', stage: 'alice_poll_description_create', errorType: 'POLL_ANSWERS_INVALID'}),
@@ -122,8 +122,14 @@ export function parseRequiredScenarios(value) {
 }
 
 export function expectedScreenshotCount({pollCreationNegativeControl = false, scenarios = REQUIRED_SCENARIOS} = {}) {
-  const channelScreenshots = Array.isArray(scenarios) && scenarios.includes('channel') ? 10 : 0;
-  return 16 + channelScreenshots + (pollCreationNegativeControl ? 4 : 14);
+  const hasScenarios = Array.isArray(scenarios);
+  const hasPollScenario = hasScenarios && scenarios.includes('poll');
+  if(pollCreationNegativeControl && !hasPollScenario) {
+    throw new Error('negative control requires poll scenario');
+  }
+  const channelScreenshots = hasScenarios && scenarios.includes('channel') ? 10 : 0;
+  const pollScreenshots = hasPollScenario ? (pollCreationNegativeControl ? 4 : 14) : 0;
+  return 16 + channelScreenshots + pollScreenshots;
 }
 
 export function parseRealClientArgs(argv) {
@@ -206,6 +212,9 @@ export function parseRealClientArgs(argv) {
     parsed.scenarios = parseRequiredScenarios(parsed.scenarioSelection);
   }
   if(pollCreationNegativeControl) {
+    if(!parsed.scenarios.includes('poll')) {
+      throw new Error('--poll-creation-negative-control requires poll scenario');
+    }
     if(parsed.serverRevision !== POLL_NEGATIVE_CONTROL_SERVER_REVISION) {
       throw new Error('--poll-creation-negative-control requires the pinned negative-control server revision');
     }

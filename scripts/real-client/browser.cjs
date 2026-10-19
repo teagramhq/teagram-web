@@ -4,7 +4,9 @@ const {createHash} = require('node:crypto');
 const {chromium} = require('playwright');
 const observation = require('./observation.cjs');
 
-const REQUIRED_SCENARIOS = ['sign-in', 'message', 'group', 'poll'];
+const REQUIRED_SCENARIOS = ['sign-in', 'message', 'group'];
+const OPTIONAL_SCENARIOS = ['channel', 'poll'];
+const AVAILABLE_SCENARIOS = [...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS];
 const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
 const PRIVATE_CSP_WSS = 'wss://teagramd.test/apiws';
 const PROBE_PATH = '/_fixture_probe/';
@@ -54,7 +56,7 @@ const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
 const PAGE_DIAGNOSTIC_FIELD_LIMIT = 256;
 const PAGE_DIAGNOSTIC_VALUE_TYPES = new Set(['undefined', 'null', 'boolean', 'number', 'string', 'object', 'function']);
 const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'message', 'group', 'channel', 'poll', 'unknown']);
-const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set([...REQUIRED_SCENARIOS, 'channel']);
+const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set(AVAILABLE_SCENARIOS);
 const PAGE_ERROR_EVENT_CAPTURE_KEY = '__teagramPageErrorEvents';
 const pageErrorDiagnosticCounts = new WeakMap();
 const pageErrorDiagnosticMessageHashes = new WeakMap();
@@ -293,8 +295,10 @@ function readRuntimeInput() {
 function validateRuntimeInput(config) {
   const authProgress = config?.authProgressOneSubmission === true;
   const pollCreationNegativeControl = config?.pollCreationNegativeControl === true;
-  const hasChannelScenario = Array.isArray(config?.scenarios) && config.scenarios.includes('channel');
-  const expectedScenarios = ['sign-in', 'message', 'group', ...(hasChannelScenario ? ['channel'] : []), 'poll'];
+  const selectedScenarios = Array.isArray(config?.scenarios) ? config.scenarios : [];
+  const hasPollScenario = selectedScenarios.includes('poll');
+  const expectedScenarios = AVAILABLE_SCENARIOS.filter((scenario) =>
+    REQUIRED_SCENARIOS.includes(scenario) || selectedScenarios.includes(scenario));
   if(!/^[0-9a-f]{32}$/.test(config?.runId || '') ||
       config.endpoint !== PRIVATE_CSP_ORIGIN || config.wssEndpoint !== PRIVATE_CSP_WSS ||
       !/^[0-9a-f]{16}$/.test(config.fingerprint || '') ||
@@ -317,6 +321,7 @@ function validateRuntimeInput(config) {
       (config.observationOnly === true && config.pageErrorDiagnostics === true) ||
       (authProgress && config.observationOnly === true) ||
       (pollCreationNegativeControl && (authProgress || config.observationOnly === true)) ||
+      (pollCreationNegativeControl && !hasPollScenario) ||
       (!authProgress && config.observationOnly !== true &&
         (!Array.isArray(config.scenarios) || JSON.stringify(config.scenarios) !== JSON.stringify(expectedScenarios))) ||
       !Array.isArray(config.accounts) || config.accounts.length !== (authProgress ? 1 : 2)) {
@@ -5368,6 +5373,10 @@ function shouldRunChannelScenario(runtimeConfig) {
   return runtimeConfig.scenarios.includes('channel');
 }
 
+function shouldRunPollScenario(runtimeConfig) {
+  return runtimeConfig.scenarios.includes('poll');
+}
+
 async function main(dependencies = {}) {
   let report;
   let browser;
@@ -5616,30 +5625,32 @@ async function main(dependencies = {}) {
       report.push({name: 'channel', status: 'passed'});
     }
 
-    currentScenario = 'poll';
-    if(runtime.pollCreationNegativeControl === true) {
-      const negativeControl = await runPollCreationNegativeControl({
-        alice,
-        bob,
-        runtime,
-        groupName,
-        screenshotDirectory: runtime.screenshotDirectory,
-        capturedScreenshots
-      });
-      pollNegativeControlEvidence = negativeControl.evidence;
-      pollSendResults = negativeControl.sendResults;
-    } else {
-      const pollRun = await runPollLifecycle({
-        alice,
-        bob,
-        runtime,
-        groupName,
-        screenshotDirectory: runtime.screenshotDirectory,
-        capturedScreenshots
-      });
-      pollSendResults = pollRun.sendResults;
+    if(shouldRunPollScenario(runtime)) {
+      currentScenario = 'poll';
+      if(runtime.pollCreationNegativeControl === true) {
+        const negativeControl = await runPollCreationNegativeControl({
+          alice,
+          bob,
+          runtime,
+          groupName,
+          screenshotDirectory: runtime.screenshotDirectory,
+          capturedScreenshots
+        });
+        pollNegativeControlEvidence = negativeControl.evidence;
+        pollSendResults = negativeControl.sendResults;
+      } else {
+        const pollRun = await runPollLifecycle({
+          alice,
+          bob,
+          runtime,
+          groupName,
+          screenshotDirectory: runtime.screenshotDirectory,
+          capturedScreenshots
+        });
+        pollSendResults = pollRun.sendResults;
+      }
+      report.push({name: 'poll', status: 'passed'});
     }
-    report.push({name: 'poll', status: 'passed'});
     if(JSON.stringify(report.map((scenario) => scenario.name)) !== JSON.stringify(runtime.scenarios)) {
       failStage('scenario_report_incomplete');
     }
@@ -5818,7 +5829,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPollMessageErrorObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPollMessageErrorObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
