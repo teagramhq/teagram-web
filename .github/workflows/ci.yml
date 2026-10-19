@@ -107,7 +107,7 @@ jobs:
           go-version-file: teagram-server/go.mod
 
       - name: Set up Atlas for the local Teagram server
-        uses: ariga/setup-atlas@v0.3
+        uses: ariga/setup-atlas@2f3c785c89a15e1c0d07bcae3900fb5feb969eea # v0.3
         with:
           version: v1.2.0
 

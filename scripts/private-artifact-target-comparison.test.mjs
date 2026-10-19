@@ -403,4 +403,11 @@ describe('private artifact target comparison', () => {
     expect(smokeStep).not.toContain('MTPROTO_');
     expect(smokeStep).not.toContain('TWEB_REGISTRATION_E2E');
   });
+
+  it('pins the Atlas setup action to the reviewed v0.3 commit', () => {
+    const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
+
+    expect(workflow).toContain('uses: ariga/setup-atlas@2f3c785c89a15e1c0d07bcae3900fb5feb969eea # v0.3');
+    expect(workflow).not.toMatch(/uses: ariga\/setup-atlas@v/);
+  });
 });
