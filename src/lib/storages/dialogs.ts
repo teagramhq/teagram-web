@@ -9,6 +9,7 @@ import type {Chat, Dialog as MTDialog, ForumTopic as MTForumTopic, DialogPeer, M
 import type {AppMessagesManager, Dialog, ForumTopic, MyMessage, SavedDialog} from '@appManagers/appMessagesManager';
 import type {AccountDatabase} from '@config/databases/state';
 import tsNow from '@helpers/tsNow';
+import noop from '@helpers/noop';
 import SearchIndex from '@lib/searchIndex';
 import {SliceEnd} from '@helpers/slicedArray';
 import {MyDialogFilter} from '@lib/storages/filters';
@@ -94,6 +95,7 @@ export default class DialogsStorage extends AppManager {
   private dialogsOffsetDate: {[folder_id: number]: number};
   private pinnedOrders: {[folder_id: number]: PeerId[]};
   private savedDialogsLoaded: boolean;
+  private cachedListReconciled: boolean;
   private savedDialogsOffsetDate: number;
   private savedDialogsPinnedOrder: PeerId[];
   private dialogsNum: number;
@@ -1990,6 +1992,10 @@ export default class DialogsStorage extends AppManager {
     const loadedAll = this.isDialogsLoaded(realFolderId, filterType);
     const isEnoughDialogs = curDialogStorage.length >= (offset + limit);
     if((isServerSearchSupported ? false : query) || loadedAll || isEnoughDialogs || forceLocal) {
+      if(!query && !offset && filterId === FOLDER_ID_ALL) {
+        this.reconcileCachedChannelDialogs();
+      }
+
       const dialogs = curDialogStorage.slice(offset, offset + limit);
       return {
         dialogs,
@@ -2045,6 +2051,50 @@ export default class DialogsStorage extends AppManager {
         isEnd: result.isEnd && curDialogStorage[curDialogStorage.length - 1] === dialogs[dialogs.length - 1]
       };
     });
+  }
+
+  /**
+   * A cached list is not asked from the server again, but a channel membership reaches the client
+   * only as a transient `updateChannel` that `getDifference` never replays. A join pushed while the
+   * previous worker was going away (its `getPeerDialogs` unanswered) or while offline is missing
+   * from that cache for good, so once per start compare it with the server's first page and fetch
+   * the channel dialogs it lacks. The server's chats decide membership, so a left, kicked or banned
+   * channel is never fetched back.
+   */
+  private reconcileCachedChannelDialogs() {
+    if(this.cachedListReconciled) {
+      return;
+    }
+
+    this.cachedListReconciled = true;
+    this.apiManager.invokeApiSingleProcess({
+      method: 'messages.getDialogs',
+      params: {
+        folder_id: FOLDER_ID_ALL,
+        offset_date: 0,
+        offset_id: 0,
+        offset_peer: {_: 'inputPeerEmpty'},
+        limit: 20,
+        hash: '0'
+      },
+      processResult: (result) => {
+        if(result._ === 'messages.dialogsNotModified') {
+          return;
+        }
+
+        this.appPeersManager.saveApiPeers(result);
+        for(const dialog of result.dialogs) {
+          if(dialog._ !== 'dialog' || dialog.peer._ !== 'peerChannel') {
+            continue;
+          }
+
+          const peerId = this.appPeersManager.getPeerId(dialog.peer);
+          if(!this.getDialogOnly(peerId) && this.appChatsManager.isInChat(peerId.toChatId())) {
+            this.appMessagesManager.reloadConversation(peerId);
+          }
+        }
+      }
+    }).catch(noop);
   }
 
   public async markFolderAsRead(
