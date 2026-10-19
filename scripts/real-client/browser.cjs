@@ -3361,8 +3361,8 @@ function uniquePageErrorRpcMethod(page, diagnostic, rpcErrorType, rpcErrorCode) 
   for(const step of getClientErrorDiagnostics(page, scenarioStep)) {
     if(step.rpcFailuresTruncated) return;
     for(const failure of step.rpcFailures) {
-      if(failure.type !== rpcErrorType || failure.code !== rpcErrorCode ||
-          typeof failure.method !== 'string' || !RPC_METHOD_PATTERN.test(failure.method)) continue;
+      if(failure.type !== rpcErrorType || failure.code !== rpcErrorCode) continue;
+      if(typeof failure.method !== 'string' || !RPC_METHOD_PATTERN.test(failure.method)) return;
       methods.add(failure.method);
     }
   }

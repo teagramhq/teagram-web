@@ -2912,6 +2912,77 @@ describe('discovery shared-worker network accounting', () => {
     resolver.clear();
   });
 
+  it('omits RPC attribution when a matching failure has no method', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorReport = (realClientBrowser as any).enrichPageErrorReport;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [], bob: []} as any;
+    const frame = {};
+    const scenarioStep = {scenario: 'channel', step: 'alice_channel_create'};
+    let captureDiagnostic: any;
+    const page = {
+      mainFrame: (): object => frame,
+      exposeBinding: async(_name: string, handler: any) => { captureDiagnostic = handler; },
+      on: (): void => undefined,
+      addInitScript: async(): Promise<void> => undefined,
+      url: (): string => `${APP_ORIGIN}/`,
+      evaluate: async(): Promise<unknown[]> => []
+    } as any;
+    await countClientErrors(page, () => scenarioStep);
+    for(const fields of [
+      {type: 'PEER_ID_INVALID', code: 400, description: 'unavailable', method: 'channels.createChannel'},
+      {type: 'PEER_ID_INVALID', code: 400, description: 'unavailable'}
+    ]) {
+      captureDiagnostic({frame}, {kind: 'rpc_failure', rpcSource: 'api_log', fields});
+    }
+
+    const error = new Error('Object');
+    recordPageError(pageErrors, 'alice', error, undefined, scenarioStep, {
+      captureDetails: true,
+      pageUrl: `${APP_ORIGIN}/`,
+      scenario: scenarioStep.scenario,
+      stage: scenarioStep.step
+    });
+    recordPageErrorProtocolEvent(page, {
+      exceptionId: 34,
+      executionContextId: 3,
+      text: 'Uncaught (in promise)',
+      exception: {
+        type: 'object',
+        description: 'Object',
+        objectId: 'runtime-object-34',
+        preview: {properties: [
+          {name: 'type', type: 'string', value: 'PEER_ID_INVALID'},
+          {name: 'code', type: 'number', value: '400'}
+        ]}
+      },
+      stackTrace: {callFrames: [{
+        scriptId: '34',
+        url: `${APP_ORIGIN}/cryptoMessagePort-AbCd.js`,
+        functionName: 'processResultTask',
+        lineNumber: 588,
+        columnNumber: 12
+      }]}
+    }, 'runtime', scenarioStep);
+
+    const gateBreakdown = await enrichPageErrorReport(
+      pageErrors,
+      {alice: page},
+      {alice: resolver},
+      {},
+      [],
+      {alice: getClientErrorDiagnostics(page), bob: []}
+    );
+
+    expect(gateBreakdown.stepDiagnostics.alice[0].rpcFailures.map((failure: any) => failure.method))
+    .toEqual(['channels.createChannel', 'unavailable']);
+    expect(gateBreakdown.pageErrors.alice[0].diagnostic.rpcMethod).toBeUndefined();
+    expect(realClientContract.parseBrowserGateBreakdown(gateBreakdown)).toEqual(gateBreakdown);
+    resolver.clear();
+  });
+
   it('omits the RPC method when same-stage errors leave more than one candidate', async() => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const enrichPageErrorReport = (realClientBrowser as any).enrichPageErrorReport;
