@@ -7,15 +7,14 @@ import {expect, test} from '@playwright/test';
 import {WebSocket, WebSocketServer} from 'ws';
 
 const SERVER_HOST = 'second-server.example.test';
-const SERVER_WSS_ENDPOINT = `wss://${SERVER_HOST}:18443/apiws`;
+const SERVER_WSS_ENDPOINT = `wss://${SERVER_HOST}/apiws`;
 const SERVER_USER = process.env.TEAGRAM_CUSTOM_SERVER_TEST_USER || 'custom_server_user';
 const SERVER_PASSWORD = process.env.TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD || 'Teagram-Test-Password-123!';
 
 test('signs in to a second local server through the custom server picker and worker', async({page}, testInfo) => {
   const serverHttpUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL;
   const serverWebSocketUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_WS_URL;
-  const discoveryFile = process.env.TEAGRAM_CUSTOM_SERVER_TEST_DISCOVERY_FILE;
-  const hasServerFixture = !!serverHttpUrl && !!serverWebSocketUrl && !!discoveryFile;
+  const hasServerFixture = !!serverHttpUrl && !!serverWebSocketUrl;
   test.skip(!process.env.CI && !hasServerFixture, 'CI must provide the local Teagram server');
   if(!hasServerFixture) throw new Error('CI must provide the local Teagram server');
 
@@ -95,32 +94,12 @@ test('signs in to a second local server through the custom server picker and wor
         }
       } else if(url.hostname === SERVER_HOST && url.pathname === '/.well-known/telegramd/client') {
         const response = await route.fetch({url: `${serverHttpUrl}/.well-known/telegramd/client`});
-        if(response.ok()) {
-          const discovery = await response.json() as {websocket?: {endpoint?: string}};
-          if(discovery.websocket?.endpoint !== SERVER_WSS_ENDPOINT) {
-            throw new Error('local server discovery endpoint does not match its test listener');
-          }
-          await route.fulfill({response});
-          return;
-        } else if(response.status() === 404) {
-          const discovery = JSON.parse(readFileSync(discoveryFile, 'utf8')) as {
-            websocket?: {endpoint?: string},
-            [key: string]: unknown
-          };
-          if(discovery.websocket?.endpoint && discovery.websocket.endpoint !== SERVER_WSS_ENDPOINT) {
-            throw new Error('local server identity endpoint does not match its test listener');
-          }
-          discovery.websocket = {endpoint: SERVER_WSS_ENDPOINT};
-          await route.fulfill({
-            status: 200,
-            headers: {'access-control-allow-origin': '*'},
-            contentType: 'application/json',
-            body: JSON.stringify(discovery)
-          });
-          return;
-        } else {
-          throw new Error(`local server discovery returned ${response.status()}`);
+        if(!response.ok()) throw new Error(`local server discovery returned ${response.status()}`);
+        const discovery = await response.json() as {websocket?: {endpoint?: string}};
+        if(discovery.websocket?.endpoint !== SERVER_WSS_ENDPOINT) {
+          throw new Error(`local server discovery advertises ${discovery.websocket?.endpoint}, expected ${SERVER_WSS_ENDPOINT}`);
         }
+        await route.fulfill({response});
       } else {
         await route.abort();
       }

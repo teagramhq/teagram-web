@@ -123,12 +123,10 @@ jobs:
           TG_LISTEN_ADDR=127.0.0.1:2443
           TG_ADVERTISE_ADDR=second-server.example.test:2443
           TG_WEBSOCKET_LISTEN_ADDR=127.0.0.1:2445
-          TG_WEBSOCKET_ADVERTISE_ENDPOINT=wss://second-server.example.test:18443/apiws
           TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io
           TG_REGISTRATION=closed
           TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL=http://127.0.0.1:2445
           TEAGRAM_CUSTOM_SERVER_TEST_WS_URL=ws://127.0.0.1:2445/apiws
-          TEAGRAM_CUSTOM_SERVER_TEST_DISCOVERY_FILE=$RUNNER_TEMP/teagram-custom-server-discovery.json
           TEAGRAM_CUSTOM_SERVER_TEST_USER=custom_server_user
           TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD=Teagram-Test-Password-123!
           TEAGRAMD_PID_FILE=$RUNNER_TEMP/teagramd.pid
@@ -145,13 +143,6 @@ jobs:
           go -C teagram-server build -o "$RUNNER_TEMP/teagramd" ./cmd/teagramd
           openssl genrsa -traditional -F4 -out "$TG_RSA_KEY_PATH" 2048
           chmod 0600 "$TG_RSA_KEY_PATH"
-          rsa_spki="$(openssl pkey -in "$TG_RSA_KEY_PATH" -pubout -outform DER | base64 -w0)"
-          jq -n \
-            --arg endpoint 'second-server.example.test:2443' \
-            --arg websocket 'wss://second-server.example.test:18443/apiws' \
-            --arg rsa_spki "$rsa_spki" \
-            '{version: 1, mtproto: {endpoint: $endpoint, dc_id: 2, rsa_spki: $rsa_spki}, websocket: {endpoint: $websocket}}' \
-            > "$TEAGRAM_CUSTOM_SERVER_TEST_DISCOVERY_FILE"
           mkdir -p "$TG_BLOB_DIR"
           printf '%s\n' "$TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD" \
             | sudo env \
