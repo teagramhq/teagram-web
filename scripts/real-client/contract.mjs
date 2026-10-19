@@ -1009,7 +1009,11 @@ function isSafeStepDiagnostics(value) {
   if(!hasExactOwnKeys(value, GATE_CONTEXTS)) return false;
   return GATE_CONTEXTS.every((context) => Array.isArray(value[context]) &&
     value[context].length <= PAGE_DIAGNOSTIC_STEP_LIMIT && value[context].every((entry) =>
-      hasExactOwnKeys(entry, ['scenarioStep', 'thrownValues', 'rpcFailures', 'consoleErrors']) &&
+      hasExactOwnKeys(entry, [
+        'scenarioStep', 'thrownValues', 'rpcFailures', 'consoleErrors',
+        ...(Object.hasOwn(entry || {}, 'rpcFailuresTruncated') ? ['rpcFailuresTruncated'] : [])
+      ]) &&
+      (!Object.hasOwn(entry, 'rpcFailuresTruncated') || entry.rpcFailuresTruncated === true) &&
       isSafePageErrorScenarioStep(entry.scenarioStep) &&
       Array.isArray(entry.thrownValues) && entry.thrownValues.length <= PAGE_DIAGNOSTIC_LIMIT && entry.thrownValues.every((thrown) =>
         hasExactOwnKeys(thrown, ['source', 'valueType', 'type', 'code', 'description']) &&

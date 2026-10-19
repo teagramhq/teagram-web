@@ -1716,7 +1716,7 @@ function recordClientDiagnostic(state, diagnostic, scenarioStep) {
       valueType: PAGE_DIAGNOSTIC_VALUE_TYPES.has(diagnostic.valueType) ? diagnostic.valueType : 'undefined',
       ...sanitizeThrownValueFields(diagnostic.fields)
     });
-  } else if(diagnostic.kind === 'rpc_failure' && entry.rpcFailures.length < PAGE_DIAGNOSTIC_LIMIT) {
+  } else if(diagnostic.kind === 'rpc_failure') {
     recordRpcFailure(entry, diagnostic);
   } else if(diagnostic.kind === 'console_error' && entry.consoleErrors.length < PAGE_DIAGNOSTIC_LIMIT) {
     entry.consoleErrors.push({message: sanitizePageErrorMessage(diagnostic.message).slice(0, PAGE_DIAGNOSTIC_FIELD_LIMIT)});
@@ -1728,12 +1728,17 @@ function recordRpcFailure(entry, diagnostic) {
   const source = diagnostic.rpcSource === 'api_log' ? 'api_log' : 'message_port';
   const candidate = entry.rpcFailures.find((failure) => failure._rpcSource !== source && !failure._rpcPaired &&
     failure.type === fields.type && failure.code === fields.code &&
+    (failure.method === fields.method || failure.method === 'unavailable' || fields.method === 'unavailable') &&
     (failure.description === fields.description || failure.description === 'unavailable' || fields.description === 'unavailable'));
   if(candidate) {
     candidate._rpcPaired = true;
     if(candidate.method === 'unavailable' && fields.method !== 'unavailable') candidate.method = fields.method;
     if(candidate.peerArguments.length === 0 && fields.peerArguments.length > 0) candidate.peerArguments = fields.peerArguments;
     if(candidate.description === 'unavailable' && fields.description !== 'unavailable') candidate.description = fields.description;
+    return;
+  }
+  if(entry.rpcFailures.length >= PAGE_DIAGNOSTIC_LIMIT) {
+    entry.rpcFailuresTruncated = true;
     return;
   }
   entry.rpcFailures.push({...fields, _rpcSource: source, _rpcPaired: false});
@@ -1936,6 +1941,7 @@ function getClientErrorDiagnostics(page, scenarioStep) {
     scenarioStep: {...entry.scenarioStep},
     thrownValues: entry.thrownValues.map((value) => ({...value})),
     rpcFailures: entry.rpcFailures.map(sanitizeRpcFailureFields),
+    ...(entry.rpcFailuresTruncated ? {rpcFailuresTruncated: true} : {}),
     consoleErrors: entry.consoleErrors.map((value) => ({...value}))
   }));
 }
@@ -1950,6 +1956,7 @@ function sanitizeClientDiagnostics(diagnostics) {
       ...sanitizeThrownValueFields(value)
     })) : [],
     rpcFailures: Array.isArray(entry?.rpcFailures) ? entry.rpcFailures.slice(0, PAGE_DIAGNOSTIC_LIMIT).map(sanitizeRpcFailureFields) : [],
+    ...(entry?.rpcFailuresTruncated === true ? {rpcFailuresTruncated: true} : {}),
     consoleErrors: Array.isArray(entry?.consoleErrors) ? entry.consoleErrors.slice(0, PAGE_DIAGNOSTIC_LIMIT).map((value) => ({
       message: sanitizePageErrorMessage(value?.message).slice(0, PAGE_DIAGNOSTIC_FIELD_LIMIT)
     })) : []
@@ -3352,6 +3359,7 @@ function uniquePageErrorRpcMethod(page, diagnostic, rpcErrorType, rpcErrorCode) 
   const scenarioStep = {scenario: diagnostic.scenario, step: diagnostic.stage};
   const methods = new Set();
   for(const step of getClientErrorDiagnostics(page, scenarioStep)) {
+    if(step.rpcFailuresTruncated) return;
     for(const failure of step.rpcFailures) {
       if(failure.type !== rpcErrorType || failure.code !== rpcErrorCode ||
           typeof failure.method !== 'string' || !RPC_METHOD_PATTERN.test(failure.method)) continue;
