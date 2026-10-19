@@ -11,7 +11,9 @@ import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
 import {
   assertAllScenariosPassed,
   formatBrowserFailureMessage,
+  parsePassedBrowserGateBreakdown,
   parseAuthProgressReport,
+  parseChannelMembershipState,
   parseCenterColumnState,
   parseFixtureReadiness,
   parseGroupCreatedState,
@@ -27,10 +29,11 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
-const {captureCenterColumnState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
+const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, getClientErrorDiagnostics, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword, waitForUnreadCount} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
-const APP_ORIGIN = 'https://telegramd.test';
+const APP_ORIGIN = 'https://teagramd.test';
+const CONTRACT_WAIT_TIMEOUT_MS = 5_000;
 const MTPROTO_CHUNK_URL = `${APP_ORIGIN}/index.worker-AbCdEfGh.js?x-protocol-version=4`;
 const LOTTIE_WORKER_CHUNK_URL = `${APP_ORIGIN}/tlottie.worker-JkLmNoPq.js`;
 const PROBE_WORKER_URL = `${APP_ORIGIN}/_fixture_probe/shared-worker.js`;
@@ -41,21 +44,10 @@ const HOSTILE = Object.freeze({
   password: HOSTILE_PASSWORD,
   token: 'bearer-secret-value',
   url: 'https://unannounced.invalid/exfiltrate?token=bearer-secret-value',
-  blobUrl: 'blob:https://telegramd.test/0e4a2c1a-1111-2222-3333-444444444444',
+  blobUrl: 'blob:https://teagramd.test/0e4a2c1a-1111-2222-3333-444444444444',
   phrase: 'hunter2 secret passphrase',
   frame: `at ${APP_ORIGIN}/index.worker-AbCdEfGh.js:1:7 (${HOSTILE_PASSWORD})`
 });
-
-function expectedTypeError(scriptAsset: string, firstFrame: any, stage = 'unknown') {
-  return {
-    constructorName: 'TypeError',
-    scriptAsset,
-    message: 'unclassified',
-    firstFrame,
-    scenario: 'unknown',
-    stage
-  };
-}
 
 function createPlaywrightWrappedPageError(name: 'TypeError' | 'RangeError', asset: string) {
   const error = new Error(HOSTILE.phrase);
@@ -71,8 +63,23 @@ function createNetworkObserverHarness(observer: any, options: any = {}) {
     : {});
   cdp.detach = options.detach || (async() => {});
   const context = {newCDPSession: async() => cdp, close: options.closeContext || (async() => {})};
-  const page: any = {context: () => context};
-  return {cdp, networkObserver: createNetworkObserver(page, 'contract-test', observer, options.pageErrorAssetResolver)};
+  const page: any = new EventEmitter();
+  page.mainFrame = () => ({});
+  page.context = () => context;
+  page.exposeBinding = async() => {};
+  page.addInitScript = async() => {};
+  return {cdp, page, networkObserver: createNetworkObserver(page, 'contract-test', observer, options.pageErrorAssetResolver, options.onPageException)};
+}
+
+function createDiagnosticPageErrors(message = 'Object', pageUrl = `${APP_ORIGIN}/`) {
+  const recordPageError = (realClientBrowser as any).recordPageError;
+  const error = new Error(message);
+  error.stack = `Error: ${message}`;
+  const pageErrors = {alice: [], bob: []} as any;
+  recordPageError(pageErrors, 'alice', error, undefined,
+    {scenario: 'channel', step: 'alice_channel_invite_button'},
+    {captureDetails: true, pageUrl, scenario: 'channel', stage: 'alice_channel_invite_button'});
+  return pageErrors;
 }
 
 function emptyWebSocket101Grid() {
@@ -98,11 +105,11 @@ function createDiscoveryHarness(send: (method: string, params: any) => Promise<a
   return {browser, registry: createWorkerDiscovery(), session};
 }
 
-function acknowledgeCdpCommand(session: any, params: any, error = false) {
+function acknowledgeCdpCommand(session: any, params: any, error = false, result = {}) {
   const {id} = JSON.parse(params.message);
   queueMicrotask(() => session.emit('Target.receivedMessageFromTarget', {
     sessionId: params.sessionId,
-    message: JSON.stringify(error ? {id, error: {message: HOSTILE.phrase}} : {id, result: {}})
+    message: JSON.stringify(error ? {id, error: {message: HOSTILE.phrase}} : {id, result})
   }));
 }
 
@@ -130,7 +137,10 @@ async function createDiscoveryNetworkHarness(options: any = {}) {
       if(options.detachBeforeSetup && nestedMethod === 'Network.enable') {
         discovery.session.emit('Target.detachedFromTarget', {sessionId: params.sessionId});
       }
-      acknowledgeCdpCommand(discovery.session, params, options.setupFailure && nestedMethod === 'Network.enable');
+      const result = nestedMethod === 'Runtime.callFunctionOn'
+        ? {result: {value: {peerArguments: [{argument: 'peer', constructor: 'inputPeerChannel', id: '603'}]}}}
+        : {};
+      acknowledgeCdpCommand(discovery.session, params, options.setupFailure && nestedMethod === 'Network.enable', result);
     }
     return {};
   });
@@ -138,13 +148,13 @@ async function createDiscoveryNetworkHarness(options: any = {}) {
   const contexts: any[] = [];
   async function startContext(name: string, control = false) {
     const observer = observation.createContextObserver(name, {control, observeWebSocket101: options.observeWebSocket101 !== false});
-    const {cdp, networkObserver} = createWorkerNetworkObserverHarness(observer, name, {
+    const {cdp, page, networkObserver} = createWorkerNetworkObserverHarness(observer, name, {
       pageErrorAssetResolver: options.pageErrorAssetResolver
     });
     await networkObserver.start(discovery.registry);
     discovery.session.emit('Target.targetCreated', {targetInfo: pageTarget(`${name}-page`, name)});
     observer.state.windowElapsed = true;
-    const context = {name, observer, cdp, networkObserver};
+    const context = {name, observer, cdp, page, networkObserver};
     contexts.push(context);
     return context;
   }
@@ -189,7 +199,7 @@ async function runDiscoveryAccountingGate(events: any[], fault?: string) {
   const runtimeConfig = {
     runId,
     endpoint: APP_ORIGIN,
-    wssEndpoint: 'wss://telegramd.test/apiws',
+    wssEndpoint: 'wss://teagramd.test/apiws',
     fingerprint: '1234567890abcdef',
     publicKeySHA256: 'a'.repeat(64),
     artifactDigest: `sha256:${'b'.repeat(64)}`,
@@ -223,8 +233,8 @@ async function runDiscoveryAccountingGate(events: any[], fault?: string) {
         harness.session.emit('Target.targetCreated', {targetInfo: pageTarget('alice-page', 'alice')});
         await harness.attach(app, 'alice-worker');
         await harness.attach(app, 'service-worker', 'auto', 'service_worker');
-        harness.emit(app, 'service-worker', 'Network.webSocketCreated', {requestId: 'service-allowed', url: 'wss://telegramd.test/apiws'}, 'auto');
-        harness.emit(app, 'alice-worker', 'Network.webSocketCreated', {requestId: 'allowed', url: 'wss://telegramd.test/apiws'});
+        harness.emit(app, 'service-worker', 'Network.webSocketCreated', {requestId: 'service-allowed', url: 'wss://teagramd.test/apiws'}, 'auto');
+        harness.emit(app, 'alice-worker', 'Network.webSocketCreated', {requestId: 'allowed', url: 'wss://teagramd.test/apiws'});
         if(fault === 'overflow') app.observer.noteInjectedControlFault('overflow');
         if(fault === 'malformed_discovery') harness.session.emit('Target.receivedMessageFromTarget', {
           sessionId: 'discovery-alice-worker', message: HOSTILE.phrase
@@ -273,17 +283,17 @@ function buildServerReady(): any {
     event: 'server-ready',
     status: 'ready',
     ...READINESS_PINS,
-    evidenceClass: 'production-telegramd',
-    endpoint: 'https://telegramd.test',
-    wssEndpoint: 'wss://telegramd.test/apiws',
+    evidenceClass: 'production-teagramd',
+    endpoint: 'https://teagramd.test',
+    wssEndpoint: 'wss://teagramd.test/apiws',
     mode: 'private',
     mtprotoPublicKeyPEM,
     publicKeySHA256: createHash('sha256').update(mtprotoPublicKeyPEM).digest('hex'),
     fingerprint: '1234567890abcdef',
     leafSPKI: Buffer.from('a'.repeat(64), 'hex').toString('base64'),
     credentials: [
-      {username: `u${runId.slice(0, 30)}a`, passwordFile: `/dev/shm/telegram-fixture-${runId}.abc/a-password`},
-      {username: `u${runId.slice(0, 30)}b`, passwordFile: `/dev/shm/telegram-fixture-${runId}.abc/b-password`}
+      {username: `u${runId.slice(0, 30)}a`, passwordFile: `/dev/shm/teagram-fixture-${runId}.abc/a-password`},
+      {username: `u${runId.slice(0, 30)}b`, passwordFile: `/dev/shm/teagram-fixture-${runId}.abc/b-password`}
     ],
     security: {
       registrationClosed: true,
@@ -425,7 +435,7 @@ function expectNoHostileLeak(summary: any) {
   expect(serialized).not.toContain(HOSTILE.frame);
   expect(serialized).not.toContain('unannounced');
   expect(serialized).not.toContain('blob:');
-  expect(serialized).not.toContain('telegramd.test');
+  expect(serialized).not.toContain('teagramd.test');
   expect(serialized).not.toContain('AbCdEfGh');
   expect(serialized).not.toMatch(/https?:/);
   expect(serialized).not.toMatch(/wss?:/);
@@ -553,7 +563,7 @@ function createAuthProgressNetworkObserver(contextObserver: any, onStop: () => v
         sessionId: 'service-worker-session',
         message: JSON.stringify({
           method: 'Network.requestWillBeSent',
-          params: {type: 'WebSocket', request: {url: 'wss://telegramd.test/apiws'}}
+          params: {type: 'WebSocket', request: {url: 'wss://teagramd.test/apiws'}}
         })
       });
     },
@@ -792,7 +802,7 @@ describe('confined runner shared-worker observation contract', () => {
   it('reports two same-origin blob workers as ambiguous, never as one candidate', () => {
     const summary = replayContext([
       ...appContextEvents(),
-      {kind: 'target', target: sharedWorker('second-worker', 'blob:https://telegramd.test/11111111-2222-3333-4444-555555555555')},
+      {kind: 'target', target: sharedWorker('second-worker', 'blob:https://teagramd.test/11111111-2222-3333-4444-555555555555')},
       {kind: 'attach', targetId: 'second-worker'},
       {kind: 'setup', targetId: 'second-worker'}
     ]);
@@ -1042,7 +1052,7 @@ describe('confined runner shared-worker observation contract', () => {
     await networkObserver.start();
 
     try {
-      cdp.emit('Network.webSocketCreated', {requestId: 'page-socket', url: 'wss://telegramd.test/apiws'});
+      cdp.emit('Network.webSocketCreated', {requestId: 'page-socket', url: 'wss://teagramd.test/apiws'});
       cdp.emit('Network.webSocketHandshakeResponseReceived', {
         requestId: 'page-socket',
         response: {
@@ -1097,7 +1107,7 @@ describe('confined runner shared-worker observation contract', () => {
         sessionId: 'service-worker-session',
         message: JSON.stringify({method, params})
       });
-      emitWorkerEvent('Network.webSocketCreated', {requestId: 'service-socket', url: 'wss://telegramd.test/apiws'});
+      emitWorkerEvent('Network.webSocketCreated', {requestId: 'service-socket', url: 'wss://teagramd.test/apiws'});
       emitWorkerEvent('Network.webSocketHandshakeResponseReceived', {
         requestId: 'service-socket',
         response: {
@@ -1152,7 +1162,7 @@ describe('confined runner shared-worker observation contract', () => {
         sessionId: 'shared-worker-session',
         message: JSON.stringify({method, params})
       });
-      emitWorkerEvent('Network.webSocketCreated', {requestId: 'shared-socket', url: 'wss://telegramd.test/apiws'});
+      emitWorkerEvent('Network.webSocketCreated', {requestId: 'shared-socket', url: 'wss://teagramd.test/apiws'});
       emitWorkerEvent('Network.webSocketHandshakeResponseReceived', {
         requestId: 'shared-socket',
         response: {status: 101, url: HOSTILE.url, headers: {cookie: HOSTILE.password}, headersText: HOSTILE.token}
@@ -1282,6 +1292,39 @@ describe('confined runner shared-worker observation contract', () => {
     expect(networkObserver.errors).toHaveLength(retainedErrors);
     expect(contextObserver.summary().observerErrors).toBeLessThanOrEqual(observation.LIMITS.countedEventsPerContext + 1);
     await networkObserver.stop();
+  });
+
+  it('reuses the worker attachment budget after targets are destroyed', () => {
+    const events: any[] = [{kind: 'target', target: pageTarget()}];
+    for(let index = 0; index < observation.LIMITS.attachedTargets * 2; index++) {
+      const targetId = `reused-worker-${index}`;
+      events.push({kind: 'target', target: sharedWorker(targetId, HOSTILE.blobUrl)});
+      events.push({kind: 'attach', targetId});
+      events.push({kind: 'setup', targetId});
+      events.push({kind: 'destroy', targetId});
+    }
+
+    const summary = replayContext(events);
+
+    expect(summary.observerOverflow).toBe(0);
+    expect(summary.attachedTargets).toBe(1);
+    expect(summary.coverageComplete).toBe(1);
+  });
+
+  it('keeps coverage complete for a 32-target worker burst', () => {
+    const events: any[] = [{kind: 'target', target: pageTarget()}];
+    for(let index = 0; index < 32; index++) {
+      const targetId = `burst-worker-${index}`;
+      events.push({kind: 'target', target: sharedWorker(targetId, HOSTILE.blobUrl)});
+      events.push({kind: 'attach', targetId});
+      events.push({kind: 'setup', targetId});
+    }
+
+    const summary = replayContext(events);
+
+    expect(summary.observerOverflow).toBe(0);
+    expect(summary.attachedTargets).toBe(32);
+    expect(summary.coverageComplete).toBe(1);
   });
 
   it('skips page URL classifiers after observer overflow', async() => {
@@ -1578,8 +1621,9 @@ describe('confined runner shared-worker observation contract', () => {
   });
 
   it('rejects every CDP method outside the accepted scope, including nested sends', () => {
-    const forbidden = ['Runtime.evaluate', 'Runtime.callFunctionOn', 'Runtime.getProperties', 'Runtime.addBinding',
-      'Debugger.enable', 'Debugger.setBreakpoint', 'Fetch.enable', 'Network.setBlockedFrequencies',
+    const forbidden = ['Runtime.evaluate', 'Runtime.getProperties', 'Runtime.addBinding',
+      'Debugger.enable', 'Debugger.setPauseOnExceptions', 'Debugger.resume', 'Debugger.setBreakpoint',
+      'Fetch.enable', 'Network.setBlockedFrequencies',
       'Page.addScriptToEvaluateOnNewDocument', 'Page.setBypassCSP', 'Page.captureScreenshot',
       'Target.createTarget', 'Target.exposeFunction', 'Network.setRequestInterception'];
 
@@ -1590,18 +1634,73 @@ describe('confined runner shared-worker observation contract', () => {
     }
 
     expect(observation.BROWSER_CDP_METHODS).toEqual(['Target.setDiscoverTargets', 'Target.attachToTarget', 'Target.detachFromTarget', 'Target.sendMessageToTarget']);
-    expect(observation.PAGE_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.sendMessageToTarget', 'Target.detachFromTarget']);
-    expect(observation.WORKER_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable', 'Runtime.runIfWaitingForDebugger']);
+    expect(observation.PAGE_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable', 'Runtime.callFunctionOn', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.sendMessageToTarget', 'Target.detachFromTarget']);
+    expect(observation.WORKER_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable', 'Runtime.callFunctionOn', 'Runtime.runIfWaitingForDebugger']);
     expect(observation.allowCdpMethod('page', 'Target.getTargetInfo')).toBe(true);
-    expect(observation.allowCdpMethod('page', 'Runtime.enable')).toBe(false);
+    expect(observation.allowCdpMethod('page', 'Runtime.enable')).toBe(true);
+    for(const method of ['Debugger.enable', 'Debugger.setPauseOnExceptions', 'Debugger.resume']) {
+      expect(observation.allowCdpMethod('page', method)).toBe(false);
+      expect(observation.allowCdpMethod('browser', method)).toBe(false);
+      expect(observation.allowCdpMethod('worker', method)).toBe(false);
+    }
+    expect(observation.allowCdpMethod('page', 'Runtime.callFunctionOn')).toBe(true);
     expect(observation.allowCdpMethod('page', 'Target.setAutoAttach')).toBe(true);
     expect(observation.allowCdpMethod('browser', 'Target.setDiscoverTargets')).toBe(true);
     expect(observation.allowCdpMethod('worker', 'Runtime.enable')).toBe(true);
+    expect(observation.allowCdpMethod('worker', 'Runtime.callFunctionOn')).toBe(true);
+  });
+
+  it('does not send debugger commands in a default run', async() => {
+    const calls: string[] = [];
+    const observer = observation.createContextObserver('alice');
+    const {cdp, networkObserver} = createNetworkObserverHarness(observer, {
+      send: async(method: string) => {
+        calls.push(method);
+        return method === 'Target.getTargetInfo'
+          ? {targetInfo: {targetId: 'contract-test-page', browserContextId: 'contract-test'}}
+          : {};
+      }
+    });
+    await networkObserver.start();
+
+    try {
+      cdp.emit('Debugger.paused', {reason: 'exception', callFrames: []});
+      expect(calls).not.toContain('Debugger.enable');
+      expect(calls).not.toContain('Debugger.setPauseOnExceptions');
+      expect(calls).not.toContain('Debugger.resume');
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
+  it('uses debugger commands only when page-error diagnostics are enabled', async() => {
+    const calls: string[] = [];
+    const exceptions: any[] = [];
+    const observer = observation.createContextObserver('alice');
+    const {cdp, networkObserver} = createNetworkObserverHarness(observer, {
+      send: async(method: string) => {
+        calls.push(method);
+        return method === 'Target.getTargetInfo'
+          ? {targetInfo: {targetId: 'contract-test-page', browserContextId: 'contract-test'}}
+          : {};
+      },
+      onPageException: (details: any, source: string) => exceptions.push({details, source})
+    });
+    await networkObserver.start();
+
+    try {
+      expect(calls).toEqual(expect.arrayContaining(['Debugger.enable', 'Debugger.setPauseOnExceptions']));
+      cdp.emit('Debugger.paused', {reason: 'exception', callFrames: []});
+      await Promise.resolve();
+      expect(calls).toContain('Debugger.resume');
+      expect(exceptions).toEqual([{details: {reason: 'exception', callFrames: [], executionContextId: undefined, scriptUrls: {}}, source: 'debugger'}]);
+    } finally {
+      await networkObserver.stop();
+    }
   });
 
   it('names chunk sources only as allowlisted logical names without hash or query', () => {
     expect(observation.classifyWorkerSource(MTPROTO_CHUNK_URL).label).toBe('mtproto_worker');
-    expect(observation.classifyWorkerSource('https://teagramd.test/index.worker-AbCdEfGh.js').label).toBe('mtproto_worker');
     expect(observation.classifyWorkerSource(`${APP_ORIGIN}/crypto.worker-Zz0yYyXx.js`).label).toBe('crypto_worker');
     expect(observation.classifyWorkerSource(`${APP_ORIGIN}/sw-Zz0yYyXx.js`).label).toBe('service_worker');
     expect(observation.classifyWorkerSource(`${APP_ORIGIN}/index.worker.js`).label).toBe('other_same_origin');
@@ -1626,7 +1725,7 @@ describe('confined runner shared-worker observation contract', () => {
       block.contexts.alice.workerFailure = HOSTILE.phrase;
     })).toContain('workerFailure');
     expect(tampered((block: any) => {
-      block.contexts.alice.workerSourceChunks = ['https://telegramd.test/index.worker-AbCdEfGh.js'];
+      block.contexts.alice.workerSourceChunks = ['https://teagramd.test/index.worker-AbCdEfGh.js'];
     })).toContain('workerSourceChunks');
     expect(tampered((block: any) => {
       block.contexts.alice.mtprotoSourceFetch = MTPROTO_CHUNK_URL;
@@ -1742,7 +1841,7 @@ describe('confined runner shared-worker observation contract', () => {
   });
 
   it('keeps the resource bounds and page count that the report depends on', () => {
-    expect(observation.LIMITS).toEqual({attachedTargets: 16, countedEventsPerContext: 4096, cdpMessageBytes: 262_144, commandTimeoutMs: 5000});
+    expect(observation.LIMITS).toEqual({attachedTargets: 32, countedEventsPerContext: 4096, cdpMessageBytes: 262_144, commandTimeoutMs: 5000});
 
     const twoPages = replayContext([
       {kind: 'target', target: pageTarget()},
@@ -1795,7 +1894,7 @@ describe('discovery shared-worker network accounting', () => {
       await harness.attach(alice, 'alice-worker');
       const before = alice.observer.eventCount();
       const workerEvents = vi.spyOn(alice.observer, 'noteWorkerEvent');
-      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'socket', url: 'wss://telegramd.test/apiws'});
+      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'socket', url: 'wss://teagramd.test/apiws'});
 
       expect(alice.observer.eventCount()).toBe(before + 1);
       expect(workerEvents).toHaveBeenCalledTimes(1);
@@ -1807,8 +1906,8 @@ describe('discovery shared-worker network accounting', () => {
         allowedWebSocketsBySource: {page: 0, shared_worker: 1, service_worker: 0, worker: 0}
       });
       expect(alice.observer.webSocket101ByContextPhase()).toEqual(emptyWebSocket101Grid());
-      harness.emit(alice, 'alice-worker', 'Network.requestWillBeSent', {type: 'WebSocket', request: {url: 'wss://telegramd.test/apiws'}});
-      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'repeat', url: 'wss://telegramd.test/apiws'});
+      harness.emit(alice, 'alice-worker', 'Network.requestWillBeSent', {type: 'WebSocket', request: {url: 'wss://teagramd.test/apiws'}});
+      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'repeat', url: 'wss://teagramd.test/apiws'});
       expect(alice.networkObserver.events).toHaveLength(1);
     } finally {
       await harness.stop();
@@ -1855,7 +1954,7 @@ describe('discovery shared-worker network accounting', () => {
       }
       expect(alice.observer.summary()).toMatchObject({observerErrors: 0, coverageComplete: 1});
       expect(alice.networkObserver.summary().unexpectedAttempts).toBe(0);
-      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'query-socket', url: 'wss://telegramd.test/apiws?extra=1'});
+      harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {requestId: 'query-socket', url: 'wss://teagramd.test/apiws?extra=1'});
       expect(alice.networkObserver.summary()).toMatchObject({unexpectedAttempts: 1, allowedWebSockets: 0});
     } finally {
       await harness.stop();
@@ -1889,8 +1988,9 @@ describe('discovery shared-worker network accounting', () => {
     try {
       await harness.attach(alice, 'duplicate-worker', first);
       await harness.attach(alice, 'duplicate-worker', second);
+      expect(alice.observer.summary().attachedTargets).toBe(1);
       for(const via of [first, second]) {
-        harness.emit(alice, 'duplicate-worker', 'Network.webSocketCreated', {requestId: 'socket', url: 'wss://telegramd.test/apiws'}, via);
+        harness.emit(alice, 'duplicate-worker', 'Network.webSocketCreated', {requestId: 'socket', url: 'wss://teagramd.test/apiws'}, via);
         harness.emit(alice, 'duplicate-worker', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: `${APP_ORIGIN}/fetch`}}, via);
       }
       harness.emit(alice, 'duplicate-worker', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}}, second);
@@ -1901,7 +2001,8 @@ describe('discovery shared-worker network accounting', () => {
         workerTargets: {shared_worker: 1, service_worker: 0}
       });
       await harness.attach(alice, 'distinct-worker', second);
-      harness.emit(alice, 'distinct-worker', 'Network.webSocketCreated', {requestId: 'distinct-socket', url: 'wss://telegramd.test/apiws'}, second);
+      expect(alice.observer.summary().attachedTargets).toBe(2);
+      harness.emit(alice, 'distinct-worker', 'Network.webSocketCreated', {requestId: 'distinct-socket', url: 'wss://teagramd.test/apiws'}, second);
       expect(alice.networkObserver.summary()).toMatchObject({allowedWebSockets: 2, workerTargets: {shared_worker: 2, service_worker: 0}});
     } finally {
       await harness.stop();
@@ -1916,12 +2017,12 @@ describe('discovery shared-worker network accounting', () => {
     try {
       for(const context of [alice, bob, control]) await harness.attach(context, `${context.name}-worker`);
       harness.emit(alice, 'alice-worker', 'Network.webSocketCreated', {
-        requestId: 'alice-socket', url: 'wss://telegramd.test/apiws', targetId: 'bob-worker', type: 'service_worker', source: 'page'
+        requestId: 'alice-socket', url: 'wss://teagramd.test/apiws', targetId: 'bob-worker', type: 'service_worker', source: 'page'
       }, 'discovery', {targetId: 'bob-worker', type: 'service_worker', source: 'page'});
       expect(alice.networkObserver.summary().attemptsBySource).toEqual({page: 0, shared_worker: 1, service_worker: 0, worker: 0});
       expect(bob.networkObserver.events).toHaveLength(0);
       expect(control.networkObserver.events).toHaveLength(0);
-      harness.emit(bob, 'bob-worker', 'Network.webSocketCreated', {requestId: 'bob-socket', url: 'wss://telegramd.test/apiws'});
+      harness.emit(bob, 'bob-worker', 'Network.webSocketCreated', {requestId: 'bob-socket', url: 'wss://teagramd.test/apiws'});
       harness.emit(control, `${control.name}-worker`, 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}});
       expect(alice.networkObserver.summary().allowedWebSockets).toBe(1);
       expect(bob.networkObserver.summary().allowedWebSockets).toBe(1);
@@ -1941,13 +2042,13 @@ describe('discovery shared-worker network accounting', () => {
         harness.session.emit('Target.targetCreated', {targetInfo: sharedWorker(targetId, HOSTILE.blobUrl, targetId)});
       }
       for(const targetId of ['baseline', 'contextless', 'unattributed', 'pending']) {
-        harness.emit(alice, targetId, 'Network.webSocketCreated', {requestId: targetId, url: 'wss://telegramd.test/apiws'});
+        harness.emit(alice, targetId, 'Network.webSocketCreated', {requestId: targetId, url: 'wss://teagramd.test/apiws'});
       }
       expect(alice.networkObserver.summary()).toMatchObject({allowedWebSockets: 0, workerTargets: {shared_worker: 0, service_worker: 0}});
       expect(alice.networkObserver.events).toHaveLength(0);
       const pending = await harness.startContext('pending');
       await harness.registry.waitForSetup();
-      harness.emit(pending, 'pending', 'Network.webSocketCreated', {requestId: 'now-owned', url: 'wss://telegramd.test/apiws'});
+      harness.emit(pending, 'pending', 'Network.webSocketCreated', {requestId: 'now-owned', url: 'wss://teagramd.test/apiws'});
       expect(pending.networkObserver.summary()).toMatchObject({allowedWebSockets: 1, workerTargets: {shared_worker: 1, service_worker: 0}});
       expect(alice.networkObserver.events).toHaveLength(0);
     } finally {
@@ -1964,7 +2065,7 @@ describe('discovery shared-worker network accounting', () => {
       const before = alice.observer.eventCount();
       const errorsBefore = alice.observer.summary().observerErrors;
       const releasing = harness.registry.releaseContext(alice.observer);
-      harness.emit(alice, 'discovery-worker', 'Network.webSocketCreated', {requestId: 'late-discovery', url: 'wss://telegramd.test/apiws'});
+      harness.emit(alice, 'discovery-worker', 'Network.webSocketCreated', {requestId: 'late-discovery', url: 'wss://teagramd.test/apiws'});
       harness.emit(alice, 'auto-worker', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}}, 'auto');
       for(const [emitter, sessionId] of [[harness.session, 'discovery-discovery-worker'], [alice.cdp, 'auto-auto-worker']]) {
         expect(() => emitter.emit('Target.receivedMessageFromTarget', {sessionId, message: 'null'})).not.toThrow();
@@ -2222,7 +2323,7 @@ describe('discovery shared-worker network accounting', () => {
   it('associates an already mapped blob asset with a later worker target notification', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
-    const blobUrl = 'blob:https://telegramd.test/abababab-abab-abab-abab-abababababab';
+    const blobUrl = 'blob:https://teagramd.test/abababab-abab-abab-abab-abababababab';
     try {
       resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'source-worker', 'dedicated_worker');
       resolver.observeRequest(blobUrl, {type: 'script'}, 'Script', 'source-worker', 'dedicated_worker');
@@ -2303,12 +2404,18 @@ describe('discovery shared-worker network accounting', () => {
       unexpectedEgressAttempts: {alice: [], bob: []},
       observerErrors: {alice: {}, bob: {}},
       pageErrors: {
-        alice: [expectedTypeError('auth-client.js', {
-          functionName: 'anonymous',
-          line: 21,
-          column: 3,
-          manifestAsset: 'unknown'
-        }, 'alice_context')],
+        alice: [{
+          constructorName: 'TypeError',
+          scriptAsset: 'auth-client.js',
+          message: '[redacted]',
+          stack: {
+            state: 'captured',
+            lineCount: 2,
+            frameCount: 1,
+            frames: [{functionName: 'unknown', scriptAsset: 'auth-client.js', line: 21, column: 3}]
+          },
+          scenarioStep: {scenario: 'sign-in', step: 'alice_context'}
+        }],
         bob: []
       },
       pageErrorOverflow: {alice: [], bob: []}
@@ -2317,60 +2424,702 @@ describe('discovery shared-worker network accounting', () => {
     expectNoGateSecretLeak(report.gateBreakdown);
   });
 
-  it('records a TypeError message, first artifact frame and active poll step', () => {
-    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
-    const recordPageError = (realClientBrowser as any).recordPageError;
-    const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
-    expect(typeof createPageErrorAssetResolver).toBe('function');
-    expect(typeof recordPageError).toBe('function');
-    expect(typeof summarizeGateBreakdown).toBe('function');
+  it('rejects unsafe gate diagnostics on a passing browser report', () => {
+    const passingReport: any = {
+      status: 'passed',
+      gateBreakdown: {
+        counters: {unexpectedEgressAttempts: 0, observerErrors: 0, pageErrors: 0},
+        unexpectedEgressAttempts: {alice: [], bob: []},
+        observerErrors: {alice: {}, bob: {}},
+        pageErrors: {alice: [], bob: []},
+        pageErrorOverflow: {alice: [], bob: []},
+        stepDiagnostics: {alice: [], bob: []}
+      }
+    };
 
-    const resolver = createPageErrorAssetResolver();
-    const asset = 'index-AbCdEfGh.js';
-    resolver.observeRequest(`${APP_ORIGIN}/${asset}`, {}, 'Script', 'page-target');
-    const pageErrors = {alice: [], bob: []} as any;
-    const error = new TypeError('Cannot read properties of undefined (reading \'poll\')');
-    error.stack = `TypeError: ${error.message}\n    at sendPoll (https://telegramd.test/${asset}?run=fixture:21:13)\n    at start (https://telegramd.test/index-Other123.js:4:5)`;
-
-    recordPageError(pageErrors, 'alice', error, resolver, 'poll', 'alice_poll_input_answer_sent');
-
-    const breakdown = summarizeGateBreakdown({pageErrors});
-    expect(breakdown.pageErrors.alice).toEqual([{
-      constructorName: 'TypeError',
-      scriptAsset: asset,
-      message: 'Cannot read properties of undefined (reading \'poll\')',
-      firstFrame: {functionName: 'sendPoll', line: 21, column: 13, manifestAsset: asset},
-      scenario: 'poll',
-      stage: 'alice_poll_input_answer_sent'
-    }]);
-    expect(formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: breakdown}))
-    .toContain('alice_poll_input_answer_sent');
-    expect(formatBrowserFailureMessage({status: 'failed', stage: 'alice_poll_send_diagnostic', gateBreakdown: breakdown}))
-    .toContain('alice_poll_input_answer_sent');
+    expect(parsePassedBrowserGateBreakdown(passingReport)).toEqual(passingReport.gateBreakdown);
+    expect(() => parsePassedBrowserGateBreakdown({
+      ...passingReport,
+      gateBreakdown: {
+        ...passingReport.gateBreakdown,
+        stepDiagnostics: {
+          alice: [{scenarioStep: {scenario: 'message', step: 'alice_message_send'}, thrownValues: [], rpcFailures: [], consoleErrors: [], raw: HOSTILE.phrase}],
+          bob: []
+        }
+      }
+    })).toThrow('browser egress/page error evidence is invalid');
+    expect(() => parsePassedBrowserGateBreakdown({
+      ...passingReport,
+      gateBreakdown: {
+        ...passingReport.gateBreakdown,
+        stepDiagnostics: {
+          alice: [{scenarioStep: {scenario: 'message', step: 'alice_message_send'}, thrownValues: [], rpcFailures: [], consoleErrors: [{message: HOSTILE.url}]}],
+          bob: []
+        }
+      }
+    })).toThrow('browser egress/page error evidence is invalid');
   });
 
-  it('redacts secrets from TypeError messages and does not map unobserved assets to the artifact manifest', () => {
-    const recordPageError = (realClientBrowser as any).recordPageError;
+  it('keeps page-error reports free of page text while retaining safe stack frames', () => {
     const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
-    const resolver = (realClientBrowser as any).createPageErrorAssetResolver();
+    const recordPageError = (realClientBrowser as any).recordPageError;
     const pageErrors = {alice: [], bob: []} as any;
-    const error = new TypeError(`Token=${HOSTILE.token} from ${HOSTILE.url}`);
-    error.stack = `TypeError: ${error.message}\n    at sendPoll (${HOSTILE.url}:21:13)`;
+    const message = 'private channel text: deployment window is at 09:30';
+    const error = new TypeError(message);
+    error.stack = `TypeError: ${message}\n    at renderSyntheticChat (https://unannounced.invalid/assets/bob-client.js?token=${HOSTILE.token}:21:3)`;
 
-    recordPageError(pageErrors, 'alice', error, resolver, 'poll', 'alice_poll_input_answer_sent');
-
+    recordPageError(pageErrors, 'bob', error, undefined, {scenario: 'channel', step: 'bob_channel_reload_chats_list'}, {
+      captureDetails: true,
+      pageUrl: `${APP_ORIGIN}/`,
+      scenario: 'channel',
+      stage: 'bob_channel_reload_chats_list'
+    });
+    const diagnosticError = new TypeError(message);
+    diagnosticError.stack = `TypeError: ${message}\n    at renderSyntheticChat (webpack://bundle/src/client.ts:21:3)`;
+    recordPageError(pageErrors, 'bob', diagnosticError, undefined, {scenario: 'channel', step: 'bob_channel_reload_chats_list'}, {
+      captureDetails: true,
+      pageUrl: `${APP_ORIGIN}/`,
+      scenario: 'channel',
+      stage: 'bob_channel_reload_chats_list'
+    });
     const breakdown = summarizeGateBreakdown({pageErrors});
-    expect(breakdown.pageErrors.alice[0]).toMatchObject({
+
+    expect(breakdown.pageErrors.bob[0]).toEqual({
+      constructorName: 'TypeError',
+      scriptAsset: 'bob-client.js',
+      message: '[redacted]',
+      stack: {
+        state: 'captured',
+        lineCount: 2,
+        frameCount: 1,
+        frames: [{functionName: 'renderSyntheticChat', scriptAsset: 'bob-client.js', line: 21, column: 3}]
+      },
+      scenarioStep: {scenario: 'channel', step: 'bob_channel_reload_chats_list'}
+    });
+    expect(breakdown.pageErrors.bob[1]).toEqual({
       constructorName: 'TypeError',
       scriptAsset: 'unknown',
-      message: 'unclassified',
-      firstFrame: {functionName: 'sendPoll', line: 21, column: 13, manifestAsset: 'unknown'},
-      scenario: 'poll',
-      stage: 'alice_poll_input_answer_sent'
+      message: '[redacted]',
+      stack: {
+        state: 'unclassified_frames',
+        lineCount: 2,
+        frameCount: 1,
+        frames: []
+      },
+      scenarioStep: {scenario: 'channel', step: 'bob_channel_reload_chats_list'},
+      diagnostic: {
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'bob_channel_reload_chats_list'
+      }
     });
-    expect(breakdown.pageErrors.alice[0].message).not.toContain(HOSTILE.token);
-    expect(breakdown.pageErrors.alice[0].message).not.toContain(HOSTILE.url);
+    expect(JSON.stringify(breakdown)).not.toContain(message);
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: breakdown}))
+    .toContain(JSON.stringify(breakdown));
     expectNoGateSecretLeak(breakdown);
+    for(const pageError of [
+      {...breakdown.pageErrors.bob[0], message: HOSTILE.url},
+      {...breakdown.pageErrors.bob[0], stack: {...breakdown.pageErrors.bob[0].stack, frames: [{...breakdown.pageErrors.bob[0].stack.frames[0], url: HOSTILE.url}]}},
+      {...breakdown.pageErrors.bob[0], scenarioStep: {scenario: 'channel', step: HOSTILE.phrase}},
+      {...breakdown.pageErrors.bob[1], diagnostic: {...breakdown.pageErrors.bob[1].diagnostic, message}},
+      {...breakdown.pageErrors.bob[1], diagnostic: {...breakdown.pageErrors.bob[1].diagnostic, stack: message}}
+    ]) {
+      const invalid = {...breakdown, pageErrors: {alice: [], bob: [pageError]}};
+      expect(() => formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: invalid}))
+      .toThrow('browser egress/page error evidence is invalid');
+    }
+
+    const missingStackError = {name: 'Error', message: 'Synthetic missing stack'};
+    recordPageError(pageErrors, 'bob', missingStackError, undefined, {scenario: 'channel', step: 'bob_channel_post_visible'});
+    const unclassifiedStackError = new Error('Synthetic unclassified stack');
+    unclassifiedStackError.stack = 'Error: Synthetic unclassified stack\n    at load (webpack://bundle/src/client.js:33:7)';
+    recordPageError(pageErrors, 'bob', unclassifiedStackError, undefined, {scenario: 'channel', step: 'bob_channel_post_visible'});
+    const stackStates = summarizeGateBreakdown({pageErrors}).pageErrors.bob.slice(1).map((pageError: any) => pageError.stack);
+    expect(stackStates).toEqual([
+      {state: 'unclassified_frames', lineCount: 2, frameCount: 1, frames: []},
+      {state: 'unavailable', lineCount: 0, frameCount: 0, frames: []},
+      {state: 'unclassified_frames', lineCount: 2, frameCount: 1, frames: []}
+    ]);
+  });
+
+  it('correlates one repeated generic Alice rejection through its unique action stage', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [], bob: []} as any;
+    const stages = ['alice_channel_invite_button', 'alice_channel_post_send', 'alice_channel_other_conversation'];
+    for(const stage of stages) {
+      recordPageError(pageErrors, 'alice', new Error('Object'), undefined, {scenario: 'channel', step: stage}, {
+        captureDetails: true,
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage
+      });
+    }
+    const source = `${APP_ORIGIN}/cryptoMessagePort-AbCd.js`;
+    const page = {url: () => `${APP_ORIGIN}/`, evaluate: async(): Promise<unknown[]> => []} as any;
+    const createRuntimeException = (exceptionId: number, functionName: string, errorType: string, errorCode: number) => ({
+      exceptionId,
+      executionContextId: 3,
+      text: 'Uncaught (in promise)',
+      scriptId: String(exceptionId),
+      lineNumber: 15,
+      columnNumber: 23,
+      exception: {
+        type: 'object',
+        description: 'Object',
+        objectId: `runtime-object-${exceptionId}`,
+        preview: {properties: [
+          {name: 'type', type: 'string', value: errorType},
+          {name: 'code', type: 'number', value: String(errorCode)}
+        ]}
+      },
+      stackTrace: {callFrames: [{
+        scriptId: String(exceptionId),
+        url: source,
+        functionName,
+        lineNumber: 15,
+        columnNumber: 23
+      }]}
+    });
+    recordPageErrorProtocolEvent(page, createRuntimeException(11, 'inviteToChannel', 'PEER_ID_INVALID', 400), 'runtime', {scenario: 'channel', step: stages[0]});
+    recordPageErrorProtocolEvent(page, createRuntimeException(12, 'unrelatedHandler', 'PEER_ID_INVALID', 400), 'runtime', {scenario: 'channel', step: stages[0]});
+    recordPageErrorProtocolEvent(page, createRuntimeException(13, 'processResultTask', 'PEER_ID_INVALID', 400), 'runtime', {scenario: 'channel', step: stages[1]});
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver);
+
+    expect(pageErrors.alice[0].scriptAsset).toBe('unknown');
+    expect(pageErrors.alice[0].diagnostic.rpcErrorType).toBeUndefined();
+    expect(pageErrors.alice[1].scriptAsset).toBe('cryptoMessagePort-AbCd.js');
+    expect(pageErrors.alice[1].stack.frames).toEqual([{functionName: 'processResultTask', scriptAsset: 'cryptoMessagePort-AbCd.js', line: 16, column: 24}]);
+    expect(pageErrors.alice[1].diagnostic).toMatchObject({stage: stages[1], rpcErrorType: 'PEER_ID_INVALID', rpcErrorCode: 400});
+    expect(pageErrors.alice[2].scriptAsset).toBe('unknown');
+    expect(pageErrors.alice[2].diagnostic.rpcErrorType).toBeUndefined();
+    expect(JSON.stringify(pageErrors)).not.toContain('Object');
+    resolver.clear();
+  });
+
+  it('leaves same-stage duplicate generic Alice rejections unattributed', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [], bob: []} as any;
+    const stage = 'alice_channel_post_send';
+    for(let index = 0; index < 2; index++) {
+      recordPageError(pageErrors, 'alice', new Error('Object'), undefined, {scenario: 'channel', step: stage}, {
+        captureDetails: true,
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage
+      });
+    }
+    const page = {url: () => `${APP_ORIGIN}/`, evaluate: async(): Promise<unknown[]> => []} as any;
+    recordPageErrorProtocolEvent(page, {
+      exceptionId: 21,
+      executionContextId: 3,
+      text: 'Uncaught (in promise)',
+      exception: {type: 'object', description: 'Object', objectId: 'runtime-object-21'},
+      stackTrace: {callFrames: [{
+        scriptId: '21',
+        url: `${APP_ORIGIN}/cryptoMessagePort-AbCd.js`,
+        functionName: 'processResultTask',
+        lineNumber: 15,
+        columnNumber: 23
+      }]}
+    }, 'runtime', {scenario: 'channel', step: stage});
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver);
+
+    expect(pageErrors.alice.map((error: any) => error.scriptAsset)).toEqual(['unknown', 'unknown']);
+    expect(pageErrors.alice.map((error: any) => error.diagnostic.rpcErrorType)).toEqual([undefined, undefined]);
+    resolver.clear();
+  });
+
+  it('keeps the preceding action scoped to its page while the other context advances', () => {
+    const readPageScenarioStep = (realClientBrowser as any).readPageScenarioStep;
+    const setPageActionStep = (realClientBrowser as any).setPageActionStep;
+    const setPageScenarioStep = (realClientBrowser as any).setPageScenarioStep;
+    const alicePage = {};
+    const bobPage = {};
+    setPageActionStep(alicePage, 'alice_channel_create');
+    setPageScenarioStep(alicePage, 'alice_channel_identity');
+    setPageActionStep(bobPage, 'bob_channel_membership_refresh');
+
+    expect(readPageScenarioStep(alicePage).step).toBe('alice_channel_create');
+    expect(readPageScenarioStep(bobPage).step).toBe('bob_channel_membership_refresh');
+  });
+
+  it('correlates simultaneous window, Runtime and debugger observations of one object rejection', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
+    const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = createDiagnosticPageErrors();
+    const source = `${APP_ORIGIN}/index-XYZ.js`;
+    const page = {
+      url: () => `${APP_ORIGIN}/`,
+      evaluate: async(): Promise<unknown[]> => [{
+        message: 'Object',
+        stack: '',
+        filename: '',
+        lineNumber: 0,
+        columnNumber: 0,
+        pageUrl: `${APP_ORIGIN}/`,
+        errorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
+        errorCode: 400
+      }]
+    } as any;
+    recordPageErrorProtocolEvent(page, {
+      exceptionId: 11,
+      executionContextId: 3,
+      text: 'Uncaught (in promise)',
+      scriptId: '1',
+      lineNumber: 0,
+      columnNumber: 0,
+      exception: {
+        type: 'object',
+        description: 'Object',
+        objectId: 'runtime-object-11',
+        preview: {properties: [
+          {name: 'type', type: 'string', value: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH'},
+          {name: 'code', type: 'number', value: '400'}
+        ]}
+      },
+      stackTrace: {callFrames: [{
+        scriptId: '1',
+        url: `${APP_ORIGIN}/`,
+        functionName: '',
+        lineNumber: 0,
+        columnNumber: 0
+      }]}
+    }, 'runtime');
+    recordPageErrorProtocolEvent(page, {
+      reason: 'promiseRejection',
+      executionContextId: 3,
+      data: {type: 'object', description: 'Object', objectId: 'debugger-object-11'},
+      callFrames: [{
+        functionName: 'inviteToChannel',
+        url: '',
+        location: {scriptId: '7', lineNumber: 40, columnNumber: 8}
+      }],
+      scriptUrls: {'7': source}
+    }, 'debugger');
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver);
+
+    expect(pageErrors.alice[0].scriptAsset).toBe('index-XYZ.js');
+    expect(pageErrors.alice[0].stack).toEqual({
+      state: 'captured',
+      lineCount: 2,
+      frameCount: 1,
+      frames: [{functionName: 'inviteToChannel', scriptAsset: 'index-XYZ.js', line: 41, column: 9}]
+    });
+    expect(pageErrors.alice[0].diagnostic).toMatchObject({
+      pageUrl: `${APP_ORIGIN}/`,
+      scenario: 'channel',
+      stage: 'alice_channel_invite_button',
+      rpcErrorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
+      rpcErrorCode: 400
+    });
+    expect(JSON.stringify(pageErrors)).not.toContain('Object');
+    resolver.clear();
+  });
+
+  it('keeps same-message exceptions separate when their protocol identities differ', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
+    const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = createDiagnosticPageErrors();
+    const page = {url: () => `${APP_ORIGIN}/`, evaluate: async(): Promise<unknown[]> => []} as any;
+    const createRuntimeException = (exceptionId: number, scriptId: string, functionName: string) => ({
+      exceptionId,
+      executionContextId: 3,
+      text: 'Uncaught (in promise)',
+      scriptId,
+      lineNumber: 40,
+      columnNumber: 8,
+      exception: {type: 'object', description: 'Object', objectId: `runtime-object-${exceptionId}`},
+      stackTrace: {callFrames: [{
+        scriptId,
+        url: `${APP_ORIGIN}/index-${scriptId}.js`,
+        functionName,
+        lineNumber: 40,
+        columnNumber: 8
+      }]}
+    });
+    recordPageErrorProtocolEvent(page, createRuntimeException(11, '1', 'inviteToChannel'), 'runtime');
+    recordPageErrorProtocolEvent(page, {
+      reason: 'promiseRejection',
+      executionContextId: 3,
+      data: {type: 'object', description: 'Object'},
+      callFrames: [{
+        functionName: 'inviteToChannel',
+        url: '',
+        location: {scriptId: '7', lineNumber: 40, columnNumber: 8}
+      }],
+      scriptUrls: {'7': `${APP_ORIGIN}/index-7.js`}
+    }, 'debugger');
+    recordPageErrorProtocolEvent(page, createRuntimeException(12, '8', 'unrelatedHandler'), 'runtime');
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver);
+
+    expect(pageErrors.alice[0].scriptAsset).toBe('unknown');
+    expect(pageErrors.alice[0].stack.state).toBe('no_frames');
+    expect(pageErrors.alice[0].diagnostic.rpcErrorType).toBeUndefined();
+    resolver.clear();
+  });
+
+  it('leaves page-error attribution unknown when generic messages match multiple fallback events', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = createDiagnosticPageErrors();
+    const page = {evaluate: async(): Promise<unknown[]> => []} as any;
+    const events = [{
+      message: 'Object',
+      stack: `Object\n    at inviteToChannel (${APP_ORIGIN}/index-Aaaa.js:91:7)`,
+      filename: `${APP_ORIGIN}/index-Aaaa.js`,
+      lineNumber: 91,
+      columnNumber: 7,
+      pageUrl: `${APP_ORIGIN}/`,
+      errorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH'
+    }, {
+      message: 'Object',
+      stack: `Object\n    at unrelatedHandler (${APP_ORIGIN}/index-Bbbb.js:4:2)`,
+      filename: `${APP_ORIGIN}/index-Bbbb.js`,
+      lineNumber: 4,
+      columnNumber: 2,
+      pageUrl: `${APP_ORIGIN}/other`,
+      errorCode: 400
+    }];
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver, [], events);
+
+    expect(pageErrors.alice[0].scriptAsset).toBe('unknown');
+    expect(pageErrors.alice[0].stack.state).toBe('no_frames');
+    expect(pageErrors.alice[0].diagnostic.rpcErrorType).toBeUndefined();
+    resolver.clear();
+  });
+
+  it('enriches page-error evidence for failures before the final scenario gate', async() => {
+    const enrichPageErrorReport = (realClientBrowser as any).enrichPageErrorReport;
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = createDiagnosticPageErrors('invite failed');
+    const page = {evaluate: async(): Promise<unknown[]> => [{
+      message: 'invite failed',
+      stack: `Error: invite failed\n    at inviteToChannel (${APP_ORIGIN}/index-XYZ.js?token=${HOSTILE.token}:91:7)`,
+      filename: `${APP_ORIGIN}/index-XYZ.js?token=${HOSTILE.token}`,
+      lineNumber: 91,
+      columnNumber: 7,
+      pageUrl: `${APP_ORIGIN}/?token=${HOSTILE.token}`
+    }]} as any;
+
+    const gateBreakdown = await enrichPageErrorReport(pageErrors, {alice: page}, {alice: resolver}, {}, [HOSTILE.token]);
+    const failureMessage = formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'alice_channel_invite_button',
+      gateBreakdown
+    });
+
+    expect(failureMessage).toContain('"line":91,"column":7');
+    expect(failureMessage).toContain(`${APP_ORIGIN}/`);
+    expect(failureMessage).not.toContain(HOSTILE.token);
+    expect(failureMessage).not.toContain('invite failed');
+    resolver.clear();
+  });
+
+  it('adds only the unique same-stage RPC method to a correlated page error', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorReport = (realClientBrowser as any).enrichPageErrorReport;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [], bob: []} as any;
+    const frame = {};
+    const scenarioStep = {scenario: 'channel', step: 'alice_channel_create'};
+    let captureDiagnostic: any;
+    const page = {
+      mainFrame: (): object => frame,
+      exposeBinding: async(_name: string, handler: any) => { captureDiagnostic = handler; },
+      on: (): void => undefined,
+      addInitScript: async(): Promise<void> => undefined,
+      url: (): string => `${APP_ORIGIN}/`,
+      evaluate: async(): Promise<unknown[]> => []
+    } as any;
+    await countClientErrors(page, () => scenarioStep);
+    captureDiagnostic({frame}, {
+      kind: 'rpc_failure',
+      rpcSource: 'api_log',
+      fields: {
+        type: 'PEER_ID_INVALID',
+        code: 400,
+        description: 'unavailable',
+        method: 'channels.createChannel',
+        peerArguments: [{argument: 'channel', constructor: 'inputChannel', id: '123'}]
+      }
+    });
+
+    const error = new Error('Object');
+    recordPageError(pageErrors, 'alice', error, undefined, scenarioStep, {
+      captureDetails: true,
+      pageUrl: `${APP_ORIGIN}/`,
+      scenario: scenarioStep.scenario,
+      stage: scenarioStep.step
+    });
+    recordPageErrorProtocolEvent(page, {
+      exceptionId: 31,
+      executionContextId: 3,
+      text: 'Uncaught (in promise)',
+      exception: {
+        type: 'object',
+        description: 'Object',
+        objectId: 'runtime-object-31',
+        preview: {properties: [
+          {name: 'type', type: 'string', value: 'PEER_ID_INVALID'},
+          {name: 'code', type: 'number', value: '400'}
+        ]}
+      },
+      stackTrace: {callFrames: [{
+        scriptId: '31',
+        url: `${APP_ORIGIN}/cryptoMessagePort-AbCd.js`,
+        functionName: 'processResultTask',
+        lineNumber: 588,
+        columnNumber: 12
+      }]}
+    }, 'runtime', scenarioStep);
+
+    const gateBreakdown = await enrichPageErrorReport(pageErrors, {alice: page}, {alice: resolver});
+
+    expect(gateBreakdown.pageErrors.alice[0].diagnostic).toMatchObject({
+      scenario: 'channel',
+      stage: 'alice_channel_create',
+      rpcErrorType: 'PEER_ID_INVALID',
+      rpcErrorCode: 400,
+      rpcMethod: 'channels.createChannel'
+    });
+    expect(JSON.stringify(gateBreakdown)).toContain('channels.createChannel');
+    expect(JSON.stringify(gateBreakdown)).not.toContain('peerArguments');
+    expect(realClientContract.parseBrowserGateBreakdown(gateBreakdown)).toEqual(gateBreakdown);
+    const unsafeBreakdown = JSON.parse(JSON.stringify(gateBreakdown));
+    unsafeBreakdown.pageErrors.alice[0].diagnostic.rpcMethod = 'channels.createChannel title=private';
+    expect(() => realClientContract.parseBrowserGateBreakdown(unsafeBreakdown)).toThrow('browser egress/page error evidence is invalid');
+    resolver.clear();
+  });
+
+  it('omits RPC attribution when a matching failure has no method', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorReport = (realClientBrowser as any).enrichPageErrorReport;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [], bob: []} as any;
+    const frame = {};
+    const scenarioStep = {scenario: 'channel', step: 'alice_channel_create'};
+    let captureDiagnostic: any;
+    const page = {
+      mainFrame: (): object => frame,
+      exposeBinding: async(_name: string, handler: any) => { captureDiagnostic = handler; },
+      on: (): void => undefined,
+      addInitScript: async(): Promise<void> => undefined,
+      url: (): string => `${APP_ORIGIN}/`,
+      evaluate: async(): Promise<unknown[]> => []
+    } as any;
+    await countClientErrors(page, () => scenarioStep);
+    for(const fields of [
+      {type: 'PEER_ID_INVALID', code: 400, description: 'unavailable', method: 'channels.createChannel'},
+      {type: 'PEER_ID_INVALID', code: 400, description: 'unavailable'}
+    ]) {
+      captureDiagnostic({frame}, {kind: 'rpc_failure', rpcSource: 'api_log', fields});
+    }
+
+    const error = new Error('Object');
+    recordPageError(pageErrors, 'alice', error, undefined, scenarioStep, {
+      captureDetails: true,
+      pageUrl: `${APP_ORIGIN}/`,
+      scenario: scenarioStep.scenario,
+      stage: scenarioStep.step
+    });
+    recordPageErrorProtocolEvent(page, {
+      exceptionId: 34,
+      executionContextId: 3,
+      text: 'Uncaught (in promise)',
+      exception: {
+        type: 'object',
+        description: 'Object',
+        objectId: 'runtime-object-34',
+        preview: {properties: [
+          {name: 'type', type: 'string', value: 'PEER_ID_INVALID'},
+          {name: 'code', type: 'number', value: '400'}
+        ]}
+      },
+      stackTrace: {callFrames: [{
+        scriptId: '34',
+        url: `${APP_ORIGIN}/cryptoMessagePort-AbCd.js`,
+        functionName: 'processResultTask',
+        lineNumber: 588,
+        columnNumber: 12
+      }]}
+    }, 'runtime', scenarioStep);
+
+    const gateBreakdown = await enrichPageErrorReport(
+      pageErrors,
+      {alice: page},
+      {alice: resolver},
+      {},
+      [],
+      {alice: getClientErrorDiagnostics(page), bob: []}
+    );
+
+    expect(gateBreakdown.stepDiagnostics.alice[0].rpcFailures.map((failure: any) => failure.method))
+    .toEqual(['channels.createChannel', 'unavailable']);
+    expect(gateBreakdown.pageErrors.alice[0].diagnostic.rpcMethod).toBeUndefined();
+    expect(realClientContract.parseBrowserGateBreakdown(gateBreakdown)).toEqual(gateBreakdown);
+    resolver.clear();
+  });
+
+  it('omits the RPC method when same-stage errors leave more than one candidate', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorReport = (realClientBrowser as any).enrichPageErrorReport;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [], bob: []} as any;
+    const frame = {};
+    const scenarioStep = {scenario: 'channel', step: 'alice_channel_create'};
+    let captureDiagnostic: any;
+    const page = {
+      mainFrame: (): object => frame,
+      exposeBinding: async(_name: string, handler: any) => { captureDiagnostic = handler; },
+      on: (): void => undefined,
+      addInitScript: async(): Promise<void> => undefined,
+      url: (): string => `${APP_ORIGIN}/`,
+      evaluate: async(): Promise<unknown[]> => []
+    } as any;
+    await countClientErrors(page, () => scenarioStep);
+    for(const method of ['channels.createChannel', 'messages.sendMessage']) {
+      captureDiagnostic({frame}, {
+        kind: 'rpc_failure',
+        rpcSource: 'api_log',
+        fields: {type: 'PEER_ID_INVALID', code: 400, description: 'unavailable', method}
+      });
+    }
+
+    const error = new Error('Object');
+    recordPageError(pageErrors, 'alice', error, undefined, scenarioStep, {
+      captureDetails: true,
+      pageUrl: `${APP_ORIGIN}/`,
+      scenario: scenarioStep.scenario,
+      stage: scenarioStep.step
+    });
+    recordPageErrorProtocolEvent(page, {
+      exceptionId: 32,
+      executionContextId: 3,
+      text: 'Uncaught (in promise)',
+      exception: {
+        type: 'object',
+        description: 'Object',
+        objectId: 'runtime-object-32',
+        preview: {properties: [
+          {name: 'type', type: 'string', value: 'PEER_ID_INVALID'},
+          {name: 'code', type: 'number', value: '400'}
+        ]}
+      },
+      stackTrace: {callFrames: [{
+        scriptId: '32',
+        url: `${APP_ORIGIN}/cryptoMessagePort-AbCd.js`,
+        functionName: 'processResultTask',
+        lineNumber: 588,
+        columnNumber: 12
+      }]}
+    }, 'runtime', scenarioStep);
+
+    const gateBreakdown = await enrichPageErrorReport(pageErrors, {alice: page}, {alice: resolver});
+
+    expect(gateBreakdown.pageErrors.alice[0].diagnostic.rpcMethod).toBeUndefined();
+    expect(realClientContract.parseBrowserGateBreakdown(gateBreakdown)).toEqual(gateBreakdown);
+    resolver.clear();
+  });
+
+  it('omits RPC attribution when same-stage failures exceed the capture cap', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorReport = (realClientBrowser as any).enrichPageErrorReport;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [], bob: []} as any;
+    const frame = {};
+    const scenarioStep = {scenario: 'channel', step: 'alice_channel_create'};
+    let captureDiagnostic: any;
+    const page = {
+      mainFrame: (): object => frame,
+      exposeBinding: async(_name: string, handler: any) => { captureDiagnostic = handler; },
+      on: (): void => undefined,
+      addInitScript: async(): Promise<void> => undefined,
+      url: (): string => `${APP_ORIGIN}/`,
+      evaluate: async(): Promise<unknown[]> => []
+    } as any;
+    await countClientErrors(page, () => scenarioStep);
+    for(let index = 0; index < 16; index++) {
+      captureDiagnostic({frame}, {
+        kind: 'rpc_failure',
+        rpcSource: 'api_log',
+        fields: {type: 'PEER_ID_INVALID', code: 400, description: 'unavailable', method: 'channels.createChannel'}
+      });
+    }
+    captureDiagnostic({frame}, {
+      kind: 'rpc_failure',
+      rpcSource: 'message_port',
+      fields: {type: 'PEER_ID_INVALID', code: 400, description: 'unavailable', method: 'messages.setTyping'}
+    });
+
+    const error = new Error('Object');
+    recordPageError(pageErrors, 'alice', error, undefined, scenarioStep, {
+      captureDetails: true,
+      pageUrl: `${APP_ORIGIN}/`,
+      scenario: scenarioStep.scenario,
+      stage: scenarioStep.step
+    });
+    recordPageErrorProtocolEvent(page, {
+      exceptionId: 33,
+      executionContextId: 3,
+      text: 'Uncaught (in promise)',
+      exception: {
+        type: 'object',
+        description: 'Object',
+        objectId: 'runtime-object-33',
+        preview: {properties: [
+          {name: 'type', type: 'string', value: 'PEER_ID_INVALID'},
+          {name: 'code', type: 'number', value: '400'}
+        ]}
+      },
+      stackTrace: {callFrames: [{
+        scriptId: '33',
+        url: `${APP_ORIGIN}/cryptoMessagePort-AbCd.js`,
+        functionName: 'processResultTask',
+        lineNumber: 588,
+        columnNumber: 12
+      }]}
+    }, 'runtime', scenarioStep);
+
+    const gateBreakdown = await enrichPageErrorReport(
+      pageErrors,
+      {alice: page},
+      {alice: resolver},
+      {},
+      [],
+      {alice: getClientErrorDiagnostics(page), bob: []}
+    );
+
+    expect(gateBreakdown.pageErrors.alice[0].diagnostic.rpcMethod).toBeUndefined();
+    expect(gateBreakdown.stepDiagnostics.alice[0].rpcFailuresTruncated).toBe(true);
+    expect(realClientContract.parseBrowserGateBreakdown(gateBreakdown)).toEqual(gateBreakdown);
+    resolver.clear();
   });
 
   it('attributes blob stack frames from correlated worker evidence without persisting blob identifiers', async() => {
@@ -2393,13 +3142,13 @@ describe('discovery shared-worker network accounting', () => {
         request: {url: HOSTILE.blobUrl},
         initiator: {type: 'script', stack: {callFrames: [{url: MTPROTO_CHUNK_URL}]}}
       });
-      const blobFromUrl = 'blob:https://telegramd.test/22222222-2222-2222-2222-222222222222';
+      const blobFromUrl = 'blob:https://teagramd.test/22222222-2222-2222-2222-222222222222';
       cdp.emit('Network.requestWillBeSent', {
         type: 'Script',
         request: {url: blobFromUrl},
         initiator: {type: 'other', url: MTPROTO_CHUNK_URL}
       });
-      const blobWithoutInitiator = 'blob:https://telegramd.test/33333333-3333-3333-3333-333333333333';
+      const blobWithoutInitiator = 'blob:https://teagramd.test/33333333-3333-3333-3333-333333333333';
       cdp.emit('Network.requestWillBeSent', {
         type: 'Fetch',
         request: {url: MTPROTO_CHUNK_URL},
@@ -2438,27 +3187,35 @@ describe('discovery shared-worker network accounting', () => {
       });
       const error = new TypeError(HOSTILE.phrase);
       error.stack = `TypeError: ${HOSTILE.phrase}\n    at t (${HOSTILE.blobUrl}:1:183)\n    at r (${blobFromUrl}:2:12)`;
-      recordPageError(pageErrors, 'alice', error, resolver);
+      recordPageError(pageErrors, 'alice', error, resolver, {scenario: 'sign-in', step: 'alice_context'});
 
       const pageErrorsFromUrl = {alice: [], bob: []} as any;
       const urlOnlyError = new TypeError(HOSTILE.phrase);
       urlOnlyError.stack = `TypeError: ${HOSTILE.phrase}\n    at r (${blobFromUrl}:2:12)`;
-      recordPageError(pageErrorsFromUrl, 'alice', urlOnlyError, resolver);
+      recordPageError(pageErrorsFromUrl, 'alice', urlOnlyError, resolver, {scenario: 'sign-in', step: 'alice_context'});
 
       const breakdown = summarizeGateBreakdown({pageErrors});
       const breakdownFromUrl = summarizeGateBreakdown({pageErrors: pageErrorsFromUrl});
-      expect(breakdown.pageErrors.alice).toEqual([expectedTypeError('unknown', {
-        functionName: 't',
-        line: 1,
-        column: 183,
-        manifestAsset: 'unknown'
-      })]);
-      expect(breakdownFromUrl.pageErrors.alice).toEqual([expectedTypeError('unknown', {
-        functionName: 'r',
-        line: 2,
-        column: 12,
-        manifestAsset: 'unknown'
-      })]);
+      const expectedPageError = {
+        constructorName: 'TypeError',
+        scriptAsset: 'unknown',
+        message: '[redacted]',
+        stack: {
+          state: 'captured',
+          lineCount: 3,
+          frameCount: 2,
+          frames: [
+            {functionName: 't', scriptAsset: 'unknown', line: 1, column: 183},
+            {functionName: 'r', scriptAsset: 'unknown', line: 2, column: 12}
+          ]
+        },
+        scenarioStep: {scenario: 'sign-in', step: 'alice_context'}
+      };
+      expect(breakdown.pageErrors.alice).toEqual([expectedPageError]);
+      expect(breakdownFromUrl.pageErrors.alice).toEqual([{
+        ...expectedPageError,
+        stack: {state: 'captured', lineCount: 2, frameCount: 1, frames: [expectedPageError.stack.frames[1]]}
+      }]);
       expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.blobUrl);
       expect(JSON.stringify(breakdown)).not.toContain(blobFromUrl);
       expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.phrase);
@@ -2468,17 +3225,21 @@ describe('discovery shared-worker network accounting', () => {
       const pageErrorsFromFetch = {alice: [], bob: []} as any;
       const fetchOnlyError = new TypeError(HOSTILE.phrase);
       fetchOnlyError.stack = `TypeError: ${HOSTILE.phrase}\n    at r (${blobWithoutInitiator}:2:12)`;
-      recordPageError(pageErrorsFromFetch, 'alice', fetchOnlyError, resolver);
+      recordPageError(pageErrorsFromFetch, 'alice', fetchOnlyError, resolver, {scenario: 'sign-in', step: 'alice_context'});
       const breakdownFromFetch = summarizeGateBreakdown({pageErrors: pageErrorsFromFetch});
-      expect(breakdownFromFetch.pageErrors.alice).toEqual([expectedTypeError('index.worker-AbCdEfGh.js', {
-        functionName: 'r',
-        line: 2,
-        column: 12,
-        manifestAsset: 'index.worker-AbCdEfGh.js'
-      })]);
+      expect(breakdownFromFetch.pageErrors.alice).toEqual([{
+        ...expectedPageError,
+        scriptAsset: 'index.worker-AbCdEfGh.js',
+        stack: {
+          state: 'captured',
+          lineCount: 2,
+          frameCount: 1,
+          frames: [{functionName: 'r', scriptAsset: 'index.worker-AbCdEfGh.js', line: 2, column: 12}]
+        }
+      }]);
       expect(JSON.stringify(breakdownFromFetch)).not.toContain(blobWithoutInitiator);
 
-      const blobFromScriptRequest = 'blob:https://telegramd.test/66666666-6666-6666-6666-666666666666';
+      const blobFromScriptRequest = 'blob:https://teagramd.test/66666666-6666-6666-6666-666666666666';
       cdp.emit('Network.requestWillBeSent', {
         type: 'Fetch',
         request: {url: MTPROTO_CHUNK_URL},
@@ -2492,25 +3253,45 @@ describe('discovery shared-worker network accounting', () => {
       const scriptRequestError = new TypeError(HOSTILE.phrase);
       scriptRequestError.stack = `TypeError: ${HOSTILE.phrase}\n    at t (${blobFromScriptRequest}:1:183)`;
       const pageErrorsFromScriptRequest = {alice: [], bob: []} as any;
-      recordPageError(pageErrorsFromScriptRequest, 'alice', scriptRequestError, resolver);
+      recordPageError(pageErrorsFromScriptRequest, 'alice', scriptRequestError, resolver, {scenario: 'sign-in', step: 'alice_context'});
       const breakdownFromScriptRequest = summarizeGateBreakdown({pageErrors: pageErrorsFromScriptRequest});
-      expect(breakdownFromScriptRequest.pageErrors.alice).toEqual([expectedTypeError('index.worker-AbCdEfGh.js', {
-        functionName: 't',
-        line: 1,
-        column: 183,
-        manifestAsset: 'index.worker-AbCdEfGh.js'
-      })]);
+      expect(breakdownFromScriptRequest.pageErrors.alice).toEqual([{
+        ...expectedPageError,
+        scriptAsset: 'index.worker-AbCdEfGh.js',
+        stack: {
+          state: 'captured',
+          lineCount: 2,
+          frameCount: 1,
+          frames: [{functionName: 't', scriptAsset: 'index.worker-AbCdEfGh.js', line: 1, column: 183}]
+        }
+      }]);
       expect(JSON.stringify(breakdownFromScriptRequest)).not.toContain(blobFromScriptRequest);
 
-      const lottieBlobUrl = 'blob:https://telegramd.test/55555555-5555-5555-5555-555555555555';
+      const lottieBlobUrl = 'blob:https://teagramd.test/55555555-5555-5555-5555-555555555555';
       resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'lottie-error-target');
       const lottiePageErrors = {alice: [], bob: []} as any;
       const lottieError = new Error(HOSTILE.phrase);
       lottieError.stack = `Error: ${HOSTILE.phrase}\n    at TLottieWasm.createAnimation (${lottieBlobUrl}:1197:23)\n    at TLottieItem.init (${lottieBlobUrl}:1328:35)\n    at Object.loadFromData [as callback] (${lottieBlobUrl}:1580:16)\n    at async SuperMessagePort.processInvokeTask [as invoke] (${lottieBlobUrl}:804:29)`;
-      recordPageError(lottiePageErrors, 'alice', lottieError, resolver);
+      recordPageError(lottiePageErrors, 'alice', lottieError, resolver, {scenario: 'channel', step: 'bob_channel_post_visible'});
       const lottieBreakdown = summarizeGateBreakdown({pageErrors: lottiePageErrors});
       expect(lottieBreakdown.counters.pageErrors).toBe(1);
-      expect(lottieBreakdown.pageErrors.alice).toEqual([{constructorName: 'Error', scriptAsset: 'tlottie.worker-JkLmNoPq.js'}]);
+      expect(lottieBreakdown.pageErrors.alice).toEqual([{
+        constructorName: 'Error',
+        scriptAsset: 'tlottie.worker-JkLmNoPq.js',
+        message: '[redacted]',
+        stack: {
+          state: 'captured',
+          lineCount: 5,
+          frameCount: 4,
+          frames: [
+            {functionName: 'TLottieWasm.createAnimation', scriptAsset: 'tlottie.worker-JkLmNoPq.js', line: 1197, column: 23},
+            {functionName: 'TLottieItem.init', scriptAsset: 'tlottie.worker-JkLmNoPq.js', line: 1328, column: 35},
+            {functionName: 'unknown', scriptAsset: 'tlottie.worker-JkLmNoPq.js', line: 1580, column: 16},
+            {functionName: 'unknown', scriptAsset: 'tlottie.worker-JkLmNoPq.js', line: 804, column: 29}
+          ]
+        },
+        scenarioStep: {scenario: 'channel', step: 'bob_channel_post_visible'}
+      }]);
       expect(JSON.stringify(lottieBreakdown)).not.toContain(lottieBlobUrl);
     } finally {
       resolver.clear();
@@ -2523,8 +3304,8 @@ describe('discovery shared-worker network accounting', () => {
     const resolver = createPageErrorAssetResolver();
     resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'contract-test-page');
 
-    const firstBlobUrl = 'blob:https://telegramd.test/77777777-7777-7777-7777-777777777777';
-    const secondBlobUrl = 'blob:https://telegramd.test/88888888-8888-8888-8888-888888888888';
+    const firstBlobUrl = 'blob:https://teagramd.test/77777777-7777-7777-7777-777777777777';
+    const secondBlobUrl = 'blob:https://teagramd.test/88888888-8888-8888-8888-888888888888';
     expect(resolver.scriptAsset(`Error: failed\n    at render (${firstBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
     expect(resolver.scriptAsset(`Error: failed\n    at render (${secondBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
     expect(resolver.scriptAsset('Error: failed')).toBe('unknown');
@@ -2534,9 +3315,9 @@ describe('discovery shared-worker network accounting', () => {
   it('correlates interleaved worker blobs by source and rejects ambiguous fallback', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
-    const firstBlobUrl = 'blob:https://telegramd.test/99999999-9999-9999-9999-999999999999';
-    const secondBlobUrl = 'blob:https://telegramd.test/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-    const uncorrelatedBlobUrl = 'blob:https://telegramd.test/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+    const firstBlobUrl = 'blob:https://teagramd.test/99999999-9999-9999-9999-999999999999';
+    const secondBlobUrl = 'blob:https://teagramd.test/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+    const uncorrelatedBlobUrl = 'blob:https://teagramd.test/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
     try {
       resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'worker-a', 'dedicated_worker');
@@ -2555,7 +3336,7 @@ describe('discovery shared-worker network accounting', () => {
   it('prefers a correlated worker bundle over its main-bundle initiator', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
-    const blobUrl = 'blob:https://telegramd.test/cccccccc-cccc-cccc-cccc-cccccccccccc';
+    const blobUrl = 'blob:https://teagramd.test/cccccccc-cccc-cccc-cccc-cccccccccccc';
 
     vi.useFakeTimers();
     try {
@@ -2577,7 +3358,7 @@ describe('discovery shared-worker network accounting', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
     const pageTargetId = 'shared-page-target';
-    const blobUrl = 'blob:https://telegramd.test/12121212-1212-1212-1212-121212121212';
+    const blobUrl = 'blob:https://teagramd.test/12121212-1212-1212-1212-121212121212';
 
     try {
       resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', pageTargetId);
@@ -2597,8 +3378,8 @@ describe('discovery shared-worker network accounting', () => {
   it('keeps lifetime attribution for hinted stacks and expires unhinted fallback', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
-    const hintedBlobUrl = 'blob:https://telegramd.test/dddddddd-dddd-dddd-dddd-dddddddddddd';
-    const unhintedBlobUrl = 'blob:https://telegramd.test/ffffffff-ffff-ffff-ffff-ffffffffffff';
+    const hintedBlobUrl = 'blob:https://teagramd.test/dddddddd-dddd-dddd-dddd-dddddddddddd';
+    const unhintedBlobUrl = 'blob:https://teagramd.test/ffffffff-ffff-ffff-ffff-ffffffffffff';
 
     vi.useFakeTimers();
     try {
@@ -2616,7 +3397,7 @@ describe('discovery shared-worker network accounting', () => {
   it('does not map an unmatched blob from stale worker or loader evidence', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
-    const blobUrl = 'blob:https://telegramd.test/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
+    const blobUrl = 'blob:https://teagramd.test/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
 
     vi.useFakeTimers();
     try {
@@ -2653,7 +3434,7 @@ describe('discovery shared-worker network accounting', () => {
       return {};
     };
     const {networkObserver} = createWorkerNetworkObserverHarness(observer, 'contract-test', {pageErrorAssetResolver: resolver});
-    const blobUrl = 'blob:https://telegramd.test/44444444-4444-4444-4444-444444444444';
+    const blobUrl = 'blob:https://teagramd.test/44444444-4444-4444-4444-444444444444';
     const pageErrors = {alice: [], bob: []} as any;
     await discovery.registry.launch(discovery.browser);
     await networkObserver.start(discovery.registry);
@@ -2673,14 +3454,20 @@ describe('discovery shared-worker network accounting', () => {
 
       const error = new TypeError(HOSTILE.phrase);
       error.stack = `TypeError: ${HOSTILE.phrase}\n    at t (${blobUrl}:1:183)`;
-      recordPageError(pageErrors, 'alice', error, resolver);
+      recordPageError(pageErrors, 'alice', error, resolver, {scenario: 'sign-in', step: 'alice_context'});
       const breakdown = summarizeGateBreakdown({pageErrors});
-      expect(breakdown.pageErrors.alice).toEqual([expectedTypeError('index.worker-AbCdEfGh.js', {
-        functionName: 't',
-        line: 1,
-        column: 183,
-        manifestAsset: 'index.worker-AbCdEfGh.js'
-      })]);
+      expect(breakdown.pageErrors.alice).toEqual([{
+        constructorName: 'TypeError',
+        scriptAsset: 'index.worker-AbCdEfGh.js',
+        message: '[redacted]',
+        stack: {
+          state: 'captured',
+          lineCount: 2,
+          frameCount: 1,
+          frames: [{functionName: 't', scriptAsset: 'index.worker-AbCdEfGh.js', line: 1, column: 183}]
+        },
+        scenarioStep: {scenario: 'sign-in', step: 'alice_context'}
+      }]);
       expect(JSON.stringify(breakdown)).not.toContain(blobUrl);
       expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.phrase);
     } finally {
@@ -2696,21 +3483,46 @@ describe('discovery shared-worker network accounting', () => {
     expect(report).toMatchObject({status: 'failed', stage: 'browser_egress_or_page_errors'});
     expect(breakdown.counters.pageErrors).toBe(515);
     expect(breakdown.pageErrors.alice).toHaveLength(512);
-    expect(breakdown.pageErrors.alice[0]).toEqual(expectedTypeError('auth-client.js', {
-      functionName: 'anonymous',
-      line: 21,
-      column: 3,
-      manifestAsset: 'unknown'
-    }, 'alice_context'));
+    expect(breakdown.pageErrors.alice[0]).toEqual({
+      constructorName: 'TypeError',
+      scriptAsset: 'auth-client.js',
+      message: '[redacted]',
+      stack: {
+        state: 'captured',
+        lineCount: 2,
+        frameCount: 1,
+        frames: [{functionName: 'unknown', scriptAsset: 'auth-client.js', line: 21, column: 3}]
+      },
+      scenarioStep: {scenario: 'sign-in', step: 'alice_context'}
+    });
     expect(breakdown.pageErrorOverflow).toEqual({
       alice: [
-        {constructorName: 'RangeError', scriptAsset: 'overflow-client.js', count: 1},
-        {...expectedTypeError('auth-client.js', {
-          functionName: 'anonymous',
-          line: 21,
-          column: 3,
-          manifestAsset: 'unknown'
-        }, 'alice_context'), count: 2}
+        {
+          constructorName: 'RangeError',
+          scriptAsset: 'overflow-client.js',
+          message: '[redacted]',
+          stack: {
+            state: 'captured',
+            lineCount: 2,
+            frameCount: 1,
+            frames: [{functionName: 'unknown', scriptAsset: 'overflow-client.js', line: 21, column: 3}]
+          },
+          scenarioStep: {scenario: 'sign-in', step: 'alice_context'},
+          count: 1
+        },
+        {
+          constructorName: 'TypeError',
+          scriptAsset: 'auth-client.js',
+          message: '[redacted]',
+          stack: {
+            state: 'captured',
+            lineCount: 2,
+            frameCount: 1,
+            frames: [{functionName: 'unknown', scriptAsset: 'auth-client.js', line: 21, column: 3}]
+          },
+          scenarioStep: {scenario: 'sign-in', step: 'alice_context'},
+          count: 2
+        }
       ],
       bob: []
     });
@@ -2720,7 +3532,7 @@ describe('discovery shared-worker network accounting', () => {
     expectNoGateSecretLeak(breakdown);
   });
 
-  it('breaks down the final gate by context and keeps error details private', async() => {
+  it('breaks down the final gate by context and redacts private error details', async() => {
     const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
     const recordPageError = (realClientBrowser as any).recordPageError;
     expect(typeof summarizeGateBreakdown).toBe('function');
@@ -2751,7 +3563,7 @@ describe('discovery shared-worker network accounting', () => {
       });
       const error = new TypeError(HOSTILE.phrase);
       error.stack = `TypeError: ${HOSTILE.phrase}\n    at https://unannounced.invalid/assets/bob-client.js?token=${HOSTILE.token}:21:3`;
-      recordPageError(pageErrors, 'bob', error);
+      recordPageError(pageErrors, 'bob', error, undefined, {scenario: 'message', step: 'bob_direct_message_visible'});
 
       const breakdown = summarizeGateBreakdown({
         networkObservers: {alice: alice.networkObserver, bob: bob.networkObserver},
@@ -2774,12 +3586,18 @@ describe('discovery shared-worker network accounting', () => {
         },
         pageErrors: {
           alice: [],
-          bob: [expectedTypeError('bob-client.js', {
-            functionName: 'anonymous',
-            line: 21,
-            column: 3,
-            manifestAsset: 'unknown'
-          })]
+          bob: [{
+            constructorName: 'TypeError',
+            scriptAsset: 'bob-client.js',
+            message: '[redacted]',
+            stack: {
+              state: 'captured',
+              lineCount: 2,
+              frameCount: 1,
+              frames: [{functionName: 'unknown', scriptAsset: 'bob-client.js', line: 21, column: 3}]
+            },
+            scenarioStep: {scenario: 'message', step: 'bob_direct_message_visible'}
+          }]
         },
         pageErrorOverflow: {alice: [], bob: []}
       });
@@ -2946,7 +3764,7 @@ describe('discovery shared-worker network accounting', () => {
     const {alice} = harness;
     try {
       for(let index = 0; index < observation.LIMITS.attachedTargets; index++) await harness.attach(alice, `bounded-${index}`);
-      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(16);
+      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(observation.LIMITS.attachedTargets);
       const eventsBeforeFlood = alice.observer.eventCount();
       for(let index = 0; index < observation.LIMITS.countedEventsPerContext + 20; index++) {
         harness.emit(alice, 'bounded-0', 'Network.webSocketCreated', {requestId: `socket-${index}`, url: `wss://unannounced.invalid/${index}`});
@@ -2957,7 +3775,7 @@ describe('discovery shared-worker network accounting', () => {
       await harness.attach(alice, 'over-budget-target');
       harness.emit(alice, 'bounded-0', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}});
       expect(alice.networkObserver.events).toHaveLength(retained);
-      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(16);
+      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(observation.LIMITS.attachedTargets);
     } finally {
       await harness.stop();
     }
@@ -2967,10 +3785,10 @@ describe('discovery shared-worker network accounting', () => {
     const harness = await createDiscoveryNetworkHarness();
     const {alice} = harness;
     try {
-      for(let index = 0; index < 20; index++) await harness.attach(alice, `bounded-${index}`);
-      expect(alice.networkObserver.summary().workerTargets).toEqual({shared_worker: 16, service_worker: 0});
-      expect(harness.calls.filter((call) => call.method === 'Target.attachToTarget')).toHaveLength(16);
-      expect(alice.observer.summary()).toMatchObject({attachedTargets: 16, observerOverflow: 1, coverageComplete: 0});
+      for(let index = 0; index < observation.LIMITS.attachedTargets + 4; index++) await harness.attach(alice, `bounded-${index}`);
+      expect(alice.networkObserver.summary().workerTargets).toEqual({shared_worker: observation.LIMITS.attachedTargets, service_worker: 0});
+      expect(harness.calls.filter((call) => call.method === 'Target.attachToTarget')).toHaveLength(observation.LIMITS.attachedTargets);
+      expect(alice.observer.summary()).toMatchObject({attachedTargets: observation.LIMITS.attachedTargets, observerOverflow: 1, coverageComplete: 0});
     } finally {
       await harness.stop();
     }
@@ -2992,34 +3810,63 @@ describe('real client scenario contract', () => {
 
   it('requires every scenario exactly once', () => {
     expect(() => parseRequiredScenarios('sign-in,message')).toThrow('required scenarios are missing');
-    expect(() => parseRequiredScenarios('sign-in,message,group,poll,group')).toThrow('duplicate scenario');
-    expect(() => parseRequiredScenarios('sign-in,message,group,poll,channel')).toThrow('unknown scenario');
+    expect(() => parseRequiredScenarios('sign-in,message,group,group')).toThrow('duplicate scenario');
+    expect(() => parseRequiredScenarios('sign-in,message,group,channel,unknown')).toThrow('unknown scenario');
     expect(parseRequiredScenarios('sign-in,message,group,poll')).toEqual(['sign-in', 'message', 'group', 'poll']);
+    expect(parseRequiredScenarios('sign-in,message,group,channel,poll')).toEqual(['sign-in', 'message', 'group', 'channel', 'poll']);
+    expect(parseRequiredScenarios('channel,poll,group,sign-in,message')).toEqual(['sign-in', 'message', 'group', 'channel', 'poll']);
   });
 
-  it('requires the captured screenshot count for each real-client mode', () => {
-    expect(realClientContract.expectedScreenshotCount).toBeTypeOf('function');
-    expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: false})).toBe(30);
-    expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true})).toBe(20);
+  it('runs the channel scenario only when selected', () => {
+    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'message', 'group', 'poll']})).toBe(false);
+    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'message', 'group', 'channel', 'poll']})).toBe(true);
   });
 
-  it('allows only the fixed no-poll page-error comparison behind its explicit mode', () => {
+  it('requires the selected optional channel scenario to pass', () => {
+    const scenarios = ['sign-in', 'message', 'group', 'channel', 'poll'];
+    expect(() => assertAllScenariosPassed([
+      {name: 'sign-in', status: 'passed'},
+      {name: 'message', status: 'passed'},
+      {name: 'group', status: 'passed'}
+    ], scenarios)).toThrow('channel did not execute');
+    expect(assertAllScenariosPassed([
+      {name: 'sign-in', status: 'passed'},
+      {name: 'message', status: 'passed'},
+      {name: 'group', status: 'passed'},
+      {name: 'channel', status: 'passed'},
+      {name: 'poll', status: 'passed'}
+    ], scenarios)).toEqual(scenarios);
+  });
+
+  it('counts poll and optional channel screenshots separately for positive and negative runs', () => {
+    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'message', 'group', 'poll']})).toBe(30);
+    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'message', 'group', 'channel', 'poll']})).toBe(40);
+    expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'message', 'group', 'poll']})).toBe(20);
+    expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'message', 'group', 'channel', 'poll']})).toBe(30);
+  });
+
+  it('pins the poll creation negative control to the pre-MAIN-2111 server and fixed evidence', () => {
     const args = [
       '--readiness-file', './fixture.jsonl',
-      '--harness-revision', '5f294c39abb32fc8ae15a4f7ccb085974098b320',
-      '--server-revision', '47daaaea5c71b859d9865c03cabb50da5a1a013b',
-      '--web-revision', 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
-      '--run-id', 'a'.repeat(32),
-      '--scenarios', 'sign-in,message,group'
+      '--harness-revision', READINESS_PINS.harnessRevision,
+      '--server-revision', realClientContract.POLL_NEGATIVE_CONTROL_SERVER_REVISION,
+      '--web-revision', READINESS_PINS.webRevision,
+      '--run-id', READINESS_PINS.runId,
+      '--scenarios', 'sign-in,message,group,channel,poll'
     ];
-    expect(() => parseRealClientArgs(args)).toThrow('required scenarios are missing');
-    expect(parseRealClientArgs([...args, '--page-error-no-poll-comparison'])).toMatchObject({
-      scenarios: ['sign-in', 'message', 'group'],
-      pageErrorNoPollComparison: true
+
+    expect(parseRealClientArgs([...args, '--poll-creation-negative-control'])).toMatchObject({
+      scenarios: ['sign-in', 'message', 'group', 'channel', 'poll'],
+      pollCreationNegativeControl: true
     });
-    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group,poll', '--page-error-no-poll-comparison']))
-    .toThrow('option was provided more than once');
-    expect(() => parseRealClientArgs([...args, '--page-error-no-poll-comparison', '--poll-creation-negative-control']))
+    expect(realClientContract.POLL_NEGATIVE_CONTROL_EVIDENCE).toEqual([
+      {shape: 'description', stage: 'alice_poll_description_create', errorType: 'POLL_ANSWERS_INVALID'},
+      {shape: 'input_answer', stage: 'alice_poll_input_answer_create', errorType: 'POLL_ANSWERS_INVALID'}
+    ]);
+    expect(() => parseRealClientArgs([
+      ...args.slice(0, 4), '--server-revision', READINESS_PINS.serverRevision, ...args.slice(6), '--poll-creation-negative-control'
+    ])).toThrow('requires the pinned negative-control server revision');
+    expect(() => parseRealClientArgs([...args, '--poll-creation-negative-control', '--auth-progress-one-submission']))
     .toThrow('cannot be combined');
   });
 
@@ -3028,13 +3875,14 @@ describe('real client scenario contract', () => {
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'},
       {name: 'group', status: 'passed'},
-      {name: 'poll', status: 'skipped'}
-    ])).toThrow('poll was skipped');
+      {name: 'channel', status: 'skipped'},
+      {name: 'poll', status: 'passed'}
+    ], ['sign-in', 'message', 'group', 'channel', 'poll'])).toThrow('channel was skipped');
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'failed'},
       {name: 'group', status: 'passed'},
-      {name: 'poll', status: 'passed'}
+      {name: 'channel', status: 'passed'}
     ])).toThrow('message did not pass');
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
@@ -3044,23 +3892,19 @@ describe('real client scenario contract', () => {
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'},
       {name: 'group', status: 'passed'}
-    ])).toThrow('poll did not execute');
+    ], ['sign-in', 'message', 'group', 'channel', 'poll'])).toThrow('channel did not execute');
     expect(assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'},
       {name: 'group', status: 'passed'},
+      {name: 'channel', status: 'passed'},
       {name: 'poll', status: 'passed'}
-    ])).toEqual(['sign-in', 'message', 'group', 'poll']);
-    expect(assertAllScenariosPassed([
-      {name: 'sign-in', status: 'passed'},
-      {name: 'message', status: 'passed'},
-      {name: 'group', status: 'passed'}
-    ], ['sign-in', 'message', 'group'])).toEqual(['sign-in', 'message', 'group']);
+    ], ['sign-in', 'message', 'group', 'channel', 'poll'])).toEqual(['sign-in', 'message', 'group', 'channel', 'poll']);
   });
 
   it('matches the audited private manifest schema without requiring an absent public key hash field', () => {
     const expected = {
-      wssEndpoint: 'wss://telegramd.test/apiws',
+      wssEndpoint: 'wss://teagramd.test/apiws',
       fingerprint: '1234567890abcdef',
       publicKeySHA256: 'a'.repeat(64),
       webRevision: 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
@@ -3103,24 +3947,6 @@ describe('real client scenario contract', () => {
       .map((event) => JSON.stringify(event)).join('\n'), pins)).toThrow('artifact-ready audit or browser evidence is incomplete');
   });
 
-  it('accepts the renamed Teagram fixture endpoint and evidence namespace', () => {
-    const serverReady = buildServerReady();
-    const teagramReady = {
-      ...serverReady,
-      evidenceClass: 'production-teagramd',
-      endpoint: 'https://teagramd.test',
-      wssEndpoint: 'wss://teagramd.test/apiws',
-      credentials: serverReady.credentials.map((credential: any) => ({
-        ...credential,
-        passwordFile: credential.passwordFile.replace('/telegram-fixture-', '/teagram-fixture-')
-      }))
-    };
-    const artifactReady = buildArtifactReady(teagramReady);
-    const text = [teagramReady, artifactReady].map((event) => JSON.stringify(event)).join('\n');
-
-    expect(parseFixtureReadiness(text, READINESS_PINS)).toEqual({serverReady: teagramReady, artifactReady});
-  });
-
   it('requires the manifest payload digest beside the staged artifact digest', () => {
     const serverReady = buildServerReady();
     const artifactReady = buildArtifactReady(serverReady);
@@ -3140,7 +3966,7 @@ describe('real client scenario contract', () => {
     const runtime = {
       runId,
       endpoint: APP_ORIGIN,
-      wssEndpoint: 'wss://telegramd.test/apiws',
+      wssEndpoint: 'wss://teagramd.test/apiws',
       fingerprint: '1234567890abcdef',
       publicKeySHA256: 'a'.repeat(64),
       artifactDigest: `sha256:${'c'.repeat(64)}`,
@@ -3157,10 +3983,9 @@ describe('real client scenario contract', () => {
     };
 
     expect(() => validateRuntimeInput(runtime)).not.toThrow();
-    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'message', 'group'], pageErrorNoPollComparison: true})).not.toThrow();
-    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'message', 'group', 'poll'], pageErrorNoPollComparison: true}))
-    .toThrow('runtime_input_validation');
-    expect(() => validateRuntimeInput({...runtime, endpoint: 'https://teagramd.test', wssEndpoint: 'wss://teagramd.test/apiws'})).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'message', 'group', 'channel', 'poll']})).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'message', 'group']})).toThrow('runtime_input_validation');
+    expect(() => validateRuntimeInput({...runtime, pollCreationNegativeControl: false})).toThrow('runtime_input_validation');
     expect(() => validateRuntimeInput({...runtime, observationOnly: true, artifactDigest: null, manifestArtifactDigest: null})).not.toThrow();
     for(const malformed of [undefined, null, [runtime.manifestArtifactDigest], `sha256:${'f'.repeat(63)}`]) {
       expect(() => validateRuntimeInput({...runtime, manifestArtifactDigest: malformed})).toThrow('runtime_input_validation');
@@ -3170,7 +3995,7 @@ describe('real client scenario contract', () => {
 
   it('reads only the fixture-owned mode-0400 synthetic password files', () => {
     const runId = 'c'.repeat(32);
-    const secretDirectory = mkdtempSync(join(tmpdir(), `telegram-fixture-${runId}.`));
+    const secretDirectory = mkdtempSync(join(tmpdir(), `teagram-fixture-${runId}.`));
     chmodSync(secretDirectory, 0o700);
     const passwordFileA = join(secretDirectory, 'a-password');
     const passwordFileB = join(secretDirectory, 'b-password');
@@ -3207,26 +4032,6 @@ describe('real client scenario contract', () => {
     }
   });
 
-  it('reads protected synthetic credentials from the renamed Teagram fixture directory', () => {
-    const runId = 'd'.repeat(32);
-    const secretDirectory = mkdtempSync(join(tmpdir(), `teagram-fixture-${runId}.`));
-    chmodSync(secretDirectory, 0o700);
-    const passwordFile = join(secretDirectory, 'a-password');
-    writeFileSync(passwordFile, `${'3'.repeat(64)}\n`, {mode: 0o400});
-    chmodSync(passwordFile, 0o400);
-
-    try {
-      expect(readSyntheticCredentials([
-        {username: `u${runId.slice(0, 30)}a`, passwordFile},
-        {username: `u${runId.slice(0, 30)}b`, passwordFile: join(secretDirectory, 'b-password')}
-      ], runId, 1, 'teagram-fixture')).toEqual([
-        {username: `u${runId.slice(0, 30)}a`, password: '3'.repeat(64)}
-      ]);
-    } finally {
-      rmSync(secretDirectory, {recursive: true, force: true});
-    }
-  });
-
   it('requires explicit immutable pins, readiness and the complete scenario set', () => {
     const args = [
       '--readiness-file', './fixture.jsonl',
@@ -3234,7 +4039,7 @@ describe('real client scenario contract', () => {
       '--server-revision', '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       '--web-revision', 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       '--run-id', 'a'.repeat(32),
-      '--scenarios', 'sign-in,message,group,poll'
+      '--scenarios', 'sign-in,message,group,channel,poll'
     ];
 
     expect(parseRealClientArgs(args)).toEqual({
@@ -3243,26 +4048,13 @@ describe('real client scenario contract', () => {
       serverRevision: '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       webRevision: 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       runId: 'a'.repeat(32),
-      scenarios: ['sign-in', 'message', 'group', 'poll']
+      scenarios: ['sign-in', 'message', 'group', 'channel', 'poll']
     });
     expect(parseRealClientArgs(['--', ...args])).toEqual(parseRealClientArgs(args));
     expect(() => parseRealClientArgs([])).toThrow('missing required options');
     expect(() => parseRealClientArgs(args.slice(0, -2))).toThrow('scenario selection is required');
-    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message'])).toThrow('option was provided more than once');
+    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group'])).toThrow('option was provided more than once');
     expect(() => parseRealClientArgs([...args, '--source-sha', 'a'.repeat(40)])).toThrow('unknown option');
-
-    expect(realClientContract.POLL_NEGATIVE_CONTROL_SERVER_REVISION).toBe('586403c1f4c92c09b006652278bdd02fd40ddf2d');
-    expect(realClientContract.POLL_NEGATIVE_CONTROL_EVIDENCE).toEqual([
-      {shape: 'description', stage: 'alice_poll_description_create', errorType: 'POLL_ANSWERS_INVALID'},
-      {shape: 'input_answer', stage: 'alice_poll_input_answer_create', errorType: 'POLL_ANSWERS_INVALID'}
-    ]);
-    const legacyServerArgs = [...args];
-    legacyServerArgs[5] = realClientContract.POLL_NEGATIVE_CONTROL_SERVER_REVISION;
-    expect(parseRealClientArgs([...legacyServerArgs, '--poll-creation-negative-control']).pollCreationNegativeControl).toBe(true);
-    expect(() => parseRealClientArgs([...args, '--poll-creation-negative-control']))
-    .toThrow('negative-control server revision');
-    expect(() => parseRealClientArgs([...legacyServerArgs, '--poll-creation-negative-control', '--auth-progress-one-submission']))
-    .toThrow('cannot be combined');
   });
 
   it('accepts a server-ready-only readiness pair for the synthetic-only run', () => {
@@ -3295,7 +4087,7 @@ describe('real client scenario contract', () => {
       observerControlsOnly: true,
       scenarios: ['sign-in', 'message', 'group', 'poll']
     });
-    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group,poll', '--observer-controls-only']).observerControlsOnly).toBe(true);
+    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group,channel,poll', '--observer-controls-only']).observerControlsOnly).toBe(true);
     expect(() => parseRealClientArgs(args)).toThrow('scenario selection is required');
     expect(() => parseRealClientArgs([...args, '--observer-controls-only', '--observer-controls-only'])).toThrow('option was provided more than once');
   });
@@ -3317,7 +4109,7 @@ describe('real client scenario contract', () => {
       runId: READINESS_PINS.runId,
       authProgressOneSubmission: true
     });
-    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group,poll', '--auth-progress-one-submission']))
+    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group,channel', '--auth-progress-one-submission']))
     .toThrow('cannot be combined');
     expect(() => parseRealClientArgs([...args, '--observer-controls-only', '--auth-progress-one-submission']))
     .toThrow('cannot be combined');
@@ -3333,7 +4125,7 @@ describe('real client scenario contract', () => {
       '--server-revision', READINESS_PINS.serverRevision,
       '--web-revision', READINESS_PINS.webRevision,
       '--run-id', READINESS_PINS.runId,
-      '--scenarios', 'sign-in,message,group,poll',
+      '--scenarios', 'sign-in,message,group,channel',
       '--auth-progress-one-submission'
     ], {encoding: 'utf8'});
 
@@ -3665,7 +4457,7 @@ describe('real client password evidence contract', () => {
 });
 
 const USERNAME_ENTRY_RUNTIME = Object.freeze({
-  wssEndpoint: 'wss://telegramd.test/apiws',
+  wssEndpoint: 'wss://teagramd.test/apiws',
   fingerprint: '1234567890abcdef',
   webRevision: READINESS_PINS.webRevision,
   artifactDigest: `sha256:${'c'.repeat(64)}`,
@@ -3774,6 +4566,351 @@ describe('real client username field readiness', () => {
     });
     return page;
   }
+
+  it('captures own thrown and RPC fields plus console errors by synthetic scenario step', async() => {
+    setFixture('<!doctype html><html><body>synthetic diagnostic page</body></html>');
+    const page = await createRunnerPage();
+    try {
+      await countClientErrors(page, () => ({scenario: 'channel', step: 'bob_channel_membership'}));
+      await page.goto(`${APP_ORIGIN}/`);
+      await page.evaluate(async() => {
+        const thrown = Object.create(null);
+        Object.defineProperties(thrown, {
+          type: {value: 'CHANNEL_PRIVATE', enumerable: true},
+          code: {value: 403, enumerable: true},
+          description: {value: 'Synthetic channel write denied', enumerable: true}
+        });
+        window.dispatchEvent(new ErrorEvent('error', {error: thrown}));
+        window.dispatchEvent(new PromiseRejectionEvent('unhandledrejection', {promise: Promise.resolve(), reason: thrown}));
+        const unsafe = {type: 'CHANNEL_PRIVATE', code: 403, description: 'https://synthetic.invalid/?token=synthetic'};
+        window.dispatchEvent(new ErrorEvent('error', {error: unsafe}));
+        const long = {type: 'CHANNEL_PRIVATE', code: 403, description: 'Synthetic ' + 'x'.repeat(400)};
+        window.dispatchEvent(new PromiseRejectionEvent('unhandledrejection', {promise: Promise.resolve(), reason: long}));
+        const channel = new MessageChannel();
+        channel.port1.addEventListener('message', () => {});
+        channel.port1.start();
+        channel.port2.postMessage({type: 'result', payload: {error: thrown}});
+        console.error('Synthetic channel console failure');
+        console.error('https://synthetic.invalid/?token=synthetic');
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      });
+
+      const diagnostics = getClientErrorDiagnostics(page);
+      expect(diagnostics).toEqual([{
+        scenarioStep: {scenario: 'channel', step: 'bob_channel_membership'},
+        thrownValues: [
+          {source: 'error_event', valueType: 'object', type: 'CHANNEL_PRIVATE', code: 403, description: 'Synthetic channel write denied'},
+          {source: 'unhandled_rejection', valueType: 'object', type: 'CHANNEL_PRIVATE', code: 403, description: 'Synthetic channel write denied'},
+          {source: 'error_event', valueType: 'object', type: 'CHANNEL_PRIVATE', code: 403, description: '[redacted]'},
+          {source: 'unhandled_rejection', valueType: 'object', type: 'CHANNEL_PRIVATE', code: 403, description: 'Synthetic [redacted]'}
+        ],
+        rpcFailures: [{type: 'CHANNEL_PRIVATE', code: 403, description: 'Synthetic channel write denied', method: 'unavailable', peerArguments: []}],
+        consoleErrors: [{message: 'Synthetic channel console failure'}, {message: '[redacted]'}]
+      }]);
+      expect(getClientErrorDiagnostics(page, {scenario: 'channel', step: 'bob_channel_membership'})).toEqual(diagnostics);
+      expect(getClientErrorDiagnostics(page, {scenario: 'channel', step: 'bob_channel_open'})).toEqual([]);
+      const pageErrors = {alice: [], bob: []} as any;
+      (realClientBrowser as any).recordPageError(
+        pageErrors,
+        'alice',
+        Object.assign(new Error('Object'), {stack: 'Error: Object'}),
+        undefined,
+        {scenario: 'channel', step: 'bob_channel_membership'}
+      );
+      const breakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown({
+        pageErrors,
+        clientErrorDiagnostics: {alice: diagnostics, bob: []}
+      });
+      expect(breakdown.stepDiagnostics).toEqual({alice: diagnostics, bob: []});
+      expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_channel_membership', gateBreakdown: breakdown}))
+      .toContain(JSON.stringify(breakdown));
+      expectNoGateSecretLeak(breakdown);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('keeps RPC diagnostics under a later failure stage after an action step', async() => {
+    const readClientErrorScenarioStep = (realClientBrowser as any).readClientErrorScenarioStep;
+    const setPageActionStep = (realClientBrowser as any).setPageActionStep;
+    const setPageScenarioStep = (realClientBrowser as any).setPageScenarioStep;
+    const summarizeBrowserGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
+    const frame = {};
+    let captureDiagnostic: any;
+    const page = {
+      mainFrame: (): object => frame,
+      exposeBinding: async(_name: string, handler: any) => { captureDiagnostic = handler; },
+      on: (): void => undefined,
+      addInitScript: async(): Promise<void> => undefined
+    } as any;
+    setPageActionStep(page, 'alice_direct_chat');
+    setPageScenarioStep(page, 'alice_direct_message');
+    await countClientErrors(page, () => readClientErrorScenarioStep(page, false));
+    captureDiagnostic({frame}, {
+      kind: 'rpc_failure',
+      rpcSource: 'api_log',
+      fields: {type: 'CHANNEL_PRIVATE', code: 403, description: 'unavailable', method: 'messages.sendMessage'}
+    });
+
+    const failedScenarioStep = readClientErrorScenarioStep(page, false);
+    const diagnostics = getClientErrorDiagnostics(page, failedScenarioStep);
+    const gateBreakdown = summarizeBrowserGateBreakdown({
+      pageErrors: {alice: [], bob: []},
+      clientErrorDiagnostics: {alice: diagnostics, bob: []}
+    });
+
+    expect(failedScenarioStep.step).toBe('alice_direct_message');
+    expect(readClientErrorScenarioStep(page, true).step).toBe('alice_direct_chat');
+    expect(diagnostics[0].rpcFailures[0].method).toBe('messages.sendMessage');
+    expect(gateBreakdown.stepDiagnostics.alice[0].scenarioStep.step).toBe('alice_direct_message');
+  });
+
+  it('captures failed RPC methods and only constructor ids from peer arguments', async() => {
+    setFixture('<!doctype html><html><body>synthetic diagnostic page</body></html>');
+    const page = await createRunnerPage();
+    try {
+      await countClientErrors(page, () => ({scenario: 'channel', step: 'bob_channel_other_conversation'}));
+      await page.goto(`${APP_ORIGIN}/`);
+
+      await page.evaluate((hostile: {token: string, password: string}) => {
+        const channelPeer: any = {_: 'inputPeerChannel', channel_id: 90210};
+        Object.defineProperty(channelPeer, 'access_hash', {
+          enumerable: true,
+          get() {
+            throw new Error('access_hash must not be read');
+          }
+        });
+        (window as any).__syntheticRpcParams = {
+          peer: channelPeer,
+          id: {_: 'inputUser', user_id: 70021, access_hash: hostile.token},
+          random_id: hostile.password
+        };
+      }, HOSTILE);
+      const cdp = await page.context().newCDPSession(page);
+      let readerResponse: any;
+      const paramsObject = await cdp.send('Runtime.evaluate', {
+        expression: 'window.__syntheticRpcParams',
+        returnByValue: false
+      });
+      const captured = await (realClientBrowser as any).captureRpcFailureFromConsole(page, {
+        type: 'error',
+        args: [
+          {type: 'string', value: '%s'},
+          {type: 'string', value: '12:00:00'},
+          {type: 'string', value: '[ApiManager]'},
+          {type: 'string', value: 'Error'},
+          {type: 'number', value: 400},
+          {type: 'string', value: 'PEER_ID_INVALID'},
+          {type: 'number', value: 1},
+          {type: 'number', value: 1},
+          {type: 'string', value: 'messages.getDialogs'},
+          {type: 'object', objectId: paramsObject.result.objectId}
+        ]
+      }, async(objectId: string) => {
+        expect(objectId).toBe(paramsObject.result.objectId);
+        readerResponse = await cdp.send('Runtime.callFunctionOn', {
+          objectId,
+          functionDeclaration: (realClientBrowser as any).readSafeRpcArguments.toString(),
+          arguments: [{value: 8}],
+          returnByValue: true,
+          silent: true
+        });
+        return readerResponse.result?.value;
+      });
+      expect(readerResponse.exceptionDetails).toBeUndefined();
+      expect(readerResponse.result.value).toEqual({peerArguments: [
+        {argument: 'peer', constructor: 'inputPeerChannel', id: '90210'},
+        {argument: 'id', constructor: 'inputUser', id: '70021'}
+      ]});
+      const peerArguments = readerResponse.result.value.peerArguments;
+      expect(captured).toBe(true);
+
+      const diagnostics = (realClientBrowser as any).getClientErrorDiagnostics(page);
+      expect(diagnostics).toEqual([{
+        scenarioStep: {scenario: 'channel', step: 'bob_channel_other_conversation'},
+        thrownValues: [],
+        rpcFailures: [{
+          type: 'PEER_ID_INVALID',
+          code: 400,
+          description: 'unavailable',
+          method: 'messages.getDialogs',
+          peerArguments
+        }],
+        consoleErrors: []
+      }]);
+      expect(JSON.stringify(diagnostics)).not.toContain(HOSTILE.token);
+      expect(JSON.stringify(diagnostics)).not.toContain(HOSTILE.password);
+      expect(JSON.stringify(diagnostics)).not.toContain('access_hash');
+      const breakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown({
+        pageErrors: {alice: [], bob: []},
+        clientErrorDiagnostics: {alice: [], bob: diagnostics}
+      });
+      expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_channel_other_conversation', gateBreakdown: breakdown}))
+      .toContain('messages.getDialogs');
+      expectNoGateSecretLeak(breakdown);
+      const unsafeBreakdown = structuredClone(breakdown);
+      unsafeBreakdown.stepDiagnostics.bob[0].rpcFailures[0].peerArguments[0].access_hash = HOSTILE.token;
+      expect(() => formatBrowserFailureMessage({status: 'failed', stage: 'bob_channel_other_conversation', gateBreakdown: unsafeBreakdown}))
+      .toThrow('browser egress/page error evidence is invalid');
+
+      await page.evaluate(() => {
+        const channel = new MessageChannel();
+        channel.port1.addEventListener('message', () => {});
+        channel.port1.start();
+        channel.port2.postMessage({type: 'result', payload: {error: {type: 'PEER_ID_INVALID', code: 400}}});
+      });
+      await page.waitForTimeout(25);
+      expect((realClientBrowser as any).getClientErrorDiagnostics(page)[0].rpcFailures).toHaveLength(1);
+      await cdp.detach();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('captures a sanitized RPC failure from a page CDP console event', async() => {
+    const cdp: any = new EventEmitter();
+    cdp.send = async(method: string) => method === 'Target.getTargetInfo'
+      ? {targetInfo: {targetId: 'rpc-diagnostic-page', browserContextId: 'rpc-diagnostic'}}
+      : method === 'Runtime.callFunctionOn'
+        ? {result: {value: {peerArguments: [{argument: 'peer', constructor: 'inputPeerUser', id: 501}]}}}
+        : {};
+    cdp.detach = async() => {};
+    const fakePage: any = new EventEmitter();
+    const frame = {};
+    fakePage.mainFrame = () => frame;
+    fakePage.context = () => ({newCDPSession: async() => cdp});
+    fakePage.exposeBinding = async() => {};
+    fakePage.addInitScript = async() => {};
+    await countClientErrors(fakePage, () => ({scenario: 'channel', step: 'bob_channel_reload_chats_list'}));
+    const observer = observation.createContextObserver('rpc-diagnostic');
+    const networkObserver = createNetworkObserver(fakePage, 'rpc-diagnostic', observer);
+    await networkObserver.start();
+    try {
+      cdp.emit('Runtime.consoleAPICalled', {
+        type: 'error',
+        args: [
+          {type: 'string', value: '%s'}, {type: 'string', value: '12:00:00'},
+          {type: 'string', value: '[ApiManager]'}, {type: 'string', value: 'Error'},
+          {type: 'number', value: 400}, {type: 'string', value: 'PEER_ID_INVALID'},
+          {type: 'number', value: 1}, {type: 'number', value: 1},
+          {type: 'string', value: 'messages.getDialogs'}, {type: 'object', objectId: 'synthetic-rpc-params'}
+        ]
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(getClientErrorDiagnostics(fakePage)).toEqual([{
+        scenarioStep: {scenario: 'channel', step: 'bob_channel_reload_chats_list'},
+        thrownValues: [],
+        rpcFailures: [{
+          type: 'PEER_ID_INVALID', code: 400, description: 'unavailable',
+          method: 'messages.getDialogs',
+          peerArguments: [{argument: 'peer', constructor: 'inputPeerUser', id: '501'}]
+        }],
+        consoleErrors: []
+      }]);
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
+  it('captures a sanitized RPC failure from an attached worker console event', async() => {
+    const cdp: any = new EventEmitter();
+    const nestedCalls: any[] = [];
+    cdp.send = async(method: string, params: any) => {
+      if(method === 'Target.getTargetInfo') return {targetInfo: {targetId: 'worker-rpc-page', browserContextId: 'worker-rpc'}};
+      if(method === 'Target.sendMessageToTarget') {
+        const nested = JSON.parse(params.message);
+        nestedCalls.push(nested);
+        const result = nested.method === 'Runtime.callFunctionOn'
+          ? {result: {result: {value: {peerArguments: [{argument: 'channel', constructor: 'inputChannel', id: '602'}]}}}}
+          : {result: {}};
+        queueMicrotask(() => cdp.emit('Target.receivedMessageFromTarget', {
+          sessionId: params.sessionId,
+          message: JSON.stringify({id: nested.id, ...result})
+        }));
+      }
+      return {};
+    };
+    cdp.detach = async() => {};
+    const fakePage: any = new EventEmitter();
+    const frame = {};
+    fakePage.mainFrame = () => frame;
+    fakePage.context = () => ({newCDPSession: async() => cdp});
+    fakePage.exposeBinding = async() => {};
+    fakePage.addInitScript = async() => {};
+    await countClientErrors(fakePage, () => ({scenario: 'channel', step: 'bob_channel_other_conversation'}));
+    const observer = observation.createContextObserver('worker-rpc');
+    const networkObserver = createNetworkObserver(fakePage, 'worker-rpc', observer);
+    await networkObserver.start();
+    try {
+      cdp.emit('Target.attachedToTarget', {
+        sessionId: 'synthetic-worker-session',
+        targetInfo: {targetId: 'synthetic-worker', type: 'worker', url: MTPROTO_CHUNK_URL, browserContextId: 'worker-rpc'}
+      });
+      await networkObserver.waitForSetup();
+      const workerConsoleEvent = {
+        type: 'error',
+        args: [
+          {type: 'string', value: '%s'}, {type: 'string', value: '12:00:00'},
+          {type: 'string', value: '[ApiManager]'}, {type: 'string', value: 'Error'},
+          {type: 'number', value: 400}, {type: 'string', value: 'PEER_ID_INVALID'},
+          {type: 'number', value: 1}, {type: 'number', value: 1},
+          {type: 'string', value: 'channels.getMessages'}, {type: 'object', objectId: 'synthetic-worker-rpc-params'}
+        ]
+      };
+      cdp.emit('Target.receivedMessageFromTarget', {
+        sessionId: 'synthetic-worker-session',
+        message: JSON.stringify({method: 'Runtime.consoleAPICalled', params: workerConsoleEvent})
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(nestedCalls.some((call) => call.method === 'Runtime.callFunctionOn')).toBe(true);
+      expect(getClientErrorDiagnostics(fakePage)).toEqual([{
+        scenarioStep: {scenario: 'channel', step: 'bob_channel_other_conversation'},
+        thrownValues: [],
+        rpcFailures: [{
+          type: 'PEER_ID_INVALID', code: 400, description: 'unavailable',
+          method: 'channels.getMessages',
+          peerArguments: [{argument: 'channel', constructor: 'inputChannel', id: '602'}]
+        }],
+        consoleErrors: []
+      }]);
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
+  it('captures a sanitized RPC failure from the shared worker discovery path', async() => {
+    const harness = await createDiscoveryNetworkHarness({startContext: false});
+    const bob = await harness.startContext('bob');
+    await countClientErrors(bob.page, () => ({scenario: 'channel', step: 'bob_channel_other_conversation'}));
+    try {
+      await harness.attach(bob, 'shared-rpc-worker', 'discovery', 'shared_worker');
+      const countedEventsBeforeConsole = bob.observer.state.countedEvents;
+      harness.emit(bob, 'shared-rpc-worker', 'Runtime.consoleAPICalled', {
+        type: 'error',
+        args: [
+          {type: 'string', value: '%s'}, {type: 'string', value: '12:00:00'},
+          {type: 'string', value: '[ApiManager]'}, {type: 'string', value: 'Error'},
+          {type: 'number', value: 400}, {type: 'string', value: 'PEER_ID_INVALID'},
+          {type: 'number', value: 1}, {type: 'number', value: 1},
+          {type: 'string', value: 'messages.getDialogs'}, {type: 'object', objectId: 'shared-worker-rpc-params'}
+        ]
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(bob.observer.state.countedEvents).toBe(countedEventsBeforeConsole);
+      expect(getClientErrorDiagnostics(bob.page)).toEqual([{
+        scenarioStep: {scenario: 'channel', step: 'bob_channel_other_conversation'},
+        thrownValues: [],
+        rpcFailures: [{
+          type: 'PEER_ID_INVALID', code: 400, description: 'unavailable',
+          method: 'messages.getDialogs',
+          peerArguments: [{argument: 'peer', constructor: 'inputPeerChannel', id: '603'}]
+        }],
+        consoleErrors: []
+      }]);
+    } finally {
+      await harness.stop();
+    }
+  });
 
   async function runAuthProgressRunner({
     card = 'ready',
@@ -3919,7 +5056,7 @@ describe('real client username field readiness', () => {
 
   function runOuterAuthProgressRunner(browserOutput: string, {browserExitCode = 0, failRunnerCleanup = false}: {browserExitCode?: number, failRunnerCleanup?: boolean} = {}) {
     const fixtureDirectory = mkdtempSync(join(tmpdir(), 'real-client-runner-contract-'));
-    const secretDirectory = mkdtempSync(join(tmpdir(), `telegram-fixture-${READINESS_PINS.runId}.`));
+    const secretDirectory = mkdtempSync(join(tmpdir(), `teagram-fixture-${READINESS_PINS.runId}.`));
     const passwordFiles = [join(secretDirectory, 'a-password'), join(secretDirectory, 'b-password')];
     const statePath = join(fixtureDirectory, 'docker-state.json');
     const readinessPath = join(fixtureDirectory, 'readiness.jsonl');
@@ -3927,9 +5064,9 @@ describe('real client username field readiness', () => {
     const cleanupPath = join(fixtureDirectory, 'cleanup.log');
     const browserInputPath = join(fixtureDirectory, 'browser-input.json');
     const runLabel = 'org.teagram.fixture.run';
-    const browserName = `telegram-fixture-${READINESS_PINS.runId}browser`;
-    const edgeName = `telegram-fixture-${READINESS_PINS.runId}edge`;
-    const serverName = `telegram-fixture-${READINESS_PINS.runId}server`;
+    const browserName = `teagram-fixture-${READINESS_PINS.runId}browser`;
+    const edgeName = `teagram-fixture-${READINESS_PINS.runId}edge`;
+    const serverName = `teagram-fixture-${READINESS_PINS.runId}server`;
     const browser = {
       NetworkSettings: {Networks: {[edgeName]: {IPAddress: '172.20.0.2'}}},
       Config: {Labels: {[runLabel]: READINESS_PINS.runId}, Env: [] as string[], User: '1001:1001'},
@@ -3973,14 +5110,15 @@ describe('real client username field readiness', () => {
       'const {appendFileSync, readFileSync} = require(\'node:fs\');',
       'const args = process.argv.slice(2);',
       'const state = JSON.parse(readFileSync(process.env.REAL_CLIENT_DOCKER_FIXTURE_STATE, \'utf8\'));',
+      'const input = args.includes(\'-i\') ? readFileSync(0, \'utf8\') : \'\';',
       'const write = (value) => process.stdout.write(typeof value === \'string\' ? value : JSON.stringify(value));',
       'if(args[0] === \'inspect\') write(args.at(-1) === state.browserName ? state.browser : state.front);',
       'else if(args[0] === \'network\') write(state.network);',
       'else if(args[0] === \'exec\') {',
       '  if(args.includes(\'/proc/net/route\')) write(\'Iface Destination Gateway\\n\');',
       '  else if(args.includes(\'/proc/net/ipv6_route\')) {}',
+      '  else if(args.includes(\'node\')) { appendFileSync(state.browserInputPath, input); write(readFileSync(state.browserOutputPath, \'utf8\')); if(state.browserExitCode) process.exitCode = state.browserExitCode; }',
       '  else if(args.some((argument) => argument.includes(\'cat >\'))) readFileSync(0, \'utf8\');',
-      '  else if(args.includes(\'node\')) { appendFileSync(state.browserInputPath, readFileSync(0, \'utf8\')); write(readFileSync(state.browserOutputPath, \'utf8\')); if(state.browserExitCode) process.exitCode = state.browserExitCode; }',
       '  else if(args.includes(\'rm\')) { appendFileSync(state.cleanupPath, `${args.at(-1)}\\n`); if(state.failRunnerCleanup && args.at(-1).endsWith(\'-runner\')) process.exitCode = 1; }',
       '}'
     ].join('\n');
@@ -4144,7 +5282,7 @@ describe('real client username field readiness', () => {
     const cleanupReport = JSON.parse(cleanupFailure.stdout.trim());
     expect(cleanupReport).toMatchObject({...result.report, status: 'failed', stage: 'cleanup'});
     expect(cleanupReport.network).toEqual(result.report.network);
-  });
+  }, 45_000);
 
   it('reports a timeout after cleaning up and exits nonzero', async() => {
     const result = await runAuthProgressRunner({card: 'timeout', realEmitter: true});
@@ -4560,6 +5698,47 @@ describe('real client username field readiness', () => {
   });
 });
 
+describe('real client channel invite completion', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  it('waits for the active channel after the add-members tab closes without a popup', async() => {
+    const page = await browser.newPage();
+    try {
+      const channelName = 'browser-ci-channel-abc123';
+      await page.setContent(`<div class="add-members-container"></div><div id="column-center"><div class="chat active"><div class="topbar"><div class="chat-info">${channelName}</div><div class="avatar" data-peer-id="-10012345"></div></div></div></div>`);
+      const addMembers = page.locator('.add-members-container');
+      await page.evaluate(() => setTimeout(() => document.querySelector('.add-members-container')?.remove(), 20));
+
+      await expect(waitForChannelInviteCompletion(page, addMembers, channelName, 500)).resolves.toBe('-10012345');
+      expect(await page.locator('.popup-add-members').count()).toBe(0);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('confirms Add when the channel flow shows an invite popup', async() => {
+    const page = await browser.newPage();
+    try {
+      const channelName = 'browser-ci-channel-def456';
+      await page.setContent(`<div class="add-members-container"></div><div class="popup-add-members" style="display:none"><button class="popup-button btn primary" aria-label="Add">Add</button><button class="popup-button btn primary">Cancel</button></div><div id="column-center"><div class="chat active"><div class="topbar"><div class="chat-info">${channelName}</div><div class="avatar" data-peer-id="-10012346"></div></div></div></div><script>window.inviteResult = ''; document.querySelector('.popup-button[aria-label="Add"]').addEventListener('click', () => {window.inviteResult = 'add'; document.querySelector('.popup-add-members').remove()}); document.querySelector('.popup-button:not([aria-label="Add"])').addEventListener('click', () => {window.inviteResult = 'cancel'}); setTimeout(() => {document.querySelector('.add-members-container').remove(); document.querySelector('.popup-add-members').style.display = ''}, 20)</script>`);
+      const addMembers = page.locator('.add-members-container');
+
+      await expect(waitForChannelInviteCompletion(page, addMembers, channelName, 500)).resolves.toBe('-10012346');
+      expect(await page.evaluate(() => (window as any).inviteResult)).toBe('add');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
 describe('real client centre-column failure state', () => {
   let browser: any;
 
@@ -4807,6 +5986,240 @@ describe('real client centre-column failure state', () => {
   });
 });
 
+describe('real client channel unread count', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  it('waits for exactly one unread post on the selected channel dialog', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat" data-peer-id="-1000001">
+          <div class="dialog-subtitle-badge badge dialog-subtitle-badge-unread unread is-visible">1</div>
+        </div>
+        <div class="chatlist-chat" data-peer-id="-1000002">
+          <div class="dialog-subtitle-badge badge dialog-subtitle-badge-unread unread is-visible">7</div>
+        </div>
+      </div>`);
+      await waitForUnreadCount(page, '-1000001', 1, 'bob_channel_unread', 1_000);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('waits for the unread badge to clear after reading', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat" data-peer-id="-1000001">
+          <div class="dialog-subtitle-badge badge dialog-subtitle-badge-unread unread">1</div>
+        </div>
+      </div>`);
+      await waitForUnreadCount(page, '-1000001', 0, 'bob_channel_read', 1_000);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('finds a new channel row by its unique title before it has a peer id', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat">browser-ci-channel-no-posts</div>
+      </div>`);
+      const row = await waitForChannelDialogRow(page, '-1000001', 'browser-ci-channel-no-posts', 'bob_channel_membership', 1_000);
+      expect(await row.count()).toBe(1);
+      expect(await row.getAttribute('data-peer-id')).toBeNull();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails the membership wait when an invited channel row has not appeared', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat" data-peer-id="2">Bob's other conversation</div>
+      </div>`);
+      await expect(waitForChannelDialogRow(page, '-1000001', 'browser-ci-channel-no-posts', 'bob_channel_membership', 50))
+      .rejects.toThrow('bob_channel_membership');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('allows an invited channel to have no dialog row before its first post', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat" data-peer-id="2">Bob's other conversation</div>
+      </div>`);
+      expect(await findChannelDialogRow(page, '-1000001', 'browser-ci-channel-no-posts', 'bob_channel_membership')).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('uses the unique channel title before a new channel row has a peer id', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat">browser-ci-channel-no-posts</div>
+      </div>`);
+      await waitForUnreadCount(page, '-1000001', 0, 'bob_channel_read', CONTRACT_WAIT_TIMEOUT_MS, 'browser-ci-channel-no-posts');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails with a fixed stage when the unread count is not exact', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat" data-peer-id="-1000001">
+          <div class="dialog-subtitle-badge badge dialog-subtitle-badge-unread unread is-visible">2</div>
+        </div>
+      </div>`);
+      await expect(waitForUnreadCount(page, '-1000001', 1, 'bob_channel_unread', CONTRACT_WAIT_TIMEOUT_MS))
+      .rejects.toThrow('bob_channel_unread_count');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('real client channel membership diagnostics', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  it('keeps channel invitation failure evidence within a closed schema', () => {
+    const parseChannelMembershipState = (realClientContract as any).parseChannelMembershipState;
+    expect(typeof parseChannelMembershipState).toBe('function');
+    const state = {
+      channelPeerId: '-1000003',
+      selectedBobPeerId: '1000002',
+      alice: {
+        channelRowCount: 1,
+        channelTitleMatches: 1,
+        activePeerId: '-1000003',
+        chatListRowCount: 2,
+        pageErrorsSinceStep: 0,
+        consoleErrorsSinceStep: 0,
+        rpcErrorsSinceStep: 0,
+        rpcErrorTypesSinceStep: {}
+      },
+      bob: {
+        channelRowCount: 0,
+        channelTitleMatches: 0,
+        activePeerId: '1000002',
+        chatListRowCount: 1,
+        pageErrorsSinceStep: 0,
+        consoleErrorsSinceStep: 0,
+        rpcErrorsSinceStep: 0,
+        rpcErrorTypesSinceStep: {}
+      },
+      stepWait: 'timeout'
+    };
+    expect(parseChannelMembershipState(state)).toEqual(state);
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_channel_membership', channelMembership: state}))
+    .toBe(`real client scenario failed at bob_channel_membership; channel membership ${JSON.stringify(state)}`);
+
+    for(const hostile of [
+      {...state, pageText: HOSTILE.phrase},
+      {...state, channelPeerId: HOSTILE.username},
+      {...state, selectedBobPeerId: HOSTILE.username},
+      {...state, alice: {...state.alice, activePeerId: HOSTILE.phrase}},
+      {...state, bob: {...state.bob, rpcErrorTypesSinceStep: {[HOSTILE.phrase]: 1}}},
+      {...state, bob: {...state.bob, rpcErrorTypesSinceStep: {PEER_ID_INVALID: 0}}},
+      {...state, stepWait: HOSTILE.phrase},
+      null
+    ]) {
+      expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_channel_membership', channelMembership: hostile}))
+      .toBe('real client scenario failed at bob_channel_membership; channel membership "unclassified"');
+    }
+  });
+
+  it('summarizes the channel row and safe errors from both clients', async() => {
+    const alicePage = await browser.newPage();
+    const bobPage = await browser.newPage();
+    try {
+      await Promise.all([countClientErrors(alicePage), countClientErrors(bobPage)]);
+      await alicePage.setContent(`<div id="chatlist-container"><div class="chatlist-chat" data-peer-id="-1000003">browser-ci-channel-secret</div></div>
+        <div id="column-center"><div class="chat active"><div class="topbar"><div class="avatar" data-peer-id="-1000003"></div></div></div></div>`);
+      await bobPage.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat" data-peer-id="1000002">direct</div>
+        <div class="chatlist-chat">browser-ci-channel-secret</div>
+      </div>
+        <div id="column-center"><div class="chat active"><div class="topbar"><div class="avatar" data-peer-id="1000002"></div></div></div></div>`);
+      await alicePage.evaluate((secret: string) => {
+        (window as any).__realClientRpcErrors = () => ({total: 2, byType: {PEER_ID_INVALID: 1, [secret]: 1}});
+      }, HOSTILE.phrase);
+      await bobPage.evaluate(() => {
+        (window as any).__realClientRpcErrors = () => ({total: 1, byType: {CHANNEL_PRIVATE: 1}});
+      });
+
+      const state = await captureChannelMembershipState({
+        alicePage,
+        bobPage,
+        channelPeerId: '-1000003',
+        selectedBobPeerId: '1000002',
+        channelName: 'browser-ci-channel-secret',
+        errorsAtStep: {
+          alice: {pageErrors: 0, consoleErrors: 0, rpc: {total: 0, byType: {}}},
+          bob: {pageErrors: 0, consoleErrors: 0, rpc: {total: 0, byType: {}}}
+        },
+        stepWait: 'timeout'
+      });
+      expect(state).toEqual({
+        channelPeerId: '-1000003',
+        selectedBobPeerId: '1000002',
+        alice: {
+          channelRowCount: 1,
+          channelTitleMatches: 1,
+          activePeerId: '-1000003',
+          chatListRowCount: 1,
+          pageErrorsSinceStep: 0,
+          consoleErrorsSinceStep: 0,
+          rpcErrorsSinceStep: 2,
+          rpcErrorTypesSinceStep: {PEER_ID_INVALID: 1}
+        },
+        bob: {
+          channelRowCount: 0,
+          channelTitleMatches: 1,
+          activePeerId: '1000002',
+          chatListRowCount: 2,
+          pageErrorsSinceStep: 0,
+          consoleErrorsSinceStep: 0,
+          rpcErrorsSinceStep: 1,
+          rpcErrorTypesSinceStep: {CHANNEL_PRIVATE: 1}
+        },
+        stepWait: 'timeout'
+      });
+      expect(JSON.stringify(state)).not.toContain('browser-ci-channel-secret');
+      expect(JSON.stringify(state)).not.toContain(HOSTILE.phrase);
+      expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_channel_membership', channelMembership: state}))
+      .toContain('PEER_ID_INVALID');
+      expectNoHostileLeak(state);
+    } finally {
+      await Promise.all([alicePage.close(), bobPage.close()]);
+    }
+  });
+});
+
 describe('real client group name form', () => {
   let browser: any;
   let screenshotDirectory: string;
@@ -4867,7 +6280,7 @@ describe('real client group name form', () => {
     const page = await browser.newPage();
     try {
       await page.setContent(groupFormMarkup({nameField: false}));
-      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, {count: 0}, 200))
+      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('alice_group_name_fill');
       const state = await captureGroupNameFormState();
       expect(state).toEqual({
@@ -4894,7 +6307,7 @@ describe('real client group name form', () => {
     try {
       await page.setContent(groupFormMarkup().replace(/<script>[\s\S]*<\/script>/, ''));
       await page.locator('.btn-corner').evaluate((button: HTMLElement) => button.setAttribute('disabled', 'true'));
-      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, {count: 0}, 200))
+      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('alice_group_name_confirm');
       const state = await captureGroupNameFormState();
       expect(state).toMatchObject({
@@ -5060,8 +6473,7 @@ describe('real client group created', () => {
           channel.port2.start();
           channel.port1.postMessage({type: 'result', payload: {taskId: 1, error: {type: 'GROUP_TEST_ERROR', message: 'group message diagnostic secret'}}});
         } else if(mode === 'disappears') {
-          const bubble = addBubble('9201', 'is-sent');
-          setTimeout(() => bubble.remove(), 200);
+          addBubble('9201', 'is-sent');
         } else {
           addBubble('9000', 'is-sent');
         }
@@ -5166,8 +6578,23 @@ describe('real client group created', () => {
     try {
       await page.setContent(messageCenterMarkup());
       await installMessageSender(page, 'disappears');
-      await expect(sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 2_000))
-      .rejects.toThrow('alice_group_message_message_count');
+      const send = sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 2_000);
+      const rejectedSend = expect(send).rejects.toThrow('alice_group_message_message_count');
+      const captureTrace = realClientBrowser.captureGroupMessageState;
+      const removeAfterPositiveSample = async() => {
+        const deadline = Date.now() + CONTRACT_WAIT_TIMEOUT_MS;
+        while(Date.now() < deadline) {
+          const state = typeof captureTrace === 'function' ? await captureTrace() : undefined;
+          if(typeof state === 'object' && state?.samples.some((sample: any) => sample.count === 1)) {
+            await page.locator('#column-center .chat.active .bubble .message').filter({hasText: GROUP_MESSAGE})
+            .evaluate((message: Element) => message.closest('.bubble')?.remove());
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        throw new Error('group message runner did not capture the visible bubble');
+      };
+      await Promise.all([rejectedSend, removeAfterPositiveSample()]);
       const capture = realClientBrowser.captureGroupMessageState;
       const state = typeof capture === 'function' ? await capture() : undefined;
       expect(state).toBeDefined();
@@ -5224,7 +6651,7 @@ describe('real client group created', () => {
     try {
       await page.setContent(messageCenterMarkup({groupActive: false}));
       await installMessageSender(page);
-      await expect(sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 100))
+      await expect(sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('alice_group_message_chat');
       const state = await captureGroupCreatedState();
       expect(state).toEqual({activeChat: 'user', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'});
@@ -5259,7 +6686,7 @@ describe('real client group created', () => {
     const page = await browser.newPage();
     try {
       await page.setContent(centerMarkup({groupActive: false}));
-      await expect(waitForGroupCreated(page, GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      await expect(waitForGroupCreated(page, GROUP_NAME, screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('alice_group_created_chat');
       const state = await captureGroupCreatedState();
       expect(state).toEqual({activeChat: 'user', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'});
@@ -5276,7 +6703,7 @@ describe('real client group created', () => {
     const page = await browser.newPage();
     try {
       await page.setContent(centerMarkup({groupTitle: 'another-group'}));
-      await expect(waitForGroupCreated(page, GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      await expect(waitForGroupCreated(page, GROUP_NAME, screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('alice_group_created_title');
       expect(await captureGroupCreatedState()).toEqual({activeChat: 'group', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'});
     } finally {
@@ -5421,7 +6848,7 @@ describe('real client group created', () => {
     try {
       await page.setContent(`<div id="chatlist-container"><a class="chatlist-chat">${GROUP_NAME}</a></div>
         <div style="position:relative;height:200px"><div id="column-center"><div class="chats-container">${chatMarkup({peerId: '1000002', title: GROUP_NAME, active: true})}</div></div></div>`);
-      await expect(openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      await expect(openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_chat');
       expect(await captureGroupCreatedState()).toEqual({activeChat: 'user', chatCount: 1, groupHeaderVisible: true, stepWait: 'timeout'});
     } finally {
@@ -5445,7 +6872,7 @@ describe('real client group created', () => {
     const page = await browser.newPage();
     try {
       await page.setContent(bobMarkup());
-      await expect(openBobGroupChat(page, page.locator('#chatlist-container .missing-row'), GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      await expect(openBobGroupChat(page, page.locator('#chatlist-container .missing-row'), GROUP_NAME, screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_open');
       const blocked = join(screenshotDirectory, 'bob-blocked');
       writeFileSync(blocked, '');
@@ -5466,7 +6893,7 @@ describe('real client group created', () => {
       expect(await page.locator('#column-right .sidebar-slider-item.active .profile-avatars-avatar-fake').evaluate((avatar: Element) => getComputedStyle(avatar).visibility)).toBe('hidden');
       expect(await page.locator('#column-right .sidebar-slider-item.active .profile-avatars-avatars > .profile-avatars-avatar.active .avatar[data-peer-id]').isVisible()).toBe(true);
       expect(await page.locator('#column-right .sidebar-slider-item.active .search-super-container-media.active').count()).toBe(1);
-      await openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 500);
+      await openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS);
       expect(await page.evaluate(() => (window as any).memberTabClickCount)).toBe(1);
       expect(capturedScreenshots.count).toBe(2);
     } finally {
@@ -5480,7 +6907,7 @@ describe('real client group created', () => {
       profileMarkup: groupProfileMarkup({membersTabActive: true})
     });
     try {
-      await openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 500);
+      await openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS);
       expect(await page.evaluate(() => (window as any).memberTabClickCount)).toBe(0);
       expect(capturedScreenshots.count).toBe(2);
     } finally {
@@ -5492,7 +6919,7 @@ describe('real client group created', () => {
     const openBobGroupMembers = requireOpenBobGroupMembers();
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({openProfile: false});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_profile');
       const state = await realClientBrowser.captureGroupMemberState();
       expect(state).toMatchObject({activePanel: 'none', profileMatchesActiveGroup: false, membersTabExists: false, membersListExists: false, memberRowCount: 0});
@@ -5507,7 +6934,7 @@ describe('real client group created', () => {
     const staleProfile = groupProfileMarkup({groupPeerId: '-1000004', membersTabActive: true});
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({profileMarkup: staleProfile});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_profile');
       expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'members', profileMatchesActiveGroup: false, membersTabExists: true, membersListExists: true, memberRowCount: 2});
     } finally {
@@ -5520,7 +6947,7 @@ describe('real client group created', () => {
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage();
     try {
       await page.locator('#column-center .chat.active').evaluate((chat: Element) => chat.classList.remove('active'));
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_profile');
       expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({
         pageErrorsSinceStep: 0,
@@ -5536,7 +6963,7 @@ describe('real client group created', () => {
     const openBobGroupMembers = requireOpenBobGroupMembers();
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({profileMarkup: groupProfileMarkup({membersTab: false})});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_tab');
       expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'media', profileMatchesActiveGroup: true, membersTabExists: false, membersListExists: false, memberRowCount: 0});
     } finally {
@@ -5550,7 +6977,7 @@ describe('real client group created', () => {
       profileMarkup: groupProfileMarkup({membersTabVisible: false})
     });
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_tab');
       const state = await realClientBrowser.captureGroupMemberState();
       expect(state).toMatchObject({
@@ -5582,7 +7009,7 @@ describe('real client group created', () => {
     const openBobGroupMembers = requireOpenBobGroupMembers();
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({activateMembers: false});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_tab');
       expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({
         activePanel: 'media',
@@ -5601,7 +7028,7 @@ describe('real client group created', () => {
     const openBobGroupMembers = requireOpenBobGroupMembers();
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({interceptMembersClick: true});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 200))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_tab');
       const state = await realClientBrowser.captureGroupMemberState();
       expect(state).toMatchObject({
@@ -5633,7 +7060,7 @@ describe('real client group created', () => {
     const openBobGroupMembers = requireOpenBobGroupMembers();
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({profileMarkup: groupProfileMarkup({memberIds: ['1000002']})});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_count');
       expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'members', membersTabExists: true, membersListExists: true, memberRowCount: 1});
     } finally {
@@ -5646,7 +7073,7 @@ describe('real client group created', () => {
     for(const memberIds of [['1000003', '1000004'], ['1000002', '1000003', '1000004']]) {
       const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({profileMarkup: groupProfileMarkup({memberIds})});
       try {
-        await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 500))
+        await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
         .rejects.toThrow('bob_group_member_identity');
         expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'members', memberRowCount: memberIds.length});
       } finally {
@@ -5659,7 +7086,7 @@ describe('real client group created', () => {
     const openBobGroupMembers = requireOpenBobGroupMembers();
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({activateMembers: false, reportErrorsOnMembersClick: true});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_tab');
       const state = await realClientBrowser.captureGroupMemberState();
       expect(state).toMatchObject({
@@ -5801,7 +7228,7 @@ describe('real client poll answer media setup', () => {
 
       await realClientBrowser.attachSyntheticPollAnswerLink(page, page.locator('#create-poll'), 'alice_poll_input_answer');
 
-      expect(await page.evaluate(() => (window as any).pollAnswerLink)).toBe('https://telegramd.test/browser-ci-poll-answer');
+      expect(await page.evaluate(() => (window as any).pollAnswerLink)).toBe(`${APP_ORIGIN}/browser-ci-poll-answer`);
       expect(await page.locator('#create-poll .poll-option').first().getByRole('button', {name: 'Add Link', exact: true}).isVisible()).toBe(true);
     } finally {
       await page.close();
@@ -6132,6 +7559,29 @@ describe('real client poll option interaction', () => {
   afterAll(async() => {
     await browser?.close();
   }, 15_000);
+
+  it('returns to the active group before polls when channel leaves another chat selected', async() => {
+    const page = await browser.newPage();
+    const groupName = 'browser-ci-group-poll-context';
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="chat active"><div class="topbar"><div class="avatar" data-peer-id="-100"></div><div class="chat-info">channel</div></div></div>
+      </div>
+      <div id="chatlist-container"><div class="chatlist-chat" data-peer-id="-42">${groupName}</div></div>
+      <script>
+        document.querySelector('.chatlist-chat').addEventListener('click', () => {
+          document.querySelector('#column-center').innerHTML = '<div class="chat active"><div class="topbar"><div class="avatar" data-peer-id="-42"></div><div class="chat-info">${groupName}</div></div></div>';
+        });
+      </script>`);
+
+      await realClientBrowser.ensurePollGroupActive(page, groupName, 'alice_poll_group_chat');
+
+      expect(await page.locator('#column-center .chat.active .topbar .avatar').getAttribute('data-peer-id')).toBe('-42');
+      expect(await page.locator('#column-center .chat.active .topbar .chat-info').textContent()).toBe(groupName);
+    } finally {
+      await page.close();
+    }
+  });
 
   it('clicks the poll option hit area without relying on its scoped CSS class', async() => {
     const page = await browser.newPage();

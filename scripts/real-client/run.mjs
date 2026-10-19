@@ -3,14 +3,15 @@ import {readFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {dirname, resolve} from 'node:path';
 import {isIPv4} from 'node:net';
-import observation from './observation.cjs';
 
 import {
   assertAllScenariosPassed,
   expectedScreenshotCount,
   formatBrowserFailureMessage,
-  REQUIRED_CONTROLS,
+  parsePassedBrowserGateBreakdown,
+  parseChannelMembershipState,
   POLL_NEGATIVE_CONTROL_EVIDENCE,
+  REQUIRED_CONTROLS,
   parseFixtureReadiness,
   parseAuthProgressReport,
   parseObserverControls,
@@ -20,16 +21,17 @@ import {
   readSyntheticCredentials
 } from './contract.mjs';
 
-const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> (--scenarios sign-in,message,group,poll | --auth-progress-one-submission)
+const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> (--scenarios sign-in,message,group[,channel],poll | --auth-progress-one-submission) [--page-error-diagnostics]
 
-For the legacy poll regression control, add --poll-creation-negative-control and pin the pre-MAIN-1301 server revision.
+For the legacy poll regression control, add --poll-creation-negative-control and pin the pre-MAIN-2111 server revision.
 
 The fixture must remain running after artifact-ready. The command validates its immutable pins,
 protected synthetic credentials, internal browser network, audited artifact evidence, per-context
-shared-worker observation, and all four required UI scenarios or one bounded Username submission.
-The one-submission mode stops at password-field readiness without entering or submitting a password.
-For page-error diagnosis only, use --scenarios sign-in,message,group --page-error-no-poll-comparison;
-this mode runs exactly those three scenarios and does not satisfy the four-scenario acceptance gate.`;
+shared-worker observation, the four required UI scenarios plus the optional channel scenario,
+or one bounded Username submission. The opt-in page-error diagnostics include bounded, sanitized
+source frames, private page path, fixed scenario and stage labels, and optional RPC error type/code.
+Raw page-error messages and stack text are never serialized.
+The one-submission mode stops at password-field readiness without entering or submitting a password.`;
 const NETWORK_SOURCES = ['page', 'shared_worker', 'service_worker', 'worker'];
 
 function hasNetworkSourceEvidence(context) {
@@ -66,7 +68,6 @@ if(args?.help) {
   let browserResult;
   let passwordEvidence = [];
   let readiness;
-  let fixturePrefix = 'telegram-fixture';
   let controlsOnlyDone = false;
   let authProgressFailure = false;
 
@@ -97,17 +98,14 @@ if(args?.help) {
       webRevision: args.webRevision
     }, {requireArtifact: !controlsOnly});
     const {serverReady, artifactReady} = readiness;
-    const fixtureTarget = observation.getPrivateCspTarget(serverReady.endpoint, serverReady.wssEndpoint);
-    if(!fixtureTarget) throw new Error('fixture private target is unsupported');
-    fixturePrefix = fixtureTarget.resourcePrefix;
-    const credentials = readSyntheticCredentials(serverReady.credentials, args.runId, authProgress ? 1 : 2, fixturePrefix);
+    const credentials = readSyntheticCredentials(serverReady.credentials, args.runId, authProgress ? 1 : 2);
 
     if(!/^[A-Za-z0-9+/]{43}=$/.test(serverReady.leafSPKI || '') ||
         Buffer.from(serverReady.leafSPKI, 'base64').byteLength !== 32) {
       throw new Error('fixture TLS SPKI pin is invalid');
     }
 
-    const prefix = `${fixturePrefix}-${args.runId}`;
+    const prefix = `teagram-fixture-${args.runId}`;
     const browserName = `${prefix}browser`;
     const frontName = `${prefix}tls-front`;
     const edgeName = `${prefix}edge`;
@@ -187,9 +185,9 @@ if(args?.help) {
     const browserInput = JSON.stringify({
       ...(controlsOnly ? {observationOnly: true} : {}),
       ...(authProgress ? {authProgressOneSubmission: true} : {}),
+      ...(args.pageErrorDiagnostics === true ? {pageErrorDiagnostics: true} : {}),
       ...(args.pollCreationNegativeControl === true ? {pollCreationNegativeControl: true} : {}),
-      ...(args.pageErrorNoPollComparison === true ? {pageErrorNoPollComparison: true} : {}),
-      ...(!controlsOnly && !authProgress ? {scenarios: args.scenarios} : {}),
+      ...(Array.isArray(args.scenarios) ? {scenarios: args.scenarios} : {}),
       runId: args.runId,
       endpoint: serverReady.endpoint,
       wssEndpoint: serverReady.wssEndpoint,
@@ -285,18 +283,13 @@ if(args?.help) {
         throw new Error('password readiness evidence is incomplete');
       }
       assertAllScenariosPassed(browserResult.scenarios, args.scenarios);
-      const expectedScreenshots = expectedScreenshotCount(args);
-      const screenshotsValid = args.pageErrorNoPollComparison === true
-        ? Number.isSafeInteger(browserResult.screenshotsCaptured) && browserResult.screenshotsCaptured > 0 && browserResult.screenshotsCaptured < expectedScreenshots
-        : browserResult.screenshotsCaptured === expectedScreenshots;
-      if(browserResult.contextCount !== 2 || !screenshotsValid ||
-          browserResult.network?.unexpectedAttempts !== 0 || browserResult.network?.observerErrors !== 0 ||
-          ['alice', 'bob'].some((account) => {
-            const context = browserResult.network?.contexts?.[account];
-            return !hasNetworkSourceEvidence(context) ||
-              !Number.isSafeInteger(context.workerTargets?.service_worker) || context.workerTargets.service_worker < 1;
-          })) {
-        throw new Error('real client UI or page/worker egress evidence is incomplete');
+      if(args.scenarios.includes('channel')) {
+        const channelMembership = parseChannelMembershipState(browserResult.channelMembership);
+        if(channelMembership === 'unavailable' || channelMembership === 'unclassified' ||
+            channelMembership.bob.channelRowCount !== 1 || channelMembership.bob.channelTitleMatches !== 1) {
+          throw new Error('channel membership evidence is incomplete');
+        }
+        browserResult.channelMembership = channelMembership;
       }
       if(args.pollCreationNegativeControl === true) {
         if(JSON.stringify(browserResult.pollNegativeControl) !== JSON.stringify(POLL_NEGATIVE_CONTROL_EVIDENCE)) {
@@ -304,6 +297,17 @@ if(args?.help) {
         }
       } else if(browserResult.pollNegativeControl !== undefined) {
         throw new Error('poll creation negative control evidence was unexpected');
+      }
+      browserResult.gateBreakdown = parsePassedBrowserGateBreakdown(browserResult);
+      const expectedScreenshots = expectedScreenshotCount(args);
+      if(browserResult.contextCount !== 2 || browserResult.screenshotsCaptured !== expectedScreenshots ||
+          browserResult.network?.unexpectedAttempts !== 0 || browserResult.network?.observerErrors !== 0 ||
+          ['alice', 'bob'].some((account) => {
+            const context = browserResult.network?.contexts?.[account];
+            return !hasNetworkSourceEvidence(context) ||
+              !Number.isSafeInteger(context.workerTargets?.service_worker) || context.workerTargets.service_worker < 1;
+          })) {
+        throw new Error('real client UI or page/worker egress evidence is incomplete');
       }
       // The page-session observer cannot see shared workers, so the shared-worker
       // evidence is the browser-level observation block: synthetic controls, per-context
@@ -315,7 +319,7 @@ if(args?.help) {
   } finally {
     if(browserContainerValidated) {
       try {
-        const browserName = `${fixturePrefix}-${args.runId}browser`;
+        const browserName = `teagram-fixture-${args.runId}browser`;
         docker(['exec', browserName, 'rm', '-rf', '--', `/tmp/real-client-${args.runId}`], undefined, 'screenshot cleanup');
       } catch {
         cleanupError = new Error('screenshot cleanup failed');
@@ -323,7 +327,7 @@ if(args?.help) {
     }
     if(browserScriptInstalled || observerScriptInstalled) {
       try {
-        const browserName = `${fixturePrefix}-${args.runId}browser`;
+        const browserName = `teagram-fixture-${args.runId}browser`;
         docker(['exec', browserName, 'rm', '-rf', '--', `/tmp/real-client-${args.runId}-runner`], undefined, 'browser runner cleanup');
       } catch {
         cleanupError ||= new Error('browser runner cleanup failed');
@@ -368,12 +372,14 @@ if(args?.help) {
         directTCP: readiness.serverReady.evidence.directTCP
       },
       scenarios: browserResult.scenarios,
-      contextCount: browserResult.contextCount,
-      screenshotsCaptured: browserResult.screenshotsCaptured,
-      passwordEvidence,
+      ...(browserResult.channelMembership ? {channelMembership: browserResult.channelMembership} : {}),
       ...(browserResult.pollSendResults ? {pollSendResults: browserResult.pollSendResults} : {}),
       pollCreationNegativeControl: args.pollCreationNegativeControl === true,
       ...(args.pollCreationNegativeControl === true ? {pollNegativeControl: POLL_NEGATIVE_CONTROL_EVIDENCE} : {}),
+      ...(browserResult.gateBreakdown ? {gateBreakdown: browserResult.gateBreakdown} : {}),
+      contextCount: browserResult.contextCount,
+      screenshotsCaptured: browserResult.screenshotsCaptured,
+      passwordEvidence,
       network: browserResult.network,
       workerObservation: browserResult.workerObservation
     })}\n`);

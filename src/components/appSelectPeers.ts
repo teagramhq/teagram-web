@@ -16,6 +16,7 @@ import {attachClickEvent, simulateClickEvent} from '@helpers/dom/clickEvent';
 import filterUnique from '@helpers/array/filterUnique';
 import safeAssign from '@helpers/object/safeAssign';
 import {AppManagers} from '@lib/managers';
+import {FilterType} from '@lib/storages/dialogs';
 import filterAsync from '@helpers/array/filterAsync';
 import getParticipantPeerId from '@appManagers/utils/chats/getParticipantPeerId';
 import getChatMembersString from '@components/wrappers/getChatMembersString';
@@ -742,6 +743,7 @@ export default class AppSelectPeers {
       offsetIndex: this.offsetIndex,
       limit: pageCount,
       filterId: this.folderId,
+      filterType: FilterType.Folder,
       skipMigrated: true
     });
 

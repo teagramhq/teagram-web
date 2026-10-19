@@ -84,6 +84,7 @@ import {
   CacheStorageThreadedControls,
   createCacheStorageThreadedControls,
   deleteObjectURLMirrorValue,
+  getNewActiveChannelMirrorChatId,
   reconcileObjectURLMirrorSnapshot,
   reconcileObjectURLMirrorValue
 } from './apiManagerProxyUtils';
@@ -1458,6 +1459,9 @@ class ApiManagerProxy extends MTProtoMessagePort {
     const isSettingsUpdate = name === 'state' && key === 'settings';
     if(!isSettingsUpdate && accountNumber !== getCurrentAccount()) return;
 
+    const newActiveChannelId = name === 'peers' && key ?
+      getNewActiveChannelMirrorChatId(this.mirrors.peers[key.toPeerId()], value) :
+      undefined;
     const result = this.processMirrorTaskMap[name]?.(payload);
     if(result === false) {
       return;
@@ -1470,6 +1474,10 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
     const mirror = this.mirrors[name] ??= {} as any;
     setDeepProperty(mirror, key, value, true);
+
+    if(newActiveChannelId !== undefined) {
+      rootScope.dispatchEvent('chat_update', newActiveChannelId);
+    }
   };
 
   public async setInterval(callback: () => void, ms: number) {

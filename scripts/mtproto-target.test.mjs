@@ -432,7 +432,7 @@ describe('MTProto build target', () => {
 
   it.each([
     ['alternate WSS endpoint', 'wss://other.example.test/apiws', /second private MTProto target/i],
-    ['cleartext WebSocket URL', 'ws://telegramd.test/apiws', /cleartext WebSocket/i],
+    ['cleartext WebSocket URL', 'ws://teagramd.test/apiws', /cleartext WebSocket/i],
     ['official DC route', 'https://kws1.web.telegram.org/apiws', /official Telegram MTProto route/i],
     ['official IPv4 DC address', '149.154.167.91', /official Telegram MTProto IP/i],
     ['official IPv6 DC prefix', '2001:b28:f23d:f001::a', /official Telegram MTProto IP/i],
@@ -656,7 +656,7 @@ describe('MTProto build target', () => {
     });
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('endpoint=wss://telegramd.test/apiws');
+    expect(result.stdout).toContain('endpoint=wss://teagramd.test/apiws');
     expect(result.stdout).toMatch(/sourceCommit=[0-9a-f]{40}/);
     expect(result.stdout).toMatch(/artifactDigest=sha256:[0-9a-f]{64}/);
     expect(result.stdout).toMatch(/0 mapped chunks for miscompiled defaults/);

@@ -13,7 +13,7 @@ import getDialogIndexKey from '@appManagers/utils/dialogs/getDialogIndexKey';
 import {isForumTopic} from '@appManagers/utils/dialogs/isDialog';
 import {logger} from '@lib/logger';
 import rootScope from '@lib/rootScope';
-import {AnyDialog} from '@lib/storages/dialogs';
+import {AnyDialog, FilterType} from '@lib/storages/dialogs';
 import {MonoforumDialog} from '@lib/storages/monoforumDialogs';
 import Scrollable from '@components/scrollable';
 import SortedDialogList from '@components/sortedDialogList';
@@ -235,6 +235,10 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
     throw NOT_IMPLEMENTED_ERROR;
   }
 
+  protected getFilterType(): FilterType | undefined {
+    return undefined;
+  }
+
   public checkForDialogsPlaceholder() {
     if(this.placeholder || this.loadedDialogsAtLeastOnce) return;
 
@@ -253,6 +257,7 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
       offsetIndex: 0,
       limit: this.guessLoadCount(),
       filterId,
+      filterType: this.getFilterType(),
       skipMigrated: this.skipMigrated
     });
 
@@ -264,6 +269,7 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
       offsetIndex,
       limit,
       filterId: this.getFilterId(),
+      filterType: this.getFilterType(),
       skipMigrated: this.skipMigrated
     });
 

@@ -1,18 +1,20 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const {createHash} = require('node:crypto');
 const {chromium} = require('playwright');
 const observation = require('./observation.cjs');
 
 const REQUIRED_SCENARIOS = ['sign-in', 'message', 'group', 'poll'];
-let PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
-let PRIVATE_CSP_WSS = observation.PRIVATE_CSP_WSS;
+const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
+const PRIVATE_CSP_WSS = 'wss://teagramd.test/apiws';
 const PROBE_PATH = '/_fixture_probe/';
 const MESSAGE = 'browser-ci-hello';
 const GROUP_MESSAGE = 'browser-ci-group-hello';
+const CHANNEL_MESSAGE = 'browser-channel-post';
 const POLL_DESCRIPTION = 'Description stuff';
 const POLL_ANSWER_ONE = 'browser-ci-poll-answer-one';
 const POLL_ANSWER_TWO = 'browser-ci-poll-answer-two';
-let POLL_ANSWER_LINK = `${PRIVATE_CSP_ORIGIN}/browser-ci-poll-answer`;
+const POLL_ANSWER_LINK = `${PRIVATE_CSP_ORIGIN}/browser-ci-poll-answer`;
 const POLL_NEGATIVE_CONTROL = Object.freeze([
   Object.freeze({shape: 'description', stage: 'alice_poll_description_create', errorType: 'POLL_ANSWERS_INVALID'}),
   Object.freeze({shape: 'input_answer', stage: 'alice_poll_input_answer_create', errorType: 'POLL_ANSWERS_INVALID'})
@@ -35,11 +37,31 @@ const GROUP_MESSAGE_SAMPLE_INTERVAL_MS = 100;
 const GROUP_MESSAGE_SETTLE_TIMEOUT_MS = 10_000;
 const RPC_ERROR_TYPE_LIMIT = 16;
 const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
+const RPC_METHOD_PATTERN = /^[a-z][A-Za-z0-9_]{0,63}\.[a-z][A-Za-z0-9_]{0,63}$/;
+const RPC_PEER_ARGUMENT_LIMIT = 8;
 const APP_CONTEXTS = observation.GATE_CONTEXTS;
 const NETWORK_RESOURCE_TYPES = observation.GATE_RESOURCE_TYPES;
 const NETWORK_OBSERVER_ERROR_KINDS = new Set(observation.GATE_OBSERVER_ERROR_KINDS);
 const PAGE_ERROR_CONSTRUCTORS = new Set(observation.GATE_PAGE_ERROR_CONSTRUCTORS);
 const PAGE_ERROR_BLOB_ASSET_LIMIT = 512;
+const PAGE_ERROR_DIAGNOSTIC_LIMITS = observation.GATE_PAGE_ERROR_DIAGNOSTIC_LIMITS;
+const PAGE_ERROR_DEBUGGER_METHODS = Object.freeze(['Debugger.enable', 'Debugger.setPauseOnExceptions', 'Debugger.resume']);
+const PAGE_ERROR_MESSAGE_LIMIT = 512;
+const PAGE_ERROR_STACK_FRAME_LIMIT = 16;
+const PAGE_ERROR_FUNCTION_NAME_LIMIT = 128;
+const PAGE_DIAGNOSTIC_LIMIT = 16;
+const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
+const PAGE_DIAGNOSTIC_FIELD_LIMIT = 256;
+const PAGE_DIAGNOSTIC_VALUE_TYPES = new Set(['undefined', 'null', 'boolean', 'number', 'string', 'object', 'function']);
+const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'message', 'group', 'channel', 'poll', 'unknown']);
+const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set([...REQUIRED_SCENARIOS, 'channel']);
+const PAGE_ERROR_EVENT_CAPTURE_KEY = '__teagramPageErrorEvents';
+const pageErrorDiagnosticCounts = new WeakMap();
+const pageErrorDiagnosticMessageHashes = new WeakMap();
+const pageErrorConsoleEvents = new WeakMap();
+const pageErrorProtocolEvents = new WeakMap();
+const pageScenarioSteps = new WeakMap();
+const pageScenarioActions = new WeakMap();
 const PAGE_ERROR_BLOB_ASSET_HINTS = Object.freeze([
   {pattern: /\bTLottieWasm\.createAnimation\b/, workerLabel: 'lottie_worker'}
 ]);
@@ -71,11 +93,34 @@ const CONTROL_PLAN = Object.freeze([
   // More distinct shared workers than the attached-target budget: the observer
   // must stop attaching, release the rejected targets and stay bounded.
   Object.freeze({name: 'c5_attach_budget', windowMs: 6000,
-    expression: "for(let index = 0; index < 20; index++) new SharedWorker('/_fixture_probe/shared-worker.js', 'budget' + index)"})
+    expression: `for(let index = 0; index < ${observation.LIMITS.attachedTargets + 4}; index++) new SharedWorker('/_fixture_probe/shared-worker.js', 'budget' + index)`})
 ]);
 
 let currentStage = 'runtime_inputs';
 let currentScenario;
+
+function readPageScenarioStep(page) {
+  const pageAction = pageScenarioActions.get(page);
+  if(pageAction?.scenario === currentScenario) return {...pageAction};
+  const pageStep = pageScenarioSteps.get(page);
+  return pageStep?.scenario === currentScenario ? {...pageStep} : {scenario: currentScenario, step: currentStage};
+}
+
+// Default reports follow the active failure stage; opt-in diagnostics use the last action for correlation.
+function readClientErrorScenarioStep(page, diagnosticsEnabled = runtime?.pageErrorDiagnostics === true) {
+  return diagnosticsEnabled ? readPageScenarioStep(page) : readCurrentScenarioStep();
+}
+
+function setPageScenarioStep(page, step) {
+  currentStage = step;
+  if(page && typeof page === 'object') pageScenarioSteps.set(page, {scenario: currentScenario, step});
+}
+
+function setPageActionStep(page, step) {
+  setPageScenarioStep(page, step);
+  if(page && typeof page === 'object') pageScenarioActions.set(page, {scenario: currentScenario, step});
+}
+
 // The chat that the scenario last selected and the page it waits on, kept so a
 // failing chat stage can describe the centre column it gave up on.
 let centerColumnTrace = createCenterColumnTrace();
@@ -89,6 +134,26 @@ let groupNameFormTrace = {page: undefined, stepWait: 'none'};
 let groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
 let groupMemberTrace = createGroupMemberTrace();
 let groupMessageTrace = createGroupMessageTrace();
+let channelMembershipTrace = createChannelMembershipTrace();
+
+const CHANNEL_MEMBERSHIP_STAGES = [
+  'alice_channel_add_bob',
+  'alice_channel_add_confirmation',
+  'alice_channel_add_bob_complete',
+  'bob_channel_membership_refresh',
+  'bob_channel_membership',
+  'bob_channel_unread_before_post',
+  'bob_channel_unread_before_open',
+  'bob_channel_open',
+  'bob_channel_post_visible',
+  'bob_channel_read',
+  'bob_channel_return_to_other_conversation',
+  'bob_channel_reload',
+  'bob_channel_reload_chats_list',
+  'bob_channel_other_conversation_after_reload',
+  'bob_channel_membership_after_reload',
+  'bob_channel_unread_after_reload'
+];
 
 function createGroupMemberTrace() {
   return {page: undefined, groupPeerId: undefined, stages: [], stepWait: 'none', errorsAtStep: undefined, membersTab: createMembersTabTrace()};
@@ -109,6 +174,18 @@ function createGroupMessageTrace() {
   return {page: undefined, stage: undefined, errorsAtStep: undefined, samples: [], result: 'pending'};
 }
 
+function createChannelMembershipTrace() {
+  return {
+    alicePage: undefined,
+    bobPage: undefined,
+    channelPeerId: undefined,
+    selectedBobPeerId: undefined,
+    channelName: undefined,
+    errorsAtStep: undefined,
+    stepWait: 'none'
+  };
+}
+
 function createCenterColumnTrace() {
   return {page: undefined, selectedPeerId: undefined, errorsAtSelection: undefined, composerWait: 'none'};
 }
@@ -116,6 +193,36 @@ function createCenterColumnTrace() {
 function failStage(stage) {
   currentStage = stage;
   throw new Error(stage);
+}
+
+async function waitForActiveChannel(page, channelName, timeoutMs = 30_000) {
+  const channelHeader = page.locator('#column-center .chat.active .topbar .chat-info').filter({hasText: channelName});
+  await channelHeader.waitFor({state: 'visible', timeout: timeoutMs})
+  .catch(() => failStage('alice_channel_active_channel'));
+  const channelPeerId = await page.locator('#column-center .chat.active .topbar .avatar[data-peer-id]').getAttribute('data-peer-id');
+  if(!/^-?[0-9]{1,20}$/.test(channelPeerId || '')) failStage('alice_channel_peer_identity');
+  return channelPeerId;
+}
+
+async function waitForChannelInviteCompletion(page, addMembers, channelName, timeoutMs = 30_000, popupTimeoutMs = 3_000) {
+  setPageScenarioStep(page, 'alice_channel_add_members_close');
+  await addMembers.waitFor({state: 'hidden', timeout: timeoutMs})
+  .catch(() => failStage('alice_channel_add_members_close'));
+
+  const invitePopup = page.locator('.popup-add-members');
+  const popupVisible = await invitePopup.waitFor({state: 'visible', timeout: popupTimeoutMs})
+  .then(() => true, () => false);
+  if(popupVisible) {
+    setPageScenarioStep(page, 'alice_channel_invite_confirm');
+    await invitePopup.getByRole('button', {name: 'Add', exact: true}).click({timeout: 15_000})
+    .catch(() => failStage('alice_channel_invite_confirm'));
+    setPageScenarioStep(page, 'alice_channel_invite_popup_close');
+    await invitePopup.waitFor({state: 'hidden', timeout: 30_000})
+    .catch(() => failStage('alice_channel_invite_popup_close'));
+  }
+
+  setPageScenarioStep(page, 'alice_channel_active_channel');
+  return waitForActiveChannel(page, channelName);
 }
 
 function matchesPrivateArtifactManifest(manifest, expected) {
@@ -185,11 +292,11 @@ function readRuntimeInput() {
 
 function validateRuntimeInput(config) {
   const authProgress = config?.authProgressOneSubmission === true;
-  const observationOnly = config?.observationOnly === true;
-  const noPollPageErrorComparison = config?.pageErrorNoPollComparison === true;
-  const expectedScenarios = noPollPageErrorComparison ? ['sign-in', 'message', 'group'] : REQUIRED_SCENARIOS;
+  const pollCreationNegativeControl = config?.pollCreationNegativeControl === true;
+  const hasChannelScenario = Array.isArray(config?.scenarios) && config.scenarios.includes('channel');
+  const expectedScenarios = ['sign-in', 'message', 'group', ...(hasChannelScenario ? ['channel'] : []), 'poll'];
   if(!/^[0-9a-f]{32}$/.test(config?.runId || '') ||
-      !observation.getPrivateCspTarget(config?.endpoint, config?.wssEndpoint) ||
+      config.endpoint !== PRIVATE_CSP_ORIGIN || config.wssEndpoint !== PRIVATE_CSP_WSS ||
       !/^[0-9a-f]{16}$/.test(config.fingerprint || '') ||
       !/^[0-9a-f]{64}$/.test(config.publicKeySHA256 || '') ||
       (config.observationOnly === true
@@ -205,12 +312,12 @@ function validateRuntimeInput(config) {
       config.screenshotDirectory !== `/tmp/real-client-${config.runId}` ||
       (config.observationOnly !== undefined && config.observationOnly !== true) ||
       (config.authProgressOneSubmission !== undefined && !authProgress) ||
-      (config.pollCreationNegativeControl !== undefined && config.pollCreationNegativeControl !== true) ||
-      (config.pageErrorNoPollComparison !== undefined && !noPollPageErrorComparison) ||
+      (config.pageErrorDiagnostics !== undefined && typeof config.pageErrorDiagnostics !== 'boolean') ||
+      (config.pollCreationNegativeControl !== undefined && !pollCreationNegativeControl) ||
+      (config.observationOnly === true && config.pageErrorDiagnostics === true) ||
       (authProgress && config.observationOnly === true) ||
-      (config.pollCreationNegativeControl === true && (authProgress || config.observationOnly === true)) ||
-      (noPollPageErrorComparison && (authProgress || observationOnly || config.pollCreationNegativeControl === true)) ||
-      (!authProgress && !observationOnly &&
+      (pollCreationNegativeControl && (authProgress || config.observationOnly === true)) ||
+      (!authProgress && config.observationOnly !== true &&
         (!Array.isArray(config.scenarios) || JSON.stringify(config.scenarios) !== JSON.stringify(expectedScenarios))) ||
       !Array.isArray(config.accounts) || config.accounts.length !== (authProgress ? 1 : 2)) {
     failStage('runtime_input_validation');
@@ -229,9 +336,10 @@ function validateRuntimeInput(config) {
 // Every CDP send is gated by session scope. A method outside the accepted scope
 // fails the run, and the nested worker channel carried by
 // Target.sendMessageToTarget is gated by the worker scope as well.
-function createGatedSender(scope, session, observer, getTargetId) {
+function createGatedSender(scope, session, observer, getTargetId, additionalPageMethods = []) {
   return function send(method, params = {}) {
-    if(!observation.allowCdpMethod(scope, method)) {
+    const pageDiagnosticMethod = scope === 'page' && additionalPageMethods.includes(method);
+    if(!observation.allowCdpMethod(scope, method) && !pageDiagnosticMethod) {
       observer?.recordObserverError(getTargetId?.());
       return Promise.reject(new Error('cdp_method_not_allowed'));
     }
@@ -520,6 +628,18 @@ function createWorkerDiscovery() {
       observer.recordObserverError(targetId);
       return;
     }
+    if(payload.method === 'Runtime.consoleAPICalled') {
+      sink.captureRpcConsoleEvent?.(payload.params, async(objectId) => {
+        const result = await sendNested(event.sessionId, 'Runtime.callFunctionOn', {
+          objectId,
+          functionDeclaration: readSafeRpcArguments.toString(),
+          arguments: [{value: RPC_PEER_ARGUMENT_LIMIT}],
+          returnByValue: true,
+          silent: true
+        });
+        return result?.result?.value;
+      });
+    }
     sink.recordWorkerEvent(targetId, 'shared_worker', event.sessionId, payload.method, payload.params);
   }
 
@@ -701,7 +821,7 @@ function createWorkerDiscovery() {
   };
 }
 
-function createNetworkObserver(page, contextName, contextObserver, pageErrorAssetResolver) {
+function createNetworkObserver(page, contextName, contextObserver, pageErrorAssetResolver, onPageException) {
   const events = [];
   const gateEvents = [];
   const eventKeys = new Set();
@@ -717,6 +837,8 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
   const maxPendingReleases = observation.LIMITS.attachedTargets;
   let nextCommandId = 0;
   let cdp;
+  const pageScriptUrls = new Map();
+  const pageScriptExecutionContexts = new Map();
   let pageTargetId;
   let targetRegistry;
   let send;
@@ -886,6 +1008,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
         await sendTargetCommand(sessionId, 'Network.enable');
         await sendTargetCommand(sessionId, 'Audits.enable');
         await sendTargetCommand(sessionId, 'Log.enable');
+        await sendTargetCommand(sessionId, 'Runtime.enable');
       }
       // Unconditional startup release: page auto-attach holds the target.
       await sendTargetCommand(sessionId, 'Runtime.runIfWaitingForDebugger');
@@ -1016,6 +1139,18 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     const targetInfo = targets.get(sessionId);
     if(!targetInfo) return;
     const wasOverflowed = contextObserver?.state.overflow === true;
+    if(payload.method === 'Runtime.consoleAPICalled') {
+      scheduleRpcConsoleCapture(page, payload.params, async(objectId) => {
+        const result = await sendTargetCommand(sessionId, 'Runtime.callFunctionOn', {
+          objectId,
+          functionDeclaration: readSafeRpcArguments.toString(),
+          arguments: [{value: RPC_PEER_ARGUMENT_LIMIT}],
+          returnByValue: true,
+          silent: true
+        });
+        return result?.result?.value;
+      });
+    }
     contextObserver?.noteWorkerEvent(targetInfo.targetId, payload.method, payload.params, sessionId);
     if(!wasOverflowed && contextObserver?.state.overflow) targetRegistry?.noteTargetOverflow?.(targetInfo.targetId);
     if(observerClosed()) return;
@@ -1028,7 +1163,8 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
 
   async function start(registry) {
     cdp = await withCommandTimeout(() => page.context().newCDPSession(page));
-    send = createGatedSender('page', cdp, contextObserver, () => pageTargetId);
+    send = createGatedSender('page', cdp, contextObserver, () => pageTargetId,
+      typeof onPageException === 'function' ? PAGE_ERROR_DEBUGGER_METHODS : []);
     // Page-session identity mapping only: the browser context this page lives
     // in is what attributes every browser-level shared worker to it.
     const info = await send('Target.getTargetInfo');
@@ -1036,6 +1172,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     registry?.registerContext(info?.targetInfo?.browserContextId, contextObserver, {
       claimTarget,
       recordWorkerEvent,
+      captureRpcConsoleEvent: (params, readPeerArguments) => scheduleRpcConsoleCapture(page, params, readPeerArguments),
       observeTarget: (targetInfo) => {
         pageErrorAssetResolver?.observeWorkerTarget(targetInfo);
         return pageErrorAssetResolver?.workerAsset(targetInfo?.targetId);
@@ -1043,6 +1180,43 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
       workerAsset: (targetId) => pageErrorAssetResolver?.workerAsset(targetId),
       release: () => { released = true; }
     });
+    if(typeof onPageException === 'function') {
+      cdp.on('Debugger.scriptParsed', (event) => {
+        if(typeof event?.scriptId === 'string' && event.scriptId.length <= 128 &&
+            typeof event.url === 'string' && event.url && event.url.length <= 8192 && pageScriptUrls.size < 4096) {
+          pageScriptUrls.set(event.scriptId, event.url);
+          if(Number.isSafeInteger(event.executionContextId)) pageScriptExecutionContexts.set(event.scriptId, event.executionContextId);
+        }
+      });
+      cdp.on('Runtime.exceptionThrown', (event) => {
+        try {
+          onPageException(event?.exceptionDetails, 'runtime');
+        } catch {
+          // Page exception diagnostics must not interfere with browser observation.
+        }
+      });
+      cdp.on('Debugger.paused', (event) => {
+        try {
+          if(event?.reason === 'exception' || event?.reason === 'promiseRejection') {
+            const scriptUrls = {};
+            for(const frame of (Array.isArray(event.callFrames) ? event.callFrames : []).slice(0, PAGE_ERROR_DIAGNOSTIC_LIMITS.count)) {
+              const scriptId = frame?.location?.scriptId;
+              const url = typeof frame?.url === 'string' && frame.url ? frame.url : pageScriptUrls.get(scriptId);
+              if(typeof scriptId === 'string' && typeof url === 'string' && url) scriptUrls[scriptId] = url;
+            }
+            const firstScriptId = event.callFrames?.[0]?.location?.scriptId;
+            const executionContextId = pageScriptExecutionContexts.get(firstScriptId);
+            onPageException({...event, executionContextId, scriptUrls}, 'debugger');
+          }
+        } catch {
+          // Page exception diagnostics must not interfere with browser observation.
+        }
+        send('Debugger.resume').catch(() => {});
+      });
+      await send('Runtime.enable');
+      await send('Debugger.enable');
+      await send('Debugger.setPauseOnExceptions', {state: 'uncaught'});
+    }
     cdp.on('Network.requestWillBeSent', (event) => {
       if(observerClosed()) return;
       const kind = event.type === 'WebSocket' ? 'websocket' : 'fetch';
@@ -1085,12 +1259,26 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
       if(observerClosed()) return;
       recordLogViolation('page', pageTargetId, entry);
     });
+    cdp.on('Runtime.consoleAPICalled', (event) => {
+      if(observerClosed()) return;
+      scheduleRpcConsoleCapture(page, event, async(objectId) => {
+        const result = await send('Runtime.callFunctionOn', {
+          objectId,
+          functionDeclaration: readSafeRpcArguments.toString(),
+          arguments: [{value: RPC_PEER_ARGUMENT_LIMIT}],
+          returnByValue: true,
+          silent: true
+        });
+        return result?.result?.value;
+      });
+    });
     cdp.on('Target.attachedToTarget', ({sessionId, targetInfo}) => addTarget(sessionId, targetInfo));
     cdp.on('Target.receivedMessageFromTarget', ({sessionId, message}) => dispatchTargetMessage(sessionId, message));
     cdp.on('Target.detachedFromTarget', ({sessionId}) => targets.delete(sessionId));
     await send('Network.enable');
     await send('Audits.enable');
     await send('Log.enable');
+    await send('Runtime.enable');
     await send('Target.setAutoAttach', {autoAttach: true, waitForDebuggerOnStart: true, flatten: false});
     // Complete page coverage: this session is enabled before every navigation.
     contextObserver.state.pageCoverageComplete = true;
@@ -1359,7 +1547,7 @@ async function submitUsernameOnceAndWaitForPassword(page, account, expected, nam
 }
 
 async function selectUniquePeer(page, inputSelector, resultsSelector, username, stage) {
-  currentStage = stage;
+  setPageActionStep(page, stage);
   const input = page.locator(inputSelector).first();
   await input.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_search_field`));
   await input.fill(username);
@@ -1394,6 +1582,7 @@ async function selectUniquePeer(page, inputSelector, resultsSelector, username, 
 }
 
 async function openComposer(page, stage, chat = page.locator('#column-center'), timeoutMs = 30_000) {
+  setPageScenarioStep(page, stage);
   if(centerColumnTrace.page !== page) centerColumnTrace = {...createCenterColumnTrace(), page};
   const input = chat.locator(COMPOSER_INPUT_SELECTOR);
   await input.waitFor({state: 'visible', timeout: timeoutMs}).catch((error) => {
@@ -1497,27 +1686,380 @@ function classifyLocatorError(error) {
   return 'other';
 }
 
-// Counts only: neither an exception message nor console text is read.
+// Keeps bounded, sanitized diagnostics by the runner's current scenario step.
 const clientErrorCounts = new WeakMap();
-async function countClientErrors(page) {
-  const counts = {pageErrors: 0, consoleErrors: 0};
+async function countClientErrors(page, getScenarioStep = readCurrentScenarioStep) {
+  const counts = {pageErrors: 0, consoleErrors: 0, stepDiagnostics: new Map(), pendingCapturePromises: new Set(), getScenarioStep};
   clientErrorCounts.set(page, counts);
+  await page.exposeBinding('__realClientCaptureDiagnostic', (source, diagnostic) => {
+    if(source?.frame !== page.mainFrame()) return;
+    recordClientDiagnostic(counts, diagnostic, getScenarioStep());
+  });
   page.on('pageerror', () => counts.pageErrors++);
   page.on('console', (message) => {
-    if(message.type() === 'error') counts.consoleErrors++;
+    if(message.type() !== 'error') return;
+    counts.consoleErrors++;
+    let text;
+    try {
+      text = message.text();
+    } catch {
+      text = undefined;
+    }
+    recordClientDiagnostic(counts, {kind: 'console_error', message: text}, getScenarioStep());
   });
-  await page.addInitScript(installRpcErrorCounter, {limit: RPC_ERROR_TYPE_LIMIT, pattern: RPC_ERROR_TYPE_PATTERN.source});
+  await page.addInitScript(installRpcErrorCounter, {
+    limit: RPC_ERROR_TYPE_LIMIT,
+    pattern: RPC_ERROR_TYPE_PATTERN.source,
+    diagnosticLimit: PAGE_DIAGNOSTIC_LIMIT,
+    diagnosticFieldLimit: PAGE_DIAGNOSTIC_FIELD_LIMIT
+  });
 }
 
-// Runs in the page before the app. Handled RPC failures reach the page as
-// `result`/`ack` tasks with an `error` on the worker's MessagePort; a passive
-// listener counts them and keeps only an error type that matches the fixed
-// pattern, up to `limit` types. Messages, results and arguments are not read.
-function installRpcErrorCounter({limit, pattern}) {
+function readCurrentScenarioStep() {
+  return {scenario: currentScenario, step: currentStage};
+}
+
+function recordClientDiagnostic(state, diagnostic, scenarioStep) {
+  const step = sanitizePageErrorScenarioStep(scenarioStep);
+  if(!state || !diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) return;
+  const key = `${step.scenario}\0${step.step}`;
+  let entry = state.stepDiagnostics.get(key);
+  if(!entry) {
+    if(state.stepDiagnostics.size >= PAGE_DIAGNOSTIC_STEP_LIMIT) return;
+    entry = {scenarioStep: step, thrownValues: [], rpcFailures: [], consoleErrors: []};
+    state.stepDiagnostics.set(key, entry);
+  }
+  if(diagnostic.kind === 'thrown_value' && entry.thrownValues.length < PAGE_DIAGNOSTIC_LIMIT) {
+    const source = ['error_event', 'unhandled_rejection'].includes(diagnostic.source) ? diagnostic.source : 'unknown';
+    entry.thrownValues.push({
+      source,
+      valueType: PAGE_DIAGNOSTIC_VALUE_TYPES.has(diagnostic.valueType) ? diagnostic.valueType : 'undefined',
+      ...sanitizeThrownValueFields(diagnostic.fields)
+    });
+  } else if(diagnostic.kind === 'rpc_failure') {
+    recordRpcFailure(entry, diagnostic);
+  } else if(diagnostic.kind === 'console_error' && entry.consoleErrors.length < PAGE_DIAGNOSTIC_LIMIT) {
+    entry.consoleErrors.push({message: sanitizePageErrorMessage(diagnostic.message).slice(0, PAGE_DIAGNOSTIC_FIELD_LIMIT)});
+  }
+}
+
+function recordRpcFailure(entry, diagnostic) {
+  const fields = sanitizeRpcFailureFields(diagnostic.fields);
+  const source = diagnostic.rpcSource === 'api_log' ? 'api_log' : 'message_port';
+  const candidate = entry.rpcFailures.find((failure) => failure._rpcSource !== source && !failure._rpcPaired &&
+    failure.type === fields.type && failure.code === fields.code &&
+    (failure.method === fields.method || failure.method === 'unavailable' || fields.method === 'unavailable') &&
+    (failure.description === fields.description || failure.description === 'unavailable' || fields.description === 'unavailable'));
+  if(candidate) {
+    candidate._rpcPaired = true;
+    if(candidate.method === 'unavailable' && fields.method !== 'unavailable') candidate.method = fields.method;
+    if(candidate.peerArguments.length === 0 && fields.peerArguments.length > 0) candidate.peerArguments = fields.peerArguments;
+    if(candidate.description === 'unavailable' && fields.description !== 'unavailable') candidate.description = fields.description;
+    return;
+  }
+  if(entry.rpcFailures.length >= PAGE_DIAGNOSTIC_LIMIT) {
+    entry.rpcFailuresTruncated = true;
+    return;
+  }
+  entry.rpcFailures.push({...fields, _rpcSource: source, _rpcPaired: false});
+}
+
+function sanitizeRpcFailureFields(fields) {
+  const method = ownDataValue(fields, 'method');
+  const peerArguments = ownDataValue(fields, 'peerArguments');
+  return {
+    ...sanitizeThrownValueFields(fields),
+    method: typeof method === 'string' && RPC_METHOD_PATTERN.test(method) ? method : 'unavailable',
+    peerArguments: sanitizeRpcPeerArguments(peerArguments)
+  };
+}
+
+function sanitizeRpcPeerArguments(value) {
+  if(!Array.isArray(value)) return [];
+  const allowedConstructors = new Set([
+    'inputPeerUser', 'inputPeerChannel', 'inputPeerChat', 'inputPeerSelf',
+    'inputUser', 'inputUserSelf', 'inputChannel', 'peerUser', 'peerChannel', 'peerChat',
+    'inputUserFromMessage', 'inputPeerUserFromMessage', 'inputPeerChannelFromMessage', 'inputChannelFromMessage'
+  ]);
+  const safeId = (id) => {
+    if(typeof id === 'bigint') return id.toString().length <= 20 ? id.toString() : 'unavailable';
+    if(Number.isSafeInteger(id) && Math.abs(id) <= Number.MAX_SAFE_INTEGER) return String(id);
+    if(typeof id === 'string' && /^-?[0-9]{1,20}$/.test(id)) return id;
+    return 'unavailable';
+  };
+  return value.slice(0, RPC_PEER_ARGUMENT_LIMIT).flatMap((argument) => {
+    const name = ownDataValue(argument, 'argument');
+    const constructor = ownDataValue(argument, 'constructor');
+    const id = ownDataValue(argument, 'id');
+    if(typeof name !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) ||
+        typeof constructor !== 'string' || !allowedConstructors.has(constructor)) return [];
+    return [{argument: name, constructor, id: safeId(id)}];
+  });
+}
+
+function ownDataValue(object, key) {
+  try {
+    const descriptor = object && typeof object === 'object' ? Object.getOwnPropertyDescriptor(object, key) : undefined;
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseRpcFailureConsoleCall(event) {
+  if(event?.type !== 'error' || !Array.isArray(event.args) || event.args.length > 32) return undefined;
+  const args = event.args;
+  for(let index = 2; index < args.length; index++) {
+    const type = args[index];
+    const code = args[index - 1];
+    const label = args[index - 2];
+    if(label?.type !== 'string' || label.value !== 'Error' ||
+        type?.type !== 'string' || !RPC_ERROR_TYPE_PATTERN.test(type.value) ||
+        code?.type !== 'number' || !Number.isSafeInteger(code.value) || Math.abs(code.value) > 1_000_000) continue;
+    let methodIndex = -1;
+    for(let candidate = index + 1; candidate < args.length; candidate++) {
+      const value = args[candidate];
+      if(value?.type === 'string' && typeof value.value === 'string' && RPC_METHOD_PATTERN.test(value.value)) {
+        methodIndex = candidate;
+        break;
+      }
+    }
+    if(methodIndex === -1) return undefined;
+    let paramsObjectId;
+    for(let candidate = methodIndex + 1; candidate < args.length; candidate++) {
+      const value = args[candidate];
+      if(value?.type === 'object' && typeof value.objectId === 'string' && value.objectId.length > 0 && value.objectId.length <= 512) {
+        paramsObjectId = value.objectId;
+        break;
+      }
+    }
+    return {
+      type: type.value,
+      code: code.value,
+      method: args[methodIndex].value,
+      paramsObjectId
+    };
+  }
+  return undefined;
+}
+
+async function captureRpcFailureFromConsole(page, event, readPeerArguments) {
+  const parsed = parseRpcFailureConsoleCall(event);
+  const state = clientErrorCounts.get(page);
+  if(!parsed || !state) return false;
+  let peerArguments = [];
+  if(parsed.paramsObjectId && typeof readPeerArguments === 'function') {
+    try {
+      const result = await readPeerArguments(parsed.paramsObjectId);
+      peerArguments = sanitizeRpcPeerArguments(result?.peerArguments);
+    } catch {
+      // The method and error remain useful if the worker released the call args.
+    }
+  }
+  recordClientDiagnostic(state, {
+    kind: 'rpc_failure',
+    rpcSource: 'api_log',
+    fields: {type: parsed.type, code: parsed.code, description: 'unavailable', method: parsed.method, peerArguments}
+  }, state.getScenarioStep());
+  return true;
+}
+
+function scheduleRpcConsoleCapture(page, event, readPeerArguments) {
+  const state = clientErrorCounts.get(page);
+  if(!state) return;
+  const promise = captureRpcFailureFromConsole(page, event, readPeerArguments).catch(() => false);
+  state.pendingCapturePromises.add(promise);
+  void promise.finally(() => state.pendingCapturePromises.delete(promise));
+}
+
+function readSafeRpcArguments(limit) {
+  const idKeyByConstructor = {
+    inputPeerUser: 'user_id',
+    inputPeerChannel: 'channel_id',
+    inputPeerChat: 'chat_id',
+    inputPeerSelf: undefined,
+    inputUser: 'user_id',
+    inputUserSelf: undefined,
+    inputChannel: 'channel_id',
+    peerUser: 'user_id',
+    peerChannel: 'channel_id',
+    peerChat: 'chat_id',
+    inputUserFromMessage: 'user_id',
+    inputPeerUserFromMessage: 'user_id',
+    inputPeerChannelFromMessage: 'channel_id',
+    inputChannelFromMessage: 'channel_id'
+  };
+  const own = (value, key) => {
+    try {
+      const descriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key) : undefined;
+      return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const formatId = (value) => {
+    if(typeof value === 'bigint') return value.toString().length <= 20 ? value.toString() : 'unavailable';
+    if(Number.isSafeInteger(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER) return String(value);
+    if(typeof value === 'string' && /^-?[0-9]{1,20}$/.test(value)) return value;
+    return 'unavailable';
+  };
+  const output = [];
+  const maxArguments = Number.isSafeInteger(limit) && limit > 0 ? limit : 0;
+  const add = (argument, value) => {
+    if(!value || typeof value !== 'object' || Array.isArray(value)) return;
+    const constructor = own(value, '_');
+    if(typeof constructor !== 'string' || !Object.hasOwn(idKeyByConstructor, constructor)) return;
+    const idKey = idKeyByConstructor[constructor];
+    output.push({argument, constructor, id: idKey ? formatId(own(value, idKey)) : 'unavailable'});
+  };
+  try {
+    if(this && typeof this === 'object' && !Array.isArray(this)) {
+      add('args', this);
+      for(const key of Object.keys(this).slice(0, 64)) {
+        if(!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)) continue;
+        add(key, own(this, key));
+        if(output.length >= maxArguments) break;
+      }
+    }
+  } catch {
+    return {peerArguments: output.slice(0, maxArguments)};
+  }
+  return {peerArguments: output.slice(0, maxArguments)};
+}
+
+function sanitizeThrownValueFields(fields) {
+  const ownValue = (key) => {
+    try {
+      const descriptor = fields && typeof fields === 'object' ? Object.getOwnPropertyDescriptor(fields, key) : undefined;
+      return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const type = ownValue('type');
+  const code = ownValue('code');
+  const description = ownValue('description');
+  return {
+    type: typeof type === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(type) ? type : 'unavailable',
+    code: Number.isSafeInteger(code) && Math.abs(code) <= 1_000_000
+      ? code
+      : typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : 'unavailable',
+    description: typeof description === 'string'
+      ? sanitizePageErrorMessage(description).slice(0, PAGE_DIAGNOSTIC_FIELD_LIMIT)
+      : 'unavailable'
+  };
+}
+
+function getClientErrorDiagnostics(page, scenarioStep) {
+  const state = clientErrorCounts.get(page);
+  if(!state) return [];
+  const expectedStep = scenarioStep ? sanitizePageErrorScenarioStep(scenarioStep) : undefined;
+  return [...state.stepDiagnostics.values()]
+  .filter((entry) => !expectedStep ||
+    (entry.scenarioStep.scenario === expectedStep.scenario && entry.scenarioStep.step === expectedStep.step))
+  .map((entry) => ({
+    scenarioStep: {...entry.scenarioStep},
+    thrownValues: entry.thrownValues.map((value) => ({...value})),
+    rpcFailures: entry.rpcFailures.map(sanitizeRpcFailureFields),
+    ...(entry.rpcFailuresTruncated ? {rpcFailuresTruncated: true} : {}),
+    consoleErrors: entry.consoleErrors.map((value) => ({...value}))
+  }));
+}
+
+function sanitizeClientDiagnostics(diagnostics) {
+  if(!Array.isArray(diagnostics)) return [];
+  return diagnostics.slice(0, PAGE_DIAGNOSTIC_STEP_LIMIT).map((entry) => ({
+    scenarioStep: sanitizePageErrorScenarioStep(entry?.scenarioStep),
+    thrownValues: Array.isArray(entry?.thrownValues) ? entry.thrownValues.slice(0, PAGE_DIAGNOSTIC_LIMIT).map((value) => ({
+      source: ['error_event', 'unhandled_rejection'].includes(value?.source) ? value.source : 'unknown',
+      valueType: PAGE_DIAGNOSTIC_VALUE_TYPES.has(value?.valueType) ? value.valueType : 'undefined',
+      ...sanitizeThrownValueFields(value)
+    })) : [],
+    rpcFailures: Array.isArray(entry?.rpcFailures) ? entry.rpcFailures.slice(0, PAGE_DIAGNOSTIC_LIMIT).map(sanitizeRpcFailureFields) : [],
+    ...(entry?.rpcFailuresTruncated === true ? {rpcFailuresTruncated: true} : {}),
+    consoleErrors: Array.isArray(entry?.consoleErrors) ? entry.consoleErrors.slice(0, PAGE_DIAGNOSTIC_LIMIT).map((value) => ({
+      message: sanitizePageErrorMessage(value?.message).slice(0, PAGE_DIAGNOSTIC_FIELD_LIMIT)
+    })) : []
+  }));
+}
+
+async function waitForClientDiagnostics(pages) {
+  await Promise.all(pages.map((page) => withDeadline(
+    page.evaluate(() => window.__realClientWaitForDiagnostics?.()),
+    CENTER_COLUMN_CAPTURE_TIMEOUT_MS
+  ).catch(() => undefined)));
+  await Promise.all(pages.map(async(page) => {
+    const pending = clientErrorCounts.get(page)?.pendingCapturePromises;
+    if(pending) await Promise.all([...pending].map((promise) => withDeadline(promise, CENTER_COLUMN_CAPTURE_TIMEOUT_MS).catch(() => undefined)));
+  }));
+}
+
+// Runs in the page before the app. A passive MessagePort listener counts RPC
+// failures and reports only their own scalar type, code and description fields.
+// It also reports thrown/rejected values' own fields; request payloads, other
+// result fields and arguments are not read.
+function installRpcErrorCounter({limit, pattern, diagnosticLimit, diagnosticFieldLimit}) {
   const typePattern = new RegExp(pattern);
   const byType = new Map();
   let total = 0;
   const listened = new WeakSet();
+  const pending = new Set();
+  const emittedCounts = {thrown_value: 0, rpc_failure: 0};
+  const emitDiagnostic = (diagnostic) => {
+    if(!Object.hasOwn(emittedCounts, diagnostic?.kind) || emittedCounts[diagnostic.kind] >= diagnosticLimit) return;
+    if(typeof window.__realClientCaptureDiagnostic !== 'function') return;
+    emittedCounts[diagnostic.kind]++;
+    let result;
+    try {
+      result = window.__realClientCaptureDiagnostic(diagnostic);
+    } catch {
+      return;
+    }
+    const promise = Promise.resolve(result).catch(() => {});
+    pending.add(promise);
+    void promise.finally(() => pending.delete(promise));
+  };
+  const ownPrimitiveFields = (value) => {
+    const fields = {};
+    for(const key of ['type', 'code', 'description']) {
+      let descriptor;
+      try {
+        descriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key) : undefined;
+      } catch {
+        descriptor = undefined;
+      }
+      if(!descriptor || !Object.hasOwn(descriptor, 'value')) continue;
+      const field = descriptor.value;
+      if(typeof field === 'string') fields[key] = field.slice(0, diagnosticFieldLimit);
+      else if(typeof field === 'number' && Number.isFinite(field)) fields[key] = field;
+    }
+    return fields;
+  };
+  const valueType = (value) => value === null ? 'null' : typeof value;
+  const reportThrownValue = (source, value) => {
+    emitDiagnostic({kind: 'thrown_value', source, valueType: valueType(value), fields: ownPrimitiveFields(value)});
+  };
+  window.addEventListener('error', (event) => {
+    let thrownValue;
+    try {
+      thrownValue = event?.error;
+    } catch {
+      return;
+    }
+    if(thrownValue !== undefined && thrownValue !== null) reportThrownValue('error_event', thrownValue);
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    let thrownValue;
+    try {
+      thrownValue = event?.reason;
+    } catch {
+      return;
+    }
+    reportThrownValue('unhandled_rejection', thrownValue);
+  });
+  Object.defineProperty(window, '__realClientWaitForDiagnostics', {
+    value: () => Promise.all([...pending])
+  });
   const record = (data) => {
     const tasks = data?.type === 'batch' && Array.isArray(data.payload) ? data.payload : [data];
     for(const task of tasks) {
@@ -1527,6 +2069,7 @@ function installRpcErrorCounter({limit, pattern}) {
       if(typeof type === 'string' && typePattern.test(type) && (byType.has(type) || byType.size < limit)) {
         byType.set(type, Math.min((byType.get(type) || 0) + 1, 1_000_000));
       }
+      emitDiagnostic({kind: 'rpc_failure', fields: ownPrimitiveFields(task.payload.error)});
     }
   };
   const addEventListener = MessagePort.prototype.addEventListener;
@@ -1915,11 +2458,162 @@ async function captureGroupMessageState(trace = groupMessageTrace) {
   }
 }
 
+// Runs in each client page and returns only fixed counts, a numeric active
+// peer id and a title-match count. Channel names and other page text stay in
+// the page.
+function channelMembershipProbe({channelPeerId, channelName}) {
+  const rows = [...document.querySelectorAll('#chatlist-container .chatlist-chat')];
+  const activeChats = [...document.querySelectorAll('#column-center .chat.active')];
+  const active = activeChats.length === 1 ? activeChats[0] : undefined;
+  const activePeerId = active?.querySelector('.topbar .avatar[data-peer-id]')?.getAttribute('data-peer-id') || '';
+  return {
+    channelRowCount: rows.filter((row) => row.getAttribute('data-peer-id') === channelPeerId).length,
+    channelTitleMatches: rows.filter((row) => (row.textContent || '').includes(channelName)).length,
+    activePeerId: /^-?[0-9]{1,20}$/.test(activePeerId) ? activePeerId : null,
+    chatListRowCount: rows.length
+  };
+}
+
+async function captureChannelMembershipClient(page, channelPeerId, channelName, errorsAtStep) {
+  const [probe, rawRpcCounts] = await Promise.all([
+    page.evaluate(channelMembershipProbe, {channelPeerId, channelName}),
+    page.evaluate(() => window.__realClientRpcErrors?.()).catch(() => undefined)
+  ]);
+  const rpcCounts = sanitizeRpcErrorCounts(rawRpcCounts);
+  const rpcBefore = errorsAtStep?.rpc;
+  const rpcErrorTypesSinceStep = {};
+  let rpcErrorsSinceStep = null;
+  if(rpcBefore && rpcCounts) {
+    rpcErrorsSinceStep = Math.max(rpcCounts.total - rpcBefore.total, 0);
+    for(const [type, count] of Object.entries(rpcCounts.byType)) {
+      const delta = count - (rpcBefore.byType[type] || 0);
+      if(delta > 0) rpcErrorTypesSinceStep[type] = delta;
+    }
+  }
+  const errorCounts = clientErrorCounts.get(page);
+  const delta = (key) => errorCounts && errorsAtStep
+    ? Math.max(errorCounts[key] - errorsAtStep[key], 0)
+    : null;
+  return {
+    ...probe,
+    pageErrorsSinceStep: delta('pageErrors'),
+    consoleErrorsSinceStep: delta('consoleErrors'),
+    rpcErrorsSinceStep,
+    rpcErrorTypesSinceStep
+  };
+}
+
+async function captureChannelMembershipState(trace = channelMembershipTrace, timeoutMs = CENTER_COLUMN_CAPTURE_TIMEOUT_MS) {
+  if(!trace.alicePage || !trace.bobPage || !/^-?[0-9]{1,20}$/.test(trace.channelPeerId || '') ||
+      !trace.channelPeerId.startsWith('-') || !/^[0-9]{1,20}$/.test(trace.selectedBobPeerId || '') ||
+      typeof trace.channelName !== 'string') return 'unavailable';
+  try {
+    const [alice, bob] = await withDeadline(Promise.all([
+      captureChannelMembershipClient(trace.alicePage, trace.channelPeerId, trace.channelName, trace.errorsAtStep?.alice),
+      captureChannelMembershipClient(trace.bobPage, trace.channelPeerId, trace.channelName, trace.errorsAtStep?.bob)
+    ]), timeoutMs);
+    return {
+      channelPeerId: trace.channelPeerId,
+      selectedBobPeerId: trace.selectedBobPeerId,
+      alice,
+      bob,
+      stepWait: trace.stepWait
+    };
+  } catch {
+    return 'unavailable';
+  }
+}
+
 function resolveActiveGroupChat(page, groupName) {
   const activeChats = page.locator('#column-center .chat.active');
   const chat = activeChats.filter({has: page.locator(GROUP_CHAT_SELECTOR)});
   const header = chat.locator('.topbar .chat-info');
   return {activeChats, chat, header, title: header.filter({hasText: groupName})};
+}
+
+async function readActivePeerId(page, stage) {
+  setPageScenarioStep(page, stage);
+  const peer = page.locator('#column-center .chat.active .topbar .avatar[data-peer-id]');
+  if(await peer.count() !== 1) failStage(stage);
+  const peerId = await peer.getAttribute('data-peer-id');
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '')) failStage(stage);
+  return peerId;
+}
+
+async function waitForActivePeerId(page, peerId, stage, timeoutMs = 45_000) {
+  setPageScenarioStep(page, stage);
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '')) failStage(stage);
+  await page.waitForFunction((expectedPeerId) => {
+    const peers = [...document.querySelectorAll('#column-center .chat.active .topbar .avatar[data-peer-id]')];
+    return peers.length === 1 && peers[0].getAttribute('data-peer-id') === expectedPeerId;
+  }, peerId, {timeout: timeoutMs}).catch(() => failStage(stage));
+}
+
+async function findChannelDialogRow(page, peerId, channelName, stage) {
+  setPageScenarioStep(page, stage);
+  const failChannelRow = (failureStage) => {
+    channelMembershipTrace.stepWait = 'other';
+    failStage(failureStage);
+  };
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '') || !peerId.startsWith('-') || typeof channelName !== 'string' || !channelName) {
+    failChannelRow(`${stage}_row_identity`);
+  }
+
+  const peerRow = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${peerId}"]`);
+  const peerRowCount = await peerRow.count();
+  if(peerRowCount > 1) failChannelRow(`${stage}_row_not_unique`);
+  if(peerRowCount === 1) return await peerRow.isVisible() ? peerRow : undefined;
+
+  const titleRows = page.locator('#chatlist-container .chatlist-chat').filter({hasText: channelName});
+  const titleRowCount = await titleRows.count();
+  if(titleRowCount === 0) return undefined;
+  if(titleRowCount !== 1) failChannelRow(`${stage}_row_not_unique`);
+  const rowPeerId = await titleRows.getAttribute('data-peer-id');
+  if(rowPeerId && rowPeerId !== peerId) failChannelRow(`${stage}_row_identity`);
+  return await titleRows.isVisible() ? titleRows : undefined;
+}
+
+async function waitForChannelDialogRow(page, peerId, channelName, stage, timeoutMs = 45_000) {
+  setPageScenarioStep(page, stage);
+  const failChannelRow = (failureStage, error) => {
+    channelMembershipTrace.stepWait = error ? classifyLocatorError(error) : 'other';
+    failStage(failureStage);
+  };
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '') || !peerId.startsWith('-') || typeof channelName !== 'string' || !channelName) {
+    failChannelRow(`${stage}_row_identity`);
+  }
+  await page.waitForFunction(({peerId, channelName}) => {
+    const isVisible = (row) => {
+      const style = window.getComputedStyle(row);
+      return style.display !== 'none' && style.visibility !== 'hidden' && row.getClientRects().length > 0;
+    };
+    const rows = [...document.querySelectorAll('#chatlist-container .chatlist-chat')].filter(isVisible);
+    return rows.some((row) => row.getAttribute('data-peer-id') === peerId) ||
+      rows.some((row) => !row.getAttribute('data-peer-id') && (row.textContent || '').includes(channelName));
+  }, {peerId, channelName}, {timeout: timeoutMs}).catch((error) => failChannelRow(stage, error));
+
+  const row = await findChannelDialogRow(page, peerId, channelName, stage);
+  if(!row) failChannelRow(stage);
+  return row;
+}
+
+async function waitForUnreadCount(page, peerId, expectedCount, stage, timeoutMs = 30_000, rowTitle) {
+  setPageScenarioStep(page, stage);
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '')) failStage(`${stage}_peer_identity`);
+  if(!Number.isSafeInteger(expectedCount) || expectedCount < 0) failStage(`${stage}_expected_count`);
+  await page.waitForFunction(({peerId, expectedCount, rowTitle}) => {
+    const rows = [...document.querySelectorAll('#chatlist-container .chatlist-chat')];
+    const peerRows = rows
+    .filter((row) => row.getAttribute('data-peer-id') === peerId);
+    const titleRows = rowTitle
+      ? rows.filter((row) => !row.getAttribute('data-peer-id') && (row.textContent || '').includes(rowTitle))
+      : [];
+    const targetRows = peerRows.length === 1 ? peerRows : peerRows.length === 0 && titleRows.length === 1 ? titleRows : [];
+    if(targetRows.length !== 1) return false;
+    const badges = [...targetRows[0].querySelectorAll('.dialog-subtitle-badge-unread.unread.is-visible')];
+    if(expectedCount === 0) return badges.length === 0;
+    return badges.length === 1 && badges[0].textContent?.trim() === String(expectedCount);
+  }, {peerId, expectedCount, rowTitle}, {timeout: timeoutMs}).catch(() => failStage(`${stage}_count`));
 }
 
 async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {
@@ -1948,6 +2642,49 @@ async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle)
     const count = await message.count();
     if(count !== 1) failStage(`${stage}_message_count`);
   }
+}
+
+async function sendChannelText(page, channelName, screenshotDirectory, capturedScreenshots, timeoutMs = 30_000) {
+  const activeChannel = resolveActiveGroupChat(page, channelName);
+  setPageScenarioStep(page, 'alice_channel_post_chat');
+  await activeChannel.chat.waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage('alice_channel_post_chat'));
+  await activeChannel.title.waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage('alice_channel_post_chat'));
+  if(await activeChannel.chat.count() !== 1 || await activeChannel.title.count() !== 1) failStage('alice_channel_post_chat');
+  const channelPeerId = await readActivePeerId(page, 'alice_channel_post_identity');
+  if(!channelPeerId.startsWith('-')) failStage('alice_channel_post_identity');
+
+  const input = await openComposer(page, 'alice_channel_post', activeChannel.chat, timeoutMs);
+  setPageActionStep(page, 'alice_channel_post_fill');
+  await input.fill(CHANNEL_MESSAGE, {timeout: timeoutMs}).catch(() => failStage('alice_channel_post_fill'));
+  setPageActionStep(page, 'alice_channel_post_send');
+  await input.press('Enter', {timeout: timeoutMs}).catch(() => failStage('alice_channel_post_send'));
+  const message = activeChannel.chat.locator('.bubble .message').filter({hasText: CHANNEL_MESSAGE});
+  setPageScenarioStep(page, 'alice_channel_post_visible');
+  await message.first().waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage('alice_channel_post_visible'));
+  await page.waitForTimeout(600);
+  const messageFailure = await getSingleExactMessageTextFailure(message, CHANNEL_MESSAGE);
+  if(messageFailure) failStage(`alice_channel_post_${messageFailure}`);
+  await captureState(page, screenshotDirectory, 'alice-channel-post', capturedScreenshots);
+  return channelPeerId;
+}
+
+async function startChannelMembershipTrace(alicePage, bobPage, channelPeerId, selectedBobPeerId, channelName) {
+  const snapshot = async(page) => {
+    const counts = clientErrorCounts.get(page) || {pageErrors: 0, consoleErrors: 0};
+    return {...counts, rpc: await readRpcErrorCounts(page)};
+  };
+  channelMembershipTrace = {
+    ...createChannelMembershipTrace(),
+    alicePage,
+    bobPage,
+    channelPeerId,
+    selectedBobPeerId,
+    channelName,
+    errorsAtStep: {
+      alice: await snapshot(alicePage),
+      bob: await snapshot(bobPage)
+    }
+  };
 }
 
 async function sendGroupText(page, text, groupName, stage, timeoutMs = 30_000) {
@@ -2004,6 +2741,21 @@ async function sendGroupText(page, text, groupName, stage, timeoutMs = 30_000) {
 
 function pollMessageLocator(page, question) {
   return page.locator('#column-center .bubble').filter({hasText: question});
+}
+
+async function ensurePollGroupActive(page, groupName, stage) {
+  setPageScenarioStep(page, stage);
+  const activeGroup = resolveActiveGroupChat(page, groupName);
+  if(await activeGroup.activeChats.count() === 1 && await activeGroup.title.count() === 1) return;
+
+  const groupRow = page.locator('#chatlist-container .chatlist-chat').filter({hasText: groupName});
+  await groupRow.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(stage));
+  if(await groupRow.count() !== 1) failStage(`${stage}_not_unique`);
+  const peerId = await groupRow.getAttribute('data-peer-id');
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '') || !peerId.startsWith('-')) failStage(`${stage}_peer`);
+  await groupRow.click().catch(() => failStage(stage));
+  await waitForActivePeerId(page, peerId, stage);
+  if(await activeGroup.activeChats.count() !== 1 || await activeGroup.title.count() !== 1) failStage(`${stage}_title`);
 }
 
 function getPollOptionClickTarget(poll, answerText) {
@@ -2315,7 +3067,7 @@ function isExpectedPollCreationRejection(diagnostic, expectedErrorType) {
     getPollCreationRejectionErrorType(diagnostic) === expectedErrorType;
 }
 
-async function runPollCreationNegativeControl({alice, bob, runtime, screenshotDirectory, capturedScreenshots}) {
+async function runPollCreationNegativeControl({alice, bob, runtime, groupName, screenshotDirectory, capturedScreenshots}) {
   const cases = [
     {
       shape: 'description',
@@ -2335,6 +3087,8 @@ async function runPollCreationNegativeControl({alice, bob, runtime, screenshotDi
     }
   ];
 
+  await ensurePollGroupActive(alice.page, groupName, 'alice_poll_group_chat');
+  await ensurePollGroupActive(bob.page, groupName, 'bob_poll_group_chat');
   await installPollMessageErrorObserver(alice.page);
   const evidence = [];
   const sendResults = [];
@@ -2912,7 +3666,7 @@ async function waitForPollResults(page, question, stage, timeoutMs = 30_000) {
   return poll;
 }
 
-async function runPollLifecycle({alice, bob, runtime, screenshotDirectory, capturedScreenshots}) {
+async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirectory, capturedScreenshots}) {
   const polls = [
     {
       shape: 'description',
@@ -2930,6 +3684,8 @@ async function runPollLifecycle({alice, bob, runtime, screenshotDirectory, captu
     }
   ];
 
+  await ensurePollGroupActive(alice.page, groupName, 'alice_poll_group_chat');
+  await ensurePollGroupActive(bob.page, groupName, 'bob_poll_group_chat');
   await installPollMessageErrorObserver(alice.page);
   const evidence = [];
   const sendAttempts = [];
@@ -3073,6 +3829,7 @@ async function runPollLifecycle({alice, bob, runtime, screenshotDirectory, captu
     }))
   };
 }
+
 
 function failGroupMemberStep(stage, error) {
   groupMemberTrace.stepWait = error ? classifyLocatorError(error) : 'other';
@@ -3376,49 +4133,8 @@ function pageErrorScriptAsset(stack, blobAssets = new Map(), resolveBlobAsset) {
   return 'unknown';
 }
 
-function firstPageErrorStackFrame(stack) {
-  if(typeof stack !== 'string') return;
-  return stack.split(/\r?\n/).slice(1).find((line) => /^\s*at\s+/.test(line));
-}
-
-function pageErrorFrameDetails(stack, pageErrorAssetResolver) {
-  const frame = firstPageErrorStackFrame(stack);
-  if(!frame) return {functionName: 'unknown', line: null, column: null, manifestAsset: 'unknown'};
-
-  const frameText = frame.trim().replace(/^at\s+/, '');
-  const wrappedLocation = frameText.match(/^(.*?)\s+\((.+)\)$/);
-  const functionName = wrappedLocation?.[1] || 'anonymous';
-  const location = wrappedLocation?.[2] || frameText;
-  const position = location.match(/:(\d+):(\d+)$/);
-  const stackWithFirstFrame = `TypeError:\n${frame}`;
-  const manifestAsset = pageErrorAssetResolver?.manifestAsset(stackWithFirstFrame) || 'unknown';
-  const safeFunctionName = /^[A-Za-z0-9_$ .<>.[\]-]{1,128}$/.test(functionName) ? functionName : 'unknown';
-  return {
-    functionName: safeFunctionName,
-    line: position ? Number(position[1]) : null,
-    column: position ? Number(position[2]) : null,
-    manifestAsset: typeof manifestAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(manifestAsset)
-      ? manifestAsset
-      : 'unknown'
-  };
-}
-
-function sanitizePageErrorMessage(message) {
-  if(typeof message !== 'string' || !message.trim()) return 'unavailable';
-  const normalized = message.trim().replace(/\s+/g, ' ');
-  const safeMessages = [
-    /^Cannot read properties of (?:undefined|null) \(reading '[A-Za-z_$][A-Za-z0-9_$]*'\)$/,
-    /^Cannot set properties of (?:undefined|null) \(setting '[A-Za-z_$][A-Za-z0-9_$]*'\)$/,
-    /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)* is not a function$/,
-    /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)* is not iterable$/,
-    /^Cannot convert undefined or null to object$/
-  ];
-  return normalized.length <= 256 && safeMessages.some((pattern) => pattern.test(normalized)) ? normalized : 'unclassified';
-}
-
 function createPageErrorAssetResolver() {
   const blobAssets = new Map();
-  const artifactAssets = new Set();
   const workerAssetCandidates = [];
   const directWorkerAssets = new Map();
   const workerBlobUrls = new Map();
@@ -3462,9 +4178,6 @@ function createPageErrorAssetResolver() {
       if(parsed.protocol !== 'blob:') {
         const workerLabel = observation.labelForPathname(parsed.pathname);
         const asset = path.posix.basename(parsed.pathname);
-        if(parsed.origin === PRIVATE_CSP_ORIGIN && observation.SCRIPT_ASSET_PATTERN.test(asset) && artifactAssets.size < PAGE_ERROR_BLOB_ASSET_LIMIT) {
-          artifactAssets.add(asset);
-        }
         if(parsed.origin === PRIVATE_CSP_ORIGIN && workerLabel && workerLabel !== 'service_worker' && !workerLabel.startsWith('probe_')) {
           if(sourceType !== 'page' && typeof sourceTargetId === 'string' && observation.SCRIPT_ASSET_PATTERN.test(asset)) {
             if(directWorkerAssets.size >= PAGE_ERROR_BLOB_ASSET_LIMIT && !directWorkerAssets.has(sourceTargetId)) {
@@ -3502,7 +4215,6 @@ function createPageErrorAssetResolver() {
       if(['http:', 'https:'].includes(parsed.protocol) && parsed.origin === PRIVATE_CSP_ORIGIN &&
           observation.labelForPathname(parsed.pathname) && observation.SCRIPT_ASSET_PATTERN.test(path.posix.basename(parsed.pathname)) &&
           typeof targetInfo.targetId === 'string') {
-        if(artifactAssets.size < PAGE_ERROR_BLOB_ASSET_LIMIT) artifactAssets.add(path.posix.basename(parsed.pathname));
         if(directWorkerAssets.size >= PAGE_ERROR_BLOB_ASSET_LIMIT && !directWorkerAssets.has(targetInfo.targetId)) {
           directWorkerAssets.delete(directWorkerAssets.keys().next().value);
         }
@@ -3525,30 +4237,9 @@ function createPageErrorAssetResolver() {
     scriptAsset(stack) {
       return pageErrorScriptAsset(stack, blobAssets, pageErrorWorkerAsset);
     },
-    manifestAsset(stack) {
-      const frame = firstPageErrorStackFrame(stack);
-      if(!frame) return 'unknown';
-      const match = /(?:\(|\s)(https?:\/\/[^\s)]+|blob:[^\s)]+)/.exec(frame.trim());
-      if(!match) return 'unknown';
-      const candidate = match[1].replace(/:\d+(?::\d+)?$/, '');
-      let parsed;
-      try {
-        parsed = new URL(candidate);
-      } catch {
-        return 'unknown';
-      }
-      let asset;
-      if(parsed.protocol === 'blob:') {
-        asset = blobAssets.get(parsed.href);
-      } else if(['http:', 'https:'].includes(parsed.protocol) && parsed.origin === PRIVATE_CSP_ORIGIN) {
-        asset = path.posix.basename(parsed.pathname);
-      }
-      return typeof asset === 'string' && artifactAssets.has(asset) ? asset : 'unknown';
-    },
     workerAsset,
     clear() {
       blobAssets.clear();
-      artifactAssets.clear();
       workerAssetCandidates.length = 0;
       directWorkerAssets.clear();
       workerBlobUrls.clear();
@@ -3556,21 +4247,578 @@ function createPageErrorAssetResolver() {
   };
 }
 
-function recordPageError(pageErrors, contextName, error, pageErrorAssetResolver, scenario = 'unknown', stage = 'unknown') {
-  if(!APP_CONTEXTS.includes(contextName) || !Array.isArray(pageErrors?.[contextName])) return;
-  const constructorName = pageErrorConstructorName(error);
-  const stack = error?.stack;
-  const pageError = {
-    constructorName,
-    scriptAsset: pageErrorAssetResolver?.scriptAsset(stack) || pageErrorScriptAsset(stack)
-  };
-  if(constructorName === 'TypeError') {
-    pageError.message = sanitizePageErrorMessage(error?.message);
-    pageError.firstFrame = pageErrorFrameDetails(stack, pageErrorAssetResolver);
-    pageError.scenario = ['sign-in', 'message', 'group', 'poll'].includes(scenario) ? scenario : 'unknown';
-    pageError.stage = typeof stage === 'string' && /^[a-z][a-z0-9_]{0,95}$/.test(stage) ? stage : 'unknown';
+function pageErrorDiagnosticOptions(page) {
+  if(runtime?.pageErrorDiagnostics !== true) return;
+  let pageUrl = 'unknown';
+  try {
+    pageUrl = page.url();
+  } catch {
+    // An unavailable URL is reported as unknown by the diagnostic sanitizer.
   }
-  pageErrors[contextName].push(pageError);
+  const scenarioStep = readPageScenarioStep(page);
+  return {captureDetails: true, pageUrl, scenario: scenarioStep.scenario, stage: scenarioStep.step, redactValues: pageErrorRedactValues()};
+}
+
+function pageErrorRedactValues() {
+  const redactValues = [];
+  for(const account of runtime?.accounts || []) {
+    if(typeof account?.username === 'string') redactValues.push(account.username);
+    if(typeof account?.password === 'string') redactValues.push(account.password);
+  }
+  return redactValues;
+}
+
+function createPageErrorExceptionEvent(exceptionDetails, pageUrl, redactValues = []) {
+  if(!exceptionDetails || typeof exceptionDetails !== 'object' || Array.isArray(exceptionDetails)) return;
+  const exceptionFrames = Array.isArray(exceptionDetails.callFrames)
+    ? exceptionDetails.callFrames
+    : exceptionDetails.stackTrace?.callFrames;
+  const rawFrames = Array.isArray(exceptionFrames)
+    ? exceptionFrames.slice(0, PAGE_ERROR_DIAGNOSTIC_LIMITS.count)
+    : [];
+  const frames = rawFrames.map((frame) => {
+    if(!frame || typeof frame !== 'object') return;
+    const scriptId = frame.location?.scriptId;
+    const mappedUrl = typeof scriptId === 'string' ? exceptionDetails.scriptUrls?.[scriptId] : undefined;
+    const url = typeof frame.url === 'string' && frame.url ? frame.url : mappedUrl;
+    if(typeof url !== 'string' || !url) return;
+    return {
+      url: sanitizePageErrorDiagnosticText(url, PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength, redactValues),
+      functionName: sanitizePageErrorDiagnosticText(frame.functionName || '', 128, redactValues),
+      lineNumber: Number.isSafeInteger(frame.lineNumber) && frame.lineNumber >= 0
+        ? frame.lineNumber + 1
+        : Number.isSafeInteger(frame.location?.lineNumber) && frame.location.lineNumber >= 0 ? frame.location.lineNumber + 1 : 0,
+      columnNumber: Number.isSafeInteger(frame.columnNumber) && frame.columnNumber >= 0
+        ? frame.columnNumber + 1
+        : Number.isSafeInteger(frame.location?.columnNumber) && frame.location.columnNumber >= 0 ? frame.location.columnNumber + 1 : 0
+    };
+  }).filter(Boolean);
+  const firstFrame = frames[0];
+  const exception = exceptionDetails.exception || exceptionDetails.data;
+  const exceptionDescription = typeof exception?.description === 'string'
+    ? exception.description.split('\n', 1)[0]
+    : '';
+  const message = sanitizePageErrorDiagnosticText(exceptionDescription || exceptionDetails.text || '', PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength, redactValues);
+  const fallbackUrl = typeof exceptionDetails.url === 'string' ? exceptionDetails.url : firstFrame?.url || '';
+  const filename = firstFrame?.url || sanitizePageErrorDiagnosticText(fallbackUrl, PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength, redactValues);
+  const lineNumber = firstFrame?.lineNumber || (Number.isSafeInteger(exceptionDetails.lineNumber) && exceptionDetails.lineNumber >= 0 ? exceptionDetails.lineNumber + 1 : 0);
+  const columnNumber = firstFrame?.columnNumber || (Number.isSafeInteger(exceptionDetails.columnNumber) && exceptionDetails.columnNumber >= 0 ? exceptionDetails.columnNumber + 1 : 0);
+  const stackFrames = frames.map((frame) => {
+    const location = `${frame.url}${frame.lineNumber ? `:${frame.lineNumber}` : ''}${frame.columnNumber ? `:${frame.columnNumber}` : ''}`;
+    return `    at ${frame.functionName ? `${frame.functionName} (${location})` : location}`;
+  });
+  const stack = sanitizePageErrorDiagnosticText([message || 'Error', ...stackFrames].join('\n'), PAGE_ERROR_DIAGNOSTIC_LIMITS.stackLength, redactValues);
+  return {
+    message,
+    stack,
+    filename,
+    lineNumber,
+    columnNumber,
+    pageUrl: sanitizePageErrorPageUrl(pageUrl)
+  };
+}
+
+function recordPageErrorProtocolEvent(page, exceptionDetails, captureSource, scenarioStep) {
+  let events = pageErrorProtocolEvents.get(page);
+  if(!Array.isArray(events)) {
+    events = [];
+    pageErrorProtocolEvents.set(page, events);
+  }
+  if(events.length >= PAGE_ERROR_DIAGNOSTIC_LIMITS.count) return;
+  let pageUrl = 'unknown';
+  try {
+    pageUrl = page.url();
+  } catch {
+    // An unavailable URL is reported as unknown by the diagnostic sanitizer.
+  }
+  const event = createPageErrorExceptionEvent(exceptionDetails, pageUrl, pageErrorRedactValues());
+  if(!event) return;
+  const isRuntimeException = captureSource === 'runtime';
+  const firstFrame = (Array.isArray(exceptionDetails?.callFrames)
+    ? exceptionDetails.callFrames
+    : exceptionDetails?.stackTrace?.callFrames)?.[0];
+  const location = isRuntimeException
+    ? {
+      scriptId: firstFrame?.scriptId || exceptionDetails.scriptId,
+      lineNumber: Number.isSafeInteger(firstFrame?.lineNumber) ? firstFrame.lineNumber : exceptionDetails.lineNumber,
+      columnNumber: Number.isSafeInteger(firstFrame?.columnNumber) ? firstFrame.columnNumber : exceptionDetails.columnNumber
+    }
+    : firstFrame?.location || {};
+  const exception = exceptionDetails?.exception || exceptionDetails?.data;
+  const previewProperties = Array.isArray(exception?.preview?.properties) ? exception.preview.properties : [];
+  const errorTypePreview = previewProperties.find((property) => property?.name === 'type' && property?.type === 'string')?.value;
+  const errorCodePreview = previewProperties.find((property) => property?.name === 'code' && property?.type === 'number')?.value;
+  const errorCode = typeof errorCodePreview === 'string' && errorCodePreview.trim() !== ''
+    ? Number(errorCodePreview)
+    : errorCodePreview;
+  events.push({
+    ...event,
+    captureSequence: events.length,
+    captureSource: ['runtime', 'debugger'].includes(captureSource) ? captureSource : 'unknown',
+    scenarioStep: scenarioStep ? sanitizePageErrorScenarioStep(scenarioStep) : undefined,
+    exceptionId: Number.isSafeInteger(exceptionDetails?.exceptionId) ? exceptionDetails.exceptionId : undefined,
+    executionContextId: Number.isSafeInteger(exceptionDetails?.executionContextId) ? exceptionDetails.executionContextId : undefined,
+    exceptionObjectId: typeof exception?.objectId === 'string' ? exception.objectId : undefined,
+    exceptionLocation: typeof location?.scriptId === 'string' && Number.isSafeInteger(location.lineNumber) && Number.isSafeInteger(location.columnNumber)
+      ? {scriptId: location.scriptId, lineNumber: location.lineNumber, columnNumber: location.columnNumber}
+      : undefined,
+    errorType: sanitizePageErrorRpcErrorType(errorTypePreview),
+    errorCode: sanitizePageErrorRpcErrorCode(errorCode)
+  });
+}
+
+async function installPageErrorEventCapture(page) {
+  if(runtime?.pageErrorDiagnostics !== true) return;
+  const consoleEvents = [];
+  pageErrorProtocolEvents.set(page, []);
+  pageErrorConsoleEvents.set(page, consoleEvents);
+  page.on('console', (message) => {
+    try {
+      if(message.type() !== 'error' || consoleEvents.length >= PAGE_ERROR_DIAGNOSTIC_LIMITS.count) return;
+      const location = message.location();
+      let pageUrl = 'unknown';
+      try {
+        pageUrl = sanitizePageErrorPageUrl(page.url());
+      } catch {
+        // An unavailable URL is reported as unknown by the diagnostic sanitizer.
+      }
+      consoleEvents.push({
+        message: sanitizePageErrorDiagnosticText(message.text(), PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength, pageErrorRedactValues()),
+        stack: '',
+        filename: sanitizePageErrorDiagnosticText(location?.url || '', PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength, pageErrorRedactValues()),
+        lineNumber: Number.isSafeInteger(location?.lineNumber) ? location.lineNumber : 0,
+        columnNumber: Number.isSafeInteger(location?.columnNumber) ? location.columnNumber : 0,
+        pageUrl
+      });
+    } catch {
+      // Console diagnostics must not interfere with the browser scenario.
+    }
+  });
+  await page.addInitScript(() => {
+    const events = [];
+    Object.defineProperty(window, '__teagramPageErrorEvents', {value: events});
+    const record = (event) => {
+      if(events.length >= 16) return;
+      const thrown = event?.error || event?.reason;
+      events.push({
+        message: typeof event?.message === 'string'
+          ? event.message
+          : typeof thrown?.message === 'string' ? thrown.message
+            : thrown && typeof thrown === 'object' ? 'Object'
+              : typeof thrown === 'string' ? thrown : '',
+        stack: typeof thrown?.stack === 'string' ? thrown.stack : '',
+        filename: typeof event?.filename === 'string' ? event.filename : '',
+        lineNumber: Number.isSafeInteger(event?.lineno) ? event.lineno : 0,
+        columnNumber: Number.isSafeInteger(event?.colno) ? event.colno : 0,
+        pageUrl: window.location.href,
+        errorType: typeof thrown?.type === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(thrown.type) ? thrown.type : undefined,
+        errorCode: Number.isSafeInteger(thrown?.code) && thrown.code >= 0 && thrown.code <= 999_999 ? thrown.code : undefined
+      });
+    };
+    window.addEventListener('error', record);
+    window.addEventListener('unhandledrejection', record);
+  });
+}
+
+async function enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAssetResolver, redactValues = [], consoleEvents = pageErrorConsoleEvents.get(page) || []) {
+  const entries = pageErrors?.[contextName]?.filter((error) => error?.diagnostic) || [];
+  if(entries.length === 0) return;
+  let windowEvents = [];
+  try {
+    windowEvents = await page.evaluate((captureKey) => window[captureKey] || [], PAGE_ERROR_EVENT_CAPTURE_KEY);
+  } catch {
+    // A navigated or closing page can make its in-page diagnostics unavailable.
+  }
+  for(const entry of entries) {
+    const diagnostic = entry.diagnostic;
+    const diagnosticMessageHash = pageErrorDiagnosticMessageHashes.get(diagnostic);
+    if(!diagnosticMessageHash) continue;
+    const matchingEntries = entries.filter((candidate) =>
+      pageErrorDiagnosticMessageHashes.get(candidate?.diagnostic) === diagnosticMessageHash &&
+      candidate?.diagnostic?.scenario === diagnostic.scenario && candidate?.diagnostic?.stage === diagnostic.stage
+    );
+    if(matchingEntries.length !== 1) continue;
+    const event = correlatePageErrorDiagnosticEvents(diagnostic, {
+      windowEvents: Array.isArray(windowEvents) ? windowEvents : [],
+      protocolEvents: pageErrorProtocolEvents.get(page) || [],
+      consoleEvents: Array.isArray(consoleEvents) ? consoleEvents : []
+    }, redactValues);
+    if(!event) continue;
+    const eventStack = typeof event.stack === 'string' ? event.stack : '';
+    const eventPageUrl = sanitizePageErrorPageUrl(event.pageUrl);
+    const fallbackStack = typeof event.filename === 'string' && event.filename
+      ? `Error\n    at ${event.filename}:${event.lineNumber || 0}:${event.columnNumber || 0}`
+      : '';
+    const stack = eventStack || fallbackStack;
+    const safeStack = stack ? safePageErrorStack(stack, pageErrorAssetResolver) : undefined;
+    if(safeStack && safeStack.frames.length > 0) entry.stack = safeStack;
+    if(eventPageUrl !== 'unknown') diagnostic.pageUrl = eventPageUrl;
+    const rpcErrorType = sanitizePageErrorRpcErrorType(event.errorType);
+    const rpcErrorCode = sanitizePageErrorRpcErrorCode(event.errorCode);
+    if(rpcErrorType) diagnostic.rpcErrorType = rpcErrorType;
+    if(rpcErrorCode !== undefined) diagnostic.rpcErrorCode = rpcErrorCode;
+    const rpcMethod = uniquePageErrorRpcMethod(page, diagnostic, rpcErrorType, rpcErrorCode);
+    if(rpcMethod) diagnostic.rpcMethod = rpcMethod;
+    if(entry.scriptAsset === 'unknown' && safeStack?.frames.length > 0) {
+      const scriptAsset = safeStack.frames.find((frame) => frame.scriptAsset !== 'unknown')?.scriptAsset || 'unknown';
+      if(scriptAsset !== 'unknown') entry.scriptAsset = scriptAsset;
+    }
+  }
+}
+
+function uniquePageErrorRpcMethod(page, diagnostic, rpcErrorType, rpcErrorCode) {
+  if(!rpcErrorType || rpcErrorCode === undefined) return;
+  const scenarioStep = {scenario: diagnostic.scenario, step: diagnostic.stage};
+  const methods = new Set();
+  for(const step of getClientErrorDiagnostics(page, scenarioStep)) {
+    if(step.rpcFailuresTruncated) return;
+    for(const failure of step.rpcFailures) {
+      if(failure.type !== rpcErrorType || failure.code !== rpcErrorCode) continue;
+      if(typeof failure.method !== 'string' || !RPC_METHOD_PATTERN.test(failure.method)) return;
+      methods.add(failure.method);
+    }
+  }
+  return methods.size === 1 ? [...methods][0] : undefined;
+}
+
+function correlatePageErrorDiagnosticEvents(diagnostic, {windowEvents = [], protocolEvents = [], consoleEvents = []} = {}, redactValues = []) {
+  const diagnosticMessageHash = pageErrorDiagnosticMessageHashes.get(diagnostic);
+  if(!diagnosticMessageHash) return;
+  const matchesMessage = (event) => pageErrorDiagnosticMessageHash(event?.message, redactValues) === diagnosticMessageHash;
+  const matchingProtocolEvents = protocolEvents.filter(matchesMessage);
+  const runtimeGroups = [];
+  const debuggerEvents = [];
+  const otherProtocolEvents = [];
+
+  for(const event of matchingProtocolEvents) {
+    if(event.captureSource === 'debugger') {
+      debuggerEvents.push(event);
+      continue;
+    }
+    if(event.captureSource !== 'runtime') {
+      otherProtocolEvents.push(event);
+      continue;
+    }
+    const existing = Number.isSafeInteger(event.exceptionId)
+      ? runtimeGroups.find((group) => group.exceptionId === event.exceptionId && group.executionContextId === event.executionContextId)
+      : undefined;
+    if(existing) existing.events.push(event);
+    else runtimeGroups.push({
+      exceptionId: event.exceptionId,
+      executionContextId: event.executionContextId,
+      events: [event]
+    });
+  }
+
+  const protocolGroups = [...runtimeGroups];
+  for(const event of debuggerEvents) {
+    const matchingById = Number.isSafeInteger(event.exceptionId)
+      ? protocolGroups.filter((group) => group.exceptionId === event.exceptionId && group.executionContextId === event.executionContextId)
+      : [];
+    const locationKey = pageErrorExceptionLocationKey(event);
+    const matchingByLocation = locationKey
+      ? protocolGroups.filter((group) => group.events.some((candidate) => pageErrorExceptionLocationKey(candidate) === locationKey))
+      : [];
+    const matchingByObjectId = typeof event.exceptionObjectId === 'string'
+      ? protocolGroups.filter((group) => group.events.some((candidate) => candidate.exceptionObjectId === event.exceptionObjectId))
+      : [];
+    const matchingAdjacentRuntime = Number.isSafeInteger(event.executionContextId) && Number.isSafeInteger(event.captureSequence)
+      ? protocolGroups.filter((group) => group.executionContextId === event.executionContextId &&
+        group.events.some((candidate) => candidate.captureSource === 'runtime' && Number.isSafeInteger(candidate.captureSequence) &&
+          Math.abs(candidate.captureSequence - event.captureSequence) === 1))
+      : [];
+    // Chromium can report a synthetic Runtime location for an uncaught rejection.
+    // Adjacent same-context pause/exception observations still identify one throw;
+    // a second Runtime group keeps the overall result ambiguous.
+    const matches = matchingById.length > 0 ? matchingById : matchingByObjectId.length > 0 ? matchingByObjectId :
+      matchingByLocation.length > 0 ? matchingByLocation : matchingAdjacentRuntime;
+    if(matches.length === 1) {
+      matches[0].events.push(event);
+      continue;
+    }
+    protocolGroups.push({exceptionId: undefined, executionContextId: undefined, events: [event]});
+  }
+  for(const event of otherProtocolEvents) protocolGroups.push({exceptionId: undefined, executionContextId: undefined, events: [event]});
+
+  let candidateProtocolGroups = protocolGroups;
+  const hasActionScopedProtocolEvents = protocolGroups.some((group) => group.events.some((event) => event.scenarioStep));
+  if(hasActionScopedProtocolEvents) {
+    candidateProtocolGroups = protocolGroups.filter((group) => group.events.some((event) =>
+      event.scenarioStep?.scenario === diagnostic.scenario && event.scenarioStep?.step === diagnostic.stage
+    ));
+    if(candidateProtocolGroups.length === 0) return;
+  }
+  if(candidateProtocolGroups.length > 0) {
+    if(candidateProtocolGroups.length !== 1) return;
+    const groupEvents = [...candidateProtocolGroups[0].events];
+    const matchingWindowEvents = windowEvents.filter(matchesMessage);
+    if(matchingWindowEvents.length === 1 && canCorrelatePageErrorSupplement(groupEvents, matchingWindowEvents[0])) {
+      groupEvents.push({...matchingWindowEvents[0], captureSource: 'window'});
+    }
+    return mergePageErrorObservationGroup(groupEvents);
+  }
+
+  const fallbackEvents = [...windowEvents, ...consoleEvents].filter(matchesMessage);
+  if(fallbackEvents.length !== 1) return;
+  return fallbackEvents[0];
+}
+
+function canCorrelatePageErrorSupplement(groupEvents, supplement) {
+  const supplementLocation = pageErrorDiagnosticLocationKey(supplement);
+  if(supplementLocation && groupEvents.some((event) => pageErrorDiagnosticLocationKey(event) === supplementLocation)) return true;
+  const supplementType = sanitizePageErrorRpcErrorType(supplement?.errorType);
+  const supplementCode = sanitizePageErrorRpcErrorCode(supplement?.errorCode);
+  if(!supplementType && supplementCode === undefined) return false;
+  const groupTypes = [...new Set(groupEvents.map((event) => sanitizePageErrorRpcErrorType(event.errorType)).filter(Boolean))];
+  const groupCodes = [...new Set(groupEvents.map((event) => sanitizePageErrorRpcErrorCode(event.errorCode)).filter((value) => value !== undefined))];
+  return (!supplementType || groupTypes.length === 1 && groupTypes[0] === supplementType) &&
+    (supplementCode === undefined || groupCodes.length === 1 && groupCodes[0] === supplementCode);
+}
+
+function pageErrorDiagnosticLocationKey(event) {
+  const filename = typeof event?.filename === 'string' ? sanitizePageErrorStackUrl(event.filename) : '';
+  if(!filename || filename === '[redacted-url]' || !Number.isSafeInteger(event?.lineNumber) || event.lineNumber <= 0 ||
+      !Number.isSafeInteger(event?.columnNumber) || event.columnNumber <= 0) return;
+  return `${filename}:${event.lineNumber}:${event.columnNumber}`;
+}
+
+function pageErrorExceptionLocationKey(event) {
+  const location = event?.exceptionLocation;
+  if(typeof location?.scriptId !== 'string' || !Number.isSafeInteger(location.lineNumber) || !Number.isSafeInteger(location.columnNumber)) return;
+  return `${location.scriptId}:${location.lineNumber}:${location.columnNumber}`;
+}
+
+function mergePageErrorObservationGroup(events) {
+  const ranked = [...events].sort((first, second) => pageErrorObservationScore(second) - pageErrorObservationScore(first));
+  const merged = {...ranked[0]};
+  const errorTypes = [...new Set(events.map((event) => sanitizePageErrorRpcErrorType(event.errorType)).filter(Boolean))];
+  const errorCodes = [...new Set(events.map((event) => sanitizePageErrorRpcErrorCode(event.errorCode)).filter((value) => value !== undefined))];
+  if(errorTypes.length === 1) merged.errorType = errorTypes[0];
+  else delete merged.errorType;
+  if(errorCodes.length === 1) merged.errorCode = errorCodes[0];
+  else delete merged.errorCode;
+  return merged;
+}
+
+function pageErrorObservationScore(event) {
+  const stackLength = typeof event?.stack === 'string' ? event.stack.length : 0;
+  const hasLocation = pageErrorExceptionLocationKey(event) || (typeof event?.filename === 'string' && event.filename);
+  return stackLength + (hasLocation ? 256 : 0);
+}
+
+function normalizePageErrorMessage(value, redactValues) {
+  return sanitizePageErrorDiagnosticText(value, PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength, redactValues)
+  .replace(/^Uncaught(?:\s+\(in promise\))?\s*/i, '')
+  .trim();
+}
+
+function pageErrorDiagnosticMessageHash(value, redactValues = []) {
+  const normalized = normalizePageErrorMessage(value, redactValues);
+  return normalized ? createHash('sha256').update(normalized).digest('hex') : undefined;
+}
+
+async function enrichPageErrorReport(pageErrors, pages, pageErrorAssetResolvers, networkObservers = {}, redactValues = [], clientErrorDiagnostics) {
+  await Promise.all(APP_CONTEXTS.map(async(contextName) => {
+    const page = pages?.[contextName];
+    if(!page) return;
+    try {
+      await enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAssetResolvers?.[contextName], redactValues);
+    } catch {
+      // Diagnostics are best-effort and must not replace the scenario result.
+    }
+  }));
+  const summaryOptions = {networkObservers, pageErrors};
+  if(clientErrorDiagnostics) summaryOptions.clientErrorDiagnostics = clientErrorDiagnostics;
+  return summarizeBrowserGateBreakdown(summaryOptions);
+}
+
+function sanitizePageErrorRpcErrorType(value) {
+  return typeof value === 'string' && RPC_ERROR_TYPE_PATTERN.test(value) ? value : undefined;
+}
+
+function sanitizePageErrorRpcErrorCode(value) {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 999_999 ? value : undefined;
+}
+
+function readPageErrorText(error, key) {
+  try {
+    const value = error?.[key];
+    return typeof value === 'string' ? value : '';
+  } catch {
+    return '';
+  }
+}
+
+function sanitizePageErrorStackUrl(value) {
+  const lineSuffix = /:\d+(?::\d+)?$/.exec(value)?.[0] || '';
+  const urlText = lineSuffix ? value.slice(0, -lineSuffix.length) : value;
+  let parsed;
+  try {
+    parsed = new URL(urlText);
+  } catch {
+    return `[redacted-url]${lineSuffix}`;
+  }
+  if(parsed.protocol === 'blob:') {
+    return `${parsed.origin === PRIVATE_CSP_ORIGIN ? `${PRIVATE_CSP_ORIGIN}/<blob>` : 'blob:<external>'}${lineSuffix}`;
+  }
+  if(!['http:', 'https:'].includes(parsed.protocol)) return `[redacted-url]${lineSuffix}`;
+  const location = parsed.origin === PRIVATE_CSP_ORIGIN
+    ? `${parsed.origin}${parsed.pathname}`
+    : path.posix.basename(parsed.pathname) || '[external-script]';
+  return `${location}${lineSuffix}`;
+}
+
+function sanitizePageErrorDiagnosticText(value, limit, redactValues = []) {
+  if(typeof value !== 'string') return '';
+  let sanitized = value;
+  for(const secret of redactValues) {
+    if(typeof secret === 'string' && secret.length > 0) sanitized = sanitized.split(secret).join('[redacted]');
+  }
+  sanitized = sanitized
+  .replace(/(?:https?:\/\/|blob:https?:\/\/)[^\s)]+/g, sanitizePageErrorStackUrl)
+  .replace(/\b(password|passwd|token|secret|authorization|api[_ -]?key)\b(\s*[:=]\s*)[^,;\r\n]+/gi, '$1$2[redacted]');
+  return sanitized.slice(0, limit);
+}
+
+function sanitizePageErrorPageUrl(value) {
+  if(typeof value !== 'string') return 'unknown';
+  try {
+    const parsed = new URL(value);
+    if(!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== PRIVATE_CSP_ORIGIN) return 'unknown';
+    return `${parsed.origin}${parsed.pathname}`.slice(0, PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength);
+  } catch {
+    return 'unknown';
+  }
+}
+
+function sanitizePageErrorScenario(value) {
+  return PAGE_ERROR_DIAGNOSTIC_SCENARIOS.has(value) ? value : 'unknown';
+}
+
+function sanitizePageErrorStage(value) {
+  return typeof value === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : 'unknown';
+}
+
+function createPageErrorDiagnostic(error, options = {}) {
+  const diagnostic = {
+    pageUrl: sanitizePageErrorPageUrl(options.pageUrl),
+    scenario: sanitizePageErrorScenario(options.scenario),
+    stage: sanitizePageErrorStage(options.stage)
+  };
+  const messageHash = pageErrorDiagnosticMessageHash(readPageErrorText(error, 'message'), options.redactValues);
+  if(messageHash) pageErrorDiagnosticMessageHashes.set(diagnostic, messageHash);
+  return diagnostic;
+}
+
+
+function recordPageError(pageErrors, contextName, error, pageErrorAssetResolver, scenarioStep = {scenario: currentScenario, step: currentStage}, diagnosticOptions) {
+  if(!APP_CONTEXTS.includes(contextName) || !Array.isArray(pageErrors?.[contextName])) return;
+  if(!diagnosticOptions && scenarioStep?.captureDetails === true) {
+    diagnosticOptions = scenarioStep;
+    scenarioStep = {scenario: currentScenario, step: currentStage};
+  }
+  const stackValue = readPageErrorValue(error, 'stack');
+  const stack = typeof stackValue === 'string' ? stackValue : undefined;
+  const safeStack = safePageErrorStack(stackValue, pageErrorAssetResolver);
+  const resolvedAsset = safeStack.frames.find((frame) => frame.scriptAsset !== 'unknown')?.scriptAsset;
+  const scriptAsset = resolvedAsset || pageErrorScriptAsset(stack);
+  const entry = {
+    constructorName: pageErrorConstructorName(error),
+    scriptAsset,
+    message: '[redacted]',
+    stack: safeStack,
+    scenarioStep: sanitizePageErrorScenarioStep(scenarioStep)
+  };
+  const events = pageErrors[contextName];
+  const diagnosticCount = pageErrorDiagnosticCounts.get(events) || 0;
+  if(scriptAsset === 'unknown' && diagnosticOptions?.captureDetails === true &&
+      diagnosticCount < PAGE_ERROR_DIAGNOSTIC_LIMITS.count) {
+    entry.diagnostic = createPageErrorDiagnostic(error, diagnosticOptions);
+    pageErrorDiagnosticCounts.set(events, diagnosticCount + 1);
+  }
+  events.push(entry);
+}
+
+function readPageErrorString(error, key) {
+  const value = readPageErrorValue(error, key);
+  return typeof value === 'string' ? value : undefined;
+}
+
+function readPageErrorValue(error, key) {
+  try {
+    return error?.[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizePageErrorMessage(message) {
+  if(typeof message !== 'string' || !message.trim()) return 'unavailable';
+  if(/\b(?:password|secret|passphrase|token|bearer|authorization|api[_-]?key|private[_-]?key)\b/i.test(message)) {
+    return '[redacted]';
+  }
+  return message
+  .replace(/(?:https?:\/\/|wss?:\/\/|blob:|file:|data:)[^\s"'<>)]*/gi, '[url]')
+  .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email]')
+  .replace(/[A-Za-z0-9+/=_-]{32,}/g, '[redacted]')
+  .replace(/[\u0000-\u001f\u007f]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .slice(0, PAGE_ERROR_MESSAGE_LIMIT) || 'unavailable';
+}
+
+function safePageErrorStack(stack, pageErrorAssetResolver) {
+  if(typeof stack !== 'string') {
+    return {state: stack === undefined || stack === null ? 'unavailable' : 'non_string', lineCount: 0, frameCount: 0, frames: []};
+  }
+  const lines = stack.slice(0, 16_384).split('\n');
+  const frameLines = lines.slice(1).filter((line) => /^\s*at\s+/.test(line));
+  const frames = [];
+  for(const line of frameLines.slice(0, PAGE_ERROR_STACK_FRAME_LIMIT)) {
+    const match = /^\s*at\s+(?:(.*?)\s+\()?((?:https?:\/\/|blob:https?:\/\/)[^()\s]+):(\d+):(\d+)\)?$/.exec(line);
+    if(!match) continue;
+    const lineNumber = Number(match[3]);
+    const column = Number(match[4]);
+    if(!Number.isSafeInteger(lineNumber) || lineNumber < 0 || lineNumber > 100_000_000 ||
+        !Number.isSafeInteger(column) || column < 0 || column > 100_000_000) continue;
+    const functionName = sanitizePageErrorFunctionName(match[1]);
+    frames.push({
+      functionName,
+      scriptAsset: pageErrorAssetResolver?.scriptAsset(`Error:\n${line}`) || pageErrorScriptAsset(`Error:\n${line}`),
+      line: lineNumber,
+      column
+    });
+  }
+  const lineCount = Math.min(lines.length, 1_000_000);
+  const frameCount = Math.min(frameLines.length, 1_000_000);
+  const truncated = stack.length > 16_384 || frameLines.length > PAGE_ERROR_STACK_FRAME_LIMIT;
+  return {
+    state: truncated
+      ? 'truncated'
+      : frames.length === 0
+        ? frameCount === 0 ? 'no_frames' : 'unclassified_frames'
+        : frames.length < frameCount ? 'partial' : 'captured',
+    lineCount,
+    frameCount,
+    frames
+  };
+}
+
+function sanitizePageErrorFunctionName(value) {
+  return typeof value === 'string' && value.length <= PAGE_ERROR_FUNCTION_NAME_LIMIT &&
+    !/\b(?:password|secret|passphrase|token|bearer|authorization|api[_-]?key|private[_-]?key)\b/i.test(value) &&
+    !/^[A-Za-z0-9_-]{32,}$/.test(value) &&
+    /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.(?:[A-Za-z_$][A-Za-z0-9_$]*|<anonymous>))*$/.test(value)
+    ? value
+    : 'unknown';
+}
+
+function sanitizePageErrorScenarioStep(value) {
+  const scenario = PAGE_ERROR_SCENARIOS.has(value?.scenario) ? value.scenario : 'unknown';
+  const step = typeof value?.step === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(value.step)
+    ? value.step
+    : 'unknown';
+  return {scenario, step};
 }
 
 function sanitizePageError(error) {
@@ -3578,32 +4826,58 @@ function sanitizePageError(error) {
     constructorName: PAGE_ERROR_CONSTRUCTORS.has(error?.constructorName) ? error.constructorName : 'Error',
     scriptAsset: typeof error?.scriptAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(error.scriptAsset)
       ? error.scriptAsset
-      : 'unknown'
+      : 'unknown',
+    message: '[redacted]',
+    stack: error?.stack && typeof error.stack === 'object' && !Array.isArray(error.stack)
+      ? {
+        state: ['unavailable', 'non_string', 'no_frames', 'unclassified_frames', 'captured', 'partial', 'truncated'].includes(error.stack.state)
+          ? error.stack.state
+          : 'unavailable',
+        lineCount: Number.isSafeInteger(error.stack.lineCount) && error.stack.lineCount >= 0 && error.stack.lineCount <= 1_000_000
+          ? error.stack.lineCount
+          : 0,
+        frameCount: Number.isSafeInteger(error.stack.frameCount) && error.stack.frameCount >= 0 && error.stack.frameCount <= 1_000_000
+          ? error.stack.frameCount
+          : 0,
+        frames: Array.isArray(error.stack.frames) ? error.stack.frames.slice(0, PAGE_ERROR_STACK_FRAME_LIMIT).map((frame) => ({
+        functionName: sanitizePageErrorFunctionName(frame?.functionName),
+        scriptAsset: typeof frame?.scriptAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(frame.scriptAsset)
+          ? frame.scriptAsset
+          : 'unknown',
+        line: Number.isSafeInteger(frame?.line) && frame.line >= 0 && frame.line <= 100_000_000 ? frame.line : 0,
+        column: Number.isSafeInteger(frame?.column) && frame.column >= 0 && frame.column <= 100_000_000 ? frame.column : 0
+        })) : []
+      }
+      : {state: 'unavailable', lineCount: 0, frameCount: 0, frames: []},
+    scenarioStep: sanitizePageErrorScenarioStep(error?.scenarioStep)
   };
-  if(sanitized.constructorName === 'TypeError') {
-    const frame = error?.firstFrame;
-    sanitized.message = sanitizePageErrorMessage(error?.message);
-    sanitized.firstFrame = {
-      functionName: typeof frame?.functionName === 'string' && /^[A-Za-z0-9_$ .<>.[\]-]{1,128}$/.test(frame.functionName)
-        ? frame.functionName
-        : 'unknown',
-      line: Number.isSafeInteger(frame?.line) && frame.line > 0 && frame.line <= 1_000_000_000 ? frame.line : null,
-      column: Number.isSafeInteger(frame?.column) && frame.column > 0 && frame.column <= 1_000_000_000 ? frame.column : null,
-      manifestAsset: typeof frame?.manifestAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(frame.manifestAsset)
-        ? frame.manifestAsset
-        : 'unknown'
+  const diagnostic = error?.diagnostic;
+  if(diagnostic && typeof diagnostic === 'object') {
+    sanitized.diagnostic = {
+      pageUrl: sanitizePageErrorPageUrl(diagnostic.pageUrl),
+      scenario: sanitizePageErrorScenario(diagnostic.scenario),
+      stage: sanitizePageErrorStage(diagnostic.stage),
+      ...(sanitizePageErrorRpcErrorType(diagnostic.rpcErrorType)
+        ? {rpcErrorType: sanitizePageErrorRpcErrorType(diagnostic.rpcErrorType)}
+        : {}),
+      ...(sanitizePageErrorRpcErrorCode(diagnostic.rpcErrorCode) !== undefined
+        ? {rpcErrorCode: sanitizePageErrorRpcErrorCode(diagnostic.rpcErrorCode)}
+        : {}),
+      ...(typeof diagnostic.rpcMethod === 'string' && RPC_METHOD_PATTERN.test(diagnostic.rpcMethod)
+        ? {rpcMethod: diagnostic.rpcMethod}
+        : {})
     };
-    sanitized.scenario = ['sign-in', 'message', 'group', 'poll'].includes(error?.scenario) ? error.scenario : 'unknown';
-    sanitized.stage = typeof error?.stage === 'string' && /^[a-z][a-z0-9_]{0,95}$/.test(error.stage) ? error.stage : 'unknown';
   }
   return sanitized;
 }
 
-function summarizeBrowserGateBreakdown({networkObservers = {}, pageErrors = {}} = {}) {
+function summarizeBrowserGateBreakdown(options = {}) {
+  const {networkObservers = {}, pageErrors = {}, clientErrorDiagnostics = {}} = options;
   const unexpectedEgressAttempts = {};
   const observerErrors = {};
   const sanitizedPageErrors = {};
   const pageErrorOverflow = {};
+  const stepDiagnostics = {};
   for(const contextName of APP_CONTEXTS) {
     const events = networkObservers[contextName]?.gateEvents || [];
     unexpectedEgressAttempts[contextName] = events.slice(0, 512).map((event) => {
@@ -3642,13 +4916,21 @@ function summarizeBrowserGateBreakdown({networkObservers = {}, pageErrors = {}} 
     pageErrorOverflow[contextName] = [...overflowCounts.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, count]) => ({...JSON.parse(key), count}));
+    stepDiagnostics[contextName] = sanitizeClientDiagnostics(clientErrorDiagnostics[contextName]);
   }
   const counters = {
     unexpectedEgressAttempts: Object.values(unexpectedEgressAttempts).reduce((sum, attempts) => sum + attempts.length, 0),
     observerErrors: Object.values(observerErrors).reduce((sum, errors) => sum + Object.values(errors).reduce((count, total) => count + total, 0), 0),
     pageErrors: Math.min(1_000_000, APP_CONTEXTS.reduce((sum, contextName) => sum + (pageErrors[contextName]?.length || 0), 0))
   };
-  return {counters, unexpectedEgressAttempts, observerErrors, pageErrors: sanitizedPageErrors, pageErrorOverflow};
+  return {
+    counters,
+    unexpectedEgressAttempts,
+    observerErrors,
+    pageErrors: sanitizedPageErrors,
+    pageErrorOverflow,
+    ...(Object.hasOwn(options, 'clientErrorDiagnostics') ? {stepDiagnostics} : {})
+  };
 }
 
 function mergeWebSocket101ByContextPhase(grids) {
@@ -3853,6 +5135,7 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
   let gateBreakdown;
 
   try {
+    currentScenario = 'sign-in';
     currentStage = 'alice_context';
     const alice = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(alice.context);
@@ -3864,7 +5147,7 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
     observers.push(alice.networkObserver);
     await alice.networkObserver.start(registry);
 
-    alice.page.on('pageerror', (error) => recordPageError(pageErrors, 'alice', error, pageErrorAssets.alice, currentScenario, currentStage));
+    alice.page.on('pageerror', (error) => recordPageError(pageErrors, 'alice', error, pageErrorAssets.alice));
     await submitUsername(
       alice.page,
       runtimeConfig.accounts[0],
@@ -3945,6 +5228,129 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
   return {report, cleanupFailed};
 }
 
+async function runChannelScenario(alice, bob, runtimeConfig, capturedScreenshots) {
+  const channelName = `browser-ci-channel-${runtimeConfig.runId.slice(0, 8)}`;
+  const channelFormSelector = '.new-channel-container';
+  const memberSelector = '.add-members-container';
+
+  setPageActionStep(alice.page, 'alice_channel_menu');
+  await alice.page.locator('#new-menu').click().catch(() => failStage('alice_channel_menu'));
+  await captureState(alice.page, runtimeConfig.screenshotDirectory, 'alice-channel-menu', capturedScreenshots);
+
+  setPageActionStep(alice.page, 'alice_channel_new');
+  await alice.page.getByText('New Channel', {exact: true}).click().catch(() => failStage('alice_channel_new'));
+  const channelForm = alice.page.locator(channelFormSelector);
+  setPageScenarioStep(alice.page, 'alice_channel_name_form');
+  await channelForm.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_channel_name_form'));
+  await captureState(alice.page, runtimeConfig.screenshotDirectory, 'alice-channel-name', capturedScreenshots);
+
+  setPageActionStep(alice.page, 'alice_channel_name_fill');
+  await channelForm.locator(GROUP_NAME_FIELD_SELECTOR).first().fill(channelName, {timeout: 15_000})
+  .catch(() => failStage('alice_channel_name_fill'));
+  setPageActionStep(alice.page, 'alice_channel_create');
+  await channelForm.locator('.btn-corner.is-visible').click({timeout: 15_000}).catch(() => failStage('alice_channel_create'));
+
+  setPageScenarioStep(alice.page, 'alice_channel_members_form');
+  await alice.page.locator(memberSelector).waitFor({state: 'visible', timeout: 30_000})
+  .catch(() => failStage('alice_channel_members_form'));
+  const activeChannel = resolveActiveGroupChat(alice.page, channelName);
+  setPageScenarioStep(alice.page, 'alice_channel_created');
+  await activeChannel.chat.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_channel_created'));
+  await activeChannel.title.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_channel_created'));
+  if(await activeChannel.chat.count() !== 1 || await activeChannel.title.count() !== 1) failStage('alice_channel_created');
+  const channelPeerId = await readActivePeerId(alice.page, 'alice_channel_identity');
+  if(!channelPeerId.startsWith('-')) failStage('alice_channel_identity');
+  const bobOtherPeerId = await readActivePeerId(bob.page, 'bob_channel_other_conversation');
+  if(bobOtherPeerId === channelPeerId) failStage('bob_channel_other_conversation');
+  await captureState(alice.page, runtimeConfig.screenshotDirectory, 'alice-channel-created', capturedScreenshots);
+
+  const selectedBobPeerId = await selectUniquePeer(
+    alice.page,
+    `${memberSelector} .input-search-input`,
+    `${memberSelector} .row[data-peer-id]`,
+    runtimeConfig.accounts[1].username,
+    'alice_add_bob_to_channel'
+  );
+  if(!/^[0-9]{1,20}$/.test(selectedBobPeerId || '')) failStage('alice_add_bob_to_channel_peer_identity');
+  await captureState(alice.page, runtimeConfig.screenshotDirectory, 'alice-channel-member-selection', capturedScreenshots);
+  await startChannelMembershipTrace(alice.page, bob.page, channelPeerId, selectedBobPeerId, channelName);
+
+  setPageActionStep(alice.page, 'alice_channel_add_bob');
+  const continueChannel = alice.page.locator(`${memberSelector} .btn-corner`);
+  await continueChannel.click({timeout: 15_000}).catch(() => failStage('alice_channel_add_bob'));
+  setPageScenarioStep(alice.page, 'alice_channel_add_confirmation');
+  const confirmAdd = alice.page.getByText('Add', {exact: true});
+  await confirmAdd.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_channel_add_confirmation'));
+  if(await confirmAdd.count() !== 1) failStage('alice_channel_add_confirmation');
+  setPageActionStep(alice.page, 'alice_channel_add_confirmation');
+  await confirmAdd.click({timeout: 15_000}).catch(() => failStage('alice_channel_add_confirmation'));
+  setPageScenarioStep(alice.page, 'alice_channel_add_bob_complete');
+  await alice.page.locator(memberSelector).waitFor({state: 'hidden', timeout: 30_000})
+  .catch(() => failStage('alice_channel_add_bob_complete'));
+  await activeChannel.title.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_channel_add_bob_complete'));
+
+  setPageActionStep(bob.page, 'bob_channel_membership_refresh');
+  await bob.page.reload({waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage('bob_channel_membership_refresh'));
+  await bob.page.waitForFunction(() => {
+    const chats = document.querySelector('#page-chats');
+    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+  }, null, {timeout: 45_000}).catch(() => failStage('bob_channel_membership_refresh'));
+  const bobOtherRow = bob.page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${bobOtherPeerId}"]`);
+  await bobOtherRow.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_channel_membership_refresh'));
+  if(await bobOtherRow.getAttribute('data-peer-id') !== bobOtherPeerId) failStage('bob_channel_membership_refresh');
+  await bobOtherRow.click({timeout: 30_000}).catch(() => failStage('bob_channel_membership_refresh'));
+  await waitForActivePeerId(bob.page, bobOtherPeerId, 'bob_channel_membership_refresh');
+
+  setPageScenarioStep(bob.page, 'bob_channel_membership');
+  let bobChannelRow = await waitForChannelDialogRow(bob.page, channelPeerId, channelName, 'bob_channel_membership');
+  await waitForUnreadCount(bob.page, channelPeerId, 0, 'bob_channel_unread_before_post', 30_000, channelName);
+  await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-membership', capturedScreenshots);
+
+  await sendChannelText(alice.page, channelName, runtimeConfig.screenshotDirectory, capturedScreenshots);
+
+  bobChannelRow = await waitForChannelDialogRow(bob.page, channelPeerId, channelName, 'bob_channel_membership');
+  await waitForUnreadCount(bob.page, channelPeerId, 1, 'bob_channel_unread_before_open', 30_000, channelName);
+  await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-unread', capturedScreenshots);
+
+  setPageActionStep(bob.page, 'bob_channel_open');
+  await bobChannelRow.click({timeout: 30_000}).catch(() => failStage('bob_channel_open'));
+  const bobActiveChannel = resolveActiveGroupChat(bob.page, channelName);
+  await bobActiveChannel.chat.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_channel_open'));
+  await bobActiveChannel.title.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_channel_open'));
+  await waitForActivePeerId(bob.page, channelPeerId, 'bob_channel_open');
+
+  const bobChannelMessage = bobActiveChannel.chat.locator('.bubble .message').filter({hasText: CHANNEL_MESSAGE});
+  setPageScenarioStep(bob.page, 'bob_channel_post_visible');
+  await bobChannelMessage.first().waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_channel_post_visible'));
+  await bob.page.waitForTimeout(600);
+  const receivedMessageFailure = await getSingleExactMessageTextFailure(bobChannelMessage, CHANNEL_MESSAGE);
+  if(receivedMessageFailure) failStage(`bob_channel_post_${receivedMessageFailure}`);
+  await waitForUnreadCount(bob.page, channelPeerId, 0, 'bob_channel_read', 30_000, channelName);
+  await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-read', capturedScreenshots);
+
+  setPageActionStep(bob.page, 'bob_channel_return_to_other_conversation');
+  await bobOtherRow.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_channel_return_to_other_conversation'));
+  await bobOtherRow.click({timeout: 30_000}).catch(() => failStage('bob_channel_return_to_other_conversation'));
+  await waitForActivePeerId(bob.page, bobOtherPeerId, 'bob_channel_return_to_other_conversation');
+  await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-return', capturedScreenshots);
+
+  setPageActionStep(bob.page, 'bob_channel_reload');
+  await bob.page.reload({waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage('bob_channel_reload'));
+  setPageScenarioStep(bob.page, 'bob_channel_reload_chats_list');
+  await bob.page.waitForFunction(() => {
+    const chats = document.querySelector('#page-chats');
+    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+  }, null, {timeout: 45_000}).catch(() => failStage('bob_channel_reload_chats_list'));
+  await waitForActivePeerId(bob.page, bobOtherPeerId, 'bob_channel_other_conversation_after_reload');
+  await waitForChannelDialogRow(bob.page, channelPeerId, channelName, 'bob_channel_membership_after_reload');
+  await waitForUnreadCount(bob.page, channelPeerId, 0, 'bob_channel_unread_after_reload', 30_000, channelName);
+  await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-after-reload', capturedScreenshots);
+}
+
+function shouldRunChannelScenario(runtimeConfig) {
+  return runtimeConfig.scenarios.includes('channel');
+}
+
 async function main(dependencies = {}) {
   let report;
   let browser;
@@ -3956,6 +5362,7 @@ async function main(dependencies = {}) {
   const actionCounts = {usernameSubmissions: 0};
   const passwordEvidence = [];
   const pageErrors = {alice: [], bob: []};
+  const appPages = {alice: undefined, bob: undefined};
   const pageErrorAssets = Object.fromEntries(APP_CONTEXTS.map((name) => [name, createPageErrorAssetResolver()]));
   const cleanupIssues = [];
   let cleanupFailed = false;
@@ -3965,6 +5372,7 @@ async function main(dependencies = {}) {
   let webSocket101Phase;
   let controlWebSocket101ByContextPhase;
   let gateBreakdown;
+  let clientErrorDiagnostics;
   let pollNegativeControlEvidence;
   let pollSendResults;
   centerColumnTrace = createCenterColumnTrace();
@@ -3972,15 +5380,14 @@ async function main(dependencies = {}) {
   groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
   groupMemberTrace = createGroupMemberTrace();
   groupMessageTrace = createGroupMessageTrace();
+  channelMembershipTrace = createChannelMembershipTrace();
+  currentScenario = undefined;
+  currentStage = 'runtime_inputs';
   try {
     runtime = Object.prototype.hasOwnProperty.call(dependencies, 'runtimeConfig')
       ? dependencies.runtimeConfig
       : await (dependencies.readRuntimeInput || readRuntimeInput)();
-    const privateTarget = observation.getPrivateCspTarget(runtime?.endpoint, runtime?.wssEndpoint);
     (dependencies.validateRuntimeInput || validateRuntimeInput)(runtime);
-    PRIVATE_CSP_ORIGIN = privateTarget.origin;
-    PRIVATE_CSP_WSS = privateTarget.wssEndpoint;
-    POLL_ANSWER_LINK = `${privateTarget.origin}/browser-ci-poll-answer`;
     fs.mkdirSync(runtime.screenshotDirectory, {mode: 0o700});
 
     currentStage = 'browser_launch';
@@ -3988,7 +5395,7 @@ async function main(dependencies = {}) {
       headless: true,
       chromiumSandbox: true,
       args: [
-        `--host-resolver-rules=MAP ${privateTarget.host} ${runtime.frontIp},MAP * ~NOTFOUND`,
+        `--host-resolver-rules=MAP teagramd.test ${runtime.frontIp},MAP * ~NOTFOUND`,
         `--ignore-certificate-errors-spki-list=${runtime.leafSPKI}`,
         '--disable-background-networking',
         '--disable-component-update',
@@ -4038,33 +5445,74 @@ async function main(dependencies = {}) {
       return;
     }
 
+    currentScenario = 'sign-in';
     currentStage = 'alice_context';
     const alice = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(alice.context);
     alice.page = await alice.context.newPage();
+    appPages.alice = alice.page;
+    await installPageErrorEventCapture(alice.page);
     alice.observer = observation.createContextObserver('alice');
     appObservers.alice = alice.observer;
-    alice.networkObserver = createNetworkObserver(alice.page, 'alice', alice.observer, pageErrorAssets.alice);
+    alice.networkObserver = createNetworkObserver(
+      alice.page,
+      'alice',
+      alice.observer,
+      pageErrorAssets.alice,
+      runtime.pageErrorDiagnostics === true ? (details, source) => recordPageErrorProtocolEvent(
+        alice.page,
+        details,
+        source,
+        readPageScenarioStep(alice.page)
+      ) : undefined
+    );
     appNetworkObservers.alice = alice.networkObserver;
     observers.push(alice.networkObserver);
     await alice.networkObserver.start(registry);
 
-    alice.page.on('pageerror', (error) => recordPageError(pageErrors, 'alice', error, pageErrorAssets.alice, currentScenario, currentStage));
-    await countClientErrors(alice.page);
+    alice.page.on('pageerror', (error) => recordPageError(
+      pageErrors,
+      'alice',
+      error,
+      pageErrorAssets.alice,
+      readClientErrorScenarioStep(alice.page),
+      pageErrorDiagnosticOptions(alice.page)
+    ));
+    await countClientErrors(alice.page, () => readClientErrorScenarioStep(alice.page));
 
     currentStage = 'bob_context';
     const bob = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(bob.context);
     bob.page = await bob.context.newPage();
+    appPages.bob = bob.page;
+    await installPageErrorEventCapture(bob.page);
     bob.observer = observation.createContextObserver('bob');
     appObservers.bob = bob.observer;
-    bob.networkObserver = createNetworkObserver(bob.page, 'bob', bob.observer, pageErrorAssets.bob);
+    bob.networkObserver = createNetworkObserver(
+      bob.page,
+      'bob',
+      bob.observer,
+      pageErrorAssets.bob,
+      runtime.pageErrorDiagnostics === true ? (details, source) => recordPageErrorProtocolEvent(
+        bob.page,
+        details,
+        source,
+        readPageScenarioStep(bob.page)
+      ) : undefined
+    );
     appNetworkObservers.bob = bob.networkObserver;
     observers.push(bob.networkObserver);
     await bob.networkObserver.start(registry);
 
-    bob.page.on('pageerror', (error) => recordPageError(pageErrors, 'bob', error, pageErrorAssets.bob, currentScenario, currentStage));
-    await countClientErrors(bob.page);
+    bob.page.on('pageerror', (error) => recordPageError(
+      pageErrors,
+      'bob',
+      error,
+      pageErrorAssets.bob,
+      readClientErrorScenarioStep(bob.page),
+      pageErrorDiagnosticOptions(bob.page)
+    ));
+    await countClientErrors(bob.page, () => readClientErrorScenarioStep(bob.page));
 
     currentScenario = 'sign-in';
     await signIn(alice.page, accounts[0], 'alice', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
@@ -4145,31 +5593,36 @@ async function main(dependencies = {}) {
     await openBobGroupMembers(bob.page, bobGroupHeader, groupName, selectedBobPeerId, runtime.screenshotDirectory, capturedScreenshots);
     report.push({name: 'group', status: 'passed'});
 
-    if(runtime.pageErrorNoPollComparison !== true) {
-      currentScenario = 'poll';
-      if(runtime.pollCreationNegativeControl === true) {
-        const negativeControl = await runPollCreationNegativeControl({
-          alice,
-          bob,
-          runtime,
-          screenshotDirectory: runtime.screenshotDirectory,
-          capturedScreenshots
-        });
-        pollNegativeControlEvidence = negativeControl.evidence;
-        pollSendResults = negativeControl.sendResults;
-      } else {
-        const pollRun = await runPollLifecycle({
-          alice,
-          bob,
-          runtime,
-          screenshotDirectory: runtime.screenshotDirectory,
-          capturedScreenshots
-        });
-        pollSendResults = pollRun.sendResults;
-      }
-      report.push({name: 'poll', status: 'passed'});
+    if(shouldRunChannelScenario(runtime)) {
+      currentScenario = 'channel';
+      await runChannelScenario(alice, bob, runtime, capturedScreenshots);
+      report.push({name: 'channel', status: 'passed'});
     }
 
+    currentScenario = 'poll';
+    if(runtime.pollCreationNegativeControl === true) {
+      const negativeControl = await runPollCreationNegativeControl({
+        alice,
+        bob,
+        runtime,
+        groupName,
+        screenshotDirectory: runtime.screenshotDirectory,
+        capturedScreenshots
+      });
+      pollNegativeControlEvidence = negativeControl.evidence;
+      pollSendResults = negativeControl.sendResults;
+    } else {
+      const pollRun = await runPollLifecycle({
+        alice,
+        bob,
+        runtime,
+        groupName,
+        screenshotDirectory: runtime.screenshotDirectory,
+        capturedScreenshots
+      });
+      pollSendResults = pollRun.sendResults;
+    }
+    report.push({name: 'poll', status: 'passed'});
     if(JSON.stringify(report.map((scenario) => scenario.name)) !== JSON.stringify(runtime.scenarios)) {
       failStage('scenario_report_incomplete');
     }
@@ -4189,7 +5642,11 @@ async function main(dependencies = {}) {
     }));
     const egress = summarizeEgress(observers);
     const observationBlock = buildObservationBlock(registry, appObservers, controls, egress);
-    gateBreakdown = summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors});
+    await waitForClientDiagnostics([alice.page, bob.page]);
+    clientErrorDiagnostics = {alice: getClientErrorDiagnostics(alice.page), bob: getClientErrorDiagnostics(bob.page)};
+    gateBreakdown = runtime.pageErrorDiagnostics === true
+      ? await enrichPageErrorReport(pageErrors, appPages, pageErrorAssets, appNetworkObservers, pageErrorRedactValues(), clientErrorDiagnostics)
+      : summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors, clientErrorDiagnostics});
     if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.alice.length + pageErrors.bob.length !== 0) {
       failStage('browser_egress_or_page_errors');
     }
@@ -4209,8 +5666,10 @@ async function main(dependencies = {}) {
       controlContextCount: CONTROL_PLAN.length,
       screenshotsCaptured: capturedScreenshots.count,
       passwordEvidence,
+      ...(runtime.scenarios?.includes('channel') ? {channelMembership: await captureChannelMembershipState()} : {}),
       ...(pollNegativeControlEvidence ? {pollNegativeControl: pollNegativeControlEvidence} : {}),
       ...(pollSendResults ? {pollSendResults} : {}),
+      gateBreakdown,
       network: {unexpectedAttempts: egress.unexpectedAttempts, observerErrors: egress.observerErrors, contexts: networkContexts},
       workerObservation: observationBlock
     };
@@ -4237,16 +5696,36 @@ async function main(dependencies = {}) {
       await Promise.all(observers.map((observer) => observer.waitForSetup()));
       await registry?.waitForSetup();
       const egress = summarizeEgress(observers);
-      gateBreakdown = summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors});
       // The bounded sign-in window has ended by the time a sign-in stage fails,
       // so the failure report states what the observer established, not a blank.
       for(const observer of Object.values(appObservers)) observer.state.windowElapsed = true;
       const failureBlock = buildObservationBlock(registry, appObservers, controls, egress);
+      if(currentStage !== 'browser_egress_or_page_errors') {
+        const diagnosticPages = Object.values(appPages).filter(Boolean);
+        await waitForClientDiagnostics(diagnosticPages);
+        const failedScenarioStep = {scenario: currentScenario, step: currentStage};
+        clientErrorDiagnostics = {
+          alice: getClientErrorDiagnostics(appPages.alice, failedScenarioStep),
+          bob: getClientErrorDiagnostics(appPages.bob, failedScenarioStep)
+        };
+        gateBreakdown = summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors, clientErrorDiagnostics});
+      }
+      if(runtime?.pageErrorDiagnostics === true) {
+        gateBreakdown = await enrichPageErrorReport(
+          pageErrors,
+          appPages,
+          pageErrorAssets,
+          appNetworkObservers,
+          pageErrorRedactValues(),
+          clientErrorDiagnostics
+        );
+      }
       const centerColumn = ['message', 'group'].includes(currentScenario) ? await captureCenterColumnState() : undefined;
       const groupNameForm = currentStage.startsWith('alice_group_name_') ? await captureGroupNameFormState() : undefined;
       const groupCreated = groupCreatedTrace.stages?.includes(currentStage) ? await captureGroupCreatedState() : undefined;
       const groupMember = groupMemberTrace.stages?.includes(currentStage) ? await captureGroupMemberState() : undefined;
       const groupMessage = groupMessageTrace.stage === currentStage ? await captureGroupMessageState() : undefined;
+      const channelMembership = CHANNEL_MEMBERSHIP_STAGES.includes(currentStage) ? await captureChannelMembershipState() : undefined;
       report = {
         status: 'failed',
         stage: currentStage,
@@ -4262,10 +5741,13 @@ async function main(dependencies = {}) {
         ...(groupCreated ? {groupCreated} : {}),
         ...(groupMember ? {groupMember} : {}),
         ...(groupMessage ? {groupMessage} : {}),
+        ...(channelMembership ? {channelMembership} : {}),
+        ...(pollNegativeControlEvidence ? {pollNegativeControl: pollNegativeControlEvidence} : {}),
+        ...(pollSendResults ? {pollSendResults} : {}),
+        ...(currentScenario ? {gateBreakdown} : {}),
         ...(currentStage === 'browser_worker_observation_incomplete' && registry
           ? {workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers)}
           : {}),
-        ...(gateBreakdown ? {gateBreakdown} : {}),
         // On failure the closed-schema evidence is still the point, validated the
         // same way: any schema violation collapses it to `unclassified`.
         ...(registry ? {
@@ -4319,7 +5801,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createWorkerDiscovery, emitAuthProgressReport, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPollMessageErrorObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPollMessageErrorObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

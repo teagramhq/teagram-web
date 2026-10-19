@@ -5,15 +5,14 @@ import {basename, dirname, isAbsolute} from 'node:path';
 import observation from './observation.cjs';
 
 export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'poll']);
-const NO_POLL_PAGE_ERROR_COMPARISON_SCENARIOS = Object.freeze(['sign-in', 'message', 'group']);
+export const OPTIONAL_SCENARIOS = Object.freeze(['channel']);
+const AVAILABLE_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'channel', 'poll']);
 export const POLL_NEGATIVE_CONTROL_SERVER_REVISION = '586403c1f4c92c09b006652278bdd02fd40ddf2d';
 export const POLL_NEGATIVE_CONTROL_EVIDENCE = Object.freeze([
   Object.freeze({shape: 'description', stage: 'alice_poll_description_create', errorType: 'POLL_ANSWERS_INVALID'}),
   Object.freeze({shape: 'input_answer', stage: 'alice_poll_input_answer_create', errorType: 'POLL_ANSWERS_INVALID'})
 ]);
 export const REQUIRED_CONTROLS = Object.freeze(Object.keys(observation.CONTROL_EXPECTATIONS));
-const POSITIVE_SCENARIO_SCREENSHOT_COUNT = 30;
-const POLL_NEGATIVE_CONTROL_SCREENSHOT_COUNT = 20;
 const REQUIRED_OBSERVATION_CONTEXTS = Object.freeze(['alice', 'bob']);
 const AUTH_PROGRESS_OBSERVATION_CONTEXTS = Object.freeze(['alice']);
 const AUTH_PROGRESS_WEBSOCKET_101_CONTEXTS = Object.freeze(['alice', 'control', 'other']);
@@ -24,10 +23,27 @@ const GATE_SCHEMES = observation.GATE_SCHEMES;
 const GATE_RESOURCE_TYPES = observation.GATE_RESOURCE_TYPES;
 const GATE_OBSERVER_ERROR_KINDS = observation.GATE_OBSERVER_ERROR_KINDS;
 const PAGE_ERROR_CONSTRUCTORS = observation.GATE_PAGE_ERROR_CONSTRUCTORS;
+const PAGE_ERROR_DIAGNOSTIC_LIMITS = observation.GATE_PAGE_ERROR_DIAGNOSTIC_LIMITS;
+const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
 const SCRIPT_ASSET = observation.SCRIPT_ASSET_PATTERN;
-const TYPE_ERROR_MESSAGE = /^[A-Za-z0-9_$ .,:'`(){}\[\]:!?+=\/-]{1,256}$/;
-const TYPE_ERROR_FUNCTION_NAME = /^[A-Za-z0-9_$ .<>.[\]-]{1,128}$/;
-const TYPE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'poll', 'unknown']);
+const PAGE_ERROR_MESSAGE_LIMIT = 512;
+const PAGE_ERROR_STACK_FRAME_LIMIT = 16;
+const PAGE_ERROR_FUNCTION_NAME_LIMIT = 128;
+const PAGE_ERROR_STACK_STATES = Object.freeze(['unavailable', 'non_string', 'no_frames', 'unclassified_frames', 'captured', 'partial', 'truncated']);
+const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'channel', 'poll', 'unknown']);
+const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
+const PAGE_DIAGNOSTIC_LIMIT = 16;
+const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
+const PAGE_DIAGNOSTIC_FIELD_LIMIT = 256;
+const PAGE_DIAGNOSTIC_VALUE_TYPES = Object.freeze(['undefined', 'null', 'boolean', 'number', 'string', 'object', 'function']);
+const PAGE_DIAGNOSTIC_SOURCES = Object.freeze(['error_event', 'unhandled_rejection', 'unknown']);
+const PAGE_DIAGNOSTIC_RPC_METHOD = /^[a-z][A-Za-z0-9_]{0,63}\.[a-z][A-Za-z0-9_]{0,63}$/;
+const PAGE_DIAGNOSTIC_RPC_CONSTRUCTORS = Object.freeze([
+  'inputPeerUser', 'inputPeerChannel', 'inputPeerChat', 'inputPeerSelf',
+  'inputUser', 'inputUserSelf', 'inputChannel', 'peerUser', 'peerChannel', 'peerChat',
+  'inputUserFromMessage', 'inputPeerUserFromMessage', 'inputPeerChannelFromMessage', 'inputChannelFromMessage'
+]);
+const PAGE_DIAGNOSTIC_RPC_ARGUMENT_LIMIT = 8;
 const AUTH_PROGRESS_REPORT_STAGES = Object.freeze([
   'runtime_inputs',
   'runtime_input_validation',
@@ -73,11 +89,7 @@ const REQUIRED_ARTIFACT_AUDIT_CHECKS = Object.freeze([
   'routeCollisions'
 ]);
 
-export function expectedScreenshotCount({pollCreationNegativeControl = false} = {}) {
-  return pollCreationNegativeControl ? POLL_NEGATIVE_CONTROL_SCREENSHOT_COUNT : POSITIVE_SCENARIO_SCREENSHOT_COUNT;
-}
-
-export function parseRequiredScenarios(value, noPollPageErrorComparison = false) {
+export function parseRequiredScenarios(value) {
   if(typeof value !== 'string' || !value.trim()) {
     throw new Error('scenario selection is required');
   }
@@ -92,7 +104,7 @@ export function parseRequiredScenarios(value, noPollPageErrorComparison = false)
 
   const seen = new Set();
   for(const scenario of scenarios) {
-    if(!REQUIRED_SCENARIOS.includes(scenario)) {
+    if(!AVAILABLE_SCENARIOS.includes(scenario)) {
       throw new Error(`unknown scenario: ${scenario}`);
     }
     if(seen.has(scenario)) {
@@ -101,19 +113,17 @@ export function parseRequiredScenarios(value, noPollPageErrorComparison = false)
     seen.add(scenario);
   }
 
-  if(noPollPageErrorComparison) {
-    if(JSON.stringify(scenarios) !== JSON.stringify(NO_POLL_PAGE_ERROR_COMPARISON_SCENARIOS)) {
-      throw new Error('--page-error-no-poll-comparison requires sign-in,message,group');
-    }
-    return [...NO_POLL_PAGE_ERROR_COMPARISON_SCENARIOS];
-  }
-
   const missing = REQUIRED_SCENARIOS.filter((scenario) => !seen.has(scenario));
   if(missing.length) {
     throw new Error(`required scenarios are missing: ${missing.join(',')}`);
   }
 
-  return [...REQUIRED_SCENARIOS];
+  return AVAILABLE_SCENARIOS.filter((scenario) => seen.has(scenario));
+}
+
+export function expectedScreenshotCount({pollCreationNegativeControl = false, scenarios = REQUIRED_SCENARIOS} = {}) {
+  const channelScreenshots = Array.isArray(scenarios) && scenarios.includes('channel') ? 10 : 0;
+  return 16 + channelScreenshots + (pollCreationNegativeControl ? 4 : 14);
 }
 
 export function parseRealClientArgs(argv) {
@@ -134,8 +144,8 @@ export function parseRealClientArgs(argv) {
     ['--scenarios', 'scenarioSelection'],
     ['--observer-controls-only', 'observerControlsOnly'],
     ['--auth-progress-one-submission', 'authProgressOneSubmission'],
-    ['--poll-creation-negative-control', 'pollCreationNegativeControl'],
-    ['--page-error-no-poll-comparison', 'pageErrorNoPollComparison']
+    ['--page-error-diagnostics', 'pageErrorDiagnostics'],
+    ['--poll-creation-negative-control', 'pollCreationNegativeControl']
   ]);
   const options = new Map();
   for(let index = 0; index < argumentsList.length; index++) {
@@ -147,7 +157,7 @@ export function parseRealClientArgs(argv) {
       throw new Error(`option was provided more than once: ${name}`);
     }
     if(name === '--observer-controls-only' || name === '--auth-progress-one-submission' ||
-        name === '--poll-creation-negative-control' || name === '--page-error-no-poll-comparison') {
+        name === '--page-error-diagnostics' || name === '--poll-creation-negative-control') {
       options.set(name, true);
       continue;
     }
@@ -162,28 +172,22 @@ export function parseRealClientArgs(argv) {
 
   const controlsOnly = options.get('--observer-controls-only') === true;
   const authProgress = options.get('--auth-progress-one-submission') === true;
+  const pageErrorDiagnostics = options.get('--page-error-diagnostics') === true;
   const pollCreationNegativeControl = options.get('--poll-creation-negative-control') === true;
-  const pageErrorNoPollComparison = options.get('--page-error-no-poll-comparison') === true;
   if(authProgress && (controlsOnly || options.has('--scenarios'))) {
     throw new Error('--auth-progress-one-submission cannot be combined with --scenarios or --observer-controls-only');
   }
+  if(controlsOnly && pageErrorDiagnostics) {
+    throw new Error('--page-error-diagnostics cannot be combined with --observer-controls-only');
+  }
   if(pollCreationNegativeControl && (controlsOnly || authProgress)) {
     throw new Error('--poll-creation-negative-control cannot be combined with --observer-controls-only or --auth-progress-one-submission');
-  }
-  if(pageErrorNoPollComparison && (controlsOnly || authProgress || pollCreationNegativeControl)) {
-    throw new Error('--page-error-no-poll-comparison cannot be combined with --observer-controls-only, --auth-progress-one-submission or --poll-creation-negative-control');
   }
   if(!controlsOnly && !authProgress && !options.has('--scenarios')) {
     throw new Error('scenario selection is required');
   }
 
-  const optional = new Set([
-    '--scenarios',
-    '--observer-controls-only',
-    '--auth-progress-one-submission',
-    '--poll-creation-negative-control',
-    '--page-error-no-poll-comparison'
-  ]);
+  const optional = new Set(['--scenarios', '--observer-controls-only', '--auth-progress-one-submission', '--page-error-diagnostics', '--poll-creation-negative-control']);
   const missing = [...names.keys()].filter((name) => !optional.has(name) && !options.has(name));
   if(missing.length) {
     throw new Error(`missing required options: ${missing.join(',')}`);
@@ -199,9 +203,8 @@ export function parseRealClientArgs(argv) {
   if(controlsOnly) {
     parsed.scenarios = [...REQUIRED_SCENARIOS];
   } else if(!authProgress) {
-    parsed.scenarios = parseRequiredScenarios(parsed.scenarioSelection, pageErrorNoPollComparison);
+    parsed.scenarios = parseRequiredScenarios(parsed.scenarioSelection);
   }
-  if(pageErrorNoPollComparison) parsed.pageErrorNoPollComparison = true;
   if(pollCreationNegativeControl) {
     if(parsed.serverRevision !== POLL_NEGATIVE_CONTROL_SERVER_REVISION) {
       throw new Error('--poll-creation-negative-control requires the pinned negative-control server revision');
@@ -239,8 +242,8 @@ export function parseFixtureReadiness(text, expected, options = {}) {
   if(requireArtifact) {
     assertEventPins(artifactReady, 'artifact-ready', expected);
   }
-  const fixtureTarget = observation.getPrivateCspTarget(serverReady.endpoint, serverReady.wssEndpoint);
-  if(!fixtureTarget || serverReady.evidenceClass !== fixtureTarget.evidenceClass ||
+  if(serverReady.endpoint !== 'https://teagramd.test' ||
+      serverReady.wssEndpoint !== 'wss://teagramd.test/apiws' ||
       serverReady.mode !== 'private' ||
       (requireArtifact && (artifactReady.endpoint !== serverReady.endpoint ||
         artifactReady.wssEndpoint !== serverReady.wssEndpoint ||
@@ -266,9 +269,8 @@ export function parseFixtureReadiness(text, expected, options = {}) {
   return {serverReady, artifactReady};
 }
 
-export function readSyntheticCredentials(credentials, runId, count = 2, resourcePrefix = 'telegram-fixture') {
-  if(!RUN_ID.test(runId || '') || !Array.isArray(credentials) || credentials.length !== 2 || ![1, 2].includes(count) ||
-      !observation.PRIVATE_CSP_TARGETS.some((target) => target.resourcePrefix === resourcePrefix)) {
+export function readSyntheticCredentials(credentials, runId, count = 2) {
+  if(!RUN_ID.test(runId || '') || !Array.isArray(credentials) || credentials.length !== 2 || ![1, 2].includes(count)) {
     throw new Error('two fixture credentials and a full run ID are required');
   }
 
@@ -300,7 +302,7 @@ export function readSyntheticCredentials(credentials, runId, count = 2, resource
     if(!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() ||
         (directoryInfo.mode & 0o077) !== 0 ||
         (typeof process.getuid === 'function' && directoryInfo.uid !== process.getuid()) ||
-        !basename(dirname(filePath)).startsWith(`${resourcePrefix}-${runId}.`) ||
+        !basename(dirname(filePath)).startsWith(`teagram-fixture-${runId}.`) ||
         !fileInfo.isFile() || fileInfo.isSymbolicLink() || fileInfo.nlink !== 1 ||
         (typeof process.getuid === 'function' && fileInfo.uid !== process.getuid()) ||
         (fileInfo.mode & 0o777) !== 0o400 || !/^[0-9a-f]{64}\n?$/.test(content)) {
@@ -327,7 +329,6 @@ function assertServerReadyEvidence(ready) {
   const workers = evidence?.workerProbes;
   const observer = evidence?.observerControlledAttempts;
   const workerTypes = ['page', 'shared_worker', 'service_worker'];
-  const fixtureTarget = observation.getPrivateCspTarget(ready.endpoint, ready.wssEndpoint);
 
   if(security?.registrationClosed !== true || security.loginCodeLogging !== false ||
       security.electionClosed !== true || security.administratorIsNull !== true ||
@@ -336,7 +337,7 @@ function assertServerReadyEvidence(ready) {
       evidence?.httpStatus !== 200 || evidence.wssUpgradeStatus !== 101 || evidence.allowedWssObserved !== 1 ||
       evidence.unexpectedAttempts !== 0 || evidence.unexpectedDetectionVerified !== true ||
       evidence.directTCP?.attempted !== 5 || evidence.directTCP.blocked !== 5 ||
-      !fixtureTarget || ready.evidenceClass !== fixtureTarget.evidenceClass ||
+      ready.evidenceClass !== 'production-teagramd' ||
       !/^[A-Za-z0-9+/]{43}=$/.test(ready.leafSPKI || '') ||
       Buffer.from(ready.leafSPKI, 'base64').byteLength !== 32 ||
       typeof ready.mtprotoPublicKeyPEM !== 'string' ||
@@ -685,6 +686,49 @@ export function parseGroupMemberState(state) {
   return Object.fromEntries(keys.map((key) => [key, key === 'membersTab' ? membersTab : state[key]]));
 }
 
+const CHANNEL_MEMBERSHIP_PAGE_KEYS = [
+  'channelRowCount',
+  'channelTitleMatches',
+  'activePeerId',
+  'chatListRowCount',
+  'pageErrorsSinceStep',
+  'consoleErrorsSinceStep',
+  'rpcErrorsSinceStep',
+  'rpcErrorTypesSinceStep'
+];
+const CHANNEL_MEMBERSHIP_STEP_WAITS = ['none', 'timeout', 'strict_mode_violation', 'other'];
+// Channel admission crosses two live clients. Keep only row counts, numeric
+// peer ids and sanitized error counts/types when describing a failed wait.
+export function parseChannelMembershipState(state) {
+  if(state === 'unavailable') return state;
+  const keys = ['channelPeerId', 'selectedBobPeerId', 'alice', 'bob', 'stepWait'];
+  const isCount = (value) => value === null || Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000;
+  const isPeerId = (value, allowNegative = true) => value === null || typeof value === 'string' &&
+    (allowNegative ? /^-?[0-9]{1,20}$/ : /^[0-9]{1,20}$/).test(value);
+  const isRpcTypes = (value) => value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length <= 16 && Object.entries(value).every(([type, count]) =>
+      /^[A-Z][A-Z0-9_]{1,63}$/.test(type) && Number.isSafeInteger(count) && count > 0 && count <= 1_000_000
+    );
+  const isClient = (client) => client !== null && typeof client === 'object' && !Array.isArray(client) &&
+    JSON.stringify(Object.keys(client).sort()) === JSON.stringify([...CHANNEL_MEMBERSHIP_PAGE_KEYS].sort()) &&
+    Number.isSafeInteger(client.channelRowCount) && client.channelRowCount >= 0 && client.channelRowCount <= 1_000_000 &&
+    Number.isSafeInteger(client.channelTitleMatches) && client.channelTitleMatches >= 0 && client.channelTitleMatches <= 1_000_000 &&
+    isPeerId(client.activePeerId) &&
+    Number.isSafeInteger(client.chatListRowCount) && client.chatListRowCount >= 0 && client.chatListRowCount <= 1_000_000 &&
+    isCount(client.pageErrorsSinceStep) && isCount(client.consoleErrorsSinceStep) && isCount(client.rpcErrorsSinceStep) &&
+    isRpcTypes(client.rpcErrorTypesSinceStep);
+  if(!state || typeof state !== 'object' || Array.isArray(state) ||
+      JSON.stringify(Object.keys(state).sort()) !== JSON.stringify([...keys].sort()) ||
+      typeof state.channelPeerId !== 'string' || !/^-?[0-9]{1,20}$/.test(state.channelPeerId) ||
+      !state.channelPeerId.startsWith('-') ||
+      typeof state.selectedBobPeerId !== 'string' || !/^[0-9]{1,20}$/.test(state.selectedBobPeerId) ||
+      !isClient(state.alice) || !isClient(state.bob) ||
+      !CHANNEL_MEMBERSHIP_STEP_WAITS.includes(state.stepWait)) {
+    return 'unclassified';
+  }
+  return Object.fromEntries(keys.map((key) => [key, state[key]]));
+}
+
 export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const hasPasswordEvidence = report.passwordEvidence !== undefined;
   const failedPasswordEvidence = controlsOnly || !hasPasswordEvidence
@@ -708,6 +752,9 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const groupMessageSummary = controlsOnly || report.groupMessage === undefined
     ? ''
     : `; group message ${JSON.stringify(parseGroupMessageState(report.groupMessage))}`;
+  const channelMembershipSummary = controlsOnly || report.channelMembership === undefined
+    ? ''
+    : `; channel membership ${JSON.stringify(parseChannelMembershipState(report.channelMembership))}`;
   if(report.stage === 'browser_egress_or_page_errors' && report.status === 'failed' && report.gateBreakdown === undefined) {
     throw new Error('browser egress/page error evidence is invalid');
   }
@@ -722,7 +769,7 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
       throw new Error('worker coverage evidence is invalid');
     }
   }
-  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}${groupMemberSummary}${groupMessageSummary}${gateBreakdownSummary}${workerCoverageSummary}`;
+  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}${groupMemberSummary}${groupMessageSummary}${channelMembershipSummary}${gateBreakdownSummary}${workerCoverageSummary}`;
 }
 
 function parseWorkerCoverageBreakdown(value) {
@@ -904,10 +951,11 @@ export function parseAuthProgressReport(report) {
   };
 }
 
-function parseBrowserGateBreakdown(value) {
+export function parseBrowserGateBreakdown(value) {
   const keys = ['counters', 'unexpectedEgressAttempts', 'observerErrors', 'pageErrors', 'pageErrorOverflow'];
   const counterKeys = ['unexpectedEgressAttempts', 'observerErrors', 'pageErrors'];
-  if(!hasExactOwnKeys(value, keys) ||
+  const hasStepDiagnostics = Object.hasOwn(value || {}, 'stepDiagnostics');
+  if(!hasExactOwnKeys(value, [...keys, ...(hasStepDiagnostics ? ['stepDiagnostics'] : [])]) ||
       !hasExactOwnKeys(value.counters, counterKeys) ||
       counterKeys.some((key) => !Number.isSafeInteger(value.counters[key]) || value.counters[key] < 0 || value.counters[key] > 1_000_000) ||
       !hasExactOwnKeys(value.unexpectedEgressAttempts, GATE_CONTEXTS) ||
@@ -946,38 +994,23 @@ function parseBrowserGateBreakdown(value) {
     }
     observerErrorCount += Object.values(errors).reduce((sum, count) => sum + count, 0);
 
-    const isPageError = (error) => {
-      if(!error || typeof error !== 'object' || Array.isArray(error) ||
-          !PAGE_ERROR_CONSTRUCTORS.includes(error.constructorName) ||
-          typeof error.scriptAsset !== 'string' || !SCRIPT_ASSET.test(error.scriptAsset)) return false;
-      if(error.constructorName !== 'TypeError') return hasExactOwnKeys(error, ['constructorName', 'scriptAsset']);
-      const frame = error.firstFrame;
-      return hasExactOwnKeys(error, ['constructorName', 'scriptAsset', 'message', 'firstFrame', 'scenario', 'stage']) &&
-        typeof error.message === 'string' && TYPE_ERROR_MESSAGE.test(error.message) &&
-        TYPE_ERROR_SCENARIOS.includes(error.scenario) &&
-        typeof error.stage === 'string' && /^[a-z][a-z0-9_]{0,95}$/.test(error.stage) &&
-        hasExactOwnKeys(frame, ['functionName', 'line', 'column', 'manifestAsset']) &&
-        typeof frame.functionName === 'string' && TYPE_ERROR_FUNCTION_NAME.test(frame.functionName) &&
-        (frame.line === null || Number.isSafeInteger(frame.line) && frame.line > 0 && frame.line <= 1_000_000_000) &&
-        (frame.column === null || Number.isSafeInteger(frame.column) && frame.column > 0 && frame.column <= 1_000_000_000) &&
-        typeof frame.manifestAsset === 'string' && SCRIPT_ASSET.test(frame.manifestAsset);
-    };
     const pageErrors = value.pageErrors[context];
-    if(!Array.isArray(pageErrors) || pageErrors.length > 512 || pageErrors.some((error) => !isPageError(error))) {
+    if(!Array.isArray(pageErrors) || pageErrors.length > 512 || pageErrors.some((error) => !isClosedPageError(error))) {
       throw new Error('browser egress/page error evidence is invalid');
     }
     pageErrorCount += pageErrors.length;
 
     const overflow = value.pageErrorOverflow[context];
-    if(!Array.isArray(overflow) || overflow.length > 1_000_000 || overflow.some((entry) => {
-      if(!entry || typeof entry !== 'object' || Array.isArray(entry) ||
-          !Number.isSafeInteger(entry.count) || entry.count < 1 || entry.count > 1_000_000) return true;
-      const {count, ...error} = entry;
-      return !isPageError(error);
-    }) || (overflow.length > 0 && pageErrors.length !== 512)) {
+    if(!Array.isArray(overflow) || overflow.length > 1_000_000 || overflow.some((entry) =>
+      !isClosedPageError(entry, true) ||
+      !Number.isSafeInteger(entry.count) || entry.count < 1 || entry.count > 1_000_000
+    ) || (overflow.length > 0 && pageErrors.length !== 512)) {
       throw new Error('browser egress/page error evidence is invalid');
     }
     pageErrorCount += overflow.reduce((sum, entry) => sum + entry.count, 0);
+  }
+  if(hasStepDiagnostics && !isSafeStepDiagnostics(value.stepDiagnostics)) {
+    throw new Error('browser egress/page error evidence is invalid');
   }
   if(value.counters.unexpectedEgressAttempts !== unexpectedAttemptCount ||
       value.counters.observerErrors !== observerErrorCount ||
@@ -985,6 +1018,137 @@ function parseBrowserGateBreakdown(value) {
     throw new Error('browser egress/page error evidence is invalid');
   }
   return value;
+}
+
+export function parsePassedBrowserGateBreakdown(report) {
+  if(!report || typeof report !== 'object' || Array.isArray(report) || report.status !== 'passed') {
+    throw new Error('passing browser report is invalid');
+  }
+  return parseBrowserGateBreakdown(report.gateBreakdown);
+}
+
+function isSafeStepDiagnostics(value) {
+  if(!hasExactOwnKeys(value, GATE_CONTEXTS)) return false;
+  return GATE_CONTEXTS.every((context) => Array.isArray(value[context]) &&
+    value[context].length <= PAGE_DIAGNOSTIC_STEP_LIMIT && value[context].every((entry) =>
+      hasExactOwnKeys(entry, [
+        'scenarioStep', 'thrownValues', 'rpcFailures', 'consoleErrors',
+        ...(Object.hasOwn(entry || {}, 'rpcFailuresTruncated') ? ['rpcFailuresTruncated'] : [])
+      ]) &&
+      (!Object.hasOwn(entry, 'rpcFailuresTruncated') || entry.rpcFailuresTruncated === true) &&
+      isSafePageErrorScenarioStep(entry.scenarioStep) &&
+      Array.isArray(entry.thrownValues) && entry.thrownValues.length <= PAGE_DIAGNOSTIC_LIMIT && entry.thrownValues.every((thrown) =>
+        hasExactOwnKeys(thrown, ['source', 'valueType', 'type', 'code', 'description']) &&
+        PAGE_DIAGNOSTIC_SOURCES.includes(thrown.source) && PAGE_DIAGNOSTIC_VALUE_TYPES.includes(thrown.valueType) &&
+        isSafeDiagnosticFields({type: thrown.type, code: thrown.code, description: thrown.description})) &&
+      Array.isArray(entry.rpcFailures) && entry.rpcFailures.length <= PAGE_DIAGNOSTIC_LIMIT && entry.rpcFailures.every(isSafeRpcDiagnosticFields) &&
+      Array.isArray(entry.consoleErrors) && entry.consoleErrors.length <= PAGE_DIAGNOSTIC_LIMIT && entry.consoleErrors.every((error) =>
+        hasExactOwnKeys(error, ['message']) && isSafeDiagnosticMessage(error.message))
+    ));
+}
+
+function isSafeRpcDiagnosticFields(value) {
+  return hasExactOwnKeys(value, ['type', 'code', 'description', 'method', 'peerArguments']) &&
+    isSafeDiagnosticFields({type: value.type, code: value.code, description: value.description}) &&
+    (value.method === 'unavailable' || typeof value.method === 'string' && PAGE_DIAGNOSTIC_RPC_METHOD.test(value.method)) &&
+    Array.isArray(value.peerArguments) && value.peerArguments.length <= PAGE_DIAGNOSTIC_RPC_ARGUMENT_LIMIT && value.peerArguments.every((argument) =>
+      hasExactOwnKeys(argument, ['argument', 'constructor', 'id']) &&
+      typeof argument.argument === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(argument.argument) &&
+      PAGE_DIAGNOSTIC_RPC_CONSTRUCTORS.includes(argument.constructor) &&
+      (argument.id === 'unavailable' || typeof argument.id === 'string' && /^-?[0-9]{1,20}$/.test(argument.id))
+    );
+}
+
+function isSafeDiagnosticFields(value) {
+  const safeType = (type) => typeof type === 'string' && (type === 'unavailable' || /^[A-Z][A-Z0-9_]{1,63}$/.test(type));
+  const safeCode = (code) => code === 'unavailable' ||
+    (Number.isSafeInteger(code) && Math.abs(code) <= 1_000_000) ||
+    (typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code));
+  return hasExactOwnKeys(value, ['type', 'code', 'description']) && safeType(value.type) && safeCode(value.code) &&
+    isSafeDiagnosticMessage(value.description);
+}
+
+function isSafeDiagnosticMessage(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= PAGE_DIAGNOSTIC_FIELD_LIMIT && isSafePageErrorMessage(value);
+}
+
+function isClosedPageError(error, includeCount = false) {
+  if(!error || typeof error !== 'object' || Array.isArray(error)) return false;
+  const hasDiagnostic = Object.hasOwn(error, 'diagnostic');
+  return hasExactOwnKeys(error, [
+    'constructorName', 'scriptAsset', 'message', 'stack', 'scenarioStep',
+    ...(hasDiagnostic ? ['diagnostic'] : []),
+    ...(includeCount ? ['count'] : [])
+  ]) &&
+    PAGE_ERROR_CONSTRUCTORS.includes(error.constructorName) &&
+    typeof error.scriptAsset === 'string' && SCRIPT_ASSET.test(error.scriptAsset) &&
+    error.message === '[redacted]' &&
+    isSafePageErrorStack(error.stack) &&
+    isSafePageErrorScenarioStep(error.scenarioStep) &&
+    (!hasDiagnostic || isSafePageErrorDiagnostic(error.diagnostic));
+}
+
+function isSafePageErrorDiagnostic(diagnostic) {
+  if(!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) return false;
+  const hasRpcErrorType = Object.hasOwn(diagnostic, 'rpcErrorType');
+  const hasRpcErrorCode = Object.hasOwn(diagnostic, 'rpcErrorCode');
+  const hasRpcMethod = Object.hasOwn(diagnostic, 'rpcMethod');
+  const keys = ['pageUrl', 'scenario', 'stage',
+    ...(hasRpcErrorType ? ['rpcErrorType'] : []), ...(hasRpcErrorCode ? ['rpcErrorCode'] : []),
+    ...(hasRpcMethod ? ['rpcMethod'] : [])];
+  if(!hasExactOwnKeys(diagnostic, keys) ||
+      !PAGE_ERROR_SCENARIOS.includes(diagnostic.scenario) ||
+      typeof diagnostic.stage !== 'string' || !/^(?:unknown|[a-z][a-z0-9_]{0,63})$/.test(diagnostic.stage) ||
+      (hasRpcErrorType && (typeof diagnostic.rpcErrorType !== 'string' || !RPC_ERROR_TYPE_PATTERN.test(diagnostic.rpcErrorType))) ||
+      (hasRpcErrorCode && (!Number.isSafeInteger(diagnostic.rpcErrorCode) || diagnostic.rpcErrorCode < 0 || diagnostic.rpcErrorCode > 999_999)) ||
+      (hasRpcMethod && (typeof diagnostic.rpcMethod !== 'string' || !PAGE_DIAGNOSTIC_RPC_METHOD.test(diagnostic.rpcMethod)))) return false;
+  if(diagnostic.pageUrl === 'unknown') return true;
+  if(typeof diagnostic.pageUrl !== 'string' || diagnostic.pageUrl.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength ||
+      /[\s?#]/.test(diagnostic.pageUrl)) return false;
+  try {
+    const parsed = new URL(diagnostic.pageUrl);
+    return parsed.origin === PRIVATE_CSP_ORIGIN && parsed.search === '' && parsed.hash === '' &&
+      !parsed.username && !parsed.password && `${parsed.origin}${parsed.pathname}` === diagnostic.pageUrl;
+  } catch {
+    return false;
+  }
+}
+
+function isSafePageErrorMessage(message) {
+  return typeof message === 'string' && message.length > 0 && message.length <= PAGE_ERROR_MESSAGE_LIMIT &&
+    !/[\u0000-\u001f\u007f]/.test(message) &&
+    !/(?:https?:\/\/|wss?:\/\/|blob:|file:|data:)|\b(?:password|secret|passphrase|token|bearer|authorization|api[_-]?key|private[_-]?key)\b|\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|[A-Za-z0-9+/=_-]{32,}/i.test(message);
+}
+
+function isSafePageErrorStack(stack) {
+  if(!hasExactOwnKeys(stack, ['state', 'lineCount', 'frameCount', 'frames']) ||
+      !PAGE_ERROR_STACK_STATES.includes(stack.state) ||
+      !Number.isSafeInteger(stack.lineCount) || stack.lineCount < 0 || stack.lineCount > 1_000_000 ||
+      !Number.isSafeInteger(stack.frameCount) || stack.frameCount < 0 || stack.frameCount > 1_000_000 ||
+      !Array.isArray(stack.frames) || stack.frames.length > PAGE_ERROR_STACK_FRAME_LIMIT || stack.frames.length > stack.frameCount ||
+      stack.frames.some((frame) => !isSafePageErrorStackFrame(frame))) return false;
+  if(['unavailable', 'non_string'].includes(stack.state)) return stack.lineCount === 0 && stack.frameCount === 0 && stack.frames.length === 0;
+  if(stack.state === 'no_frames') return stack.lineCount > 0 && stack.frameCount === 0 && stack.frames.length === 0;
+  if(stack.state === 'unclassified_frames') return stack.lineCount > 1 && stack.frameCount > 0 && stack.frames.length === 0;
+  if(stack.state === 'captured') return stack.lineCount > 1 && stack.frameCount > 0 && stack.frames.length === stack.frameCount;
+  if(stack.state === 'partial') return stack.lineCount > 1 && stack.frameCount > stack.frames.length && stack.frames.length > 0;
+  return stack.state === 'truncated' && stack.lineCount > 0 && stack.frameCount >= stack.frames.length;
+}
+
+function isSafePageErrorStackFrame(frame) {
+  return hasExactOwnKeys(frame, ['functionName', 'scriptAsset', 'line', 'column']) &&
+    typeof frame.functionName === 'string' && frame.functionName.length <= PAGE_ERROR_FUNCTION_NAME_LIMIT &&
+    !/\b(?:password|secret|passphrase|token|bearer|authorization|api[_-]?key|private[_-]?key)\b/i.test(frame.functionName) &&
+    !/^[A-Za-z0-9_-]{32,}$/.test(frame.functionName) &&
+    /^(?:unknown|[A-Za-z_$][A-Za-z0-9_$]*(?:\.(?:[A-Za-z_$][A-Za-z0-9_$]*|<anonymous>))*)$/.test(frame.functionName) &&
+    typeof frame.scriptAsset === 'string' && SCRIPT_ASSET.test(frame.scriptAsset) &&
+    Number.isSafeInteger(frame.line) && frame.line >= 0 && frame.line <= 100_000_000 &&
+    Number.isSafeInteger(frame.column) && frame.column >= 0 && frame.column <= 100_000_000;
+}
+
+function isSafePageErrorScenarioStep(value) {
+  return hasExactOwnKeys(value, ['scenario', 'step']) && PAGE_ERROR_SCENARIOS.includes(value.scenario) &&
+    typeof value.step === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(value.step);
 }
 
 function parseAuthProgressNetwork(network) {
@@ -1064,15 +1228,17 @@ function hasExactOwnKeys(value, keys) {
 }
 
 export function assertAllScenariosPassed(results, expectedScenarios = REQUIRED_SCENARIOS) {
-  if(!Array.isArray(results) || !Array.isArray(expectedScenarios) || expectedScenarios.length === 0 ||
-      expectedScenarios.some((scenario) => !REQUIRED_SCENARIOS.includes(scenario)) ||
-      new Set(expectedScenarios).size !== expectedScenarios.length) {
+  if(!Array.isArray(results)) {
     throw new Error('scenario results are required');
+  }
+  if(!Array.isArray(expectedScenarios) || expectedScenarios.some((scenario) => !AVAILABLE_SCENARIOS.includes(scenario)) ||
+      new Set(expectedScenarios).size !== expectedScenarios.length) {
+    throw new Error('expected scenarios are invalid');
   }
 
   const byName = new Map();
   for(const result of results) {
-    if(!result || typeof result.name !== 'string' || !expectedScenarios.includes(result.name)) {
+    if(!result || typeof result.name !== 'string' || !AVAILABLE_SCENARIOS.includes(result.name)) {
       throw new Error('scenario result has an unknown name');
     }
     if(byName.has(result.name)) {

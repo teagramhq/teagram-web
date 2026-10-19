@@ -15,24 +15,10 @@
 // state because the accepted harness owns no blob module probe able to confirm
 // them (MAIN-1483 precheck).
 
-const PRIVATE_CSP_TARGETS = Object.freeze([
-  Object.freeze({origin: 'https://telegramd.test', wssEndpoint: 'wss://telegramd.test/apiws', host: 'telegramd.test', evidenceClass: 'production-telegramd', resourcePrefix: 'telegram-fixture'}),
-  Object.freeze({origin: 'https://teagramd.test', wssEndpoint: 'wss://teagramd.test/apiws', host: 'teagramd.test', evidenceClass: 'production-teagramd', resourcePrefix: 'teagram-fixture'})
-]);
-const PRIVATE_CSP_ORIGINS = Object.freeze(PRIVATE_CSP_TARGETS.map((target) => target.origin));
-const PRIVATE_CSP_ORIGIN = PRIVATE_CSP_TARGETS[0].origin;
-const PRIVATE_CSP_WSS = PRIVATE_CSP_TARGETS[0].wssEndpoint;
-
-function getPrivateCspTarget(endpoint, wssEndpoint) {
-  return PRIVATE_CSP_TARGETS.find((target) => target.origin === endpoint && target.wssEndpoint === wssEndpoint);
-}
-
-function isPrivateCspOrigin(origin) {
-  return PRIVATE_CSP_ORIGINS.includes(origin);
-}
+const PRIVATE_CSP_ORIGIN = 'https://teagramd.test';
 
 const LIMITS = Object.freeze({
-  attachedTargets: 16,
+  attachedTargets: 32,
   countedEventsPerContext: 4096,
   cdpMessageBytes: 256 * 1024,
   commandTimeoutMs: 5000
@@ -51,6 +37,8 @@ const PAGE_CDP_METHODS = Object.freeze([
   'Network.enable',
   'Audits.enable',
   'Log.enable',
+  'Runtime.enable',
+  'Runtime.callFunctionOn',
   'Target.setAutoAttach',
   'Target.getTargetInfo',
   'Target.sendMessageToTarget',
@@ -61,6 +49,7 @@ const WORKER_CDP_METHODS = Object.freeze([
   'Audits.enable',
   'Log.enable',
   'Runtime.enable',
+  'Runtime.callFunctionOn',
   'Runtime.runIfWaitingForDebugger'
 ]);
 
@@ -157,6 +146,7 @@ const GATE_PAGE_ERROR_CONSTRUCTORS = Object.freeze([
   'TypeError',
   'URIError'
 ]);
+const GATE_PAGE_ERROR_DIAGNOSTIC_LIMITS = Object.freeze({count: 16, messageLength: 2048, stackLength: 8192, pageUrlLength: 2048});
 const SCRIPT_ASSET_PATTERN = /^(?:unknown|[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(?:c|m)?js)$/;
 
 const UNCLASSIFIED_NETWORK_BLOCK = Object.freeze({classification: 'unclassified'});
@@ -205,10 +195,10 @@ function classifyWorkerSource(url, origin = PRIVATE_CSP_ORIGIN) {
     } catch {
       return {label: 'cross_origin', originClass: 'cross_origin', isBlob: true};
     }
-    if(inner.origin === origin || isPrivateCspOrigin(inner.origin)) return {label: 'blob_same_origin', originClass: 'blob_same_origin', isBlob: true};
+    if(inner.origin === origin) return {label: 'blob_same_origin', originClass: 'blob_same_origin', isBlob: true};
     return {label: 'cross_origin', originClass: 'cross_origin', isBlob: true};
   }
-  if(parsed.origin === origin || isPrivateCspOrigin(parsed.origin)) {
+  if(parsed.origin === origin) {
     const label = labelForPathname(parsed.pathname);
     return {label: label || 'other_same_origin', originClass: 'other_same_origin', isBlob: false};
   }
@@ -294,6 +284,8 @@ function createContextObserver(name, options = {}) {
   const dedicatedWorkerTargetIds = new Set();
   const workerSourceLabels = new Set();
   const requestLabels = new Map();
+  const attachedTargetIds = new Set();
+  let anonymousAttachedTargets = 0;
 
   const state = {
     countedEvents: 0,
@@ -438,7 +430,7 @@ function createContextObserver(name, options = {}) {
   }
 
   function workerErrorSnapshot() {
-    const errorTypes = Object.fromEntries([...state.workerErrorCounts.entries()].sort(([a], [b]) => a.localeCompare(b)));
+    const errorTypes = Object.fromEntries([...state.workerErrorCounts.entries()].sort(([left], [right]) => left.localeCompare(right)));
     return {
       evaluationExceptions: state.workerErrorCounts.get('evaluation_exception') || 0,
       errorTypes
@@ -492,12 +484,15 @@ function createContextObserver(name, options = {}) {
 
   function noteAttached(targetId = null) {
     if(!countEvent()) return false;
-    if(state.attachedTargets >= LIMITS.attachedTargets) {
+    if(typeof targetId === 'string' && attachedTargetIds.has(targetId)) return true;
+    if(attachedTargetIds.size + anonymousAttachedTargets >= LIMITS.attachedTargets) {
       recordOverflow();
       return false;
     }
-    state.attachedTargets++;
+    if(typeof targetId === 'string') attachedTargetIds.add(targetId);
+    else anonymousAttachedTargets++;
     const record = targetId ? targets.get(targetId) : null;
+    state.attachedTargets = Math.max(state.attachedTargets, attachedTargetIds.size + anonymousAttachedTargets);
     if(record) record.attached = true;
     return true;
   }
@@ -511,6 +506,7 @@ function createContextObserver(name, options = {}) {
   function noteDestroyed(targetId) {
     if(!countEvent()) return;
     const record = targets.get(targetId);
+    if(attachedTargetIds.delete(targetId) && record) record.attached = false;
     if(!record) return;
     record.destroyed = true;
     if(!record.setupComplete) {
@@ -544,6 +540,8 @@ function createContextObserver(name, options = {}) {
   }
 
   function noteWorkerEvent(targetId, method, params, sessionId = targetId) {
+    // Console payloads use a separate bounded reader for synthetic API error diagnostics.
+    if(method === 'Runtime.consoleAPICalled') return;
     if(!countEvent()) return;
     if(method === 'Network.webSocketCreated' || method === 'Network.webSocketHandshakeResponseReceived') {
       noteWebSocket101Event(sessionId, method, params, targetId);
@@ -983,6 +981,7 @@ module.exports = {
   GATE_EGRESS_SOURCES,
   GATE_OBSERVER_ERROR_KINDS,
   GATE_PAGE_ERROR_CONSTRUCTORS,
+  GATE_PAGE_ERROR_DIAGNOSTIC_LIMITS,
   GATE_RESOURCE_TYPES,
   GATE_SCHEMES,
   LIMITS,
@@ -991,9 +990,6 @@ module.exports = {
   ORIGIN_CLASSES,
   PAGE_CDP_METHODS,
   PRIVATE_CSP_ORIGIN,
-  PRIVATE_CSP_ORIGINS,
-  PRIVATE_CSP_TARGETS,
-  PRIVATE_CSP_WSS,
   SHARED_WORKER_STATES,
   SCRIPT_ASSET_PATTERN,
   SOURCE_FETCH_STATES,
@@ -1013,8 +1009,6 @@ module.exports = {
   createWebSocket101Grid,
   createWebSocket101Phase,
   evaluateControl,
-  getPrivateCspTarget,
-  isPrivateCspOrigin,
   isWorkerScriptType,
   labelForPathname,
   validateContextBlock,

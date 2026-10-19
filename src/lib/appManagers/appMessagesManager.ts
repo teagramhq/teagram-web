@@ -843,7 +843,10 @@ export class AppMessagesManager extends AppManager {
         dialog.draft = draft;
 
         let drop = false;
-        if(!draft && !getServerMessageId(dialog.top_message)) {
+        const hasTopMessage = getServerMessageId(dialog.top_message);
+        const canKeepEmptyChannelDialog = !hasTopMessage && isDialog(dialog) &&
+          this.dialogsStorage.canSaveEmptyChannelDialog(peerId, dialog);
+        if(!draft && !hasTopMessage && !canKeepEmptyChannelDialog) {
           this.dialogsStorage.dropDialog(peerId);
           drop = true;
         } else {
@@ -4685,7 +4688,7 @@ export class AppMessagesManager extends AppManager {
     let offsetIndex = 0;
     query ||= undefined;
 
-    let offsetDate = this.dialogsStorage.getOffsetDate(folderId);
+    let offsetDate = this.dialogsStorage.getOffsetDate(folderId, filterType);
     if(offsetDate) {
       offsetIndex = offsetDate * 0x10000;
       offsetDate += this.timeManager.getServerTimeOffset();
@@ -4694,7 +4697,7 @@ export class AppMessagesManager extends AppManager {
     const useLimit = 100;
     const middleware = this.middleware.get();
     const isSearch = !!query;
-    const peerId = this.dialogsStorage.isVirtualFilter(folderId) ? folderId : undefined;
+    const peerId = this.dialogsStorage.isVirtualFilter(folderId, filterType) ? folderId : undefined;
     const cutoffGeneration = filterType === FilterType.Saved ?
       undefined :
       this.getChannelAvailableMinIdGeneration();
@@ -4735,7 +4738,7 @@ export class AppMessagesManager extends AppManager {
         folderId !== GLOBAL_FOLDER_ID;
       if(shouldResetPinnedOrder && folderId !== FOLDER_ID_ALL) {
         log('resetting pinned order', folderId);
-        this.dialogsStorage.resetPinnedOrder(folderId);
+        this.dialogsStorage.resetPinnedOrder(folderId, filterType);
       }
 
       if(!peerId && !offsetDate) {
@@ -4761,7 +4764,7 @@ export class AppMessagesManager extends AppManager {
           result.dialogs,
           shouldResetPinnedOrder && folderId === FOLDER_ID_ALL ? (order) => {
             log('seeding pinned order', folderId, order);
-            this.dialogsStorage.handleDialogsPinned(folderId, order);
+            this.dialogsStorage.handleDialogsPinned(folderId, order, filterType);
             this.appCommunitiesManager.handlePinnedDialogsOrder(folderId);
           } : undefined
         );
@@ -4857,11 +4860,16 @@ export class AppMessagesManager extends AppManager {
         ) : rawCount;
 
       // exclude empty draft dialogs
-      const folderDialogs = this.dialogsStorage.getFolderDialogs(folderId, false);
+      const folderDialogs = this.dialogsStorage.getFolderDialogs(folderId, false, filterType);
       let dialogsLength = 0;
       if(!isSearch) for(let i = 0, length = folderDialogs.length; i < length; ++i) {
         const dialog = folderDialogs[i];
-        if(getServerMessageId(dialog.top_message) || (dialog as Dialog).draft) {
+        const peerId = isDialog(dialog) ? dialog.peerId : undefined;
+        const hasTopMessage = getServerMessageId(dialog.top_message);
+        const hasDraft = (dialog as Dialog).draft;
+        const isEmptyChannelDialog = !hasTopMessage && !hasDraft && peerId !== undefined &&
+          this.dialogsStorage.canSaveEmptyChannelDialog(peerId, dialog as Dialog);
+        if(hasTopMessage || hasDraft || isEmptyChannelDialog) {
           ++dialogsLength;
         } else {
           this.log.error('something strange with dialog', dialog);
@@ -4879,7 +4887,7 @@ export class AppMessagesManager extends AppManager {
       }
 
       if(isEnd && !isSearch) {
-        this.dialogsStorage.setDialogsLoaded(folderId, true);
+        this.dialogsStorage.setDialogsLoaded(folderId, true, filterType);
       }
 
       if(hasPrepend) {
@@ -4888,7 +4896,7 @@ export class AppMessagesManager extends AppManager {
         this.rootScope.dispatchEvent('dialogs_multiupdate', new Map());
       }
 
-      log('end', {isEnd, hasPrepend, offsetDate: this.dialogsStorage.getOffsetDate(folderId)});
+      log('end', {isEnd, hasPrepend, offsetDate: this.dialogsStorage.getOffsetDate(folderId, filterType)});
 
       const dialogs = items;
       const slicedDialogs = limit === useLimit ? dialogs : dialogs.slice(0, limit);
@@ -5805,9 +5813,28 @@ export class AppMessagesManager extends AppManager {
             }
           }
 
-          this.dialogsStorage.applyDialogs(result);
+          const dialogs = [...result.dialogs];
+          for(const peerId of reloadConversationsPeers.keys()) {
+            const updates = this.newUpdatesAfterReloadToHandle[this.getUpdateAfterReloadKey(peerId)];
+            const hasNewChannelMessage = updates && [...updates].some((update) => update._ === 'updateNewChannelMessage');
+            // A queued post can fill a missing dialog only while cached membership is still active.
+            if(
+              !hasNewChannelMessage ||
+              !this.appPeersManager.isChannel(peerId) ||
+              !this.appChatsManager.isInChat(peerId.toChatId()) ||
+              dialogs.some((dialog) => dialog._ === 'dialog' && this.dialogsStorage.getDialogPeerId(dialog) === peerId)
+            ) {
+              continue;
+            }
 
-          result.dialogs.forEach((dialog) => {
+            const cachedDialog = this.dialogsStorage.getDialogOnly(peerId);
+            dialogs.push(cachedDialog ? copy(cachedDialog) : this.dialogsStorage.generateDialog(peerId));
+          }
+
+          const resultToApply = dialogs.length === result.dialogs.length ? result : {...result, dialogs};
+          this.dialogsStorage.applyDialogs(resultToApply);
+
+          resultToApply.dialogs.forEach((dialog) => {
             if(dialog._ !== 'dialog') {
               return;
             }
@@ -7405,7 +7432,8 @@ export class AppMessagesManager extends AppManager {
       }
 
       const max = await this.apiManager.getLimit(limitType);
-      if(this.dialogsStorage.getVisiblePinnedCount(filterId) >= max) {
+      const filterType = isSaved ? FilterType.Saved : this.dialogsStorage.getFilterType(filterId);
+      if(this.dialogsStorage.getVisiblePinnedCount(filterId, filterType) >= max) {
         throw makeError(!_isDialog ? 'PINNED_TOO_MUCH' : 'PINNED_DIALOGS_TOO_MUCH');
       }
     }
@@ -8057,6 +8085,10 @@ export class AppMessagesManager extends AppManager {
 
     const processDialog = (dialog: AnyDialog) => {
       const {peerId} = dialog;
+      if(isDialog(dialog) && this.dialogsStorage.dropIfCannotSaveDialog(peerId, dialog)) {
+        return;
+      }
+
       this.dialogsStorage.pushDialog({dialog});
       if(!this.appPeersManager.isChannel(peerId)) {
         newMaxSeenId = Math.max(newMaxSeenId, dialog.top_message || 0);
@@ -10771,7 +10803,13 @@ export class AppMessagesManager extends AppManager {
     const channelId = update.channel_id;
     const peerId = channelId.toPeerId(true);
     const channel = this.appChatsManager.getChat(channelId);
-    if(channel?._ !== 'channel') {
+    if(channel?._ === 'channelForbidden') {
+      const dialog = this.dialogsStorage.getDialogOnly(peerId);
+      if(dialog) {
+        this.dialogsStorage.dropIfCannotSaveDialog(peerId, dialog);
+      }
+      return;
+    } else if(channel?._ !== 'channel') {
       return;
     }
 
@@ -12509,23 +12547,7 @@ export class AppMessagesManager extends AppManager {
               break;
             }
 
-            let channel = this.appChatsManager.getChat(peerId.toChatId());
-            if(channel._ === 'channel') {
-              channel = {
-                _: 'channelForbidden',
-                id: channel.id,
-                access_hash: channel.access_hash,
-                title: channel.title,
-                pFlags: channel.pFlags
-              };
-            }
-
-            this.appChatsManager.saveApiChats([channel]);
-
-            this.apiUpdatesManager.processLocalUpdate({
-              _: 'updateChannel',
-              channel_id: channel.id
-            });
+            this.appChatsManager.forbidChannel(peerId.toChatId());
             break;
         }
 
@@ -12885,6 +12907,7 @@ export class AppMessagesManager extends AppManager {
     let typing = this.typings[key];
     if(
       !peerId ||
+      this.appPeersManager.isBroadcast(peerId) ||
       !(await this.canSendToPeer(peerId)) ||
       peerId === this.appPeersManager.peerId ||
       // (!force && deepEqual(typing?.action, action))

@@ -489,6 +489,16 @@ class ApiUpdatesManager {
         this.reconcileStreamedMessageDraftState(streamedDraftState);
         log('finished channel get diff');
       }
+    }).catch((error: ApiError) => {
+      switch(error.type) {
+        case 'PEER_ID_INVALID':
+        case 'CHANNEL_PRIVATE':
+        case 'CHANNEL_INVALID':
+          this.appChatsManager.forbidChannel(channelId);
+          break;
+      }
+
+      throw error;
     });
 
     const guardedPromise = this.guardStreamedMessageDraftDifference(

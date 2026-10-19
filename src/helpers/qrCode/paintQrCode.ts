@@ -2,7 +2,7 @@ import pause from '@helpers/schedulers/pause';
 import textToSvgURL from '@helpers/textToSvgURL';
 
 /**
- * Builds a Telegram-styled QR canvas for `data` using the supplied palette.
+ * Builds a Teagram-branded QR canvas for `data` using the supplied palette.
  * Shared between the auth-flow `SignQRCard` and the in-app "My QR code" popup.
  *
  * The host element receives the canvas as its last child; existing children
@@ -20,7 +20,7 @@ export type PaintQrOptions = {
   background: string;
   /** Dot color — the "ink" of the QR code. */
   foreground: string;
-  /** Color used to tint the embedded Telegram logo. */
+  /** Color used to tint the embedded Teagram T mark. */
   logoColor: string;
   /**
    * Device-pixel multiplier for the rendered QR bitmap. Defaults to the screen
@@ -39,7 +39,7 @@ export type PaintQrOptions = {
   QRCodeStylingCtor: any;
 };
 
-// The Telegram logo SVG is identical for a given tint every paint; fetch +
+// The monochrome T mark is identical for a given tint every paint; fetch +
 // recolor + data-URL it once per colour instead of on every QR regenerate.
 const logoUrlCache = new Map<string, Promise<string>>();
 function getLogoUrl(logoColor: string): Promise<string> {
