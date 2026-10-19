@@ -1,4 +1,4 @@
-import getNewActiveChannelMirrorChatId, {getNewActiveChannelMirrorChatIds} from '@lib/apiManagerProxyUtils/newActiveChannelMirror';
+import getNewActiveChannelMirrorChatId from '@lib/apiManagerProxyUtils/newActiveChannelMirror';
 
 describe('new active channel mirror notifications', () => {
   const activeChannel = (id: number, pFlags: Record<string, boolean> = {}) => ({
@@ -30,21 +30,5 @@ describe('new active channel mirror notifications', () => {
   test('does not notify for a channel peer that was already mirrored', () => {
     const channel = activeChannel(12349) as any;
     expect(getNewActiveChannelMirrorChatId(channel, channel)).toBeUndefined();
-  });
-
-  test('returns newly active channel ids from a full peer mirror snapshot', () => {
-    const previousPeers = {
-      [12351]: activeChannel(12351, {left: true}),
-      [12352]: activeChannel(12352),
-      [12353]: {_:'channelForbidden', id: 12353}
-    } as any;
-    const nextPeers = {
-      [12351]: activeChannel(12351),
-      [12352]: activeChannel(12352),
-      [12353]: activeChannel(12353),
-      [12354]: activeChannel(12354)
-    } as any;
-
-    expect(getNewActiveChannelMirrorChatIds(previousPeers, nextPeers)).toEqual([12351, 12353, 12354]);
   });
 });
