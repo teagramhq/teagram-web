@@ -202,6 +202,8 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
   public serviceMessagePort: ServiceMessagePort<true>;
   private lastServiceWorker: ServiceWorker;
+  private serviceWorkerServerIds = new WeakMap<ServiceWorker, string>();
+  private serviceWorkerAttaches = new WeakMap<ServiceWorker, Promise<boolean>>();
 
   private pingServiceWorkerPromise: CancellablePromise<void>;
 
@@ -773,17 +775,105 @@ class ApiManagerProxy extends MTProtoMessagePort {
   private attachServiceWorker(serviceWorker: ServiceWorker) {
     if(this.lastServiceWorker === serviceWorker) {
       this.log.warn('trying to attach same service worker');
-      return;
+      return Promise.resolve(true);
     }
 
-    this.lastServiceWorker && this.serviceMessagePort.detachPort(this.lastServiceWorker);
+    const pending = this.serviceWorkerAttaches.get(serviceWorker);
+    if(pending) return pending;
+
+    const promise = this.attachServiceWorkerWithIdentity(serviceWorker);
+    this.serviceWorkerAttaches.set(serviceWorker, promise);
+    return promise.finally(() => {
+      if(this.serviceWorkerAttaches.get(serviceWorker) === promise) {
+        this.serviceWorkerAttaches.delete(serviceWorker);
+      }
+    });
+  }
+
+  private async attachServiceWorkerWithIdentity(serviceWorker: ServiceWorker) {
+    if(this.lastServiceWorker) {
+      this.serviceMessagePort.detachPort(this.lastServiceWorker);
+      this.lastServiceWorker = undefined;
+    }
+
+    const serverId = getActiveServerId();
+    if(!this.isServiceWorkerForServer(serviceWorker, serverId)) {
+      this.log.warn('refusing service worker whose script targets another server', serviceWorker.scriptURL, serverId);
+      return false;
+    }
+
+    const identity = await this.requestServiceWorkerHandshake(serviceWorker, 'teagram:server-handshake', serverId);
+
+    if(!identity?.accepted || identity.serverId !== serverId || getActiveServerId() !== serverId) {
+      this.log.warn('refusing service worker with a different server identity', identity?.serverId, serverId);
+      return false;
+    }
+
+    this.serviceWorkerServerIds.set(serviceWorker, serverId);
+    const acknowledgment = await this.requestServiceWorkerHandshake(serviceWorker, 'teagram:server-handshake-ack', serverId);
+    if(!acknowledgment?.accepted || acknowledgment.serverId !== serverId) {
+      this.serviceWorkerServerIds.delete(serviceWorker);
+      this.log.warn('service worker identity acknowledgment failed', acknowledgment?.serverId, serverId);
+      return false;
+    }
+
     this.serviceMessagePort.attachSendPort(this.lastServiceWorker = serviceWorker);
-    this.serviceMessagePort.invokeVoid('hello', undefined);
+    this.invokeVoid('serviceWorkerOnline', true);
     this.serviceMessagePort.invokeVoid('environment', ENVIRONMENT);
     this.serviceMessagePort.invokeVoid('setLogBufferEnabled', DEBUG);
 
     DeferredIsUsingPasscode.isUsingPasscode().then((value) => {
       this.serviceMessagePort.invokeVoid('toggleUsingPasscode', {type: 'init', isUsingPasscode: value});
+    });
+
+    return true;
+  }
+
+  private isServiceWorkerForServer(serviceWorker: ServiceWorker, serverId: string) {
+    try {
+      return new URL(serviceWorker.scriptURL).searchParams.get('__tg_server') === serverId;
+    } catch{
+      return false;
+    }
+  }
+
+  private requestServiceWorkerHandshake(
+    serviceWorker: ServiceWorker,
+    type: 'teagram:server-handshake' | 'teagram:server-handshake-ack',
+    serverId: string
+  ) {
+    return new Promise<{serverId: string, accepted: boolean}>((resolve) => {
+      let channel: MessageChannel;
+      try {
+        channel = new MessageChannel();
+      } catch{
+        resolve(undefined);
+        return;
+      }
+
+      let settled = false;
+      const finish = (result?: {serverId: string, accepted: boolean}) => {
+        if(settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        channel.port1.close();
+        resolve(result);
+      };
+      const timeout = window.setTimeout(() => finish(), 5000);
+      channel.port1.addEventListener('message', (event) => {
+        const result = event.data;
+        if(typeof result?.serverId === 'string' && typeof result?.accepted === 'boolean') {
+          finish(result);
+        } else {
+          finish();
+        }
+      }, {once: true});
+      channel.port1.start();
+      try {
+        serviceWorker.postMessage({type, serverId}, [channel.port2]);
+      } catch{
+        finish();
+      }
     });
   }
 
@@ -836,11 +926,9 @@ class ApiManagerProxy extends MTProtoMessagePort {
       });
 
       const controller = navigator.serviceWorker.controller || registration.installing || registration.waiting || registration.active;
-      this.attachServiceWorker(controller);
-
-      if(import.meta.env.VITE_MTPROTO_SW) {
-        this.onWorkerFirstMessage(controller);
-      }
+      void this.attachServiceWorker(controller).then((attached) => {
+        if(attached && import.meta.env.VITE_MTPROTO_SW) this.onWorkerFirstMessage(controller);
+      });
     }).catch((err) => {
       this.log.error('SW registration failed!', err);
 
@@ -878,6 +966,28 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
     // ! I hate webpack - it won't load it by using worker.register, only navigator.serviceWorker will do it.
     const worker = navigator.serviceWorker;
+    worker.addEventListener('message', (event) => {
+      const data = event.data;
+      const serviceWorker = event.source as ServiceWorker | null;
+      if(data?.type === 'teagram:server-handshake-request') {
+        event.stopImmediatePropagation();
+        const port = event.ports[0];
+        if(!port) return;
+
+        const serverId = getActiveServerId();
+        const accepted = !!serviceWorker && data.serverId === serverId &&
+          this.isServiceWorkerForServer(serviceWorker, serverId);
+        if(accepted) this.serviceWorkerServerIds.set(serviceWorker, serverId);
+        port.postMessage({serverId, accepted});
+        port.close();
+        return;
+      }
+
+      if(!serviceWorker || this.serviceWorkerServerIds.get(serviceWorker) !== getActiveServerId()) {
+        event.stopImmediatePropagation();
+        event.ports.forEach((port) => port.close());
+      }
+    }, {capture: true});
     this._registerServiceWorker();
 
     // worker.startMessages();
@@ -886,7 +996,8 @@ class ApiManagerProxy extends MTProtoMessagePort {
       this.log.warn('controllerchange');
 
       const controller = worker.controller;
-      this.attachServiceWorker(controller);
+      if(!controller) return;
+      void this.attachServiceWorker(controller);
 
       controller.addEventListener('error', (e) => {
         this.log.error('controller error:', e);
@@ -908,9 +1019,10 @@ class ApiManagerProxy extends MTProtoMessagePort {
         },
 
         hello: (payload, source) => {
+          if(payload?.serverId !== getActiveServerId()) return;
           this.log('got hello from service worker');
           this.serviceMessagePort.resendLockTask(source);
-          this.serviceMessagePort.invokeVoid('environment', ENVIRONMENT);
+          this.serviceMessagePort.invokeVoid('environment', ENVIRONMENT, source);
         },
 
         share: (payload) => {

@@ -121,7 +121,7 @@ class LocalStorage<Storage extends Record<string, any>> {
         }
       } else {
         const persistentServerKeys = Object.keys(localStorage)
-          .filter((key) => key.startsWith('teagram.'))
+          .filter((key) => key.startsWith('teagram.') || /^teagram-custom-[0-9a-f]{64}:/.test(key))
           .map((key) => [key, localStorage.getItem(key)] as const);
         localStorage.clear();
         persistentServerKeys.forEach(([key, value]) => {

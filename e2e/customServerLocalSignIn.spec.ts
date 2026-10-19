@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {request as httpRequest} from 'node:http';
 import {createServer} from 'node:https';
-import {expect, test} from '@playwright/test';
+import {expect, test, type Page} from '@playwright/test';
 import {WebSocket, WebSocketServer} from 'ws';
 
 const SERVER_HOST = 'second-server.example.test';
@@ -13,7 +13,7 @@ const SERVER_WSS_ENDPOINT = `wss://${SERVER_HOST}/apiws`;
 const SERVER_USER = process.env.TEAGRAM_CUSTOM_SERVER_TEST_USER || 'custom_server_user';
 const SERVER_PASSWORD = process.env.TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD || 'Teagram-Test-Password-123!';
 
-test('signs in to a second local server through the custom server picker and worker', async({page}, testInfo) => {
+test('isolates two server tabs when a custom server worker takes control', async({page}, testInfo) => {
   const serverHttpUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL;
   const serverWebSocketUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_WS_URL;
   const hasServerFixture = !!serverHttpUrl && !!serverWebSocketUrl;
@@ -42,6 +42,7 @@ test('signs in to a second local server through the custom server picker and wor
   // Both hosts resolve to this listener (see playwright.private-auth.config.ts) because
   // Playwright routing does not cover module imports inside the MTProto SharedWorker.
   const connections: string[] = [];
+  let customPage: Page | undefined;
   const tlsServer = createServer({
     key: readFileSync(privateKeyPath),
     cert: readFileSync(certificatePath)
@@ -49,6 +50,12 @@ test('signs in to a second local server through the custom server picker and wor
     const host = (request.headers.host || '').replace(/:\d+$/, '');
     const url = new URL(request.url || '/', `https://${host}`);
     if(host === APP_HOST) {
+      if(url.pathname === '/stream/__server-isolation-probe') {
+        response.writeHead(200, {'content-type': 'text/plain'});
+        response.end('network-default');
+        return;
+      }
+
       const upstream = httpRequest({
         host: 'localhost',
         port: localAppPort,
@@ -127,28 +134,64 @@ test('signs in to a second local server through the custom server picker and wor
       return hostname === APP_HOST || hostname === SERVER_HOST ? route.continue() : route.abort();
     });
 
-    await page.goto(`${appOriginString}/?noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
+    await page.goto(appOriginString, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => isSecureContext && !!crypto.subtle)).toBe(true);
 
-    const picker = page.getByRole('dialog');
+    const defaultPicker = page.getByRole('dialog');
+    await defaultPicker.getByRole('textbox', {name: 'Server host'}).fill(APP_HOST);
+    await defaultPicker.getByRole('button', {name: 'Continue'}).click();
+    await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+    await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
+
+    customPage = await page.context().newPage();
+    await customPage.goto(appOriginString, {waitUntil: 'domcontentloaded'});
+    expect(await customPage.evaluate(() => isSecureContext && !!crypto.subtle)).toBe(true);
+
+    const picker = customPage.getByRole('dialog');
     const hostInput = picker.getByRole('textbox', {name: 'Server host'});
-    await expect(hostInput).toHaveValue('demo.teagram.io');
     await hostInput.fill(SERVER_HOST);
     await picker.getByRole('button', {name: 'Continue'}).click();
 
-    const confirm = page.getByRole('dialog');
+    const confirm = customPage.getByRole('dialog');
     await expect(confirm.getByText(`Server: ${SERVER_HOST}`)).toBeVisible();
     expect(discoveryErrors).toEqual([]);
     await expect(confirm.getByText(/SPKI SHA-256:/)).toBeVisible();
     await confirm.getByRole('button', {name: 'Confirm and use this server'}).click();
 
-    const returningPicker = page.getByRole('dialog');
+    const returningPicker = customPage.getByRole('dialog');
     await expect(returningPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(SERVER_HOST);
     await returningPicker.getByRole('button', {name: 'Continue'}).click();
-    await expect.poll(() => page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__ || ''), {timeout: 20_000})
+    await expect.poll(() => customPage.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__ || ''), {timeout: 20_000})
       .toBe(SERVER_HOST);
 
-    const auth = page.locator('#auth-pages');
+    const customServerId = await customPage.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__ as string);
+    await expect.poll(() => page.evaluate(() => {
+      const scriptUrl = navigator.serviceWorker.controller?.scriptURL;
+      return scriptUrl ? new URL(scriptUrl).searchParams.get('__tg_server') : null;
+    }), {timeout: 30_000}).toBe(customServerId);
+    expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
+
+    const handshake = await page.evaluate((serverId) => new Promise((resolve, reject) => {
+      const controller = navigator.serviceWorker.controller;
+      if(!controller) return reject(new Error('custom server worker did not take control'));
+
+      const channel = new MessageChannel();
+      const timer = setTimeout(() => reject(new Error('service worker identity check timed out')), 5000);
+      channel.port1.onmessage = (event) => {
+        clearTimeout(timer);
+        resolve(event.data);
+      };
+      controller.postMessage({type: 'teagram:server-handshake', serverId}, [channel.port2]);
+    }), 'default');
+    expect(handshake).toEqual({serverId: customServerId, accepted: false});
+
+    const streamProbe = await page.evaluate(async() => {
+      const response = await fetch('/stream/__server-isolation-probe');
+      return {status: response.status, body: await response.text()};
+    });
+    expect(streamProbe).toEqual({status: 200, body: 'network-default'});
+
+    const auth = customPage.locator('#auth-pages');
     await expect(auth.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
     await expect(auth.getByText(`Server: ${SERVER_HOST}`, {exact: true})).toBeVisible();
     await auth.getByRole('textbox', {name: 'Username'}).fill(SERVER_USER);
@@ -158,10 +201,11 @@ test('signs in to a second local server through the custom server picker and wor
     await expect(password).toBeVisible({timeout: 30_000});
     await password.fill(SERVER_PASSWORD);
     await auth.getByRole('button', {name: 'Next'}).click();
-    await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
+    await expect(customPage.locator('#page-chats')).toBeVisible({timeout: 60_000});
     expect(connections.length).toBeGreaterThan(0);
     expect(connections.every((origin) => origin === 'https://web.teagram.io')).toBe(true);
   } finally {
+    await customPage?.close();
     await page.close();
     for(const client of webSocketServer.clients) client.terminate();
     await new Promise<void>((resolve) => webSocketServer.close(() => resolve()));

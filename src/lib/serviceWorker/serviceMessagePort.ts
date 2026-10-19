@@ -57,13 +57,15 @@ export type SWToggleUsingPasscodePayload = {
   encryptionKey?: CryptoKey;
 };
 
+export type ServiceWorkerHelloPayload = {serverId: string};
+
 export default class ServiceMessagePort<Master extends boolean = false> extends SuperMessagePort<{
   // from main thread to service worker
   environment: (environment: ReturnType<typeof getEnvironment>) => void,
   notificationsClear: () => void,
   toggleStorages: (payload: {enabled: boolean, clearWrite: boolean}) => void,
   pushPing: (payload: ServicePushPingTaskPayload, source: MessageEventSource, event: MessageEvent) => void,
-  hello: (payload: void, source: MessageEventSource, event: MessageEvent) => void,
+  hello: (payload: ServiceWorkerHelloPayload, source: MessageEventSource, event: MessageEvent) => void,
   shownNotification: (payload: string) => void,
   leaveRtmpCall: (payload: [Long, boolean]) => void,
   toggleStreamInUse: (payload: {url: string, inUse: boolean, accountNumber: ActiveAccountNumber}) => void,
@@ -89,7 +91,7 @@ export default class ServiceMessagePort<Master extends boolean = false> extends 
 }, {
   // to main thread
   pushClick: (payload: PushNotificationObject) => void,
-  hello: (payload: void, source: MessageEventSource) => void,
+  hello: (payload: ServiceWorkerHelloPayload, source: MessageEventSource) => void,
   share: (payload: ShareData) => void,
   rtmpStreamTime: (payload: {callId: Long, time: string}) => void,
   rtmpStreamDestroyed: (payload: Long) => void,
