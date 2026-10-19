@@ -5597,6 +5597,7 @@ async function main(dependencies = {}) {
     if(directMessageFailure) failStage(`bob_direct_message_${directMessageFailure}`);
     await captureState(bob.page, runtime.screenshotDirectory, 'bob-direct-message', capturedScreenshots);
     report.push({name: 'message', status: 'passed'});
+    failStage('intentional_browser_failure_trace_proof');
 
     currentScenario = 'group';
     currentStage = 'alice_new_group_menu';
