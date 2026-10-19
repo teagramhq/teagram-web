@@ -1017,10 +1017,8 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       apiManagerProxy.getPeer(dialog.peerId) as Chat :
       undefined;
     if(
-      !this.sortedList.has(dialog.peerId) &&
       dialog.peer?._ === 'peerChannel' &&
       !getServerMessageId(dialog.top_message) &&
-      !dialog.draft &&
       // Manager proxies return promises, so check the mirrored membership snapshot synchronously.
       channel?._ === 'channel' &&
       !channel.pFlags?.left &&

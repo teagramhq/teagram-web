@@ -147,6 +147,28 @@ describe('invited channel dialog rows', () => {
     expect(sortedList.has(peerId)).toBe(true);
   });
 
+  it('keeps an active empty channel visible when its draft is cleared below the loaded page', () => {
+    const peerId = (990020 as ChatId).toPeerId(true);
+    const dialog = createDialog(0);
+    dialog.draft = {
+      _: 'draftMessage',
+      date: 2,
+      message: 'draft',
+      pFlags: {}
+    } as any;
+    dialog.index_0 = 101;
+    const {list, sortedList} = createList();
+
+    list.updateDialog(dialog);
+    expect(sortedList.has(peerId)).toBe(true);
+
+    dialog.draft = undefined;
+    dialog.index_0 = 1;
+    list.updateDialog(dialog);
+
+    expect(sortedList.has(peerId)).toBe(true);
+  });
+
   it('keeps a channel with messages below the loaded page out', () => {
     const peerId = (990020 as ChatId).toPeerId(true);
     const {list, sortedList} = createList();
