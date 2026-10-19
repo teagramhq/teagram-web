@@ -12907,6 +12907,7 @@ export class AppMessagesManager extends AppManager {
     let typing = this.typings[key];
     if(
       !peerId ||
+      this.appPeersManager.isBroadcast(peerId) ||
       !(await this.canSendToPeer(peerId)) ||
       peerId === this.appPeersManager.peerId ||
       // (!force && deepEqual(typing?.action, action))
