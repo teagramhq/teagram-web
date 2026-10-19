@@ -147,6 +147,7 @@ import {avatarNew, findUpAvatar} from '@components/avatarNew';
 import Icon from '@components/icon';
 import wrapCallBubble from '@components/wrappers/callBubble';
 import {FullMid, makeFullMid, splitFullMid} from '@appManagers/utils/messages/fullMid';
+import {getCurrentMessageFullMid} from './bubbles/renderQueue';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import setBlankToAnchor from '@lib/richTextProcessor/setBlankToAnchor';
 import addAnchorListener, {UNSAFE_ANCHOR_LINK_TYPES} from '@helpers/addAnchorListener';
@@ -6565,10 +6566,12 @@ export default class ChatBubbles {
 
     const filterQueue = (queue: typeof loadQueue) => {
       return queue.filter((details) => {
+        if(!details) return false;
+
         // message can be deleted during rendering
-        return details &&
-          this.getBubble(this.makeFullMid(details.message)) === details.bubble &&
-          !this.changedMids.has(getMid(details.message));
+        const fullMid = this.makeFullMid(details.message);
+        const currentFullMid = getCurrentMessageFullMid(fullMid, getMid(details.message), this.changedMids);
+        return this.getBubble(currentFullMid) === details.bubble;
       });
     };
 
