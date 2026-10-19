@@ -46,6 +46,17 @@ const HOSTILE = Object.freeze({
   frame: `at ${APP_ORIGIN}/index.worker-AbCdEfGh.js:1:7 (${HOSTILE_PASSWORD})`
 });
 
+function expectedTypeError(scriptAsset: string, firstFrame: any, stage = 'unknown') {
+  return {
+    constructorName: 'TypeError',
+    scriptAsset,
+    message: 'unclassified',
+    firstFrame,
+    scenario: 'unknown',
+    stage
+  };
+}
+
 function createPlaywrightWrappedPageError(name: 'TypeError' | 'RangeError', asset: string) {
   const error = new Error(HOSTILE.phrase);
   error.name = name;
@@ -1590,6 +1601,7 @@ describe('confined runner shared-worker observation contract', () => {
 
   it('names chunk sources only as allowlisted logical names without hash or query', () => {
     expect(observation.classifyWorkerSource(MTPROTO_CHUNK_URL).label).toBe('mtproto_worker');
+    expect(observation.classifyWorkerSource('https://teagramd.test/index.worker-AbCdEfGh.js').label).toBe('mtproto_worker');
     expect(observation.classifyWorkerSource(`${APP_ORIGIN}/crypto.worker-Zz0yYyXx.js`).label).toBe('crypto_worker');
     expect(observation.classifyWorkerSource(`${APP_ORIGIN}/sw-Zz0yYyXx.js`).label).toBe('service_worker');
     expect(observation.classifyWorkerSource(`${APP_ORIGIN}/index.worker.js`).label).toBe('other_same_origin');
@@ -2291,13 +2303,74 @@ describe('discovery shared-worker network accounting', () => {
       unexpectedEgressAttempts: {alice: [], bob: []},
       observerErrors: {alice: {}, bob: {}},
       pageErrors: {
-        alice: [{constructorName: 'TypeError', scriptAsset: 'auth-client.js'}],
+        alice: [expectedTypeError('auth-client.js', {
+          functionName: 'anonymous',
+          line: 21,
+          column: 3,
+          manifestAsset: 'unknown'
+        }, 'alice_context')],
         bob: []
       },
       pageErrorOverflow: {alice: [], bob: []}
     });
     expect(parseAuthProgressReport(report).gateBreakdown).toEqual(report.gateBreakdown);
     expectNoGateSecretLeak(report.gateBreakdown);
+  });
+
+  it('records a TypeError message, first artifact frame and active poll step', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
+    expect(typeof createPageErrorAssetResolver).toBe('function');
+    expect(typeof recordPageError).toBe('function');
+    expect(typeof summarizeGateBreakdown).toBe('function');
+
+    const resolver = createPageErrorAssetResolver();
+    const asset = 'index-AbCdEfGh.js';
+    resolver.observeRequest(`${APP_ORIGIN}/${asset}`, {}, 'Script', 'page-target');
+    const pageErrors = {alice: [], bob: []} as any;
+    const error = new TypeError('Cannot read properties of undefined (reading \'poll\')');
+    error.stack = `TypeError: ${error.message}\n    at sendPoll (https://telegramd.test/${asset}?run=fixture:21:13)\n    at start (https://telegramd.test/index-Other123.js:4:5)`;
+
+    recordPageError(pageErrors, 'alice', error, resolver, 'poll', 'alice_poll_input_answer_sent');
+
+    const breakdown = summarizeGateBreakdown({pageErrors});
+    expect(breakdown.pageErrors.alice).toEqual([{
+      constructorName: 'TypeError',
+      scriptAsset: asset,
+      message: 'Cannot read properties of undefined (reading \'poll\')',
+      firstFrame: {functionName: 'sendPoll', line: 21, column: 13, manifestAsset: asset},
+      scenario: 'poll',
+      stage: 'alice_poll_input_answer_sent'
+    }]);
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: breakdown}))
+    .toContain('alice_poll_input_answer_sent');
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'alice_poll_send_diagnostic', gateBreakdown: breakdown}))
+    .toContain('alice_poll_input_answer_sent');
+  });
+
+  it('redacts secrets from TypeError messages and does not map unobserved assets to the artifact manifest', () => {
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
+    const resolver = (realClientBrowser as any).createPageErrorAssetResolver();
+    const pageErrors = {alice: [], bob: []} as any;
+    const error = new TypeError(`Token=${HOSTILE.token} from ${HOSTILE.url}`);
+    error.stack = `TypeError: ${error.message}\n    at sendPoll (${HOSTILE.url}:21:13)`;
+
+    recordPageError(pageErrors, 'alice', error, resolver, 'poll', 'alice_poll_input_answer_sent');
+
+    const breakdown = summarizeGateBreakdown({pageErrors});
+    expect(breakdown.pageErrors.alice[0]).toMatchObject({
+      constructorName: 'TypeError',
+      scriptAsset: 'unknown',
+      message: 'unclassified',
+      firstFrame: {functionName: 'sendPoll', line: 21, column: 13, manifestAsset: 'unknown'},
+      scenario: 'poll',
+      stage: 'alice_poll_input_answer_sent'
+    });
+    expect(breakdown.pageErrors.alice[0].message).not.toContain(HOSTILE.token);
+    expect(breakdown.pageErrors.alice[0].message).not.toContain(HOSTILE.url);
+    expectNoGateSecretLeak(breakdown);
   });
 
   it('attributes blob stack frames from correlated worker evidence without persisting blob identifiers', async() => {
@@ -2374,8 +2447,18 @@ describe('discovery shared-worker network accounting', () => {
 
       const breakdown = summarizeGateBreakdown({pageErrors});
       const breakdownFromUrl = summarizeGateBreakdown({pageErrors: pageErrorsFromUrl});
-      expect(breakdown.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'unknown'}]);
-      expect(breakdownFromUrl.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'unknown'}]);
+      expect(breakdown.pageErrors.alice).toEqual([expectedTypeError('unknown', {
+        functionName: 't',
+        line: 1,
+        column: 183,
+        manifestAsset: 'unknown'
+      })]);
+      expect(breakdownFromUrl.pageErrors.alice).toEqual([expectedTypeError('unknown', {
+        functionName: 'r',
+        line: 2,
+        column: 12,
+        manifestAsset: 'unknown'
+      })]);
       expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.blobUrl);
       expect(JSON.stringify(breakdown)).not.toContain(blobFromUrl);
       expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.phrase);
@@ -2387,7 +2470,12 @@ describe('discovery shared-worker network accounting', () => {
       fetchOnlyError.stack = `TypeError: ${HOSTILE.phrase}\n    at r (${blobWithoutInitiator}:2:12)`;
       recordPageError(pageErrorsFromFetch, 'alice', fetchOnlyError, resolver);
       const breakdownFromFetch = summarizeGateBreakdown({pageErrors: pageErrorsFromFetch});
-      expect(breakdownFromFetch.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'index.worker-AbCdEfGh.js'}]);
+      expect(breakdownFromFetch.pageErrors.alice).toEqual([expectedTypeError('index.worker-AbCdEfGh.js', {
+        functionName: 'r',
+        line: 2,
+        column: 12,
+        manifestAsset: 'index.worker-AbCdEfGh.js'
+      })]);
       expect(JSON.stringify(breakdownFromFetch)).not.toContain(blobWithoutInitiator);
 
       const blobFromScriptRequest = 'blob:https://telegramd.test/66666666-6666-6666-6666-666666666666';
@@ -2406,7 +2494,12 @@ describe('discovery shared-worker network accounting', () => {
       const pageErrorsFromScriptRequest = {alice: [], bob: []} as any;
       recordPageError(pageErrorsFromScriptRequest, 'alice', scriptRequestError, resolver);
       const breakdownFromScriptRequest = summarizeGateBreakdown({pageErrors: pageErrorsFromScriptRequest});
-      expect(breakdownFromScriptRequest.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'index.worker-AbCdEfGh.js'}]);
+      expect(breakdownFromScriptRequest.pageErrors.alice).toEqual([expectedTypeError('index.worker-AbCdEfGh.js', {
+        functionName: 't',
+        line: 1,
+        column: 183,
+        manifestAsset: 'index.worker-AbCdEfGh.js'
+      })]);
       expect(JSON.stringify(breakdownFromScriptRequest)).not.toContain(blobFromScriptRequest);
 
       const lottieBlobUrl = 'blob:https://telegramd.test/55555555-5555-5555-5555-555555555555';
@@ -2582,7 +2675,12 @@ describe('discovery shared-worker network accounting', () => {
       error.stack = `TypeError: ${HOSTILE.phrase}\n    at t (${blobUrl}:1:183)`;
       recordPageError(pageErrors, 'alice', error, resolver);
       const breakdown = summarizeGateBreakdown({pageErrors});
-      expect(breakdown.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'index.worker-AbCdEfGh.js'}]);
+      expect(breakdown.pageErrors.alice).toEqual([expectedTypeError('index.worker-AbCdEfGh.js', {
+        functionName: 't',
+        line: 1,
+        column: 183,
+        manifestAsset: 'index.worker-AbCdEfGh.js'
+      })]);
       expect(JSON.stringify(breakdown)).not.toContain(blobUrl);
       expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.phrase);
     } finally {
@@ -2598,11 +2696,21 @@ describe('discovery shared-worker network accounting', () => {
     expect(report).toMatchObject({status: 'failed', stage: 'browser_egress_or_page_errors'});
     expect(breakdown.counters.pageErrors).toBe(515);
     expect(breakdown.pageErrors.alice).toHaveLength(512);
-    expect(breakdown.pageErrors.alice[0]).toEqual({constructorName: 'TypeError', scriptAsset: 'auth-client.js'});
+    expect(breakdown.pageErrors.alice[0]).toEqual(expectedTypeError('auth-client.js', {
+      functionName: 'anonymous',
+      line: 21,
+      column: 3,
+      manifestAsset: 'unknown'
+    }, 'alice_context'));
     expect(breakdown.pageErrorOverflow).toEqual({
       alice: [
         {constructorName: 'RangeError', scriptAsset: 'overflow-client.js', count: 1},
-        {constructorName: 'TypeError', scriptAsset: 'auth-client.js', count: 2}
+        {...expectedTypeError('auth-client.js', {
+          functionName: 'anonymous',
+          line: 21,
+          column: 3,
+          manifestAsset: 'unknown'
+        }, 'alice_context'), count: 2}
       ],
       bob: []
     });
@@ -2666,7 +2774,12 @@ describe('discovery shared-worker network accounting', () => {
         },
         pageErrors: {
           alice: [],
-          bob: [{constructorName: 'TypeError', scriptAsset: 'bob-client.js'}]
+          bob: [expectedTypeError('bob-client.js', {
+            functionName: 'anonymous',
+            line: 21,
+            column: 3,
+            manifestAsset: 'unknown'
+          })]
         },
         pageErrorOverflow: {alice: [], bob: []}
       });
@@ -2879,31 +2992,70 @@ describe('real client scenario contract', () => {
 
   it('requires every scenario exactly once', () => {
     expect(() => parseRequiredScenarios('sign-in,message')).toThrow('required scenarios are missing');
-    expect(() => parseRequiredScenarios('sign-in,message,group,group')).toThrow('duplicate scenario');
-    expect(() => parseRequiredScenarios('sign-in,message,group,channel')).toThrow('unknown scenario');
-    expect(parseRequiredScenarios('sign-in,message,group')).toEqual(['sign-in', 'message', 'group']);
+    expect(() => parseRequiredScenarios('sign-in,message,group,poll,group')).toThrow('duplicate scenario');
+    expect(() => parseRequiredScenarios('sign-in,message,group,poll,channel')).toThrow('unknown scenario');
+    expect(parseRequiredScenarios('sign-in,message,group,poll')).toEqual(['sign-in', 'message', 'group', 'poll']);
+  });
+
+  it('requires the captured screenshot count for each real-client mode', () => {
+    expect(realClientContract.expectedScreenshotCount).toBeTypeOf('function');
+    expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: false})).toBe(30);
+    expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true})).toBe(20);
+  });
+
+  it('allows only the fixed no-poll page-error comparison behind its explicit mode', () => {
+    const args = [
+      '--readiness-file', './fixture.jsonl',
+      '--harness-revision', '5f294c39abb32fc8ae15a4f7ccb085974098b320',
+      '--server-revision', '47daaaea5c71b859d9865c03cabb50da5a1a013b',
+      '--web-revision', 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
+      '--run-id', 'a'.repeat(32),
+      '--scenarios', 'sign-in,message,group'
+    ];
+    expect(() => parseRealClientArgs(args)).toThrow('required scenarios are missing');
+    expect(parseRealClientArgs([...args, '--page-error-no-poll-comparison'])).toMatchObject({
+      scenarios: ['sign-in', 'message', 'group'],
+      pageErrorNoPollComparison: true
+    });
+    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group,poll', '--page-error-no-poll-comparison']))
+    .toThrow('option was provided more than once');
+    expect(() => parseRealClientArgs([...args, '--page-error-no-poll-comparison', '--poll-creation-negative-control']))
+    .toThrow('cannot be combined');
   });
 
   it('fails if a required scenario was skipped or did not report success', () => {
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'},
-      {name: 'group', status: 'skipped'}
-    ])).toThrow('group was skipped');
+      {name: 'group', status: 'passed'},
+      {name: 'poll', status: 'skipped'}
+    ])).toThrow('poll was skipped');
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'failed'},
-      {name: 'group', status: 'passed'}
+      {name: 'group', status: 'passed'},
+      {name: 'poll', status: 'passed'}
     ])).toThrow('message did not pass');
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'}
     ])).toThrow('group did not execute');
+    expect(() => assertAllScenariosPassed([
+      {name: 'sign-in', status: 'passed'},
+      {name: 'message', status: 'passed'},
+      {name: 'group', status: 'passed'}
+    ])).toThrow('poll did not execute');
+    expect(assertAllScenariosPassed([
+      {name: 'sign-in', status: 'passed'},
+      {name: 'message', status: 'passed'},
+      {name: 'group', status: 'passed'},
+      {name: 'poll', status: 'passed'}
+    ])).toEqual(['sign-in', 'message', 'group', 'poll']);
     expect(assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'},
       {name: 'group', status: 'passed'}
-    ])).toEqual(['sign-in', 'message', 'group']);
+    ], ['sign-in', 'message', 'group'])).toEqual(['sign-in', 'message', 'group']);
   });
 
   it('matches the audited private manifest schema without requiring an absent public key hash field', () => {
@@ -2951,6 +3103,24 @@ describe('real client scenario contract', () => {
       .map((event) => JSON.stringify(event)).join('\n'), pins)).toThrow('artifact-ready audit or browser evidence is incomplete');
   });
 
+  it('accepts the renamed Teagram fixture endpoint and evidence namespace', () => {
+    const serverReady = buildServerReady();
+    const teagramReady = {
+      ...serverReady,
+      evidenceClass: 'production-teagramd',
+      endpoint: 'https://teagramd.test',
+      wssEndpoint: 'wss://teagramd.test/apiws',
+      credentials: serverReady.credentials.map((credential: any) => ({
+        ...credential,
+        passwordFile: credential.passwordFile.replace('/telegram-fixture-', '/teagram-fixture-')
+      }))
+    };
+    const artifactReady = buildArtifactReady(teagramReady);
+    const text = [teagramReady, artifactReady].map((event) => JSON.stringify(event)).join('\n');
+
+    expect(parseFixtureReadiness(text, READINESS_PINS)).toEqual({serverReady: teagramReady, artifactReady});
+  });
+
   it('requires the manifest payload digest beside the staged artifact digest', () => {
     const serverReady = buildServerReady();
     const artifactReady = buildArtifactReady(serverReady);
@@ -2979,6 +3149,7 @@ describe('real client scenario contract', () => {
       leafSPKI: Buffer.alloc(32, 1).toString('base64'),
       frontIp: '127.0.0.1',
       screenshotDirectory: `/tmp/real-client-${runId}`,
+      scenarios: ['sign-in', 'message', 'group', 'poll'],
       accounts: [
         {username: `u${runId.slice(0, 30)}a`, password: 'b'.repeat(64)},
         {username: `u${runId.slice(0, 30)}b`, password: 'c'.repeat(64)}
@@ -2986,6 +3157,10 @@ describe('real client scenario contract', () => {
     };
 
     expect(() => validateRuntimeInput(runtime)).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'message', 'group'], pageErrorNoPollComparison: true})).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'message', 'group', 'poll'], pageErrorNoPollComparison: true}))
+    .toThrow('runtime_input_validation');
+    expect(() => validateRuntimeInput({...runtime, endpoint: 'https://teagramd.test', wssEndpoint: 'wss://teagramd.test/apiws'})).not.toThrow();
     expect(() => validateRuntimeInput({...runtime, observationOnly: true, artifactDigest: null, manifestArtifactDigest: null})).not.toThrow();
     for(const malformed of [undefined, null, [runtime.manifestArtifactDigest], `sha256:${'f'.repeat(63)}`]) {
       expect(() => validateRuntimeInput({...runtime, manifestArtifactDigest: malformed})).toThrow('runtime_input_validation');
@@ -3032,6 +3207,26 @@ describe('real client scenario contract', () => {
     }
   });
 
+  it('reads protected synthetic credentials from the renamed Teagram fixture directory', () => {
+    const runId = 'd'.repeat(32);
+    const secretDirectory = mkdtempSync(join(tmpdir(), `teagram-fixture-${runId}.`));
+    chmodSync(secretDirectory, 0o700);
+    const passwordFile = join(secretDirectory, 'a-password');
+    writeFileSync(passwordFile, `${'3'.repeat(64)}\n`, {mode: 0o400});
+    chmodSync(passwordFile, 0o400);
+
+    try {
+      expect(readSyntheticCredentials([
+        {username: `u${runId.slice(0, 30)}a`, passwordFile},
+        {username: `u${runId.slice(0, 30)}b`, passwordFile: join(secretDirectory, 'b-password')}
+      ], runId, 1, 'teagram-fixture')).toEqual([
+        {username: `u${runId.slice(0, 30)}a`, password: '3'.repeat(64)}
+      ]);
+    } finally {
+      rmSync(secretDirectory, {recursive: true, force: true});
+    }
+  });
+
   it('requires explicit immutable pins, readiness and the complete scenario set', () => {
     const args = [
       '--readiness-file', './fixture.jsonl',
@@ -3039,7 +3234,7 @@ describe('real client scenario contract', () => {
       '--server-revision', '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       '--web-revision', 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       '--run-id', 'a'.repeat(32),
-      '--scenarios', 'sign-in,message,group'
+      '--scenarios', 'sign-in,message,group,poll'
     ];
 
     expect(parseRealClientArgs(args)).toEqual({
@@ -3048,13 +3243,26 @@ describe('real client scenario contract', () => {
       serverRevision: '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       webRevision: 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       runId: 'a'.repeat(32),
-      scenarios: ['sign-in', 'message', 'group']
+      scenarios: ['sign-in', 'message', 'group', 'poll']
     });
     expect(parseRealClientArgs(['--', ...args])).toEqual(parseRealClientArgs(args));
     expect(() => parseRealClientArgs([])).toThrow('missing required options');
     expect(() => parseRealClientArgs(args.slice(0, -2))).toThrow('scenario selection is required');
     expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message'])).toThrow('option was provided more than once');
     expect(() => parseRealClientArgs([...args, '--source-sha', 'a'.repeat(40)])).toThrow('unknown option');
+
+    expect(realClientContract.POLL_NEGATIVE_CONTROL_SERVER_REVISION).toBe('586403c1f4c92c09b006652278bdd02fd40ddf2d');
+    expect(realClientContract.POLL_NEGATIVE_CONTROL_EVIDENCE).toEqual([
+      {shape: 'description', stage: 'alice_poll_description_create', errorType: 'POLL_ANSWERS_INVALID'},
+      {shape: 'input_answer', stage: 'alice_poll_input_answer_create', errorType: 'POLL_ANSWERS_INVALID'}
+    ]);
+    const legacyServerArgs = [...args];
+    legacyServerArgs[5] = realClientContract.POLL_NEGATIVE_CONTROL_SERVER_REVISION;
+    expect(parseRealClientArgs([...legacyServerArgs, '--poll-creation-negative-control']).pollCreationNegativeControl).toBe(true);
+    expect(() => parseRealClientArgs([...args, '--poll-creation-negative-control']))
+    .toThrow('negative-control server revision');
+    expect(() => parseRealClientArgs([...legacyServerArgs, '--poll-creation-negative-control', '--auth-progress-one-submission']))
+    .toThrow('cannot be combined');
   });
 
   it('accepts a server-ready-only readiness pair for the synthetic-only run', () => {
@@ -3085,9 +3293,9 @@ describe('real client scenario contract', () => {
       webRevision: READINESS_PINS.webRevision,
       runId: READINESS_PINS.runId,
       observerControlsOnly: true,
-      scenarios: ['sign-in', 'message', 'group']
+      scenarios: ['sign-in', 'message', 'group', 'poll']
     });
-    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group', '--observer-controls-only']).observerControlsOnly).toBe(true);
+    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group,poll', '--observer-controls-only']).observerControlsOnly).toBe(true);
     expect(() => parseRealClientArgs(args)).toThrow('scenario selection is required');
     expect(() => parseRealClientArgs([...args, '--observer-controls-only', '--observer-controls-only'])).toThrow('option was provided more than once');
   });
@@ -3109,7 +3317,7 @@ describe('real client scenario contract', () => {
       runId: READINESS_PINS.runId,
       authProgressOneSubmission: true
     });
-    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group', '--auth-progress-one-submission']))
+    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group,poll', '--auth-progress-one-submission']))
     .toThrow('cannot be combined');
     expect(() => parseRealClientArgs([...args, '--observer-controls-only', '--auth-progress-one-submission']))
     .toThrow('cannot be combined');
@@ -3125,7 +3333,7 @@ describe('real client scenario contract', () => {
       '--server-revision', READINESS_PINS.serverRevision,
       '--web-revision', READINESS_PINS.webRevision,
       '--run-id', READINESS_PINS.runId,
-      '--scenarios', 'sign-in,message,group',
+      '--scenarios', 'sign-in,message,group,poll',
       '--auth-progress-one-submission'
     ], {encoding: 'utf8'});
 
@@ -3771,6 +3979,7 @@ describe('real client username field readiness', () => {
       'else if(args[0] === \'exec\') {',
       '  if(args.includes(\'/proc/net/route\')) write(\'Iface Destination Gateway\\n\');',
       '  else if(args.includes(\'/proc/net/ipv6_route\')) {}',
+      '  else if(args.some((argument) => argument.includes(\'cat >\'))) readFileSync(0, \'utf8\');',
       '  else if(args.includes(\'node\')) { appendFileSync(state.browserInputPath, readFileSync(0, \'utf8\')); write(readFileSync(state.browserOutputPath, \'utf8\')); if(state.browserExitCode) process.exitCode = state.browserExitCode; }',
       '  else if(args.includes(\'rm\')) { appendFileSync(state.cleanupPath, `${args.at(-1)}\\n`); if(state.failRunnerCleanup && args.at(-1).endsWith(\'-runner\')) process.exitCode = 1; }',
       '}'
@@ -5531,6 +5740,599 @@ describe('real client group created', () => {
     ]) {
       expect(formatBrowserFailureMessage({status: 'failed', stage: 'alice_group_created_chat', groupCreated: hostile}))
       .toBe('real client scenario failed at alice_group_created_chat; group created "unclassified"');
+    }
+  });
+});
+
+describe('real client poll answer media setup', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  it('attaches an input answer through the supported Add Link UI flow', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<!doctype html><html><body>
+        <div class="popup" id="create-poll">
+          <div contenteditable="true"></div>
+          <div contenteditable="true"></div>
+          <div class="poll-option"><div><div contenteditable="true"></div></div><button class="btn-icon"></button></div>
+          <div class="poll-option"><div><div contenteditable="true"></div></div><button class="btn-icon"></button></div>
+        </div>
+        <script>
+          const answer = document.querySelector('.poll-option');
+          const attachButton = answer.querySelector('.btn-icon');
+          attachButton.addEventListener('click', () => {
+            const menu = document.createElement('div');
+            menu.className = 'btn-menu';
+            const item = document.createElement('div');
+            item.className = 'btn-menu-item';
+            const itemText = document.createElement('span');
+            itemText.className = 'btn-menu-item-text';
+            itemText.textContent = 'Add Link';
+            item.append(itemText);
+            menu.append(item);
+            document.body.append(menu);
+            item.addEventListener('click', () => {
+              menu.remove();
+              const popup = document.createElement('div');
+              popup.className = 'popup';
+              popup.innerHTML = '<div>Add Link</div><input name="url"><button>Done</button>';
+              const input = popup.querySelector('input');
+              const done = popup.querySelector('button');
+              done.addEventListener('click', () => {
+                window.pollAnswerLink = input.value;
+                popup.remove();
+                const linkButton = document.createElement('button');
+                linkButton.setAttribute('aria-label', 'Add Link');
+                answer.append(linkButton);
+              });
+              document.body.append(popup);
+            });
+          });
+        </script>
+      </body></html>`);
+
+      await realClientBrowser.attachSyntheticPollAnswerLink(page, page.locator('#create-poll'), 'alice_poll_input_answer');
+
+      expect(await page.evaluate(() => (window as any).pollAnswerLink)).toBe('https://telegramd.test/browser-ci-poll-answer');
+      expect(await page.locator('#create-poll .poll-option').first().getByRole('button', {name: 'Add Link', exact: true}).isVisible()).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('real client poll send diagnostics', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  });
+
+  it('finds the synthetic temp poll and retains only bounded composer, send, RPC and worker evidence', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-input-answer-a1b2c3d4';
+    const workerObserver = observation.createContextObserver('alice');
+    workerObserver.registerTarget(sharedWorker('poll-worker', `blob:${APP_ORIGIN}/worker`));
+    const workerErrorsBefore = workerObserver.workerErrorSnapshot();
+    workerObserver.noteWorkerEvent('poll-worker', 'Runtime.exceptionThrown', {
+      exceptionDetails: {text: 'Uncaught', exception: {className: 'Error', description: HOSTILE.frame}}
+    });
+    const workerErrorsAfter = workerObserver.workerErrorSnapshot();
+    try {
+      await page.setContent(`<!doctype html><html><body>
+        <div id="column-center">
+          <div class="topbar"><div class="avatar" data-peer-id="-42"></div></div>
+          <div class="bubble is-error" data-mid="0.0001">Sending failed</div>
+        </div>
+      </body></html>`);
+      await page.evaluate((syntheticQuestion: string) => {
+        (window as any).apiManagerProxy = {
+          getMessageByPeer: () => ({
+            mid: 0.0001,
+            peerId: -42,
+            random_id: 123456789,
+            media: {_: 'messageMediaPoll', poll: {question: {text: syntheticQuestion}}},
+            error: {type: 'POLL_ANSWERS_INVALID', code: 400, message: 'POLL_ANSWERS_INVALID'}
+          })
+        };
+        (window as any).__realClientPollErrors = (): unknown[] => [];
+        (window as any).__realClientRpcErrors = () => ({total: 1, byType: {POLL_ANSWERS_INVALID: 1}});
+      }, question);
+
+      const diagnostic = await realClientBrowser.readPollSendDiagnostic(
+        page,
+        question,
+        'error',
+        0,
+        {total: 0, byType: {}},
+        {createClicked: true, composerClosed: true},
+        workerErrorsBefore,
+        workerErrorsAfter
+      );
+
+      expect(diagnostic).toMatchObject({
+        status: 'error',
+        createClicked: true,
+        composerClosed: true,
+        tempMessageFound: true,
+        tempId: '0.0001',
+        randomId: '123456789',
+        bubbleStatuses: ['is-error'],
+        messageError: {type: 'POLL_ANSWERS_INVALID', code: 400, message: 'POLL_ANSWERS_INVALID'},
+        messageErrorStored: true,
+        rpcErrorCount: 1,
+        rpcErrorTypes: {POLL_ANSWERS_INVALID: 1},
+        workerEvaluationExceptions: 1,
+        workerErrorTypes: {evaluation_exception: 1}
+      });
+
+      const summary = realClientBrowser.formatPollSendDiagnostic({shape: 'input_answer', ...diagnostic});
+      expect(summary).toContain('POLL_ANSWERS_INVALID');
+      expectNoHostileLeak(summary);
+      expect(summary).not.toContain(question);
+
+      await page.evaluate((syntheticQuestion: string) => {
+        (window as any).apiManagerProxy.getMessageByPeer = (): undefined => undefined;
+        (window as any).__realClientPollErrors = (): unknown[] => [{
+          source: 'message_error',
+          tempId: '0.0001',
+          randomId: null,
+          storedError: null,
+          eventError: {type: 'POLL_ANSWERS_INVALID', code: 400, message: 'POLL_ANSWERS_INVALID'}
+        }];
+        document.querySelector('#column-center .bubble')!.textContent = syntheticQuestion;
+      }, question);
+      const eventDiagnostic = await realClientBrowser.readPollSendDiagnostic(
+        page,
+        question,
+        'error',
+        0,
+        {total: 0, byType: {}},
+        {createClicked: true, composerClosed: true},
+        workerErrorsBefore,
+        workerErrorsAfter
+      );
+      expect(eventDiagnostic).toMatchObject({
+        tempMessageFound: true,
+        tempId: '0.0001',
+        randomId: null,
+        messageError: {type: 'POLL_ANSWERS_INVALID', code: 400, message: 'POLL_ANSWERS_INVALID'},
+        messageErrorStored: false,
+        sendResult: 'rejected',
+        sendResultCount: 1,
+        sendResultSource: 'message_error'
+      });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('accepts a stored poll rejection when page-side RPC observation misses the worker failure', () => {
+    const diagnostic = {
+      status: 'error',
+      createClicked: true,
+      composerClosed: true,
+      tempMessageFound: true,
+      messageError: {type: 'POLL_ANSWERS_INVALID', code: 400},
+      sendResult: 'rejected',
+      bubbleStatuses: ['is-sending', 'is-error'],
+      rpcErrorCount: 0,
+      rpcErrorTypes: {}
+    };
+
+    expect(realClientBrowser.isExpectedPollCreationRejection?.(diagnostic, 'POLL_ANSWERS_INVALID')).toBe(true);
+    expect(realClientBrowser.isExpectedPollCreationRejection?.({...diagnostic, messageError: {type: 'MEDIA_INVALID'}}, 'POLL_ANSWERS_INVALID')).toBe(false);
+    expect(realClientBrowser.isExpectedPollCreationRejection?.({...diagnostic, status: 'timeout'}, 'POLL_ANSWERS_INVALID')).toBe(false);
+  });
+
+  it('compares the synthetic send store, rendered message row and poll selector', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-description-a1b2c3d4';
+    const workerObserver = observation.createContextObserver('alice');
+    const workerErrors = workerObserver.workerErrorSnapshot();
+    try {
+      await page.setContent('<!doctype html><html><body><div id="column-center"><div class="topbar"><div class="avatar" data-peer-id="-42"></div></div></div></body></html>');
+      await page.evaluate((syntheticQuestion: string) => {
+        const listeners: Record<string, (payload: unknown) => void> = {};
+        (window as any).__pollListeners = listeners;
+        (window as any).rootScope = {addEventListener: (type: string, listener: (payload: unknown) => void): void => {
+          listeners[type] = listener;
+        }};
+        const storedPoll = {
+          mid: 55,
+          peerId: -42,
+          media: {_: 'messageMediaPoll', poll: {question: {text: syntheticQuestion}}}
+        };
+        const lookups: Array<{peerId: number; mid: number}> = [];
+        (window as any).__pollStoreLookups = lookups;
+        (window as any).apiManagerProxy = {getMessageByPeer: (peerId: number, mid: number): unknown => {
+          lookups.push({peerId, mid});
+          return peerId === -42 && mid === 55 ? storedPoll : undefined;
+        }};
+        (window as any).__realClientActivePollQuestion = syntheticQuestion;
+      }, question);
+
+      await realClientBrowser.installPollMessageErrorObserver(page);
+      await page.evaluate((syntheticQuestion: string) => {
+        const dispatch = (window as any).__pollListeners.message_sent;
+        dispatch({
+          tempId: 0.0001,
+          tempMessage: {
+            mid: 0.0001,
+            random_id: 123456789,
+            media: {_: 'messageMediaPoll', poll: {question: {text: syntheticQuestion}}}
+          },
+          mid: 55,
+          message: {mid: 55, peerId: -42}
+        });
+        dispatch({
+          tempId: 0.0002,
+          tempMessage: {
+            mid: 0.0002,
+            random_id: 987654321,
+            media: {_: 'messageMediaPoll', poll: {question: {text: 'unrelated poll text'}}}
+          },
+          mid: 56,
+          message: {mid: 56}
+        });
+      }, question);
+
+      const diagnostic = await realClientBrowser.readPollSendDiagnostic(
+        page,
+        question,
+        'timeout',
+        0,
+        {total: 0, byType: {}},
+        {createClicked: true, composerClosed: true},
+        workerErrors,
+        workerErrors
+      );
+      expect(diagnostic).toMatchObject({
+        status: 'timeout',
+        tempMessageFound: false,
+        sendResult: 'accepted',
+        sendResultCount: 1,
+        sentTempId: '0.0001',
+        sentMessageId: '55',
+        sentRandomId: '123456789',
+        sentMessageStore: 'present',
+        sentPollStoreMatch: true,
+        sentDomAtEvent: {
+          bubbleRowCount: 0,
+          serverMidNodeCount: 0,
+          serverMidRowCount: 0,
+          tempMidNodeCount: 0,
+          tempMidRowCount: 0,
+          questionTextNodeCount: 0,
+          questionVisibleTextNodeCount: 0,
+          questionRowCount: 0,
+          questionVisibleRowCount: 0
+        },
+        renderedPollDom: {
+          bubbleRowCount: 0,
+          serverMidNodeCount: 0,
+          serverMidRowCount: 0,
+          tempMidNodeCount: 0,
+          tempMidRowCount: 0,
+          questionTextNodeCount: 0,
+          questionVisibleTextNodeCount: 0,
+          questionRowCount: 0,
+          questionVisibleRowCount: 0,
+          selectorCount: 0,
+          selectorVisibleCount: 0
+        }
+      });
+      expect(await page.evaluate(() => (window as any).__pollStoreLookups)).toEqual([{peerId: -42, mid: 55}]);
+      const summary = realClientBrowser.formatPollSendDiagnostic({shape: 'description', ...diagnostic});
+      expect(summary).toContain('send_result_accepted');
+      expect(summary).toContain('_send_mid_55');
+      expect(summary).toContain('_store_mid_present_store_poll_match_1');
+      expect(summary).toContain('_dom_event_mid_rows_0_temp_rows_0_question_text_nodes_0_question_rows_0');
+      expect(summary).toContain('_dom_after_mid_nodes_0_mid_rows_0_temp_nodes_0_temp_rows_0_question_text_nodes_0_question_text_visible_0_question_rows_0_question_visible_0_selector_0_selector_visible_0');
+      expectNoHostileLeak(summary);
+      expect(summary).not.toContain(question);
+      expect(summary).not.toContain('unrelated poll text');
+
+      await page.evaluate((syntheticQuestion: string) => {
+        const row = document.createElement('div');
+        row.className = 'bubble is-sent';
+        row.dataset.mid = '55';
+        row.textContent = syntheticQuestion;
+        document.querySelector('#column-center')!.append(row);
+      }, question);
+      const renderedDiagnostic = await realClientBrowser.readPollSendDiagnostic(
+        page,
+        question,
+        'sent',
+        0,
+        {total: 0, byType: {}},
+        {createClicked: true, composerClosed: true},
+        workerErrors,
+        workerErrors
+      );
+      expect(renderedDiagnostic).toMatchObject({
+        tempMessageFound: true,
+        sentMessageStore: 'present',
+        sentPollStoreMatch: true,
+        sentDomAtEvent: {
+          serverMidRowCount: 0,
+          tempMidRowCount: 0,
+          questionRowCount: 0
+        },
+        renderedPollDom: {
+          serverMidNodeCount: 1,
+          serverMidRowCount: 1,
+          tempMidNodeCount: 0,
+          tempMidRowCount: 0,
+          questionTextNodeCount: 1,
+          questionVisibleTextNodeCount: 1,
+          questionRowCount: 1,
+          questionVisibleRowCount: 1,
+          selectorCount: 1,
+          selectorVisibleCount: 1
+        }
+      });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('classifies poll answer rows using visible DOM counts only', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="poll" class="bubble" data-mid="55">
+        <div data-poll-option-idx="0"><span>browser-ci-answer-one</span><a href="https://fixture.invalid">link</a></div>
+        <div data-poll-option-idx="1"><span>browser-ci-answer-two</span></div>
+      </div>`);
+
+      expect(realClientBrowser.readPollContentDiagnostic).toBeTypeOf('function');
+      const diagnostic = await realClientBrowser.readPollContentDiagnostic(
+        page.locator('#poll'),
+        ['browser-ci-answer-one', 'browser-ci-answer-two']
+      );
+
+      expect(diagnostic).toEqual({
+        rowVisible: true,
+        optionCount: 2,
+        visibleOptionCount: 2,
+        answerTextCounts: [1, 1],
+        visibleAnswerTextCounts: [1, 1],
+        answerOptionCounts: [1, 1]
+      });
+      const summary = realClientBrowser.formatPollContentDiagnostic(diagnostic);
+      expect(summary).toContain('row_visible_1_options_2_visible_options_2');
+      expect(summary).toContain('answer_text_counts_1_1_visible_answer_text_counts_1_1_answer_options_1_1');
+      expect(summary).not.toContain('browser-ci-answer');
+      expect(summary).not.toContain('fixture.invalid');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('real client poll option interaction', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  it('clicks the poll option hit area without relying on its scoped CSS class', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="poll">
+        <div data-poll-option-idx="0">
+          <div class="clickableArea_t24sq_158" style="width: 120px; height: 24px" onclick="window.voteCount++"></div>
+          <div>browser-ci-poll-answer-one</div>
+        </div>
+      </div>`);
+      await page.evaluate(() => { (window as any).voteCount = 0; });
+
+      expect(realClientBrowser.getPollOptionClickTarget).toBeTypeOf('function');
+      const target = realClientBrowser.getPollOptionClickTarget(page.locator('#poll'), 'browser-ci-poll-answer-one');
+      expect(await target.count()).toBe(1);
+      await target.click();
+
+      expect(await page.evaluate(() => (window as any).voteCount)).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('finds poll vote and result labels without relying on footer CSS-module classes', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="poll">
+        <div class="footerButton_t24sq_609">Vote</div>
+        <div class="footerButton_t24sq_609">1 member voted</div>
+      </div>`);
+
+      const poll = page.locator('#poll');
+      expect(realClientBrowser.getPollVoteButton).toBeTypeOf('function');
+      expect(realClientBrowser.getPollResultIndicator).toBeTypeOf('function');
+      expect(await realClientBrowser.getPollVoteButton(poll).count()).toBe(1);
+      expect(await realClientBrowser.getPollResultIndicator(poll).count()).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('waits for the sender poll option transition to settle before checking row count', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-transition-question';
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="bubble" data-mid="55">
+          <div>${question}</div>
+          <div data-poll-option-idx="0"><span>browser-ci-poll-answer-one</span></div>
+          <div data-poll-option-idx="0"><span>browser-ci-poll-answer-one</span></div>
+          <div data-poll-option-idx="1"><span>browser-ci-poll-answer-two</span></div>
+        </div>
+      </div>`);
+      await page.evaluate(() => {
+        window.setTimeout(() => document.querySelector('[data-poll-option-idx="0"] + [data-poll-option-idx="0"]')?.remove(), 100);
+      });
+
+      expect(realClientBrowser.waitForPollMessage).toBeTypeOf('function');
+      const poll = await realClientBrowser.waitForPollMessage(page, question, 'poll_transition', 1000);
+
+      expect(await poll.locator('[data-poll-option-idx]').count()).toBe(2);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('compares synthetic poll results in the message store with visible DOM indicators', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-result-diagnostic';
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="topbar"><div class="avatar" data-peer-id="42"></div></div>
+        <div class="bubble" data-mid="77">
+          <div>${question}</div>
+          <div data-poll-option-idx="0"><span>browser-ci-poll-answer-one</span></div>
+          <div data-poll-option-idx="1"><span>browser-ci-poll-answer-two</span></div>
+          <div class="footerButton_t24sq_609">Select an option</div>
+        </div>
+      </div>`);
+      await page.evaluate((syntheticQuestion: string) => {
+        const poll = {id: 9, question: syntheticQuestion, pFlags: {closed: false}, chosenIndexes: [] as number[]};
+        const results = {total_voters: 1, results: [{voters: 1}, {voters: 0}]};
+        (window as any).apiManagerProxy = {
+          getMessageByPeer: () => ({
+            mid: 77,
+            peerId: 42,
+            media: {_: 'messageMediaPoll', poll}
+          })
+        };
+        (window as any).rootScope = {
+          managers: {appPollsManager: {getPoll: async() => ({poll, results})}}
+        };
+      }, question);
+
+      expect(realClientBrowser.readPollResultsDiagnostic).toBeTypeOf('function');
+      const diagnostic = await realClientBrowser.readPollResultsDiagnostic(page, question, 'browser-ci-poll-answer-one');
+      expect(diagnostic).toMatchObject({
+        messageFound: true,
+        storePollMatches: true,
+        storePollFound: true,
+        storeResultsFound: true,
+        storeTotalVoters: 1,
+        storeAnswerVoters: [1, 0],
+        storeChosenIndexesCount: 0,
+        storeClosed: false,
+        domPollCount: 1,
+        domVisiblePollCount: 1,
+        domResultIndicatorCount: 0,
+        domSelectOptionCount: 1,
+        domAnswerOneCountCount: 0,
+        domAnswerOnePercentCount: 0
+      });
+      const summary = realClientBrowser.formatPollResultsDiagnostic(diagnostic);
+      expect(summary).toContain('store_total_voters_1_store_answer_voters_1_0');
+      expect(summary).not.toContain(question);
+      expect(summary).not.toContain('browser-ci-poll-answer-one');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('treats message_sent as confirmation while the bubble status still says sending', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent('<div id="column-center"><div class="bubble is-sending">browser-ci-poll-send-confirmed</div></div>');
+      await page.evaluate(() => {
+        (window as any).__realClientPollSendOutcomes = () => [{question: 'browser-ci-poll-send-confirmed'}];
+        (window as any).__realClientPollErrors = (): unknown[] => [];
+      });
+
+      expect(realClientBrowser.waitForPollSendOutcome).toBeTypeOf('function');
+      await expect(realClientBrowser.waitForPollSendOutcome(page, 'browser-ci-poll-send-confirmed', 'send', 50)).resolves.toBe('sent');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('captures the real sendMedia resolution for an empty-description poll with an input answer', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-empty-description-send-result';
+    try {
+      await page.setContent('<div id="column-center"><div class="topbar"><div class="avatar" data-peer-id="-42"></div></div></div>');
+      await page.evaluate((syntheticQuestion: string) => {
+        const apiManager = {
+          invokeApi: (method: string) => Promise.resolve(method === 'messages.sendMedia' ? {
+            _: 'updates',
+            updates: [{_: 'updateNewMessage', message: {id: 77}}]
+          } : {})
+        };
+        (window as any).rootScope = {
+          addEventListener: (): void => undefined,
+          managers: {appPollsManager: {apiManager}}
+        };
+        (window as any).apiManagerProxy = {getMessageByPeer: (): undefined => undefined};
+        (window as any).__realClientActivePollQuestion = syntheticQuestion;
+      }, question);
+
+      await realClientBrowser.installPollMessageErrorObserver(page);
+      await page.evaluate(async(syntheticQuestion: string) => {
+        await (window as any).rootScope.managers.appPollsManager.apiManager.invokeApi('messages.sendMedia', {
+          message: '',
+          random_id: '123456789',
+          media: {
+            _: 'inputMediaPoll',
+            poll: {
+              question: {_: 'textWithEntities', text: syntheticQuestion},
+              answers: [{_: 'inputPollAnswer'}, {_: 'pollAnswer'}]
+            }
+          }
+        });
+      }, question);
+
+      const diagnostic = await realClientBrowser.readPollSendDiagnostic(
+        page,
+        question,
+        'timeout',
+        0,
+        {total: 0, byType: {}},
+        {createClicked: true, composerClosed: true},
+        observation.createContextObserver('alice').workerErrorSnapshot(),
+        observation.createContextObserver('alice').workerErrorSnapshot()
+      );
+      expect(diagnostic).toMatchObject({
+        randomId: '123456789',
+        sendResult: 'accepted',
+        sendResultSource: 'messages.sendMedia',
+        sentMessageId: '77',
+        sendMediaCallCount: 1,
+        sendMediaStatus: 'resolved',
+        sendMediaResultType: 'updates',
+        sendMediaResponseMessageId: '77',
+        sendMediaInputAnswerCount: 1,
+        sendMediaDescriptionEmpty: true
+      });
+      const summary = realClientBrowser.formatPollSendDiagnostic({shape: 'input_answer', ...diagnostic});
+      expect(summary).toContain('_send_media_observer_1_send_media_calls_1_send_media_status_resolved_result_type_updates_response_mid_77');
+      expect(summary).toContain('_send_media_input_answer_count_1_description_empty_1_error_none');
+      expectNoHostileLeak(summary);
+      expect(summary).not.toContain(question);
+    } finally {
+      await page.close();
     }
   });
 });

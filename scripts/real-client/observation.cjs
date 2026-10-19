@@ -15,7 +15,21 @@
 // state because the accepted harness owns no blob module probe able to confirm
 // them (MAIN-1483 precheck).
 
-const PRIVATE_CSP_ORIGIN = 'https://telegramd.test';
+const PRIVATE_CSP_TARGETS = Object.freeze([
+  Object.freeze({origin: 'https://telegramd.test', wssEndpoint: 'wss://telegramd.test/apiws', host: 'telegramd.test', evidenceClass: 'production-telegramd', resourcePrefix: 'telegram-fixture'}),
+  Object.freeze({origin: 'https://teagramd.test', wssEndpoint: 'wss://teagramd.test/apiws', host: 'teagramd.test', evidenceClass: 'production-teagramd', resourcePrefix: 'teagram-fixture'})
+]);
+const PRIVATE_CSP_ORIGINS = Object.freeze(PRIVATE_CSP_TARGETS.map((target) => target.origin));
+const PRIVATE_CSP_ORIGIN = PRIVATE_CSP_TARGETS[0].origin;
+const PRIVATE_CSP_WSS = PRIVATE_CSP_TARGETS[0].wssEndpoint;
+
+function getPrivateCspTarget(endpoint, wssEndpoint) {
+  return PRIVATE_CSP_TARGETS.find((target) => target.origin === endpoint && target.wssEndpoint === wssEndpoint);
+}
+
+function isPrivateCspOrigin(origin) {
+  return PRIVATE_CSP_ORIGINS.includes(origin);
+}
 
 const LIMITS = Object.freeze({
   attachedTargets: 16,
@@ -191,10 +205,10 @@ function classifyWorkerSource(url, origin = PRIVATE_CSP_ORIGIN) {
     } catch {
       return {label: 'cross_origin', originClass: 'cross_origin', isBlob: true};
     }
-    if(inner.origin === origin) return {label: 'blob_same_origin', originClass: 'blob_same_origin', isBlob: true};
+    if(inner.origin === origin || isPrivateCspOrigin(inner.origin)) return {label: 'blob_same_origin', originClass: 'blob_same_origin', isBlob: true};
     return {label: 'cross_origin', originClass: 'cross_origin', isBlob: true};
   }
-  if(parsed.origin === origin) {
+  if(parsed.origin === origin || isPrivateCspOrigin(parsed.origin)) {
     const label = labelForPathname(parsed.pathname);
     return {label: label || 'other_same_origin', originClass: 'other_same_origin', isBlob: false};
   }
@@ -297,7 +311,8 @@ function createContextObserver(name, options = {}) {
     mtprotoSourceFetchedSequence: null,
     mtprotoSourceChunk: 'none',
     sequence: 0,
-    failures: new Set()
+    failures: new Set(),
+    workerErrorCounts: new Map()
   };
 
   function recordOverflow() {
@@ -415,6 +430,21 @@ function createContextObserver(name, options = {}) {
     if(typeof category === 'string' && WORKER_FAILURE_STATES.includes(category)) state.failures.add(category);
   }
 
+  function addWorkerFailure(category) {
+    if(closed() || typeof category !== 'string' || !WORKER_FAILURE_STATES.includes(category)) return;
+    const count = state.workerErrorCounts.get(category) || 0;
+    state.workerErrorCounts.set(category, Math.min(count + 1, LIMITS.countedEventsPerContext));
+    addFailure(category);
+  }
+
+  function workerErrorSnapshot() {
+    const errorTypes = Object.fromEntries([...state.workerErrorCounts.entries()].sort(([a], [b]) => a.localeCompare(b)));
+    return {
+      evaluationExceptions: state.workerErrorCounts.get('evaluation_exception') || 0,
+      errorTypes
+    };
+  }
+
   function classifySharedTarget(targetInfo) {
     const source = classifyWorkerSource(targetInfo.url);
     const existing = targets.get(targetInfo.targetId);
@@ -524,19 +554,19 @@ function createContextObserver(name, options = {}) {
       const category = classifyWorkerLogEntry(params?.entry, record.isBlob);
       if(category) {
         record.failures.add(category);
-        addFailure(category);
+        addWorkerFailure(category);
       }
       return;
     }
     if(method === 'Runtime.exceptionThrown') {
       record.failures.add('evaluation_exception');
-      addFailure('evaluation_exception');
+      addWorkerFailure('evaluation_exception');
       return;
     }
     if(method === 'Network.loadingFailed') {
       if(isWorkerScriptType(params?.type)) {
         record.failures.add('module_fetch_failed');
-        addFailure('module_fetch_failed');
+        addWorkerFailure('module_fetch_failed');
       }
       return;
     }
@@ -544,7 +574,7 @@ function createContextObserver(name, options = {}) {
       const status = params?.response?.status;
       if(isWorkerScriptType(params?.type) && typeof status === 'number' && status >= 400) {
         record.failures.add('script_load_failed');
-        addFailure('script_load_failed');
+        addWorkerFailure('script_load_failed');
       }
       return;
     }
@@ -552,7 +582,7 @@ function createContextObserver(name, options = {}) {
       const details = params?.issue?.details?.contentSecurityPolicyIssueDetails;
       if(details && /worker/i.test(String(details.blockedType || ''))) {
         record.failures.add('csp_blocked');
-        addFailure('csp_blocked');
+        addWorkerFailure('csp_blocked');
       }
       return;
     }
@@ -743,6 +773,7 @@ function createContextObserver(name, options = {}) {
     classifySharedWorker,
     classifyMtproto,
     classifyFailure,
+    workerErrorSnapshot,
     summary
   };
 }
@@ -960,6 +991,9 @@ module.exports = {
   ORIGIN_CLASSES,
   PAGE_CDP_METHODS,
   PRIVATE_CSP_ORIGIN,
+  PRIVATE_CSP_ORIGINS,
+  PRIVATE_CSP_TARGETS,
+  PRIVATE_CSP_WSS,
   SHARED_WORKER_STATES,
   SCRIPT_ASSET_PATTERN,
   SOURCE_FETCH_STATES,
@@ -979,6 +1013,8 @@ module.exports = {
   createWebSocket101Grid,
   createWebSocket101Phase,
   evaluateControl,
+  getPrivateCspTarget,
+  isPrivateCspOrigin,
   isWorkerScriptType,
   labelForPathname,
   validateContextBlock,

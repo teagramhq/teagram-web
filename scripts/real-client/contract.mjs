@@ -4,8 +4,16 @@ import {basename, dirname, isAbsolute} from 'node:path';
 
 import observation from './observation.cjs';
 
-export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'message', 'group']);
+export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'poll']);
+const NO_POLL_PAGE_ERROR_COMPARISON_SCENARIOS = Object.freeze(['sign-in', 'message', 'group']);
+export const POLL_NEGATIVE_CONTROL_SERVER_REVISION = '586403c1f4c92c09b006652278bdd02fd40ddf2d';
+export const POLL_NEGATIVE_CONTROL_EVIDENCE = Object.freeze([
+  Object.freeze({shape: 'description', stage: 'alice_poll_description_create', errorType: 'POLL_ANSWERS_INVALID'}),
+  Object.freeze({shape: 'input_answer', stage: 'alice_poll_input_answer_create', errorType: 'POLL_ANSWERS_INVALID'})
+]);
 export const REQUIRED_CONTROLS = Object.freeze(Object.keys(observation.CONTROL_EXPECTATIONS));
+const POSITIVE_SCENARIO_SCREENSHOT_COUNT = 30;
+const POLL_NEGATIVE_CONTROL_SCREENSHOT_COUNT = 20;
 const REQUIRED_OBSERVATION_CONTEXTS = Object.freeze(['alice', 'bob']);
 const AUTH_PROGRESS_OBSERVATION_CONTEXTS = Object.freeze(['alice']);
 const AUTH_PROGRESS_WEBSOCKET_101_CONTEXTS = Object.freeze(['alice', 'control', 'other']);
@@ -17,6 +25,9 @@ const GATE_RESOURCE_TYPES = observation.GATE_RESOURCE_TYPES;
 const GATE_OBSERVER_ERROR_KINDS = observation.GATE_OBSERVER_ERROR_KINDS;
 const PAGE_ERROR_CONSTRUCTORS = observation.GATE_PAGE_ERROR_CONSTRUCTORS;
 const SCRIPT_ASSET = observation.SCRIPT_ASSET_PATTERN;
+const TYPE_ERROR_MESSAGE = /^[A-Za-z0-9_$ .,:'`(){}\[\]:!?+=\/-]{1,256}$/;
+const TYPE_ERROR_FUNCTION_NAME = /^[A-Za-z0-9_$ .<>.[\]-]{1,128}$/;
+const TYPE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'poll', 'unknown']);
 const AUTH_PROGRESS_REPORT_STAGES = Object.freeze([
   'runtime_inputs',
   'runtime_input_validation',
@@ -62,7 +73,11 @@ const REQUIRED_ARTIFACT_AUDIT_CHECKS = Object.freeze([
   'routeCollisions'
 ]);
 
-export function parseRequiredScenarios(value) {
+export function expectedScreenshotCount({pollCreationNegativeControl = false} = {}) {
+  return pollCreationNegativeControl ? POLL_NEGATIVE_CONTROL_SCREENSHOT_COUNT : POSITIVE_SCENARIO_SCREENSHOT_COUNT;
+}
+
+export function parseRequiredScenarios(value, noPollPageErrorComparison = false) {
   if(typeof value !== 'string' || !value.trim()) {
     throw new Error('scenario selection is required');
   }
@@ -84,6 +99,13 @@ export function parseRequiredScenarios(value) {
       throw new Error(`duplicate scenario: ${scenario}`);
     }
     seen.add(scenario);
+  }
+
+  if(noPollPageErrorComparison) {
+    if(JSON.stringify(scenarios) !== JSON.stringify(NO_POLL_PAGE_ERROR_COMPARISON_SCENARIOS)) {
+      throw new Error('--page-error-no-poll-comparison requires sign-in,message,group');
+    }
+    return [...NO_POLL_PAGE_ERROR_COMPARISON_SCENARIOS];
   }
 
   const missing = REQUIRED_SCENARIOS.filter((scenario) => !seen.has(scenario));
@@ -111,7 +133,9 @@ export function parseRealClientArgs(argv) {
     ['--run-id', 'runId'],
     ['--scenarios', 'scenarioSelection'],
     ['--observer-controls-only', 'observerControlsOnly'],
-    ['--auth-progress-one-submission', 'authProgressOneSubmission']
+    ['--auth-progress-one-submission', 'authProgressOneSubmission'],
+    ['--poll-creation-negative-control', 'pollCreationNegativeControl'],
+    ['--page-error-no-poll-comparison', 'pageErrorNoPollComparison']
   ]);
   const options = new Map();
   for(let index = 0; index < argumentsList.length; index++) {
@@ -122,7 +146,8 @@ export function parseRealClientArgs(argv) {
     if(options.has(name)) {
       throw new Error(`option was provided more than once: ${name}`);
     }
-    if(name === '--observer-controls-only' || name === '--auth-progress-one-submission') {
+    if(name === '--observer-controls-only' || name === '--auth-progress-one-submission' ||
+        name === '--poll-creation-negative-control' || name === '--page-error-no-poll-comparison') {
       options.set(name, true);
       continue;
     }
@@ -137,14 +162,28 @@ export function parseRealClientArgs(argv) {
 
   const controlsOnly = options.get('--observer-controls-only') === true;
   const authProgress = options.get('--auth-progress-one-submission') === true;
+  const pollCreationNegativeControl = options.get('--poll-creation-negative-control') === true;
+  const pageErrorNoPollComparison = options.get('--page-error-no-poll-comparison') === true;
   if(authProgress && (controlsOnly || options.has('--scenarios'))) {
     throw new Error('--auth-progress-one-submission cannot be combined with --scenarios or --observer-controls-only');
+  }
+  if(pollCreationNegativeControl && (controlsOnly || authProgress)) {
+    throw new Error('--poll-creation-negative-control cannot be combined with --observer-controls-only or --auth-progress-one-submission');
+  }
+  if(pageErrorNoPollComparison && (controlsOnly || authProgress || pollCreationNegativeControl)) {
+    throw new Error('--page-error-no-poll-comparison cannot be combined with --observer-controls-only, --auth-progress-one-submission or --poll-creation-negative-control');
   }
   if(!controlsOnly && !authProgress && !options.has('--scenarios')) {
     throw new Error('scenario selection is required');
   }
 
-  const optional = new Set(['--scenarios', '--observer-controls-only', '--auth-progress-one-submission']);
+  const optional = new Set([
+    '--scenarios',
+    '--observer-controls-only',
+    '--auth-progress-one-submission',
+    '--poll-creation-negative-control',
+    '--page-error-no-poll-comparison'
+  ]);
   const missing = [...names.keys()].filter((name) => !optional.has(name) && !options.has(name));
   if(missing.length) {
     throw new Error(`missing required options: ${missing.join(',')}`);
@@ -160,7 +199,14 @@ export function parseRealClientArgs(argv) {
   if(controlsOnly) {
     parsed.scenarios = [...REQUIRED_SCENARIOS];
   } else if(!authProgress) {
-    parsed.scenarios = parseRequiredScenarios(parsed.scenarioSelection);
+    parsed.scenarios = parseRequiredScenarios(parsed.scenarioSelection, pageErrorNoPollComparison);
+  }
+  if(pageErrorNoPollComparison) parsed.pageErrorNoPollComparison = true;
+  if(pollCreationNegativeControl) {
+    if(parsed.serverRevision !== POLL_NEGATIVE_CONTROL_SERVER_REVISION) {
+      throw new Error('--poll-creation-negative-control requires the pinned negative-control server revision');
+    }
+    parsed.pollCreationNegativeControl = true;
   }
   delete parsed.scenarioSelection;
   return parsed;
@@ -193,8 +239,8 @@ export function parseFixtureReadiness(text, expected, options = {}) {
   if(requireArtifact) {
     assertEventPins(artifactReady, 'artifact-ready', expected);
   }
-  if(serverReady.endpoint !== 'https://telegramd.test' ||
-      serverReady.wssEndpoint !== 'wss://telegramd.test/apiws' ||
+  const fixtureTarget = observation.getPrivateCspTarget(serverReady.endpoint, serverReady.wssEndpoint);
+  if(!fixtureTarget || serverReady.evidenceClass !== fixtureTarget.evidenceClass ||
       serverReady.mode !== 'private' ||
       (requireArtifact && (artifactReady.endpoint !== serverReady.endpoint ||
         artifactReady.wssEndpoint !== serverReady.wssEndpoint ||
@@ -220,8 +266,9 @@ export function parseFixtureReadiness(text, expected, options = {}) {
   return {serverReady, artifactReady};
 }
 
-export function readSyntheticCredentials(credentials, runId, count = 2) {
-  if(!RUN_ID.test(runId || '') || !Array.isArray(credentials) || credentials.length !== 2 || ![1, 2].includes(count)) {
+export function readSyntheticCredentials(credentials, runId, count = 2, resourcePrefix = 'telegram-fixture') {
+  if(!RUN_ID.test(runId || '') || !Array.isArray(credentials) || credentials.length !== 2 || ![1, 2].includes(count) ||
+      !observation.PRIVATE_CSP_TARGETS.some((target) => target.resourcePrefix === resourcePrefix)) {
     throw new Error('two fixture credentials and a full run ID are required');
   }
 
@@ -253,7 +300,7 @@ export function readSyntheticCredentials(credentials, runId, count = 2) {
     if(!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() ||
         (directoryInfo.mode & 0o077) !== 0 ||
         (typeof process.getuid === 'function' && directoryInfo.uid !== process.getuid()) ||
-        !basename(dirname(filePath)).startsWith(`telegram-fixture-${runId}.`) ||
+        !basename(dirname(filePath)).startsWith(`${resourcePrefix}-${runId}.`) ||
         !fileInfo.isFile() || fileInfo.isSymbolicLink() || fileInfo.nlink !== 1 ||
         (typeof process.getuid === 'function' && fileInfo.uid !== process.getuid()) ||
         (fileInfo.mode & 0o777) !== 0o400 || !/^[0-9a-f]{64}\n?$/.test(content)) {
@@ -280,6 +327,7 @@ function assertServerReadyEvidence(ready) {
   const workers = evidence?.workerProbes;
   const observer = evidence?.observerControlledAttempts;
   const workerTypes = ['page', 'shared_worker', 'service_worker'];
+  const fixtureTarget = observation.getPrivateCspTarget(ready.endpoint, ready.wssEndpoint);
 
   if(security?.registrationClosed !== true || security.loginCodeLogging !== false ||
       security.electionClosed !== true || security.administratorIsNull !== true ||
@@ -288,7 +336,7 @@ function assertServerReadyEvidence(ready) {
       evidence?.httpStatus !== 200 || evidence.wssUpgradeStatus !== 101 || evidence.allowedWssObserved !== 1 ||
       evidence.unexpectedAttempts !== 0 || evidence.unexpectedDetectionVerified !== true ||
       evidence.directTCP?.attempted !== 5 || evidence.directTCP.blocked !== 5 ||
-      ready.evidenceClass !== 'production-telegramd' ||
+      !fixtureTarget || ready.evidenceClass !== fixtureTarget.evidenceClass ||
       !/^[A-Za-z0-9+/]{43}=$/.test(ready.leafSPKI || '') ||
       Buffer.from(ready.leafSPKI, 'base64').byteLength !== 32 ||
       typeof ready.mtprotoPublicKeyPEM !== 'string' ||
@@ -898,23 +946,35 @@ function parseBrowserGateBreakdown(value) {
     }
     observerErrorCount += Object.values(errors).reduce((sum, count) => sum + count, 0);
 
+    const isPageError = (error) => {
+      if(!error || typeof error !== 'object' || Array.isArray(error) ||
+          !PAGE_ERROR_CONSTRUCTORS.includes(error.constructorName) ||
+          typeof error.scriptAsset !== 'string' || !SCRIPT_ASSET.test(error.scriptAsset)) return false;
+      if(error.constructorName !== 'TypeError') return hasExactOwnKeys(error, ['constructorName', 'scriptAsset']);
+      const frame = error.firstFrame;
+      return hasExactOwnKeys(error, ['constructorName', 'scriptAsset', 'message', 'firstFrame', 'scenario', 'stage']) &&
+        typeof error.message === 'string' && TYPE_ERROR_MESSAGE.test(error.message) &&
+        TYPE_ERROR_SCENARIOS.includes(error.scenario) &&
+        typeof error.stage === 'string' && /^[a-z][a-z0-9_]{0,95}$/.test(error.stage) &&
+        hasExactOwnKeys(frame, ['functionName', 'line', 'column', 'manifestAsset']) &&
+        typeof frame.functionName === 'string' && TYPE_ERROR_FUNCTION_NAME.test(frame.functionName) &&
+        (frame.line === null || Number.isSafeInteger(frame.line) && frame.line > 0 && frame.line <= 1_000_000_000) &&
+        (frame.column === null || Number.isSafeInteger(frame.column) && frame.column > 0 && frame.column <= 1_000_000_000) &&
+        typeof frame.manifestAsset === 'string' && SCRIPT_ASSET.test(frame.manifestAsset);
+    };
     const pageErrors = value.pageErrors[context];
-    if(!Array.isArray(pageErrors) || pageErrors.length > 512 || pageErrors.some((error) =>
-      !hasExactOwnKeys(error, ['constructorName', 'scriptAsset']) ||
-      !PAGE_ERROR_CONSTRUCTORS.includes(error.constructorName) ||
-      typeof error.scriptAsset !== 'string' || !SCRIPT_ASSET.test(error.scriptAsset)
-    )) {
+    if(!Array.isArray(pageErrors) || pageErrors.length > 512 || pageErrors.some((error) => !isPageError(error))) {
       throw new Error('browser egress/page error evidence is invalid');
     }
     pageErrorCount += pageErrors.length;
 
     const overflow = value.pageErrorOverflow[context];
-    if(!Array.isArray(overflow) || overflow.length > 1_000_000 || overflow.some((entry) =>
-      !hasExactOwnKeys(entry, ['constructorName', 'scriptAsset', 'count']) ||
-      !PAGE_ERROR_CONSTRUCTORS.includes(entry.constructorName) ||
-      typeof entry.scriptAsset !== 'string' || !SCRIPT_ASSET.test(entry.scriptAsset) ||
-      !Number.isSafeInteger(entry.count) || entry.count < 1 || entry.count > 1_000_000
-    ) || (overflow.length > 0 && pageErrors.length !== 512)) {
+    if(!Array.isArray(overflow) || overflow.length > 1_000_000 || overflow.some((entry) => {
+      if(!entry || typeof entry !== 'object' || Array.isArray(entry) ||
+          !Number.isSafeInteger(entry.count) || entry.count < 1 || entry.count > 1_000_000) return true;
+      const {count, ...error} = entry;
+      return !isPageError(error);
+    }) || (overflow.length > 0 && pageErrors.length !== 512)) {
       throw new Error('browser egress/page error evidence is invalid');
     }
     pageErrorCount += overflow.reduce((sum, entry) => sum + entry.count, 0);
@@ -1003,14 +1063,16 @@ function hasExactOwnKeys(value, keys) {
     ownKeys.every((key) => typeof key === 'string' && keys.includes(key));
 }
 
-export function assertAllScenariosPassed(results) {
-  if(!Array.isArray(results)) {
+export function assertAllScenariosPassed(results, expectedScenarios = REQUIRED_SCENARIOS) {
+  if(!Array.isArray(results) || !Array.isArray(expectedScenarios) || expectedScenarios.length === 0 ||
+      expectedScenarios.some((scenario) => !REQUIRED_SCENARIOS.includes(scenario)) ||
+      new Set(expectedScenarios).size !== expectedScenarios.length) {
     throw new Error('scenario results are required');
   }
 
   const byName = new Map();
   for(const result of results) {
-    if(!result || typeof result.name !== 'string' || !REQUIRED_SCENARIOS.includes(result.name)) {
+    if(!result || typeof result.name !== 'string' || !expectedScenarios.includes(result.name)) {
       throw new Error('scenario result has an unknown name');
     }
     if(byName.has(result.name)) {
@@ -1019,7 +1081,7 @@ export function assertAllScenariosPassed(results) {
     byName.set(result.name, result.status);
   }
 
-  for(const scenario of REQUIRED_SCENARIOS) {
+  for(const scenario of expectedScenarios) {
     if(!byName.has(scenario)) {
       throw new Error(`${scenario} did not execute`);
     }
@@ -1032,5 +1094,5 @@ export function assertAllScenariosPassed(results) {
     }
   }
 
-  return [...REQUIRED_SCENARIOS];
+  return [...expectedScenarios];
 }

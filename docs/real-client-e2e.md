@@ -1,10 +1,10 @@
 # Real client fixture scenarios
 
-`pnpm run test:real-client` consumes a completed `server-ready` and `artifact-ready` pair from one foreground real-server fixture run. It checks the immutable harness, server and web pins, the fixture's protected synthetic credentials, isolation and audit evidence before driving the production UI. It requires all three scenarios: `sign-in,message,group`.
+`pnpm run test:real-client` consumes a completed `server-ready` and `artifact-ready` pair from one foreground real-server fixture run. It checks the immutable harness, server and web pins, the fixture's protected synthetic credentials, isolation and audit evidence before driving the production UI. It requires all four scenarios: `sign-in,message,group,poll`.
 
-The accepted positive inputs are harness `5f294c39abb32fc8ae15a4f7ccb085974098b320`, server `47daaaea5c71b859d9865c03cabb50da5a1a013b` and web artifact source `c88211e3985942343bf40dcbbcb8e8f5b4b7d364`. The scenario runner revision is recorded separately from the artifact source revision. Each run also has a fresh run ID, RSA public key and endpoint identity. Do not reuse readiness or artifacts from another run.
+The accepted positive inputs are harness `22cbb3fd22f6a1c38ddf1e21b3cf35013f178d35`, server `052f1b91274be72ccc9a7eda0d71af10272addc0` and web artifact source `aa060751df036727fb27cbdd4dbdf0525cd381b4`. The negative-control server is pinned separately to `586403c1f4c92c09b006652278bdd02fd40ddf2d`: it includes MAIN-1301 group support but predates the MAIN-2111 poll creator-flag fix. Each run records the harness, server and artifact source revisions with a fresh run ID, RSA public key, endpoint identity and artifact. Do not reuse readiness or artifacts from another run.
 
-The native arm64 fixture successor was accepted from server PR #499, merged as `b61fbe1a53348edd0039885fb4a4659e0dc455c0`. The executable harness pin remains the reviewed PR head `5f294c39abb32fc8ae15a4f7ccb085974098b320`; do not substitute the squash merge or moving main. The server-under-test and historical negative pair remain unchanged.
+The fixture harness, server and web pins are the exact revisions used for the accepted positive run. Keep the fixture process in the foreground while building and attaching a fresh artifact.
 
 ## Run the fixture
 
@@ -16,11 +16,11 @@ RUN_ID="$(openssl rand -hex 16)"
 READINESS_FILE="$(mktemp /dev/shm/real-client-readiness.XXXXXX)"
 chmod 600 "$READINESS_FILE"
 printf 'READINESS_FILE=%s\n' "$READINESS_FILE"
-test "$(git rev-parse HEAD)" = 5f294c39abb32fc8ae15a4f7ccb085974098b320
+test "$(git rev-parse HEAD)" = 22cbb3fd22f6a1c38ddf1e21b3cf35013f178d35
 test -z "$(git status --porcelain --untracked-files=all)"
 bash test/e2e/real_server_fixture/run.sh \
-  --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
-  --web-revision c88211e3985942343bf40dcbbcb8e8f5b4b7d364 \
+  --server-revision 052f1b91274be72ccc9a7eda0d71af10272addc0 \
+  --web-revision aa060751df036727fb27cbdd4dbdf0525cd381b4 \
   --run-id "$RUN_ID" | tee "$READINESS_FILE"
 ```
 
@@ -34,7 +34,7 @@ From a clean web checkout at the exact positive web revision, use only that run'
 set -euo pipefail
 READINESS_FILE='/dev/shm/real-client-readiness.<path-printed-in-fixture-terminal>'
 RUN_ID="$(jq -er 'select(.event == "server-ready") | .runId' "$READINESS_FILE")"
-test "$(git rev-parse HEAD)" = c88211e3985942343bf40dcbbcb8e8f5b4b7d364
+test "$(git rev-parse HEAD)" = aa060751df036727fb27cbdd4dbdf0525cd381b4
 test -z "$(git status --porcelain --untracked-files=all)"
 KEY_FILE="$(mktemp /dev/shm/real-client-public-key.XXXXXX)"
 chmod 600 "$KEY_FILE"
@@ -63,14 +63,52 @@ Run from the checkout containing `test:real-client`, using the readiness file an
 ```sh
 corepack pnpm run test:real-client -- \
   --readiness-file "$READINESS_FILE" \
-  --harness-revision 5f294c39abb32fc8ae15a4f7ccb085974098b320 \
-  --server-revision 47daaaea5c71b859d9865c03cabb50da5a1a013b \
-  --web-revision c88211e3985942343bf40dcbbcb8e8f5b4b7d364 \
+  --harness-revision 22cbb3fd22f6a1c38ddf1e21b3cf35013f178d35 \
+  --server-revision 052f1b91274be72ccc9a7eda0d71af10272addc0 \
+  --web-revision aa060751df036727fb27cbdd4dbdf0525cd381b4 \
   --run-id "$RUN_ID" \
-  --scenarios sign-in,message,group
+  --scenarios sign-in,message,group,poll
 ```
 
-The browser uses two new independent contexts and the actual username/password flow. It sends `browser-ci-hello` to the other account, creates a basic group through the UI with that account, then checks the received group message and member list. It captures each state inside the fixture browser's temporary directory, removes those screenshots and the runner on exit, and emits only scenario, fixed password-stage and network summaries. It does not import storage state, use test-only authentication, or export credentials, traces or captures.
+The browser uses two new independent contexts and the actual username/password flow. It sends `browser-ci-hello` to the other account, creates a basic group through the UI with that account, then checks the received group message and member list. The poll scenario creates one two-answer poll with the description `Description stuff` and one with an empty description. The second poll attaches a synthetic link to its first answer through the UI, exercising the client's `inputPollAnswer` creation path without depending on photo permissions. Bob sees both polls and votes in each; his count/result is checked after his vote, and Alice's after she closes each poll. Alice stops each poll from the message context menu after the send status confirms delivery. Bob must then see `Final Results`, and the answer controls must reject a trial click. Each positive run captures 30 states inside the fixture browser's temporary directory, removes those screenshots and the runner on exit, and emits only scenario, fixed password-stage and network summaries. Poll send failures also retain whether Create was clicked and the composer closed, synthetic temp-message status and error fields, a matching `message_sent` result with numeric message identifiers when present, whether its server mid was found in Alice's peer-scoped message store and whether that entry still matched the synthetic poll, synthetic-only counts for server/temp-id message rows and question text nodes at send time and after the DOM wait, and the actual poll locator's match and visibility counts, RPC error counts/types, and worker exception categories/counts; no poll text or arbitrary error text is emitted. It does not import storage state, use test-only authentication, or export credentials, traces or captures.
+
+Each scenario failure includes the page/worker gate snapshot collected at that point. A `TypeError` retains a recognized JavaScript error message, the first stack frame's function and line/column, its asset name when that frame maps to a script requested from the staged private artifact, and the active scenario/stage. Other messages collapse to `unclassified`; raw URLs, full stacks and arbitrary exception text stay out of the report.
+
+To compare page errors without the poll step, run the same pins in a fresh fixture with `--scenarios sign-in,message,group --page-error-no-poll-comparison`. This diagnostic mode accepts only that exact scenario set and still enforces all page, worker and egress gates; it is not a substitute for the four-scenario acceptance run.
+
+## Verify the legacy poll failures
+
+Run a separate fresh fixture using the same harness and web artifact source, but server revision `586403c1f4c92c09b006652278bdd02fd40ddf2d`. This server includes MAIN-1301 group support while predating the MAIN-2111 creator-flag fix, so sign-in, message and group can pass before both poll creations are rejected. Build and attach a new private artifact for that run. Do not reuse the positive run's readiness, public key, endpoint or artifact.
+
+From the teagram-server checkout at the harness revision, keep this fixture process in the foreground and use a fresh run ID and readiness file:
+
+```sh
+set -euo pipefail
+RUN_ID="$(openssl rand -hex 16)"
+READINESS_FILE="$(mktemp /dev/shm/real-client-negative-readiness.XXXXXX)"
+chmod 600 "$READINESS_FILE"
+printf 'READINESS_FILE=%s\n' "$READINESS_FILE"
+test "$(git rev-parse HEAD)" = 22cbb3fd22f6a1c38ddf1e21b3cf35013f178d35
+bash test/e2e/real_server_fixture/run.sh \
+  --server-revision 586403c1f4c92c09b006652278bdd02fd40ddf2d \
+  --web-revision aa060751df036727fb27cbdd4dbdf0525cd381b4 \
+  --run-id "$RUN_ID" | tee "$READINESS_FILE"
+```
+
+Run the complete scenario set with `--poll-creation-negative-control`:
+
+```sh
+corepack pnpm run test:real-client -- \
+  --readiness-file "$READINESS_FILE" \
+  --harness-revision 22cbb3fd22f6a1c38ddf1e21b3cf35013f178d35 \
+  --server-revision 586403c1f4c92c09b006652278bdd02fd40ddf2d \
+  --web-revision aa060751df036727fb27cbdd4dbdf0525cd381b4 \
+  --run-id "$RUN_ID" \
+  --scenarios sign-in,message,group,poll \
+  --poll-creation-negative-control
+```
+
+This mode still signs in both users and completes the message and group scenarios. It then submits two polls through the UI and passes only when the server rejects both at poll creation with `POLL_ANSWERS_INVALID`: the description shape at `alice_poll_description_create` and empty-description media-answer shape at `alice_poll_input_answer_create`. It captures 20 states and cleans them up with the runner. Login or fixture startup failures do not count as a regression result.
 
 When a message or group stage fails, the failure line adds one centre-column summary, read from the failing page before cleanup: the number of open and active chats, the active chat's numeric peer id and the one selected from search, how many elements the composer selector matched, how many composer inputs exist and how many are visible or editable, whether the chat input is absent, hidden or visible, which bottom bar replaced it (`start`, `unblock`, `join`, `mute`, `unmute`, `open_chat`, `frozen`, `multiple`, `other` or `none`), whether the composer wait ended on `timeout` or `strict_mode_violation`, the page exception and console-error counts since the peer was selected, and the handled RPC failures since then: their count and, for up to 16 types, the error types that match `^[A-Z][A-Z0-9_]{1,63}$` (such as `PEER_ID_INVALID`). The RPC count comes from a passive listener the runner adds to the page's worker message ports before the app loads. It reads only the error type of a failed result, never a request, result, argument or message. It is a closed schema of counts, fixed values, numeric ids and error-type identifiers: a field outside it is reported as `unclassified`, and no page text, message, label, console text or exception message is read. A page that cannot be read within 5 seconds is reported as `unavailable`. Screenshots are still removed and cleanup is unchanged.
 
