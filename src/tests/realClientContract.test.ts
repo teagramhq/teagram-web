@@ -2831,9 +2831,9 @@ describe('discovery shared-worker network accounting', () => {
       exceptionId: 11,
       executionContextId: 3,
       text: 'Uncaught (in promise)',
-      scriptId: '7',
-      lineNumber: 40,
-      columnNumber: 8,
+      scriptId: '1',
+      lineNumber: 0,
+      columnNumber: 0,
       exception: {
         type: 'object',
         description: 'Object',
@@ -2844,15 +2844,16 @@ describe('discovery shared-worker network accounting', () => {
         ]}
       },
       stackTrace: {callFrames: [{
-        scriptId: '7',
-        url: source,
-        functionName: 'inviteToChannel',
-        lineNumber: 40,
-        columnNumber: 8
+        scriptId: '1',
+        url: `${APP_ORIGIN}/`,
+        functionName: '',
+        lineNumber: 0,
+        columnNumber: 0
       }]}
     }, 'runtime');
     recordPageErrorProtocolEvent(page, {
       reason: 'promiseRejection',
+      executionContextId: 3,
       data: {type: 'object', description: 'Object', objectId: 'debugger-object-11'},
       callFrames: [{
         functionName: 'inviteToChannel',
@@ -2908,9 +2909,10 @@ describe('discovery shared-worker network accounting', () => {
         columnNumber: 8
       }]}
     });
-    recordPageErrorProtocolEvent(page, createRuntimeException(11, '7', 'inviteToChannel'), 'runtime');
+    recordPageErrorProtocolEvent(page, createRuntimeException(11, '1', 'inviteToChannel'), 'runtime');
     recordPageErrorProtocolEvent(page, {
       reason: 'promiseRejection',
+      executionContextId: 3,
       data: {type: 'object', description: 'Object'},
       callFrames: [{
         functionName: 'inviteToChannel',

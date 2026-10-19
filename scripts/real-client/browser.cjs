@@ -741,6 +741,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
   let nextCommandId = 0;
   let cdp;
   const pageScriptUrls = new Map();
+  const pageScriptExecutionContexts = new Map();
   let pageTargetId;
   let targetRegistry;
   let send;
@@ -1072,6 +1073,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
         if(typeof event?.scriptId === 'string' && event.scriptId.length <= 128 &&
             typeof event.url === 'string' && event.url && event.url.length <= 8192 && pageScriptUrls.size < 4096) {
           pageScriptUrls.set(event.scriptId, event.url);
+          if(Number.isSafeInteger(event.executionContextId)) pageScriptExecutionContexts.set(event.scriptId, event.executionContextId);
         }
       });
       cdp.on('Runtime.exceptionThrown', (event) => {
@@ -1090,7 +1092,9 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
               const url = typeof frame?.url === 'string' && frame.url ? frame.url : pageScriptUrls.get(scriptId);
               if(typeof scriptId === 'string' && typeof url === 'string' && url) scriptUrls[scriptId] = url;
             }
-            onPageException({...event, scriptUrls}, 'debugger');
+            const firstScriptId = event.callFrames?.[0]?.location?.scriptId;
+            const executionContextId = pageScriptExecutionContexts.get(firstScriptId);
+            onPageException({...event, executionContextId, scriptUrls}, 'debugger');
           }
         } catch {
           // Page exception diagnostics must not interfere with browser observation.
@@ -2598,9 +2602,9 @@ function recordPageErrorProtocolEvent(page, exceptionDetails, captureSource) {
     : exceptionDetails?.stackTrace?.callFrames)?.[0];
   const location = isRuntimeException
     ? {
-      scriptId: exceptionDetails.scriptId || firstFrame?.scriptId,
-      lineNumber: Number.isSafeInteger(exceptionDetails.lineNumber) ? exceptionDetails.lineNumber : firstFrame?.lineNumber,
-      columnNumber: Number.isSafeInteger(exceptionDetails.columnNumber) ? exceptionDetails.columnNumber : firstFrame?.columnNumber
+      scriptId: firstFrame?.scriptId || exceptionDetails.scriptId,
+      lineNumber: Number.isSafeInteger(firstFrame?.lineNumber) ? firstFrame.lineNumber : exceptionDetails.lineNumber,
+      columnNumber: Number.isSafeInteger(firstFrame?.columnNumber) ? firstFrame.columnNumber : exceptionDetails.columnNumber
     }
     : firstFrame?.location || {};
   const exception = exceptionDetails?.exception || exceptionDetails?.data;
@@ -2612,6 +2616,7 @@ function recordPageErrorProtocolEvent(page, exceptionDetails, captureSource) {
     : errorCodePreview;
   events.push({
     ...event,
+    captureSequence: events.length,
     captureSource: ['runtime', 'debugger'].includes(captureSource) ? captureSource : 'unknown',
     exceptionId: Number.isSafeInteger(exceptionDetails?.exceptionId) ? exceptionDetails.exceptionId : undefined,
     executionContextId: Number.isSafeInteger(exceptionDetails?.executionContextId) ? exceptionDetails.executionContextId : undefined,
@@ -2762,7 +2767,16 @@ function correlatePageErrorDiagnosticEvents(diagnostic, {windowEvents = [], prot
     const matchingByObjectId = typeof event.exceptionObjectId === 'string'
       ? protocolGroups.filter((group) => group.events.some((candidate) => candidate.exceptionObjectId === event.exceptionObjectId))
       : [];
-    const matches = matchingById.length > 0 ? matchingById : matchingByObjectId.length > 0 ? matchingByObjectId : matchingByLocation;
+    const matchingAdjacentRuntime = Number.isSafeInteger(event.executionContextId) && Number.isSafeInteger(event.captureSequence)
+      ? protocolGroups.filter((group) => group.executionContextId === event.executionContextId &&
+        group.events.some((candidate) => candidate.captureSource === 'runtime' && Number.isSafeInteger(candidate.captureSequence) &&
+          Math.abs(candidate.captureSequence - event.captureSequence) === 1))
+      : [];
+    // Chromium can report a synthetic Runtime location for an uncaught rejection.
+    // Adjacent same-context pause/exception observations still identify one throw;
+    // a second Runtime group keeps the overall result ambiguous.
+    const matches = matchingById.length > 0 ? matchingById : matchingByObjectId.length > 0 ? matchingByObjectId :
+      matchingByLocation.length > 0 ? matchingByLocation : matchingAdjacentRuntime;
     if(matches.length === 1) {
       matches[0].events.push(event);
       continue;
