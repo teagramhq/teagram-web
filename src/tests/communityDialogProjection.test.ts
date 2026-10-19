@@ -85,6 +85,7 @@ import {
   getCommunityProjectionFolderCountDelta
 } from '@components/autonomousDialogList/dialogs';
 import apiManagerProxy from '@lib/apiManagerProxy';
+import {reconcilePeer} from '@stores/peers';
 import {FilterType} from '@lib/storages/dialogs';
 import DialogsStorage from '@lib/storages/dialogs';
 import '@helpers/peerIdPolyfill';
@@ -113,11 +114,14 @@ describe('Community dialog projection counts', () => {
         },
         itemsLength: () => 1
       },
+      appDialogsManager: {},
+      managers: {dialogsStorage: {getCachedDialogs: vi.fn().mockResolvedValue([])}},
       ensureArchiveDialogHydrated: vi.fn(),
       scheduleCommunityProjection: vi.fn(async() => {
         events.push('projection');
       })
     });
+    list.appDialogsManager.xd = list;
 
     try {
       await expect(list.loadDialogsInner({
@@ -160,6 +164,11 @@ describe('Community dialog projection counts', () => {
         }
       },
       sortedList: {has: vi.fn().mockReturnValue(false)},
+      emptyChannelDialogReconcileDisposers: new Map(),
+      emptyChannelDialogReconcilePromises: new Map(),
+      emptyChannelDialogReconcileRequested: new Set(),
+      emptyChannelDialogReconcileUpdatingDialogs: new Set(),
+      emptyChannelDialogReconcileGeneration: 0,
       updateDialog: vi.fn(),
       processDialogForCallStatus: vi.fn()
     });
@@ -167,15 +176,18 @@ describe('Community dialog projection counts', () => {
     const proxy = apiManagerProxy as any;
     const originalGetPeer = proxy.getPeer;
     proxy.getPeer = vi.fn().mockReturnValue(channel);
+    reconcilePeer(peerId, channel as any);
 
     try {
       const handleChatUpdate = list.handleChatUpdate;
       expect(handleChatUpdate).toBeTypeOf('function');
-      await handleChatUpdate.call(list, channelId);
+      handleChatUpdate.call(list, channelId);
 
-      expect(list.managers.appMessagesManager.getDialogOnly).toHaveBeenCalledWith(peerId);
+      await vi.waitFor(() => expect(list.managers.appMessagesManager.getDialogOnly).toHaveBeenCalledWith(peerId));
       expect(list.updateDialog).toHaveBeenCalledWith(dialog);
     } finally {
+      list.clearEmptyChannelDialogReconciliations();
+      reconcilePeer(peerId);
       if(originalGetPeer === undefined) {
         delete proxy.getPeer;
       } else {

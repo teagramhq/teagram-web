@@ -94,6 +94,7 @@ export default class DialogsStorage extends AppManager {
   private dialogsOffsetDate: {[folder_id: number]: number};
   private pinnedOrders: {[folder_id: number]: PeerId[]};
   private savedDialogsLoaded: boolean;
+  private cachedListReconciled: boolean;
   private savedDialogsOffsetDate: number;
   private savedDialogsPinnedOrder: PeerId[];
   private dialogsNum: number;
@@ -1990,6 +1991,10 @@ export default class DialogsStorage extends AppManager {
     const loadedAll = this.isDialogsLoaded(realFolderId, filterType);
     const isEnoughDialogs = curDialogStorage.length >= (offset + limit);
     if((isServerSearchSupported ? false : query) || loadedAll || isEnoughDialogs || forceLocal) {
+      if(!query && !offset && filterId === FOLDER_ID_ALL) {
+        this.reconcileCachedChannelDialogs();
+      }
+
       const dialogs = curDialogStorage.slice(offset, offset + limit);
       return {
         dialogs,
@@ -2045,6 +2050,99 @@ export default class DialogsStorage extends AppManager {
         isEnd: result.isEnd && curDialogStorage[curDialogStorage.length - 1] === dialogs[dialogs.length - 1]
       };
     });
+  }
+
+  /**
+   * A cached list is not asked from the server again, but a channel membership reaches the client
+   * only as a transient `updateChannel` that `getDifference` never replays. A join pushed while the
+   * previous worker was going away (its `getPeerDialogs` unanswered) or while offline is missing
+   * from that cache for good, so once per start compare it with the server's list and fetch the
+   * channel dialogs it lacks. The server's chats decide membership, so a left, kicked or banned
+   * channel is never fetched back. Until every listed channel is restored, the next cached first
+   * page retries the comparison.
+   */
+  private async reconcileCachedChannelDialogs() {
+    if(this.cachedListReconciled) {
+      return;
+    }
+
+    this.cachedListReconciled = true;
+    try {
+      const missingPeerIds = await this.getServerChannelsMissingLocally();
+      await Promise.all(missingPeerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
+      if(missingPeerIds.some((peerId) => !this.getDialogOnly(peerId) && this.appChatsManager.isInChat(peerId.toChatId()))) {
+        this.cachedListReconciled = false;
+      }
+    } catch(err) {
+      this.cachedListReconciled = false;
+    }
+  }
+
+  private async getServerChannelsMissingLocally() {
+    const limit = 100;
+    const missingPeerIds: PeerId[] = [];
+    const seenPeerIds: Set<PeerId> = new Set();
+    let offsetDate = 0, offsetId = 0, offsetPeerId: PeerId;
+    for(;;) {
+      const result = await this.apiManager.invokeApiSingleProcess({
+        method: 'messages.getDialogs',
+        params: {
+          folder_id: FOLDER_ID_ALL,
+          offset_date: offsetDate,
+          offset_id: offsetId,
+          offset_peer: offsetPeerId ? this.appPeersManager.getInputPeerById(offsetPeerId) : {_: 'inputPeerEmpty'},
+          limit,
+          hash: '0'
+        },
+        processResult: (result) => {
+          if(result._ !== 'messages.dialogsNotModified') {
+            this.appPeersManager.saveApiPeers(result);
+          }
+
+          return result;
+        }
+      });
+
+      if(result._ === 'messages.dialogsNotModified') {
+        return missingPeerIds;
+      }
+
+      let hasNewPeer = false;
+      const dialogs = result.dialogs.filter((dialog) => dialog._ === 'dialog');
+      for(const dialog of dialogs) {
+        const peerId = this.appPeersManager.getPeerId(dialog.peer);
+        if(seenPeerIds.has(peerId)) {
+          continue;
+        }
+
+        seenPeerIds.add(peerId);
+        hasNewPeer = true;
+        if(
+          dialog.peer._ === 'peerChannel' &&
+          !this.getDialogOnly(peerId) &&
+          this.appChatsManager.isInChat(peerId.toChatId())
+        ) {
+          missingPeerIds.push(peerId);
+        }
+      }
+
+      const lastDialog = dialogs[dialogs.length - 1];
+      if(
+        result._ !== 'messages.dialogsSlice' ||
+        !hasNewPeer ||
+        seenPeerIds.size >= result.count
+      ) {
+        return missingPeerIds;
+      }
+
+      // * the next page starts after the last dialog's top message, the way the server orders the list
+      offsetPeerId = this.appPeersManager.getPeerId(lastDialog.peer);
+      offsetId = lastDialog.top_message;
+      const lastMessage = result.messages.find((message) => {
+        return message.id === offsetId && this.appPeersManager.getPeerId(message.peer_id) === offsetPeerId;
+      });
+      offsetDate = (lastMessage as Message.message)?.date ?? 0;
+    }
   }
 
   public async markFolderAsRead(

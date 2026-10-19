@@ -843,7 +843,10 @@ export class AppMessagesManager extends AppManager {
         dialog.draft = draft;
 
         let drop = false;
-        if(!draft && !getServerMessageId(dialog.top_message)) {
+        const hasTopMessage = getServerMessageId(dialog.top_message);
+        const canKeepEmptyChannelDialog = !hasTopMessage && isDialog(dialog) &&
+          this.dialogsStorage.canSaveEmptyChannelDialog(peerId, dialog);
+        if(!draft && !hasTopMessage && !canKeepEmptyChannelDialog) {
           this.dialogsStorage.dropDialog(peerId);
           drop = true;
         } else {

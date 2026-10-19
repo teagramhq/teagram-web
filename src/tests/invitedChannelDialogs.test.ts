@@ -1,5 +1,6 @@
 import {createTestClient} from './api/harness';
 import type {Message} from '@layer';
+import {GLOBAL_FOLDER_ID} from '@lib/storages/dialogs';
 
 describe('invited channel dialogs', () => {
   let client: Awaited<ReturnType<typeof createTestClient>>;
@@ -69,6 +70,28 @@ describe('invited channel dialogs', () => {
       pFlags: {megagroup: true}
     };
   }
+
+  test('keeps an empty channel dialog when its draft is cleared', () => {
+    const channelId = 990030;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    const channel = makeChannel(channelId);
+    client.managers.appChatsManager.saveApiChats([channel]);
+    applyEmptyChannelDialog(channel);
+
+    const dialog = client.managers.dialogsStorage.getDialogOnly(peerId);
+    expect(dialog).toBeDefined();
+    dialog!.draft = {
+      _: 'draftMessage',
+      date: 1,
+      message: 'draft',
+      pFlags: {}
+    } as any;
+
+    client.managers.rootScope.dispatchEvent('draft_updated', {peerId, draft: undefined} as any);
+
+    expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeDefined();
+    expect(client.managers.dialogsStorage.getFolderDialogs(0, false).map((item) => item.peerId)).toContain(peerId);
+  });
 
   test('lists an empty invited channel from the messages.getDialogs response after reload', async() => {
     const channelId = 990004;
@@ -520,6 +543,184 @@ describe('invited channel dialogs', () => {
       expect(client.managers.appChatsManager.getChat(channelId)._).toBe('channelForbidden');
     } finally {
       apiManager.invokeApi = originalInvoke;
+    }
+  });
+  function makeChannelDialogsPage(channels: any[], count: number) {
+    const page = makeEmptyChannelDialogResult(channels[0], 'messages.dialogsSlice');
+    page.dialogs = channels.map((channel) => ({...page.dialogs[0], peer: {_: 'peerChannel', channel_id: channel.id}, top_message: 1}));
+    page.chats = channels;
+    page.count = count;
+    return page;
+  }
+
+  async function getCachedListWithServer(
+    channel: any,
+    {
+      pages = [makeChannelDialogsPage([channel], 1)],
+      failFirstList = false,
+      failFirstPeerDialogs = false
+    }: {pages?: any[], failFirstList?: boolean, failFirstPeerDialogs?: boolean} = {}
+  ) {
+    const dialogsStorage: any = client.managers.dialogsStorage;
+    const apiManager: any = (client.managers.appMessagesManager as any).apiManager;
+    const originalInvoke = apiManager.invokeApi;
+    const originalInvokeSingleProcess = apiManager.invokeApiSingleProcess;
+    const allDialogsLoaded = dialogsStorage.allDialogsLoaded;
+    const requests: string[] = [];
+    const listParams: any[] = [];
+    apiManager.invokeApiSingleProcess = (options: any) => {
+      if(options.method !== 'messages.getDialogs') {
+        return originalInvokeSingleProcess.call(apiManager, options);
+      }
+
+      requests.push(options.method);
+      if(failFirstList && requests.length === 1) {
+        return Promise.reject(Object.assign(new Error('NETWORK_BAD_REQUEST'), {type: 'NETWORK_BAD_REQUEST'}));
+      }
+
+      // * the first page is the one asked from the top of the list, the rest follow its offset
+      const pageIndex = options.params.offset_peer._ === 'inputPeerEmpty' ? 0 : listParams.filter((params) => params.offset_peer._ !== 'inputPeerEmpty').length + 1;
+      listParams.push(options.params);
+      return Promise.resolve(options.processResult(pages[pageIndex]));
+    };
+    let peerDialogsRequestCount = 0;
+    apiManager.invokeApi = (method: string, ...args: any[]) => {
+      if(method !== 'messages.getPeerDialogs') {
+        return originalInvoke.apply(apiManager, [method, ...args]);
+      }
+
+      requests.push(method);
+      if(failFirstPeerDialogs && ++peerDialogsRequestCount === 1) {
+        return Promise.reject(Object.assign(new Error('NETWORK_BAD_REQUEST'), {type: 'NETWORK_BAD_REQUEST'}));
+      }
+
+      return Promise.resolve(makeEmptyChannelDialogResult(channel, 'messages.peerDialogs'));
+    };
+
+    // * a completed full load marks every real folder and the global cursor as loaded
+    dialogsStorage.allDialogsLoaded = {...allDialogsLoaded};
+    dialogsStorage.setDialogsLoaded(0, true);
+    dialogsStorage.setDialogsLoaded(GLOBAL_FOLDER_ID, true);
+    dialogsStorage.cachedListReconciled = false;
+    const restore = () => {
+      apiManager.invokeApi = originalInvoke;
+      apiManager.invokeApiSingleProcess = originalInvokeSingleProcess;
+      dialogsStorage.allDialogsLoaded = allDialogsLoaded;
+    };
+
+    try {
+      await dialogsStorage.getDialogs({limit: 20, filterId: 0});
+      await vi.waitFor(() => expect(requests).toContain('messages.getDialogs'));
+      if(failFirstList || failFirstPeerDialogs) {
+        await vi.waitFor(() => expect(dialogsStorage.cachedListReconciled).toBe(false));
+      }
+
+      await dialogsStorage.getDialogs({limit: 20, filterId: 0});
+    } catch(err) {
+      restore();
+      throw err;
+    }
+
+    return {requests, listParams, restore};
+  }
+
+  test.each([
+    ['its peer is cached', true],
+    ['its peer never reached the client', false]
+  ])('lists a joined channel that a fully loaded cache missed when %s', async(_name, isPeerCached) => {
+    const channelId = isPeerCached ? 990040 : 990041;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    if(isPeerCached) {
+      client.managers.appChatsManager.saveApiChats([makeChannel(channelId)]);
+    }
+
+    expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeUndefined();
+    const {requests, restore} = await getCachedListWithServer(makeChannel(channelId));
+
+    try {
+      await vi.waitFor(() => {
+        expect(client.managers.dialogsStorage.getFolderDialogs(0, false).map((dialog) => dialog.peerId)).toContain(peerId);
+      });
+      expect(requests.filter((method) => method === 'messages.getDialogs')).toHaveLength(1);
+    } finally {
+      restore();
+    }
+  });
+
+  test('retries the server list when the first comparison fails', async() => {
+    const channelId = 990045;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    client.managers.appChatsManager.saveApiChats([makeChannel(channelId)]);
+
+    const {requests, restore} = await getCachedListWithServer(makeChannel(channelId), {failFirstList: true});
+
+    try {
+      await vi.waitFor(() => {
+        expect(client.managers.dialogsStorage.getFolderDialogs(0, false).map((dialog) => dialog.peerId)).toContain(peerId);
+      });
+      expect(requests.filter((method) => method === 'messages.getDialogs')).toHaveLength(2);
+    } finally {
+      restore();
+    }
+  });
+
+  test('finds a missed channel on a later page of the server list', async() => {
+    const listedChannel = makeChannel(990046);
+    const missedChannel = makeChannel(990047);
+    const missedPeerId = (missedChannel.id as ChatId).toPeerId(true);
+    client.managers.appChatsManager.saveApiChats([listedChannel, missedChannel]);
+    applyEmptyChannelDialog(listedChannel);
+
+    const {listParams, restore} = await getCachedListWithServer(missedChannel, {
+      pages: [makeChannelDialogsPage([listedChannel], 2), makeChannelDialogsPage([missedChannel], 2)]
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(client.managers.dialogsStorage.getFolderDialogs(0, false).map((dialog) => dialog.peerId)).toContain(missedPeerId);
+      });
+      expect(listParams).toHaveLength(2);
+      expect(listParams[1].offset_peer).toMatchObject({_: 'inputPeerChannel', channel_id: listedChannel.id});
+    } finally {
+      restore();
+    }
+  });
+
+  test('retries a channel whose dialog fetch failed after the list was compared', async() => {
+    const channelId = 990048;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    client.managers.appChatsManager.saveApiChats([makeChannel(channelId)]);
+
+    const {requests, restore} = await getCachedListWithServer(makeChannel(channelId), {failFirstPeerDialogs: true});
+
+    try {
+      await vi.waitFor(() => {
+        expect(client.managers.dialogsStorage.getFolderDialogs(0, false).map((dialog) => dialog.peerId)).toContain(peerId);
+      });
+      expect(requests.filter((method) => method === 'messages.getPeerDialogs')).toHaveLength(2);
+    } finally {
+      restore();
+    }
+  });
+
+  test.each([
+    ['left', 990042, (id: number) => makeChannel(id, {left: true})],
+    ['kicked', 990043, (id: number) => makeChannel(id, {kicked: true})],
+    ['banned', 990044, makeForbiddenChannel]
+  ])('does not restore a %s channel from the server list', async(_membership, channelId, makeRemovedChannel) => {
+    const peerId = (channelId as number).toPeerId(true);
+    const removedChannel = (makeRemovedChannel as (id: number) => any)(channelId as number);
+    client.managers.appChatsManager.saveApiChats([makeChannel(channelId as number)]);
+
+    const {requests, restore} = await getCachedListWithServer(removedChannel);
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(requests).not.toContain('messages.getPeerDialogs');
+      expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeUndefined();
+      expect(client.managers.appChatsManager.isInChat(channelId as number)).toBe(false);
+    } finally {
+      restore();
     }
   });
 });
