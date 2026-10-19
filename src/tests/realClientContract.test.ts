@@ -4591,6 +4591,41 @@ describe('real client username field readiness', () => {
     }
   });
 
+  it('keeps RPC diagnostics under a later failure stage after an action step', async() => {
+    const readClientErrorScenarioStep = (realClientBrowser as any).readClientErrorScenarioStep;
+    const setPageActionStep = (realClientBrowser as any).setPageActionStep;
+    const setPageScenarioStep = (realClientBrowser as any).setPageScenarioStep;
+    const summarizeBrowserGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
+    const frame = {};
+    let captureDiagnostic: any;
+    const page = {
+      mainFrame: (): object => frame,
+      exposeBinding: async(_name: string, handler: any) => { captureDiagnostic = handler; },
+      on: (): void => undefined,
+      addInitScript: async(): Promise<void> => undefined
+    } as any;
+    setPageActionStep(page, 'alice_direct_chat');
+    setPageScenarioStep(page, 'alice_direct_message');
+    await countClientErrors(page, () => readClientErrorScenarioStep(page, false));
+    captureDiagnostic({frame}, {
+      kind: 'rpc_failure',
+      rpcSource: 'api_log',
+      fields: {type: 'CHANNEL_PRIVATE', code: 403, description: 'unavailable', method: 'messages.sendMessage'}
+    });
+
+    const failedScenarioStep = readClientErrorScenarioStep(page, false);
+    const diagnostics = getClientErrorDiagnostics(page, failedScenarioStep);
+    const gateBreakdown = summarizeBrowserGateBreakdown({
+      pageErrors: {alice: [], bob: []},
+      clientErrorDiagnostics: {alice: diagnostics, bob: []}
+    });
+
+    expect(failedScenarioStep.step).toBe('alice_direct_message');
+    expect(readClientErrorScenarioStep(page, true).step).toBe('alice_direct_chat');
+    expect(diagnostics[0].rpcFailures[0].method).toBe('messages.sendMessage');
+    expect(gateBreakdown.stepDiagnostics.alice[0].scenarioStep.step).toBe('alice_direct_message');
+  });
+
   it('captures failed RPC methods and only constructor ids from peer arguments', async() => {
     setFixture('<!doctype html><html><body>synthetic diagnostic page</body></html>');
     const page = await createRunnerPage();

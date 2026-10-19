@@ -98,6 +98,11 @@ function readPageScenarioStep(page) {
   return pageStep?.scenario === currentScenario ? {...pageStep} : {scenario: currentScenario, step: currentStage};
 }
 
+// Default reports follow the active failure stage; opt-in diagnostics use the last action for correlation.
+function readClientErrorScenarioStep(page, diagnosticsEnabled = runtime?.pageErrorDiagnostics === true) {
+  return diagnosticsEnabled ? readPageScenarioStep(page) : readCurrentScenarioStep();
+}
+
 function setPageScenarioStep(page, step) {
   currentStage = step;
   if(page && typeof page === 'object') pageScenarioSteps.set(page, {scenario: currentScenario, step});
@@ -4361,10 +4366,10 @@ async function main(dependencies = {}) {
       'alice',
       error,
       pageErrorAssets.alice,
-      readPageScenarioStep(alice.page),
+      readClientErrorScenarioStep(alice.page),
       pageErrorDiagnosticOptions(alice.page)
     ));
-    await countClientErrors(alice.page, () => readPageScenarioStep(alice.page));
+    await countClientErrors(alice.page, () => readClientErrorScenarioStep(alice.page));
 
     currentStage = 'bob_context';
     const bob = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
@@ -4395,10 +4400,10 @@ async function main(dependencies = {}) {
       'bob',
       error,
       pageErrorAssets.bob,
-      readPageScenarioStep(bob.page),
+      readClientErrorScenarioStep(bob.page),
       pageErrorDiagnosticOptions(bob.page)
     ));
-    await countClientErrors(bob.page, () => readPageScenarioStep(bob.page));
+    await countClientErrors(bob.page, () => readClientErrorScenarioStep(bob.page));
 
     currentScenario = 'sign-in';
     await signIn(alice.page, accounts[0], 'alice', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
@@ -4655,7 +4660,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureChannelMembershipState, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, getClientErrorDiagnostics, readPageScenarioStep, readSafeRpcArguments, createNetworkObserver, emitAuthProgressReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword, waitForUnreadCount};
+module.exports = {captureCenterColumnState, captureChannelMembershipState, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, getClientErrorDiagnostics, readClientErrorScenarioStep, readPageScenarioStep, readSafeRpcArguments, createNetworkObserver, emitAuthProgressReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
