@@ -300,14 +300,22 @@ if(args?.help) {
       }
       browserResult.gateBreakdown = parsePassedBrowserGateBreakdown(browserResult);
       const expectedScreenshots = expectedScreenshotCount(args);
-      if(browserResult.contextCount !== 2 || browserResult.screenshotsCaptured !== expectedScreenshots ||
-          browserResult.network?.unexpectedAttempts !== 0 || browserResult.network?.observerErrors !== 0 ||
-          ['alice', 'bob'].some((account) => {
-            const context = browserResult.network?.contexts?.[account];
-            return !hasNetworkSourceEvidence(context) ||
-              !Number.isSafeInteger(context.workerTargets?.service_worker) || context.workerTargets.service_worker < 1;
-          })) {
-        throw new Error('real client UI or page/worker egress evidence is incomplete');
+      const incompleteEvidence = [];
+      if(browserResult.contextCount !== 2) incompleteEvidence.push('contexts');
+      if(browserResult.screenshotsCaptured !== expectedScreenshots) {
+        incompleteEvidence.push(`screenshots_${Number.isSafeInteger(browserResult.screenshotsCaptured) ? browserResult.screenshotsCaptured : 'unavailable'}_expected_${expectedScreenshots}`);
+      }
+      if(browserResult.network?.unexpectedAttempts !== 0) incompleteEvidence.push('unexpected_egress');
+      if(browserResult.network?.observerErrors !== 0) incompleteEvidence.push('observer_errors');
+      for(const account of ['alice', 'bob']) {
+        const context = browserResult.network?.contexts?.[account];
+        if(!hasNetworkSourceEvidence(context)) incompleteEvidence.push(`${account}_network_sources`);
+        if(!Number.isSafeInteger(context?.workerTargets?.service_worker) || context.workerTargets.service_worker < 1) {
+          incompleteEvidence.push(`${account}_service_worker`);
+        }
+      }
+      if(incompleteEvidence.length > 0) {
+        throw new Error(`real client UI or page/worker egress evidence is incomplete (${incompleteEvidence.join(',')})`);
       }
       // The page-session observer cannot see shared workers, so the shared-worker
       // evidence is the browser-level observation block: synthetic controls, per-context
