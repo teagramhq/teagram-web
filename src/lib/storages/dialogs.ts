@@ -2056,47 +2056,93 @@ export default class DialogsStorage extends AppManager {
    * A cached list is not asked from the server again, but a channel membership reaches the client
    * only as a transient `updateChannel` that `getDifference` never replays. A join pushed while the
    * previous worker was going away (its `getPeerDialogs` unanswered) or while offline is missing
-   * from that cache for good, so once per start compare it with the server's first page and fetch
-   * the channel dialogs it lacks. The server's chats decide membership, so a left, kicked or banned
-   * channel is never fetched back.
+   * from that cache for good, so once per start compare it with the server's list and fetch the
+   * channel dialogs it lacks. The server's chats decide membership, so a left, kicked or banned
+   * channel is never fetched back. Until every listed channel is restored, the next cached first
+   * page retries the comparison.
    */
-  private reconcileCachedChannelDialogs() {
+  private async reconcileCachedChannelDialogs() {
     if(this.cachedListReconciled) {
       return;
     }
 
     this.cachedListReconciled = true;
-    this.apiManager.invokeApiSingleProcess({
-      method: 'messages.getDialogs',
-      params: {
-        folder_id: FOLDER_ID_ALL,
-        offset_date: 0,
-        offset_id: 0,
-        offset_peer: {_: 'inputPeerEmpty'},
-        limit: 20,
-        hash: '0'
-      },
-      processResult: (result) => {
-        if(result._ === 'messages.dialogsNotModified') {
-          return;
+    try {
+      const missingPeerIds = await this.getServerChannelsMissingLocally();
+      await Promise.all(missingPeerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
+      if(missingPeerIds.some((peerId) => !this.getDialogOnly(peerId) && this.appChatsManager.isInChat(peerId.toChatId()))) {
+        this.cachedListReconciled = false;
+      }
+    } catch(err) {
+      this.cachedListReconciled = false;
+    }
+  }
+
+  private async getServerChannelsMissingLocally() {
+    const limit = 100;
+    const missingPeerIds: PeerId[] = [];
+    const seenPeerIds: Set<PeerId> = new Set();
+    let offsetDate = 0, offsetId = 0, offsetPeerId: PeerId;
+    for(;;) {
+      const result = await this.apiManager.invokeApiSingleProcess({
+        method: 'messages.getDialogs',
+        params: {
+          folder_id: FOLDER_ID_ALL,
+          offset_date: offsetDate,
+          offset_id: offsetId,
+          offset_peer: offsetPeerId ? this.appPeersManager.getInputPeerById(offsetPeerId) : {_: 'inputPeerEmpty'},
+          limit,
+          hash: '0'
+        },
+        processResult: (result) => {
+          if(result._ !== 'messages.dialogsNotModified') {
+            this.appPeersManager.saveApiPeers(result);
+          }
+
+          return result;
+        }
+      });
+
+      if(result._ === 'messages.dialogsNotModified') {
+        return missingPeerIds;
+      }
+
+      let hasNewPeer = false;
+      const dialogs = result.dialogs.filter((dialog) => dialog._ === 'dialog');
+      for(const dialog of dialogs) {
+        const peerId = this.appPeersManager.getPeerId(dialog.peer);
+        if(seenPeerIds.has(peerId)) {
+          continue;
         }
 
-        this.appPeersManager.saveApiPeers(result);
-        for(const dialog of result.dialogs) {
-          if(dialog._ !== 'dialog' || dialog.peer._ !== 'peerChannel') {
-            continue;
-          }
-
-          const peerId = this.appPeersManager.getPeerId(dialog.peer);
-          if(!this.getDialogOnly(peerId) && this.appChatsManager.isInChat(peerId.toChatId())) {
-            this.appMessagesManager.reloadConversation(peerId);
-          }
+        seenPeerIds.add(peerId);
+        hasNewPeer = true;
+        if(
+          dialog.peer._ === 'peerChannel' &&
+          !this.getDialogOnly(peerId) &&
+          this.appChatsManager.isInChat(peerId.toChatId())
+        ) {
+          missingPeerIds.push(peerId);
         }
       }
-    }).catch(() => {
-      // * a failed comparison proves nothing about the cache, so let the next cached first page retry it
-      this.cachedListReconciled = false;
-    });
+
+      const lastDialog = dialogs[dialogs.length - 1];
+      if(
+        result._ !== 'messages.dialogsSlice' ||
+        !hasNewPeer ||
+        seenPeerIds.size >= result.count
+      ) {
+        return missingPeerIds;
+      }
+
+      // * the next page starts after the last dialog's top message, the way the server orders the list
+      offsetPeerId = this.appPeersManager.getPeerId(lastDialog.peer);
+      offsetId = lastDialog.top_message;
+      const lastMessage = result.messages.find((message) => {
+        return message.id === offsetId && this.appPeersManager.getPeerId(message.peer_id) === offsetPeerId;
+      });
+      offsetDate = (lastMessage as Message.message)?.date ?? 0;
+    }
   }
 
   public async markFolderAsRead(
