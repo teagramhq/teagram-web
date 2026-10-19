@@ -2639,6 +2639,18 @@ describe('discovery shared-worker network accounting', () => {
     resolver.clear();
   });
 
+  it('keeps concurrent scenario action stages scoped to their page', () => {
+    const readPageScenarioStep = (realClientBrowser as any).readPageScenarioStep;
+    const setPageScenarioStep = (realClientBrowser as any).setPageScenarioStep;
+    const alicePage = {};
+    const bobPage = {};
+    setPageScenarioStep(alicePage, 'alice_channel_create');
+    setPageScenarioStep(bobPage, 'bob_channel_membership_refresh');
+
+    expect(readPageScenarioStep(alicePage).step).toBe('alice_channel_create');
+    expect(readPageScenarioStep(bobPage).step).toBe('bob_channel_membership_refresh');
+  });
+
   it('correlates simultaneous window, Runtime and debugger observations of one object rejection', async() => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
