@@ -24,6 +24,11 @@ describe('forget server pin', () => {
     localStorage.setItem(SERVER_PINS_KEY, JSON.stringify({[host]: pin}));
     localStorage.setItem(SERVER_CHOICE_KEY, host);
     localStorage.setItem(ACTIVE_SERVER_ID_KEY, id);
+    vi.stubGlobal('navigator', {
+      locks: {
+        request: vi.fn(async(_name: string, callback: () => void) => callback())
+      }
+    });
 
     vi.stubGlobal('indexedDB', {
       databases: async(): Promise<IDBDatabaseInfo[]> => [],
