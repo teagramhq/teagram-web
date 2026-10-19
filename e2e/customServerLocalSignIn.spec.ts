@@ -229,49 +229,35 @@ test('isolates two server tabs when a custom server worker takes control', async
     });
     expect(streamProbe).toEqual({status: 200, body: 'network-default'});
 
-    const iframeDownload = await customPage.evaluate(async({serverId, doc}) => {
+    const iframeDownload = await customPage.evaluate(async({doc}) => {
       const appDownloadManager = (window as any).appDownloadManager;
       const previousManagers = appDownloadManager.managers;
       const serviceMessagePort = (window as any).apiManagerProxy.serviceMessagePort;
-      let resolveDownloadRequestReceived = () => {};
-      const downloadRequestReceived = new Promise<void>((resolve, reject) => {
-        const timeout = window.setTimeout(() => reject(new Error('service worker did not request the iframe download')), 5000);
-        resolveDownloadRequestReceived = () => {
-          clearTimeout(timeout);
-          resolve();
-        };
-      });
-      let onRequestReceived = (_id: string) => {};
-      const downloadResult = new Promise<{serverId: string | null, text: string}>((resolve, reject) => {
-        const timeout = window.setTimeout(() => {
-          serviceMessagePort.removeEventListener('downloadRequestReceived', onRequestReceived);
-          reject(new Error('service worker did not finish the iframe download'));
-        }, 10_000);
-        onRequestReceived = (id: string) => {
-          const iframe = Array.from(document.querySelectorAll('iframe')).find((candidate) => {
-            return new URL(candidate.src).pathname === `/d/${id}`;
-          });
-          if(!iframe) return;
-          resolveDownloadRequestReceived();
+      let iframeResult: Promise<{serverId: string | null, text: string}>;
 
-          iframe.addEventListener('load', () => {
-            clearTimeout(timeout);
-            serviceMessagePort.removeEventListener('downloadRequestReceived', onRequestReceived);
-            resolve({
-              serverId: new URL(iframe.src).searchParams.get('__tg_server'),
-              text: iframe.contentDocument?.body.textContent?.trim() || ''
-            });
-          }, {once: true});
-        };
-        serviceMessagePort.addEventListener('downloadRequestReceived', onRequestReceived);
-      });
-
+      // downloadToDisc calls this only after the service worker reported the iframe
+      // request. Do not listen for downloadRequestReceived here: a port invoke reaches
+      // only the first listener, which would starve downloadToDisc and force the fallback.
       appDownloadManager.managers = {
         apiFileManager: {
-          downloadMedia: async(options: {downloadId: string}) => {
-            // Hold registration until the iframe fetch is pending, then cover a slow
-            // cross-worker handoff that outlasts the service worker's old 1.5s wait.
-            await downloadRequestReceived;
+          downloadMedia: async(options: {downloadId?: string}) => {
+            if(!options.downloadId) throw new Error('download fell back without the service worker');
+            const iframe = Array.from(document.querySelectorAll('iframe')).find((candidate) => {
+              return new URL(candidate.src).pathname === `/d/${options.downloadId}`;
+            });
+            if(!iframe) throw new Error('download iframe is missing');
+            iframeResult = new Promise((resolve, reject) => {
+              const timeout = window.setTimeout(() => reject(new Error('service worker did not finish the iframe download')), 10_000);
+              iframe.addEventListener('load', () => {
+                clearTimeout(timeout);
+                resolve({
+                  serverId: new URL(iframe.src).searchParams.get('__tg_server'),
+                  text: iframe.contentDocument?.body.textContent?.trim() || ''
+                });
+              }, {once: true});
+            });
+
+            // Cover a slow cross-worker handoff that outlasts the service worker's old 1.5s wait.
             await new Promise<void>((resolve) => window.setTimeout(resolve, 1750));
             const download = await serviceMessagePort.invoke('download', {
               id: options.downloadId,
@@ -290,12 +276,11 @@ test('isolates two server tabs when a custom server worker takes control', async
 
       try {
         await appDownloadManager.downloadToDisc({media: doc, fileName: 'custom-server-iframe-download.txt'});
-        return await downloadResult;
+        return await iframeResult;
       } finally {
         appDownloadManager.managers = previousManagers;
-        serviceMessagePort.removeEventListener('downloadRequestReceived', onRequestReceived);
       }
-    }, {serverId: customServerId, doc: streamingDocument('987654322')});
+    }, {doc: streamingDocument('987654322')});
     expect(iframeDownload).toEqual({serverId: customServerId, text: 'iframe-download-ok'});
 
     sharePage = await page.context().newPage();
@@ -308,6 +293,10 @@ test('isolates two server tabs when a custom server worker takes control', async
       form.action = action;
       form.submit();
     }, `${appOriginString}/share/`);
+    // web.teagram.io always opens on the server prompt, with the remembered server preselected.
+    const sharePicker = sharePage.getByRole('dialog');
+    await expect(sharePicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(SERVER_HOST, {timeout: 30_000});
+    await sharePicker.getByRole('button', {name: 'Continue'}).click();
     await expect(sharePage.locator('#auth-pages')).toBeVisible({timeout: 30_000});
     await expect.poll(() => sharePage!.evaluate(() => {
       const share = (window as any).apiManagerProxy.share;
