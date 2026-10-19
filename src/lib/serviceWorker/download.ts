@@ -27,7 +27,8 @@ type DownloadReadyWaiter = {
 const downloadReadyWaiters: Map<string, DownloadReadyWaiter> = new Map();
 const DOWNLOAD_ERROR = makeError('UNKNOWN');
 const DOWNLOAD_TEST = false;
-const DOWNLOAD_READY_TIMEOUT = 1500;
+// The iframe navigation can reach the service worker before its stream is registered.
+const DOWNLOAD_READY_TIMEOUT = 5000;
 
 (self as any).downloadMap = downloadMap;
 

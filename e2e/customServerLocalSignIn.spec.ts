@@ -233,6 +233,14 @@ test('isolates two server tabs when a custom server worker takes control', async
       const appDownloadManager = (window as any).appDownloadManager;
       const previousManagers = appDownloadManager.managers;
       const serviceMessagePort = (window as any).apiManagerProxy.serviceMessagePort;
+      let resolveDownloadRequestReceived = () => {};
+      const downloadRequestReceived = new Promise<void>((resolve, reject) => {
+        const timeout = window.setTimeout(() => reject(new Error('service worker did not request the iframe download')), 5000);
+        resolveDownloadRequestReceived = () => {
+          clearTimeout(timeout);
+          resolve();
+        };
+      });
       let onRequestReceived = (_id: string) => {};
       const downloadResult = new Promise<{serverId: string | null, text: string}>((resolve, reject) => {
         const timeout = window.setTimeout(() => {
@@ -244,6 +252,7 @@ test('isolates two server tabs when a custom server worker takes control', async
             return new URL(candidate.src).pathname === `/d/${id}`;
           });
           if(!iframe) return;
+          resolveDownloadRequestReceived();
 
           iframe.addEventListener('load', () => {
             clearTimeout(timeout);
@@ -260,8 +269,10 @@ test('isolates two server tabs when a custom server worker takes control', async
       appDownloadManager.managers = {
         apiFileManager: {
           downloadMedia: async(options: {downloadId: string}) => {
-            // The fetch reaches the service worker before the MTProto worker can register its stream.
-            await new Promise<void>((resolve) => window.setTimeout(() => resolve(), 250));
+            // Hold registration until the iframe fetch is pending, then cover a slow
+            // cross-worker handoff that outlasts the service worker's old 1.5s wait.
+            await downloadRequestReceived;
+            await new Promise<void>((resolve) => window.setTimeout(resolve, 1750));
             const download = await serviceMessagePort.invoke('download', {
               id: options.downloadId,
               headers: {'content-type': 'text/plain'}
