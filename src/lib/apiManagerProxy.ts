@@ -799,14 +799,14 @@ class ApiManagerProxy extends MTProtoMessagePort {
     const serverId = getActiveServerId();
     if(!this.isServiceWorkerForServer(serviceWorker, serverId)) {
       this.log.warn('refusing service worker whose script targets another server', serviceWorker.scriptURL, serverId);
-      return false;
+      return this.rejectServiceWorkerAttachment();
     }
 
     const identity = await this.requestServiceWorkerHandshake(serviceWorker, 'teagram:server-handshake', serverId);
 
     if(!identity?.accepted || identity.serverId !== serverId || getActiveServerId() !== serverId) {
       this.log.warn('refusing service worker with a different server identity', identity?.serverId, serverId);
-      return false;
+      return this.rejectServiceWorkerAttachment();
     }
 
     this.serviceWorkerServerIds.set(serviceWorker, serverId);
@@ -814,7 +814,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
     if(!acknowledgment?.accepted || acknowledgment.serverId !== serverId) {
       this.serviceWorkerServerIds.delete(serviceWorker);
       this.log.warn('service worker identity acknowledgment failed', acknowledgment?.serverId, serverId);
-      return false;
+      return this.rejectServiceWorkerAttachment();
     }
 
     this.serviceMessagePort.attachSendPort(this.lastServiceWorker = serviceWorker);
@@ -827,6 +827,11 @@ class ApiManagerProxy extends MTProtoMessagePort {
     });
 
     return true;
+  }
+
+  private rejectServiceWorkerAttachment() {
+    this.invokeVoid('serviceWorkerOnline', false);
+    return false;
   }
 
   private isServiceWorkerForServer(serviceWorker: ServiceWorker, serverId: string) {

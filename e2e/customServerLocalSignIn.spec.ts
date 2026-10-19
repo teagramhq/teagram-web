@@ -13,6 +13,27 @@ const SERVER_WSS_ENDPOINT = `wss://${SERVER_HOST}/apiws`;
 const SERVER_USER = process.env.TEAGRAM_CUSTOM_SERVER_TEST_USER || 'custom_server_user';
 const SERVER_PASSWORD = process.env.TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD || 'Teagram-Test-Password-123!';
 
+function streamingDocument(id: string) {
+  return {
+    _: 'document',
+    id,
+    access_hash: '1',
+    file_reference: [] as number[],
+    date: 1,
+    mime_type: 'video/mp4',
+    size: 1,
+    dc_id: 2,
+    pFlags: {},
+    attributes: [{
+      _: 'documentAttributeVideo',
+      duration: 1,
+      w: 1,
+      h: 1,
+      pFlags: {}
+    }]
+  };
+}
+
 test('isolates two server tabs when a custom server worker takes control', async({page}, testInfo) => {
   const serverHttpUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL;
   const serverWebSocketUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_WS_URL;
@@ -143,6 +164,12 @@ test('isolates two server tabs when a custom server worker takes control', async
     await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
     await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
 
+    const streamingDocId = '987654321';
+    await expect.poll(() => page.evaluate(async(doc) => {
+      const saved = await (window as any).rootScope.managers.appDocsManager.saveDoc(doc);
+      return saved.supportsStreaming;
+    }, streamingDocument(streamingDocId))).toBe(true);
+
     customPage = await page.context().newPage();
     const customPageMainFrame = customPage.mainFrame();
     const customPageNavigations: string[] = [];
@@ -189,6 +216,11 @@ test('isolates two server tabs when a custom server worker takes control', async
       controller.postMessage({type: 'teagram:server-handshake', serverId}, [channel.port2]);
     }), 'default');
     expect(handshake).toEqual({serverId: customServerId, accepted: false});
+
+    await expect.poll(() => page.evaluate(async(doc) => {
+      const saved = await (window as any).rootScope.managers.appDocsManager.saveDoc(doc);
+      return saved.supportsStreaming;
+    }, streamingDocument(streamingDocId))).toBe(false);
 
     const streamProbe = await page.evaluate(async() => {
       const response = await fetch('/stream/__server-isolation-probe');
