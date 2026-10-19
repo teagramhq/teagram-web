@@ -19,12 +19,14 @@ import {
   readSyntheticCredentials
 } from './contract.mjs';
 
-const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> (--scenarios sign-in,message,group[,channel] | --auth-progress-one-submission)
+const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> (--scenarios sign-in,message,group[,channel] | --auth-progress-one-submission) [--page-error-diagnostics]
 
 The fixture must remain running after artifact-ready. The command validates its immutable pins,
 protected synthetic credentials, internal browser network, audited artifact evidence, per-context
 shared-worker observation, the three required UI scenarios plus the optional channel scenario,
-or one bounded Username submission.
+or one bounded Username submission. The opt-in page-error diagnostics include bounded, sanitized
+source frames, private page path, fixed scenario and stage labels, and optional RPC error type/code.
+Raw page-error messages and stack text are never serialized.
 The one-submission mode stops at password-field readiness without entering or submitting a password.`;
 const NETWORK_SOURCES = ['page', 'shared_worker', 'service_worker', 'worker'];
 
@@ -179,6 +181,7 @@ if(args?.help) {
     const browserInput = JSON.stringify({
       ...(controlsOnly ? {observationOnly: true} : {}),
       ...(authProgress ? {authProgressOneSubmission: true} : {}),
+      ...(args.pageErrorDiagnostics === true ? {pageErrorDiagnostics: true} : {}),
       ...(Array.isArray(args.scenarios) ? {scenarios: args.scenarios} : {}),
       runId: args.runId,
       endpoint: serverReady.endpoint,

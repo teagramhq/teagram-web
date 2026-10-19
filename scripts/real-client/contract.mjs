@@ -18,12 +18,15 @@ const GATE_SCHEMES = observation.GATE_SCHEMES;
 const GATE_RESOURCE_TYPES = observation.GATE_RESOURCE_TYPES;
 const GATE_OBSERVER_ERROR_KINDS = observation.GATE_OBSERVER_ERROR_KINDS;
 const PAGE_ERROR_CONSTRUCTORS = observation.GATE_PAGE_ERROR_CONSTRUCTORS;
+const PAGE_ERROR_DIAGNOSTIC_LIMITS = observation.GATE_PAGE_ERROR_DIAGNOSTIC_LIMITS;
+const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
 const SCRIPT_ASSET = observation.SCRIPT_ASSET_PATTERN;
 const PAGE_ERROR_MESSAGE_LIMIT = 512;
 const PAGE_ERROR_STACK_FRAME_LIMIT = 16;
 const PAGE_ERROR_FUNCTION_NAME_LIMIT = 128;
 const PAGE_ERROR_STACK_STATES = Object.freeze(['unavailable', 'non_string', 'no_frames', 'unclassified_frames', 'captured', 'partial', 'truncated']);
 const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'channel', 'unknown']);
+const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 const PAGE_DIAGNOSTIC_LIMIT = 16;
 const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
 const PAGE_DIAGNOSTIC_FIELD_LIMIT = 256;
@@ -130,7 +133,8 @@ export function parseRealClientArgs(argv) {
     ['--run-id', 'runId'],
     ['--scenarios', 'scenarioSelection'],
     ['--observer-controls-only', 'observerControlsOnly'],
-    ['--auth-progress-one-submission', 'authProgressOneSubmission']
+    ['--auth-progress-one-submission', 'authProgressOneSubmission'],
+    ['--page-error-diagnostics', 'pageErrorDiagnostics']
   ]);
   const options = new Map();
   for(let index = 0; index < argumentsList.length; index++) {
@@ -141,7 +145,7 @@ export function parseRealClientArgs(argv) {
     if(options.has(name)) {
       throw new Error(`option was provided more than once: ${name}`);
     }
-    if(name === '--observer-controls-only' || name === '--auth-progress-one-submission') {
+    if(name === '--observer-controls-only' || name === '--auth-progress-one-submission' || name === '--page-error-diagnostics') {
       options.set(name, true);
       continue;
     }
@@ -156,14 +160,18 @@ export function parseRealClientArgs(argv) {
 
   const controlsOnly = options.get('--observer-controls-only') === true;
   const authProgress = options.get('--auth-progress-one-submission') === true;
+  const pageErrorDiagnostics = options.get('--page-error-diagnostics') === true;
   if(authProgress && (controlsOnly || options.has('--scenarios'))) {
     throw new Error('--auth-progress-one-submission cannot be combined with --scenarios or --observer-controls-only');
+  }
+  if(controlsOnly && pageErrorDiagnostics) {
+    throw new Error('--page-error-diagnostics cannot be combined with --observer-controls-only');
   }
   if(!controlsOnly && !authProgress && !options.has('--scenarios')) {
     throw new Error('scenario selection is required');
   }
 
-  const optional = new Set(['--scenarios', '--observer-controls-only', '--auth-progress-one-submission']);
+  const optional = new Set(['--scenarios', '--observer-controls-only', '--auth-progress-one-submission', '--page-error-diagnostics']);
   const missing = [...names.keys()].filter((name) => !optional.has(name) && !options.has(name));
   if(missing.length) {
     throw new Error(`missing required options: ${missing.join(',')}`);
@@ -972,7 +980,6 @@ export function parseBrowserGateBreakdown(value) {
 
     const overflow = value.pageErrorOverflow[context];
     if(!Array.isArray(overflow) || overflow.length > 1_000_000 || overflow.some((entry) =>
-      !hasExactOwnKeys(entry, ['constructorName', 'scriptAsset', 'message', 'stack', 'scenarioStep', 'count']) ||
       !isClosedPageError(entry, true) ||
       !Number.isSafeInteger(entry.count) || entry.count < 1 || entry.count > 1_000_000
     ) || (overflow.length > 0 && pageErrors.length !== 512)) {
@@ -1002,7 +1009,11 @@ function isSafeStepDiagnostics(value) {
   if(!hasExactOwnKeys(value, GATE_CONTEXTS)) return false;
   return GATE_CONTEXTS.every((context) => Array.isArray(value[context]) &&
     value[context].length <= PAGE_DIAGNOSTIC_STEP_LIMIT && value[context].every((entry) =>
-      hasExactOwnKeys(entry, ['scenarioStep', 'thrownValues', 'rpcFailures', 'consoleErrors']) &&
+      hasExactOwnKeys(entry, [
+        'scenarioStep', 'thrownValues', 'rpcFailures', 'consoleErrors',
+        ...(Object.hasOwn(entry || {}, 'rpcFailuresTruncated') ? ['rpcFailuresTruncated'] : [])
+      ]) &&
+      (!Object.hasOwn(entry, 'rpcFailuresTruncated') || entry.rpcFailuresTruncated === true) &&
       isSafePageErrorScenarioStep(entry.scenarioStep) &&
       Array.isArray(entry.thrownValues) && entry.thrownValues.length <= PAGE_DIAGNOSTIC_LIMIT && entry.thrownValues.every((thrown) =>
         hasExactOwnKeys(thrown, ['source', 'valueType', 'type', 'code', 'description']) &&
@@ -1040,15 +1051,45 @@ function isSafeDiagnosticMessage(value) {
 }
 
 function isClosedPageError(error, includeCount = false) {
+  if(!error || typeof error !== 'object' || Array.isArray(error)) return false;
+  const hasDiagnostic = Object.hasOwn(error, 'diagnostic');
   return hasExactOwnKeys(error, [
     'constructorName', 'scriptAsset', 'message', 'stack', 'scenarioStep',
+    ...(hasDiagnostic ? ['diagnostic'] : []),
     ...(includeCount ? ['count'] : [])
   ]) &&
     PAGE_ERROR_CONSTRUCTORS.includes(error.constructorName) &&
     typeof error.scriptAsset === 'string' && SCRIPT_ASSET.test(error.scriptAsset) &&
-    isSafePageErrorMessage(error.message) &&
+    error.message === '[redacted]' &&
     isSafePageErrorStack(error.stack) &&
-    isSafePageErrorScenarioStep(error.scenarioStep);
+    isSafePageErrorScenarioStep(error.scenarioStep) &&
+    (!hasDiagnostic || isSafePageErrorDiagnostic(error.diagnostic));
+}
+
+function isSafePageErrorDiagnostic(diagnostic) {
+  if(!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) return false;
+  const hasRpcErrorType = Object.hasOwn(diagnostic, 'rpcErrorType');
+  const hasRpcErrorCode = Object.hasOwn(diagnostic, 'rpcErrorCode');
+  const hasRpcMethod = Object.hasOwn(diagnostic, 'rpcMethod');
+  const keys = ['pageUrl', 'scenario', 'stage',
+    ...(hasRpcErrorType ? ['rpcErrorType'] : []), ...(hasRpcErrorCode ? ['rpcErrorCode'] : []),
+    ...(hasRpcMethod ? ['rpcMethod'] : [])];
+  if(!hasExactOwnKeys(diagnostic, keys) ||
+      !PAGE_ERROR_SCENARIOS.includes(diagnostic.scenario) ||
+      typeof diagnostic.stage !== 'string' || !/^(?:unknown|[a-z][a-z0-9_]{0,63})$/.test(diagnostic.stage) ||
+      (hasRpcErrorType && (typeof diagnostic.rpcErrorType !== 'string' || !RPC_ERROR_TYPE_PATTERN.test(diagnostic.rpcErrorType))) ||
+      (hasRpcErrorCode && (!Number.isSafeInteger(diagnostic.rpcErrorCode) || diagnostic.rpcErrorCode < 0 || diagnostic.rpcErrorCode > 999_999)) ||
+      (hasRpcMethod && (typeof diagnostic.rpcMethod !== 'string' || !PAGE_DIAGNOSTIC_RPC_METHOD.test(diagnostic.rpcMethod)))) return false;
+  if(diagnostic.pageUrl === 'unknown') return true;
+  if(typeof diagnostic.pageUrl !== 'string' || diagnostic.pageUrl.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength ||
+      /[\s?#]/.test(diagnostic.pageUrl)) return false;
+  try {
+    const parsed = new URL(diagnostic.pageUrl);
+    return parsed.origin === PRIVATE_CSP_ORIGIN && parsed.search === '' && parsed.hash === '' &&
+      !parsed.username && !parsed.password && `${parsed.origin}${parsed.pathname}` === diagnostic.pageUrl;
+  } catch {
+    return false;
+  }
 }
 
 function isSafePageErrorMessage(message) {

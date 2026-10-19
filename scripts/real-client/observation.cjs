@@ -146,6 +146,7 @@ const GATE_PAGE_ERROR_CONSTRUCTORS = Object.freeze([
   'TypeError',
   'URIError'
 ]);
+const GATE_PAGE_ERROR_DIAGNOSTIC_LIMITS = Object.freeze({count: 16, messageLength: 2048, stackLength: 8192, pageUrlLength: 2048});
 const SCRIPT_ASSET_PATTERN = /^(?:unknown|[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(?:c|m)?js)$/;
 
 const UNCLASSIFIED_NETWORK_BLOCK = Object.freeze({classification: 'unclassified'});
@@ -963,6 +964,7 @@ module.exports = {
   GATE_EGRESS_SOURCES,
   GATE_OBSERVER_ERROR_KINDS,
   GATE_PAGE_ERROR_CONSTRUCTORS,
+  GATE_PAGE_ERROR_DIAGNOSTIC_LIMITS,
   GATE_RESOURCE_TYPES,
   GATE_SCHEMES,
   LIMITS,
