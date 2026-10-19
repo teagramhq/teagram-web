@@ -75,7 +75,7 @@ import {createHistoryStorageSearchSlicedArray} from '@appManagers/utils/messages
 import tabId from '@config/tabId';
 import Modes from '@config/modes';
 import {getMtprotoTarget, isPrivateMtprotoTarget} from '@config/mtprotoTarget';
-import {getActiveServerId} from '@config/serverContext';
+import {getActiveServerId, getActiveServerQuery} from '@config/serverContext';
 import {waitForMtprotoWorkerReady} from '@helpers/mtprotoWorkerReady';
 import {toast} from '@components/toast';
 import appNavigationController from '@components/appNavigationController';
@@ -765,7 +765,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
     };
     iframe.addEventListener('load', onLoad);
     iframe.addEventListener('error', onError);
-    iframe.src = 'ping/' + (Math.random() * 0xFFFFFFFF | 0) + '.nocache';
+    iframe.src = `ping/${(Math.random() * 0xFFFFFFFF | 0)}.nocache?${getActiveServerQuery()}`;
     document.body.append(iframe);
 
     const timeout = window.setTimeout(onError, 1500);

@@ -340,8 +340,26 @@ watchCacheStoragesLifetime({
 
 watchMtprotoOnDev({connectedWindows, onWindowConnected});
 
+function isAuthorizedUnclaimedNavigationFetch(event: FetchEvent) {
+  if(event.clientId || event.request.mode !== 'navigate' || !event.resultingClientId) return false;
+
+  const url = new URL(event.request.url);
+  if(url.origin !== location.origin) return false;
+
+  // The manifest's fixed share target cannot carry a server id. Its payload stays
+  // deferred until the resulting app page proves its server id in the normal handshake.
+  if(url.pathname === '/share/' && event.request.method === 'POST') return true;
+
+  if(event.request.method !== 'GET' || url.searchParams.get('__tg_server') !== getActiveServerId()) return false;
+  return /^\/(?:ping\/[^/]+\.nocache|(?:d|download)\/[^/]+)$/.test(url.pathname);
+}
+
 const onFetch = (event: FetchEvent): void => {
-  if(!event.clientId || connectedServerIds.get(event.clientId) !== getActiveServerId()) return;
+  if(event.clientId) {
+    if(connectedServerIds.get(event.clientId) !== getActiveServerId()) return;
+  } else if(!isAuthorizedUnclaimedNavigationFetch(event)) {
+    return;
+  }
 
   // Web manifests must reach the network so installed PWA metadata can update.
   if(
@@ -377,6 +395,7 @@ const onFetch = (event: FetchEvent): void => {
       }
 
       case 'share': {
+        if(event.request.method !== 'POST' || event.request.mode !== 'navigate' || !event.resultingClientId) return;
         onShareFetch(event, params);
         break;
       }

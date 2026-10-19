@@ -64,6 +64,7 @@ test('isolates two server tabs when a custom server worker takes control', async
   // Playwright routing does not cover module imports inside the MTProto SharedWorker.
   const connections: string[] = [];
   let customPage: Page | undefined;
+  let sharePage: Page | undefined;
   const tlsServer = createServer({
     key: readFileSync(privateKeyPath),
     cert: readFileSync(certificatePath)
@@ -228,6 +229,83 @@ test('isolates two server tabs when a custom server worker takes control', async
     });
     expect(streamProbe).toEqual({status: 200, body: 'network-default'});
 
+    const iframeDownload = await customPage.evaluate(async({serverId, doc}) => {
+      const appDownloadManager = (window as any).appDownloadManager;
+      const previousManagers = appDownloadManager.managers;
+      const serviceMessagePort = (window as any).apiManagerProxy.serviceMessagePort;
+      let onRequestReceived = (_id: string) => {};
+      const downloadResult = new Promise<{serverId: string | null, text: string}>((resolve, reject) => {
+        const timeout = window.setTimeout(() => {
+          serviceMessagePort.removeEventListener('downloadRequestReceived', onRequestReceived);
+          reject(new Error('service worker did not finish the iframe download'));
+        }, 10_000);
+        onRequestReceived = (id: string) => {
+          const iframe = Array.from(document.querySelectorAll('iframe')).find((candidate) => {
+            return new URL(candidate.src).pathname === `/d/${id}`;
+          });
+          if(!iframe) return;
+
+          iframe.addEventListener('load', () => {
+            clearTimeout(timeout);
+            serviceMessagePort.removeEventListener('downloadRequestReceived', onRequestReceived);
+            resolve({
+              serverId: new URL(iframe.src).searchParams.get('__tg_server'),
+              text: iframe.contentDocument?.body.textContent?.trim() || ''
+            });
+          }, {once: true});
+        };
+        serviceMessagePort.addEventListener('downloadRequestReceived', onRequestReceived);
+      });
+
+      appDownloadManager.managers = {
+        apiFileManager: {
+          downloadMedia: async(options: {downloadId: string}) => {
+            const download = await serviceMessagePort.invoke('download', {
+              id: options.downloadId,
+              headers: {'content-type': 'text/plain'}
+            }, true);
+            await serviceMessagePort.invoke('downloadChunk', {
+              id: options.downloadId,
+              chunk: new TextEncoder().encode('iframe-download-ok')
+            });
+            await serviceMessagePort.invoke('downloadFinalize', options.downloadId);
+            await download.result;
+            return new Blob(['download-complete'], {type: 'text/plain'});
+          }
+        }
+      };
+
+      try {
+        await appDownloadManager.downloadToDisc({media: doc, fileName: 'custom-server-iframe-download.txt'});
+        return await downloadResult;
+      } finally {
+        appDownloadManager.managers = previousManagers;
+        serviceMessagePort.removeEventListener('downloadRequestReceived', onRequestReceived);
+      }
+    }, {serverId: customServerId, doc: streamingDocument('987654322')});
+    expect(iframeDownload).toEqual({serverId: customServerId, text: 'iframe-download-ok'});
+
+    sharePage = await page.context().newPage();
+    await sharePage.setContent('<form method="post" enctype="multipart/form-data"><input name="title"><input name="text"><input name="url"></form>');
+    await sharePage.evaluate((action) => {
+      const form = document.querySelector('form')!;
+      (form.elements.namedItem('title') as HTMLInputElement).value = 'Share target title';
+      (form.elements.namedItem('text') as HTMLInputElement).value = 'Share target text';
+      (form.elements.namedItem('url') as HTMLInputElement).value = 'https://example.test/shared';
+      form.action = action;
+      form.submit();
+    }, `${appOriginString}/share/`);
+    await expect(sharePage.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+    await expect.poll(() => sharePage!.evaluate(() => {
+      const share = (window as any).apiManagerProxy.share;
+      return share && {title: share.title, text: share.text, url: share.url};
+    }), {timeout: 10_000}).toEqual({
+      title: 'Share target title',
+      text: 'Share target text',
+      url: 'https://example.test/shared'
+    });
+    expect(await page.evaluate(() => (window as any).apiManagerProxy.share)).toBeUndefined();
+
     const auth = customPage.locator('#auth-pages');
     await expect(auth.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
     expect(customPageNavigations.some((url) => new URL(url).searchParams.has('swfix'))).toBe(false);
@@ -243,6 +321,7 @@ test('isolates two server tabs when a custom server worker takes control', async
     expect(connections.length).toBeGreaterThan(0);
     expect(connections.every((origin) => origin === 'https://web.teagram.io')).toBe(true);
   } finally {
+    await sharePage?.close();
     await customPage?.close();
     await page.close();
     for(const client of webSocketServer.clients) client.terminate();

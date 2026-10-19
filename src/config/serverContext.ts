@@ -14,6 +14,10 @@ export function getActiveServerId() {
   return 'default';
 }
 
+export function getActiveServerQuery() {
+  return `__tg_server=${encodeURIComponent(getActiveServerId())}`;
+}
+
 export function getServerStoragePrefix() {
   const id = getActiveServerId();
   return id === 'default' ? '' : `teagram-${id}:`;
