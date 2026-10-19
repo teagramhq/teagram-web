@@ -2,11 +2,13 @@ import {execFileSync} from 'node:child_process';
 import {mkdtempSync, readFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {request as httpRequest} from 'node:http';
 import {createServer} from 'node:https';
 import {expect, test} from '@playwright/test';
 import {WebSocket, WebSocketServer} from 'ws';
 
 const SERVER_HOST = 'second-server.example.test';
+const APP_HOST = 'web.teagram.io';
 const SERVER_WSS_ENDPOINT = `wss://${SERVER_HOST}/apiws`;
 const SERVER_USER = process.env.TEAGRAM_CUSTOM_SERVER_TEST_USER || 'custom_server_user';
 const SERVER_PASSWORD = process.env.TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD || 'Teagram-Test-Password-123!';
@@ -21,7 +23,7 @@ test('signs in to a second local server through the custom server picker and wor
   const appBaseUrl = new URL(testInfo.project.use.baseURL as string);
   const appOrigin = new URL(appBaseUrl);
   appOrigin.protocol = 'https:';
-  appOrigin.hostname = 'web.teagram.io';
+  appOrigin.hostname = APP_HOST;
   appOrigin.port = '';
   const localAppPort = appBaseUrl.port;
   const appOriginString = appOrigin.origin;
@@ -34,14 +36,56 @@ test('signs in to a second local server through the custom server picker and wor
     '-out', certificatePath,
     '-days', '1',
     '-subj', `/CN=${SERVER_HOST}`,
-    '-addext', `subjectAltName=DNS:${SERVER_HOST}`
+    '-addext', `subjectAltName=DNS:${SERVER_HOST},DNS:${APP_HOST}`
   ]);
 
+  // Both hosts resolve to this listener (see playwright.private-auth.config.ts) because
+  // Playwright routing does not cover module imports inside the MTProto SharedWorker.
   const connections: string[] = [];
   const tlsServer = createServer({
     key: readFileSync(privateKeyPath),
     cert: readFileSync(certificatePath)
+  }, (request, response) => {
+    const host = (request.headers.host || '').replace(/:\d+$/, '');
+    const url = new URL(request.url || '/', `https://${host}`);
+    if(host === APP_HOST) {
+      const upstream = httpRequest({
+        host: 'localhost',
+        port: localAppPort,
+        method: request.method,
+        path: request.url,
+        headers: {...request.headers, host: `localhost:${localAppPort}`}
+      }, (upstreamResponse) => {
+        const headers = {...upstreamResponse.headers};
+        if(url.pathname === '/') {
+          headers['content-security-policy'] = "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:";
+        }
+        response.writeHead(upstreamResponse.statusCode || 502, headers);
+        upstreamResponse.pipe(response);
+      });
+      upstream.on('error', () => response.destroy());
+      request.pipe(upstream);
+    } else if(host === SERVER_HOST && url.pathname === '/.well-known/telegramd/client') {
+      void fetch(`${serverHttpUrl}/.well-known/telegramd/client`).then(async(upstreamResponse) => {
+        const body = await upstreamResponse.text();
+        if(!upstreamResponse.ok) throw new Error(`local server discovery returned ${upstreamResponse.status}`);
+        const discovery = JSON.parse(body) as {websocket?: {endpoint?: string}};
+        if(discovery.websocket?.endpoint !== SERVER_WSS_ENDPOINT) {
+          throw new Error(`local server discovery advertises ${discovery.websocket?.endpoint}, expected ${SERVER_WSS_ENDPOINT}`);
+        }
+        response.writeHead(upstreamResponse.status, Object.fromEntries(upstreamResponse.headers));
+        response.end(body);
+      }).catch((error: Error) => {
+        discoveryErrors.push(error.message);
+        response.writeHead(502);
+        response.end();
+      });
+    } else {
+      response.writeHead(404);
+      response.end();
+    }
   });
+  const discoveryErrors: string[] = [];
   const webSocketServer = new WebSocketServer({noServer: true});
   tlsServer.on('upgrade', (request, socket, head) => {
     if(request.url !== '/apiws') {
@@ -78,31 +122,9 @@ test('signs in to a second local server through the custom server picker and wor
   });
 
   try {
-    await page.context().route('**/*', async(route) => {
-      const url = new URL(route.request().url());
-      if(url.origin === appOriginString) {
-        url.protocol = 'http:';
-        url.hostname = 'localhost';
-        url.port = localAppPort;
-        const response = await route.fetch({url: url.toString()});
-        if(url.pathname === '/') {
-          const headers = await response.headers();
-          headers['content-security-policy'] = "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:";
-          await route.fulfill({response, headers});
-        } else {
-          await route.fulfill({response});
-        }
-      } else if(url.hostname === SERVER_HOST && url.pathname === '/.well-known/telegramd/client') {
-        const response = await route.fetch({url: `${serverHttpUrl}/.well-known/telegramd/client`});
-        if(!response.ok()) throw new Error(`local server discovery returned ${response.status()}`);
-        const discovery = await response.json() as {websocket?: {endpoint?: string}};
-        if(discovery.websocket?.endpoint !== SERVER_WSS_ENDPOINT) {
-          throw new Error(`local server discovery advertises ${discovery.websocket?.endpoint}, expected ${SERVER_WSS_ENDPOINT}`);
-        }
-        await route.fulfill({response});
-      } else {
-        await route.abort();
-      }
+    await page.context().route('**/*', (route) => {
+      const {hostname} = new URL(route.request().url());
+      return hostname === APP_HOST || hostname === SERVER_HOST ? route.continue() : route.abort();
     });
 
     await page.goto(`${appOriginString}/?noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
@@ -116,6 +138,7 @@ test('signs in to a second local server through the custom server picker and wor
 
     const confirm = page.getByRole('dialog');
     await expect(confirm.getByText(`Server: ${SERVER_HOST}`)).toBeVisible();
+    expect(discoveryErrors).toEqual([]);
     await expect(confirm.getByText(/SPKI SHA-256:/)).toBeVisible();
     await confirm.getByRole('button', {name: 'Confirm and use this server'}).click();
 
@@ -131,7 +154,7 @@ test('signs in to a second local server through the custom server picker and wor
     await auth.getByRole('textbox', {name: 'Username'}).fill(SERVER_USER);
     await auth.getByRole('button', {name: 'Next'}).click();
 
-    const password = auth.locator('input[type="password"]');
+    const password = auth.locator('input[name="notsearch_password"]');
     await expect(password).toBeVisible({timeout: 30_000});
     await password.fill(SERVER_PASSWORD);
     await auth.getByRole('button', {name: 'Next'}).click();

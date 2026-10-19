@@ -26,7 +26,12 @@ export async function createPrivateWorkerBlobURL(url: string | URL, serverId?: s
   if(serverId && target) {
     source += `globalThis.__TEAGRAM_ACTIVE_SERVER_ID__=${JSON.stringify(serverId)};globalThis.__TEAGRAM_ACTIVE_MTPROTO_TARGET__=JSON.parse(${JSON.stringify(JSON.stringify(target))});\n`;
   }
-  source += `await import(${JSON.stringify(entryUrl)});`;
+  // A SharedWorker fires `connect` without waiting for top-level await, so hold
+  // connections that arrive during the import until the entry has its listener.
+  source += 'const pendingConnects=[];const holdConnect=(event)=>pendingConnects.push(event);' +
+    'globalThis.addEventListener(\'connect\',holdConnect);' +
+    `try{await import(${JSON.stringify(entryUrl)});}finally{globalThis.removeEventListener('connect',holdConnect);}` +
+    'for(const event of pendingConnects)globalThis.dispatchEvent(new MessageEvent(\'connect\',{data:event.data,ports:event.ports,source:event.source}));';
 
   return URL.createObjectURL(new Blob([source], {type: 'application/javascript'}));
 }
