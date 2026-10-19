@@ -423,7 +423,12 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       return;
     }
 
-    const dialog = await this.managers.appMessagesManager.getDialogOnly(peerId);
+    let dialog = await this.managers.appMessagesManager.getDialogOnly(peerId);
+    if(!dialog) {
+      // Membership updates can arrive before a dialog is cached for an empty channel.
+      dialog = await this.managers.appMessagesManager.reloadConversation(peerId) ||
+        await this.managers.appMessagesManager.getDialogOnly(peerId);
+    }
     if(generation !== this.emptyChannelDialogReconcileGeneration) {
       return;
     }

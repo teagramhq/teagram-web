@@ -200,6 +200,29 @@ describe('invited channel dialog rows', () => {
     await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
   });
 
+  it('fetches a missing empty dialog after active channel membership arrives', async() => {
+    const peerId = (990020 as ChatId).toPeerId(true);
+    const dialog = createDialog(0);
+    const {list, sortedList} = createList('unknown');
+    let cachedDialog: Dialog | undefined;
+    const reloadConversation = vi.fn(async() => {
+      cachedDialog = dialog;
+      return dialog;
+    });
+    list.managers.appMessagesManager = {
+      getDialogOnly: vi.fn(() => Promise.resolve(cachedDialog)),
+      reloadConversation
+    };
+    const channel = {_:'channel', id: 990020, pFlags: {}} as any;
+    (apiManagerProxy as any).getPeer.mockReturnValue(channel);
+    reconcilePeer(peerId, channel);
+
+    await list.handleChatUpdate(990020 as ChatId);
+
+    await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
+    expect(reloadConversation).toHaveBeenCalledExactlyOnceWith(peerId);
+  });
+
   it('restores a dialog skipped before its active peer mirror arrives', async() => {
     const peerId = (990020 as ChatId).toPeerId(true);
     const dialog = createDialog(0);
