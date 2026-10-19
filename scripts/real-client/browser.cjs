@@ -2772,7 +2772,7 @@ function getPollOptionClickTarget(poll, answerText) {
 }
 
 function getPollVoteButton(poll) {
-  return poll.getByText('Vote', {exact: true});
+  return poll.getByText('Vote', {exact: true}).locator('xpath=..');
 }
 
 function getPollResultIndicator(poll) {

@@ -7649,14 +7649,21 @@ describe('real client poll option interaction', () => {
     const page = await browser.newPage();
     try {
       await page.setContent(`<div id="poll">
-        <div class="footerButton_t24sq_609">Vote</div>
+        <div class="footerButton_t24sq_609" style="position:relative;width:120px;height:36px" onclick="window.voteCount++">
+          <div class="c-ripple" style="position:absolute;inset:0"></div>
+          <span>Vote</span>
+        </div>
         <div class="footerButton_t24sq_609">1 member voted</div>
       </div>`);
+      await page.evaluate(() => { (window as any).voteCount = 0; });
 
       const poll = page.locator('#poll');
       expect(realClientBrowser.getPollVoteButton).toBeTypeOf('function');
       expect(realClientBrowser.getPollResultIndicator).toBeTypeOf('function');
-      expect(await realClientBrowser.getPollVoteButton(poll).count()).toBe(1);
+      const voteButton = realClientBrowser.getPollVoteButton(poll);
+      expect(await voteButton.count()).toBe(1);
+      await voteButton.click({timeout: 1_000});
+      expect(await page.evaluate(() => (window as any).voteCount)).toBe(1);
       expect(await realClientBrowser.getPollResultIndicator(poll).count()).toBe(1);
     } finally {
       await page.close();
