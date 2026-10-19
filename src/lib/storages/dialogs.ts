@@ -9,7 +9,6 @@ import type {Chat, Dialog as MTDialog, ForumTopic as MTForumTopic, DialogPeer, M
 import type {AppMessagesManager, Dialog, ForumTopic, MyMessage, SavedDialog} from '@appManagers/appMessagesManager';
 import type {AccountDatabase} from '@config/databases/state';
 import tsNow from '@helpers/tsNow';
-import noop from '@helpers/noop';
 import SearchIndex from '@lib/searchIndex';
 import {SliceEnd} from '@helpers/slicedArray';
 import {MyDialogFilter} from '@lib/storages/filters';
@@ -2094,7 +2093,10 @@ export default class DialogsStorage extends AppManager {
           }
         }
       }
-    }).catch(noop);
+    }).catch(() => {
+      // * a failed comparison proves nothing about the cache, so let the next cached first page retry it
+      this.cachedListReconciled = false;
+    });
   }
 
   public async markFolderAsRead(

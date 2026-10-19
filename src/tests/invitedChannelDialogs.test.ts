@@ -547,7 +547,8 @@ describe('invited channel dialogs', () => {
   });
   async function getCachedListWithServer(
     channel: any,
-    peerDialogsChannel = channel
+    peerDialogsChannel = channel,
+    failFirstList = false
   ) {
     const dialogsStorage: any = client.managers.dialogsStorage;
     const apiManager: any = (client.managers.appMessagesManager as any).apiManager;
@@ -564,6 +565,10 @@ describe('invited channel dialogs', () => {
       }
 
       requests.push(options.method);
+      if(failFirstList && requests.length === 1) {
+        return Promise.reject(Object.assign(new Error('NETWORK_BAD_REQUEST'), {type: 'NETWORK_BAD_REQUEST'}));
+      }
+
       return Promise.resolve(options.processResult(dialogsResponse));
     };
     apiManager.invokeApi = (method: string, ...args: any[]) => {
@@ -589,6 +594,10 @@ describe('invited channel dialogs', () => {
     try {
       await dialogsStorage.getDialogs({limit: 20, filterId: 0});
       await vi.waitFor(() => expect(requests).toContain('messages.getDialogs'));
+      if(failFirstList) {
+        await vi.waitFor(() => expect(dialogsStorage.cachedListReconciled).toBe(false));
+      }
+
       await dialogsStorage.getDialogs({limit: 20, filterId: 0});
     } catch(err) {
       restore();
@@ -616,6 +625,23 @@ describe('invited channel dialogs', () => {
         expect(client.managers.dialogsStorage.getFolderDialogs(0, false).map((dialog) => dialog.peerId)).toContain(peerId);
       });
       expect(requests.filter((method) => method === 'messages.getDialogs')).toHaveLength(1);
+    } finally {
+      restore();
+    }
+  });
+
+  test('retries the server list when the first comparison fails', async() => {
+    const channelId = 990045;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    client.managers.appChatsManager.saveApiChats([makeChannel(channelId)]);
+
+    const {requests, restore} = await getCachedListWithServer(makeChannel(channelId), undefined, true);
+
+    try {
+      await vi.waitFor(() => {
+        expect(client.managers.dialogsStorage.getFolderDialogs(0, false).map((dialog) => dialog.peerId)).toContain(peerId);
+      });
+      expect(requests.filter((method) => method === 'messages.getDialogs')).toHaveLength(2);
     } finally {
       restore();
     }
