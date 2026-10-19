@@ -7,7 +7,7 @@ const SERVER_HOST = 'second-server.example.test';
 const INVITE_SECRET = 'test-invite-secret';
 const PASSWORD = 'Teagram-Test-Password-123!';
 
-test('registers on a second server selected from the web prompt', async({page}, testInfo) => {
+test('registers on a second server after a failed host selection', async({page}, testInfo) => {
   const appOrigin = new URL(testInfo.project.use.baseURL as string);
   appOrigin.hostname = 'web.teagram.io';
   appOrigin.protocol = 'https:';
@@ -161,6 +161,10 @@ test('registers on a second server selected from the web prompt', async({page}, 
   const hostInput = picker.getByRole('textbox', {name: 'Server host'});
   await expect(hostInput).toHaveValue('demo.teagram.io');
   await expect(picker.getByRole('button', {name: 'Continue'})).toBeVisible();
+  await hostInput.fill('unreachable-server.example.test');
+  await picker.getByRole('button', {name: 'Continue'}).click();
+  await expect(picker.getByRole('alert')).toContainText('Could not reach unreachable-server.example.test');
+
   await hostInput.fill(SERVER_HOST);
   await picker.getByRole('button', {name: 'Continue'}).click();
 

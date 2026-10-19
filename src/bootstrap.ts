@@ -231,7 +231,6 @@ async function showServerPicker() {
       return;
     }
 
-    setConnectPolicy(host);
     let discovered: DiscoveredServer;
     try {
       discovered = await fetchServerDiscovery(host);
