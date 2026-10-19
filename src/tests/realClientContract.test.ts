@@ -11,6 +11,7 @@ import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
 import {
   assertAllScenariosPassed,
   formatBrowserFailureMessage,
+  parsePassedBrowserGateBreakdown,
   parseAuthProgressReport,
   parseChannelMembershipState,
   parseCenterColumnState,
@@ -28,10 +29,11 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
-const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createPageErrorExceptionEvent, createWorkerDiscovery, emitAuthProgressReport, enrichPageErrorDetails, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPageErrorEventCapture, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword} = realClientBrowser;
+const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, getClientErrorDiagnostics, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword, waitForUnreadCount} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://teagramd.test';
+const CONTRACT_WAIT_TIMEOUT_MS = 5_000;
 const MTPROTO_CHUNK_URL = `${APP_ORIGIN}/index.worker-AbCdEfGh.js?x-protocol-version=4`;
 const LOTTIE_WORKER_CHUNK_URL = `${APP_ORIGIN}/tlottie.worker-JkLmNoPq.js`;
 const PROBE_WORKER_URL = `${APP_ORIGIN}/_fixture_probe/shared-worker.js`;
@@ -61,8 +63,12 @@ function createNetworkObserverHarness(observer: any, options: any = {}) {
     : {});
   cdp.detach = options.detach || (async() => {});
   const context = {newCDPSession: async() => cdp, close: options.closeContext || (async() => {})};
-  const page: any = {context: () => context};
-  return {cdp, networkObserver: createNetworkObserver(page, 'contract-test', observer, options.pageErrorAssetResolver, options.onPageException)};
+  const page: any = new EventEmitter();
+  page.mainFrame = () => ({});
+  page.context = () => context;
+  page.exposeBinding = async() => {};
+  page.addInitScript = async() => {};
+  return {cdp, page, networkObserver: createNetworkObserver(page, 'contract-test', observer, options.pageErrorAssetResolver, options.onPageException)};
 }
 
 function emptyWebSocket101Grid() {
@@ -88,11 +94,11 @@ function createDiscoveryHarness(send: (method: string, params: any) => Promise<a
   return {browser, registry: createWorkerDiscovery(), session};
 }
 
-function acknowledgeCdpCommand(session: any, params: any, error = false) {
+function acknowledgeCdpCommand(session: any, params: any, error = false, result = {}) {
   const {id} = JSON.parse(params.message);
   queueMicrotask(() => session.emit('Target.receivedMessageFromTarget', {
     sessionId: params.sessionId,
-    message: JSON.stringify(error ? {id, error: {message: HOSTILE.phrase}} : {id, result: {}})
+    message: JSON.stringify(error ? {id, error: {message: HOSTILE.phrase}} : {id, result})
   }));
 }
 
@@ -120,7 +126,10 @@ async function createDiscoveryNetworkHarness(options: any = {}) {
       if(options.detachBeforeSetup && nestedMethod === 'Network.enable') {
         discovery.session.emit('Target.detachedFromTarget', {sessionId: params.sessionId});
       }
-      acknowledgeCdpCommand(discovery.session, params, options.setupFailure && nestedMethod === 'Network.enable');
+      const result = nestedMethod === 'Runtime.callFunctionOn'
+        ? {result: {value: {peerArguments: [{argument: 'peer', constructor: 'inputPeerChannel', id: '603'}]}}}
+        : {};
+      acknowledgeCdpCommand(discovery.session, params, options.setupFailure && nestedMethod === 'Network.enable', result);
     }
     return {};
   });
@@ -128,13 +137,13 @@ async function createDiscoveryNetworkHarness(options: any = {}) {
   const contexts: any[] = [];
   async function startContext(name: string, control = false) {
     const observer = observation.createContextObserver(name, {control, observeWebSocket101: options.observeWebSocket101 !== false});
-    const {cdp, networkObserver} = createWorkerNetworkObserverHarness(observer, name, {
+    const {cdp, page, networkObserver} = createWorkerNetworkObserverHarness(observer, name, {
       pageErrorAssetResolver: options.pageErrorAssetResolver
     });
     await networkObserver.start(discovery.registry);
     discovery.session.emit('Target.targetCreated', {targetInfo: pageTarget(`${name}-page`, name)});
     observer.state.windowElapsed = true;
-    const context = {name, observer, cdp, networkObserver};
+    const context = {name, observer, cdp, page, networkObserver};
     contexts.push(context);
     return context;
   }
@@ -935,39 +944,6 @@ describe('confined runner shared-worker observation contract', () => {
     }
   });
 
-  it('captures page exception details through the existing CDP observer when requested', async() => {
-    const contextObserver = observation.createContextObserver('page-error-diagnostics');
-    const onPageException = vi.fn();
-    const commands: string[] = [];
-    const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver, {
-      onPageException,
-      send: async(method: string) => {
-        commands.push(method);
-        return method === 'Target.getTargetInfo'
-          ? {targetInfo: {targetId: 'contract-test-page', browserContextId: 'contract-test'}}
-          : {};
-      }
-    });
-    const exceptionDetails = {
-      text: 'Uncaught Error: Object',
-      exception: {className: 'Error', description: 'Error: Object'},
-      url: `${APP_ORIGIN}/index-XYZ.js`,
-      lineNumber: 90,
-      columnNumber: 6,
-      stackTrace: {callFrames: [{url: `${APP_ORIGIN}/index-XYZ.js`, functionName: 'inviteToChannel', lineNumber: 90, columnNumber: 6}]}
-    };
-
-    await networkObserver.start();
-    try {
-      cdp.emit('Runtime.exceptionThrown', {exceptionDetails});
-
-      expect(commands).toContain('Runtime.enable');
-      expect(onPageException).toHaveBeenCalledWith(exceptionDetails, 'runtime');
-    } finally {
-      await networkObserver.stop();
-    }
-  });
-
   it('populates all websocket 101 context and submission phase cells', () => {
     const phase = observation.createWebSocket101Phase();
     const alice = observation.createContextObserver('alice', {observeWebSocket101: true, webSocket101Phase: phase});
@@ -1307,6 +1283,39 @@ describe('confined runner shared-worker observation contract', () => {
     await networkObserver.stop();
   });
 
+  it('reuses the worker attachment budget after targets are destroyed', () => {
+    const events: any[] = [{kind: 'target', target: pageTarget()}];
+    for(let index = 0; index < observation.LIMITS.attachedTargets * 2; index++) {
+      const targetId = `reused-worker-${index}`;
+      events.push({kind: 'target', target: sharedWorker(targetId, HOSTILE.blobUrl)});
+      events.push({kind: 'attach', targetId});
+      events.push({kind: 'setup', targetId});
+      events.push({kind: 'destroy', targetId});
+    }
+
+    const summary = replayContext(events);
+
+    expect(summary.observerOverflow).toBe(0);
+    expect(summary.attachedTargets).toBe(1);
+    expect(summary.coverageComplete).toBe(1);
+  });
+
+  it('keeps coverage complete for a 32-target worker burst', () => {
+    const events: any[] = [{kind: 'target', target: pageTarget()}];
+    for(let index = 0; index < 32; index++) {
+      const targetId = `burst-worker-${index}`;
+      events.push({kind: 'target', target: sharedWorker(targetId, HOSTILE.blobUrl)});
+      events.push({kind: 'attach', targetId});
+      events.push({kind: 'setup', targetId});
+    }
+
+    const summary = replayContext(events);
+
+    expect(summary.observerOverflow).toBe(0);
+    expect(summary.attachedTargets).toBe(32);
+    expect(summary.coverageComplete).toBe(1);
+  });
+
   it('skips page URL classifiers after observer overflow', async() => {
     const contextObserver = observation.createContextObserver('page-handler-overflow');
     const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver);
@@ -1601,7 +1610,7 @@ describe('confined runner shared-worker observation contract', () => {
   });
 
   it('rejects every CDP method outside the accepted scope, including nested sends', () => {
-    const forbidden = ['Runtime.evaluate', 'Runtime.callFunctionOn', 'Runtime.getProperties', 'Runtime.addBinding',
+    const forbidden = ['Runtime.evaluate', 'Runtime.getProperties', 'Runtime.addBinding',
       'Debugger.setBreakpoint', 'Fetch.enable', 'Network.setBlockedFrequencies',
       'Page.addScriptToEvaluateOnNewDocument', 'Page.setBypassCSP', 'Page.captureScreenshot',
       'Target.createTarget', 'Target.exposeFunction', 'Network.setRequestInterception'];
@@ -1613,18 +1622,20 @@ describe('confined runner shared-worker observation contract', () => {
     }
 
     expect(observation.BROWSER_CDP_METHODS).toEqual(['Target.setDiscoverTargets', 'Target.attachToTarget', 'Target.detachFromTarget', 'Target.sendMessageToTarget']);
-    expect(observation.PAGE_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.sendMessageToTarget', 'Target.detachFromTarget', 'Runtime.enable', 'Debugger.enable', 'Debugger.setPauseOnExceptions', 'Debugger.resume']);
-    expect(observation.WORKER_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable', 'Runtime.runIfWaitingForDebugger']);
+    expect(observation.PAGE_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable', 'Runtime.callFunctionOn', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.sendMessageToTarget', 'Target.detachFromTarget', 'Debugger.enable', 'Debugger.setPauseOnExceptions', 'Debugger.resume']);
+    expect(observation.WORKER_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable', 'Runtime.callFunctionOn', 'Runtime.runIfWaitingForDebugger']);
     expect(observation.allowCdpMethod('page', 'Target.getTargetInfo')).toBe(true);
     expect(observation.allowCdpMethod('page', 'Runtime.enable')).toBe(true);
-    expect(observation.allowCdpMethod('page', 'Debugger.enable')).toBe(true);
-    expect(observation.allowCdpMethod('page', 'Debugger.setPauseOnExceptions')).toBe(true);
-    expect(observation.allowCdpMethod('page', 'Debugger.resume')).toBe(true);
-    expect(observation.allowCdpMethod('browser', 'Debugger.enable')).toBe(false);
-    expect(observation.allowCdpMethod('worker', 'Debugger.enable')).toBe(false);
+    for(const method of ['Debugger.enable', 'Debugger.setPauseOnExceptions', 'Debugger.resume']) {
+      expect(observation.allowCdpMethod('page', method)).toBe(true);
+      expect(observation.allowCdpMethod('browser', method)).toBe(false);
+      expect(observation.allowCdpMethod('worker', method)).toBe(false);
+    }
+    expect(observation.allowCdpMethod('page', 'Runtime.callFunctionOn')).toBe(true);
     expect(observation.allowCdpMethod('page', 'Target.setAutoAttach')).toBe(true);
     expect(observation.allowCdpMethod('browser', 'Target.setDiscoverTargets')).toBe(true);
     expect(observation.allowCdpMethod('worker', 'Runtime.enable')).toBe(true);
+    expect(observation.allowCdpMethod('worker', 'Runtime.callFunctionOn')).toBe(true);
   });
 
   it('names chunk sources only as allowlisted logical names without hash or query', () => {
@@ -1769,7 +1780,7 @@ describe('confined runner shared-worker observation contract', () => {
   });
 
   it('keeps the resource bounds and page count that the report depends on', () => {
-    expect(observation.LIMITS).toEqual({attachedTargets: 16, countedEventsPerContext: 4096, cdpMessageBytes: 262_144, commandTimeoutMs: 5000});
+    expect(observation.LIMITS).toEqual({attachedTargets: 32, countedEventsPerContext: 4096, cdpMessageBytes: 262_144, commandTimeoutMs: 5000});
 
     const twoPages = replayContext([
       {kind: 'target', target: pageTarget()},
@@ -1916,6 +1927,7 @@ describe('discovery shared-worker network accounting', () => {
     try {
       await harness.attach(alice, 'duplicate-worker', first);
       await harness.attach(alice, 'duplicate-worker', second);
+      expect(alice.observer.summary().attachedTargets).toBe(1);
       for(const via of [first, second]) {
         harness.emit(alice, 'duplicate-worker', 'Network.webSocketCreated', {requestId: 'socket', url: 'wss://teagramd.test/apiws'}, via);
         harness.emit(alice, 'duplicate-worker', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: `${APP_ORIGIN}/fetch`}}, via);
@@ -1928,6 +1940,7 @@ describe('discovery shared-worker network accounting', () => {
         workerTargets: {shared_worker: 1, service_worker: 0}
       });
       await harness.attach(alice, 'distinct-worker', second);
+      expect(alice.observer.summary().attachedTargets).toBe(2);
       harness.emit(alice, 'distinct-worker', 'Network.webSocketCreated', {requestId: 'distinct-socket', url: 'wss://teagramd.test/apiws'}, second);
       expect(alice.networkObserver.summary()).toMatchObject({allowedWebSockets: 2, workerTargets: {shared_worker: 2, service_worker: 0}});
     } finally {
@@ -2330,7 +2343,18 @@ describe('discovery shared-worker network accounting', () => {
       unexpectedEgressAttempts: {alice: [], bob: []},
       observerErrors: {alice: {}, bob: {}},
       pageErrors: {
-        alice: [{constructorName: 'TypeError', scriptAsset: 'auth-client.js'}],
+        alice: [{
+          constructorName: 'TypeError',
+          scriptAsset: 'auth-client.js',
+          message: '[redacted]',
+          stack: {
+            state: 'captured',
+            lineCount: 2,
+            frameCount: 1,
+            frames: [{functionName: 'unknown', scriptAsset: 'auth-client.js', line: 21, column: 3}]
+          },
+          scenarioStep: {scenario: 'sign-in', step: 'alice_context'}
+        }],
         bob: []
       },
       pageErrorOverflow: {alice: [], bob: []}
@@ -2339,468 +2363,94 @@ describe('discovery shared-worker network accounting', () => {
     expectNoGateSecretLeak(report.gateBreakdown);
   });
 
-  it('attributes blob stack frames from correlated worker evidence without persisting blob identifiers', async() => {
-    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
-    const recordPageError = (realClientBrowser as any).recordPageError;
-    const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
-    expect(typeof createPageErrorAssetResolver).toBe('function');
-    expect(typeof recordPageError).toBe('function');
-    expect(typeof summarizeGateBreakdown).toBe('function');
+  it('rejects unsafe gate diagnostics on a passing browser report', () => {
+    const passingReport: any = {
+      status: 'passed',
+      gateBreakdown: {
+        counters: {unexpectedEgressAttempts: 0, observerErrors: 0, pageErrors: 0},
+        unexpectedEgressAttempts: {alice: [], bob: []},
+        observerErrors: {alice: {}, bob: {}},
+        pageErrors: {alice: [], bob: []},
+        pageErrorOverflow: {alice: [], bob: []},
+        stepDiagnostics: {alice: [], bob: []}
+      }
+    };
 
-    const resolver = createPageErrorAssetResolver();
-    const observer = observation.createContextObserver('alice');
-    const {cdp, networkObserver} = createWorkerNetworkObserverHarness(observer, 'contract-test', {pageErrorAssetResolver: resolver});
-    const pageErrors = {alice: [], bob: []} as any;
-    await networkObserver.start();
-
-    try {
-      cdp.emit('Network.requestWillBeSent', {
-        type: 'Script',
-        request: {url: HOSTILE.blobUrl},
-        initiator: {type: 'script', stack: {callFrames: [{url: MTPROTO_CHUNK_URL}]}}
-      });
-      const blobFromUrl = 'blob:https://teagramd.test/22222222-2222-2222-2222-222222222222';
-      cdp.emit('Network.requestWillBeSent', {
-        type: 'Script',
-        request: {url: blobFromUrl},
-        initiator: {type: 'other', url: MTPROTO_CHUNK_URL}
-      });
-      const blobWithoutInitiator = 'blob:https://teagramd.test/33333333-3333-3333-3333-333333333333';
-      cdp.emit('Network.requestWillBeSent', {
-        type: 'Fetch',
-        request: {url: MTPROTO_CHUNK_URL},
-        initiator: {type: 'script'}
-      });
-      cdp.emit('Target.attachedToTarget', {
-        sessionId: 'rival-worker-session',
-        targetInfo: {
-          targetId: 'rival-worker-target',
-          type: 'shared_worker',
-          url: `${APP_ORIGIN}/rival.worker-ZzYyXxWw.js`
+    expect(parsePassedBrowserGateBreakdown(passingReport)).toEqual(passingReport.gateBreakdown);
+    expect(() => parsePassedBrowserGateBreakdown({
+      ...passingReport,
+      gateBreakdown: {
+        ...passingReport.gateBreakdown,
+        stepDiagnostics: {
+          alice: [{scenarioStep: {scenario: 'message', step: 'alice_message_send'}, thrownValues: [], rpcFailures: [], consoleErrors: [], raw: HOSTILE.phrase}],
+          bob: []
         }
-      });
-      await networkObserver.waitForSetup();
-      cdp.emit('Target.receivedMessageFromTarget', {
-        sessionId: 'rival-worker-session',
-        message: JSON.stringify({
-          method: 'Network.requestWillBeSent',
-          params: {type: 'Fetch', request: {url: LOTTIE_WORKER_CHUNK_URL}}
-        })
-      });
-      cdp.emit('Target.attachedToTarget', {
-        sessionId: 'worker-session',
-        targetInfo: {
-          targetId: 'mtproto-worker-target',
-          type: 'shared_worker',
-          url: blobWithoutInitiator,
-          browserContextId: 'contract-test'
+      }
+    })).toThrow('browser egress/page error evidence is invalid');
+    expect(() => parsePassedBrowserGateBreakdown({
+      ...passingReport,
+      gateBreakdown: {
+        ...passingReport.gateBreakdown,
+        stepDiagnostics: {
+          alice: [{scenarioStep: {scenario: 'message', step: 'alice_message_send'}, thrownValues: [], rpcFailures: [], consoleErrors: [{message: HOSTILE.url}]}],
+          bob: []
         }
-      });
-      await networkObserver.waitForSetup();
-      cdp.emit('Network.requestWillBeSent', {
-        type: 'Script',
-        request: {url: blobWithoutInitiator},
-        initiator: {type: 'other'}
-      });
-      const error = new TypeError(HOSTILE.phrase);
-      error.stack = `TypeError: ${HOSTILE.phrase}\n    at t (${HOSTILE.blobUrl}:1:183)\n    at r (${blobFromUrl}:2:12)`;
-      recordPageError(pageErrors, 'alice', error, resolver);
-
-      const pageErrorsFromUrl = {alice: [], bob: []} as any;
-      const urlOnlyError = new TypeError(HOSTILE.phrase);
-      urlOnlyError.stack = `TypeError: ${HOSTILE.phrase}\n    at r (${blobFromUrl}:2:12)`;
-      recordPageError(pageErrorsFromUrl, 'alice', urlOnlyError, resolver);
-
-      const breakdown = summarizeGateBreakdown({pageErrors});
-      const breakdownFromUrl = summarizeGateBreakdown({pageErrors: pageErrorsFromUrl});
-      expect(breakdown.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'unknown'}]);
-      expect(breakdownFromUrl.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'unknown'}]);
-      expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.blobUrl);
-      expect(JSON.stringify(breakdown)).not.toContain(blobFromUrl);
-      expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.phrase);
-      expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.token);
-      expect(JSON.stringify(breakdownFromUrl)).not.toContain(blobFromUrl);
-
-      const pageErrorsFromFetch = {alice: [], bob: []} as any;
-      const fetchOnlyError = new TypeError(HOSTILE.phrase);
-      fetchOnlyError.stack = `TypeError: ${HOSTILE.phrase}\n    at r (${blobWithoutInitiator}:2:12)`;
-      recordPageError(pageErrorsFromFetch, 'alice', fetchOnlyError, resolver);
-      const breakdownFromFetch = summarizeGateBreakdown({pageErrors: pageErrorsFromFetch});
-      expect(breakdownFromFetch.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'index.worker-AbCdEfGh.js'}]);
-      expect(JSON.stringify(breakdownFromFetch)).not.toContain(blobWithoutInitiator);
-
-      const blobFromScriptRequest = 'blob:https://teagramd.test/66666666-6666-6666-6666-666666666666';
-      cdp.emit('Network.requestWillBeSent', {
-        type: 'Fetch',
-        request: {url: MTPROTO_CHUNK_URL},
-        initiator: {type: 'script'}
-      });
-      cdp.emit('Network.requestWillBeSent', {
-        type: 'Script',
-        request: {url: blobFromScriptRequest},
-        initiator: {type: 'other'}
-      });
-      const scriptRequestError = new TypeError(HOSTILE.phrase);
-      scriptRequestError.stack = `TypeError: ${HOSTILE.phrase}\n    at t (${blobFromScriptRequest}:1:183)`;
-      const pageErrorsFromScriptRequest = {alice: [], bob: []} as any;
-      recordPageError(pageErrorsFromScriptRequest, 'alice', scriptRequestError, resolver);
-      const breakdownFromScriptRequest = summarizeGateBreakdown({pageErrors: pageErrorsFromScriptRequest});
-      expect(breakdownFromScriptRequest.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'index.worker-AbCdEfGh.js'}]);
-      expect(JSON.stringify(breakdownFromScriptRequest)).not.toContain(blobFromScriptRequest);
-
-      const lottieBlobUrl = 'blob:https://teagramd.test/55555555-5555-5555-5555-555555555555';
-      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'lottie-error-target');
-      const lottiePageErrors = {alice: [], bob: []} as any;
-      const lottieError = new Error(HOSTILE.phrase);
-      lottieError.stack = `Error: ${HOSTILE.phrase}\n    at TLottieWasm.createAnimation (${lottieBlobUrl}:1197:23)\n    at TLottieItem.init (${lottieBlobUrl}:1328:35)\n    at Object.loadFromData [as callback] (${lottieBlobUrl}:1580:16)\n    at async SuperMessagePort.processInvokeTask [as invoke] (${lottieBlobUrl}:804:29)`;
-      recordPageError(lottiePageErrors, 'alice', lottieError, resolver);
-      const lottieBreakdown = summarizeGateBreakdown({pageErrors: lottiePageErrors});
-      expect(lottieBreakdown.counters.pageErrors).toBe(1);
-      expect(lottieBreakdown.pageErrors.alice).toEqual([{constructorName: 'Error', scriptAsset: 'tlottie.worker-JkLmNoPq.js'}]);
-      expect(JSON.stringify(lottieBreakdown)).not.toContain(lottieBlobUrl);
-    } finally {
-      resolver.clear();
-      await networkObserver.stop();
-    }
+      }
+    })).toThrow('browser egress/page error evidence is invalid');
   });
 
-  it('resolves unmapped blob script frames from fetched bundles and keeps unknown for frameless stacks', () => {
-    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
-    const resolver = createPageErrorAssetResolver();
-    resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'contract-test-page');
-
-    const firstBlobUrl = 'blob:https://teagramd.test/77777777-7777-7777-7777-777777777777';
-    const secondBlobUrl = 'blob:https://teagramd.test/88888888-8888-8888-8888-888888888888';
-    expect(resolver.scriptAsset(`Error: failed\n    at render (${firstBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
-    expect(resolver.scriptAsset(`Error: failed\n    at render (${secondBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
-    expect(resolver.scriptAsset('Error: failed')).toBe('unknown');
-    resolver.clear();
-  });
-
-  it('captures sanitized unknown-source page-error details only when diagnostics are enabled', () => {
-    const recordPageError = (realClientBrowser as any).recordPageError;
+  it('records bounded page error message, stack frames and scenario step', () => {
     const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
-    const error = new Error(HOSTILE.phrase);
-    error.stack = `Error: ${HOSTILE.phrase}\n    at throwFailure (${APP_ORIGIN}/index.js?token=${HOSTILE.token}:21:3)\nAuthorization: Bearer untracked-secret`;
+    const recordPageError = (realClientBrowser as any).recordPageError;
     const pageErrors = {alice: [], bob: []} as any;
-    const unknownAssetResolver = {scriptAsset: () => 'unknown'};
+    const message = 'Cannot read properties of undefined (reading \'sender\')';
+    const error = new TypeError(message);
+    error.stack = `TypeError: ${message}\n    at renderSyntheticChat (https://unannounced.invalid/assets/bob-client.js?token=${HOSTILE.token}:21:3)`;
 
-    recordPageError(pageErrors, 'alice', error, unknownAssetResolver, {
-      captureDetails: true,
-      pageUrl: `${APP_ORIGIN}/messages?token=${HOSTILE.token}#private`,
-      scenario: 'channel',
-      stage: 'alice_channel_create',
-      redactValues: [HOSTILE.phrase, HOSTILE.token, HOSTILE.password]
-    });
-
+    recordPageError(pageErrors, 'bob', error, undefined, {scenario: 'channel', step: 'bob_channel_reload_chats_list'});
     const breakdown = summarizeGateBreakdown({pageErrors});
-    expect(breakdown.pageErrors.alice).toEqual([{
-      constructorName: 'Error',
-      scriptAsset: 'unknown',
-      diagnostic: {
-        message: '[redacted]',
-        stack: `Error: [redacted]\n    at throwFailure (${APP_ORIGIN}/index.js:21:3)\nAuthorization: [redacted]`,
-        pageUrl: `${APP_ORIGIN}/messages`,
-        scenario: 'channel',
-        stage: 'alice_channel_create'
-      }
+
+    expect(breakdown.pageErrors.bob).toEqual([{
+      constructorName: 'TypeError',
+      scriptAsset: 'bob-client.js',
+      message,
+      stack: {
+        state: 'captured',
+        lineCount: 2,
+        frameCount: 1,
+        frames: [{functionName: 'renderSyntheticChat', scriptAsset: 'bob-client.js', line: 21, column: 3}]
+      },
+      scenarioStep: {scenario: 'channel', step: 'bob_channel_reload_chats_list'}
     }]);
-    expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.token);
-    expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.password);
-    expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.phrase);
-    expect(JSON.stringify(breakdown)).not.toContain('untracked-secret');
-    expect(JSON.stringify(breakdown)).not.toContain('#private');
     expect(formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: breakdown}))
-    .toContain(`; browser egress/page errors ${JSON.stringify(breakdown)}`);
-    const unsafeBreakdown = structuredClone(breakdown);
-    unsafeBreakdown.pageErrors.alice[0].diagnostic.pageUrl += `?token=${HOSTILE.token}`;
-    expect(() => formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: unsafeBreakdown}))
-    .toThrow('browser egress/page error evidence is invalid');
-  });
-
-  it('preserves allowlisted RPC hints in sanitized page-error diagnostics', () => {
-    const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
-    const pageErrors = {alice: [{
-      constructorName: 'Error',
-      scriptAsset: 'unknown',
-      diagnostic: {
-        message: 'Object',
-        stack: '',
-        pageUrl: `${APP_ORIGIN}/`,
-        scenario: 'channel',
-        stage: 'alice_add_bob_to_channel',
-        rpcErrorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
-        rpcErrorCode: 400
-      }
-    }], bob: []} as any;
-
-    expect(summarizeGateBreakdown({pageErrors}).pageErrors.alice[0].diagnostic).toEqual({
-      message: 'Object',
-      stack: '',
-      pageUrl: `${APP_ORIGIN}/`,
-      scenario: 'channel',
-      stage: 'alice_add_bob_to_channel',
-      rpcErrorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
-      rpcErrorCode: 400
-    });
-  });
-
-  it('caps unknown-source page-error diagnostics per browser context', () => {
-    const recordPageError = (realClientBrowser as any).recordPageError;
-    const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
-    const pageErrors = {alice: [], bob: []} as any;
-    const unknownAssetResolver = {scriptAsset: () => 'unknown'};
-    for(let index = 0; index < 18; index++) {
-      recordPageError(pageErrors, 'alice', new Error(`failure ${index}`), unknownAssetResolver, {
-        captureDetails: true,
-        pageUrl: `${APP_ORIGIN}/`,
-        scenario: 'channel',
-        stage: 'alice_channel_create'
-      });
+    .toContain(JSON.stringify(breakdown));
+    expectNoGateSecretLeak(breakdown);
+    for(const pageError of [
+      {...breakdown.pageErrors.bob[0], message: HOSTILE.url},
+      {...breakdown.pageErrors.bob[0], stack: {...breakdown.pageErrors.bob[0].stack, frames: [{...breakdown.pageErrors.bob[0].stack.frames[0], url: HOSTILE.url}]}},
+      {...breakdown.pageErrors.bob[0], scenarioStep: {scenario: 'channel', step: HOSTILE.phrase}}
+    ]) {
+      const invalid = {...breakdown, pageErrors: {alice: [], bob: [pageError]}};
+      expect(() => formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: invalid}))
+      .toThrow('browser egress/page error evidence is invalid');
     }
 
-    const diagnostics = summarizeGateBreakdown({pageErrors}).pageErrors.alice;
-    expect(diagnostics).toHaveLength(18);
-    expect(diagnostics.slice(0, 16).every((error: any) => error.diagnostic)).toBe(true);
-    expect(diagnostics.slice(16).every((error: any) => !error.diagnostic)).toBe(true);
-  });
-
-  it('normalizes CDP exception stack frames with one-based source coordinates', () => {
-    const event = createPageErrorExceptionEvent({
-      text: 'Uncaught Error: Object',
-      exception: {className: 'Error', description: 'Error: Object'},
-      url: `${APP_ORIGIN}/index-XYZ.js?token=${HOSTILE.token}`,
-      lineNumber: 90,
-      columnNumber: 6,
-      stackTrace: {callFrames: [{url: `${APP_ORIGIN}/index-XYZ.js?token=${HOSTILE.token}`, functionName: 'inviteToChannel', lineNumber: 90, columnNumber: 6}]}
-    }, `${APP_ORIGIN}/?token=${HOSTILE.token}`, [HOSTILE.token]);
-
-    expect(event).toEqual({
-      message: 'Error: Object',
-      stack: `Error: Object\n    at inviteToChannel (${APP_ORIGIN}/index-XYZ.js:91:7)`,
-      filename: `${APP_ORIGIN}/index-XYZ.js`,
-      lineNumber: 91,
-      columnNumber: 7,
-      pageUrl: `${APP_ORIGIN}/`
-    });
-    expect(JSON.stringify(event)).not.toContain(HOSTILE.token);
-  });
-
-  it('normalizes debugger pause frames for uncaught object rejections', () => {
-    const event = createPageErrorExceptionEvent({
-      reason: 'promiseRejection',
-      data: {type: 'object', description: 'Object'},
-      callFrames: [{
-        functionName: 'searchContacts',
-        url: '',
-        location: {scriptId: '7', lineNumber: 41, columnNumber: 8}
-      }],
-      scriptUrls: {'7': `${APP_ORIGIN}/appSelectPeers-XYZ.js?token=${HOSTILE.token}`}
-    }, `${APP_ORIGIN}/?token=${HOSTILE.token}`, [HOSTILE.token]);
-
-    expect(event).toEqual({
-      message: 'Object',
-      stack: `Object\n    at searchContacts (${APP_ORIGIN}/appSelectPeers-XYZ.js:42:9)`,
-      filename: `${APP_ORIGIN}/appSelectPeers-XYZ.js`,
-      lineNumber: 42,
-      columnNumber: 9,
-      pageUrl: `${APP_ORIGIN}/`
-    });
-    expect(JSON.stringify(event)).not.toContain(HOSTILE.token);
-  });
-
-  it('uses the browser ErrorEvent location when a page error has no stack', async() => {
-    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
-    const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
-    const resolver = createPageErrorAssetResolver();
-    const pageErrors = {alice: [{
-      constructorName: 'Error',
-      scriptAsset: 'unknown',
-      diagnostic: {
-        message: 'Object',
-        stack: '',
-        pageUrl: APP_ORIGIN,
-        scenario: 'channel',
-        stage: 'alice_add_bob_to_channel'
-      }
-    }], bob: []} as any;
-    const page = {evaluate: async(): Promise<unknown[]> => [{
-      message: 'Object',
-      stack: '',
-      filename: `${APP_ORIGIN}/index-ABC.js?token=${HOSTILE.token}`,
-      lineNumber: 327,
-      columnNumber: 11,
-      pageUrl: `${APP_ORIGIN}/?token=${HOSTILE.token}`
-    }]} as any;
-
-    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver, [HOSTILE.token]);
-
-    expect(pageErrors.alice[0]).toEqual({
-      constructorName: 'Error',
-      scriptAsset: 'index-ABC.js',
-      diagnostic: {
-        message: 'Object',
-        stack: `Object\n    at ${APP_ORIGIN}/index-ABC.js:327:11`,
-        pageUrl: `${APP_ORIGIN}/`,
-        scenario: 'channel',
-        stage: 'alice_add_bob_to_channel'
-      }
-    });
-    expect(formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: {
-      counters: {unexpectedEgressAttempts: 0, observerErrors: 0, pageErrors: 1},
-      unexpectedEgressAttempts: {alice: [], bob: []},
-      observerErrors: {alice: {}, bob: {}},
-      pageErrors,
-      pageErrorOverflow: {alice: [], bob: []}
-    }})).toContain('index-ABC.js');
-    expect(JSON.stringify(pageErrors)).not.toContain(HOSTILE.token);
-    resolver.clear();
-  });
-
-  it('records only allowlisted RPC error type and code from a rejected object', async() => {
-    const resolver = createPageErrorAssetResolver();
-    const pageErrors = {alice: [{
-      constructorName: 'Error',
-      scriptAsset: 'unknown',
-      diagnostic: {
-        message: 'Object',
-        stack: '',
-        pageUrl: `${APP_ORIGIN}/`,
-        scenario: 'channel',
-        stage: 'alice_channel_invite_button'
-      }
-    }], bob: []} as any;
-    const page = {evaluate: async(): Promise<unknown[]> => []} as any;
-    const protocolEvents = [{
-      message: 'Object',
-      stack: `Object\n    at inviteToChannel (${APP_ORIGIN}/index-XYZ.js:91:7)`,
-      filename: `${APP_ORIGIN}/index-XYZ.js`,
-      lineNumber: 91,
-      columnNumber: 7,
-      pageUrl: `${APP_ORIGIN}/?token=${HOSTILE.token}`,
-      errorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
-      errorCode: 400
-    }];
-
-    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver, [HOSTILE.token], protocolEvents);
-
-    expect(pageErrors.alice[0].scriptAsset).toBe('index-XYZ.js');
-    expect(pageErrors.alice[0].diagnostic).toEqual({
-      message: 'Object',
-      stack: `Object\n    at inviteToChannel (${APP_ORIGIN}/index-XYZ.js:91:7)`,
-      pageUrl: `${APP_ORIGIN}/`,
-      scenario: 'channel',
-      stage: 'alice_channel_invite_button',
-      rpcErrorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
-      rpcErrorCode: 400
-    });
-    const report: any = {status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: {
-      counters: {unexpectedEgressAttempts: 0, observerErrors: 0, pageErrors: 1},
-      unexpectedEgressAttempts: {alice: [], bob: []},
-      observerErrors: {alice: {}, bob: {}},
-      pageErrors,
-      pageErrorOverflow: {alice: [], bob: []}
-    }};
-    expect(formatBrowserFailureMessage(report)).toContain('CHANNELS_ADMIN_PUBLIC_TOO_MUCH');
-    const unsafeReport = structuredClone(report);
-    unsafeReport.gateBreakdown.pageErrors.alice[0].diagnostic.rpcErrorType = HOSTILE.token;
-    expect(() => formatBrowserFailureMessage(unsafeReport)).toThrow('browser egress/page error evidence is invalid');
-    expect(JSON.stringify(report)).not.toContain(HOSTILE.token);
-    resolver.clear();
-  });
-
-  it('uses a browser console location when a page error has no stack or ErrorEvent', async() => {
-    const resolver = createPageErrorAssetResolver();
-    const pageErrors = {alice: [{
-      constructorName: 'Error',
-      scriptAsset: 'unknown',
-      diagnostic: {
-        message: 'Object',
-        stack: '',
-        pageUrl: `${APP_ORIGIN}/`,
-        scenario: 'channel',
-        stage: 'alice_add_bob_to_channel'
-      }
-    }], bob: []} as any;
-    const page = {evaluate: async(): Promise<unknown[]> => []} as any;
-    const consoleErrors = [{
-      message: 'Uncaught (in promise) Object',
-      filename: `${APP_ORIGIN}/index-XYZ.js?token=${HOSTILE.token}`,
-      lineNumber: 91,
-      columnNumber: 7,
-      pageUrl: `${APP_ORIGIN}/?token=${HOSTILE.token}`
-    }];
-
-    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver, [HOSTILE.token], consoleErrors);
-
-    expect(pageErrors.alice[0]).toEqual({
-      constructorName: 'Error',
-      scriptAsset: 'index-XYZ.js',
-      diagnostic: {
-        message: 'Object',
-        stack: `Object\n    at ${APP_ORIGIN}/index-XYZ.js:91:7`,
-        pageUrl: `${APP_ORIGIN}/`,
-        scenario: 'channel',
-        stage: 'alice_add_bob_to_channel'
-      }
-    });
-    expect(JSON.stringify(pageErrors)).not.toContain(HOSTILE.token);
-    resolver.clear();
-  });
-
-  it('leaves page-error attribution unknown when generic messages match multiple events', async() => {
-    const resolver = createPageErrorAssetResolver();
-    const pageErrors = {alice: [{
-      constructorName: 'Error',
-      scriptAsset: 'unknown',
-      diagnostic: {
-        message: 'Object',
-        stack: 'Object',
-        pageUrl: `${APP_ORIGIN}/`,
-        scenario: 'channel',
-        stage: 'alice_channel_invite_button'
-      }
-    }], bob: []} as any;
-    const page = {evaluate: async(): Promise<unknown[]> => []} as any;
-    const events = [{
-      message: 'Object',
-      stack: `Object\n    at inviteToChannel (${APP_ORIGIN}/index-Aaaa.js:91:7)`,
-      filename: `${APP_ORIGIN}/index-Aaaa.js`,
-      lineNumber: 91,
-      columnNumber: 7,
-      pageUrl: `${APP_ORIGIN}/`,
-      errorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH'
-    }, {
-      message: 'Object',
-      stack: `Object\n    at unrelatedHandler (${APP_ORIGIN}/index-Bbbb.js:4:2)`,
-      filename: `${APP_ORIGIN}/index-Bbbb.js`,
-      lineNumber: 4,
-      columnNumber: 2,
-      pageUrl: `${APP_ORIGIN}/other`,
-      errorCode: 400
-    }];
-
-    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver, [], events);
-
-    expect(pageErrors.alice[0]).toEqual({
-      constructorName: 'Error',
-      scriptAsset: 'unknown',
-      diagnostic: {
-        message: 'Object',
-        stack: 'Object',
-        pageUrl: `${APP_ORIGIN}/`,
-        scenario: 'channel',
-        stage: 'alice_channel_invite_button'
-      }
-    });
-    resolver.clear();
+    const missingStackError = {name: 'Error', message: 'Synthetic missing stack'};
+    recordPageError(pageErrors, 'bob', missingStackError, undefined, {scenario: 'channel', step: 'bob_channel_post_visible'});
+    const unclassifiedStackError = new Error('Synthetic unclassified stack');
+    unclassifiedStackError.stack = 'Error: Synthetic unclassified stack\n    at load (webpack://bundle/src/client.js:33:7)';
+    recordPageError(pageErrors, 'bob', unclassifiedStackError, undefined, {scenario: 'channel', step: 'bob_channel_post_visible'});
+    const stackStates = summarizeGateBreakdown({pageErrors}).pageErrors.bob.slice(1).map((pageError: any) => pageError.stack);
+    expect(stackStates).toEqual([
+      {state: 'unavailable', lineCount: 0, frameCount: 0, frames: []},
+      {state: 'unclassified_frames', lineCount: 2, frameCount: 1, frames: []}
+    ]);
   });
 
   it('correlates simultaneous window, Runtime and debugger observations of one object rejection', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
     const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
-    expect(recordPageErrorProtocolEvent).toBeTypeOf('function');
-    if(typeof recordPageErrorProtocolEvent !== 'function') return;
-
     const resolver = createPageErrorAssetResolver();
     const pageErrors = {alice: [{
       constructorName: 'Error',
@@ -2876,10 +2526,9 @@ describe('discovery shared-worker network accounting', () => {
   });
 
   it('keeps same-message exceptions separate when their protocol identities differ', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
     const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
-    expect(recordPageErrorProtocolEvent).toBeTypeOf('function');
-    if(typeof recordPageErrorProtocolEvent !== 'function') return;
-
     const resolver = createPageErrorAssetResolver();
     const pageErrors = {alice: [{
       constructorName: 'Error',
@@ -2931,11 +2580,51 @@ describe('discovery shared-worker network accounting', () => {
     resolver.clear();
   });
 
+  it('leaves page-error attribution unknown when generic messages match multiple fallback events', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [{
+      constructorName: 'Error',
+      scriptAsset: 'unknown',
+      diagnostic: {
+        message: 'Object',
+        stack: 'Object',
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'alice_channel_invite_button'
+      }
+    }], bob: []} as any;
+    const page = {evaluate: async(): Promise<unknown[]> => []} as any;
+    const events = [{
+      message: 'Object',
+      stack: `Object\n    at inviteToChannel (${APP_ORIGIN}/index-Aaaa.js:91:7)`,
+      filename: `${APP_ORIGIN}/index-Aaaa.js`,
+      lineNumber: 91,
+      columnNumber: 7,
+      pageUrl: `${APP_ORIGIN}/`,
+      errorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH'
+    }, {
+      message: 'Object',
+      stack: `Object\n    at unrelatedHandler (${APP_ORIGIN}/index-Bbbb.js:4:2)`,
+      filename: `${APP_ORIGIN}/index-Bbbb.js`,
+      lineNumber: 4,
+      columnNumber: 2,
+      pageUrl: `${APP_ORIGIN}/other`,
+      errorCode: 400
+    }];
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver, [], events);
+
+    expect(pageErrors.alice[0].scriptAsset).toBe('unknown');
+    expect(pageErrors.alice[0].diagnostic.stack).toBe('Object');
+    expect(pageErrors.alice[0].diagnostic.rpcErrorType).toBeUndefined();
+    resolver.clear();
+  });
+
   it('enriches page-error evidence for failures before the final scenario gate', async() => {
     const enrichPageErrorReport = (realClientBrowser as any).enrichPageErrorReport;
-    expect(enrichPageErrorReport).toBeTypeOf('function');
-    if(typeof enrichPageErrorReport !== 'function') return;
-
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
     const pageErrors = {alice: [{
       constructorName: 'Error',
@@ -2967,6 +2656,196 @@ describe('discovery shared-worker network accounting', () => {
     expect(failureMessage).toContain('index-XYZ.js:91:7');
     expect(failureMessage).toContain(`${APP_ORIGIN}/`);
     expect(failureMessage).not.toContain(HOSTILE.token);
+    resolver.clear();
+  });
+
+  it('attributes blob stack frames from correlated worker evidence without persisting blob identifiers', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
+    expect(typeof createPageErrorAssetResolver).toBe('function');
+    expect(typeof recordPageError).toBe('function');
+    expect(typeof summarizeGateBreakdown).toBe('function');
+
+    const resolver = createPageErrorAssetResolver();
+    const observer = observation.createContextObserver('alice');
+    const {cdp, networkObserver} = createWorkerNetworkObserverHarness(observer, 'contract-test', {pageErrorAssetResolver: resolver});
+    const pageErrors = {alice: [], bob: []} as any;
+    await networkObserver.start();
+
+    try {
+      cdp.emit('Network.requestWillBeSent', {
+        type: 'Script',
+        request: {url: HOSTILE.blobUrl},
+        initiator: {type: 'script', stack: {callFrames: [{url: MTPROTO_CHUNK_URL}]}}
+      });
+      const blobFromUrl = 'blob:https://teagramd.test/22222222-2222-2222-2222-222222222222';
+      cdp.emit('Network.requestWillBeSent', {
+        type: 'Script',
+        request: {url: blobFromUrl},
+        initiator: {type: 'other', url: MTPROTO_CHUNK_URL}
+      });
+      const blobWithoutInitiator = 'blob:https://teagramd.test/33333333-3333-3333-3333-333333333333';
+      cdp.emit('Network.requestWillBeSent', {
+        type: 'Fetch',
+        request: {url: MTPROTO_CHUNK_URL},
+        initiator: {type: 'script'}
+      });
+      cdp.emit('Target.attachedToTarget', {
+        sessionId: 'rival-worker-session',
+        targetInfo: {
+          targetId: 'rival-worker-target',
+          type: 'shared_worker',
+          url: `${APP_ORIGIN}/rival.worker-ZzYyXxWw.js`
+        }
+      });
+      await networkObserver.waitForSetup();
+      cdp.emit('Target.receivedMessageFromTarget', {
+        sessionId: 'rival-worker-session',
+        message: JSON.stringify({
+          method: 'Network.requestWillBeSent',
+          params: {type: 'Fetch', request: {url: LOTTIE_WORKER_CHUNK_URL}}
+        })
+      });
+      cdp.emit('Target.attachedToTarget', {
+        sessionId: 'worker-session',
+        targetInfo: {
+          targetId: 'mtproto-worker-target',
+          type: 'shared_worker',
+          url: blobWithoutInitiator,
+          browserContextId: 'contract-test'
+        }
+      });
+      await networkObserver.waitForSetup();
+      cdp.emit('Network.requestWillBeSent', {
+        type: 'Script',
+        request: {url: blobWithoutInitiator},
+        initiator: {type: 'other'}
+      });
+      const error = new TypeError(HOSTILE.phrase);
+      error.stack = `TypeError: ${HOSTILE.phrase}\n    at t (${HOSTILE.blobUrl}:1:183)\n    at r (${blobFromUrl}:2:12)`;
+      recordPageError(pageErrors, 'alice', error, resolver, {scenario: 'sign-in', step: 'alice_context'});
+
+      const pageErrorsFromUrl = {alice: [], bob: []} as any;
+      const urlOnlyError = new TypeError(HOSTILE.phrase);
+      urlOnlyError.stack = `TypeError: ${HOSTILE.phrase}\n    at r (${blobFromUrl}:2:12)`;
+      recordPageError(pageErrorsFromUrl, 'alice', urlOnlyError, resolver, {scenario: 'sign-in', step: 'alice_context'});
+
+      const breakdown = summarizeGateBreakdown({pageErrors});
+      const breakdownFromUrl = summarizeGateBreakdown({pageErrors: pageErrorsFromUrl});
+      const expectedPageError = {
+        constructorName: 'TypeError',
+        scriptAsset: 'unknown',
+        message: '[redacted]',
+        stack: {
+          state: 'captured',
+          lineCount: 3,
+          frameCount: 2,
+          frames: [
+            {functionName: 't', scriptAsset: 'unknown', line: 1, column: 183},
+            {functionName: 'r', scriptAsset: 'unknown', line: 2, column: 12}
+          ]
+        },
+        scenarioStep: {scenario: 'sign-in', step: 'alice_context'}
+      };
+      expect(breakdown.pageErrors.alice).toEqual([expectedPageError]);
+      expect(breakdownFromUrl.pageErrors.alice).toEqual([{
+        ...expectedPageError,
+        stack: {state: 'captured', lineCount: 2, frameCount: 1, frames: [expectedPageError.stack.frames[1]]}
+      }]);
+      expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.blobUrl);
+      expect(JSON.stringify(breakdown)).not.toContain(blobFromUrl);
+      expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.phrase);
+      expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.token);
+      expect(JSON.stringify(breakdownFromUrl)).not.toContain(blobFromUrl);
+
+      const pageErrorsFromFetch = {alice: [], bob: []} as any;
+      const fetchOnlyError = new TypeError(HOSTILE.phrase);
+      fetchOnlyError.stack = `TypeError: ${HOSTILE.phrase}\n    at r (${blobWithoutInitiator}:2:12)`;
+      recordPageError(pageErrorsFromFetch, 'alice', fetchOnlyError, resolver, {scenario: 'sign-in', step: 'alice_context'});
+      const breakdownFromFetch = summarizeGateBreakdown({pageErrors: pageErrorsFromFetch});
+      expect(breakdownFromFetch.pageErrors.alice).toEqual([{
+        ...expectedPageError,
+        scriptAsset: 'index.worker-AbCdEfGh.js',
+        stack: {
+          state: 'captured',
+          lineCount: 2,
+          frameCount: 1,
+          frames: [{functionName: 'r', scriptAsset: 'index.worker-AbCdEfGh.js', line: 2, column: 12}]
+        }
+      }]);
+      expect(JSON.stringify(breakdownFromFetch)).not.toContain(blobWithoutInitiator);
+
+      const blobFromScriptRequest = 'blob:https://teagramd.test/66666666-6666-6666-6666-666666666666';
+      cdp.emit('Network.requestWillBeSent', {
+        type: 'Fetch',
+        request: {url: MTPROTO_CHUNK_URL},
+        initiator: {type: 'script'}
+      });
+      cdp.emit('Network.requestWillBeSent', {
+        type: 'Script',
+        request: {url: blobFromScriptRequest},
+        initiator: {type: 'other'}
+      });
+      const scriptRequestError = new TypeError(HOSTILE.phrase);
+      scriptRequestError.stack = `TypeError: ${HOSTILE.phrase}\n    at t (${blobFromScriptRequest}:1:183)`;
+      const pageErrorsFromScriptRequest = {alice: [], bob: []} as any;
+      recordPageError(pageErrorsFromScriptRequest, 'alice', scriptRequestError, resolver, {scenario: 'sign-in', step: 'alice_context'});
+      const breakdownFromScriptRequest = summarizeGateBreakdown({pageErrors: pageErrorsFromScriptRequest});
+      expect(breakdownFromScriptRequest.pageErrors.alice).toEqual([{
+        ...expectedPageError,
+        scriptAsset: 'index.worker-AbCdEfGh.js',
+        stack: {
+          state: 'captured',
+          lineCount: 2,
+          frameCount: 1,
+          frames: [{functionName: 't', scriptAsset: 'index.worker-AbCdEfGh.js', line: 1, column: 183}]
+        }
+      }]);
+      expect(JSON.stringify(breakdownFromScriptRequest)).not.toContain(blobFromScriptRequest);
+
+      const lottieBlobUrl = 'blob:https://teagramd.test/55555555-5555-5555-5555-555555555555';
+      resolver.observeRequest(LOTTIE_WORKER_CHUNK_URL, {type: 'script'}, 'Fetch', 'lottie-error-target');
+      const lottiePageErrors = {alice: [], bob: []} as any;
+      const lottieError = new Error(HOSTILE.phrase);
+      lottieError.stack = `Error: ${HOSTILE.phrase}\n    at TLottieWasm.createAnimation (${lottieBlobUrl}:1197:23)\n    at TLottieItem.init (${lottieBlobUrl}:1328:35)\n    at Object.loadFromData [as callback] (${lottieBlobUrl}:1580:16)\n    at async SuperMessagePort.processInvokeTask [as invoke] (${lottieBlobUrl}:804:29)`;
+      recordPageError(lottiePageErrors, 'alice', lottieError, resolver, {scenario: 'channel', step: 'bob_channel_post_visible'});
+      const lottieBreakdown = summarizeGateBreakdown({pageErrors: lottiePageErrors});
+      expect(lottieBreakdown.counters.pageErrors).toBe(1);
+      expect(lottieBreakdown.pageErrors.alice).toEqual([{
+        constructorName: 'Error',
+        scriptAsset: 'tlottie.worker-JkLmNoPq.js',
+        message: '[redacted]',
+        stack: {
+          state: 'captured',
+          lineCount: 5,
+          frameCount: 4,
+          frames: [
+            {functionName: 'TLottieWasm.createAnimation', scriptAsset: 'tlottie.worker-JkLmNoPq.js', line: 1197, column: 23},
+            {functionName: 'TLottieItem.init', scriptAsset: 'tlottie.worker-JkLmNoPq.js', line: 1328, column: 35},
+            {functionName: 'unknown', scriptAsset: 'tlottie.worker-JkLmNoPq.js', line: 1580, column: 16},
+            {functionName: 'unknown', scriptAsset: 'tlottie.worker-JkLmNoPq.js', line: 804, column: 29}
+          ]
+        },
+        scenarioStep: {scenario: 'channel', step: 'bob_channel_post_visible'}
+      }]);
+      expect(JSON.stringify(lottieBreakdown)).not.toContain(lottieBlobUrl);
+    } finally {
+      resolver.clear();
+      await networkObserver.stop();
+    }
+  });
+
+  it('resolves unmapped blob script frames from fetched bundles and keeps unknown for frameless stacks', () => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const resolver = createPageErrorAssetResolver();
+    resolver.observeRequest(MTPROTO_CHUNK_URL, {type: 'script'}, 'Fetch', 'contract-test-page');
+
+    const firstBlobUrl = 'blob:https://teagramd.test/77777777-7777-7777-7777-777777777777';
+    const secondBlobUrl = 'blob:https://teagramd.test/88888888-8888-8888-8888-888888888888';
+    expect(resolver.scriptAsset(`Error: failed\n    at render (${firstBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
+    expect(resolver.scriptAsset(`Error: failed\n    at render (${secondBlobUrl}:1:183)`)).toBe('index.worker-AbCdEfGh.js');
+    expect(resolver.scriptAsset('Error: failed')).toBe('unknown');
     resolver.clear();
   });
 
@@ -3112,9 +2991,20 @@ describe('discovery shared-worker network accounting', () => {
 
       const error = new TypeError(HOSTILE.phrase);
       error.stack = `TypeError: ${HOSTILE.phrase}\n    at t (${blobUrl}:1:183)`;
-      recordPageError(pageErrors, 'alice', error, resolver);
+      recordPageError(pageErrors, 'alice', error, resolver, {scenario: 'sign-in', step: 'alice_context'});
       const breakdown = summarizeGateBreakdown({pageErrors});
-      expect(breakdown.pageErrors.alice).toEqual([{constructorName: 'TypeError', scriptAsset: 'index.worker-AbCdEfGh.js'}]);
+      expect(breakdown.pageErrors.alice).toEqual([{
+        constructorName: 'TypeError',
+        scriptAsset: 'index.worker-AbCdEfGh.js',
+        message: '[redacted]',
+        stack: {
+          state: 'captured',
+          lineCount: 2,
+          frameCount: 1,
+          frames: [{functionName: 't', scriptAsset: 'index.worker-AbCdEfGh.js', line: 1, column: 183}]
+        },
+        scenarioStep: {scenario: 'sign-in', step: 'alice_context'}
+      }]);
       expect(JSON.stringify(breakdown)).not.toContain(blobUrl);
       expect(JSON.stringify(breakdown)).not.toContain(HOSTILE.phrase);
     } finally {
@@ -3130,11 +3020,46 @@ describe('discovery shared-worker network accounting', () => {
     expect(report).toMatchObject({status: 'failed', stage: 'browser_egress_or_page_errors'});
     expect(breakdown.counters.pageErrors).toBe(515);
     expect(breakdown.pageErrors.alice).toHaveLength(512);
-    expect(breakdown.pageErrors.alice[0]).toEqual({constructorName: 'TypeError', scriptAsset: 'auth-client.js'});
+    expect(breakdown.pageErrors.alice[0]).toEqual({
+      constructorName: 'TypeError',
+      scriptAsset: 'auth-client.js',
+      message: '[redacted]',
+      stack: {
+        state: 'captured',
+        lineCount: 2,
+        frameCount: 1,
+        frames: [{functionName: 'unknown', scriptAsset: 'auth-client.js', line: 21, column: 3}]
+      },
+      scenarioStep: {scenario: 'sign-in', step: 'alice_context'}
+    });
     expect(breakdown.pageErrorOverflow).toEqual({
       alice: [
-        {constructorName: 'RangeError', scriptAsset: 'overflow-client.js', count: 1},
-        {constructorName: 'TypeError', scriptAsset: 'auth-client.js', count: 2}
+        {
+          constructorName: 'RangeError',
+          scriptAsset: 'overflow-client.js',
+          message: '[redacted]',
+          stack: {
+            state: 'captured',
+            lineCount: 2,
+            frameCount: 1,
+            frames: [{functionName: 'unknown', scriptAsset: 'overflow-client.js', line: 21, column: 3}]
+          },
+          scenarioStep: {scenario: 'sign-in', step: 'alice_context'},
+          count: 1
+        },
+        {
+          constructorName: 'TypeError',
+          scriptAsset: 'auth-client.js',
+          message: '[redacted]',
+          stack: {
+            state: 'captured',
+            lineCount: 2,
+            frameCount: 1,
+            frames: [{functionName: 'unknown', scriptAsset: 'auth-client.js', line: 21, column: 3}]
+          },
+          scenarioStep: {scenario: 'sign-in', step: 'alice_context'},
+          count: 2
+        }
       ],
       bob: []
     });
@@ -3144,7 +3069,7 @@ describe('discovery shared-worker network accounting', () => {
     expectNoGateSecretLeak(breakdown);
   });
 
-  it('breaks down the final gate by context and keeps error details private', async() => {
+  it('breaks down the final gate by context and redacts private error details', async() => {
     const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
     const recordPageError = (realClientBrowser as any).recordPageError;
     expect(typeof summarizeGateBreakdown).toBe('function');
@@ -3175,7 +3100,7 @@ describe('discovery shared-worker network accounting', () => {
       });
       const error = new TypeError(HOSTILE.phrase);
       error.stack = `TypeError: ${HOSTILE.phrase}\n    at https://unannounced.invalid/assets/bob-client.js?token=${HOSTILE.token}:21:3`;
-      recordPageError(pageErrors, 'bob', error);
+      recordPageError(pageErrors, 'bob', error, undefined, {scenario: 'message', step: 'bob_direct_message_visible'});
 
       const breakdown = summarizeGateBreakdown({
         networkObservers: {alice: alice.networkObserver, bob: bob.networkObserver},
@@ -3198,7 +3123,18 @@ describe('discovery shared-worker network accounting', () => {
         },
         pageErrors: {
           alice: [],
-          bob: [{constructorName: 'TypeError', scriptAsset: 'bob-client.js'}]
+          bob: [{
+            constructorName: 'TypeError',
+            scriptAsset: 'bob-client.js',
+            message: '[redacted]',
+            stack: {
+              state: 'captured',
+              lineCount: 2,
+              frameCount: 1,
+              frames: [{functionName: 'unknown', scriptAsset: 'bob-client.js', line: 21, column: 3}]
+            },
+            scenarioStep: {scenario: 'message', step: 'bob_direct_message_visible'}
+          }]
         },
         pageErrorOverflow: {alice: [], bob: []}
       });
@@ -3365,7 +3301,7 @@ describe('discovery shared-worker network accounting', () => {
     const {alice} = harness;
     try {
       for(let index = 0; index < observation.LIMITS.attachedTargets; index++) await harness.attach(alice, `bounded-${index}`);
-      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(16);
+      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(observation.LIMITS.attachedTargets);
       const eventsBeforeFlood = alice.observer.eventCount();
       for(let index = 0; index < observation.LIMITS.countedEventsPerContext + 20; index++) {
         harness.emit(alice, 'bounded-0', 'Network.webSocketCreated', {requestId: `socket-${index}`, url: `wss://unannounced.invalid/${index}`});
@@ -3376,7 +3312,7 @@ describe('discovery shared-worker network accounting', () => {
       await harness.attach(alice, 'over-budget-target');
       harness.emit(alice, 'bounded-0', 'Network.requestWillBeSent', {type: 'Fetch', request: {url: HOSTILE.url}});
       expect(alice.networkObserver.events).toHaveLength(retained);
-      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(16);
+      expect(alice.networkObserver.summary().workerTargets.shared_worker).toBe(observation.LIMITS.attachedTargets);
     } finally {
       await harness.stop();
     }
@@ -3386,10 +3322,10 @@ describe('discovery shared-worker network accounting', () => {
     const harness = await createDiscoveryNetworkHarness();
     const {alice} = harness;
     try {
-      for(let index = 0; index < 20; index++) await harness.attach(alice, `bounded-${index}`);
-      expect(alice.networkObserver.summary().workerTargets).toEqual({shared_worker: 16, service_worker: 0});
-      expect(harness.calls.filter((call) => call.method === 'Target.attachToTarget')).toHaveLength(16);
-      expect(alice.observer.summary()).toMatchObject({attachedTargets: 16, observerOverflow: 1, coverageComplete: 0});
+      for(let index = 0; index < observation.LIMITS.attachedTargets + 4; index++) await harness.attach(alice, `bounded-${index}`);
+      expect(alice.networkObserver.summary().workerTargets).toEqual({shared_worker: observation.LIMITS.attachedTargets, service_worker: 0});
+      expect(harness.calls.filter((call) => call.method === 'Target.attachToTarget')).toHaveLength(observation.LIMITS.attachedTargets);
+      expect(alice.observer.summary()).toMatchObject({attachedTargets: observation.LIMITS.attachedTargets, observerOverflow: 1, coverageComplete: 0});
     } finally {
       await harness.stop();
     }
@@ -3412,8 +3348,15 @@ describe('real client scenario contract', () => {
   it('requires every scenario exactly once', () => {
     expect(() => parseRequiredScenarios('sign-in,message')).toThrow('required scenarios are missing');
     expect(() => parseRequiredScenarios('sign-in,message,group,group')).toThrow('duplicate scenario');
+    expect(() => parseRequiredScenarios('sign-in,message,group,channel,unknown')).toThrow('unknown scenario');
     expect(parseRequiredScenarios('sign-in,message,group')).toEqual(['sign-in', 'message', 'group']);
     expect(parseRequiredScenarios('sign-in,message,group,channel')).toEqual(['sign-in', 'message', 'group', 'channel']);
+    expect(parseRequiredScenarios('channel,group,sign-in,message')).toEqual(['sign-in', 'message', 'group', 'channel']);
+  });
+
+  it('runs the channel scenario only when selected', () => {
+    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'message', 'group']})).toBe(false);
+    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'message', 'group', 'channel']})).toBe(true);
   });
 
   it('requires the selected optional channel scenario to pass', () => {
@@ -3431,57 +3374,34 @@ describe('real client scenario contract', () => {
     ], scenarios)).toEqual(scenarios);
   });
 
-  it('keeps only channel row counts and boolean matches in failure diagnostics', () => {
-    const state = {
-      chatListRowCount: 1,
-      peerRowCount: 0,
-      titleRowCount: 0,
-      peerRowHasTitle: false,
-      activePeerMatches: false,
-      stepWait: 'timeout'
-    };
-    expect(parseChannelMembershipState(state)).toEqual(state);
-    expect(formatBrowserFailureMessage({
-      status: 'failed',
-      stage: 'bob_channel_membership',
-      channelMembership: state
-    })).toBe(`real client scenario failed at bob_channel_membership; channel membership ${JSON.stringify(state)}`);
-    for(const hostile of [
-      {...state, title: HOSTILE.phrase},
-      {...state, peerRowHasTitle: HOSTILE.phrase},
-      {...state, peerRowCount: -1},
-      {...state, stepWait: HOSTILE.phrase},
-      HOSTILE.phrase,
-      null
-    ]) {
-      expect(formatBrowserFailureMessage({
-        status: 'failed',
-        stage: 'bob_channel_membership',
-        channelMembership: hostile
-      })).toBe('real client scenario failed at bob_channel_membership; channel membership "unclassified"');
-    }
-  });
-
   it('fails if a required scenario was skipped or did not report success', () => {
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'},
-      {name: 'group', status: 'skipped'}
-    ])).toThrow('group was skipped');
+      {name: 'group', status: 'passed'},
+      {name: 'channel', status: 'skipped'}
+    ], ['sign-in', 'message', 'group', 'channel'])).toThrow('channel was skipped');
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'failed'},
-      {name: 'group', status: 'passed'}
+      {name: 'group', status: 'passed'},
+      {name: 'channel', status: 'passed'}
     ])).toThrow('message did not pass');
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'}
     ])).toThrow('group did not execute');
-    expect(assertAllScenariosPassed([
+    expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'},
       {name: 'group', status: 'passed'}
-    ])).toEqual(['sign-in', 'message', 'group']);
+    ], ['sign-in', 'message', 'group', 'channel'])).toThrow('channel did not execute');
+    expect(assertAllScenariosPassed([
+      {name: 'sign-in', status: 'passed'},
+      {name: 'message', status: 'passed'},
+      {name: 'group', status: 'passed'},
+      {name: 'channel', status: 'passed'}
+    ], ['sign-in', 'message', 'group', 'channel'])).toEqual(['sign-in', 'message', 'group', 'channel']);
   });
 
   it('matches the audited private manifest schema without requiring an absent public key hash field', () => {
@@ -3565,10 +3485,6 @@ describe('real client scenario contract', () => {
 
     expect(() => validateRuntimeInput(runtime)).not.toThrow();
     expect(() => validateRuntimeInput({...runtime, observationOnly: true, artifactDigest: null, manifestArtifactDigest: null})).not.toThrow();
-    expect(() => validateRuntimeInput({...runtime, pageErrorDiagnostics: true})).not.toThrow();
-    expect(() => validateRuntimeInput({...runtime, pageErrorDiagnostics: 'true'})).toThrow('runtime_input_validation');
-    expect(() => validateRuntimeInput({...runtime, observationOnly: true, artifactDigest: null, manifestArtifactDigest: null, pageErrorDiagnostics: true}))
-    .toThrow('runtime_input_validation');
     for(const malformed of [undefined, null, [runtime.manifestArtifactDigest], `sha256:${'f'.repeat(63)}`]) {
       expect(() => validateRuntimeInput({...runtime, manifestArtifactDigest: malformed})).toThrow('runtime_input_validation');
     }
@@ -3621,7 +3537,7 @@ describe('real client scenario contract', () => {
       '--server-revision', '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       '--web-revision', 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       '--run-id', 'a'.repeat(32),
-      '--scenarios', 'sign-in,message,group'
+      '--scenarios', 'sign-in,message,group,channel'
     ];
 
     expect(parseRealClientArgs(args)).toEqual({
@@ -3630,14 +3546,12 @@ describe('real client scenario contract', () => {
       serverRevision: '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       webRevision: 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       runId: 'a'.repeat(32),
-      scenarios: ['sign-in', 'message', 'group']
+      scenarios: ['sign-in', 'message', 'group', 'channel']
     });
-    expect(parseRealClientArgs([...args, '--page-error-diagnostics'])).toMatchObject({pageErrorDiagnostics: true});
     expect(parseRealClientArgs(['--', ...args])).toEqual(parseRealClientArgs(args));
     expect(() => parseRealClientArgs([])).toThrow('missing required options');
     expect(() => parseRealClientArgs(args.slice(0, -2))).toThrow('scenario selection is required');
-    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message'])).toThrow('option was provided more than once');
-    expect(() => parseRealClientArgs([...args, '--page-error-diagnostics', '--page-error-diagnostics'])).toThrow('option was provided more than once');
+    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group'])).toThrow('option was provided more than once');
     expect(() => parseRealClientArgs([...args, '--source-sha', 'a'.repeat(40)])).toThrow('unknown option');
   });
 
@@ -3671,7 +3585,7 @@ describe('real client scenario contract', () => {
       observerControlsOnly: true,
       scenarios: ['sign-in', 'message', 'group']
     });
-    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group', '--observer-controls-only']).observerControlsOnly).toBe(true);
+    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group,channel', '--observer-controls-only']).observerControlsOnly).toBe(true);
     expect(() => parseRealClientArgs(args)).toThrow('scenario selection is required');
     expect(() => parseRealClientArgs([...args, '--observer-controls-only', '--observer-controls-only'])).toThrow('option was provided more than once');
   });
@@ -3693,7 +3607,7 @@ describe('real client scenario contract', () => {
       runId: READINESS_PINS.runId,
       authProgressOneSubmission: true
     });
-    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group', '--auth-progress-one-submission']))
+    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group,channel', '--auth-progress-one-submission']))
     .toThrow('cannot be combined');
     expect(() => parseRealClientArgs([...args, '--observer-controls-only', '--auth-progress-one-submission']))
     .toThrow('cannot be combined');
@@ -3709,7 +3623,7 @@ describe('real client scenario contract', () => {
       '--server-revision', READINESS_PINS.serverRevision,
       '--web-revision', READINESS_PINS.webRevision,
       '--run-id', READINESS_PINS.runId,
-      '--scenarios', 'sign-in,message,group',
+      '--scenarios', 'sign-in,message,group,channel',
       '--auth-progress-one-submission'
     ], {encoding: 'utf8'});
 
@@ -4151,6 +4065,316 @@ describe('real client username field readiness', () => {
     return page;
   }
 
+  it('captures own thrown and RPC fields plus console errors by synthetic scenario step', async() => {
+    setFixture('<!doctype html><html><body>synthetic diagnostic page</body></html>');
+    const page = await createRunnerPage();
+    try {
+      await countClientErrors(page, () => ({scenario: 'channel', step: 'bob_channel_membership'}));
+      await page.goto(`${APP_ORIGIN}/`);
+      await page.evaluate(async() => {
+        const thrown = Object.create(null);
+        Object.defineProperties(thrown, {
+          type: {value: 'CHANNEL_PRIVATE', enumerable: true},
+          code: {value: 403, enumerable: true},
+          description: {value: 'Synthetic channel write denied', enumerable: true}
+        });
+        window.dispatchEvent(new ErrorEvent('error', {error: thrown}));
+        window.dispatchEvent(new PromiseRejectionEvent('unhandledrejection', {promise: Promise.resolve(), reason: thrown}));
+        const unsafe = {type: 'CHANNEL_PRIVATE', code: 403, description: 'https://synthetic.invalid/?token=synthetic'};
+        window.dispatchEvent(new ErrorEvent('error', {error: unsafe}));
+        const long = {type: 'CHANNEL_PRIVATE', code: 403, description: 'Synthetic ' + 'x'.repeat(400)};
+        window.dispatchEvent(new PromiseRejectionEvent('unhandledrejection', {promise: Promise.resolve(), reason: long}));
+        const channel = new MessageChannel();
+        channel.port1.addEventListener('message', () => {});
+        channel.port1.start();
+        channel.port2.postMessage({type: 'result', payload: {error: thrown}});
+        console.error('Synthetic channel console failure');
+        console.error('https://synthetic.invalid/?token=synthetic');
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      });
+
+      const diagnostics = getClientErrorDiagnostics(page);
+      expect(diagnostics).toEqual([{
+        scenarioStep: {scenario: 'channel', step: 'bob_channel_membership'},
+        thrownValues: [
+          {source: 'error_event', valueType: 'object', type: 'CHANNEL_PRIVATE', code: 403, description: 'Synthetic channel write denied'},
+          {source: 'unhandled_rejection', valueType: 'object', type: 'CHANNEL_PRIVATE', code: 403, description: 'Synthetic channel write denied'},
+          {source: 'error_event', valueType: 'object', type: 'CHANNEL_PRIVATE', code: 403, description: '[redacted]'},
+          {source: 'unhandled_rejection', valueType: 'object', type: 'CHANNEL_PRIVATE', code: 403, description: 'Synthetic [redacted]'}
+        ],
+        rpcFailures: [{type: 'CHANNEL_PRIVATE', code: 403, description: 'Synthetic channel write denied', method: 'unavailable', peerArguments: []}],
+        consoleErrors: [{message: 'Synthetic channel console failure'}, {message: '[redacted]'}]
+      }]);
+      expect(getClientErrorDiagnostics(page, {scenario: 'channel', step: 'bob_channel_membership'})).toEqual(diagnostics);
+      expect(getClientErrorDiagnostics(page, {scenario: 'channel', step: 'bob_channel_open'})).toEqual([]);
+      const pageErrors = {alice: [], bob: []} as any;
+      (realClientBrowser as any).recordPageError(
+        pageErrors,
+        'alice',
+        Object.assign(new Error('Object'), {stack: 'Error: Object'}),
+        undefined,
+        {scenario: 'channel', step: 'bob_channel_membership'}
+      );
+      const breakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown({
+        pageErrors,
+        clientErrorDiagnostics: {alice: diagnostics, bob: []}
+      });
+      expect(breakdown.stepDiagnostics).toEqual({alice: diagnostics, bob: []});
+      expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_channel_membership', gateBreakdown: breakdown}))
+      .toContain(JSON.stringify(breakdown));
+      expectNoGateSecretLeak(breakdown);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('captures failed RPC methods and only constructor ids from peer arguments', async() => {
+    setFixture('<!doctype html><html><body>synthetic diagnostic page</body></html>');
+    const page = await createRunnerPage();
+    try {
+      await countClientErrors(page, () => ({scenario: 'channel', step: 'bob_channel_other_conversation'}));
+      await page.goto(`${APP_ORIGIN}/`);
+
+      await page.evaluate((hostile: {token: string, password: string}) => {
+        const channelPeer: any = {_: 'inputPeerChannel', channel_id: 90210};
+        Object.defineProperty(channelPeer, 'access_hash', {
+          enumerable: true,
+          get() {
+            throw new Error('access_hash must not be read');
+          }
+        });
+        (window as any).__syntheticRpcParams = {
+          peer: channelPeer,
+          id: {_: 'inputUser', user_id: 70021, access_hash: hostile.token},
+          random_id: hostile.password
+        };
+      }, HOSTILE);
+      const cdp = await page.context().newCDPSession(page);
+      let readerResponse: any;
+      const paramsObject = await cdp.send('Runtime.evaluate', {
+        expression: 'window.__syntheticRpcParams',
+        returnByValue: false
+      });
+      const captured = await (realClientBrowser as any).captureRpcFailureFromConsole(page, {
+        type: 'error',
+        args: [
+          {type: 'string', value: '%s'},
+          {type: 'string', value: '12:00:00'},
+          {type: 'string', value: '[ApiManager]'},
+          {type: 'string', value: 'Error'},
+          {type: 'number', value: 400},
+          {type: 'string', value: 'PEER_ID_INVALID'},
+          {type: 'number', value: 1},
+          {type: 'number', value: 1},
+          {type: 'string', value: 'messages.getDialogs'},
+          {type: 'object', objectId: paramsObject.result.objectId}
+        ]
+      }, async(objectId: string) => {
+        expect(objectId).toBe(paramsObject.result.objectId);
+        readerResponse = await cdp.send('Runtime.callFunctionOn', {
+          objectId,
+          functionDeclaration: (realClientBrowser as any).readSafeRpcArguments.toString(),
+          arguments: [{value: 8}],
+          returnByValue: true,
+          silent: true
+        });
+        return readerResponse.result?.value;
+      });
+      expect(readerResponse.exceptionDetails).toBeUndefined();
+      expect(readerResponse.result.value).toEqual({peerArguments: [
+        {argument: 'peer', constructor: 'inputPeerChannel', id: '90210'},
+        {argument: 'id', constructor: 'inputUser', id: '70021'}
+      ]});
+      const peerArguments = readerResponse.result.value.peerArguments;
+      expect(captured).toBe(true);
+
+      const diagnostics = (realClientBrowser as any).getClientErrorDiagnostics(page);
+      expect(diagnostics).toEqual([{
+        scenarioStep: {scenario: 'channel', step: 'bob_channel_other_conversation'},
+        thrownValues: [],
+        rpcFailures: [{
+          type: 'PEER_ID_INVALID',
+          code: 400,
+          description: 'unavailable',
+          method: 'messages.getDialogs',
+          peerArguments
+        }],
+        consoleErrors: []
+      }]);
+      expect(JSON.stringify(diagnostics)).not.toContain(HOSTILE.token);
+      expect(JSON.stringify(diagnostics)).not.toContain(HOSTILE.password);
+      expect(JSON.stringify(diagnostics)).not.toContain('access_hash');
+      const breakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown({
+        pageErrors: {alice: [], bob: []},
+        clientErrorDiagnostics: {alice: [], bob: diagnostics}
+      });
+      expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_channel_other_conversation', gateBreakdown: breakdown}))
+      .toContain('messages.getDialogs');
+      expectNoGateSecretLeak(breakdown);
+      const unsafeBreakdown = structuredClone(breakdown);
+      unsafeBreakdown.stepDiagnostics.bob[0].rpcFailures[0].peerArguments[0].access_hash = HOSTILE.token;
+      expect(() => formatBrowserFailureMessage({status: 'failed', stage: 'bob_channel_other_conversation', gateBreakdown: unsafeBreakdown}))
+      .toThrow('browser egress/page error evidence is invalid');
+
+      await page.evaluate(() => {
+        const channel = new MessageChannel();
+        channel.port1.addEventListener('message', () => {});
+        channel.port1.start();
+        channel.port2.postMessage({type: 'result', payload: {error: {type: 'PEER_ID_INVALID', code: 400}}});
+      });
+      await page.waitForTimeout(25);
+      expect((realClientBrowser as any).getClientErrorDiagnostics(page)[0].rpcFailures).toHaveLength(1);
+      await cdp.detach();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('captures a sanitized RPC failure from a page CDP console event', async() => {
+    const cdp: any = new EventEmitter();
+    cdp.send = async(method: string) => method === 'Target.getTargetInfo'
+      ? {targetInfo: {targetId: 'rpc-diagnostic-page', browserContextId: 'rpc-diagnostic'}}
+      : method === 'Runtime.callFunctionOn'
+        ? {result: {value: {peerArguments: [{argument: 'peer', constructor: 'inputPeerUser', id: 501}]}}}
+        : {};
+    cdp.detach = async() => {};
+    const fakePage: any = new EventEmitter();
+    const frame = {};
+    fakePage.mainFrame = () => frame;
+    fakePage.context = () => ({newCDPSession: async() => cdp});
+    fakePage.exposeBinding = async() => {};
+    fakePage.addInitScript = async() => {};
+    await countClientErrors(fakePage, () => ({scenario: 'channel', step: 'bob_channel_reload_chats_list'}));
+    const observer = observation.createContextObserver('rpc-diagnostic');
+    const networkObserver = createNetworkObserver(fakePage, 'rpc-diagnostic', observer);
+    await networkObserver.start();
+    try {
+      cdp.emit('Runtime.consoleAPICalled', {
+        type: 'error',
+        args: [
+          {type: 'string', value: '%s'}, {type: 'string', value: '12:00:00'},
+          {type: 'string', value: '[ApiManager]'}, {type: 'string', value: 'Error'},
+          {type: 'number', value: 400}, {type: 'string', value: 'PEER_ID_INVALID'},
+          {type: 'number', value: 1}, {type: 'number', value: 1},
+          {type: 'string', value: 'messages.getDialogs'}, {type: 'object', objectId: 'synthetic-rpc-params'}
+        ]
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(getClientErrorDiagnostics(fakePage)).toEqual([{
+        scenarioStep: {scenario: 'channel', step: 'bob_channel_reload_chats_list'},
+        thrownValues: [],
+        rpcFailures: [{
+          type: 'PEER_ID_INVALID', code: 400, description: 'unavailable',
+          method: 'messages.getDialogs',
+          peerArguments: [{argument: 'peer', constructor: 'inputPeerUser', id: '501'}]
+        }],
+        consoleErrors: []
+      }]);
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
+  it('captures a sanitized RPC failure from an attached worker console event', async() => {
+    const cdp: any = new EventEmitter();
+    const nestedCalls: any[] = [];
+    cdp.send = async(method: string, params: any) => {
+      if(method === 'Target.getTargetInfo') return {targetInfo: {targetId: 'worker-rpc-page', browserContextId: 'worker-rpc'}};
+      if(method === 'Target.sendMessageToTarget') {
+        const nested = JSON.parse(params.message);
+        nestedCalls.push(nested);
+        const result = nested.method === 'Runtime.callFunctionOn'
+          ? {result: {result: {value: {peerArguments: [{argument: 'channel', constructor: 'inputChannel', id: '602'}]}}}}
+          : {result: {}};
+        queueMicrotask(() => cdp.emit('Target.receivedMessageFromTarget', {
+          sessionId: params.sessionId,
+          message: JSON.stringify({id: nested.id, ...result})
+        }));
+      }
+      return {};
+    };
+    cdp.detach = async() => {};
+    const fakePage: any = new EventEmitter();
+    const frame = {};
+    fakePage.mainFrame = () => frame;
+    fakePage.context = () => ({newCDPSession: async() => cdp});
+    fakePage.exposeBinding = async() => {};
+    fakePage.addInitScript = async() => {};
+    await countClientErrors(fakePage, () => ({scenario: 'channel', step: 'bob_channel_other_conversation'}));
+    const observer = observation.createContextObserver('worker-rpc');
+    const networkObserver = createNetworkObserver(fakePage, 'worker-rpc', observer);
+    await networkObserver.start();
+    try {
+      cdp.emit('Target.attachedToTarget', {
+        sessionId: 'synthetic-worker-session',
+        targetInfo: {targetId: 'synthetic-worker', type: 'worker', url: MTPROTO_CHUNK_URL, browserContextId: 'worker-rpc'}
+      });
+      await networkObserver.waitForSetup();
+      const workerConsoleEvent = {
+        type: 'error',
+        args: [
+          {type: 'string', value: '%s'}, {type: 'string', value: '12:00:00'},
+          {type: 'string', value: '[ApiManager]'}, {type: 'string', value: 'Error'},
+          {type: 'number', value: 400}, {type: 'string', value: 'PEER_ID_INVALID'},
+          {type: 'number', value: 1}, {type: 'number', value: 1},
+          {type: 'string', value: 'channels.getMessages'}, {type: 'object', objectId: 'synthetic-worker-rpc-params'}
+        ]
+      };
+      cdp.emit('Target.receivedMessageFromTarget', {
+        sessionId: 'synthetic-worker-session',
+        message: JSON.stringify({method: 'Runtime.consoleAPICalled', params: workerConsoleEvent})
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(nestedCalls.some((call) => call.method === 'Runtime.callFunctionOn')).toBe(true);
+      expect(getClientErrorDiagnostics(fakePage)).toEqual([{
+        scenarioStep: {scenario: 'channel', step: 'bob_channel_other_conversation'},
+        thrownValues: [],
+        rpcFailures: [{
+          type: 'PEER_ID_INVALID', code: 400, description: 'unavailable',
+          method: 'channels.getMessages',
+          peerArguments: [{argument: 'channel', constructor: 'inputChannel', id: '602'}]
+        }],
+        consoleErrors: []
+      }]);
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
+  it('captures a sanitized RPC failure from the shared worker discovery path', async() => {
+    const harness = await createDiscoveryNetworkHarness({startContext: false});
+    const bob = await harness.startContext('bob');
+    await countClientErrors(bob.page, () => ({scenario: 'channel', step: 'bob_channel_other_conversation'}));
+    try {
+      await harness.attach(bob, 'shared-rpc-worker', 'discovery', 'shared_worker');
+      const countedEventsBeforeConsole = bob.observer.state.countedEvents;
+      harness.emit(bob, 'shared-rpc-worker', 'Runtime.consoleAPICalled', {
+        type: 'error',
+        args: [
+          {type: 'string', value: '%s'}, {type: 'string', value: '12:00:00'},
+          {type: 'string', value: '[ApiManager]'}, {type: 'string', value: 'Error'},
+          {type: 'number', value: 400}, {type: 'string', value: 'PEER_ID_INVALID'},
+          {type: 'number', value: 1}, {type: 'number', value: 1},
+          {type: 'string', value: 'messages.getDialogs'}, {type: 'object', objectId: 'shared-worker-rpc-params'}
+        ]
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(bob.observer.state.countedEvents).toBe(countedEventsBeforeConsole);
+      expect(getClientErrorDiagnostics(bob.page)).toEqual([{
+        scenarioStep: {scenario: 'channel', step: 'bob_channel_other_conversation'},
+        thrownValues: [],
+        rpcFailures: [{
+          type: 'PEER_ID_INVALID', code: 400, description: 'unavailable',
+          method: 'messages.getDialogs',
+          peerArguments: [{argument: 'peer', constructor: 'inputPeerChannel', id: '603'}]
+        }],
+        consoleErrors: []
+      }]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
   async function runAuthProgressRunner({
     card = 'ready',
     failContextClose = false,
@@ -4293,11 +4517,7 @@ describe('real client username field readiness', () => {
     }
   }
 
-  function runOuterAuthProgressRunner(browserOutput: string, {browserExitCode = 0, failRunnerCleanup = false, pageErrorDiagnostics = false}: {
-    browserExitCode?: number,
-    failRunnerCleanup?: boolean,
-    pageErrorDiagnostics?: boolean
-  } = {}) {
+  function runOuterAuthProgressRunner(browserOutput: string, {browserExitCode = 0, failRunnerCleanup = false}: {browserExitCode?: number, failRunnerCleanup?: boolean} = {}) {
     const fixtureDirectory = mkdtempSync(join(tmpdir(), 'real-client-runner-contract-'));
     const secretDirectory = mkdtempSync(join(tmpdir(), `teagram-fixture-${READINESS_PINS.runId}.`));
     const passwordFiles = [join(secretDirectory, 'a-password'), join(secretDirectory, 'b-password')];
@@ -4361,6 +4581,7 @@ describe('real client username field readiness', () => {
       '  if(args.includes(\'/proc/net/route\')) write(\'Iface Destination Gateway\\n\');',
       '  else if(args.includes(\'/proc/net/ipv6_route\')) {}',
       '  else if(args.includes(\'node\')) { appendFileSync(state.browserInputPath, input); write(readFileSync(state.browserOutputPath, \'utf8\')); if(state.browserExitCode) process.exitCode = state.browserExitCode; }',
+      '  else if(args.some((argument) => argument.includes(\'cat >\'))) readFileSync(0, \'utf8\');',
       '  else if(args.includes(\'rm\')) { appendFileSync(state.cleanupPath, `${args.at(-1)}\\n`); if(state.failRunnerCleanup && args.at(-1).endsWith(\'-runner\')) process.exitCode = 1; }',
       '}'
     ].join('\n');
@@ -4394,8 +4615,7 @@ describe('real client username field readiness', () => {
         '--server-revision', READINESS_PINS.serverRevision,
         '--web-revision', READINESS_PINS.webRevision,
         '--run-id', READINESS_PINS.runId,
-        '--auth-progress-one-submission',
-        ...(pageErrorDiagnostics ? ['--page-error-diagnostics'] : [])
+        '--auth-progress-one-submission'
       ], {
         encoding: 'utf8',
         env: {
@@ -4518,9 +4738,6 @@ describe('real client username field readiness', () => {
       artifactDigest: outer.artifactReady.artifactDigest,
       manifestArtifactDigest: outer.artifactReady.manifestArtifactDigest
     });
-    const diagnosticOuter = runOuterAuthProgressRunner(result.output, {pageErrorDiagnostics: true});
-    expect(diagnosticOuter.status).toBe(0);
-    expect(diagnosticOuter.browserInput).toMatchObject({pageErrorDiagnostics: true});
 
     const cleanupFailure = runOuterAuthProgressRunner(result.output, {failRunnerCleanup: true});
     expect(cleanupFailure.status).toBe(1);
@@ -4528,7 +4745,7 @@ describe('real client username field readiness', () => {
     const cleanupReport = JSON.parse(cleanupFailure.stdout.trim());
     expect(cleanupReport).toMatchObject({...result.report, status: 'failed', stage: 'cleanup'});
     expect(cleanupReport.network).toEqual(result.report.network);
-  });
+  }, 45_000);
 
   it('reports a timeout after cleaning up and exits nonzero', async() => {
     const result = await runAuthProgressRunner({card: 'timeout', realEmitter: true});
@@ -5232,6 +5449,240 @@ describe('real client centre-column failure state', () => {
   });
 });
 
+describe('real client channel unread count', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  it('waits for exactly one unread post on the selected channel dialog', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat" data-peer-id="-1000001">
+          <div class="dialog-subtitle-badge badge dialog-subtitle-badge-unread unread is-visible">1</div>
+        </div>
+        <div class="chatlist-chat" data-peer-id="-1000002">
+          <div class="dialog-subtitle-badge badge dialog-subtitle-badge-unread unread is-visible">7</div>
+        </div>
+      </div>`);
+      await waitForUnreadCount(page, '-1000001', 1, 'bob_channel_unread', 1_000);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('waits for the unread badge to clear after reading', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat" data-peer-id="-1000001">
+          <div class="dialog-subtitle-badge badge dialog-subtitle-badge-unread unread">1</div>
+        </div>
+      </div>`);
+      await waitForUnreadCount(page, '-1000001', 0, 'bob_channel_read', 1_000);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('finds a new channel row by its unique title before it has a peer id', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat">browser-ci-channel-no-posts</div>
+      </div>`);
+      const row = await waitForChannelDialogRow(page, '-1000001', 'browser-ci-channel-no-posts', 'bob_channel_membership', 1_000);
+      expect(await row.count()).toBe(1);
+      expect(await row.getAttribute('data-peer-id')).toBeNull();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails the membership wait when an invited channel row has not appeared', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat" data-peer-id="2">Bob's other conversation</div>
+      </div>`);
+      await expect(waitForChannelDialogRow(page, '-1000001', 'browser-ci-channel-no-posts', 'bob_channel_membership', 50))
+      .rejects.toThrow('bob_channel_membership');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('allows an invited channel to have no dialog row before its first post', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat" data-peer-id="2">Bob's other conversation</div>
+      </div>`);
+      expect(await findChannelDialogRow(page, '-1000001', 'browser-ci-channel-no-posts', 'bob_channel_membership')).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('uses the unique channel title before a new channel row has a peer id', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat">browser-ci-channel-no-posts</div>
+      </div>`);
+      await waitForUnreadCount(page, '-1000001', 0, 'bob_channel_read', CONTRACT_WAIT_TIMEOUT_MS, 'browser-ci-channel-no-posts');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('fails with a fixed stage when the unread count is not exact', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat" data-peer-id="-1000001">
+          <div class="dialog-subtitle-badge badge dialog-subtitle-badge-unread unread is-visible">2</div>
+        </div>
+      </div>`);
+      await expect(waitForUnreadCount(page, '-1000001', 1, 'bob_channel_unread', CONTRACT_WAIT_TIMEOUT_MS))
+      .rejects.toThrow('bob_channel_unread_count');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('real client channel membership diagnostics', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  it('keeps channel invitation failure evidence within a closed schema', () => {
+    const parseChannelMembershipState = (realClientContract as any).parseChannelMembershipState;
+    expect(typeof parseChannelMembershipState).toBe('function');
+    const state = {
+      channelPeerId: '-1000003',
+      selectedBobPeerId: '1000002',
+      alice: {
+        channelRowCount: 1,
+        channelTitleMatches: 1,
+        activePeerId: '-1000003',
+        chatListRowCount: 2,
+        pageErrorsSinceStep: 0,
+        consoleErrorsSinceStep: 0,
+        rpcErrorsSinceStep: 0,
+        rpcErrorTypesSinceStep: {}
+      },
+      bob: {
+        channelRowCount: 0,
+        channelTitleMatches: 0,
+        activePeerId: '1000002',
+        chatListRowCount: 1,
+        pageErrorsSinceStep: 0,
+        consoleErrorsSinceStep: 0,
+        rpcErrorsSinceStep: 0,
+        rpcErrorTypesSinceStep: {}
+      },
+      stepWait: 'timeout'
+    };
+    expect(parseChannelMembershipState(state)).toEqual(state);
+    expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_channel_membership', channelMembership: state}))
+    .toBe(`real client scenario failed at bob_channel_membership; channel membership ${JSON.stringify(state)}`);
+
+    for(const hostile of [
+      {...state, pageText: HOSTILE.phrase},
+      {...state, channelPeerId: HOSTILE.username},
+      {...state, selectedBobPeerId: HOSTILE.username},
+      {...state, alice: {...state.alice, activePeerId: HOSTILE.phrase}},
+      {...state, bob: {...state.bob, rpcErrorTypesSinceStep: {[HOSTILE.phrase]: 1}}},
+      {...state, bob: {...state.bob, rpcErrorTypesSinceStep: {PEER_ID_INVALID: 0}}},
+      {...state, stepWait: HOSTILE.phrase},
+      null
+    ]) {
+      expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_channel_membership', channelMembership: hostile}))
+      .toBe('real client scenario failed at bob_channel_membership; channel membership "unclassified"');
+    }
+  });
+
+  it('summarizes the channel row and safe errors from both clients', async() => {
+    const alicePage = await browser.newPage();
+    const bobPage = await browser.newPage();
+    try {
+      await Promise.all([countClientErrors(alicePage), countClientErrors(bobPage)]);
+      await alicePage.setContent(`<div id="chatlist-container"><div class="chatlist-chat" data-peer-id="-1000003">browser-ci-channel-secret</div></div>
+        <div id="column-center"><div class="chat active"><div class="topbar"><div class="avatar" data-peer-id="-1000003"></div></div></div></div>`);
+      await bobPage.setContent(`<div id="chatlist-container">
+        <div class="chatlist-chat" data-peer-id="1000002">direct</div>
+        <div class="chatlist-chat">browser-ci-channel-secret</div>
+      </div>
+        <div id="column-center"><div class="chat active"><div class="topbar"><div class="avatar" data-peer-id="1000002"></div></div></div></div>`);
+      await alicePage.evaluate((secret: string) => {
+        (window as any).__realClientRpcErrors = () => ({total: 2, byType: {PEER_ID_INVALID: 1, [secret]: 1}});
+      }, HOSTILE.phrase);
+      await bobPage.evaluate(() => {
+        (window as any).__realClientRpcErrors = () => ({total: 1, byType: {CHANNEL_PRIVATE: 1}});
+      });
+
+      const state = await captureChannelMembershipState({
+        alicePage,
+        bobPage,
+        channelPeerId: '-1000003',
+        selectedBobPeerId: '1000002',
+        channelName: 'browser-ci-channel-secret',
+        errorsAtStep: {
+          alice: {pageErrors: 0, consoleErrors: 0, rpc: {total: 0, byType: {}}},
+          bob: {pageErrors: 0, consoleErrors: 0, rpc: {total: 0, byType: {}}}
+        },
+        stepWait: 'timeout'
+      });
+      expect(state).toEqual({
+        channelPeerId: '-1000003',
+        selectedBobPeerId: '1000002',
+        alice: {
+          channelRowCount: 1,
+          channelTitleMatches: 1,
+          activePeerId: '-1000003',
+          chatListRowCount: 1,
+          pageErrorsSinceStep: 0,
+          consoleErrorsSinceStep: 0,
+          rpcErrorsSinceStep: 2,
+          rpcErrorTypesSinceStep: {PEER_ID_INVALID: 1}
+        },
+        bob: {
+          channelRowCount: 0,
+          channelTitleMatches: 1,
+          activePeerId: '1000002',
+          chatListRowCount: 2,
+          pageErrorsSinceStep: 0,
+          consoleErrorsSinceStep: 0,
+          rpcErrorsSinceStep: 1,
+          rpcErrorTypesSinceStep: {CHANNEL_PRIVATE: 1}
+        },
+        stepWait: 'timeout'
+      });
+      expect(JSON.stringify(state)).not.toContain('browser-ci-channel-secret');
+      expect(JSON.stringify(state)).not.toContain(HOSTILE.phrase);
+      expect(formatBrowserFailureMessage({status: 'failed', stage: 'bob_channel_membership', channelMembership: state}))
+      .toContain('PEER_ID_INVALID');
+      expectNoHostileLeak(state);
+    } finally {
+      await Promise.all([alicePage.close(), bobPage.close()]);
+    }
+  });
+});
+
 describe('real client group name form', () => {
   let browser: any;
   let screenshotDirectory: string;
@@ -5292,7 +5743,7 @@ describe('real client group name form', () => {
     const page = await browser.newPage();
     try {
       await page.setContent(groupFormMarkup({nameField: false}));
-      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, {count: 0}, 200))
+      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('alice_group_name_fill');
       const state = await captureGroupNameFormState();
       expect(state).toEqual({
@@ -5319,7 +5770,7 @@ describe('real client group name form', () => {
     try {
       await page.setContent(groupFormMarkup().replace(/<script>[\s\S]*<\/script>/, ''));
       await page.locator('.btn-corner').evaluate((button: HTMLElement) => button.setAttribute('disabled', 'true'));
-      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, {count: 0}, 200))
+      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('alice_group_name_confirm');
       const state = await captureGroupNameFormState();
       expect(state).toMatchObject({
@@ -5417,36 +5868,6 @@ describe('real client group created', () => {
     </div></div>`;
   }
 
-  it('compares Bob\'s channel row id and title without returning the title', async() => {
-    const page = await browser.newPage();
-    const channelName = 'browser-ci-channel-0123abcd';
-    try {
-      await page.setContent(`<div id="chatlist-container">
-        <div class="chatlist-chat" data-peer-id="-990020"><span>${channelName}</span></div>
-      </div>
-      <div id="column-center"><div class="chat active"><div class="topbar"><div class="avatar" data-peer-id="-1000003"></div></div></div></div>`);
-      const state = await captureChannelMembershipState({
-        page,
-        channelName,
-        peerId: '-990020',
-        stepWait: 'timeout'
-      }, 2_000);
-
-      expect(state).toEqual({
-        chatListRowCount: 1,
-        peerRowCount: 1,
-        titleRowCount: 1,
-        peerRowHasTitle: true,
-        activePeerMatches: false,
-        stepWait: 'timeout'
-      });
-      expect(JSON.stringify(state)).not.toContain(channelName);
-      expect(parseChannelMembershipState(state)).toEqual(state);
-    } finally {
-      await page.close();
-    }
-  });
-
   it('resolves the active group chat and matching title beside a mounted direct chat', async() => {
     const page = await browser.newPage();
     try {
@@ -5515,8 +5936,7 @@ describe('real client group created', () => {
           channel.port2.start();
           channel.port1.postMessage({type: 'result', payload: {taskId: 1, error: {type: 'GROUP_TEST_ERROR', message: 'group message diagnostic secret'}}});
         } else if(mode === 'disappears') {
-          const bubble = addBubble('9201', 'is-sent');
-          setTimeout(() => bubble.remove(), 200);
+          addBubble('9201', 'is-sent');
         } else {
           addBubble('9000', 'is-sent');
         }
@@ -5621,8 +6041,23 @@ describe('real client group created', () => {
     try {
       await page.setContent(messageCenterMarkup());
       await installMessageSender(page, 'disappears');
-      await expect(sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 2_000))
-      .rejects.toThrow('alice_group_message_message_count');
+      const send = sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 2_000);
+      const rejectedSend = expect(send).rejects.toThrow('alice_group_message_message_count');
+      const captureTrace = realClientBrowser.captureGroupMessageState;
+      const removeAfterPositiveSample = async() => {
+        const deadline = Date.now() + CONTRACT_WAIT_TIMEOUT_MS;
+        while(Date.now() < deadline) {
+          const state = typeof captureTrace === 'function' ? await captureTrace() : undefined;
+          if(typeof state === 'object' && state?.samples.some((sample: any) => sample.count === 1)) {
+            await page.locator('#column-center .chat.active .bubble .message').filter({hasText: GROUP_MESSAGE})
+            .evaluate((message: Element) => message.closest('.bubble')?.remove());
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        throw new Error('group message runner did not capture the visible bubble');
+      };
+      await Promise.all([rejectedSend, removeAfterPositiveSample()]);
       const capture = realClientBrowser.captureGroupMessageState;
       const state = typeof capture === 'function' ? await capture() : undefined;
       expect(state).toBeDefined();
@@ -5679,7 +6114,7 @@ describe('real client group created', () => {
     try {
       await page.setContent(messageCenterMarkup({groupActive: false}));
       await installMessageSender(page);
-      await expect(sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', 100))
+      await expect(sendGroupText(page, GROUP_MESSAGE, GROUP_NAME, 'alice_group_message', CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('alice_group_message_chat');
       const state = await captureGroupCreatedState();
       expect(state).toEqual({activeChat: 'user', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'});
@@ -5714,7 +6149,7 @@ describe('real client group created', () => {
     const page = await browser.newPage();
     try {
       await page.setContent(centerMarkup({groupActive: false}));
-      await expect(waitForGroupCreated(page, GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      await expect(waitForGroupCreated(page, GROUP_NAME, screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('alice_group_created_chat');
       const state = await captureGroupCreatedState();
       expect(state).toEqual({activeChat: 'user', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'});
@@ -5731,7 +6166,7 @@ describe('real client group created', () => {
     const page = await browser.newPage();
     try {
       await page.setContent(centerMarkup({groupTitle: 'another-group'}));
-      await expect(waitForGroupCreated(page, GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      await expect(waitForGroupCreated(page, GROUP_NAME, screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('alice_group_created_title');
       expect(await captureGroupCreatedState()).toEqual({activeChat: 'group', chatCount: 2, groupHeaderVisible: false, stepWait: 'timeout'});
     } finally {
@@ -5876,7 +6311,7 @@ describe('real client group created', () => {
     try {
       await page.setContent(`<div id="chatlist-container"><a class="chatlist-chat">${GROUP_NAME}</a></div>
         <div style="position:relative;height:200px"><div id="column-center"><div class="chats-container">${chatMarkup({peerId: '1000002', title: GROUP_NAME, active: true})}</div></div></div>`);
-      await expect(openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      await expect(openBobGroupChat(page, page.locator('#chatlist-container .chatlist-chat'), GROUP_NAME, screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_chat');
       expect(await captureGroupCreatedState()).toEqual({activeChat: 'user', chatCount: 1, groupHeaderVisible: true, stepWait: 'timeout'});
     } finally {
@@ -5900,7 +6335,7 @@ describe('real client group created', () => {
     const page = await browser.newPage();
     try {
       await page.setContent(bobMarkup());
-      await expect(openBobGroupChat(page, page.locator('#chatlist-container .missing-row'), GROUP_NAME, screenshotDirectory, {count: 0}, 200))
+      await expect(openBobGroupChat(page, page.locator('#chatlist-container .missing-row'), GROUP_NAME, screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_open');
       const blocked = join(screenshotDirectory, 'bob-blocked');
       writeFileSync(blocked, '');
@@ -5921,7 +6356,7 @@ describe('real client group created', () => {
       expect(await page.locator('#column-right .sidebar-slider-item.active .profile-avatars-avatar-fake').evaluate((avatar: Element) => getComputedStyle(avatar).visibility)).toBe('hidden');
       expect(await page.locator('#column-right .sidebar-slider-item.active .profile-avatars-avatars > .profile-avatars-avatar.active .avatar[data-peer-id]').isVisible()).toBe(true);
       expect(await page.locator('#column-right .sidebar-slider-item.active .search-super-container-media.active').count()).toBe(1);
-      await openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 500);
+      await openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS);
       expect(await page.evaluate(() => (window as any).memberTabClickCount)).toBe(1);
       expect(capturedScreenshots.count).toBe(2);
     } finally {
@@ -5935,7 +6370,7 @@ describe('real client group created', () => {
       profileMarkup: groupProfileMarkup({membersTabActive: true})
     });
     try {
-      await openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 500);
+      await openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS);
       expect(await page.evaluate(() => (window as any).memberTabClickCount)).toBe(0);
       expect(capturedScreenshots.count).toBe(2);
     } finally {
@@ -5947,7 +6382,7 @@ describe('real client group created', () => {
     const openBobGroupMembers = requireOpenBobGroupMembers();
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({openProfile: false});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_profile');
       const state = await realClientBrowser.captureGroupMemberState();
       expect(state).toMatchObject({activePanel: 'none', profileMatchesActiveGroup: false, membersTabExists: false, membersListExists: false, memberRowCount: 0});
@@ -5962,7 +6397,7 @@ describe('real client group created', () => {
     const staleProfile = groupProfileMarkup({groupPeerId: '-1000004', membersTabActive: true});
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({profileMarkup: staleProfile});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_profile');
       expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'members', profileMatchesActiveGroup: false, membersTabExists: true, membersListExists: true, memberRowCount: 2});
     } finally {
@@ -5975,7 +6410,7 @@ describe('real client group created', () => {
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage();
     try {
       await page.locator('#column-center .chat.active').evaluate((chat: Element) => chat.classList.remove('active'));
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_profile');
       expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({
         pageErrorsSinceStep: 0,
@@ -5991,7 +6426,7 @@ describe('real client group created', () => {
     const openBobGroupMembers = requireOpenBobGroupMembers();
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({profileMarkup: groupProfileMarkup({membersTab: false})});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_tab');
       expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'media', profileMatchesActiveGroup: true, membersTabExists: false, membersListExists: false, memberRowCount: 0});
     } finally {
@@ -6005,7 +6440,7 @@ describe('real client group created', () => {
       profileMarkup: groupProfileMarkup({membersTabVisible: false})
     });
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_tab');
       const state = await realClientBrowser.captureGroupMemberState();
       expect(state).toMatchObject({
@@ -6037,7 +6472,7 @@ describe('real client group created', () => {
     const openBobGroupMembers = requireOpenBobGroupMembers();
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({activateMembers: false});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_tab');
       expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({
         activePanel: 'media',
@@ -6056,7 +6491,7 @@ describe('real client group created', () => {
     const openBobGroupMembers = requireOpenBobGroupMembers();
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({interceptMembersClick: true});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 200))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_tab');
       const state = await realClientBrowser.captureGroupMemberState();
       expect(state).toMatchObject({
@@ -6088,7 +6523,7 @@ describe('real client group created', () => {
     const openBobGroupMembers = requireOpenBobGroupMembers();
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({profileMarkup: groupProfileMarkup({memberIds: ['1000002']})});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_count');
       expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'members', membersTabExists: true, membersListExists: true, memberRowCount: 1});
     } finally {
@@ -6101,7 +6536,7 @@ describe('real client group created', () => {
     for(const memberIds of [['1000003', '1000004'], ['1000002', '1000003', '1000004']]) {
       const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({profileMarkup: groupProfileMarkup({memberIds})});
       try {
-        await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 500))
+        await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
         .rejects.toThrow('bob_group_member_identity');
         expect(await realClientBrowser.captureGroupMemberState()).toMatchObject({activePanel: 'members', memberRowCount: memberIds.length});
       } finally {
@@ -6114,7 +6549,7 @@ describe('real client group created', () => {
     const openBobGroupMembers = requireOpenBobGroupMembers();
     const {page, groupHeader, capturedScreenshots} = await prepareBobGroupMemberPage({activateMembers: false, reportErrorsOnMembersClick: true});
     try {
-      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, 100))
+      await expect(openBobGroupMembers(page, groupHeader, GROUP_NAME, '1000002', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS))
       .rejects.toThrow('bob_group_member_tab');
       const state = await realClientBrowser.captureGroupMemberState();
       expect(state).toMatchObject({

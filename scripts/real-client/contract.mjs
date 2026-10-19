@@ -21,6 +21,24 @@ const PAGE_ERROR_CONSTRUCTORS = observation.GATE_PAGE_ERROR_CONSTRUCTORS;
 const PAGE_ERROR_DIAGNOSTIC_LIMITS = observation.GATE_PAGE_ERROR_DIAGNOSTIC_LIMITS;
 const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
 const SCRIPT_ASSET = observation.SCRIPT_ASSET_PATTERN;
+const PAGE_ERROR_MESSAGE_LIMIT = 512;
+const PAGE_ERROR_STACK_FRAME_LIMIT = 16;
+const PAGE_ERROR_FUNCTION_NAME_LIMIT = 128;
+const PAGE_ERROR_STACK_STATES = Object.freeze(['unavailable', 'non_string', 'no_frames', 'unclassified_frames', 'captured', 'partial', 'truncated']);
+const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'channel', 'unknown']);
+const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
+const PAGE_DIAGNOSTIC_LIMIT = 16;
+const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
+const PAGE_DIAGNOSTIC_FIELD_LIMIT = 256;
+const PAGE_DIAGNOSTIC_VALUE_TYPES = Object.freeze(['undefined', 'null', 'boolean', 'number', 'string', 'object', 'function']);
+const PAGE_DIAGNOSTIC_SOURCES = Object.freeze(['error_event', 'unhandled_rejection', 'unknown']);
+const PAGE_DIAGNOSTIC_RPC_METHOD = /^[a-z][A-Za-z0-9_]{0,63}\.[a-z][A-Za-z0-9_]{0,63}$/;
+const PAGE_DIAGNOSTIC_RPC_CONSTRUCTORS = Object.freeze([
+  'inputPeerUser', 'inputPeerChannel', 'inputPeerChat', 'inputPeerSelf',
+  'inputUser', 'inputUserSelf', 'inputChannel', 'peerUser', 'peerChannel', 'peerChat',
+  'inputUserFromMessage', 'inputPeerUserFromMessage', 'inputPeerChannelFromMessage', 'inputChannelFromMessage'
+]);
+const PAGE_DIAGNOSTIC_RPC_ARGUMENT_LIMIT = 8;
 const AUTH_PROGRESS_REPORT_STAGES = Object.freeze([
   'runtime_inputs',
   'runtime_input_validation',
@@ -53,7 +71,6 @@ const AUTH_PROGRESS_REPORT_STAGES = Object.freeze([
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
 const RUN_ID = /^[0-9a-f]{32}$/;
-const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const REQUIRED_ARTIFACT_AUDIT_CHECKS = Object.freeze([
   'manifestMode',
@@ -551,25 +568,6 @@ export function parseGroupCreatedState(state) {
   return Object.fromEntries(keys.map((key) => [key, state[key]]));
 }
 
-const CHANNEL_MEMBERSHIP_STEP_WAITS = ['none', 'timeout', 'strict_mode_violation', 'other'];
-
-// The page compares the synthetic title and peer id locally, then reports only
-// counts and booleans so a failure distinguishes a missing row from a selector mismatch.
-export function parseChannelMembershipState(state) {
-  if(state === 'unavailable') return state;
-  const keys = ['chatListRowCount', 'peerRowCount', 'titleRowCount', 'peerRowHasTitle', 'activePeerMatches', 'stepWait'];
-  const isCount = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000;
-  if(!state || typeof state !== 'object' || Array.isArray(state) ||
-      JSON.stringify(Object.keys(state).sort()) !== JSON.stringify([...keys].sort()) ||
-      !['chatListRowCount', 'peerRowCount', 'titleRowCount'].every((key) => isCount(state[key])) ||
-      typeof state.peerRowHasTitle !== 'boolean' ||
-      typeof state.activePeerMatches !== 'boolean' ||
-      !CHANNEL_MEMBERSHIP_STEP_WAITS.includes(state.stepWait)) {
-    return 'unclassified';
-  }
-  return Object.fromEntries(keys.map((key) => [key, state[key]]));
-}
-
 const GROUP_MEMBER_ACTIVE_PANELS = ['none', 'profile', 'media', 'members', 'edit', 'other'];
 const GROUP_MEMBER_STEP_WAITS = ['none', 'timeout', 'strict_mode_violation', 'other'];
 const GROUP_MEMBER_ERROR_KEYS = ['pageErrorsSinceStep', 'consoleErrorsSinceStep', 'rpcErrorsSinceStep'];
@@ -664,6 +662,49 @@ export function parseGroupMemberState(state) {
     interceptedBy: tab.interceptedBy === null ? null : {tag: tab.interceptedBy.tag, classes: [...tab.interceptedBy.classes]}
   };
   return Object.fromEntries(keys.map((key) => [key, key === 'membersTab' ? membersTab : state[key]]));
+}
+
+const CHANNEL_MEMBERSHIP_PAGE_KEYS = [
+  'channelRowCount',
+  'channelTitleMatches',
+  'activePeerId',
+  'chatListRowCount',
+  'pageErrorsSinceStep',
+  'consoleErrorsSinceStep',
+  'rpcErrorsSinceStep',
+  'rpcErrorTypesSinceStep'
+];
+const CHANNEL_MEMBERSHIP_STEP_WAITS = ['none', 'timeout', 'strict_mode_violation', 'other'];
+// Channel admission crosses two live clients. Keep only row counts, numeric
+// peer ids and sanitized error counts/types when describing a failed wait.
+export function parseChannelMembershipState(state) {
+  if(state === 'unavailable') return state;
+  const keys = ['channelPeerId', 'selectedBobPeerId', 'alice', 'bob', 'stepWait'];
+  const isCount = (value) => value === null || Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000;
+  const isPeerId = (value, allowNegative = true) => value === null || typeof value === 'string' &&
+    (allowNegative ? /^-?[0-9]{1,20}$/ : /^[0-9]{1,20}$/).test(value);
+  const isRpcTypes = (value) => value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length <= 16 && Object.entries(value).every(([type, count]) =>
+      /^[A-Z][A-Z0-9_]{1,63}$/.test(type) && Number.isSafeInteger(count) && count > 0 && count <= 1_000_000
+    );
+  const isClient = (client) => client !== null && typeof client === 'object' && !Array.isArray(client) &&
+    JSON.stringify(Object.keys(client).sort()) === JSON.stringify([...CHANNEL_MEMBERSHIP_PAGE_KEYS].sort()) &&
+    Number.isSafeInteger(client.channelRowCount) && client.channelRowCount >= 0 && client.channelRowCount <= 1_000_000 &&
+    Number.isSafeInteger(client.channelTitleMatches) && client.channelTitleMatches >= 0 && client.channelTitleMatches <= 1_000_000 &&
+    isPeerId(client.activePeerId) &&
+    Number.isSafeInteger(client.chatListRowCount) && client.chatListRowCount >= 0 && client.chatListRowCount <= 1_000_000 &&
+    isCount(client.pageErrorsSinceStep) && isCount(client.consoleErrorsSinceStep) && isCount(client.rpcErrorsSinceStep) &&
+    isRpcTypes(client.rpcErrorTypesSinceStep);
+  if(!state || typeof state !== 'object' || Array.isArray(state) ||
+      JSON.stringify(Object.keys(state).sort()) !== JSON.stringify([...keys].sort()) ||
+      typeof state.channelPeerId !== 'string' || !/^-?[0-9]{1,20}$/.test(state.channelPeerId) ||
+      !state.channelPeerId.startsWith('-') ||
+      typeof state.selectedBobPeerId !== 'string' || !/^[0-9]{1,20}$/.test(state.selectedBobPeerId) ||
+      !isClient(state.alice) || !isClient(state.bob) ||
+      !CHANNEL_MEMBERSHIP_STEP_WAITS.includes(state.stepWait)) {
+    return 'unclassified';
+  }
+  return Object.fromEntries(keys.map((key) => [key, state[key]]));
 }
 
 export function formatBrowserFailureMessage(report, controlsOnly = false) {
@@ -888,10 +929,11 @@ export function parseAuthProgressReport(report) {
   };
 }
 
-function parseBrowserGateBreakdown(value) {
+export function parseBrowserGateBreakdown(value) {
   const keys = ['counters', 'unexpectedEgressAttempts', 'observerErrors', 'pageErrors', 'pageErrorOverflow'];
   const counterKeys = ['unexpectedEgressAttempts', 'observerErrors', 'pageErrors'];
-  if(!hasExactOwnKeys(value, keys) ||
+  const hasStepDiagnostics = Object.hasOwn(value || {}, 'stepDiagnostics');
+  if(!hasExactOwnKeys(value, [...keys, ...(hasStepDiagnostics ? ['stepDiagnostics'] : [])]) ||
       !hasExactOwnKeys(value.counters, counterKeys) ||
       counterKeys.some((key) => !Number.isSafeInteger(value.counters[key]) || value.counters[key] < 0 || value.counters[key] > 1_000_000) ||
       !hasExactOwnKeys(value.unexpectedEgressAttempts, GATE_CONTEXTS) ||
@@ -931,53 +973,22 @@ function parseBrowserGateBreakdown(value) {
     observerErrorCount += Object.values(errors).reduce((sum, count) => sum + count, 0);
 
     const pageErrors = value.pageErrors[context];
-    if(!Array.isArray(pageErrors) || pageErrors.length > 512 || pageErrors.some((error) => {
-      const baseKeys = ['constructorName', 'scriptAsset'];
-      const hasDiagnostic = hasExactOwnKeys(error, [...baseKeys, 'diagnostic']);
-      if((!hasDiagnostic && !hasExactOwnKeys(error, baseKeys)) ||
-          !PAGE_ERROR_CONSTRUCTORS.includes(error.constructorName) ||
-          typeof error.scriptAsset !== 'string' || !SCRIPT_ASSET.test(error.scriptAsset)) return true;
-      if(!hasDiagnostic) return false;
-      const diagnostic = error.diagnostic;
-      const hasRpcErrorType = Object.hasOwn(diagnostic, 'rpcErrorType');
-      const hasRpcErrorCode = Object.hasOwn(diagnostic, 'rpcErrorCode');
-      const diagnosticKeys = ['message', 'stack', 'pageUrl', 'scenario', 'stage',
-        ...(hasRpcErrorType ? ['rpcErrorType'] : []), ...(hasRpcErrorCode ? ['rpcErrorCode'] : [])];
-      if(!hasExactOwnKeys(diagnostic, diagnosticKeys) ||
-          typeof diagnostic.message !== 'string' || diagnostic.message.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength ||
-          typeof diagnostic.stack !== 'string' || diagnostic.stack.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.stackLength ||
-          !['sign-in', 'message', 'group', 'channel', 'unknown'].includes(diagnostic.scenario) ||
-          typeof diagnostic.stage !== 'string' || !/^(?:unknown|[a-z][a-z0-9_]{0,63})$/.test(diagnostic.stage) ||
-          (hasRpcErrorType && (typeof diagnostic.rpcErrorType !== 'string' || !RPC_ERROR_TYPE_PATTERN.test(diagnostic.rpcErrorType))) ||
-          (hasRpcErrorCode && (!Number.isSafeInteger(diagnostic.rpcErrorCode) || diagnostic.rpcErrorCode < 0 || diagnostic.rpcErrorCode > 999_999))) return true;
-      const diagnosticTextIsUnsafe = (text) => /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text) ||
-        /(?:https?:\/\/|blob:)[^\s)]*[?#]/i.test(text) || /https?:\/\/(?!teagramd\.test(?:\/|:|\b))/i.test(text);
-      if(diagnosticTextIsUnsafe(diagnostic.message) || diagnosticTextIsUnsafe(diagnostic.stack)) return true;
-      if(diagnostic.pageUrl === 'unknown') return false;
-      if(typeof diagnostic.pageUrl !== 'string' || diagnostic.pageUrl.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength ||
-          /[\s?#]/.test(diagnostic.pageUrl)) return true;
-      try {
-        const parsedPageUrl = new URL(diagnostic.pageUrl);
-        return parsedPageUrl.origin !== PRIVATE_CSP_ORIGIN || parsedPageUrl.search !== '' || parsedPageUrl.hash !== '' ||
-          Boolean(parsedPageUrl.username || parsedPageUrl.password) || `${parsedPageUrl.origin}${parsedPageUrl.pathname}` !== diagnostic.pageUrl;
-      } catch {
-        return true;
-      }
-    })) {
+    if(!Array.isArray(pageErrors) || pageErrors.length > 512 || pageErrors.some((error) => !isClosedPageError(error))) {
       throw new Error('browser egress/page error evidence is invalid');
     }
     pageErrorCount += pageErrors.length;
 
     const overflow = value.pageErrorOverflow[context];
     if(!Array.isArray(overflow) || overflow.length > 1_000_000 || overflow.some((entry) =>
-      !hasExactOwnKeys(entry, ['constructorName', 'scriptAsset', 'count']) ||
-      !PAGE_ERROR_CONSTRUCTORS.includes(entry.constructorName) ||
-      typeof entry.scriptAsset !== 'string' || !SCRIPT_ASSET.test(entry.scriptAsset) ||
+      !isClosedPageError(entry, true) ||
       !Number.isSafeInteger(entry.count) || entry.count < 1 || entry.count > 1_000_000
     ) || (overflow.length > 0 && pageErrors.length !== 512)) {
       throw new Error('browser egress/page error evidence is invalid');
     }
     pageErrorCount += overflow.reduce((sum, entry) => sum + entry.count, 0);
+  }
+  if(hasStepDiagnostics && !isSafeStepDiagnostics(value.stepDiagnostics)) {
+    throw new Error('browser egress/page error evidence is invalid');
   }
   if(value.counters.unexpectedEgressAttempts !== unexpectedAttemptCount ||
       value.counters.observerErrors !== observerErrorCount ||
@@ -985,6 +996,135 @@ function parseBrowserGateBreakdown(value) {
     throw new Error('browser egress/page error evidence is invalid');
   }
   return value;
+}
+
+export function parsePassedBrowserGateBreakdown(report) {
+  if(!report || typeof report !== 'object' || Array.isArray(report) || report.status !== 'passed') {
+    throw new Error('passing browser report is invalid');
+  }
+  return parseBrowserGateBreakdown(report.gateBreakdown);
+}
+
+function isSafeStepDiagnostics(value) {
+  if(!hasExactOwnKeys(value, GATE_CONTEXTS)) return false;
+  return GATE_CONTEXTS.every((context) => Array.isArray(value[context]) &&
+    value[context].length <= PAGE_DIAGNOSTIC_STEP_LIMIT && value[context].every((entry) =>
+      hasExactOwnKeys(entry, ['scenarioStep', 'thrownValues', 'rpcFailures', 'consoleErrors']) &&
+      isSafePageErrorScenarioStep(entry.scenarioStep) &&
+      Array.isArray(entry.thrownValues) && entry.thrownValues.length <= PAGE_DIAGNOSTIC_LIMIT && entry.thrownValues.every((thrown) =>
+        hasExactOwnKeys(thrown, ['source', 'valueType', 'type', 'code', 'description']) &&
+        PAGE_DIAGNOSTIC_SOURCES.includes(thrown.source) && PAGE_DIAGNOSTIC_VALUE_TYPES.includes(thrown.valueType) &&
+        isSafeDiagnosticFields({type: thrown.type, code: thrown.code, description: thrown.description})) &&
+      Array.isArray(entry.rpcFailures) && entry.rpcFailures.length <= PAGE_DIAGNOSTIC_LIMIT && entry.rpcFailures.every(isSafeRpcDiagnosticFields) &&
+      Array.isArray(entry.consoleErrors) && entry.consoleErrors.length <= PAGE_DIAGNOSTIC_LIMIT && entry.consoleErrors.every((error) =>
+        hasExactOwnKeys(error, ['message']) && isSafeDiagnosticMessage(error.message))
+    ));
+}
+
+function isSafeRpcDiagnosticFields(value) {
+  return hasExactOwnKeys(value, ['type', 'code', 'description', 'method', 'peerArguments']) &&
+    isSafeDiagnosticFields({type: value.type, code: value.code, description: value.description}) &&
+    (value.method === 'unavailable' || typeof value.method === 'string' && PAGE_DIAGNOSTIC_RPC_METHOD.test(value.method)) &&
+    Array.isArray(value.peerArguments) && value.peerArguments.length <= PAGE_DIAGNOSTIC_RPC_ARGUMENT_LIMIT && value.peerArguments.every((argument) =>
+      hasExactOwnKeys(argument, ['argument', 'constructor', 'id']) &&
+      typeof argument.argument === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(argument.argument) &&
+      PAGE_DIAGNOSTIC_RPC_CONSTRUCTORS.includes(argument.constructor) &&
+      (argument.id === 'unavailable' || typeof argument.id === 'string' && /^-?[0-9]{1,20}$/.test(argument.id))
+    );
+}
+
+function isSafeDiagnosticFields(value) {
+  const safeType = (type) => typeof type === 'string' && (type === 'unavailable' || /^[A-Z][A-Z0-9_]{1,63}$/.test(type));
+  const safeCode = (code) => code === 'unavailable' ||
+    (Number.isSafeInteger(code) && Math.abs(code) <= 1_000_000) ||
+    (typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code));
+  return hasExactOwnKeys(value, ['type', 'code', 'description']) && safeType(value.type) && safeCode(value.code) &&
+    isSafeDiagnosticMessage(value.description);
+}
+
+function isSafeDiagnosticMessage(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= PAGE_DIAGNOSTIC_FIELD_LIMIT && isSafePageErrorMessage(value);
+}
+
+function isClosedPageError(error, includeCount = false) {
+  if(!error || typeof error !== 'object' || Array.isArray(error)) return false;
+  const hasDiagnostic = Object.hasOwn(error, 'diagnostic');
+  return hasExactOwnKeys(error, [
+    'constructorName', 'scriptAsset', 'message', 'stack', 'scenarioStep',
+    ...(hasDiagnostic ? ['diagnostic'] : []),
+    ...(includeCount ? ['count'] : [])
+  ]) &&
+    PAGE_ERROR_CONSTRUCTORS.includes(error.constructorName) &&
+    typeof error.scriptAsset === 'string' && SCRIPT_ASSET.test(error.scriptAsset) &&
+    isSafePageErrorMessage(error.message) &&
+    isSafePageErrorStack(error.stack) &&
+    isSafePageErrorScenarioStep(error.scenarioStep) &&
+    (!hasDiagnostic || isSafePageErrorDiagnostic(error.diagnostic));
+}
+
+function isSafePageErrorDiagnostic(diagnostic) {
+  if(!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) return false;
+  const hasRpcErrorType = Object.hasOwn(diagnostic, 'rpcErrorType');
+  const hasRpcErrorCode = Object.hasOwn(diagnostic, 'rpcErrorCode');
+  const keys = ['message', 'stack', 'pageUrl', 'scenario', 'stage',
+    ...(hasRpcErrorType ? ['rpcErrorType'] : []), ...(hasRpcErrorCode ? ['rpcErrorCode'] : [])];
+  if(!hasExactOwnKeys(diagnostic, keys) ||
+      typeof diagnostic.message !== 'string' || diagnostic.message.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength ||
+      typeof diagnostic.stack !== 'string' || diagnostic.stack.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.stackLength ||
+      !PAGE_ERROR_SCENARIOS.includes(diagnostic.scenario) ||
+      typeof diagnostic.stage !== 'string' || !/^(?:unknown|[a-z][a-z0-9_]{0,63})$/.test(diagnostic.stage) ||
+      (hasRpcErrorType && (typeof diagnostic.rpcErrorType !== 'string' || !RPC_ERROR_TYPE_PATTERN.test(diagnostic.rpcErrorType))) ||
+      (hasRpcErrorCode && (!Number.isSafeInteger(diagnostic.rpcErrorCode) || diagnostic.rpcErrorCode < 0 || diagnostic.rpcErrorCode > 999_999))) return false;
+  const textIsUnsafe = (value) => /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value) ||
+    /(?:https?:\/\/|blob:)[^\s)]*[?#]/i.test(value) || /https?:\/\/(?!teagramd\.test(?:\/|:|\b))/i.test(value);
+  if(textIsUnsafe(diagnostic.message) || textIsUnsafe(diagnostic.stack)) return false;
+  if(diagnostic.pageUrl === 'unknown') return true;
+  if(typeof diagnostic.pageUrl !== 'string' || diagnostic.pageUrl.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength ||
+      /[\s?#]/.test(diagnostic.pageUrl)) return false;
+  try {
+    const parsed = new URL(diagnostic.pageUrl);
+    return parsed.origin === PRIVATE_CSP_ORIGIN && parsed.search === '' && parsed.hash === '' &&
+      !parsed.username && !parsed.password && `${parsed.origin}${parsed.pathname}` === diagnostic.pageUrl;
+  } catch {
+    return false;
+  }
+}
+
+function isSafePageErrorMessage(message) {
+  return typeof message === 'string' && message.length > 0 && message.length <= PAGE_ERROR_MESSAGE_LIMIT &&
+    !/[\u0000-\u001f\u007f]/.test(message) &&
+    !/(?:https?:\/\/|wss?:\/\/|blob:|file:|data:)|\b(?:password|secret|passphrase|token|bearer|authorization|api[_-]?key|private[_-]?key)\b|\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|[A-Za-z0-9+/=_-]{32,}/i.test(message);
+}
+
+function isSafePageErrorStack(stack) {
+  if(!hasExactOwnKeys(stack, ['state', 'lineCount', 'frameCount', 'frames']) ||
+      !PAGE_ERROR_STACK_STATES.includes(stack.state) ||
+      !Number.isSafeInteger(stack.lineCount) || stack.lineCount < 0 || stack.lineCount > 1_000_000 ||
+      !Number.isSafeInteger(stack.frameCount) || stack.frameCount < 0 || stack.frameCount > 1_000_000 ||
+      !Array.isArray(stack.frames) || stack.frames.length > PAGE_ERROR_STACK_FRAME_LIMIT || stack.frames.length > stack.frameCount ||
+      stack.frames.some((frame) => !isSafePageErrorStackFrame(frame))) return false;
+  if(['unavailable', 'non_string'].includes(stack.state)) return stack.lineCount === 0 && stack.frameCount === 0 && stack.frames.length === 0;
+  if(stack.state === 'no_frames') return stack.lineCount > 0 && stack.frameCount === 0 && stack.frames.length === 0;
+  if(stack.state === 'unclassified_frames') return stack.lineCount > 1 && stack.frameCount > 0 && stack.frames.length === 0;
+  if(stack.state === 'captured') return stack.lineCount > 1 && stack.frameCount > 0 && stack.frames.length === stack.frameCount;
+  if(stack.state === 'partial') return stack.lineCount > 1 && stack.frameCount > stack.frames.length && stack.frames.length > 0;
+  return stack.state === 'truncated' && stack.lineCount > 0 && stack.frameCount >= stack.frames.length;
+}
+
+function isSafePageErrorStackFrame(frame) {
+  return hasExactOwnKeys(frame, ['functionName', 'scriptAsset', 'line', 'column']) &&
+    typeof frame.functionName === 'string' && frame.functionName.length <= PAGE_ERROR_FUNCTION_NAME_LIMIT &&
+    !/\b(?:password|secret|passphrase|token|bearer|authorization|api[_-]?key|private[_-]?key)\b/i.test(frame.functionName) &&
+    !/^[A-Za-z0-9_-]{32,}$/.test(frame.functionName) &&
+    /^(?:unknown|[A-Za-z_$][A-Za-z0-9_$]*(?:\.(?:[A-Za-z_$][A-Za-z0-9_$]*|<anonymous>))*)$/.test(frame.functionName) &&
+    typeof frame.scriptAsset === 'string' && SCRIPT_ASSET.test(frame.scriptAsset) &&
+    Number.isSafeInteger(frame.line) && frame.line >= 0 && frame.line <= 100_000_000 &&
+    Number.isSafeInteger(frame.column) && frame.column >= 0 && frame.column <= 100_000_000;
+}
+
+function isSafePageErrorScenarioStep(value) {
+  return hasExactOwnKeys(value, ['scenario', 'step']) && PAGE_ERROR_SCENARIOS.includes(value.scenario) &&
+    typeof value.step === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(value.step);
 }
 
 function parseAuthProgressNetwork(network) {

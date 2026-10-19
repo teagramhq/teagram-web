@@ -18,7 +18,7 @@
 const PRIVATE_CSP_ORIGIN = 'https://teagramd.test';
 
 const LIMITS = Object.freeze({
-  attachedTargets: 16,
+  attachedTargets: 32,
   countedEventsPerContext: 4096,
   cdpMessageBytes: 256 * 1024,
   commandTimeoutMs: 5000
@@ -37,11 +37,12 @@ const PAGE_CDP_METHODS = Object.freeze([
   'Network.enable',
   'Audits.enable',
   'Log.enable',
+  'Runtime.enable',
+  'Runtime.callFunctionOn',
   'Target.setAutoAttach',
   'Target.getTargetInfo',
   'Target.sendMessageToTarget',
   'Target.detachFromTarget',
-  'Runtime.enable',
   'Debugger.enable',
   'Debugger.setPauseOnExceptions',
   'Debugger.resume'
@@ -51,6 +52,7 @@ const WORKER_CDP_METHODS = Object.freeze([
   'Audits.enable',
   'Log.enable',
   'Runtime.enable',
+  'Runtime.callFunctionOn',
   'Runtime.runIfWaitingForDebugger'
 ]);
 
@@ -285,6 +287,8 @@ function createContextObserver(name, options = {}) {
   const dedicatedWorkerTargetIds = new Set();
   const workerSourceLabels = new Set();
   const requestLabels = new Map();
+  const attachedTargetIds = new Set();
+  let anonymousAttachedTargets = 0;
 
   const state = {
     countedEvents: 0,
@@ -467,12 +471,15 @@ function createContextObserver(name, options = {}) {
 
   function noteAttached(targetId = null) {
     if(!countEvent()) return false;
-    if(state.attachedTargets >= LIMITS.attachedTargets) {
+    if(typeof targetId === 'string' && attachedTargetIds.has(targetId)) return true;
+    if(attachedTargetIds.size + anonymousAttachedTargets >= LIMITS.attachedTargets) {
       recordOverflow();
       return false;
     }
-    state.attachedTargets++;
+    if(typeof targetId === 'string') attachedTargetIds.add(targetId);
+    else anonymousAttachedTargets++;
     const record = targetId ? targets.get(targetId) : null;
+    state.attachedTargets = Math.max(state.attachedTargets, attachedTargetIds.size + anonymousAttachedTargets);
     if(record) record.attached = true;
     return true;
   }
@@ -486,6 +493,7 @@ function createContextObserver(name, options = {}) {
   function noteDestroyed(targetId) {
     if(!countEvent()) return;
     const record = targets.get(targetId);
+    if(attachedTargetIds.delete(targetId) && record) record.attached = false;
     if(!record) return;
     record.destroyed = true;
     if(!record.setupComplete) {
@@ -519,6 +527,8 @@ function createContextObserver(name, options = {}) {
   }
 
   function noteWorkerEvent(targetId, method, params, sessionId = targetId) {
+    // Console payloads use a separate bounded reader for synthetic API error diagnostics.
+    if(method === 'Runtime.consoleAPICalled') return;
     if(!countEvent()) return;
     if(method === 'Network.webSocketCreated' || method === 'Network.webSocketHandshakeResponseReceived') {
       noteWebSocket101Event(sessionId, method, params, targetId);
