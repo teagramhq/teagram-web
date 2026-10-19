@@ -70,6 +70,28 @@ describe('invited channel dialogs', () => {
     };
   }
 
+  test('keeps an empty channel dialog when its draft is cleared', () => {
+    const channelId = 990030;
+    const peerId = (channelId as ChatId).toPeerId(true);
+    const channel = makeChannel(channelId);
+    client.managers.appChatsManager.saveApiChats([channel]);
+    applyEmptyChannelDialog(channel);
+
+    const dialog = client.managers.dialogsStorage.getDialogOnly(peerId);
+    expect(dialog).toBeDefined();
+    dialog!.draft = {
+      _: 'draftMessage',
+      date: 1,
+      message: 'draft',
+      pFlags: {}
+    } as any;
+
+    client.managers.rootScope.dispatchEvent('draft_updated', {peerId, draft: undefined} as any);
+
+    expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeDefined();
+    expect(client.managers.dialogsStorage.getFolderDialogs(0, false).map((item) => item.peerId)).toContain(peerId);
+  });
+
   test('lists an empty invited channel from the messages.getDialogs response after reload', async() => {
     const channelId = 990004;
     const peerId = (channelId as ChatId).toPeerId(true);
