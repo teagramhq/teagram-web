@@ -25,7 +25,8 @@ The fixture must remain running after artifact-ready. The command validates its 
 protected synthetic credentials, internal browser network, audited artifact evidence, per-context
 shared-worker observation, the three required UI scenarios plus the optional channel scenario,
 or one bounded Username submission. The opt-in page-error diagnostics include bounded, sanitized
-details only for errors whose source is unknown.
+source frames, private page path, fixed scenario and stage labels, and optional RPC error type/code.
+Raw page-error messages and stack text are never serialized.
 The one-submission mode stops at password-field readiness without entering or submitting a password.`;
 const NETWORK_SOURCES = ['page', 'shared_worker', 'service_worker', 'worker'];
 
