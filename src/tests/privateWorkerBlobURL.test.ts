@@ -37,7 +37,12 @@ describe('private worker blob URL', () => {
     const running = run(scope, importEntry);
 
     const {port1} = new MessageChannel();
-    scope.dispatchEvent(new MessageEvent('connect', {source: port1}));
+    const connectEvent = new Event('connect') as MessageEvent;
+    Object.defineProperties(connectEvent, {
+      source: {value: null},
+      ports: {value: [port1]}
+    });
+    scope.dispatchEvent(connectEvent);
     finishImport();
     await running;
 

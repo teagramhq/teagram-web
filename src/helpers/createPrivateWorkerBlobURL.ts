@@ -31,7 +31,7 @@ export async function createPrivateWorkerBlobURL(url: string | URL, serverId?: s
   source += 'const pendingConnects=[];const holdConnect=(event)=>pendingConnects.push(event);' +
     'globalThis.addEventListener(\'connect\',holdConnect);' +
     `try{await import(${JSON.stringify(entryUrl)});}finally{globalThis.removeEventListener('connect',holdConnect);}` +
-    'for(const event of pendingConnects)globalThis.dispatchEvent(new MessageEvent(\'connect\',{data:event.data,ports:event.ports,source:event.source}));';
+    'for(const event of pendingConnects){const source=event.ports?.[0]||event.source;globalThis.dispatchEvent(new MessageEvent(\'connect\',{data:event.data,source}));}';
 
   return URL.createObjectURL(new Blob([source], {type: 'application/javascript'}));
 }

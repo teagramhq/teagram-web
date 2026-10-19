@@ -144,6 +144,11 @@ test('isolates two server tabs when a custom server worker takes control', async
     await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
 
     customPage = await page.context().newPage();
+    const customPageMainFrame = customPage.mainFrame();
+    const customPageNavigations: string[] = [];
+    customPage.on('framenavigated', (frame) => {
+      if(frame === customPageMainFrame) customPageNavigations.push(frame.url());
+    });
     await customPage.goto(appOriginString, {waitUntil: 'domcontentloaded'});
     expect(await customPage.evaluate(() => isSecureContext && !!crypto.subtle)).toBe(true);
 
@@ -193,6 +198,7 @@ test('isolates two server tabs when a custom server worker takes control', async
 
     const auth = customPage.locator('#auth-pages');
     await expect(auth.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
+    expect(customPageNavigations.some((url) => new URL(url).searchParams.has('swfix'))).toBe(false);
     await expect(auth.getByText(`Server: ${SERVER_HOST}`, {exact: true})).toBeVisible();
     await auth.getByRole('textbox', {name: 'Username'}).fill(SERVER_USER);
     await auth.getByRole('button', {name: 'Next'}).click();

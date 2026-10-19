@@ -837,6 +837,27 @@ class ApiManagerProxy extends MTProtoMessagePort {
     }
   }
 
+  private waitForServiceWorkerController(serverId: string) {
+    return new Promise<ServiceWorker | undefined>((resolve) => {
+      const serviceWorker = navigator.serviceWorker;
+      let settled = false;
+      const finish = (controller?: ServiceWorker) => {
+        if(settled) return;
+        settled = true;
+        clearTimeout(timer);
+        serviceWorker.removeEventListener('controllerchange', onControllerChange);
+        resolve(controller);
+      };
+      const onControllerChange = () => {
+        const controller = serviceWorker.controller;
+        if(controller && this.isServiceWorkerForServer(controller, serverId)) finish(controller);
+      };
+      const timer = window.setTimeout(() => finish(), 5000);
+      serviceWorker.addEventListener('controllerchange', onControllerChange);
+      onControllerChange();
+    });
+  }
+
   private requestServiceWorkerHandshake(
     serviceWorker: ServiceWorker,
     type: 'teagram:server-handshake' | 'teagram:server-handshake-ack',
@@ -892,7 +913,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
       // '../../../sw',
       withRuntimeMtprotoTarget(ServiceWorkerURL),
       {type: 'module', scope: './'}
-    ).then((registration) => {
+    ).then(async(registration) => {
       if(TEST_NO_STREAMING) {
         throw 1;
       }
@@ -903,7 +924,13 @@ class ApiManagerProxy extends MTProtoMessagePort {
       const url = new URL(window.location.href);
       const FIX_KEY = 'swfix';
       const swfix = +url.searchParams.get(FIX_KEY) || 0;
-      if(registration.active && !navigator.serviceWorker.controller) {
+      const serverId = getActiveServerId();
+      let activeController = navigator.serviceWorker.controller;
+      if(registration.active && (!activeController || !this.isServiceWorkerForServer(activeController, serverId))) {
+        activeController = await this.waitForServiceWorkerController(serverId);
+      }
+
+      if(registration.active && !activeController) {
         if(swfix >= 3) {
           throw new Error('no controller');
         }
