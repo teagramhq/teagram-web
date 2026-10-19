@@ -1,7 +1,7 @@
 import {execFileSync} from 'node:child_process';
-import {readFileSync} from 'node:fs';
+import {chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
-import {dirname, resolve} from 'node:path';
+import {dirname, isAbsolute, join, resolve} from 'node:path';
 import {isIPv4} from 'node:net';
 
 import {
@@ -68,6 +68,7 @@ if(args?.help) {
   let browserResult;
   let passwordEvidence = [];
   let readiness;
+  let traceOutputDirectory;
   let controlsOnlyDone = false;
   let authProgressFailure = false;
 
@@ -88,6 +89,17 @@ if(args?.help) {
   };
 
   try {
+    if(process.env.REAL_CLIENT_TRACE_DIR) {
+      if(!isAbsolute(process.env.REAL_CLIENT_TRACE_DIR)) throw new Error('trace output directory must be absolute');
+      traceOutputDirectory = resolve(process.env.REAL_CLIENT_TRACE_DIR);
+      mkdirSync(traceOutputDirectory, {recursive: true, mode: 0o700});
+      const traceDirectoryStat = lstatSync(traceOutputDirectory);
+      if(!traceDirectoryStat.isDirectory() || traceDirectoryStat.isSymbolicLink() || readdirSync(traceOutputDirectory).length > 0) {
+        throw new Error('trace output directory must be a new empty directory');
+      }
+      chmodSync(traceOutputDirectory, 0o700);
+    }
+
     const controlsOnly = args.observerControlsOnly === true;
     const authProgress = args.authProgressOneSubmission === true;
     const readinessText = readFileSync(resolve(args.readinessFile), 'utf8');
@@ -199,6 +211,7 @@ if(args?.help) {
       webRevision: args.webRevision,
       frontIp,
       screenshotDirectory,
+      traceDirectory: `${screenshotDirectory}/traces`,
       accounts: credentials
     });
     let browserOutput;
@@ -224,6 +237,7 @@ if(args?.help) {
         try {
           const failedRun = JSON.parse(browserStdout.trim());
           if(failedRun.status === 'failed' && typeof failedRun.stage === 'string') {
+            browserResult = failedRun;
             throw new Error(formatBrowserFailureMessage(failedRun, controlsOnly));
           }
         } catch(parseError) {
@@ -325,6 +339,33 @@ if(args?.help) {
   } catch(error) {
     operationError = error;
   } finally {
+    if(browserResult?.status === 'failed' && traceOutputDirectory && browserContainerValidated) {
+      try {
+        const browserName = `teagram-fixture-${args.runId}browser`;
+        docker(['cp', `${browserName}:/tmp/real-client-${args.runId}/traces/.`, traceOutputDirectory], undefined, 'Playwright failure trace export');
+        const entries = readdirSync(traceOutputDirectory);
+        const traceFiles = entries.filter((name) => /^[a-z]+\.zip$/.test(name));
+        if(traceFiles.length === 0 || traceFiles.length !== entries.length) throw new Error('browser assertion failure produced no Playwright trace');
+        for(const name of traceFiles) {
+          const tracePath = join(traceOutputDirectory, name);
+          const fileStat = lstatSync(tracePath);
+          if(!fileStat.isFile() || fileStat.isSymbolicLink() || fileStat.size < 4 || fileStat.size > 50 * 1024 * 1024 ||
+              readFileSync(tracePath).subarray(0, 4).toString('hex') !== '504b0304') {
+            throw new Error('Playwright failure trace is invalid');
+          }
+        }
+        writeFileSync(join(traceOutputDirectory, 'trace-manifest.json'), `${JSON.stringify({
+          status: 'browser-assertion-failed',
+          runId: args.runId,
+          harnessRevision: args.harnessRevision,
+          serverRevision: args.serverRevision,
+          webRevision: args.webRevision,
+          traces: traceFiles.sort()
+        })}\n`, {mode: 0o600});
+      } catch {
+        cleanupError ||= new Error('Playwright failure trace export failed');
+      }
+    }
     if(browserContainerValidated) {
       try {
         const browserName = `teagram-fixture-${args.runId}browser`;

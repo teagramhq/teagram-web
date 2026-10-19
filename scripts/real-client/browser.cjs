@@ -314,6 +314,7 @@ function validateRuntimeInput(config) {
       Buffer.from(config.leafSPKI, 'base64').toString('base64') !== config.leafSPKI ||
       !/^(?:\d{1,3}\.){3}\d{1,3}$/.test(config.frontIp || '') ||
       config.screenshotDirectory !== `/tmp/real-client-${config.runId}` ||
+      (config.traceDirectory !== undefined && config.traceDirectory !== `${config.screenshotDirectory}/traces`) ||
       (config.observationOnly !== undefined && config.observationOnly !== true) ||
       (config.authProgressOneSubmission !== undefined && !authProgress) ||
       (config.pageErrorDiagnostics !== undefined && typeof config.pageErrorDiagnostics !== 'boolean') ||
@@ -5104,7 +5105,7 @@ function buildAuthProgressReport(status, stage, contexts, controlCount, password
   };
 }
 
-async function cleanupBrowserRun({registry, observers, contexts, browser, screenshotDirectory, cleanupIssues}) {
+async function cleanupBrowserRun({registry, observers, contexts, browser, screenshotDirectory, preserveTrace, cleanupIssues}) {
   let cleanupFailed = false;
   try {
     const discoveryStopped = await registry?.stop();
@@ -5132,7 +5133,13 @@ async function cleanupBrowserRun({registry, observers, contexts, browser, screen
     cleanupFailed = true;
   }
   try {
-    if(screenshotDirectory) fs.rmSync(screenshotDirectory, {recursive: true, force: true});
+    if(screenshotDirectory && preserveTrace) {
+      for(const entry of fs.readdirSync(screenshotDirectory)) {
+        if(entry !== 'traces') fs.rmSync(path.join(screenshotDirectory, entry), {recursive: true, force: true});
+      }
+    } else if(screenshotDirectory) {
+      fs.rmSync(screenshotDirectory, {recursive: true, force: true});
+    }
   } catch {
     cleanupFailed = true;
   }
@@ -5381,6 +5388,7 @@ async function main(dependencies = {}) {
   let report;
   let browser;
   const contexts = [];
+  const traceContexts = [];
   const observers = [];
   const appObservers = {};
   const appNetworkObservers = {};
@@ -5415,6 +5423,7 @@ async function main(dependencies = {}) {
       : await (dependencies.readRuntimeInput || readRuntimeInput)();
     (dependencies.validateRuntimeInput || validateRuntimeInput)(runtime);
     fs.mkdirSync(runtime.screenshotDirectory, {mode: 0o700});
+    if(runtime.traceDirectory) fs.mkdirSync(runtime.traceDirectory, {mode: 0o700});
 
     currentStage = 'browser_launch';
     browser = await (dependencies.launchBrowser || ((options) => chromium.launch(options)))({
@@ -5475,6 +5484,10 @@ async function main(dependencies = {}) {
     currentStage = 'alice_context';
     const alice = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(alice.context);
+    if(runtime.traceDirectory) {
+      await alice.context.tracing.start({screenshots: true, snapshots: false, sources: false});
+      traceContexts.push({context: alice.context, name: 'alice', active: false});
+    }
     alice.page = await alice.context.newPage();
     appPages.alice = alice.page;
     await installPageErrorEventCapture(alice.page);
@@ -5509,6 +5522,10 @@ async function main(dependencies = {}) {
     currentStage = 'bob_context';
     const bob = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(bob.context);
+    if(runtime.traceDirectory) {
+      await bob.context.tracing.start({screenshots: true, snapshots: false, sources: false});
+      traceContexts.push({context: bob.context, name: 'bob', active: false});
+    }
     bob.page = await bob.context.newPage();
     appPages.bob = bob.page;
     await installPageErrorEventCapture(bob.page);
@@ -5543,6 +5560,10 @@ async function main(dependencies = {}) {
     currentScenario = 'sign-in';
     await signIn(alice.page, accounts[0], 'alice', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
     await signIn(bob.page, accounts[1], 'bob', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
+    for(const trace of traceContexts) {
+      await trace.context.tracing.startChunk({title: `real-client ${trace.name} scenarios`});
+      trace.active = true;
+    }
     alice.observer.state.windowElapsed = true;
     bob.observer.state.windowElapsed = true;
     await waitForWorkerTargets(alice.page, alice.networkObserver, alice.observer);
@@ -5784,6 +5805,25 @@ async function main(dependencies = {}) {
       };
     }
   } finally {
+    for(const trace of traceContexts) {
+      try {
+        if(report?.status === 'failed') {
+          if(!trace.active) {
+            await trace.context.tracing.startChunk({title: `real-client ${trace.name} failure state`});
+            trace.active = true;
+            const page = trace.context.pages()[0];
+            await page?.screenshot({timeout: 5000}).catch(() => {});
+          }
+          await trace.context.tracing.stopChunk({path: path.join(runtime.traceDirectory, `${trace.name}.zip`)});
+        } else if(trace.active) {
+          await trace.context.tracing.stopChunk();
+        }
+        trace.active = false;
+        await trace.context.tracing.stop();
+      } catch {
+        cleanupIssues.push('playwright_trace_cleanup');
+      }
+    }
     if(!authProgressCleanupHandled) {
       currentStage = 'cleanup';
       cleanupFailed = await cleanupBrowserRun({
@@ -5792,6 +5832,7 @@ async function main(dependencies = {}) {
         contexts,
         browser,
         screenshotDirectory: runtime?.screenshotDirectory,
+        preserveTrace: report?.status === 'failed' && traceContexts.length > 0,
         cleanupIssues
       });
     }
