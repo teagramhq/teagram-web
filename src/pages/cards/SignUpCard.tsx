@@ -1,4 +1,4 @@
-import {createSignal, JSX, onMount} from 'solid-js';
+import {createSignal, JSX, onCleanup, onMount, Show} from 'solid-js';
 
 import Button from '@components/buttonTsx';
 import Icon from '@components/icon';
@@ -14,7 +14,9 @@ import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 
 import AuthCard from '@/pages/AuthCard';
 import {CardSpec, useAuthFlow} from '@/pages/authFlow';
+import TurnstileChallenge, {useTurnstileChallenge} from '@/pages/TurnstileChallenge';
 import styles from '@/pages/authFlow.module.scss';
+import {invokeSignUpWithTurnstile} from '@/pages/turnstileSignup';
 
 if(import.meta.hot) import.meta.hot.accept();
 
@@ -27,6 +29,8 @@ type Spec = Extract<CardSpec, {name: 'signUp'}>;
  */
 export default function SignUpCard(props: {spec: Spec}) {
   const {managers, toIm} = useAuthFlow();
+  const turnstile = useTurnstileChallenge();
+  let cancelled = false;
 
   /* ---------- state ---------- */
 
@@ -116,7 +120,12 @@ export default function SignUpCard(props: {spec: Spec}) {
 
     setSignUpKey('PleaseWait');
 
-    managers.apiManager.invokeApi('auth.signUp', params).then(async(response) => {
+    invokeSignUpWithTurnstile(
+      (method, request) => managers.apiManager.invokeApi(method as any, request as any),
+      params,
+      turnstile.request
+    ).then(async(response) => {
+      if(cancelled) return;
       switch(response._) {
         case 'auth.authorization':
           await managers.apiManager.setUser(response.user);
@@ -130,6 +139,7 @@ export default function SignUpCard(props: {spec: Spec}) {
           break;
       }
     }).catch((err) => {
+      if(cancelled) return;
       setSubmitting(false);
 
       switch(err.type) {
@@ -151,6 +161,11 @@ export default function SignUpCard(props: {spec: Spec}) {
     blurActiveElement();
   });
 
+  onCleanup(() => {
+    cancelled = true;
+    turnstile.cancel();
+  });
+
   return (
     <AuthCard
       class={styles.pageSignUp}
@@ -164,6 +179,9 @@ export default function SignUpCard(props: {spec: Spec}) {
     >
       {nameInputField.container}
       {lastNameInputField.container}
+      <Show when={turnstile.challenge()} keyed>
+        {(challenge) => <TurnstileChallenge {...challenge}/>}
+      </Show>
       <Button
         class="btn-primary btn-color-primary"
         disabled={submitting()}

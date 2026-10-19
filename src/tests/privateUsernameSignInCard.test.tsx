@@ -62,7 +62,12 @@ vi.mock('@lib/langPack', async(importOriginal) => {
       'Teagram.Registration.WeakPassword': 'Choose a stronger password.',
       'Teagram.Registration.Network': 'Unable to create your account. Try again.',
       'Teagram.Registration.PasswordNetwork': 'Unable to set your password. Try again.',
-      'Teagram.Registration.ConfigNetwork': 'Unable to check whether account creation is available.'
+      'Teagram.Registration.ConfigNetwork': 'Unable to check whether account creation is available.',
+      'Teagram.Registration.SecurityCheckRetry': 'Try again',
+      'Teagram.Registration.SecurityCheckFailed': 'The security check failed. Try again.',
+      'Teagram.Registration.SecurityCheckExpired': 'The security check expired. Try again.',
+      'Teagram.Registration.SecurityCheckUnavailable': 'The security check couldn\'t load. Try again.',
+      'Teagram.Registration.SecurityCheckLoading': 'Loading security check…'
     };
     const span = document.createElement('span');
     span.textContent = copy[key] || key;
@@ -97,6 +102,8 @@ describe('private username sign-in card', () => {
   let dispose: VoidFunction;
   let storageWrites: ReturnType<typeof vi.spyOn>[];
   let consoleError: ReturnType<typeof vi.spyOn>;
+  let turnstileCallbacks: {callback: (token: string) => void, 'expired-callback': () => void};
+  let turnstileReset: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     mocks.invokeApi.mockReset();
@@ -106,6 +113,16 @@ describe('private username sign-in card', () => {
     mocks.pushToState.mockReset();
     mocks.navigate.mockReset();
     mocks.toIm.mockReset();
+    turnstileCallbacks = undefined as any;
+    turnstileReset = vi.fn();
+    vi.stubGlobal('turnstile', {
+      render: vi.fn((_container: HTMLElement, callbacks: {callback: (token: string) => void, 'expired-callback': () => void}) => {
+        turnstileCallbacks = callbacks;
+        return 'test-widget';
+      }),
+      reset: turnstileReset,
+      remove: vi.fn()
+    });
     clearPrivateUsernameLogin();
     storageWrites = [
       vi.spyOn(Storage.prototype, 'setItem'),
@@ -120,6 +137,7 @@ describe('private username sign-in card', () => {
     clearPrivateUsernameLogin();
     storageWrites.forEach((spy) => spy.mockRestore());
     consoleError.mockRestore();
+    vi.unstubAllGlobals();
     document.body.replaceChildren();
   });
 
@@ -169,6 +187,7 @@ describe('private username sign-in card', () => {
     expect(mocks.navigate).toHaveBeenCalledWith({name: 'password'});
     expect(isPrivateUsernameLogin()).toBe(true);
     expect(input.value).toBe('');
+    expect(document.querySelector('script[src*="challenges.cloudflare.com"]')).toBeNull();
     expect(mocks.pushToState.mock.calls).toEqual([['authState', {_: 'authStateSignIn'}]]);
     const hasStoredUsername = storageWrites.some((spy) =>
       spy.mock.calls.some((call: unknown[]) => call.some((value: unknown) => String(value).includes(USERNAME)))
@@ -231,6 +250,52 @@ describe('private username sign-in card', () => {
     (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
 
     expect(document.querySelector('input[aria-label="Invite secret"]')).not.toBeNull();
+  });
+
+  it('keeps registration fields and allows a retry after an expired or rejected Turnstile token', async() => {
+    const user = {_: 'user', id: 44};
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'open'});
+    mocks.invokeApi
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signup__test-site-key'})
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signup__test-site-key'})
+    .mockResolvedValueOnce({_: 'auth.authorization', user});
+    mocks.updatePasswordSettings.mockResolvedValue(true);
+    mount();
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Create account')).toBe(true));
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+
+    const fill = (label: string, value: string) => {
+      const input = document.querySelector(`input[aria-label="${label}"]`) as HTMLInputElement;
+      input.value = value;
+      input.dispatchEvent(new Event('input', {bubbles: true}));
+    };
+    fill('Username', USERNAME);
+    fill('Display name', 'Alice Example');
+    fill('Password', 'StrongPassword123');
+    fill('Confirm password', 'StrongPassword123');
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(document.querySelector('[data-testid="turnstile-challenge"]')).not.toBeNull());
+    expect((document.querySelector('input[aria-label="Display name"]') as HTMLInputElement).value).toBe('Alice Example');
+    expect((document.querySelector('[data-testid="turnstile-challenge"]') as HTMLElement).dataset.sitekey).toBe('test-site-key');
+
+    turnstileCallbacks['expired-callback']();
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Try again')).toBe(true));
+    expect((document.querySelector('input[aria-label="Display name"]') as HTMLInputElement).value).toBe('Alice Example');
+
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Try again') as HTMLButtonElement).click();
+    expect(turnstileReset).toHaveBeenCalledWith('test-widget');
+    turnstileCallbacks.callback('rejected-token');
+    await vi.waitFor(() => expect(mocks.invokeApi).toHaveBeenCalledTimes(4));
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Try again')).toBe(true));
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Try again') as HTMLButtonElement).click();
+    turnstileCallbacks.callback('fresh-token');
+    await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
+
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(4, 'invokeWithReCaptcha', expect.objectContaining({token: 'rejected-token'}));
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(5, 'invokeWithReCaptcha', expect.objectContaining({token: 'fresh-token'}));
   });
 
   it('lets the user sign in with the same username after registration reports it is taken', async() => {
