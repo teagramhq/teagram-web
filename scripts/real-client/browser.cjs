@@ -4,13 +4,23 @@ const {createHash} = require('node:crypto');
 const {chromium} = require('playwright');
 const observation = require('./observation.cjs');
 
-const REQUIRED_SCENARIOS = ['sign-in', 'message', 'group', 'channel'];
+const REQUIRED_SCENARIOS = ['sign-in', 'message', 'group'];
+const OPTIONAL_SCENARIOS = ['channel', 'poll'];
+const AVAILABLE_SCENARIOS = [...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS];
 const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
 const PRIVATE_CSP_WSS = 'wss://teagramd.test/apiws';
 const PROBE_PATH = '/_fixture_probe/';
 const MESSAGE = 'browser-ci-hello';
 const GROUP_MESSAGE = 'browser-ci-group-hello';
 const CHANNEL_MESSAGE = 'browser-channel-post';
+const POLL_DESCRIPTION = 'Description stuff';
+const POLL_ANSWER_ONE = 'browser-ci-poll-answer-one';
+const POLL_ANSWER_TWO = 'browser-ci-poll-answer-two';
+const POLL_ANSWER_LINK = `${PRIVATE_CSP_ORIGIN}/browser-ci-poll-answer`;
+const POLL_NEGATIVE_CONTROL = Object.freeze([
+  Object.freeze({shape: 'description', stage: 'alice_poll_description_create', errorType: 'POLL_ANSWERS_INVALID'}),
+  Object.freeze({shape: 'input_answer', stage: 'alice_poll_input_answer_create', errorType: 'POLL_ANSWERS_INVALID'})
+]);
 const PASSWORD_FIELD_SELECTOR = '#auth-pages input[name="notsearch_password"]';
 const PASSWORD_FIELD_TIMEOUT_MS = 30_000;
 // The height mirror next to the composer shares its class and editability.
@@ -45,8 +55,8 @@ const PAGE_DIAGNOSTIC_LIMIT = 16;
 const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
 const PAGE_DIAGNOSTIC_FIELD_LIMIT = 256;
 const PAGE_DIAGNOSTIC_VALUE_TYPES = new Set(['undefined', 'null', 'boolean', 'number', 'string', 'object', 'function']);
-const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'message', 'group', 'channel', 'unknown']);
-const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set([...REQUIRED_SCENARIOS, 'channel']);
+const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'message', 'group', 'channel', 'poll', 'unknown']);
+const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set(AVAILABLE_SCENARIOS);
 const PAGE_ERROR_EVENT_CAPTURE_KEY = '__teagramPageErrorEvents';
 const pageErrorDiagnosticCounts = new WeakMap();
 const pageErrorDiagnosticMessageHashes = new WeakMap();
@@ -284,6 +294,11 @@ function readRuntimeInput() {
 
 function validateRuntimeInput(config) {
   const authProgress = config?.authProgressOneSubmission === true;
+  const pollCreationNegativeControl = config?.pollCreationNegativeControl === true;
+  const selectedScenarios = Array.isArray(config?.scenarios) ? config.scenarios : [];
+  const hasPollScenario = selectedScenarios.includes('poll');
+  const expectedScenarios = AVAILABLE_SCENARIOS.filter((scenario) =>
+    REQUIRED_SCENARIOS.includes(scenario) || selectedScenarios.includes(scenario));
   if(!/^[0-9a-f]{32}$/.test(config?.runId || '') ||
       config.endpoint !== PRIVATE_CSP_ORIGIN || config.wssEndpoint !== PRIVATE_CSP_WSS ||
       !/^[0-9a-f]{16}$/.test(config.fingerprint || '') ||
@@ -302,8 +317,13 @@ function validateRuntimeInput(config) {
       (config.observationOnly !== undefined && config.observationOnly !== true) ||
       (config.authProgressOneSubmission !== undefined && !authProgress) ||
       (config.pageErrorDiagnostics !== undefined && typeof config.pageErrorDiagnostics !== 'boolean') ||
+      (config.pollCreationNegativeControl !== undefined && !pollCreationNegativeControl) ||
       (config.observationOnly === true && config.pageErrorDiagnostics === true) ||
       (authProgress && config.observationOnly === true) ||
+      (pollCreationNegativeControl && (authProgress || config.observationOnly === true)) ||
+      (pollCreationNegativeControl && !hasPollScenario) ||
+      (!authProgress && config.observationOnly !== true &&
+        (!Array.isArray(config.scenarios) || JSON.stringify(config.scenarios) !== JSON.stringify(expectedScenarios))) ||
       !Array.isArray(config.accounts) || config.accounts.length !== (authProgress ? 1 : 2)) {
     failStage('runtime_input_validation');
   }
@@ -2724,6 +2744,1115 @@ async function sendGroupText(page, text, groupName, stage, timeoutMs = 30_000) {
   currentStage = stage;
 }
 
+function pollMessageLocator(page, question) {
+  return page.locator('#column-center .bubble').filter({hasText: question});
+}
+
+async function ensurePollGroupActive(page, groupName, stage) {
+  setPageScenarioStep(page, stage);
+  const activeGroup = resolveActiveGroupChat(page, groupName);
+  if(await activeGroup.activeChats.count() === 1 && await activeGroup.title.count() === 1) return;
+
+  const groupRow = page.locator('#chatlist-container .chatlist-chat').filter({hasText: groupName});
+  await groupRow.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(stage));
+  if(await groupRow.count() !== 1) failStage(`${stage}_not_unique`);
+  const peerId = await groupRow.getAttribute('data-peer-id');
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '') || !peerId.startsWith('-')) failStage(`${stage}_peer`);
+  await groupRow.click().catch(() => failStage(stage));
+  await waitForActivePeerId(page, peerId, stage);
+  if(await activeGroup.activeChats.count() !== 1 || await activeGroup.title.count() !== 1) failStage(`${stage}_title`);
+}
+
+function getPollOptionClickTarget(poll, answerText) {
+  return poll.locator('[data-poll-option-idx]')
+  .filter({hasText: answerText})
+  .locator(':scope > div')
+  .first();
+}
+
+function getPollVoteButton(poll) {
+  return poll.getByText('Vote', {exact: true});
+}
+
+function getPollResultIndicator(poll) {
+  return poll.getByText(/^(?:1 member voted|View Votes \(1\))$/);
+}
+
+async function readPollResultsDiagnostic(page, question, answerText) {
+  return page.evaluate(async({questionText, expectedAnswerText}) => {
+    const bubbles = [...document.querySelectorAll('#column-center .bubble[data-mid]')]
+    .filter((element) => element.textContent?.includes(questionText));
+    const bubble = bubbles.length === 1 ? bubbles[0] : undefined;
+    const isVisible = (element) => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    const leafTextCount = (element, text) => element ? [...element.querySelectorAll('*')]
+    .filter((node) => node.children.length === 0 && node.textContent?.trim() === text).length : 0;
+    const options = bubble ? [...bubble.querySelectorAll('[data-poll-option-idx]')] : [];
+    const answer = options.filter((element) => element.textContent?.includes(expectedAnswerText));
+    const resultIndicatorCount = bubble ? [...bubble.querySelectorAll('*')]
+    .filter((element) => element.children.length === 0 &&
+      ['1 member voted', 'View Votes (1)'].includes(element.textContent?.trim())).length : 0;
+    const voteButtonCount = leafTextCount(bubble, 'Vote');
+    const selectOptionCount = leafTextCount(bubble, 'Select an option');
+    const peerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
+    const midText = bubble?.dataset.mid;
+    const mid = midText && /^-?[0-9]{1,20}$/.test(midText) ? Number(midText) : NaN;
+    let message;
+    if(Number.isSafeInteger(peerId) && Number.isSafeInteger(mid)) {
+      try {
+        message = window.apiManagerProxy?.getMessageByPeer(peerId, mid) ||
+          window.rootScope?.managers?.appMessagesManager?.getMessageByPeer(peerId, mid);
+      } catch {}
+    }
+
+    const media = message?.media;
+    const storedQuestion = media?.poll?.question;
+    const storePollMatches = media?._ === 'messageMediaPoll' &&
+      (typeof storedQuestion === 'string' ? storedQuestion : storedQuestion?.text) === questionText;
+    let pollState;
+    if(storePollMatches) {
+      try {
+        pollState = await window.rootScope?.managers?.appPollsManager?.getPoll(media.poll.id);
+      } catch {}
+    }
+    const storedPoll = pollState?.poll;
+    const storedResults = pollState?.results;
+    const storeResultsFound = !!storedResults &&
+      (typeof storedResults.total_voters === 'number' || Array.isArray(storedResults.results));
+    const answerVoters = Array.isArray(storedResults?.results)
+      ? storedResults.results.slice(0, 2).map((entry) => Number.isSafeInteger(entry?.voters) ? entry.voters : null)
+      : null;
+    const visiblePollCount = bubble && isVisible(bubble) ? 1 : 0;
+    return {
+      messageFound: !!message,
+      storePollMatches,
+      storePollFound: !!storedPoll,
+      storeResultsFound,
+      storeTotalVoters: Number.isSafeInteger(storedResults?.total_voters) ? storedResults.total_voters : null,
+      storeAnswerVoters: answerVoters,
+      storeChosenIndexesCount: Array.isArray(storedPoll?.chosenIndexes) ? storedPoll.chosenIndexes.length : null,
+      storeClosed: typeof storedPoll?.pFlags?.closed === 'boolean' ? storedPoll.pFlags.closed : null,
+      domPollCount: bubbles.length,
+      domVisiblePollCount: visiblePollCount,
+      domOptionCount: options.length,
+      domResultIndicatorCount: resultIndicatorCount,
+      domVoteButtonCount: voteButtonCount,
+      domSelectOptionCount: selectOptionCount,
+      domAnswerOneCount: answer.length,
+      domAnswerOneCountCount: answer.length === 1 ? leafTextCount(answer[0], '1') : 0,
+      domAnswerOnePercentCount: answer.length === 1 ? leafTextCount(answer[0], '100%') : 0
+    };
+  }, {questionText: question, expectedAnswerText: answerText}).catch(() => ({
+    messageFound: false,
+    storePollMatches: null,
+    storePollFound: null,
+    storeResultsFound: null,
+    storeTotalVoters: null,
+    storeAnswerVoters: null,
+    storeChosenIndexesCount: null,
+    storeClosed: null,
+    domPollCount: null,
+    domVisiblePollCount: null,
+    domOptionCount: null,
+    domResultIndicatorCount: null,
+    domVoteButtonCount: null,
+    domSelectOptionCount: null,
+    domAnswerOneCount: null,
+    domAnswerOneCountCount: null,
+    domAnswerOnePercentCount: null
+  }));
+}
+
+function formatPollResultsDiagnostic(diagnostic) {
+  const safeBool = (value) => value === true ? 1 : value === false ? 0 : 'unavailable';
+  const safeCount = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 'unavailable';
+  const safeVoters = Array.isArray(diagnostic.storeAnswerVoters) && diagnostic.storeAnswerVoters.length === 2
+    ? diagnostic.storeAnswerVoters.map(safeCount).join('_')
+    : 'unavailable';
+  return `message_${safeBool(diagnostic.messageFound)}` +
+    `_store_poll_match_${safeBool(diagnostic.storePollMatches)}` +
+    `_store_poll_found_${safeBool(diagnostic.storePollFound)}` +
+    `_store_results_${safeBool(diagnostic.storeResultsFound)}` +
+    `_store_total_voters_${safeCount(diagnostic.storeTotalVoters)}` +
+    `_store_answer_voters_${safeVoters}` +
+    `_store_chosen_indexes_${safeCount(diagnostic.storeChosenIndexesCount)}` +
+    `_store_closed_${safeBool(diagnostic.storeClosed)}` +
+    `_dom_polls_${safeCount(diagnostic.domPollCount)}` +
+    `_dom_visible_polls_${safeCount(diagnostic.domVisiblePollCount)}` +
+    `_dom_options_${safeCount(diagnostic.domOptionCount)}` +
+    `_dom_result_indicators_${safeCount(diagnostic.domResultIndicatorCount)}` +
+    `_dom_vote_buttons_${safeCount(diagnostic.domVoteButtonCount)}` +
+    `_dom_select_option_${safeCount(diagnostic.domSelectOptionCount)}` +
+    `_dom_answer_matches_${safeCount(diagnostic.domAnswerOneCount)}` +
+    `_dom_answer_one_counts_${safeCount(diagnostic.domAnswerOneCountCount)}` +
+    `_dom_answer_one_percents_${safeCount(diagnostic.domAnswerOnePercentCount)}`;
+}
+
+async function capturePollState(page, screenshotDirectory, name, stage, capturedScreenshots) {
+  currentStage = stage;
+  await captureState(page, screenshotDirectory, name, capturedScreenshots).catch(() => failStage(stage));
+}
+
+async function waitForPollMessage(page, question, stage, timeoutMs = 30_000) {
+  currentStage = stage;
+  const poll = pollMessageLocator(page, question);
+  await poll.first().waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(stage));
+  if(await poll.count() !== 1) failStage(`${stage}_not_unique`);
+  const questionText = poll.getByText(question, {exact: true});
+  await questionText.waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_question`));
+  await page.waitForFunction(({questionText, expectedAnswers}) => {
+    const matches = [...document.querySelectorAll('#column-center .bubble')]
+    .filter((element) => element.textContent?.includes(questionText));
+    if(matches.length !== 1) return false;
+    const message = matches[0];
+    if(message.querySelectorAll('[data-poll-option-idx]').length !== 2) return false;
+    return expectedAnswers.every((answerText) => [...message.querySelectorAll('*')]
+    .filter((node) => node.children.length === 0 && node.textContent?.trim() === answerText).length === 1);
+  }, {questionText: question, expectedAnswers: [POLL_ANSWER_ONE, POLL_ANSWER_TWO]}, {timeout: timeoutMs}).catch(async() => {
+    const diagnostic = await readPollContentDiagnostic(poll, [POLL_ANSWER_ONE, POLL_ANSWER_TWO]);
+    failStage(`${stage}_answers_${formatPollContentDiagnostic(diagnostic)}`);
+  });
+  return poll;
+}
+
+async function assertPollContent(poll, {question, description, stage}) {
+  const questionMatches = poll.getByText(question, {exact: true});
+  if(await questionMatches.count() !== 1) failStage(`${stage}_question`);
+
+  const descriptionMatches = poll.getByText(POLL_DESCRIPTION, {exact: true});
+  if(description) {
+    if(await descriptionMatches.count() !== 1) failStage(`${stage}_description`);
+  } else if(await descriptionMatches.count() !== 0) {
+    failStage(`${stage}_empty_description`);
+  }
+
+  const answers = poll.locator('[data-poll-option-idx]');
+  if(await answers.count() !== 2) {
+    const diagnostic = await readPollContentDiagnostic(poll, [POLL_ANSWER_ONE, POLL_ANSWER_TWO]);
+    failStage(`${stage}_answers_${formatPollContentDiagnostic(diagnostic)}`);
+  }
+  for(const [index, answerText] of [POLL_ANSWER_ONE, POLL_ANSWER_TWO].entries()) {
+    if(await poll.getByText(answerText, {exact: true}).count() !== 1) {
+      const diagnostic = await readPollContentDiagnostic(poll, [POLL_ANSWER_ONE, POLL_ANSWER_TWO]);
+      failStage(`${stage}_answer_${index + 1}_${formatPollContentDiagnostic(diagnostic)}`);
+    }
+  }
+}
+
+async function readPollContentDiagnostic(poll, answerTexts) {
+  return poll.evaluate((poll, {expectedAnswers}) => {
+    const isVisible = (element) => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    const countText = (element, answerText, visibleOnly) => element ? [...element.querySelectorAll('*')]
+    .filter((node) => node.children.length === 0 && node.textContent?.trim() === answerText &&
+      (!visibleOnly || isVisible(node))).length : 0;
+    const options = [...poll.querySelectorAll('[data-poll-option-idx]')];
+    return {
+      rowVisible: isVisible(poll),
+      optionCount: options.length,
+      visibleOptionCount: options.filter(isVisible).length,
+      answerTextCounts: expectedAnswers.map((answerText) => countText(poll, answerText, false)),
+      visibleAnswerTextCounts: expectedAnswers.map((answerText) => countText(poll, answerText, true)),
+      answerOptionCounts: expectedAnswers.map((answerText) => options.filter((option) => option.textContent?.includes(answerText)).length)
+    };
+  }, {expectedAnswers: answerTexts}).catch(() => ({
+    rowVisible: null,
+    optionCount: null,
+    visibleOptionCount: null,
+    answerTextCounts: null,
+    visibleAnswerTextCounts: null,
+    answerOptionCounts: null
+  }));
+}
+
+function formatPollContentDiagnostic(diagnostic) {
+  const safeBool = (value) => value === true ? 1 : value === false ? 0 : 'unavailable';
+  const safeCount = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 'unavailable';
+  const safePair = (values) => Array.isArray(values) && values.length === 2 ? values.map(safeCount).join('_') : 'unavailable';
+  return `row_visible_${safeBool(diagnostic.rowVisible)}` +
+    `_options_${safeCount(diagnostic.optionCount)}_visible_options_${safeCount(diagnostic.visibleOptionCount)}` +
+    `_answer_text_counts_${safePair(diagnostic.answerTextCounts)}` +
+    `_visible_answer_text_counts_${safePair(diagnostic.visibleAnswerTextCounts)}` +
+    `_answer_options_${safePair(diagnostic.answerOptionCounts)}`;
+}
+
+async function attachSyntheticPollAnswerLink(page, popup, stage) {
+  currentStage = `${stage}_answer_media_button`;
+  const answerInput = popup.locator('[contenteditable="true"]').nth(2);
+  const answer = answerInput.locator('xpath=../..');
+  const attachButtons = answer.locator('button.btn-icon');
+  const attachButton = attachButtons.last();
+  if(await attachButtons.count() < 1) failStage(`${stage}_answer_media_button_absent`);
+
+  await attachButton.click().catch(() => failStage(`${stage}_answer_media_button`));
+  const attachMenu = page.locator('.btn-menu:visible').last();
+  const linkOption = attachMenu.getByText('Add Link', {exact: true});
+  await linkOption.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`${stage}_answer_media_menu`));
+  await linkOption.click().catch(() => failStage(`${stage}_answer_media_menu`));
+
+  currentStage = `${stage}_answer_media_link`;
+  const linkPopup = page.locator('.popup').filter({hasText: 'Add Link'}).last();
+  await linkPopup.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`${stage}_answer_media_link`));
+  await linkPopup.locator('input[name="url"]').fill(POLL_ANSWER_LINK).catch(() => failStage(`${stage}_answer_media_link_url`));
+  const done = linkPopup.getByRole('button', {name: 'Done', exact: true});
+  await done.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`${stage}_answer_media_link_done`));
+  await done.click().catch(() => failStage(`${stage}_answer_media_link_done`));
+  await linkPopup.waitFor({state: 'detached', timeout: 10_000}).catch(() => failStage(`${stage}_answer_media_link_close`));
+  await answer.getByRole('button', {name: 'Add Link', exact: true})
+  .waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_answer_media_attached`));
+}
+
+async function openPollComposer(page, {stage, question, description, mediaAnswer, screenshotDirectory, capturedScreenshots,
+  submission = {createClicked: false, composerClosed: false}}) {
+  currentStage = `${stage}_open_menu`;
+  const attachMenu = page.locator('#column-center .chat.active .new-message-wrapper > .attach-file');
+  await attachMenu.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_open_menu`));
+  await attachMenu.click().catch(() => failStage(`${stage}_open_menu`));
+
+  currentStage = `${stage}_open`;
+  const attachOptions = page.locator('.btn-menu:visible').last();
+  const pollOption = attachOptions.getByText('Poll', {exact: true});
+  await pollOption.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`${stage}_open`));
+  await pollOption.click().catch(() => failStage(`${stage}_open`));
+
+  currentStage = `${stage}_popup`;
+  const popup = page.locator('.popup').filter({hasText: 'New Poll'}).last();
+  await popup.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_popup`));
+  const fields = popup.locator('[contenteditable="true"]');
+  if(await fields.count() !== 4) failStage(`${stage}_fields`);
+  await fields.nth(0).fill(question).catch(() => failStage(`${stage}_question_fill`));
+  await fields.nth(1).fill(description).catch(() => failStage(`${stage}_description_fill`));
+  await fields.nth(2).fill(POLL_ANSWER_ONE).catch(() => failStage(`${stage}_answer_1_fill`));
+  await fields.nth(3).fill(POLL_ANSWER_TWO).catch(() => failStage(`${stage}_answer_2_fill`));
+  if(mediaAnswer) await attachSyntheticPollAnswerLink(page, popup, stage);
+
+  await capturePollState(
+    page,
+    screenshotDirectory,
+    `${stage.replaceAll('_', '-')}-composer`,
+    `${stage}_composer_screenshot`,
+    capturedScreenshots
+  );
+
+  currentStage = `${stage}_create`;
+  const createButton = popup.getByRole('button', {name: 'Create', exact: true});
+  await createButton.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`${stage}_create`));
+  const rpcErrorsBeforeCreation = await readRpcErrorCounts(page);
+  const clientErrorsBeforeCreation = {...clientErrorCounts.get(page)};
+  await createButton.click().catch(() => failStage(`${stage}_create`));
+  submission.createClicked = true;
+  await popup.waitFor({state: 'detached', timeout: 15_000}).catch(() => failStage(`${stage}_popup_close`));
+  submission.composerClosed = true;
+  return {rpc: rpcErrorsBeforeCreation, client: clientErrorsBeforeCreation, submission: {...submission}};
+}
+
+function getPollCreationRejectionErrorType(diagnostic) {
+  const messageErrorType = diagnostic?.messageError?.type;
+  if(typeof messageErrorType === 'string' && RPC_ERROR_TYPE_PATTERN.test(messageErrorType)) return messageErrorType;
+  const sendMediaErrorType = diagnostic?.sendMediaError?.type;
+  if(typeof sendMediaErrorType === 'string' && RPC_ERROR_TYPE_PATTERN.test(sendMediaErrorType)) return sendMediaErrorType;
+  return Object.entries(diagnostic?.rpcErrorTypes || {}).find(([type, count]) =>
+    RPC_ERROR_TYPE_PATTERN.test(type) && Number.isSafeInteger(count) && count > 0
+  )?.[0] || null;
+}
+
+function isExpectedPollCreationRejection(diagnostic, expectedErrorType) {
+  return diagnostic?.status === 'error' &&
+    diagnostic.createClicked === true &&
+    diagnostic.composerClosed === true &&
+    diagnostic.tempMessageFound === true &&
+    diagnostic.sendResult === 'rejected' &&
+    Array.isArray(diagnostic.bubbleStatuses) && diagnostic.bubbleStatuses.includes('is-error') &&
+    getPollCreationRejectionErrorType(diagnostic) === expectedErrorType;
+}
+
+async function runPollCreationNegativeControl({alice, bob, runtime, groupName, screenshotDirectory, capturedScreenshots}) {
+  const cases = [
+    {
+      shape: 'description',
+      stage: 'alice_poll_description_create',
+      question: `browser-ci-poll-description-${runtime.runId.slice(0, 8)}`,
+      description: POLL_DESCRIPTION,
+      mediaAnswer: false,
+      errorType: 'POLL_ANSWERS_INVALID'
+    },
+    {
+      shape: 'input_answer',
+      stage: 'alice_poll_input_answer_create',
+      question: `browser-ci-poll-input-answer-${runtime.runId.slice(0, 8)}`,
+      description: '',
+      mediaAnswer: true,
+      errorType: 'POLL_ANSWERS_INVALID'
+    }
+  ];
+
+  await ensurePollGroupActive(alice.page, groupName, 'alice_poll_group_chat');
+  await ensurePollGroupActive(bob.page, groupName, 'bob_poll_group_chat');
+  await installPollMessageErrorObserver(alice.page);
+  const evidence = [];
+  const sendResults = [];
+  for(const testCase of cases) {
+    const pollErrorStart = await alice.page.evaluate(() => window.__realClientPollErrors?.().length || 0).catch(() => 0);
+    const workerErrorsBefore = alice.observer?.workerErrorSnapshot?.();
+    const submission = {createClicked: false, composerClosed: false};
+    await alice.page.evaluate((question) => { window.__realClientActivePollQuestion = question; }, testCase.question);
+    let rpcErrorsBeforeCreation;
+    const creationEvidence = await openPollComposer(alice.page, {
+      stage: testCase.stage.replace('_create', ''),
+      question: testCase.question,
+      description: testCase.description,
+      mediaAnswer: testCase.mediaAnswer,
+      screenshotDirectory,
+      capturedScreenshots,
+      submission
+    });
+    rpcErrorsBeforeCreation = creationEvidence?.rpc;
+    const sendStatus = await waitForPollSendOutcome(alice.page, testCase.question, testCase.stage);
+    const sendDiagnostic = await readPollSendDiagnostic(
+      alice.page,
+      testCase.question,
+      sendStatus,
+      pollErrorStart,
+      rpcErrorsBeforeCreation,
+      submission,
+      workerErrorsBefore,
+      alice.observer?.workerErrorSnapshot?.()
+    );
+    sendResults.push({shape: testCase.shape, ...sendDiagnostic});
+    const actualErrorType = getPollCreationRejectionErrorType(sendDiagnostic);
+    if(!isExpectedPollCreationRejection(sendDiagnostic, testCase.errorType)) {
+      failStage(`${testCase.stage}_${formatPollSendDiagnostic({shape: testCase.shape, ...sendDiagnostic})}`);
+    }
+    const bobPoll = pollMessageLocator(bob.page, testCase.question);
+    if(await bobPoll.count() !== 0) failStage(`${testCase.stage}_delivered`);
+    await capturePollState(
+      alice.page,
+      screenshotDirectory,
+      `${testCase.shape.replaceAll('_', '-')}-poll-rejected`,
+      `${testCase.stage}_rejection_screenshot`,
+      capturedScreenshots
+    );
+    evidence.push({shape: testCase.shape, stage: testCase.stage, errorType: actualErrorType});
+  }
+
+  if(JSON.stringify(evidence) !== JSON.stringify(POLL_NEGATIVE_CONTROL)) {
+    failStage('alice_poll_negative_control_evidence');
+  }
+  return {evidence, sendResults};
+}
+
+async function installPollMessageErrorObserver(page) {
+  const observerReady = await page.waitForFunction(() =>
+    typeof window.rootScope?.addEventListener === 'function' &&
+    typeof window.apiManagerProxy?.getMessageByPeer === 'function'
+  , undefined, {timeout: 15_000}).catch(() => undefined);
+  if(!observerReady) failStage('alice_poll_message_error_observer');
+  await page.evaluate(() => {
+    if(typeof window.__realClientPollErrors === 'function') return;
+
+    const errorTypePattern = /^[A-Z][A-Z0-9_]{1,63}$/;
+    const safeError = (error) => {
+      if(!error || typeof error !== 'object') return null;
+      const type = typeof error.type === 'string' && errorTypePattern.test(error.type) ? error.type : 'unclassified';
+      const code = Number.isSafeInteger(error.code) ? error.code : null;
+      const message = typeof error.message === 'string' && errorTypePattern.test(error.message) ? error.message : null;
+      return {type, code, message};
+    };
+    const safeRandomId = (value) => {
+      if(value === undefined || value === null) return null;
+      let randomId;
+      try {
+        randomId = String(value);
+      } catch {
+        return null;
+      }
+      return /^-?[0-9]{1,24}$/.test(randomId) ? randomId : null;
+    };
+    const safeMessageId = (value) => {
+      if(value === undefined || value === null) return null;
+      const messageId = String(value);
+      return /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(messageId) ? messageId : null;
+    };
+    const errors = [];
+    const sendOutcomes = [];
+    const sendMediaOutcomes = [];
+    let sendMediaObserverInstalled = false;
+    const capturePollError = (source, message, error, tempId, peerId) => {
+      const pollQuestion = message?.media?.poll?.question;
+      const questionText = typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text;
+      const activeQuestion = window.__realClientActivePollQuestion;
+      const activePeerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
+      const matchesStoredPoll = message?.media?._ === 'messageMediaPoll' && questionText === activeQuestion;
+      const messageId = safeMessageId(tempId ?? message?.mid);
+      const matchesRenderedPoll = Number(peerId ?? message?.peerId) === activePeerId && messageId !== null &&
+        [...document.querySelectorAll('#column-center .bubble[data-mid]')].filter((bubble) =>
+          bubble.dataset.mid === messageId && bubble.textContent?.includes(activeQuestion)
+        ).length === 1;
+      if(!matchesStoredPoll && !matchesRenderedPoll) return;
+      errors.push({
+        source,
+        question: activeQuestion,
+        isPoll: true,
+        peerId: Number.isSafeInteger(peerId ?? message?.peerId) ? peerId ?? message?.peerId : null,
+        tempId: messageId,
+        randomId: safeRandomId(message?.random_id),
+        messageFound: !!message,
+        storedError: safeError(message?.error),
+        eventError: safeError(error)
+      });
+    };
+    window.rootScope.addEventListener('message_error', ({peerId, tempId, error}) => {
+      let message;
+      try {
+        message = window.apiManagerProxy.getMessageByPeer(peerId, tempId) ||
+          window.rootScope.managers?.appMessagesManager?.getMessageByPeer(peerId, tempId);
+      } catch {}
+      capturePollError('message_error', message, error, tempId, peerId);
+    });
+    const getPollQuestion = (message) => {
+      const pollQuestion = message?.media?.poll?.question;
+      return typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text;
+    };
+    const capturePollDom = (questionText, messageId, tempId) => {
+      const center = document.querySelector('#column-center');
+      const bubbleRows = center ? [...center.querySelectorAll('.bubble[data-mid]')] : [];
+      const dataMidNodes = center ? [...center.querySelectorAll('[data-mid]')] : [];
+      const questionRows = center ? [...center.querySelectorAll('.bubble')]
+      .filter((element) => element.textContent?.includes(questionText)) : [];
+      const countByMid = (elements, id) => id === null ? 0 : elements
+      .filter((element) => element.dataset.mid === id).length;
+      const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const matchingQuestionTextNodes = [];
+      if(center) {
+        const walker = document.createTreeWalker(center, NodeFilter.SHOW_TEXT);
+        let node;
+        while((node = walker.nextNode())) {
+          if(node.nodeValue?.includes(questionText)) matchingQuestionTextNodes.push(node);
+        }
+      }
+      return {
+        bubbleRowCount: bubbleRows.length,
+        serverMidNodeCount: countByMid(dataMidNodes, messageId),
+        serverMidRowCount: countByMid(bubbleRows, messageId),
+        tempMidNodeCount: countByMid(dataMidNodes, tempId),
+        tempMidRowCount: countByMid(bubbleRows, tempId),
+        questionTextNodeCount: matchingQuestionTextNodes.length,
+        questionVisibleTextNodeCount: matchingQuestionTextNodes.filter((node) => isVisible(node.parentElement)).length,
+        questionRowCount: questionRows.length,
+        questionVisibleRowCount: questionRows.filter(isVisible).length
+      };
+    };
+    Object.defineProperty(window, '__realClientPollDomSnapshot', {
+      value: capturePollDom,
+      configurable: false
+    });
+    window.rootScope.addEventListener('message_sent', ({tempId, tempMessage, mid, message}) => {
+      const activeQuestion = window.__realClientActivePollQuestion;
+      if(!activeQuestion || (getPollQuestion(tempMessage) !== activeQuestion && getPollQuestion(message) !== activeQuestion)) return;
+      if(sendOutcomes.length >= 16) return;
+      const messageId = safeMessageId(mid ?? message?.mid);
+      const peerId = Number(message?.peerId ?? tempMessage?.peerId);
+      let storeMidPresent = null;
+      let storePollMatches = null;
+      if(messageId !== null && Number.isSafeInteger(peerId) && typeof window.apiManagerProxy?.getMessageByPeer === 'function') {
+        try {
+          const storedMessage = window.apiManagerProxy.getMessageByPeer(peerId, Number(messageId));
+          if(!storedMessage) {
+            storeMidPresent = false;
+            storePollMatches = false;
+          } else {
+            const storedMid = Number(storedMessage.mid);
+            const storedPeerId = storedMessage.peerId === undefined ? peerId : Number(storedMessage.peerId);
+            storeMidPresent = storedMid === Number(messageId) && storedPeerId === peerId;
+            storePollMatches = storeMidPresent && storedMessage.media?._ === 'messageMediaPoll' &&
+              getPollQuestion(storedMessage) === activeQuestion;
+          }
+        } catch {}
+      }
+      const safeTempId = safeMessageId(tempId ?? tempMessage?.mid);
+      sendOutcomes.push({
+        source: 'message_sent',
+        question: activeQuestion,
+        tempId: safeTempId,
+        messageId,
+        randomId: safeRandomId(tempMessage?.random_id),
+        storeMidPresent,
+        storePollMatches,
+        domAtEvent: capturePollDom(activeQuestion, messageId, safeTempId)
+      });
+    });
+    const pollApiManager = window.rootScope.managers?.appPollsManager?.apiManager;
+    if(pollApiManager && typeof pollApiManager.invokeApi === 'function') {
+      const invokeApi = pollApiManager.invokeApi;
+      try {
+        pollApiManager.invokeApi = function(method, params) {
+          const poll = params?.media?._ === 'inputMediaPoll' ? params.media.poll : undefined;
+          const question = typeof poll?.question === 'string' ? poll.question : poll?.question?.text;
+          const activeQuestion = window.__realClientActivePollQuestion;
+          if(method !== 'messages.sendMedia' || question !== activeQuestion) {
+            return invokeApi.apply(this, arguments);
+          }
+
+          const outcome = {
+            source: 'messages.sendMedia',
+            question: activeQuestion,
+            randomId: safeRandomId(params.random_id),
+            status: 'pending',
+            resultType: null,
+            responseMessageId: null,
+            inputAnswerCount: Array.isArray(poll.answers) ? poll.answers.filter((answer) => answer?._ === 'inputPollAnswer').length : null,
+            descriptionEmpty: params.message === '',
+            error: null
+          };
+          if(sendMediaOutcomes.length < 16) sendMediaOutcomes.push(outcome);
+
+          const recordResult = (result, error) => {
+            outcome.status = error ? 'rejected' : 'resolved';
+            const resultType = result?._;
+            outcome.resultType = typeof resultType === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(resultType)
+              ? resultType
+              : null;
+            const updates = Array.isArray(result?.updates) ? result.updates : [result];
+            for(const update of updates) {
+              const rawMessageId = update?.message?.id ?? update?.message?.mid ??
+                (update?._ === 'updateShortSentMessage' ? update.id : undefined);
+              const messageId = safeMessageId(rawMessageId);
+              if(messageId !== null) {
+                outcome.responseMessageId = messageId;
+                break;
+              }
+            }
+            outcome.error = error ? safeError(error) : null;
+          };
+
+          let request;
+          try {
+            request = invokeApi.apply(this, arguments);
+          } catch(error) {
+            recordResult(undefined, error);
+            throw error;
+          }
+          if(request && typeof request.then === 'function') {
+            try {
+              request.then((result) => recordResult(result), (error) => recordResult(undefined, error));
+            } catch {}
+          } else {
+            recordResult(request);
+          }
+          return request;
+        };
+        sendMediaObserverInstalled = pollApiManager.invokeApi !== invokeApi;
+      } catch {}
+    }
+    const appMessagesManager = window.rootScope.managers?.appMessagesManager;
+    if(typeof appMessagesManager?.toggleError === 'function') {
+      const toggleError = appMessagesManager.toggleError;
+      appMessagesManager.toggleError = function(message, error, repayRequest) {
+        const result = toggleError.call(this, message, error, repayRequest);
+        capturePollError('toggle_error', message, error, message?.mid, message?.peerId);
+        return result;
+      };
+    }
+    Object.defineProperty(window, '__realClientPollErrors', {
+      value: () => errors.slice(),
+      configurable: false
+    });
+    Object.defineProperty(window, '__realClientPollSendOutcomes', {
+      value: () => sendOutcomes.slice(),
+      configurable: false
+    });
+    Object.defineProperty(window, '__realClientPollApiOutcomes', {
+      value: () => sendMediaOutcomes.slice(),
+      configurable: false
+    });
+    Object.defineProperty(window, '__realClientPollApiObserverInstalled', {
+      value: () => sendMediaObserverInstalled,
+      configurable: false
+    });
+  });
+}
+
+async function waitForPollSendOutcome(page, question, stage, timeoutMs = 30_000) {
+  currentStage = stage;
+  const outcome = await page.waitForFunction((questionText) => {
+    if(window.__realClientPollSendOutcomes?.().some((entry) => entry.question === questionText)) return 'sent';
+    if(window.__realClientPollErrors?.().some((entry) => entry.question === questionText)) return 'error';
+    const apiOutcome = window.__realClientPollApiOutcomes?.().filter((entry) => entry.question === questionText).at(-1);
+    if(apiOutcome?.status === 'rejected') return 'error';
+    const matches = [...document.querySelectorAll('#column-center .bubble')]
+    .filter((element) => element.textContent?.includes(questionText));
+    if(matches.length !== 1) return false;
+    if(matches[0].classList.contains('is-error')) return 'error';
+    if(matches[0].classList.contains('is-sent') || matches[0].classList.contains('is-read')) return 'sent';
+    return false;
+  }, question, {timeout: timeoutMs}).catch(() => undefined);
+  return outcome ? outcome.jsonValue() : 'timeout';
+}
+
+async function readPollSendDiagnostic(page, question, status, errorStart, rpcErrorsBefore, submission = {}, workerErrorsBefore, workerErrorsAfter) {
+  const [messageState, errors, sendOutcomes, rpcErrors, sendMediaOutcomes, sendMediaObserverInstalled] = await Promise.all([
+    page.evaluate((questionText) => {
+      const peerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
+      const statusClasses = ['is-sending', 'is-error', 'is-sent', 'is-read'];
+      const errorTypePattern = /^[A-Z][A-Z0-9_]{1,63}$/;
+      const safeError = (error) => {
+        if(!error || typeof error !== 'object') return null;
+        const type = typeof error.type === 'string' && errorTypePattern.test(error.type) ? error.type : 'unclassified';
+        const code = Number.isSafeInteger(error.code) ? error.code : null;
+        const message = typeof error.message === 'string' && errorTypePattern.test(error.message) ? error.message : null;
+        return {type, code, message};
+      };
+      const safeNumericIdentifier = (value) => {
+        if(value === undefined || value === null) return null;
+        let identifier;
+        try {
+          identifier = String(value);
+        } catch {
+          return null;
+        }
+        return /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(identifier) ? identifier : null;
+      };
+      const safeRandomId = (value) => {
+        const identifier = safeNumericIdentifier(value);
+        return identifier !== null && /^-?[0-9]{1,24}$/.test(identifier) ? identifier : null;
+      };
+      const matches = [...document.querySelectorAll('#column-center .bubble[data-mid]')].map((element) => {
+        const tempId = safeNumericIdentifier(element.dataset.mid);
+        let message;
+        const numericTempId = Number(tempId);
+        if(Number.isSafeInteger(peerId) && tempId !== null && Number.isFinite(numericTempId) &&
+            Math.abs(numericTempId) <= Number.MAX_SAFE_INTEGER) {
+          try {
+            message = window.apiManagerProxy?.getMessageByPeer(peerId, Number(tempId)) ||
+              window.rootScope?.managers?.appMessagesManager?.getMessageByPeer(peerId, Number(tempId));
+          } catch {}
+        }
+        const pollQuestion = message?.media?.poll?.question;
+        const matchesStoredPoll = message?.media?._ === 'messageMediaPoll' &&
+          (typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text) === questionText;
+        const matchesRenderedPoll = element.textContent?.includes(questionText) === true;
+        if(!matchesStoredPoll && !matchesRenderedPoll) return null;
+        return {
+          tempId: safeNumericIdentifier(message?.mid) || tempId,
+          randomId: safeRandomId(message?.random_id),
+          statuses: statusClasses.filter((name) => element.classList.contains(name)),
+          error: safeError(message?.error)
+        };
+      }).filter(Boolean);
+      const match = matches.length === 1 ? matches[0] : undefined;
+      return {
+        found: !!match,
+        candidateCount: matches.length,
+        tempId: match?.tempId ?? null,
+        randomId: match?.randomId ?? null,
+        statuses: match?.statuses || [],
+        error: match?.error || null
+      };
+    }, question).catch(() => ({found: false, candidateCount: null, tempId: null, randomId: null, statuses: [], error: null})),
+    page.evaluate(() => window.__realClientPollErrors?.() || []).catch(() => []),
+    page.evaluate(() => window.__realClientPollSendOutcomes?.() || []).catch(() => []),
+    readRpcErrorCounts(page),
+    page.evaluate(() => window.__realClientPollApiOutcomes?.() || []).catch(() => []),
+    page.evaluate(() => window.__realClientPollApiObserverInstalled?.() === true).catch(() => false)
+  ]);
+  const newErrors = errors.slice(Number.isSafeInteger(errorStart) ? errorStart : 0);
+  const matchingErrors = newErrors.filter((entry) => entry.question === question ||
+    (messageState.tempId !== null && String(entry.tempId) === messageState.tempId));
+  const messageError = matchingErrors.find((entry) => entry.source === 'toggle_error' && entry.storedError) ||
+    matchingErrors.at(-1);
+  const matchingSendOutcomes = sendOutcomes.filter((entry) => entry.question === question);
+  const sendOutcome = matchingSendOutcomes.at(-1);
+  const matchingSendMediaOutcomes = sendMediaOutcomes.filter((entry) => entry.question === question);
+  const sendMediaOutcome = matchingSendMediaOutcomes.at(-1);
+  const apiMessageError = sendMediaOutcome?.error;
+  const [apiStoreState, renderedPollDom, selectorCount, selectorVisibleCount] = await Promise.all([
+    page.evaluate(({messageId, questionText}) => {
+      if(messageId === null) return {storeMidPresent: null, storePollMatches: null};
+      const peerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
+      const numericMessageId = Number(messageId);
+      if(!Number.isSafeInteger(peerId) || !Number.isSafeInteger(numericMessageId)) {
+        return {storeMidPresent: null, storePollMatches: null};
+      }
+      let storedMessage;
+      try {
+        storedMessage = window.apiManagerProxy?.getMessageByPeer(peerId, numericMessageId) ||
+          window.rootScope?.managers?.appMessagesManager?.getMessageByPeer(peerId, numericMessageId);
+      } catch {}
+      if(!storedMessage) return {storeMidPresent: false, storePollMatches: false};
+      const storedPeerId = storedMessage.peerId === undefined ? peerId : Number(storedMessage.peerId);
+      const storedMid = Number(storedMessage.mid);
+      const storeMidPresent = storedMid === numericMessageId && storedPeerId === peerId;
+      const pollQuestion = storedMessage.media?.poll?.question;
+      return {
+        storeMidPresent,
+        storePollMatches: storeMidPresent && storedMessage.media?._ === 'messageMediaPoll' &&
+          (typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text) === questionText
+      };
+    }, {messageId: sendMediaOutcome?.responseMessageId || null, questionText: question})
+    .catch(() => ({storeMidPresent: null, storePollMatches: null})),
+    page.evaluate(({questionText, messageId, tempId}) =>
+      window.__realClientPollDomSnapshot?.(questionText, messageId, tempId) || null,
+    {questionText: question, messageId: sendOutcome?.messageId || sendMediaOutcome?.responseMessageId || null, tempId: sendOutcome?.tempId || null}
+    ).catch(() => null),
+    pollMessageLocator(page, question).count().catch(() => null),
+    pollMessageLocator(page, question).evaluateAll((elements) => elements.filter((element) => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    }).length).catch(() => null)
+  ]);
+  if(renderedPollDom) {
+    renderedPollDom.selectorCount = selectorCount;
+    renderedPollDom.selectorVisibleCount = selectorVisibleCount;
+  }
+  const rpcErrorDelta = rpcErrorsSince(rpcErrorsBefore, rpcErrors);
+  const workerErrorDelta = workerErrorsSince(workerErrorsBefore, workerErrorsAfter);
+  return {
+    status,
+    createClicked: submission.createClicked === true,
+    composerClosed: submission.composerClosed === true,
+    tempMessageFound: messageState.found,
+    tempCandidateCount: messageState.candidateCount,
+    tempId: messageState.tempId || sendOutcome?.tempId || messageError?.tempId || null,
+    bubbleStatuses: messageState.statuses,
+    randomId: messageState.randomId || sendOutcome?.randomId || messageError?.randomId || sendMediaOutcome?.randomId || null,
+    messageError: messageState.error || messageError?.storedError || messageError?.eventError || apiMessageError || null,
+    messageErrorStored: !!(messageState.error || messageError?.storedError),
+    sendResult: sendOutcome || sendMediaOutcome?.status === 'resolved' ? 'accepted' :
+      sendMediaOutcome?.status === 'rejected' || messageError ? 'rejected' : 'unobserved',
+    sendResultCount: sendOutcome ? matchingSendOutcomes.length :
+      ['resolved', 'rejected'].includes(sendMediaOutcome?.status) ? 1 : messageError ? 1 : 0,
+    sendResultSource: sendOutcome?.source ||
+      (['resolved', 'rejected'].includes(sendMediaOutcome?.status) ? sendMediaOutcome.source : messageError?.source) || null,
+    sentTempId: sendOutcome?.tempId || null,
+    sentMessageId: sendOutcome?.messageId || sendMediaOutcome?.responseMessageId || null,
+    sentRandomId: sendOutcome?.randomId || sendMediaOutcome?.randomId || null,
+    sentMessageStore: sendOutcome?.storeMidPresent === true || apiStoreState.storeMidPresent === true ? 'present' :
+      sendOutcome?.storeMidPresent === false || apiStoreState.storeMidPresent === false ? 'missing' : null,
+    sentPollStoreMatch: sendOutcome?.storePollMatches === true || apiStoreState.storePollMatches === true ? true :
+      sendOutcome?.storePollMatches === false || apiStoreState.storePollMatches === false ? false : null,
+    sentDomAtEvent: sendOutcome?.domAtEvent || null,
+    sendMediaObserverInstalled,
+    sendMediaCallCount: matchingSendMediaOutcomes.length,
+    sendMediaStatus: sendMediaOutcome?.status || null,
+    sendMediaResultType: sendMediaOutcome?.resultType || null,
+    sendMediaResponseMessageId: sendMediaOutcome?.responseMessageId || null,
+    sendMediaInputAnswerCount: sendMediaOutcome?.inputAnswerCount ?? null,
+    sendMediaDescriptionEmpty: sendMediaOutcome?.descriptionEmpty ?? null,
+    sendMediaError: apiMessageError || null,
+    renderedPollDom,
+    rpcErrorCount: rpcErrorDelta.rpcErrorsSinceSelection,
+    rpcErrorTypes: rpcErrorDelta.rpcErrorTypesSinceSelection || {},
+    workerEvaluationExceptions: workerErrorDelta.evaluationExceptions,
+    workerErrorTypes: workerErrorDelta.errorTypes
+  };
+}
+
+function workerErrorsSince(before, after) {
+  const isSnapshot = (value) => value && Number.isSafeInteger(value.evaluationExceptions) &&
+    value.evaluationExceptions >= 0 && value.errorTypes && typeof value.errorTypes === 'object' && !Array.isArray(value.errorTypes);
+  if(!isSnapshot(before) || !isSnapshot(after)) return {evaluationExceptions: null, errorTypes: {}};
+  const errorTypes = {};
+  for(const type of observation.WORKER_FAILURE_STATES) {
+    const beforeCount = Number.isSafeInteger(before.errorTypes[type]) ? before.errorTypes[type] : 0;
+    const afterCount = Number.isSafeInteger(after.errorTypes[type]) ? after.errorTypes[type] : 0;
+    if(afterCount > beforeCount) errorTypes[type] = afterCount - beforeCount;
+  }
+  return {
+    evaluationExceptions: Math.max(after.evaluationExceptions - before.evaluationExceptions, 0),
+    errorTypes
+  };
+}
+
+function formatPollSendDiagnostic({shape, status, createClicked, composerClosed, tempMessageFound, tempCandidateCount, tempId,
+  bubbleStatuses, randomId, messageError, messageErrorStored, sendResult, sendResultCount, sentMessageId, sentMessageStore,
+  sentPollStoreMatch, sentDomAtEvent, sendMediaObserverInstalled, sendMediaCallCount, sendMediaStatus, sendMediaResultType,
+  sendMediaResponseMessageId, sendMediaInputAnswerCount, sendMediaDescriptionEmpty, sendMediaError,
+  renderedPollDom, rpcErrorCount, rpcErrorTypes,
+  workerEvaluationExceptions, workerErrorTypes}) {
+  const safeShape = ['description', 'input_answer'].includes(shape) ? shape : 'unclassified';
+  const safeStatus = ['sent', 'error', 'timeout'].includes(status) ? status : 'unavailable';
+  const safeErrorType = (value) => typeof value === 'string' && RPC_ERROR_TYPE_PATTERN.test(value) ? value : 'unclassified';
+  const safeError = messageError && typeof messageError === 'object' ? {
+    type: safeErrorType(messageError.type),
+    code: Number.isSafeInteger(messageError.code) ? messageError.code : null,
+    message: typeof messageError.message === 'string' && RPC_ERROR_TYPE_PATTERN.test(messageError.message)
+      ? messageError.message
+      : null
+  } : null;
+  const error = safeError
+    ? `${safeError.type}_code_${safeError.code ?? 'none'}_message_${safeError.message || 'none'}`
+    : 'error_unavailable';
+  const safeId = typeof randomId === 'string' && /^-?[0-9]{1,24}$/.test(randomId) ? randomId : 'unavailable';
+  const safeTempId = typeof tempId === 'string' && /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(tempId)
+    ? tempId
+    : Number.isSafeInteger(tempId) ? tempId : 'unavailable';
+  const safeStatusClasses = new Set(['is-sending', 'is-error', 'is-sent', 'is-read']);
+  const statuses = Array.isArray(bubbleStatuses) ? bubbleStatuses.filter((value) => safeStatusClasses.has(value)).join('+') || 'none' : 'unavailable';
+  const safeRpcTypes = Object.keys(rpcErrorTypes || {}).filter((type) => RPC_ERROR_TYPE_PATTERN.test(type)).slice(0, RPC_ERROR_TYPE_LIMIT).join('+') || 'none';
+  const safeWorkerTypes = Object.keys(workerErrorTypes || {}).filter((type) => observation.WORKER_FAILURE_STATES.includes(type)).join('+') || 'none';
+  const safeRpcCount = Number.isSafeInteger(rpcErrorCount) && rpcErrorCount >= 0 ? rpcErrorCount : 'unavailable';
+  const safeWorkerExceptions = Number.isSafeInteger(workerEvaluationExceptions) && workerEvaluationExceptions >= 0
+    ? workerEvaluationExceptions
+    : 'unavailable';
+  const safeSendResult = ['accepted', 'rejected', 'unobserved'].includes(sendResult) ? sendResult : 'unavailable';
+  const safeSendResultCount = Number.isSafeInteger(sendResultCount) && sendResultCount >= 0 ? sendResultCount : 'unavailable';
+  const safeSendMediaCallCount = Number.isSafeInteger(sendMediaCallCount) && sendMediaCallCount >= 0 ? sendMediaCallCount : 'unavailable';
+  const safeSendMediaStatus = ['pending', 'resolved', 'rejected'].includes(sendMediaStatus) ? sendMediaStatus : 'unavailable';
+  const safeSendMediaType = typeof sendMediaResultType === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(sendMediaResultType)
+    ? sendMediaResultType
+    : 'unavailable';
+  const safeSendMediaError = sendMediaError && typeof sendMediaError === 'object' ? {
+    type: safeErrorType(sendMediaError.type),
+    code: Number.isSafeInteger(sendMediaError.code) ? sendMediaError.code : null,
+    message: typeof sendMediaError.message === 'string' && RPC_ERROR_TYPE_PATTERN.test(sendMediaError.message)
+      ? sendMediaError.message
+      : null
+  } : null;
+  const sendMediaErrorSummary = safeSendMediaError
+    ? `${safeSendMediaError.type}_code_${safeSendMediaError.code ?? 'none'}_message_${safeSendMediaError.message || 'none'}`
+    : 'none';
+  const safeSendMediaResponseId = typeof sendMediaResponseMessageId === 'string' && /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(sendMediaResponseMessageId)
+    ? sendMediaResponseMessageId
+    : 'unavailable';
+  const safeInputAnswerCount = Number.isSafeInteger(sendMediaInputAnswerCount) && sendMediaInputAnswerCount >= 0
+    ? sendMediaInputAnswerCount
+    : 'unavailable';
+  const safeDescriptionEmpty = typeof sendMediaDescriptionEmpty === 'boolean' ? Number(sendMediaDescriptionEmpty) : 'unavailable';
+  const safeSentMessageId = typeof sentMessageId === 'string' && /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(sentMessageId)
+    ? sentMessageId
+    : 'unavailable';
+  const safeSentMessageStore = ['present', 'missing'].includes(sentMessageStore) ? sentMessageStore : 'unavailable';
+  const safeSentPollStoreMatch = typeof sentPollStoreMatch === 'boolean' ? Number(sentPollStoreMatch) : 'unavailable';
+  const safeDomCount = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 'unavailable';
+  return `${safeShape}_${safeStatus}_create_${createClicked === true ? 1 : 0}_closed_${composerClosed === true ? 1 : 0}` +
+    `_temp_${tempMessageFound === true ? 1 : 0}_candidates_${Number.isSafeInteger(tempCandidateCount) ? Math.max(tempCandidateCount, 0) : 'unavailable'}` +
+    `_id_${safeTempId}_bubble_${statuses}_error_${error}_stored_${messageErrorStored === true ? 1 : 0}` +
+    `_send_result_${safeSendResult}_send_count_${safeSendResultCount}_send_mid_${safeSentMessageId}` +
+    `_store_mid_${safeSentMessageStore}_store_poll_match_${safeSentPollStoreMatch}` +
+    `_dom_event_mid_rows_${safeDomCount(sentDomAtEvent?.serverMidRowCount)}_temp_rows_${safeDomCount(sentDomAtEvent?.tempMidRowCount)}` +
+    `_question_text_nodes_${safeDomCount(sentDomAtEvent?.questionTextNodeCount)}_question_rows_${safeDomCount(sentDomAtEvent?.questionRowCount)}` +
+    `_dom_after_mid_nodes_${safeDomCount(renderedPollDom?.serverMidNodeCount)}_mid_rows_${safeDomCount(renderedPollDom?.serverMidRowCount)}` +
+    `_temp_nodes_${safeDomCount(renderedPollDom?.tempMidNodeCount)}_temp_rows_${safeDomCount(renderedPollDom?.tempMidRowCount)}` +
+    `_question_text_nodes_${safeDomCount(renderedPollDom?.questionTextNodeCount)}_question_text_visible_${safeDomCount(renderedPollDom?.questionVisibleTextNodeCount)}` +
+    `_question_rows_${safeDomCount(renderedPollDom?.questionRowCount)}_question_visible_${safeDomCount(renderedPollDom?.questionVisibleRowCount)}` +
+    `_selector_${safeDomCount(renderedPollDom?.selectorCount)}_selector_visible_${safeDomCount(renderedPollDom?.selectorVisibleCount)}` +
+    `_send_media_observer_${sendMediaObserverInstalled === true ? 1 : 0}_send_media_calls_${safeSendMediaCallCount}` +
+    `_send_media_status_${safeSendMediaStatus}_result_type_${safeSendMediaType}_response_mid_${safeSendMediaResponseId}` +
+    `_send_media_input_answer_count_${safeInputAnswerCount}_description_empty_${safeDescriptionEmpty}_error_${sendMediaErrorSummary}` +
+    `_random_id_${safeId}_rpc_${safeRpcCount}_types_${safeRpcTypes}` +
+    `_worker_exceptions_${safeWorkerExceptions}_worker_types_${safeWorkerTypes}`;
+}
+
+async function waitForPollResults(page, question, stage, timeoutMs = 30_000) {
+  currentStage = stage;
+  const poll = pollMessageLocator(page, question);
+  const resultIndicator = getPollResultIndicator(poll);
+  await resultIndicator.first().waitFor({state: 'visible', timeout: timeoutMs})
+  .catch(async() => {
+    const diagnostic = await readPollResultsDiagnostic(page, question, POLL_ANSWER_ONE);
+    failStage(`${stage}_${formatPollResultsDiagnostic(diagnostic)}`);
+  });
+  if(await resultIndicator.count() !== 1) failStage(`${stage}_footer`);
+  const selectedAnswer = poll.locator('[data-poll-option-idx]').filter({hasText: POLL_ANSWER_ONE});
+  if(await selectedAnswer.count() !== 1) failStage(`${stage}_selected_answer`);
+  await selectedAnswer.getByText('1', {exact: true}).waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_count`));
+  await selectedAnswer.getByText('100%', {exact: true}).waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_percentage`));
+  return poll;
+}
+
+async function submitPollVote(page, poll, question, stage) {
+  currentStage = stage;
+  const voteButton = getPollVoteButton(poll);
+  const resultIndicator = getPollResultIndicator(poll).first();
+  const nextAction = await Promise.race([
+    voteButton.waitFor({state: 'visible', timeout: 10_000}).then(() => 'vote').catch(() => undefined),
+    resultIndicator.waitFor({state: 'visible', timeout: 10_000}).then(() => 'results').catch(() => undefined)
+  ]);
+
+  if(nextAction === 'vote' && !await resultIndicator.isVisible().catch(() => false)) {
+    await voteButton.click().catch(() => failStage(`${stage}_button`));
+  } else if(nextAction !== 'results' && nextAction !== 'vote') {
+    const diagnostic = await readPollResultsDiagnostic(page, question, POLL_ANSWER_ONE);
+    failStage(`${stage}_${formatPollResultsDiagnostic(diagnostic)}`);
+  }
+
+  await waitForPollResults(page, question, `${stage}_results`);
+  return poll;
+}
+
+async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirectory, capturedScreenshots}) {
+  const polls = [
+    {
+      shape: 'description',
+      stage: 'alice_poll_description',
+      question: `browser-ci-poll-description-${runtime.runId.slice(0, 8)}`,
+      description: POLL_DESCRIPTION,
+      mediaAnswer: false
+    },
+    {
+      shape: 'input_answer',
+      stage: 'alice_poll_input_answer',
+      question: `browser-ci-poll-input-answer-${runtime.runId.slice(0, 8)}`,
+      description: '',
+      mediaAnswer: true
+    }
+  ];
+
+  await ensurePollGroupActive(alice.page, groupName, 'alice_poll_group_chat');
+  await ensurePollGroupActive(bob.page, groupName, 'bob_poll_group_chat');
+  await installPollMessageErrorObserver(alice.page);
+  const evidence = [];
+  const sendAttempts = [];
+  const pollFlowFailures = [];
+  for(const testCase of polls) {
+    const prefix = testCase.stage;
+    const pollErrorStart = await alice.page.evaluate(() => window.__realClientPollErrors?.().length || 0).catch(() => 0);
+    const workerErrorsBefore = alice.observer?.workerErrorSnapshot?.();
+    const submission = {createClicked: false, composerClosed: false};
+    await alice.page.evaluate((question) => { window.__realClientActivePollQuestion = question; }, testCase.question);
+    let rpcErrorsBeforeCreation;
+    try {
+      rpcErrorsBeforeCreation = await openPollComposer(alice.page, {
+        stage: prefix,
+        question: testCase.question,
+        description: testCase.description,
+        mediaAnswer: testCase.mediaAnswer,
+        screenshotDirectory,
+        capturedScreenshots,
+        submission
+      });
+    } catch(error) {
+      if(sendAttempts.length > 0) {
+        failStage(`${currentStage}_after_${sendAttempts.map(formatPollSendDiagnostic).join('__')}`);
+      }
+      throw error;
+    }
+
+    const sendStatus = await waitForPollSendOutcome(alice.page, testCase.question, `${prefix}_send_confirmed`);
+    const sendDiagnostic = await readPollSendDiagnostic(
+      alice.page,
+      testCase.question,
+      sendStatus,
+      pollErrorStart,
+      rpcErrorsBeforeCreation?.rpc,
+      submission,
+      workerErrorsBefore,
+      alice.observer?.workerErrorSnapshot?.()
+    );
+    sendAttempts.push({shape: testCase.shape, ...sendDiagnostic});
+    const senderPollCount = await pollMessageLocator(alice.page, testCase.question).count().catch(() => null);
+    if(sendStatus !== 'sent' || sendDiagnostic.sendResult !== 'accepted' || senderPollCount !== 1) {
+      continue;
+    }
+
+    try {
+    const alicePoll = await waitForPollMessage(alice.page, testCase.question, `${prefix}_sent`);
+    await assertPollContent(alicePoll, {...testCase, stage: `${prefix}_sent`});
+    await capturePollState(alice.page, screenshotDirectory, `${testCase.shape.replaceAll('_', '-')}-poll-sent`, `${prefix}_sent_screenshot`, capturedScreenshots);
+
+    const bobPoll = await waitForPollMessage(bob.page, testCase.question, `bob_poll_${testCase.shape}_received`);
+    await assertPollContent(bobPoll, {...testCase, stage: `bob_poll_${testCase.shape}_received`});
+    await capturePollState(bob.page, screenshotDirectory, `bob-${testCase.shape.replaceAll('_', '-')}-poll-received`, `bob_poll_${testCase.shape}_received_screenshot`, capturedScreenshots);
+
+    currentStage = `bob_poll_${testCase.shape}_vote_select`;
+    const voteOption = getPollOptionClickTarget(bobPoll, POLL_ANSWER_ONE);
+    await voteOption.click().catch(() => failStage(`bob_poll_${testCase.shape}_vote_select`));
+    currentStage = `bob_poll_${testCase.shape}_vote_submit`;
+    await submitPollVote(bob.page, bobPoll, testCase.question, `bob_poll_${testCase.shape}_vote_submit`);
+    await capturePollState(bob.page, screenshotDirectory, `bob-${testCase.shape.replaceAll('_', '-')}-poll-results`, `bob_poll_${testCase.shape}_results_screenshot`, capturedScreenshots);
+
+    currentStage = `alice_poll_${testCase.shape}_stop_menu`;
+    await alicePoll.click({button: 'right'}).catch(() => failStage(`alice_poll_${testCase.shape}_stop_menu`));
+    const contextMenu = alice.page.locator('.btn-menu:visible').last();
+    const stopPoll = contextMenu.getByText('Stop Poll', {exact: true});
+    await stopPoll.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`alice_poll_${testCase.shape}_stop_menu`));
+    await capturePollState(alice.page, screenshotDirectory, `alice-${testCase.shape.replaceAll('_', '-')}-stop-poll-menu`, `alice_poll_${testCase.shape}_stop_menu_screenshot`, capturedScreenshots);
+    await stopPoll.click().catch(() => failStage(`alice_poll_${testCase.shape}_stop`));
+
+    currentStage = `alice_poll_${testCase.shape}_closed`;
+    await alicePoll.getByText('Final Results', {exact: true}).waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`alice_poll_${testCase.shape}_closed`));
+    await waitForPollResults(alice.page, testCase.question, `alice_poll_${testCase.shape}_closed_results`);
+    await capturePollState(alice.page, screenshotDirectory, `alice-${testCase.shape.replaceAll('_', '-')}-poll-closed`, `alice_poll_${testCase.shape}_closed_screenshot`, capturedScreenshots);
+
+    const bobClosedPoll = await waitForPollMessage(bob.page, testCase.question, `bob_poll_${testCase.shape}_closed`);
+    await bobClosedPoll.getByText('Final Results', {exact: true}).waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`bob_poll_${testCase.shape}_closed`));
+    await waitForPollResults(bob.page, testCase.question, `bob_poll_${testCase.shape}_closed_results`);
+
+    const closedOption = getPollOptionClickTarget(bobClosedPoll, POLL_ANSWER_TWO);
+    currentStage = `bob_poll_${testCase.shape}_closed_vote_blocked`;
+    const pointerEvents = await closedOption.evaluate((element) => getComputedStyle(element).pointerEvents).catch(() => 'unknown');
+    let trialClickSucceeded = true;
+    await closedOption.click({trial: true, timeout: 1_000}).catch(() => {
+      trialClickSucceeded = false;
+    });
+    if(pointerEvents !== 'none' || trialClickSucceeded) failStage(`bob_poll_${testCase.shape}_closed_vote_blocked`);
+    await waitForPollResults(bob.page, testCase.question, `bob_poll_${testCase.shape}_closed_vote_unchanged`);
+    await capturePollState(bob.page, screenshotDirectory, `bob-${testCase.shape.replaceAll('_', '-')}-poll-closed-no-vote`, `bob_poll_${testCase.shape}_closed_no_vote_screenshot`, capturedScreenshots);
+
+    evidence.push({shape: testCase.shape, answers: 2, description: testCase.description ? 'present' : 'empty', mediaAnswer: testCase.mediaAnswer});
+    } catch(error) {
+      const stage = currentStage;
+      const page = stage.startsWith('alice_') ? alice.page : bob.page;
+      const resultDiagnostic = stage.includes('_results')
+        ? await readPollResultsDiagnostic(page, testCase.question, POLL_ANSWER_ONE)
+        : undefined;
+      pollFlowFailures.push({shape: testCase.shape, stage, resultDiagnostic});
+    }
+  }
+
+  if(sendAttempts.some(({status, sendResult}) => status !== 'sent' || sendResult !== 'accepted')) {
+    const diagnostic = sendAttempts.map(formatPollSendDiagnostic).join('__');
+    failStage(`alice_poll_send_diagnostic_${diagnostic}`);
+  }
+
+  if(pollFlowFailures.length > 0) {
+    const flowDiagnostic = pollFlowFailures.map(({shape, stage, resultDiagnostic}) =>
+      `${shape}_${stage}_${resultDiagnostic ? formatPollResultsDiagnostic(resultDiagnostic) : 'result_unavailable'}`
+    ).join('__');
+    const sendDiagnostic = sendAttempts.map(formatPollSendDiagnostic).join('__');
+    failStage(`poll_flow_diagnostic_${flowDiagnostic}__send_${sendDiagnostic}`);
+  }
+
+  return {
+    evidence,
+    sendResults: sendAttempts.map(({shape, status, sendResult, sendResultCount, sendResultSource, randomId, messageError,
+      sentMessageId, sentMessageStore, sentPollStoreMatch, sendMediaObserverInstalled, sendMediaCallCount,
+      sendMediaStatus, sendMediaResultType, sendMediaResponseMessageId, sendMediaInputAnswerCount,
+      sendMediaDescriptionEmpty, sendMediaError}) => ({
+      shape,
+      status,
+      sendResult,
+      sendResultCount,
+      sendResultSource,
+      randomId,
+      messageError,
+      sentMessageId,
+      sentMessageStore,
+      sentPollStoreMatch,
+      sendMediaObserverInstalled,
+      sendMediaCallCount,
+      sendMediaStatus,
+      sendMediaResultType,
+      sendMediaResponseMessageId,
+      sendMediaInputAnswerCount,
+      sendMediaDescriptionEmpty,
+      sendMediaError
+    }))
+  };
+}
+
+
 function failGroupMemberStep(stage, error) {
   groupMemberTrace.stepWait = error ? classifyLocatorError(error) : 'other';
   failStage(stage);
@@ -4244,6 +5373,10 @@ function shouldRunChannelScenario(runtimeConfig) {
   return runtimeConfig.scenarios.includes('channel');
 }
 
+function shouldRunPollScenario(runtimeConfig) {
+  return runtimeConfig.scenarios.includes('poll');
+}
+
 async function main(dependencies = {}) {
   let report;
   let browser;
@@ -4266,6 +5399,8 @@ async function main(dependencies = {}) {
   let controlWebSocket101ByContextPhase;
   let gateBreakdown;
   let clientErrorDiagnostics;
+  let pollNegativeControlEvidence;
+  let pollSendResults;
   centerColumnTrace = createCenterColumnTrace();
   groupNameFormTrace = {page: undefined, stepWait: 'none'};
   groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
@@ -4490,6 +5625,36 @@ async function main(dependencies = {}) {
       report.push({name: 'channel', status: 'passed'});
     }
 
+    if(shouldRunPollScenario(runtime)) {
+      currentScenario = 'poll';
+      if(runtime.pollCreationNegativeControl === true) {
+        const negativeControl = await runPollCreationNegativeControl({
+          alice,
+          bob,
+          runtime,
+          groupName,
+          screenshotDirectory: runtime.screenshotDirectory,
+          capturedScreenshots
+        });
+        pollNegativeControlEvidence = negativeControl.evidence;
+        pollSendResults = negativeControl.sendResults;
+      } else {
+        const pollRun = await runPollLifecycle({
+          alice,
+          bob,
+          runtime,
+          groupName,
+          screenshotDirectory: runtime.screenshotDirectory,
+          capturedScreenshots
+        });
+        pollSendResults = pollRun.sendResults;
+      }
+      report.push({name: 'poll', status: 'passed'});
+    }
+    if(JSON.stringify(report.map((scenario) => scenario.name)) !== JSON.stringify(runtime.scenarios)) {
+      failStage('scenario_report_incomplete');
+    }
+
     await Promise.all(observers.map((observer) => observer.waitForSetup()));
     await registry.waitForSetup();
     const apps = {alice, bob};
@@ -4530,6 +5695,8 @@ async function main(dependencies = {}) {
       screenshotsCaptured: capturedScreenshots.count,
       passwordEvidence,
       ...(runtime.scenarios?.includes('channel') ? {channelMembership: await captureChannelMembershipState()} : {}),
+      ...(pollNegativeControlEvidence ? {pollNegativeControl: pollNegativeControlEvidence} : {}),
+      ...(pollSendResults ? {pollSendResults} : {}),
       gateBreakdown,
       network: {unexpectedAttempts: egress.unexpectedAttempts, observerErrors: egress.observerErrors, contexts: networkContexts},
       workerObservation: observationBlock
@@ -4603,6 +5770,8 @@ async function main(dependencies = {}) {
         ...(groupMember ? {groupMember} : {}),
         ...(groupMessage ? {groupMessage} : {}),
         ...(channelMembership ? {channelMembership} : {}),
+        ...(pollNegativeControlEvidence ? {pollNegativeControl: pollNegativeControlEvidence} : {}),
+        ...(pollSendResults ? {pollSendResults} : {}),
         ...(currentScenario ? {gateBreakdown} : {}),
         ...(currentStage === 'browser_worker_observation_incomplete' && registry
           ? {workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers)}
@@ -4660,7 +5829,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureChannelMembershipState, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, getClientErrorDiagnostics, readClientErrorScenarioStep, readPageScenarioStep, readSafeRpcArguments, createNetworkObserver, emitAuthProgressReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword, waitForUnreadCount};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPollMessageErrorObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

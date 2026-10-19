@@ -6,9 +6,11 @@ import {isIPv4} from 'node:net';
 
 import {
   assertAllScenariosPassed,
+  expectedScreenshotCount,
   formatBrowserFailureMessage,
   parsePassedBrowserGateBreakdown,
   parseChannelMembershipState,
+  POLL_NEGATIVE_CONTROL_EVIDENCE,
   REQUIRED_CONTROLS,
   parseFixtureReadiness,
   parseAuthProgressReport,
@@ -19,11 +21,13 @@ import {
   readSyntheticCredentials
 } from './contract.mjs';
 
-const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> (--scenarios sign-in,message,group[,channel] | --auth-progress-one-submission) [--page-error-diagnostics]
+const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> (--scenarios <scenario-list> | --auth-progress-one-submission) [--page-error-diagnostics]
+
+For the legacy poll regression control, add --poll-creation-negative-control and pin the pre-MAIN-2111 server revision.
 
 The fixture must remain running after artifact-ready. The command validates its immutable pins,
 protected synthetic credentials, internal browser network, audited artifact evidence, per-context
-shared-worker observation, the three required UI scenarios plus the optional channel scenario,
+shared-worker observation, sign-in/message/group plus independently optional channel and poll scenarios,
 or one bounded Username submission. The opt-in page-error diagnostics include bounded, sanitized
 source frames, private page path, fixed scenario and stage labels, and optional RPC error type/code.
 Raw page-error messages and stack text are never serialized.
@@ -182,6 +186,7 @@ if(args?.help) {
       ...(controlsOnly ? {observationOnly: true} : {}),
       ...(authProgress ? {authProgressOneSubmission: true} : {}),
       ...(args.pageErrorDiagnostics === true ? {pageErrorDiagnostics: true} : {}),
+      ...(args.pollCreationNegativeControl === true ? {pollCreationNegativeControl: true} : {}),
       ...(Array.isArray(args.scenarios) ? {scenarios: args.scenarios} : {}),
       runId: args.runId,
       endpoint: serverReady.endpoint,
@@ -286,16 +291,31 @@ if(args?.help) {
         }
         browserResult.channelMembership = channelMembership;
       }
+      if(args.pollCreationNegativeControl === true) {
+        if(JSON.stringify(browserResult.pollNegativeControl) !== JSON.stringify(POLL_NEGATIVE_CONTROL_EVIDENCE)) {
+          throw new Error('poll creation negative control evidence is incomplete');
+        }
+      } else if(browserResult.pollNegativeControl !== undefined) {
+        throw new Error('poll creation negative control evidence was unexpected');
+      }
       browserResult.gateBreakdown = parsePassedBrowserGateBreakdown(browserResult);
-      const expectedScreenshots = args.scenarios.includes('channel') ? 26 : 16;
-      if(browserResult.contextCount !== 2 || browserResult.screenshotsCaptured !== expectedScreenshots ||
-          browserResult.network?.unexpectedAttempts !== 0 || browserResult.network?.observerErrors !== 0 ||
-          ['alice', 'bob'].some((account) => {
-            const context = browserResult.network?.contexts?.[account];
-            return !hasNetworkSourceEvidence(context) ||
-              !Number.isSafeInteger(context.workerTargets?.service_worker) || context.workerTargets.service_worker < 1;
-          })) {
-        throw new Error('real client UI or page/worker egress evidence is incomplete');
+      const expectedScreenshots = expectedScreenshotCount(args);
+      const incompleteEvidence = [];
+      if(browserResult.contextCount !== 2) incompleteEvidence.push('contexts');
+      if(browserResult.screenshotsCaptured !== expectedScreenshots) {
+        incompleteEvidence.push(`screenshots_${Number.isSafeInteger(browserResult.screenshotsCaptured) ? browserResult.screenshotsCaptured : 'unavailable'}_expected_${expectedScreenshots}`);
+      }
+      if(browserResult.network?.unexpectedAttempts !== 0) incompleteEvidence.push('unexpected_egress');
+      if(browserResult.network?.observerErrors !== 0) incompleteEvidence.push('observer_errors');
+      for(const account of ['alice', 'bob']) {
+        const context = browserResult.network?.contexts?.[account];
+        if(!hasNetworkSourceEvidence(context)) incompleteEvidence.push(`${account}_network_sources`);
+        if(!Number.isSafeInteger(context?.workerTargets?.service_worker) || context.workerTargets.service_worker < 1) {
+          incompleteEvidence.push(`${account}_service_worker`);
+        }
+      }
+      if(incompleteEvidence.length > 0) {
+        throw new Error(`real client UI or page/worker egress evidence is incomplete (${incompleteEvidence.join(',')})`);
       }
       // The page-session observer cannot see shared workers, so the shared-worker
       // evidence is the browser-level observation block: synthetic controls, per-context
@@ -361,6 +381,9 @@ if(args?.help) {
       },
       scenarios: browserResult.scenarios,
       ...(browserResult.channelMembership ? {channelMembership: browserResult.channelMembership} : {}),
+      ...(browserResult.pollSendResults ? {pollSendResults: browserResult.pollSendResults} : {}),
+      pollCreationNegativeControl: args.pollCreationNegativeControl === true,
+      ...(args.pollCreationNegativeControl === true ? {pollNegativeControl: POLL_NEGATIVE_CONTROL_EVIDENCE} : {}),
       ...(browserResult.gateBreakdown ? {gateBreakdown: browserResult.gateBreakdown} : {}),
       contextCount: browserResult.contextCount,
       screenshotsCaptured: browserResult.screenshotsCaptured,

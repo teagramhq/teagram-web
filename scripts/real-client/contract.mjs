@@ -5,8 +5,13 @@ import {basename, dirname, isAbsolute} from 'node:path';
 import observation from './observation.cjs';
 
 export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'message', 'group']);
-export const OPTIONAL_SCENARIOS = Object.freeze(['channel']);
+export const OPTIONAL_SCENARIOS = Object.freeze(['channel', 'poll']);
 const AVAILABLE_SCENARIOS = Object.freeze([...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS]);
+export const POLL_NEGATIVE_CONTROL_SERVER_REVISION = '586403c1f4c92c09b006652278bdd02fd40ddf2d';
+export const POLL_NEGATIVE_CONTROL_EVIDENCE = Object.freeze([
+  Object.freeze({shape: 'description', stage: 'alice_poll_description_create', errorType: 'POLL_ANSWERS_INVALID'}),
+  Object.freeze({shape: 'input_answer', stage: 'alice_poll_input_answer_create', errorType: 'POLL_ANSWERS_INVALID'})
+]);
 export const REQUIRED_CONTROLS = Object.freeze(Object.keys(observation.CONTROL_EXPECTATIONS));
 const REQUIRED_OBSERVATION_CONTEXTS = Object.freeze(['alice', 'bob']);
 const AUTH_PROGRESS_OBSERVATION_CONTEXTS = Object.freeze(['alice']);
@@ -25,7 +30,7 @@ const PAGE_ERROR_MESSAGE_LIMIT = 512;
 const PAGE_ERROR_STACK_FRAME_LIMIT = 16;
 const PAGE_ERROR_FUNCTION_NAME_LIMIT = 128;
 const PAGE_ERROR_STACK_STATES = Object.freeze(['unavailable', 'non_string', 'no_frames', 'unclassified_frames', 'captured', 'partial', 'truncated']);
-const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'channel', 'unknown']);
+const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'channel', 'poll', 'unknown']);
 const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 const PAGE_DIAGNOSTIC_LIMIT = 16;
 const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
@@ -116,6 +121,17 @@ export function parseRequiredScenarios(value) {
   return AVAILABLE_SCENARIOS.filter((scenario) => seen.has(scenario));
 }
 
+export function expectedScreenshotCount({pollCreationNegativeControl = false, scenarios = REQUIRED_SCENARIOS} = {}) {
+  const hasScenarios = Array.isArray(scenarios);
+  const hasPollScenario = hasScenarios && scenarios.includes('poll');
+  if(pollCreationNegativeControl && !hasPollScenario) {
+    throw new Error('negative control requires poll scenario');
+  }
+  const channelScreenshots = hasScenarios && scenarios.includes('channel') ? 10 : 0;
+  const pollScreenshots = hasPollScenario ? (pollCreationNegativeControl ? 4 : 14) : 0;
+  return 16 + channelScreenshots + pollScreenshots;
+}
+
 export function parseRealClientArgs(argv) {
   const argumentsList = argv[0] === '--' ? argv.slice(1) : argv;
   if(argumentsList.includes('--help') || argumentsList.includes('-h')) {
@@ -134,7 +150,8 @@ export function parseRealClientArgs(argv) {
     ['--scenarios', 'scenarioSelection'],
     ['--observer-controls-only', 'observerControlsOnly'],
     ['--auth-progress-one-submission', 'authProgressOneSubmission'],
-    ['--page-error-diagnostics', 'pageErrorDiagnostics']
+    ['--page-error-diagnostics', 'pageErrorDiagnostics'],
+    ['--poll-creation-negative-control', 'pollCreationNegativeControl']
   ]);
   const options = new Map();
   for(let index = 0; index < argumentsList.length; index++) {
@@ -145,7 +162,8 @@ export function parseRealClientArgs(argv) {
     if(options.has(name)) {
       throw new Error(`option was provided more than once: ${name}`);
     }
-    if(name === '--observer-controls-only' || name === '--auth-progress-one-submission' || name === '--page-error-diagnostics') {
+    if(name === '--observer-controls-only' || name === '--auth-progress-one-submission' ||
+        name === '--page-error-diagnostics' || name === '--poll-creation-negative-control') {
       options.set(name, true);
       continue;
     }
@@ -161,17 +179,21 @@ export function parseRealClientArgs(argv) {
   const controlsOnly = options.get('--observer-controls-only') === true;
   const authProgress = options.get('--auth-progress-one-submission') === true;
   const pageErrorDiagnostics = options.get('--page-error-diagnostics') === true;
+  const pollCreationNegativeControl = options.get('--poll-creation-negative-control') === true;
   if(authProgress && (controlsOnly || options.has('--scenarios'))) {
     throw new Error('--auth-progress-one-submission cannot be combined with --scenarios or --observer-controls-only');
   }
   if(controlsOnly && pageErrorDiagnostics) {
     throw new Error('--page-error-diagnostics cannot be combined with --observer-controls-only');
   }
+  if(pollCreationNegativeControl && (controlsOnly || authProgress)) {
+    throw new Error('--poll-creation-negative-control cannot be combined with --observer-controls-only or --auth-progress-one-submission');
+  }
   if(!controlsOnly && !authProgress && !options.has('--scenarios')) {
     throw new Error('scenario selection is required');
   }
 
-  const optional = new Set(['--scenarios', '--observer-controls-only', '--auth-progress-one-submission', '--page-error-diagnostics']);
+  const optional = new Set(['--scenarios', '--observer-controls-only', '--auth-progress-one-submission', '--page-error-diagnostics', '--poll-creation-negative-control']);
   const missing = [...names.keys()].filter((name) => !optional.has(name) && !options.has(name));
   if(missing.length) {
     throw new Error(`missing required options: ${missing.join(',')}`);
@@ -188,6 +210,15 @@ export function parseRealClientArgs(argv) {
     parsed.scenarios = [...REQUIRED_SCENARIOS];
   } else if(!authProgress) {
     parsed.scenarios = parseRequiredScenarios(parsed.scenarioSelection);
+  }
+  if(pollCreationNegativeControl) {
+    if(!parsed.scenarios.includes('poll')) {
+      throw new Error('--poll-creation-negative-control requires poll scenario');
+    }
+    if(parsed.serverRevision !== POLL_NEGATIVE_CONTROL_SERVER_REVISION) {
+      throw new Error('--poll-creation-negative-control requires the pinned negative-control server revision');
+    }
+    parsed.pollCreationNegativeControl = true;
   }
   delete parsed.scenarioSelection;
   return parsed;

@@ -303,7 +303,8 @@ function createContextObserver(name, options = {}) {
     mtprotoSourceFetchedSequence: null,
     mtprotoSourceChunk: 'none',
     sequence: 0,
-    failures: new Set()
+    failures: new Set(),
+    workerErrorCounts: new Map()
   };
 
   function recordOverflow() {
@@ -421,6 +422,21 @@ function createContextObserver(name, options = {}) {
     if(typeof category === 'string' && WORKER_FAILURE_STATES.includes(category)) state.failures.add(category);
   }
 
+  function addWorkerFailure(category) {
+    if(closed() || typeof category !== 'string' || !WORKER_FAILURE_STATES.includes(category)) return;
+    const count = state.workerErrorCounts.get(category) || 0;
+    state.workerErrorCounts.set(category, Math.min(count + 1, LIMITS.countedEventsPerContext));
+    addFailure(category);
+  }
+
+  function workerErrorSnapshot() {
+    const errorTypes = Object.fromEntries([...state.workerErrorCounts.entries()].sort(([left], [right]) => left.localeCompare(right)));
+    return {
+      evaluationExceptions: state.workerErrorCounts.get('evaluation_exception') || 0,
+      errorTypes
+    };
+  }
+
   function classifySharedTarget(targetInfo) {
     const source = classifyWorkerSource(targetInfo.url);
     const existing = targets.get(targetInfo.targetId);
@@ -536,19 +552,19 @@ function createContextObserver(name, options = {}) {
       const category = classifyWorkerLogEntry(params?.entry, record.isBlob);
       if(category) {
         record.failures.add(category);
-        addFailure(category);
+        addWorkerFailure(category);
       }
       return;
     }
     if(method === 'Runtime.exceptionThrown') {
       record.failures.add('evaluation_exception');
-      addFailure('evaluation_exception');
+      addWorkerFailure('evaluation_exception');
       return;
     }
     if(method === 'Network.loadingFailed') {
       if(isWorkerScriptType(params?.type)) {
         record.failures.add('module_fetch_failed');
-        addFailure('module_fetch_failed');
+        addWorkerFailure('module_fetch_failed');
       }
       return;
     }
@@ -556,7 +572,7 @@ function createContextObserver(name, options = {}) {
       const status = params?.response?.status;
       if(isWorkerScriptType(params?.type) && typeof status === 'number' && status >= 400) {
         record.failures.add('script_load_failed');
-        addFailure('script_load_failed');
+        addWorkerFailure('script_load_failed');
       }
       return;
     }
@@ -564,7 +580,7 @@ function createContextObserver(name, options = {}) {
       const details = params?.issue?.details?.contentSecurityPolicyIssueDetails;
       if(details && /worker/i.test(String(details.blockedType || ''))) {
         record.failures.add('csp_blocked');
-        addFailure('csp_blocked');
+        addWorkerFailure('csp_blocked');
       }
       return;
     }
@@ -755,6 +771,7 @@ function createContextObserver(name, options = {}) {
     classifySharedWorker,
     classifyMtproto,
     classifyFailure,
+    workerErrorSnapshot,
     summary
   };
 }

@@ -3814,16 +3814,24 @@ describe('real client scenario contract', () => {
     expect(() => parseRequiredScenarios('sign-in,message,group,channel,unknown')).toThrow('unknown scenario');
     expect(parseRequiredScenarios('sign-in,message,group')).toEqual(['sign-in', 'message', 'group']);
     expect(parseRequiredScenarios('sign-in,message,group,channel')).toEqual(['sign-in', 'message', 'group', 'channel']);
-    expect(parseRequiredScenarios('channel,group,sign-in,message')).toEqual(['sign-in', 'message', 'group', 'channel']);
+    expect(parseRequiredScenarios('sign-in,message,group,poll')).toEqual(['sign-in', 'message', 'group', 'poll']);
+    expect(parseRequiredScenarios('sign-in,message,group,channel,poll')).toEqual(['sign-in', 'message', 'group', 'channel', 'poll']);
+    expect(parseRequiredScenarios('channel,poll,group,sign-in,message')).toEqual(['sign-in', 'message', 'group', 'channel', 'poll']);
   });
 
   it('runs the channel scenario only when selected', () => {
-    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'message', 'group']})).toBe(false);
-    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'message', 'group', 'channel']})).toBe(true);
+    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'message', 'group', 'poll']})).toBe(false);
+    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'message', 'group', 'channel', 'poll']})).toBe(true);
+  });
+
+  it('runs the poll scenario only when selected', () => {
+    expect(realClientBrowser.shouldRunPollScenario({scenarios: ['sign-in', 'message', 'group']})).toBe(false);
+    expect(realClientBrowser.shouldRunPollScenario({scenarios: ['sign-in', 'message', 'group', 'channel']})).toBe(false);
+    expect(realClientBrowser.shouldRunPollScenario({scenarios: ['sign-in', 'message', 'group', 'poll']})).toBe(true);
   });
 
   it('requires the selected optional channel scenario to pass', () => {
-    const scenarios = ['sign-in', 'message', 'group', 'channel'];
+    const scenarios = ['sign-in', 'message', 'group', 'channel', 'poll'];
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'},
@@ -3833,8 +3841,44 @@ describe('real client scenario contract', () => {
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'},
       {name: 'group', status: 'passed'},
-      {name: 'channel', status: 'passed'}
+      {name: 'channel', status: 'passed'},
+      {name: 'poll', status: 'passed'}
     ], scenarios)).toEqual(scenarios);
+  });
+
+  it('counts poll and optional channel screenshots separately for positive and negative runs', () => {
+    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'message', 'group']})).toBe(16);
+    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'message', 'group', 'channel']})).toBe(26);
+    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'message', 'group', 'poll']})).toBe(30);
+    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'message', 'group', 'channel', 'poll']})).toBe(40);
+    expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'message', 'group', 'poll']})).toBe(20);
+    expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'message', 'group', 'channel', 'poll']})).toBe(30);
+    expect(() => realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'message', 'group']})).toThrow('negative control requires poll');
+  });
+
+  it('pins the poll creation negative control to the pre-MAIN-2111 server and fixed evidence', () => {
+    const args = [
+      '--readiness-file', './fixture.jsonl',
+      '--harness-revision', READINESS_PINS.harnessRevision,
+      '--server-revision', realClientContract.POLL_NEGATIVE_CONTROL_SERVER_REVISION,
+      '--web-revision', READINESS_PINS.webRevision,
+      '--run-id', READINESS_PINS.runId,
+      '--scenarios', 'sign-in,message,group,channel,poll'
+    ];
+
+    expect(parseRealClientArgs([...args, '--poll-creation-negative-control'])).toMatchObject({
+      scenarios: ['sign-in', 'message', 'group', 'channel', 'poll'],
+      pollCreationNegativeControl: true
+    });
+    expect(realClientContract.POLL_NEGATIVE_CONTROL_EVIDENCE).toEqual([
+      {shape: 'description', stage: 'alice_poll_description_create', errorType: 'POLL_ANSWERS_INVALID'},
+      {shape: 'input_answer', stage: 'alice_poll_input_answer_create', errorType: 'POLL_ANSWERS_INVALID'}
+    ]);
+    expect(() => parseRealClientArgs([
+      ...args.slice(0, 4), '--server-revision', READINESS_PINS.serverRevision, ...args.slice(6), '--poll-creation-negative-control'
+    ])).toThrow('requires the pinned negative-control server revision');
+    expect(() => parseRealClientArgs([...args, '--poll-creation-negative-control', '--auth-progress-one-submission']))
+    .toThrow('cannot be combined');
   });
 
   it('fails if a required scenario was skipped or did not report success', () => {
@@ -3842,8 +3886,9 @@ describe('real client scenario contract', () => {
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'},
       {name: 'group', status: 'passed'},
-      {name: 'channel', status: 'skipped'}
-    ], ['sign-in', 'message', 'group', 'channel'])).toThrow('channel was skipped');
+      {name: 'channel', status: 'skipped'},
+      {name: 'poll', status: 'passed'}
+    ], ['sign-in', 'message', 'group', 'channel', 'poll'])).toThrow('channel was skipped');
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'failed'},
@@ -3858,13 +3903,19 @@ describe('real client scenario contract', () => {
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'},
       {name: 'group', status: 'passed'}
-    ], ['sign-in', 'message', 'group', 'channel'])).toThrow('channel did not execute');
+    ], ['sign-in', 'message', 'group', 'channel', 'poll'])).toThrow('channel did not execute');
     expect(assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'message', status: 'passed'},
       {name: 'group', status: 'passed'},
-      {name: 'channel', status: 'passed'}
-    ], ['sign-in', 'message', 'group', 'channel'])).toEqual(['sign-in', 'message', 'group', 'channel']);
+      {name: 'channel', status: 'passed'},
+      {name: 'poll', status: 'passed'}
+    ], ['sign-in', 'message', 'group', 'channel', 'poll'])).toEqual(['sign-in', 'message', 'group', 'channel', 'poll']);
+    expect(assertAllScenariosPassed([
+      {name: 'sign-in', status: 'passed'},
+      {name: 'message', status: 'passed'},
+      {name: 'group', status: 'passed'}
+    ])).toEqual(['sign-in', 'message', 'group']);
   });
 
   it('matches the audited private manifest schema without requiring an absent public key hash field', () => {
@@ -3940,6 +3991,7 @@ describe('real client scenario contract', () => {
       leafSPKI: Buffer.alloc(32, 1).toString('base64'),
       frontIp: '127.0.0.1',
       screenshotDirectory: `/tmp/real-client-${runId}`,
+      scenarios: ['sign-in', 'message', 'group', 'poll'],
       accounts: [
         {username: `u${runId.slice(0, 30)}a`, password: 'b'.repeat(64)},
         {username: `u${runId.slice(0, 30)}b`, password: 'c'.repeat(64)}
@@ -3947,6 +3999,11 @@ describe('real client scenario contract', () => {
     };
 
     expect(() => validateRuntimeInput(runtime)).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'message', 'group', 'channel', 'poll']})).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'message', 'group']})).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'message', 'group', 'channel']})).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'message', 'group'], pollCreationNegativeControl: true})).toThrow('runtime_input_validation');
+    expect(() => validateRuntimeInput({...runtime, pollCreationNegativeControl: false})).toThrow('runtime_input_validation');
     expect(() => validateRuntimeInput({...runtime, observationOnly: true, artifactDigest: null, manifestArtifactDigest: null})).not.toThrow();
     for(const malformed of [undefined, null, [runtime.manifestArtifactDigest], `sha256:${'f'.repeat(63)}`]) {
       expect(() => validateRuntimeInput({...runtime, manifestArtifactDigest: malformed})).toThrow('runtime_input_validation');
@@ -4000,7 +4057,7 @@ describe('real client scenario contract', () => {
       '--server-revision', '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       '--web-revision', 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       '--run-id', 'a'.repeat(32),
-      '--scenarios', 'sign-in,message,group,channel'
+      '--scenarios', 'sign-in,message,group,channel,poll'
     ];
 
     expect(parseRealClientArgs(args)).toEqual({
@@ -4009,13 +4066,35 @@ describe('real client scenario contract', () => {
       serverRevision: '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       webRevision: 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       runId: 'a'.repeat(32),
-      scenarios: ['sign-in', 'message', 'group', 'channel']
+      scenarios: ['sign-in', 'message', 'group', 'channel', 'poll']
     });
     expect(parseRealClientArgs(['--', ...args])).toEqual(parseRealClientArgs(args));
     expect(() => parseRealClientArgs([])).toThrow('missing required options');
     expect(() => parseRealClientArgs(args.slice(0, -2))).toThrow('scenario selection is required');
     expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group'])).toThrow('option was provided more than once');
     expect(() => parseRealClientArgs([...args, '--source-sha', 'a'.repeat(40)])).toThrow('unknown option');
+  });
+
+  it('accepts the previously supported scenario selections without poll', () => {
+    const args = [
+      '--readiness-file', './fixture.jsonl',
+      '--harness-revision', READINESS_PINS.harnessRevision,
+      '--server-revision', READINESS_PINS.serverRevision,
+      '--web-revision', READINESS_PINS.webRevision,
+      '--run-id', READINESS_PINS.runId
+    ];
+
+    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group']).scenarios)
+    .toEqual(['sign-in', 'message', 'group']);
+    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group,channel']).scenarios)
+    .toEqual(['sign-in', 'message', 'group', 'channel']);
+    const negativeControlArgs = [...args];
+    negativeControlArgs[negativeControlArgs.indexOf('--server-revision') + 1] = realClientContract.POLL_NEGATIVE_CONTROL_SERVER_REVISION;
+    expect(() => parseRealClientArgs([
+      ...negativeControlArgs,
+      '--scenarios', 'sign-in,message,group',
+      '--poll-creation-negative-control'
+    ])).toThrow('requires poll scenario');
   });
 
   it('accepts a server-ready-only readiness pair for the synthetic-only run', () => {
@@ -4048,7 +4127,7 @@ describe('real client scenario contract', () => {
       observerControlsOnly: true,
       scenarios: ['sign-in', 'message', 'group']
     });
-    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group,channel', '--observer-controls-only']).observerControlsOnly).toBe(true);
+    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group,channel,poll', '--observer-controls-only']).observerControlsOnly).toBe(true);
     expect(() => parseRealClientArgs(args)).toThrow('scenario selection is required');
     expect(() => parseRealClientArgs([...args, '--observer-controls-only', '--observer-controls-only'])).toThrow('option was provided more than once');
   });
@@ -7128,6 +7207,643 @@ describe('real client group created', () => {
     ]) {
       expect(formatBrowserFailureMessage({status: 'failed', stage: 'alice_group_created_chat', groupCreated: hostile}))
       .toBe('real client scenario failed at alice_group_created_chat; group created "unclassified"');
+    }
+  });
+});
+
+describe('real client poll answer media setup', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  it('attaches an input answer through the supported Add Link UI flow', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<!doctype html><html><body>
+        <div class="popup" id="create-poll">
+          <div contenteditable="true"></div>
+          <div contenteditable="true"></div>
+          <div class="poll-option"><div><div contenteditable="true"></div></div><button class="btn-icon"></button></div>
+          <div class="poll-option"><div><div contenteditable="true"></div></div><button class="btn-icon"></button></div>
+        </div>
+        <script>
+          const answer = document.querySelector('.poll-option');
+          const attachButton = answer.querySelector('.btn-icon');
+          attachButton.addEventListener('click', () => {
+            const menu = document.createElement('div');
+            menu.className = 'btn-menu';
+            const item = document.createElement('div');
+            item.className = 'btn-menu-item';
+            const itemText = document.createElement('span');
+            itemText.className = 'btn-menu-item-text';
+            itemText.textContent = 'Add Link';
+            item.append(itemText);
+            menu.append(item);
+            document.body.append(menu);
+            item.addEventListener('click', () => {
+              menu.remove();
+              const popup = document.createElement('div');
+              popup.className = 'popup';
+              popup.innerHTML = '<div>Add Link</div><input name="url"><button>Done</button>';
+              const input = popup.querySelector('input');
+              const done = popup.querySelector('button');
+              done.addEventListener('click', () => {
+                window.pollAnswerLink = input.value;
+                popup.remove();
+                const linkButton = document.createElement('button');
+                linkButton.setAttribute('aria-label', 'Add Link');
+                answer.append(linkButton);
+              });
+              document.body.append(popup);
+            });
+          });
+        </script>
+      </body></html>`);
+
+      await realClientBrowser.attachSyntheticPollAnswerLink(page, page.locator('#create-poll'), 'alice_poll_input_answer');
+
+      expect(await page.evaluate(() => (window as any).pollAnswerLink)).toBe(`${APP_ORIGIN}/browser-ci-poll-answer`);
+      expect(await page.locator('#create-poll .poll-option').first().getByRole('button', {name: 'Add Link', exact: true}).isVisible()).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('real client poll send diagnostics', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  });
+
+  it('finds the synthetic temp poll and retains only bounded composer, send, RPC and worker evidence', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-input-answer-a1b2c3d4';
+    const workerObserver = observation.createContextObserver('alice');
+    workerObserver.registerTarget(sharedWorker('poll-worker', `blob:${APP_ORIGIN}/worker`));
+    const workerErrorsBefore = workerObserver.workerErrorSnapshot();
+    workerObserver.noteWorkerEvent('poll-worker', 'Runtime.exceptionThrown', {
+      exceptionDetails: {text: 'Uncaught', exception: {className: 'Error', description: HOSTILE.frame}}
+    });
+    const workerErrorsAfter = workerObserver.workerErrorSnapshot();
+    try {
+      await page.setContent(`<!doctype html><html><body>
+        <div id="column-center">
+          <div class="topbar"><div class="avatar" data-peer-id="-42"></div></div>
+          <div class="bubble is-error" data-mid="0.0001">Sending failed</div>
+        </div>
+      </body></html>`);
+      await page.evaluate((syntheticQuestion: string) => {
+        (window as any).apiManagerProxy = {
+          getMessageByPeer: () => ({
+            mid: 0.0001,
+            peerId: -42,
+            random_id: 123456789,
+            media: {_: 'messageMediaPoll', poll: {question: {text: syntheticQuestion}}},
+            error: {type: 'POLL_ANSWERS_INVALID', code: 400, message: 'POLL_ANSWERS_INVALID'}
+          })
+        };
+        (window as any).__realClientPollErrors = (): unknown[] => [];
+        (window as any).__realClientRpcErrors = () => ({total: 1, byType: {POLL_ANSWERS_INVALID: 1}});
+      }, question);
+
+      const diagnostic = await realClientBrowser.readPollSendDiagnostic(
+        page,
+        question,
+        'error',
+        0,
+        {total: 0, byType: {}},
+        {createClicked: true, composerClosed: true},
+        workerErrorsBefore,
+        workerErrorsAfter
+      );
+
+      expect(diagnostic).toMatchObject({
+        status: 'error',
+        createClicked: true,
+        composerClosed: true,
+        tempMessageFound: true,
+        tempId: '0.0001',
+        randomId: '123456789',
+        bubbleStatuses: ['is-error'],
+        messageError: {type: 'POLL_ANSWERS_INVALID', code: 400, message: 'POLL_ANSWERS_INVALID'},
+        messageErrorStored: true,
+        rpcErrorCount: 1,
+        rpcErrorTypes: {POLL_ANSWERS_INVALID: 1},
+        workerEvaluationExceptions: 1,
+        workerErrorTypes: {evaluation_exception: 1}
+      });
+
+      const summary = realClientBrowser.formatPollSendDiagnostic({shape: 'input_answer', ...diagnostic});
+      expect(summary).toContain('POLL_ANSWERS_INVALID');
+      expectNoHostileLeak(summary);
+      expect(summary).not.toContain(question);
+
+      await page.evaluate((syntheticQuestion: string) => {
+        (window as any).apiManagerProxy.getMessageByPeer = (): undefined => undefined;
+        (window as any).__realClientPollErrors = (): unknown[] => [{
+          source: 'message_error',
+          tempId: '0.0001',
+          randomId: null,
+          storedError: null,
+          eventError: {type: 'POLL_ANSWERS_INVALID', code: 400, message: 'POLL_ANSWERS_INVALID'}
+        }];
+        document.querySelector('#column-center .bubble')!.textContent = syntheticQuestion;
+      }, question);
+      const eventDiagnostic = await realClientBrowser.readPollSendDiagnostic(
+        page,
+        question,
+        'error',
+        0,
+        {total: 0, byType: {}},
+        {createClicked: true, composerClosed: true},
+        workerErrorsBefore,
+        workerErrorsAfter
+      );
+      expect(eventDiagnostic).toMatchObject({
+        tempMessageFound: true,
+        tempId: '0.0001',
+        randomId: null,
+        messageError: {type: 'POLL_ANSWERS_INVALID', code: 400, message: 'POLL_ANSWERS_INVALID'},
+        messageErrorStored: false,
+        sendResult: 'rejected',
+        sendResultCount: 1,
+        sendResultSource: 'message_error'
+      });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('accepts a stored poll rejection when page-side RPC observation misses the worker failure', () => {
+    const diagnostic = {
+      status: 'error',
+      createClicked: true,
+      composerClosed: true,
+      tempMessageFound: true,
+      messageError: {type: 'POLL_ANSWERS_INVALID', code: 400},
+      sendResult: 'rejected',
+      bubbleStatuses: ['is-sending', 'is-error'],
+      rpcErrorCount: 0,
+      rpcErrorTypes: {}
+    };
+
+    expect(realClientBrowser.isExpectedPollCreationRejection?.(diagnostic, 'POLL_ANSWERS_INVALID')).toBe(true);
+    expect(realClientBrowser.isExpectedPollCreationRejection?.({...diagnostic, messageError: {type: 'MEDIA_INVALID'}}, 'POLL_ANSWERS_INVALID')).toBe(false);
+    expect(realClientBrowser.isExpectedPollCreationRejection?.({...diagnostic, status: 'timeout'}, 'POLL_ANSWERS_INVALID')).toBe(false);
+  });
+
+  it('compares the synthetic send store, rendered message row and poll selector', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-description-a1b2c3d4';
+    const workerObserver = observation.createContextObserver('alice');
+    const workerErrors = workerObserver.workerErrorSnapshot();
+    try {
+      await page.setContent('<!doctype html><html><body><div id="column-center"><div class="topbar"><div class="avatar" data-peer-id="-42"></div></div></div></body></html>');
+      await page.evaluate((syntheticQuestion: string) => {
+        const listeners: Record<string, (payload: unknown) => void> = {};
+        (window as any).__pollListeners = listeners;
+        (window as any).rootScope = {addEventListener: (type: string, listener: (payload: unknown) => void): void => {
+          listeners[type] = listener;
+        }};
+        const storedPoll = {
+          mid: 55,
+          peerId: -42,
+          media: {_: 'messageMediaPoll', poll: {question: {text: syntheticQuestion}}}
+        };
+        const lookups: Array<{peerId: number; mid: number}> = [];
+        (window as any).__pollStoreLookups = lookups;
+        (window as any).apiManagerProxy = {getMessageByPeer: (peerId: number, mid: number): unknown => {
+          lookups.push({peerId, mid});
+          return peerId === -42 && mid === 55 ? storedPoll : undefined;
+        }};
+        (window as any).__realClientActivePollQuestion = syntheticQuestion;
+      }, question);
+
+      await realClientBrowser.installPollMessageErrorObserver(page);
+      await page.evaluate((syntheticQuestion: string) => {
+        const dispatch = (window as any).__pollListeners.message_sent;
+        dispatch({
+          tempId: 0.0001,
+          tempMessage: {
+            mid: 0.0001,
+            random_id: 123456789,
+            media: {_: 'messageMediaPoll', poll: {question: {text: syntheticQuestion}}}
+          },
+          mid: 55,
+          message: {mid: 55, peerId: -42}
+        });
+        dispatch({
+          tempId: 0.0002,
+          tempMessage: {
+            mid: 0.0002,
+            random_id: 987654321,
+            media: {_: 'messageMediaPoll', poll: {question: {text: 'unrelated poll text'}}}
+          },
+          mid: 56,
+          message: {mid: 56}
+        });
+      }, question);
+
+      const diagnostic = await realClientBrowser.readPollSendDiagnostic(
+        page,
+        question,
+        'timeout',
+        0,
+        {total: 0, byType: {}},
+        {createClicked: true, composerClosed: true},
+        workerErrors,
+        workerErrors
+      );
+      expect(diagnostic).toMatchObject({
+        status: 'timeout',
+        tempMessageFound: false,
+        sendResult: 'accepted',
+        sendResultCount: 1,
+        sentTempId: '0.0001',
+        sentMessageId: '55',
+        sentRandomId: '123456789',
+        sentMessageStore: 'present',
+        sentPollStoreMatch: true,
+        sentDomAtEvent: {
+          bubbleRowCount: 0,
+          serverMidNodeCount: 0,
+          serverMidRowCount: 0,
+          tempMidNodeCount: 0,
+          tempMidRowCount: 0,
+          questionTextNodeCount: 0,
+          questionVisibleTextNodeCount: 0,
+          questionRowCount: 0,
+          questionVisibleRowCount: 0
+        },
+        renderedPollDom: {
+          bubbleRowCount: 0,
+          serverMidNodeCount: 0,
+          serverMidRowCount: 0,
+          tempMidNodeCount: 0,
+          tempMidRowCount: 0,
+          questionTextNodeCount: 0,
+          questionVisibleTextNodeCount: 0,
+          questionRowCount: 0,
+          questionVisibleRowCount: 0,
+          selectorCount: 0,
+          selectorVisibleCount: 0
+        }
+      });
+      expect(await page.evaluate(() => (window as any).__pollStoreLookups)).toEqual([{peerId: -42, mid: 55}]);
+      const summary = realClientBrowser.formatPollSendDiagnostic({shape: 'description', ...diagnostic});
+      expect(summary).toContain('send_result_accepted');
+      expect(summary).toContain('_send_mid_55');
+      expect(summary).toContain('_store_mid_present_store_poll_match_1');
+      expect(summary).toContain('_dom_event_mid_rows_0_temp_rows_0_question_text_nodes_0_question_rows_0');
+      expect(summary).toContain('_dom_after_mid_nodes_0_mid_rows_0_temp_nodes_0_temp_rows_0_question_text_nodes_0_question_text_visible_0_question_rows_0_question_visible_0_selector_0_selector_visible_0');
+      expectNoHostileLeak(summary);
+      expect(summary).not.toContain(question);
+      expect(summary).not.toContain('unrelated poll text');
+
+      await page.evaluate((syntheticQuestion: string) => {
+        const row = document.createElement('div');
+        row.className = 'bubble is-sent';
+        row.dataset.mid = '55';
+        row.textContent = syntheticQuestion;
+        document.querySelector('#column-center')!.append(row);
+      }, question);
+      const renderedDiagnostic = await realClientBrowser.readPollSendDiagnostic(
+        page,
+        question,
+        'sent',
+        0,
+        {total: 0, byType: {}},
+        {createClicked: true, composerClosed: true},
+        workerErrors,
+        workerErrors
+      );
+      expect(renderedDiagnostic).toMatchObject({
+        tempMessageFound: true,
+        sentMessageStore: 'present',
+        sentPollStoreMatch: true,
+        sentDomAtEvent: {
+          serverMidRowCount: 0,
+          tempMidRowCount: 0,
+          questionRowCount: 0
+        },
+        renderedPollDom: {
+          serverMidNodeCount: 1,
+          serverMidRowCount: 1,
+          tempMidNodeCount: 0,
+          tempMidRowCount: 0,
+          questionTextNodeCount: 1,
+          questionVisibleTextNodeCount: 1,
+          questionRowCount: 1,
+          questionVisibleRowCount: 1,
+          selectorCount: 1,
+          selectorVisibleCount: 1
+        }
+      });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('classifies poll answer rows using visible DOM counts only', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="poll" class="bubble" data-mid="55">
+        <div data-poll-option-idx="0"><span>browser-ci-answer-one</span><a href="https://fixture.invalid">link</a></div>
+        <div data-poll-option-idx="1"><span>browser-ci-answer-two</span></div>
+      </div>`);
+
+      expect(realClientBrowser.readPollContentDiagnostic).toBeTypeOf('function');
+      const diagnostic = await realClientBrowser.readPollContentDiagnostic(
+        page.locator('#poll'),
+        ['browser-ci-answer-one', 'browser-ci-answer-two']
+      );
+
+      expect(diagnostic).toEqual({
+        rowVisible: true,
+        optionCount: 2,
+        visibleOptionCount: 2,
+        answerTextCounts: [1, 1],
+        visibleAnswerTextCounts: [1, 1],
+        answerOptionCounts: [1, 1]
+      });
+      const summary = realClientBrowser.formatPollContentDiagnostic(diagnostic);
+      expect(summary).toContain('row_visible_1_options_2_visible_options_2');
+      expect(summary).toContain('answer_text_counts_1_1_visible_answer_text_counts_1_1_answer_options_1_1');
+      expect(summary).not.toContain('browser-ci-answer');
+      expect(summary).not.toContain('fixture.invalid');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('real client poll option interaction', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  it('returns to the active group before polls when channel leaves another chat selected', async() => {
+    const page = await browser.newPage();
+    const groupName = 'browser-ci-group-poll-context';
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="chat active"><div class="topbar"><div class="avatar" data-peer-id="-100"></div><div class="chat-info">channel</div></div></div>
+      </div>
+      <div id="chatlist-container"><div class="chatlist-chat" data-peer-id="-42">${groupName}</div></div>
+      <script>
+        document.querySelector('.chatlist-chat').addEventListener('click', () => {
+          document.querySelector('#column-center').innerHTML = '<div class="chat active"><div class="topbar"><div class="avatar" data-peer-id="-42"></div><div class="chat-info">${groupName}</div></div></div>';
+        });
+      </script>`);
+
+      await realClientBrowser.ensurePollGroupActive(page, groupName, 'alice_poll_group_chat');
+
+      expect(await page.locator('#column-center .chat.active .topbar .avatar').getAttribute('data-peer-id')).toBe('-42');
+      expect(await page.locator('#column-center .chat.active .topbar .chat-info').textContent()).toBe(groupName);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('clicks the poll option hit area without relying on its scoped CSS class', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="poll">
+        <div data-poll-option-idx="0">
+          <div class="clickableArea_t24sq_158" style="width: 120px; height: 24px" onclick="window.voteCount++"></div>
+          <div>browser-ci-poll-answer-one</div>
+        </div>
+      </div>`);
+      await page.evaluate(() => { (window as any).voteCount = 0; });
+
+      expect(realClientBrowser.getPollOptionClickTarget).toBeTypeOf('function');
+      const target = realClientBrowser.getPollOptionClickTarget(page.locator('#poll'), 'browser-ci-poll-answer-one');
+      expect(await target.count()).toBe(1);
+      await target.click();
+
+      expect(await page.evaluate(() => (window as any).voteCount)).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('finds poll vote and result labels without relying on footer CSS-module classes', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="poll">
+        <div class="footerButton_t24sq_609">Vote</div>
+        <div class="footerButton_t24sq_609">1 member voted</div>
+      </div>`);
+
+      const poll = page.locator('#poll');
+      expect(realClientBrowser.getPollVoteButton).toBeTypeOf('function');
+      expect(realClientBrowser.getPollResultIndicator).toBeTypeOf('function');
+      expect(await realClientBrowser.getPollVoteButton(poll).count()).toBe(1);
+      expect(await realClientBrowser.getPollResultIndicator(poll).count()).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('accepts visible results when choosing a poll option auto-submits without a Vote button', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-auto-submit-question';
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="bubble" data-mid="78">
+          <div>${question}</div>
+          <div data-poll-option-idx="0"><span>browser-ci-poll-answer-one</span><span>1</span><span>100%</span></div>
+          <div data-poll-option-idx="1"><span>browser-ci-poll-answer-two</span></div>
+          <div>1 member voted</div>
+        </div>
+      </div>`);
+
+      const poll = page.locator('#column-center .bubble').filter({hasText: question});
+      expect(realClientBrowser.submitPollVote).toBeTypeOf('function');
+      await expect(realClientBrowser.submitPollVote(page, poll, question, 'bob_poll_vote')).resolves.toBe(poll);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('waits for the sender poll option transition to settle before checking row count', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-transition-question';
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="bubble" data-mid="55">
+          <div>${question}</div>
+          <div data-poll-option-idx="0"><span>browser-ci-poll-answer-one</span></div>
+          <div data-poll-option-idx="0"><span>browser-ci-poll-answer-one</span></div>
+          <div data-poll-option-idx="1"><span>browser-ci-poll-answer-two</span></div>
+        </div>
+      </div>`);
+      await page.evaluate(() => {
+        window.setTimeout(() => document.querySelector('[data-poll-option-idx="0"] + [data-poll-option-idx="0"]')?.remove(), 100);
+      });
+
+      expect(realClientBrowser.waitForPollMessage).toBeTypeOf('function');
+      const poll = await realClientBrowser.waitForPollMessage(page, question, 'poll_transition', 1000);
+
+      expect(await poll.locator('[data-poll-option-idx]').count()).toBe(2);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('compares synthetic poll results in the message store with visible DOM indicators', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-result-diagnostic';
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="topbar"><div class="avatar" data-peer-id="42"></div></div>
+        <div class="bubble" data-mid="77">
+          <div>${question}</div>
+          <div data-poll-option-idx="0"><span>browser-ci-poll-answer-one</span></div>
+          <div data-poll-option-idx="1"><span>browser-ci-poll-answer-two</span></div>
+          <div class="footerButton_t24sq_609">Select an option</div>
+        </div>
+      </div>`);
+      await page.evaluate((syntheticQuestion: string) => {
+        const poll = {id: 9, question: syntheticQuestion, pFlags: {closed: false}, chosenIndexes: [] as number[]};
+        const results = {total_voters: 1, results: [{voters: 1}, {voters: 0}]};
+        (window as any).apiManagerProxy = {
+          getMessageByPeer: () => ({
+            mid: 77,
+            peerId: 42,
+            media: {_: 'messageMediaPoll', poll}
+          })
+        };
+        (window as any).rootScope = {
+          managers: {appPollsManager: {getPoll: async() => ({poll, results})}}
+        };
+      }, question);
+
+      expect(realClientBrowser.readPollResultsDiagnostic).toBeTypeOf('function');
+      const diagnostic = await realClientBrowser.readPollResultsDiagnostic(page, question, 'browser-ci-poll-answer-one');
+      expect(diagnostic).toMatchObject({
+        messageFound: true,
+        storePollMatches: true,
+        storePollFound: true,
+        storeResultsFound: true,
+        storeTotalVoters: 1,
+        storeAnswerVoters: [1, 0],
+        storeChosenIndexesCount: 0,
+        storeClosed: false,
+        domPollCount: 1,
+        domVisiblePollCount: 1,
+        domResultIndicatorCount: 0,
+        domSelectOptionCount: 1,
+        domAnswerOneCountCount: 0,
+        domAnswerOnePercentCount: 0
+      });
+      const summary = realClientBrowser.formatPollResultsDiagnostic(diagnostic);
+      expect(summary).toContain('store_total_voters_1_store_answer_voters_1_0');
+      expect(summary).not.toContain(question);
+      expect(summary).not.toContain('browser-ci-poll-answer-one');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('treats message_sent as confirmation while the bubble status still says sending', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent('<div id="column-center"><div class="bubble is-sending">browser-ci-poll-send-confirmed</div></div>');
+      await page.evaluate(() => {
+        (window as any).__realClientPollSendOutcomes = () => [{question: 'browser-ci-poll-send-confirmed'}];
+        (window as any).__realClientPollErrors = (): unknown[] => [];
+      });
+
+      expect(realClientBrowser.waitForPollSendOutcome).toBeTypeOf('function');
+      await expect(realClientBrowser.waitForPollSendOutcome(page, 'browser-ci-poll-send-confirmed', 'send', 50)).resolves.toBe('sent');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('captures the real sendMedia resolution for an empty-description poll with an input answer', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-empty-description-send-result';
+    try {
+      await page.setContent('<div id="column-center"><div class="topbar"><div class="avatar" data-peer-id="-42"></div></div></div>');
+      await page.evaluate((syntheticQuestion: string) => {
+        const apiManager = {
+          invokeApi: (method: string) => Promise.resolve(method === 'messages.sendMedia' ? {
+            _: 'updates',
+            updates: [{_: 'updateNewMessage', message: {id: 77}}]
+          } : {})
+        };
+        (window as any).rootScope = {
+          addEventListener: (): void => undefined,
+          managers: {appPollsManager: {apiManager}}
+        };
+        (window as any).apiManagerProxy = {getMessageByPeer: (): undefined => undefined};
+        (window as any).__realClientActivePollQuestion = syntheticQuestion;
+      }, question);
+
+      await realClientBrowser.installPollMessageErrorObserver(page);
+      await page.evaluate(async(syntheticQuestion: string) => {
+        await (window as any).rootScope.managers.appPollsManager.apiManager.invokeApi('messages.sendMedia', {
+          message: '',
+          random_id: '123456789',
+          media: {
+            _: 'inputMediaPoll',
+            poll: {
+              question: {_: 'textWithEntities', text: syntheticQuestion},
+              answers: [{_: 'inputPollAnswer'}, {_: 'pollAnswer'}]
+            }
+          }
+        });
+      }, question);
+
+      const diagnostic = await realClientBrowser.readPollSendDiagnostic(
+        page,
+        question,
+        'timeout',
+        0,
+        {total: 0, byType: {}},
+        {createClicked: true, composerClosed: true},
+        observation.createContextObserver('alice').workerErrorSnapshot(),
+        observation.createContextObserver('alice').workerErrorSnapshot()
+      );
+      expect(diagnostic).toMatchObject({
+        randomId: '123456789',
+        sendResult: 'accepted',
+        sendResultSource: 'messages.sendMedia',
+        sentMessageId: '77',
+        sendMediaCallCount: 1,
+        sendMediaStatus: 'resolved',
+        sendMediaResultType: 'updates',
+        sendMediaResponseMessageId: '77',
+        sendMediaInputAnswerCount: 1,
+        sendMediaDescriptionEmpty: true
+      });
+      const summary = realClientBrowser.formatPollSendDiagnostic({shape: 'input_answer', ...diagnostic});
+      expect(summary).toContain('_send_media_observer_1_send_media_calls_1_send_media_status_resolved_result_type_updates_response_mid_77');
+      expect(summary).toContain('_send_media_input_answer_count_1_description_empty_1_error_none');
+      expectNoHostileLeak(summary);
+      expect(summary).not.toContain(question);
+    } finally {
+      await page.close();
     }
   });
 });
