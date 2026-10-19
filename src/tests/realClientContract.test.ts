@@ -2542,6 +2542,103 @@ describe('discovery shared-worker network accounting', () => {
     ]);
   });
 
+  it('correlates one repeated generic Alice rejection through its unique action stage', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [], bob: []} as any;
+    const stages = ['alice_channel_invite_button', 'alice_channel_post_send', 'alice_channel_other_conversation'];
+    for(const stage of stages) {
+      recordPageError(pageErrors, 'alice', new Error('Object'), undefined, {scenario: 'channel', step: stage}, {
+        captureDetails: true,
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage
+      });
+    }
+    const source = `${APP_ORIGIN}/cryptoMessagePort-AbCd.js`;
+    const page = {url: () => `${APP_ORIGIN}/`, evaluate: async(): Promise<unknown[]> => []} as any;
+    const createRuntimeException = (exceptionId: number, functionName: string, errorType: string, errorCode: number) => ({
+      exceptionId,
+      executionContextId: 3,
+      text: 'Uncaught (in promise)',
+      scriptId: String(exceptionId),
+      lineNumber: 15,
+      columnNumber: 23,
+      exception: {
+        type: 'object',
+        description: 'Object',
+        objectId: `runtime-object-${exceptionId}`,
+        preview: {properties: [
+          {name: 'type', type: 'string', value: errorType},
+          {name: 'code', type: 'number', value: String(errorCode)}
+        ]}
+      },
+      stackTrace: {callFrames: [{
+        scriptId: String(exceptionId),
+        url: source,
+        functionName,
+        lineNumber: 15,
+        columnNumber: 23
+      }]}
+    });
+    recordPageErrorProtocolEvent(page, createRuntimeException(11, 'inviteToChannel', 'PEER_ID_INVALID', 400), 'runtime', {scenario: 'channel', step: stages[0]});
+    recordPageErrorProtocolEvent(page, createRuntimeException(12, 'unrelatedHandler', 'PEER_ID_INVALID', 400), 'runtime', {scenario: 'channel', step: stages[0]});
+    recordPageErrorProtocolEvent(page, createRuntimeException(13, 'processResultTask', 'PEER_ID_INVALID', 400), 'runtime', {scenario: 'channel', step: stages[1]});
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver);
+
+    expect(pageErrors.alice[0].scriptAsset).toBe('unknown');
+    expect(pageErrors.alice[0].diagnostic.rpcErrorType).toBeUndefined();
+    expect(pageErrors.alice[1].scriptAsset).toBe('cryptoMessagePort-AbCd.js');
+    expect(pageErrors.alice[1].stack.frames).toEqual([{functionName: 'processResultTask', scriptAsset: 'cryptoMessagePort-AbCd.js', line: 16, column: 24}]);
+    expect(pageErrors.alice[1].diagnostic).toMatchObject({stage: stages[1], rpcErrorType: 'PEER_ID_INVALID', rpcErrorCode: 400});
+    expect(pageErrors.alice[2].scriptAsset).toBe('unknown');
+    expect(pageErrors.alice[2].diagnostic.rpcErrorType).toBeUndefined();
+    expect(JSON.stringify(pageErrors)).not.toContain('Object');
+    resolver.clear();
+  });
+
+  it('leaves same-stage duplicate generic Alice rejections unattributed', async() => {
+    const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
+    const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
+    const recordPageError = (realClientBrowser as any).recordPageError;
+    const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
+    const resolver = createPageErrorAssetResolver();
+    const pageErrors = {alice: [], bob: []} as any;
+    const stage = 'alice_channel_post_send';
+    for(let index = 0; index < 2; index++) {
+      recordPageError(pageErrors, 'alice', new Error('Object'), undefined, {scenario: 'channel', step: stage}, {
+        captureDetails: true,
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage
+      });
+    }
+    const page = {url: () => `${APP_ORIGIN}/`, evaluate: async(): Promise<unknown[]> => []} as any;
+    recordPageErrorProtocolEvent(page, {
+      exceptionId: 21,
+      executionContextId: 3,
+      text: 'Uncaught (in promise)',
+      exception: {type: 'object', description: 'Object', objectId: 'runtime-object-21'},
+      stackTrace: {callFrames: [{
+        scriptId: '21',
+        url: `${APP_ORIGIN}/cryptoMessagePort-AbCd.js`,
+        functionName: 'processResultTask',
+        lineNumber: 15,
+        columnNumber: 23
+      }]}
+    }, 'runtime', {scenario: 'channel', step: stage});
+
+    await enrichPageErrorDetails(pageErrors, 'alice', page, resolver);
+
+    expect(pageErrors.alice.map((error: any) => error.scriptAsset)).toEqual(['unknown', 'unknown']);
+    expect(pageErrors.alice.map((error: any) => error.diagnostic.rpcErrorType)).toEqual([undefined, undefined]);
+    resolver.clear();
+  });
+
   it('correlates simultaneous window, Runtime and debugger observations of one object rejection', async() => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;

@@ -3177,7 +3177,7 @@ function createPageErrorExceptionEvent(exceptionDetails, pageUrl, redactValues =
   };
 }
 
-function recordPageErrorProtocolEvent(page, exceptionDetails, captureSource) {
+function recordPageErrorProtocolEvent(page, exceptionDetails, captureSource, scenarioStep) {
   let events = pageErrorProtocolEvents.get(page);
   if(!Array.isArray(events)) {
     events = [];
@@ -3214,6 +3214,7 @@ function recordPageErrorProtocolEvent(page, exceptionDetails, captureSource) {
     ...event,
     captureSequence: events.length,
     captureSource: ['runtime', 'debugger'].includes(captureSource) ? captureSource : 'unknown',
+    scenarioStep: scenarioStep ? sanitizePageErrorScenarioStep(scenarioStep) : undefined,
     exceptionId: Number.isSafeInteger(exceptionDetails?.exceptionId) ? exceptionDetails.exceptionId : undefined,
     executionContextId: Number.isSafeInteger(exceptionDetails?.executionContextId) ? exceptionDetails.executionContextId : undefined,
     exceptionObjectId: typeof exception?.objectId === 'string' ? exception.objectId : undefined,
@@ -3292,7 +3293,8 @@ async function enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAs
     const diagnosticMessageHash = pageErrorDiagnosticMessageHashes.get(diagnostic);
     if(!diagnosticMessageHash) continue;
     const matchingEntries = entries.filter((candidate) =>
-      pageErrorDiagnosticMessageHashes.get(candidate?.diagnostic) === diagnosticMessageHash
+      pageErrorDiagnosticMessageHashes.get(candidate?.diagnostic) === diagnosticMessageHash &&
+      candidate?.diagnostic?.scenario === diagnostic.scenario && candidate?.diagnostic?.stage === diagnostic.stage
     );
     if(matchingEntries.length !== 1) continue;
     const event = correlatePageErrorDiagnosticEvents(diagnostic, {
@@ -3380,9 +3382,17 @@ function correlatePageErrorDiagnosticEvents(diagnostic, {windowEvents = [], prot
   }
   for(const event of otherProtocolEvents) protocolGroups.push({exceptionId: undefined, executionContextId: undefined, events: [event]});
 
-  if(protocolGroups.length > 0) {
-    if(protocolGroups.length !== 1) return;
-    const groupEvents = [...protocolGroups[0].events];
+  let candidateProtocolGroups = protocolGroups;
+  const hasActionScopedProtocolEvents = protocolGroups.some((group) => group.events.some((event) => event.scenarioStep));
+  if(hasActionScopedProtocolEvents) {
+    candidateProtocolGroups = protocolGroups.filter((group) => group.events.some((event) =>
+      event.scenarioStep?.scenario === diagnostic.scenario && event.scenarioStep?.step === diagnostic.stage
+    ));
+    if(candidateProtocolGroups.length === 0) return;
+  }
+  if(candidateProtocolGroups.length > 0) {
+    if(candidateProtocolGroups.length !== 1) return;
+    const groupEvents = [...candidateProtocolGroups[0].events];
     const matchingWindowEvents = windowEvents.filter(matchesMessage);
     if(matchingWindowEvents.length === 1 && canCorrelatePageErrorSupplement(groupEvents, matchingWindowEvents[0])) {
       groupEvents.push({...matchingWindowEvents[0], captureSource: 'window'});
@@ -4285,7 +4295,12 @@ async function main(dependencies = {}) {
       'alice',
       alice.observer,
       pageErrorAssets.alice,
-      runtime.pageErrorDiagnostics === true ? (details, source) => recordPageErrorProtocolEvent(alice.page, details, source) : undefined
+      runtime.pageErrorDiagnostics === true ? (details, source) => recordPageErrorProtocolEvent(
+        alice.page,
+        details,
+        source,
+        {scenario: currentScenario, step: currentStage}
+      ) : undefined
     );
     appNetworkObservers.alice = alice.networkObserver;
     observers.push(alice.networkObserver);
@@ -4314,7 +4329,12 @@ async function main(dependencies = {}) {
       'bob',
       bob.observer,
       pageErrorAssets.bob,
-      runtime.pageErrorDiagnostics === true ? (details, source) => recordPageErrorProtocolEvent(bob.page, details, source) : undefined
+      runtime.pageErrorDiagnostics === true ? (details, source) => recordPageErrorProtocolEvent(
+        bob.page,
+        details,
+        source,
+        {scenario: currentScenario, step: currentStage}
+      ) : undefined
     );
     appNetworkObservers.bob = bob.networkObserver;
     observers.push(bob.networkObserver);
