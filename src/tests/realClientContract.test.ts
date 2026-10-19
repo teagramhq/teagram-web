@@ -7623,6 +7623,27 @@ describe('real client poll option interaction', () => {
     }
   });
 
+  it('accepts visible results when choosing a poll option auto-submits without a Vote button', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-auto-submit-question';
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="bubble" data-mid="78">
+          <div>${question}</div>
+          <div data-poll-option-idx="0"><span>browser-ci-poll-answer-one</span><span>1</span><span>100%</span></div>
+          <div data-poll-option-idx="1"><span>browser-ci-poll-answer-two</span></div>
+          <div>1 member voted</div>
+        </div>
+      </div>`);
+
+      const poll = page.locator('#column-center .bubble').filter({hasText: question});
+      expect(realClientBrowser.submitPollVote).toBeTypeOf('function');
+      await expect(realClientBrowser.submitPollVote(page, poll, question, 'bob_poll_vote')).resolves.toBe(poll);
+    } finally {
+      await page.close();
+    }
+  });
+
   it('waits for the sender poll option transition to settle before checking row count', async() => {
     const page = await browser.newPage();
     const question = 'browser-ci-poll-transition-question';

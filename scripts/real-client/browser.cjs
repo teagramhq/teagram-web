@@ -3666,6 +3666,26 @@ async function waitForPollResults(page, question, stage, timeoutMs = 30_000) {
   return poll;
 }
 
+async function submitPollVote(page, poll, question, stage) {
+  currentStage = stage;
+  const voteButton = getPollVoteButton(poll);
+  const resultIndicator = getPollResultIndicator(poll).first();
+  const nextAction = await Promise.race([
+    voteButton.waitFor({state: 'visible', timeout: 10_000}).then(() => 'vote').catch(() => undefined),
+    resultIndicator.waitFor({state: 'visible', timeout: 10_000}).then(() => 'results').catch(() => undefined)
+  ]);
+
+  if(nextAction === 'vote' && !await resultIndicator.isVisible().catch(() => false)) {
+    await voteButton.click().catch(() => failStage(`${stage}_button`));
+  } else if(nextAction !== 'results' && nextAction !== 'vote') {
+    const diagnostic = await readPollResultsDiagnostic(page, question, POLL_ANSWER_ONE);
+    failStage(`${stage}_${formatPollResultsDiagnostic(diagnostic)}`);
+  }
+
+  await waitForPollResults(page, question, `${stage}_results`);
+  return poll;
+}
+
 async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirectory, capturedScreenshots}) {
   const polls = [
     {
@@ -3744,10 +3764,7 @@ async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirec
     const voteOption = getPollOptionClickTarget(bobPoll, POLL_ANSWER_ONE);
     await voteOption.click().catch(() => failStage(`bob_poll_${testCase.shape}_vote_select`));
     currentStage = `bob_poll_${testCase.shape}_vote_submit`;
-    const voteButton = getPollVoteButton(bobPoll);
-    await voteButton.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`bob_poll_${testCase.shape}_vote_submit`));
-    await voteButton.click().catch(() => failStage(`bob_poll_${testCase.shape}_vote_submit`));
-    await waitForPollResults(bob.page, testCase.question, `bob_poll_${testCase.shape}_results`);
+    await submitPollVote(bob.page, bobPoll, testCase.question, `bob_poll_${testCase.shape}_vote_submit`);
     await capturePollState(bob.page, screenshotDirectory, `bob-${testCase.shape.replaceAll('_', '-')}-poll-results`, `bob_poll_${testCase.shape}_results_screenshot`, capturedScreenshots);
 
     currentStage = `alice_poll_${testCase.shape}_stop_menu`;
@@ -5801,7 +5818,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPollMessageErrorObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPollMessageErrorObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
