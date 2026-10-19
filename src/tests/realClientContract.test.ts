@@ -2639,13 +2639,15 @@ describe('discovery shared-worker network accounting', () => {
     resolver.clear();
   });
 
-  it('keeps concurrent scenario action stages scoped to their page', () => {
+  it('keeps the preceding action scoped to its page while the other context advances', () => {
     const readPageScenarioStep = (realClientBrowser as any).readPageScenarioStep;
+    const setPageActionStep = (realClientBrowser as any).setPageActionStep;
     const setPageScenarioStep = (realClientBrowser as any).setPageScenarioStep;
     const alicePage = {};
     const bobPage = {};
-    setPageScenarioStep(alicePage, 'alice_channel_create');
-    setPageScenarioStep(bobPage, 'bob_channel_membership_refresh');
+    setPageActionStep(alicePage, 'alice_channel_create');
+    setPageScenarioStep(alicePage, 'alice_channel_identity');
+    setPageActionStep(bobPage, 'bob_channel_membership_refresh');
 
     expect(readPageScenarioStep(alicePage).step).toBe('alice_channel_create');
     expect(readPageScenarioStep(bobPage).step).toBe('bob_channel_membership_refresh');

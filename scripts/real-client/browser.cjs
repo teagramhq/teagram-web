@@ -53,6 +53,7 @@ const pageErrorDiagnosticMessageHashes = new WeakMap();
 const pageErrorConsoleEvents = new WeakMap();
 const pageErrorProtocolEvents = new WeakMap();
 const pageScenarioSteps = new WeakMap();
+const pageScenarioActions = new WeakMap();
 const PAGE_ERROR_BLOB_ASSET_HINTS = Object.freeze([
   {pattern: /\bTLottieWasm\.createAnimation\b/, workerLabel: 'lottie_worker'}
 ]);
@@ -91,6 +92,8 @@ let currentStage = 'runtime_inputs';
 let currentScenario;
 
 function readPageScenarioStep(page) {
+  const pageAction = pageScenarioActions.get(page);
+  if(pageAction?.scenario === currentScenario) return {...pageAction};
   const pageStep = pageScenarioSteps.get(page);
   return pageStep?.scenario === currentScenario ? {...pageStep} : {scenario: currentScenario, step: currentStage};
 }
@@ -98,6 +101,11 @@ function readPageScenarioStep(page) {
 function setPageScenarioStep(page, step) {
   currentStage = step;
   if(page && typeof page === 'object') pageScenarioSteps.set(page, {scenario: currentScenario, step});
+}
+
+function setPageActionStep(page, step) {
+  setPageScenarioStep(page, step);
+  if(page && typeof page === 'object') pageScenarioActions.set(page, {scenario: currentScenario, step});
 }
 
 // The chat that the scenario last selected and the page it waits on, kept so a
@@ -1519,7 +1527,7 @@ async function submitUsernameOnceAndWaitForPassword(page, account, expected, nam
 }
 
 async function selectUniquePeer(page, inputSelector, resultsSelector, username, stage) {
-  setPageScenarioStep(page, stage);
+  setPageActionStep(page, stage);
   const input = page.locator(inputSelector).first();
   await input.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_search_field`));
   await input.fill(username);
@@ -2619,9 +2627,9 @@ async function sendChannelText(page, channelName, screenshotDirectory, capturedS
   if(!channelPeerId.startsWith('-')) failStage('alice_channel_post_identity');
 
   const input = await openComposer(page, 'alice_channel_post', activeChannel.chat, timeoutMs);
-  setPageScenarioStep(page, 'alice_channel_post_fill');
+  setPageActionStep(page, 'alice_channel_post_fill');
   await input.fill(CHANNEL_MESSAGE, {timeout: timeoutMs}).catch(() => failStage('alice_channel_post_fill'));
-  setPageScenarioStep(page, 'alice_channel_post_send');
+  setPageActionStep(page, 'alice_channel_post_send');
   await input.press('Enter', {timeout: timeoutMs}).catch(() => failStage('alice_channel_post_send'));
   const message = activeChannel.chat.locator('.bubble .message').filter({hasText: CHANNEL_MESSAGE});
   setPageScenarioStep(page, 'alice_channel_post_visible');
@@ -4086,21 +4094,21 @@ async function runChannelScenario(alice, bob, runtimeConfig, capturedScreenshots
   const channelFormSelector = '.new-channel-container';
   const memberSelector = '.add-members-container';
 
-  setPageScenarioStep(alice.page, 'alice_channel_menu');
+  setPageActionStep(alice.page, 'alice_channel_menu');
   await alice.page.locator('#new-menu').click().catch(() => failStage('alice_channel_menu'));
   await captureState(alice.page, runtimeConfig.screenshotDirectory, 'alice-channel-menu', capturedScreenshots);
 
-  setPageScenarioStep(alice.page, 'alice_channel_new');
+  setPageActionStep(alice.page, 'alice_channel_new');
   await alice.page.getByText('New Channel', {exact: true}).click().catch(() => failStage('alice_channel_new'));
   const channelForm = alice.page.locator(channelFormSelector);
   setPageScenarioStep(alice.page, 'alice_channel_name_form');
   await channelForm.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_channel_name_form'));
   await captureState(alice.page, runtimeConfig.screenshotDirectory, 'alice-channel-name', capturedScreenshots);
 
-  setPageScenarioStep(alice.page, 'alice_channel_name_fill');
+  setPageActionStep(alice.page, 'alice_channel_name_fill');
   await channelForm.locator(GROUP_NAME_FIELD_SELECTOR).first().fill(channelName, {timeout: 15_000})
   .catch(() => failStage('alice_channel_name_fill'));
-  setPageScenarioStep(alice.page, 'alice_channel_create');
+  setPageActionStep(alice.page, 'alice_channel_create');
   await channelForm.locator('.btn-corner.is-visible').click({timeout: 15_000}).catch(() => failStage('alice_channel_create'));
 
   setPageScenarioStep(alice.page, 'alice_channel_members_form');
@@ -4128,20 +4136,21 @@ async function runChannelScenario(alice, bob, runtimeConfig, capturedScreenshots
   await captureState(alice.page, runtimeConfig.screenshotDirectory, 'alice-channel-member-selection', capturedScreenshots);
   await startChannelMembershipTrace(alice.page, bob.page, channelPeerId, selectedBobPeerId, channelName);
 
-  setPageScenarioStep(alice.page, 'alice_channel_add_bob');
+  setPageActionStep(alice.page, 'alice_channel_add_bob');
   const continueChannel = alice.page.locator(`${memberSelector} .btn-corner`);
   await continueChannel.click({timeout: 15_000}).catch(() => failStage('alice_channel_add_bob'));
   setPageScenarioStep(alice.page, 'alice_channel_add_confirmation');
   const confirmAdd = alice.page.getByText('Add', {exact: true});
   await confirmAdd.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_channel_add_confirmation'));
   if(await confirmAdd.count() !== 1) failStage('alice_channel_add_confirmation');
+  setPageActionStep(alice.page, 'alice_channel_add_confirmation');
   await confirmAdd.click({timeout: 15_000}).catch(() => failStage('alice_channel_add_confirmation'));
   setPageScenarioStep(alice.page, 'alice_channel_add_bob_complete');
   await alice.page.locator(memberSelector).waitFor({state: 'hidden', timeout: 30_000})
   .catch(() => failStage('alice_channel_add_bob_complete'));
   await activeChannel.title.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_channel_add_bob_complete'));
 
-  setPageScenarioStep(bob.page, 'bob_channel_membership_refresh');
+  setPageActionStep(bob.page, 'bob_channel_membership_refresh');
   await bob.page.reload({waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage('bob_channel_membership_refresh'));
   await bob.page.waitForFunction(() => {
     const chats = document.querySelector('#page-chats');
@@ -4164,7 +4173,7 @@ async function runChannelScenario(alice, bob, runtimeConfig, capturedScreenshots
   await waitForUnreadCount(bob.page, channelPeerId, 1, 'bob_channel_unread_before_open', 30_000, channelName);
   await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-unread', capturedScreenshots);
 
-  setPageScenarioStep(bob.page, 'bob_channel_open');
+  setPageActionStep(bob.page, 'bob_channel_open');
   await bobChannelRow.click({timeout: 30_000}).catch(() => failStage('bob_channel_open'));
   const bobActiveChannel = resolveActiveGroupChat(bob.page, channelName);
   await bobActiveChannel.chat.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_channel_open'));
@@ -4180,13 +4189,13 @@ async function runChannelScenario(alice, bob, runtimeConfig, capturedScreenshots
   await waitForUnreadCount(bob.page, channelPeerId, 0, 'bob_channel_read', 30_000, channelName);
   await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-read', capturedScreenshots);
 
-  setPageScenarioStep(bob.page, 'bob_channel_return_to_other_conversation');
+  setPageActionStep(bob.page, 'bob_channel_return_to_other_conversation');
   await bobOtherRow.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_channel_return_to_other_conversation'));
   await bobOtherRow.click({timeout: 30_000}).catch(() => failStage('bob_channel_return_to_other_conversation'));
   await waitForActivePeerId(bob.page, bobOtherPeerId, 'bob_channel_return_to_other_conversation');
   await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-return', capturedScreenshots);
 
-  setPageScenarioStep(bob.page, 'bob_channel_reload');
+  setPageActionStep(bob.page, 'bob_channel_reload');
   await bob.page.reload({waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage('bob_channel_reload'));
   setPageScenarioStep(bob.page, 'bob_channel_reload_chats_list');
   await bob.page.waitForFunction(() => {
@@ -4325,7 +4334,7 @@ async function main(dependencies = {}) {
       'alice',
       error,
       pageErrorAssets.alice,
-      undefined,
+      readPageScenarioStep(alice.page),
       pageErrorDiagnosticOptions(alice.page)
     ));
     await countClientErrors(alice.page, () => readPageScenarioStep(alice.page));
@@ -4359,7 +4368,7 @@ async function main(dependencies = {}) {
       'bob',
       error,
       pageErrorAssets.bob,
-      undefined,
+      readPageScenarioStep(bob.page),
       pageErrorDiagnosticOptions(bob.page)
     ));
     await countClientErrors(bob.page, () => readPageScenarioStep(bob.page));
@@ -4619,7 +4628,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureChannelMembershipState, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, getClientErrorDiagnostics, readPageScenarioStep, readSafeRpcArguments, createNetworkObserver, emitAuthProgressReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, setPageScenarioStep, shouldRunChannelScenario, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword, waitForUnreadCount};
+module.exports = {captureCenterColumnState, captureChannelMembershipState, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, getClientErrorDiagnostics, readPageScenarioStep, readSafeRpcArguments, createNetworkObserver, emitAuthProgressReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
