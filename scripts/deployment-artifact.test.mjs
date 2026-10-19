@@ -79,6 +79,13 @@ afterAll(() => {
 });
 
 describe('deployment artifact verification', () => {
+  it('allows the fixed Cloudflare Turnstile origin in the deployed nginx CSP', () => {
+    const nginx = readFileSync(resolve('deploy/teagram-web/nginx.conf'), 'utf8');
+
+    expect(nginx).toMatch(/script-src[^;]*https:\/\/challenges\.cloudflare\.com/);
+    expect(nginx).toContain("frame-src 'self' https://challenges.cloudflare.com;");
+  });
+
   it('uses the Teagram stack names and keeps its legacy link-edge network attachment', () => {
     const compose = readFileSync(resolve('deploy/teagram-web/compose.yaml'), 'utf8');
 

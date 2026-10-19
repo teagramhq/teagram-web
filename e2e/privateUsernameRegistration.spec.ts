@@ -1,80 +1,17 @@
 import {expect, test} from '@playwright/test';
+import {captureState, setupRegistrationMocks} from './registrationMocks';
 
 for(const mode of ['open', 'invite'] as const) {
   test(`registers a username account in ${mode} mode without a live server`, async({page}, testInfo) => {
-    const appOrigin = new URL(testInfo.project.use.baseURL as string).origin;
+    const turnstileRequests: string[] = [];
+    page.on('request', (request) => {
+      if(request.url().includes('challenges.cloudflare.com')) turnstileRequests.push(request.url());
+    });
     const username = mode === 'open' ? 'test_user_open' : 'test_user_invite';
     const inviteSecret = 'test-invite-secret';
     const password = 'Teagram-Test-Password-123!';
 
-    await page.context().route('**/*', async(route) => {
-      if(new URL(route.request().url()).origin === appOrigin) {
-        await route.continue();
-      } else {
-        await route.abort();
-      }
-    });
-    await page.context().routeWebSocket(/.*/, (socket) => {
-      const url = new URL(socket.url());
-      const origin = url.protocol === 'ws:' ? `http://${url.host}` : `https://${url.host}`;
-      if(origin === appOrigin && url.pathname === '/') {
-        socket.connectToServer();
-      } else {
-        socket.close();
-      }
-    });
-    await page.addInitScript((registrationMode) => {
-      Object.defineProperty(window, 'apiManagerProxy', {
-        configurable: true,
-        set(proxy: any) {
-          delete (window as any).apiManagerProxy;
-          (window as any).apiManagerProxy = proxy;
-          const invoke = proxy.invoke.bind(proxy);
-          const calls: Array<{method: string, params?: Record<string, unknown>}> =
-            ((window as any).__privateRegistrationCalls = []);
-          const user = {_ : 'user', id: 4242, first_name: 'CI Registration'};
-
-          proxy.invoke = (type: string, payload: any, ...args: any[]) => {
-            if(type === 'manager' && payload?.name === 'apiManager') {
-              if(payload.method === 'getAppConfig') {
-                calls.push({method: 'help.getAppConfig', params: {registration_mode: registrationMode}});
-                return Promise.resolve({registration_mode: registrationMode});
-              }
-
-              if(payload.method === 'invokeApi') {
-                const [method, params] = payload.args;
-                calls.push({method, params});
-                switch(method) {
-                  case 'auth.sendCode':
-                    return Promise.resolve({
-                      _: 'auth.sentCode',
-                      phone_code_hash: 'mock-registration-code-hash',
-                      type: {_ : 'auth.sentCodeTypeApp', length: 5},
-                      timeout: 60
-                    });
-                  case 'auth.signIn':
-                    return Promise.resolve({_ : 'auth.authorizationSignUpRequired'});
-                  case 'auth.signUp':
-                    return Promise.resolve({_ : 'auth.authorization', user});
-                }
-              }
-
-              if(payload.method === 'setUser') {
-                calls.push({method: 'apiManager.setUser'});
-                return invoke(type, payload, ...args);
-              }
-            }
-
-            if(type === 'manager' && payload?.name === 'passwordManager' && payload.method === 'updateSettings') {
-              calls.push({method: 'account.updatePasswordSettings', params: payload.args[0]});
-              return Promise.resolve(true);
-            }
-
-            return invoke(type, payload, ...args);
-          };
-        }
-      });
-    }, mode);
+    await setupRegistrationMocks(page, testInfo, mode);
 
     await page.goto('/?noWorker=1', {waitUntil: 'domcontentloaded'});
     const registration = page.locator('#auth-pages');
@@ -95,7 +32,7 @@ for(const mode of ['open', 'invite'] as const) {
     await registration.getByRole('button', {name: 'Create account'}).click();
     await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
 
-    const calls = await page.evaluate(() => (window as any).__privateRegistrationCalls as Array<{
+    const calls = await page.evaluate(() => (window as any).__registrationCalls as Array<{
       method: string,
       params?: Record<string, unknown>
     }>);
@@ -113,6 +50,7 @@ for(const mode of ['open', 'invite'] as const) {
     });
     expect(calls.find((call) => call.method === 'account.updatePasswordSettings')?.params).toEqual({newPassword: password});
     expect(calls.some((call) => call.method === 'apiManager.setUser')).toBe(true);
+    expect(turnstileRequests).toHaveLength(0);
     await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(4242))).toMatchObject({
       _: 'user',
       id: 4242,
@@ -120,3 +58,91 @@ for(const mode of ['open', 'invite'] as const) {
     });
   });
 }
+
+test('retries username registration when the server requests Turnstile', async({page}, testInfo) => {
+  const turnstileRequests: string[] = [];
+  page.on('request', (request) => {
+    if(request.url().includes('challenges.cloudflare.com')) turnstileRequests.push(request.url());
+  });
+  await page.setViewportSize({width: 320, height: 720});
+  await setupRegistrationMocks(page, testInfo, 'open', true, true);
+
+  await page.goto('/?noWorker=1', {waitUntil: 'domcontentloaded'});
+  const registration = page.locator('#auth-pages');
+  await expect(registration.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
+  await registration.getByRole('button', {name: 'Create account'}).click();
+  await registration.locator('input[aria-label="Username"]').fill('test_user_open');
+  await registration.locator('input[aria-label="Display name"]').fill('CI Registration');
+  await registration.locator('input[aria-label="Password"]').fill('Teagram-Test-Password-123!');
+  await registration.locator('input[aria-label="Confirm password"]').fill('Teagram-Test-Password-123!');
+  await captureState(page, testInfo, 'turnstile-registration-form');
+  await registration.getByRole('button', {name: 'Create account'}).click();
+
+  const challenge = registration.getByTestId('turnstile-challenge');
+  await expect(challenge).toBeVisible();
+  await expect(challenge).toHaveAttribute('data-sitekey', 'test-site-key');
+  await expect(challenge.getByRole('alert')).toHaveText("The security check couldn't load. Try again.");
+  await captureState(page, testInfo, 'turnstile-unavailable');
+  await expect.poll(() => turnstileRequests).toHaveLength(1);
+  await registration.getByRole('button', {name: 'Try again'}).click();
+  await expect(challenge.getByRole('status')).toHaveText('Loading security check…');
+  await captureState(page, testInfo, 'turnstile-loading');
+  await expect(registration.getByRole('button', {name: 'Complete security check'})).toBeVisible();
+  await expect(registration.locator('input[aria-label="Display name"]')).toHaveValue('CI Registration');
+  await expect.poll(() => turnstileRequests).toHaveLength(2);
+  await captureState(page, testInfo, 'turnstile-ready');
+  const challengeWidths = await page.evaluate(() => ({
+    document: document.documentElement.scrollWidth,
+    viewport: document.documentElement.clientWidth
+  }));
+  expect(challengeWidths.document).toBeLessThanOrEqual(challengeWidths.viewport);
+  await page.setViewportSize({width: 768, height: 900});
+  const wideChallengeWidths = await page.evaluate(() => ({
+    document: document.documentElement.scrollWidth,
+    viewport: document.documentElement.clientWidth
+  }));
+  expect(wideChallengeWidths.document).toBeLessThanOrEqual(wideChallengeWidths.viewport);
+  await page.setViewportSize({width: 320, height: 720});
+  const narrowChallengeWidths = await page.evaluate(() => ({
+    document: document.documentElement.scrollWidth,
+    viewport: document.documentElement.clientWidth
+  }));
+  expect(narrowChallengeWidths.document).toBeLessThanOrEqual(narrowChallengeWidths.viewport);
+
+  await registration.getByRole('button', {name: 'Expire security check'}).click();
+  await expect(registration.getByRole('alert')).toHaveText('The security check expired. Try again.');
+  await captureState(page, testInfo, 'turnstile-expired');
+  await expect(registration.locator('input[aria-label="Display name"]')).toHaveValue('CI Registration');
+  await registration.getByRole('button', {name: 'Try again'}).focus();
+  await page.keyboard.press('Enter');
+  await registration.getByRole('button', {name: 'Complete security check'}).click();
+  await expect(challenge.getByRole('status')).toHaveText('Checking…');
+  await captureState(page, testInfo, 'turnstile-checking');
+  await expect(registration.getByRole('alert')).toHaveText('The security check failed. Try again.');
+  await captureState(page, testInfo, 'turnstile-rejected');
+  await registration.getByRole('button', {name: 'Try again'}).click();
+  await registration.getByRole('button', {name: 'Complete security check'}).click();
+  await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
+  await captureState(page, testInfo, 'turnstile-signup-complete');
+
+  const calls = await page.evaluate(() => (window as any).__registrationCalls as Array<{
+    method: string,
+    params?: Record<string, any>
+  }>);
+  const wrappedCalls = calls.filter((call) => call.method === 'invokeWithReCaptcha');
+  expect(wrappedCalls).toHaveLength(2);
+  expect(wrappedCalls[0].params).toMatchObject({
+    token: 'rejected-turnstile-token',
+    query: {
+      _: 'auth.signUp',
+      phone_number: 'test_user_open',
+      first_name: 'CI Registration',
+      last_name: ''
+    }
+  });
+  expect(wrappedCalls[1].params).toMatchObject({
+    token: 'synthetic-turnstile-token',
+    query: {_: 'auth.signUp', phone_number: 'test_user_open', first_name: 'CI Registration'}
+  });
+  expect(turnstileRequests).toHaveLength(2);
+});

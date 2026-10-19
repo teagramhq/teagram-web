@@ -1,6 +1,8 @@
-import type {AuthSendCode, AuthSignIn, AuthSignUp, User} from '@layer';
+import type {AuthSendCode, AuthSignIn, AuthSignUp, InvokeWithReCaptcha, User} from '@layer';
 import App from '@config/app';
 import {isPrivateUsernameCredentialError} from '@/pages/privateUsernameLoginState';
+import {invokeSignUpWithTurnstile} from '@/pages/turnstileSignup';
+import type {RequestTurnstileChallenge} from '@/pages/turnstileSignup';
 
 export {isPrivateUsernameCredentialError} from '@/pages/privateUsernameLoginState';
 
@@ -34,8 +36,8 @@ export type PrivateUsernameRegistration = {
 export type PrivateUsernameRegistrationError = 'usernameTaken' | 'invalidUsername' | 'invalidDisplayName' | 'invalidInvite' | 'registrationClosed' | 'weakPassword' | 'error';
 
 type InvokeAuthApi = (
-  method: 'auth.sendCode' | 'auth.signIn' | 'auth.signUp',
-  params: AuthSendCode | AuthSignIn | AuthSignUp,
+  method: 'auth.sendCode' | 'auth.signIn' | 'auth.signUp' | 'invokeWithReCaptcha',
+  params: AuthSendCode | AuthSignIn | AuthSignUp | InvokeWithReCaptcha,
   options?: {ignoreErrors: true}
 ) => Promise<unknown>;
 
@@ -77,7 +79,8 @@ export async function authenticatePrivateUsername(
   username: string,
   invokeApi: InvokeAuthApi,
   isCancelled: () => boolean = () => false,
-  registration?: PrivateUsernameRegistration
+  registration?: PrivateUsernameRegistration,
+  requestTurnstile?: RequestTurnstileChallenge
 ): Promise<PrivateUsernameAuthResult> {
   if(!isPrivateUsername(username)) return {kind: 'invalidInput'};
   if(registration && registration.mode !== 'closed' && !registration.displayName.trim()) return {kind: 'invalidInput'};
@@ -128,12 +131,17 @@ export async function authenticatePrivateUsername(
 
     let signUpResponse: unknown;
     try {
-      signUpResponse = await invokeApi('auth.signUp', {
+      const params: AuthSignUp = {
         phone_number: username,
         phone_code_hash: sentCode.phone_code_hash,
         first_name: registration.displayName.trim(),
         last_name: ''
-      });
+      };
+      signUpResponse = await invokeSignUpWithTurnstile(
+        (method, request) => invokeApi(method, request),
+        params,
+        requestTurnstile
+      );
     } catch(error) {
       if(isCancelled()) return {kind: 'cancelled'};
       const errorKind = getPrivateUsernameRegistrationError(error);

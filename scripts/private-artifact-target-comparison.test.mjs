@@ -390,11 +390,13 @@ describe('private artifact target comparison', () => {
     expect(auditStep).toContain('pnpm run check-bundle -- "$audit_dir"');
   });
 
-  it('runs the private username auth browser smoke in CI', () => {
+  it('runs the private and standard auth browser smoke in CI', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
-    const packageJson = readFileSync(join(repositoryRoot, 'package.json'), 'utf8');
+    const scripts = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')).scripts;
 
-    expect(packageJson).toContain('"test:private-auth": "playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameRegistration.spec.ts"');
+    expect(scripts['test:private-auth']).toContain('playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameRegistration.spec.ts');
+    expect(scripts['test:private-auth']).toContain('pnpm run test:standard-auth');
+    expect(scripts['test:standard-auth']).toBe('playwright test -c playwright.standard-auth.config.ts e2e/standardSignupTurnstile.spec.ts');
     expect(workflow).toContain('pnpm exec playwright install --with-deps chromium');
     expect(workflow).toContain('pnpm run test:private-auth');
 

@@ -284,7 +284,9 @@ class TLSerialization {
   public storeObject(obj: any, type: string, field?: string) {
     switch(type) {
       case '!X':
-        return obj(this);
+        if(typeof obj === 'function') return obj(this);
+        if(typeof obj?._ !== 'string') throw new TypeError('Expected a method object for !X');
+        return this.storeMethod(obj._, obj);
       case '#':
         obj ||= 0;
       case 'int':

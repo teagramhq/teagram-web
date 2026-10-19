@@ -99,6 +99,51 @@ describe('private username sign-in', () => {
     expect(updatePasswordSettings).toHaveBeenCalledWith('StrongPassword123');
   });
 
+  it('retries sign-up with the Turnstile token requested by the server', async() => {
+    const user = {_: 'user', id: 42};
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signup__test-site-key'})
+    .mockResolvedValueOnce({_: 'auth.authorization', user});
+    const updatePasswordSettings = vi.fn().mockResolvedValue(true);
+    const requestTurnstile = vi.fn((siteKey, submit) => {
+      expect(siteKey).toBe('test-site-key');
+      return submit('turnstile-token');
+    });
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings
+    }, requestTurnstile)).resolves.toEqual({kind: 'authorized', user});
+
+    expect(invokeApi).toHaveBeenNthCalledWith(4, 'invokeWithReCaptcha', {
+      token: 'turnstile-token',
+      query: {
+        _: 'auth.signUp',
+        phone_number: USERNAME,
+        phone_code_hash: 'mock-code-hash',
+        first_name: 'Alice Example',
+        last_name: ''
+      }
+    });
+    expect(updatePasswordSettings).toHaveBeenCalledWith('StrongPassword123');
+  });
+
+  it('does not request a challenge for an auth.sendCode error', async() => {
+    const invokeApi = vi.fn().mockRejectedValue({type: 'RECAPTCHA_CHECK_signup__test-site-key'});
+    const requestTurnstile = vi.fn();
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, undefined, requestTurnstile))
+    .resolves.toEqual({kind: 'error'});
+
+    expect(requestTurnstile).not.toHaveBeenCalled();
+    expect(invokeApi).toHaveBeenCalledOnce();
+    expect(invokeApi.mock.calls[0][0]).toBe('auth.sendCode');
+  });
+
   it('sends the invite secret in sign-in phone_code before creating an invited account', async() => {
     const user = {_: 'user', id: 43};
     const invokeApi = vi.fn()
