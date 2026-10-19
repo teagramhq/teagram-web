@@ -392,10 +392,11 @@ if(args?.help) {
     }
     if(browserContainerValidated) {
       const browserName = `teagram-fixture-${args.runId}browser`;
-      for(const [directory, stage] of [
+      const cleanupDirectories = [
         [`/tmp/real-client-${args.runId}`, 'screenshot cleanup'],
-        [`/tmp/real-client-traces-${args.runId}`, 'trace cleanup']
-      ]) {
+        ...(traceOutputDirectory ? [[`/tmp/real-client-traces-${args.runId}`, 'trace cleanup']] : [])
+      ];
+      for(const [directory, stage] of cleanupDirectories) {
         try {
           docker(['exec', browserName, 'rm', '-rf', '--', directory], undefined, stage);
         } catch {

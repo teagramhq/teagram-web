@@ -5832,7 +5832,7 @@ async function main(dependencies = {}) {
         cleanupIssues.push('playwright_trace_cleanup');
       }
     }
-    if(report?.status === 'failed') report.failureTraceReady = failureTraceReady;
+    if(report?.status === 'failed' && traceContexts.length > 0) report.failureTraceReady = failureTraceReady;
     if(!authProgressCleanupHandled) {
       currentStage = 'cleanup';
       cleanupFailed = await cleanupBrowserRun({
