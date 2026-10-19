@@ -88,6 +88,19 @@ if(args?.help) {
     }
   };
 
+  const dockerBytes = (dockerArgs, stage, timeout = 30_000) => {
+    try {
+      return execFileSync('docker', dockerArgs, {
+        encoding: null,
+        maxBuffer: 52 * 1024 * 1024,
+        timeout,
+        windowsHide: true
+      });
+    } catch {
+      throw new Error(`${stage} failed`);
+    }
+  };
+
   try {
     if(process.env.REAL_CLIENT_TRACE_DIR) {
       if(!isAbsolute(process.env.REAL_CLIENT_TRACE_DIR)) throw new Error('trace output directory must be absolute');
@@ -211,7 +224,7 @@ if(args?.help) {
       webRevision: args.webRevision,
       frontIp,
       screenshotDirectory,
-      traceDirectory: `${screenshotDirectory}/traces`,
+      ...(traceOutputDirectory ? {traceDirectory: `/tmp/real-client-traces-${args.runId}`} : {}),
       accounts: credentials
     });
     let browserOutput;
@@ -339,13 +352,24 @@ if(args?.help) {
   } catch(error) {
     operationError = error;
   } finally {
-    if(browserResult?.status === 'failed' && traceOutputDirectory && browserContainerValidated) {
+    if(browserResult?.status === 'failed' && browserResult.failureTraceReady === true && traceOutputDirectory && browserContainerValidated) {
       try {
         const browserName = `teagram-fixture-${args.runId}browser`;
-        docker(['cp', `${browserName}:/tmp/real-client-${args.runId}/traces/.`, traceOutputDirectory], undefined, 'Playwright failure trace export');
+        const traceRoot = `/tmp/real-client-traces-${args.runId}`;
+        const traceListing = docker(['exec', browserName, 'find', traceRoot, '-maxdepth', '1', '-type', 'f', '-printf', '%f\\n'], undefined, 'Playwright failure trace inspection');
+        const availableTraceFiles = new Set(traceListing.split(/\r?\n/).filter((name) => /^[a-z]+\.zip$/.test(name)));
+        const traceFiles = [];
+        for(const name of ['alice', 'bob']) {
+          if(!availableTraceFiles.has(`${name}.zip`)) continue;
+          const traceBytes = dockerBytes(['exec', browserName, 'cat', `${traceRoot}/${name}.zip`], 'Playwright failure trace export');
+          writeFileSync(join(traceOutputDirectory, `${name}.zip`), traceBytes, {mode: 0o600, flag: 'wx'});
+          traceFiles.push(`${name}.zip`);
+        }
         const entries = readdirSync(traceOutputDirectory);
-        const traceFiles = entries.filter((name) => /^[a-z]+\.zip$/.test(name));
-        if(traceFiles.length === 0 || traceFiles.length !== entries.length) throw new Error('browser assertion failure produced no Playwright trace');
+        if(traceFiles.length === 0 || JSON.stringify([...traceFiles].sort()) !== JSON.stringify(entries.sort())) {
+          const observedFiles = traceListing.split(/\r?\n/).filter((name) => /^[a-z0-9_.-]+$/.test(name)).slice(0, 24);
+          throw new Error(`browser assertion failure produced no Playwright trace (browser files: ${observedFiles.join(',') || 'none'})`);
+        }
         for(const name of traceFiles) {
           const tracePath = join(traceOutputDirectory, name);
           const fileStat = lstatSync(tracePath);
@@ -362,14 +386,15 @@ if(args?.help) {
           webRevision: args.webRevision,
           traces: traceFiles.sort()
         })}\n`, {mode: 0o600});
-      } catch {
-        cleanupError ||= new Error('Playwright failure trace export failed');
+      } catch(error) {
+        cleanupError ||= error instanceof Error ? error : new Error('Playwright failure trace export failed');
       }
     }
     if(browserContainerValidated) {
       try {
         const browserName = `teagram-fixture-${args.runId}browser`;
         docker(['exec', browserName, 'rm', '-rf', '--', `/tmp/real-client-${args.runId}`], undefined, 'screenshot cleanup');
+        docker(['exec', browserName, 'rm', '-rf', '--', `/tmp/real-client-traces-${args.runId}`], undefined, 'trace cleanup');
       } catch {
         cleanupError = new Error('screenshot cleanup failed');
       }
@@ -403,7 +428,8 @@ if(args?.help) {
     process.stdout.write(`${JSON.stringify(finalReport)}\n`);
     if(finalReport.status !== 'passed') process.exitCode = 1;
   } else if(cleanupError || operationError) {
-    process.stderr.write(`${cleanupError?.message || operationError?.message || 'real client runner failed'}\n`);
+    const errors = [operationError?.message, cleanupError?.message].filter((message) => typeof message === 'string');
+    process.stderr.write(`${errors.join('; ') || 'real client runner failed'}\n`);
     process.exitCode = 1;
   } else if(!controlsOnlyDone) {
 

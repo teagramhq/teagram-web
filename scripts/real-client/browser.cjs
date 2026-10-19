@@ -314,7 +314,7 @@ function validateRuntimeInput(config) {
       Buffer.from(config.leafSPKI, 'base64').toString('base64') !== config.leafSPKI ||
       !/^(?:\d{1,3}\.){3}\d{1,3}$/.test(config.frontIp || '') ||
       config.screenshotDirectory !== `/tmp/real-client-${config.runId}` ||
-      (config.traceDirectory !== undefined && config.traceDirectory !== `${config.screenshotDirectory}/traces`) ||
+      (config.traceDirectory !== undefined && config.traceDirectory !== `/tmp/real-client-traces-${config.runId}`) ||
       (config.observationOnly !== undefined && config.observationOnly !== true) ||
       (config.authProgressOneSubmission !== undefined && !authProgress) ||
       (config.pageErrorDiagnostics !== undefined && typeof config.pageErrorDiagnostics !== 'boolean') ||
@@ -5805,6 +5805,7 @@ async function main(dependencies = {}) {
       };
     }
   } finally {
+    let failureTraceReady = false;
     for(const trace of traceContexts) {
       try {
         if(report?.status === 'failed') {
@@ -5814,7 +5815,14 @@ async function main(dependencies = {}) {
             const page = trace.context.pages()[0];
             await page?.screenshot({timeout: 5000}).catch(() => {});
           }
-          await trace.context.tracing.stopChunk({path: path.join(runtime.traceDirectory, `${trace.name}.zip`)});
+          const tracePath = path.join(runtime.traceDirectory, `${trace.name}.zip`);
+          await trace.context.tracing.stopChunk({path: tracePath});
+          const traceStat = fs.lstatSync(tracePath);
+          if(!traceStat.isFile() || traceStat.isSymbolicLink() || traceStat.size < 4 || traceStat.size > 50 * 1024 * 1024 ||
+              fs.readFileSync(tracePath).subarray(0, 4).toString('hex') !== '504b0304') {
+            throw new Error('playwright_trace_invalid');
+          }
+          failureTraceReady = true;
         } else if(trace.active) {
           await trace.context.tracing.stopChunk();
         }
@@ -5824,6 +5832,7 @@ async function main(dependencies = {}) {
         cleanupIssues.push('playwright_trace_cleanup');
       }
     }
+    if(report?.status === 'failed') report.failureTraceReady = failureTraceReady;
     if(!authProgressCleanupHandled) {
       currentStage = 'cleanup';
       cleanupFailed = await cleanupBrowserRun({
@@ -5852,6 +5861,7 @@ function emitReport(report, cleanupFailed) {
     process.stdout.write(`${JSON.stringify({
       status: 'failed',
       stage: 'cleanup',
+      ...(report?.failureTraceReady === true ? {failureTraceReady: true} : {}),
       ...(report?.gateBreakdown ? {gateBreakdown: report.gateBreakdown} : {})
     })}\n`);
     process.exitCode = 1;
