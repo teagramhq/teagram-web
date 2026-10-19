@@ -2,6 +2,7 @@ import type {Message, PeerSettings} from '@layer';
 import '@helpers/peerIdPolyfill';
 import {getMiddleware} from '@helpers/middleware';
 import {render} from 'solid-js/web';
+import {makeFullMid} from '@appManagers/utils/messages/fullMid';
 import ejectBubble from '@components/chat/bubbles/ejectBubble';
 import {markMessageLinkEntity} from '@lib/richTextProcessor/filterDisabledEntities';
 
@@ -108,6 +109,30 @@ function streamedMessage(text: string): Message.message {
     pFlags: {currentlyTyping: true},
     message: text
   };
+}
+
+function descriptionPollMessage(mid: number): Message.message {
+  return {
+    ...message(),
+    id: mid,
+    mid,
+    peer_id: {_: 'peerChat', chat_id: 777},
+    peerId: 777 as PeerId,
+    message: 'Poll description',
+    pFlags: {out: true},
+    media: {
+      _: 'messageMediaPoll',
+      poll: {
+        _: 'poll',
+        id: 'poll-1',
+        hash: 0,
+        pFlags: {},
+        question: {_: 'textWithEntities', text: 'Question', entities: []},
+        answers: []
+      },
+      results: {_: 'pollResults', pFlags: {}}
+    }
+  } as Message.message;
 }
 
 function markGuardedMessageLink(anchor: HTMLAnchorElement) {
@@ -1063,6 +1088,75 @@ test('commits final group identity before a structural replacement is mounted', 
   expect(newBubble.isConnected).toBe(true);
 
   middlewareHelper.destroy();
+});
+
+test('keeps a sender description poll in processBatch when message_sent rekeys it during async work', async() => {
+  const tempMessage = descriptionPollMessage(3.0001);
+  const sentMessage = {...tempMessage, id: 101, mid: 101};
+  const tempFullMid = makeFullMid(tempMessage);
+  const sentFullMid = makeFullMid(sentMessage);
+  const bubble = document.createElement('div');
+  const bubbles: Record<string, HTMLElement> = {[tempFullMid]: bubble};
+  const changedMids = new Map<number, number>();
+  const bubbleGroups = {
+    firstGroup: undefined as {firstMid?: string} | undefined,
+    lastGroup: undefined as {lastMid?: string} | undefined,
+    mountUnmountGroups: vi.fn()
+  };
+  let committedBubbles: ReadonlySet<HTMLElement> = new Set();
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    bubbles,
+    changedMids,
+    bubbleGroups,
+    chat: {selection: {isSelecting: false}, setPeerPromise: false},
+    lazyLoadQueue: {setAllSeen: vi.fn()},
+    getBubble: (fullMid: string) => bubbles[fullMid],
+    makeFullMid: (currentMessage: Message.message) => makeFullMid(currentMessage),
+    groupBubbles: vi.fn(() => ({groups: [], avatarPromises: []})),
+    setUnreadDelimiter: vi.fn(() => Promise.resolve()),
+    prepareToSaveScroll: vi.fn(() => ({restoreScroll: vi.fn(), scrollSaver: {}})),
+    commitBubbleReplacements: vi.fn((renderedBubbles: ReadonlySet<HTMLElement>) => {
+      committedBubbles = renderedBubbles;
+    })
+  }) as any;
+
+  // Hold processBatch in its async wait so message_sent can rekey the pending bubble mid-batch.
+  let releaseMessageSent: () => void = () => undefined;
+  const messageSent = new Promise<void>((resolve) => releaseMessageSent = resolve);
+  let waitingForMessageSent = false;
+  const runInMiddleware = (promise: Promise<unknown>) => {
+    if(!waitingForMessageSent) {
+      waitingForMessageSent = true;
+      return messageSent.then(() => promise);
+    }
+
+    return Promise.resolve(promise);
+  };
+  const log = Object.assign(vi.fn(), {
+    groupCollapsed: vi.fn(),
+    groupEnd: vi.fn()
+  });
+
+  const processing = harness.processBatch([{
+    message: tempMessage,
+    bubble,
+    promises: [],
+    updatePosition: true
+  }], runInMiddleware, log);
+
+  expect(waitingForMessageSent).toBe(true);
+  changedMids.set(tempMessage.mid, sentMessage.mid);
+  delete bubbles[tempFullMid];
+  bubbles[sentFullMid] = bubble;
+  bubble.dataset.mid = '' + sentMessage.mid;
+  releaseMessageSent();
+  await processing;
+
+  expect(changedMids.get(tempMessage.mid)).toBe(sentMessage.mid);
+  expect(bubbles[tempFullMid]).toBeUndefined();
+  expect(bubbles[sentFullMid]).toBe(bubble);
+  expect(Array.from(committedBubbles)).toEqual([bubble]);
+  expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledOnce();
 });
 
 test('defers every affected BubbleGroup mount during an atomic replacement regroup', () => {
