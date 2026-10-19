@@ -1056,7 +1056,7 @@ function isClosedPageError(error, includeCount = false) {
   ]) &&
     PAGE_ERROR_CONSTRUCTORS.includes(error.constructorName) &&
     typeof error.scriptAsset === 'string' && SCRIPT_ASSET.test(error.scriptAsset) &&
-    isSafePageErrorMessage(error.message) &&
+    error.message === '[redacted]' &&
     isSafePageErrorStack(error.stack) &&
     isSafePageErrorScenarioStep(error.scenarioStep) &&
     (!hasDiagnostic || isSafePageErrorDiagnostic(error.diagnostic));
@@ -1066,18 +1066,13 @@ function isSafePageErrorDiagnostic(diagnostic) {
   if(!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) return false;
   const hasRpcErrorType = Object.hasOwn(diagnostic, 'rpcErrorType');
   const hasRpcErrorCode = Object.hasOwn(diagnostic, 'rpcErrorCode');
-  const keys = ['message', 'stack', 'pageUrl', 'scenario', 'stage',
+  const keys = ['pageUrl', 'scenario', 'stage',
     ...(hasRpcErrorType ? ['rpcErrorType'] : []), ...(hasRpcErrorCode ? ['rpcErrorCode'] : [])];
   if(!hasExactOwnKeys(diagnostic, keys) ||
-      typeof diagnostic.message !== 'string' || diagnostic.message.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength ||
-      typeof diagnostic.stack !== 'string' || diagnostic.stack.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.stackLength ||
       !PAGE_ERROR_SCENARIOS.includes(diagnostic.scenario) ||
       typeof diagnostic.stage !== 'string' || !/^(?:unknown|[a-z][a-z0-9_]{0,63})$/.test(diagnostic.stage) ||
       (hasRpcErrorType && (typeof diagnostic.rpcErrorType !== 'string' || !RPC_ERROR_TYPE_PATTERN.test(diagnostic.rpcErrorType))) ||
       (hasRpcErrorCode && (!Number.isSafeInteger(diagnostic.rpcErrorCode) || diagnostic.rpcErrorCode < 0 || diagnostic.rpcErrorCode > 999_999))) return false;
-  const textIsUnsafe = (value) => /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value) ||
-    /(?:https?:\/\/|blob:)[^\s)]*[?#]/i.test(value) || /https?:\/\/(?!teagramd\.test(?:\/|:|\b))/i.test(value);
-  if(textIsUnsafe(diagnostic.message) || textIsUnsafe(diagnostic.stack)) return false;
   if(diagnostic.pageUrl === 'unknown') return true;
   if(typeof diagnostic.pageUrl !== 'string' || diagnostic.pageUrl.length > PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength ||
       /[\s?#]/.test(diagnostic.pageUrl)) return false;

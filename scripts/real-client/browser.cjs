@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const {createHash} = require('node:crypto');
 const {chromium} = require('playwright');
 const observation = require('./observation.cjs');
 
@@ -36,6 +37,7 @@ const NETWORK_OBSERVER_ERROR_KINDS = new Set(observation.GATE_OBSERVER_ERROR_KIN
 const PAGE_ERROR_CONSTRUCTORS = new Set(observation.GATE_PAGE_ERROR_CONSTRUCTORS);
 const PAGE_ERROR_BLOB_ASSET_LIMIT = 512;
 const PAGE_ERROR_DIAGNOSTIC_LIMITS = observation.GATE_PAGE_ERROR_DIAGNOSTIC_LIMITS;
+const PAGE_ERROR_DEBUGGER_METHODS = Object.freeze(['Debugger.enable', 'Debugger.setPauseOnExceptions', 'Debugger.resume']);
 const PAGE_ERROR_MESSAGE_LIMIT = 512;
 const PAGE_ERROR_STACK_FRAME_LIMIT = 16;
 const PAGE_ERROR_FUNCTION_NAME_LIMIT = 128;
@@ -47,6 +49,7 @@ const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'message', 'group', 'channel', 
 const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set([...REQUIRED_SCENARIOS, 'channel']);
 const PAGE_ERROR_EVENT_CAPTURE_KEY = '__teagramPageErrorEvents';
 const pageErrorDiagnosticCounts = new WeakMap();
+const pageErrorDiagnosticMessageHashes = new WeakMap();
 const pageErrorConsoleEvents = new WeakMap();
 const pageErrorProtocolEvents = new WeakMap();
 const PAGE_ERROR_BLOB_ASSET_HINTS = Object.freeze([
@@ -293,9 +296,10 @@ function validateRuntimeInput(config) {
 // Every CDP send is gated by session scope. A method outside the accepted scope
 // fails the run, and the nested worker channel carried by
 // Target.sendMessageToTarget is gated by the worker scope as well.
-function createGatedSender(scope, session, observer, getTargetId) {
+function createGatedSender(scope, session, observer, getTargetId, additionalPageMethods = []) {
   return function send(method, params = {}) {
-    if(!observation.allowCdpMethod(scope, method)) {
+    const pageDiagnosticMethod = scope === 'page' && additionalPageMethods.includes(method);
+    if(!observation.allowCdpMethod(scope, method) && !pageDiagnosticMethod) {
       observer?.recordObserverError(getTargetId?.());
       return Promise.reject(new Error('cdp_method_not_allowed'));
     }
@@ -1119,7 +1123,8 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
 
   async function start(registry) {
     cdp = await withCommandTimeout(() => page.context().newCDPSession(page));
-    send = createGatedSender('page', cdp, contextObserver, () => pageTargetId);
+    send = createGatedSender('page', cdp, contextObserver, () => pageTargetId,
+      typeof onPageException === 'function' ? PAGE_ERROR_DEBUGGER_METHODS : []);
     // Page-session identity mapping only: the browser context this page lives
     // in is what attributes every browser-level shared worker to it.
     const info = await send('Target.getTargetInfo');
@@ -3284,10 +3289,10 @@ async function enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAs
   }
   for(const entry of entries) {
     const diagnostic = entry.diagnostic;
-    const diagnosticMessage = normalizePageErrorMessage(diagnostic.message, redactValues);
-    if(!diagnosticMessage) continue;
+    const diagnosticMessageHash = pageErrorDiagnosticMessageHashes.get(diagnostic);
+    if(!diagnosticMessageHash) continue;
     const matchingEntries = entries.filter((candidate) =>
-      normalizePageErrorMessage(candidate?.diagnostic?.message, redactValues) === diagnosticMessage
+      pageErrorDiagnosticMessageHashes.get(candidate?.diagnostic) === diagnosticMessageHash
     );
     if(matchingEntries.length !== 1) continue;
     const event = correlatePageErrorDiagnosticEvents(diagnostic, {
@@ -3296,31 +3301,30 @@ async function enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAs
       consoleEvents: Array.isArray(consoleEvents) ? consoleEvents : []
     }, redactValues);
     if(!event) continue;
-    const eventMessage = sanitizePageErrorDiagnosticText(event.message, PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength, redactValues);
-    const eventStack = sanitizePageErrorDiagnosticText(event.stack, PAGE_ERROR_DIAGNOSTIC_LIMITS.stackLength, redactValues);
+    const eventStack = typeof event.stack === 'string' ? event.stack : '';
     const eventPageUrl = sanitizePageErrorPageUrl(event.pageUrl);
     const fallbackStack = typeof event.filename === 'string' && event.filename
-      ? `${diagnostic.message || eventMessage || 'Error'}\n    at ${event.filename}:${event.lineNumber || 0}:${event.columnNumber || 0}`
+      ? `Error\n    at ${event.filename}:${event.lineNumber || 0}:${event.columnNumber || 0}`
       : '';
-    const stack = eventStack || sanitizePageErrorDiagnosticText(fallbackStack, PAGE_ERROR_DIAGNOSTIC_LIMITS.stackLength, redactValues);
-    if(!diagnostic.message && eventMessage) diagnostic.message = eventMessage;
-    if(stack) diagnostic.stack = stack;
+    const stack = eventStack || fallbackStack;
+    const safeStack = stack ? safePageErrorStack(stack, pageErrorAssetResolver) : undefined;
+    if(safeStack && safeStack.frames.length > 0) entry.stack = safeStack;
     if(eventPageUrl !== 'unknown') diagnostic.pageUrl = eventPageUrl;
     const rpcErrorType = sanitizePageErrorRpcErrorType(event.errorType);
     const rpcErrorCode = sanitizePageErrorRpcErrorCode(event.errorCode);
     if(rpcErrorType) diagnostic.rpcErrorType = rpcErrorType;
     if(rpcErrorCode !== undefined) diagnostic.rpcErrorCode = rpcErrorCode;
-    if(entry.scriptAsset === 'unknown' && stack) {
-      const scriptAsset = pageErrorAssetResolver?.scriptAsset(stack) || pageErrorScriptAsset(stack);
+    if(entry.scriptAsset === 'unknown' && safeStack?.frames.length > 0) {
+      const scriptAsset = safeStack.frames.find((frame) => frame.scriptAsset !== 'unknown')?.scriptAsset || 'unknown';
       if(scriptAsset !== 'unknown') entry.scriptAsset = scriptAsset;
     }
   }
 }
 
 function correlatePageErrorDiagnosticEvents(diagnostic, {windowEvents = [], protocolEvents = [], consoleEvents = []} = {}, redactValues = []) {
-  const diagnosticMessage = normalizePageErrorMessage(diagnostic?.message, redactValues);
-  if(!diagnosticMessage) return;
-  const matchesMessage = (event) => normalizePageErrorMessage(event?.message, redactValues) === diagnosticMessage;
+  const diagnosticMessageHash = pageErrorDiagnosticMessageHashes.get(diagnostic);
+  if(!diagnosticMessageHash) return;
+  const matchesMessage = (event) => pageErrorDiagnosticMessageHash(event?.message, redactValues) === diagnosticMessageHash;
   const matchingProtocolEvents = protocolEvents.filter(matchesMessage);
   const runtimeGroups = [];
   const debuggerEvents = [];
@@ -3440,6 +3444,11 @@ function normalizePageErrorMessage(value, redactValues) {
   .trim();
 }
 
+function pageErrorDiagnosticMessageHash(value, redactValues = []) {
+  const normalized = normalizePageErrorMessage(value, redactValues);
+  return normalized ? createHash('sha256').update(normalized).digest('hex') : undefined;
+}
+
 async function enrichPageErrorReport(pageErrors, pages, pageErrorAssetResolvers, networkObservers = {}, redactValues = [], clientErrorDiagnostics) {
   await Promise.all(APP_CONTEXTS.map(async(contextName) => {
     const page = pages?.[contextName];
@@ -3523,13 +3532,14 @@ function sanitizePageErrorStage(value) {
 }
 
 function createPageErrorDiagnostic(error, options = {}) {
-  return {
-    message: sanitizePageErrorDiagnosticText(readPageErrorText(error, 'message'), PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength, options.redactValues),
-    stack: sanitizePageErrorDiagnosticText(readPageErrorText(error, 'stack'), PAGE_ERROR_DIAGNOSTIC_LIMITS.stackLength, options.redactValues),
+  const diagnostic = {
     pageUrl: sanitizePageErrorPageUrl(options.pageUrl),
     scenario: sanitizePageErrorScenario(options.scenario),
     stage: sanitizePageErrorStage(options.stage)
   };
+  const messageHash = pageErrorDiagnosticMessageHash(readPageErrorText(error, 'message'), options.redactValues);
+  if(messageHash) pageErrorDiagnosticMessageHashes.set(diagnostic, messageHash);
+  return diagnostic;
 }
 
 
@@ -3547,7 +3557,7 @@ function recordPageError(pageErrors, contextName, error, pageErrorAssetResolver,
   const entry = {
     constructorName: pageErrorConstructorName(error),
     scriptAsset,
-    message: readPageErrorString(error, 'message'),
+    message: '[redacted]',
     stack: safeStack,
     scenarioStep: sanitizePageErrorScenarioStep(scenarioStep)
   };
@@ -3649,7 +3659,7 @@ function sanitizePageError(error) {
     scriptAsset: typeof error?.scriptAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(error.scriptAsset)
       ? error.scriptAsset
       : 'unknown',
-    message: sanitizePageErrorMessage(error?.message),
+    message: '[redacted]',
     stack: error?.stack && typeof error.stack === 'object' && !Array.isArray(error.stack)
       ? {
         state: ['unavailable', 'non_string', 'no_frames', 'unclassified_frames', 'captured', 'partial', 'truncated'].includes(error.stack.state)
@@ -3676,8 +3686,6 @@ function sanitizePageError(error) {
   const diagnostic = error?.diagnostic;
   if(diagnostic && typeof diagnostic === 'object') {
     sanitized.diagnostic = {
-      message: sanitizePageErrorDiagnosticText(diagnostic.message, PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength),
-      stack: sanitizePageErrorDiagnosticText(diagnostic.stack, PAGE_ERROR_DIAGNOSTIC_LIMITS.stackLength),
       pageUrl: sanitizePageErrorPageUrl(diagnostic.pageUrl),
       scenario: sanitizePageErrorScenario(diagnostic.scenario),
       stage: sanitizePageErrorStage(diagnostic.stage),

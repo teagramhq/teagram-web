@@ -71,6 +71,17 @@ function createNetworkObserverHarness(observer: any, options: any = {}) {
   return {cdp, page, networkObserver: createNetworkObserver(page, 'contract-test', observer, options.pageErrorAssetResolver, options.onPageException)};
 }
 
+function createDiagnosticPageErrors(message = 'Object', pageUrl = `${APP_ORIGIN}/`) {
+  const recordPageError = (realClientBrowser as any).recordPageError;
+  const error = new Error(message);
+  error.stack = `Error: ${message}`;
+  const pageErrors = {alice: [], bob: []} as any;
+  recordPageError(pageErrors, 'alice', error, undefined,
+    {scenario: 'channel', step: 'alice_channel_invite_button'},
+    {captureDetails: true, pageUrl, scenario: 'channel', stage: 'alice_channel_invite_button'});
+  return pageErrors;
+}
+
 function emptyWebSocket101Grid() {
   return {
     alice: {pre_submit: 0, post_submit: 0, unknown: 0},
@@ -1611,7 +1622,8 @@ describe('confined runner shared-worker observation contract', () => {
 
   it('rejects every CDP method outside the accepted scope, including nested sends', () => {
     const forbidden = ['Runtime.evaluate', 'Runtime.getProperties', 'Runtime.addBinding',
-      'Debugger.setBreakpoint', 'Fetch.enable', 'Network.setBlockedFrequencies',
+      'Debugger.enable', 'Debugger.setPauseOnExceptions', 'Debugger.resume', 'Debugger.setBreakpoint',
+      'Fetch.enable', 'Network.setBlockedFrequencies',
       'Page.addScriptToEvaluateOnNewDocument', 'Page.setBypassCSP', 'Page.captureScreenshot',
       'Target.createTarget', 'Target.exposeFunction', 'Network.setRequestInterception'];
 
@@ -1622,12 +1634,12 @@ describe('confined runner shared-worker observation contract', () => {
     }
 
     expect(observation.BROWSER_CDP_METHODS).toEqual(['Target.setDiscoverTargets', 'Target.attachToTarget', 'Target.detachFromTarget', 'Target.sendMessageToTarget']);
-    expect(observation.PAGE_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable', 'Runtime.callFunctionOn', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.sendMessageToTarget', 'Target.detachFromTarget', 'Debugger.enable', 'Debugger.setPauseOnExceptions', 'Debugger.resume']);
+    expect(observation.PAGE_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable', 'Runtime.callFunctionOn', 'Target.setAutoAttach', 'Target.getTargetInfo', 'Target.sendMessageToTarget', 'Target.detachFromTarget']);
     expect(observation.WORKER_CDP_METHODS).toEqual(['Network.enable', 'Audits.enable', 'Log.enable', 'Runtime.enable', 'Runtime.callFunctionOn', 'Runtime.runIfWaitingForDebugger']);
     expect(observation.allowCdpMethod('page', 'Target.getTargetInfo')).toBe(true);
     expect(observation.allowCdpMethod('page', 'Runtime.enable')).toBe(true);
     for(const method of ['Debugger.enable', 'Debugger.setPauseOnExceptions', 'Debugger.resume']) {
-      expect(observation.allowCdpMethod('page', method)).toBe(true);
+      expect(observation.allowCdpMethod('page', method)).toBe(false);
       expect(observation.allowCdpMethod('browser', method)).toBe(false);
       expect(observation.allowCdpMethod('worker', method)).toBe(false);
     }
@@ -1636,6 +1648,55 @@ describe('confined runner shared-worker observation contract', () => {
     expect(observation.allowCdpMethod('browser', 'Target.setDiscoverTargets')).toBe(true);
     expect(observation.allowCdpMethod('worker', 'Runtime.enable')).toBe(true);
     expect(observation.allowCdpMethod('worker', 'Runtime.callFunctionOn')).toBe(true);
+  });
+
+  it('does not send debugger commands in a default run', async() => {
+    const calls: string[] = [];
+    const observer = observation.createContextObserver('alice');
+    const {cdp, networkObserver} = createNetworkObserverHarness(observer, {
+      send: async(method: string) => {
+        calls.push(method);
+        return method === 'Target.getTargetInfo'
+          ? {targetInfo: {targetId: 'contract-test-page', browserContextId: 'contract-test'}}
+          : {};
+      }
+    });
+    await networkObserver.start();
+
+    try {
+      cdp.emit('Debugger.paused', {reason: 'exception', callFrames: []});
+      expect(calls).not.toContain('Debugger.enable');
+      expect(calls).not.toContain('Debugger.setPauseOnExceptions');
+      expect(calls).not.toContain('Debugger.resume');
+    } finally {
+      await networkObserver.stop();
+    }
+  });
+
+  it('uses debugger commands only when page-error diagnostics are enabled', async() => {
+    const calls: string[] = [];
+    const exceptions: any[] = [];
+    const observer = observation.createContextObserver('alice');
+    const {cdp, networkObserver} = createNetworkObserverHarness(observer, {
+      send: async(method: string) => {
+        calls.push(method);
+        return method === 'Target.getTargetInfo'
+          ? {targetInfo: {targetId: 'contract-test-page', browserContextId: 'contract-test'}}
+          : {};
+      },
+      onPageException: (details: any, source: string) => exceptions.push({details, source})
+    });
+    await networkObserver.start();
+
+    try {
+      expect(calls).toEqual(expect.arrayContaining(['Debugger.enable', 'Debugger.setPauseOnExceptions']));
+      cdp.emit('Debugger.paused', {reason: 'exception', callFrames: []});
+      await Promise.resolve();
+      expect(calls).toContain('Debugger.resume');
+      expect(exceptions).toEqual([{details: {reason: 'exception', callFrames: [], executionContextId: undefined, scriptUrls: {}}, source: 'debugger'}]);
+    } finally {
+      await networkObserver.stop();
+    }
   });
 
   it('names chunk sources only as allowlisted logical names without hash or query', () => {
@@ -2399,21 +2460,34 @@ describe('discovery shared-worker network accounting', () => {
     })).toThrow('browser egress/page error evidence is invalid');
   });
 
-  it('records bounded page error message, stack frames and scenario step', () => {
+  it('keeps page-error reports free of page text while retaining safe stack frames', () => {
     const summarizeGateBreakdown = (realClientBrowser as any).summarizeBrowserGateBreakdown;
     const recordPageError = (realClientBrowser as any).recordPageError;
     const pageErrors = {alice: [], bob: []} as any;
-    const message = 'Cannot read properties of undefined (reading \'sender\')';
+    const message = 'private channel text: deployment window is at 09:30';
     const error = new TypeError(message);
     error.stack = `TypeError: ${message}\n    at renderSyntheticChat (https://unannounced.invalid/assets/bob-client.js?token=${HOSTILE.token}:21:3)`;
 
-    recordPageError(pageErrors, 'bob', error, undefined, {scenario: 'channel', step: 'bob_channel_reload_chats_list'});
+    recordPageError(pageErrors, 'bob', error, undefined, {scenario: 'channel', step: 'bob_channel_reload_chats_list'}, {
+      captureDetails: true,
+      pageUrl: `${APP_ORIGIN}/`,
+      scenario: 'channel',
+      stage: 'bob_channel_reload_chats_list'
+    });
+    const diagnosticError = new TypeError(message);
+    diagnosticError.stack = `TypeError: ${message}\n    at renderSyntheticChat (webpack://bundle/src/client.ts:21:3)`;
+    recordPageError(pageErrors, 'bob', diagnosticError, undefined, {scenario: 'channel', step: 'bob_channel_reload_chats_list'}, {
+      captureDetails: true,
+      pageUrl: `${APP_ORIGIN}/`,
+      scenario: 'channel',
+      stage: 'bob_channel_reload_chats_list'
+    });
     const breakdown = summarizeGateBreakdown({pageErrors});
 
-    expect(breakdown.pageErrors.bob).toEqual([{
+    expect(breakdown.pageErrors.bob[0]).toEqual({
       constructorName: 'TypeError',
       scriptAsset: 'bob-client.js',
-      message,
+      message: '[redacted]',
       stack: {
         state: 'captured',
         lineCount: 2,
@@ -2421,14 +2495,34 @@ describe('discovery shared-worker network accounting', () => {
         frames: [{functionName: 'renderSyntheticChat', scriptAsset: 'bob-client.js', line: 21, column: 3}]
       },
       scenarioStep: {scenario: 'channel', step: 'bob_channel_reload_chats_list'}
-    }]);
+    });
+    expect(breakdown.pageErrors.bob[1]).toEqual({
+      constructorName: 'TypeError',
+      scriptAsset: 'unknown',
+      message: '[redacted]',
+      stack: {
+        state: 'unclassified_frames',
+        lineCount: 2,
+        frameCount: 1,
+        frames: []
+      },
+      scenarioStep: {scenario: 'channel', step: 'bob_channel_reload_chats_list'},
+      diagnostic: {
+        pageUrl: `${APP_ORIGIN}/`,
+        scenario: 'channel',
+        stage: 'bob_channel_reload_chats_list'
+      }
+    });
+    expect(JSON.stringify(breakdown)).not.toContain(message);
     expect(formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: breakdown}))
     .toContain(JSON.stringify(breakdown));
     expectNoGateSecretLeak(breakdown);
     for(const pageError of [
       {...breakdown.pageErrors.bob[0], message: HOSTILE.url},
       {...breakdown.pageErrors.bob[0], stack: {...breakdown.pageErrors.bob[0].stack, frames: [{...breakdown.pageErrors.bob[0].stack.frames[0], url: HOSTILE.url}]}},
-      {...breakdown.pageErrors.bob[0], scenarioStep: {scenario: 'channel', step: HOSTILE.phrase}}
+      {...breakdown.pageErrors.bob[0], scenarioStep: {scenario: 'channel', step: HOSTILE.phrase}},
+      {...breakdown.pageErrors.bob[1], diagnostic: {...breakdown.pageErrors.bob[1].diagnostic, message}},
+      {...breakdown.pageErrors.bob[1], diagnostic: {...breakdown.pageErrors.bob[1].diagnostic, stack: message}}
     ]) {
       const invalid = {...breakdown, pageErrors: {alice: [], bob: [pageError]}};
       expect(() => formatBrowserFailureMessage({status: 'failed', stage: 'browser_egress_or_page_errors', gateBreakdown: invalid}))
@@ -2442,6 +2536,7 @@ describe('discovery shared-worker network accounting', () => {
     recordPageError(pageErrors, 'bob', unclassifiedStackError, undefined, {scenario: 'channel', step: 'bob_channel_post_visible'});
     const stackStates = summarizeGateBreakdown({pageErrors}).pageErrors.bob.slice(1).map((pageError: any) => pageError.stack);
     expect(stackStates).toEqual([
+      {state: 'unclassified_frames', lineCount: 2, frameCount: 1, frames: []},
       {state: 'unavailable', lineCount: 0, frameCount: 0, frames: []},
       {state: 'unclassified_frames', lineCount: 2, frameCount: 1, frames: []}
     ]);
@@ -2452,17 +2547,7 @@ describe('discovery shared-worker network accounting', () => {
     const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
     const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
     const resolver = createPageErrorAssetResolver();
-    const pageErrors = {alice: [{
-      constructorName: 'Error',
-      scriptAsset: 'unknown',
-      diagnostic: {
-        message: 'Object',
-        stack: '',
-        pageUrl: `${APP_ORIGIN}/`,
-        scenario: 'channel',
-        stage: 'alice_channel_invite_button'
-      }
-    }], bob: []} as any;
+    const pageErrors = createDiagnosticPageErrors();
     const source = `${APP_ORIGIN}/index-XYZ.js`;
     const page = {
       url: () => `${APP_ORIGIN}/`,
@@ -2516,12 +2601,20 @@ describe('discovery shared-worker network accounting', () => {
     await enrichPageErrorDetails(pageErrors, 'alice', page, resolver);
 
     expect(pageErrors.alice[0].scriptAsset).toBe('index-XYZ.js');
+    expect(pageErrors.alice[0].stack).toEqual({
+      state: 'captured',
+      lineCount: 2,
+      frameCount: 1,
+      frames: [{functionName: 'inviteToChannel', scriptAsset: 'index-XYZ.js', line: 41, column: 9}]
+    });
     expect(pageErrors.alice[0].diagnostic).toMatchObject({
-      message: 'Object',
-      stack: `Object\n    at inviteToChannel (${source}:41:9)`,
+      pageUrl: `${APP_ORIGIN}/`,
+      scenario: 'channel',
+      stage: 'alice_channel_invite_button',
       rpcErrorType: 'CHANNELS_ADMIN_PUBLIC_TOO_MUCH',
       rpcErrorCode: 400
     });
+    expect(JSON.stringify(pageErrors)).not.toContain('Object');
     resolver.clear();
   });
 
@@ -2530,17 +2623,7 @@ describe('discovery shared-worker network accounting', () => {
     const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
     const recordPageErrorProtocolEvent = (realClientBrowser as any).recordPageErrorProtocolEvent;
     const resolver = createPageErrorAssetResolver();
-    const pageErrors = {alice: [{
-      constructorName: 'Error',
-      scriptAsset: 'unknown',
-      diagnostic: {
-        message: 'Object',
-        stack: '',
-        pageUrl: `${APP_ORIGIN}/`,
-        scenario: 'channel',
-        stage: 'alice_channel_invite_button'
-      }
-    }], bob: []} as any;
+    const pageErrors = createDiagnosticPageErrors();
     const page = {url: () => `${APP_ORIGIN}/`, evaluate: async(): Promise<unknown[]> => []} as any;
     const createRuntimeException = (exceptionId: number, scriptId: string, functionName: string) => ({
       exceptionId,
@@ -2575,7 +2658,7 @@ describe('discovery shared-worker network accounting', () => {
     await enrichPageErrorDetails(pageErrors, 'alice', page, resolver);
 
     expect(pageErrors.alice[0].scriptAsset).toBe('unknown');
-    expect(pageErrors.alice[0].diagnostic.stack).toBe('');
+    expect(pageErrors.alice[0].stack.state).toBe('no_frames');
     expect(pageErrors.alice[0].diagnostic.rpcErrorType).toBeUndefined();
     resolver.clear();
   });
@@ -2584,17 +2667,7 @@ describe('discovery shared-worker network accounting', () => {
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const enrichPageErrorDetails = (realClientBrowser as any).enrichPageErrorDetails;
     const resolver = createPageErrorAssetResolver();
-    const pageErrors = {alice: [{
-      constructorName: 'Error',
-      scriptAsset: 'unknown',
-      diagnostic: {
-        message: 'Object',
-        stack: 'Object',
-        pageUrl: `${APP_ORIGIN}/`,
-        scenario: 'channel',
-        stage: 'alice_channel_invite_button'
-      }
-    }], bob: []} as any;
+    const pageErrors = createDiagnosticPageErrors();
     const page = {evaluate: async(): Promise<unknown[]> => []} as any;
     const events = [{
       message: 'Object',
@@ -2617,7 +2690,7 @@ describe('discovery shared-worker network accounting', () => {
     await enrichPageErrorDetails(pageErrors, 'alice', page, resolver, [], events);
 
     expect(pageErrors.alice[0].scriptAsset).toBe('unknown');
-    expect(pageErrors.alice[0].diagnostic.stack).toBe('Object');
+    expect(pageErrors.alice[0].stack.state).toBe('no_frames');
     expect(pageErrors.alice[0].diagnostic.rpcErrorType).toBeUndefined();
     resolver.clear();
   });
@@ -2626,17 +2699,7 @@ describe('discovery shared-worker network accounting', () => {
     const enrichPageErrorReport = (realClientBrowser as any).enrichPageErrorReport;
     const createPageErrorAssetResolver = (realClientBrowser as any).createPageErrorAssetResolver;
     const resolver = createPageErrorAssetResolver();
-    const pageErrors = {alice: [{
-      constructorName: 'Error',
-      scriptAsset: 'unknown',
-      diagnostic: {
-        message: 'invite failed',
-        stack: '',
-        pageUrl: `${APP_ORIGIN}/`,
-        scenario: 'channel',
-        stage: 'alice_channel_invite_button'
-      }
-    }], bob: []} as any;
+    const pageErrors = createDiagnosticPageErrors('invite failed');
     const page = {evaluate: async(): Promise<unknown[]> => [{
       message: 'invite failed',
       stack: `Error: invite failed\n    at inviteToChannel (${APP_ORIGIN}/index-XYZ.js?token=${HOSTILE.token}:91:7)`,
@@ -2653,9 +2716,10 @@ describe('discovery shared-worker network accounting', () => {
       gateBreakdown
     });
 
-    expect(failureMessage).toContain('index-XYZ.js:91:7');
+    expect(failureMessage).toContain('"line":91,"column":7');
     expect(failureMessage).toContain(`${APP_ORIGIN}/`);
     expect(failureMessage).not.toContain(HOSTILE.token);
+    expect(failureMessage).not.toContain('invite failed');
     resolver.clear();
   });
 
