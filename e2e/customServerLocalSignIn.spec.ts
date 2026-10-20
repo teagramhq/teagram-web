@@ -1,9 +1,9 @@
 import {execFileSync} from 'node:child_process';
-import {mkdtempSync, readFileSync, rmSync} from 'node:fs';
+import {existsSync, mkdtempSync, readFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {request as httpRequest} from 'node:http';
-import {createServer} from 'node:https';
+import {request as httpRequest, type IncomingMessage, type ServerResponse} from 'node:http';
+import {createServer, request as httpsRequest} from 'node:https';
 import {expect, test, type Page} from '@playwright/test';
 import {WebSocket, WebSocketServer} from 'ws';
 import {createPhaseTracker, type PhaseDiagnostic} from './customServerPhaseTracker';
@@ -13,6 +13,43 @@ const APP_HOST = 'web.teagram.io';
 const SERVER_WSS_ENDPOINT = `wss://${SERVER_HOST}/apiws`;
 const SERVER_USER = process.env.TEAGRAM_CUSTOM_SERVER_TEST_USER || 'custom_server_user';
 const SERVER_PASSWORD = process.env.TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD || 'Teagram-Test-Password-123!';
+
+async function closeTlsServer(server: ReturnType<typeof createServer>) {
+  if(!server.listening) return;
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+    server.closeAllConnections();
+  });
+}
+
+function holdTlsResponseOpen(response: ServerResponse) {
+  response.writeHead(200, {'content-type': 'text/plain'});
+  response.flushHeaders();
+}
+
+function getTlsConnectionCount(server: ReturnType<typeof createServer>) {
+  return new Promise<number>((resolve, reject) => {
+    server.getConnections((error, count) => error ? reject(error) : resolve(count));
+  });
+}
+
+function hasOnlyConnectionResetErrors(errors: Error[]) {
+  return errors.every((error) => (error as Error & {code?: string}).code === 'ECONNRESET');
+}
+
+function createTlsFixtureCredentials(directory: string, hostnames: string[]) {
+  const privateKeyPath = join(directory, 'server-key.pem');
+  const certificatePath = join(directory, 'server-cert.pem');
+  execFileSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+    '-keyout', privateKeyPath,
+    '-out', certificatePath,
+    '-days', '1',
+    '-subj', `/CN=${hostnames[0]}`,
+    '-addext', `subjectAltName=${hostnames.map((hostname) => `DNS:${hostname}`).join(',')}`
+  ]);
+  return {privateKeyPath, certificatePath};
+}
 
 function streamingDocument(id: string) {
   return {
@@ -35,6 +72,86 @@ function streamingDocument(id: string) {
   };
 }
 
+test('closes a TLS listener with an active HTTPS response', async() => {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-custom-server-cleanup-'));
+  let privateKeyPath: string | undefined;
+  let server: ReturnType<typeof createServer> | undefined;
+  let response: IncomingMessage | undefined;
+  let responseClosed = false;
+  let closeTask: Promise<void> | undefined;
+  const responseErrors: Error[] = [];
+
+  try {
+    const credentials = createTlsFixtureCredentials(temporaryDirectory, ['localhost']);
+    privateKeyPath = credentials.privateKeyPath;
+    server = createServer({
+      key: readFileSync(credentials.privateKeyPath),
+      cert: readFileSync(credentials.certificatePath)
+    }, (_request, serverResponse) => {
+      holdTlsResponseOpen(serverResponse);
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server!.once('error', reject);
+      server!.listen(0, '127.0.0.1', resolve);
+    });
+    const address = server.address();
+    if(!address || typeof address === 'string') throw new Error('TLS fixture did not bind to a TCP port');
+
+    response = await new Promise<IncomingMessage>((resolve, reject) => {
+      const request = httpsRequest({
+        host: '127.0.0.1',
+        port: address.port,
+        path: '/',
+        servername: 'localhost',
+        rejectUnauthorized: false
+      }, resolve);
+      request.once('error', reject);
+      request.end();
+    });
+    response.on('error', (error) => responseErrors.push(error));
+    const responseClosePromise = new Promise<void>((resolve) => {
+      response!.once('close', () => {
+        responseClosed = true;
+        resolve();
+      });
+    });
+    response.resume();
+
+    closeTask = closeTlsServer(server);
+    const closeCompleted = await Promise.race([
+      closeTask.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1000))
+    ]);
+    expect(closeCompleted).toBe(true);
+    const responseWasClosed = await Promise.race([
+      responseClosePromise.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1000))
+    ]);
+    expect(responseWasClosed).toBe(true);
+    const remainingConnections = await getTlsConnectionCount(server);
+    expect(remainingConnections).toBe(0);
+  } finally {
+    if(server) {
+      if(server.listening) {
+        await new Promise<void>((resolve, reject) => {
+          server!.close((error) => error ? reject(error) : resolve());
+          server!.closeAllConnections();
+        });
+      } else {
+        server.closeAllConnections();
+        if(closeTask) await closeTask;
+      }
+    }
+    response?.destroy();
+    rmSync(temporaryDirectory, {recursive: true, force: true});
+  }
+
+  expect(responseClosed).toBe(true);
+  expect(hasOnlyConnectionResetErrors(responseErrors)).toBe(true);
+  if(privateKeyPath) expect(existsSync(privateKeyPath)).toBe(false);
+});
+
 test('isolates two server tabs when a custom server worker takes control', async({page}, testInfo) => {
   const serverHttpUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL;
   const serverWebSocketUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_WS_URL;
@@ -53,6 +170,9 @@ test('isolates two server tabs when a custom server worker takes control', async
   let sharePage: Page | undefined;
   let customServerId = '';
   let tlsServer: ReturnType<typeof createServer> | undefined;
+  let tlsResponseClosed = false;
+  let tlsResponseClose: Promise<void> | undefined;
+  const tlsResponseErrors: Error[] = [];
   let webSocketServer: WebSocketServer | undefined;
   const phaseDiagnostics: PhaseDiagnostic[] = [];
   const phaseTracker = createPhaseTracker((diagnostic) => {
@@ -86,23 +206,14 @@ test('isolates two server tabs when a custom server worker takes control', async
       localAppPort = appBaseUrl.port;
       appOriginString = appOrigin.origin;
       temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-custom-server-ws-'));
-      const privateKeyPath = join(temporaryDirectory, 'server-key.pem');
-      const certificatePath = join(temporaryDirectory, 'server-cert.pem');
-      execFileSync('openssl', [
-        'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-        '-keyout', privateKeyPath,
-        '-out', certificatePath,
-        '-days', '1',
-        '-subj', `/CN=${SERVER_HOST}`,
-        '-addext', `subjectAltName=DNS:${SERVER_HOST},DNS:${APP_HOST}`
-      ]);
+      const credentials = createTlsFixtureCredentials(temporaryDirectory, [SERVER_HOST, APP_HOST]);
 
       // Both hosts resolve to this listener (see playwright.private-auth.config.ts) because
       // Playwright routing does not cover module imports inside the MTProto SharedWorker.
       webSocketServer = new WebSocketServer({noServer: true});
       tlsServer = createServer({
-        key: readFileSync(privateKeyPath),
-        cert: readFileSync(certificatePath)
+        key: readFileSync(credentials.privateKeyPath),
+        cert: readFileSync(credentials.certificatePath)
       }, (request, response) => {
         const host = (request.headers.host || '').replace(/:\d+$/, '');
         const url = new URL(request.url || '/', `https://${host}`);
@@ -129,6 +240,8 @@ test('isolates two server tabs when a custom server worker takes control', async
           });
           upstream.on('error', () => response.destroy());
           request.pipe(upstream);
+        } else if(host === SERVER_HOST && url.pathname === '/__fixture/open-connection') {
+          holdTlsResponseOpen(response);
         } else if(host === SERVER_HOST && url.pathname === '/.well-known/telegramd/client') {
           void fetch(`${serverHttpUrl}/.well-known/telegramd/client`).then(async(upstreamResponse) => {
             const body = await upstreamResponse.text();
@@ -182,6 +295,27 @@ test('isolates two server tabs when a custom server worker takes control', async
         tlsServer!.once('error', reject);
         tlsServer!.listen(18443, '127.0.0.1', resolve);
       });
+      // Keep an HTTPS response open through sign-in so TLS teardown has a live connection to release.
+      const tlsResponse = await new Promise<IncomingMessage>((resolve, reject) => {
+        const request = httpsRequest({
+          host: '127.0.0.1',
+          port: 18443,
+          path: '/__fixture/open-connection',
+          servername: SERVER_HOST,
+          rejectUnauthorized: false,
+          headers: {host: SERVER_HOST}
+        }, resolve);
+        request.once('error', reject);
+        request.end();
+      });
+      tlsResponse.on('error', (error) => tlsResponseErrors.push(error));
+      tlsResponseClose = new Promise<void>((resolve) => {
+        tlsResponse.once('close', () => {
+          tlsResponseClosed = true;
+          resolve();
+        });
+      });
+      tlsResponse.resume();
 
       await page.context().route('**/*', (route) => {
         const {hostname} = new URL(route.request().url());
@@ -365,6 +499,7 @@ test('isolates two server tabs when a custom server worker takes control', async
       await expect(customPage!.locator('#page-chats')).toBeVisible({timeout: 60_000});
       expect(connections.length).toBeGreaterThan(0);
       expect(connections.every((origin) => origin === 'https://web.teagram.io')).toBe(true);
+      expect(tlsResponseClosed).toBe(false);
     });
   } catch(error) {
     testError = error;
@@ -392,13 +527,16 @@ test('isolates two server tabs when a custom server worker takes control', async
     await runCleanup('cleanup: close TLS server', async() => {
       const server = tlsServer;
       if(!server?.listening) return;
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
-        server.closeAllConnections();
-      });
+      await closeTlsServer(server);
+      if(tlsResponseClose) await tlsResponseClose;
+      if(server.listening) throw new Error('TLS fixture server remained open after cleanup');
+      const remainingConnections = await getTlsConnectionCount(server);
+      if(remainingConnections) throw new Error(`TLS fixture retained ${remainingConnections} connections after cleanup`);
     });
     await runCleanup('cleanup: remove temporary directory', () => {
-      if(temporaryDirectory) rmSync(temporaryDirectory, {recursive: true, force: true});
+      if(!temporaryDirectory) return;
+      rmSync(temporaryDirectory, {recursive: true, force: true});
+      if(existsSync(temporaryDirectory)) throw new Error('temporary TLS key directory remains after cleanup');
     });
     clearInterval(phaseHeartbeat);
     if(cleanupErrors.length) {
@@ -430,6 +568,8 @@ test('isolates two server tabs when a custom server worker takes control', async
     'cleanup: remove temporary directory'
   ]);
   expect(phaseDiagnostics.every(({elapsedMs}) => Number.isFinite(elapsedMs) && elapsedMs >= 0)).toBe(true);
+  expect(tlsResponseClosed).toBe(true);
+  expect(hasOnlyConnectionResetErrors(tlsResponseErrors)).toBe(true);
   expect(phaseDiagnostics.every((diagnostic) => Object.keys(diagnostic).sort().join(',') === 'elapsedMs,lastCompletedPhase,phase,status')).toBe(true);
   expect(testInfo.annotations
     .filter((annotation) => annotation.type === 'custom-server-phase')
