@@ -1,9 +1,10 @@
 import {execFileSync} from 'node:child_process';
-import {mkdtempSync, readFileSync, rmSync} from 'node:fs';
+import {existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {request as httpRequest} from 'node:http';
-import {createServer} from 'node:https';
+import {request as httpRequest, type IncomingMessage, type ServerResponse} from 'node:http';
+import type {Duplex} from 'node:stream';
+import {createServer, request as httpsRequest} from 'node:https';
 import {expect, test, type Page} from '@playwright/test';
 import {WebSocket, WebSocketServer} from 'ws';
 import {createPhaseTracker, type PhaseDiagnostic} from './customServerPhaseTracker';
@@ -13,6 +14,122 @@ const APP_HOST = 'web.teagram.io';
 const SERVER_WSS_ENDPOINT = `wss://${SERVER_HOST}/apiws`;
 const SERVER_USER = process.env.TEAGRAM_CUSTOM_SERVER_TEST_USER || 'custom_server_user';
 const SERVER_PASSWORD = process.env.TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD || 'Teagram-Test-Password-123!';
+
+function trackTlsServerSockets(server: ReturnType<typeof createServer>) {
+  const sockets = new Map<Duplex, 'https' | 'websocket'>();
+  const track = (socket: Duplex, kind: 'https' | 'websocket') => {
+    sockets.set(socket, kind);
+    socket.once('close', () => sockets.delete(socket));
+  };
+  server.on('connection', (socket) => {
+    track(socket, 'https');
+  });
+  return {
+    markUpgrade(socket: Duplex) {
+      track(socket, 'websocket');
+    },
+    async closeAll() {
+      const closing = [...sockets.keys()].map((socket) => new Promise<void>((resolve) => {
+        socket.once('close', resolve);
+        socket.destroy();
+      }));
+      await Promise.all(closing);
+    },
+    snapshot() {
+      return {
+        https: [...sockets.values()].filter((kind) => kind === 'https').length,
+        websocket: [...sockets.values()].filter((kind) => kind === 'websocket').length
+      };
+    }
+  };
+}
+
+async function closeTlsServer(
+  server: ReturnType<typeof createServer>,
+  socketTracker?: ReturnType<typeof trackTlsServerSockets>,
+  reportListenerClose?: (stage: 'pending' | 'completed') => void
+) {
+  let listenerClose: Promise<void> | undefined;
+  if(server.listening) {
+    listenerClose = new Promise<void>((resolve, reject) => {
+      server.close((error) => {
+        reportListenerClose?.('completed');
+        if(error) reject(error);
+        else resolve();
+      });
+    });
+    reportListenerClose?.('pending');
+  }
+  server.closeAllConnections();
+  const shutdownResults = await Promise.allSettled([
+    listenerClose || Promise.resolve(),
+    socketTracker?.closeAll() || Promise.resolve()
+  ]);
+  const shutdownError = shutdownResults.find((result) => result.status === 'rejected');
+  if(shutdownError?.status === 'rejected') throw shutdownError.reason;
+}
+
+async function cleanupTlsTestFixture(
+  destroyClient: () => void,
+  closeTask: Promise<void>,
+  temporaryDirectory: string
+) {
+  try {
+    destroyClient();
+    await closeTask;
+  } finally {
+    rmSync(temporaryDirectory, {recursive: true, force: true});
+  }
+}
+
+async function withTlsTestDirectory<T>(prefix: string, action: (directory: string) => Promise<T>) {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), prefix));
+  try {
+    return await action(temporaryDirectory);
+  } finally {
+    rmSync(temporaryDirectory, {recursive: true, force: true});
+  }
+}
+
+function throwTlsTestErrors(testError: unknown, cleanupError: unknown) {
+  if(testError !== undefined && cleanupError !== undefined) {
+    throw Object.assign(new Error('TLS fixture test and cleanup failed'), {
+      cause: testError,
+      errors: [testError, cleanupError]
+    });
+  }
+  if(testError !== undefined) throw testError;
+  if(cleanupError !== undefined) throw cleanupError;
+}
+
+function holdTlsResponseOpen(response: ServerResponse) {
+  response.writeHead(200, {'content-type': 'text/plain'});
+  response.flushHeaders();
+}
+
+function getTlsConnectionCount(server: ReturnType<typeof createServer>) {
+  return new Promise<number>((resolve, reject) => {
+    server.getConnections((error, count) => error ? reject(error) : resolve(count));
+  });
+}
+
+function hasOnlyConnectionResetErrors(errors: Error[]) {
+  return errors.every((error) => (error as Error & {code?: string}).code === 'ECONNRESET');
+}
+
+function createTlsFixtureCredentials(directory: string, hostnames: string[]) {
+  const privateKeyPath = join(directory, 'server-key.pem');
+  const certificatePath = join(directory, 'server-cert.pem');
+  execFileSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+    '-keyout', privateKeyPath,
+    '-out', certificatePath,
+    '-days', '1',
+    '-subj', `/CN=${hostnames[0]}`,
+    '-addext', `subjectAltName=${hostnames.map((hostname) => `DNS:${hostname}`).join(',')}`
+  ]);
+  return {privateKeyPath, certificatePath};
+}
 
 function streamingDocument(id: string) {
   return {
@@ -35,6 +152,225 @@ function streamingDocument(id: string) {
   };
 }
 
+test('closes a TLS listener with an active HTTPS response', async() => {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-custom-server-cleanup-'));
+  let privateKeyPath: string | undefined;
+  let server: ReturnType<typeof createServer> | undefined;
+  let socketTracker: ReturnType<typeof trackTlsServerSockets> | undefined;
+  let response: IncomingMessage | undefined;
+  let responseClosed = false;
+  let closeTask: Promise<void> | undefined;
+  let testError: unknown;
+  const responseErrors: Error[] = [];
+
+  try {
+    const credentials = createTlsFixtureCredentials(temporaryDirectory, ['localhost']);
+    privateKeyPath = credentials.privateKeyPath;
+    server = createServer({
+      key: readFileSync(credentials.privateKeyPath),
+      cert: readFileSync(credentials.certificatePath)
+    }, (_request, serverResponse) => {
+      holdTlsResponseOpen(serverResponse);
+    });
+    socketTracker = trackTlsServerSockets(server);
+
+    await new Promise<void>((resolve, reject) => {
+      server!.once('error', reject);
+      server!.listen(0, '127.0.0.1', resolve);
+    });
+    const address = server.address();
+    if(!address || typeof address === 'string') throw new Error('TLS fixture did not bind to a TCP port');
+
+    response = await new Promise<IncomingMessage>((resolve, reject) => {
+      const request = httpsRequest({
+        host: '127.0.0.1',
+        port: address.port,
+        path: '/',
+        servername: 'localhost',
+        rejectUnauthorized: false
+      }, resolve);
+      request.once('error', reject);
+      request.end();
+    });
+    response.on('error', (error) => responseErrors.push(error));
+    const responseClosePromise = new Promise<void>((resolve) => {
+      response!.once('close', () => {
+        responseClosed = true;
+        resolve();
+      });
+    });
+    response.resume();
+
+    closeTask = closeTlsServer(server, socketTracker);
+    const closeCompleted = await Promise.race([
+      closeTask.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1000))
+    ]);
+    expect(closeCompleted).toBe(true);
+    const responseWasClosed = await Promise.race([
+      responseClosePromise.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1000))
+    ]);
+    expect(responseWasClosed).toBe(true);
+    const remainingConnections = await getTlsConnectionCount(server);
+    expect(remainingConnections).toBe(0);
+  } catch(error) {
+    testError = error;
+  }
+
+  let cleanupError: unknown;
+  try {
+    await cleanupTlsTestFixture(
+      () => response?.destroy(),
+      closeTask || (server ? closeTlsServer(server, socketTracker) : Promise.resolve()),
+      temporaryDirectory
+    );
+  } catch(error) {
+    cleanupError = error;
+  }
+  throwTlsTestErrors(testError, cleanupError);
+
+  expect(responseClosed).toBe(true);
+  expect(hasOnlyConnectionResetErrors(responseErrors)).toBe(true);
+  if(privateKeyPath) expect(existsSync(privateKeyPath)).toBe(false);
+});
+
+test('removes a partial TLS key when fixture credential setup fails', async() => {
+  let temporaryDirectory = '';
+  const setupError = new Error('OpenSSL setup failed');
+  const setupTask = withTlsTestDirectory('teagram-custom-server-setup-failure-', async(directory) => {
+    temporaryDirectory = directory;
+    writeFileSync(join(directory, 'server-key.pem'), 'partial private key');
+    throw setupError;
+  });
+
+  await expect(setupTask).rejects.toBe(setupError);
+  expect(temporaryDirectory).not.toBe('');
+  expect(existsSync(temporaryDirectory)).toBe(false);
+});
+
+async function verifyStalledTlsShutdownCleanup(temporaryDirectory: string) {
+  const credentials = createTlsFixtureCredentials(temporaryDirectory, ['localhost']);
+  const shutdownError = new Error('TLS shutdown stalled');
+  const assertionError = new Error('TLS listener did not close before the deadline');
+  let clientDestroyed = false;
+  let rejectShutdown!: (error: Error) => void;
+  let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
+  const closeTask = new Promise<void>((_resolve, reject) => {
+    rejectShutdown = reject;
+    shutdownTimer = setTimeout(() => reject(shutdownError), 100);
+  });
+
+  try {
+    let cleanupError: unknown;
+    try {
+      await cleanupTlsTestFixture(
+        () => {
+          clientDestroyed = true;
+          if(shutdownTimer) clearTimeout(shutdownTimer);
+          shutdownTimer = setTimeout(() => rejectShutdown(shutdownError), 10);
+        },
+        closeTask,
+        temporaryDirectory
+      );
+    } catch(error) {
+      cleanupError = error;
+    }
+    expect(cleanupError).toBe(shutdownError);
+    expect(clientDestroyed).toBe(true);
+    expect(existsSync(credentials.privateKeyPath)).toBe(false);
+    let reportedError: unknown;
+    try {
+      throwTlsTestErrors(assertionError, cleanupError);
+    } catch(error) {
+      reportedError = error;
+    }
+    expect(reportedError).toBeInstanceOf(Error);
+    expect((reportedError as Error & {errors: unknown[], cause?: unknown}).errors).toEqual([assertionError, shutdownError]);
+    expect((reportedError as Error & {errors: unknown[], cause?: unknown}).cause).toBe(assertionError);
+  } finally {
+    if(shutdownTimer) clearTimeout(shutdownTimer);
+  }
+}
+
+test('removes TLS keys when a stalled shutdown rejects after client teardown', () => withTlsTestDirectory(
+  'teagram-custom-server-stalled-cleanup-',
+  verifyStalledTlsShutdownCleanup
+));
+
+test('does not wait on a pending TLS upgrade after stopping the listener', async() => {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-custom-server-upgrade-'));
+  let server: ReturnType<typeof createServer> | undefined;
+  let socketTracker: ReturnType<typeof trackTlsServerSockets> | undefined;
+  let upgradeSocket: Duplex | undefined;
+  let clientRequest: ReturnType<typeof httpsRequest> | undefined;
+  let closeTask: Promise<void> | undefined;
+  let testError: unknown;
+  const requestErrors: Error[] = [];
+
+  try {
+    const credentials = createTlsFixtureCredentials(temporaryDirectory, ['localhost']);
+    server = createServer({
+      key: readFileSync(credentials.privateKeyPath),
+      cert: readFileSync(credentials.certificatePath)
+    });
+    socketTracker = trackTlsServerSockets(server);
+    const upgradeReceived = new Promise<void>((resolve, reject) => {
+      server!.once('upgrade', (_request, socket) => {
+        upgradeSocket = socket;
+        socketTracker!.markUpgrade(socket);
+        resolve();
+      });
+      server!.once('error', reject);
+    });
+    await new Promise<void>((resolve, reject) => {
+      server!.once('error', reject);
+      server!.listen(0, '127.0.0.1', resolve);
+    });
+    const address = server.address();
+    if(!address || typeof address === 'string') throw new Error('TLS fixture did not bind to a TCP port');
+
+    clientRequest = httpsRequest({
+      host: '127.0.0.1',
+      port: address.port,
+      path: '/apiws',
+      servername: 'localhost',
+      rejectUnauthorized: false,
+      headers: {connection: 'Upgrade', upgrade: 'websocket'}
+    });
+    clientRequest.on('error', (error) => requestErrors.push(error));
+    clientRequest.end();
+    await upgradeReceived;
+
+    closeTask = closeTlsServer(server, socketTracker);
+    const closeCompleted = await Promise.race([
+      closeTask.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1000))
+    ]);
+    expect(closeCompleted).toBe(true);
+  } catch(error) {
+    testError = error;
+  }
+
+  let cleanupError: unknown;
+  try {
+    await cleanupTlsTestFixture(
+      () => {
+        clientRequest?.destroy();
+        upgradeSocket?.destroy();
+      },
+      closeTask || (server ? closeTlsServer(server, socketTracker) : Promise.resolve()),
+      temporaryDirectory
+    );
+  } catch(error) {
+    cleanupError = error;
+  }
+  throwTlsTestErrors(testError, cleanupError);
+
+  expect(hasOnlyConnectionResetErrors(requestErrors)).toBe(true);
+  expect(socketTracker?.snapshot()).toEqual({https: 0, websocket: 0});
+});
+
 test('isolates two server tabs when a custom server worker takes control', async({page}, testInfo) => {
   const serverHttpUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL;
   const serverWebSocketUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_WS_URL;
@@ -53,7 +389,13 @@ test('isolates two server tabs when a custom server worker takes control', async
   let sharePage: Page | undefined;
   let customServerId = '';
   let tlsServer: ReturnType<typeof createServer> | undefined;
+  let tlsSocketTracker: ReturnType<typeof trackTlsServerSockets> | undefined;
+  let tlsResponseClosed = false;
+  let tlsResponseClose: Promise<void> | undefined;
+  const tlsResponseErrors: Error[] = [];
+  const fixtureResponses = new Set<ServerResponse>();
   let webSocketServer: WebSocketServer | undefined;
+  let tlsCleanupWait: string | undefined;
   const phaseDiagnostics: PhaseDiagnostic[] = [];
   const phaseTracker = createPhaseTracker((diagnostic) => {
     phaseDiagnostics.push(diagnostic);
@@ -61,7 +403,20 @@ test('isolates two server tabs when a custom server worker takes control', async
     console.info(`[custom-server-phase] ${description}`);
     testInfo.annotations.push({type: 'custom-server-phase', description});
   });
-  const phaseHeartbeat = setInterval(() => phaseTracker.reportActive(), 5000);
+  const reportTlsLifecycle = (stage: string) => {
+    console.info(`[custom-server-tls] ${JSON.stringify({
+      stage,
+      listening: tlsServer?.listening ?? false,
+      clientResponseClosed: tlsResponseClosed,
+      fixtureResponses: fixtureResponses.size,
+      sockets: tlsSocketTracker?.snapshot() ?? {https: 0, websocket: 0},
+      websocketClients: webSocketServer?.clients.size ?? 0
+    })}`);
+  };
+  const phaseHeartbeat = setInterval(() => {
+    phaseTracker.reportActive();
+    if(tlsCleanupWait) reportTlsLifecycle(tlsCleanupWait);
+  }, 5000);
   phaseHeartbeat.unref();
   const runPhase = <T>(name: string, operation: () => Promise<T> | T) => {
     return phaseTracker.run(name, () => test.step(name, operation));
@@ -86,23 +441,14 @@ test('isolates two server tabs when a custom server worker takes control', async
       localAppPort = appBaseUrl.port;
       appOriginString = appOrigin.origin;
       temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-custom-server-ws-'));
-      const privateKeyPath = join(temporaryDirectory, 'server-key.pem');
-      const certificatePath = join(temporaryDirectory, 'server-cert.pem');
-      execFileSync('openssl', [
-        'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-        '-keyout', privateKeyPath,
-        '-out', certificatePath,
-        '-days', '1',
-        '-subj', `/CN=${SERVER_HOST}`,
-        '-addext', `subjectAltName=DNS:${SERVER_HOST},DNS:${APP_HOST}`
-      ]);
+      const credentials = createTlsFixtureCredentials(temporaryDirectory, [SERVER_HOST, APP_HOST]);
 
       // Both hosts resolve to this listener (see playwright.private-auth.config.ts) because
       // Playwright routing does not cover module imports inside the MTProto SharedWorker.
       webSocketServer = new WebSocketServer({noServer: true});
       tlsServer = createServer({
-        key: readFileSync(privateKeyPath),
-        cert: readFileSync(certificatePath)
+        key: readFileSync(credentials.privateKeyPath),
+        cert: readFileSync(credentials.certificatePath)
       }, (request, response) => {
         const host = (request.headers.host || '').replace(/:\d+$/, '');
         const url = new URL(request.url || '/', `https://${host}`);
@@ -129,6 +475,10 @@ test('isolates two server tabs when a custom server worker takes control', async
           });
           upstream.on('error', () => response.destroy());
           request.pipe(upstream);
+        } else if(host === SERVER_HOST && url.pathname === '/__fixture/open-connection') {
+          fixtureResponses.add(response);
+          response.once('close', () => fixtureResponses.delete(response));
+          holdTlsResponseOpen(response);
         } else if(host === SERVER_HOST && url.pathname === '/.well-known/telegramd/client') {
           void fetch(`${serverHttpUrl}/.well-known/telegramd/client`).then(async(upstreamResponse) => {
             const body = await upstreamResponse.text();
@@ -149,7 +499,9 @@ test('isolates two server tabs when a custom server worker takes control', async
           response.end();
         }
       });
+      tlsSocketTracker = trackTlsServerSockets(tlsServer);
       tlsServer.on('upgrade', (request, socket, head) => {
+        tlsSocketTracker!.markUpgrade(socket);
         if(request.url !== '/apiws') {
           socket.destroy();
           return;
@@ -182,6 +534,27 @@ test('isolates two server tabs when a custom server worker takes control', async
         tlsServer!.once('error', reject);
         tlsServer!.listen(18443, '127.0.0.1', resolve);
       });
+      // Keep an HTTPS response open through sign-in so TLS teardown has a live connection to release.
+      const tlsResponse = await new Promise<IncomingMessage>((resolve, reject) => {
+        const request = httpsRequest({
+          host: '127.0.0.1',
+          port: 18443,
+          path: '/__fixture/open-connection',
+          servername: SERVER_HOST,
+          rejectUnauthorized: false,
+          headers: {host: SERVER_HOST}
+        }, resolve);
+        request.once('error', reject);
+        request.end();
+      });
+      tlsResponse.on('error', (error) => tlsResponseErrors.push(error));
+      tlsResponseClose = new Promise<void>((resolve) => {
+        tlsResponse.once('close', () => {
+          tlsResponseClosed = true;
+          resolve();
+        });
+      });
+      tlsResponse.resume();
 
       await page.context().route('**/*', (route) => {
         const {hostname} = new URL(route.request().url());
@@ -365,6 +738,7 @@ test('isolates two server tabs when a custom server worker takes control', async
       await expect(customPage!.locator('#page-chats')).toBeVisible({timeout: 60_000});
       expect(connections.length).toBeGreaterThan(0);
       expect(connections.every((origin) => origin === 'https://web.teagram.io')).toBe(true);
+      expect(tlsResponseClosed).toBe(false);
     });
   } catch(error) {
     testError = error;
@@ -392,13 +766,31 @@ test('isolates two server tabs when a custom server worker takes control', async
     await runCleanup('cleanup: close TLS server', async() => {
       const server = tlsServer;
       if(!server?.listening) return;
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
-        server.closeAllConnections();
+      tlsCleanupWait = 'listener-close requested';
+      reportTlsLifecycle(tlsCleanupWait);
+      await closeTlsServer(server, tlsSocketTracker, (stage) => {
+        tlsCleanupWait = `server.close ${stage}`;
+        reportTlsLifecycle(tlsCleanupWait);
       });
+      reportTlsLifecycle('listener and tracked socket shutdown resolved');
+      tlsCleanupWait = 'held-response-close pending';
+      reportTlsLifecycle(tlsCleanupWait);
+      if(tlsResponseClose) await tlsResponseClose;
+      tlsCleanupWait = 'connection-count verification pending';
+      reportTlsLifecycle('held-response-close resolved');
+      reportTlsLifecycle(tlsCleanupWait);
+      if(server.listening) throw new Error('TLS fixture server remained open after cleanup');
+      const remainingConnections = await getTlsConnectionCount(server);
+      const remainingSockets = tlsSocketTracker?.snapshot() ?? {https: 0, websocket: 0};
+      tlsCleanupWait = undefined;
+      reportTlsLifecycle(`connection-count verified: ${remainingConnections}; sockets: ${JSON.stringify(remainingSockets)}`);
+      if(remainingConnections) throw new Error(`TLS fixture retained ${remainingConnections} connections after cleanup`);
+      if(remainingSockets.https || remainingSockets.websocket) throw new Error('TLS fixture retained sockets after cleanup');
     });
     await runCleanup('cleanup: remove temporary directory', () => {
-      if(temporaryDirectory) rmSync(temporaryDirectory, {recursive: true, force: true});
+      if(!temporaryDirectory) return;
+      rmSync(temporaryDirectory, {recursive: true, force: true});
+      if(existsSync(temporaryDirectory)) throw new Error('temporary TLS key directory remains after cleanup');
     });
     clearInterval(phaseHeartbeat);
     if(cleanupErrors.length) {
@@ -430,6 +822,8 @@ test('isolates two server tabs when a custom server worker takes control', async
     'cleanup: remove temporary directory'
   ]);
   expect(phaseDiagnostics.every(({elapsedMs}) => Number.isFinite(elapsedMs) && elapsedMs >= 0)).toBe(true);
+  expect(tlsResponseClosed).toBe(true);
+  expect(hasOnlyConnectionResetErrors(tlsResponseErrors)).toBe(true);
   expect(phaseDiagnostics.every((diagnostic) => Object.keys(diagnostic).sort().join(',') === 'elapsedMs,lastCompletedPhase,phase,status')).toBe(true);
   expect(testInfo.annotations
     .filter((annotation) => annotation.type === 'custom-server-phase')
