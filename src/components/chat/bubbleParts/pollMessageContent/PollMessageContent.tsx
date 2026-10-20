@@ -53,7 +53,7 @@ import {
 import {PollWebPageMedia} from './PollWebPageMedia';
 import styles from './styles.module.scss';
 import {usePollDerivedProps} from './usePollDerivedProps';
-import {usePollMutations} from './usePollMutations';
+import {usePollMutations, type PollVoteStatus} from './usePollMutations';
 import {usePollOptionsStore} from './usePollOptionsStore';
 import {attachSpoilerOverlay, dataPollViewerIdx, hasSelectedCorrectAnswers, NewOptionValues} from './utils';
 
@@ -113,6 +113,8 @@ export const PollMessageContent =
     // ----- Local state -----
     const [explanationToggled, setExplanationToggled] = createSignal(false);
     const [chosenIndexes, setChosenIndexes] = createSignal<number[]>([]);
+    const [votePending, setVotePending] = createSignal(false);
+    const [voteStatus, setVoteStatus] = createSignal<PollVoteStatus>('idle');
     const [canFooterBeClickable, setCanFooterBeClickable] = createSignal(false);
     const [isAddingNewOptionActive, setIsAddingNewOptionActive] = createSignal(false);
     const [newOption, setNewOption] = createStore<NewOptionValues>({
@@ -252,11 +254,20 @@ export const PollMessageContent =
       pollOptions,
       chosenIndexes,
       newOptionText: () => newOption.text,
-      activeVoteRestriction
+      activeVoteRestriction,
+      votePending
     });
     const voteRestrictionDisplayState = createMemo(() =>
       getPollVoteRestrictionDisplayState(activeVoteRestriction(), hideResults())
     );
+    const footerBranch = createMemo(() => {
+      if(voteRestrictionDisplayState().showVotersCount) return 'restriction_votes';
+      if(canShowViewResults()) return 'view_votes';
+      if(hasSelectedSomething()) return 'submit_vote';
+      if(hasTypedNewOption() && !isShowingResult()) return 'save';
+      if(isShowingResult()) return 'poll_votes';
+      return 'select_option';
+    });
 
     const isChecked = createSelector(chosenIndexes, (index: number, indices) => indices.includes(index));
 
@@ -282,6 +293,8 @@ export const PollMessageContent =
       initialIdxFromShuffledIdx,
       newOption,
       activeVoteRestriction,
+      setVotePending,
+      setVoteStatus,
       onVoteRestriction,
       showVoteRestriction,
       onSuccess: resetInteractiveState
@@ -384,7 +397,7 @@ export const PollMessageContent =
 
     const onFooterClick = wrapAsyncClickHandler(async() => {
       if(canShowViewResults()) openViewResults();
-      else if(hasSelectedSomething()) await sendVoteMutation.mutateAsync(chosenIndexes());
+      else if(hasSelectedSomething()) await wrappedSendVote(chosenIndexes());
       else if(hasTypedNewOption()) await wrappedAddOption();
     });
 
@@ -607,6 +620,12 @@ export const PollMessageContent =
         <div class={styles.footer}>
           <div
             class={styles.footerButton}
+            data-poll-footer-branch={footerBranch()}
+            data-poll-footer-result={isShowingResult() ? 'true' : 'false'}
+            data-poll-footer-view-results={canShowViewResults() ? 'true' : 'false'}
+            data-poll-footer-selected={hasSelectedSomething() ? 'true' : 'false'}
+            data-poll-footer-show-voters-count={voteRestrictionDisplayState().showVotersCount ? 'true' : 'false'}
+            data-poll-vote-status={voteStatus()}
             classList={{
               [styles.clickable]: isFooterClickable(),
               [styles.outgoing]: props.isOutgoing
@@ -616,13 +635,13 @@ export const PollMessageContent =
           >
             <Transition
               name='fade-2'
-              mode='outin'
+              mode='inout'
               onAfterExit={() => {
                 setCanFooterBeClickable(willFooterBeClickable());
               }}
             >
               <Switch>
-                <Match when={voteRestrictionDisplayState().showVotersCount}>
+                <Match when={footerBranch() === 'restriction_votes'}>
                   <PollVotes
                     votersCount={votersCount()}
                     closed={closed()}
@@ -630,16 +649,16 @@ export const PollMessageContent =
                     showWhoVoted={showWhoVoted()}
                   />
                 </Match>
-                <Match when={canShowViewResults()}>
+                <Match when={footerBranch() === 'view_votes'}>
                   <I18nTsx key='Chat.Poll.ViewVotes' args={votersCount()?.toString()} />
                 </Match>
-                <Match when={hasSelectedSomething()}>
+                <Match when={footerBranch() === 'submit_vote'}>
                   <I18nTsx key='Chat.Poll.SubmitVote' />
                 </Match>
-                <Match when={hasTypedNewOption() && !isShowingResult()}>
+                <Match when={footerBranch() === 'save'}>
                   <I18nTsx key='Save' />
                 </Match>
-                <Match when={isShowingResult()}>
+                <Match when={footerBranch() === 'poll_votes'}>
                   <PollVotes
                     votersCount={votersCount()}
                     closed={closed()}

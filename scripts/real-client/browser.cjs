@@ -100,6 +100,7 @@ const CONTROL_PLAN = Object.freeze([
 
 let currentStage = 'runtime_inputs';
 let currentScenario;
+let pollFooterTransitions = [];
 
 function readPageScenarioStep(page) {
   const pageAction = pageScenarioActions.get(page);
@@ -2866,10 +2867,26 @@ async function readPollResultsDiagnostic(page, question, answerText, messageId) 
     const visibleExactTextCount = (element, text) => innermostExactTextElements(element, text).filter(isVisible).length;
     const options = bubble ? [...bubble.querySelectorAll('[data-poll-option-idx]')] : [];
     const answer = options.filter((element) => element.textContent?.includes(expectedAnswerText));
+    const allResultIndicatorCount = leafTextCount(bubble, '1 member voted') + leafTextCount(bubble, 'View Votes (1)');
     const resultIndicatorCount = visibleExactTextCount(bubble, '1 member voted') + visibleExactTextCount(bubble, 'View Votes (1)');
     const voteLabels = innermostExactTextElements(bubble, 'Vote').filter(isVisible);
     const voteButtonCount = new Set(voteLabels.map((label) => label.parentElement).filter((control) => control && isVisible(control))).size;
     const selectOptionCount = leafTextCount(bubble, 'Select an option');
+    const footer = bubble?.querySelector('[data-poll-footer-branch]');
+    const footerBranch = ['restriction_votes', 'view_votes', 'submit_vote', 'save', 'poll_votes', 'select_option'].includes(footer?.dataset.pollFooterBranch)
+      ? footer.dataset.pollFooterBranch
+      : 'unavailable';
+    const footerVoteStatus = ['idle', 'pending', 'accepted', 'rejected'].includes(footer?.dataset.pollVoteStatus)
+      ? footer.dataset.pollVoteStatus
+      : 'unavailable';
+    const footerText = footer?.textContent?.trim() || '';
+    const footerTransitionClasses = footer ? [footer, ...footer.querySelectorAll('*')].flatMap((element) => [...element.classList])
+      .filter((className) => /^fade-2-(?:enter|enter-active|enter-to|exit|exit-active|exit-to)$/.test(className))
+      .sort() : [];
+    const resultLabels = [
+      ...innermostExactTextElements(bubble, '1 member voted'),
+      ...innermostExactTextElements(bubble, 'View Votes (1)')
+    ].filter((element) => footer?.contains(element));
     const peerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
     const midText = bubble?.dataset.mid;
     const mid = midText && /^-?[0-9]{1,20}$/.test(midText) ? Number(midText) : NaN;
@@ -2914,6 +2931,22 @@ async function readPollResultsDiagnostic(page, question, answerText, messageId) 
       domVisibleResultIndicatorCount: resultIndicatorCount,
       domVisibleVoteButtonCount: voteButtonCount,
       domSelectOptionCount: selectOptionCount,
+      footerBranch,
+      footerVoteStatus,
+      footerIsShowingResult: footer?.dataset.pollFooterResult === 'true',
+      footerCanShowViewResults: footer?.dataset.pollFooterViewResults === 'true',
+      footerHasSelectedSomething: footer?.dataset.pollFooterSelected === 'true',
+      footerShowsVotersCount: footer?.dataset.pollFooterShowVotersCount === 'true',
+      footerVisible: !!footer && isVisible(footer),
+      footerTextPresent: footerText.length > 0,
+      footerTextVisible: !!footer && [...footer.querySelectorAll('*')].some((node) =>
+        node.children.length === 0 && !!node.textContent?.trim() && isVisible(node)
+      ),
+      footerTextCategory: allResultIndicatorCount ? 'results_label' : voteButtonCount ? 'vote_control' : selectOptionCount ? 'select_option' : footerText ? 'other' : 'empty',
+      footerOpacity: footer ? Number.parseFloat(window.getComputedStyle(footer).opacity) : null,
+      footerResultLabelOpacity: resultLabels.length ? Number.parseFloat(window.getComputedStyle(resultLabels[0]).opacity) : null,
+      footerChildElementCount: footer?.childElementCount ?? null,
+      footerTransitionClasses,
       domAnswerOneCount: answer.length,
       domAnswerOneCountCount: answer.length === 1 ? leafTextCount(answer[0], '1') : 0,
       domAnswerOnePercentCount: answer.length === 1 ? leafTextCount(answer[0], '100%') : 0
@@ -2933,6 +2966,20 @@ async function readPollResultsDiagnostic(page, question, answerText, messageId) 
     domVisibleResultIndicatorCount: null,
     domVisibleVoteButtonCount: null,
     domSelectOptionCount: null,
+    footerBranch: 'unavailable',
+    footerVoteStatus: 'unavailable',
+    footerIsShowingResult: null,
+    footerCanShowViewResults: null,
+    footerHasSelectedSomething: null,
+    footerShowsVotersCount: null,
+    footerVisible: null,
+    footerTextPresent: null,
+    footerTextVisible: null,
+    footerTextCategory: 'unavailable',
+    footerOpacity: null,
+    footerResultLabelOpacity: null,
+    footerChildElementCount: null,
+    footerTransitionClasses: [],
     domAnswerOneCount: null,
     domAnswerOneCountCount: null,
     domAnswerOnePercentCount: null
@@ -2959,9 +3006,98 @@ function formatPollResultsDiagnostic(diagnostic) {
     `_dom_visible_result_indicators_${safeCount(diagnostic.domVisibleResultIndicatorCount)}` +
     `_dom_visible_vote_buttons_${safeCount(diagnostic.domVisibleVoteButtonCount)}` +
     `_dom_select_option_${safeCount(diagnostic.domSelectOptionCount)}` +
+    `_footer_branch_${diagnostic.footerBranch}` +
+    `_footer_vote_status_${diagnostic.footerVoteStatus}` +
+    `_footer_result_${safeBool(diagnostic.footerIsShowingResult)}` +
+    `_footer_view_results_${safeBool(diagnostic.footerCanShowViewResults)}` +
+    `_footer_selected_${safeBool(diagnostic.footerHasSelectedSomething)}` +
+    `_footer_restriction_votes_${safeBool(diagnostic.footerShowsVotersCount)}` +
+    `_footer_visible_${safeBool(diagnostic.footerVisible)}` +
+    `_footer_text_present_${safeBool(diagnostic.footerTextPresent)}` +
+    `_footer_text_visible_${safeBool(diagnostic.footerTextVisible)}` +
+    `_footer_text_${diagnostic.footerTextCategory}` +
+    `_footer_opacity_${Number.isFinite(diagnostic.footerOpacity) ? diagnostic.footerOpacity : 'unavailable'}` +
+    `_footer_result_opacity_${Number.isFinite(diagnostic.footerResultLabelOpacity) ? diagnostic.footerResultLabelOpacity : 'unavailable'}` +
+    `_footer_children_${safeCount(diagnostic.footerChildElementCount)}` +
+    `_footer_transition_${diagnostic.footerTransitionClasses?.join('+') || 'none'}` +
     `_dom_answer_matches_${safeCount(diagnostic.domAnswerOneCount)}` +
     `_dom_answer_one_counts_${safeCount(diagnostic.domAnswerOneCountCount)}` +
     `_dom_answer_one_percents_${safeCount(diagnostic.domAnswerOnePercentCount)}`;
+}
+
+async function startPollFooterTrace(poll) {
+  await poll.evaluate((element) => {
+    const key = '__realClientPollFooterTrace';
+    const existing = window[key];
+    if(existing?.observer) existing.observer.disconnect();
+    if(existing?.timer) window.clearInterval(existing.timer);
+
+    const samples = [];
+    const startedAt = performance.now();
+    const isVisible = (node) => {
+      for(let ancestor = node; ancestor; ancestor = ancestor.parentElement) {
+        const style = window.getComputedStyle(ancestor);
+        if(style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+      }
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const takeSample = () => {
+      const footer = element.querySelector('[data-poll-footer-branch]');
+      if(!footer || samples.length >= 48) return;
+      const labelNodes = [...footer.querySelectorAll('*')].filter((node) =>
+        node.children.length === 0 && ['1 member voted', 'View Votes (1)'].includes(node.textContent?.trim())
+      );
+      const text = footer.textContent?.trim() || '';
+      const transitionClasses = [footer, ...footer.querySelectorAll('*')]
+      .flatMap((node) => [...node.classList])
+      .filter((className) => /^fade-2-(?:enter|enter-active|enter-to|exit|exit-active|exit-to)$/.test(className))
+      .sort();
+      const sample = {
+        elapsedMs: Math.round(performance.now() - startedAt),
+        branch: ['restriction_votes', 'view_votes', 'submit_vote', 'save', 'poll_votes', 'select_option'].includes(footer.dataset.pollFooterBranch)
+          ? footer.dataset.pollFooterBranch : 'unavailable',
+        voteStatus: ['idle', 'pending', 'accepted', 'rejected'].includes(footer.dataset.pollVoteStatus)
+          ? footer.dataset.pollVoteStatus : 'unavailable',
+        isShowingResult: footer.dataset.pollFooterResult === 'true',
+        canShowViewResults: footer.dataset.pollFooterViewResults === 'true',
+        hasSelectedSomething: footer.dataset.pollFooterSelected === 'true',
+        showVotersCount: footer.dataset.pollFooterShowVotersCount === 'true',
+        footerVisible: isVisible(footer),
+        footerTextPresent: text.length > 0,
+        footerTextVisible: [...footer.querySelectorAll('*')].some((node) =>
+          node.children.length === 0 && !!node.textContent?.trim() && isVisible(node)
+        ),
+        footerTextCategory: labelNodes.length ? 'results_label' : text ? 'other' : 'empty',
+        footerOpacity: Number.parseFloat(window.getComputedStyle(footer).opacity),
+        resultLabelRendered: labelNodes.length > 0,
+        resultLabelVisible: labelNodes.some(isVisible),
+        resultLabelOpacity: labelNodes.length ? Number.parseFloat(window.getComputedStyle(labelNodes[0]).opacity) : null,
+        transitionClasses
+      };
+      const signature = JSON.stringify({...sample, elapsedMs: 0});
+      if(samples.length && samples[samples.length - 1].signature === signature) return;
+      samples.push({...sample, signature});
+    };
+    const observer = new MutationObserver(takeSample);
+    observer.observe(element, {attributes: true, childList: true, subtree: true});
+    const timer = window.setInterval(takeSample, 25);
+    window[key] = {samples, startedAt, observer, timer, takeSample};
+    takeSample();
+  });
+}
+
+async function stopPollFooterTrace(poll) {
+  return poll.evaluate((element) => {
+    const key = '__realClientPollFooterTrace';
+    const trace = window[key];
+    if(!trace) return [];
+    trace.takeSample();
+    trace.observer.disconnect();
+    window.clearInterval(trace.timer);
+    delete window[key];
+    return trace.samples.map(({signature, ...sample}) => sample);
+  }).catch(() => []);
 }
 
 async function capturePollState(page, screenshotDirectory, name, stage, capturedScreenshots) {
@@ -4079,6 +4215,7 @@ async function submitPollVote(page, poll, question, stage, messageId) {
 }
 
 async function runPollLifecycle({alice, bob, registry, runtime, groupName, screenshotDirectory, capturedScreenshots}) {
+  pollFooterTransitions = [];
   const polls = [
     {
       shape: 'description',
@@ -4150,21 +4287,41 @@ async function runPollLifecycle({alice, bob, registry, runtime, groupName, scree
     }
 
     let bobPollMessageId;
+    let footerTracePoll;
     try {
     const alicePoll = await waitForPollMessage(alice.page, testCase.question, `${prefix}_sent`, 30_000, sendDiagnostic.sentMessageId);
     await assertPollContent(alicePoll, {...testCase, stage: `${prefix}_sent`});
     await capturePollState(alice.page, screenshotDirectory, `${testCase.shape.replaceAll('_', '-')}-poll-sent`, `${prefix}_sent_screenshot`, capturedScreenshots);
 
     const bobPoll = await waitForPollMessage(bob.page, testCase.question, `bob_poll_${testCase.shape}_received`);
+    footerTracePoll = bobPoll;
     bobPollMessageId = await bobPoll.getAttribute('data-mid');
     await assertPollContent(bobPoll, {...testCase, stage: `bob_poll_${testCase.shape}_received`});
     await capturePollState(bob.page, screenshotDirectory, `bob-${testCase.shape.replaceAll('_', '-')}-poll-received`, `bob_poll_${testCase.shape}_received_screenshot`, capturedScreenshots);
 
     currentStage = `bob_poll_${testCase.shape}_vote_select`;
+    await startPollFooterTrace(bobPoll);
     const voteOption = getPollOptionClickTarget(bobPoll, POLL_ANSWER_ONE);
     await voteOption.click().catch(() => failStage(`bob_poll_${testCase.shape}_vote_select`));
     currentStage = `bob_poll_${testCase.shape}_vote_submit`;
     await submitPollVote(bob.page, bobPoll, testCase.question, `bob_poll_${testCase.shape}_vote_submit`, bobPollMessageId);
+    const footerSamples = await stopPollFooterTrace(bobPoll);
+    pollFooterTransitions.push({shape: testCase.shape, samples: footerSamples});
+    if(!footerSamples.some((sample) => sample.voteStatus === 'pending')) {
+      failStage(`bob_poll_${testCase.shape}_pending_vote_state_unobserved`);
+    }
+    if(!footerSamples.some((sample) => sample.voteStatus === 'accepted')) {
+      failStage(`bob_poll_${testCase.shape}_accepted_vote_state_unobserved`);
+    }
+    if(footerSamples.some((sample) => sample.voteStatus === 'pending' && sample.isShowingResult)) {
+      failStage(`bob_poll_${testCase.shape}_results_before_vote_accepted`);
+    }
+    if(footerSamples.some((sample) => sample.voteStatus === 'accepted' && sample.branch === 'view_votes' && !sample.footerTextVisible)) {
+      failStage(`bob_poll_${testCase.shape}_blank_results_footer`);
+    }
+    if(!footerSamples.some((sample) => sample.voteStatus === 'accepted' && sample.branch === 'view_votes' && sample.resultLabelVisible)) {
+      failStage(`bob_poll_${testCase.shape}_visible_results_footer_unobserved`);
+    }
     await capturePollState(bob.page, screenshotDirectory, `bob-${testCase.shape.replaceAll('_', '-')}-poll-results`, `bob_poll_${testCase.shape}_results_screenshot`, capturedScreenshots);
 
     currentStage = `alice_poll_${testCase.shape}_stop_menu`;
@@ -4204,7 +4361,11 @@ async function runPollLifecycle({alice, bob, registry, runtime, groupName, scree
         ? await readPollResultsDiagnostic(page, testCase.question, POLL_ANSWER_ONE,
           stage.startsWith('alice_') ? sendDiagnostic.sentMessageId : bobPollMessageId)
         : undefined;
-      pollFlowFailures.push({shape: testCase.shape, stage, resultDiagnostic});
+      const footerTrace = stage.startsWith('bob_poll_') && bobPollMessageId && footerTracePoll
+        ? await stopPollFooterTrace(footerTracePoll)
+        : undefined;
+      if(footerTrace?.length) pollFooterTransitions.push({shape: testCase.shape, samples: footerTrace});
+      pollFlowFailures.push({shape: testCase.shape, stage, resultDiagnostic, footerTrace});
     }
   }
 
@@ -4226,6 +4387,7 @@ async function runPollLifecycle({alice, bob, registry, runtime, groupName, scree
 
   return {
     evidence,
+    footerTransitions: pollFooterTransitions,
     sendResults: sendAttempts.map(({shape, status, sendResult, sendResultCount, sendResultSource, randomId, messageError,
       sentMessageId, sentMessageStore, sentPollStoreMatch, sendMediaObserverInstalled, sendWorkerObserverStatus,
       sendObservationStatus, persistedIdentityStatus, sendMediaCallCount,
@@ -6074,6 +6236,7 @@ async function main(dependencies = {}) {
           capturedScreenshots
         });
         pollSendResults = pollRun.sendResults;
+        pollFooterTransitions = pollRun.footerTransitions;
       }
       report.push({name: 'poll', status: 'passed'});
     }
@@ -6123,6 +6286,7 @@ async function main(dependencies = {}) {
       ...(runtime.scenarios?.includes('channel') ? {channelMembership: await captureChannelMembershipState()} : {}),
       ...(pollNegativeControlEvidence ? {pollNegativeControl: pollNegativeControlEvidence} : {}),
       ...(pollSendResults ? {pollSendResults} : {}),
+      ...(pollFooterTransitions.length ? {pollFooterTransitions} : {}),
       gateBreakdown,
       network: {unexpectedAttempts: egress.unexpectedAttempts, observerErrors: egress.observerErrors, contexts: networkContexts},
       workerObservation: observationBlock
@@ -6198,6 +6362,7 @@ async function main(dependencies = {}) {
         ...(channelMembership ? {channelMembership} : {}),
         ...(pollNegativeControlEvidence ? {pollNegativeControl: pollNegativeControlEvidence} : {}),
         ...(pollSendResults ? {pollSendResults} : {}),
+        ...(pollFooterTransitions.length ? {pollFooterTransitions} : {}),
         ...(currentScenario ? {gateBreakdown} : {}),
         ...(currentStage === 'browser_worker_observation_incomplete' && registry
           ? {workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers)}
