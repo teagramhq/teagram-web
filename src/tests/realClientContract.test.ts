@@ -133,13 +133,21 @@ async function createDiscoveryNetworkHarness(options: any = {}) {
       return {sessionId: `discovery-${params.targetId}`};
     }
     if(method === 'Target.sendMessageToTarget') {
-      const {method: nestedMethod} = JSON.parse(params.message);
+      const {method: nestedMethod, params: nestedParams} = JSON.parse(params.message);
       if(options.detachBeforeSetup && nestedMethod === 'Network.enable') {
         discovery.session.emit('Target.detachedFromTarget', {sessionId: params.sessionId});
       }
-      const result = nestedMethod === 'Runtime.callFunctionOn'
-        ? {result: {value: {peerArguments: [{argument: 'peer', constructor: 'inputPeerChannel', id: '603'}]}}}
-        : {};
+      let result = {};
+      if(nestedMethod === 'Runtime.callFunctionOn') {
+        const declaration = String(nestedParams?.functionDeclaration || '');
+        if(declaration.includes('function installWorkerPollSendObserver')) {
+          result = {result: {value: {status: 'installed'}}};
+        } else if(declaration.includes('function readWorkerPollSendObservation')) {
+          result = {result: {value: options.pollSendObservation || {status: 'installed', attempts: [], droppedAttempts: 0}}};
+        } else {
+          result = {result: {value: {peerArguments: [{argument: 'peer', constructor: 'inputPeerChannel', id: '603'}]}}};
+        }
+      }
       acknowledgeCdpCommand(discovery.session, params, options.setupFailure && nestedMethod === 'Network.enable', result);
     }
     return {};
@@ -7301,7 +7309,7 @@ describe('real client poll send diagnostics', () => {
       await page.setContent(`<!doctype html><html><body>
         <div id="column-center">
           <div class="topbar"><div class="avatar" data-peer-id="-42"></div></div>
-          <div class="bubble is-error" data-mid="0.0001">Sending failed</div>
+          <div class="bubble is-error" data-mid="0.0001">${question}</div>
         </div>
       </body></html>`);
       await page.evaluate((syntheticQuestion: string) => {
@@ -7326,7 +7334,17 @@ describe('real client poll send diagnostics', () => {
         {total: 0, byType: {}},
         {createClicked: true, composerClosed: true},
         workerErrorsBefore,
-        workerErrorsAfter
+        workerErrorsAfter,
+        {
+          status: 'installed',
+          attempts: [{
+            shape: 'input_answer',
+            questionToken: 'a1b2c3d4',
+            randomId: '123456789',
+            status: 'rejected',
+            error: {type: 'POLL_ANSWERS_INVALID', code: 400, message: 'POLL_ANSWERS_INVALID'}
+          }]
+        }
       );
 
       expect(diagnostic).toMatchObject({
@@ -7339,6 +7357,8 @@ describe('real client poll send diagnostics', () => {
         bubbleStatuses: ['is-error'],
         messageError: {type: 'POLL_ANSWERS_INVALID', code: 400, message: 'POLL_ANSWERS_INVALID'},
         messageErrorStored: true,
+        sendResult: 'rejected',
+        sendObservationStatus: 'rejected',
         rpcErrorCount: 1,
         rpcErrorTypes: {POLL_ANSWERS_INVALID: 1},
         workerEvaluationExceptions: 1,
@@ -7354,6 +7374,7 @@ describe('real client poll send diagnostics', () => {
         (window as any).apiManagerProxy.getMessageByPeer = (): undefined => undefined;
         (window as any).__realClientPollErrors = (): unknown[] => [{
           source: 'message_error',
+          question: syntheticQuestion,
           tempId: '0.0001',
           randomId: null,
           storedError: null,
@@ -7372,14 +7393,14 @@ describe('real client poll send diagnostics', () => {
         workerErrorsAfter
       );
       expect(eventDiagnostic).toMatchObject({
-        tempMessageFound: true,
+        tempMessageFound: false,
         tempId: '0.0001',
         randomId: null,
         messageError: {type: 'POLL_ANSWERS_INVALID', code: 400, message: 'POLL_ANSWERS_INVALID'},
         messageErrorStored: false,
-        sendResult: 'rejected',
-        sendResultCount: 1,
-        sendResultSource: 'message_error'
+        sendResult: 'unobserved',
+        sendResultCount: 0,
+        sendResultSource: null
       });
     } finally {
       await page.close();
@@ -7394,6 +7415,7 @@ describe('real client poll send diagnostics', () => {
       tempMessageFound: true,
       messageError: {type: 'POLL_ANSWERS_INVALID', code: 400},
       sendResult: 'rejected',
+      sendObservationStatus: 'rejected',
       bubbleStatuses: ['is-sending', 'is-error'],
       rpcErrorCount: 0,
       rpcErrorTypes: {}
@@ -7404,7 +7426,7 @@ describe('real client poll send diagnostics', () => {
     expect(realClientBrowser.isExpectedPollCreationRejection?.({...diagnostic, status: 'timeout'}, 'POLL_ANSWERS_INVALID')).toBe(false);
   });
 
-  it('compares the synthetic send store, rendered message row and poll selector', async() => {
+  it('confirms the response MID across duplicate question rows without a message_sent event', async() => {
     const page = await browser.newPage();
     const question = 'browser-ci-poll-description-a1b2c3d4';
     const workerObserver = observation.createContextObserver('alice');
@@ -7422,53 +7444,57 @@ describe('real client poll send diagnostics', () => {
           peerId: -42,
           media: {_: 'messageMediaPoll', poll: {question: {text: syntheticQuestion}}}
         };
+        const temporaryPoll = {
+          mid: 0.0001,
+          peerId: -42,
+          random_id: 123456789,
+          media: {_: 'messageMediaPoll', poll: {question: {text: syntheticQuestion}}}
+        };
         const lookups: Array<{peerId: number; mid: number}> = [];
         (window as any).__pollStoreLookups = lookups;
         (window as any).apiManagerProxy = {getMessageByPeer: (peerId: number, mid: number): unknown => {
           lookups.push({peerId, mid});
-          return peerId === -42 && mid === 55 ? storedPoll : undefined;
+          if(peerId !== -42) return undefined;
+          return mid === 55 ? storedPoll : mid === 0.0001 ? temporaryPoll : undefined;
         }};
         (window as any).__realClientActivePollQuestion = syntheticQuestion;
+        const center = document.querySelector('#column-center')!;
+        for(const [mid, status] of [['0.0001', 'is-sending'], ['55', 'is-sent']]) {
+          const row = document.createElement('div');
+          row.className = `bubble ${status}`;
+          row.dataset.mid = mid;
+          row.innerHTML = '<div data-poll-option-idx="0">browser-ci-poll-answer-one</div>';
+          row.append(document.createTextNode(syntheticQuestion));
+          center.append(row);
+        }
       }, question);
 
       await realClientBrowser.installPollMessageErrorObserver(page);
-      await page.evaluate((syntheticQuestion: string) => {
-        const dispatch = (window as any).__pollListeners.message_sent;
-        dispatch({
-          tempId: 0.0001,
-          tempMessage: {
-            mid: 0.0001,
-            random_id: 123456789,
-            media: {_: 'messageMediaPoll', poll: {question: {text: syntheticQuestion}}}
-          },
-          mid: 55,
-          message: {mid: 55, peerId: -42}
-        });
-        dispatch({
-          tempId: 0.0002,
-          tempMessage: {
-            mid: 0.0002,
-            random_id: 987654321,
-            media: {_: 'messageMediaPoll', poll: {question: {text: 'unrelated poll text'}}}
-          },
-          mid: 56,
-          message: {mid: 56}
-        });
-      }, question);
-
       const diagnostic = await realClientBrowser.readPollSendDiagnostic(
         page,
         question,
-        'timeout',
+        'sent',
         0,
         {total: 0, byType: {}},
         {createClicked: true, composerClosed: true},
         workerErrors,
-        workerErrors
+        workerErrors,
+        {
+          status: 'installed',
+          attempts: [{
+            shape: 'description',
+            questionToken: 'a1b2c3d4',
+            randomId: '123456789',
+            status: 'accepted',
+            resultType: 'updates',
+            responseMessageId: '55'
+          }]
+        }
       );
       expect(diagnostic).toMatchObject({
-        status: 'timeout',
-        tempMessageFound: false,
+        status: 'sent',
+        tempMessageFound: true,
+        tempCandidateCount: 2,
         sendResult: 'accepted',
         sendResultCount: 1,
         sentTempId: '0.0001',
@@ -7476,49 +7502,37 @@ describe('real client poll send diagnostics', () => {
         sentRandomId: '123456789',
         sentMessageStore: 'present',
         sentPollStoreMatch: true,
-        sentDomAtEvent: {
-          bubbleRowCount: 0,
-          serverMidNodeCount: 0,
-          serverMidRowCount: 0,
-          tempMidNodeCount: 0,
-          tempMidRowCount: 0,
-          questionTextNodeCount: 0,
-          questionVisibleTextNodeCount: 0,
-          questionRowCount: 0,
-          questionVisibleRowCount: 0
-        },
+        sendObservationStatus: 'persisted_identity',
+        sentDomAtEvent: null,
         renderedPollDom: {
-          bubbleRowCount: 0,
-          serverMidNodeCount: 0,
-          serverMidRowCount: 0,
-          tempMidNodeCount: 0,
-          tempMidRowCount: 0,
-          questionTextNodeCount: 0,
-          questionVisibleTextNodeCount: 0,
-          questionRowCount: 0,
-          questionVisibleRowCount: 0,
-          selectorCount: 0,
-          selectorVisibleCount: 0
+          bubbleRowCount: 2,
+          serverMidNodeCount: 1,
+          serverMidRowCount: 1,
+          tempMidNodeCount: 1,
+          tempMidRowCount: 1,
+          questionTextNodeCount: 2,
+          questionVisibleTextNodeCount: 2,
+          questionRowCount: 2,
+          questionVisibleRowCount: 2,
+          selectorCount: 2,
+          selectorVisibleCount: 2
         }
       });
-      expect(await page.evaluate(() => (window as any).__pollStoreLookups)).toEqual([{peerId: -42, mid: 55}]);
+      expect(await page.evaluate(() => (window as any).__pollStoreLookups)).toEqual([
+        {peerId: -42, mid: 0.0001},
+        {peerId: -42, mid: 55},
+        {peerId: -42, mid: 55}
+      ]);
+      expect(await page.evaluate(() => (window as any).__realClientPollSendOutcomes())).toEqual([]);
       const summary = realClientBrowser.formatPollSendDiagnostic({shape: 'description', ...diagnostic});
       expect(summary).toContain('send_result_accepted');
       expect(summary).toContain('_send_mid_55');
+      expect(summary).toContain('_send_observation_persisted_identity');
       expect(summary).toContain('_store_mid_present_store_poll_match_1');
-      expect(summary).toContain('_dom_event_mid_rows_0_temp_rows_0_question_text_nodes_0_question_rows_0');
-      expect(summary).toContain('_dom_after_mid_nodes_0_mid_rows_0_temp_nodes_0_temp_rows_0_question_text_nodes_0_question_text_visible_0_question_rows_0_question_visible_0_selector_0_selector_visible_0');
+      expect(summary).toContain('_dom_event_mid_rows_unavailable_temp_rows_unavailable_question_text_nodes_unavailable_question_rows_unavailable');
+      expect(summary).toContain('_dom_after_mid_nodes_1_mid_rows_1_temp_nodes_1_temp_rows_1_question_text_nodes_2_question_text_visible_2_question_rows_2_question_visible_2_selector_2_selector_visible_2');
       expectNoHostileLeak(summary);
       expect(summary).not.toContain(question);
-      expect(summary).not.toContain('unrelated poll text');
-
-      await page.evaluate((syntheticQuestion: string) => {
-        const row = document.createElement('div');
-        row.className = 'bubble is-sent';
-        row.dataset.mid = '55';
-        row.textContent = syntheticQuestion;
-        document.querySelector('#column-center')!.append(row);
-      }, question);
       const renderedDiagnostic = await realClientBrowser.readPollSendDiagnostic(
         page,
         question,
@@ -7527,32 +7541,90 @@ describe('real client poll send diagnostics', () => {
         {total: 0, byType: {}},
         {createClicked: true, composerClosed: true},
         workerErrors,
-        workerErrors
+        workerErrors,
+        {
+          status: 'installed',
+          attempts: [{
+            shape: 'description',
+            questionToken: 'a1b2c3d4',
+            randomId: '123456789',
+            status: 'accepted',
+            resultType: 'updates',
+            responseMessageId: '55'
+          }]
+        }
       );
       expect(renderedDiagnostic).toMatchObject({
         tempMessageFound: true,
         sentMessageStore: 'present',
         sentPollStoreMatch: true,
-        sentDomAtEvent: {
-          serverMidRowCount: 0,
-          tempMidRowCount: 0,
-          questionRowCount: 0
-        },
+        sentDomAtEvent: null,
         renderedPollDom: {
           serverMidNodeCount: 1,
           serverMidRowCount: 1,
-          tempMidNodeCount: 0,
-          tempMidRowCount: 0,
-          questionTextNodeCount: 1,
-          questionVisibleTextNodeCount: 1,
-          questionRowCount: 1,
-          questionVisibleRowCount: 1,
-          selectorCount: 1,
-          selectorVisibleCount: 1
+          tempMidNodeCount: 1,
+          tempMidRowCount: 1,
+          questionTextNodeCount: 2,
+          questionVisibleTextNodeCount: 2,
+          questionRowCount: 2,
+          questionVisibleRowCount: 2,
+          selectorCount: 2,
+          selectorVisibleCount: 2
         }
       });
     } finally {
       await page.close();
+    }
+  });
+
+  it('installs and reads the poll observer in Alice SharedWorkers', async() => {
+    const pollSendObservation = {
+      status: 'installed',
+      attempts: [{
+        shape: 'input_answer',
+        questionToken: 'a1b2c3d4',
+        randomId: '123456789',
+        status: 'accepted',
+        resultType: 'updates',
+        responseMessageId: '77',
+        description: HOSTILE.phrase
+      }],
+      droppedAttempts: 0
+    };
+    const harness = await createDiscoveryNetworkHarness({pollSendObservation});
+    try {
+      await harness.attach(harness.alice, 'poll-send-worker');
+      harness.emit(harness.alice, 'poll-send-worker', 'Runtime.executionContextCreated', {
+        context: {id: 9, auxData: {isDefault: true}}
+      });
+      await harness.registry.waitForSetup();
+
+      const observed = await harness.registry.readPollSendObservation(harness.alice.observer);
+      expect(observed).toEqual({
+        status: 'installed',
+        attempts: [{
+          shape: 'input_answer',
+          questionToken: 'a1b2c3d4',
+          randomId: '123456789',
+          status: 'accepted',
+          resultType: 'updates',
+          responseMessageId: '77',
+          inputAnswerCount: null,
+          descriptionEmpty: null,
+          error: null
+        }],
+        droppedAttempts: 0
+      });
+      const declarations = harness.calls.flatMap(({method, params}) => {
+        if(method !== 'Target.sendMessageToTarget') return [];
+        const nested = JSON.parse(params.message);
+        return nested.method === 'Runtime.callFunctionOn' ? [nested.params.functionDeclaration] : [];
+      });
+      expect(declarations.some((declaration: string) => declaration.includes('function installWorkerPollSendObserver'))).toBe(true);
+      expect(declarations.some((declaration: string) => declaration.includes('function readWorkerPollSendObservation'))).toBe(true);
+      expect(JSON.stringify(observed)).not.toContain(HOSTILE.phrase);
+    } finally {
+      await harness.stop();
     }
   });
 
@@ -7837,84 +7909,278 @@ describe('real client poll option interaction', () => {
     }
   });
 
-  it('treats message_sent as confirmation while the bubble status still says sending', async() => {
+  it('does not treat message_sent or a sent-looking row as poll send confirmation', async() => {
     const page = await browser.newPage();
+    const question = 'browser-ci-poll-send-confirmed';
     try {
-      await page.setContent('<div id="column-center"><div class="bubble is-sending">browser-ci-poll-send-confirmed</div></div>');
+      await page.setContent(`<div id="column-center"><div class="bubble is-sent">${question}</div></div>`);
       await page.evaluate(() => {
         (window as any).__realClientPollSendOutcomes = () => [{question: 'browser-ci-poll-send-confirmed'}];
         (window as any).__realClientPollErrors = (): unknown[] => [];
       });
 
       expect(realClientBrowser.waitForPollSendOutcome).toBeTypeOf('function');
-      await expect(realClientBrowser.waitForPollSendOutcome(page, 'browser-ci-poll-send-confirmed', 'send', 50)).resolves.toBe('sent');
+      await expect(realClientBrowser.waitForPollSendOutcome(page, question, 'send', 50)).resolves.toBe('timeout');
     } finally {
       await page.close();
     }
   });
 
-  it('captures the real sendMedia resolution for an empty-description poll with an input answer', async() => {
+  it('classifies poll sends only from the matching random id, accepted response and persisted identity', () => {
+    const classify = (realClientBrowser as any).classifyPollSendConfirmation;
+    expect(classify).toBeTypeOf('function');
+    if(typeof classify !== 'function') return;
+
+    const question = 'browser-ci-poll-input-answer-a1b2c3d4';
+    const accepted = {
+      status: 'installed',
+      attempts: [{
+        shape: 'input_answer',
+        questionToken: 'a1b2c3d4',
+        randomId: '123456789',
+        status: 'accepted',
+        resultType: 'updates',
+        responseMessageId: '55'
+      }]
+    };
+    const persistedIdentity = {status: 'present', messageId: '55', peerMatches: true, pollMatches: true};
+
+    expect(classify({observation: {status: 'unavailable', attempts: []}, question, persistedIdentity}).status)
+    .toBe('observer_unavailable');
+    expect(classify({observation: {status: 'installed', attempts: []}, question, persistedIdentity}).status)
+    .toBe('no_observed_attempt');
+    expect(classify({observation: {...accepted, attempts: [{...accepted.attempts[0], status: 'pending'}]}, question, persistedIdentity}).status)
+    .toBe('pending');
+    expect(classify({observation: {...accepted, attempts: [{...accepted.attempts[0], status: 'rejected'}]}, question, persistedIdentity}).status)
+    .toBe('rejected');
+    expect(classify({observation: accepted, question: 'browser-ci-poll-input-answer-b2c3d4e5', persistedIdentity}).status)
+    .toBe('no_observed_attempt');
+    expect(classify({observation: accepted, question, persistedIdentity: {...persistedIdentity, messageId: '56'}}).confirmed)
+    .toBe(false);
+    expect(classify({observation: accepted, question, persistedIdentity})).toMatchObject({
+      status: 'persisted_identity',
+      confirmed: true,
+      sendResult: 'accepted',
+      randomId: '123456789',
+      responseMessageId: '55'
+    });
+    expect(classify({
+      observation: {...accepted, attempts: [
+        {...accepted.attempts[0], randomId: '987654321', status: 'rejected'},
+        accepted.attempts[0]
+      ]},
+      question,
+      attemptCursor: {attemptCount: 1, droppedAttempts: 0},
+      persistedIdentity
+    }).status).toBe('persisted_identity');
+    expect(classify({
+      observation: accepted,
+      question,
+      persistedIdentity: {...persistedIdentity, messageId: '99'}
+    }).status).toBe('persisted_identity_mismatch');
+    expect(classify({
+      observation: {...accepted, attempts: [
+        accepted.attempts[0],
+        {...accepted.attempts[0], randomId: '987654321', responseMessageId: '56'}
+      ]},
+      question,
+      persistedIdentity
+    }).status).toBe('ambiguous_attempt');
+    expect(classify({
+      observation: {...accepted, droppedAttempts: 1},
+      question,
+      persistedIdentity
+    }).status).toBe('ambiguous_attempt');
+  });
+
+  it('observes actual SharedWorker sendMedia outcomes for both synthetic poll shapes without retaining payload text', async() => {
+    const install = (realClientBrowser as any).installWorkerPollSendObserver;
+    const read = (realClientBrowser as any).readWorkerPollSendObservation;
+    expect(install).toBeTypeOf('function');
+    expect(read).toBeTypeOf('function');
+    if(typeof install !== 'function' || typeof read !== 'function') return;
+
+    let resolveDescription: (value: unknown) => void = () => undefined;
+    let rejectInputAnswer: (error: unknown) => void = () => undefined;
+    const calls: string[] = [];
+    const apiManager = {
+      invokeApi(method: string, params: any) {
+        calls.push(method);
+        if(params.media.poll.question.text.endsWith('a1b2c3d4')) {
+          return new Promise((resolve) => { resolveDescription = resolve; });
+        }
+        return new Promise((_resolve, reject) => { rejectInputAnswer = reject; });
+      }
+    };
+    const workerScope: any = {
+      appManagersManager: {
+        areManagersCreated: true,
+        getManagersByAccount: () => ({1: {appPollsManager: {apiManager}}})
+      },
+      setInterval: () => 1,
+      clearInterval: (): void => undefined
+    };
+    install(workerScope);
+    await vi.waitFor(() => expect(read(workerScope).status).toBe('installed'));
+
+    const descriptionRequest = apiManager.invokeApi('messages.sendMedia', {
+      message: 'private description text',
+      random_id: '123456789',
+      media: {_: 'inputMediaPoll', poll: {
+        question: {text: 'browser-ci-poll-description-a1b2c3d4'},
+        answers: [{_: 'pollAnswer', text: {text: 'private answer text'}}]
+      }}
+    });
+    const inputAnswerRequest = apiManager.invokeApi('messages.sendMedia', {
+      message: '',
+      random_id: '987654321',
+      media: {_: 'inputMediaPoll', poll: {
+        question: {text: 'browser-ci-poll-input-answer-b2c3d4e5'},
+        answers: [{_: 'inputPollAnswer', text: {text: 'private linked answer'}}]
+      }}
+    });
+    const pending = read(workerScope);
+    expect(pending.attempts.map((attempt: any) => attempt.status)).toEqual(['pending', 'pending']);
+    resolveDescription({_: 'updates', updates: [
+      {_: 'updateMessageID', random_id: '123456789', id: 77},
+      {_: 'updateNewMessage', message: {id: 77}}
+    ]});
+    rejectInputAnswer({type: 'POLL_ANSWERS_INVALID', code: 400, message: 'POLL_ANSWERS_INVALID', secret: HOSTILE.token});
+    await expect(descriptionRequest).resolves.toMatchObject({_: 'updates'});
+    await expect(inputAnswerRequest).rejects.toMatchObject({type: 'POLL_ANSWERS_INVALID'});
+
+    const observed = read(workerScope);
+    expect(observed).toMatchObject({
+      status: 'installed',
+      attempts: [
+        {shape: 'description', randomId: '123456789', status: 'accepted', responseMessageId: '77', inputAnswerCount: 0, descriptionEmpty: false},
+        {shape: 'input_answer', randomId: '987654321', status: 'rejected', inputAnswerCount: 1, descriptionEmpty: true,
+          error: {type: 'POLL_ANSWERS_INVALID', code: 400, message: 'POLL_ANSWERS_INVALID'}}
+      ]
+    });
+    expect(calls).toEqual(['messages.sendMedia', 'messages.sendMedia']);
+    expect(JSON.stringify(observed)).not.toContain('private description text');
+    expect(JSON.stringify(observed)).not.toContain('private answer text');
+    expect(JSON.stringify(observed)).not.toContain('private linked answer');
+    expectNoHostileLeak(observed);
+  });
+
+  it('does not link an updateMessageID response to a different request random_id', async() => {
+    const install = (realClientBrowser as any).installWorkerPollSendObserver;
+    const read = (realClientBrowser as any).readWorkerPollSendObservation;
+    let invocation: any;
+    const apiManager = {
+      invokeApi(_method: string, params: any) {
+        invocation = params;
+        return Promise.resolve({_: 'updates', updates: [{_: 'updateMessageID', random_id: '987654321', id: 77}]});
+      }
+    };
+    const workerScope: any = {
+      appManagersManager: {areManagersCreated: true, getManagersByAccount: () => ({1: {appPollsManager: {apiManager}}})},
+      setInterval: () => 1,
+      clearInterval: (): void => undefined
+    };
+    install(workerScope);
+    await vi.waitFor(() => expect(read(workerScope).status).toBe('installed'));
+    await apiManager.invokeApi('messages.sendMedia', {
+      message: '',
+      random_id: '123456789',
+      media: {_: 'inputMediaPoll', poll: {
+        question: {text: 'browser-ci-poll-description-a1b2c3d4'},
+        answers: [{_: 'pollAnswer'}]
+      }}
+    });
+
+    expect(invocation.random_id).toBe('123456789');
+    expect(read(workerScope).attempts).toMatchObject([{status: 'accepted', randomId: '123456789', responseMessageId: null}]);
+  });
+
+  it('does not derive a response MID from a same-question update paired with another send random_id', async() => {
+    const install = (realClientBrowser as any).installWorkerPollSendObserver;
+    const read = (realClientBrowser as any).readWorkerPollSendObservation;
+    const apiManager = {
+      invokeApi(_method: string, _params: any) {
+        return Promise.resolve({_: 'updates', updates: [
+          {_: 'updateMessageID', random_id: '987654321', id: 77},
+          {_: 'updateNewMessage', message: {
+            id: 77,
+            media: {_: 'messageMediaPoll', poll: {question: {text: 'browser-ci-poll-description-a1b2c3d4'}}}
+          }}
+        ]});
+      }
+    };
+    const workerScope: any = {
+      appManagersManager: {areManagersCreated: true, getManagersByAccount: () => ({1: {appPollsManager: {apiManager}}})},
+      setInterval: () => 1,
+      clearInterval: (): void => undefined
+    };
+    install(workerScope);
+    await vi.waitFor(() => expect(read(workerScope).status).toBe('installed'));
+    await apiManager.invokeApi('messages.sendMedia', {
+      message: '',
+      random_id: '123456789',
+      media: {_: 'inputMediaPoll', poll: {
+        question: {text: 'browser-ci-poll-description-a1b2c3d4'},
+        answers: [{_: 'pollAnswer'}]
+      }}
+    });
+
+    expect(read(workerScope).attempts).toMatchObject([{status: 'accepted', randomId: '123456789', responseMessageId: null}]);
+  });
+
+  it('waits for the worker response MID to resolve to a persisted poll identity', async() => {
     const page = await browser.newPage();
-    const question = 'browser-ci-poll-empty-description-send-result';
+    const question = 'browser-ci-poll-input-answer-a1b2c3d4';
+    const observationSnapshot = {
+      status: 'installed',
+      attempts: [{
+        shape: 'input_answer',
+        questionToken: 'a1b2c3d4',
+        randomId: '123456789',
+        status: 'accepted',
+        resultType: 'updates',
+        responseMessageId: '77'
+      }]
+    };
     try {
-      await page.setContent('<div id="column-center"><div class="topbar"><div class="avatar" data-peer-id="-42"></div></div></div>');
+      await page.setContent(`<div id="column-center">
+        <div class="topbar"><div class="avatar" data-peer-id="-42"></div></div>
+        <div class="bubble is-sent" data-mid="76">${question}</div>
+      </div>`);
       await page.evaluate((syntheticQuestion: string) => {
-        const apiManager = {
-          invokeApi: (method: string) => Promise.resolve(method === 'messages.sendMedia' ? {
-            _: 'updates',
-            updates: [{_: 'updateNewMessage', message: {id: 77}}]
-          } : {})
+        const matchingPoll = {
+          mid: 77,
+          peerId: -42,
+          media: {_: 'messageMediaPoll', poll: {question: {text: syntheticQuestion}}}
         };
-        (window as any).rootScope = {
-          addEventListener: (): void => undefined,
-          managers: {appPollsManager: {apiManager}}
+        const stalePoll = {
+          mid: 76,
+          peerId: -42,
+          media: {_: 'messageMediaPoll', poll: {question: {text: syntheticQuestion}}}
         };
-        (window as any).apiManagerProxy = {getMessageByPeer: (): undefined => undefined};
-        (window as any).__realClientActivePollQuestion = syntheticQuestion;
+        (window as any).apiManagerProxy = {getMessageByPeer: (_peerId: number, mid: number): unknown =>
+          mid === 77 ? matchingPoll : mid === 76 ? stalePoll : undefined};
       }, question);
 
-      await realClientBrowser.installPollMessageErrorObserver(page);
-      await page.evaluate(async(syntheticQuestion: string) => {
-        await (window as any).rootScope.managers.appPollsManager.apiManager.invokeApi('messages.sendMedia', {
-          message: '',
-          random_id: '123456789',
-          media: {
-            _: 'inputMediaPoll',
-            poll: {
-              question: {_: 'textWithEntities', text: syntheticQuestion},
-              answers: [{_: 'inputPollAnswer'}, {_: 'pollAnswer'}]
-            }
-          }
-        });
-      }, question);
-
-      const diagnostic = await realClientBrowser.readPollSendDiagnostic(
+      await expect(realClientBrowser.waitForPollSendOutcome(
         page,
         question,
-        'timeout',
-        0,
-        {total: 0, byType: {}},
-        {createClicked: true, composerClosed: true},
-        observation.createContextObserver('alice').workerErrorSnapshot(),
-        observation.createContextObserver('alice').workerErrorSnapshot()
-      );
-      expect(diagnostic).toMatchObject({
-        randomId: '123456789',
-        sendResult: 'accepted',
-        sendResultSource: 'messages.sendMedia',
-        sentMessageId: '77',
-        sendMediaCallCount: 1,
-        sendMediaStatus: 'resolved',
-        sendMediaResultType: 'updates',
-        sendMediaResponseMessageId: '77',
-        sendMediaInputAnswerCount: 1,
-        sendMediaDescriptionEmpty: true
+        'send',
+        async() => observationSnapshot,
+        50
+      )).resolves.toBe('sent');
+
+      await page.evaluate(() => {
+        (window as any).apiManagerProxy.getMessageByPeer = (_peerId: number, mid: number): unknown =>
+          mid === 76 ? {mid: 76, peerId: -42, media: {_: 'messageMediaPoll', poll: {question: {text: 'browser-ci-poll-input-answer-a1b2c3d4'}}}} : undefined;
       });
-      const summary = realClientBrowser.formatPollSendDiagnostic({shape: 'input_answer', ...diagnostic});
-      expect(summary).toContain('_send_media_observer_1_send_media_calls_1_send_media_status_resolved_result_type_updates_response_mid_77');
-      expect(summary).toContain('_send_media_input_answer_count_1_description_empty_1_error_none');
-      expectNoHostileLeak(summary);
-      expect(summary).not.toContain(question);
+      await expect(realClientBrowser.waitForPollSendOutcome(
+        page,
+        question,
+        'send_stale_row',
+        async() => observationSnapshot,
+        50
+      )).resolves.toBe('timeout');
     } finally {
       await page.close();
     }

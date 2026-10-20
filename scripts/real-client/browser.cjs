@@ -378,6 +378,7 @@ function createWorkerDiscovery() {
   let appContextCount = 0;
   const pendingCommands = new Map();
   const setupPromises = new Set();
+  const pollSendTargets = new Map();
   let session;
   let send;
   let nextCommandId = 0;
@@ -497,6 +498,9 @@ function createWorkerDiscovery() {
     targetSessions.set(targetId, sessionId);
     sessionTargets.set(sessionId, targetId);
     attachedSessions.add(sessionId);
+    if(targetInfo.type === 'shared_worker' && observer.name === 'alice' && observer.control !== true) {
+      pollSendTargets.set(targetId, {observer, sessionId, executionContextId: null, status: 'pending'});
+    }
     attachingTargets.delete(targetId);
     networkSinks.get(observer)?.claimTarget(targetId, 'shared_worker', sessionId);
     setupObserver(observer, targetId);
@@ -622,6 +626,26 @@ function createWorkerDiscovery() {
       observer.recordObserverError(targetId);
       return;
     }
+    if(payload.method === 'Runtime.executionContextCreated') {
+      const context = payload.params?.context;
+      const pollTarget = pollSendTargets.get(targetId);
+      if(pollTarget && Number.isSafeInteger(context?.id) && context?.auxData?.isDefault !== false &&
+          pollTarget.executionContextId === null) {
+        pollTarget.executionContextId = context.id;
+        const setup = sendNested(event.sessionId, 'Runtime.callFunctionOn', {
+          executionContextId: context.id,
+          functionDeclaration: installWorkerPollSendObserver.toString(),
+          returnByValue: true,
+          silent: true
+        }).then((result) => {
+          const status = result?.result?.value?.status;
+          pollTarget.status = ['pending', 'installed', 'unavailable'].includes(status) ? status : 'unavailable';
+        }).catch(() => {
+          pollTarget.status = 'unavailable';
+        }).finally(() => setupPromises.delete(setup));
+        setupPromises.add(setup);
+      }
+    }
     const wasOverflowed = observer.state.overflow;
     observer.noteWorkerEvent(targetId, payload.method, payload.params, event.sessionId);
     if(!wasOverflowed && observer.state.overflow) {
@@ -716,6 +740,7 @@ function createWorkerDiscovery() {
         contextlessTargets.delete(targetId);
         appContextlessTargets.delete(targetId);
         const observer = ownerOf(targetId);
+        pollSendTargets.delete(targetId);
         if(observer) {
           const observerWasOverflowed = observer.state.overflow;
           observer.noteDestroyed(targetId);
@@ -772,6 +797,36 @@ function createWorkerDiscovery() {
     async waitForSetup() {
       await waitForSetup();
     },
+    async readPollSendObservation(observer) {
+      const targets = [...pollSendTargets.values()].filter((target) => target.observer === observer);
+      const snapshots = await Promise.all(targets.map(async(target) => {
+        if(!Number.isSafeInteger(target.executionContextId) || target.status === 'unavailable') {
+          return {status: target.status, attempts: [], droppedAttempts: 0};
+        }
+        try {
+          const result = await sendNested(target.sessionId, 'Runtime.callFunctionOn', {
+            executionContextId: target.executionContextId,
+            functionDeclaration: readWorkerPollSendObservation.toString(),
+            returnByValue: true,
+            silent: true
+          });
+          const snapshot = sanitizePollSendObservation(result?.result?.value);
+          target.status = snapshot.status;
+          return snapshot;
+        } catch {
+          target.status = 'unavailable';
+          return {status: 'unavailable', attempts: [], droppedAttempts: 0};
+        }
+      }));
+      const status = snapshots.some((snapshot) => snapshot.status === 'installed')
+        ? 'installed'
+        : snapshots.some((snapshot) => snapshot.status === 'pending') ? 'pending' : 'unavailable';
+      return sanitizePollSendObservation({
+        status,
+        attempts: snapshots.flatMap((snapshot) => snapshot.attempts),
+        droppedAttempts: snapshots.reduce((count, snapshot) => count + snapshot.droppedAttempts, 0)
+      });
+    },
     async releaseContext(observer) {
       retiredObservers.add(observer);
       networkSinks.get(observer)?.release();
@@ -821,6 +876,7 @@ function createWorkerDiscovery() {
       sessionTargets.clear();
       targetSessions.clear();
       networkSinks.clear();
+      pollSendTargets.clear();
       session.removeAllListeners();
       return {detachFailures, discoveryDisabled};
     }
@@ -2745,7 +2801,11 @@ async function sendGroupText(page, text, groupName, stage, timeoutMs = 30_000) {
   currentStage = stage;
 }
 
-function pollMessageLocator(page, question) {
+function pollMessageLocator(page, question, messageId) {
+  const safeMessageId = typeof messageId === 'string' && /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(messageId)
+    ? messageId
+    : Number.isSafeInteger(messageId) ? String(messageId) : null;
+  if(safeMessageId !== null) return page.locator(`#column-center .bubble[data-mid="${safeMessageId}"]`);
   return page.locator('#column-center .bubble').filter({hasText: question});
 }
 
@@ -2779,10 +2839,13 @@ function getPollResultIndicator(poll) {
   return poll.getByText(/^(?:1 member voted|View Votes \(1\))$/);
 }
 
-async function readPollResultsDiagnostic(page, question, answerText) {
-  return page.evaluate(async({questionText, expectedAnswerText}) => {
-    const bubbles = [...document.querySelectorAll('#column-center .bubble[data-mid]')]
+async function readPollResultsDiagnostic(page, question, answerText, messageId) {
+  return page.evaluate(async({questionText, expectedAnswerText, responseMessageId}) => {
+    const matchingBubbles = [...document.querySelectorAll('#column-center .bubble[data-mid]')]
     .filter((element) => element.textContent?.includes(questionText));
+    const bubbles = responseMessageId === undefined || responseMessageId === null
+      ? matchingBubbles
+      : matchingBubbles.filter((element) => element.dataset.mid === String(responseMessageId));
     const bubble = bubbles.length === 1 ? bubbles[0] : undefined;
     const isVisible = (element) => {
       for(let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
@@ -2855,7 +2918,7 @@ async function readPollResultsDiagnostic(page, question, answerText) {
       domAnswerOneCountCount: answer.length === 1 ? leafTextCount(answer[0], '1') : 0,
       domAnswerOnePercentCount: answer.length === 1 ? leafTextCount(answer[0], '100%') : 0
     };
-  }, {questionText: question, expectedAnswerText: answerText}).catch(() => ({
+  }, {questionText: question, expectedAnswerText: answerText, responseMessageId: messageId}).catch(() => ({
     messageFound: false,
     storePollMatches: null,
     storePollFound: null,
@@ -2906,22 +2969,25 @@ async function capturePollState(page, screenshotDirectory, name, stage, captured
   await captureState(page, screenshotDirectory, name, capturedScreenshots).catch(() => failStage(stage));
 }
 
-async function waitForPollMessage(page, question, stage, timeoutMs = 30_000) {
+async function waitForPollMessage(page, question, stage, timeoutMs = 30_000, messageId) {
   currentStage = stage;
-  const poll = pollMessageLocator(page, question);
+  const poll = pollMessageLocator(page, question, messageId);
   await poll.first().waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(stage));
   if(await poll.count() !== 1) failStage(`${stage}_not_unique`);
   const questionText = poll.getByText(question, {exact: true});
   await questionText.waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_question`));
-  await page.waitForFunction(({questionText, expectedAnswers}) => {
+  await page.waitForFunction(({questionText, expectedAnswers, messageId}) => {
     const matches = [...document.querySelectorAll('#column-center .bubble')]
     .filter((element) => element.textContent?.includes(questionText));
-    if(matches.length !== 1) return false;
-    const message = matches[0];
+    const selectedMessage = messageId === undefined || messageId === null
+      ? matches
+      : matches.filter((element) => element.dataset.mid === String(messageId));
+    if(selectedMessage.length !== 1) return false;
+    const message = selectedMessage[0];
     if(message.querySelectorAll('[data-poll-option-idx]').length !== 2) return false;
     return expectedAnswers.every((answerText) => [...message.querySelectorAll('*')]
     .filter((node) => node.children.length === 0 && node.textContent?.trim() === answerText).length === 1);
-  }, {questionText: question, expectedAnswers: [POLL_ANSWER_ONE, POLL_ANSWER_TWO]}, {timeout: timeoutMs}).catch(async() => {
+  }, {questionText: question, expectedAnswers: [POLL_ANSWER_ONE, POLL_ANSWER_TWO], messageId}, {timeout: timeoutMs}).catch(async() => {
     const diagnostic = await readPollContentDiagnostic(poll, [POLL_ANSWER_ONE, POLL_ANSWER_TWO]);
     failStage(`${stage}_answers_${formatPollContentDiagnostic(diagnostic)}`);
   });
@@ -3063,13 +3129,320 @@ async function openPollComposer(page, {stage, question, description, mediaAnswer
 }
 
 function getPollCreationRejectionErrorType(diagnostic) {
-  const messageErrorType = diagnostic?.messageError?.type;
-  if(typeof messageErrorType === 'string' && RPC_ERROR_TYPE_PATTERN.test(messageErrorType)) return messageErrorType;
   const sendMediaErrorType = diagnostic?.sendMediaError?.type;
   if(typeof sendMediaErrorType === 'string' && RPC_ERROR_TYPE_PATTERN.test(sendMediaErrorType)) return sendMediaErrorType;
+  const messageErrorType = diagnostic?.messageError?.type;
+  if(typeof messageErrorType === 'string' && RPC_ERROR_TYPE_PATTERN.test(messageErrorType)) return messageErrorType;
   return Object.entries(diagnostic?.rpcErrorTypes || {}).find(([type, count]) =>
     RPC_ERROR_TYPE_PATTERN.test(type) && Number.isSafeInteger(count) && count > 0
   )?.[0] || null;
+}
+
+function installWorkerPollSendObserver(scope = globalThis) {
+  const observerKey = '__realClientPollSendObservation';
+  const existing = scope[observerKey];
+  if(existing) return {status: existing.status};
+
+  const state = {status: 'pending', attempts: [], droppedAttempts: 0};
+  try {
+    Object.defineProperty(scope, observerKey, {value: state, configurable: true});
+  } catch {
+    return {status: 'unavailable'};
+  }
+
+  let timer;
+  let elapsedMs = 0;
+  let installing = false;
+  const stop = () => {
+    if(timer !== undefined) {
+      scope.clearInterval(timer);
+      timer = undefined;
+    }
+  };
+  const markUnavailable = () => {
+    state.status = 'unavailable';
+    stop();
+  };
+  const install = async() => {
+    if(state.status !== 'pending' || installing) return;
+    const managerRegistry = scope.appManagersManager;
+    if(!managerRegistry || managerRegistry.areManagersCreated !== true) {
+      elapsedMs += 100;
+      if(elapsedMs >= 30_000) markUnavailable();
+      return;
+    }
+
+    installing = true;
+    try {
+      const managersByAccount = await managerRegistry.getManagersByAccount();
+      let installedManagers = 0;
+      for(const managers of Object.values(managersByAccount || {})) {
+        const apiManager = managers?.appPollsManager?.apiManager;
+        if(!apiManager || typeof apiManager.invokeApi !== 'function') continue;
+        const original = apiManager.invokeApi;
+        if(original.__realClientPollSendObserver === true) {
+          installedManagers++;
+          continue;
+        }
+
+        const wrapped = function(method, params) {
+          if(method !== 'messages.sendMedia' || params?.media?._ !== 'inputMediaPoll') {
+            return original.apply(this, arguments);
+          }
+          const poll = params.media.poll;
+          const question = typeof poll?.question === 'string' ? poll.question : poll?.question?.text;
+          const match = typeof question === 'string' && /^browser-ci-poll-(description|input-answer)-([a-f0-9]{8})$/.exec(question);
+          if(!match) return original.apply(this, arguments);
+
+          const safeRandomId = (value) => {
+            if(value === undefined || value === null) return null;
+            let randomId;
+            try {
+              randomId = String(value);
+            } catch {
+              return null;
+            }
+            return /^-?[0-9]{1,24}$/.test(randomId) ? randomId : null;
+          };
+          const safeMessageId = (value) => {
+            if(value === undefined || value === null) return null;
+            let messageId;
+            try {
+              messageId = String(value);
+            } catch {
+              return null;
+            }
+            return /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(messageId) ? messageId : null;
+          };
+          const safeError = (error) => {
+            if(!error || typeof error !== 'object') return null;
+            const type = typeof error.type === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.type) ? error.type : 'unclassified';
+            const code = Number.isSafeInteger(error.code) ? error.code : null;
+            const message = typeof error.message === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.message) ? error.message : null;
+            return {type, code, message};
+          };
+          const outcome = {
+            shape: match[1] === 'input-answer' ? 'input_answer' : 'description',
+            questionToken: match[2],
+            randomId: safeRandomId(params.random_id),
+            status: 'pending',
+            resultType: null,
+            responseMessageId: null,
+            inputAnswerCount: Array.isArray(poll.answers)
+              ? poll.answers.filter((answer) => answer?._ === 'inputPollAnswer').length
+              : null,
+            descriptionEmpty: typeof params.message === 'string' ? params.message === '' : null,
+            error: null
+          };
+          if(state.attempts.length < 16) state.attempts.push(outcome);
+          else state.droppedAttempts++;
+
+          const recordResult = (result, error, rejected = false) => {
+            try {
+              outcome.status = rejected ? 'rejected' : 'accepted';
+              const resultType = result?._;
+              outcome.resultType = typeof resultType === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(resultType)
+                ? resultType
+                : null;
+              const updates = Array.isArray(result?.updates) ? result.updates : [result];
+              const responseMessageIds = [];
+              for(const update of updates) {
+                const message = update?.message;
+                const correlatedUpdate = outcome.randomId !== null &&
+                  safeRandomId(update?.random_id ?? message?.random_id) === outcome.randomId;
+                const shortSentMessage = update?._ === 'updateShortSentMessage';
+                const rawMessageId = update?._ === 'updateMessageID' && correlatedUpdate
+                  ? update.id
+                  : message?.id ?? message?.mid ?? (shortSentMessage ? update.id : undefined);
+                const messageId = safeMessageId(rawMessageId);
+                if(messageId !== null && (correlatedUpdate || shortSentMessage)) responseMessageIds.push(messageId);
+              }
+              const distinctResponseMessageIds = [...new Set(responseMessageIds)];
+              outcome.responseMessageId = distinctResponseMessageIds.length === 1 ? distinctResponseMessageIds[0] : null;
+              outcome.error = rejected ? safeError(error) : null;
+            } catch {
+              outcome.status = rejected ? 'rejected' : 'accepted';
+            }
+          };
+
+          let request;
+          try {
+            request = original.apply(this, arguments);
+          } catch(error) {
+            recordResult(undefined, error, true);
+            throw error;
+          }
+          try {
+            if(request && typeof request.then === 'function') {
+              request.then((result) => recordResult(result), (error) => recordResult(undefined, error, true));
+            } else {
+              recordResult(request);
+            }
+          } catch(error) {
+            recordResult(undefined, error);
+          }
+          return request;
+        };
+        Object.defineProperty(wrapped, '__realClientPollSendObserver', {value: true});
+        apiManager.invokeApi = wrapped;
+        if(apiManager.invokeApi === wrapped) installedManagers++;
+      }
+
+      if(installedManagers > 0) {
+        state.status = 'installed';
+        stop();
+      } else {
+        elapsedMs += 100;
+        if(elapsedMs >= 30_000) markUnavailable();
+      }
+    } catch {
+      elapsedMs += 100;
+      if(elapsedMs >= 30_000) markUnavailable();
+    } finally {
+      installing = false;
+    }
+  };
+
+  timer = scope.setInterval(() => { install(); }, 100);
+  install();
+  return {status: state.status};
+}
+
+function readWorkerPollSendObservation(scope = globalThis) {
+  const state = scope?.__realClientPollSendObservation;
+  if(!state || !['pending', 'installed', 'unavailable'].includes(state.status)) {
+    return {status: 'unavailable', attempts: [], droppedAttempts: 0};
+  }
+  return {
+    status: state.status,
+    attempts: Array.isArray(state.attempts) ? state.attempts.slice(0, 16).map((attempt) => ({...attempt})) : [],
+    droppedAttempts: Number.isSafeInteger(state.droppedAttempts) && state.droppedAttempts >= 0 ? state.droppedAttempts : 0
+  };
+}
+
+function sanitizePollSendObservation(value) {
+  if(!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {status: 'unavailable', attempts: [], droppedAttempts: 0};
+  }
+  const status = ['pending', 'installed', 'unavailable'].includes(value.status) ? value.status : 'unavailable';
+  const safeId = (id, pattern) => {
+    if(id === undefined || id === null) return null;
+    let text;
+    try {
+      text = String(id);
+    } catch {
+      return null;
+    }
+    return pattern.test(text) ? text : null;
+  };
+  const attempts = (Array.isArray(value.attempts) ? value.attempts : []).slice(0, 16).flatMap((attempt) => {
+    if(!attempt || typeof attempt !== 'object' || Array.isArray(attempt)) return [];
+    const shape = ['description', 'input_answer'].includes(attempt.shape) ? attempt.shape : null;
+    const questionToken = safeId(attempt.questionToken, /^[a-f0-9]{8}$/);
+    const attemptStatus = ['pending', 'accepted', 'rejected'].includes(attempt.status) ? attempt.status : null;
+    if(!shape || !questionToken || !attemptStatus) return [];
+    const resultType = typeof attempt.resultType === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(attempt.resultType)
+      ? attempt.resultType
+      : null;
+    const inputAnswerCount = Number.isSafeInteger(attempt.inputAnswerCount) && attempt.inputAnswerCount >= 0
+      ? Math.min(attempt.inputAnswerCount, 100)
+      : null;
+    const descriptionEmpty = typeof attempt.descriptionEmpty === 'boolean' ? attempt.descriptionEmpty : null;
+    const error = attempt.error && typeof attempt.error === 'object' ? {
+      type: typeof attempt.error.type === 'string' && RPC_ERROR_TYPE_PATTERN.test(attempt.error.type) ? attempt.error.type : 'unclassified',
+      code: Number.isSafeInteger(attempt.error.code) ? attempt.error.code : null,
+      message: typeof attempt.error.message === 'string' && RPC_ERROR_TYPE_PATTERN.test(attempt.error.message) ? attempt.error.message : null
+    } : null;
+    return [{
+      shape,
+      questionToken,
+      randomId: safeId(attempt.randomId, /^-?[0-9]{1,24}$/),
+      status: attemptStatus,
+      resultType,
+      responseMessageId: safeId(attempt.responseMessageId, /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/),
+      inputAnswerCount,
+      descriptionEmpty,
+      error
+    }];
+  });
+  return {
+    status,
+    attempts,
+    droppedAttempts: Number.isSafeInteger(value.droppedAttempts) && value.droppedAttempts >= 0
+      ? Math.min(value.droppedAttempts, 1_000_000)
+      : 0
+  };
+}
+
+function pollSendAttemptCursor(observation) {
+  const safeObservation = sanitizePollSendObservation(observation);
+  return {attemptCount: safeObservation.attempts.length, droppedAttempts: safeObservation.droppedAttempts};
+}
+
+function classifyPollSendConfirmation({observation, question, persistedIdentity, attemptCursor = {attemptCount: 0, droppedAttempts: 0}}) {
+  const safeObservation = sanitizePollSendObservation(observation);
+  const questionMatch = typeof question === 'string' && /^browser-ci-poll-(description|input-answer)-([a-f0-9]{8})$/.exec(question);
+  const result = (status, extra = {}) => ({
+    status,
+    confirmed: status === 'persisted_identity',
+    sendResult: extra.sendResult || 'unobserved',
+    sendResultCount: extra.sendResultCount || 0,
+    sendResultSource: extra.attempt ? 'messages.sendMedia' : null,
+    randomId: extra.attempt?.randomId || null,
+    responseMessageId: extra.attempt?.responseMessageId || null,
+    resultType: extra.attempt?.resultType || null,
+    sendMediaStatus: extra.attempt?.status === 'accepted' ? 'resolved' : extra.attempt?.status || null,
+    inputAnswerCount: extra.attempt?.inputAnswerCount ?? null,
+    descriptionEmpty: extra.attempt?.descriptionEmpty ?? null,
+    error: extra.attempt?.error || null,
+    persistedIdentityStatus: extra.persistedIdentityStatus || 'unavailable',
+    attempt: extra.attempt || null
+  });
+  if(safeObservation.status !== 'installed') {
+    return result(safeObservation.status === 'pending' ? 'observer_pending' : 'observer_unavailable');
+  }
+  if(!questionMatch) return result('no_observed_attempt');
+  const attemptOffset = Number.isSafeInteger(attemptCursor?.attemptCount) && attemptCursor.attemptCount >= 0
+    ? Math.min(attemptCursor.attemptCount, 16)
+    : 0;
+  const droppedAttemptsBefore = Number.isSafeInteger(attemptCursor?.droppedAttempts) && attemptCursor.droppedAttempts >= 0
+    ? attemptCursor.droppedAttempts
+    : 0;
+  if(safeObservation.droppedAttempts > droppedAttemptsBefore) {
+    return result('ambiguous_attempt', {sendResultCount: safeObservation.droppedAttempts - droppedAttemptsBefore});
+  }
+
+  const shape = questionMatch[1] === 'input-answer' ? 'input_answer' : 'description';
+  const questionToken = questionMatch[2];
+  const matchingAttempts = safeObservation.attempts.slice(attemptOffset).filter((attempt) =>
+    attempt.shape === shape && attempt.questionToken === questionToken
+  );
+  if(matchingAttempts.length === 0) return result('no_observed_attempt');
+  const attemptIdentities = new Set(matchingAttempts.map((attempt) =>
+    `${attempt.randomId || 'missing'}:${attempt.status}:${attempt.responseMessageId || 'missing'}`
+  ));
+  if(attemptIdentities.size > 1) return result('ambiguous_attempt', {sendResultCount: matchingAttempts.length});
+  const attempt = matchingAttempts.at(-1);
+  const base = {attempt, sendResultCount: matchingAttempts.length};
+  if(attempt.status === 'pending') return result('pending', base);
+  if(attempt.status === 'rejected') return result('rejected', {...base, sendResult: 'rejected'});
+  if(attempt.status !== 'accepted' || !attempt.randomId || !attempt.responseMessageId) {
+    return result('accepted_response', {...base, sendResult: 'accepted'});
+  }
+
+  const identityStatus = ['present', 'missing', 'mismatch', 'unavailable'].includes(persistedIdentity?.status)
+    ? persistedIdentity.status
+    : 'unavailable';
+  const persistedMid = persistedIdentity?.messageId === undefined || persistedIdentity?.messageId === null
+    ? null
+    : String(persistedIdentity.messageId);
+  if(identityStatus !== 'present' || persistedMid !== attempt.responseMessageId ||
+      persistedIdentity.peerMatches !== true || persistedIdentity.pollMatches !== true) {
+    return result(identityStatus === 'mismatch' || (identityStatus === 'present' && persistedMid !== attempt.responseMessageId)
+      ? 'persisted_identity_mismatch'
+      : 'accepted_response', {...base, sendResult: 'accepted', persistedIdentityStatus: identityStatus});
+  }
+  return result('persisted_identity', {...base, sendResult: 'accepted', persistedIdentityStatus: 'present'});
 }
 
 function isExpectedPollCreationRejection(diagnostic, expectedErrorType) {
@@ -3078,11 +3451,12 @@ function isExpectedPollCreationRejection(diagnostic, expectedErrorType) {
     diagnostic.composerClosed === true &&
     diagnostic.tempMessageFound === true &&
     diagnostic.sendResult === 'rejected' &&
+    diagnostic.sendObservationStatus === 'rejected' &&
     Array.isArray(diagnostic.bubbleStatuses) && diagnostic.bubbleStatuses.includes('is-error') &&
     getPollCreationRejectionErrorType(diagnostic) === expectedErrorType;
 }
 
-async function runPollCreationNegativeControl({alice, bob, runtime, groupName, screenshotDirectory, capturedScreenshots}) {
+async function runPollCreationNegativeControl({alice, bob, registry, runtime, groupName, screenshotDirectory, capturedScreenshots}) {
   const cases = [
     {
       shape: 'description',
@@ -3110,6 +3484,7 @@ async function runPollCreationNegativeControl({alice, bob, runtime, groupName, s
   for(const testCase of cases) {
     const pollErrorStart = await alice.page.evaluate(() => window.__realClientPollErrors?.().length || 0).catch(() => 0);
     const workerErrorsBefore = alice.observer?.workerErrorSnapshot?.();
+    const attemptCursor = pollSendAttemptCursor(await registry.readPollSendObservation(alice.observer));
     const submission = {createClicked: false, composerClosed: false};
     await alice.page.evaluate((question) => { window.__realClientActivePollQuestion = question; }, testCase.question);
     let rpcErrorsBeforeCreation;
@@ -3123,7 +3498,8 @@ async function runPollCreationNegativeControl({alice, bob, runtime, groupName, s
       submission
     });
     rpcErrorsBeforeCreation = creationEvidence?.rpc;
-    const sendStatus = await waitForPollSendOutcome(alice.page, testCase.question, testCase.stage);
+    const readSendObservation = () => registry.readPollSendObservation(alice.observer);
+    const sendStatus = await waitForPollSendOutcome(alice.page, testCase.question, testCase.stage, readSendObservation, 30_000, attemptCursor);
     const sendDiagnostic = await readPollSendDiagnostic(
       alice.page,
       testCase.question,
@@ -3132,7 +3508,9 @@ async function runPollCreationNegativeControl({alice, bob, runtime, groupName, s
       rpcErrorsBeforeCreation,
       submission,
       workerErrorsBefore,
-      alice.observer?.workerErrorSnapshot?.()
+      alice.observer?.workerErrorSnapshot?.(),
+      await readSendObservation(),
+      attemptCursor
     );
     sendResults.push({shape: testCase.shape, ...sendDiagnostic});
     const actualErrorType = getPollCreationRejectionErrorType(sendDiagnostic);
@@ -3191,8 +3569,6 @@ async function installPollMessageErrorObserver(page) {
     };
     const errors = [];
     const sendOutcomes = [];
-    const sendMediaOutcomes = [];
-    let sendMediaObserverInstalled = false;
     const capturePollError = (source, message, error, tempId, peerId) => {
       const pollQuestion = message?.media?.poll?.question;
       const questionText = typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text;
@@ -3301,69 +3677,6 @@ async function installPollMessageErrorObserver(page) {
         domAtEvent: capturePollDom(activeQuestion, messageId, safeTempId)
       });
     });
-    const pollApiManager = window.rootScope.managers?.appPollsManager?.apiManager;
-    if(pollApiManager && typeof pollApiManager.invokeApi === 'function') {
-      const invokeApi = pollApiManager.invokeApi;
-      try {
-        pollApiManager.invokeApi = function(method, params) {
-          const poll = params?.media?._ === 'inputMediaPoll' ? params.media.poll : undefined;
-          const question = typeof poll?.question === 'string' ? poll.question : poll?.question?.text;
-          const activeQuestion = window.__realClientActivePollQuestion;
-          if(method !== 'messages.sendMedia' || question !== activeQuestion) {
-            return invokeApi.apply(this, arguments);
-          }
-
-          const outcome = {
-            source: 'messages.sendMedia',
-            question: activeQuestion,
-            randomId: safeRandomId(params.random_id),
-            status: 'pending',
-            resultType: null,
-            responseMessageId: null,
-            inputAnswerCount: Array.isArray(poll.answers) ? poll.answers.filter((answer) => answer?._ === 'inputPollAnswer').length : null,
-            descriptionEmpty: params.message === '',
-            error: null
-          };
-          if(sendMediaOutcomes.length < 16) sendMediaOutcomes.push(outcome);
-
-          const recordResult = (result, error) => {
-            outcome.status = error ? 'rejected' : 'resolved';
-            const resultType = result?._;
-            outcome.resultType = typeof resultType === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(resultType)
-              ? resultType
-              : null;
-            const updates = Array.isArray(result?.updates) ? result.updates : [result];
-            for(const update of updates) {
-              const rawMessageId = update?.message?.id ?? update?.message?.mid ??
-                (update?._ === 'updateShortSentMessage' ? update.id : undefined);
-              const messageId = safeMessageId(rawMessageId);
-              if(messageId !== null) {
-                outcome.responseMessageId = messageId;
-                break;
-              }
-            }
-            outcome.error = error ? safeError(error) : null;
-          };
-
-          let request;
-          try {
-            request = invokeApi.apply(this, arguments);
-          } catch(error) {
-            recordResult(undefined, error);
-            throw error;
-          }
-          if(request && typeof request.then === 'function') {
-            try {
-              request.then((result) => recordResult(result), (error) => recordResult(undefined, error));
-            } catch {}
-          } else {
-            recordResult(request);
-          }
-          return request;
-        };
-        sendMediaObserverInstalled = pollApiManager.invokeApi !== invokeApi;
-      } catch {}
-    }
     const appMessagesManager = window.rootScope.managers?.appMessagesManager;
     if(typeof appMessagesManager?.toggleError === 'function') {
       const toggleError = appMessagesManager.toggleError;
@@ -3381,138 +3694,179 @@ async function installPollMessageErrorObserver(page) {
       value: () => sendOutcomes.slice(),
       configurable: false
     });
-    Object.defineProperty(window, '__realClientPollApiOutcomes', {
-      value: () => sendMediaOutcomes.slice(),
-      configurable: false
-    });
-    Object.defineProperty(window, '__realClientPollApiObserverInstalled', {
-      value: () => sendMediaObserverInstalled,
-      configurable: false
-    });
   });
 }
 
-async function waitForPollSendOutcome(page, question, stage, timeoutMs = 30_000) {
-  currentStage = stage;
-  const outcome = await page.waitForFunction((questionText) => {
-    if(window.__realClientPollSendOutcomes?.().some((entry) => entry.question === questionText)) return 'sent';
-    if(window.__realClientPollErrors?.().some((entry) => entry.question === questionText)) return 'error';
-    const apiOutcome = window.__realClientPollApiOutcomes?.().filter((entry) => entry.question === questionText).at(-1);
-    if(apiOutcome?.status === 'rejected') return 'error';
-    const matches = [...document.querySelectorAll('#column-center .bubble')]
+async function readPollSendQuestionCandidates(page, question) {
+  return page.evaluate((questionText) => {
+    const peerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
+    const safeMessageId = (value) => {
+      if(value === undefined || value === null) return null;
+      let messageId;
+      try {
+        messageId = String(value);
+      } catch {
+        return null;
+      }
+      return /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(messageId) ? messageId : null;
+    };
+    const safeRandomId = (value) => {
+      if(value === undefined || value === null) return null;
+      let randomId;
+      try {
+        randomId = String(value);
+      } catch {
+        return null;
+      }
+      return /^-?[0-9]{1,24}$/.test(randomId) ? randomId : null;
+    };
+    const safeError = (error) => {
+      if(!error || typeof error !== 'object') return null;
+      const type = typeof error.type === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.type) ? error.type : 'unclassified';
+      const code = Number.isSafeInteger(error.code) ? error.code : null;
+      const message = typeof error.message === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.message) ? error.message : null;
+      return {type, code, message};
+    };
+    const statusClasses = ['is-sending', 'is-error', 'is-sent', 'is-read'];
+    const rows = [...document.querySelectorAll('#column-center .bubble[data-mid]')]
     .filter((element) => element.textContent?.includes(questionText));
-    if(matches.length !== 1) return false;
-    if(matches[0].classList.contains('is-error')) return 'error';
-    if(matches[0].classList.contains('is-sent') || matches[0].classList.contains('is-read')) return 'sent';
-    return false;
-  }, question, {timeout: timeoutMs}).catch(() => undefined);
-  return outcome ? outcome.jsonValue() : 'timeout';
+    const isVisible = (element) => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    const candidates = rows.slice(0, 16).map((element) => {
+      const rowMid = safeMessageId(element.dataset.mid);
+      let message;
+      const numericMid = Number(rowMid);
+      if(Number.isSafeInteger(peerId) && rowMid !== null && Number.isFinite(numericMid) &&
+          Math.abs(numericMid) <= Number.MAX_SAFE_INTEGER) {
+        try {
+          message = window.apiManagerProxy?.getMessageByPeer(peerId, numericMid);
+        } catch {}
+      }
+      const pollQuestion = message?.media?.poll?.question;
+      const storedPeerId = message?.peerId === undefined ? peerId : Number(message.peerId);
+      return {
+        mid: safeMessageId(message?.mid) || rowMid,
+        randomId: safeRandomId(message?.random_id),
+        peerMatches: Number.isSafeInteger(peerId) && storedPeerId === peerId,
+        pollMatches: message?.media?._ === 'messageMediaPoll' &&
+          (typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text) === questionText,
+        statuses: statusClasses.filter((name) => element.classList.contains(name)),
+        error: safeError(message?.error),
+        visible: isVisible(element)
+      };
+    });
+    return {
+      questionRowCount: Math.min(rows.length, 100),
+      visibleQuestionRowCount: Math.min(rows.filter(isVisible).length, 100),
+      candidates
+    };
+  }, question).catch(() => ({questionRowCount: null, visibleQuestionRowCount: null, candidates: []}));
 }
 
-async function readPollSendDiagnostic(page, question, status, errorStart, rpcErrorsBefore, submission = {}, workerErrorsBefore, workerErrorsAfter) {
-  const [messageState, errors, sendOutcomes, rpcErrors, sendMediaOutcomes, sendMediaObserverInstalled] = await Promise.all([
-    page.evaluate((questionText) => {
-      const peerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
-      const statusClasses = ['is-sending', 'is-error', 'is-sent', 'is-read'];
-      const errorTypePattern = /^[A-Z][A-Z0-9_]{1,63}$/;
-      const safeError = (error) => {
-        if(!error || typeof error !== 'object') return null;
-        const type = typeof error.type === 'string' && errorTypePattern.test(error.type) ? error.type : 'unclassified';
-        const code = Number.isSafeInteger(error.code) ? error.code : null;
-        const message = typeof error.message === 'string' && errorTypePattern.test(error.message) ? error.message : null;
-        return {type, code, message};
-      };
-      const safeNumericIdentifier = (value) => {
-        if(value === undefined || value === null) return null;
-        let identifier;
-        try {
-          identifier = String(value);
-        } catch {
-          return null;
-        }
-        return /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(identifier) ? identifier : null;
-      };
-      const safeRandomId = (value) => {
-        const identifier = safeNumericIdentifier(value);
-        return identifier !== null && /^-?[0-9]{1,24}$/.test(identifier) ? identifier : null;
-      };
-      const matches = [...document.querySelectorAll('#column-center .bubble[data-mid]')].map((element) => {
-        const tempId = safeNumericIdentifier(element.dataset.mid);
-        let message;
-        const numericTempId = Number(tempId);
-        if(Number.isSafeInteger(peerId) && tempId !== null && Number.isFinite(numericTempId) &&
-            Math.abs(numericTempId) <= Number.MAX_SAFE_INTEGER) {
-          try {
-            message = window.apiManagerProxy?.getMessageByPeer(peerId, Number(tempId)) ||
-              window.rootScope?.managers?.appMessagesManager?.getMessageByPeer(peerId, Number(tempId));
-          } catch {}
-        }
-        const pollQuestion = message?.media?.poll?.question;
-        const matchesStoredPoll = message?.media?._ === 'messageMediaPoll' &&
-          (typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text) === questionText;
-        const matchesRenderedPoll = element.textContent?.includes(questionText) === true;
-        if(!matchesStoredPoll && !matchesRenderedPoll) return null;
-        return {
-          tempId: safeNumericIdentifier(message?.mid) || tempId,
-          randomId: safeRandomId(message?.random_id),
-          statuses: statusClasses.filter((name) => element.classList.contains(name)),
-          error: safeError(message?.error)
-        };
-      }).filter(Boolean);
-      const match = matches.length === 1 ? matches[0] : undefined;
-      return {
-        found: !!match,
-        candidateCount: matches.length,
-        tempId: match?.tempId ?? null,
-        randomId: match?.randomId ?? null,
-        statuses: match?.statuses || [],
-        error: match?.error || null
-      };
-    }, question).catch(() => ({found: false, candidateCount: null, tempId: null, randomId: null, statuses: [], error: null})),
+async function readPersistedPollIdentity(page, messageId, question) {
+  return page.evaluate(({responseId, questionText}) => {
+    if(typeof window.apiManagerProxy?.getMessageByPeer !== 'function') return {status: 'unavailable'};
+    const peerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
+    const numericMessageId = Number(responseId);
+    if(!Number.isSafeInteger(peerId) || !Number.isSafeInteger(numericMessageId)) return {status: 'unavailable'};
+    let message;
+    try {
+      message = window.apiManagerProxy.getMessageByPeer(peerId, numericMessageId);
+    } catch {
+      return {status: 'unavailable'};
+    }
+    if(!message) return {status: 'missing'};
+    const storedMessageId = String(message.mid);
+    const storedPeerId = message.peerId === undefined ? peerId : Number(message.peerId);
+    const pollQuestion = message.media?.poll?.question;
+    const peerMatches = storedPeerId === peerId;
+    const pollMatches = message.media?._ === 'messageMediaPoll' &&
+      (typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text) === questionText;
+    const status = storedMessageId === String(responseId) && peerMatches && pollMatches ? 'present' : 'mismatch';
+    return {
+      status,
+      messageId: /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(storedMessageId) ? storedMessageId : null,
+      peerMatches,
+      pollMatches
+    };
+  }, {responseId: messageId, questionText: question}).catch(() => ({status: 'unavailable'}));
+}
+
+async function readPollSendEvidence(page, question, pollSendObservation, attemptCursor) {
+  const messageState = await readPollSendQuestionCandidates(page, question);
+  const firstPass = classifyPollSendConfirmation({
+    observation: pollSendObservation,
+    question,
+    attemptCursor
+  });
+  const persistedIdentity = firstPass.responseMessageId
+    ? await readPersistedPollIdentity(page, firstPass.responseMessageId, question)
+    : {status: 'unavailable'};
+  const confirmation = classifyPollSendConfirmation({
+    observation: pollSendObservation,
+    question,
+    persistedIdentity,
+    attemptCursor
+  });
+  return {messageState, persistedIdentity, confirmation};
+}
+
+async function waitForPollSendOutcome(page, question, stage, readSendObservation, timeoutMs = 30_000, attemptCursor) {
+  currentStage = stage;
+  if(Number.isFinite(readSendObservation)) {
+    timeoutMs = readSendObservation;
+    readSendObservation = undefined;
+  }
+  const readObservation = typeof readSendObservation === 'function'
+    ? readSendObservation
+    : async() => ({status: 'unavailable', attempts: []});
+  const deadline = Date.now() + timeoutMs;
+  while(Date.now() < deadline) {
+    let observationSnapshot;
+    try {
+      observationSnapshot = sanitizePollSendObservation(await readObservation());
+    } catch {
+      observationSnapshot = {status: 'unavailable', attempts: []};
+    }
+    const evidence = await readPollSendEvidence(page, question, observationSnapshot, attemptCursor);
+    if(evidence.confirmation.status === 'persisted_identity') return 'sent';
+    if(evidence.confirmation.status === 'rejected') return 'error';
+    const remaining = deadline - Date.now();
+    if(remaining <= 0) break;
+    await page.waitForTimeout(Math.min(100, remaining));
+  }
+  return 'timeout';
+}
+
+async function readPollSendDiagnostic(page, question, status, errorStart, rpcErrorsBefore, submission = {}, workerErrorsBefore, workerErrorsAfter, pollSendObservation = {status: 'unavailable', attempts: []}, attemptCursor) {
+  const [errors, sendOutcomes, rpcErrors] = await Promise.all([
     page.evaluate(() => window.__realClientPollErrors?.() || []).catch(() => []),
     page.evaluate(() => window.__realClientPollSendOutcomes?.() || []).catch(() => []),
-    readRpcErrorCounts(page),
-    page.evaluate(() => window.__realClientPollApiOutcomes?.() || []).catch(() => []),
-    page.evaluate(() => window.__realClientPollApiObserverInstalled?.() === true).catch(() => false)
+    readRpcErrorCounts(page)
   ]);
+  const safeObservation = sanitizePollSendObservation(pollSendObservation);
+  const {messageState, persistedIdentity, confirmation} = await readPollSendEvidence(page, question, safeObservation, attemptCursor);
+  const matchingCandidates = messageState.candidates.filter((candidate) =>
+    candidate.randomId === confirmation.randomId && candidate.peerMatches === true && candidate.pollMatches === true
+  );
+  const tempCandidate = matchingCandidates.length === 1 ? matchingCandidates[0] : undefined;
   const newErrors = errors.slice(Number.isSafeInteger(errorStart) ? errorStart : 0);
   const matchingErrors = newErrors.filter((entry) => entry.question === question ||
-    (messageState.tempId !== null && String(entry.tempId) === messageState.tempId));
+    (tempCandidate?.mid !== null && String(entry.tempId) === tempCandidate?.mid));
   const messageError = matchingErrors.find((entry) => entry.source === 'toggle_error' && entry.storedError) ||
     matchingErrors.at(-1);
-  const matchingSendOutcomes = sendOutcomes.filter((entry) => entry.question === question);
+  const matchingSendOutcomes = sendOutcomes.filter((entry) =>
+    entry.question === question && entry.randomId === confirmation.randomId
+  );
   const sendOutcome = matchingSendOutcomes.at(-1);
-  const matchingSendMediaOutcomes = sendMediaOutcomes.filter((entry) => entry.question === question);
-  const sendMediaOutcome = matchingSendMediaOutcomes.at(-1);
-  const apiMessageError = sendMediaOutcome?.error;
-  const [apiStoreState, renderedPollDom, selectorCount, selectorVisibleCount] = await Promise.all([
-    page.evaluate(({messageId, questionText}) => {
-      if(messageId === null) return {storeMidPresent: null, storePollMatches: null};
-      const peerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
-      const numericMessageId = Number(messageId);
-      if(!Number.isSafeInteger(peerId) || !Number.isSafeInteger(numericMessageId)) {
-        return {storeMidPresent: null, storePollMatches: null};
-      }
-      let storedMessage;
-      try {
-        storedMessage = window.apiManagerProxy?.getMessageByPeer(peerId, numericMessageId) ||
-          window.rootScope?.managers?.appMessagesManager?.getMessageByPeer(peerId, numericMessageId);
-      } catch {}
-      if(!storedMessage) return {storeMidPresent: false, storePollMatches: false};
-      const storedPeerId = storedMessage.peerId === undefined ? peerId : Number(storedMessage.peerId);
-      const storedMid = Number(storedMessage.mid);
-      const storeMidPresent = storedMid === numericMessageId && storedPeerId === peerId;
-      const pollQuestion = storedMessage.media?.poll?.question;
-      return {
-        storeMidPresent,
-        storePollMatches: storeMidPresent && storedMessage.media?._ === 'messageMediaPoll' &&
-          (typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text) === questionText
-      };
-    }, {messageId: sendMediaOutcome?.responseMessageId || null, questionText: question})
-    .catch(() => ({storeMidPresent: null, storePollMatches: null})),
+  const apiMessageError = confirmation.error;
+  const [renderedPollDom, selectorCount, selectorVisibleCount] = await Promise.all([
     page.evaluate(({questionText, messageId, tempId}) =>
       window.__realClientPollDomSnapshot?.(questionText, messageId, tempId) || null,
-    {questionText: question, messageId: sendOutcome?.messageId || sendMediaOutcome?.responseMessageId || null, tempId: sendOutcome?.tempId || null}
+    {questionText: question, messageId: confirmation.responseMessageId, tempId: tempCandidate?.mid || null}
     ).catch(() => null),
     pollMessageLocator(page, question).count().catch(() => null),
     pollMessageLocator(page, question).evaluateAll((elements) => elements.filter((element) => {
@@ -3531,34 +3885,33 @@ async function readPollSendDiagnostic(page, question, status, errorStart, rpcErr
     status,
     createClicked: submission.createClicked === true,
     composerClosed: submission.composerClosed === true,
-    tempMessageFound: messageState.found,
-    tempCandidateCount: messageState.candidateCount,
-    tempId: messageState.tempId || sendOutcome?.tempId || messageError?.tempId || null,
-    bubbleStatuses: messageState.statuses,
-    randomId: messageState.randomId || sendOutcome?.randomId || messageError?.randomId || sendMediaOutcome?.randomId || null,
-    messageError: messageState.error || messageError?.storedError || messageError?.eventError || apiMessageError || null,
-    messageErrorStored: !!(messageState.error || messageError?.storedError),
-    sendResult: sendOutcome || sendMediaOutcome?.status === 'resolved' ? 'accepted' :
-      sendMediaOutcome?.status === 'rejected' || messageError ? 'rejected' : 'unobserved',
-    sendResultCount: sendOutcome ? matchingSendOutcomes.length :
-      ['resolved', 'rejected'].includes(sendMediaOutcome?.status) ? 1 : messageError ? 1 : 0,
-    sendResultSource: sendOutcome?.source ||
-      (['resolved', 'rejected'].includes(sendMediaOutcome?.status) ? sendMediaOutcome.source : messageError?.source) || null,
-    sentTempId: sendOutcome?.tempId || null,
-    sentMessageId: sendOutcome?.messageId || sendMediaOutcome?.responseMessageId || null,
-    sentRandomId: sendOutcome?.randomId || sendMediaOutcome?.randomId || null,
-    sentMessageStore: sendOutcome?.storeMidPresent === true || apiStoreState.storeMidPresent === true ? 'present' :
-      sendOutcome?.storeMidPresent === false || apiStoreState.storeMidPresent === false ? 'missing' : null,
-    sentPollStoreMatch: sendOutcome?.storePollMatches === true || apiStoreState.storePollMatches === true ? true :
-      sendOutcome?.storePollMatches === false || apiStoreState.storePollMatches === false ? false : null,
+    tempMessageFound: !!tempCandidate,
+    tempCandidateCount: messageState.questionRowCount,
+    tempId: tempCandidate?.mid || messageError?.tempId || null,
+    bubbleStatuses: tempCandidate?.statuses || [],
+    randomId: confirmation.randomId || messageError?.randomId || null,
+    messageError: tempCandidate?.error || messageError?.storedError || messageError?.eventError || apiMessageError || null,
+    messageErrorStored: !!(tempCandidate?.error || messageError?.storedError),
+    sendResult: confirmation.sendResult,
+    sendResultCount: confirmation.sendResultCount,
+    sendResultSource: confirmation.sendResultSource,
+    sentTempId: tempCandidate?.mid || null,
+    sentMessageId: confirmation.responseMessageId,
+    sentRandomId: confirmation.randomId,
+    sentMessageStore: ['present', 'missing', 'mismatch'].includes(persistedIdentity.status) ? persistedIdentity.status : null,
+    sentPollStoreMatch: persistedIdentity.status === 'present' ? true :
+      ['missing', 'mismatch'].includes(persistedIdentity.status) ? false : null,
     sentDomAtEvent: sendOutcome?.domAtEvent || null,
-    sendMediaObserverInstalled,
-    sendMediaCallCount: matchingSendMediaOutcomes.length,
-    sendMediaStatus: sendMediaOutcome?.status || null,
-    sendMediaResultType: sendMediaOutcome?.resultType || null,
-    sendMediaResponseMessageId: sendMediaOutcome?.responseMessageId || null,
-    sendMediaInputAnswerCount: sendMediaOutcome?.inputAnswerCount ?? null,
-    sendMediaDescriptionEmpty: sendMediaOutcome?.descriptionEmpty ?? null,
+    sendMediaObserverInstalled: safeObservation.status === 'installed',
+    sendWorkerObserverStatus: safeObservation.status,
+    sendObservationStatus: confirmation.status,
+    persistedIdentityStatus: confirmation.persistedIdentityStatus,
+    sendMediaCallCount: confirmation.sendResultCount,
+    sendMediaStatus: confirmation.sendMediaStatus,
+    sendMediaResultType: confirmation.resultType,
+    sendMediaResponseMessageId: confirmation.responseMessageId,
+    sendMediaInputAnswerCount: confirmation.inputAnswerCount,
+    sendMediaDescriptionEmpty: confirmation.descriptionEmpty,
     sendMediaError: apiMessageError || null,
     renderedPollDom,
     rpcErrorCount: rpcErrorDelta.rpcErrorsSinceSelection,
@@ -3586,7 +3939,8 @@ function workerErrorsSince(before, after) {
 
 function formatPollSendDiagnostic({shape, status, createClicked, composerClosed, tempMessageFound, tempCandidateCount, tempId,
   bubbleStatuses, randomId, messageError, messageErrorStored, sendResult, sendResultCount, sentMessageId, sentMessageStore,
-  sentPollStoreMatch, sentDomAtEvent, sendMediaObserverInstalled, sendMediaCallCount, sendMediaStatus, sendMediaResultType,
+  sentPollStoreMatch, sentDomAtEvent, sendMediaObserverInstalled, sendWorkerObserverStatus, sendObservationStatus,
+  persistedIdentityStatus, sendMediaCallCount, sendMediaStatus, sendMediaResultType,
   sendMediaResponseMessageId, sendMediaInputAnswerCount, sendMediaDescriptionEmpty, sendMediaError,
   renderedPollDom, rpcErrorCount, rpcErrorTypes,
   workerEvaluationExceptions, workerErrorTypes}) {
@@ -3639,16 +3993,34 @@ function formatPollSendDiagnostic({shape, status, createClicked, composerClosed,
     ? sendMediaInputAnswerCount
     : 'unavailable';
   const safeDescriptionEmpty = typeof sendMediaDescriptionEmpty === 'boolean' ? Number(sendMediaDescriptionEmpty) : 'unavailable';
+  const safeWorkerObserverStatus = ['pending', 'installed', 'unavailable'].includes(sendWorkerObserverStatus)
+    ? sendWorkerObserverStatus
+    : 'unavailable';
+  const safeSendObservationStatus = [
+    'observer_pending',
+    'observer_unavailable',
+    'no_observed_attempt',
+    'ambiguous_attempt',
+    'pending',
+    'rejected',
+    'accepted_response',
+    'persisted_identity_mismatch',
+    'persisted_identity'
+  ].includes(sendObservationStatus) ? sendObservationStatus : 'unavailable';
+  const safePersistedIdentityStatus = ['present', 'missing', 'mismatch', 'unavailable'].includes(persistedIdentityStatus)
+    ? persistedIdentityStatus
+    : 'unavailable';
   const safeSentMessageId = typeof sentMessageId === 'string' && /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(sentMessageId)
     ? sentMessageId
     : 'unavailable';
-  const safeSentMessageStore = ['present', 'missing'].includes(sentMessageStore) ? sentMessageStore : 'unavailable';
+  const safeSentMessageStore = ['present', 'missing', 'mismatch'].includes(sentMessageStore) ? sentMessageStore : 'unavailable';
   const safeSentPollStoreMatch = typeof sentPollStoreMatch === 'boolean' ? Number(sentPollStoreMatch) : 'unavailable';
   const safeDomCount = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 'unavailable';
   return `${safeShape}_${safeStatus}_create_${createClicked === true ? 1 : 0}_closed_${composerClosed === true ? 1 : 0}` +
     `_temp_${tempMessageFound === true ? 1 : 0}_candidates_${Number.isSafeInteger(tempCandidateCount) ? Math.max(tempCandidateCount, 0) : 'unavailable'}` +
     `_id_${safeTempId}_bubble_${statuses}_error_${error}_stored_${messageErrorStored === true ? 1 : 0}` +
     `_send_result_${safeSendResult}_send_count_${safeSendResultCount}_send_mid_${safeSentMessageId}` +
+    `_send_worker_observer_${safeWorkerObserverStatus}_send_observation_${safeSendObservationStatus}_persisted_identity_${safePersistedIdentityStatus}` +
     `_store_mid_${safeSentMessageStore}_store_poll_match_${safeSentPollStoreMatch}` +
     `_dom_event_mid_rows_${safeDomCount(sentDomAtEvent?.serverMidRowCount)}_temp_rows_${safeDomCount(sentDomAtEvent?.tempMidRowCount)}` +
     `_question_text_nodes_${safeDomCount(sentDomAtEvent?.questionTextNodeCount)}_question_rows_${safeDomCount(sentDomAtEvent?.questionRowCount)}` +
@@ -3664,28 +4036,28 @@ function formatPollSendDiagnostic({shape, status, createClicked, composerClosed,
     `_worker_exceptions_${safeWorkerExceptions}_worker_types_${safeWorkerTypes}`;
 }
 
-async function waitForPollResults(page, question, stage, timeoutMs = 30_000) {
+async function waitForPollResults(page, question, stage, timeoutMs = 30_000, messageId) {
   currentStage = stage;
-  const poll = pollMessageLocator(page, question);
+  const poll = pollMessageLocator(page, question, messageId);
   const resultIndicator = getPollResultIndicator(poll);
   await resultIndicator.first().waitFor({state: 'visible', timeout: timeoutMs})
   .catch(async() => {
-    const diagnostic = await readPollResultsDiagnostic(page, question, POLL_ANSWER_ONE);
+    const diagnostic = await readPollResultsDiagnostic(page, question, POLL_ANSWER_ONE, messageId);
     failStage(`${stage}_${formatPollResultsDiagnostic(diagnostic)}`);
   });
-  if(await resultIndicator.count() !== 1) failStage(`${stage}_footer`);
+  if(await poll.count() !== 1 || await resultIndicator.count() !== 1) failStage(`${stage}_footer`);
   const selectedAnswer = poll.locator('[data-poll-option-idx]').filter({hasText: POLL_ANSWER_ONE});
   if(await selectedAnswer.count() !== 1) failStage(`${stage}_selected_answer`);
   await selectedAnswer.getByText('1', {exact: true}).waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_count`));
   await selectedAnswer.getByText('100%', {exact: true}).waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_percentage`));
-  const diagnostic = await readPollResultsDiagnostic(page, question, POLL_ANSWER_ONE);
+  const diagnostic = await readPollResultsDiagnostic(page, question, POLL_ANSWER_ONE, messageId);
   if(diagnostic.domVisibleResultIndicatorCount !== 1 || diagnostic.domVisibleVoteButtonCount !== 0) {
     failStage(`${stage}_${formatPollResultsDiagnostic(diagnostic)}`);
   }
   return poll;
 }
 
-async function submitPollVote(page, poll, question, stage) {
+async function submitPollVote(page, poll, question, stage, messageId) {
   currentStage = stage;
   const voteButton = getPollVoteButton(poll);
   const resultIndicator = getPollResultIndicator(poll).first();
@@ -3701,11 +4073,12 @@ async function submitPollVote(page, poll, question, stage) {
     failStage(`${stage}_${formatPollResultsDiagnostic(diagnostic)}`);
   }
 
-  await waitForPollResults(page, question, `${stage}_results`);
+  const selectedMessageId = messageId ?? await poll.getAttribute('data-mid');
+  await waitForPollResults(page, question, `${stage}_results`, 30_000, selectedMessageId);
   return poll;
 }
 
-async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirectory, capturedScreenshots}) {
+async function runPollLifecycle({alice, bob, registry, runtime, groupName, screenshotDirectory, capturedScreenshots}) {
   const polls = [
     {
       shape: 'description',
@@ -3733,6 +4106,7 @@ async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirec
     const prefix = testCase.stage;
     const pollErrorStart = await alice.page.evaluate(() => window.__realClientPollErrors?.().length || 0).catch(() => 0);
     const workerErrorsBefore = alice.observer?.workerErrorSnapshot?.();
+    const attemptCursor = pollSendAttemptCursor(await registry.readPollSendObservation(alice.observer));
     const submission = {createClicked: false, composerClosed: false};
     await alice.page.evaluate((question) => { window.__realClientActivePollQuestion = question; }, testCase.question);
     let rpcErrorsBeforeCreation;
@@ -3753,7 +4127,8 @@ async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirec
       throw error;
     }
 
-    const sendStatus = await waitForPollSendOutcome(alice.page, testCase.question, `${prefix}_send_confirmed`);
+    const readSendObservation = () => registry.readPollSendObservation(alice.observer);
+    const sendStatus = await waitForPollSendOutcome(alice.page, testCase.question, `${prefix}_send_confirmed`, readSendObservation, 30_000, attemptCursor);
     const sendDiagnostic = await readPollSendDiagnostic(
       alice.page,
       testCase.question,
@@ -3762,20 +4137,26 @@ async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirec
       rpcErrorsBeforeCreation?.rpc,
       submission,
       workerErrorsBefore,
-      alice.observer?.workerErrorSnapshot?.()
+      alice.observer?.workerErrorSnapshot?.(),
+      await readSendObservation(),
+      attemptCursor
     );
     sendAttempts.push({shape: testCase.shape, ...sendDiagnostic});
-    const senderPollCount = await pollMessageLocator(alice.page, testCase.question).count().catch(() => null);
-    if(sendStatus !== 'sent' || sendDiagnostic.sendResult !== 'accepted' || senderPollCount !== 1) {
+    if(sendStatus !== 'sent' || sendDiagnostic.sendResult !== 'accepted' ||
+        sendDiagnostic.sendObservationStatus !== 'persisted_identity' ||
+        sendDiagnostic.sentMessageStore !== 'present' || sendDiagnostic.sentPollStoreMatch !== true ||
+        !sendDiagnostic.sentMessageId) {
       continue;
     }
 
+    let bobPollMessageId;
     try {
-    const alicePoll = await waitForPollMessage(alice.page, testCase.question, `${prefix}_sent`);
+    const alicePoll = await waitForPollMessage(alice.page, testCase.question, `${prefix}_sent`, 30_000, sendDiagnostic.sentMessageId);
     await assertPollContent(alicePoll, {...testCase, stage: `${prefix}_sent`});
     await capturePollState(alice.page, screenshotDirectory, `${testCase.shape.replaceAll('_', '-')}-poll-sent`, `${prefix}_sent_screenshot`, capturedScreenshots);
 
     const bobPoll = await waitForPollMessage(bob.page, testCase.question, `bob_poll_${testCase.shape}_received`);
+    bobPollMessageId = await bobPoll.getAttribute('data-mid');
     await assertPollContent(bobPoll, {...testCase, stage: `bob_poll_${testCase.shape}_received`});
     await capturePollState(bob.page, screenshotDirectory, `bob-${testCase.shape.replaceAll('_', '-')}-poll-received`, `bob_poll_${testCase.shape}_received_screenshot`, capturedScreenshots);
 
@@ -3783,7 +4164,7 @@ async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirec
     const voteOption = getPollOptionClickTarget(bobPoll, POLL_ANSWER_ONE);
     await voteOption.click().catch(() => failStage(`bob_poll_${testCase.shape}_vote_select`));
     currentStage = `bob_poll_${testCase.shape}_vote_submit`;
-    await submitPollVote(bob.page, bobPoll, testCase.question, `bob_poll_${testCase.shape}_vote_submit`);
+    await submitPollVote(bob.page, bobPoll, testCase.question, `bob_poll_${testCase.shape}_vote_submit`, bobPollMessageId);
     await capturePollState(bob.page, screenshotDirectory, `bob-${testCase.shape.replaceAll('_', '-')}-poll-results`, `bob_poll_${testCase.shape}_results_screenshot`, capturedScreenshots);
 
     currentStage = `alice_poll_${testCase.shape}_stop_menu`;
@@ -3796,12 +4177,13 @@ async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirec
 
     currentStage = `alice_poll_${testCase.shape}_closed`;
     await alicePoll.getByText('Final Results', {exact: true}).waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`alice_poll_${testCase.shape}_closed`));
-    await waitForPollResults(alice.page, testCase.question, `alice_poll_${testCase.shape}_closed_results`);
+    await waitForPollResults(alice.page, testCase.question, `alice_poll_${testCase.shape}_closed_results`, 30_000, sendDiagnostic.sentMessageId);
     await capturePollState(alice.page, screenshotDirectory, `alice-${testCase.shape.replaceAll('_', '-')}-poll-closed`, `alice_poll_${testCase.shape}_closed_screenshot`, capturedScreenshots);
 
     const bobClosedPoll = await waitForPollMessage(bob.page, testCase.question, `bob_poll_${testCase.shape}_closed`);
+    bobPollMessageId = await bobClosedPoll.getAttribute('data-mid');
     await bobClosedPoll.getByText('Final Results', {exact: true}).waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`bob_poll_${testCase.shape}_closed`));
-    await waitForPollResults(bob.page, testCase.question, `bob_poll_${testCase.shape}_closed_results`);
+    await waitForPollResults(bob.page, testCase.question, `bob_poll_${testCase.shape}_closed_results`, 30_000, bobPollMessageId);
 
     const closedOption = getPollOptionClickTarget(bobClosedPoll, POLL_ANSWER_TWO);
     currentStage = `bob_poll_${testCase.shape}_closed_vote_blocked`;
@@ -3811,7 +4193,7 @@ async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirec
       trialClickSucceeded = false;
     });
     if(pointerEvents !== 'none' || trialClickSucceeded) failStage(`bob_poll_${testCase.shape}_closed_vote_blocked`);
-    await waitForPollResults(bob.page, testCase.question, `bob_poll_${testCase.shape}_closed_vote_unchanged`);
+    await waitForPollResults(bob.page, testCase.question, `bob_poll_${testCase.shape}_closed_vote_unchanged`, 30_000, bobPollMessageId);
     await capturePollState(bob.page, screenshotDirectory, `bob-${testCase.shape.replaceAll('_', '-')}-poll-closed-no-vote`, `bob_poll_${testCase.shape}_closed_no_vote_screenshot`, capturedScreenshots);
 
     evidence.push({shape: testCase.shape, answers: 2, description: testCase.description ? 'present' : 'empty', mediaAnswer: testCase.mediaAnswer});
@@ -3819,13 +4201,17 @@ async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirec
       const stage = currentStage;
       const page = stage.startsWith('alice_') ? alice.page : bob.page;
       const resultDiagnostic = stage.includes('_results')
-        ? await readPollResultsDiagnostic(page, testCase.question, POLL_ANSWER_ONE)
+        ? await readPollResultsDiagnostic(page, testCase.question, POLL_ANSWER_ONE,
+          stage.startsWith('alice_') ? sendDiagnostic.sentMessageId : bobPollMessageId)
         : undefined;
       pollFlowFailures.push({shape: testCase.shape, stage, resultDiagnostic});
     }
   }
 
-  if(sendAttempts.some(({status, sendResult}) => status !== 'sent' || sendResult !== 'accepted')) {
+  if(sendAttempts.some(({status, sendResult, sendObservationStatus, sentMessageStore, sentPollStoreMatch}) =>
+    status !== 'sent' || sendResult !== 'accepted' || sendObservationStatus !== 'persisted_identity' ||
+    sentMessageStore !== 'present' || sentPollStoreMatch !== true
+  )) {
     const diagnostic = sendAttempts.map(formatPollSendDiagnostic).join('__');
     failStage(`alice_poll_send_diagnostic_${diagnostic}`);
   }
@@ -3841,7 +4227,8 @@ async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirec
   return {
     evidence,
     sendResults: sendAttempts.map(({shape, status, sendResult, sendResultCount, sendResultSource, randomId, messageError,
-      sentMessageId, sentMessageStore, sentPollStoreMatch, sendMediaObserverInstalled, sendMediaCallCount,
+      sentMessageId, sentMessageStore, sentPollStoreMatch, sendMediaObserverInstalled, sendWorkerObserverStatus,
+      sendObservationStatus, persistedIdentityStatus, sendMediaCallCount,
       sendMediaStatus, sendMediaResultType, sendMediaResponseMessageId, sendMediaInputAnswerCount,
       sendMediaDescriptionEmpty, sendMediaError}) => ({
       shape,
@@ -3855,6 +4242,9 @@ async function runPollLifecycle({alice, bob, runtime, groupName, screenshotDirec
       sentMessageStore,
       sentPollStoreMatch,
       sendMediaObserverInstalled,
+      sendWorkerObserverStatus,
+      sendObservationStatus,
+      persistedIdentityStatus,
       sendMediaCallCount,
       sendMediaStatus,
       sendMediaResultType,
@@ -5665,6 +6055,7 @@ async function main(dependencies = {}) {
         const negativeControl = await runPollCreationNegativeControl({
           alice,
           bob,
+          registry,
           runtime,
           groupName,
           screenshotDirectory: runtime.screenshotDirectory,
@@ -5676,6 +6067,7 @@ async function main(dependencies = {}) {
         const pollRun = await runPollLifecycle({
           alice,
           bob,
+          registry,
           runtime,
           groupName,
           screenshotDirectory: runtime.screenshotDirectory,
@@ -5893,7 +6285,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPollMessageErrorObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
