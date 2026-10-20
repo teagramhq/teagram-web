@@ -49,9 +49,13 @@ export type AuthCardProps = {
 
 export default function AuthCard(props: AuthCardProps): JSX.Element {
   const useInputWrapper = () => props.inputWrapper !== false;
+  const activeHost = () => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__ as string | undefined;
 
   return (
     <div class={classNames(styles.card, props.class)}>
+      <Show when={activeHost() && activeHost() !== 'web.teagram.io'}>
+        <div class={styles.activeServer}>Server: {activeHost()}</div>
+      </Show>
       {props.header}
       <Show when={useInputWrapper()} fallback={props.children}>
         <div class="input-wrapper">{props.children}</div>

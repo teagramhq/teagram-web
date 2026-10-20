@@ -23,6 +23,8 @@ import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 import {onBackgroundsFetch} from '@lib/serviceWorker/backgrounds';
 import {watchMtprotoOnDev} from '@lib/serviceWorker/watchMtprotoOnDev';
 import {watchCacheStoragesLifetime} from './clearOldCache';
+import {getActiveServerId} from '@config/serverContext';
+import {IDB} from '@lib/files/idb';
 
 // #if MTPROTO_SW
 // import '../mtproto/mtproto.worker';
@@ -30,6 +32,9 @@ import {watchCacheStoragesLifetime} from './clearOldCache';
 
 export const log = logger('SW', LogTypes.Error | LogTypes.Debug | LogTypes.Log | LogTypes.Warn, true);
 const ctx = self as any as ServiceWorkerGlobalScope;
+const connectedServerIds = new Map<string, string>();
+const pendingServerIds = new Map<string, string>();
+let connectServerClient = (_source: WindowClient, _from: string) => {};
 
 // #if !MTPROTO_SW
 let _mtprotoMessagePort: MessagePort;
@@ -38,15 +43,22 @@ export const getMtprotoMessagePort = () => _mtprotoMessagePort;
 let _cryptoMessagePort: MessagePort;
 
 export const invokeVoidAll: ServiceMessagePort['invokeVoid'] = (...args) => {
-  getWindowClients().then((windowClients) => {
-    windowClients.forEach((windowClient) => {
-      // @ts-ignore
-      serviceMessagePort.invokeVoid(...args, windowClient);
-    });
+  connectedWindows.forEach((windowClient) => {
+    // @ts-ignore
+    serviceMessagePort.invokeVoid(...args, windowClient);
   });
 };
 
 log('init');
+
+ctx.addEventListener('message', (event: ExtendableMessageEvent) => {
+  const data = event.data;
+  if(data?.type !== 'teagram:close-server-databases' || data.serverId !== getActiveServerId()) return;
+
+  event.waitUntil(IDB.closeDatabasesForServer(data.serverId).then(() => {
+    event.ports[0]?.postMessage({closed: true});
+  }));
+});
 
 // setTimeout(async() => {
 //   const salt = new Uint8Array([1, 2, 3]);
@@ -87,9 +99,16 @@ const sendMessagePortIfNeeded = (source: MessageSendPort) => {
   }
 };
 
+const connectedWindows: Map<string, WindowClient> = new Map();
+
 const onWindowConnected = (source: WindowClient, from: string) => {
   const _log = log.bindPrefix('windowConnected');
   _log('new', source.id, 'from', from, 'before', connectedWindows.size);
+
+  if(connectedServerIds.get(source.id) !== getActiveServerId()) {
+    _log.warn('refusing client from another server', source.id);
+    return;
+  }
 
   if(source.frameType === 'none') {
     log.warn('maybe a bugged Safari starting window', source.id);
@@ -102,13 +121,14 @@ const onWindowConnected = (source: WindowClient, from: string) => {
   }
 
   _log('before', Array.from(connectedWindows));
-  serviceMessagePort.invokeVoid('hello', undefined, source);
+  serviceMessagePort.invokeVoid('hello', {serverId: getActiveServerId()}, source);
   sendMessagePortIfNeeded(source);
   connectedWindows.set(source.id, source);
   _log('after', Array.from(connectedWindows));
 
   checkWindowClientForDeferredShare(source);
 };
+connectServerClient = (source, from) => onWindowConnected(source, from);
 
 export const serviceMessagePort = new ServiceMessagePort<false>();
 
@@ -132,7 +152,9 @@ serviceMessagePort.addMultipleEventsListeners({
   },
 
   hello: (payload, source) => {
-    onWindowConnected(source as any as WindowClient, 'hello');
+    const client = source as any as WindowClient;
+    if(payload?.serverId !== getActiveServerId() || connectedServerIds.get(client.id) !== payload.serverId) return;
+    onWindowConnected(client, 'hello');
   },
 
   shownNotification: onShownNotification,
@@ -181,42 +203,6 @@ const {
   onClosedWindows: onDownloadClosedWindows
 } = handleDownload(serviceMessagePort);
 
-// * service worker can be killed, so won't get 'hello' event
-async function startupCheck() {
-  const windowClients = await getWindowClients();
-  const length = windowClients.length;
-  log(`got ${length} windows from the start`);
-  windowClients.forEach((windowClient) => {
-    if(windowClient.frameType === 'none') {
-      log.warn('skipping bugged Safari starting window', windowClient.id);
-      return;
-    }
-
-    log('checking window', windowClient.id);
-    try {
-      const promise = serviceMessagePort.invoke(
-        'hello',
-        undefined,
-        undefined,
-        windowClient
-      );
-
-      let timedOut = false;
-      const timeout = setTimeout(() => timedOut = true, 5000);
-      promise.finally(() => {
-        if(!timedOut) {
-          clearTimeout(timeout);
-          onWindowConnected(windowClient, 'startup check');
-        }
-      });
-    } catch(err) {
-      log.error('failed to send hello to window', windowClient.id, err);
-    }
-  });
-}
-startupCheck();
-
-const connectedWindows: Map<string, WindowClient> = new Map();
 (self as any).connectedWindows = connectedWindows;
 listenMessagePort(serviceMessagePort, undefined, (source) => {
   log('something has disconnected', source);
@@ -227,6 +213,7 @@ listenMessagePort(serviceMessagePort, undefined, (source) => {
   }
 
   connectedWindows.delete(source.id);
+  connectedServerIds.delete(source.id);
   log('window disconnected, left', connectedWindows.size);
   if(!connectedWindows.size) {
     log.warn('no windows left');
@@ -252,21 +239,128 @@ listenMessagePort(serviceMessagePort, undefined, (source) => {
 });
 // #endif
 
+const getClientServerId = (client: WindowClient) => new Promise<string>((resolve) => {
+  const channel = new MessageChannel();
+  let settled = false;
+  const finish = (serverId?: string) => {
+    if(settled) return;
+    settled = true;
+    clearTimeout(timer);
+    channel.port1.close();
+    resolve(serverId);
+  };
+  const timer = setTimeout(() => finish(), 5000);
+  channel.port1.addEventListener('message', (event) => {
+    const response = event.data;
+    finish(response?.accepted === true && typeof response.serverId === 'string' ? response.serverId : undefined);
+  }, {once: true});
+  channel.port1.start();
+  try {
+    client.postMessage({type: 'teagram:server-handshake-request', serverId: getActiveServerId()}, [channel.port2]);
+  } catch{
+    finish();
+  }
+});
+
+ctx.addEventListener('message', (event: ExtendableMessageEvent) => {
+  const data = event.data;
+  const source = event.source as WindowClient | null;
+  if(data?.type === 'teagram:server-handshake') {
+    event.stopImmediatePropagation();
+    const serverId = getActiveServerId();
+    const accepted = !!source?.id && source.frameType !== 'none' && data.serverId === serverId;
+    if(accepted) pendingServerIds.set(source.id, serverId);
+    event.ports[0]?.postMessage({serverId, accepted});
+    event.ports[0]?.close();
+    return;
+  }
+
+  if(data?.type === 'teagram:server-handshake-ack') {
+    event.stopImmediatePropagation();
+    const serverId = getActiveServerId();
+    const accepted = !!source?.id && source.frameType !== 'none' &&
+      (pendingServerIds.get(source.id) === data.serverId || connectedServerIds.get(source.id) === data.serverId) &&
+      data.serverId === serverId;
+    if(accepted) {
+      pendingServerIds.delete(source.id);
+      connectedServerIds.set(source.id, serverId);
+      connectServerClient(source, 'server handshake');
+    }
+    event.ports[0]?.postMessage({serverId, accepted});
+    event.ports[0]?.close();
+    return;
+  }
+
+  if(data?.type === 'teagram:close-server-databases') {
+    if(data.serverId !== getActiveServerId()) event.stopImmediatePropagation();
+    return;
+  }
+
+  if(!source?.id || connectedServerIds.get(source.id) !== getActiveServerId()) {
+    event.stopImmediatePropagation();
+  }
+}, {capture: true});
+
+// A restarted worker accepts only pages that prove they belong to its server.
+async function startupCheck() {
+  const windowClients = await getWindowClients();
+  const length = windowClients.length;
+  log(`got ${length} windows from the start`);
+  await Promise.all(windowClients.map(async(windowClient) => {
+    if(windowClient.frameType === 'none') {
+      log.warn('skipping bugged Safari starting window', windowClient.id);
+      return;
+    }
+
+    log('checking window', windowClient.id);
+    try {
+      const serverId = await getClientServerId(windowClient);
+      if(serverId !== getActiveServerId()) return;
+
+      connectedServerIds.set(windowClient.id, serverId);
+      connectServerClient(windowClient, 'startup check');
+    } catch(err) {
+      log.error('failed to send hello to window', windowClient.id, err);
+    }
+  }));
+}
+void startupCheck();
+
 watchCacheStoragesLifetime({
   onStorageError: async({storageName, error}) => {
     log(`Error clearing old cache in ${storageName}:`, error);
     log(`Clearing cache storage ${storageName}`);
 
-    const windowClients = await getWindowClients();
-    if(!windowClients.length) return;
+    const [windowClient] = connectedWindows.values();
+    if(!windowClient) return;
 
-    await serviceMessagePort.invoke('clearCacheStoragesByNames', [storageName], undefined, windowClients[0]);
+    await serviceMessagePort.invoke('clearCacheStoragesByNames', [storageName], undefined, windowClient);
   }
 });
 
 watchMtprotoOnDev({connectedWindows, onWindowConnected});
 
+function isAuthorizedUnclaimedNavigationFetch(event: FetchEvent) {
+  if(event.clientId || event.request.mode !== 'navigate' || !event.resultingClientId) return false;
+
+  const url = new URL(event.request.url);
+  if(url.origin !== location.origin) return false;
+
+  // The manifest's fixed share target cannot carry a server id. Its payload stays
+  // deferred until the resulting app page proves its server id in the normal handshake.
+  if(url.pathname === '/share/' && event.request.method === 'POST') return true;
+
+  if(event.request.method !== 'GET' || url.searchParams.get('__tg_server') !== getActiveServerId()) return false;
+  return /^\/(?:ping\/[^/]+\.nocache|(?:d|download)\/[^/]+)$/.test(url.pathname);
+}
+
 const onFetch = (event: FetchEvent): void => {
+  if(event.clientId) {
+    if(connectedServerIds.get(event.clientId) !== getActiveServerId()) return;
+  } else if(!isAuthorizedUnclaimedNavigationFetch(event)) {
+    return;
+  }
+
   // Web manifests must reach the network so installed PWA metadata can update.
   if(
     import.meta.env.PROD &&
@@ -301,6 +395,7 @@ const onFetch = (event: FetchEvent): void => {
       }
 
       case 'share': {
+        if(event.request.method !== 'POST' || event.request.mode !== 'navigate' || !event.resultingClientId) return;
         onShareFetch(event, params);
         break;
       }

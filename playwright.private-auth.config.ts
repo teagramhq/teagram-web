@@ -11,6 +11,10 @@ export default defineConfig({
   use: {
     baseURL: `http://localhost:${PORT}/`,
     headless: true,
+    ignoreHTTPSErrors: true,
+    // The custom server sign-in smoke serves both hosts from its TLS listener on 18443.
+    // ignoreHTTPSErrors does not reach SharedWorker sockets, so its self-signed certificate needs the flag.
+    launchOptions: {args: ['--ignore-certificate-errors', '--host-resolver-rules=MAP second-server.example.test:443 127.0.0.1:18443, MAP web.teagram.io:443 127.0.0.1:18443, MAP second-server.example.test 127.0.0.1']},
     viewport: {width: 320, height: 720}
   },
   projects: [{name: 'chromium', use: {...devices['Desktop Chrome']}}],

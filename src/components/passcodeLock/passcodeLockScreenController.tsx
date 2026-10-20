@@ -57,7 +57,6 @@ export default class PasscodeLockScreenController extends StaticUtilityClass {
     const isLocked = hasStoredEncryptionHash ?
       false :
       await apiManagerProxy.invoke('isLocked', undefined);
-
     this.isLocked = isLocked;
 
     if(isLocked) {

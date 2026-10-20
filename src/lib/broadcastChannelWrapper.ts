@@ -1,3 +1,5 @@
+import {scopeServerStorageKey} from '@config/serverContext';
+
 type TypedEventData<EventName extends string, Payload = void> = {
   eventName: EventName;
   payload: Payload;
@@ -19,7 +21,7 @@ type VoidKeys<M extends Record<string, any>> = keyof {
 };
 
 export function createBroadcastChannelWrapper<EventMap extends Record<string, any>>(name: string): BroadcastChannelWrapper<EventMap> {
-  const broadcastChannel = new BroadcastChannel(name);
+  const broadcastChannel = new BroadcastChannel(scopeServerStorageKey(name));
 
   const listeners = new Map<string, Array<(payload: any) => void>>();
 

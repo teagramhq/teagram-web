@@ -2,7 +2,6 @@ import type {ServiceDownloadTaskPayload} from '@lib/serviceWorker/serviceMessage
 import type ServiceMessagePort from '@lib/serviceWorker/serviceMessagePort';
 import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
 import makeError from '@helpers/makeError';
-import pause from '@helpers/schedulers/pause';
 import {logger} from '@lib/logger';
 import {invokeVoidAll, log} from '@lib/serviceWorker/index.service';
 
@@ -20,8 +19,16 @@ type DownloadItem = ServiceDownloadTaskPayload & {
   used?: boolean
 };
 const downloadMap: Map<string, DownloadItem> = new Map();
+type DownloadReadyWaiter = {
+  promise: Promise<DownloadItem | undefined>,
+  resolve: (item: DownloadItem | undefined) => void,
+  timeout: ReturnType<typeof setTimeout>
+};
+const downloadReadyWaiters: Map<string, DownloadReadyWaiter> = new Map();
 const DOWNLOAD_ERROR = makeError('UNKNOWN');
 const DOWNLOAD_TEST = false;
+// The iframe navigation can reach the service worker before its stream is registered.
+const DOWNLOAD_READY_TIMEOUT = 5000;
 
 (self as any).downloadMap = downloadMap;
 
@@ -90,6 +97,12 @@ const events: A = {
     };
 
     downloadMap.set(id, item);
+    const waiter = downloadReadyWaiters.get(id);
+    if(waiter) {
+      clearTimeout(waiter.timeout);
+      downloadReadyWaiters.delete(id);
+      waiter.resolve(item);
+    }
 
     // return downloadPromise;
     return promise.catch(() => {throw DOWNLOAD_ERROR});
@@ -150,8 +163,7 @@ export default function handleDownload(serviceMessagePort: ServiceMessagePort<fa
 function onDownloadFetch(event: FetchEvent, params: string) {
   invokeVoidAll('downloadRequestReceived', params);
 
-  const promise = pause(100).then(() => {
-    const item = downloadMap.get(params);
+  const promise = getDownloadWhenReady(params).then((item) => {
     if(!item || (item.used && !DOWNLOAD_TEST)) {
       log.warn('no such download', params);
       return;
@@ -165,6 +177,27 @@ function onDownloadFetch(event: FetchEvent, params: string) {
   });
 
   event.respondWith(promise);
+}
+
+function getDownloadWhenReady(id: string) {
+  const item = downloadMap.get(id);
+  if(item) return Promise.resolve(item);
+
+  const existingWaiter = downloadReadyWaiters.get(id);
+  if(existingWaiter) return existingWaiter.promise;
+
+  let resolve!: DownloadReadyWaiter['resolve'];
+  const promise = new Promise<DownloadItem | undefined>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  const timeout = setTimeout(() => {
+    if(downloadReadyWaiters.get(id)?.promise !== promise) return;
+    downloadReadyWaiters.delete(id);
+    resolve(undefined);
+  }, DOWNLOAD_READY_TIMEOUT);
+  downloadReadyWaiters.set(id, {promise, resolve, timeout});
+
+  return promise;
 }
 
 function cancelAllDownloads() {

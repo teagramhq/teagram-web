@@ -20,17 +20,18 @@ export function rewritePrivateWorkerImports(source: string, base: string) {
     );
 }
 
-export async function createPrivateWorkerBlobURL(url: string | URL) {
-  const response = await fetch(url);
-  if(!response.ok) {
-    throw new Error(`[MT] unable to load private MTProto worker (${response.status})`);
+export async function createPrivateWorkerBlobURL(url: string | URL, serverId?: string, target?: unknown) {
+  const entryUrl = new URL(url + '', location.href).href;
+  let source = '';
+  if(serverId && target) {
+    source += `globalThis.__TEAGRAM_ACTIVE_SERVER_ID__=${JSON.stringify(serverId)};globalThis.__TEAGRAM_ACTIVE_MTPROTO_TARGET__=JSON.parse(${JSON.stringify(JSON.stringify(target))});\n`;
   }
-
-  let source = await response.text();
-  const pathnameSplitted = location.pathname.split('/');
-  pathnameSplitted[pathnameSplitted.length - 1] = '';
-  const base = location.origin + pathnameSplitted.join('/');
-  source = rewritePrivateWorkerImports(source, base);
+  // A SharedWorker fires `connect` without waiting for top-level await, so hold
+  // connections that arrive during the import until the entry has its listener.
+  source += 'const pendingConnects=[];const holdConnect=(event)=>pendingConnects.push(event);' +
+    'globalThis.addEventListener(\'connect\',holdConnect);' +
+    `try{await import(${JSON.stringify(entryUrl)});}finally{globalThis.removeEventListener('connect',holdConnect);}` +
+    'for(const event of pendingConnects){const source=event.ports?.[0]||event.source;globalThis.dispatchEvent(new MessageEvent(\'connect\',{data:event.data,source}));}';
 
   return URL.createObjectURL(new Blob([source], {type: 'application/javascript'}));
 }

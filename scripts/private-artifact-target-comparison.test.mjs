@@ -390,11 +390,19 @@ describe('private artifact target comparison', () => {
     expect(auditStep).toContain('pnpm run check-bundle -- "$audit_dir"');
   });
 
+  it('keeps the private server-selection bootstrap free of production route literals', () => {
+    const bootstrap = readFileSync(join(repositoryRoot, 'src/bootstrap.ts'), 'utf8');
+
+    expect(bootstrap).not.toContain('teagram.tailaa4918.ts.net');
+    expect(bootstrap).not.toMatch(/wss:\/\/\$\{/);
+  });
+
   it('runs the private and standard auth browser smoke in CI', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
     const scripts = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')).scripts;
 
     expect(scripts['test:private-auth']).toContain('playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameRegistration.spec.ts');
+    expect(scripts['test:private-auth']).toContain('e2e/customServerRegistration.spec.ts e2e/customServerLocalSignIn.spec.ts');
     expect(scripts['test:private-auth']).toContain('pnpm run test:standard-auth');
     expect(scripts['test:standard-auth']).toBe('playwright test -c playwright.standard-auth.config.ts e2e/standardSignupTurnstile.spec.ts');
     expect(workflow).toContain('pnpm exec playwright install --with-deps chromium');
@@ -404,5 +412,12 @@ describe('private artifact target comparison', () => {
     ?.split('\n      - name: ')[0];
     expect(smokeStep).not.toContain('MTPROTO_');
     expect(smokeStep).not.toContain('TWEB_REGISTRATION_E2E');
+  });
+
+  it('pins the Atlas setup action to the reviewed v0.3 commit', () => {
+    const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
+
+    expect(workflow).toContain('uses: ariga/setup-atlas@2f3c785c89a15e1c0d07bcae3900fb5feb969eea # v0.3');
+    expect(workflow).not.toMatch(/uses: ariga\/setup-atlas@v/);
   });
 });

@@ -15,6 +15,7 @@ import EncryptedStorageLayer from '@lib/encryptedStorageLayer';
 import {logger} from '@lib/logger';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
+import {getServerStoragePrefix} from '@config/serverContext';
 
 
 class LocalStorage<Storage extends Record<string, any>> {
@@ -26,6 +27,7 @@ class LocalStorage<Storage extends Record<string, any>> {
     if(Modes.test) {
       this.prefix = 't_';
     }
+    this.prefix = getServerStoragePrefix() + this.prefix;
   }
 
   public get<T extends keyof Storage>(key: T, useCache = true): Storage[T] {
@@ -113,7 +115,23 @@ class LocalStorage<Storage extends Record<string, any>> {
         });
       }
 
-      localStorage.clear();
+      if(this.prefix) {
+        for(const key of Object.keys(localStorage)) {
+          if(key.startsWith(this.prefix)) localStorage.removeItem(key);
+        }
+      } else {
+        const persistentServerKeys = Object.keys(localStorage)
+          .filter((key) => key.startsWith('teagram.') || /^teagram-custom-[0-9a-f]{64}:/.test(key))
+          .map((key) => [key, localStorage.getItem(key)] as const);
+        localStorage.clear();
+        persistentServerKeys.forEach(([key, value]) => {
+          if(value !== null) localStorage.setItem(key, value);
+        });
+      }
+
+      Object.keys(this.cache).forEach((key) => {
+        if(!preserveKeys.includes(key as keyof Storage)) delete this.cache[key as keyof Storage];
+      });
 
       if(preserveKeys?.length) {
         this.set(obj);

@@ -1,7 +1,9 @@
 import pause from '@helpers/schedulers/pause';
+import {getActiveServerId} from '@config/serverContext';
 
 const ctx = self as any as ServiceWorkerGlobalScope;
-export const CACHE_ASSETS_NAME = 'cachedAssets';
+const serverId = getActiveServerId();
+export const CACHE_ASSETS_NAME = serverId === 'default' ? 'cachedAssets' : `teagram-${serverId}-cachedAssets`;
 
 function isCorrectResponse(response: Response) {
   return response.ok && response.status === 200;

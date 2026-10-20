@@ -23,6 +23,20 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
 
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: smoketest
+          POSTGRES_DB: teagram
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+
     steps:
       - name: Check out code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -79,8 +93,96 @@ jobs:
       - name: Lint
         run: pnpm run lint
 
+      - name: Check out the local Teagram server for the worker sign-in smoke
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: teagramhq/teagram-server
+          ref: main
+          path: teagram-server
+          persist-credentials: false
+
+      - name: Set up Go for the local Teagram server
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: teagram-server/go.mod
+
+      - name: Set up Atlas for the local Teagram server
+        uses: ariga/setup-atlas@2f3c785c89a15e1c0d07bcae3900fb5feb969eea # v0.3
+        with:
+          version: v1.2.0
+
+      - name: Configure the local Teagram server smoke
+        shell: bash
+        run: |
+          cat >> "$GITHUB_ENV" <<EOF
+          TG_POSTGRES_DSN=postgres://postgres:smoketest@localhost:5432/teagram?sslmode=disable
+          TG_AUTHKEY_ENC_KEY=0000000000000000000000000000000000000000000000000000000000000000
+          TG_PUBLIC_LINK_PREFIX=https://links.example.test/
+          TG_RSA_KEY_PATH=$RUNNER_TEMP/teagram-custom-server-key.pem
+          TG_BLOB_DIR=$RUNNER_TEMP/teagram-custom-server-blobs
+          TG_LISTEN_ADDR=127.0.0.1:2443
+          TG_ADVERTISE_ADDR=second-server.example.test:2443
+          TG_WEBSOCKET_LISTEN_ADDR=127.0.0.1:2445
+          TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io
+          TG_REGISTRATION=closed
+          TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL=http://127.0.0.1:2445
+          TEAGRAM_CUSTOM_SERVER_TEST_WS_URL=ws://127.0.0.1:2445/apiws
+          TEAGRAM_CUSTOM_SERVER_TEST_USER=custom_server_user
+          TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD=Teagram-Test-Password-123!
+          TEAGRAMD_PID_FILE=$RUNNER_TEMP/teagramd.pid
+          TEAGRAMD_LOG_FILE=$RUNNER_TEMP/teagramd.log
+          EOF
+
+      - name: Migrate the local Teagram server database
+        run: atlas migrate apply --dir file://teagram-server/migrations --url "$TG_POSTGRES_DSN"
+
+      - name: Start the local Teagram server and seed the sign-in account
+        shell: bash
+        run: |
+          set -euo pipefail
+          go -C teagram-server build -o "$RUNNER_TEMP/teagramd" ./cmd/teagramd
+          openssl genrsa -traditional -F4 -out "$TG_RSA_KEY_PATH" 2048
+          chmod 0600 "$TG_RSA_KEY_PATH"
+          mkdir -p "$TG_BLOB_DIR"
+          printf '%s\n' "$TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD" \
+            | sudo env \
+              TG_POSTGRES_DSN="$TG_POSTGRES_DSN" \
+              TG_AUTHKEY_ENC_KEY="$TG_AUTHKEY_ENC_KEY" \
+              TG_PUBLIC_LINK_PREFIX="$TG_PUBLIC_LINK_PREFIX" \
+              TG_RSA_KEY_PATH="$TG_RSA_KEY_PATH" \
+              "$RUNNER_TEMP/teagramd" admin create-user --username "$TEAGRAM_CUSTOM_SERVER_TEST_USER"
+          nohup "$RUNNER_TEMP/teagramd" > "$TEAGRAMD_LOG_FILE" 2>&1 < /dev/null &
+          echo "$!" > "$TEAGRAMD_PID_FILE"
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl --max-time 2 --silent --show-error \
+              "$TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL/.well-known/telegramd/client" >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat "$TEAGRAMD_LOG_FILE"
+            echo "local Teagram server did not start"
+            exit 1
+          fi
+
       - name: Run private username auth browser smoke
         run: pnpm run test:private-auth
+
+      - name: Stop the local Teagram server
+        if: always()
+        shell: bash
+        run: |
+          if [ -f "$TEAGRAMD_PID_FILE" ]; then
+            server_pid="$(cat "$TEAGRAMD_PID_FILE")"
+            kill "$server_pid" 2>/dev/null || true
+          fi
+
+      - name: Show local Teagram server log on failure
+        if: failure()
+        run: if [ -f "$TEAGRAMD_LOG_FILE" ]; then cat "$TEAGRAMD_LOG_FILE"; fi
 
   deployment-workflow:
     name: Deployment workflow contract and actionlint

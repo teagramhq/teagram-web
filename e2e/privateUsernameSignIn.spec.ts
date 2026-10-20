@@ -25,7 +25,7 @@ test('private target keeps every unauthenticated state on username sign-in', asy
     }
   });
 
-  await page.goto('/?noWorker=1', {waitUntil: 'domcontentloaded'});
+  await page.goto('/?noWorker=1&noServiceWorker=1', {waitUntil: 'domcontentloaded'});
   const auth = page.locator('#auth-pages');
   await expect(auth).toBeAttached({timeout: 20_000});
   const initialUsername = auth.getByRole('textbox', {name: 'Username'});

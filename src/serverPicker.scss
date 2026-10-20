@@ -1,0 +1,80 @@
+.server-picker {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: var(--page-background, #f4f4f5);
+  color: var(--text-color, #202124);
+  font-family: var(--font-family, Arial, sans-serif);
+}
+
+.server-picker__card {
+  width: min(100%, 28rem);
+  padding: 2rem;
+  border-radius: 1.5rem;
+  background: var(--surface-color, #fff);
+  box-shadow: 0 1rem 3rem #0002;
+}
+
+.server-picker h1 {
+  margin: 0 0 1rem;
+  font-size: 1.5rem;
+}
+
+.server-picker p {
+  line-height: 1.5;
+}
+
+.server-picker label {
+  display: block;
+  margin-top: 1.5rem;
+  font-weight: 600;
+}
+
+.server-picker input {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: .5rem;
+  padding: .85rem 1rem;
+  border: 1px solid #8b8c90;
+  border-radius: .75rem;
+  background: var(--surface-color, #fff);
+  color: inherit;
+  font: inherit;
+}
+
+.server-picker button {
+  width: 100%;
+  min-height: 2.75rem;
+  margin-top: 1rem;
+  padding: .65rem 1rem;
+  border: 0;
+  border-radius: .75rem;
+  background: var(--primary-color, #3390ec);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.server-picker button:disabled {
+  cursor: wait;
+  opacity: .65;
+}
+
+.server-picker button.server-picker__secondary {
+  border: 1px solid #8b8c90;
+  background: transparent;
+  color: inherit;
+}
+
+.server-picker__error {
+  color: var(--danger-color, #b3261e);
+}
+
+.server-picker__fingerprint {
+  overflow-wrap: anywhere;
+  font-family: monospace;
+}

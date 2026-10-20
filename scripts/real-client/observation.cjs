@@ -284,6 +284,8 @@ function createContextObserver(name, options = {}) {
   const dedicatedWorkerTargetIds = new Set();
   const workerSourceLabels = new Set();
   const requestLabels = new Map();
+  const workerSourceRequestTargets = new Map();
+  const mtprotoSourceTargetIds = new Set();
   const attachedTargetIds = new Set();
   let anonymousAttachedTargets = 0;
 
@@ -311,6 +313,8 @@ function createContextObserver(name, options = {}) {
     if(!state.overflow) state.observerErrors++;
     state.overflow = true;
     requestLabels.clear();
+    workerSourceRequestTargets.clear();
+    mtprotoSourceTargetIds.clear();
     webSocket101RequestStates.clear();
     webSocket101RequestCount = 0;
   }
@@ -548,6 +552,52 @@ function createContextObserver(name, options = {}) {
     }
     const record = targets.get(targetId);
     if(!record) return;
+    if(method === 'Network.requestWillBeSent') {
+      const source = classifyWorkerSource(params?.request?.url);
+      const requestId = params?.requestId;
+      if(source.label === 'mtproto_worker') {
+        state.mtprotoSourceChunk = 'mtproto_worker';
+        workerSourceLabels.add('mtproto_worker');
+        if(typeof sessionId === 'string' && sessionId && typeof requestId === 'string' && requestId &&
+            (workerSourceRequestTargets.has(`${sessionId}:${requestId}`) ||
+              workerSourceRequestTargets.size < LIMITS.countedEventsPerContext)) {
+          workerSourceRequestTargets.set(`${sessionId}:${requestId}`, targetId);
+        }
+      }
+      return;
+    }
+    if(method === 'Network.responseReceived') {
+      const source = classifyWorkerSource(params?.response?.url);
+      const status = params?.response?.status;
+      if(source.label === 'mtproto_worker' && typeof status === 'number') {
+        state.mtprotoSourceChunk = 'mtproto_worker';
+        state.mtprotoSourceFetch = statusCategory(status);
+        if(status < 400) {
+          if(state.mtprotoSourceFetchedSequence === null) state.mtprotoSourceFetchedSequence = state.sequence;
+          mtprotoSourceTargetIds.add(targetId);
+        } else {
+          mtprotoSourceTargetIds.delete(targetId);
+        }
+      }
+    }
+    if(method === 'Network.loadingFailed') {
+      const requestId = params?.requestId;
+      const key = typeof sessionId === 'string' && typeof requestId === 'string' ? `${sessionId}:${requestId}` : '';
+      const sourceTargetId = key ? workerSourceRequestTargets.get(key) : undefined;
+      if(sourceTargetId) {
+        state.mtprotoSourceChunk = 'mtproto_worker';
+        state.mtprotoSourceFetch = 'failed';
+        mtprotoSourceTargetIds.delete(sourceTargetId);
+        workerSourceRequestTargets.delete(key);
+      }
+    }
+    if(method === 'Network.loadingFinished') {
+      const requestId = params?.requestId;
+      if(typeof sessionId === 'string' && typeof requestId === 'string') {
+        workerSourceRequestTargets.delete(`${sessionId}:${requestId}`);
+      }
+      return;
+    }
     if(method === 'Log.entryAdded') {
       const category = classifyWorkerLogEntry(params?.entry, record.isBlob);
       if(category) {
@@ -594,8 +644,8 @@ function createContextObserver(name, options = {}) {
     // and dropped: nothing from them is stored.
   }
 
-  // Page-session coverage. The page session is enabled before navigation, so
-  // the source fetch of the allowlisted MTProto chunk is observed completely.
+  // Page-session coverage. The page session is enabled before navigation,
+  // while private MTProto entry imports are recorded by their worker session.
   function notePageEvent(method, params, targetId) {
     if(!countEvent()) return;
     if(method === 'Network.webSocketCreated' || method === 'Network.webSocketHandshakeResponseReceived') {
@@ -683,16 +733,17 @@ function createContextObserver(name, options = {}) {
     return sharedWorkerTargetIds.size >= 1 ? 'created' : 'absent';
   }
 
-  // Attribution needs three independent facts: the allowlisted chunk source
-  // fetched successfully, and a same-origin blob worker created after that
-  // fetch. A blob that predates the fetch, a cross-origin blob and a blob under
-  // a failed or absent fetch are all unattributable, and presence of any blob
-  // rules out absence.
+  // Attribution needs a successful allowlisted chunk fetch and a same-origin
+  // blob worker. The module can be fetched by the page before worker creation
+  // or imported by the worker itself. A cross-origin blob and a blob under a
+  // failed or absent fetch are unattributable, and presence of any blob rules
+  // out absence.
   function attributableMtprotoBlobs() {
     if(state.mtprotoSourceFetch !== 'ok' || state.mtprotoSourceFetchedSequence === null) return [];
     return [...blobSharedWorkerTargetIds].filter((targetId) => {
       const record = targets.get(targetId);
-      return record && record.originClass === 'blob_same_origin' && record.registeredSequence > state.mtprotoSourceFetchedSequence;
+      return record && record.originClass === 'blob_same_origin' &&
+        (mtprotoSourceTargetIds.has(targetId) || record.registeredSequence > state.mtprotoSourceFetchedSequence);
     });
   }
 

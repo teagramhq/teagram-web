@@ -8,7 +8,7 @@ import basicSsl from '@vitejs/plugin-basic-ssl';
 import autoprefixer from 'autoprefixer';
 import {resolve} from 'path';
 import {existsSync, copyFileSync, readFileSync, realpathSync} from 'fs';
-import {ServerOptions} from 'vite';
+import {Plugin, ServerOptions} from 'vite';
 import {watchLangFile} from './watch-lang.js';
 import devChecks from './scripts/dev-checks.mjs';
 import settingsSearchPlugin from './scripts/settings-search-plugin.mjs';
@@ -154,6 +154,19 @@ if(USE_OWN_SOLID) {
   console.log('using original solid');
 }
 
+// URLSearchParams serializes Vite's bare `worker_file` key as `worker_file=`, which
+// its dev worker transform does not match, so the worker would run without `define`.
+const workerFileQueryPlugin: Plugin = {
+  name: 'teagram-worker-file-query',
+  apply: 'serve',
+  configureServer(server) {
+    server.middlewares.use((req, _res, next) => {
+      if(req.url) req.url = req.url.replace(/([?&]worker_file)=(?=&)/, '$1');
+      next();
+    });
+  }
+};
+
 const baseConfig = defineConfig({
   define: {
     __MTPROTO_TARGET__: JSON.stringify(mtprotoTarget),
@@ -170,6 +183,7 @@ const baseConfig = defineConfig({
     mtprotoTarget.mode === 'private' && !SOURCE_MAP_AUDIT ?
       createPrivateArtifactPlugin(rootDir, mtprotoTarget) : undefined,
     webVersionResourcePlugin(),
+    workerFileQueryPlugin,
     solidPlugin(),
     handlebarsPlugin as any,
     USE_SELF_SIGNED_CERTS ? basicSsl(BASIC_SSL_CONFIG) : undefined,

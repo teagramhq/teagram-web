@@ -568,40 +568,34 @@ describe('MTProto build target', () => {
       relativeImportPattern.test(readFileSync(path, 'utf8'))
     ) || workerPaths[0];
     const workerSource = readFileSync(workerPath, 'utf8');
-    const relativeImport = workerSource.match(relativeImportPattern);
-    const relativeDynamicImport = workerSource.match(relativeDynamicImportPattern);
+    const serverId = 'custom-' + 'a'.repeat(64);
+    const originalCreateObjectURL = URL.createObjectURL;
+    const createObjectURL = vi.fn(() => 'blob:private-mtproto-worker');
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: createObjectURL
+    });
 
-    if(relativeImport || relativeDynamicImport) {
-      const originalFetch = globalThis.fetch;
-      const originalCreateObjectURL = URL.createObjectURL;
-      const createObjectURL = vi.fn(() => 'blob:private-mtproto-worker');
-      vi.stubGlobal('fetch', vi.fn(async() => ({
-        ok: true,
-        text: async() => workerSource
-      })));
-      Object.defineProperty(URL, 'createObjectURL', {
-        configurable: true,
-        value: createObjectURL
-      });
+    try {
+      await expect(createPrivateWorkerBlobURL(workerPath, serverId, target)).resolves.toBe('blob:private-mtproto-worker');
+      const blob = createObjectURL.mock.calls[0][0];
+      const blobSource = await blob.text();
+      const contextAssignment = `globalThis.__TEAGRAM_ACTIVE_SERVER_ID__=${JSON.stringify(serverId)};globalThis.__TEAGRAM_ACTIVE_MTPROTO_TARGET__=JSON.parse(${JSON.stringify(JSON.stringify(target))});`;
+      const entryImport = `await import(${JSON.stringify(new URL(workerPath, location.href).href)});`;
 
-      try {
-        await expect(createPrivateWorkerBlobURL(workerPath)).resolves.toBe('blob:private-mtproto-worker');
-        const blob = createObjectURL.mock.calls[0][0];
-        const blobSource = await blob.text();
-        expect(blobSource).not.toMatch(relativeImportPattern);
-        expect(blobSource).not.toMatch(relativeDynamicImportPattern);
-        const firstRelativeSpecifier = relativeDynamicImport?.[2] || relativeImport?.[2];
-        expect(blobSource).toContain(new URL(firstRelativeSpecifier, location.href).href);
-      } finally {
-        vi.stubGlobal('fetch', originalFetch);
-        if(originalCreateObjectURL) {
-          Object.defineProperty(URL, 'createObjectURL', {
-            configurable: true,
-            value: originalCreateObjectURL
-          });
-        } else {
-          delete URL.createObjectURL;
-        }
+      expect(
+        relativeImportPattern.test(workerSource) || relativeDynamicImportPattern.test(workerSource)
+      ).toBe(true);
+      expect(blobSource.indexOf(contextAssignment)).toBeGreaterThanOrEqual(0);
+      expect(blobSource.indexOf(entryImport)).toBeGreaterThan(blobSource.indexOf(contextAssignment));
+    } finally {
+      if(originalCreateObjectURL) {
+        Object.defineProperty(URL, 'createObjectURL', {
+          configurable: true,
+          value: originalCreateObjectURL
+        });
+      } else {
+        delete URL.createObjectURL;
       }
     }
   }, 60_000);

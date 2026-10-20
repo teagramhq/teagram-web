@@ -21,6 +21,7 @@ import {IS_MOBILE_SAFARI} from '@environment/userAgent';
 import isWebFileLocation from '@appManagers/utils/webFiles/isWebFileLocation';
 import {MIME_TYPE_EXTENSION_MAP} from '@environment/mimeTypeMap';
 import {isObjectURL} from '@helpers/objectUrlUtils';
+import {getActiveServerQuery} from '@config/serverContext';
 
 export type ResponseMethodBlob = 'blob';
 export type ResponseMethodJson = 'json';
@@ -382,7 +383,7 @@ export class AppDownloadManager {
     if(USE_SW) {
       const id = '' + (Math.random() * 0x7FFFFFFF | 0);
       // const id = 'test';
-      url = `d/${id}`;
+      url = `d/${id}?${getActiveServerQuery()}`;
       options.downloadId = id;
 
       pingPromise = apiManagerProxy.pingServiceWorkerWithIframe();

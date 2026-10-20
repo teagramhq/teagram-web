@@ -2,6 +2,7 @@ import {IS_WORKER} from '@helpers/context';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import EncryptionKeyStore from '@lib/passcode/keyStore';
 import sessionStorage from '@lib/sessionStorage';
+import {scopeServerStorageKey} from '@config/serverContext';
 
 
 /**
@@ -16,7 +17,7 @@ import sessionStorage from '@lib/sessionStorage';
  * passcode exists to stop. `window.sessionStorage` is tab-scoped and dies with the tab,
  * so a switch interrupted by a crash or a closed tab cannot leave the key behind.
  */
-const HANDOFF_KEY = 'encryption_key_handoff';
+const HANDOFF_KEY = scopeServerStorageKey('encryption_key_handoff');
 
 // Only reachable in a window realm; the worker routes here over MTProtoMessagePort.
 export function writeEncryptionKeyHandoff(base64Key: string) {

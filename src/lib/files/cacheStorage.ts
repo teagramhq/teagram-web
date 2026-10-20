@@ -12,6 +12,7 @@ import MemoryWriter from '@lib/files/memoryWriter';
 import FileStorage from '@lib/files/fileStorage';
 import pause from '@helpers/schedulers/pause';
 import {HTTPHeaderNames} from '@lib/constants';
+import {getActiveServerId} from '@config/serverContext';
 
 
 type CacheStorageDbConfigEntry = {
@@ -63,6 +64,7 @@ export default class CacheStorageController implements FileStorage {
   private static STORAGES: CacheStorageController[] = [];
   private openDbPromise: Promise<Cache>;
   private config: CacheStorageDbConfigEntry;
+  private storageType: CacheStorageDbName;
 
   private useStorage = true;
 
@@ -86,7 +88,12 @@ export default class CacheStorageController implements FileStorage {
 
   // private log: ReturnType<typeof logger> = logger('CS');
 
-  constructor(private dbName: CacheStorageDbName) {
+  private dbName: string;
+
+  constructor(dbName: CacheStorageDbName) {
+    this.storageType = dbName;
+    const serverId = getActiveServerId();
+    this.dbName = serverId === 'default' ? dbName : `teagram-${serverId}-${dbName}`;
     if(Modes.test) {
       this.dbName += '_test';
     }
@@ -95,7 +102,7 @@ export default class CacheStorageController implements FileStorage {
       this.useStorage = CacheStorageController.STORAGES[0].useStorage;
     }
 
-    this.config = Object.entries(cacheStorageDbConfig).find(([name]) => name === dbName)?.[1];
+    this.config = cacheStorageDbConfig[dbName];
 
     this.openDatabase();
     CacheStorageController.STORAGES.push(this);
@@ -430,7 +437,7 @@ export default class CacheStorageController implements FileStorage {
   }
 
   public static getOpenStoragesByNames(names: CacheStorageDbName[]) {
-    return this.STORAGES.filter(storage => names.includes(storage.dbName));
+    return this.STORAGES.filter(storage => names.includes(storage.storageType));
   }
 
   public static async resetOpenStoragesByNames(names: CacheStorageDbName[]) {

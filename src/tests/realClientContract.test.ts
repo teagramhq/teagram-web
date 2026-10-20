@@ -857,6 +857,41 @@ describe('confined runner shared-worker observation contract', () => {
     ]).mtprotoSourceFetch).toBe('failed');
   });
 
+  it('attributes an MTProto module import made by its blob shared worker', () => {
+    const workerId = 'mtproto-worker';
+    const requestId = 'mtproto-worker-source';
+    const summary = replayContext([
+      {kind: 'target', target: pageTarget()},
+      {kind: 'target', target: sharedWorker(workerId, HOSTILE.blobUrl)},
+      {kind: 'attach', targetId: workerId},
+      {kind: 'setup', targetId: workerId},
+      {
+        kind: 'worker',
+        targetId: workerId,
+        method: 'Network.requestWillBeSent',
+        params: {
+          ...networkRequestWillBeSent(requestId, MTPROTO_CHUNK_URL),
+          request: {url: MTPROTO_CHUNK_URL, headers: {authorization: HOSTILE.token}}
+        }
+      },
+      {
+        kind: 'worker',
+        targetId: workerId,
+        method: 'Network.responseReceived',
+        params: {type: 'Script', response: {url: MTPROTO_CHUNK_URL, status: 200, headers: {authorization: HOSTILE.token}}}
+      }
+    ]);
+
+    expect(summary).toMatchObject({
+      mtprotoSourceChunk: 'mtproto_worker',
+      mtprotoSourceFetch: 'ok',
+      mtprotoWorker: 'mtproto_candidate',
+      sharedWorkerState: 'created',
+      workerSourceChunks: ['blob_same_origin', 'mtproto_worker']
+    });
+    expectNoHostileLeak(summary);
+  });
+
   it('never reads a worker destroyed before attach as loaded', () => {
     const summary = replayContext([
       {kind: 'target', target: pageTarget()},

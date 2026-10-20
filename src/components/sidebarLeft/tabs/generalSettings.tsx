@@ -91,6 +91,25 @@ const SettingsSection = () => {
   );
 };
 
+const ServerSettingsSection = () => {
+  const host = (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__ as string | undefined;
+  if(!host) return null;
+
+  return (
+    <Section name={<span>Server</span>}>
+      <Row>
+        <Row.Title>{host}</Row.Title>
+      </Row>
+      <Show when={location.hostname.toLowerCase().replace(/\.+$/, '') === 'web.teagram.io'}>
+        <Row clickable={() => location.reload()}>
+          <Row.Icon icon="devices_filled" />
+          <Row.Title>Choose another server</Row.Title>
+        </Row>
+      </Show>
+    </Section>
+  );
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Section 2 — color theme picker (horizontal scroller + variant radios)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -340,6 +359,7 @@ const TimeFormatSection = () => {
 const GeneralSettings = () => {
   return (
     <>
+      <ServerSettingsSection />
       <SettingsSection />
       <ThemeSection />
       {IS_GEOLOCATION_SUPPORTED && <DistanceUnitsSection />}
