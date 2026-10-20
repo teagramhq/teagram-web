@@ -198,7 +198,6 @@ jobs:
         env:
           PLAYWRIGHT_TRACING_NO_WEBSOCKET_FRAMES: '1'
           PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/custom-server-playwright-report.json
-          TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD: controlled-failure-password
         run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/customServerLocalSignIn.spec.ts --project=chromium --workers=1 --reporter=list,json
 
       - name: Run standard auth browser smoke
