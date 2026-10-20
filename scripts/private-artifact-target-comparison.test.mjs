@@ -401,7 +401,7 @@ describe('private artifact target comparison', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
     const scripts = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')).scripts;
 
-    expect(scripts['test:private-auth']).toContain('playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameRegistration.spec.ts');
+    expect(scripts['test:private-auth']).toContain('playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameSignInTurnstile.spec.ts e2e/privateUsernameRegistration.spec.ts');
     expect(scripts['test:private-auth']).toContain('e2e/customServerRegistration.spec.ts e2e/customServerLocalSignIn.spec.ts');
     expect(scripts['test:private-auth']).toContain('pnpm run test:standard-auth');
     expect(scripts['test:standard-auth']).toBe('playwright test -c playwright.standard-auth.config.ts e2e/standardSignupTurnstile.spec.ts');
