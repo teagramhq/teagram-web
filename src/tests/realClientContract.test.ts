@@ -7757,15 +7757,81 @@ describe('real client poll option interaction', () => {
         storeClosed: false,
         domPollCount: 1,
         domVisiblePollCount: 1,
-        domResultIndicatorCount: 0,
+        domVisibleResultIndicatorCount: 0,
+        domVisibleVoteButtonCount: 0,
         domSelectOptionCount: 1,
         domAnswerOneCountCount: 0,
         domAnswerOnePercentCount: 0
       });
       const summary = realClientBrowser.formatPollResultsDiagnostic(diagnostic);
       expect(summary).toContain('store_total_voters_1_store_answer_voters_1_0');
+      expect(summary).toContain('_dom_visible_result_indicators_0_dom_visible_vote_buttons_0_');
       expect(summary).not.toContain(question);
       expect(summary).not.toContain('browser-ci-poll-answer-one');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('reports nested visible results and excludes Vote text hidden on an ancestor or itself', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-visible-results-question';
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="bubble" data-mid="77">
+          <div>${question}</div>
+          <div data-poll-option-idx="0"><span>browser-ci-poll-answer-one</span><span>1</span><span>100%</span></div>
+          <div style="display:none"><div class="footerButton"><span>Vote</span></div></div>
+          <div class="footerButton"><span style="display:none">Vote</span></div>
+          <div style="display:none"><span>View Votes (1)</span></div>
+          <div class="footerButton"><span>View Votes </span><b>(</b><span>1</span><b>)</b></div>
+        </div>
+      </div>`);
+
+      const diagnostic = await realClientBrowser.readPollResultsDiagnostic(page, question, 'browser-ci-poll-answer-one');
+
+      expect(diagnostic).toMatchObject({
+        domVisibleResultIndicatorCount: 1,
+        domVisibleVoteButtonCount: 0,
+        domAnswerOneCountCount: 1,
+        domAnswerOnePercentCount: 1
+      });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('reports a genuinely visible Vote control alongside visible results', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-visible-vote-question';
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="bubble" data-mid="78">
+          <div>${question}</div>
+          <div data-poll-option-idx="0"><span>browser-ci-poll-answer-one</span><span>1</span><span>100%</span></div>
+          <div class="footerButton" style="position:relative;width:120px;height:36px" onclick="window.voteCount++">
+            <div class="c-ripple" style="position:absolute;inset:0"></div>
+            <span>Vote</span>
+          </div>
+          <div class="footerButton"><span>View Votes </span><b>(</b><span>1</span><b>)</b></div>
+        </div>
+      </div>`);
+      await page.evaluate(() => { (window as any).voteCount = 0; });
+
+      const poll = page.locator('#column-center .bubble');
+      const voteButton = realClientBrowser.getPollVoteButton(poll);
+      expect(await voteButton.count()).toBe(1);
+      await voteButton.click();
+      expect(await page.evaluate(() => (window as any).voteCount)).toBe(1);
+
+      const diagnostic = await realClientBrowser.readPollResultsDiagnostic(page, question, 'browser-ci-poll-answer-one');
+
+      expect(diagnostic).toMatchObject({
+        domVisibleResultIndicatorCount: 1,
+        domVisibleVoteButtonCount: 1
+      });
+      await expect(realClientBrowser.submitPollVote(page, poll, question, 'bob_poll_vote'))
+      .rejects.toThrow(/dom_visible_vote_buttons_1/);
     } finally {
       await page.close();
     }

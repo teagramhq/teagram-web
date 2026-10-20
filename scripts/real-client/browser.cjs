@@ -2785,18 +2785,27 @@ async function readPollResultsDiagnostic(page, question, answerText) {
     .filter((element) => element.textContent?.includes(questionText));
     const bubble = bubbles.length === 1 ? bubbles[0] : undefined;
     const isVisible = (element) => {
-      const style = window.getComputedStyle(element);
+      for(let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+        const style = window.getComputedStyle(ancestor);
+        if(style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+      }
       const rect = element.getBoundingClientRect();
-      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      return rect.width > 0 && rect.height > 0;
     };
     const leafTextCount = (element, text) => element ? [...element.querySelectorAll('*')]
     .filter((node) => node.children.length === 0 && node.textContent?.trim() === text).length : 0;
+    const exactTextElements = (element, text) => element ? [...element.querySelectorAll('*')]
+    .filter((node) => node.textContent?.trim() === text) : [];
+    const innermostExactTextElements = (element, text) => {
+      const matches = exactTextElements(element, text);
+      return matches.filter((node) => !matches.some((other) => other !== node && node.contains(other)));
+    };
+    const visibleExactTextCount = (element, text) => innermostExactTextElements(element, text).filter(isVisible).length;
     const options = bubble ? [...bubble.querySelectorAll('[data-poll-option-idx]')] : [];
     const answer = options.filter((element) => element.textContent?.includes(expectedAnswerText));
-    const resultIndicatorCount = bubble ? [...bubble.querySelectorAll('*')]
-    .filter((element) => element.children.length === 0 &&
-      ['1 member voted', 'View Votes (1)'].includes(element.textContent?.trim())).length : 0;
-    const voteButtonCount = leafTextCount(bubble, 'Vote');
+    const resultIndicatorCount = visibleExactTextCount(bubble, '1 member voted') + visibleExactTextCount(bubble, 'View Votes (1)');
+    const voteLabels = innermostExactTextElements(bubble, 'Vote').filter(isVisible);
+    const voteButtonCount = new Set(voteLabels.map((label) => label.parentElement).filter((control) => control && isVisible(control))).size;
     const selectOptionCount = leafTextCount(bubble, 'Select an option');
     const peerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
     const midText = bubble?.dataset.mid;
@@ -2839,8 +2848,8 @@ async function readPollResultsDiagnostic(page, question, answerText) {
       domPollCount: bubbles.length,
       domVisiblePollCount: visiblePollCount,
       domOptionCount: options.length,
-      domResultIndicatorCount: resultIndicatorCount,
-      domVoteButtonCount: voteButtonCount,
+      domVisibleResultIndicatorCount: resultIndicatorCount,
+      domVisibleVoteButtonCount: voteButtonCount,
       domSelectOptionCount: selectOptionCount,
       domAnswerOneCount: answer.length,
       domAnswerOneCountCount: answer.length === 1 ? leafTextCount(answer[0], '1') : 0,
@@ -2858,8 +2867,8 @@ async function readPollResultsDiagnostic(page, question, answerText) {
     domPollCount: null,
     domVisiblePollCount: null,
     domOptionCount: null,
-    domResultIndicatorCount: null,
-    domVoteButtonCount: null,
+    domVisibleResultIndicatorCount: null,
+    domVisibleVoteButtonCount: null,
     domSelectOptionCount: null,
     domAnswerOneCount: null,
     domAnswerOneCountCount: null,
@@ -2884,8 +2893,8 @@ function formatPollResultsDiagnostic(diagnostic) {
     `_dom_polls_${safeCount(diagnostic.domPollCount)}` +
     `_dom_visible_polls_${safeCount(diagnostic.domVisiblePollCount)}` +
     `_dom_options_${safeCount(diagnostic.domOptionCount)}` +
-    `_dom_result_indicators_${safeCount(diagnostic.domResultIndicatorCount)}` +
-    `_dom_vote_buttons_${safeCount(diagnostic.domVoteButtonCount)}` +
+    `_dom_visible_result_indicators_${safeCount(diagnostic.domVisibleResultIndicatorCount)}` +
+    `_dom_visible_vote_buttons_${safeCount(diagnostic.domVisibleVoteButtonCount)}` +
     `_dom_select_option_${safeCount(diagnostic.domSelectOptionCount)}` +
     `_dom_answer_matches_${safeCount(diagnostic.domAnswerOneCount)}` +
     `_dom_answer_one_counts_${safeCount(diagnostic.domAnswerOneCountCount)}` +
@@ -3669,6 +3678,10 @@ async function waitForPollResults(page, question, stage, timeoutMs = 30_000) {
   if(await selectedAnswer.count() !== 1) failStage(`${stage}_selected_answer`);
   await selectedAnswer.getByText('1', {exact: true}).waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_count`));
   await selectedAnswer.getByText('100%', {exact: true}).waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_percentage`));
+  const diagnostic = await readPollResultsDiagnostic(page, question, POLL_ANSWER_ONE);
+  if(diagnostic.domVisibleResultIndicatorCount !== 1 || diagnostic.domVisibleVoteButtonCount !== 0) {
+    failStage(`${stage}_${formatPollResultsDiagnostic(diagnostic)}`);
+  }
   return poll;
 }
 
