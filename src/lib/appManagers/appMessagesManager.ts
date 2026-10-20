@@ -843,7 +843,10 @@ export class AppMessagesManager extends AppManager {
         dialog.draft = draft;
 
         let drop = false;
-        if(!draft && !getServerMessageId(dialog.top_message)) {
+        const hasTopMessage = getServerMessageId(dialog.top_message);
+        const canKeepEmptyChannelDialog = !hasTopMessage && isDialog(dialog) &&
+          this.dialogsStorage.canSaveEmptyChannelDialog(peerId, dialog);
+        if(!draft && !hasTopMessage && !canKeepEmptyChannelDialog) {
           this.dialogsStorage.dropDialog(peerId);
           drop = true;
         } else {
@@ -12904,6 +12907,7 @@ export class AppMessagesManager extends AppManager {
     let typing = this.typings[key];
     if(
       !peerId ||
+      this.appPeersManager.isBroadcast(peerId) ||
       !(await this.canSendToPeer(peerId)) ||
       peerId === this.appPeersManager.peerId ||
       // (!force && deepEqual(typing?.action, action))

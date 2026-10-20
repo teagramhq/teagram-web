@@ -94,6 +94,11 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
   private projectedPeerFolderIds = new Map<PeerId, number>();
   private filterPinnedPeerIds = new Set<PeerId>();
   private communityProjectionDestroyed = false;
+  private emptyChannelDialogReconcileDisposers = new Map<PeerId, () => void>();
+  private emptyChannelDialogReconcilePromises = new Map<PeerId, Promise<void>>();
+  private emptyChannelDialogReconcileRequested = new Set<PeerId>();
+  private emptyChannelDialogReconcileUpdatingDialogs = new Set<PeerId>();
+  private emptyChannelDialogReconcileGeneration = 0;
 
   constructor({filterId, ...args}: ConstructorArgs) {
     super(args);
@@ -220,6 +225,8 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
         this.updateDialog(dialog);
         this.appDialogsManager.processContact?.(peerId.toPeerId());
       }
+
+      this.reconcileWatchedEmptyChannelDialogs();
     });
 
     this.listenerSetter.add(rootScope)('dialog_drop', (dialog) => {
@@ -298,7 +305,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     return this.appDialogsManager.xd === this;
   }
 
-  public async handleChatUpdate(chatId: ChatId) {
+  public handleChatUpdate(chatId: ChatId) {
     const peerId = chatId.toPeerId(true);
     if(this.isActive && !this.sortedList.has(peerId)) {
       const channel = apiManagerProxy.getPeer(peerId) as Chat;
@@ -307,14 +314,171 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
         !channel.pFlags?.left &&
         !(channel as any).pFlags?.kicked
       ) {
-        const dialog = await this.managers.appMessagesManager.getDialogOnly(peerId);
-        if(dialog && this.isActive && !this.sortedList.has(peerId)) {
-          this.updateDialog(dialog);
-        }
+        this.watchForEmptyChannelDialog(peerId);
       }
     }
 
     this.processDialogForCallStatus(peerId);
+  }
+
+  private watchForEmptyChannelDialog(peerId: PeerId) {
+    if(
+      !this.isActive ||
+      this.sortedList.has(peerId) ||
+      this.emptyChannelDialogReconcileUpdatingDialogs.has(peerId)
+    ) {
+      return;
+    }
+
+    if(!this.emptyChannelDialogReconcileDisposers.has(peerId)) {
+      const dispose = createRoot((dispose) => {
+        createEffect(() => {
+          if(usePeers()[peerId]) {
+            this.requestEmptyChannelDialogReconcile(peerId);
+          }
+        });
+        return dispose;
+      });
+      this.emptyChannelDialogReconcileDisposers.set(peerId, dispose);
+    }
+
+    this.requestEmptyChannelDialogReconcile(peerId);
+  }
+
+  private reconcileWatchedEmptyChannelDialogs() {
+    for(const peerId of this.emptyChannelDialogReconcileDisposers.keys()) {
+      this.requestEmptyChannelDialogReconcile(peerId);
+    }
+  }
+
+  private async reconcileCachedEmptyChannelDialogs() {
+    if(!this.isActive) {
+      return;
+    }
+
+    const dialogs = await this.managers.dialogsStorage.getCachedDialogs(true);
+    if(!this.isActive) {
+      return;
+    }
+
+    for(const dialog of dialogs) {
+      if(
+        dialog.peer?._ === 'peerChannel' &&
+        !getServerMessageId(dialog.top_message) &&
+        !dialog.draft &&
+        !this.sortedList.has(dialog.peerId)
+      ) {
+        this.watchForEmptyChannelDialog(dialog.peerId);
+      }
+    }
+  }
+
+  private requestEmptyChannelDialogReconcile(peerId: PeerId) {
+    void this.reconcileEmptyChannelDialog(peerId).catch(noop);
+  }
+
+  private reconcileEmptyChannelDialog(peerId: PeerId) {
+    const pending = this.emptyChannelDialogReconcilePromises.get(peerId);
+    if(pending) {
+      this.emptyChannelDialogReconcileRequested.add(peerId);
+      return pending;
+    }
+
+    const generation = this.emptyChannelDialogReconcileGeneration;
+    const promise = Promise.resolve().then(async() => {
+      try {
+        do {
+          this.emptyChannelDialogReconcileRequested.delete(peerId);
+          await this.reconcileEmptyChannelDialogOnce(peerId, generation);
+        } while(
+          this.emptyChannelDialogReconcileRequested.has(peerId) &&
+          generation === this.emptyChannelDialogReconcileGeneration &&
+          this.isActive &&
+          !this.sortedList.has(peerId) &&
+          this.emptyChannelDialogReconcileDisposers.has(peerId)
+        );
+      } finally {
+        this.emptyChannelDialogReconcileRequested.delete(peerId);
+        if(this.emptyChannelDialogReconcilePromises.get(peerId) === promise) {
+          this.emptyChannelDialogReconcilePromises.delete(peerId);
+        }
+      }
+    });
+    this.emptyChannelDialogReconcilePromises.set(peerId, promise);
+    return promise;
+  }
+
+  private async reconcileEmptyChannelDialogOnce(peerId: PeerId, generation: number) {
+    if(!this.isActive || this.sortedList.has(peerId)) {
+      this.stopWatchingEmptyChannelDialog(peerId);
+      return;
+    }
+
+    const peer = usePeers()[peerId];
+    if(!peer) {
+      return;
+    }
+    if(peer._ !== 'channel' || peer.pFlags?.left || (peer as any).pFlags?.kicked) {
+      this.stopWatchingEmptyChannelDialog(peerId);
+      return;
+    }
+
+    let dialog = await this.managers.appMessagesManager.getDialogOnly(peerId);
+    if(!dialog) {
+      // Membership updates can arrive before a dialog is cached for an empty channel.
+      dialog = await this.managers.appMessagesManager.reloadConversation(peerId) ||
+        await this.managers.appMessagesManager.getDialogOnly(peerId);
+    }
+    if(generation !== this.emptyChannelDialogReconcileGeneration) {
+      return;
+    }
+    if(!this.isActive || this.sortedList.has(peerId)) {
+      this.stopWatchingEmptyChannelDialog(peerId);
+      return;
+    }
+    if(!dialog) {
+      return;
+    }
+
+    const currentPeer = usePeers()[peerId];
+    if(!currentPeer || currentPeer._ !== 'channel' || currentPeer.pFlags?.left || (currentPeer as any).pFlags?.kicked) {
+      this.stopWatchingEmptyChannelDialog(peerId);
+      return;
+    }
+    if(dialog.peer?._ !== 'peerChannel' || getServerMessageId(dialog.top_message) || dialog.draft) {
+      this.stopWatchingEmptyChannelDialog(peerId);
+      return;
+    }
+
+    this.emptyChannelDialogReconcileUpdatingDialogs.add(peerId);
+    try {
+      this.updateDialog(dialog);
+    } finally {
+      this.emptyChannelDialogReconcileUpdatingDialogs.delete(peerId);
+    }
+    if(this.sortedList.has(peerId)) {
+      this.stopWatchingEmptyChannelDialog(peerId);
+    }
+  }
+
+  private stopWatchingEmptyChannelDialog(peerId: PeerId) {
+    this.emptyChannelDialogReconcilePromises.delete(peerId);
+    this.emptyChannelDialogReconcileRequested.delete(peerId);
+    this.emptyChannelDialogReconcileUpdatingDialogs.delete(peerId);
+    const dispose = this.emptyChannelDialogReconcileDisposers.get(peerId);
+    this.emptyChannelDialogReconcileDisposers.delete(peerId);
+    dispose?.();
+  }
+
+  private clearEmptyChannelDialogReconciliations() {
+    ++this.emptyChannelDialogReconcileGeneration;
+    this.emptyChannelDialogReconcilePromises.clear();
+    this.emptyChannelDialogReconcileRequested.clear();
+    this.emptyChannelDialogReconcileUpdatingDialogs.clear();
+    for(const dispose of this.emptyChannelDialogReconcileDisposers.values()) {
+      dispose();
+    }
+    this.emptyChannelDialogReconcileDisposers.clear();
   }
 
   public getRectFromForPlaceholder() {
@@ -417,6 +581,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       });
 
       await this.scheduleCommunityProjection();
+      await this.reconcileCachedEmptyChannelDialogs();
       this.placeholder?.detach(this.sortedList.itemsLength());
 
       return {
@@ -733,7 +898,17 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       return;
     }
 
-    return super.updateDialog(dialog);
+    const result = super.updateDialog(dialog);
+    if(
+      dialog.peer?._ === 'peerChannel' &&
+      !getServerMessageId(dialog.top_message) &&
+      !dialog.draft &&
+      !this.sortedList.has(dialog.peerId)
+    ) {
+      this.watchForEmptyChannelDialog(dialog.peerId);
+    }
+
+    return result;
   }
 
   public setCallStatus(dom: DialogDom, visible: boolean) {
@@ -842,10 +1017,8 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       apiManagerProxy.getPeer(dialog.peerId) as Chat :
       undefined;
     if(
-      !this.sortedList.has(dialog.peerId) &&
       dialog.peer?._ === 'peerChannel' &&
       !getServerMessageId(dialog.top_message) &&
-      !dialog.draft &&
       // Manager proxies return promises, so check the mirrored membership snapshot synchronously.
       channel?._ === 'channel' &&
       !channel.pFlags?.left &&
@@ -870,6 +1043,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
   public clear(): void {
     ++this.communityProjectionGeneration;
     this.communityProjectionPromise = Promise.resolve();
+    this.clearEmptyChannelDialogReconciliations();
     for(const row of this.communityProjectionRows.values()) {
       row.destroy();
     }
@@ -883,6 +1057,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     this.communityProjectionDestroyed = true;
     this.communityProjectionDispose?.();
     this.communityProjectionDispose = undefined;
+    this.clearEmptyChannelDialogReconciliations();
     super.destroy();
     this.archiveDialogState?.dispose();
   }

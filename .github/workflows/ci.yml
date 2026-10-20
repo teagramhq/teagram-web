@@ -195,6 +195,10 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.18.0
+
       - name: Set up Go
         uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
@@ -206,9 +210,14 @@ jobs:
       - name: Install yq
         run: go install github.com/mikefarah/yq/v4@v4.54.1
 
-      - name: Lint the production deploy workflow
+      - name: Lint deployment and real-client workflows
         run: |
-          "$(go env GOPATH)/bin/actionlint" .github/workflows/deploy.yml
+          "$(go env GOPATH)/bin/actionlint" -ignore 'label "ubuntu-26.04" is unknown' \
+            .github/workflows/ci.yml \
+            .github/workflows/deploy.yml \
+            .github/workflows/real-client-browser-flow.yml
+          node --check scripts/real-client/browser.cjs
+          node --check scripts/real-client/run.mjs
 
       - name: Check the deploy workflow contract
         run: PATH="$(go env GOPATH)/bin:$PATH" bash .github/scripts/test-deploy-workflow-contract.sh

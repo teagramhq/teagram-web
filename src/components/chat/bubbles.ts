@@ -147,6 +147,7 @@ import {avatarNew, findUpAvatar} from '@components/avatarNew';
 import Icon from '@components/icon';
 import wrapCallBubble from '@components/wrappers/callBubble';
 import {FullMid, makeFullMid, splitFullMid} from '@appManagers/utils/messages/fullMid';
+import {getCurrentMessageFullMid} from './bubbles/renderQueue';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import setBlankToAnchor from '@lib/richTextProcessor/setBlankToAnchor';
 import addAnchorListener, {UNSAFE_ANCHOR_LINK_TYPES} from '@helpers/addAnchorListener';
@@ -941,7 +942,7 @@ export default class ChatBubbles {
 
     this.batchProcessor = new BatchProcessor({
       log: this.log,
-      process: this.processBatch,
+      process: this.processBatch.bind(this),
       possibleError: PEER_CHANGED_ERROR
     });
     this.preloader = new ProgressivePreloader({
@@ -2405,6 +2406,8 @@ export default class ChatBubbles {
         this.chat.canSend('embed_links')
       ]);
       if(!middleware()) return;
+      const input = this.chat.input;
+      if(!input) return;
 
       if(hadRights !== hasRights || hadPlainRights !== hasPlainRights) {
         await refreshInput();
@@ -2412,9 +2415,9 @@ export default class ChatBubbles {
 
       if(!middleware()) return;
       // reset webpage
-      if((canEmbedLinks && !this.chat.input.willSendWebPage) || (!canEmbedLinks && this.chat.input.willSendWebPage)) {
-        this.chat.input.lastUrl = '';
-        this.chat.input.onMessageInput();
+      if((canEmbedLinks && !input.willSendWebPage) || (!canEmbedLinks && input.willSendWebPage)) {
+        input.lastUrl = '';
+        input.onMessageInput();
       }
 
       if(!!(chat as MTChat.channel).pFlags.forum !== this.chat.isForum && this.chat.type === ChatType.Chat) {
@@ -6560,15 +6563,17 @@ export default class ChatBubbles {
     });
   }
 
-  private processBatch = async(...args: Parameters<ChatBubbles['batchProcessor']['process']>) => {
+  private async processBatch(...args: Parameters<ChatBubbles['batchProcessor']['process']>) {
     let [loadQueue, m, log] = args;
 
     const filterQueue = (queue: typeof loadQueue) => {
       return queue.filter((details) => {
+        if(!details) return false;
+
         // message can be deleted during rendering
-        return details &&
-          this.getBubble(this.makeFullMid(details.message)) === details.bubble &&
-          !this.changedMids.has(getMid(details.message));
+        const fullMid = this.makeFullMid(details.message);
+        const currentFullMid = getCurrentMessageFullMid(fullMid, getMid(details.message), this.changedMids);
+        return this.getBubble(currentFullMid) === details.bubble;
       });
     };
 
@@ -6702,7 +6707,7 @@ export default class ChatBubbles {
     }).catch(noop);
 
     // this.setStickyDateManually();
-  };
+  }
 
   public renderMessagesQueue(options: ReturnType<ChatBubbles['safeRenderMessage']>) {
     return this.batchProcessor.addToQueue(options);

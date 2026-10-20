@@ -1,13 +1,16 @@
 import {execFileSync} from 'node:child_process';
-import {readFileSync} from 'node:fs';
+import {chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
-import {dirname, resolve} from 'node:path';
+import {dirname, isAbsolute, join, resolve} from 'node:path';
 import {isIPv4} from 'node:net';
 
 import {
   assertAllScenariosPassed,
+  expectedScreenshotCount,
   formatBrowserFailureMessage,
+  parsePassedBrowserGateBreakdown,
   parseChannelMembershipState,
+  POLL_NEGATIVE_CONTROL_EVIDENCE,
   REQUIRED_CONTROLS,
   parseFixtureReadiness,
   parseAuthProgressReport,
@@ -18,12 +21,16 @@ import {
   readSyntheticCredentials
 } from './contract.mjs';
 
-const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> (--scenarios sign-in,message,group[,channel] | --auth-progress-one-submission)
+const HELP = `Usage: pnpm run test:real-client -- --readiness-file <jsonl> --harness-revision <sha> --server-revision <sha> --web-revision <sha> --run-id <hex> (--scenarios <scenario-list> | --auth-progress-one-submission) [--page-error-diagnostics]
+
+For the legacy poll regression control, add --poll-creation-negative-control and pin the pre-MAIN-2111 server revision.
 
 The fixture must remain running after artifact-ready. The command validates its immutable pins,
 protected synthetic credentials, internal browser network, audited artifact evidence, per-context
-shared-worker observation, the three required UI scenarios plus the optional channel scenario,
-or one bounded Username submission.
+shared-worker observation, sign-in/message/group plus independently optional channel and poll scenarios,
+or one bounded Username submission. The opt-in page-error diagnostics include bounded, sanitized
+source frames, private page path, fixed scenario and stage labels, and optional RPC error type/code.
+Raw page-error messages and stack text are never serialized.
 The one-submission mode stops at password-field readiness without entering or submitting a password.`;
 const NETWORK_SOURCES = ['page', 'shared_worker', 'service_worker', 'worker'];
 
@@ -61,6 +68,7 @@ if(args?.help) {
   let browserResult;
   let passwordEvidence = [];
   let readiness;
+  let traceOutputDirectory;
   let controlsOnlyDone = false;
   let authProgressFailure = false;
 
@@ -80,7 +88,31 @@ if(args?.help) {
     }
   };
 
+  const dockerBytes = (dockerArgs, stage, timeout = 30_000) => {
+    try {
+      return execFileSync('docker', dockerArgs, {
+        encoding: null,
+        maxBuffer: 52 * 1024 * 1024,
+        timeout,
+        windowsHide: true
+      });
+    } catch {
+      throw new Error(`${stage} failed`);
+    }
+  };
+
   try {
+    if(process.env.REAL_CLIENT_TRACE_DIR) {
+      if(!isAbsolute(process.env.REAL_CLIENT_TRACE_DIR)) throw new Error('trace output directory must be absolute');
+      traceOutputDirectory = resolve(process.env.REAL_CLIENT_TRACE_DIR);
+      mkdirSync(traceOutputDirectory, {recursive: true, mode: 0o700});
+      const traceDirectoryStat = lstatSync(traceOutputDirectory);
+      if(!traceDirectoryStat.isDirectory() || traceDirectoryStat.isSymbolicLink() || readdirSync(traceOutputDirectory).length > 0) {
+        throw new Error('trace output directory must be a new empty directory');
+      }
+      chmodSync(traceOutputDirectory, 0o700);
+    }
+
     const controlsOnly = args.observerControlsOnly === true;
     const authProgress = args.authProgressOneSubmission === true;
     const readinessText = readFileSync(resolve(args.readinessFile), 'utf8');
@@ -178,6 +210,8 @@ if(args?.help) {
     const browserInput = JSON.stringify({
       ...(controlsOnly ? {observationOnly: true} : {}),
       ...(authProgress ? {authProgressOneSubmission: true} : {}),
+      ...(args.pageErrorDiagnostics === true ? {pageErrorDiagnostics: true} : {}),
+      ...(args.pollCreationNegativeControl === true ? {pollCreationNegativeControl: true} : {}),
       ...(Array.isArray(args.scenarios) ? {scenarios: args.scenarios} : {}),
       runId: args.runId,
       endpoint: serverReady.endpoint,
@@ -190,6 +224,7 @@ if(args?.help) {
       webRevision: args.webRevision,
       frontIp,
       screenshotDirectory,
+      ...(traceOutputDirectory ? {traceDirectory: `/tmp/real-client-traces-${args.runId}`} : {}),
       accounts: credentials
     });
     let browserOutput;
@@ -215,6 +250,7 @@ if(args?.help) {
         try {
           const failedRun = JSON.parse(browserStdout.trim());
           if(failedRun.status === 'failed' && typeof failedRun.stage === 'string') {
+            browserResult = failedRun;
             throw new Error(formatBrowserFailureMessage(failedRun, controlsOnly));
           }
         } catch(parseError) {
@@ -277,19 +313,36 @@ if(args?.help) {
       if(args.scenarios.includes('channel')) {
         const channelMembership = parseChannelMembershipState(browserResult.channelMembership);
         if(channelMembership === 'unavailable' || channelMembership === 'unclassified' ||
-            channelMembership.peerRowCount !== 1 || !channelMembership.peerRowHasTitle) {
+            channelMembership.bob.channelRowCount !== 1 || channelMembership.bob.channelTitleMatches !== 1) {
           throw new Error('channel membership evidence is incomplete');
         }
         browserResult.channelMembership = channelMembership;
       }
-      if(browserResult.contextCount !== 2 || browserResult.screenshotsCaptured !== 16 ||
-          browserResult.network?.unexpectedAttempts !== 0 || browserResult.network?.observerErrors !== 0 ||
-          ['alice', 'bob'].some((account) => {
-            const context = browserResult.network?.contexts?.[account];
-            return !hasNetworkSourceEvidence(context) ||
-              !Number.isSafeInteger(context.workerTargets?.service_worker) || context.workerTargets.service_worker < 1;
-          })) {
-        throw new Error('real client UI or page/worker egress evidence is incomplete');
+      if(args.pollCreationNegativeControl === true) {
+        if(JSON.stringify(browserResult.pollNegativeControl) !== JSON.stringify(POLL_NEGATIVE_CONTROL_EVIDENCE)) {
+          throw new Error('poll creation negative control evidence is incomplete');
+        }
+      } else if(browserResult.pollNegativeControl !== undefined) {
+        throw new Error('poll creation negative control evidence was unexpected');
+      }
+      browserResult.gateBreakdown = parsePassedBrowserGateBreakdown(browserResult);
+      const expectedScreenshots = expectedScreenshotCount(args);
+      const incompleteEvidence = [];
+      if(browserResult.contextCount !== 2) incompleteEvidence.push('contexts');
+      if(browserResult.screenshotsCaptured !== expectedScreenshots) {
+        incompleteEvidence.push(`screenshots_${Number.isSafeInteger(browserResult.screenshotsCaptured) ? browserResult.screenshotsCaptured : 'unavailable'}_expected_${expectedScreenshots}`);
+      }
+      if(browserResult.network?.unexpectedAttempts !== 0) incompleteEvidence.push('unexpected_egress');
+      if(browserResult.network?.observerErrors !== 0) incompleteEvidence.push('observer_errors');
+      for(const account of ['alice', 'bob']) {
+        const context = browserResult.network?.contexts?.[account];
+        if(!hasNetworkSourceEvidence(context)) incompleteEvidence.push(`${account}_network_sources`);
+        if(!Number.isSafeInteger(context?.workerTargets?.service_worker) || context.workerTargets.service_worker < 1) {
+          incompleteEvidence.push(`${account}_service_worker`);
+        }
+      }
+      if(incompleteEvidence.length > 0) {
+        throw new Error(`real client UI or page/worker egress evidence is incomplete (${incompleteEvidence.join(',')})`);
       }
       // The page-session observer cannot see shared workers, so the shared-worker
       // evidence is the browser-level observation block: synthetic controls, per-context
@@ -299,12 +352,56 @@ if(args?.help) {
   } catch(error) {
     operationError = error;
   } finally {
-    if(browserContainerValidated) {
+    if(browserResult?.status === 'failed' && browserResult.failureTraceReady === true && traceOutputDirectory && browserContainerValidated) {
       try {
         const browserName = `teagram-fixture-${args.runId}browser`;
-        docker(['exec', browserName, 'rm', '-rf', '--', `/tmp/real-client-${args.runId}`], undefined, 'screenshot cleanup');
-      } catch {
-        cleanupError = new Error('screenshot cleanup failed');
+        const traceRoot = `/tmp/real-client-traces-${args.runId}`;
+        const traceListing = docker(['exec', browserName, 'find', traceRoot, '-maxdepth', '1', '-type', 'f', '-printf', '%f\\n'], undefined, 'Playwright failure trace inspection');
+        const availableTraceFiles = new Set(traceListing.split(/\r?\n/).filter((name) => /^[a-z]+\.zip$/.test(name)));
+        const traceFiles = [];
+        for(const name of ['alice', 'bob']) {
+          if(!availableTraceFiles.has(`${name}.zip`)) continue;
+          const traceBytes = dockerBytes(['exec', browserName, 'cat', `${traceRoot}/${name}.zip`], 'Playwright failure trace export');
+          writeFileSync(join(traceOutputDirectory, `${name}.zip`), traceBytes, {mode: 0o600, flag: 'wx'});
+          traceFiles.push(`${name}.zip`);
+        }
+        const entries = readdirSync(traceOutputDirectory);
+        if(traceFiles.length === 0 || JSON.stringify([...traceFiles].sort()) !== JSON.stringify(entries.sort())) {
+          const observedFiles = traceListing.split(/\r?\n/).filter((name) => /^[a-z0-9_.-]+$/.test(name)).slice(0, 24);
+          throw new Error(`browser assertion failure produced no Playwright trace (browser files: ${observedFiles.join(',') || 'none'})`);
+        }
+        for(const name of traceFiles) {
+          const tracePath = join(traceOutputDirectory, name);
+          const fileStat = lstatSync(tracePath);
+          if(!fileStat.isFile() || fileStat.isSymbolicLink() || fileStat.size < 4 || fileStat.size > 50 * 1024 * 1024 ||
+              readFileSync(tracePath).subarray(0, 4).toString('hex') !== '504b0304') {
+            throw new Error('Playwright failure trace is invalid');
+          }
+        }
+        writeFileSync(join(traceOutputDirectory, 'trace-manifest.json'), `${JSON.stringify({
+          status: 'browser-assertion-failed',
+          runId: args.runId,
+          harnessRevision: args.harnessRevision,
+          serverRevision: args.serverRevision,
+          webRevision: args.webRevision,
+          traces: traceFiles.sort()
+        })}\n`, {mode: 0o600});
+      } catch(error) {
+        cleanupError ||= error instanceof Error ? error : new Error('Playwright failure trace export failed');
+      }
+    }
+    if(browserContainerValidated) {
+      const browserName = `teagram-fixture-${args.runId}browser`;
+      const cleanupDirectories = [
+        [`/tmp/real-client-${args.runId}`, 'screenshot cleanup'],
+        ...(traceOutputDirectory ? [[`/tmp/real-client-traces-${args.runId}`, 'trace cleanup']] : [])
+      ];
+      for(const [directory, stage] of cleanupDirectories) {
+        try {
+          docker(['exec', browserName, 'rm', '-rf', '--', directory], undefined, stage);
+        } catch {
+          cleanupError ||= new Error(`${stage} failed`);
+        }
       }
     }
     if(browserScriptInstalled || observerScriptInstalled) {
@@ -336,7 +433,8 @@ if(args?.help) {
     process.stdout.write(`${JSON.stringify(finalReport)}\n`);
     if(finalReport.status !== 'passed') process.exitCode = 1;
   } else if(cleanupError || operationError) {
-    process.stderr.write(`${cleanupError?.message || operationError?.message || 'real client runner failed'}\n`);
+    const errors = [operationError?.message, cleanupError?.message].filter((message) => typeof message === 'string');
+    process.stderr.write(`${errors.join('; ') || 'real client runner failed'}\n`);
     process.exitCode = 1;
   } else if(!controlsOnlyDone) {
 
@@ -355,6 +453,10 @@ if(args?.help) {
       },
       scenarios: browserResult.scenarios,
       ...(browserResult.channelMembership ? {channelMembership: browserResult.channelMembership} : {}),
+      ...(browserResult.pollSendResults ? {pollSendResults: browserResult.pollSendResults} : {}),
+      pollCreationNegativeControl: args.pollCreationNegativeControl === true,
+      ...(args.pollCreationNegativeControl === true ? {pollNegativeControl: POLL_NEGATIVE_CONTROL_EVIDENCE} : {}),
+      ...(browserResult.gateBreakdown ? {gateBreakdown: browserResult.gateBreakdown} : {}),
       contextCount: browserResult.contextCount,
       screenshotsCaptured: browserResult.screenshotsCaptured,
       passwordEvidence,

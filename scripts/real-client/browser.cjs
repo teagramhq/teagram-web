@@ -1,14 +1,26 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const {createHash} = require('node:crypto');
 const {chromium} = require('playwright');
 const observation = require('./observation.cjs');
 
 const REQUIRED_SCENARIOS = ['sign-in', 'message', 'group'];
+const OPTIONAL_SCENARIOS = ['channel', 'poll'];
+const AVAILABLE_SCENARIOS = [...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS];
 const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
 const PRIVATE_CSP_WSS = 'wss://teagramd.test/apiws';
 const PROBE_PATH = '/_fixture_probe/';
 const MESSAGE = 'browser-ci-hello';
 const GROUP_MESSAGE = 'browser-ci-group-hello';
+const CHANNEL_MESSAGE = 'browser-channel-post';
+const POLL_DESCRIPTION = 'Description stuff';
+const POLL_ANSWER_ONE = 'browser-ci-poll-answer-one';
+const POLL_ANSWER_TWO = 'browser-ci-poll-answer-two';
+const POLL_ANSWER_LINK = `${PRIVATE_CSP_ORIGIN}/browser-ci-poll-answer`;
+const POLL_NEGATIVE_CONTROL = Object.freeze([
+  Object.freeze({shape: 'description', stage: 'alice_poll_description_create', errorType: 'POLL_ANSWERS_INVALID'}),
+  Object.freeze({shape: 'input_answer', stage: 'alice_poll_input_answer_create', errorType: 'POLL_ANSWERS_INVALID'})
+]);
 const PASSWORD_FIELD_SELECTOR = '#auth-pages input[name="notsearch_password"]';
 const PASSWORD_FIELD_TIMEOUT_MS = 30_000;
 // The height mirror next to the composer shares its class and editability.
@@ -22,17 +34,36 @@ const GROUP_NAME_STEP_TIMEOUT_MS = 15_000;
 // A basic group's peer id is negative, a user's positive.
 const GROUP_CHAT_SELECTOR = '.topbar .avatar[data-peer-id^="-"]';
 const GROUP_CREATED_STEP_TIMEOUT_MS = 30_000;
-const CHANNEL_MEMBERSHIP_STEP_TIMEOUT_MS = 45_000;
 const GROUP_MESSAGE_STABLE_WINDOW_MS = 600;
 const GROUP_MESSAGE_SAMPLE_INTERVAL_MS = 100;
 const GROUP_MESSAGE_SETTLE_TIMEOUT_MS = 10_000;
 const RPC_ERROR_TYPE_LIMIT = 16;
 const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
+const RPC_METHOD_PATTERN = /^[a-z][A-Za-z0-9_]{0,63}\.[a-z][A-Za-z0-9_]{0,63}$/;
+const RPC_PEER_ARGUMENT_LIMIT = 8;
 const APP_CONTEXTS = observation.GATE_CONTEXTS;
 const NETWORK_RESOURCE_TYPES = observation.GATE_RESOURCE_TYPES;
 const NETWORK_OBSERVER_ERROR_KINDS = new Set(observation.GATE_OBSERVER_ERROR_KINDS);
 const PAGE_ERROR_CONSTRUCTORS = new Set(observation.GATE_PAGE_ERROR_CONSTRUCTORS);
 const PAGE_ERROR_BLOB_ASSET_LIMIT = 512;
+const PAGE_ERROR_DIAGNOSTIC_LIMITS = observation.GATE_PAGE_ERROR_DIAGNOSTIC_LIMITS;
+const PAGE_ERROR_DEBUGGER_METHODS = Object.freeze(['Debugger.enable', 'Debugger.setPauseOnExceptions', 'Debugger.resume']);
+const PAGE_ERROR_MESSAGE_LIMIT = 512;
+const PAGE_ERROR_STACK_FRAME_LIMIT = 16;
+const PAGE_ERROR_FUNCTION_NAME_LIMIT = 128;
+const PAGE_DIAGNOSTIC_LIMIT = 16;
+const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
+const PAGE_DIAGNOSTIC_FIELD_LIMIT = 256;
+const PAGE_DIAGNOSTIC_VALUE_TYPES = new Set(['undefined', 'null', 'boolean', 'number', 'string', 'object', 'function']);
+const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'message', 'group', 'channel', 'poll', 'unknown']);
+const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set(AVAILABLE_SCENARIOS);
+const PAGE_ERROR_EVENT_CAPTURE_KEY = '__teagramPageErrorEvents';
+const pageErrorDiagnosticCounts = new WeakMap();
+const pageErrorDiagnosticMessageHashes = new WeakMap();
+const pageErrorConsoleEvents = new WeakMap();
+const pageErrorProtocolEvents = new WeakMap();
+const pageScenarioSteps = new WeakMap();
+const pageScenarioActions = new WeakMap();
 const PAGE_ERROR_BLOB_ASSET_HINTS = Object.freeze([
   {pattern: /\bTLottieWasm\.createAnimation\b/, workerLabel: 'lottie_worker'}
 ]);
@@ -64,11 +95,34 @@ const CONTROL_PLAN = Object.freeze([
   // More distinct shared workers than the attached-target budget: the observer
   // must stop attaching, release the rejected targets and stay bounded.
   Object.freeze({name: 'c5_attach_budget', windowMs: 6000,
-    expression: "for(let index = 0; index < 20; index++) new SharedWorker('/_fixture_probe/shared-worker.js', 'budget' + index)"})
+    expression: `for(let index = 0; index < ${observation.LIMITS.attachedTargets + 4}; index++) new SharedWorker('/_fixture_probe/shared-worker.js', 'budget' + index)`})
 ]);
 
 let currentStage = 'runtime_inputs';
 let currentScenario;
+
+function readPageScenarioStep(page) {
+  const pageAction = pageScenarioActions.get(page);
+  if(pageAction?.scenario === currentScenario) return {...pageAction};
+  const pageStep = pageScenarioSteps.get(page);
+  return pageStep?.scenario === currentScenario ? {...pageStep} : {scenario: currentScenario, step: currentStage};
+}
+
+// Default reports follow the active failure stage; opt-in diagnostics use the last action for correlation.
+function readClientErrorScenarioStep(page, diagnosticsEnabled = runtime?.pageErrorDiagnostics === true) {
+  return diagnosticsEnabled ? readPageScenarioStep(page) : readCurrentScenarioStep();
+}
+
+function setPageScenarioStep(page, step) {
+  currentStage = step;
+  if(page && typeof page === 'object') pageScenarioSteps.set(page, {scenario: currentScenario, step});
+}
+
+function setPageActionStep(page, step) {
+  setPageScenarioStep(page, step);
+  if(page && typeof page === 'object') pageScenarioActions.set(page, {scenario: currentScenario, step});
+}
+
 // The chat that the scenario last selected and the page it waits on, kept so a
 // failing chat stage can describe the centre column it gave up on.
 let centerColumnTrace = createCenterColumnTrace();
@@ -82,7 +136,26 @@ let groupNameFormTrace = {page: undefined, stepWait: 'none'};
 let groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
 let groupMemberTrace = createGroupMemberTrace();
 let groupMessageTrace = createGroupMessageTrace();
-let channelMembershipTrace = {page: undefined, channelName: undefined, peerId: undefined, stepWait: 'none'};
+let channelMembershipTrace = createChannelMembershipTrace();
+
+const CHANNEL_MEMBERSHIP_STAGES = [
+  'alice_channel_add_bob',
+  'alice_channel_add_confirmation',
+  'alice_channel_add_bob_complete',
+  'bob_channel_membership_refresh',
+  'bob_channel_membership',
+  'bob_channel_unread_before_post',
+  'bob_channel_unread_before_open',
+  'bob_channel_open',
+  'bob_channel_post_visible',
+  'bob_channel_read',
+  'bob_channel_return_to_other_conversation',
+  'bob_channel_reload',
+  'bob_channel_reload_chats_list',
+  'bob_channel_other_conversation_after_reload',
+  'bob_channel_membership_after_reload',
+  'bob_channel_unread_after_reload'
+];
 
 function createGroupMemberTrace() {
   return {page: undefined, groupPeerId: undefined, stages: [], stepWait: 'none', errorsAtStep: undefined, membersTab: createMembersTabTrace()};
@@ -101,6 +174,18 @@ function createMembersTabTrace() {
 
 function createGroupMessageTrace() {
   return {page: undefined, stage: undefined, errorsAtStep: undefined, samples: [], result: 'pending'};
+}
+
+function createChannelMembershipTrace() {
+  return {
+    alicePage: undefined,
+    bobPage: undefined,
+    channelPeerId: undefined,
+    selectedBobPeerId: undefined,
+    channelName: undefined,
+    errorsAtStep: undefined,
+    stepWait: 'none'
+  };
 }
 
 function createCenterColumnTrace() {
@@ -122,7 +207,7 @@ async function waitForActiveChannel(page, channelName, timeoutMs = 30_000) {
 }
 
 async function waitForChannelInviteCompletion(page, addMembers, channelName, timeoutMs = 30_000, popupTimeoutMs = 3_000) {
-  currentStage = 'alice_channel_add_members_close';
+  setPageScenarioStep(page, 'alice_channel_add_members_close');
   await addMembers.waitFor({state: 'hidden', timeout: timeoutMs})
   .catch(() => failStage('alice_channel_add_members_close'));
 
@@ -130,15 +215,15 @@ async function waitForChannelInviteCompletion(page, addMembers, channelName, tim
   const popupVisible = await invitePopup.waitFor({state: 'visible', timeout: popupTimeoutMs})
   .then(() => true, () => false);
   if(popupVisible) {
-    currentStage = 'alice_channel_invite_confirm';
+    setPageScenarioStep(page, 'alice_channel_invite_confirm');
     await invitePopup.getByRole('button', {name: 'Add', exact: true}).click({timeout: 15_000})
     .catch(() => failStage('alice_channel_invite_confirm'));
-    currentStage = 'alice_channel_invite_popup_close';
+    setPageScenarioStep(page, 'alice_channel_invite_popup_close');
     await invitePopup.waitFor({state: 'hidden', timeout: 30_000})
     .catch(() => failStage('alice_channel_invite_popup_close'));
   }
 
-  currentStage = 'alice_channel_active_channel';
+  setPageScenarioStep(page, 'alice_channel_active_channel');
   return waitForActiveChannel(page, channelName);
 }
 
@@ -209,6 +294,11 @@ function readRuntimeInput() {
 
 function validateRuntimeInput(config) {
   const authProgress = config?.authProgressOneSubmission === true;
+  const pollCreationNegativeControl = config?.pollCreationNegativeControl === true;
+  const selectedScenarios = Array.isArray(config?.scenarios) ? config.scenarios : [];
+  const hasPollScenario = selectedScenarios.includes('poll');
+  const expectedScenarios = AVAILABLE_SCENARIOS.filter((scenario) =>
+    REQUIRED_SCENARIOS.includes(scenario) || selectedScenarios.includes(scenario));
   if(!/^[0-9a-f]{32}$/.test(config?.runId || '') ||
       config.endpoint !== PRIVATE_CSP_ORIGIN || config.wssEndpoint !== PRIVATE_CSP_WSS ||
       !/^[0-9a-f]{16}$/.test(config.fingerprint || '') ||
@@ -224,9 +314,17 @@ function validateRuntimeInput(config) {
       Buffer.from(config.leafSPKI, 'base64').toString('base64') !== config.leafSPKI ||
       !/^(?:\d{1,3}\.){3}\d{1,3}$/.test(config.frontIp || '') ||
       config.screenshotDirectory !== `/tmp/real-client-${config.runId}` ||
+      (config.traceDirectory !== undefined && config.traceDirectory !== `/tmp/real-client-traces-${config.runId}`) ||
       (config.observationOnly !== undefined && config.observationOnly !== true) ||
       (config.authProgressOneSubmission !== undefined && !authProgress) ||
+      (config.pageErrorDiagnostics !== undefined && typeof config.pageErrorDiagnostics !== 'boolean') ||
+      (config.pollCreationNegativeControl !== undefined && !pollCreationNegativeControl) ||
+      (config.observationOnly === true && config.pageErrorDiagnostics === true) ||
       (authProgress && config.observationOnly === true) ||
+      (pollCreationNegativeControl && (authProgress || config.observationOnly === true)) ||
+      (pollCreationNegativeControl && !hasPollScenario) ||
+      (!authProgress && config.observationOnly !== true &&
+        (!Array.isArray(config.scenarios) || JSON.stringify(config.scenarios) !== JSON.stringify(expectedScenarios))) ||
       !Array.isArray(config.accounts) || config.accounts.length !== (authProgress ? 1 : 2)) {
     failStage('runtime_input_validation');
   }
@@ -244,9 +342,10 @@ function validateRuntimeInput(config) {
 // Every CDP send is gated by session scope. A method outside the accepted scope
 // fails the run, and the nested worker channel carried by
 // Target.sendMessageToTarget is gated by the worker scope as well.
-function createGatedSender(scope, session, observer, getTargetId) {
+function createGatedSender(scope, session, observer, getTargetId, additionalPageMethods = []) {
   return function send(method, params = {}) {
-    if(!observation.allowCdpMethod(scope, method)) {
+    const pageDiagnosticMethod = scope === 'page' && additionalPageMethods.includes(method);
+    if(!observation.allowCdpMethod(scope, method) && !pageDiagnosticMethod) {
       observer?.recordObserverError(getTargetId?.());
       return Promise.reject(new Error('cdp_method_not_allowed'));
     }
@@ -279,6 +378,7 @@ function createWorkerDiscovery() {
   let appContextCount = 0;
   const pendingCommands = new Map();
   const setupPromises = new Set();
+  const pollSendTargets = new Map();
   let session;
   let send;
   let nextCommandId = 0;
@@ -398,6 +498,9 @@ function createWorkerDiscovery() {
     targetSessions.set(targetId, sessionId);
     sessionTargets.set(sessionId, targetId);
     attachedSessions.add(sessionId);
+    if(targetInfo.type === 'shared_worker' && observer.name === 'alice' && observer.control !== true) {
+      pollSendTargets.set(targetId, {observer, sessionId, executionContextId: null, status: 'pending'});
+    }
     attachingTargets.delete(targetId);
     networkSinks.get(observer)?.claimTarget(targetId, 'shared_worker', sessionId);
     setupObserver(observer, targetId);
@@ -523,6 +626,26 @@ function createWorkerDiscovery() {
       observer.recordObserverError(targetId);
       return;
     }
+    if(payload.method === 'Runtime.executionContextCreated') {
+      const context = payload.params?.context;
+      const pollTarget = pollSendTargets.get(targetId);
+      if(pollTarget && Number.isSafeInteger(context?.id) && context?.auxData?.isDefault !== false &&
+          pollTarget.executionContextId === null) {
+        pollTarget.executionContextId = context.id;
+        const setup = sendNested(event.sessionId, 'Runtime.callFunctionOn', {
+          executionContextId: context.id,
+          functionDeclaration: installWorkerPollSendObserver.toString(),
+          returnByValue: true,
+          silent: true
+        }).then((result) => {
+          const status = result?.result?.value?.status;
+          pollTarget.status = ['pending', 'installed', 'unavailable'].includes(status) ? status : 'unavailable';
+        }).catch(() => {
+          pollTarget.status = 'unavailable';
+        }).finally(() => setupPromises.delete(setup));
+        setupPromises.add(setup);
+      }
+    }
     const wasOverflowed = observer.state.overflow;
     observer.noteWorkerEvent(targetId, payload.method, payload.params, event.sessionId);
     if(!wasOverflowed && observer.state.overflow) {
@@ -534,6 +657,18 @@ function createWorkerDiscovery() {
     if(!sink) {
       observer.recordObserverError(targetId);
       return;
+    }
+    if(payload.method === 'Runtime.consoleAPICalled') {
+      sink.captureRpcConsoleEvent?.(payload.params, async(objectId) => {
+        const result = await sendNested(event.sessionId, 'Runtime.callFunctionOn', {
+          objectId,
+          functionDeclaration: readSafeRpcArguments.toString(),
+          arguments: [{value: RPC_PEER_ARGUMENT_LIMIT}],
+          returnByValue: true,
+          silent: true
+        });
+        return result?.result?.value;
+      });
     }
     sink.recordWorkerEvent(targetId, 'shared_worker', event.sessionId, payload.method, payload.params);
   }
@@ -605,6 +740,7 @@ function createWorkerDiscovery() {
         contextlessTargets.delete(targetId);
         appContextlessTargets.delete(targetId);
         const observer = ownerOf(targetId);
+        pollSendTargets.delete(targetId);
         if(observer) {
           const observerWasOverflowed = observer.state.overflow;
           observer.noteDestroyed(targetId);
@@ -661,6 +797,36 @@ function createWorkerDiscovery() {
     async waitForSetup() {
       await waitForSetup();
     },
+    async readPollSendObservation(observer) {
+      const targets = [...pollSendTargets.values()].filter((target) => target.observer === observer);
+      const snapshots = await Promise.all(targets.map(async(target) => {
+        if(!Number.isSafeInteger(target.executionContextId) || target.status === 'unavailable') {
+          return {status: target.status, attempts: [], droppedAttempts: 0};
+        }
+        try {
+          const result = await sendNested(target.sessionId, 'Runtime.callFunctionOn', {
+            executionContextId: target.executionContextId,
+            functionDeclaration: readWorkerPollSendObservation.toString(),
+            returnByValue: true,
+            silent: true
+          });
+          const snapshot = sanitizePollSendObservation(result?.result?.value);
+          target.status = snapshot.status;
+          return snapshot;
+        } catch {
+          target.status = 'unavailable';
+          return {status: 'unavailable', attempts: [], droppedAttempts: 0};
+        }
+      }));
+      const status = snapshots.some((snapshot) => snapshot.status === 'installed')
+        ? 'installed'
+        : snapshots.some((snapshot) => snapshot.status === 'pending') ? 'pending' : 'unavailable';
+      return sanitizePollSendObservation({
+        status,
+        attempts: snapshots.flatMap((snapshot) => snapshot.attempts),
+        droppedAttempts: snapshots.reduce((count, snapshot) => count + snapshot.droppedAttempts, 0)
+      });
+    },
     async releaseContext(observer) {
       retiredObservers.add(observer);
       networkSinks.get(observer)?.release();
@@ -710,13 +876,14 @@ function createWorkerDiscovery() {
       sessionTargets.clear();
       targetSessions.clear();
       networkSinks.clear();
+      pollSendTargets.clear();
       session.removeAllListeners();
       return {detachFailures, discoveryDisabled};
     }
   };
 }
 
-function createNetworkObserver(page, contextName, contextObserver, pageErrorAssetResolver) {
+function createNetworkObserver(page, contextName, contextObserver, pageErrorAssetResolver, onPageException) {
   const events = [];
   const gateEvents = [];
   const eventKeys = new Set();
@@ -732,6 +899,8 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
   const maxPendingReleases = observation.LIMITS.attachedTargets;
   let nextCommandId = 0;
   let cdp;
+  const pageScriptUrls = new Map();
+  const pageScriptExecutionContexts = new Map();
   let pageTargetId;
   let targetRegistry;
   let send;
@@ -901,6 +1070,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
         await sendTargetCommand(sessionId, 'Network.enable');
         await sendTargetCommand(sessionId, 'Audits.enable');
         await sendTargetCommand(sessionId, 'Log.enable');
+        await sendTargetCommand(sessionId, 'Runtime.enable');
       }
       // Unconditional startup release: page auto-attach holds the target.
       await sendTargetCommand(sessionId, 'Runtime.runIfWaitingForDebugger');
@@ -1031,6 +1201,18 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     const targetInfo = targets.get(sessionId);
     if(!targetInfo) return;
     const wasOverflowed = contextObserver?.state.overflow === true;
+    if(payload.method === 'Runtime.consoleAPICalled') {
+      scheduleRpcConsoleCapture(page, payload.params, async(objectId) => {
+        const result = await sendTargetCommand(sessionId, 'Runtime.callFunctionOn', {
+          objectId,
+          functionDeclaration: readSafeRpcArguments.toString(),
+          arguments: [{value: RPC_PEER_ARGUMENT_LIMIT}],
+          returnByValue: true,
+          silent: true
+        });
+        return result?.result?.value;
+      });
+    }
     contextObserver?.noteWorkerEvent(targetInfo.targetId, payload.method, payload.params, sessionId);
     if(!wasOverflowed && contextObserver?.state.overflow) targetRegistry?.noteTargetOverflow?.(targetInfo.targetId);
     if(observerClosed()) return;
@@ -1043,7 +1225,8 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
 
   async function start(registry) {
     cdp = await withCommandTimeout(() => page.context().newCDPSession(page));
-    send = createGatedSender('page', cdp, contextObserver, () => pageTargetId);
+    send = createGatedSender('page', cdp, contextObserver, () => pageTargetId,
+      typeof onPageException === 'function' ? PAGE_ERROR_DEBUGGER_METHODS : []);
     // Page-session identity mapping only: the browser context this page lives
     // in is what attributes every browser-level shared worker to it.
     const info = await send('Target.getTargetInfo');
@@ -1051,6 +1234,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     registry?.registerContext(info?.targetInfo?.browserContextId, contextObserver, {
       claimTarget,
       recordWorkerEvent,
+      captureRpcConsoleEvent: (params, readPeerArguments) => scheduleRpcConsoleCapture(page, params, readPeerArguments),
       observeTarget: (targetInfo) => {
         pageErrorAssetResolver?.observeWorkerTarget(targetInfo);
         return pageErrorAssetResolver?.workerAsset(targetInfo?.targetId);
@@ -1058,6 +1242,43 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
       workerAsset: (targetId) => pageErrorAssetResolver?.workerAsset(targetId),
       release: () => { released = true; }
     });
+    if(typeof onPageException === 'function') {
+      cdp.on('Debugger.scriptParsed', (event) => {
+        if(typeof event?.scriptId === 'string' && event.scriptId.length <= 128 &&
+            typeof event.url === 'string' && event.url && event.url.length <= 8192 && pageScriptUrls.size < 4096) {
+          pageScriptUrls.set(event.scriptId, event.url);
+          if(Number.isSafeInteger(event.executionContextId)) pageScriptExecutionContexts.set(event.scriptId, event.executionContextId);
+        }
+      });
+      cdp.on('Runtime.exceptionThrown', (event) => {
+        try {
+          onPageException(event?.exceptionDetails, 'runtime');
+        } catch {
+          // Page exception diagnostics must not interfere with browser observation.
+        }
+      });
+      cdp.on('Debugger.paused', (event) => {
+        try {
+          if(event?.reason === 'exception' || event?.reason === 'promiseRejection') {
+            const scriptUrls = {};
+            for(const frame of (Array.isArray(event.callFrames) ? event.callFrames : []).slice(0, PAGE_ERROR_DIAGNOSTIC_LIMITS.count)) {
+              const scriptId = frame?.location?.scriptId;
+              const url = typeof frame?.url === 'string' && frame.url ? frame.url : pageScriptUrls.get(scriptId);
+              if(typeof scriptId === 'string' && typeof url === 'string' && url) scriptUrls[scriptId] = url;
+            }
+            const firstScriptId = event.callFrames?.[0]?.location?.scriptId;
+            const executionContextId = pageScriptExecutionContexts.get(firstScriptId);
+            onPageException({...event, executionContextId, scriptUrls}, 'debugger');
+          }
+        } catch {
+          // Page exception diagnostics must not interfere with browser observation.
+        }
+        send('Debugger.resume').catch(() => {});
+      });
+      await send('Runtime.enable');
+      await send('Debugger.enable');
+      await send('Debugger.setPauseOnExceptions', {state: 'uncaught'});
+    }
     cdp.on('Network.requestWillBeSent', (event) => {
       if(observerClosed()) return;
       const kind = event.type === 'WebSocket' ? 'websocket' : 'fetch';
@@ -1100,12 +1321,26 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
       if(observerClosed()) return;
       recordLogViolation('page', pageTargetId, entry);
     });
+    cdp.on('Runtime.consoleAPICalled', (event) => {
+      if(observerClosed()) return;
+      scheduleRpcConsoleCapture(page, event, async(objectId) => {
+        const result = await send('Runtime.callFunctionOn', {
+          objectId,
+          functionDeclaration: readSafeRpcArguments.toString(),
+          arguments: [{value: RPC_PEER_ARGUMENT_LIMIT}],
+          returnByValue: true,
+          silent: true
+        });
+        return result?.result?.value;
+      });
+    });
     cdp.on('Target.attachedToTarget', ({sessionId, targetInfo}) => addTarget(sessionId, targetInfo));
     cdp.on('Target.receivedMessageFromTarget', ({sessionId, message}) => dispatchTargetMessage(sessionId, message));
     cdp.on('Target.detachedFromTarget', ({sessionId}) => targets.delete(sessionId));
     await send('Network.enable');
     await send('Audits.enable');
     await send('Log.enable');
+    await send('Runtime.enable');
     await send('Target.setAutoAttach', {autoAttach: true, waitForDebuggerOnStart: true, flatten: false});
     // Complete page coverage: this session is enabled before every navigation.
     contextObserver.state.pageCoverageComplete = true;
@@ -1374,7 +1609,7 @@ async function submitUsernameOnceAndWaitForPassword(page, account, expected, nam
 }
 
 async function selectUniquePeer(page, inputSelector, resultsSelector, username, stage) {
-  currentStage = stage;
+  setPageActionStep(page, stage);
   const input = page.locator(inputSelector).first();
   await input.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_search_field`));
   await input.fill(username);
@@ -1409,6 +1644,7 @@ async function selectUniquePeer(page, inputSelector, resultsSelector, username, 
 }
 
 async function openComposer(page, stage, chat = page.locator('#column-center'), timeoutMs = 30_000) {
+  setPageScenarioStep(page, stage);
   if(centerColumnTrace.page !== page) centerColumnTrace = {...createCenterColumnTrace(), page};
   const input = chat.locator(COMPOSER_INPUT_SELECTOR);
   await input.waitFor({state: 'visible', timeout: timeoutMs}).catch((error) => {
@@ -1512,27 +1748,380 @@ function classifyLocatorError(error) {
   return 'other';
 }
 
-// Counts only: neither an exception message nor console text is read.
+// Keeps bounded, sanitized diagnostics by the runner's current scenario step.
 const clientErrorCounts = new WeakMap();
-async function countClientErrors(page) {
-  const counts = {pageErrors: 0, consoleErrors: 0};
+async function countClientErrors(page, getScenarioStep = readCurrentScenarioStep) {
+  const counts = {pageErrors: 0, consoleErrors: 0, stepDiagnostics: new Map(), pendingCapturePromises: new Set(), getScenarioStep};
   clientErrorCounts.set(page, counts);
+  await page.exposeBinding('__realClientCaptureDiagnostic', (source, diagnostic) => {
+    if(source?.frame !== page.mainFrame()) return;
+    recordClientDiagnostic(counts, diagnostic, getScenarioStep());
+  });
   page.on('pageerror', () => counts.pageErrors++);
   page.on('console', (message) => {
-    if(message.type() === 'error') counts.consoleErrors++;
+    if(message.type() !== 'error') return;
+    counts.consoleErrors++;
+    let text;
+    try {
+      text = message.text();
+    } catch {
+      text = undefined;
+    }
+    recordClientDiagnostic(counts, {kind: 'console_error', message: text}, getScenarioStep());
   });
-  await page.addInitScript(installRpcErrorCounter, {limit: RPC_ERROR_TYPE_LIMIT, pattern: RPC_ERROR_TYPE_PATTERN.source});
+  await page.addInitScript(installRpcErrorCounter, {
+    limit: RPC_ERROR_TYPE_LIMIT,
+    pattern: RPC_ERROR_TYPE_PATTERN.source,
+    diagnosticLimit: PAGE_DIAGNOSTIC_LIMIT,
+    diagnosticFieldLimit: PAGE_DIAGNOSTIC_FIELD_LIMIT
+  });
 }
 
-// Runs in the page before the app. Handled RPC failures reach the page as
-// `result`/`ack` tasks with an `error` on the worker's MessagePort; a passive
-// listener counts them and keeps only an error type that matches the fixed
-// pattern, up to `limit` types. Messages, results and arguments are not read.
-function installRpcErrorCounter({limit, pattern}) {
+function readCurrentScenarioStep() {
+  return {scenario: currentScenario, step: currentStage};
+}
+
+function recordClientDiagnostic(state, diagnostic, scenarioStep) {
+  const step = sanitizePageErrorScenarioStep(scenarioStep);
+  if(!state || !diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) return;
+  const key = `${step.scenario}\0${step.step}`;
+  let entry = state.stepDiagnostics.get(key);
+  if(!entry) {
+    if(state.stepDiagnostics.size >= PAGE_DIAGNOSTIC_STEP_LIMIT) return;
+    entry = {scenarioStep: step, thrownValues: [], rpcFailures: [], consoleErrors: []};
+    state.stepDiagnostics.set(key, entry);
+  }
+  if(diagnostic.kind === 'thrown_value' && entry.thrownValues.length < PAGE_DIAGNOSTIC_LIMIT) {
+    const source = ['error_event', 'unhandled_rejection'].includes(diagnostic.source) ? diagnostic.source : 'unknown';
+    entry.thrownValues.push({
+      source,
+      valueType: PAGE_DIAGNOSTIC_VALUE_TYPES.has(diagnostic.valueType) ? diagnostic.valueType : 'undefined',
+      ...sanitizeThrownValueFields(diagnostic.fields)
+    });
+  } else if(diagnostic.kind === 'rpc_failure') {
+    recordRpcFailure(entry, diagnostic);
+  } else if(diagnostic.kind === 'console_error' && entry.consoleErrors.length < PAGE_DIAGNOSTIC_LIMIT) {
+    entry.consoleErrors.push({message: sanitizePageErrorMessage(diagnostic.message).slice(0, PAGE_DIAGNOSTIC_FIELD_LIMIT)});
+  }
+}
+
+function recordRpcFailure(entry, diagnostic) {
+  const fields = sanitizeRpcFailureFields(diagnostic.fields);
+  const source = diagnostic.rpcSource === 'api_log' ? 'api_log' : 'message_port';
+  const candidate = entry.rpcFailures.find((failure) => failure._rpcSource !== source && !failure._rpcPaired &&
+    failure.type === fields.type && failure.code === fields.code &&
+    (failure.method === fields.method || failure.method === 'unavailable' || fields.method === 'unavailable') &&
+    (failure.description === fields.description || failure.description === 'unavailable' || fields.description === 'unavailable'));
+  if(candidate) {
+    candidate._rpcPaired = true;
+    if(candidate.method === 'unavailable' && fields.method !== 'unavailable') candidate.method = fields.method;
+    if(candidate.peerArguments.length === 0 && fields.peerArguments.length > 0) candidate.peerArguments = fields.peerArguments;
+    if(candidate.description === 'unavailable' && fields.description !== 'unavailable') candidate.description = fields.description;
+    return;
+  }
+  if(entry.rpcFailures.length >= PAGE_DIAGNOSTIC_LIMIT) {
+    entry.rpcFailuresTruncated = true;
+    return;
+  }
+  entry.rpcFailures.push({...fields, _rpcSource: source, _rpcPaired: false});
+}
+
+function sanitizeRpcFailureFields(fields) {
+  const method = ownDataValue(fields, 'method');
+  const peerArguments = ownDataValue(fields, 'peerArguments');
+  return {
+    ...sanitizeThrownValueFields(fields),
+    method: typeof method === 'string' && RPC_METHOD_PATTERN.test(method) ? method : 'unavailable',
+    peerArguments: sanitizeRpcPeerArguments(peerArguments)
+  };
+}
+
+function sanitizeRpcPeerArguments(value) {
+  if(!Array.isArray(value)) return [];
+  const allowedConstructors = new Set([
+    'inputPeerUser', 'inputPeerChannel', 'inputPeerChat', 'inputPeerSelf',
+    'inputUser', 'inputUserSelf', 'inputChannel', 'peerUser', 'peerChannel', 'peerChat',
+    'inputUserFromMessage', 'inputPeerUserFromMessage', 'inputPeerChannelFromMessage', 'inputChannelFromMessage'
+  ]);
+  const safeId = (id) => {
+    if(typeof id === 'bigint') return id.toString().length <= 20 ? id.toString() : 'unavailable';
+    if(Number.isSafeInteger(id) && Math.abs(id) <= Number.MAX_SAFE_INTEGER) return String(id);
+    if(typeof id === 'string' && /^-?[0-9]{1,20}$/.test(id)) return id;
+    return 'unavailable';
+  };
+  return value.slice(0, RPC_PEER_ARGUMENT_LIMIT).flatMap((argument) => {
+    const name = ownDataValue(argument, 'argument');
+    const constructor = ownDataValue(argument, 'constructor');
+    const id = ownDataValue(argument, 'id');
+    if(typeof name !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name) ||
+        typeof constructor !== 'string' || !allowedConstructors.has(constructor)) return [];
+    return [{argument: name, constructor, id: safeId(id)}];
+  });
+}
+
+function ownDataValue(object, key) {
+  try {
+    const descriptor = object && typeof object === 'object' ? Object.getOwnPropertyDescriptor(object, key) : undefined;
+    return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseRpcFailureConsoleCall(event) {
+  if(event?.type !== 'error' || !Array.isArray(event.args) || event.args.length > 32) return undefined;
+  const args = event.args;
+  for(let index = 2; index < args.length; index++) {
+    const type = args[index];
+    const code = args[index - 1];
+    const label = args[index - 2];
+    if(label?.type !== 'string' || label.value !== 'Error' ||
+        type?.type !== 'string' || !RPC_ERROR_TYPE_PATTERN.test(type.value) ||
+        code?.type !== 'number' || !Number.isSafeInteger(code.value) || Math.abs(code.value) > 1_000_000) continue;
+    let methodIndex = -1;
+    for(let candidate = index + 1; candidate < args.length; candidate++) {
+      const value = args[candidate];
+      if(value?.type === 'string' && typeof value.value === 'string' && RPC_METHOD_PATTERN.test(value.value)) {
+        methodIndex = candidate;
+        break;
+      }
+    }
+    if(methodIndex === -1) return undefined;
+    let paramsObjectId;
+    for(let candidate = methodIndex + 1; candidate < args.length; candidate++) {
+      const value = args[candidate];
+      if(value?.type === 'object' && typeof value.objectId === 'string' && value.objectId.length > 0 && value.objectId.length <= 512) {
+        paramsObjectId = value.objectId;
+        break;
+      }
+    }
+    return {
+      type: type.value,
+      code: code.value,
+      method: args[methodIndex].value,
+      paramsObjectId
+    };
+  }
+  return undefined;
+}
+
+async function captureRpcFailureFromConsole(page, event, readPeerArguments) {
+  const parsed = parseRpcFailureConsoleCall(event);
+  const state = clientErrorCounts.get(page);
+  if(!parsed || !state) return false;
+  let peerArguments = [];
+  if(parsed.paramsObjectId && typeof readPeerArguments === 'function') {
+    try {
+      const result = await readPeerArguments(parsed.paramsObjectId);
+      peerArguments = sanitizeRpcPeerArguments(result?.peerArguments);
+    } catch {
+      // The method and error remain useful if the worker released the call args.
+    }
+  }
+  recordClientDiagnostic(state, {
+    kind: 'rpc_failure',
+    rpcSource: 'api_log',
+    fields: {type: parsed.type, code: parsed.code, description: 'unavailable', method: parsed.method, peerArguments}
+  }, state.getScenarioStep());
+  return true;
+}
+
+function scheduleRpcConsoleCapture(page, event, readPeerArguments) {
+  const state = clientErrorCounts.get(page);
+  if(!state) return;
+  const promise = captureRpcFailureFromConsole(page, event, readPeerArguments).catch(() => false);
+  state.pendingCapturePromises.add(promise);
+  void promise.finally(() => state.pendingCapturePromises.delete(promise));
+}
+
+function readSafeRpcArguments(limit) {
+  const idKeyByConstructor = {
+    inputPeerUser: 'user_id',
+    inputPeerChannel: 'channel_id',
+    inputPeerChat: 'chat_id',
+    inputPeerSelf: undefined,
+    inputUser: 'user_id',
+    inputUserSelf: undefined,
+    inputChannel: 'channel_id',
+    peerUser: 'user_id',
+    peerChannel: 'channel_id',
+    peerChat: 'chat_id',
+    inputUserFromMessage: 'user_id',
+    inputPeerUserFromMessage: 'user_id',
+    inputPeerChannelFromMessage: 'channel_id',
+    inputChannelFromMessage: 'channel_id'
+  };
+  const own = (value, key) => {
+    try {
+      const descriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key) : undefined;
+      return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const formatId = (value) => {
+    if(typeof value === 'bigint') return value.toString().length <= 20 ? value.toString() : 'unavailable';
+    if(Number.isSafeInteger(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER) return String(value);
+    if(typeof value === 'string' && /^-?[0-9]{1,20}$/.test(value)) return value;
+    return 'unavailable';
+  };
+  const output = [];
+  const maxArguments = Number.isSafeInteger(limit) && limit > 0 ? limit : 0;
+  const add = (argument, value) => {
+    if(!value || typeof value !== 'object' || Array.isArray(value)) return;
+    const constructor = own(value, '_');
+    if(typeof constructor !== 'string' || !Object.hasOwn(idKeyByConstructor, constructor)) return;
+    const idKey = idKeyByConstructor[constructor];
+    output.push({argument, constructor, id: idKey ? formatId(own(value, idKey)) : 'unavailable'});
+  };
+  try {
+    if(this && typeof this === 'object' && !Array.isArray(this)) {
+      add('args', this);
+      for(const key of Object.keys(this).slice(0, 64)) {
+        if(!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)) continue;
+        add(key, own(this, key));
+        if(output.length >= maxArguments) break;
+      }
+    }
+  } catch {
+    return {peerArguments: output.slice(0, maxArguments)};
+  }
+  return {peerArguments: output.slice(0, maxArguments)};
+}
+
+function sanitizeThrownValueFields(fields) {
+  const ownValue = (key) => {
+    try {
+      const descriptor = fields && typeof fields === 'object' ? Object.getOwnPropertyDescriptor(fields, key) : undefined;
+      return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const type = ownValue('type');
+  const code = ownValue('code');
+  const description = ownValue('description');
+  return {
+    type: typeof type === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(type) ? type : 'unavailable',
+    code: Number.isSafeInteger(code) && Math.abs(code) <= 1_000_000
+      ? code
+      : typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : 'unavailable',
+    description: typeof description === 'string'
+      ? sanitizePageErrorMessage(description).slice(0, PAGE_DIAGNOSTIC_FIELD_LIMIT)
+      : 'unavailable'
+  };
+}
+
+function getClientErrorDiagnostics(page, scenarioStep) {
+  const state = clientErrorCounts.get(page);
+  if(!state) return [];
+  const expectedStep = scenarioStep ? sanitizePageErrorScenarioStep(scenarioStep) : undefined;
+  return [...state.stepDiagnostics.values()]
+  .filter((entry) => !expectedStep ||
+    (entry.scenarioStep.scenario === expectedStep.scenario && entry.scenarioStep.step === expectedStep.step))
+  .map((entry) => ({
+    scenarioStep: {...entry.scenarioStep},
+    thrownValues: entry.thrownValues.map((value) => ({...value})),
+    rpcFailures: entry.rpcFailures.map(sanitizeRpcFailureFields),
+    ...(entry.rpcFailuresTruncated ? {rpcFailuresTruncated: true} : {}),
+    consoleErrors: entry.consoleErrors.map((value) => ({...value}))
+  }));
+}
+
+function sanitizeClientDiagnostics(diagnostics) {
+  if(!Array.isArray(diagnostics)) return [];
+  return diagnostics.slice(0, PAGE_DIAGNOSTIC_STEP_LIMIT).map((entry) => ({
+    scenarioStep: sanitizePageErrorScenarioStep(entry?.scenarioStep),
+    thrownValues: Array.isArray(entry?.thrownValues) ? entry.thrownValues.slice(0, PAGE_DIAGNOSTIC_LIMIT).map((value) => ({
+      source: ['error_event', 'unhandled_rejection'].includes(value?.source) ? value.source : 'unknown',
+      valueType: PAGE_DIAGNOSTIC_VALUE_TYPES.has(value?.valueType) ? value.valueType : 'undefined',
+      ...sanitizeThrownValueFields(value)
+    })) : [],
+    rpcFailures: Array.isArray(entry?.rpcFailures) ? entry.rpcFailures.slice(0, PAGE_DIAGNOSTIC_LIMIT).map(sanitizeRpcFailureFields) : [],
+    ...(entry?.rpcFailuresTruncated === true ? {rpcFailuresTruncated: true} : {}),
+    consoleErrors: Array.isArray(entry?.consoleErrors) ? entry.consoleErrors.slice(0, PAGE_DIAGNOSTIC_LIMIT).map((value) => ({
+      message: sanitizePageErrorMessage(value?.message).slice(0, PAGE_DIAGNOSTIC_FIELD_LIMIT)
+    })) : []
+  }));
+}
+
+async function waitForClientDiagnostics(pages) {
+  await Promise.all(pages.map((page) => withDeadline(
+    page.evaluate(() => window.__realClientWaitForDiagnostics?.()),
+    CENTER_COLUMN_CAPTURE_TIMEOUT_MS
+  ).catch(() => undefined)));
+  await Promise.all(pages.map(async(page) => {
+    const pending = clientErrorCounts.get(page)?.pendingCapturePromises;
+    if(pending) await Promise.all([...pending].map((promise) => withDeadline(promise, CENTER_COLUMN_CAPTURE_TIMEOUT_MS).catch(() => undefined)));
+  }));
+}
+
+// Runs in the page before the app. A passive MessagePort listener counts RPC
+// failures and reports only their own scalar type, code and description fields.
+// It also reports thrown/rejected values' own fields; request payloads, other
+// result fields and arguments are not read.
+function installRpcErrorCounter({limit, pattern, diagnosticLimit, diagnosticFieldLimit}) {
   const typePattern = new RegExp(pattern);
   const byType = new Map();
   let total = 0;
   const listened = new WeakSet();
+  const pending = new Set();
+  const emittedCounts = {thrown_value: 0, rpc_failure: 0};
+  const emitDiagnostic = (diagnostic) => {
+    if(!Object.hasOwn(emittedCounts, diagnostic?.kind) || emittedCounts[diagnostic.kind] >= diagnosticLimit) return;
+    if(typeof window.__realClientCaptureDiagnostic !== 'function') return;
+    emittedCounts[diagnostic.kind]++;
+    let result;
+    try {
+      result = window.__realClientCaptureDiagnostic(diagnostic);
+    } catch {
+      return;
+    }
+    const promise = Promise.resolve(result).catch(() => {});
+    pending.add(promise);
+    void promise.finally(() => pending.delete(promise));
+  };
+  const ownPrimitiveFields = (value) => {
+    const fields = {};
+    for(const key of ['type', 'code', 'description']) {
+      let descriptor;
+      try {
+        descriptor = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key) : undefined;
+      } catch {
+        descriptor = undefined;
+      }
+      if(!descriptor || !Object.hasOwn(descriptor, 'value')) continue;
+      const field = descriptor.value;
+      if(typeof field === 'string') fields[key] = field.slice(0, diagnosticFieldLimit);
+      else if(typeof field === 'number' && Number.isFinite(field)) fields[key] = field;
+    }
+    return fields;
+  };
+  const valueType = (value) => value === null ? 'null' : typeof value;
+  const reportThrownValue = (source, value) => {
+    emitDiagnostic({kind: 'thrown_value', source, valueType: valueType(value), fields: ownPrimitiveFields(value)});
+  };
+  window.addEventListener('error', (event) => {
+    let thrownValue;
+    try {
+      thrownValue = event?.error;
+    } catch {
+      return;
+    }
+    if(thrownValue !== undefined && thrownValue !== null) reportThrownValue('error_event', thrownValue);
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    let thrownValue;
+    try {
+      thrownValue = event?.reason;
+    } catch {
+      return;
+    }
+    reportThrownValue('unhandled_rejection', thrownValue);
+  });
+  Object.defineProperty(window, '__realClientWaitForDiagnostics', {
+    value: () => Promise.all([...pending])
+  });
   const record = (data) => {
     const tasks = data?.type === 'batch' && Array.isArray(data.payload) ? data.payload : [data];
     for(const task of tasks) {
@@ -1542,6 +2131,7 @@ function installRpcErrorCounter({limit, pattern}) {
       if(typeof type === 'string' && typePattern.test(type) && (byType.has(type) || byType.size < limit)) {
         byType.set(type, Math.min((byType.get(type) || 0) + 1, 1_000_000));
       }
+      emitDiagnostic({kind: 'rpc_failure', fields: ownPrimitiveFields(task.payload.error)});
     }
   };
   const addEventListener = MessagePort.prototype.addEventListener;
@@ -1731,37 +2321,6 @@ async function captureGroupCreatedState(trace = groupCreatedTrace, timeoutMs = C
   if(!trace.page) return 'unavailable';
   try {
     const probe = await withDeadline(trace.page.evaluate(groupCreatedProbe, {groupName: trace.groupName}), timeoutMs);
-    return {...probe, stepWait: trace.stepWait};
-  } catch {
-    return 'unavailable';
-  }
-}
-
-function channelMembershipProbe({channelName, peerId}) {
-  const rows = Array.from(document.querySelectorAll('#chatlist-container .chatlist-chat'));
-  const peerRows = rows.filter((row) => row.getAttribute('data-peer-id') === peerId);
-  const titleRows = rows.filter((row) => (row.textContent || '').includes(channelName));
-  const activeChats = Array.from(document.querySelectorAll('#column-center .chat.active'));
-  const activePeerId = activeChats.length === 1 ?
-    activeChats[0].querySelector('.topbar .avatar[data-peer-id]')?.getAttribute('data-peer-id') :
-    undefined;
-
-  return {
-    chatListRowCount: rows.length,
-    peerRowCount: peerRows.length,
-    titleRowCount: titleRows.length,
-    peerRowHasTitle: peerRows.some((row) => (row.textContent || '').includes(channelName)),
-    activePeerMatches: activePeerId === peerId
-  };
-}
-
-async function captureChannelMembershipState(trace = channelMembershipTrace, timeoutMs = CENTER_COLUMN_CAPTURE_TIMEOUT_MS) {
-  if(!trace.page) return 'unavailable';
-  try {
-    const probe = await withDeadline(trace.page.evaluate(channelMembershipProbe, {
-      channelName: trace.channelName,
-      peerId: trace.peerId
-    }), timeoutMs);
     return {...probe, stepWait: trace.stepWait};
   } catch {
     return 'unavailable';
@@ -1961,11 +2520,162 @@ async function captureGroupMessageState(trace = groupMessageTrace) {
   }
 }
 
+// Runs in each client page and returns only fixed counts, a numeric active
+// peer id and a title-match count. Channel names and other page text stay in
+// the page.
+function channelMembershipProbe({channelPeerId, channelName}) {
+  const rows = [...document.querySelectorAll('#chatlist-container .chatlist-chat')];
+  const activeChats = [...document.querySelectorAll('#column-center .chat.active')];
+  const active = activeChats.length === 1 ? activeChats[0] : undefined;
+  const activePeerId = active?.querySelector('.topbar .avatar[data-peer-id]')?.getAttribute('data-peer-id') || '';
+  return {
+    channelRowCount: rows.filter((row) => row.getAttribute('data-peer-id') === channelPeerId).length,
+    channelTitleMatches: rows.filter((row) => (row.textContent || '').includes(channelName)).length,
+    activePeerId: /^-?[0-9]{1,20}$/.test(activePeerId) ? activePeerId : null,
+    chatListRowCount: rows.length
+  };
+}
+
+async function captureChannelMembershipClient(page, channelPeerId, channelName, errorsAtStep) {
+  const [probe, rawRpcCounts] = await Promise.all([
+    page.evaluate(channelMembershipProbe, {channelPeerId, channelName}),
+    page.evaluate(() => window.__realClientRpcErrors?.()).catch(() => undefined)
+  ]);
+  const rpcCounts = sanitizeRpcErrorCounts(rawRpcCounts);
+  const rpcBefore = errorsAtStep?.rpc;
+  const rpcErrorTypesSinceStep = {};
+  let rpcErrorsSinceStep = null;
+  if(rpcBefore && rpcCounts) {
+    rpcErrorsSinceStep = Math.max(rpcCounts.total - rpcBefore.total, 0);
+    for(const [type, count] of Object.entries(rpcCounts.byType)) {
+      const delta = count - (rpcBefore.byType[type] || 0);
+      if(delta > 0) rpcErrorTypesSinceStep[type] = delta;
+    }
+  }
+  const errorCounts = clientErrorCounts.get(page);
+  const delta = (key) => errorCounts && errorsAtStep
+    ? Math.max(errorCounts[key] - errorsAtStep[key], 0)
+    : null;
+  return {
+    ...probe,
+    pageErrorsSinceStep: delta('pageErrors'),
+    consoleErrorsSinceStep: delta('consoleErrors'),
+    rpcErrorsSinceStep,
+    rpcErrorTypesSinceStep
+  };
+}
+
+async function captureChannelMembershipState(trace = channelMembershipTrace, timeoutMs = CENTER_COLUMN_CAPTURE_TIMEOUT_MS) {
+  if(!trace.alicePage || !trace.bobPage || !/^-?[0-9]{1,20}$/.test(trace.channelPeerId || '') ||
+      !trace.channelPeerId.startsWith('-') || !/^[0-9]{1,20}$/.test(trace.selectedBobPeerId || '') ||
+      typeof trace.channelName !== 'string') return 'unavailable';
+  try {
+    const [alice, bob] = await withDeadline(Promise.all([
+      captureChannelMembershipClient(trace.alicePage, trace.channelPeerId, trace.channelName, trace.errorsAtStep?.alice),
+      captureChannelMembershipClient(trace.bobPage, trace.channelPeerId, trace.channelName, trace.errorsAtStep?.bob)
+    ]), timeoutMs);
+    return {
+      channelPeerId: trace.channelPeerId,
+      selectedBobPeerId: trace.selectedBobPeerId,
+      alice,
+      bob,
+      stepWait: trace.stepWait
+    };
+  } catch {
+    return 'unavailable';
+  }
+}
+
 function resolveActiveGroupChat(page, groupName) {
   const activeChats = page.locator('#column-center .chat.active');
   const chat = activeChats.filter({has: page.locator(GROUP_CHAT_SELECTOR)});
   const header = chat.locator('.topbar .chat-info');
   return {activeChats, chat, header, title: header.filter({hasText: groupName})};
+}
+
+async function readActivePeerId(page, stage) {
+  setPageScenarioStep(page, stage);
+  const peer = page.locator('#column-center .chat.active .topbar .avatar[data-peer-id]');
+  if(await peer.count() !== 1) failStage(stage);
+  const peerId = await peer.getAttribute('data-peer-id');
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '')) failStage(stage);
+  return peerId;
+}
+
+async function waitForActivePeerId(page, peerId, stage, timeoutMs = 45_000) {
+  setPageScenarioStep(page, stage);
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '')) failStage(stage);
+  await page.waitForFunction((expectedPeerId) => {
+    const peers = [...document.querySelectorAll('#column-center .chat.active .topbar .avatar[data-peer-id]')];
+    return peers.length === 1 && peers[0].getAttribute('data-peer-id') === expectedPeerId;
+  }, peerId, {timeout: timeoutMs}).catch(() => failStage(stage));
+}
+
+async function findChannelDialogRow(page, peerId, channelName, stage) {
+  setPageScenarioStep(page, stage);
+  const failChannelRow = (failureStage) => {
+    channelMembershipTrace.stepWait = 'other';
+    failStage(failureStage);
+  };
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '') || !peerId.startsWith('-') || typeof channelName !== 'string' || !channelName) {
+    failChannelRow(`${stage}_row_identity`);
+  }
+
+  const peerRow = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${peerId}"]`);
+  const peerRowCount = await peerRow.count();
+  if(peerRowCount > 1) failChannelRow(`${stage}_row_not_unique`);
+  if(peerRowCount === 1) return await peerRow.isVisible() ? peerRow : undefined;
+
+  const titleRows = page.locator('#chatlist-container .chatlist-chat').filter({hasText: channelName});
+  const titleRowCount = await titleRows.count();
+  if(titleRowCount === 0) return undefined;
+  if(titleRowCount !== 1) failChannelRow(`${stage}_row_not_unique`);
+  const rowPeerId = await titleRows.getAttribute('data-peer-id');
+  if(rowPeerId && rowPeerId !== peerId) failChannelRow(`${stage}_row_identity`);
+  return await titleRows.isVisible() ? titleRows : undefined;
+}
+
+async function waitForChannelDialogRow(page, peerId, channelName, stage, timeoutMs = 45_000) {
+  setPageScenarioStep(page, stage);
+  const failChannelRow = (failureStage, error) => {
+    channelMembershipTrace.stepWait = error ? classifyLocatorError(error) : 'other';
+    failStage(failureStage);
+  };
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '') || !peerId.startsWith('-') || typeof channelName !== 'string' || !channelName) {
+    failChannelRow(`${stage}_row_identity`);
+  }
+  await page.waitForFunction(({peerId, channelName}) => {
+    const isVisible = (row) => {
+      const style = window.getComputedStyle(row);
+      return style.display !== 'none' && style.visibility !== 'hidden' && row.getClientRects().length > 0;
+    };
+    const rows = [...document.querySelectorAll('#chatlist-container .chatlist-chat')].filter(isVisible);
+    return rows.some((row) => row.getAttribute('data-peer-id') === peerId) ||
+      rows.some((row) => !row.getAttribute('data-peer-id') && (row.textContent || '').includes(channelName));
+  }, {peerId, channelName}, {timeout: timeoutMs}).catch((error) => failChannelRow(stage, error));
+
+  const row = await findChannelDialogRow(page, peerId, channelName, stage);
+  if(!row) failChannelRow(stage);
+  return row;
+}
+
+async function waitForUnreadCount(page, peerId, expectedCount, stage, timeoutMs = 30_000, rowTitle) {
+  setPageScenarioStep(page, stage);
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '')) failStage(`${stage}_peer_identity`);
+  if(!Number.isSafeInteger(expectedCount) || expectedCount < 0) failStage(`${stage}_expected_count`);
+  await page.waitForFunction(({peerId, expectedCount, rowTitle}) => {
+    const rows = [...document.querySelectorAll('#chatlist-container .chatlist-chat')];
+    const peerRows = rows
+    .filter((row) => row.getAttribute('data-peer-id') === peerId);
+    const titleRows = rowTitle
+      ? rows.filter((row) => !row.getAttribute('data-peer-id') && (row.textContent || '').includes(rowTitle))
+      : [];
+    const targetRows = peerRows.length === 1 ? peerRows : peerRows.length === 0 && titleRows.length === 1 ? titleRows : [];
+    if(targetRows.length !== 1) return false;
+    const badges = [...targetRows[0].querySelectorAll('.dialog-subtitle-badge-unread.unread.is-visible')];
+    if(expectedCount === 0) return badges.length === 0;
+    return badges.length === 1 && badges[0].textContent?.trim() === String(expectedCount);
+  }, {peerId, expectedCount, rowTitle}, {timeout: timeoutMs}).catch(() => failStage(`${stage}_count`));
 }
 
 async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle) {
@@ -1994,6 +2704,49 @@ async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle)
     const count = await message.count();
     if(count !== 1) failStage(`${stage}_message_count`);
   }
+}
+
+async function sendChannelText(page, channelName, screenshotDirectory, capturedScreenshots, timeoutMs = 30_000) {
+  const activeChannel = resolveActiveGroupChat(page, channelName);
+  setPageScenarioStep(page, 'alice_channel_post_chat');
+  await activeChannel.chat.waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage('alice_channel_post_chat'));
+  await activeChannel.title.waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage('alice_channel_post_chat'));
+  if(await activeChannel.chat.count() !== 1 || await activeChannel.title.count() !== 1) failStage('alice_channel_post_chat');
+  const channelPeerId = await readActivePeerId(page, 'alice_channel_post_identity');
+  if(!channelPeerId.startsWith('-')) failStage('alice_channel_post_identity');
+
+  const input = await openComposer(page, 'alice_channel_post', activeChannel.chat, timeoutMs);
+  setPageActionStep(page, 'alice_channel_post_fill');
+  await input.fill(CHANNEL_MESSAGE, {timeout: timeoutMs}).catch(() => failStage('alice_channel_post_fill'));
+  setPageActionStep(page, 'alice_channel_post_send');
+  await input.press('Enter', {timeout: timeoutMs}).catch(() => failStage('alice_channel_post_send'));
+  const message = activeChannel.chat.locator('.bubble .message').filter({hasText: CHANNEL_MESSAGE});
+  setPageScenarioStep(page, 'alice_channel_post_visible');
+  await message.first().waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage('alice_channel_post_visible'));
+  await page.waitForTimeout(600);
+  const messageFailure = await getSingleExactMessageTextFailure(message, CHANNEL_MESSAGE);
+  if(messageFailure) failStage(`alice_channel_post_${messageFailure}`);
+  await captureState(page, screenshotDirectory, 'alice-channel-post', capturedScreenshots);
+  return channelPeerId;
+}
+
+async function startChannelMembershipTrace(alicePage, bobPage, channelPeerId, selectedBobPeerId, channelName) {
+  const snapshot = async(page) => {
+    const counts = clientErrorCounts.get(page) || {pageErrors: 0, consoleErrors: 0};
+    return {...counts, rpc: await readRpcErrorCounts(page)};
+  };
+  channelMembershipTrace = {
+    ...createChannelMembershipTrace(),
+    alicePage,
+    bobPage,
+    channelPeerId,
+    selectedBobPeerId,
+    channelName,
+    errorsAtStep: {
+      alice: await snapshot(alicePage),
+      bob: await snapshot(bobPage)
+    }
+  };
 }
 
 async function sendGroupText(page, text, groupName, stage, timeoutMs = 30_000) {
@@ -2047,6 +2800,1462 @@ async function sendGroupText(page, text, groupName, stage, timeoutMs = 30_000) {
   }
   currentStage = stage;
 }
+
+function pollMessageLocator(page, question, messageId) {
+  const safeMessageId = typeof messageId === 'string' && /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(messageId)
+    ? messageId
+    : Number.isSafeInteger(messageId) ? String(messageId) : null;
+  if(safeMessageId !== null) return page.locator(`#column-center .bubble[data-mid="${safeMessageId}"]`);
+  return page.locator('#column-center .bubble').filter({hasText: question});
+}
+
+async function ensurePollGroupActive(page, groupName, stage) {
+  setPageScenarioStep(page, stage);
+  const activeGroup = resolveActiveGroupChat(page, groupName);
+  if(await activeGroup.activeChats.count() === 1 && await activeGroup.title.count() === 1) return;
+
+  const groupRow = page.locator('#chatlist-container .chatlist-chat').filter({hasText: groupName});
+  await groupRow.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(stage));
+  if(await groupRow.count() !== 1) failStage(`${stage}_not_unique`);
+  const peerId = await groupRow.getAttribute('data-peer-id');
+  if(!/^-?[0-9]{1,20}$/.test(peerId || '') || !peerId.startsWith('-')) failStage(`${stage}_peer`);
+  await groupRow.click().catch(() => failStage(stage));
+  await waitForActivePeerId(page, peerId, stage);
+  if(await activeGroup.activeChats.count() !== 1 || await activeGroup.title.count() !== 1) failStage(`${stage}_title`);
+}
+
+function getPollOptionClickTarget(poll, answerText) {
+  return poll.locator('[data-poll-option-idx]')
+  .filter({hasText: answerText})
+  .locator(':scope > div')
+  .first();
+}
+
+function getPollVoteButton(poll) {
+  return poll.getByText('Vote', {exact: true}).locator('xpath=..');
+}
+
+function getPollResultIndicator(poll) {
+  return poll.getByText(/^(?:1 member voted|View Votes \(1\))$/);
+}
+
+async function readPollResultsDiagnostic(page, question, answerText, messageId) {
+  return page.evaluate(async({questionText, expectedAnswerText, responseMessageId}) => {
+    const matchingBubbles = [...document.querySelectorAll('#column-center .bubble[data-mid]')]
+    .filter((element) => element.textContent?.includes(questionText));
+    const bubbles = responseMessageId === undefined || responseMessageId === null
+      ? matchingBubbles
+      : matchingBubbles.filter((element) => element.dataset.mid === String(responseMessageId));
+    const bubble = bubbles.length === 1 ? bubbles[0] : undefined;
+    const isVisible = (element) => {
+      for(let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+        const style = window.getComputedStyle(ancestor);
+        if(style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
+      }
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const leafTextCount = (element, text) => element ? [...element.querySelectorAll('*')]
+    .filter((node) => node.children.length === 0 && node.textContent?.trim() === text).length : 0;
+    const exactTextElements = (element, text) => element ? [...element.querySelectorAll('*')]
+    .filter((node) => node.textContent?.trim() === text) : [];
+    const innermostExactTextElements = (element, text) => {
+      const matches = exactTextElements(element, text);
+      return matches.filter((node) => !matches.some((other) => other !== node && node.contains(other)));
+    };
+    const visibleExactTextCount = (element, text) => innermostExactTextElements(element, text).filter(isVisible).length;
+    const options = bubble ? [...bubble.querySelectorAll('[data-poll-option-idx]')] : [];
+    const answer = options.filter((element) => element.textContent?.includes(expectedAnswerText));
+    const resultIndicatorCount = visibleExactTextCount(bubble, '1 member voted') + visibleExactTextCount(bubble, 'View Votes (1)');
+    const voteLabels = innermostExactTextElements(bubble, 'Vote').filter(isVisible);
+    const voteButtonCount = new Set(voteLabels.map((label) => label.parentElement).filter((control) => control && isVisible(control))).size;
+    const selectOptionCount = leafTextCount(bubble, 'Select an option');
+    const peerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
+    const midText = bubble?.dataset.mid;
+    const mid = midText && /^-?[0-9]{1,20}$/.test(midText) ? Number(midText) : NaN;
+    let message;
+    if(Number.isSafeInteger(peerId) && Number.isSafeInteger(mid)) {
+      try {
+        message = window.apiManagerProxy?.getMessageByPeer(peerId, mid) ||
+          window.rootScope?.managers?.appMessagesManager?.getMessageByPeer(peerId, mid);
+      } catch {}
+    }
+
+    const media = message?.media;
+    const storedQuestion = media?.poll?.question;
+    const storePollMatches = media?._ === 'messageMediaPoll' &&
+      (typeof storedQuestion === 'string' ? storedQuestion : storedQuestion?.text) === questionText;
+    let pollState;
+    if(storePollMatches) {
+      try {
+        pollState = await window.rootScope?.managers?.appPollsManager?.getPoll(media.poll.id);
+      } catch {}
+    }
+    const storedPoll = pollState?.poll;
+    const storedResults = pollState?.results;
+    const storeResultsFound = !!storedResults &&
+      (typeof storedResults.total_voters === 'number' || Array.isArray(storedResults.results));
+    const answerVoters = Array.isArray(storedResults?.results)
+      ? storedResults.results.slice(0, 2).map((entry) => Number.isSafeInteger(entry?.voters) ? entry.voters : null)
+      : null;
+    const visiblePollCount = bubble && isVisible(bubble) ? 1 : 0;
+    return {
+      messageFound: !!message,
+      storePollMatches,
+      storePollFound: !!storedPoll,
+      storeResultsFound,
+      storeTotalVoters: Number.isSafeInteger(storedResults?.total_voters) ? storedResults.total_voters : null,
+      storeAnswerVoters: answerVoters,
+      storeChosenIndexesCount: Array.isArray(storedPoll?.chosenIndexes) ? storedPoll.chosenIndexes.length : null,
+      storeClosed: typeof storedPoll?.pFlags?.closed === 'boolean' ? storedPoll.pFlags.closed : null,
+      domPollCount: bubbles.length,
+      domVisiblePollCount: visiblePollCount,
+      domOptionCount: options.length,
+      domVisibleResultIndicatorCount: resultIndicatorCount,
+      domVisibleVoteButtonCount: voteButtonCount,
+      domSelectOptionCount: selectOptionCount,
+      domAnswerOneCount: answer.length,
+      domAnswerOneCountCount: answer.length === 1 ? leafTextCount(answer[0], '1') : 0,
+      domAnswerOnePercentCount: answer.length === 1 ? leafTextCount(answer[0], '100%') : 0
+    };
+  }, {questionText: question, expectedAnswerText: answerText, responseMessageId: messageId}).catch(() => ({
+    messageFound: false,
+    storePollMatches: null,
+    storePollFound: null,
+    storeResultsFound: null,
+    storeTotalVoters: null,
+    storeAnswerVoters: null,
+    storeChosenIndexesCount: null,
+    storeClosed: null,
+    domPollCount: null,
+    domVisiblePollCount: null,
+    domOptionCount: null,
+    domVisibleResultIndicatorCount: null,
+    domVisibleVoteButtonCount: null,
+    domSelectOptionCount: null,
+    domAnswerOneCount: null,
+    domAnswerOneCountCount: null,
+    domAnswerOnePercentCount: null
+  }));
+}
+
+function formatPollResultsDiagnostic(diagnostic) {
+  const safeBool = (value) => value === true ? 1 : value === false ? 0 : 'unavailable';
+  const safeCount = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 'unavailable';
+  const safeVoters = Array.isArray(diagnostic.storeAnswerVoters) && diagnostic.storeAnswerVoters.length === 2
+    ? diagnostic.storeAnswerVoters.map(safeCount).join('_')
+    : 'unavailable';
+  return `message_${safeBool(diagnostic.messageFound)}` +
+    `_store_poll_match_${safeBool(diagnostic.storePollMatches)}` +
+    `_store_poll_found_${safeBool(diagnostic.storePollFound)}` +
+    `_store_results_${safeBool(diagnostic.storeResultsFound)}` +
+    `_store_total_voters_${safeCount(diagnostic.storeTotalVoters)}` +
+    `_store_answer_voters_${safeVoters}` +
+    `_store_chosen_indexes_${safeCount(diagnostic.storeChosenIndexesCount)}` +
+    `_store_closed_${safeBool(diagnostic.storeClosed)}` +
+    `_dom_polls_${safeCount(diagnostic.domPollCount)}` +
+    `_dom_visible_polls_${safeCount(diagnostic.domVisiblePollCount)}` +
+    `_dom_options_${safeCount(diagnostic.domOptionCount)}` +
+    `_dom_visible_result_indicators_${safeCount(diagnostic.domVisibleResultIndicatorCount)}` +
+    `_dom_visible_vote_buttons_${safeCount(diagnostic.domVisibleVoteButtonCount)}` +
+    `_dom_select_option_${safeCount(diagnostic.domSelectOptionCount)}` +
+    `_dom_answer_matches_${safeCount(diagnostic.domAnswerOneCount)}` +
+    `_dom_answer_one_counts_${safeCount(diagnostic.domAnswerOneCountCount)}` +
+    `_dom_answer_one_percents_${safeCount(diagnostic.domAnswerOnePercentCount)}`;
+}
+
+async function capturePollState(page, screenshotDirectory, name, stage, capturedScreenshots) {
+  currentStage = stage;
+  await captureState(page, screenshotDirectory, name, capturedScreenshots).catch(() => failStage(stage));
+}
+
+async function waitForPollMessage(page, question, stage, timeoutMs = 30_000, messageId) {
+  currentStage = stage;
+  const poll = pollMessageLocator(page, question, messageId);
+  await poll.first().waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(stage));
+  if(await poll.count() !== 1) failStage(`${stage}_not_unique`);
+  const questionText = poll.getByText(question, {exact: true});
+  await questionText.waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_question`));
+  await page.waitForFunction(({questionText, expectedAnswers, messageId}) => {
+    const matches = [...document.querySelectorAll('#column-center .bubble')]
+    .filter((element) => element.textContent?.includes(questionText));
+    const selectedMessage = messageId === undefined || messageId === null
+      ? matches
+      : matches.filter((element) => element.dataset.mid === String(messageId));
+    if(selectedMessage.length !== 1) return false;
+    const message = selectedMessage[0];
+    if(message.querySelectorAll('[data-poll-option-idx]').length !== 2) return false;
+    return expectedAnswers.every((answerText) => [...message.querySelectorAll('*')]
+    .filter((node) => node.children.length === 0 && node.textContent?.trim() === answerText).length === 1);
+  }, {questionText: question, expectedAnswers: [POLL_ANSWER_ONE, POLL_ANSWER_TWO], messageId}, {timeout: timeoutMs}).catch(async() => {
+    const diagnostic = await readPollContentDiagnostic(poll, [POLL_ANSWER_ONE, POLL_ANSWER_TWO]);
+    failStage(`${stage}_answers_${formatPollContentDiagnostic(diagnostic)}`);
+  });
+  return poll;
+}
+
+async function assertPollContent(poll, {question, description, stage}) {
+  const questionMatches = poll.getByText(question, {exact: true});
+  if(await questionMatches.count() !== 1) failStage(`${stage}_question`);
+
+  const descriptionMatches = poll.getByText(POLL_DESCRIPTION, {exact: true});
+  if(description) {
+    if(await descriptionMatches.count() !== 1) failStage(`${stage}_description`);
+  } else if(await descriptionMatches.count() !== 0) {
+    failStage(`${stage}_empty_description`);
+  }
+
+  const answers = poll.locator('[data-poll-option-idx]');
+  if(await answers.count() !== 2) {
+    const diagnostic = await readPollContentDiagnostic(poll, [POLL_ANSWER_ONE, POLL_ANSWER_TWO]);
+    failStage(`${stage}_answers_${formatPollContentDiagnostic(diagnostic)}`);
+  }
+  for(const [index, answerText] of [POLL_ANSWER_ONE, POLL_ANSWER_TWO].entries()) {
+    if(await poll.getByText(answerText, {exact: true}).count() !== 1) {
+      const diagnostic = await readPollContentDiagnostic(poll, [POLL_ANSWER_ONE, POLL_ANSWER_TWO]);
+      failStage(`${stage}_answer_${index + 1}_${formatPollContentDiagnostic(diagnostic)}`);
+    }
+  }
+}
+
+async function readPollContentDiagnostic(poll, answerTexts) {
+  return poll.evaluate((poll, {expectedAnswers}) => {
+    const isVisible = (element) => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    const countText = (element, answerText, visibleOnly) => element ? [...element.querySelectorAll('*')]
+    .filter((node) => node.children.length === 0 && node.textContent?.trim() === answerText &&
+      (!visibleOnly || isVisible(node))).length : 0;
+    const options = [...poll.querySelectorAll('[data-poll-option-idx]')];
+    return {
+      rowVisible: isVisible(poll),
+      optionCount: options.length,
+      visibleOptionCount: options.filter(isVisible).length,
+      answerTextCounts: expectedAnswers.map((answerText) => countText(poll, answerText, false)),
+      visibleAnswerTextCounts: expectedAnswers.map((answerText) => countText(poll, answerText, true)),
+      answerOptionCounts: expectedAnswers.map((answerText) => options.filter((option) => option.textContent?.includes(answerText)).length)
+    };
+  }, {expectedAnswers: answerTexts}).catch(() => ({
+    rowVisible: null,
+    optionCount: null,
+    visibleOptionCount: null,
+    answerTextCounts: null,
+    visibleAnswerTextCounts: null,
+    answerOptionCounts: null
+  }));
+}
+
+function formatPollContentDiagnostic(diagnostic) {
+  const safeBool = (value) => value === true ? 1 : value === false ? 0 : 'unavailable';
+  const safeCount = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 'unavailable';
+  const safePair = (values) => Array.isArray(values) && values.length === 2 ? values.map(safeCount).join('_') : 'unavailable';
+  return `row_visible_${safeBool(diagnostic.rowVisible)}` +
+    `_options_${safeCount(diagnostic.optionCount)}_visible_options_${safeCount(diagnostic.visibleOptionCount)}` +
+    `_answer_text_counts_${safePair(diagnostic.answerTextCounts)}` +
+    `_visible_answer_text_counts_${safePair(diagnostic.visibleAnswerTextCounts)}` +
+    `_answer_options_${safePair(diagnostic.answerOptionCounts)}`;
+}
+
+async function attachSyntheticPollAnswerLink(page, popup, stage) {
+  currentStage = `${stage}_answer_media_button`;
+  const answerInput = popup.locator('[contenteditable="true"]').nth(2);
+  const answer = answerInput.locator('xpath=../..');
+  const attachButtons = answer.locator('button.btn-icon');
+  const attachButton = attachButtons.last();
+  if(await attachButtons.count() < 1) failStage(`${stage}_answer_media_button_absent`);
+
+  await attachButton.click().catch(() => failStage(`${stage}_answer_media_button`));
+  const attachMenu = page.locator('.btn-menu:visible').last();
+  const linkOption = attachMenu.getByText('Add Link', {exact: true});
+  await linkOption.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`${stage}_answer_media_menu`));
+  await linkOption.click().catch(() => failStage(`${stage}_answer_media_menu`));
+
+  currentStage = `${stage}_answer_media_link`;
+  const linkPopup = page.locator('.popup').filter({hasText: 'Add Link'}).last();
+  await linkPopup.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`${stage}_answer_media_link`));
+  await linkPopup.locator('input[name="url"]').fill(POLL_ANSWER_LINK).catch(() => failStage(`${stage}_answer_media_link_url`));
+  const done = linkPopup.getByRole('button', {name: 'Done', exact: true});
+  await done.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`${stage}_answer_media_link_done`));
+  await done.click().catch(() => failStage(`${stage}_answer_media_link_done`));
+  await linkPopup.waitFor({state: 'detached', timeout: 10_000}).catch(() => failStage(`${stage}_answer_media_link_close`));
+  await answer.getByRole('button', {name: 'Add Link', exact: true})
+  .waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_answer_media_attached`));
+}
+
+async function openPollComposer(page, {stage, question, description, mediaAnswer, screenshotDirectory, capturedScreenshots,
+  submission = {createClicked: false, composerClosed: false}}) {
+  currentStage = `${stage}_open_menu`;
+  const attachMenu = page.locator('#column-center .chat.active .new-message-wrapper > .attach-file');
+  await attachMenu.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_open_menu`));
+  await attachMenu.click().catch(() => failStage(`${stage}_open_menu`));
+
+  currentStage = `${stage}_open`;
+  const attachOptions = page.locator('.btn-menu:visible').last();
+  const pollOption = attachOptions.getByText('Poll', {exact: true});
+  await pollOption.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`${stage}_open`));
+  await pollOption.click().catch(() => failStage(`${stage}_open`));
+
+  currentStage = `${stage}_popup`;
+  const popup = page.locator('.popup').filter({hasText: 'New Poll'}).last();
+  await popup.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_popup`));
+  const fields = popup.locator('[contenteditable="true"]');
+  if(await fields.count() !== 4) failStage(`${stage}_fields`);
+  await fields.nth(0).fill(question).catch(() => failStage(`${stage}_question_fill`));
+  await fields.nth(1).fill(description).catch(() => failStage(`${stage}_description_fill`));
+  await fields.nth(2).fill(POLL_ANSWER_ONE).catch(() => failStage(`${stage}_answer_1_fill`));
+  await fields.nth(3).fill(POLL_ANSWER_TWO).catch(() => failStage(`${stage}_answer_2_fill`));
+  if(mediaAnswer) await attachSyntheticPollAnswerLink(page, popup, stage);
+
+  await capturePollState(
+    page,
+    screenshotDirectory,
+    `${stage.replaceAll('_', '-')}-composer`,
+    `${stage}_composer_screenshot`,
+    capturedScreenshots
+  );
+
+  currentStage = `${stage}_create`;
+  const createButton = popup.getByRole('button', {name: 'Create', exact: true});
+  await createButton.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`${stage}_create`));
+  const rpcErrorsBeforeCreation = await readRpcErrorCounts(page);
+  const clientErrorsBeforeCreation = {...clientErrorCounts.get(page)};
+  await createButton.click().catch(() => failStage(`${stage}_create`));
+  submission.createClicked = true;
+  await popup.waitFor({state: 'detached', timeout: 15_000}).catch(() => failStage(`${stage}_popup_close`));
+  submission.composerClosed = true;
+  return {rpc: rpcErrorsBeforeCreation, client: clientErrorsBeforeCreation, submission: {...submission}};
+}
+
+function getPollCreationRejectionErrorType(diagnostic) {
+  const sendMediaErrorType = diagnostic?.sendMediaError?.type;
+  if(typeof sendMediaErrorType === 'string' && RPC_ERROR_TYPE_PATTERN.test(sendMediaErrorType)) return sendMediaErrorType;
+  const messageErrorType = diagnostic?.messageError?.type;
+  if(typeof messageErrorType === 'string' && RPC_ERROR_TYPE_PATTERN.test(messageErrorType)) return messageErrorType;
+  return Object.entries(diagnostic?.rpcErrorTypes || {}).find(([type, count]) =>
+    RPC_ERROR_TYPE_PATTERN.test(type) && Number.isSafeInteger(count) && count > 0
+  )?.[0] || null;
+}
+
+function installWorkerPollSendObserver(scope = globalThis) {
+  const observerKey = '__realClientPollSendObservation';
+  const existing = scope[observerKey];
+  if(existing) return {status: existing.status};
+
+  const state = {status: 'pending', attempts: [], droppedAttempts: 0};
+  try {
+    Object.defineProperty(scope, observerKey, {value: state, configurable: true});
+  } catch {
+    return {status: 'unavailable'};
+  }
+
+  let timer;
+  let elapsedMs = 0;
+  let installing = false;
+  const stop = () => {
+    if(timer !== undefined) {
+      scope.clearInterval(timer);
+      timer = undefined;
+    }
+  };
+  const markUnavailable = () => {
+    state.status = 'unavailable';
+    stop();
+  };
+  const install = async() => {
+    if(state.status !== 'pending' || installing) return;
+    const managerRegistry = scope.appManagersManager;
+    if(!managerRegistry || managerRegistry.areManagersCreated !== true) {
+      elapsedMs += 100;
+      if(elapsedMs >= 30_000) markUnavailable();
+      return;
+    }
+
+    installing = true;
+    try {
+      const managersByAccount = await managerRegistry.getManagersByAccount();
+      let installedManagers = 0;
+      for(const managers of Object.values(managersByAccount || {})) {
+        const apiManager = managers?.appPollsManager?.apiManager;
+        if(!apiManager || typeof apiManager.invokeApi !== 'function') continue;
+        const original = apiManager.invokeApi;
+        if(original.__realClientPollSendObserver === true) {
+          installedManagers++;
+          continue;
+        }
+
+        const wrapped = function(method, params) {
+          if(method !== 'messages.sendMedia' || params?.media?._ !== 'inputMediaPoll') {
+            return original.apply(this, arguments);
+          }
+          const poll = params.media.poll;
+          const question = typeof poll?.question === 'string' ? poll.question : poll?.question?.text;
+          const match = typeof question === 'string' && /^browser-ci-poll-(description|input-answer)-([a-f0-9]{8})$/.exec(question);
+          if(!match) return original.apply(this, arguments);
+
+          const safeRandomId = (value) => {
+            if(value === undefined || value === null) return null;
+            let randomId;
+            try {
+              randomId = String(value);
+            } catch {
+              return null;
+            }
+            return /^-?[0-9]{1,24}$/.test(randomId) ? randomId : null;
+          };
+          const safeMessageId = (value) => {
+            if(value === undefined || value === null) return null;
+            let messageId;
+            try {
+              messageId = String(value);
+            } catch {
+              return null;
+            }
+            return /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(messageId) ? messageId : null;
+          };
+          const safeError = (error) => {
+            if(!error || typeof error !== 'object') return null;
+            const type = typeof error.type === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.type) ? error.type : 'unclassified';
+            const code = Number.isSafeInteger(error.code) ? error.code : null;
+            const message = typeof error.message === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.message) ? error.message : null;
+            return {type, code, message};
+          };
+          const outcome = {
+            shape: match[1] === 'input-answer' ? 'input_answer' : 'description',
+            questionToken: match[2],
+            randomId: safeRandomId(params.random_id),
+            status: 'pending',
+            resultType: null,
+            responseMessageId: null,
+            inputAnswerCount: Array.isArray(poll.answers)
+              ? poll.answers.filter((answer) => answer?._ === 'inputPollAnswer').length
+              : null,
+            descriptionEmpty: typeof params.message === 'string' ? params.message === '' : null,
+            error: null
+          };
+          if(state.attempts.length < 16) state.attempts.push(outcome);
+          else state.droppedAttempts++;
+
+          const recordResult = (result, error, rejected = false) => {
+            try {
+              outcome.status = rejected ? 'rejected' : 'accepted';
+              const resultType = result?._;
+              outcome.resultType = typeof resultType === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(resultType)
+                ? resultType
+                : null;
+              const updates = Array.isArray(result?.updates) ? result.updates : [result];
+              const responseMessageIds = [];
+              for(const update of updates) {
+                const message = update?.message;
+                const correlatedUpdate = outcome.randomId !== null &&
+                  safeRandomId(update?.random_id ?? message?.random_id) === outcome.randomId;
+                const shortSentMessage = update?._ === 'updateShortSentMessage';
+                const rawMessageId = update?._ === 'updateMessageID' && correlatedUpdate
+                  ? update.id
+                  : message?.id ?? message?.mid ?? (shortSentMessage ? update.id : undefined);
+                const messageId = safeMessageId(rawMessageId);
+                if(messageId !== null && (correlatedUpdate || shortSentMessage)) responseMessageIds.push(messageId);
+              }
+              const distinctResponseMessageIds = [...new Set(responseMessageIds)];
+              outcome.responseMessageId = distinctResponseMessageIds.length === 1 ? distinctResponseMessageIds[0] : null;
+              outcome.error = rejected ? safeError(error) : null;
+            } catch {
+              outcome.status = rejected ? 'rejected' : 'accepted';
+            }
+          };
+
+          let request;
+          try {
+            request = original.apply(this, arguments);
+          } catch(error) {
+            recordResult(undefined, error, true);
+            throw error;
+          }
+          try {
+            if(request && typeof request.then === 'function') {
+              request.then((result) => recordResult(result), (error) => recordResult(undefined, error, true));
+            } else {
+              recordResult(request);
+            }
+          } catch(error) {
+            recordResult(undefined, error);
+          }
+          return request;
+        };
+        Object.defineProperty(wrapped, '__realClientPollSendObserver', {value: true});
+        apiManager.invokeApi = wrapped;
+        if(apiManager.invokeApi === wrapped) installedManagers++;
+      }
+
+      if(installedManagers > 0) {
+        state.status = 'installed';
+        stop();
+      } else {
+        elapsedMs += 100;
+        if(elapsedMs >= 30_000) markUnavailable();
+      }
+    } catch {
+      elapsedMs += 100;
+      if(elapsedMs >= 30_000) markUnavailable();
+    } finally {
+      installing = false;
+    }
+  };
+
+  timer = scope.setInterval(() => { install(); }, 100);
+  install();
+  return {status: state.status};
+}
+
+function readWorkerPollSendObservation(scope = globalThis) {
+  const state = scope?.__realClientPollSendObservation;
+  if(!state || !['pending', 'installed', 'unavailable'].includes(state.status)) {
+    return {status: 'unavailable', attempts: [], droppedAttempts: 0};
+  }
+  return {
+    status: state.status,
+    attempts: Array.isArray(state.attempts) ? state.attempts.slice(0, 16).map((attempt) => ({...attempt})) : [],
+    droppedAttempts: Number.isSafeInteger(state.droppedAttempts) && state.droppedAttempts >= 0 ? state.droppedAttempts : 0
+  };
+}
+
+function sanitizePollSendObservation(value) {
+  if(!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {status: 'unavailable', attempts: [], droppedAttempts: 0};
+  }
+  const status = ['pending', 'installed', 'unavailable'].includes(value.status) ? value.status : 'unavailable';
+  const safeId = (id, pattern) => {
+    if(id === undefined || id === null) return null;
+    let text;
+    try {
+      text = String(id);
+    } catch {
+      return null;
+    }
+    return pattern.test(text) ? text : null;
+  };
+  const attempts = (Array.isArray(value.attempts) ? value.attempts : []).slice(0, 16).flatMap((attempt) => {
+    if(!attempt || typeof attempt !== 'object' || Array.isArray(attempt)) return [];
+    const shape = ['description', 'input_answer'].includes(attempt.shape) ? attempt.shape : null;
+    const questionToken = safeId(attempt.questionToken, /^[a-f0-9]{8}$/);
+    const attemptStatus = ['pending', 'accepted', 'rejected'].includes(attempt.status) ? attempt.status : null;
+    if(!shape || !questionToken || !attemptStatus) return [];
+    const resultType = typeof attempt.resultType === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(attempt.resultType)
+      ? attempt.resultType
+      : null;
+    const inputAnswerCount = Number.isSafeInteger(attempt.inputAnswerCount) && attempt.inputAnswerCount >= 0
+      ? Math.min(attempt.inputAnswerCount, 100)
+      : null;
+    const descriptionEmpty = typeof attempt.descriptionEmpty === 'boolean' ? attempt.descriptionEmpty : null;
+    const error = attempt.error && typeof attempt.error === 'object' ? {
+      type: typeof attempt.error.type === 'string' && RPC_ERROR_TYPE_PATTERN.test(attempt.error.type) ? attempt.error.type : 'unclassified',
+      code: Number.isSafeInteger(attempt.error.code) ? attempt.error.code : null,
+      message: typeof attempt.error.message === 'string' && RPC_ERROR_TYPE_PATTERN.test(attempt.error.message) ? attempt.error.message : null
+    } : null;
+    return [{
+      shape,
+      questionToken,
+      randomId: safeId(attempt.randomId, /^-?[0-9]{1,24}$/),
+      status: attemptStatus,
+      resultType,
+      responseMessageId: safeId(attempt.responseMessageId, /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/),
+      inputAnswerCount,
+      descriptionEmpty,
+      error
+    }];
+  });
+  return {
+    status,
+    attempts,
+    droppedAttempts: Number.isSafeInteger(value.droppedAttempts) && value.droppedAttempts >= 0
+      ? Math.min(value.droppedAttempts, 1_000_000)
+      : 0
+  };
+}
+
+function pollSendAttemptCursor(observation) {
+  const safeObservation = sanitizePollSendObservation(observation);
+  return {attemptCount: safeObservation.attempts.length, droppedAttempts: safeObservation.droppedAttempts};
+}
+
+function classifyPollSendConfirmation({observation, question, persistedIdentity, attemptCursor = {attemptCount: 0, droppedAttempts: 0}}) {
+  const safeObservation = sanitizePollSendObservation(observation);
+  const questionMatch = typeof question === 'string' && /^browser-ci-poll-(description|input-answer)-([a-f0-9]{8})$/.exec(question);
+  const result = (status, extra = {}) => ({
+    status,
+    confirmed: status === 'persisted_identity',
+    sendResult: extra.sendResult || 'unobserved',
+    sendResultCount: extra.sendResultCount || 0,
+    sendResultSource: extra.attempt ? 'messages.sendMedia' : null,
+    randomId: extra.attempt?.randomId || null,
+    responseMessageId: extra.attempt?.responseMessageId || null,
+    resultType: extra.attempt?.resultType || null,
+    sendMediaStatus: extra.attempt?.status === 'accepted' ? 'resolved' : extra.attempt?.status || null,
+    inputAnswerCount: extra.attempt?.inputAnswerCount ?? null,
+    descriptionEmpty: extra.attempt?.descriptionEmpty ?? null,
+    error: extra.attempt?.error || null,
+    persistedIdentityStatus: extra.persistedIdentityStatus || 'unavailable',
+    attempt: extra.attempt || null
+  });
+  if(safeObservation.status !== 'installed') {
+    return result(safeObservation.status === 'pending' ? 'observer_pending' : 'observer_unavailable');
+  }
+  if(!questionMatch) return result('no_observed_attempt');
+  const attemptOffset = Number.isSafeInteger(attemptCursor?.attemptCount) && attemptCursor.attemptCount >= 0
+    ? Math.min(attemptCursor.attemptCount, 16)
+    : 0;
+  const droppedAttemptsBefore = Number.isSafeInteger(attemptCursor?.droppedAttempts) && attemptCursor.droppedAttempts >= 0
+    ? attemptCursor.droppedAttempts
+    : 0;
+  if(safeObservation.droppedAttempts > droppedAttemptsBefore) {
+    return result('ambiguous_attempt', {sendResultCount: safeObservation.droppedAttempts - droppedAttemptsBefore});
+  }
+
+  const shape = questionMatch[1] === 'input-answer' ? 'input_answer' : 'description';
+  const questionToken = questionMatch[2];
+  const matchingAttempts = safeObservation.attempts.slice(attemptOffset).filter((attempt) =>
+    attempt.shape === shape && attempt.questionToken === questionToken
+  );
+  if(matchingAttempts.length === 0) return result('no_observed_attempt');
+  const attemptIdentities = new Set(matchingAttempts.map((attempt) =>
+    `${attempt.randomId || 'missing'}:${attempt.status}:${attempt.responseMessageId || 'missing'}`
+  ));
+  if(attemptIdentities.size > 1) return result('ambiguous_attempt', {sendResultCount: matchingAttempts.length});
+  const attempt = matchingAttempts.at(-1);
+  const base = {attempt, sendResultCount: matchingAttempts.length};
+  if(attempt.status === 'pending') return result('pending', base);
+  if(attempt.status === 'rejected') return result('rejected', {...base, sendResult: 'rejected'});
+  if(attempt.status !== 'accepted' || !attempt.randomId || !attempt.responseMessageId) {
+    return result('accepted_response', {...base, sendResult: 'accepted'});
+  }
+
+  const identityStatus = ['present', 'missing', 'mismatch', 'unavailable'].includes(persistedIdentity?.status)
+    ? persistedIdentity.status
+    : 'unavailable';
+  const persistedMid = persistedIdentity?.messageId === undefined || persistedIdentity?.messageId === null
+    ? null
+    : String(persistedIdentity.messageId);
+  if(identityStatus !== 'present' || persistedMid !== attempt.responseMessageId ||
+      persistedIdentity.peerMatches !== true || persistedIdentity.pollMatches !== true) {
+    return result(identityStatus === 'mismatch' || (identityStatus === 'present' && persistedMid !== attempt.responseMessageId)
+      ? 'persisted_identity_mismatch'
+      : 'accepted_response', {...base, sendResult: 'accepted', persistedIdentityStatus: identityStatus});
+  }
+  return result('persisted_identity', {...base, sendResult: 'accepted', persistedIdentityStatus: 'present'});
+}
+
+function isExpectedPollCreationRejection(diagnostic, expectedErrorType) {
+  return diagnostic?.status === 'error' &&
+    diagnostic.createClicked === true &&
+    diagnostic.composerClosed === true &&
+    diagnostic.tempMessageFound === true &&
+    diagnostic.sendResult === 'rejected' &&
+    diagnostic.sendObservationStatus === 'rejected' &&
+    Array.isArray(diagnostic.bubbleStatuses) && diagnostic.bubbleStatuses.includes('is-error') &&
+    getPollCreationRejectionErrorType(diagnostic) === expectedErrorType;
+}
+
+async function runPollCreationNegativeControl({alice, bob, registry, runtime, groupName, screenshotDirectory, capturedScreenshots}) {
+  const cases = [
+    {
+      shape: 'description',
+      stage: 'alice_poll_description_create',
+      question: `browser-ci-poll-description-${runtime.runId.slice(0, 8)}`,
+      description: POLL_DESCRIPTION,
+      mediaAnswer: false,
+      errorType: 'POLL_ANSWERS_INVALID'
+    },
+    {
+      shape: 'input_answer',
+      stage: 'alice_poll_input_answer_create',
+      question: `browser-ci-poll-input-answer-${runtime.runId.slice(0, 8)}`,
+      description: '',
+      mediaAnswer: true,
+      errorType: 'POLL_ANSWERS_INVALID'
+    }
+  ];
+
+  await ensurePollGroupActive(alice.page, groupName, 'alice_poll_group_chat');
+  await ensurePollGroupActive(bob.page, groupName, 'bob_poll_group_chat');
+  await installPollMessageErrorObserver(alice.page);
+  const evidence = [];
+  const sendResults = [];
+  for(const testCase of cases) {
+    const pollErrorStart = await alice.page.evaluate(() => window.__realClientPollErrors?.().length || 0).catch(() => 0);
+    const workerErrorsBefore = alice.observer?.workerErrorSnapshot?.();
+    const attemptCursor = pollSendAttemptCursor(await registry.readPollSendObservation(alice.observer));
+    const submission = {createClicked: false, composerClosed: false};
+    await alice.page.evaluate((question) => { window.__realClientActivePollQuestion = question; }, testCase.question);
+    let rpcErrorsBeforeCreation;
+    const creationEvidence = await openPollComposer(alice.page, {
+      stage: testCase.stage.replace('_create', ''),
+      question: testCase.question,
+      description: testCase.description,
+      mediaAnswer: testCase.mediaAnswer,
+      screenshotDirectory,
+      capturedScreenshots,
+      submission
+    });
+    rpcErrorsBeforeCreation = creationEvidence?.rpc;
+    const readSendObservation = () => registry.readPollSendObservation(alice.observer);
+    const sendStatus = await waitForPollSendOutcome(alice.page, testCase.question, testCase.stage, readSendObservation, 30_000, attemptCursor);
+    const sendDiagnostic = await readPollSendDiagnostic(
+      alice.page,
+      testCase.question,
+      sendStatus,
+      pollErrorStart,
+      rpcErrorsBeforeCreation,
+      submission,
+      workerErrorsBefore,
+      alice.observer?.workerErrorSnapshot?.(),
+      await readSendObservation(),
+      attemptCursor
+    );
+    sendResults.push({shape: testCase.shape, ...sendDiagnostic});
+    const actualErrorType = getPollCreationRejectionErrorType(sendDiagnostic);
+    if(!isExpectedPollCreationRejection(sendDiagnostic, testCase.errorType)) {
+      failStage(`${testCase.stage}_${formatPollSendDiagnostic({shape: testCase.shape, ...sendDiagnostic})}`);
+    }
+    const bobPoll = pollMessageLocator(bob.page, testCase.question);
+    if(await bobPoll.count() !== 0) failStage(`${testCase.stage}_delivered`);
+    await capturePollState(
+      alice.page,
+      screenshotDirectory,
+      `${testCase.shape.replaceAll('_', '-')}-poll-rejected`,
+      `${testCase.stage}_rejection_screenshot`,
+      capturedScreenshots
+    );
+    evidence.push({shape: testCase.shape, stage: testCase.stage, errorType: actualErrorType});
+  }
+
+  if(JSON.stringify(evidence) !== JSON.stringify(POLL_NEGATIVE_CONTROL)) {
+    failStage('alice_poll_negative_control_evidence');
+  }
+  return {evidence, sendResults};
+}
+
+async function installPollMessageErrorObserver(page) {
+  const observerReady = await page.waitForFunction(() =>
+    typeof window.rootScope?.addEventListener === 'function' &&
+    typeof window.apiManagerProxy?.getMessageByPeer === 'function'
+  , undefined, {timeout: 15_000}).catch(() => undefined);
+  if(!observerReady) failStage('alice_poll_message_error_observer');
+  await page.evaluate(() => {
+    if(typeof window.__realClientPollErrors === 'function') return;
+
+    const errorTypePattern = /^[A-Z][A-Z0-9_]{1,63}$/;
+    const safeError = (error) => {
+      if(!error || typeof error !== 'object') return null;
+      const type = typeof error.type === 'string' && errorTypePattern.test(error.type) ? error.type : 'unclassified';
+      const code = Number.isSafeInteger(error.code) ? error.code : null;
+      const message = typeof error.message === 'string' && errorTypePattern.test(error.message) ? error.message : null;
+      return {type, code, message};
+    };
+    const safeRandomId = (value) => {
+      if(value === undefined || value === null) return null;
+      let randomId;
+      try {
+        randomId = String(value);
+      } catch {
+        return null;
+      }
+      return /^-?[0-9]{1,24}$/.test(randomId) ? randomId : null;
+    };
+    const safeMessageId = (value) => {
+      if(value === undefined || value === null) return null;
+      const messageId = String(value);
+      return /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(messageId) ? messageId : null;
+    };
+    const errors = [];
+    const sendOutcomes = [];
+    const capturePollError = (source, message, error, tempId, peerId) => {
+      const pollQuestion = message?.media?.poll?.question;
+      const questionText = typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text;
+      const activeQuestion = window.__realClientActivePollQuestion;
+      const activePeerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
+      const matchesStoredPoll = message?.media?._ === 'messageMediaPoll' && questionText === activeQuestion;
+      const messageId = safeMessageId(tempId ?? message?.mid);
+      const matchesRenderedPoll = Number(peerId ?? message?.peerId) === activePeerId && messageId !== null &&
+        [...document.querySelectorAll('#column-center .bubble[data-mid]')].filter((bubble) =>
+          bubble.dataset.mid === messageId && bubble.textContent?.includes(activeQuestion)
+        ).length === 1;
+      if(!matchesStoredPoll && !matchesRenderedPoll) return;
+      errors.push({
+        source,
+        question: activeQuestion,
+        isPoll: true,
+        peerId: Number.isSafeInteger(peerId ?? message?.peerId) ? peerId ?? message?.peerId : null,
+        tempId: messageId,
+        randomId: safeRandomId(message?.random_id),
+        messageFound: !!message,
+        storedError: safeError(message?.error),
+        eventError: safeError(error)
+      });
+    };
+    window.rootScope.addEventListener('message_error', ({peerId, tempId, error}) => {
+      let message;
+      try {
+        message = window.apiManagerProxy.getMessageByPeer(peerId, tempId) ||
+          window.rootScope.managers?.appMessagesManager?.getMessageByPeer(peerId, tempId);
+      } catch {}
+      capturePollError('message_error', message, error, tempId, peerId);
+    });
+    const getPollQuestion = (message) => {
+      const pollQuestion = message?.media?.poll?.question;
+      return typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text;
+    };
+    const capturePollDom = (questionText, messageId, tempId) => {
+      const center = document.querySelector('#column-center');
+      const bubbleRows = center ? [...center.querySelectorAll('.bubble[data-mid]')] : [];
+      const dataMidNodes = center ? [...center.querySelectorAll('[data-mid]')] : [];
+      const questionRows = center ? [...center.querySelectorAll('.bubble')]
+      .filter((element) => element.textContent?.includes(questionText)) : [];
+      const countByMid = (elements, id) => id === null ? 0 : elements
+      .filter((element) => element.dataset.mid === id).length;
+      const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const matchingQuestionTextNodes = [];
+      if(center) {
+        const walker = document.createTreeWalker(center, NodeFilter.SHOW_TEXT);
+        let node;
+        while((node = walker.nextNode())) {
+          if(node.nodeValue?.includes(questionText)) matchingQuestionTextNodes.push(node);
+        }
+      }
+      return {
+        bubbleRowCount: bubbleRows.length,
+        serverMidNodeCount: countByMid(dataMidNodes, messageId),
+        serverMidRowCount: countByMid(bubbleRows, messageId),
+        tempMidNodeCount: countByMid(dataMidNodes, tempId),
+        tempMidRowCount: countByMid(bubbleRows, tempId),
+        questionTextNodeCount: matchingQuestionTextNodes.length,
+        questionVisibleTextNodeCount: matchingQuestionTextNodes.filter((node) => isVisible(node.parentElement)).length,
+        questionRowCount: questionRows.length,
+        questionVisibleRowCount: questionRows.filter(isVisible).length
+      };
+    };
+    Object.defineProperty(window, '__realClientPollDomSnapshot', {
+      value: capturePollDom,
+      configurable: false
+    });
+    window.rootScope.addEventListener('message_sent', ({tempId, tempMessage, mid, message}) => {
+      const activeQuestion = window.__realClientActivePollQuestion;
+      if(!activeQuestion || (getPollQuestion(tempMessage) !== activeQuestion && getPollQuestion(message) !== activeQuestion)) return;
+      if(sendOutcomes.length >= 16) return;
+      const messageId = safeMessageId(mid ?? message?.mid);
+      const peerId = Number(message?.peerId ?? tempMessage?.peerId);
+      let storeMidPresent = null;
+      let storePollMatches = null;
+      if(messageId !== null && Number.isSafeInteger(peerId) && typeof window.apiManagerProxy?.getMessageByPeer === 'function') {
+        try {
+          const storedMessage = window.apiManagerProxy.getMessageByPeer(peerId, Number(messageId));
+          if(!storedMessage) {
+            storeMidPresent = false;
+            storePollMatches = false;
+          } else {
+            const storedMid = Number(storedMessage.mid);
+            const storedPeerId = storedMessage.peerId === undefined ? peerId : Number(storedMessage.peerId);
+            storeMidPresent = storedMid === Number(messageId) && storedPeerId === peerId;
+            storePollMatches = storeMidPresent && storedMessage.media?._ === 'messageMediaPoll' &&
+              getPollQuestion(storedMessage) === activeQuestion;
+          }
+        } catch {}
+      }
+      const safeTempId = safeMessageId(tempId ?? tempMessage?.mid);
+      sendOutcomes.push({
+        source: 'message_sent',
+        question: activeQuestion,
+        tempId: safeTempId,
+        messageId,
+        randomId: safeRandomId(tempMessage?.random_id),
+        storeMidPresent,
+        storePollMatches,
+        domAtEvent: capturePollDom(activeQuestion, messageId, safeTempId)
+      });
+    });
+    const appMessagesManager = window.rootScope.managers?.appMessagesManager;
+    if(typeof appMessagesManager?.toggleError === 'function') {
+      const toggleError = appMessagesManager.toggleError;
+      appMessagesManager.toggleError = function(message, error, repayRequest) {
+        const result = toggleError.call(this, message, error, repayRequest);
+        capturePollError('toggle_error', message, error, message?.mid, message?.peerId);
+        return result;
+      };
+    }
+    Object.defineProperty(window, '__realClientPollErrors', {
+      value: () => errors.slice(),
+      configurable: false
+    });
+    Object.defineProperty(window, '__realClientPollSendOutcomes', {
+      value: () => sendOutcomes.slice(),
+      configurable: false
+    });
+  });
+}
+
+async function readPollSendQuestionCandidates(page, question) {
+  return page.evaluate((questionText) => {
+    const peerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
+    const safeMessageId = (value) => {
+      if(value === undefined || value === null) return null;
+      let messageId;
+      try {
+        messageId = String(value);
+      } catch {
+        return null;
+      }
+      return /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(messageId) ? messageId : null;
+    };
+    const safeRandomId = (value) => {
+      if(value === undefined || value === null) return null;
+      let randomId;
+      try {
+        randomId = String(value);
+      } catch {
+        return null;
+      }
+      return /^-?[0-9]{1,24}$/.test(randomId) ? randomId : null;
+    };
+    const safeError = (error) => {
+      if(!error || typeof error !== 'object') return null;
+      const type = typeof error.type === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.type) ? error.type : 'unclassified';
+      const code = Number.isSafeInteger(error.code) ? error.code : null;
+      const message = typeof error.message === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.message) ? error.message : null;
+      return {type, code, message};
+    };
+    const statusClasses = ['is-sending', 'is-error', 'is-sent', 'is-read'];
+    const rows = [...document.querySelectorAll('#column-center .bubble[data-mid]')]
+    .filter((element) => element.textContent?.includes(questionText));
+    const isVisible = (element) => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    const candidates = rows.slice(0, 16).map((element) => {
+      const rowMid = safeMessageId(element.dataset.mid);
+      let message;
+      const numericMid = Number(rowMid);
+      if(Number.isSafeInteger(peerId) && rowMid !== null && Number.isFinite(numericMid) &&
+          Math.abs(numericMid) <= Number.MAX_SAFE_INTEGER) {
+        try {
+          message = window.apiManagerProxy?.getMessageByPeer(peerId, numericMid);
+        } catch {}
+      }
+      const pollQuestion = message?.media?.poll?.question;
+      const storedPeerId = message?.peerId === undefined ? peerId : Number(message.peerId);
+      return {
+        mid: safeMessageId(message?.mid) || rowMid,
+        randomId: safeRandomId(message?.random_id),
+        peerMatches: Number.isSafeInteger(peerId) && storedPeerId === peerId,
+        pollMatches: message?.media?._ === 'messageMediaPoll' &&
+          (typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text) === questionText,
+        statuses: statusClasses.filter((name) => element.classList.contains(name)),
+        error: safeError(message?.error),
+        visible: isVisible(element)
+      };
+    });
+    return {
+      questionRowCount: Math.min(rows.length, 100),
+      visibleQuestionRowCount: Math.min(rows.filter(isVisible).length, 100),
+      candidates
+    };
+  }, question).catch(() => ({questionRowCount: null, visibleQuestionRowCount: null, candidates: []}));
+}
+
+async function readPersistedPollIdentity(page, messageId, question) {
+  return page.evaluate(({responseId, questionText}) => {
+    if(typeof window.apiManagerProxy?.getMessageByPeer !== 'function') return {status: 'unavailable'};
+    const peerId = Number(document.querySelector('#column-center .topbar .avatar[data-peer-id]')?.dataset.peerId);
+    const numericMessageId = Number(responseId);
+    if(!Number.isSafeInteger(peerId) || !Number.isSafeInteger(numericMessageId)) return {status: 'unavailable'};
+    let message;
+    try {
+      message = window.apiManagerProxy.getMessageByPeer(peerId, numericMessageId);
+    } catch {
+      return {status: 'unavailable'};
+    }
+    if(!message) return {status: 'missing'};
+    const storedMessageId = String(message.mid);
+    const storedPeerId = message.peerId === undefined ? peerId : Number(message.peerId);
+    const pollQuestion = message.media?.poll?.question;
+    const peerMatches = storedPeerId === peerId;
+    const pollMatches = message.media?._ === 'messageMediaPoll' &&
+      (typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text) === questionText;
+    const status = storedMessageId === String(responseId) && peerMatches && pollMatches ? 'present' : 'mismatch';
+    return {
+      status,
+      messageId: /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(storedMessageId) ? storedMessageId : null,
+      peerMatches,
+      pollMatches
+    };
+  }, {responseId: messageId, questionText: question}).catch(() => ({status: 'unavailable'}));
+}
+
+async function readPollSendEvidence(page, question, pollSendObservation, attemptCursor) {
+  const messageState = await readPollSendQuestionCandidates(page, question);
+  const firstPass = classifyPollSendConfirmation({
+    observation: pollSendObservation,
+    question,
+    attemptCursor
+  });
+  const persistedIdentity = firstPass.responseMessageId
+    ? await readPersistedPollIdentity(page, firstPass.responseMessageId, question)
+    : {status: 'unavailable'};
+  const confirmation = classifyPollSendConfirmation({
+    observation: pollSendObservation,
+    question,
+    persistedIdentity,
+    attemptCursor
+  });
+  return {messageState, persistedIdentity, confirmation};
+}
+
+async function waitForPollSendOutcome(page, question, stage, readSendObservation, timeoutMs = 30_000, attemptCursor) {
+  currentStage = stage;
+  if(Number.isFinite(readSendObservation)) {
+    timeoutMs = readSendObservation;
+    readSendObservation = undefined;
+  }
+  const readObservation = typeof readSendObservation === 'function'
+    ? readSendObservation
+    : async() => ({status: 'unavailable', attempts: []});
+  const deadline = Date.now() + timeoutMs;
+  while(Date.now() < deadline) {
+    let observationSnapshot;
+    try {
+      observationSnapshot = sanitizePollSendObservation(await readObservation());
+    } catch {
+      observationSnapshot = {status: 'unavailable', attempts: []};
+    }
+    const evidence = await readPollSendEvidence(page, question, observationSnapshot, attemptCursor);
+    if(evidence.confirmation.status === 'persisted_identity') return 'sent';
+    if(evidence.confirmation.status === 'rejected') return 'error';
+    const remaining = deadline - Date.now();
+    if(remaining <= 0) break;
+    await page.waitForTimeout(Math.min(100, remaining));
+  }
+  return 'timeout';
+}
+
+async function readPollSendDiagnostic(page, question, status, errorStart, rpcErrorsBefore, submission = {}, workerErrorsBefore, workerErrorsAfter, pollSendObservation = {status: 'unavailable', attempts: []}, attemptCursor) {
+  const [errors, sendOutcomes, rpcErrors] = await Promise.all([
+    page.evaluate(() => window.__realClientPollErrors?.() || []).catch(() => []),
+    page.evaluate(() => window.__realClientPollSendOutcomes?.() || []).catch(() => []),
+    readRpcErrorCounts(page)
+  ]);
+  const safeObservation = sanitizePollSendObservation(pollSendObservation);
+  const {messageState, persistedIdentity, confirmation} = await readPollSendEvidence(page, question, safeObservation, attemptCursor);
+  const matchingCandidates = messageState.candidates.filter((candidate) =>
+    candidate.randomId === confirmation.randomId && candidate.peerMatches === true && candidate.pollMatches === true
+  );
+  const tempCandidate = matchingCandidates.length === 1 ? matchingCandidates[0] : undefined;
+  const newErrors = errors.slice(Number.isSafeInteger(errorStart) ? errorStart : 0);
+  const matchingErrors = newErrors.filter((entry) => entry.question === question ||
+    (tempCandidate?.mid !== null && String(entry.tempId) === tempCandidate?.mid));
+  const messageError = matchingErrors.find((entry) => entry.source === 'toggle_error' && entry.storedError) ||
+    matchingErrors.at(-1);
+  const matchingSendOutcomes = sendOutcomes.filter((entry) =>
+    entry.question === question && entry.randomId === confirmation.randomId
+  );
+  const sendOutcome = matchingSendOutcomes.at(-1);
+  const apiMessageError = confirmation.error;
+  const [renderedPollDom, selectorCount, selectorVisibleCount] = await Promise.all([
+    page.evaluate(({questionText, messageId, tempId}) =>
+      window.__realClientPollDomSnapshot?.(questionText, messageId, tempId) || null,
+    {questionText: question, messageId: confirmation.responseMessageId, tempId: tempCandidate?.mid || null}
+    ).catch(() => null),
+    pollMessageLocator(page, question).count().catch(() => null),
+    pollMessageLocator(page, question).evaluateAll((elements) => elements.filter((element) => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    }).length).catch(() => null)
+  ]);
+  if(renderedPollDom) {
+    renderedPollDom.selectorCount = selectorCount;
+    renderedPollDom.selectorVisibleCount = selectorVisibleCount;
+  }
+  const rpcErrorDelta = rpcErrorsSince(rpcErrorsBefore, rpcErrors);
+  const workerErrorDelta = workerErrorsSince(workerErrorsBefore, workerErrorsAfter);
+  return {
+    status,
+    createClicked: submission.createClicked === true,
+    composerClosed: submission.composerClosed === true,
+    tempMessageFound: !!tempCandidate,
+    tempCandidateCount: messageState.questionRowCount,
+    tempId: tempCandidate?.mid || messageError?.tempId || null,
+    bubbleStatuses: tempCandidate?.statuses || [],
+    randomId: confirmation.randomId || messageError?.randomId || null,
+    messageError: tempCandidate?.error || messageError?.storedError || messageError?.eventError || apiMessageError || null,
+    messageErrorStored: !!(tempCandidate?.error || messageError?.storedError),
+    sendResult: confirmation.sendResult,
+    sendResultCount: confirmation.sendResultCount,
+    sendResultSource: confirmation.sendResultSource,
+    sentTempId: tempCandidate?.mid || null,
+    sentMessageId: confirmation.responseMessageId,
+    sentRandomId: confirmation.randomId,
+    sentMessageStore: ['present', 'missing', 'mismatch'].includes(persistedIdentity.status) ? persistedIdentity.status : null,
+    sentPollStoreMatch: persistedIdentity.status === 'present' ? true :
+      ['missing', 'mismatch'].includes(persistedIdentity.status) ? false : null,
+    sentDomAtEvent: sendOutcome?.domAtEvent || null,
+    sendMediaObserverInstalled: safeObservation.status === 'installed',
+    sendWorkerObserverStatus: safeObservation.status,
+    sendObservationStatus: confirmation.status,
+    persistedIdentityStatus: confirmation.persistedIdentityStatus,
+    sendMediaCallCount: confirmation.sendResultCount,
+    sendMediaStatus: confirmation.sendMediaStatus,
+    sendMediaResultType: confirmation.resultType,
+    sendMediaResponseMessageId: confirmation.responseMessageId,
+    sendMediaInputAnswerCount: confirmation.inputAnswerCount,
+    sendMediaDescriptionEmpty: confirmation.descriptionEmpty,
+    sendMediaError: apiMessageError || null,
+    renderedPollDom,
+    rpcErrorCount: rpcErrorDelta.rpcErrorsSinceSelection,
+    rpcErrorTypes: rpcErrorDelta.rpcErrorTypesSinceSelection || {},
+    workerEvaluationExceptions: workerErrorDelta.evaluationExceptions,
+    workerErrorTypes: workerErrorDelta.errorTypes
+  };
+}
+
+function workerErrorsSince(before, after) {
+  const isSnapshot = (value) => value && Number.isSafeInteger(value.evaluationExceptions) &&
+    value.evaluationExceptions >= 0 && value.errorTypes && typeof value.errorTypes === 'object' && !Array.isArray(value.errorTypes);
+  if(!isSnapshot(before) || !isSnapshot(after)) return {evaluationExceptions: null, errorTypes: {}};
+  const errorTypes = {};
+  for(const type of observation.WORKER_FAILURE_STATES) {
+    const beforeCount = Number.isSafeInteger(before.errorTypes[type]) ? before.errorTypes[type] : 0;
+    const afterCount = Number.isSafeInteger(after.errorTypes[type]) ? after.errorTypes[type] : 0;
+    if(afterCount > beforeCount) errorTypes[type] = afterCount - beforeCount;
+  }
+  return {
+    evaluationExceptions: Math.max(after.evaluationExceptions - before.evaluationExceptions, 0),
+    errorTypes
+  };
+}
+
+function formatPollSendDiagnostic({shape, status, createClicked, composerClosed, tempMessageFound, tempCandidateCount, tempId,
+  bubbleStatuses, randomId, messageError, messageErrorStored, sendResult, sendResultCount, sentMessageId, sentMessageStore,
+  sentPollStoreMatch, sentDomAtEvent, sendMediaObserverInstalled, sendWorkerObserverStatus, sendObservationStatus,
+  persistedIdentityStatus, sendMediaCallCount, sendMediaStatus, sendMediaResultType,
+  sendMediaResponseMessageId, sendMediaInputAnswerCount, sendMediaDescriptionEmpty, sendMediaError,
+  renderedPollDom, rpcErrorCount, rpcErrorTypes,
+  workerEvaluationExceptions, workerErrorTypes}) {
+  const safeShape = ['description', 'input_answer'].includes(shape) ? shape : 'unclassified';
+  const safeStatus = ['sent', 'error', 'timeout'].includes(status) ? status : 'unavailable';
+  const safeErrorType = (value) => typeof value === 'string' && RPC_ERROR_TYPE_PATTERN.test(value) ? value : 'unclassified';
+  const safeError = messageError && typeof messageError === 'object' ? {
+    type: safeErrorType(messageError.type),
+    code: Number.isSafeInteger(messageError.code) ? messageError.code : null,
+    message: typeof messageError.message === 'string' && RPC_ERROR_TYPE_PATTERN.test(messageError.message)
+      ? messageError.message
+      : null
+  } : null;
+  const error = safeError
+    ? `${safeError.type}_code_${safeError.code ?? 'none'}_message_${safeError.message || 'none'}`
+    : 'error_unavailable';
+  const safeId = typeof randomId === 'string' && /^-?[0-9]{1,24}$/.test(randomId) ? randomId : 'unavailable';
+  const safeTempId = typeof tempId === 'string' && /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(tempId)
+    ? tempId
+    : Number.isSafeInteger(tempId) ? tempId : 'unavailable';
+  const safeStatusClasses = new Set(['is-sending', 'is-error', 'is-sent', 'is-read']);
+  const statuses = Array.isArray(bubbleStatuses) ? bubbleStatuses.filter((value) => safeStatusClasses.has(value)).join('+') || 'none' : 'unavailable';
+  const safeRpcTypes = Object.keys(rpcErrorTypes || {}).filter((type) => RPC_ERROR_TYPE_PATTERN.test(type)).slice(0, RPC_ERROR_TYPE_LIMIT).join('+') || 'none';
+  const safeWorkerTypes = Object.keys(workerErrorTypes || {}).filter((type) => observation.WORKER_FAILURE_STATES.includes(type)).join('+') || 'none';
+  const safeRpcCount = Number.isSafeInteger(rpcErrorCount) && rpcErrorCount >= 0 ? rpcErrorCount : 'unavailable';
+  const safeWorkerExceptions = Number.isSafeInteger(workerEvaluationExceptions) && workerEvaluationExceptions >= 0
+    ? workerEvaluationExceptions
+    : 'unavailable';
+  const safeSendResult = ['accepted', 'rejected', 'unobserved'].includes(sendResult) ? sendResult : 'unavailable';
+  const safeSendResultCount = Number.isSafeInteger(sendResultCount) && sendResultCount >= 0 ? sendResultCount : 'unavailable';
+  const safeSendMediaCallCount = Number.isSafeInteger(sendMediaCallCount) && sendMediaCallCount >= 0 ? sendMediaCallCount : 'unavailable';
+  const safeSendMediaStatus = ['pending', 'resolved', 'rejected'].includes(sendMediaStatus) ? sendMediaStatus : 'unavailable';
+  const safeSendMediaType = typeof sendMediaResultType === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(sendMediaResultType)
+    ? sendMediaResultType
+    : 'unavailable';
+  const safeSendMediaError = sendMediaError && typeof sendMediaError === 'object' ? {
+    type: safeErrorType(sendMediaError.type),
+    code: Number.isSafeInteger(sendMediaError.code) ? sendMediaError.code : null,
+    message: typeof sendMediaError.message === 'string' && RPC_ERROR_TYPE_PATTERN.test(sendMediaError.message)
+      ? sendMediaError.message
+      : null
+  } : null;
+  const sendMediaErrorSummary = safeSendMediaError
+    ? `${safeSendMediaError.type}_code_${safeSendMediaError.code ?? 'none'}_message_${safeSendMediaError.message || 'none'}`
+    : 'none';
+  const safeSendMediaResponseId = typeof sendMediaResponseMessageId === 'string' && /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(sendMediaResponseMessageId)
+    ? sendMediaResponseMessageId
+    : 'unavailable';
+  const safeInputAnswerCount = Number.isSafeInteger(sendMediaInputAnswerCount) && sendMediaInputAnswerCount >= 0
+    ? sendMediaInputAnswerCount
+    : 'unavailable';
+  const safeDescriptionEmpty = typeof sendMediaDescriptionEmpty === 'boolean' ? Number(sendMediaDescriptionEmpty) : 'unavailable';
+  const safeWorkerObserverStatus = ['pending', 'installed', 'unavailable'].includes(sendWorkerObserverStatus)
+    ? sendWorkerObserverStatus
+    : 'unavailable';
+  const safeSendObservationStatus = [
+    'observer_pending',
+    'observer_unavailable',
+    'no_observed_attempt',
+    'ambiguous_attempt',
+    'pending',
+    'rejected',
+    'accepted_response',
+    'persisted_identity_mismatch',
+    'persisted_identity'
+  ].includes(sendObservationStatus) ? sendObservationStatus : 'unavailable';
+  const safePersistedIdentityStatus = ['present', 'missing', 'mismatch', 'unavailable'].includes(persistedIdentityStatus)
+    ? persistedIdentityStatus
+    : 'unavailable';
+  const safeSentMessageId = typeof sentMessageId === 'string' && /^-?[0-9]{1,20}(?:\.[0-9]{1,4})?$/.test(sentMessageId)
+    ? sentMessageId
+    : 'unavailable';
+  const safeSentMessageStore = ['present', 'missing', 'mismatch'].includes(sentMessageStore) ? sentMessageStore : 'unavailable';
+  const safeSentPollStoreMatch = typeof sentPollStoreMatch === 'boolean' ? Number(sentPollStoreMatch) : 'unavailable';
+  const safeDomCount = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 'unavailable';
+  return `${safeShape}_${safeStatus}_create_${createClicked === true ? 1 : 0}_closed_${composerClosed === true ? 1 : 0}` +
+    `_temp_${tempMessageFound === true ? 1 : 0}_candidates_${Number.isSafeInteger(tempCandidateCount) ? Math.max(tempCandidateCount, 0) : 'unavailable'}` +
+    `_id_${safeTempId}_bubble_${statuses}_error_${error}_stored_${messageErrorStored === true ? 1 : 0}` +
+    `_send_result_${safeSendResult}_send_count_${safeSendResultCount}_send_mid_${safeSentMessageId}` +
+    `_send_worker_observer_${safeWorkerObserverStatus}_send_observation_${safeSendObservationStatus}_persisted_identity_${safePersistedIdentityStatus}` +
+    `_store_mid_${safeSentMessageStore}_store_poll_match_${safeSentPollStoreMatch}` +
+    `_dom_event_mid_rows_${safeDomCount(sentDomAtEvent?.serverMidRowCount)}_temp_rows_${safeDomCount(sentDomAtEvent?.tempMidRowCount)}` +
+    `_question_text_nodes_${safeDomCount(sentDomAtEvent?.questionTextNodeCount)}_question_rows_${safeDomCount(sentDomAtEvent?.questionRowCount)}` +
+    `_dom_after_mid_nodes_${safeDomCount(renderedPollDom?.serverMidNodeCount)}_mid_rows_${safeDomCount(renderedPollDom?.serverMidRowCount)}` +
+    `_temp_nodes_${safeDomCount(renderedPollDom?.tempMidNodeCount)}_temp_rows_${safeDomCount(renderedPollDom?.tempMidRowCount)}` +
+    `_question_text_nodes_${safeDomCount(renderedPollDom?.questionTextNodeCount)}_question_text_visible_${safeDomCount(renderedPollDom?.questionVisibleTextNodeCount)}` +
+    `_question_rows_${safeDomCount(renderedPollDom?.questionRowCount)}_question_visible_${safeDomCount(renderedPollDom?.questionVisibleRowCount)}` +
+    `_selector_${safeDomCount(renderedPollDom?.selectorCount)}_selector_visible_${safeDomCount(renderedPollDom?.selectorVisibleCount)}` +
+    `_send_media_observer_${sendMediaObserverInstalled === true ? 1 : 0}_send_media_calls_${safeSendMediaCallCount}` +
+    `_send_media_status_${safeSendMediaStatus}_result_type_${safeSendMediaType}_response_mid_${safeSendMediaResponseId}` +
+    `_send_media_input_answer_count_${safeInputAnswerCount}_description_empty_${safeDescriptionEmpty}_error_${sendMediaErrorSummary}` +
+    `_random_id_${safeId}_rpc_${safeRpcCount}_types_${safeRpcTypes}` +
+    `_worker_exceptions_${safeWorkerExceptions}_worker_types_${safeWorkerTypes}`;
+}
+
+async function waitForPollResults(page, question, stage, timeoutMs = 30_000, messageId) {
+  currentStage = stage;
+  const poll = pollMessageLocator(page, question, messageId);
+  const resultIndicator = getPollResultIndicator(poll);
+  await resultIndicator.first().waitFor({state: 'visible', timeout: timeoutMs})
+  .catch(async() => {
+    const diagnostic = await readPollResultsDiagnostic(page, question, POLL_ANSWER_ONE, messageId);
+    failStage(`${stage}_${formatPollResultsDiagnostic(diagnostic)}`);
+  });
+  if(await poll.count() !== 1 || await resultIndicator.count() !== 1) failStage(`${stage}_footer`);
+  const selectedAnswer = poll.locator('[data-poll-option-idx]').filter({hasText: POLL_ANSWER_ONE});
+  if(await selectedAnswer.count() !== 1) failStage(`${stage}_selected_answer`);
+  await selectedAnswer.getByText('1', {exact: true}).waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_count`));
+  await selectedAnswer.getByText('100%', {exact: true}).waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_percentage`));
+  const diagnostic = await readPollResultsDiagnostic(page, question, POLL_ANSWER_ONE, messageId);
+  if(diagnostic.domVisibleResultIndicatorCount !== 1 || diagnostic.domVisibleVoteButtonCount !== 0) {
+    failStage(`${stage}_${formatPollResultsDiagnostic(diagnostic)}`);
+  }
+  return poll;
+}
+
+async function submitPollVote(page, poll, question, stage, messageId) {
+  currentStage = stage;
+  const voteButton = getPollVoteButton(poll);
+  const resultIndicator = getPollResultIndicator(poll).first();
+  const nextAction = await Promise.race([
+    voteButton.waitFor({state: 'visible', timeout: 10_000}).then(() => 'vote').catch(() => undefined),
+    resultIndicator.waitFor({state: 'visible', timeout: 10_000}).then(() => 'results').catch(() => undefined)
+  ]);
+
+  if(nextAction === 'vote' && !await resultIndicator.isVisible().catch(() => false)) {
+    await voteButton.click().catch(() => failStage(`${stage}_button`));
+  } else if(nextAction !== 'results' && nextAction !== 'vote') {
+    const diagnostic = await readPollResultsDiagnostic(page, question, POLL_ANSWER_ONE);
+    failStage(`${stage}_${formatPollResultsDiagnostic(diagnostic)}`);
+  }
+
+  const selectedMessageId = messageId ?? await poll.getAttribute('data-mid');
+  await waitForPollResults(page, question, `${stage}_results`, 30_000, selectedMessageId);
+  return poll;
+}
+
+async function runPollLifecycle({alice, bob, registry, runtime, groupName, screenshotDirectory, capturedScreenshots}) {
+  const polls = [
+    {
+      shape: 'description',
+      stage: 'alice_poll_description',
+      question: `browser-ci-poll-description-${runtime.runId.slice(0, 8)}`,
+      description: POLL_DESCRIPTION,
+      mediaAnswer: false
+    },
+    {
+      shape: 'input_answer',
+      stage: 'alice_poll_input_answer',
+      question: `browser-ci-poll-input-answer-${runtime.runId.slice(0, 8)}`,
+      description: '',
+      mediaAnswer: true
+    }
+  ];
+
+  await ensurePollGroupActive(alice.page, groupName, 'alice_poll_group_chat');
+  await ensurePollGroupActive(bob.page, groupName, 'bob_poll_group_chat');
+  await installPollMessageErrorObserver(alice.page);
+  const evidence = [];
+  const sendAttempts = [];
+  const pollFlowFailures = [];
+  for(const testCase of polls) {
+    const prefix = testCase.stage;
+    const pollErrorStart = await alice.page.evaluate(() => window.__realClientPollErrors?.().length || 0).catch(() => 0);
+    const workerErrorsBefore = alice.observer?.workerErrorSnapshot?.();
+    const attemptCursor = pollSendAttemptCursor(await registry.readPollSendObservation(alice.observer));
+    const submission = {createClicked: false, composerClosed: false};
+    await alice.page.evaluate((question) => { window.__realClientActivePollQuestion = question; }, testCase.question);
+    let rpcErrorsBeforeCreation;
+    try {
+      rpcErrorsBeforeCreation = await openPollComposer(alice.page, {
+        stage: prefix,
+        question: testCase.question,
+        description: testCase.description,
+        mediaAnswer: testCase.mediaAnswer,
+        screenshotDirectory,
+        capturedScreenshots,
+        submission
+      });
+    } catch(error) {
+      if(sendAttempts.length > 0) {
+        failStage(`${currentStage}_after_${sendAttempts.map(formatPollSendDiagnostic).join('__')}`);
+      }
+      throw error;
+    }
+
+    const readSendObservation = () => registry.readPollSendObservation(alice.observer);
+    const sendStatus = await waitForPollSendOutcome(alice.page, testCase.question, `${prefix}_send_confirmed`, readSendObservation, 30_000, attemptCursor);
+    const sendDiagnostic = await readPollSendDiagnostic(
+      alice.page,
+      testCase.question,
+      sendStatus,
+      pollErrorStart,
+      rpcErrorsBeforeCreation?.rpc,
+      submission,
+      workerErrorsBefore,
+      alice.observer?.workerErrorSnapshot?.(),
+      await readSendObservation(),
+      attemptCursor
+    );
+    sendAttempts.push({shape: testCase.shape, ...sendDiagnostic});
+    if(sendStatus !== 'sent' || sendDiagnostic.sendResult !== 'accepted' ||
+        sendDiagnostic.sendObservationStatus !== 'persisted_identity' ||
+        sendDiagnostic.sentMessageStore !== 'present' || sendDiagnostic.sentPollStoreMatch !== true ||
+        !sendDiagnostic.sentMessageId) {
+      continue;
+    }
+
+    let bobPollMessageId;
+    try {
+    const alicePoll = await waitForPollMessage(alice.page, testCase.question, `${prefix}_sent`, 30_000, sendDiagnostic.sentMessageId);
+    await assertPollContent(alicePoll, {...testCase, stage: `${prefix}_sent`});
+    await capturePollState(alice.page, screenshotDirectory, `${testCase.shape.replaceAll('_', '-')}-poll-sent`, `${prefix}_sent_screenshot`, capturedScreenshots);
+
+    const bobPoll = await waitForPollMessage(bob.page, testCase.question, `bob_poll_${testCase.shape}_received`);
+    bobPollMessageId = await bobPoll.getAttribute('data-mid');
+    await assertPollContent(bobPoll, {...testCase, stage: `bob_poll_${testCase.shape}_received`});
+    await capturePollState(bob.page, screenshotDirectory, `bob-${testCase.shape.replaceAll('_', '-')}-poll-received`, `bob_poll_${testCase.shape}_received_screenshot`, capturedScreenshots);
+
+    currentStage = `bob_poll_${testCase.shape}_vote_select`;
+    const voteOption = getPollOptionClickTarget(bobPoll, POLL_ANSWER_ONE);
+    await voteOption.click().catch(() => failStage(`bob_poll_${testCase.shape}_vote_select`));
+    currentStage = `bob_poll_${testCase.shape}_vote_submit`;
+    await submitPollVote(bob.page, bobPoll, testCase.question, `bob_poll_${testCase.shape}_vote_submit`, bobPollMessageId);
+    await capturePollState(bob.page, screenshotDirectory, `bob-${testCase.shape.replaceAll('_', '-')}-poll-results`, `bob_poll_${testCase.shape}_results_screenshot`, capturedScreenshots);
+
+    currentStage = `alice_poll_${testCase.shape}_stop_menu`;
+    await alicePoll.click({button: 'right'}).catch(() => failStage(`alice_poll_${testCase.shape}_stop_menu`));
+    const contextMenu = alice.page.locator('.btn-menu:visible').last();
+    const stopPoll = contextMenu.getByText('Stop Poll', {exact: true});
+    await stopPoll.waitFor({state: 'visible', timeout: 10_000}).catch(() => failStage(`alice_poll_${testCase.shape}_stop_menu`));
+    await capturePollState(alice.page, screenshotDirectory, `alice-${testCase.shape.replaceAll('_', '-')}-stop-poll-menu`, `alice_poll_${testCase.shape}_stop_menu_screenshot`, capturedScreenshots);
+    await stopPoll.click().catch(() => failStage(`alice_poll_${testCase.shape}_stop`));
+
+    currentStage = `alice_poll_${testCase.shape}_closed`;
+    await alicePoll.getByText('Final Results', {exact: true}).waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`alice_poll_${testCase.shape}_closed`));
+    await waitForPollResults(alice.page, testCase.question, `alice_poll_${testCase.shape}_closed_results`, 30_000, sendDiagnostic.sentMessageId);
+    await capturePollState(alice.page, screenshotDirectory, `alice-${testCase.shape.replaceAll('_', '-')}-poll-closed`, `alice_poll_${testCase.shape}_closed_screenshot`, capturedScreenshots);
+
+    const bobClosedPoll = await waitForPollMessage(bob.page, testCase.question, `bob_poll_${testCase.shape}_closed`);
+    bobPollMessageId = await bobClosedPoll.getAttribute('data-mid');
+    await bobClosedPoll.getByText('Final Results', {exact: true}).waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`bob_poll_${testCase.shape}_closed`));
+    await waitForPollResults(bob.page, testCase.question, `bob_poll_${testCase.shape}_closed_results`, 30_000, bobPollMessageId);
+
+    const closedOption = getPollOptionClickTarget(bobClosedPoll, POLL_ANSWER_TWO);
+    currentStage = `bob_poll_${testCase.shape}_closed_vote_blocked`;
+    const pointerEvents = await closedOption.evaluate((element) => getComputedStyle(element).pointerEvents).catch(() => 'unknown');
+    let trialClickSucceeded = true;
+    await closedOption.click({trial: true, timeout: 1_000}).catch(() => {
+      trialClickSucceeded = false;
+    });
+    if(pointerEvents !== 'none' || trialClickSucceeded) failStage(`bob_poll_${testCase.shape}_closed_vote_blocked`);
+    await waitForPollResults(bob.page, testCase.question, `bob_poll_${testCase.shape}_closed_vote_unchanged`, 30_000, bobPollMessageId);
+    await capturePollState(bob.page, screenshotDirectory, `bob-${testCase.shape.replaceAll('_', '-')}-poll-closed-no-vote`, `bob_poll_${testCase.shape}_closed_no_vote_screenshot`, capturedScreenshots);
+
+    evidence.push({shape: testCase.shape, answers: 2, description: testCase.description ? 'present' : 'empty', mediaAnswer: testCase.mediaAnswer});
+    } catch(error) {
+      const stage = currentStage;
+      const page = stage.startsWith('alice_') ? alice.page : bob.page;
+      const resultDiagnostic = stage.includes('_results')
+        ? await readPollResultsDiagnostic(page, testCase.question, POLL_ANSWER_ONE,
+          stage.startsWith('alice_') ? sendDiagnostic.sentMessageId : bobPollMessageId)
+        : undefined;
+      pollFlowFailures.push({shape: testCase.shape, stage, resultDiagnostic});
+    }
+  }
+
+  if(sendAttempts.some(({status, sendResult, sendObservationStatus, sentMessageStore, sentPollStoreMatch}) =>
+    status !== 'sent' || sendResult !== 'accepted' || sendObservationStatus !== 'persisted_identity' ||
+    sentMessageStore !== 'present' || sentPollStoreMatch !== true
+  )) {
+    const diagnostic = sendAttempts.map(formatPollSendDiagnostic).join('__');
+    failStage(`alice_poll_send_diagnostic_${diagnostic}`);
+  }
+
+  if(pollFlowFailures.length > 0) {
+    const flowDiagnostic = pollFlowFailures.map(({shape, stage, resultDiagnostic}) =>
+      `${shape}_${stage}_${resultDiagnostic ? formatPollResultsDiagnostic(resultDiagnostic) : 'result_unavailable'}`
+    ).join('__');
+    const sendDiagnostic = sendAttempts.map(formatPollSendDiagnostic).join('__');
+    failStage(`poll_flow_diagnostic_${flowDiagnostic}__send_${sendDiagnostic}`);
+  }
+
+  return {
+    evidence,
+    sendResults: sendAttempts.map(({shape, status, sendResult, sendResultCount, sendResultSource, randomId, messageError,
+      sentMessageId, sentMessageStore, sentPollStoreMatch, sendMediaObserverInstalled, sendWorkerObserverStatus,
+      sendObservationStatus, persistedIdentityStatus, sendMediaCallCount,
+      sendMediaStatus, sendMediaResultType, sendMediaResponseMessageId, sendMediaInputAnswerCount,
+      sendMediaDescriptionEmpty, sendMediaError}) => ({
+      shape,
+      status,
+      sendResult,
+      sendResultCount,
+      sendResultSource,
+      randomId,
+      messageError,
+      sentMessageId,
+      sentMessageStore,
+      sentPollStoreMatch,
+      sendMediaObserverInstalled,
+      sendWorkerObserverStatus,
+      sendObservationStatus,
+      persistedIdentityStatus,
+      sendMediaCallCount,
+      sendMediaStatus,
+      sendMediaResultType,
+      sendMediaResponseMessageId,
+      sendMediaInputAnswerCount,
+      sendMediaDescriptionEmpty,
+      sendMediaError
+    }))
+  };
+}
+
 
 function failGroupMemberStep(stage, error) {
   groupMemberTrace.stepWait = error ? classifyLocatorError(error) : 'other';
@@ -2464,28 +4673,637 @@ function createPageErrorAssetResolver() {
   };
 }
 
-function recordPageError(pageErrors, contextName, error, pageErrorAssetResolver) {
-  if(!APP_CONTEXTS.includes(contextName) || !Array.isArray(pageErrors?.[contextName])) return;
-  pageErrors[contextName].push({
-    constructorName: pageErrorConstructorName(error),
-    scriptAsset: pageErrorAssetResolver?.scriptAsset(error?.stack) || pageErrorScriptAsset(error?.stack)
-  });
+function pageErrorDiagnosticOptions(page) {
+  if(runtime?.pageErrorDiagnostics !== true) return;
+  let pageUrl = 'unknown';
+  try {
+    pageUrl = page.url();
+  } catch {
+    // An unavailable URL is reported as unknown by the diagnostic sanitizer.
+  }
+  const scenarioStep = readPageScenarioStep(page);
+  return {captureDetails: true, pageUrl, scenario: scenarioStep.scenario, stage: scenarioStep.step, redactValues: pageErrorRedactValues()};
 }
 
-function sanitizePageError(error) {
+function pageErrorRedactValues() {
+  const redactValues = [];
+  for(const account of runtime?.accounts || []) {
+    if(typeof account?.username === 'string') redactValues.push(account.username);
+    if(typeof account?.password === 'string') redactValues.push(account.password);
+  }
+  return redactValues;
+}
+
+function createPageErrorExceptionEvent(exceptionDetails, pageUrl, redactValues = []) {
+  if(!exceptionDetails || typeof exceptionDetails !== 'object' || Array.isArray(exceptionDetails)) return;
+  const exceptionFrames = Array.isArray(exceptionDetails.callFrames)
+    ? exceptionDetails.callFrames
+    : exceptionDetails.stackTrace?.callFrames;
+  const rawFrames = Array.isArray(exceptionFrames)
+    ? exceptionFrames.slice(0, PAGE_ERROR_DIAGNOSTIC_LIMITS.count)
+    : [];
+  const frames = rawFrames.map((frame) => {
+    if(!frame || typeof frame !== 'object') return;
+    const scriptId = frame.location?.scriptId;
+    const mappedUrl = typeof scriptId === 'string' ? exceptionDetails.scriptUrls?.[scriptId] : undefined;
+    const url = typeof frame.url === 'string' && frame.url ? frame.url : mappedUrl;
+    if(typeof url !== 'string' || !url) return;
+    return {
+      url: sanitizePageErrorDiagnosticText(url, PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength, redactValues),
+      functionName: sanitizePageErrorDiagnosticText(frame.functionName || '', 128, redactValues),
+      lineNumber: Number.isSafeInteger(frame.lineNumber) && frame.lineNumber >= 0
+        ? frame.lineNumber + 1
+        : Number.isSafeInteger(frame.location?.lineNumber) && frame.location.lineNumber >= 0 ? frame.location.lineNumber + 1 : 0,
+      columnNumber: Number.isSafeInteger(frame.columnNumber) && frame.columnNumber >= 0
+        ? frame.columnNumber + 1
+        : Number.isSafeInteger(frame.location?.columnNumber) && frame.location.columnNumber >= 0 ? frame.location.columnNumber + 1 : 0
+    };
+  }).filter(Boolean);
+  const firstFrame = frames[0];
+  const exception = exceptionDetails.exception || exceptionDetails.data;
+  const exceptionDescription = typeof exception?.description === 'string'
+    ? exception.description.split('\n', 1)[0]
+    : '';
+  const message = sanitizePageErrorDiagnosticText(exceptionDescription || exceptionDetails.text || '', PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength, redactValues);
+  const fallbackUrl = typeof exceptionDetails.url === 'string' ? exceptionDetails.url : firstFrame?.url || '';
+  const filename = firstFrame?.url || sanitizePageErrorDiagnosticText(fallbackUrl, PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength, redactValues);
+  const lineNumber = firstFrame?.lineNumber || (Number.isSafeInteger(exceptionDetails.lineNumber) && exceptionDetails.lineNumber >= 0 ? exceptionDetails.lineNumber + 1 : 0);
+  const columnNumber = firstFrame?.columnNumber || (Number.isSafeInteger(exceptionDetails.columnNumber) && exceptionDetails.columnNumber >= 0 ? exceptionDetails.columnNumber + 1 : 0);
+  const stackFrames = frames.map((frame) => {
+    const location = `${frame.url}${frame.lineNumber ? `:${frame.lineNumber}` : ''}${frame.columnNumber ? `:${frame.columnNumber}` : ''}`;
+    return `    at ${frame.functionName ? `${frame.functionName} (${location})` : location}`;
+  });
+  const stack = sanitizePageErrorDiagnosticText([message || 'Error', ...stackFrames].join('\n'), PAGE_ERROR_DIAGNOSTIC_LIMITS.stackLength, redactValues);
   return {
-    constructorName: PAGE_ERROR_CONSTRUCTORS.has(error?.constructorName) ? error.constructorName : 'Error',
-    scriptAsset: typeof error?.scriptAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(error.scriptAsset)
-      ? error.scriptAsset
-      : 'unknown'
+    message,
+    stack,
+    filename,
+    lineNumber,
+    columnNumber,
+    pageUrl: sanitizePageErrorPageUrl(pageUrl)
   };
 }
 
-function summarizeBrowserGateBreakdown({networkObservers = {}, pageErrors = {}} = {}) {
+function recordPageErrorProtocolEvent(page, exceptionDetails, captureSource, scenarioStep) {
+  let events = pageErrorProtocolEvents.get(page);
+  if(!Array.isArray(events)) {
+    events = [];
+    pageErrorProtocolEvents.set(page, events);
+  }
+  if(events.length >= PAGE_ERROR_DIAGNOSTIC_LIMITS.count) return;
+  let pageUrl = 'unknown';
+  try {
+    pageUrl = page.url();
+  } catch {
+    // An unavailable URL is reported as unknown by the diagnostic sanitizer.
+  }
+  const event = createPageErrorExceptionEvent(exceptionDetails, pageUrl, pageErrorRedactValues());
+  if(!event) return;
+  const isRuntimeException = captureSource === 'runtime';
+  const firstFrame = (Array.isArray(exceptionDetails?.callFrames)
+    ? exceptionDetails.callFrames
+    : exceptionDetails?.stackTrace?.callFrames)?.[0];
+  const location = isRuntimeException
+    ? {
+      scriptId: firstFrame?.scriptId || exceptionDetails.scriptId,
+      lineNumber: Number.isSafeInteger(firstFrame?.lineNumber) ? firstFrame.lineNumber : exceptionDetails.lineNumber,
+      columnNumber: Number.isSafeInteger(firstFrame?.columnNumber) ? firstFrame.columnNumber : exceptionDetails.columnNumber
+    }
+    : firstFrame?.location || {};
+  const exception = exceptionDetails?.exception || exceptionDetails?.data;
+  const previewProperties = Array.isArray(exception?.preview?.properties) ? exception.preview.properties : [];
+  const errorTypePreview = previewProperties.find((property) => property?.name === 'type' && property?.type === 'string')?.value;
+  const errorCodePreview = previewProperties.find((property) => property?.name === 'code' && property?.type === 'number')?.value;
+  const errorCode = typeof errorCodePreview === 'string' && errorCodePreview.trim() !== ''
+    ? Number(errorCodePreview)
+    : errorCodePreview;
+  events.push({
+    ...event,
+    captureSequence: events.length,
+    captureSource: ['runtime', 'debugger'].includes(captureSource) ? captureSource : 'unknown',
+    scenarioStep: scenarioStep ? sanitizePageErrorScenarioStep(scenarioStep) : undefined,
+    exceptionId: Number.isSafeInteger(exceptionDetails?.exceptionId) ? exceptionDetails.exceptionId : undefined,
+    executionContextId: Number.isSafeInteger(exceptionDetails?.executionContextId) ? exceptionDetails.executionContextId : undefined,
+    exceptionObjectId: typeof exception?.objectId === 'string' ? exception.objectId : undefined,
+    exceptionLocation: typeof location?.scriptId === 'string' && Number.isSafeInteger(location.lineNumber) && Number.isSafeInteger(location.columnNumber)
+      ? {scriptId: location.scriptId, lineNumber: location.lineNumber, columnNumber: location.columnNumber}
+      : undefined,
+    errorType: sanitizePageErrorRpcErrorType(errorTypePreview),
+    errorCode: sanitizePageErrorRpcErrorCode(errorCode)
+  });
+}
+
+async function installPageErrorEventCapture(page) {
+  if(runtime?.pageErrorDiagnostics !== true) return;
+  const consoleEvents = [];
+  pageErrorProtocolEvents.set(page, []);
+  pageErrorConsoleEvents.set(page, consoleEvents);
+  page.on('console', (message) => {
+    try {
+      if(message.type() !== 'error' || consoleEvents.length >= PAGE_ERROR_DIAGNOSTIC_LIMITS.count) return;
+      const location = message.location();
+      let pageUrl = 'unknown';
+      try {
+        pageUrl = sanitizePageErrorPageUrl(page.url());
+      } catch {
+        // An unavailable URL is reported as unknown by the diagnostic sanitizer.
+      }
+      consoleEvents.push({
+        message: sanitizePageErrorDiagnosticText(message.text(), PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength, pageErrorRedactValues()),
+        stack: '',
+        filename: sanitizePageErrorDiagnosticText(location?.url || '', PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength, pageErrorRedactValues()),
+        lineNumber: Number.isSafeInteger(location?.lineNumber) ? location.lineNumber : 0,
+        columnNumber: Number.isSafeInteger(location?.columnNumber) ? location.columnNumber : 0,
+        pageUrl
+      });
+    } catch {
+      // Console diagnostics must not interfere with the browser scenario.
+    }
+  });
+  await page.addInitScript(() => {
+    const events = [];
+    Object.defineProperty(window, '__teagramPageErrorEvents', {value: events});
+    const record = (event) => {
+      if(events.length >= 16) return;
+      const thrown = event?.error || event?.reason;
+      events.push({
+        message: typeof event?.message === 'string'
+          ? event.message
+          : typeof thrown?.message === 'string' ? thrown.message
+            : thrown && typeof thrown === 'object' ? 'Object'
+              : typeof thrown === 'string' ? thrown : '',
+        stack: typeof thrown?.stack === 'string' ? thrown.stack : '',
+        filename: typeof event?.filename === 'string' ? event.filename : '',
+        lineNumber: Number.isSafeInteger(event?.lineno) ? event.lineno : 0,
+        columnNumber: Number.isSafeInteger(event?.colno) ? event.colno : 0,
+        pageUrl: window.location.href,
+        errorType: typeof thrown?.type === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(thrown.type) ? thrown.type : undefined,
+        errorCode: Number.isSafeInteger(thrown?.code) && thrown.code >= 0 && thrown.code <= 999_999 ? thrown.code : undefined
+      });
+    };
+    window.addEventListener('error', record);
+    window.addEventListener('unhandledrejection', record);
+  });
+}
+
+async function enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAssetResolver, redactValues = [], consoleEvents = pageErrorConsoleEvents.get(page) || []) {
+  const entries = pageErrors?.[contextName]?.filter((error) => error?.diagnostic) || [];
+  if(entries.length === 0) return;
+  let windowEvents = [];
+  try {
+    windowEvents = await page.evaluate((captureKey) => window[captureKey] || [], PAGE_ERROR_EVENT_CAPTURE_KEY);
+  } catch {
+    // A navigated or closing page can make its in-page diagnostics unavailable.
+  }
+  for(const entry of entries) {
+    const diagnostic = entry.diagnostic;
+    const diagnosticMessageHash = pageErrorDiagnosticMessageHashes.get(diagnostic);
+    if(!diagnosticMessageHash) continue;
+    const matchingEntries = entries.filter((candidate) =>
+      pageErrorDiagnosticMessageHashes.get(candidate?.diagnostic) === diagnosticMessageHash &&
+      candidate?.diagnostic?.scenario === diagnostic.scenario && candidate?.diagnostic?.stage === diagnostic.stage
+    );
+    if(matchingEntries.length !== 1) continue;
+    const event = correlatePageErrorDiagnosticEvents(diagnostic, {
+      windowEvents: Array.isArray(windowEvents) ? windowEvents : [],
+      protocolEvents: pageErrorProtocolEvents.get(page) || [],
+      consoleEvents: Array.isArray(consoleEvents) ? consoleEvents : []
+    }, redactValues);
+    if(!event) continue;
+    const eventStack = typeof event.stack === 'string' ? event.stack : '';
+    const eventPageUrl = sanitizePageErrorPageUrl(event.pageUrl);
+    const fallbackStack = typeof event.filename === 'string' && event.filename
+      ? `Error\n    at ${event.filename}:${event.lineNumber || 0}:${event.columnNumber || 0}`
+      : '';
+    const stack = eventStack || fallbackStack;
+    const safeStack = stack ? safePageErrorStack(stack, pageErrorAssetResolver) : undefined;
+    if(safeStack && safeStack.frames.length > 0) entry.stack = safeStack;
+    if(eventPageUrl !== 'unknown') diagnostic.pageUrl = eventPageUrl;
+    const rpcErrorType = sanitizePageErrorRpcErrorType(event.errorType);
+    const rpcErrorCode = sanitizePageErrorRpcErrorCode(event.errorCode);
+    if(rpcErrorType) diagnostic.rpcErrorType = rpcErrorType;
+    if(rpcErrorCode !== undefined) diagnostic.rpcErrorCode = rpcErrorCode;
+    const rpcMethod = uniquePageErrorRpcMethod(page, diagnostic, rpcErrorType, rpcErrorCode);
+    if(rpcMethod) diagnostic.rpcMethod = rpcMethod;
+    if(entry.scriptAsset === 'unknown' && safeStack?.frames.length > 0) {
+      const scriptAsset = safeStack.frames.find((frame) => frame.scriptAsset !== 'unknown')?.scriptAsset || 'unknown';
+      if(scriptAsset !== 'unknown') entry.scriptAsset = scriptAsset;
+    }
+  }
+}
+
+function uniquePageErrorRpcMethod(page, diagnostic, rpcErrorType, rpcErrorCode) {
+  if(!rpcErrorType || rpcErrorCode === undefined) return;
+  const scenarioStep = {scenario: diagnostic.scenario, step: diagnostic.stage};
+  const methods = new Set();
+  for(const step of getClientErrorDiagnostics(page, scenarioStep)) {
+    if(step.rpcFailuresTruncated) return;
+    for(const failure of step.rpcFailures) {
+      if(failure.type !== rpcErrorType || failure.code !== rpcErrorCode) continue;
+      if(typeof failure.method !== 'string' || !RPC_METHOD_PATTERN.test(failure.method)) return;
+      methods.add(failure.method);
+    }
+  }
+  return methods.size === 1 ? [...methods][0] : undefined;
+}
+
+function correlatePageErrorDiagnosticEvents(diagnostic, {windowEvents = [], protocolEvents = [], consoleEvents = []} = {}, redactValues = []) {
+  const diagnosticMessageHash = pageErrorDiagnosticMessageHashes.get(diagnostic);
+  if(!diagnosticMessageHash) return;
+  const matchesMessage = (event) => pageErrorDiagnosticMessageHash(event?.message, redactValues) === diagnosticMessageHash;
+  const matchingProtocolEvents = protocolEvents.filter(matchesMessage);
+  const runtimeGroups = [];
+  const debuggerEvents = [];
+  const otherProtocolEvents = [];
+
+  for(const event of matchingProtocolEvents) {
+    if(event.captureSource === 'debugger') {
+      debuggerEvents.push(event);
+      continue;
+    }
+    if(event.captureSource !== 'runtime') {
+      otherProtocolEvents.push(event);
+      continue;
+    }
+    const existing = Number.isSafeInteger(event.exceptionId)
+      ? runtimeGroups.find((group) => group.exceptionId === event.exceptionId && group.executionContextId === event.executionContextId)
+      : undefined;
+    if(existing) existing.events.push(event);
+    else runtimeGroups.push({
+      exceptionId: event.exceptionId,
+      executionContextId: event.executionContextId,
+      events: [event]
+    });
+  }
+
+  const protocolGroups = [...runtimeGroups];
+  for(const event of debuggerEvents) {
+    const matchingById = Number.isSafeInteger(event.exceptionId)
+      ? protocolGroups.filter((group) => group.exceptionId === event.exceptionId && group.executionContextId === event.executionContextId)
+      : [];
+    const locationKey = pageErrorExceptionLocationKey(event);
+    const matchingByLocation = locationKey
+      ? protocolGroups.filter((group) => group.events.some((candidate) => pageErrorExceptionLocationKey(candidate) === locationKey))
+      : [];
+    const matchingByObjectId = typeof event.exceptionObjectId === 'string'
+      ? protocolGroups.filter((group) => group.events.some((candidate) => candidate.exceptionObjectId === event.exceptionObjectId))
+      : [];
+    const matchingAdjacentRuntime = Number.isSafeInteger(event.executionContextId) && Number.isSafeInteger(event.captureSequence)
+      ? protocolGroups.filter((group) => group.executionContextId === event.executionContextId &&
+        group.events.some((candidate) => candidate.captureSource === 'runtime' && Number.isSafeInteger(candidate.captureSequence) &&
+          Math.abs(candidate.captureSequence - event.captureSequence) === 1))
+      : [];
+    // Chromium can report a synthetic Runtime location for an uncaught rejection.
+    // Adjacent same-context pause/exception observations still identify one throw;
+    // a second Runtime group keeps the overall result ambiguous.
+    const matches = matchingById.length > 0 ? matchingById : matchingByObjectId.length > 0 ? matchingByObjectId :
+      matchingByLocation.length > 0 ? matchingByLocation : matchingAdjacentRuntime;
+    if(matches.length === 1) {
+      matches[0].events.push(event);
+      continue;
+    }
+    protocolGroups.push({exceptionId: undefined, executionContextId: undefined, events: [event]});
+  }
+  for(const event of otherProtocolEvents) protocolGroups.push({exceptionId: undefined, executionContextId: undefined, events: [event]});
+
+  let candidateProtocolGroups = protocolGroups;
+  const hasActionScopedProtocolEvents = protocolGroups.some((group) => group.events.some((event) => event.scenarioStep));
+  if(hasActionScopedProtocolEvents) {
+    candidateProtocolGroups = protocolGroups.filter((group) => group.events.some((event) =>
+      event.scenarioStep?.scenario === diagnostic.scenario && event.scenarioStep?.step === diagnostic.stage
+    ));
+    if(candidateProtocolGroups.length === 0) return;
+  }
+  if(candidateProtocolGroups.length > 0) {
+    if(candidateProtocolGroups.length !== 1) return;
+    const groupEvents = [...candidateProtocolGroups[0].events];
+    const matchingWindowEvents = windowEvents.filter(matchesMessage);
+    if(matchingWindowEvents.length === 1 && canCorrelatePageErrorSupplement(groupEvents, matchingWindowEvents[0])) {
+      groupEvents.push({...matchingWindowEvents[0], captureSource: 'window'});
+    }
+    return mergePageErrorObservationGroup(groupEvents);
+  }
+
+  const fallbackEvents = [...windowEvents, ...consoleEvents].filter(matchesMessage);
+  if(fallbackEvents.length !== 1) return;
+  return fallbackEvents[0];
+}
+
+function canCorrelatePageErrorSupplement(groupEvents, supplement) {
+  const supplementLocation = pageErrorDiagnosticLocationKey(supplement);
+  if(supplementLocation && groupEvents.some((event) => pageErrorDiagnosticLocationKey(event) === supplementLocation)) return true;
+  const supplementType = sanitizePageErrorRpcErrorType(supplement?.errorType);
+  const supplementCode = sanitizePageErrorRpcErrorCode(supplement?.errorCode);
+  if(!supplementType && supplementCode === undefined) return false;
+  const groupTypes = [...new Set(groupEvents.map((event) => sanitizePageErrorRpcErrorType(event.errorType)).filter(Boolean))];
+  const groupCodes = [...new Set(groupEvents.map((event) => sanitizePageErrorRpcErrorCode(event.errorCode)).filter((value) => value !== undefined))];
+  return (!supplementType || groupTypes.length === 1 && groupTypes[0] === supplementType) &&
+    (supplementCode === undefined || groupCodes.length === 1 && groupCodes[0] === supplementCode);
+}
+
+function pageErrorDiagnosticLocationKey(event) {
+  const filename = typeof event?.filename === 'string' ? sanitizePageErrorStackUrl(event.filename) : '';
+  if(!filename || filename === '[redacted-url]' || !Number.isSafeInteger(event?.lineNumber) || event.lineNumber <= 0 ||
+      !Number.isSafeInteger(event?.columnNumber) || event.columnNumber <= 0) return;
+  return `${filename}:${event.lineNumber}:${event.columnNumber}`;
+}
+
+function pageErrorExceptionLocationKey(event) {
+  const location = event?.exceptionLocation;
+  if(typeof location?.scriptId !== 'string' || !Number.isSafeInteger(location.lineNumber) || !Number.isSafeInteger(location.columnNumber)) return;
+  return `${location.scriptId}:${location.lineNumber}:${location.columnNumber}`;
+}
+
+function mergePageErrorObservationGroup(events) {
+  const ranked = [...events].sort((first, second) => pageErrorObservationScore(second) - pageErrorObservationScore(first));
+  const merged = {...ranked[0]};
+  const errorTypes = [...new Set(events.map((event) => sanitizePageErrorRpcErrorType(event.errorType)).filter(Boolean))];
+  const errorCodes = [...new Set(events.map((event) => sanitizePageErrorRpcErrorCode(event.errorCode)).filter((value) => value !== undefined))];
+  if(errorTypes.length === 1) merged.errorType = errorTypes[0];
+  else delete merged.errorType;
+  if(errorCodes.length === 1) merged.errorCode = errorCodes[0];
+  else delete merged.errorCode;
+  return merged;
+}
+
+function pageErrorObservationScore(event) {
+  const stackLength = typeof event?.stack === 'string' ? event.stack.length : 0;
+  const hasLocation = pageErrorExceptionLocationKey(event) || (typeof event?.filename === 'string' && event.filename);
+  return stackLength + (hasLocation ? 256 : 0);
+}
+
+function normalizePageErrorMessage(value, redactValues) {
+  return sanitizePageErrorDiagnosticText(value, PAGE_ERROR_DIAGNOSTIC_LIMITS.messageLength, redactValues)
+  .replace(/^Uncaught(?:\s+\(in promise\))?\s*/i, '')
+  .trim();
+}
+
+function pageErrorDiagnosticMessageHash(value, redactValues = []) {
+  const normalized = normalizePageErrorMessage(value, redactValues);
+  return normalized ? createHash('sha256').update(normalized).digest('hex') : undefined;
+}
+
+async function enrichPageErrorReport(pageErrors, pages, pageErrorAssetResolvers, networkObservers = {}, redactValues = [], clientErrorDiagnostics) {
+  await Promise.all(APP_CONTEXTS.map(async(contextName) => {
+    const page = pages?.[contextName];
+    if(!page) return;
+    try {
+      await enrichPageErrorDetails(pageErrors, contextName, page, pageErrorAssetResolvers?.[contextName], redactValues);
+    } catch {
+      // Diagnostics are best-effort and must not replace the scenario result.
+    }
+  }));
+  const summaryOptions = {networkObservers, pageErrors};
+  if(clientErrorDiagnostics) summaryOptions.clientErrorDiagnostics = clientErrorDiagnostics;
+  return summarizeBrowserGateBreakdown(summaryOptions);
+}
+
+function sanitizePageErrorRpcErrorType(value) {
+  return typeof value === 'string' && RPC_ERROR_TYPE_PATTERN.test(value) ? value : undefined;
+}
+
+function sanitizePageErrorRpcErrorCode(value) {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 999_999 ? value : undefined;
+}
+
+function readPageErrorText(error, key) {
+  try {
+    const value = error?.[key];
+    return typeof value === 'string' ? value : '';
+  } catch {
+    return '';
+  }
+}
+
+function sanitizePageErrorStackUrl(value) {
+  const lineSuffix = /:\d+(?::\d+)?$/.exec(value)?.[0] || '';
+  const urlText = lineSuffix ? value.slice(0, -lineSuffix.length) : value;
+  let parsed;
+  try {
+    parsed = new URL(urlText);
+  } catch {
+    return `[redacted-url]${lineSuffix}`;
+  }
+  if(parsed.protocol === 'blob:') {
+    return `${parsed.origin === PRIVATE_CSP_ORIGIN ? `${PRIVATE_CSP_ORIGIN}/<blob>` : 'blob:<external>'}${lineSuffix}`;
+  }
+  if(!['http:', 'https:'].includes(parsed.protocol)) return `[redacted-url]${lineSuffix}`;
+  const location = parsed.origin === PRIVATE_CSP_ORIGIN
+    ? `${parsed.origin}${parsed.pathname}`
+    : path.posix.basename(parsed.pathname) || '[external-script]';
+  return `${location}${lineSuffix}`;
+}
+
+function sanitizePageErrorDiagnosticText(value, limit, redactValues = []) {
+  if(typeof value !== 'string') return '';
+  let sanitized = value;
+  for(const secret of redactValues) {
+    if(typeof secret === 'string' && secret.length > 0) sanitized = sanitized.split(secret).join('[redacted]');
+  }
+  sanitized = sanitized
+  .replace(/(?:https?:\/\/|blob:https?:\/\/)[^\s)]+/g, sanitizePageErrorStackUrl)
+  .replace(/\b(password|passwd|token|secret|authorization|api[_ -]?key)\b(\s*[:=]\s*)[^,;\r\n]+/gi, '$1$2[redacted]');
+  return sanitized.slice(0, limit);
+}
+
+function sanitizePageErrorPageUrl(value) {
+  if(typeof value !== 'string') return 'unknown';
+  try {
+    const parsed = new URL(value);
+    if(!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== PRIVATE_CSP_ORIGIN) return 'unknown';
+    return `${parsed.origin}${parsed.pathname}`.slice(0, PAGE_ERROR_DIAGNOSTIC_LIMITS.pageUrlLength);
+  } catch {
+    return 'unknown';
+  }
+}
+
+function sanitizePageErrorScenario(value) {
+  return PAGE_ERROR_DIAGNOSTIC_SCENARIOS.has(value) ? value : 'unknown';
+}
+
+function sanitizePageErrorStage(value) {
+  return typeof value === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : 'unknown';
+}
+
+function createPageErrorDiagnostic(error, options = {}) {
+  const diagnostic = {
+    pageUrl: sanitizePageErrorPageUrl(options.pageUrl),
+    scenario: sanitizePageErrorScenario(options.scenario),
+    stage: sanitizePageErrorStage(options.stage)
+  };
+  const messageHash = pageErrorDiagnosticMessageHash(readPageErrorText(error, 'message'), options.redactValues);
+  if(messageHash) pageErrorDiagnosticMessageHashes.set(diagnostic, messageHash);
+  return diagnostic;
+}
+
+
+function recordPageError(pageErrors, contextName, error, pageErrorAssetResolver, scenarioStep = {scenario: currentScenario, step: currentStage}, diagnosticOptions) {
+  if(!APP_CONTEXTS.includes(contextName) || !Array.isArray(pageErrors?.[contextName])) return;
+  if(!diagnosticOptions && scenarioStep?.captureDetails === true) {
+    diagnosticOptions = scenarioStep;
+    scenarioStep = {scenario: currentScenario, step: currentStage};
+  }
+  const stackValue = readPageErrorValue(error, 'stack');
+  const stack = typeof stackValue === 'string' ? stackValue : undefined;
+  const safeStack = safePageErrorStack(stackValue, pageErrorAssetResolver);
+  const resolvedAsset = safeStack.frames.find((frame) => frame.scriptAsset !== 'unknown')?.scriptAsset;
+  const scriptAsset = resolvedAsset || pageErrorScriptAsset(stack);
+  const entry = {
+    constructorName: pageErrorConstructorName(error),
+    scriptAsset,
+    message: '[redacted]',
+    stack: safeStack,
+    scenarioStep: sanitizePageErrorScenarioStep(scenarioStep)
+  };
+  const events = pageErrors[contextName];
+  const diagnosticCount = pageErrorDiagnosticCounts.get(events) || 0;
+  if(scriptAsset === 'unknown' && diagnosticOptions?.captureDetails === true &&
+      diagnosticCount < PAGE_ERROR_DIAGNOSTIC_LIMITS.count) {
+    entry.diagnostic = createPageErrorDiagnostic(error, diagnosticOptions);
+    pageErrorDiagnosticCounts.set(events, diagnosticCount + 1);
+  }
+  events.push(entry);
+}
+
+function readPageErrorString(error, key) {
+  const value = readPageErrorValue(error, key);
+  return typeof value === 'string' ? value : undefined;
+}
+
+function readPageErrorValue(error, key) {
+  try {
+    return error?.[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizePageErrorMessage(message) {
+  if(typeof message !== 'string' || !message.trim()) return 'unavailable';
+  if(/\b(?:password|secret|passphrase|token|bearer|authorization|api[_-]?key|private[_-]?key)\b/i.test(message)) {
+    return '[redacted]';
+  }
+  return message
+  .replace(/(?:https?:\/\/|wss?:\/\/|blob:|file:|data:)[^\s"'<>)]*/gi, '[url]')
+  .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email]')
+  .replace(/[A-Za-z0-9+/=_-]{32,}/g, '[redacted]')
+  .replace(/[\u0000-\u001f\u007f]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .slice(0, PAGE_ERROR_MESSAGE_LIMIT) || 'unavailable';
+}
+
+function safePageErrorStack(stack, pageErrorAssetResolver) {
+  if(typeof stack !== 'string') {
+    return {state: stack === undefined || stack === null ? 'unavailable' : 'non_string', lineCount: 0, frameCount: 0, frames: []};
+  }
+  const lines = stack.slice(0, 16_384).split('\n');
+  const frameLines = lines.slice(1).filter((line) => /^\s*at\s+/.test(line));
+  const frames = [];
+  for(const line of frameLines.slice(0, PAGE_ERROR_STACK_FRAME_LIMIT)) {
+    const match = /^\s*at\s+(?:(.*?)\s+\()?((?:https?:\/\/|blob:https?:\/\/)[^()\s]+):(\d+):(\d+)\)?$/.exec(line);
+    if(!match) continue;
+    const lineNumber = Number(match[3]);
+    const column = Number(match[4]);
+    if(!Number.isSafeInteger(lineNumber) || lineNumber < 0 || lineNumber > 100_000_000 ||
+        !Number.isSafeInteger(column) || column < 0 || column > 100_000_000) continue;
+    const functionName = sanitizePageErrorFunctionName(match[1]);
+    frames.push({
+      functionName,
+      scriptAsset: pageErrorAssetResolver?.scriptAsset(`Error:\n${line}`) || pageErrorScriptAsset(`Error:\n${line}`),
+      line: lineNumber,
+      column
+    });
+  }
+  const lineCount = Math.min(lines.length, 1_000_000);
+  const frameCount = Math.min(frameLines.length, 1_000_000);
+  const truncated = stack.length > 16_384 || frameLines.length > PAGE_ERROR_STACK_FRAME_LIMIT;
+  return {
+    state: truncated
+      ? 'truncated'
+      : frames.length === 0
+        ? frameCount === 0 ? 'no_frames' : 'unclassified_frames'
+        : frames.length < frameCount ? 'partial' : 'captured',
+    lineCount,
+    frameCount,
+    frames
+  };
+}
+
+function sanitizePageErrorFunctionName(value) {
+  return typeof value === 'string' && value.length <= PAGE_ERROR_FUNCTION_NAME_LIMIT &&
+    !/\b(?:password|secret|passphrase|token|bearer|authorization|api[_-]?key|private[_-]?key)\b/i.test(value) &&
+    !/^[A-Za-z0-9_-]{32,}$/.test(value) &&
+    /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.(?:[A-Za-z_$][A-Za-z0-9_$]*|<anonymous>))*$/.test(value)
+    ? value
+    : 'unknown';
+}
+
+function sanitizePageErrorScenarioStep(value) {
+  const scenario = PAGE_ERROR_SCENARIOS.has(value?.scenario) ? value.scenario : 'unknown';
+  const step = typeof value?.step === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(value.step)
+    ? value.step
+    : 'unknown';
+  return {scenario, step};
+}
+
+function sanitizePageError(error) {
+  const sanitized = {
+    constructorName: PAGE_ERROR_CONSTRUCTORS.has(error?.constructorName) ? error.constructorName : 'Error',
+    scriptAsset: typeof error?.scriptAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(error.scriptAsset)
+      ? error.scriptAsset
+      : 'unknown',
+    message: '[redacted]',
+    stack: error?.stack && typeof error.stack === 'object' && !Array.isArray(error.stack)
+      ? {
+        state: ['unavailable', 'non_string', 'no_frames', 'unclassified_frames', 'captured', 'partial', 'truncated'].includes(error.stack.state)
+          ? error.stack.state
+          : 'unavailable',
+        lineCount: Number.isSafeInteger(error.stack.lineCount) && error.stack.lineCount >= 0 && error.stack.lineCount <= 1_000_000
+          ? error.stack.lineCount
+          : 0,
+        frameCount: Number.isSafeInteger(error.stack.frameCount) && error.stack.frameCount >= 0 && error.stack.frameCount <= 1_000_000
+          ? error.stack.frameCount
+          : 0,
+        frames: Array.isArray(error.stack.frames) ? error.stack.frames.slice(0, PAGE_ERROR_STACK_FRAME_LIMIT).map((frame) => ({
+        functionName: sanitizePageErrorFunctionName(frame?.functionName),
+        scriptAsset: typeof frame?.scriptAsset === 'string' && observation.SCRIPT_ASSET_PATTERN.test(frame.scriptAsset)
+          ? frame.scriptAsset
+          : 'unknown',
+        line: Number.isSafeInteger(frame?.line) && frame.line >= 0 && frame.line <= 100_000_000 ? frame.line : 0,
+        column: Number.isSafeInteger(frame?.column) && frame.column >= 0 && frame.column <= 100_000_000 ? frame.column : 0
+        })) : []
+      }
+      : {state: 'unavailable', lineCount: 0, frameCount: 0, frames: []},
+    scenarioStep: sanitizePageErrorScenarioStep(error?.scenarioStep)
+  };
+  const diagnostic = error?.diagnostic;
+  if(diagnostic && typeof diagnostic === 'object') {
+    sanitized.diagnostic = {
+      pageUrl: sanitizePageErrorPageUrl(diagnostic.pageUrl),
+      scenario: sanitizePageErrorScenario(diagnostic.scenario),
+      stage: sanitizePageErrorStage(diagnostic.stage),
+      ...(sanitizePageErrorRpcErrorType(diagnostic.rpcErrorType)
+        ? {rpcErrorType: sanitizePageErrorRpcErrorType(diagnostic.rpcErrorType)}
+        : {}),
+      ...(sanitizePageErrorRpcErrorCode(diagnostic.rpcErrorCode) !== undefined
+        ? {rpcErrorCode: sanitizePageErrorRpcErrorCode(diagnostic.rpcErrorCode)}
+        : {}),
+      ...(typeof diagnostic.rpcMethod === 'string' && RPC_METHOD_PATTERN.test(diagnostic.rpcMethod)
+        ? {rpcMethod: diagnostic.rpcMethod}
+        : {})
+    };
+  }
+  return sanitized;
+}
+
+function summarizeBrowserGateBreakdown(options = {}) {
+  const {networkObservers = {}, pageErrors = {}, clientErrorDiagnostics = {}} = options;
   const unexpectedEgressAttempts = {};
   const observerErrors = {};
   const sanitizedPageErrors = {};
   const pageErrorOverflow = {};
+  const stepDiagnostics = {};
   for(const contextName of APP_CONTEXTS) {
     const events = networkObservers[contextName]?.gateEvents || [];
     unexpectedEgressAttempts[contextName] = events.slice(0, 512).map((event) => {
@@ -2518,26 +5336,27 @@ function summarizeBrowserGateBreakdown({networkObservers = {}, pageErrors = {}} 
     const overflowCounts = new Map();
     for(const error of contextPageErrors.slice(512)) {
       const sanitized = sanitizePageError(error);
-      const key = `${sanitized.constructorName}\0${sanitized.scriptAsset}`;
+      const key = JSON.stringify(sanitized);
       overflowCounts.set(key, Math.min(1_000_000, (overflowCounts.get(key) || 0) + 1));
     }
     pageErrorOverflow[contextName] = [...overflowCounts.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, count]) => {
-        const separator = key.indexOf('\0');
-        return {
-          constructorName: key.slice(0, separator),
-          scriptAsset: key.slice(separator + 1),
-          count
-        };
-      });
+      .map(([key, count]) => ({...JSON.parse(key), count}));
+    stepDiagnostics[contextName] = sanitizeClientDiagnostics(clientErrorDiagnostics[contextName]);
   }
   const counters = {
     unexpectedEgressAttempts: Object.values(unexpectedEgressAttempts).reduce((sum, attempts) => sum + attempts.length, 0),
     observerErrors: Object.values(observerErrors).reduce((sum, errors) => sum + Object.values(errors).reduce((count, total) => count + total, 0), 0),
     pageErrors: Math.min(1_000_000, APP_CONTEXTS.reduce((sum, contextName) => sum + (pageErrors[contextName]?.length || 0), 0))
   };
-  return {counters, unexpectedEgressAttempts, observerErrors, pageErrors: sanitizedPageErrors, pageErrorOverflow};
+  return {
+    counters,
+    unexpectedEgressAttempts,
+    observerErrors,
+    pageErrors: sanitizedPageErrors,
+    pageErrorOverflow,
+    ...(Object.hasOwn(options, 'clientErrorDiagnostics') ? {stepDiagnostics} : {})
+  };
 }
 
 function mergeWebSocket101ByContextPhase(grids) {
@@ -2689,7 +5508,7 @@ function buildAuthProgressReport(status, stage, contexts, controlCount, password
   };
 }
 
-async function cleanupBrowserRun({registry, observers, contexts, browser, screenshotDirectory, cleanupIssues}) {
+async function cleanupBrowserRun({registry, observers, contexts, browser, screenshotDirectory, preserveTrace, cleanupIssues}) {
   let cleanupFailed = false;
   try {
     const discoveryStopped = await registry?.stop();
@@ -2717,7 +5536,13 @@ async function cleanupBrowserRun({registry, observers, contexts, browser, screen
     cleanupFailed = true;
   }
   try {
-    if(screenshotDirectory) fs.rmSync(screenshotDirectory, {recursive: true, force: true});
+    if(screenshotDirectory && preserveTrace) {
+      for(const entry of fs.readdirSync(screenshotDirectory)) {
+        if(entry !== 'traces') fs.rmSync(path.join(screenshotDirectory, entry), {recursive: true, force: true});
+      }
+    } else if(screenshotDirectory) {
+      fs.rmSync(screenshotDirectory, {recursive: true, force: true});
+    }
   } catch {
     cleanupFailed = true;
   }
@@ -2742,6 +5567,7 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
   let gateBreakdown;
 
   try {
+    currentScenario = 'sign-in';
     currentStage = 'alice_context';
     const alice = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(alice.context);
@@ -2834,10 +5660,138 @@ async function runAuthProgressOneSubmission({browser, runtimeConfig, registry, c
   return {report, cleanupFailed};
 }
 
+async function runChannelScenario(alice, bob, runtimeConfig, capturedScreenshots) {
+  const channelName = `browser-ci-channel-${runtimeConfig.runId.slice(0, 8)}`;
+  const channelFormSelector = '.new-channel-container';
+  const memberSelector = '.add-members-container';
+
+  setPageActionStep(alice.page, 'alice_channel_menu');
+  await alice.page.locator('#new-menu').click().catch(() => failStage('alice_channel_menu'));
+  await captureState(alice.page, runtimeConfig.screenshotDirectory, 'alice-channel-menu', capturedScreenshots);
+
+  setPageActionStep(alice.page, 'alice_channel_new');
+  await alice.page.getByText('New Channel', {exact: true}).click().catch(() => failStage('alice_channel_new'));
+  const channelForm = alice.page.locator(channelFormSelector);
+  setPageScenarioStep(alice.page, 'alice_channel_name_form');
+  await channelForm.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_channel_name_form'));
+  await captureState(alice.page, runtimeConfig.screenshotDirectory, 'alice-channel-name', capturedScreenshots);
+
+  setPageActionStep(alice.page, 'alice_channel_name_fill');
+  await channelForm.locator(GROUP_NAME_FIELD_SELECTOR).first().fill(channelName, {timeout: 15_000})
+  .catch(() => failStage('alice_channel_name_fill'));
+  setPageActionStep(alice.page, 'alice_channel_create');
+  await channelForm.locator('.btn-corner.is-visible').click({timeout: 15_000}).catch(() => failStage('alice_channel_create'));
+
+  setPageScenarioStep(alice.page, 'alice_channel_members_form');
+  await alice.page.locator(memberSelector).waitFor({state: 'visible', timeout: 30_000})
+  .catch(() => failStage('alice_channel_members_form'));
+  const activeChannel = resolveActiveGroupChat(alice.page, channelName);
+  setPageScenarioStep(alice.page, 'alice_channel_created');
+  await activeChannel.chat.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_channel_created'));
+  await activeChannel.title.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_channel_created'));
+  if(await activeChannel.chat.count() !== 1 || await activeChannel.title.count() !== 1) failStage('alice_channel_created');
+  const channelPeerId = await readActivePeerId(alice.page, 'alice_channel_identity');
+  if(!channelPeerId.startsWith('-')) failStage('alice_channel_identity');
+  const bobOtherPeerId = await readActivePeerId(bob.page, 'bob_channel_other_conversation');
+  if(bobOtherPeerId === channelPeerId) failStage('bob_channel_other_conversation');
+  await captureState(alice.page, runtimeConfig.screenshotDirectory, 'alice-channel-created', capturedScreenshots);
+
+  const selectedBobPeerId = await selectUniquePeer(
+    alice.page,
+    `${memberSelector} .input-search-input`,
+    `${memberSelector} .row[data-peer-id]`,
+    runtimeConfig.accounts[1].username,
+    'alice_add_bob_to_channel'
+  );
+  if(!/^[0-9]{1,20}$/.test(selectedBobPeerId || '')) failStage('alice_add_bob_to_channel_peer_identity');
+  await captureState(alice.page, runtimeConfig.screenshotDirectory, 'alice-channel-member-selection', capturedScreenshots);
+  await startChannelMembershipTrace(alice.page, bob.page, channelPeerId, selectedBobPeerId, channelName);
+
+  setPageActionStep(alice.page, 'alice_channel_add_bob');
+  const continueChannel = alice.page.locator(`${memberSelector} .btn-corner`);
+  await continueChannel.click({timeout: 15_000}).catch(() => failStage('alice_channel_add_bob'));
+  setPageScenarioStep(alice.page, 'alice_channel_add_confirmation');
+  const confirmAdd = alice.page.getByText('Add', {exact: true});
+  await confirmAdd.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_channel_add_confirmation'));
+  if(await confirmAdd.count() !== 1) failStage('alice_channel_add_confirmation');
+  setPageActionStep(alice.page, 'alice_channel_add_confirmation');
+  await confirmAdd.click({timeout: 15_000}).catch(() => failStage('alice_channel_add_confirmation'));
+  setPageScenarioStep(alice.page, 'alice_channel_add_bob_complete');
+  await alice.page.locator(memberSelector).waitFor({state: 'hidden', timeout: 30_000})
+  .catch(() => failStage('alice_channel_add_bob_complete'));
+  await activeChannel.title.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_channel_add_bob_complete'));
+
+  setPageActionStep(bob.page, 'bob_channel_membership_refresh');
+  await bob.page.reload({waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage('bob_channel_membership_refresh'));
+  await bob.page.waitForFunction(() => {
+    const chats = document.querySelector('#page-chats');
+    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+  }, null, {timeout: 45_000}).catch(() => failStage('bob_channel_membership_refresh'));
+  const bobOtherRow = bob.page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${bobOtherPeerId}"]`);
+  await bobOtherRow.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_channel_membership_refresh'));
+  if(await bobOtherRow.getAttribute('data-peer-id') !== bobOtherPeerId) failStage('bob_channel_membership_refresh');
+  await bobOtherRow.click({timeout: 30_000}).catch(() => failStage('bob_channel_membership_refresh'));
+  await waitForActivePeerId(bob.page, bobOtherPeerId, 'bob_channel_membership_refresh');
+
+  setPageScenarioStep(bob.page, 'bob_channel_membership');
+  let bobChannelRow = await waitForChannelDialogRow(bob.page, channelPeerId, channelName, 'bob_channel_membership');
+  await waitForUnreadCount(bob.page, channelPeerId, 0, 'bob_channel_unread_before_post', 30_000, channelName);
+  await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-membership', capturedScreenshots);
+
+  await sendChannelText(alice.page, channelName, runtimeConfig.screenshotDirectory, capturedScreenshots);
+
+  bobChannelRow = await waitForChannelDialogRow(bob.page, channelPeerId, channelName, 'bob_channel_membership');
+  await waitForUnreadCount(bob.page, channelPeerId, 1, 'bob_channel_unread_before_open', 30_000, channelName);
+  await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-unread', capturedScreenshots);
+
+  setPageActionStep(bob.page, 'bob_channel_open');
+  await bobChannelRow.click({timeout: 30_000}).catch(() => failStage('bob_channel_open'));
+  const bobActiveChannel = resolveActiveGroupChat(bob.page, channelName);
+  await bobActiveChannel.chat.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_channel_open'));
+  await bobActiveChannel.title.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_channel_open'));
+  await waitForActivePeerId(bob.page, channelPeerId, 'bob_channel_open');
+
+  const bobChannelMessage = bobActiveChannel.chat.locator('.bubble .message').filter({hasText: CHANNEL_MESSAGE});
+  setPageScenarioStep(bob.page, 'bob_channel_post_visible');
+  await bobChannelMessage.first().waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_channel_post_visible'));
+  await bob.page.waitForTimeout(600);
+  const receivedMessageFailure = await getSingleExactMessageTextFailure(bobChannelMessage, CHANNEL_MESSAGE);
+  if(receivedMessageFailure) failStage(`bob_channel_post_${receivedMessageFailure}`);
+  await waitForUnreadCount(bob.page, channelPeerId, 0, 'bob_channel_read', 30_000, channelName);
+  await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-read', capturedScreenshots);
+
+  setPageActionStep(bob.page, 'bob_channel_return_to_other_conversation');
+  await bobOtherRow.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_channel_return_to_other_conversation'));
+  await bobOtherRow.click({timeout: 30_000}).catch(() => failStage('bob_channel_return_to_other_conversation'));
+  await waitForActivePeerId(bob.page, bobOtherPeerId, 'bob_channel_return_to_other_conversation');
+  await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-return', capturedScreenshots);
+
+  setPageActionStep(bob.page, 'bob_channel_reload');
+  await bob.page.reload({waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage('bob_channel_reload'));
+  setPageScenarioStep(bob.page, 'bob_channel_reload_chats_list');
+  await bob.page.waitForFunction(() => {
+    const chats = document.querySelector('#page-chats');
+    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+  }, null, {timeout: 45_000}).catch(() => failStage('bob_channel_reload_chats_list'));
+  await waitForActivePeerId(bob.page, bobOtherPeerId, 'bob_channel_other_conversation_after_reload');
+  await waitForChannelDialogRow(bob.page, channelPeerId, channelName, 'bob_channel_membership_after_reload');
+  await waitForUnreadCount(bob.page, channelPeerId, 0, 'bob_channel_unread_after_reload', 30_000, channelName);
+  await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-after-reload', capturedScreenshots);
+}
+
+function shouldRunChannelScenario(runtimeConfig) {
+  return runtimeConfig.scenarios.includes('channel');
+}
+
+function shouldRunPollScenario(runtimeConfig) {
+  return runtimeConfig.scenarios.includes('poll');
+}
+
 async function main(dependencies = {}) {
   let report;
   let browser;
   const contexts = [];
+  const traceContexts = [];
   const observers = [];
   const appObservers = {};
   const appNetworkObservers = {};
@@ -2845,6 +5799,7 @@ async function main(dependencies = {}) {
   const actionCounts = {usernameSubmissions: 0};
   const passwordEvidence = [];
   const pageErrors = {alice: [], bob: []};
+  const appPages = {alice: undefined, bob: undefined};
   const pageErrorAssets = Object.fromEntries(APP_CONTEXTS.map((name) => [name, createPageErrorAssetResolver()]));
   const cleanupIssues = [];
   let cleanupFailed = false;
@@ -2854,17 +5809,24 @@ async function main(dependencies = {}) {
   let webSocket101Phase;
   let controlWebSocket101ByContextPhase;
   let gateBreakdown;
+  let clientErrorDiagnostics;
+  let pollNegativeControlEvidence;
+  let pollSendResults;
   centerColumnTrace = createCenterColumnTrace();
   groupNameFormTrace = {page: undefined, stepWait: 'none'};
   groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
   groupMemberTrace = createGroupMemberTrace();
   groupMessageTrace = createGroupMessageTrace();
+  channelMembershipTrace = createChannelMembershipTrace();
+  currentScenario = undefined;
+  currentStage = 'runtime_inputs';
   try {
     runtime = Object.prototype.hasOwnProperty.call(dependencies, 'runtimeConfig')
       ? dependencies.runtimeConfig
       : await (dependencies.readRuntimeInput || readRuntimeInput)();
     (dependencies.validateRuntimeInput || validateRuntimeInput)(runtime);
     fs.mkdirSync(runtime.screenshotDirectory, {mode: 0o700});
+    if(runtime.traceDirectory) fs.mkdirSync(runtime.traceDirectory, {mode: 0o700});
 
     currentStage = 'browser_launch';
     browser = await (dependencies.launchBrowser || ((options) => chromium.launch(options)))({
@@ -2921,37 +5883,90 @@ async function main(dependencies = {}) {
       return;
     }
 
+    currentScenario = 'sign-in';
     currentStage = 'alice_context';
     const alice = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(alice.context);
+    if(runtime.traceDirectory) {
+      await alice.context.tracing.start({screenshots: true, snapshots: false, sources: false});
+      traceContexts.push({context: alice.context, name: 'alice', active: false});
+    }
     alice.page = await alice.context.newPage();
+    appPages.alice = alice.page;
+    await installPageErrorEventCapture(alice.page);
     alice.observer = observation.createContextObserver('alice');
     appObservers.alice = alice.observer;
-    alice.networkObserver = createNetworkObserver(alice.page, 'alice', alice.observer, pageErrorAssets.alice);
+    alice.networkObserver = createNetworkObserver(
+      alice.page,
+      'alice',
+      alice.observer,
+      pageErrorAssets.alice,
+      runtime.pageErrorDiagnostics === true ? (details, source) => recordPageErrorProtocolEvent(
+        alice.page,
+        details,
+        source,
+        readPageScenarioStep(alice.page)
+      ) : undefined
+    );
     appNetworkObservers.alice = alice.networkObserver;
     observers.push(alice.networkObserver);
     await alice.networkObserver.start(registry);
 
-    alice.page.on('pageerror', (error) => recordPageError(pageErrors, 'alice', error, pageErrorAssets.alice));
-    await countClientErrors(alice.page);
+    alice.page.on('pageerror', (error) => recordPageError(
+      pageErrors,
+      'alice',
+      error,
+      pageErrorAssets.alice,
+      readClientErrorScenarioStep(alice.page),
+      pageErrorDiagnosticOptions(alice.page)
+    ));
+    await countClientErrors(alice.page, () => readClientErrorScenarioStep(alice.page));
 
     currentStage = 'bob_context';
     const bob = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
     contexts.push(bob.context);
+    if(runtime.traceDirectory) {
+      await bob.context.tracing.start({screenshots: true, snapshots: false, sources: false});
+      traceContexts.push({context: bob.context, name: 'bob', active: false});
+    }
     bob.page = await bob.context.newPage();
+    appPages.bob = bob.page;
+    await installPageErrorEventCapture(bob.page);
     bob.observer = observation.createContextObserver('bob');
     appObservers.bob = bob.observer;
-    bob.networkObserver = createNetworkObserver(bob.page, 'bob', bob.observer, pageErrorAssets.bob);
+    bob.networkObserver = createNetworkObserver(
+      bob.page,
+      'bob',
+      bob.observer,
+      pageErrorAssets.bob,
+      runtime.pageErrorDiagnostics === true ? (details, source) => recordPageErrorProtocolEvent(
+        bob.page,
+        details,
+        source,
+        readPageScenarioStep(bob.page)
+      ) : undefined
+    );
     appNetworkObservers.bob = bob.networkObserver;
     observers.push(bob.networkObserver);
     await bob.networkObserver.start(registry);
 
-    bob.page.on('pageerror', (error) => recordPageError(pageErrors, 'bob', error, pageErrorAssets.bob));
-    await countClientErrors(bob.page);
+    bob.page.on('pageerror', (error) => recordPageError(
+      pageErrors,
+      'bob',
+      error,
+      pageErrorAssets.bob,
+      readClientErrorScenarioStep(bob.page),
+      pageErrorDiagnosticOptions(bob.page)
+    ));
+    await countClientErrors(bob.page, () => readClientErrorScenarioStep(bob.page));
 
     currentScenario = 'sign-in';
     await signIn(alice.page, accounts[0], 'alice', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
     await signIn(bob.page, accounts[1], 'bob', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
+    for(const trace of traceContexts) {
+      await trace.context.tracing.startChunk({title: `real-client ${trace.name} scenarios`});
+      trace.active = true;
+    }
     alice.observer.state.windowElapsed = true;
     bob.observer.state.windowElapsed = true;
     await waitForWorkerTargets(alice.page, alice.networkObserver, alice.observer);
@@ -3028,59 +6043,42 @@ async function main(dependencies = {}) {
     await openBobGroupMembers(bob.page, bobGroupHeader, groupName, selectedBobPeerId, runtime.screenshotDirectory, capturedScreenshots);
     report.push({name: 'group', status: 'passed'});
 
-    if(runtime.scenarios?.includes('channel')) {
+    if(shouldRunChannelScenario(runtime)) {
       currentScenario = 'channel';
-      const channelName = `browser-ci-channel-${runtime.runId.slice(0, 8)}`;
-
-      currentStage = 'alice_new_channel_menu';
-      await alice.page.locator('#new-menu').click().catch(() => failStage('alice_new_channel_menu'));
-      await alice.page.getByText('New Channel', {exact: true}).click().catch(() => failStage('alice_new_channel_menu'));
-
-      currentStage = 'alice_channel_form';
-      const channelForm = alice.page.locator('.new-channel-container');
-      await channelForm.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_channel_form'));
-
-      currentStage = 'alice_channel_name';
-      await channelForm.locator('.input-field-input').first().fill(channelName, {timeout: 15_000})
-      .catch(() => failStage('alice_channel_name'));
-
-      currentStage = 'alice_channel_create';
-      await channelForm.locator('.btn-corner.is-visible').click({timeout: 15_000})
-      .catch(() => failStage('alice_channel_create'));
-
-      currentStage = 'alice_add_bob_to_channel';
-      const addMembers = alice.page.locator('.add-members-container');
-      await addMembers.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_add_bob_to_channel'));
-      await selectUniquePeer(
-        alice.page,
-        '.add-members-container .input-search-input',
-        '.add-members-container .row[data-peer-id]',
-        accounts[1].username,
-        'alice_add_bob_to_channel'
-      );
-
-      currentStage = 'alice_channel_invite_button';
-      await addMembers.locator('.btn-corner.is-visible').click({timeout: 30_000})
-      .catch(() => failStage('alice_channel_invite_button'));
-      const channelPeerId = await waitForChannelInviteCompletion(alice.page, addMembers, channelName);
-
-      currentStage = 'bob_channel_reload';
-      await bob.page.reload({waitUntil: 'domcontentloaded'}).catch(() => failStage('bob_channel_reload'));
-      await bob.page.locator('#chatlist-container').waitFor({state: 'visible', timeout: CHANNEL_MEMBERSHIP_STEP_TIMEOUT_MS})
-      .catch(() => failStage('bob_channel_reload'));
-
-      channelMembershipTrace = {page: bob.page, channelName, peerId: channelPeerId, stepWait: 'none'};
-      currentStage = 'bob_channel_membership';
-      const bobChannelRow = bob.page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${channelPeerId}"]`);
-      await bobChannelRow.waitFor({state: 'visible', timeout: CHANNEL_MEMBERSHIP_STEP_TIMEOUT_MS}).catch((error) => {
-        channelMembershipTrace.stepWait = classifyLocatorError(error);
-        failStage('bob_channel_membership');
-      });
-      const channelMembership = await captureChannelMembershipState();
-      if(channelMembership === 'unavailable' || channelMembership.peerRowCount !== 1 || !channelMembership.peerRowHasTitle) {
-        failStage('bob_channel_membership');
-      }
+      await runChannelScenario(alice, bob, runtime, capturedScreenshots);
       report.push({name: 'channel', status: 'passed'});
+    }
+
+    if(shouldRunPollScenario(runtime)) {
+      currentScenario = 'poll';
+      if(runtime.pollCreationNegativeControl === true) {
+        const negativeControl = await runPollCreationNegativeControl({
+          alice,
+          bob,
+          registry,
+          runtime,
+          groupName,
+          screenshotDirectory: runtime.screenshotDirectory,
+          capturedScreenshots
+        });
+        pollNegativeControlEvidence = negativeControl.evidence;
+        pollSendResults = negativeControl.sendResults;
+      } else {
+        const pollRun = await runPollLifecycle({
+          alice,
+          bob,
+          registry,
+          runtime,
+          groupName,
+          screenshotDirectory: runtime.screenshotDirectory,
+          capturedScreenshots
+        });
+        pollSendResults = pollRun.sendResults;
+      }
+      report.push({name: 'poll', status: 'passed'});
+    }
+    if(JSON.stringify(report.map((scenario) => scenario.name)) !== JSON.stringify(runtime.scenarios)) {
+      failStage('scenario_report_incomplete');
     }
 
     await Promise.all(observers.map((observer) => observer.waitForSetup()));
@@ -3098,7 +6096,11 @@ async function main(dependencies = {}) {
     }));
     const egress = summarizeEgress(observers);
     const observationBlock = buildObservationBlock(registry, appObservers, controls, egress);
-    gateBreakdown = summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors});
+    await waitForClientDiagnostics([alice.page, bob.page]);
+    clientErrorDiagnostics = {alice: getClientErrorDiagnostics(alice.page), bob: getClientErrorDiagnostics(bob.page)};
+    gateBreakdown = runtime.pageErrorDiagnostics === true
+      ? await enrichPageErrorReport(pageErrors, appPages, pageErrorAssets, appNetworkObservers, pageErrorRedactValues(), clientErrorDiagnostics)
+      : summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors, clientErrorDiagnostics});
     if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.alice.length + pageErrors.bob.length !== 0) {
       failStage('browser_egress_or_page_errors');
     }
@@ -3119,6 +6121,9 @@ async function main(dependencies = {}) {
       screenshotsCaptured: capturedScreenshots.count,
       passwordEvidence,
       ...(runtime.scenarios?.includes('channel') ? {channelMembership: await captureChannelMembershipState()} : {}),
+      ...(pollNegativeControlEvidence ? {pollNegativeControl: pollNegativeControlEvidence} : {}),
+      ...(pollSendResults ? {pollSendResults} : {}),
+      gateBreakdown,
       network: {unexpectedAttempts: egress.unexpectedAttempts, observerErrors: egress.observerErrors, contexts: networkContexts},
       workerObservation: observationBlock
     };
@@ -3149,12 +6154,32 @@ async function main(dependencies = {}) {
       // so the failure report states what the observer established, not a blank.
       for(const observer of Object.values(appObservers)) observer.state.windowElapsed = true;
       const failureBlock = buildObservationBlock(registry, appObservers, controls, egress);
+      if(currentStage !== 'browser_egress_or_page_errors') {
+        const diagnosticPages = Object.values(appPages).filter(Boolean);
+        await waitForClientDiagnostics(diagnosticPages);
+        const failedScenarioStep = {scenario: currentScenario, step: currentStage};
+        clientErrorDiagnostics = {
+          alice: getClientErrorDiagnostics(appPages.alice, failedScenarioStep),
+          bob: getClientErrorDiagnostics(appPages.bob, failedScenarioStep)
+        };
+        gateBreakdown = summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors, clientErrorDiagnostics});
+      }
+      if(runtime?.pageErrorDiagnostics === true) {
+        gateBreakdown = await enrichPageErrorReport(
+          pageErrors,
+          appPages,
+          pageErrorAssets,
+          appNetworkObservers,
+          pageErrorRedactValues(),
+          clientErrorDiagnostics
+        );
+      }
       const centerColumn = ['message', 'group'].includes(currentScenario) ? await captureCenterColumnState() : undefined;
       const groupNameForm = currentStage.startsWith('alice_group_name_') ? await captureGroupNameFormState() : undefined;
       const groupCreated = groupCreatedTrace.stages?.includes(currentStage) ? await captureGroupCreatedState() : undefined;
       const groupMember = groupMemberTrace.stages?.includes(currentStage) ? await captureGroupMemberState() : undefined;
       const groupMessage = groupMessageTrace.stage === currentStage ? await captureGroupMessageState() : undefined;
-      const channelMembership = currentStage === 'bob_channel_membership' ? await captureChannelMembershipState() : undefined;
+      const channelMembership = CHANNEL_MEMBERSHIP_STAGES.includes(currentStage) ? await captureChannelMembershipState() : undefined;
       report = {
         status: 'failed',
         stage: currentStage,
@@ -3171,13 +6196,11 @@ async function main(dependencies = {}) {
         ...(groupMember ? {groupMember} : {}),
         ...(groupMessage ? {groupMessage} : {}),
         ...(channelMembership ? {channelMembership} : {}),
+        ...(pollNegativeControlEvidence ? {pollNegativeControl: pollNegativeControlEvidence} : {}),
+        ...(pollSendResults ? {pollSendResults} : {}),
+        ...(currentScenario ? {gateBreakdown} : {}),
         ...(currentStage === 'browser_worker_observation_incomplete' && registry
           ? {workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers)}
-          : {}),
-        ...(currentStage === 'browser_egress_or_page_errors'
-          ? {
-            gateBreakdown: gateBreakdown || summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors}),
-          }
           : {}),
         // On failure the closed-schema evidence is still the point, validated the
         // same way: any schema violation collapses it to `unclassified`.
@@ -3187,6 +6210,34 @@ async function main(dependencies = {}) {
       };
     }
   } finally {
+    let failureTraceReady = false;
+    for(const trace of traceContexts) {
+      try {
+        if(report?.status === 'failed') {
+          if(!trace.active) {
+            await trace.context.tracing.startChunk({title: `real-client ${trace.name} failure state`});
+            trace.active = true;
+            const page = trace.context.pages()[0];
+            await page?.screenshot({timeout: 5000}).catch(() => {});
+          }
+          const tracePath = path.join(runtime.traceDirectory, `${trace.name}.zip`);
+          await trace.context.tracing.stopChunk({path: tracePath});
+          const traceStat = fs.lstatSync(tracePath);
+          if(!traceStat.isFile() || traceStat.isSymbolicLink() || traceStat.size < 4 || traceStat.size > 50 * 1024 * 1024 ||
+              fs.readFileSync(tracePath).subarray(0, 4).toString('hex') !== '504b0304') {
+            throw new Error('playwright_trace_invalid');
+          }
+          failureTraceReady = true;
+        } else if(trace.active) {
+          await trace.context.tracing.stopChunk();
+        }
+        trace.active = false;
+        await trace.context.tracing.stop();
+      } catch {
+        cleanupIssues.push('playwright_trace_cleanup');
+      }
+    }
+    if(report?.status === 'failed' && traceContexts.length > 0) report.failureTraceReady = failureTraceReady;
     if(!authProgressCleanupHandled) {
       currentStage = 'cleanup';
       cleanupFailed = await cleanupBrowserRun({
@@ -3195,6 +6246,7 @@ async function main(dependencies = {}) {
         contexts,
         browser,
         screenshotDirectory: runtime?.screenshotDirectory,
+        preserveTrace: report?.status === 'failed' && traceContexts.length > 0,
         cleanupIssues
       });
     }
@@ -3214,6 +6266,7 @@ function emitReport(report, cleanupFailed) {
     process.stdout.write(`${JSON.stringify({
       status: 'failed',
       stage: 'cleanup',
+      ...(report?.failureTraceReady === true ? {failureTraceReady: true} : {}),
       ...(report?.gateBreakdown ? {gateBreakdown: report.gateBreakdown} : {})
     })}\n`);
     process.exitCode = 1;
@@ -3232,7 +6285,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, countClientErrors, createNetworkObserver, createPageErrorAssetResolver, createWorkerDiscovery, emitAuthProgressReport, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, recordPageError, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPasswordField, submitPassword};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

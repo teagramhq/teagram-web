@@ -1616,7 +1616,6 @@ class ApiManagerProxy extends MTProtoMessagePort {
     const newActiveChannelId = name === 'peers' && key ?
       getNewActiveChannelMirrorChatId(this.mirrors.peers[key.toPeerId()], value) :
       undefined;
-
     const result = this.processMirrorTaskMap[name]?.(payload);
     if(result === false) {
       return;

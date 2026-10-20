@@ -1,4 +1,4 @@
-import {createSignal, onCleanup, onMount} from 'solid-js';
+import {createSignal, onCleanup, onMount, Show} from 'solid-js';
 
 import Button from '@components/buttonTsx';
 import InputField from '@components/inputField';
@@ -14,6 +14,7 @@ import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
 
 import AuthCard from '@/pages/AuthCard';
 import {CardSpec, useAuthFlow} from '@/pages/authFlow';
+import TurnstileChallenge, {useTurnstileChallenge} from '@/pages/TurnstileChallenge';
 import {
   authenticatePrivateUsername,
   getPrivateUsernameRegistrationError,
@@ -40,6 +41,7 @@ type PrivateUsernameUiError =
 
 export default function PrivateSignInCard(_props: {spec: Spec}) {
   const {managers, navigate, toIm} = useAuthFlow();
+  const turnstile = useTurnstileChallenge();
   const usernameField = new InputField({
     labelText: 'Username',
     maxLength: 32,
@@ -237,7 +239,8 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           managers.apiManager.invokeApi(method as any, params as any, options) :
           managers.apiManager.invokeApi(method as any, params as any),
         () => cancelled,
-        registration
+        registration,
+        turnstile.request
       );
       activeIdentifier = '';
 
@@ -367,6 +370,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
   onCleanup(() => {
     cancelled = true;
+    turnstile.cancel();
     activeIdentifier = '';
     setPendingPasswordUser(undefined);
     usernameField.setValueSilently('');
@@ -405,6 +409,9 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           {confirmPasswordField.container}
         </div>
       )}
+      <Show when={turnstile.challenge()} keyed>
+        {(challenge) => <TurnstileChallenge {...challenge}/>}
+      </Show>
       {error() && <div class={styles.errorLabel} role="alert">{errorContent()}</div>}
       {registrationConfigUnavailable() && !creatingAccount() && (
         <div class={styles.registrationConfigError} role="status">

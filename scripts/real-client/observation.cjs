@@ -18,7 +18,7 @@
 const PRIVATE_CSP_ORIGIN = 'https://teagramd.test';
 
 const LIMITS = Object.freeze({
-  attachedTargets: 16,
+  attachedTargets: 32,
   countedEventsPerContext: 4096,
   cdpMessageBytes: 256 * 1024,
   commandTimeoutMs: 5000
@@ -37,6 +37,8 @@ const PAGE_CDP_METHODS = Object.freeze([
   'Network.enable',
   'Audits.enable',
   'Log.enable',
+  'Runtime.enable',
+  'Runtime.callFunctionOn',
   'Target.setAutoAttach',
   'Target.getTargetInfo',
   'Target.sendMessageToTarget',
@@ -47,6 +49,7 @@ const WORKER_CDP_METHODS = Object.freeze([
   'Audits.enable',
   'Log.enable',
   'Runtime.enable',
+  'Runtime.callFunctionOn',
   'Runtime.runIfWaitingForDebugger'
 ]);
 
@@ -143,6 +146,7 @@ const GATE_PAGE_ERROR_CONSTRUCTORS = Object.freeze([
   'TypeError',
   'URIError'
 ]);
+const GATE_PAGE_ERROR_DIAGNOSTIC_LIMITS = Object.freeze({count: 16, messageLength: 2048, stackLength: 8192, pageUrlLength: 2048});
 const SCRIPT_ASSET_PATTERN = /^(?:unknown|[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(?:c|m)?js)$/;
 
 const UNCLASSIFIED_NETWORK_BLOCK = Object.freeze({classification: 'unclassified'});
@@ -280,6 +284,8 @@ function createContextObserver(name, options = {}) {
   const dedicatedWorkerTargetIds = new Set();
   const workerSourceLabels = new Set();
   const requestLabels = new Map();
+  const attachedTargetIds = new Set();
+  let anonymousAttachedTargets = 0;
 
   const state = {
     countedEvents: 0,
@@ -297,7 +303,8 @@ function createContextObserver(name, options = {}) {
     mtprotoSourceFetchedSequence: null,
     mtprotoSourceChunk: 'none',
     sequence: 0,
-    failures: new Set()
+    failures: new Set(),
+    workerErrorCounts: new Map()
   };
 
   function recordOverflow() {
@@ -415,6 +422,21 @@ function createContextObserver(name, options = {}) {
     if(typeof category === 'string' && WORKER_FAILURE_STATES.includes(category)) state.failures.add(category);
   }
 
+  function addWorkerFailure(category) {
+    if(closed() || typeof category !== 'string' || !WORKER_FAILURE_STATES.includes(category)) return;
+    const count = state.workerErrorCounts.get(category) || 0;
+    state.workerErrorCounts.set(category, Math.min(count + 1, LIMITS.countedEventsPerContext));
+    addFailure(category);
+  }
+
+  function workerErrorSnapshot() {
+    const errorTypes = Object.fromEntries([...state.workerErrorCounts.entries()].sort(([left], [right]) => left.localeCompare(right)));
+    return {
+      evaluationExceptions: state.workerErrorCounts.get('evaluation_exception') || 0,
+      errorTypes
+    };
+  }
+
   function classifySharedTarget(targetInfo) {
     const source = classifyWorkerSource(targetInfo.url);
     const existing = targets.get(targetInfo.targetId);
@@ -462,12 +484,15 @@ function createContextObserver(name, options = {}) {
 
   function noteAttached(targetId = null) {
     if(!countEvent()) return false;
-    if(state.attachedTargets >= LIMITS.attachedTargets) {
+    if(typeof targetId === 'string' && attachedTargetIds.has(targetId)) return true;
+    if(attachedTargetIds.size + anonymousAttachedTargets >= LIMITS.attachedTargets) {
       recordOverflow();
       return false;
     }
-    state.attachedTargets++;
+    if(typeof targetId === 'string') attachedTargetIds.add(targetId);
+    else anonymousAttachedTargets++;
     const record = targetId ? targets.get(targetId) : null;
+    state.attachedTargets = Math.max(state.attachedTargets, attachedTargetIds.size + anonymousAttachedTargets);
     if(record) record.attached = true;
     return true;
   }
@@ -481,6 +506,7 @@ function createContextObserver(name, options = {}) {
   function noteDestroyed(targetId) {
     if(!countEvent()) return;
     const record = targets.get(targetId);
+    if(attachedTargetIds.delete(targetId) && record) record.attached = false;
     if(!record) return;
     record.destroyed = true;
     if(!record.setupComplete) {
@@ -514,6 +540,8 @@ function createContextObserver(name, options = {}) {
   }
 
   function noteWorkerEvent(targetId, method, params, sessionId = targetId) {
+    // Console payloads use a separate bounded reader for synthetic API error diagnostics.
+    if(method === 'Runtime.consoleAPICalled') return;
     if(!countEvent()) return;
     if(method === 'Network.webSocketCreated' || method === 'Network.webSocketHandshakeResponseReceived') {
       noteWebSocket101Event(sessionId, method, params, targetId);
@@ -524,19 +552,19 @@ function createContextObserver(name, options = {}) {
       const category = classifyWorkerLogEntry(params?.entry, record.isBlob);
       if(category) {
         record.failures.add(category);
-        addFailure(category);
+        addWorkerFailure(category);
       }
       return;
     }
     if(method === 'Runtime.exceptionThrown') {
       record.failures.add('evaluation_exception');
-      addFailure('evaluation_exception');
+      addWorkerFailure('evaluation_exception');
       return;
     }
     if(method === 'Network.loadingFailed') {
       if(isWorkerScriptType(params?.type)) {
         record.failures.add('module_fetch_failed');
-        addFailure('module_fetch_failed');
+        addWorkerFailure('module_fetch_failed');
       }
       return;
     }
@@ -544,7 +572,7 @@ function createContextObserver(name, options = {}) {
       const status = params?.response?.status;
       if(isWorkerScriptType(params?.type) && typeof status === 'number' && status >= 400) {
         record.failures.add('script_load_failed');
-        addFailure('script_load_failed');
+        addWorkerFailure('script_load_failed');
       }
       return;
     }
@@ -552,7 +580,7 @@ function createContextObserver(name, options = {}) {
       const details = params?.issue?.details?.contentSecurityPolicyIssueDetails;
       if(details && /worker/i.test(String(details.blockedType || ''))) {
         record.failures.add('csp_blocked');
-        addFailure('csp_blocked');
+        addWorkerFailure('csp_blocked');
       }
       return;
     }
@@ -743,6 +771,7 @@ function createContextObserver(name, options = {}) {
     classifySharedWorker,
     classifyMtproto,
     classifyFailure,
+    workerErrorSnapshot,
     summary
   };
 }
@@ -952,6 +981,7 @@ module.exports = {
   GATE_EGRESS_SOURCES,
   GATE_OBSERVER_ERROR_KINDS,
   GATE_PAGE_ERROR_CONSTRUCTORS,
+  GATE_PAGE_ERROR_DIAGNOSTIC_LIMITS,
   GATE_RESOURCE_TYPES,
   GATE_SCHEMES,
   LIMITS,

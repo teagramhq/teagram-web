@@ -679,6 +679,7 @@ export default class Chat extends EventListenerBase<{
     this.bubbles.listenerSetter.add(rootScope)('chat_update', async(chatId) => {
       const {peerId} = this;
       if(peerId.isAnyChat() && peerId.toChatId() === chatId) {
+        const middleware = this.middlewareHelper.get();
         const {
           starsAmount,
           isAnonymousSending,
@@ -689,7 +690,7 @@ export default class Chat extends EventListenerBase<{
           canManageDirectMessages: this.managers.appPeersManager.canManageDirectMessages(peerId)
         });
 
-        if(peerId === this.peerId) {
+        if(middleware() && peerId === this.peerId) {
           this.canManageDirectMessages = canManageDirectMessages;
           this.isAnonymousSending = isAnonymousSending;
           this.updateStarsAmount(starsAmount);
@@ -1578,6 +1579,8 @@ export default class Chat extends EventListenerBase<{
   }
 
   public updateStarsAmount(starsAmount: number) {
+    if(!this.input) return;
+
     this.starsAmount = starsAmount;
     this.input.setStarsAmount(starsAmount);
     getCurrentNewMediaPopup()?.setStarsAmount(starsAmount);

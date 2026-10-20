@@ -63,6 +63,20 @@ const pinnedSetupNodeAction = 'uses: actions/setup-node@49933ea5288caeca8642d1e8
 const pinnedNodeVersion = 'node-version: 24.18.0';
 const nodeVersionCheck = `test "$(node --version)" = 'v24.18.0' || { echo "::error::expected Node v24.18.0, got $(node --version)"; exit 1; }`;
 
+it('allows the fixed Cloudflare Turnstile origin for scripts and frames in private artifacts', () => {
+  const endpoint = 'wss://private.example.test:2443/apiws';
+  const directives = Object.fromEntries(privateContentSecurityPolicy(endpoint)
+  .split(';')
+  .filter(Boolean)
+  .map((directive) => {
+    const [name, ...sources] = directive.trim().split(/\s+/);
+    return [name, sources.join(' ')];
+  }));
+
+  expect(directives['script-src']).toBe("'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com");
+  expect(directives['frame-src']).toBe("'self' https://challenges.cloudflare.com");
+});
+
 function privateWorkflowJob(workflow, name) {
   const header = `  ${name}:\n`;
   const start = workflow.indexOf(header);
