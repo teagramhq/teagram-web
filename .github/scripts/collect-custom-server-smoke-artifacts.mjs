@@ -359,20 +359,18 @@ try {
       }
     }
 
-    const context = sanitizedErrorContext(rawContexts, reportEntries);
     const browserOutcome = process.env.TWEB_CUSTOM_SERVER_SMOKE_OUTCOME || 'not-run';
     const startupOutcome = process.env.TWEB_STARTUP_OUTCOME || 'not-run';
     const migrationOutcome = process.env.TWEB_MIGRATION_OUTCOME || 'not-run';
+    const fallbackContext = browserOutcome === 'failure' ? [
+      '# Custom-server browser failure context',
+      '',
+      `- Test: ${TEST_NAME}`,
+      '- Failure: Playwright failed without retaining its error-context file.',
+      ''
+    ].join('\n') : undefined;
+    const context = sanitizedErrorContext(rawContexts, reportEntries) || fallbackContext;
     if(context) writeFileSync(join(artifactDirectory, 'error-context.md'), context, {mode: 0o600});
-    else if(browserOutcome === 'failure') {
-      writeFileSync(join(artifactDirectory, 'error-context.md'), [
-        '# Custom-server browser failure context',
-        '',
-        `- Test: ${TEST_NAME}`,
-        '- Failure: Playwright failed without retaining its error-context file.',
-        ''
-      ].join('\n'), {mode: 0o600});
-    }
 
     const fixtureLog = [
       '# Sanitized disposable Teagram server fixture logs',
@@ -401,7 +399,7 @@ try {
       browser_trace_available: traceFiles.length > 0,
       browser_trace_files: traceFiles,
       browser_trace_unavailable_reason: browserTraceReason,
-      error_context_available: rawContexts.length > 0,
+      error_context_available: Boolean(context),
       fixture_log_files_observed: [
         ...(regularFile(process.env.TEAGRAMD_STARTUP_LOG_FILE) ? ['startup'] : []),
         ...(regularFile(process.env.TEAGRAMD_LOG_FILE) ? ['server'] : [])
