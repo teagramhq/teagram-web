@@ -8095,6 +8095,39 @@ describe('real client poll option interaction', () => {
     expect(read(workerScope).attempts).toMatchObject([{status: 'accepted', randomId: '123456789', responseMessageId: null}]);
   });
 
+  it('does not derive a response MID from a same-question update paired with another send random_id', async() => {
+    const install = (realClientBrowser as any).installWorkerPollSendObserver;
+    const read = (realClientBrowser as any).readWorkerPollSendObservation;
+    const apiManager = {
+      invokeApi(_method: string, _params: any) {
+        return Promise.resolve({_: 'updates', updates: [
+          {_: 'updateMessageID', random_id: '987654321', id: 77},
+          {_: 'updateNewMessage', message: {
+            id: 77,
+            media: {_: 'messageMediaPoll', poll: {question: {text: 'browser-ci-poll-description-a1b2c3d4'}}}
+          }}
+        ]});
+      }
+    };
+    const workerScope: any = {
+      appManagersManager: {areManagersCreated: true, getManagersByAccount: () => ({1: {appPollsManager: {apiManager}}})},
+      setInterval: () => 1,
+      clearInterval: (): void => undefined
+    };
+    install(workerScope);
+    await vi.waitFor(() => expect(read(workerScope).status).toBe('installed'));
+    await apiManager.invokeApi('messages.sendMedia', {
+      message: '',
+      random_id: '123456789',
+      media: {_: 'inputMediaPoll', poll: {
+        question: {text: 'browser-ci-poll-description-a1b2c3d4'},
+        answers: [{_: 'pollAnswer'}]
+      }}
+    });
+
+    expect(read(workerScope).attempts).toMatchObject([{status: 'accepted', randomId: '123456789', responseMessageId: null}]);
+  });
+
   it('waits for the worker response MID to resolve to a persisted poll identity', async() => {
     const page = await browser.newPage();
     const question = 'browser-ci-poll-input-answer-a1b2c3d4';

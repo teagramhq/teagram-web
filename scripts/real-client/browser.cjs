@@ -3248,17 +3248,14 @@ function installWorkerPollSendObserver(scope = globalThis) {
               const responseMessageIds = [];
               for(const update of updates) {
                 const message = update?.message;
-                const pollQuestion = message?.media?.poll?.question;
-                const responseQuestion = typeof pollQuestion === 'string' ? pollQuestion : pollQuestion?.text;
                 const correlatedUpdate = outcome.randomId !== null &&
                   safeRandomId(update?.random_id ?? message?.random_id) === outcome.randomId;
-                const matchingPoll = message?.media?._ === 'messageMediaPoll' && responseQuestion === question;
                 const shortSentMessage = update?._ === 'updateShortSentMessage';
                 const rawMessageId = update?._ === 'updateMessageID' && correlatedUpdate
                   ? update.id
                   : message?.id ?? message?.mid ?? (shortSentMessage ? update.id : undefined);
                 const messageId = safeMessageId(rawMessageId);
-                if(messageId !== null && (correlatedUpdate || matchingPoll || shortSentMessage)) responseMessageIds.push(messageId);
+                if(messageId !== null && (correlatedUpdate || shortSentMessage)) responseMessageIds.push(messageId);
               }
               const distinctResponseMessageIds = [...new Set(responseMessageIds)];
               outcome.responseMessageId = distinctResponseMessageIds.length === 1 ? distinctResponseMessageIds[0] : null;
