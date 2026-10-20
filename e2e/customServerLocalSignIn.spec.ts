@@ -394,6 +394,7 @@ test('isolates two server tabs when a custom server worker takes control', async
       if(!server?.listening) return;
       await new Promise<void>((resolve, reject) => {
         server.close((error) => error ? reject(error) : resolve());
+        server.closeAllConnections();
       });
     });
     await runCleanup('cleanup: remove temporary directory', () => {

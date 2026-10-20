@@ -4,6 +4,7 @@ const PORT = Number(process.env.TWEB_PRIVATE_AUTH_PORT || 8101);
 
 export default defineConfig({
   testDir: './e2e',
+  outputDir: process.env.TWEB_PRIVATE_AUTH_OUTPUT_DIR || 'test-results',
   fullyParallel: false,
   workers: 1,
   timeout: 60_000,
@@ -17,7 +18,27 @@ export default defineConfig({
     launchOptions: {args: ['--ignore-certificate-errors', '--host-resolver-rules=MAP second-server.example.test:443 127.0.0.1:18443, MAP web.teagram.io:443 127.0.0.1:18443, MAP second-server.example.test 127.0.0.1']},
     viewport: {width: 320, height: 720}
   },
-  projects: [{name: 'chromium', use: {...devices['Desktop Chrome']}}],
+  projects: [
+    {
+      name: 'private-auth-chromium',
+      testIgnore: /customServerLocalSignIn\.spec\.ts/,
+      use: {...devices['Desktop Chrome']}
+    },
+    {
+      name: 'chromium',
+      testMatch: /customServerLocalSignIn\.spec\.ts/,
+      use: {
+        ...devices['Desktop Chrome'],
+        trace: {
+          mode: 'retain-on-failure',
+          screenshots: false,
+          snapshots: false,
+          sources: false,
+          attachments: false
+        }
+      }
+    }
+  ],
   webServer: {
     command: `corepack pnpm --config.verify-deps-before-run=false exec vite --port ${PORT} --strictPort`,
     url: `http://localhost:${PORT}/`,
