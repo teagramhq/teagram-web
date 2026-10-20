@@ -61,25 +61,17 @@ verify_served_release() {
   fi
 }
 
-verify_version_paths() {
-  local version_resource legacy_version_resource version_content_type legacy_version_content_type
+verify_version_path() {
+  local version_resource version_content_type
   version_resource=$(curl -q --noproxy '*' --fail --silent --show-error --max-time 10 \
     --write-out $'\n%{content_type}' "$BASE_URL/.well-known/teagram-web/version.txt") || {
     printf 'new version resource request failed\n' >&2
     return 1
   }
-  legacy_version_resource=$(curl -q --noproxy '*' --fail --silent --show-error --max-time 10 \
-    --write-out $'\n%{content_type}' "$BASE_URL/.well-known/telegram-web/version.txt") || {
-    printf 'legacy version resource request failed\n' >&2
-    return 1
-  }
   version_content_type=${version_resource##*$'\n'}
-  legacy_version_content_type=${legacy_version_resource##*$'\n'}
   version_resource=${version_resource%$'\n'*}
-  legacy_version_resource=${legacy_version_resource%$'\n'*}
-  if [[ -z "$version_resource" || "$version_content_type" != text/plain* ||
-    "$legacy_version_content_type" != text/plain* || "$version_resource" != "$legacy_version_resource" ]]; then
-    printf 'new and legacy version resources do not match as plain text\n' >&2
+  if [[ -z "$version_resource" || "$version_content_type" != text/plain* ]]; then
+    printf 'new version resource is not non-empty plain text\n' >&2
     return 1
   fi
 }
@@ -295,7 +287,7 @@ fi
 
 wait_for_stack || fail 'deployment did not become healthy within 60 seconds'
 verify_served_release "$SHA" "$CONTENT_DIGEST" || fail 'served release checks failed'
-verify_version_paths || fail 'served version resource checks failed'
+verify_version_path || fail 'served version resource check failed'
 
 jq -n \
   --arg sourceCommit "$SHA" \

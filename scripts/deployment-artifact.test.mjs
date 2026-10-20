@@ -86,13 +86,22 @@ describe('deployment artifact verification', () => {
     expect(nginx).toContain("frame-src 'self' https://challenges.cloudflare.com;");
   });
 
-  it('uses the Teagram stack names and keeps its legacy link-edge network attachment', () => {
+  it('uses the Teagram stack names and only joins its current web network', () => {
     const compose = readFileSync(resolve('deploy/teagram-web/compose.yaml'), 'utf8');
 
     expect(compose).toMatch(/^name: teagram-web-edge$/m);
     expect(compose).toMatch(/^    image: teagram-web:local$/m);
     expect(compose).toMatch(/^    name: teagram-web-edge-nginx-cache$/m);
     expect(compose).toMatch(/^    name: teagram-web-edge-net$/m);
+    expect(compose).not.toContain('legacy_link_edge');
+    expect(compose).not.toContain('telegram-web-edge-net');
+  });
+
+  it('returns 404 for missing well-known resources instead of the SPA fallback', () => {
+    const nginx = readFileSync(resolve('deploy/teagram-web/nginx.conf'), 'utf8');
+
+    expect(nginx).toContain('location ^~ /.well-known/');
+    expect(nginx).toContain('try_files $uri =404;');
   });
 
   it('only records HEAD as the source commit when the build tree is clean', () => {

@@ -5,9 +5,7 @@ artifact. It is intentionally separate from the development Compose file at
 the repository root and from `/opt/teagram`. Its explicit
 `teagram-web-edge` project, `teagram-web-edge-net` network, and
 `teagram-web-edge-nginx-cache` volume names keep a root-directory Compose
-invocation from selecting this stack by basename. The web service also joins
-the existing `telegram-web-edge-net` network until MAIN-1980 removes that
-compatibility attachment.
+invocation from selecting this stack by basename.
 
 The target checkout is `/opt/telegram-web`. Run the commands below from this
 directory:
@@ -81,10 +79,8 @@ Dockerfile's `artifact-verification` stage before changing the live checkout.
 It keeps the prior artifact and a `rollback.sh` under
 `/opt/telegram-web/backups/`, checks `/`, `/healthz`, and the served artifact
 manifest after Compose starts, and runs the rollback script if deployment
-fails. The first deploy under the renamed project builds the image before it
-stops and removes the old web container, preserving the old external network
-for link-edge. Rollback stops the new web container, restores the saved image
-and artifact, then starts the previous Compose project. The release record is
+fails. Rollback stops the new web container, restores the saved image and
+artifact, then starts the previous Compose project. The release record is
 written root-owned and read-only under
 `/root/teagram-web-<commit>-<timestamp>/release-record.json`.
 
@@ -118,9 +114,7 @@ the existing Nginx policy and serving layout intact.
 The only persistent volume is `teagram-web-edge-nginx-cache`, owned by this Compose
 project. `docker compose down` is safe and leaves that cache intact; never use
 `docker compose down -v` on this host. The web build emits the version file at
-`/.well-known/teagram-web/version.txt` and keeps
-`/.well-known/telegram-web/version.txt` as a compatibility alias until
-MAIN-1980.
+`/.well-known/teagram-web/version.txt`.
 
 Each deployment records a private `rollback.sh` in the printed backup
 directory and invokes it automatically on failure. To restore manually, run

@@ -3,7 +3,6 @@ import {describe, expect, it, vi} from 'vitest';
 import webVersionResourcePlugin from '@/scripts/webVersionResource';
 import {
   hasWebVersionUpdate,
-  LEGACY_WEB_VERSION_RESOURCE_PATH,
   WEB_VERSION_RESOURCE_PATH
 } from '@lib/webVersion';
 
@@ -24,15 +23,10 @@ describe('Web version resource', () => {
 
     generateBundle.call({emitFile});
 
-    expect(emitFile).toHaveBeenCalledTimes(2);
+    expect(emitFile).toHaveBeenCalledTimes(1);
     expect(emitFile).toHaveBeenCalledWith({
       type: 'asset',
       fileName: '.well-known/teagram-web/version.txt',
-      source: fullVersion
-    });
-    expect(emitFile).toHaveBeenCalledWith({
-      type: 'asset',
-      fileName: '.well-known/telegram-web/version.txt',
       source: fullVersion
     });
   });
@@ -55,14 +49,37 @@ describe('Web version resource', () => {
     };
     const next = vi.fn();
 
-    for(const path of [WEB_VERSION_RESOURCE_PATH, LEGACY_WEB_VERSION_RESOURCE_PATH]) {
-      middleware({url: `${path}?cache-bust=1`}, response, next);
-      expect(response.statusCode).toBe(200);
-      expect(response.setHeader).toHaveBeenCalledWith('Content-Type', 'text/plain; charset=utf-8');
-      expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store');
-      expect(response.end).toHaveBeenCalledWith(fullVersion);
-    }
+    middleware({url: `${WEB_VERSION_RESOURCE_PATH}?cache-bust=1`}, response, next);
+    expect(response.statusCode).toBe(200);
+    expect(response.setHeader).toHaveBeenCalledWith('Content-Type', 'text/plain; charset=utf-8');
+    expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    expect(response.end).toHaveBeenCalledWith(fullVersion);
     expect(next).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 for missing well-known resources in development', () => {
+    const plugin = createPlugin();
+    const use = vi.fn();
+    const configureServer = plugin.configureServer as unknown as (server: {middlewares: {use: typeof use}}) => void;
+    configureServer({middlewares: {use}});
+
+    const middleware = use.mock.calls[0][0] as (
+      request: {url?: string},
+      response: {statusCode: number, setHeader: (name: string, value: string) => void, end: (body: string) => void},
+      next: () => void
+    ) => void;
+    const response = {
+      statusCode: 0,
+      setHeader: vi.fn(),
+      end: vi.fn()
+    };
+    const next = vi.fn();
+
+    middleware({url: '/.well-known/telegram-web/version.txt'}, response, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(response.statusCode).toBe(404);
+    expect(response.end).toHaveBeenCalledOnce();
   });
 
   it('requests the absolute same-origin resource and stays quiet for an unchanged version', async() => {

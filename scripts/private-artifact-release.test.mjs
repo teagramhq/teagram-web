@@ -1672,10 +1672,7 @@ describe('private artifact publication attestation', () => {
 
   it('preserves the hidden version resource through the isolated publisher transfer', () => {
     const directory = temporaryArtifact();
-    const versionResources = [
-      '.well-known/teagram-web/version.txt',
-      '.well-known/telegram-web/version.txt'
-    ];
+    const versionResources = ['.well-known/teagram-web/version.txt'];
     const versionContents = '2.2 (676)\n';
     for(const versionResource of versionResources) {
       const resourcePath = join(directory, versionResource);
