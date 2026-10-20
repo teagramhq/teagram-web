@@ -274,10 +274,9 @@ jobs:
           new_version_content_type="$(curl --fail --silent --show-error \
             --output "$RUNNER_TEMP/teagram-version.txt" --write-out '%{content_type}' \
             http://127.0.0.1:18080/.well-known/teagram-web/version.txt)"
-          legacy_version_content_type="$(curl --fail --silent --show-error \
-            --output "$RUNNER_TEMP/telegram-version.txt" --write-out '%{content_type}' \
+          legacy_version_status="$(curl --silent --show-error \
+            --output /dev/null --write-out '%{http_code}' \
             http://127.0.0.1:18080/.well-known/telegram-web/version.txt)"
           test "$new_version_content_type" = "text/plain"
-          test "$legacy_version_content_type" = "text/plain"
+          test "$legacy_version_status" = "404"
           test -s "$RUNNER_TEMP/teagram-version.txt"
-          cmp --silent "$RUNNER_TEMP/teagram-version.txt" "$RUNNER_TEMP/telegram-version.txt"
