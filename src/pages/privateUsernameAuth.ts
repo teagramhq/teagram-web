@@ -1,7 +1,7 @@
-import type {AuthSendCode, AuthSignIn, AuthSignUp, InvokeWithReCaptcha, User} from '@layer';
+import type {AuthCheckPassword, AuthSendCode, AuthSignIn, AuthSignUp, InvokeWithReCaptcha, User} from '@layer';
 import App from '@config/app';
 import {isPrivateUsernameCredentialError} from '@/pages/privateUsernameLoginState';
-import {invokeSignUpWithTurnstile} from '@/pages/turnstileSignup';
+import {invokeSignUpWithTurnstile, invokeTurnstileProtected} from '@/pages/turnstileSignup';
 import type {RequestTurnstileChallenge} from '@/pages/turnstileSignup';
 
 export {isPrivateUsernameCredentialError} from '@/pages/privateUsernameLoginState';
@@ -36,8 +36,8 @@ export type PrivateUsernameRegistration = {
 export type PrivateUsernameRegistrationError = 'usernameTaken' | 'invalidUsername' | 'invalidDisplayName' | 'invalidInvite' | 'registrationClosed' | 'weakPassword' | 'error';
 
 type InvokeAuthApi = (
-  method: 'auth.sendCode' | 'auth.signIn' | 'auth.signUp' | 'invokeWithReCaptcha',
-  params: AuthSendCode | AuthSignIn | AuthSignUp | InvokeWithReCaptcha,
+  method: 'auth.sendCode' | 'auth.signIn' | 'auth.checkPassword' | 'auth.signUp' | 'invokeWithReCaptcha',
+  params: AuthSendCode | AuthSignIn | AuthCheckPassword | AuthSignUp | InvokeWithReCaptcha,
   options?: {ignoreErrors: true}
 ) => Promise<unknown>;
 
@@ -80,7 +80,8 @@ export async function authenticatePrivateUsername(
   invokeApi: InvokeAuthApi,
   isCancelled: () => boolean = () => false,
   registration?: PrivateUsernameRegistration,
-  requestTurnstile?: RequestTurnstileChallenge
+  requestTurnstile?: RequestTurnstileChallenge,
+  turnstileSiteKey?: string
 ): Promise<PrivateUsernameAuthResult> {
   if(!isPrivateUsername(username)) return {kind: 'invalidInput'};
   if(registration && registration.mode !== 'closed' && !registration.displayName.trim()) return {kind: 'invalidInput'};
@@ -89,7 +90,7 @@ export async function authenticatePrivateUsername(
 
   let sentCode: unknown;
   try {
-    sentCode = await invokeApi('auth.sendCode', {
+    sentCode = await invokeTurnstileProtected(invokeApi, 'auth.sendCode', {
       phone_number: username,
       api_id: App.id,
       api_hash: App.hash,
@@ -97,7 +98,7 @@ export async function authenticatePrivateUsername(
         _: 'codeSettings',
         pFlags: {}
       }
-    });
+    }, 'signin', requestTurnstile);
   } catch(error) {
     if(isCancelled()) return {kind: 'cancelled'};
     return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : {kind: 'error'};
@@ -140,7 +141,8 @@ export async function authenticatePrivateUsername(
       signUpResponse = await invokeSignUpWithTurnstile(
         (method, request) => invokeApi(method, request),
         params,
-        requestTurnstile
+        requestTurnstile,
+        turnstileSiteKey
       );
     } catch(error) {
       if(isCancelled()) return {kind: 'cancelled'};

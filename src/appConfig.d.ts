@@ -171,6 +171,7 @@ export interface MTAppConfig {
   community_peers_limit?:                     number;
   community_bot_peers_limit?:                 number;
   registration_mode?:                         'closed' | 'invite' | 'open';
+  turnstile?:                                 {site_key?: string};
 }
 
 export interface EmojiesSendDiceSuccess {

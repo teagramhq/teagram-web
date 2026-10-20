@@ -1,4 +1,4 @@
-import {createSignal, JSX, onCleanup, onMount} from 'solid-js';
+import {createSignal, JSX, onCleanup, onMount, Show} from 'solid-js';
 
 import Button from '@components/buttonTsx';
 import PasswordInputField from '@components/passwordInputField';
@@ -20,6 +20,8 @@ import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 
 import AuthCard from '@/pages/AuthCard';
 import {CardSpec, useAuthFlow} from '@/pages/authFlow';
+import TurnstileChallenge, {useTurnstileChallenge} from '@/pages/TurnstileChallenge';
+import {invokeTurnstileProtected} from '@/pages/turnstileSignup';
 import {
   clearPrivateUsernameLogin,
   isPrivateUsernameCredentialError,
@@ -40,6 +42,7 @@ const TEST = false;
  */
 export default function PasswordCard(_props: {spec: Spec}) {
   const {managers, navigate, toIm} = useAuthFlow();
+  const turnstile = useTurnstileChallenge();
 
   let monkey: PasswordMonkey | undefined;
   const monkeyContainer = document.createElement('div');
@@ -163,7 +166,14 @@ export default function PasswordCard(_props: {spec: Spec}) {
     passwordInputField.setValueSilently('' + Math.random()); // prevent saving suggestion
     passwordInputField.setValueSilently(value);
 
-    managers.passwordManager.check(value, state).then((response) => {
+    const invokeCheck = (params: any) => invokeTurnstileProtected(
+      (method, request) => managers.apiManager.invokeApi(method as any, request as any),
+      'auth.checkPassword',
+      params,
+      'signin',
+      turnstile.request
+    );
+    managers.passwordManager.check(value, state, {}, invokeCheck).then((response) => {
       switch(response._) {
         case 'auth.authorization':
           if(getStateInterval) {
@@ -217,7 +227,6 @@ export default function PasswordCard(_props: {spec: Spec}) {
   let cancelFocus: (() => void) | undefined;
   onMount(() => {
     managers.appStateManager.pushToState('authState', {_: 'authStatePassword'});
-
     monkey = new PasswordMonkey(passwordInputField, monkeySize);
     monkeyContainer.append(monkey.container);
     monkey.load();
@@ -229,6 +238,7 @@ export default function PasswordCard(_props: {spec: Spec}) {
 
   onCleanup(() => {
     clearPrivateUsernameLogin();
+    turnstile.cancel();
     cancelFocus?.();
     monkey?.remove();
     if(getStateInterval) {
@@ -249,6 +259,9 @@ export default function PasswordCard(_props: {spec: Spec}) {
       }
     >
       {passwordInputField.container}
+      <Show when={turnstile.challenge()} keyed>
+        {(challenge) => <TurnstileChallenge {...challenge}/>}
+      </Show>
       {resetLink}
       <Button
         class="btn-primary btn-color-primary"

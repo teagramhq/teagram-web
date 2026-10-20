@@ -36,7 +36,8 @@ export type DiscoveredServer = {
   id: string,
   target: MtprotoTarget,
   pin: ServerPin,
-  spkiFingerprint: string
+  spkiFingerprint: string,
+  turnstileSiteKey?: string
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -122,6 +123,15 @@ export async function validateDiscoveryDocument(hostInput: string, value: unknow
     throw new Error('not a Teagram server: unsupported discovery document');
   }
 
+  let turnstileSiteKey: string | undefined;
+  if(value.turnstile !== undefined) {
+    if(!record(value.turnstile) || typeof value.turnstile.site_key !== 'string' ||
+      !/^[A-Za-z0-9_-]{1,256}$/.test(value.turnstile.site_key)) {
+      throw new Error('not a Teagram server: invalid Turnstile site key');
+    }
+    turnstileSiteKey = value.turnstile.site_key;
+  }
+
   const {endpoint, dc_id, rsa_spki} = value.mtproto;
   const websocketEndpoint = value.websocket.endpoint;
   if(typeof dc_id !== 'number' || !Number.isInteger(dc_id) || dc_id <= 0 || dc_id > 0x7fffffff ||
@@ -187,7 +197,7 @@ export async function validateDiscoveryDocument(hostInput: string, value: unknow
   });
   const id = 'custom-' + toHex(await sha256(new TextEncoder().encode(host)));
   const pin = {host, endpoint: websocketEndpoint, dc_id, key_fingerprint: spkiFingerprint};
-  return {host, id, target, pin, spkiFingerprint};
+  return {host, id, target, pin, spkiFingerprint, turnstileSiteKey};
 }
 
 export async function fetchServerDiscovery(hostInput: string, fetcher: typeof fetch = fetch): Promise<DiscoveredServer> {

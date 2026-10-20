@@ -33,7 +33,7 @@ function createNetworkerForCall() {
   return networker;
 }
 
-async function capturePrivateRpcResponse(result: any) {
+async function capturePrivateRpcResponse(result: any, method = 'auth.signIn', wrappedParams?: any) {
   const networker = createNetworkerForCall();
   (networker as any).log = logger('NET-RPC-RESPONSE-TEST', LogTypes.Log | LogTypes.Error | LogTypes.Debug, true);
   const {manager} = createPrivateManager(networker);
@@ -46,7 +46,7 @@ async function capturePrivateRpcResponse(result: any) {
     msg_id: 'auth-response-request-id',
     seq_no: 1,
     body: requestBody,
-    humanReadable: 'auth.signIn',
+    humanReadable: method,
     isAPI: true,
     resultType: 'Object',
     deferred
@@ -73,6 +73,7 @@ async function capturePrivateRpcResponse(result: any) {
   setLogBufferEnabled(true);
   try {
     await manager.getNetworker(2);
+    if(wrappedParams) (networker as any).log('call', method, sentMessage, wrappedParams, {});
     networker.processMessage(inboundContainer, '00000000000000000002', new Uint8Array(8));
     const responseLog = consoleLog.mock.calls.find((args) => args.includes(result._ === 'rpc_error' ? 'rpc error' : 'rpc result'));
 
@@ -231,6 +232,64 @@ describe.skipIf(!__MTPROTO_PRIVATE__)('private username auth logging and retries
     }
   });
 
+  it('redacts wrapped auth containers while keeping sibling diagnostics useful', async() => {
+    const networker = createNetworkerForCall();
+    (networker as any).log = logger('NET-WRAPPED-CONTAINER-TEST', LogTypes.Error | LogTypes.Debug, true);
+    const {manager} = createPrivateManager(networker);
+    const requestNetworker = networker as any;
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const consoleDebug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const originalBufferState = isLogBufferEnabled();
+    const wrappedMessage = {
+      msg_id: 'wrapped-auth-message-id',
+      humanReadable: 'invokeWithReCaptcha',
+      body: 'encoded-wrapped-auth-body'
+    };
+    const siblingMessage = {
+      msg_id: 'useful-sibling-message-id',
+      humanReadable: 'help.getConfig',
+      body: 'encoded-sibling-body'
+    };
+    const params = {
+      token: 'container-turnstile-token',
+      query: {
+        _: 'auth.checkPassword',
+        password: {_ : 'inputCheckPasswordSRP', A: 'container-srp-A', M1: 'container-srp-M1'}
+      }
+    };
+    const container = {
+      container: true,
+      inner: [wrappedMessage.msg_id, siblingMessage.msg_id],
+      body: 'encoded-container-auth-and-sibling-body'
+    };
+
+    requestNetworker.sentMessages = {
+      [wrappedMessage.msg_id]: wrappedMessage,
+      [siblingMessage.msg_id]: siblingMessage
+    };
+
+    setLogBufferEnabled(true);
+    try {
+      await manager.getNetworker(2);
+      requestNetworker.log('call', 'invokeWithReCaptcha', wrappedMessage, params, {});
+      requestNetworker.log.debug('sending container', container);
+      requestNetworker.log('call', 'help.getConfig', siblingMessage, {diagnostic: 'useful-sibling-diagnostic'}, {});
+
+      const logged = JSON.stringify({consoleLog: consoleLog.mock.calls, consoleDebug: consoleDebug.mock.calls, buffer: getLogEntries()});
+      expect(logged).not.toContain('encoded-wrapped-auth-body');
+      expect(logged).not.toContain('container-turnstile-token');
+      expect(logged).not.toContain('container-srp-A');
+      expect(logged).not.toContain('container-srp-M1');
+      expect(logged).not.toContain('encoded-container-auth-and-sibling-body');
+      expect(logged).toContain('useful-sibling-diagnostic');
+      expect(JSON.stringify(consoleDebug.mock.calls)).toContain('[REDACTED]');
+      expect(wrappedMessage.body).toBe('encoded-wrapped-auth-body');
+      expect(container.body).toBe('encoded-container-auth-and-sibling-body');
+    } finally {
+      setLogBufferEnabled(originalBufferState);
+    }
+  });
+
   it('redacts usernames from real successful inbound msg_container logs', async() => {
     const result = {_: 'auth.authorization', user: {id: 123, username: 'Alice_123'}};
     const capture = await capturePrivateRpcResponse(result);
@@ -247,6 +306,36 @@ describe.skipIf(!__MTPROTO_PRIVATE__)('private username auth logging and retries
     expect(result.user.username).toBe('Alice_123');
     expect(capture.deferred.resolve).toHaveBeenCalledWith(result);
     expect(capture.sentMessage.acked).toBe(true);
+    expect(capture.sentMessage.body).toBe(capture.requestBody);
+  });
+
+  it('redacts successful wrapped auth responses and request bodies', async() => {
+    const result = {
+      _: 'auth.sentCode',
+      phone_code_hash: 'wrapped-success-code-hash',
+      type: {_ : 'auth.sentCodeTypeApp', length: 5}
+    };
+    const params = {
+      token: 'wrapped-success-turnstile-token',
+      query: {
+        _: 'auth.sendCode',
+        phone_number: 'wrapped-success-username',
+        api_hash: 'wrapped-success-api-hash'
+      }
+    };
+    const capture = await capturePrivateRpcResponse(result, 'invokeWithReCaptcha', params);
+
+    expect(capture.consoleOutput).not.toContain(capture.requestBody);
+    expect(capture.bufferedOutput).not.toContain(capture.requestBody);
+    expect(capture.consoleOutput).not.toContain('wrapped-success-turnstile-token');
+    expect(capture.bufferedOutput).not.toContain('wrapped-success-turnstile-token');
+    expect(capture.consoleOutput).not.toContain('wrapped-success-username');
+    expect(capture.bufferedOutput).not.toContain('wrapped-success-username');
+    expect(capture.consoleOutput).not.toContain('wrapped-success-api-hash');
+    expect(capture.bufferedOutput).not.toContain('wrapped-success-api-hash');
+    expect(capture.consoleOutput).not.toContain('wrapped-success-code-hash');
+    expect(capture.bufferedOutput).not.toContain('wrapped-success-code-hash');
+    expect(JSON.stringify(capture.responseLog)).toContain('"phone_code_hash":"[REDACTED]"');
     expect(capture.sentMessage.body).toBe(capture.requestBody);
   });
 
@@ -312,6 +401,72 @@ describe.skipIf(!__MTPROTO_PRIVATE__)('private username auth logging and retries
     expect(logged).not.toContain('Alice_123');
     expect(logged).not.toContain('private-code-hash');
     expect(logged).toContain('[REDACTED]');
+  });
+
+  it('redacts wrapped auth parameters and preserves raw challenge errors', async() => {
+    const error = {code: 400, type: 'RECAPTCHA_CHECK_signin__public-site-key'};
+    const wrapApiCall = vi.fn().mockRejectedValue(error);
+    const networker = {
+      log: logger('NET-WRAPPED-AUTH-TEST', LogTypes.Error),
+      wrapApiCall,
+      attachPromise: vi.fn()
+    } as unknown as MTPNetworker;
+    const {manager, logError} = createPrivateManager(networker);
+    const params = {
+      token: 'private-turnstile-token',
+      query: {
+        _: 'auth.sendCode',
+        phone_number: 'private-username',
+        api_hash: 'private-api-hash',
+        phone_code_hash: 'private-code-hash'
+      }
+    };
+
+    await expect(manager.invokeApi('invokeWithReCaptcha', params, {dcId: 2, ignoreErrors: true}))
+    .rejects.toMatchObject({type: 'RECAPTCHA_CHECK_signin__public-site-key'});
+
+    expect(wrapApiCall).toHaveBeenCalledWith('invokeWithReCaptcha', params, expect.objectContaining({rawError: true}));
+    const logged = JSON.stringify(logError.mock.calls);
+    expect(logged).not.toContain('private-turnstile-token');
+    expect(logged).not.toContain('private-username');
+    expect(logged).not.toContain('private-api-hash');
+    expect(logged).not.toContain('private-code-hash');
+    expect(logged).not.toContain('private-srp-A');
+    expect(logged).not.toContain('private-srp-M1');
+    expect(logged).toContain('[REDACTED]');
+  });
+
+  it('keeps wrapped auth timeout redaction active across concurrent requests', async() => {
+    const pending: Array<{resolve: (value: unknown) => void, reject: (error: unknown) => void}> = [];
+    const wrapApiCall = vi.fn(() => new Promise((resolve, reject) => pending.push({resolve, reject})));
+    const networker = {
+      log: logger('NET-WRAPPED-CONCURRENT-TEST', LogTypes.Error),
+      sentMessages: {},
+      wrapApiCall,
+      attachPromise: vi.fn()
+    } as unknown as MTPNetworker;
+    const {manager, logError} = createPrivateManager(networker);
+    Object.assign(manager, {log: {error: logError}});
+    const firstParams = {token: 'first-concurrent-token', query: {_: 'auth.sendCode', phone_number: 'first-concurrent-user'}};
+    const secondParams = {token: 'second-concurrent-token', query: {_: 'auth.checkPassword', password: 'second-concurrent-srp'}};
+
+    const first = manager.invokeApi('invokeWithReCaptcha', firstParams, {dcId: 2, ignoreErrors: true});
+    const second = manager.invokeApi('invokeWithReCaptcha', secondParams, {dcId: 2, ignoreErrors: true});
+    await vi.waitFor(() => expect(wrapApiCall).toHaveBeenCalledTimes(2));
+
+    pending[0].resolve({_: 'auth.sentCode'});
+    await expect(first).resolves.toEqual({_: 'auth.sentCode'});
+
+    manager.log.error('Request is still processing:', 'invokeWithReCaptcha', secondParams, {timeout: 5});
+    const timeoutLog = JSON.stringify(logError.mock.calls);
+    expect(timeoutLog).not.toContain('second-concurrent-token');
+    expect(timeoutLog).not.toContain('second-concurrent-user');
+    expect(timeoutLog).not.toContain('second-concurrent-srp');
+    expect(timeoutLog).toContain('[REDACTED]');
+
+    pending[1].reject({code: 408, type: 'TIMEOUT'});
+    await expect(second).rejects.toMatchObject({type: 'TIMEOUT'});
+    expect(JSON.stringify(logError.mock.calls)).not.toContain('second-concurrent-token');
   });
 
   it.each(AUTH_METHODS)('does not retry %s after a server 500', async(method) => {

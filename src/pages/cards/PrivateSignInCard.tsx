@@ -86,6 +86,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   const [registrationMode, setRegistrationMode] = createSignal<PrivateUsernameRegistrationMode>('closed');
   const [creatingAccount, setCreatingAccount] = createSignal(false);
   const [registrationConfigUnavailable, setRegistrationConfigUnavailable] = createSignal(false);
+  const [turnstileSiteKey, setTurnstileSiteKey] = createSignal<string>();
   const [pendingPasswordUser, setPendingPasswordUser] = createSignal<User>();
   const [error, setError] = createSignal<PrivateUsernameUiError>();
 
@@ -240,7 +241,8 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           managers.apiManager.invokeApi(method as any, params as any),
         () => cancelled,
         registration,
-        turnstile.request
+        turnstile.request,
+        turnstileSiteKey()
       );
       activeIdentifier = '';
 
@@ -356,6 +358,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
       if(cancelled) return;
       const mode = config.registration_mode;
       setRegistrationMode(mode === 'open' || mode === 'invite' ? mode : 'closed');
+      setTurnstileSiteKey(config.turnstile?.site_key);
       updateRegistrationValidity();
     }).catch(() => {
       if(!cancelled) {

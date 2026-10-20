@@ -5,7 +5,7 @@
  * https://github.com/zhukov/webogram/blob/master/LICENSE
  */
 
-import type {AccountPassword, AccountUpdatePasswordSettings, InputCheckPasswordSRP, PasswordKdfAlgo} from '@layer';
+import type {AccountPassword, AccountUpdatePasswordSettings, AuthCheckPassword, InputCheckPasswordSRP, PasswordKdfAlgo} from '@layer';
 import randomize from '@helpers/array/randomize';
 import {AppManager} from '@appManagers/manager';
 
@@ -71,12 +71,14 @@ export class PasswordManager extends AppManager {
     return this.cryptoWorker.invokeCrypto('computeSRP', password, state, false) as Promise<InputCheckPasswordSRP.inputCheckPasswordSRP>;
   }
 
-  public check(password: string, state: AccountPassword, options: any = {}) {
+  public check(password: string, state: AccountPassword, options: any = {}, invokeCheck?: (params: AuthCheckPassword) => Promise<any>) {
     return this.getInputCheckPassword(password, state).then((inputCheckPassword) => {
       // console.log('SRP', inputCheckPassword);
-      return this.apiManager.invokeApi('auth.checkPassword', {
+      const params: AuthCheckPassword = {
         password: inputCheckPassword as InputCheckPasswordSRP.inputCheckPasswordSRP
-      }, options).then((auth) => {
+      };
+      const response = invokeCheck ? invokeCheck(params) : this.apiManager.invokeApi('auth.checkPassword', params, options);
+      return response.then((auth) => {
         if(auth._ === 'auth.authorization') {
           this.apiManager.setUser(auth.user);
         }

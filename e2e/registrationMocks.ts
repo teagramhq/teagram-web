@@ -5,7 +5,8 @@ export async function setupRegistrationMocks(
   testInfo: TestInfo,
   mode: 'open' | 'invite',
   requireTurnstile = false,
-  failFirstTurnstileScript = false
+  failFirstTurnstileScript = false,
+  requireSignInTurnstile = false
 ) {
   const appOrigin = new URL(testInfo.project.use.baseURL as string).origin;
   let turnstileScriptAttempts = 0;
@@ -14,7 +15,7 @@ export async function setupRegistrationMocks(
     const url = new URL(route.request().url());
     if(url.origin === appOrigin) {
       await route.continue();
-    } else if(requireTurnstile && url.hostname === 'challenges.cloudflare.com') {
+    } else if((requireTurnstile || requireSignInTurnstile) && url.hostname === 'challenges.cloudflare.com') {
       turnstileScriptAttempts++;
       await new Promise((resolve) => setTimeout(resolve, 500));
       if(failFirstTurnstileScript && turnstileScriptAttempts === 1) {
@@ -72,8 +73,12 @@ export async function setupRegistrationMocks(
         proxy.invoke = (type: string, payload: any, ...args: any[]) => {
           if(type === 'manager' && payload?.name === 'apiManager') {
             if(payload.method === 'getAppConfig') {
-              calls.push({method: 'help.getAppConfig', params: {registration_mode: options.registrationMode}});
-              return Promise.resolve({registration_mode: options.registrationMode});
+              const config = {
+                registration_mode: options.registrationMode,
+                ...(options.requireSignInTurnstile ? {turnstile: {site_key: 'test-site-key'}} : {})
+              };
+              calls.push({method: 'help.getAppConfig', params: config});
+              return Promise.resolve(config);
             }
 
             if(payload.method === 'invokeApi') {
@@ -81,6 +86,9 @@ export async function setupRegistrationMocks(
               calls.push({method, params});
               switch(method) {
                 case 'auth.sendCode':
+                  if(options.requireSignInTurnstile) {
+                    return Promise.reject({type: 'RECAPTCHA_CHECK_signin__test-site-key'});
+                  }
                   return Promise.resolve({
                     _: 'auth.sentCode',
                     phone_code_hash: 'mock-registration-code-hash',
@@ -88,6 +96,7 @@ export async function setupRegistrationMocks(
                     timeout: 60
                   });
                 case 'auth.signIn':
+                  if(options.requireSignInTurnstile) return Promise.resolve({_ : 'auth.authorization', user});
                   return Promise.resolve({_ : 'auth.authorizationSignUpRequired'});
                 case 'auth.signUp':
                   if(options.requireTurnstile) {
@@ -97,6 +106,17 @@ export async function setupRegistrationMocks(
                 case 'help.getNearestDc':
                   return Promise.resolve({_ : 'nearestDc', country: 'US', this_dc: 1, nearest_dc: 1});
                 case 'invokeWithReCaptcha':
+                  if(params?.query?._ === 'auth.sendCode') {
+                    if(params.token === 'rejected-turnstile-token') {
+                      return Promise.reject({type: 'RECAPTCHA_CHECK_signin__test-site-key'});
+                    }
+                    return Promise.resolve({
+                      _: 'auth.sentCode',
+                      phone_code_hash: 'mock-registration-code-hash',
+                      type: {_ : 'auth.sentCodeTypeApp', length: 5},
+                      timeout: 60
+                    });
+                  }
                   if(calls.filter((call) => call.method === 'invokeWithReCaptcha').length === 1) {
                     return new Promise((_resolve, reject) => {
                       window.setTimeout(() => reject({type: 'RECAPTCHA_CHECK_signup__test-site-key'}), 800);
@@ -121,7 +141,7 @@ export async function setupRegistrationMocks(
         };
       }
     });
-  }, {registrationMode: mode, requireTurnstile});
+  }, {registrationMode: mode, requireTurnstile, requireSignInTurnstile});
 }
 
 export async function captureState(page: Page, testInfo: TestInfo, name: string) {

@@ -1,4 +1,4 @@
-import {createSignal, JSX, onCleanup, onMount} from 'solid-js';
+import {createSignal, JSX, onCleanup, onMount, Show} from 'solid-js';
 
 import Button from '@components/buttonTsx';
 import CountryInputField from '@components/countryInputField';
@@ -22,6 +22,8 @@ import {TrueDcId} from '@types';
 
 import AuthCard from '@/pages/AuthCard';
 import {CardSpec, useAuthFlow} from '@/pages/authFlow';
+import TurnstileChallenge, {useTurnstileChallenge} from '@/pages/TurnstileChallenge';
+import {invokeTurnstileProtected} from '@/pages/turnstileSignup';
 import styles from '@/pages/authFlow.module.scss';
 
 if(import.meta.hot) import.meta.hot.accept();
@@ -37,6 +39,7 @@ type Spec = Extract<CardSpec, {name: 'signIn'}>;
  */
 export default function SignInCard(_props: {spec: Spec}) {
   const {managers, navigate, toIm} = useAuthFlow();
+  const turnstile = useTurnstileChallenge();
 
   let cancelled = false;
 
@@ -116,7 +119,10 @@ export default function SignInCard(_props: {spec: Spec}) {
     );
 
     const phone_number = telInputField.value;
-    managers.apiManager.invokeApi('auth.sendCode', {
+    invokeTurnstileProtected(
+      (method, params) => managers.apiManager.invokeApi(method as any, params as any),
+      'auth.sendCode',
+      {
       phone_number,
       api_id: App.id,
       api_hash: App.hash,
@@ -124,7 +130,10 @@ export default function SignInCard(_props: {spec: Spec}) {
         _: 'codeSettings',
         pFlags: {}
       }
-    }).then(async(code) => {
+      },
+      'signin',
+      turnstile.request
+    ).then(async(code) => {
       if(code._ === 'auth.sentCodeSuccess') {
         const {authorization} = code;
         if(authorization._ === 'auth.authorization') {
@@ -149,7 +158,6 @@ export default function SignInCard(_props: {spec: Spec}) {
           setNextContent(i18n('Login.Next'));
           break;
         default:
-          console.error('auth.sendCode error:', err);
           setNextContent(err.type);
           break;
       }
@@ -219,7 +227,6 @@ export default function SignInCard(_props: {spec: Spec}) {
   let cancelFocus: (() => void) | undefined;
   onMount(() => {
     managers.appStateManager.pushToState('authState', {_: 'authStateSignIn'});
-
     if(!IS_TOUCH_SUPPORTED) {
       cancelFocus = focusWhenConnected(telEl, () => !cancelled);
     }
@@ -229,6 +236,7 @@ export default function SignInCard(_props: {spec: Spec}) {
 
   onCleanup(() => {
     cancelled = true;
+    turnstile.cancel();
     cancelFocus?.();
   });
 
@@ -255,6 +263,9 @@ export default function SignInCard(_props: {spec: Spec}) {
       <div class="input-wrapper">
         {countryInputField.container}
         {telInputField.container}
+        <Show when={turnstile.challenge()} keyed>
+          {(challenge) => <TurnstileChallenge {...challenge}/>}
+        </Show>
         <Button
           class="btn-primary btn-color-primary"
           disabled={!hasValidInput() || submitting()}

@@ -8,6 +8,16 @@ import {ApiManager as BaseApiManager} from './apiManager';
 
 const PRIVATE_USERNAME_AUTH_METHODS = new Set(['auth.sendCode', 'auth.signIn', 'auth.checkPassword']);
 const privateNetworkers = new WeakSet<object>();
+const privateAuthMessages = new WeakSet<object>();
+
+function getAuthMethod(method: unknown, params: any): string | undefined {
+  if(typeof method !== 'string') return;
+  if(method.startsWith('auth.')) return method;
+
+  if(method === 'invokeWithReCaptcha' && typeof params?.query?._ === 'string' && params.query._.startsWith('auth.')) {
+    return params.query._;
+  }
+}
 
 type NetworkerWithLogger = {
   log: Logger,
@@ -16,15 +26,20 @@ type NetworkerWithLogger = {
 };
 
 function redactAuthCallArgs(args: any[]) {
-  if(args[0] !== 'call' || typeof args[1] !== 'string' || !args[1].startsWith('auth.')) {
+  if(args[0] !== 'call' || !getAuthMethod(args[1], args[3])) {
     return args;
   }
 
+  if(args[2] && typeof args[2] === 'object') privateAuthMessages.add(args[2]);
   return [args[0], args[1], '[REDACTED]', '[REDACTED]', '[REDACTED]'];
 }
 
 function isAuthRequest(message: any) {
-  return !!message && typeof message === 'object' && typeof message.humanReadable === 'string' && message.humanReadable.startsWith('auth.');
+  return !!message && typeof message === 'object' && (
+    privateAuthMessages.has(message) ||
+    !!getAuthMethod(message.humanReadable, message.params) ||
+    (message._ === 'invokeWithReCaptcha' && !!getAuthMethod(message._, message))
+  );
 }
 
 function isNetworkerLogValue(value: any) {
@@ -68,7 +83,7 @@ function containsAuthRequest(
 }
 
 function redactAuthResponseValue(value: any, visited = new WeakMap<object, any>()): any {
-  if(!value || typeof value !== 'object') return value;
+  if(!value || typeof value !== 'object') return '[REDACTED]';
 
   const existing = visited.get(value);
   if(existing) return existing;
@@ -81,14 +96,24 @@ function redactAuthResponseValue(value: any, visited = new WeakMap<object, any>(
   }
 
   const prototype = Object.getPrototypeOf(value);
-  if(prototype !== Object.prototype && prototype !== null) return value;
+  if(prototype !== Object.prototype && prototype !== null) return '[REDACTED]';
 
   const redacted = Object.create(prototype);
   visited.set(value, redacted);
   Object.keys(value).forEach((key) => {
-    redacted[key] = key === 'username' ? '[REDACTED]' : redactAuthResponseValue(value[key], visited);
+    redacted[key] = key === '_' ? value[key] : redactAuthResponseValue(value[key], visited);
   });
   return redacted;
+}
+
+function redactAuthMessage(value: any) {
+  return {
+    ...value,
+    ...('body' in value ? {body: '[REDACTED]'} : {}),
+    ...('token' in value ? {token: '[REDACTED]'} : {}),
+    ...('params' in value ? {params: '[REDACTED]'} : {}),
+    ...('query' in value ? {query: '[REDACTED]'} : {})
+  };
 }
 
 function redactPrivateLogValue(value: any, sentMessages: NetworkerWithLogger['sentMessages'], authContext: boolean): any {
@@ -109,9 +134,9 @@ function redactPrivateLogValue(value: any, sentMessages: NetworkerWithLogger['se
     return {type: value.type};
   }
 
-  if(isAuthRequest(value) || (value.container && containsAuthRequest(value, sentMessages))) {
-    return {...value, body: '[REDACTED]'};
-  }
+  if(isAuthRequest(value)) return redactAuthMessage(value);
+
+  if(value.container && containsAuthRequest(value, sentMessages)) return {...value, body: '[REDACTED]'};
 
   if(authContext && value._ === 'message' && containsAuthRequest(value.body, sentMessages)) {
     return {...value, body: redactPrivateLogValue(value.body, sentMessages, true)};
@@ -176,7 +201,8 @@ function securePrivateNetworker(networker: MTPNetworker): MTPNetworker {
   const wrapApiCall = privateNetworker.wrapApiCall;
   privateNetworker.wrapApiCall = function(method, params, options) {
     const request = Reflect.apply(wrapApiCall, networker, [method, params, options]);
-    if(!PRIVATE_USERNAME_AUTH_METHODS.has(method)) return request;
+    const authMethod = getAuthMethod(method, params);
+    if(!PRIVATE_USERNAME_AUTH_METHODS.has(authMethod)) return request;
 
     return request.catch((error: ApiError) => {
       if(error?.type === 'UNKNOWN' || error?.type === 'MTPROTO_CLUSTER_INVALID') {
@@ -209,13 +235,15 @@ export class ApiManager extends BaseApiManager {
     options: InvokeApiOptions = {}
   ): CancellablePromise<MethodDeclMap[T]['res']> {
     const methodName = String(method);
-    if(!methodName.startsWith('auth.')) {
+    const authMethod = getAuthMethod(methodName, params);
+    if(!authMethod) {
       return super.invokeApi(method, params, options);
     }
 
     this.beginAuthLogRedaction();
     try {
-      const requestOptions = PRIVATE_USERNAME_AUTH_METHODS.has(methodName) ? {...options, rawError: true} : options;
+      const isWrappedAuth = methodName === 'invokeWithReCaptcha';
+      const requestOptions = isWrappedAuth || PRIVATE_USERNAME_AUTH_METHODS.has(methodName) ? {...options, rawError: true} : options;
       const request = super.invokeApi(method, params, requestOptions);
       request.then(() => this.endAuthLogRedaction(), () => this.endAuthLogRedaction());
       return request;
@@ -234,7 +262,7 @@ export class ApiManager extends BaseApiManager {
     const originalError = this.log.error;
     const redactingError: Logger['error'] = (...args: any[]) => {
       const methodIndex = args[0] === 'Error' ? 5 : args[0] === 'Request is still processing:' ? 1 : -1;
-      if(methodIndex !== -1 && typeof args[methodIndex] === 'string' && args[methodIndex].startsWith('auth.')) {
+      if(methodIndex !== -1 && getAuthMethod(args[methodIndex], args[methodIndex + 1])) {
         const redactedArgs = args.slice();
         redactedArgs[methodIndex + 1] = '[REDACTED]';
         return originalError(...redactedArgs);
