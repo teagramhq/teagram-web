@@ -390,6 +390,13 @@ describe('private artifact target comparison', () => {
     expect(auditStep).toContain('pnpm run check-bundle -- "$audit_dir"');
   });
 
+  it('keeps the private server-selection bootstrap free of production route literals', () => {
+    const bootstrap = readFileSync(join(repositoryRoot, 'src/bootstrap.ts'), 'utf8');
+
+    expect(bootstrap).not.toContain('teagram.tailaa4918.ts.net');
+    expect(bootstrap).not.toMatch(/wss:\/\/\$\{/);
+  });
+
   it('runs the private and standard auth browser smoke in CI', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
     const scripts = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')).scripts;

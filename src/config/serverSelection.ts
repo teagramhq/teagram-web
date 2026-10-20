@@ -10,6 +10,20 @@ export const DEMO_SERVER_HOST = 'demo.teagram.io';
 export const DISCOVERY_MAX_BYTES = 16 * 1024;
 export const DISCOVERY_TIMEOUT_MS = 8000;
 
+export function shouldPromptForServerSelection(host: string) {
+  return host.toLowerCase().replace(/\.+$/, '') === DEFAULT_SERVER_HOST;
+}
+
+export function getServerConnectSources(host: string, target?: MtprotoTarget) {
+  const httpsOrigin = new URL(`https://${host}`);
+  const websocketOrigin = new URL(httpsOrigin);
+  websocketOrigin.protocol = 'wss:';
+
+  const sources = new Set(['\u0027self\u0027', httpsOrigin.origin, websocketOrigin.origin]);
+  if(target?.mode === 'private') sources.add(new URL(target.endpoint).origin);
+  return [...sources];
+}
+
 export type ServerPin = {
   host: string,
   endpoint: string,

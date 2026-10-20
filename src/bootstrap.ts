@@ -8,9 +8,11 @@ import {
   fetchServerDiscovery,
   formatSPKIFingerprint,
   forgetServer,
+  getServerConnectSources,
   getServerPin,
   getServerPinState,
   normalizeServerHost,
+  shouldPromptForServerSelection,
   websocketConnectionFailureMessage,
   writeServerPin
 } from '@config/serverSelection';
@@ -21,7 +23,6 @@ declare const __MTPROTO_TARGET__: MtprotoTarget | undefined;
 const runtime = window as any;
 const buildTarget = typeof __MTPROTO_TARGET__ === 'undefined' ? undefined : __MTPROTO_TARGET__;
 const pageHost = location.hostname.toLowerCase().replace(/\.+$/, '');
-const tailnetHost = 'teagram.tailaa4918.ts.net';
 
 function setActiveContext(id: string, host: string, target: MtprotoTarget) {
   runtime.__TEAGRAM_ACTIVE_SERVER_ID__ = id;
@@ -30,11 +31,7 @@ function setActiveContext(id: string, host: string, target: MtprotoTarget) {
 }
 
 function setConnectPolicy(host: string, target?: MtprotoTarget) {
-  const sources = new Set([`'self'`, `https://${host}`, `wss://${host}:*`]);
-  if(target?.mode === 'private') {
-    const endpoint = new URL(target.endpoint);
-    sources.add(endpoint.origin);
-  }
+  const sources = getServerConnectSources(host, target);
   let policy = document.querySelector<HTMLMetaElement>('meta[http-equiv="Content-Security-Policy"][data-server-policy]');
   if(!policy) {
     policy = document.createElement('meta');
@@ -298,14 +295,8 @@ function showFirstUseConfirmation(discovered: DiscoveredServer) {
 }
 
 async function boot() {
-  if(pageHost === 'web.teagram.io') {
+  if(shouldPromptForServerSelection(pageHost)) {
     await showServerPicker();
-    return;
-  }
-
-  if(pageHost === tailnetHost) {
-    if(!buildTarget) throw new Error('The tailnet server target is missing from this build');
-    await activateServer(tailnetHost, 'default', buildTarget, DEFAULT_SERVER_HOST);
     return;
   }
 

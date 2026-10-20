@@ -4,9 +4,11 @@ import {
   DISCOVERY_MAX_BYTES,
   DISCOVERY_TIMEOUT_MS,
   fetchServerDiscovery,
+  getServerConnectSources,
   getServerPinState,
   normalizeServerHost,
   pinMatches,
+  shouldPromptForServerSelection,
   validateDiscoveryDocument,
   websocketConnectionFailureMessage
 } from '@config/serverSelection';
@@ -35,6 +37,20 @@ beforeAll(async() => {
 });
 
 describe('custom server discovery', () => {
+  it('only prompts on the public multi-server origin and narrows connections to the active server', () => {
+    expect(shouldPromptForServerSelection('web.teagram.io')).toBe(true);
+    expect(shouldPromptForServerSelection('teagram.tailaa4918.ts.net')).toBe(false);
+    expect(getServerConnectSources('demo.example', {
+      mode: 'private',
+      endpoint: 'wss://demo.example:2443/apiws'
+    } as any)).toEqual([
+      '\u0027self\u0027',
+      'https://demo.example',
+      'wss://demo.example',
+      'wss://demo.example:2443'
+    ]);
+  });
+
   it('normalizes hosts to lower-case ASCII and removes a trailing dot', () => {
     expect(normalizeServerHost('BÜCHER.Example.')).toBe('xn--bcher-kva.example');
   });
