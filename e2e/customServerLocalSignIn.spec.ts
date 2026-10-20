@@ -328,7 +328,10 @@ test('isolates two server tabs when a custom server worker takes control', async
     await page.close();
     for(const client of webSocketServer.clients) client.terminate();
     await new Promise<void>((resolve) => webSocketServer.close(() => resolve()));
-    await new Promise<void>((resolve) => tlsServer.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      tlsServer.close(() => resolve());
+      tlsServer.closeAllConnections();
+    });
     rmSync(temporaryDirectory, {recursive: true, force: true});
   }
 });
