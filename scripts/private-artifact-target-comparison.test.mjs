@@ -406,7 +406,8 @@ describe('private artifact target comparison', () => {
     expect(scripts['test:private-auth']).toContain('pnpm run test:standard-auth');
     expect(scripts['test:standard-auth']).toBe('playwright test -c playwright.standard-auth.config.ts e2e/standardSignupTurnstile.spec.ts');
     expect(workflow).toContain('pnpm exec playwright install --with-deps chromium');
-    expect(workflow).toContain('pnpm run test:private-auth');
+    expect(workflow).toContain('run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameRegistration.spec.ts e2e/customServerRegistration.spec.ts');
+    expect(workflow).toContain('run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/customServerLocalSignIn.spec.ts --project=chromium --workers=1 --reporter=list,json');
 
     const smokeStep = workflow.split('      - name: Run private username auth browser smoke\n')[1]
     ?.split('\n      - name: ')[0];
