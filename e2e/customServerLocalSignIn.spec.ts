@@ -69,6 +69,30 @@ async function closeTlsServer(
   if(shutdownError?.status === 'rejected') throw shutdownError.reason;
 }
 
+async function cleanupTlsTestFixture(
+  destroyClient: () => void,
+  closeTask: Promise<void>,
+  temporaryDirectory: string
+) {
+  try {
+    destroyClient();
+    await closeTask;
+  } finally {
+    rmSync(temporaryDirectory, {recursive: true, force: true});
+  }
+}
+
+function throwTlsTestErrors(testError: unknown, cleanupError: unknown) {
+  if(testError !== undefined && cleanupError !== undefined) {
+    throw Object.assign(new Error('TLS fixture test and cleanup failed'), {
+      cause: testError,
+      errors: [testError, cleanupError]
+    });
+  }
+  if(testError !== undefined) throw testError;
+  if(cleanupError !== undefined) throw cleanupError;
+}
+
 function holdTlsResponseOpen(response: ServerResponse) {
   response.writeHead(200, {'content-type': 'text/plain'});
   response.flushHeaders();
@@ -127,6 +151,7 @@ test('closes a TLS listener with an active HTTPS response', async() => {
   let response: IncomingMessage | undefined;
   let responseClosed = false;
   let closeTask: Promise<void> | undefined;
+  let testError: unknown;
   const responseErrors: Error[] = [];
 
   try {
@@ -180,18 +205,71 @@ test('closes a TLS listener with an active HTTPS response', async() => {
     expect(responseWasClosed).toBe(true);
     const remainingConnections = await getTlsConnectionCount(server);
     expect(remainingConnections).toBe(0);
-  } finally {
-    if(server) {
-      if(closeTask) await closeTask;
-      else await closeTlsServer(server, socketTracker);
-    }
-    response?.destroy();
-    rmSync(temporaryDirectory, {recursive: true, force: true});
+  } catch(error) {
+    testError = error;
   }
+
+  let cleanupError: unknown;
+  try {
+    await cleanupTlsTestFixture(
+      () => response?.destroy(),
+      closeTask || (server ? closeTlsServer(server, socketTracker) : Promise.resolve()),
+      temporaryDirectory
+    );
+  } catch(error) {
+    cleanupError = error;
+  }
+  throwTlsTestErrors(testError, cleanupError);
 
   expect(responseClosed).toBe(true);
   expect(hasOnlyConnectionResetErrors(responseErrors)).toBe(true);
   if(privateKeyPath) expect(existsSync(privateKeyPath)).toBe(false);
+});
+
+test('removes TLS keys when a stalled shutdown rejects after client teardown', async() => {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-custom-server-stalled-cleanup-'));
+  const credentials = createTlsFixtureCredentials(temporaryDirectory, ['localhost']);
+  const shutdownError = new Error('TLS shutdown stalled');
+  const assertionError = new Error('TLS listener did not close before the deadline');
+  let clientDestroyed = false;
+  let rejectShutdown!: (error: Error) => void;
+  let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
+  const closeTask = new Promise<void>((_resolve, reject) => {
+    rejectShutdown = reject;
+    shutdownTimer = setTimeout(() => reject(shutdownError), 100);
+  });
+
+  try {
+    let cleanupError: unknown;
+    try {
+      await cleanupTlsTestFixture(
+        () => {
+          clientDestroyed = true;
+          if(shutdownTimer) clearTimeout(shutdownTimer);
+          shutdownTimer = setTimeout(() => rejectShutdown(shutdownError), 10);
+        },
+        closeTask,
+        temporaryDirectory
+      );
+    } catch(error) {
+      cleanupError = error;
+    }
+    expect(cleanupError).toBe(shutdownError);
+    expect(clientDestroyed).toBe(true);
+    expect(existsSync(credentials.privateKeyPath)).toBe(false);
+    let reportedError: unknown;
+    try {
+      throwTlsTestErrors(assertionError, cleanupError);
+    } catch(error) {
+      reportedError = error;
+    }
+    expect(reportedError).toBeInstanceOf(Error);
+    expect((reportedError as Error & {errors: unknown[], cause?: unknown}).errors).toEqual([assertionError, shutdownError]);
+    expect((reportedError as Error & {errors: unknown[], cause?: unknown}).cause).toBe(assertionError);
+  } finally {
+    if(shutdownTimer) clearTimeout(shutdownTimer);
+    rmSync(temporaryDirectory, {recursive: true, force: true});
+  }
 });
 
 test('does not wait on a pending TLS upgrade after stopping the listener', async() => {
@@ -201,6 +279,7 @@ test('does not wait on a pending TLS upgrade after stopping the listener', async
   let upgradeSocket: Duplex | undefined;
   let clientRequest: ReturnType<typeof httpsRequest> | undefined;
   let closeTask: Promise<void> | undefined;
+  let testError: unknown;
   const requestErrors: Error[] = [];
 
   try {
@@ -243,15 +322,24 @@ test('does not wait on a pending TLS upgrade after stopping the listener', async
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1000))
     ]);
     expect(closeCompleted).toBe(true);
-  } finally {
-    clientRequest?.destroy();
-    upgradeSocket?.destroy();
-    if(server) {
-      if(closeTask) await closeTask;
-      else await closeTlsServer(server, socketTracker);
-    }
-    rmSync(temporaryDirectory, {recursive: true, force: true});
+  } catch(error) {
+    testError = error;
   }
+
+  let cleanupError: unknown;
+  try {
+    await cleanupTlsTestFixture(
+      () => {
+        clientRequest?.destroy();
+        upgradeSocket?.destroy();
+      },
+      closeTask || (server ? closeTlsServer(server, socketTracker) : Promise.resolve()),
+      temporaryDirectory
+    );
+  } catch(error) {
+    cleanupError = error;
+  }
+  throwTlsTestErrors(testError, cleanupError);
 
   expect(hasOnlyConnectionResetErrors(requestErrors)).toBe(true);
   expect(socketTracker?.snapshot()).toEqual({https: 0, websocket: 0});
