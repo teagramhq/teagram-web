@@ -8,12 +8,16 @@ import {Accessor} from 'solid-js';
 import {unwrap} from 'solid-js/store';
 import {NewOptionValues} from './utils';
 
+export type PollVoteStatus = 'idle' | 'pending' | 'accepted' | 'rejected';
+
 type UsePollMutationsArgs = {
   getOverridenMessage: Accessor<Message.message>;
   isShowingResult: Accessor<boolean>;
   initialIdxFromShuffledIdx: (idx: number) => number;
   newOption: NewOptionValues;
   activeVoteRestriction: Accessor<PollVoteRestriction | undefined>;
+  setVotePending: (pending: boolean) => void;
+  setVoteStatus: (status: PollVoteStatus) => void;
   onVoteRestriction: (restriction?: PollVoteRestriction) => void;
   showVoteRestriction: (restriction: PollVoteRestriction) => void;
   onSuccess: () => void;
@@ -28,22 +32,25 @@ export function usePollMutations({
   initialIdxFromShuffledIdx,
   newOption,
   activeVoteRestriction,
+  setVotePending,
+  setVoteStatus,
   onVoteRestriction,
   showVoteRestriction,
   onSuccess
 }: UsePollMutationsArgs) {
   const {rootScope} = useHotReloadGuard();
 
-  const sendVoteMutation = createMutation(async(indexes: number[]) => {
-    if(isShowingResult() || !indexes.length) return;
+  const sendVoteMutation = createMutation(async(indexes: number[]): Promise<PollVoteStatus> => {
+    if(isShowingResult() || !indexes.length) return 'idle';
 
     const message = getOverridenMessage();
-    if(message.media?._ !== 'messageMediaPoll') return;
+    if(message.media?._ !== 'messageMediaPoll') return 'idle';
 
     const restriction = activeVoteRestriction();
     if(restriction) {
+      setVoteStatus('rejected');
       showVoteRestriction(restriction);
-      return;
+      return 'rejected';
     }
 
     const optionIndexes = indexes.map(initialIdxFromShuffledIdx).filter(idx => idx !== -1);
@@ -54,17 +61,32 @@ export function usePollMutations({
       const restriction = parsePollVoteRestrictionError((error as ApiError)?.type);
       if(!restriction) throw error;
 
+      setVoteStatus('rejected');
       onVoteRestriction(restriction);
       const activeRestriction = activeVoteRestriction();
       if(activeRestriction) showVoteRestriction(activeRestriction);
-      return;
+      return 'rejected';
     }
 
+    setVoteStatus('accepted');
     onVoteRestriction();
     onSuccess();
+    return 'accepted';
   });
 
-  const wrappedSendVote = wrapAsyncClickHandler(sendVoteMutation.mutateAsync);
+  const wrappedSendVote = wrapAsyncClickHandler(async(indexes: number[]) => {
+    setVotePending(true);
+    setVoteStatus('pending');
+    try {
+      const result = await sendVoteMutation.mutateAsync(indexes);
+      if(result === 'idle') setVoteStatus('idle');
+    } catch(error) {
+      setVoteStatus('rejected');
+      throw error;
+    } finally {
+      setVotePending(false);
+    }
+  });
 
   // In case the vote is sent immediately, we delay the pending state to avoid showing the spinner too soon
   const delayedSendVotePending = createDelayed(sendVoteMutation.isPending, false, value => value ? 100 : -1);

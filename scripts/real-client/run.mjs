@@ -454,6 +454,7 @@ if(args?.help) {
       scenarios: browserResult.scenarios,
       ...(browserResult.channelMembership ? {channelMembership: browserResult.channelMembership} : {}),
       ...(browserResult.pollSendResults ? {pollSendResults: browserResult.pollSendResults} : {}),
+      ...(Array.isArray(browserResult.pollFooterTransitions) ? {pollFooterTransitions: browserResult.pollFooterTransitions} : {}),
       pollCreationNegativeControl: args.pollCreationNegativeControl === true,
       ...(args.pollCreationNegativeControl === true ? {pollNegativeControl: POLL_NEGATIVE_CONTROL_EVIDENCE} : {}),
       ...(browserResult.gateBreakdown ? {gateBreakdown: browserResult.gateBreakdown} : {}),

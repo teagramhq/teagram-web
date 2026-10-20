@@ -19,7 +19,23 @@ type UsePollDerivedPropsArgs = {
   chosenIndexes: Accessor<number[]>;
   newOptionText: Accessor<string>;
   activeVoteRestriction: Accessor<PollVoteRestriction | undefined>;
+  votePending: Accessor<boolean>;
 };
+
+export function shouldShowPollResults({
+  hasVoted,
+  closed,
+  forceResults,
+  votePending
+}: {
+  hasVoted: boolean;
+  closed: boolean;
+  forceResults: boolean;
+  votePending: boolean;
+}) {
+  if(closed || forceResults) return true;
+  return hasVoted && !votePending;
+}
 
 const getPhoto = (media: MessageMedia | InputMedia | undefined): Photo.photo | undefined => {
   return media?._ === 'messageMediaPhoto' && media.photo?._ === 'photo' ? unwrap(media.photo) : undefined;
@@ -77,7 +93,7 @@ const getWebPageMedia = (media: MessageMedia | InputMedia | undefined): GetWebPa
  * Returns the various memos derived from the poll props plus helper
  * functions (`getOverridenMessage`, `getResultForOption`, ...).
  */
-export function usePollDerivedProps({props, pollOptions, chosenIndexes, newOptionText, activeVoteRestriction}: UsePollDerivedPropsArgs) {
+export function usePollDerivedProps({props, pollOptions, chosenIndexes, newOptionText, activeVoteRestriction, votePending}: UsePollDerivedPropsArgs) {
   const {rootScope} = useHotReloadGuard();
   const {maxOptions} = useCreatePollLimits();
 
@@ -105,11 +121,12 @@ export function usePollDerivedProps({props, pollOptions, chosenIndexes, newOptio
     props.poll.answers.some(a => !!getPhoto(a.media) || !!getStickerMedia(a.media) || !!getGeo(a.media) || !!getVideoDocument(a.media) || !!getWebPageMedia(a.media))
   );
 
-  const isShowingResult = createMemo(() =>
-    !!props.poll.chosenIndexes?.length ||
-    props.poll.pFlags.closed ||
-    getPollVoteRestrictionDisplayState(activeVoteRestriction(), hideResults()).forceResults
-  );
+  const isShowingResult = createMemo(() => shouldShowPollResults({
+    hasVoted: !!props.poll.chosenIndexes?.length,
+    closed: props.poll.pFlags.closed,
+    forceResults: getPollVoteRestrictionDisplayState(activeVoteRestriction(), hideResults()).forceResults,
+    votePending: votePending()
+  }));
   const hasExplanation = createMemo(() => isShowingResult() && (!!props.results.solution || !!props.results.solution_media));
   const hasSelectedSomething = createMemo(() => chosenIndexes().length > 0);
   const hasTypedNewOption = createMemo(() => newOptionText().length > 0);
