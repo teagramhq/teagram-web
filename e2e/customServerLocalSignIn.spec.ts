@@ -1,5 +1,5 @@
 import {execFileSync} from 'node:child_process';
-import {existsSync, mkdtempSync, readFileSync, rmSync} from 'node:fs';
+import {existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {request as httpRequest, type IncomingMessage, type ServerResponse} from 'node:http';
@@ -77,6 +77,15 @@ async function cleanupTlsTestFixture(
   try {
     destroyClient();
     await closeTask;
+  } finally {
+    rmSync(temporaryDirectory, {recursive: true, force: true});
+  }
+}
+
+async function withTlsTestDirectory<T>(prefix: string, action: (directory: string) => Promise<T>) {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), prefix));
+  try {
+    return await action(temporaryDirectory);
   } finally {
     rmSync(temporaryDirectory, {recursive: true, force: true});
   }
@@ -226,8 +235,21 @@ test('closes a TLS listener with an active HTTPS response', async() => {
   if(privateKeyPath) expect(existsSync(privateKeyPath)).toBe(false);
 });
 
-test('removes TLS keys when a stalled shutdown rejects after client teardown', async() => {
-  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-custom-server-stalled-cleanup-'));
+test('removes a partial TLS key when fixture credential setup fails', async() => {
+  let temporaryDirectory = '';
+  const setupError = new Error('OpenSSL setup failed');
+  const setupTask = withTlsTestDirectory('teagram-custom-server-setup-failure-', async(directory) => {
+    temporaryDirectory = directory;
+    writeFileSync(join(directory, 'server-key.pem'), 'partial private key');
+    throw setupError;
+  });
+
+  await expect(setupTask).rejects.toBe(setupError);
+  expect(temporaryDirectory).not.toBe('');
+  expect(existsSync(temporaryDirectory)).toBe(false);
+});
+
+async function verifyStalledTlsShutdownCleanup(temporaryDirectory: string) {
   const credentials = createTlsFixtureCredentials(temporaryDirectory, ['localhost']);
   const shutdownError = new Error('TLS shutdown stalled');
   const assertionError = new Error('TLS listener did not close before the deadline');
@@ -268,9 +290,13 @@ test('removes TLS keys when a stalled shutdown rejects after client teardown', a
     expect((reportedError as Error & {errors: unknown[], cause?: unknown}).cause).toBe(assertionError);
   } finally {
     if(shutdownTimer) clearTimeout(shutdownTimer);
-    rmSync(temporaryDirectory, {recursive: true, force: true});
   }
-});
+}
+
+test('removes TLS keys when a stalled shutdown rejects after client teardown', () => withTlsTestDirectory(
+  'teagram-custom-server-stalled-cleanup-',
+  verifyStalledTlsShutdownCleanup
+));
 
 test('does not wait on a pending TLS upgrade after stopping the listener', async() => {
   const temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-custom-server-upgrade-'));
