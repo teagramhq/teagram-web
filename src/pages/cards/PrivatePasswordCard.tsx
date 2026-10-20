@@ -166,21 +166,23 @@ export default function PasswordCard(_props: {spec: Spec}) {
     passwordInputField.setValueSilently('' + Math.random()); // prevent saving suggestion
     passwordInputField.setValueSilently(value);
 
-    const invokeCheck = (params: any) => invokeTurnstileProtected(
-      (method, request) => managers.apiManager.invokeApi(method as any, request as any),
+    managers.passwordManager.getInputCheckPassword(value, state)
+    .then((password) => invokeTurnstileProtected<any>(
+      (method, params) => managers.apiManager.invokeApi(method as any, params as any),
       'auth.checkPassword',
-      params,
+      {password},
       'signin',
       turnstile.request
-    );
-    managers.passwordManager.check(value, state, {}, invokeCheck).then((response) => {
+    ))
+    .then(async(response) => {
       switch(response._) {
         case 'auth.authorization':
           if(getStateInterval) {
             clearInterval(getStateInterval);
             getStateInterval = undefined;
           }
-          toIm();
+          await managers.apiManager.setUser(response.user);
+          await toIm();
           monkey?.remove();
           break;
         default:

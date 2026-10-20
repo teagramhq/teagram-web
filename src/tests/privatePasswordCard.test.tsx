@@ -3,9 +3,11 @@ import {render} from 'solid-js/web';
 
 const mocks = vi.hoisted(() => ({
   getState: vi.fn(),
+  getInputCheckPassword: vi.fn(),
   check: vi.fn(),
   getAppConfig: vi.fn(),
   invokeApi: vi.fn(),
+  setUser: vi.fn(),
   requestRecovery: vi.fn(),
   deleteAccount: vi.fn(),
   pushToState: vi.fn(),
@@ -21,10 +23,11 @@ vi.mock('@/pages/authFlow', () => ({
     managers: {
       passwordManager: {
         getState: mocks.getState,
+        getInputCheckPassword: mocks.getInputCheckPassword,
         check: mocks.check,
         requestRecovery: mocks.requestRecovery
       },
-      apiManager: {getAppConfig: mocks.getAppConfig, invokeApi: mocks.invokeApi},
+      apiManager: {getAppConfig: mocks.getAppConfig, invokeApi: mocks.invokeApi, setUser: mocks.setUser},
       appAccountManager: {deleteAccount: mocks.deleteAccount},
       appStateManager: {pushToState: mocks.pushToState}
     },
@@ -108,9 +111,13 @@ describe('private password card', () => {
 
   beforeEach(() => {
     mocks.getState.mockReset().mockResolvedValue({hint: ''});
-    mocks.check.mockReset().mockRejectedValue({type: 'PASSWORD_HASH_INVALID'});
+    mocks.getInputCheckPassword.mockReset().mockResolvedValue({_ : 'inputCheckPasswordSRP', srp_id: '1', A: new Uint8Array([1]), M1: new Uint8Array([2])});
+    mocks.check.mockReset().mockImplementation((...args: unknown[]) => args.some((arg) => typeof arg === 'function') ?
+      Promise.reject(new DOMException('manager arguments must be structured-cloneable', 'DataCloneError')) :
+      Promise.reject({type: 'PASSWORD_HASH_INVALID'}));
     mocks.getAppConfig.mockReset().mockResolvedValue({});
-    mocks.invokeApi.mockReset();
+    mocks.invokeApi.mockReset().mockRejectedValue({type: 'PASSWORD_HASH_INVALID'});
+    mocks.setUser.mockReset().mockResolvedValue(undefined);
     mocks.requestRecovery.mockReset().mockResolvedValue({email_pattern: 'a***@example.test'});
     mocks.deleteAccount.mockReset().mockResolvedValue(undefined);
     mocks.pushToState.mockReset();
@@ -145,7 +152,7 @@ describe('private password card', () => {
 
     expect(document.querySelector('[role="alert"]')?.textContent).toBe('invalid username or password');
     expect(document.body.textContent).not.toContain('PASSWORD_HASH_INVALID');
-    expect(mocks.check).toHaveBeenCalledWith('mock-password', {hint: ''}, {}, expect.any(Function));
+    expect(mocks.getInputCheckPassword).toHaveBeenCalledWith('mock-password', {hint: ''});
     expect(mocks.pushToState).toHaveBeenCalledWith('authState', {_: 'authStatePassword'});
   });
 
@@ -161,21 +168,19 @@ describe('private password card', () => {
 
   it('keeps the existing SRP success path', async() => {
     const user = {_: 'user', id: 42};
-    mocks.check.mockResolvedValue({_: 'auth.authorization', user});
+    mocks.invokeApi.mockResolvedValue({_: 'auth.authorization', user});
     const input = await mount();
     input.value = 'mock-password';
     (document.querySelector('button') as HTMLButtonElement).click();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
+    expect(mocks.setUser).toHaveBeenCalledWith(user);
     expect(mocks.toIm).toHaveBeenCalledOnce();
     expect(document.querySelector('[role="alert"]')).toBeNull();
   });
 
-  it('wraps the 2FA password check with a signin Turnstile token', async() => {
+  it('retries the 2FA check with a signin Turnstile token', async() => {
     mocks.getAppConfig.mockResolvedValue({turnstile: {site_key: 'test-site-key'}});
-    mocks.check.mockImplementation((_password, _state, _options, invokeCheck) => invokeCheck({
-      password: {_ : 'inputCheckPasswordSRP', srp_id: '1', A: new Uint8Array([1]), M1: new Uint8Array([2])}
-    }));
     mocks.invokeApi
     .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__test-site-key'})
     .mockResolvedValueOnce({_: 'auth.authorization', user: {_: 'user', id: 42}});
@@ -197,10 +202,15 @@ describe('private password card', () => {
     callbacks?.callback('signin-token');
     await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
 
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.checkPassword', {
+      password: {_ : 'inputCheckPasswordSRP', srp_id: '1', A: new Uint8Array([1]), M1: new Uint8Array([2])}
+    });
+    expect(mocks.check).not.toHaveBeenCalled();
     expect(mocks.invokeApi).toHaveBeenCalledWith('invokeWithReCaptcha', {
       token: 'signin-token',
       query: expect.objectContaining({_: 'auth.checkPassword'})
     });
+    expect(mocks.setUser).toHaveBeenCalledWith({_: 'user', id: 42});
   });
 
   it('does not log a raw account reset failure from the private password flow', async() => {
