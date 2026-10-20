@@ -74,11 +74,16 @@ function safeTraceEvent(event) {
     return {
       type: 'context-options',
       version: Number.isSafeInteger(event.version) ? event.version : 8,
+      origin: event.origin === 'testRunner' ? 'testRunner' : 'library',
       browserName: event.browserName === 'chromium' ? 'chromium' : 'browser',
+      ...(typeof event.playwrightVersion === 'string' && /^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(event.playwrightVersion) ?
+        {playwrightVersion: event.playwrightVersion} : {}),
       platform: process.platform,
       wallTime: Number.isFinite(event.wallTime) ? event.wallTime : 0,
       monotonicTime: Number.isFinite(event.monotonicTime) ? event.monotonicTime : 0,
       sdkLanguage: 'javascript',
+      options: {},
+      contextId: '',
       title: 'Custom-server local sign-in smoke'
     };
   }
@@ -92,7 +97,8 @@ function safeTraceEvent(event) {
   if(event.type === 'before') {
     const className = safeIdentifier(event.class) ? event.class : 'Playwright';
     const method = safeIdentifier(event.method) ? event.method : 'action';
-    const title = className === 'Tracing' && method === 'group' && safeGroupTitle(event.title) ?
+    const isNamedPhase = (className === 'Tracing' && method === 'group') || (className === 'Test' && method === 'step');
+    const title = isNamedPhase && safeGroupTitle(event.title) ?
       event.title : `${className}.${method}`;
     const result = {
       type: 'before',
