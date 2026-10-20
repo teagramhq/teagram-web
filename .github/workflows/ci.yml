@@ -130,20 +130,37 @@ jobs:
           TEAGRAM_CUSTOM_SERVER_TEST_USER=custom_server_user
           TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD=Teagram-Test-Password-123!
           TEAGRAMD_PID_FILE=$RUNNER_TEMP/teagramd.pid
+          TEAGRAMD_STARTUP_LOG_FILE=$RUNNER_TEMP/teagramd-startup.log
           TEAGRAMD_LOG_FILE=$RUNNER_TEMP/teagramd.log
+          TWEB_PRIVATE_AUTH_OUTPUT_DIR=$RUNNER_TEMP/custom-server-playwright-results
           EOF
 
       - name: Migrate the local Teagram server database
-        run: atlas migrate apply --dir file://teagram-server/migrations --url "$TG_POSTGRES_DSN"
-
-      - name: Start the local Teagram server and seed the sign-in account
+        id: migrate-server
         shell: bash
         run: |
           set -euo pipefail
+          {
+            printf 'stage=migrate_database result=started\n'
+            atlas migrate apply --dir file://teagram-server/migrations --url "$TG_POSTGRES_DSN"
+            printf 'stage=migrate_database result=success\n'
+          } >>"$TEAGRAMD_STARTUP_LOG_FILE" 2>&1
+
+      - name: Start the local Teagram server and seed the sign-in account
+        id: local-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec >>"$TEAGRAMD_STARTUP_LOG_FILE" 2>&1
+          printf 'stage=build_server result=started\n'
           go -C teagram-server build -o "$RUNNER_TEMP/teagramd" ./cmd/teagramd
+          printf 'stage=build_server result=success\n'
+          printf 'stage=generate_fixture_key result=started\n'
           openssl genrsa -traditional -F4 -out "$TG_RSA_KEY_PATH" 2048
           chmod 0600 "$TG_RSA_KEY_PATH"
+          printf 'stage=generate_fixture_key result=success\n'
           mkdir -p "$TG_BLOB_DIR"
+          printf 'stage=seed_disposable_user result=started\n'
           printf '%s\n' "$TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD" \
             | sudo env \
               TG_POSTGRES_DSN="$TG_POSTGRES_DSN" \
@@ -151,8 +168,12 @@ jobs:
               TG_PUBLIC_LINK_PREFIX="$TG_PUBLIC_LINK_PREFIX" \
               TG_RSA_KEY_PATH="$TG_RSA_KEY_PATH" \
               "$RUNNER_TEMP/teagramd" admin create-user --username "$TEAGRAM_CUSTOM_SERVER_TEST_USER"
+          printf 'stage=seed_disposable_user result=success\n'
+          printf 'stage=start_server result=started\n'
           nohup "$RUNNER_TEMP/teagramd" > "$TEAGRAMD_LOG_FILE" 2>&1 < /dev/null &
           echo "$!" > "$TEAGRAMD_PID_FILE"
+          printf 'stage=start_server result=success\n'
+          printf 'stage=wait_for_readiness result=started\n'
           ready=0
           for _ in $(seq 1 60); do
             if curl --max-time 2 --silent --show-error \
@@ -163,13 +184,26 @@ jobs:
             sleep 1
           done
           if [ "$ready" -ne 1 ]; then
-            cat "$TEAGRAMD_LOG_FILE"
             echo "local Teagram server did not start"
             exit 1
           fi
+          printf 'stage=wait_for_readiness result=success\n'
 
       - name: Run private username auth browser smoke
-        run: pnpm run test:private-auth
+        run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameRegistration.spec.ts e2e/customServerRegistration.spec.ts
+
+      - name: Run disposable custom-server sign-in browser smoke
+        id: custom-server-smoke
+        if: ${{ always() && steps.local-server.outcome == 'success' }}
+        env:
+          PLAYWRIGHT_TRACING_NO_WEBSOCKET_FRAMES: '1'
+          PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/custom-server-playwright-report.json
+          TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD: controlled-failure-password
+        run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/customServerLocalSignIn.spec.ts --project=chromium --workers=1 --reporter=list,json
+
+      - name: Run standard auth browser smoke
+        if: success()
+        run: pnpm run test:standard-auth
 
       - name: Stop the local Teagram server
         if: always()
@@ -180,9 +214,29 @@ jobs:
             kill "$server_pid" 2>/dev/null || true
           fi
 
-      - name: Show local Teagram server log on failure
-        if: failure()
-        run: if [ -f "$TEAGRAMD_LOG_FILE" ]; then cat "$TEAGRAMD_LOG_FILE"; fi
+      - name: Collect sanitized custom-server failure evidence
+        id: diagnostics
+        if: always()
+        env:
+          TWEB_MIGRATION_OUTCOME: ${{ steps.migrate-server.outcome || 'not-run' }}
+          TWEB_STARTUP_OUTCOME: ${{ steps.local-server.outcome || 'not-run' }}
+          TWEB_CUSTOM_SERVER_SMOKE_OUTCOME: ${{ steps.custom-server-smoke.outcome || 'not-run' }}
+          TWEB_PRIVATE_AUTH_JSON_REPORT: ${{ runner.temp }}/custom-server-playwright-report.json
+        run: node .github/scripts/collect-custom-server-smoke-artifacts.mjs
+
+      - name: Upload custom-server browser failure evidence
+        if: >-
+          ${{
+            always() &&
+            steps.diagnostics.outputs.artifact_ready == 'true' &&
+            (steps.migrate-server.outcome == 'failure' || steps.local-server.outcome == 'failure' || steps.custom-server-smoke.outcome == 'failure')
+          }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: custom-server-browser-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.diagnostics.outputs.artifact_path }}
+          if-no-files-found: error
+          retention-days: 7
 
   deployment-workflow:
     name: Deployment workflow contract and actionlint
