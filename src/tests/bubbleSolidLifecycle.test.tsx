@@ -1987,7 +1987,10 @@ test('a modification queued from inside a flush starts a new batch instead of be
   expect(harness.batchingModifying).toEqual([reentrant]);
 });
 
-test('handles chat updates when the chat input disappears during permission checks', async() => {
+test.each([
+  ['rights stay the same', true],
+  ['send-message rights change', false]
+])('handles chat updates when the chat input disappears during permission checks (%s)', async(_scenario, canSendMessages) => {
   const chatId = 777 as ChatId;
   const groupPeerId = chatId.toPeerId(true);
   const input = {canSendPlain: () => true, willSendWebPage: undefined as unknown};
@@ -1997,9 +2000,9 @@ test('handles chat updates when the chat input disappears during permission chec
     input,
     peer: {_: 'chat', pFlags: {}},
     isForum: false,
-    canSend: async() => {
+    canSend: async(permission: string) => {
       chat.input = undefined;
-      return true;
+      return permission === 'send_messages' ? canSendMessages : true;
     }
   };
   let chatUpdate: (chatId: ChatId) => Promise<void>;

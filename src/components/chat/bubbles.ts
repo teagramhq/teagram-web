@@ -2406,6 +2406,8 @@ export default class ChatBubbles {
         this.chat.canSend('embed_links')
       ]);
       if(!middleware()) return;
+      const input = this.chat.input;
+      if(!input) return;
 
       if(hadRights !== hasRights || hadPlainRights !== hasPlainRights) {
         await refreshInput();
@@ -2413,8 +2415,7 @@ export default class ChatBubbles {
 
       if(!middleware()) return;
       // reset webpage
-      const input = this.chat.input;
-      if(input && ((canEmbedLinks && !input.willSendWebPage) || (!canEmbedLinks && input.willSendWebPage))) {
+      if((canEmbedLinks && !input.willSendWebPage) || (!canEmbedLinks && input.willSendWebPage)) {
         input.lastUrl = '';
         input.onMessageInput();
       }
