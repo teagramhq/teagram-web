@@ -1986,3 +1986,40 @@ test('a modification queued from inside a flush starts a new batch instead of be
   expect(reentrant).not.toHaveBeenCalled();
   expect(harness.batchingModifying).toEqual([reentrant]);
 });
+
+test('handles chat updates when the chat input disappears during permission checks', async() => {
+  const chatId = 777 as ChatId;
+  const groupPeerId = chatId.toPeerId(true);
+  const input = {canSendPlain: () => true, willSendWebPage: undefined as unknown};
+  const chat: any = {
+    peerId: groupPeerId,
+    type: 'chat',
+    input,
+    peer: {_: 'chat', pFlags: {}},
+    isForum: false,
+    canSend: async() => {
+      chat.input = undefined;
+      return true;
+    }
+  };
+  let chatUpdate: (chatId: ChatId) => Promise<void>;
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chat,
+    chatInner: document.createElement('div'),
+    scrollable: {container: document.createElement('div')},
+    listenerSetter: {
+      add: () => (event: string, callback: (chatId: ChatId) => Promise<void>) => {
+        if(event === 'chat_update') chatUpdate = callback;
+      }
+    },
+    viewsMids: new Set(),
+    managers: {},
+    getMiddleware: () => () => true,
+    setupReadMetrics: vi.fn()
+  }) as any;
+  harness.chatInner.classList.add('has-rights');
+  harness.constructPeerHelpers();
+
+  expect(chatUpdate).toBeTypeOf('function');
+  await expect(chatUpdate(chatId)).resolves.toBeUndefined();
+});

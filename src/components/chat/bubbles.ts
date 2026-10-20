@@ -2413,9 +2413,10 @@ export default class ChatBubbles {
 
       if(!middleware()) return;
       // reset webpage
-      if((canEmbedLinks && !this.chat.input.willSendWebPage) || (!canEmbedLinks && this.chat.input.willSendWebPage)) {
-        this.chat.input.lastUrl = '';
-        this.chat.input.onMessageInput();
+      const input = this.chat.input;
+      if(input && ((canEmbedLinks && !input.willSendWebPage) || (!canEmbedLinks && input.willSendWebPage))) {
+        input.lastUrl = '';
+        input.onMessageInput();
       }
 
       if(!!(chat as MTChat.channel).pFlags.forum !== this.chat.isForum && this.chat.type === ChatType.Chat) {
