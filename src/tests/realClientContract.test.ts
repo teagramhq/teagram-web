@@ -7918,6 +7918,27 @@ describe('real client poll option interaction', () => {
     ])).toBe(false);
   });
 
+  it('requires the accepted results label to stay in flow and visible', () => {
+    const sample = {
+      branch: 'view_votes',
+      voteStatus: 'accepted',
+      resultLabelVisible: true,
+      footerActiveLabelChildCount: 1,
+      footerActiveInFlowLabelChildCount: 1,
+      footerActiveLabelVisible: true
+    };
+
+    expect(realClientBrowser.hasVisibleInFlowPollResultsLabel([sample])).toBe(true);
+    expect(realClientBrowser.hasVisibleInFlowPollResultsLabel([{
+      ...sample,
+      footerActiveInFlowLabelChildCount: 0
+    }])).toBe(false);
+    expect(realClientBrowser.hasVisibleInFlowPollResultsLabel([{
+      ...sample,
+      footerActiveLabelVisible: false
+    }])).toBe(false);
+  });
+
   it('reports a genuinely visible Vote control alongside visible results', async() => {
     const page = await browser.newPage();
     const question = 'browser-ci-poll-visible-vote-question';
