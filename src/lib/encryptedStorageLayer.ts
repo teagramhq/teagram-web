@@ -108,9 +108,12 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
   }
 
   public async loadDecrypted(data: StoredData) {
-    this.log('loading decrypted', data);
-    this.data = data;
-    await this.flush();
+    await this.waitToLoad();
+    await this.queueOperation(async() => {
+      this.log('loading decrypted');
+      this.data = data;
+      await this.saveToIDB();
+    });
   }
 
   private waitToLoad() {
@@ -159,10 +162,14 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
     }
   };
 
+  private queueOperation<Result>(operation: () => Promise<Result>) {
+    const result = this.saveQueue.then(operation);
+    this.saveQueue = result.then((): void => undefined, (): void => undefined);
+    return result;
+  }
+
   private queueSaveToIDB = async() => {
-    const save = this.saveQueue.then(() => this.saveToIDB());
-    this.saveQueue = save.catch((): void => undefined);
-    await save;
+    await this.queueOperation(() => this.saveToIDB());
   };
 
   private saveToIDBThrottled = asyncThrottle(
@@ -190,25 +197,26 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
 
   private async refreshFromIDB() {
     (this.saveToIDBThrottled as any).clear();
-    await this.saveQueue;
-    const storedData = await this.readFromIDB();
-    const dirtyEntries = new Map(this.dirtyEntries);
-    const dirtyValues = new Map<string, {exists: boolean, value: unknown}>();
+    await this.queueOperation(async() => {
+      const storedData = await this.readFromIDB();
+      const dirtyEntries = new Map(this.dirtyEntries);
+      const dirtyValues = new Map<string, {exists: boolean, value: unknown}>();
 
-    dirtyEntries.forEach((_version, entryName) => {
-      dirtyValues.set(entryName, {
-        exists: Object.prototype.hasOwnProperty.call(this.data, entryName),
-        value: this.data[entryName]
+      dirtyEntries.forEach((_version, entryName) => {
+        dirtyValues.set(entryName, {
+          exists: Object.prototype.hasOwnProperty.call(this.data, entryName),
+          value: this.data[entryName]
+        });
       });
-    });
 
-    this.data = storedData;
-    dirtyValues.forEach(({exists, value}, entryName) => {
-      if(exists) this.data[entryName] = value;
-      else delete this.data[entryName];
-    });
+      this.data = storedData;
+      dirtyValues.forEach(({exists, value}, entryName) => {
+        if(exists) this.data[entryName] = value;
+        else delete this.data[entryName];
+      });
 
-    if(this.dirtyEntries.size) await this.flush();
+      if(this.dirtyEntries.size) await this.saveToIDB();
+    });
   }
 
   public async reEncrypt() {
@@ -226,9 +234,11 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
     const names = toArray(entryName);
     const values = toArray(value);
 
-    names.forEach((name, idx) => {
-      this.data[name] = values[idx];
-      this.dirtyEntries.set(name, ++this.dirtyEntryVersion);
+    await this.queueOperation(async() => {
+      names.forEach((name, idx) => {
+        this.data[name] = values[idx];
+        this.dirtyEntries.set(name, ++this.dirtyEntryVersion);
+      });
     });
 
     this.saveToIDBThrottled();
@@ -263,9 +273,11 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
     await this.waitToLoad();
 
     const names = toArray(entryName);
-    names.forEach(name => {
-      delete this.data[name];
-      this.dirtyEntries.set(name, ++this.dirtyEntryVersion);
+    await this.queueOperation(async() => {
+      names.forEach(name => {
+        delete this.data[name];
+        this.dirtyEntries.set(name, ++this.dirtyEntryVersion);
+      });
     });
 
     this.saveToIDBThrottled();
@@ -273,9 +285,11 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
 
   public async clear(): Promise<void> {
     (this.saveToIDBThrottled as any).clear();
-    await this.saveQueue;
-    this.data = {};
-    this.dirtyEntries.clear();
-    await this.storage.clear();
+    await this.waitToLoad();
+    await this.queueOperation(async() => {
+      this.data = {};
+      this.dirtyEntries.clear();
+      await this.storage.clear();
+    });
   }
 }

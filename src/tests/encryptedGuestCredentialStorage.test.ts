@@ -3,7 +3,10 @@ import {beforeEach, describe, expect, it, vi} from 'vitest';
 const encryptedStore = vi.hoisted(() => ({
   values: new Map<string, Uint8Array>(),
   writeGate: undefined as Promise<void> | undefined,
-  writeStarted: 0
+  writeStarted: 0,
+  readGate: undefined as Promise<void> | undefined,
+  readStarted: 0,
+  logs: [] as unknown[][]
 }));
 
 vi.mock('@lib/files/idb', () => ({
@@ -16,6 +19,8 @@ vi.mock('@lib/files/idb', () => ({
 
     async get() {
       const value = encryptedStore.values.get(this.key);
+      encryptedStore.readStarted++;
+      if(encryptedStore.readGate) await encryptedStore.readGate;
       return value && new Uint8Array(value);
     }
 
@@ -41,6 +46,9 @@ vi.mock('@lib/crypto/cryptoMessagePort', () => ({
 
 vi.mock('@lib/passcode/keyStore', () => ({default: {get: async(): Promise<undefined> => undefined}}));
 vi.mock('@lib/passcode/deferredIsUsingPasscode', () => ({default: {isUsingPasscode: async() => true}}));
+vi.mock('@lib/logger', () => ({
+  logger: () => (...args: unknown[]) => encryptedStore.logs.push(args)
+}));
 
 import type EncryptedStorageLayer from '@lib/encryptedStorageLayer';
 import EncryptedStorageLayerClass from '@lib/encryptedStorageLayer';
@@ -85,10 +93,24 @@ beforeEach(() => {
   encryptedStore.values.clear();
   encryptedStore.writeGate = undefined;
   encryptedStore.writeStarted = 0;
+  encryptedStore.readGate = undefined;
+  encryptedStore.readStarted = 0;
+  encryptedStore.logs.length = 0;
   delete (globalThis as any).__TEAGRAM_ACTIVE_SERVER_ID__;
 });
 
 describe('passcode guest credential persistence', () => {
+  it('does not log saved guest credentials while importing them into passcode storage', async() => {
+    const secret = 'guest-password-secret';
+    const tab = createPasscodeStorage();
+
+    await tab.encrypted.loadDecrypted({
+      guestCredentials: [{username: 'guest_saved', password: secret}]
+    });
+
+    expect(JSON.stringify(encryptedStore.logs)).not.toContain(secret);
+  });
+
   it('bypasses an encrypted tab cache for an authoritative guest read', async() => {
     const saved = [{username: 'guest_saved', password: 'secret'}];
     const dbName = `guest-credential-cache-test-${++databaseId}`;
@@ -139,6 +161,38 @@ describe('passcode guest credential persistence', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('serializes a same-key flush behind an authoritative read in progress', async() => {
+    const oldCredentials = [{username: 'guest_saved', password: 'old-secret'}];
+    const updatedCredentials = [{username: 'guest_saved', password: 'new-secret'}];
+    const dbName = `guest-credential-cache-test-${++databaseId}`;
+    putEncryptedData({name: dbName}, {guestCredentials: oldCredentials});
+    const tab = createPasscodeStorage(dbName);
+    await tab.encrypted.get(['guestCredentials']);
+
+    let releaseRead!: () => void;
+    encryptedStore.readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const readsBeforeRefresh = encryptedStore.readStarted;
+    const refreshPromise = tab.encrypted.get(['guestCredentials'], false);
+    await vi.waitFor(() => expect(encryptedStore.readStarted).toBeGreaterThan(readsBeforeRefresh));
+
+    let saveFinished = false;
+    const savePromise = tab.encrypted.save('guestCredentials', updatedCredentials).then(() => { saveFinished = true; });
+    await Promise.resolve();
+
+    let flushFinished = false;
+    const flushPromise = tab.encrypted.flush().then(() => { flushFinished = true; });
+    await Promise.resolve();
+    expect(saveFinished).toBe(false);
+    expect(flushFinished).toBe(false);
+
+    releaseRead();
+    await refreshPromise;
+    await Promise.all([savePromise, flushPromise]);
+
+    const reopenedTab = createPasscodeStorage(dbName);
+    await expect(reopenedTab.encrypted.get(['guestCredentials'])).resolves.toEqual(updatedCredentials);
   });
 
   it('refreshes independent tab caches after another tab forgets a guest', async() => {
