@@ -376,6 +376,11 @@
     position: absolute;
   }
 
+  &[data-poll-footer-branch='view_votes'][data-poll-vote-status='accepted'] > :global(.fade-2-enter),
+  &[data-poll-footer-branch='view_votes'][data-poll-vote-status='accepted'] > :global(.fade-2-enter-active) {
+    opacity: 1;
+  }
+
   &.outgoing {
     color: var(--secondary-text-color);
 

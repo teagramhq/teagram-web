@@ -3048,6 +3048,13 @@ async function startPollFooterTrace(poll) {
       const labelNodes = [...footer.querySelectorAll('*')].filter((node) =>
         node.children.length === 0 && ['1 member voted', 'View Votes (1)'].includes(node.textContent?.trim())
       );
+      const activeResultLabelNodes = labelNodes.filter((node) => !node.closest('.fade-2-exit-active'));
+      const exitingResultLabelNodes = labelNodes.filter((node) => node.closest('.fade-2-exit-active'));
+      const activeResultLabelInFlowVisible = activeResultLabelNodes.some((node) => {
+        let labelChild = node;
+        while(labelChild.parentElement && labelChild.parentElement !== footer) labelChild = labelChild.parentElement;
+        return window.getComputedStyle(labelChild).position !== 'absolute' && isVisible(node);
+      });
       const footerLabelChildren = [...footer.children].filter((node) =>
         !node.classList.contains('c-ripple') && !!node.textContent?.trim()
       );
@@ -3090,7 +3097,10 @@ async function startPollFooterTrace(poll) {
         footerTextCategory: labelNodes.length ? 'results_label' : text ? 'other' : 'empty',
         footerOpacity: Number.parseFloat(window.getComputedStyle(footer).opacity),
         resultLabelRendered: labelNodes.length > 0,
-        resultLabelVisible: labelNodes.some(isVisible),
+        activeResultLabelVisible: activeResultLabelNodes.some(isVisible),
+        activeResultLabelInFlowVisible,
+        exitingResultLabelVisible: exitingResultLabelNodes.some(isVisible),
+        resultLabelVisible: activeResultLabelNodes.some(isVisible) || exitingResultLabelNodes.some(isVisible),
         resultLabelOpacity: labelNodes.length ? Number.parseFloat(window.getComputedStyle(labelNodes[0]).opacity) : null,
         transitionClasses
       };
@@ -3123,14 +3133,14 @@ function hasPollFooterLabelOverlap(samples) {
   return samples.some((sample) => sample.footerInFlowLabelChildCount > 1);
 }
 
-function hasSettledBlankPollResultsFooter(samples) {
+function hasMissingVisiblePollResultsLabel(samples) {
   return samples.some((sample) => sample.branch === 'view_votes' && sample.voteStatus === 'accepted' &&
-    !sample.footerTextVisible && !(Array.isArray(sample.transitionClasses) && sample.transitionClasses.length > 0));
+    !sample.activeResultLabelInFlowVisible && !sample.exitingResultLabelVisible);
 }
 
 function hasVisibleInFlowPollResultsLabel(samples) {
   return samples.some((sample) => sample.branch === 'view_votes' && sample.voteStatus === 'accepted' &&
-    sample.resultLabelVisible && sample.footerActiveLabelChildCount === 1 &&
+    sample.activeResultLabelInFlowVisible && sample.resultLabelVisible && sample.footerActiveLabelChildCount === 1 &&
     sample.footerActiveInFlowLabelChildCount === 1 && sample.footerActiveLabelVisible);
 }
 
@@ -4353,7 +4363,7 @@ async function runPollLifecycle({alice, bob, registry, runtime, groupName, scree
     if(footerSamples.some((sample) => sample.voteStatus === 'pending' && sample.isShowingResult)) {
       failStage(`bob_poll_${testCase.shape}_results_before_vote_accepted`);
     }
-    if(hasSettledBlankPollResultsFooter(footerSamples)) {
+    if(hasMissingVisiblePollResultsLabel(footerSamples)) {
       failStage(`bob_poll_${testCase.shape}_blank_results_footer`);
     }
     if(!hasVisibleInFlowPollResultsLabel(footerSamples)) {
@@ -6487,7 +6497,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasPollFooterLabelOverlap, hasSettledBlankPollResultsFooter, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
