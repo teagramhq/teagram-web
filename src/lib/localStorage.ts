@@ -28,6 +28,20 @@ class LocalStorage<Storage extends Record<string, any>> {
       this.prefix = 't_';
     }
     this.prefix = getServerStoragePrefix() + this.prefix;
+
+    if(typeof window !== 'undefined') {
+      window.addEventListener('storage', (event) => {
+        if(event.key === null) {
+          this.cache = {};
+        } else if(event.key.startsWith(this.prefix)) {
+          const key = event.key.slice(this.prefix.length);
+          delete this.cache[key as keyof Storage];
+          if(key === 'guest-credential-lifecycle-clear.v1') {
+            delete this.cache['guestCredentials' as keyof Storage];
+          }
+        }
+      });
+    }
   }
 
   public get<T extends keyof Storage>(key: T, useCache = true): Storage[T] {

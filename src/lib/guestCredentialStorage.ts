@@ -5,7 +5,7 @@ import {getRuntimeServerId} from '@config/serverContext';
 import {notifyGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
 
 export async function clearGuestCredentialsForAccount(userId?: PeerId, accountNumber?: ActiveAccountNumber) {
-  const records = await sessionStorage.get('guestCredentials') || [];
+  const records = await sessionStorage.get('guestCredentials', false) || [];
   const remaining = records.filter((record: GuestCredentialRecord) => {
     const sameUser = userId !== undefined && record.accountUserId !== undefined && String(record.accountUserId) === String(userId);
     const sameAccount = accountNumber !== undefined && record.accountNumber === accountNumber &&

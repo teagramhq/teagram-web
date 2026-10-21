@@ -26,6 +26,10 @@ function makeDependencies(overrides: Partial<GuestAccountLifecycleDependencies> 
   });
   const setUser = vi.fn(async(user: any) => { accountUserId = Number(user.id); });
   const signInWithPassword = vi.fn(async() => USER);
+  const clearInvalidatedAccount = vi.fn(async(accountNumber: number, userId?: number) => {
+    records = records.filter((record) => !(record.accountNumber === accountNumber &&
+      (userId === undefined || record.accountUserId === userId)));
+  });
   const dependencies: GuestAccountLifecycleDependencies = {
     getServerIdentity: () => currentIdentity,
     isServerIdentityCurrent: (identity) => identity.serverId === currentIdentity.serverId &&
@@ -38,6 +42,7 @@ function makeDependencies(overrides: Partial<GuestAccountLifecycleDependencies> 
     generateCredentials,
     invokeApi,
     setUser,
+    clearInvalidatedAccount,
     updatePasswordSettings: async() => true,
     verifyPassword: async() => true,
     signInWithPassword,
@@ -49,6 +54,7 @@ function makeDependencies(overrides: Partial<GuestAccountLifecycleDependencies> 
     dependencies,
     invokeApi,
     generateCredentials,
+    clearInvalidatedAccount,
     get records() { return records; },
     set records(value: GuestCredentialRecords) { records = value; },
     get accountUserId() { return accountUserId; },
@@ -344,8 +350,11 @@ describe('guest account lifecycle', () => {
       throw new Error('must not create an account');
     });
 
-    await expect(createGuestAccountLifecycle(state.dependencies).reauthenticate()).resolves.toEqual({kind: 'unrecoverable', username: state.records[0].username});
-    expect(state.records).toHaveLength(1);
+    const invalidatedRecord = state.records[0];
+    await expect(createGuestAccountLifecycle(state.dependencies).reauthenticate()).resolves.toEqual({kind: 'unrecoverable', username: invalidatedRecord.username});
+    expect(state.records).toHaveLength(0);
+    expect(invalidatedRecord.password).toBe('');
+    expect(state.clearInvalidatedAccount).toHaveBeenCalledWith(1, 42);
     expect(state.dependencies.setUser).not.toHaveBeenCalled();
     expect(state.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
   });
@@ -369,12 +378,71 @@ describe('guest account lifecycle', () => {
       throw new Error(`Unexpected API method ${method}`);
     });
 
+    const invalidatedRecord = state.records[0];
     await expect(createGuestAccountLifecycle(state.dependencies).reauthenticate()).resolves.toEqual({
-      kind: 'error',
-      errorType: 'GUEST_ACCOUNT_MISMATCH'
+      kind: 'unrecoverable',
+      username: invalidatedRecord.username
     });
     expect(state.dependencies.setUser).not.toHaveBeenCalled();
-    expect(state.records[0].accountUserId).toBe(42);
+    expect(state.records).toHaveLength(0);
+    expect(invalidatedRecord.password).toBe('');
+    expect(state.clearInvalidatedAccount).toHaveBeenCalledWith(1, 42);
+  });
+
+  it('clears credentials after SRP confirms the saved password is invalid', async() => {
+    const state = makeDependencies();
+    state.records = [{
+      version: 1,
+      serverId: IDENTITY.serverId,
+      keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`,
+      password: 'P'.repeat(43),
+      status: 'committed',
+      accountUserId: 42,
+      accountNumber: 1
+    }];
+    state.invokeApi.mockImplementation(async(method) => {
+      if(method === 'auth.sendCode') return SENT_CODE;
+      if(method === 'auth.signIn') throw {type: 'SESSION_PASSWORD_NEEDED'};
+      throw new Error(`Unexpected API method ${method}`);
+    });
+    state.dependencies.signInWithPassword = vi.fn(async() => { throw {type: 'PASSWORD_HASH_INVALID'}; });
+    const invalidatedRecord = state.records[0];
+
+    await expect(createGuestAccountLifecycle(state.dependencies).reauthenticate()).resolves.toEqual({
+      kind: 'unrecoverable',
+      username: invalidatedRecord.username
+    });
+
+    expect(state.records).toHaveLength(0);
+    expect(invalidatedRecord.password).toBe('');
+    expect(state.clearInvalidatedAccount).toHaveBeenCalledWith(1, 42);
+  });
+
+  it('preserves saved credentials when password verification fails in transport', async() => {
+    const state = makeDependencies();
+    state.records = [{
+      version: 1,
+      serverId: IDENTITY.serverId,
+      keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`,
+      password: 'P'.repeat(43),
+      status: 'committed',
+      accountUserId: 42,
+      accountNumber: 1
+    }];
+    state.invokeApi.mockImplementation(async(method) => {
+      if(method === 'auth.sendCode') return SENT_CODE;
+      if(method === 'auth.signIn') throw {type: 'SESSION_PASSWORD_NEEDED'};
+      throw new Error(`Unexpected API method ${method}`);
+    });
+    state.dependencies.signInWithPassword = vi.fn(async() => { throw {type: 'NETWORK_ERROR'}; });
+    const savedRecord = {...state.records[0]};
+
+    await expect(createGuestAccountLifecycle(state.dependencies).reauthenticate()).resolves.toEqual({kind: 'error', errorType: 'NETWORK_ERROR'});
+
+    expect(state.records[0]).toEqual(savedRecord);
+    expect(state.clearInvalidatedAccount).not.toHaveBeenCalled();
   });
 
   it('stops reauthentication when the pinned server key changes before password verification', async() => {

@@ -51,6 +51,7 @@ export type GuestAccountLifecycleDependencies = {
   getAccountUserId: (accountNumber: ActiveAccountNumber) => Promise<PeerId | undefined>,
   readCredentials: () => Promise<GuestCredentialRecords | undefined>,
   writeCredentials: (records: GuestCredentialRecords) => Promise<void>,
+  clearInvalidatedAccount: (accountNumber: ActiveAccountNumber, userId?: PeerId) => Promise<void>,
   withServerLock: <T>(name: string, callback: () => Promise<T>) => Promise<T>,
   generateCredentials?: () => GuestCredentialPair,
   invokeApi: (method: any, params?: any, options?: any) => Promise<any>,
@@ -175,6 +176,13 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
       !(candidate.serverId === record.serverId && candidate.keyFingerprint === record.keyFingerprint &&
         (candidate.username === record.username || (record.accountUserId !== undefined && sameUserId(candidate.accountUserId, record.accountUserId))))
     ));
+  }
+
+  async function clearInvalidatedRecord(record: GuestCredentialRecord, context: GuestAccountContext, cancelled: {value: boolean}) {
+    await assertContext(context, context.accountUserId, cancelled);
+    record.password = '';
+    await dependencies.clearInvalidatedAccount(context.accountNumber, record.accountUserId ?? context.accountUserId);
+    notifyInvalidation(context.serverId);
   }
 
   function isContextCurrent(context: GuestAccountContext) {
@@ -465,11 +473,19 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
             return {kind: 'authorized', user: result.user, username: record.username} as const;
           }
           if(result.kind === 'cancelled') return {kind: 'cancelled'} as const;
-          if(result.kind === 'invalidCredentials' || (record.status === 'provisional' &&
-            'errorType' in result && result.errorType === 'INTERNAL')) {
+          if(result.kind === 'invalidCredentials') {
+            await clearInvalidatedRecord(record, context, cancelled);
             return {kind: 'unrecoverable', username: record.username} as const;
           }
           if(result.kind === 'usernameTaken' && record.accountUserId !== undefined) {
+            await clearInvalidatedRecord(record, context, cancelled);
+            return {kind: 'unrecoverable', username: record.username} as const;
+          }
+          if(result.kind === 'error' && (result.errorType === 'PASSWORD_HASH_INVALID' || result.errorType === 'GUEST_ACCOUNT_MISMATCH')) {
+            await clearInvalidatedRecord(record, context, cancelled);
+            return {kind: 'unrecoverable', username: record.username} as const;
+          }
+          if(record.status === 'provisional' && 'errorType' in result && result.errorType === 'INTERNAL') {
             return {kind: 'unrecoverable', username: record.username} as const;
           }
           return resultFromAuthError(result);
@@ -530,7 +546,8 @@ export type GuestAccountManagers = {
   apiManager: {
     invokeApi: (method: any, params?: any, options?: any) => Promise<any>,
     setUser: (user: User) => Promise<void>,
-    logOut: () => Promise<unknown>
+    logOut: () => Promise<unknown>,
+    clearInvalidatedGuestAccount: (accountNumber: ActiveAccountNumber, userId?: PeerId) => Promise<void>
   },
   passwordManager: {
     getState: () => Promise<AccountPassword>,
@@ -584,11 +601,12 @@ export function createCurrentGuestAccountLifecycle(
     },
     getCurrentAccountNumber: getCurrentAccount,
     getAccountUserId: async(accountNumber) => (await AccountController.get(accountNumber)).userId,
-    readCredentials: () => sessionStorage.get('guestCredentials'),
+    readCredentials: () => sessionStorage.get('guestCredentials', false),
     writeCredentials: async(records) => { await sessionStorage.set({guestCredentials: records}); },
     withServerLock: createGuestAccountServerLock,
     invokeApi: (method, params, invokeOptions) => apiManager.invokeApi(method, params, invokeOptions),
     setUser: (user) => apiManager.setUser(user),
+    clearInvalidatedAccount: (accountNumber, userId) => apiManager.clearInvalidatedGuestAccount(accountNumber, userId),
     updatePasswordSettings: (password) => passwordManager.updateSettings({newPassword: password}),
     verifyPassword: async(password) => {
       const proof = await getPasswordProof(password);
