@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
   getUserIds: vi.fn(),
   paintQrCode: vi.fn(),
   getPasswordState: vi.fn(),
-  checkPassword: vi.fn(),
+  getInputCheckPassword: vi.fn(),
   requestRecovery: vi.fn(),
   deleteAccount: vi.fn(),
   addEventListener: vi.fn(),
@@ -183,7 +183,7 @@ vi.mock('@lib/rootScope', () => ({
       timeManager: {getServerTimeOffset: mocks.getServerTimeOffset},
       passwordManager: {
         getState: mocks.getPasswordState,
-        check: mocks.checkPassword,
+        getInputCheckPassword: mocks.getInputCheckPassword,
         requestRecovery: mocks.requestRecovery
       },
       appAccountManager: {deleteAccount: mocks.deleteAccount}
@@ -287,6 +287,8 @@ const SENT_CODE = {
   timeout: 60
 };
 
+const SRP_PASSWORD = {_: 'inputCheckPasswordSRP', srp_id: '1', A: new Uint8Array([1]), M1: new Uint8Array([2])};
+
 const USERNAME = 'Alice_123';
 const AUTH_CODE = {
   _: 'auth.sentCode',
@@ -310,7 +312,7 @@ describe('AuthCardsHost target-specific routing', () => {
     mocks.setUser.mockReset();
     mocks.pushToState.mockReset();
     mocks.getPasswordState.mockReset().mockResolvedValue({hint: ''});
-    mocks.checkPassword.mockReset().mockRejectedValue({type: 'PASSWORD_HASH_INVALID'});
+    mocks.getInputCheckPassword.mockReset().mockResolvedValue(SRP_PASSWORD);
     mocks.requestRecovery.mockReset().mockResolvedValue({email_pattern: 'a***@example.test'});
     mocks.deleteAccount.mockReset().mockResolvedValue(undefined);
     mocks.addEventListener.mockReset();
@@ -398,11 +400,11 @@ describe('AuthCardsHost target-specific routing', () => {
   });
 
   it('routes username sign-in through the private password step and redacts credential errors', async() => {
+    const rawPasswordError = {type: 'PASSWORD_HASH_INVALID', message: 'server rejected ' + USERNAME};
     mocks.invokeApi
     .mockResolvedValueOnce(SENT_CODE)
-    .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'});
-    const rawPasswordError = {type: 'PASSWORD_HASH_INVALID', message: 'server rejected ' + USERNAME};
-    mocks.checkPassword.mockRejectedValue(rawPasswordError);
+    .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'})
+    .mockRejectedValueOnce(rawPasswordError);
     consoleSpies = ['debug', 'info', 'log', 'warn', 'error'].map((key) => vi.spyOn(console, key as any));
     await mount(true, {name: 'signIn'});
     await waitForUsername();
@@ -423,6 +425,8 @@ describe('AuthCardsHost target-specific routing', () => {
     await waitForSelector('[role="alert"]');
 
     expect(document.querySelector('[role="alert"]')?.textContent).toBe('invalid username or password');
+    expect(mocks.getInputCheckPassword).toHaveBeenCalledWith('mock-password', {hint: ''});
+    expect(mocks.invokeApi).toHaveBeenLastCalledWith('auth.checkPassword', {password: SRP_PASSWORD});
     const attributes = Array.from(document.body.querySelectorAll('*'))
     .flatMap((element) => Array.from(element.attributes).map((attribute) => attribute.value))
     .join('\n');
