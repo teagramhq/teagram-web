@@ -10,6 +10,7 @@ import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
 import {getActiveServerHost, getRuntimeServerId} from '@config/serverContext';
 import {getServerPin} from '@config/serverSelection';
 import {getMtprotoTarget} from '@config/mtprotoTarget';
+import {saveGuestCredentials} from '@lib/guestCredentialStorage';
 import sessionStorage from '@lib/sessionStorage';
 
 const GUEST_USERNAME_PATTERN = /^guest_[a-z2-7]{16}$/;
@@ -602,7 +603,7 @@ export function createCurrentGuestAccountLifecycle(
     getCurrentAccountNumber: getCurrentAccount,
     getAccountUserId: async(accountNumber) => (await AccountController.get(accountNumber)).userId,
     readCredentials: () => sessionStorage.get('guestCredentials', false),
-    writeCredentials: async(records) => { await sessionStorage.set({guestCredentials: records}); },
+    writeCredentials: saveGuestCredentials,
     withServerLock: createGuestAccountServerLock,
     invokeApi: (method, params, invokeOptions) => apiManager.invokeApi(method, params, invokeOptions),
     setUser: (user) => apiManager.setUser(user),

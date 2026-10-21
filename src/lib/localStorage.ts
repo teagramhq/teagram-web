@@ -15,7 +15,8 @@ import EncryptedStorageLayer from '@lib/encryptedStorageLayer';
 import {logger} from '@lib/logger';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
-import {getServerStoragePrefix} from '@config/serverContext';
+import {listenForGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
+import {getRuntimeServerId, getServerStoragePrefix} from '@config/serverContext';
 
 
 class LocalStorage<Storage extends Record<string, any>> {
@@ -176,7 +177,7 @@ export interface LocalStorageProxyTask extends WorkerTaskTemplate {
   }
 };
 
-type EncryptedLocalStorageProxyTaskType = 'save' | 'get' | 'delete';
+type EncryptedLocalStorageProxyTaskType = 'save' | 'get' | 'delete' | 'flush';
 
 export interface LocalStorageEncryptedProxyTaskPayload {
   type: EncryptedLocalStorageProxyTaskType;
@@ -203,6 +204,23 @@ export default class LocalStorageController<Storage extends Record<string, any>>
 
     if(!IS_WORKER) {
       this.storage = new LocalStorage();
+    }
+
+    const guestCredentialsKey = 'guestCredentials' as keyof Storage;
+    if(this.encryptableKeys.has(guestCredentialsKey)) {
+      const refreshGuestCredentials = () => {
+        void this.get(guestCredentialsKey as StringKey<keyof Storage>, false).catch((error) => {
+          this.log.error('failed to refresh guest credentials after cross-tab invalidation', error);
+        });
+      };
+      listenForGuestCredentialInvalidation(getRuntimeServerId(), refreshGuestCredentials);
+      if(typeof window !== 'undefined') {
+        window.addEventListener('storage', (event) => {
+          if(event.key === `${getServerStoragePrefix()}guest-credential-lifecycle-clear.v1`) {
+            refreshGuestCredentials();
+          }
+        });
+      }
     }
   }
 
@@ -260,7 +278,7 @@ export default class LocalStorageController<Storage extends Record<string, any>>
     await this.waitEncryptionToFinish();
 
     if(await this.shouldUseEncryptableStorage(key)) {
-      const result = await this.encryptedStorageProxy('get', [key]); // uses cache by default
+      const result = await this.encryptedStorageProxy('get', [key], useCache);
       return result[0] as Storage[Key];
     }
 
@@ -295,6 +313,12 @@ export default class LocalStorageController<Storage extends Record<string, any>>
     }
 
     return this.localStorageProxy<void>('delete', key);
+  }
+
+  public async flush() {
+    await this.waitEncryptionToFinish();
+    if(!this.encryptableKeys.size || !await DeferredIsUsingPasscode.isUsingPasscode()) return;
+    await this.encryptedStorageProxy('flush');
   }
 
   public toggleStorage(enabled: boolean, clearWrite: boolean) {

@@ -43,6 +43,7 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
   private log: Logger;
 
   private loadingDataPromise: Promise<unknown>;
+  private saveQueue: Promise<void> = Promise.resolve();
 
   private constructor(private db: T, private encryptedStoreName: T['stores'][number]['encryptedName']) {
     this.storage = new IDBStorage(db, encryptedStoreName);
@@ -107,7 +108,7 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
   public async loadDecrypted(data: StoredData) {
     this.log('loading decrypted', data);
     this.data = data;
-    await this.saveToIDB();
+    await this.flush();
   }
 
   private waitToLoad() {
@@ -121,11 +122,15 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
 
 
     const encryptedData = await EncryptedStorageLayer.encrypt(this.data);
-    const encryptedDataSize = encryptedData.length;
+    const encryptedDataSize = encryptedData?.length || 0;
 
     const encryptionTime = performance.now();
 
-    await this.storage.save(EncryptedStorageLayer.STORAGE_KEY, encryptedData);
+    if(encryptedData) {
+      await this.storage.save(EncryptedStorageLayer.STORAGE_KEY, encryptedData);
+    } else {
+      await this.storage.delete(EncryptedStorageLayer.STORAGE_KEY);
+    }
 
 
     const endTime = performance.now();
@@ -145,20 +150,27 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
     }
   };
 
+  private queueSaveToIDB = async() => {
+    const save = this.saveQueue.then(() => this.saveToIDB());
+    this.saveQueue = save.catch((): void => undefined);
+    await save;
+  };
+
   private saveToIDBThrottled = asyncThrottle(
-    () => this.saveToIDB(),
+    () => this.queueSaveToIDB(),
     EncryptedStorageLayer.STORAGE_THROTTLE_TIME_MS
   );
 
+  private async readFromIDB() {
+    const storageData = await this.storage.get(EncryptedStorageLayer.STORAGE_KEY);
+    if(storageData === null || storageData === undefined) return {};
+    if(!(storageData instanceof Uint8Array)) throw new Error('Stored data in encrypted store is not a Uint8Array');
+    return EncryptedStorageLayer.decrypt(storageData);
+  }
+
   private async loadFromIDB() {
     try {
-      const storageData = await this.storage.get(EncryptedStorageLayer.STORAGE_KEY);
-
-      if(storageData === null || storageData === undefined) throw null;
-      if(!(storageData instanceof Uint8Array)) throw new Error('Stored data in encrypted store is not a Uint8Array'); // Should not happen but anyway))
-
-      const decrypted = await EncryptedStorageLayer.decrypt(storageData);
-      this.data = decrypted;
+      this.data = await this.readFromIDB();
     } catch(error) {
       if(error) this.log(error);
       this.data = {};
@@ -167,8 +179,26 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
     return this.data;
   }
 
+  private async refreshFromIDB(entryNames: string[]) {
+    (this.saveToIDBThrottled as any).clear();
+    await this.saveQueue;
+    const storedData = await this.readFromIDB();
+    entryNames.forEach((entryName) => {
+      if(Object.prototype.hasOwnProperty.call(storedData, entryName)) {
+        this.data[entryName] = storedData[entryName];
+      } else {
+        delete this.data[entryName];
+      }
+    });
+  }
+
   public async reEncrypt() {
-    await this.saveToIDB();
+    await this.flush();
+  }
+
+  public async flush() {
+    (this.saveToIDBThrottled as any).clear();
+    await this.queueSaveToIDB();
   }
 
   public async save(entryName: string | string[], value: any | any[]): Promise<void> {
@@ -184,8 +214,9 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
     this.saveToIDBThrottled();
   }
 
-  public async get<T>(entryNames: string[]): Promise<T[]> {
+  public async get<T>(entryNames: string[], useCache = true): Promise<T[]> {
     await this.waitToLoad();
+    if(!useCache) await this.refreshFromIDB(entryNames);
 
     return entryNames.map((entryName) => this.data[entryName]);
   }
@@ -220,8 +251,8 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
   }
 
   public async clear(): Promise<void> {
-    // await this.waitToLoad();
-
+    (this.saveToIDBThrottled as any).clear();
+    await this.saveQueue;
     this.data = {};
     await this.storage.clear();
   }
