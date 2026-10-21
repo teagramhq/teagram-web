@@ -155,6 +155,34 @@ describe('standard auth logging', () => {
   });
 });
 
+describe('standard wrapped auth transport failures', () => {
+  it.each([
+    ['auth.sendCode', 'UNKNOWN'],
+    ['auth.sendCode', 'MTPROTO_CLUSTER_INVALID'],
+    ['auth.checkPassword', 'UNKNOWN'],
+    ['auth.checkPassword', 'MTPROTO_CLUSTER_INVALID']
+  ])('does not replay wrapped %s after %s', async(method, type) => {
+    const error = {code: 0, type};
+    const wrapApiCall = vi.fn().mockRejectedValueOnce(error).mockResolvedValue({_: 'auth.result'});
+    const networker = createNetworkerForCall();
+    Object.assign(networker, {wrapApiCall, attachPromise: vi.fn()});
+    const {manager} = createStandardManager(networker);
+    const params = {
+      token: 'consumed-turnstile-token',
+      query: {
+        _: method,
+        ...(method === 'auth.sendCode' ? {phone_number: 'Alice_123'} : {password: {_ : 'inputCheckPasswordSRP', srp_id: 'stale-proof'}})
+      }
+    };
+
+    await expect(manager.invokeApi('invokeWithReCaptcha', params as any, {dcId: 2, ignoreErrors: true}))
+    .rejects.toMatchObject({code: 0, type});
+
+    expect(wrapApiCall).toHaveBeenCalledOnce();
+    expect(wrapApiCall).toHaveBeenCalledWith('invokeWithReCaptcha', params, expect.objectContaining({rawError: true}));
+  });
+});
+
 describe.skipIf(!__MTPROTO_PRIVATE__)('private username auth logging and retries', () => {
   it('redacts the real networker logger before console and debug-buffer capture', async() => {
     const networker = createNetworkerForCall();
