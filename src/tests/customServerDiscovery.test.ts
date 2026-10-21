@@ -116,6 +116,25 @@ describe('custom server discovery', () => {
     })).rejects.toThrow(/exponent 65537/);
   });
 
+  it('enables guest sign-up only for the literal discovery boolean true', async() => {
+    const values: Array<[Record<string, unknown>, boolean]> = [
+      [{demo: {guest_sign_up: true}}, true],
+      [{demo: {guest_sign_up: false}}, false],
+      [{demo: {guest_sign_up: 'true'}}, false],
+      [{demo: {guest_sign_up: 1}}, false],
+      [{demo: {guest_sign_up: null}}, false],
+      [{demo: {}}, false],
+      [{demo: null}, false],
+      [{demo: 'guest sign-up'}, false],
+      [{}, false]
+    ];
+
+    for(const [extra, expected] of values) {
+      const discovered = await validateDiscoveryDocument('demo.example', {...document, ...extra});
+      expect(discovered.guestSignUpEnabled).toBe(expected);
+    }
+  });
+
   it('fetches directly with redirect rejection and no credentials, and bounds response bytes', async() => {
     const fetcher = vi.fn(async(_url: string, _options: RequestInit) => new Response(JSON.stringify(document)));
     await fetchServerDiscovery('demo.example', fetcher as any);

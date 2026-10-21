@@ -8,7 +8,10 @@ const mocks = vi.hoisted(() => ({
   setUser: vi.fn(),
   pushToState: vi.fn(),
   navigate: vi.fn(),
-  toIm: vi.fn()
+  toIm: vi.fn(),
+  createGuest: vi.fn(),
+  reauthenticateGuest: vi.fn(),
+  guestLifecycleOptions: vi.fn()
 }));
 
 vi.mock('@/pages/authFlow', () => ({
@@ -25,10 +28,17 @@ vi.mock('@/pages/authFlow', () => ({
 
 vi.mock('@components/buttonTsx', () => ({
   default: (props: any) => (
-    <button class={props.class} disabled={props.disabled} onClick={props.onClick}>
+    <button class={props.class} type={props.type} aria-label={props['aria-label']} disabled={props.disabled} onClick={props.onClick}>
       {props.children ?? props.text}
     </button>
   )
+}));
+
+vi.mock('@lib/guestAccountLifecycle', () => ({
+  createCurrentGuestAccountLifecycle: (_managers: unknown, options: unknown) => {
+    mocks.guestLifecycleOptions(options);
+    return {create: mocks.createGuest, reauthenticate: mocks.reauthenticateGuest};
+  }
 }));
 
 vi.mock('@components/mediaHeader', () => {
@@ -44,7 +54,7 @@ vi.mock('@lib/langPack', async(importOriginal) => {
   const actual = await importOriginal<typeof import('@lib/langPack')>();
   return {
     ...actual,
-    i18n: (key: string) => {
+    i18n: (key: string, args?: unknown[]) => {
     const copy: Record<string, string> = {
       'Teagram.Registration.CreateAccount': 'Create account',
       'Teagram.Registration.SignIn': 'Sign in',
@@ -63,6 +73,18 @@ vi.mock('@lib/langPack', async(importOriginal) => {
       'Teagram.Registration.Network': 'Unable to create your account. Try again.',
       'Teagram.Registration.PasswordNetwork': 'Unable to set your password. Try again.',
       'Teagram.Registration.ConfigNetwork': 'Unable to check whether account creation is available.',
+      'Teagram.Guest.Try': 'Try it as a guest',
+      'Teagram.Guest.Creating': 'Creating a guest account…',
+      'Teagram.Guest.Disclosure': 'Your guest account is wiped weekly, is lost after you sign out or clear browser data, and is visible to the server operator.',
+      'Teagram.Guest.Flood': 'Guest sign-up is temporarily limited for this network. Try again later.',
+      'Teagram.Guest.FloodWait': 'Guest sign-up is temporarily limited for this network. Try again in %1$s.',
+      'Teagram.Guest.RestoreFlood': 'Guest sign-in is temporarily limited for this network. Try again later.',
+      'Teagram.Guest.RestoreFloodWait': 'Guest sign-in is temporarily limited for this network. Try again in %1$s.',
+      'Teagram.Guest.RestoreNetwork': 'Unable to sign you back into your guest account. Check your connection and try again.',
+      'Teagram.Guest.Unrecoverable': 'This guest account can\'t be recovered. Use a different account.',
+      'Teagram.Guest.Network': 'Unable to create your guest account. Check your connection and try again.',
+      'Teagram.Guest.AccountInUse': 'This account is already in use. Sign out before creating a guest account.',
+      'Teagram.Guest.Collision': 'Guest sign-up couldn\'t find an available username. Try again.',
       'Teagram.Registration.SecurityCheckRetry': 'Try again',
       'Teagram.Registration.SecurityCheckFailed': 'The security check failed. Try again.',
       'Teagram.Registration.SecurityCheckExpired': 'The security check expired. Try again.',
@@ -70,7 +92,7 @@ vi.mock('@lib/langPack', async(importOriginal) => {
       'Teagram.Registration.SecurityCheckLoading': 'Loading security check…'
     };
     const span = document.createElement('span');
-    span.textContent = copy[key] || key;
+    span.textContent = (copy[key] || key).replace('%1$s', String(args?.[0] ?? ''));
       return span;
     }
   };
@@ -113,6 +135,11 @@ describe('private username sign-in card', () => {
     mocks.pushToState.mockReset();
     mocks.navigate.mockReset();
     mocks.toIm.mockReset();
+    mocks.createGuest.mockReset().mockResolvedValue({kind: 'error', errorType: 'NETWORK_ERROR'});
+    mocks.reauthenticateGuest.mockReset().mockResolvedValue({kind: 'noGuest'});
+    mocks.guestLifecycleOptions.mockReset();
+    delete (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__;
+    delete (window as any).__TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__;
     turnstileCallbacks = undefined as any;
     turnstileReset = vi.fn();
     vi.stubGlobal('turnstile', {
@@ -167,15 +194,85 @@ describe('private username sign-in card', () => {
     expect(mocks.pushToState).toHaveBeenCalledWith('authState', {_: 'authStateSignIn'});
   });
 
-  it.each([true, false])('keeps guest creation unreachable from the auth card when discovery advertises %s', async(guestSignUp) => {
-    mocks.getAppConfig.mockResolvedValue({registration_mode: 'closed', demo: {guest_sign_up: guestSignUp}});
+  it.each([undefined, false, 'true', 1, null])('hides guest creation unless validated discovery is literal true (%s)', async(guestSignUp) => {
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'closed', demo: {guest_sign_up: true}});
+    (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = guestSignUp;
     mount();
     await flushAuthFlow();
 
-    expect(document.body.textContent).not.toMatch(/guest/i);
-    expect(Array.from(document.querySelectorAll('button')).some((button) => /guest/i.test(button.textContent || ''))).toBe(false);
+    expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Try it as a guest')).toBe(false);
     expect(mocks.navigate).not.toHaveBeenCalled();
     expect(mocks.invokeApi).not.toHaveBeenCalled();
+  });
+
+  it('creates a guest from the validated discovery and shows the recovery limits first', async() => {
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'closed', demo: {guest_sign_up: false}});
+    (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = true;
+    (window as any).__TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__ = 'validated-site-key';
+    let finishCreate!: (result: unknown) => void;
+    mocks.createGuest.mockImplementationOnce(() => new Promise((resolve) => { finishCreate = resolve; }));
+
+    mount();
+    await flushAuthFlow();
+
+    expect(document.body.textContent).toContain('Your guest account is wiped weekly, is lost after you sign out or clear browser data, and is visible to the server operator.');
+    const guestButton = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Try it as a guest') as HTMLButtonElement;
+    expect(guestButton).toBeDefined();
+    guestButton.click();
+
+    await vi.waitFor(() => expect(guestButton.disabled).toBe(true));
+    expect(guestButton.textContent).toBe('Creating a guest account…');
+    expect(mocks.guestLifecycleOptions).toHaveBeenCalledWith(expect.objectContaining({
+      requestTurnstile: expect.any(Function),
+      turnstileSiteKey: 'validated-site-key'
+    }));
+    finishCreate({kind: 'authorized', user: {_: 'user', id: 42}});
+    await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
+  });
+
+  it('signs a returning guest in as soon as the auth card opens', async() => {
+    mocks.reauthenticateGuest.mockResolvedValueOnce({kind: 'authorized', user: {_: 'user', id: 42}});
+
+    mount();
+
+    await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
+    expect(mocks.createGuest).not.toHaveBeenCalled();
+    expect(mocks.invokeApi).not.toHaveBeenCalled();
+  });
+
+  it('reauthenticates an existing guest result before entering the app', async() => {
+    (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = true;
+    mocks.createGuest.mockResolvedValueOnce({kind: 'existing'});
+    mocks.reauthenticateGuest
+    .mockResolvedValueOnce({kind: 'noGuest'})
+    .mockResolvedValueOnce({kind: 'authorized', user: {_: 'user', id: 42}});
+
+    mount();
+    await flushAuthFlow();
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Try it as a guest') as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
+    expect(mocks.reauthenticateGuest).toHaveBeenCalledTimes(2);
+    expect(mocks.createGuest).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [{kind: 'error', errorType: 'PHONE_NUMBER_FLOOD'}, 'Guest sign-up is temporarily limited for this network. Try again later.'],
+    [{kind: 'error', errorType: 'FLOOD_WAIT_60'}, 'Try again in'],
+    [{kind: 'unrecoverable', username: 'guest_aaaaaaaaaaaaaaaa'}, 'This guest account can\'t be recovered. Use a different account.'],
+    [{kind: 'collisionsExhausted'}, 'Guest sign-up couldn\'t find an available username. Try again.'],
+    [{kind: 'error', errorType: 'RECAPTCHA_CHECK_FAILED'}, 'The security check failed. Try again.'],
+    [{kind: 'error', errorType: 'NETWORK_ERROR'}, 'Unable to create your guest account. Check your connection and try again.']
+  ])('shows an actionable guest sign-up error for %s', async(result, expected) => {
+    (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = true;
+    mocks.createGuest.mockResolvedValueOnce(result);
+    mount();
+    await flushAuthFlow();
+
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Try it as a guest') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toContain(expected));
+    expect(mocks.createGuest).toHaveBeenCalledOnce();
+    expect(mocks.toIm).not.toHaveBeenCalled();
   });
 
   it('sends the username with an empty code and enters the existing password card', async() => {

@@ -24,10 +24,12 @@ const runtime = window as any;
 const buildTarget = typeof __MTPROTO_TARGET__ === 'undefined' ? undefined : __MTPROTO_TARGET__;
 const pageHost = location.hostname.toLowerCase().replace(/\.+$/, '');
 
-function setActiveContext(id: string, host: string, target: MtprotoTarget) {
+function setActiveContext(id: string, host: string, target: MtprotoTarget, discovered?: DiscoveredServer) {
   runtime.__TEAGRAM_ACTIVE_SERVER_ID__ = id;
   runtime.__TEAGRAM_ACTIVE_SERVER_HOST__ = host;
   runtime.__TEAGRAM_ACTIVE_MTPROTO_TARGET__ = target;
+  runtime.__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = discovered?.guestSignUpEnabled === true;
+  runtime.__TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__ = discovered?.turnstileSiteKey;
 }
 
 function setConnectPolicy(host: string, target?: MtprotoTarget) {
@@ -114,7 +116,8 @@ async function activateServer(
   id: string,
   target: MtprotoTarget,
   rememberChoice: string,
-  probeConnection = false
+  probeConnection = false,
+  discovered?: DiscoveredServer
 ) {
   if(probeConnection && target.mode === 'private') {
     const connected = await probeWebSocket(target.endpoint);
@@ -142,7 +145,7 @@ async function activateServer(
     return;
   }
 
-  setActiveContext(id, host, target);
+  setActiveContext(id, host, target, discovered);
   setConnectPolicy(host, target);
   document.querySelector('.server-picker')?.remove();
   await import('./index');
@@ -264,7 +267,7 @@ async function showServerPicker() {
     }
 
     if(pinState === 'match') {
-      await activateServer(host, discovered.id, discovered.target, host, true);
+      await activateServer(host, discovered.id, discovered.target, host, true, discovered);
       return;
     }
 
@@ -286,7 +289,7 @@ function showFirstUseConfirmation(discovered: DiscoveredServer) {
   card.append(createButton('Confirm and use this server', async() => {
     try {
       await writeServerPin(discovered);
-      await activateServer(discovered.host, discovered.id, discovered.target, discovered.host, true);
+      await activateServer(discovered.host, discovered.id, discovered.target, discovered.host, true, discovered);
     } catch(error) {
       addError(card, error instanceof Error ? error.message : 'Could not save this server pin');
     }
