@@ -7918,6 +7918,25 @@ describe('real client poll option interaction', () => {
     ])).toBe(false);
   });
 
+  it('ignores a blank results label while the footer transition is running', () => {
+    const sample = {
+      branch: 'view_votes',
+      voteStatus: 'accepted',
+      footerTextVisible: false,
+      transitionClasses: [] as string[]
+    };
+
+    expect(realClientBrowser.hasSettledBlankPollResultsFooter([{
+      ...sample,
+      transitionClasses: ['fade-2-enter-active', 'fade-2-exit-active']
+    }])).toBe(false);
+    expect(realClientBrowser.hasSettledBlankPollResultsFooter([sample])).toBe(true);
+    expect(realClientBrowser.hasSettledBlankPollResultsFooter([{
+      ...sample,
+      footerTextVisible: true
+    }])).toBe(false);
+  });
+
   it('requires the accepted results label to stay in flow and visible', () => {
     const sample = {
       branch: 'view_votes',
