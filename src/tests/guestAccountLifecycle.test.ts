@@ -144,6 +144,26 @@ describe('guest account lifecycle', () => {
     expect(state.invokeApi.mock.calls.filter(([method]) => method === 'auth.signUp')).toHaveLength(1);
   });
 
+  it('does not return a committed guest when the active account slot belongs to another user', async() => {
+    const state = makeDependencies();
+    state.accountUserId = 99;
+    state.records = [{
+      version: 1,
+      serverId: IDENTITY.serverId,
+      keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`,
+      password: 'P'.repeat(43),
+      status: 'committed',
+      accountUserId: 42,
+      accountNumber: 1
+    }];
+
+    await expect(createGuestAccountLifecycle(state.dependencies).create()).resolves.toEqual({kind: 'accountInUse'});
+
+    expect(state.invokeApi).not.toHaveBeenCalled();
+    expect(state.generateCredentials).not.toHaveBeenCalled();
+  });
+
   it('keeps the same provisional username when the sign-up response itself times out', async() => {
     const state = makeDependencies();
     state.invokeApi.mockImplementationOnce(async(method) => {

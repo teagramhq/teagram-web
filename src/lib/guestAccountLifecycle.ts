@@ -136,6 +136,7 @@ function chooseRecord(records: GuestCredentialRecords, context: GuestAccountCont
   if(context.accountUserId !== undefined) {
     const accountRecord = scoped.find((record) => sameUserId(record.accountUserId, context.accountUserId));
     if(accountRecord) return accountRecord;
+    return undefined;
   }
   return scoped.find((record) => record.accountNumber === context.accountNumber) || (scoped.length === 1 ? scoped[0] : undefined);
 }
@@ -191,11 +192,6 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
     }
   }
 
-  function findScopedRecord(records: GuestCredentialRecords, identity: GuestServerIdentity, accountNumber: ActiveAccountNumber) {
-    const scoped = matchingRecords(records, identity);
-    return scoped.find((record) => record.accountNumber === accountNumber) || (scoped.length === 1 ? scoped[0] : undefined);
-  }
-
   async function createOrResumeLocked(identity: GuestServerIdentity, cancelled: {value: boolean, record?: GuestCredentialRecord, registration?: PrivateUsernameRegistration}) {
     if(!dependencies.isServerIdentityCurrent(identity)) return {kind: 'cancelled'} as const;
     const accountNumber = dependencies.getCurrentAccountNumber();
@@ -205,7 +201,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
 
     const records = await readRecords();
     if(cancelled.value || !isContextCurrent(context)) return {kind: 'cancelled'} as const;
-    let record = chooseRecord(records, context) || findScopedRecord(records, identity, accountNumber);
+    let record = chooseRecord(records, context);
     const resumingStoredRecord = !!record;
     if(record?.status === 'committed') {
       return {kind: 'existing', username: record.username, userId: record.accountUserId} as const;
@@ -215,8 +211,11 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
     }
 
     if(!record) {
-      if(matchingRecords(records, identity).length) {
-        const existing = matchingRecords(records, identity)[0];
+      const scoped = matchingRecords(records, identity);
+      if(scoped.length) {
+        const existing = accountUserId === undefined ? scoped[0] :
+          scoped.find((candidate) => sameUserId(candidate.accountUserId, accountUserId));
+        if(!existing) return {kind: 'accountInUse'} as const;
         return {kind: 'existing', username: existing.username, userId: existing.accountUserId} as const;
       }
       const generated = generate();
@@ -415,8 +414,11 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
           if(!isContextCurrent(context)) return {kind: 'cancelled'} as const;
           const records = await readRecords();
           if(cancelled.value || !isContextCurrent(context)) return {kind: 'cancelled'} as const;
-          const record = chooseRecord(records, context) || findScopedRecord(records, identity, accountNumber);
-          if(!record) return {kind: 'noGuest'} as const;
+          const record = chooseRecord(records, context);
+          if(!record) {
+            return accountUserId !== undefined && matchingRecords(records, identity).length ?
+              {kind: 'accountInUse'} as const : {kind: 'noGuest'} as const;
+          }
           if(accountUserId !== undefined && record.accountUserId !== undefined && !sameUserId(accountUserId, record.accountUserId)) {
             return {kind: 'accountInUse'} as const;
           }
@@ -494,7 +496,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
           if(!isContextCurrent(context)) return {kind: 'cancelled'} as const;
           const records = await readRecords();
           if(cancelled.value || !isContextCurrent(context)) return {kind: 'cancelled'} as const;
-          const record = chooseRecord(records, context) || findScopedRecord(records, identity, accountNumber);
+          const record = chooseRecord(records, context);
           if(!record) return {kind: 'noGuest'} as const;
           cancelled.record = record;
           const targetAccount = accountUserId !== undefined && sameUserId(accountUserId, record.accountUserId) ?
