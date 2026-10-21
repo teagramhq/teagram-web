@@ -104,9 +104,10 @@ vi.mock('@lib/richTextProcessor/wrapRichText', () => ({
 }));
 
 import PrivatePasswordCard from '@/pages/cards/PrivatePasswordCard';
+import StandardPasswordCard from '@/pages/cards/PasswordCard';
 import {clearPrivateUsernameLogin, isPrivateUsernameLogin, markPrivateUsernameLogin} from '@/pages/privateUsernameLoginState';
 
-describe('private password card', () => {
+describe('password cards', () => {
   let dispose: VoidFunction;
 
   beforeEach(() => {
@@ -139,6 +140,12 @@ describe('private password card', () => {
 
   async function mount() {
     dispose = render(() => <PrivatePasswordCard spec={{name: 'password'}}/>, document.body);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return document.querySelector('input[aria-label="LoginPassword"]') as HTMLInputElement;
+  }
+
+  async function mountStandard() {
+    dispose = render(() => <StandardPasswordCard spec={{name: 'password'}}/>, document.body);
     await new Promise((resolve) => setTimeout(resolve, 0));
     return document.querySelector('input[aria-label="LoginPassword"]') as HTMLInputElement;
   }
@@ -206,6 +213,43 @@ describe('private password card', () => {
       password: {_ : 'inputCheckPasswordSRP', srp_id: '1', A: new Uint8Array([1]), M1: new Uint8Array([2])}
     });
     expect(mocks.check).not.toHaveBeenCalled();
+    expect(mocks.invokeApi).toHaveBeenCalledWith('invokeWithReCaptcha', {
+      token: 'signin-token',
+      query: expect.objectContaining({_: 'auth.checkPassword'})
+    });
+    expect(mocks.setUser).toHaveBeenCalledWith({_: 'user', id: 42});
+  });
+
+  it('keeps the standard 2FA challenge flow in the card', async() => {
+    mocks.getAppConfig.mockResolvedValue({turnstile: {site_key: 'test-site-key'}});
+    mocks.invokeApi
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__test-site-key'})
+    .mockResolvedValueOnce({_: 'auth.authorization', user: {_: 'user', id: 42}});
+    let callbacks: {action: 'signin' | 'signup', callback: (token: string) => void} | undefined;
+    vi.stubGlobal('turnstile', {
+      render: vi.fn((_container: HTMLElement, config: {action: 'signin' | 'signup', callback: (token: string) => void}) => {
+        callbacks = config;
+        return 'test-widget';
+      }),
+      reset: vi.fn(),
+      remove: vi.fn()
+    });
+
+    const input = await mountStandard();
+    input.value = 'mock-password';
+    (document.querySelector('button') as HTMLButtonElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mocks.check).not.toHaveBeenCalled();
+    expect(mocks.getInputCheckPassword).toHaveBeenCalledWith('mock-password', {hint: ''});
+    await vi.waitFor(() => expect(document.querySelector('[data-testid="turnstile-challenge"]')).not.toBeNull());
+    expect(callbacks?.action).toBe('signin');
+    callbacks?.callback('signin-token');
+    await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
+
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.checkPassword', {
+      password: {_ : 'inputCheckPasswordSRP', srp_id: '1', A: new Uint8Array([1]), M1: new Uint8Array([2])}
+    });
     expect(mocks.invokeApi).toHaveBeenCalledWith('invokeWithReCaptcha', {
       token: 'signin-token',
       query: expect.objectContaining({_: 'auth.checkPassword'})

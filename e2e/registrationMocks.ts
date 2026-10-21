@@ -6,7 +6,8 @@ export async function setupRegistrationMocks(
   mode: 'open' | 'invite',
   requireTurnstile = false,
   failFirstTurnstileScript = false,
-  requireSignInTurnstile = false
+  requireSignInTurnstile = false,
+  requirePasswordTurnstile = false
 ) {
   const appOrigin = new URL(testInfo.project.use.baseURL as string).origin;
   let turnstileScriptAttempts = 0;
@@ -15,7 +16,7 @@ export async function setupRegistrationMocks(
     const url = new URL(route.request().url());
     if(url.origin === appOrigin) {
       await route.continue();
-    } else if((requireTurnstile || requireSignInTurnstile) && url.hostname === 'challenges.cloudflare.com') {
+    } else if((requireTurnstile || requireSignInTurnstile || requirePasswordTurnstile) && url.hostname === 'challenges.cloudflare.com') {
       turnstileScriptAttempts++;
       await new Promise((resolve) => setTimeout(resolve, 500));
       if(failFirstTurnstileScript && turnstileScriptAttempts === 1) {
@@ -75,7 +76,7 @@ export async function setupRegistrationMocks(
             if(payload.method === 'getAppConfig') {
               const config = {
                 registration_mode: options.registrationMode,
-                ...(options.requireSignInTurnstile ? {turnstile: {site_key: 'test-site-key'}} : {})
+                ...(options.requireSignInTurnstile || options.requirePasswordTurnstile ? {turnstile: {site_key: 'test-site-key'}} : {})
               };
               calls.push({method: 'help.getAppConfig', params: config});
               return Promise.resolve(config);
@@ -97,7 +98,11 @@ export async function setupRegistrationMocks(
                   });
                 case 'auth.signIn':
                   if(options.requireSignInTurnstile) return Promise.resolve({_ : 'auth.authorization', user});
+                  if(options.requirePasswordTurnstile) return Promise.reject({type: 'SESSION_PASSWORD_NEEDED'});
                   return Promise.resolve({_ : 'auth.authorizationSignUpRequired'});
+                case 'auth.checkPassword':
+                  if(options.requirePasswordTurnstile) return Promise.reject({type: 'RECAPTCHA_CHECK_signin__test-site-key'});
+                  return Promise.reject({type: 'PASSWORD_HASH_INVALID'});
                 case 'auth.signUp':
                   if(options.requireTurnstile) {
                     return Promise.reject({type: 'RECAPTCHA_CHECK_signup__test-site-key'});
@@ -106,6 +111,12 @@ export async function setupRegistrationMocks(
                 case 'help.getNearestDc':
                   return Promise.resolve({_ : 'nearestDc', country: 'US', this_dc: 1, nearest_dc: 1});
                 case 'invokeWithReCaptcha':
+                  if(params?.query?._ === 'auth.checkPassword') {
+                    if(params.token === 'rejected-turnstile-token') {
+                      return Promise.reject({type: 'RECAPTCHA_CHECK_signin__test-site-key'});
+                    }
+                    return Promise.resolve({_ : 'auth.authorization', user});
+                  }
                   if(params?.query?._ === 'auth.sendCode') {
                     if(params.token === 'rejected-turnstile-token') {
                       return Promise.reject({type: 'RECAPTCHA_CHECK_signin__test-site-key'});
@@ -137,11 +148,19 @@ export async function setupRegistrationMocks(
             return Promise.resolve(true);
           }
 
+          if(type === 'manager' && payload?.name === 'passwordManager' && payload.method === 'getState') {
+            return Promise.resolve({hint: ''});
+          }
+
+          if(type === 'manager' && payload?.name === 'passwordManager' && payload.method === 'getInputCheckPassword') {
+            return Promise.resolve({_ : 'inputCheckPasswordSRP', srp_id: '1', A: new Uint8Array([1]), M1: new Uint8Array([2])});
+          }
+
           return invoke(type, payload, ...args);
         };
       }
     });
-  }, {registrationMode: mode, requireTurnstile, requireSignInTurnstile});
+  }, {registrationMode: mode, requireTurnstile, requireSignInTurnstile, requirePasswordTurnstile});
 }
 
 export async function captureState(page: Page, testInfo: TestInfo, name: string) {
