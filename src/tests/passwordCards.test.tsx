@@ -186,9 +186,23 @@ describe('password cards', () => {
     expect(document.querySelector('[role="alert"]')).toBeNull();
   });
 
-  it('retries the 2FA check with a signin Turnstile token', async() => {
+  it.each([
+    ['private', mount] as const,
+    ['standard', mountStandard] as const
+  ])('generates a fresh SRP proof for each Turnstile retry in the %s password card', async(_card, mountCard) => {
     mocks.getAppConfig.mockResolvedValue({turnstile: {site_key: 'test-site-key'}});
+    const proofs = [1, 2, 3].map((value) => ({
+      _: 'inputCheckPasswordSRP',
+      srp_id: `${value}`,
+      A: new Uint8Array([value]),
+      M1: new Uint8Array([value + 10])
+    }));
+    mocks.getInputCheckPassword
+    .mockResolvedValueOnce(proofs[0])
+    .mockResolvedValueOnce(proofs[1])
+    .mockResolvedValueOnce(proofs[2]);
     mocks.invokeApi
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__test-site-key'})
     .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__test-site-key'})
     .mockResolvedValueOnce({_: 'auth.authorization', user: {_: 'user', id: 42}});
     let callbacks: {action: 'signin' | 'signup', callback: (token: string) => void} | undefined;
@@ -201,58 +215,29 @@ describe('password cards', () => {
       remove: vi.fn()
     });
 
-    const input = await mount();
+    const input = await mountCard();
     input.value = 'mock-password';
     (document.querySelector('button') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(document.querySelector('[data-testid="turnstile-challenge"]')).not.toBeNull());
     expect(callbacks?.action).toBe('signin');
-    callbacks?.callback('signin-token');
+    callbacks?.callback('first-signin-token');
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')).not.toBeNull());
+    (document.querySelector('[data-testid="turnstile-challenge"] button') as HTMLButtonElement).click();
+    callbacks?.callback('retry-signin-token');
     await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
 
-    expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.checkPassword', {
-      password: {_ : 'inputCheckPasswordSRP', srp_id: '1', A: new Uint8Array([1]), M1: new Uint8Array([2])}
-    });
     expect(mocks.check).not.toHaveBeenCalled();
-    expect(mocks.invokeApi).toHaveBeenCalledWith('invokeWithReCaptcha', {
-      token: 'signin-token',
-      query: expect.objectContaining({_: 'auth.checkPassword'})
-    });
-    expect(mocks.setUser).toHaveBeenCalledWith({_: 'user', id: 42});
-  });
-
-  it('keeps the standard 2FA challenge flow in the card', async() => {
-    mocks.getAppConfig.mockResolvedValue({turnstile: {site_key: 'test-site-key'}});
-    mocks.invokeApi
-    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__test-site-key'})
-    .mockResolvedValueOnce({_: 'auth.authorization', user: {_: 'user', id: 42}});
-    let callbacks: {action: 'signin' | 'signup', callback: (token: string) => void} | undefined;
-    vi.stubGlobal('turnstile', {
-      render: vi.fn((_container: HTMLElement, config: {action: 'signin' | 'signup', callback: (token: string) => void}) => {
-        callbacks = config;
-        return 'test-widget';
-      }),
-      reset: vi.fn(),
-      remove: vi.fn()
-    });
-
-    const input = await mountStandard();
-    input.value = 'mock-password';
-    (document.querySelector('button') as HTMLButtonElement).click();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(mocks.check).not.toHaveBeenCalled();
-    expect(mocks.getInputCheckPassword).toHaveBeenCalledWith('mock-password', {hint: ''});
-    await vi.waitFor(() => expect(document.querySelector('[data-testid="turnstile-challenge"]')).not.toBeNull());
-    expect(callbacks?.action).toBe('signin');
-    callbacks?.callback('signin-token');
-    await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
-
+    expect(mocks.getInputCheckPassword).toHaveBeenCalledTimes(3);
     expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.checkPassword', {
-      password: {_ : 'inputCheckPasswordSRP', srp_id: '1', A: new Uint8Array([1]), M1: new Uint8Array([2])}
+      password: proofs[0]
     });
-    expect(mocks.invokeApi).toHaveBeenCalledWith('invokeWithReCaptcha', {
-      token: 'signin-token',
-      query: expect.objectContaining({_: 'auth.checkPassword'})
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(2, 'invokeWithReCaptcha', {
+      token: 'first-signin-token',
+      query: {_: 'auth.checkPassword', password: proofs[1]}
+    });
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(3, 'invokeWithReCaptcha', {
+      token: 'retry-signin-token',
+      query: {_: 'auth.checkPassword', password: proofs[2]}
     });
     expect(mocks.setUser).toHaveBeenCalledWith({_: 'user', id: 42});
   });

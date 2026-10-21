@@ -158,14 +158,13 @@ export default function PasswordCard(_props: {spec: Spec}) {
     passwordInputField.setValueSilently('' + Math.random()); // prevent saving suggestion
     passwordInputField.setValueSilently(value);
 
-    managers.passwordManager.getInputCheckPassword(value, state)
-    .then((password) => invokeTurnstileProtected<any>(
+    invokeTurnstileProtected<any>(
       (method, params) => managers.apiManager.invokeApi(method as any, params as any),
       'auth.checkPassword',
-      {password},
+      () => managers.passwordManager.getInputCheckPassword(value, state).then((password) => ({password})),
       'signin',
       turnstile.request
-    ))
+    )
     .then(async(response) => {
       switch(response._) {
         case 'auth.authorization':

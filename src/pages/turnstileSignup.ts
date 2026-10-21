@@ -15,6 +15,8 @@ export type RequestTurnstileChallenge = (
   submit: (token: string) => Promise<unknown>
 ) => Promise<unknown>;
 
+type GetTurnstileAuthParams = () => TurnstileAuthParams | Promise<TurnstileAuthParams>;
+
 export function getTurnstileSiteKey(error: unknown, action?: TurnstileAction): string | undefined {
   if(!error || typeof error !== 'object') return;
 
@@ -29,27 +31,33 @@ export function getTurnstileSiteKey(error: unknown, action?: TurnstileAction): s
 export async function invokeTurnstileProtected<TResponse = unknown>(
   invokeApi: InvokeTurnstileApi<TResponse>,
   method: TurnstileAuthMethod,
-  params: TurnstileAuthParams,
+  params: TurnstileAuthParams | GetTurnstileAuthParams,
   action: TurnstileAction,
   requestChallenge?: RequestTurnstileChallenge,
   siteKey?: string
 ): Promise<TResponse> {
-  const submit = (token: string) => invokeApi('invokeWithReCaptcha', {
-    token,
-    query: {_: method, ...params}
-  });
+  const getParams = typeof params === 'function' ? params : () => params;
+  const submit = async(token?: string) => {
+    const currentParams = await getParams();
+    if(token === undefined) return await invokeApi(method, currentParams);
+
+    return await invokeApi('invokeWithReCaptcha', {
+      token,
+      query: {_: method, ...currentParams}
+    });
+  };
 
   if(action === 'signup' && siteKey && requestChallenge) {
-    return await requestChallenge(siteKey, action, submit) as TResponse;
+    return await requestChallenge(siteKey, action, (token) => submit(token)) as TResponse;
   }
 
   try {
-    return await invokeApi(method, params);
+    return await submit();
   } catch(error) {
     const challengeSiteKey = getTurnstileSiteKey(error, action);
     if(!challengeSiteKey || !requestChallenge) throw error;
 
-    return await requestChallenge(challengeSiteKey, action, submit) as TResponse;
+    return await requestChallenge(challengeSiteKey, action, (token) => submit(token)) as TResponse;
   }
 }
 

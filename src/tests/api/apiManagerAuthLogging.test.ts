@@ -2,6 +2,7 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {ApiManager} from '@appManagers/apiManager';
 import {ApiManager as BaseApiManager} from '../../lib/appManagers/apiManager';
+import {secureAuthNetworker} from '../../lib/appManagers/authLogRedaction';
 import {clearLogBuffer, getLogEntries, isLogBufferEnabled, setLogBufferEnabled} from '@lib/debug/logsBuffer';
 import {LogTypes, logger} from '@lib/logger';
 import MTPNetworker from '@lib/mtproto/networker';
@@ -15,7 +16,24 @@ function createPrivateManager(networker: Pick<MTPNetworker, 'wrapApiCall' | 'att
     baseDcId: 2,
     log: {error: logError}
   });
-  vi.spyOn(BaseApiManager.prototype, 'getNetworker').mockResolvedValue(networker as MTPNetworker);
+  vi.spyOn(BaseApiManager.prototype, 'getNetworker').mockImplementation(() => Promise.resolve(secureAuthNetworker(networker as MTPNetworker)));
+  return {manager, logError};
+}
+
+function createStandardManager(networker: MTPNetworker) {
+  const logError = vi.fn();
+  const manager = Object.create(BaseApiManager.prototype) as BaseApiManager;
+  const cachedNetworkers = Object.fromEntries(['http', 'https', 'websocket'].map((transportType) => [transportType, {
+    client: {2: [networker]},
+    download: {},
+    upload: {}
+  }]));
+  Object.assign(manager, {
+    baseDcId: 2,
+    cachedNetworkers,
+    transportType: 'https',
+    log: {error: logError}
+  });
   return {manager, logError};
 }
 
@@ -94,6 +112,47 @@ async function capturePrivateRpcResponse(result: any, method = 'auth.signIn', wr
 afterEach(() => {
   vi.restoreAllMocks();
   clearLogBuffer();
+});
+
+describe('standard auth logging', () => {
+  it('redacts wrapped signin tokens and SRP parameters from manager and networker logs', async() => {
+    const networker = createNetworkerForCall();
+    const wrapApiCall = vi.fn().mockRejectedValue({code: 400, type: 'RECAPTCHA_CHECK_signin__standard-site-key'});
+    Object.assign(networker, {wrapApiCall, attachPromise: vi.fn()});
+    const {manager, logError} = createStandardManager(networker);
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const originalBufferState = isLogBufferEnabled();
+    const params = {
+      token: 'standard-turnstile-token',
+      query: {
+        _: 'auth.checkPassword',
+        password: {_ : 'inputCheckPasswordSRP', srp_id: 'standard-srp-id', A: 'standard-srp-A', M1: 'standard-srp-M1'}
+      }
+    };
+    const message = {msg_id: 'standard-auth-message-id', humanReadable: 'invokeWithReCaptcha', body: 'standard-auth-body'};
+
+    setLogBufferEnabled(true);
+    try {
+      await manager.getNetworker(2);
+      (networker as any).log('call', 'invokeWithReCaptcha', message, params, {});
+      await expect(manager.invokeApi('invokeWithReCaptcha', params, {dcId: 2, ignoreErrors: true}))
+      .rejects.toMatchObject({type: 'RECAPTCHA_CHECK_signin__standard-site-key'});
+
+      const logged = JSON.stringify({console: consoleLog.mock.calls, buffer: getLogEntries(), errors: logError.mock.calls});
+      for(const sentinel of [
+        'standard-turnstile-token',
+        'standard-srp-id',
+        'standard-srp-A',
+        'standard-srp-M1',
+        'standard-auth-body'
+      ]) {
+        expect(logged).not.toContain(sentinel);
+      }
+      expect(logged).toContain('[REDACTED]');
+    } finally {
+      setLogBufferEnabled(originalBufferState);
+    }
+  });
 });
 
 describe.skipIf(!__MTPROTO_PRIVATE__)('private username auth logging and retries', () => {
