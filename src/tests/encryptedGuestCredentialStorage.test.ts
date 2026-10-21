@@ -101,6 +101,27 @@ describe('passcode guest credential persistence', () => {
     await expect(tab.storage.get('guestCredentials', false)).resolves.toBeUndefined();
   });
 
+  it('persists unrelated pending writes during an authoritative guest read', async() => {
+    const dbName = `guest-credential-cache-test-${++databaseId}`;
+    putEncryptedData({name: dbName}, {
+      guestCredentials: [{username: 'guest_saved', password: 'secret'}],
+      account2: {state_id: 1}
+    });
+    const tab = createPasscodeStorage(dbName);
+    await tab.encrypted.get(['guestCredentials']);
+
+    vi.useFakeTimers();
+    try {
+      await tab.encrypted.save('account2', {state_id: 2});
+      await tab.encrypted.get(['guestCredentials'], false);
+
+      const reopenedTab = createPasscodeStorage(dbName);
+      await expect(reopenedTab.encrypted.get(['account2'])).resolves.toEqual([{state_id: 2}]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('refreshes independent tab caches after another tab forgets a guest', async() => {
     const saved = [{username: 'guest_saved', password: 'secret'}];
     const dbName = `guest-credential-cache-test-${++databaseId}`;

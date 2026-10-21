@@ -39,6 +39,8 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
 
   private storage: IDBStorage<T>;
   private data: StoredData;
+  private dirtyEntries = new Map<string, number>();
+  private dirtyEntryVersion = 0;
 
   private log: Logger;
 
@@ -118,10 +120,13 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
   private saveToIDB = async() => {
     await this.waitToLoad();
 
+    const data = {...this.data};
+    const dirtyEntries = new Map(this.dirtyEntries);
+
     const startTime = performance.now();
 
 
-    const encryptedData = await EncryptedStorageLayer.encrypt(this.data);
+    const encryptedData = await EncryptedStorageLayer.encrypt(data);
     const encryptedDataSize = encryptedData?.length || 0;
 
     const encryptionTime = performance.now();
@@ -131,6 +136,10 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
     } else {
       await this.storage.delete(EncryptedStorageLayer.STORAGE_KEY);
     }
+
+    dirtyEntries.forEach((version, entryName) => {
+      if(this.dirtyEntries.get(entryName) === version) this.dirtyEntries.delete(entryName);
+    });
 
 
     const endTime = performance.now();
@@ -183,13 +192,33 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
     (this.saveToIDBThrottled as any).clear();
     await this.saveQueue;
     const storedData = await this.readFromIDB();
-    entryNames.forEach((entryName) => {
-      if(Object.prototype.hasOwnProperty.call(storedData, entryName)) {
-        this.data[entryName] = storedData[entryName];
-      } else {
-        delete this.data[entryName];
+    const requestedEntries = new Set(entryNames);
+    const dirtyEntries = new Map(this.dirtyEntries);
+    const dirtyValues = new Map<string, {exists: boolean, value: unknown}>();
+
+    dirtyEntries.forEach((_version, entryName) => {
+      if(requestedEntries.has(entryName)) return;
+      dirtyValues.set(entryName, {
+        exists: Object.prototype.hasOwnProperty.call(this.data, entryName),
+        value: this.data[entryName]
+      });
+    });
+
+    this.data = storedData;
+    dirtyValues.forEach(({exists, value}, entryName) => {
+      if(exists) this.data[entryName] = value;
+      else delete this.data[entryName];
+    });
+
+    dirtyEntries.forEach((version, entryName) => {
+      if(requestedEntries.has(entryName) && this.dirtyEntries.get(entryName) === version) {
+        this.dirtyEntries.delete(entryName);
       }
     });
+
+    if(Array.from(this.dirtyEntries.keys()).some((entryName) => !requestedEntries.has(entryName))) {
+      await this.flush();
+    }
   }
 
   public async reEncrypt() {
@@ -209,6 +238,7 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
 
     names.forEach((name, idx) => {
       this.data[name] = values[idx];
+      this.dirtyEntries.set(name, ++this.dirtyEntryVersion);
     });
 
     this.saveToIDBThrottled();
@@ -245,6 +275,7 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
     const names = toArray(entryName);
     names.forEach(name => {
       delete this.data[name];
+      this.dirtyEntries.set(name, ++this.dirtyEntryVersion);
     });
 
     this.saveToIDBThrottled();
@@ -254,6 +285,7 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
     (this.saveToIDBThrottled as any).clear();
     await this.saveQueue;
     this.data = {};
+    this.dirtyEntries.clear();
     await this.storage.clear();
   }
 }
