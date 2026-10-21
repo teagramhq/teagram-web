@@ -37,10 +37,10 @@ import {ActiveAccountNumber} from '@lib/accounts/types';
 import makeError from '@helpers/makeError';
 import EncryptedStorageLayer from '@lib/encryptedStorageLayer';
 import {getCommonDatabaseState} from '@config/databases/state';
-import {saveEncryptionKeyForHandoff} from '@lib/passcode/keyHandoff';
-import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 import {MTAuthKey} from '@lib/mtproto/authKey';
 import {isPrivateMtprotoTarget} from '@config/mtprotoTarget';
+import {clearAllGuestCredentials, clearGuestCredentialsForAccount} from '@lib/guestCredentialStorage';
+import {clearGuestAccountLocalState, clearInvalidatedGuestAccount as clearInvalidatedGuestAccountLocally} from '@lib/guestAccountLocalCleanup';
 /**
  * To not be used in an ApiManager instance as there is no account number attached to it
  */
@@ -277,7 +277,7 @@ export class ApiManager extends ApiManagerMethods {
       userAuth.dcID = assertValidDcId(+userAuth.dcID);
     }
 
-    AccountController.update(this.getAccountNumber(), {
+    await AccountController.update(this.getAccountNumber(), {
       date: (userAuth as UserAuth).date,
       userId: (userAuth as UserAuth).id,
       dcId: (userAuth as UserAuth).dcID as TrueDcId
@@ -329,45 +329,15 @@ export class ApiManager extends ApiManagerMethods {
       if(wasCleared) return;
       wasCleared = true;
 
-      this.baseDcId = undefined;
-      // * totalAccounts can be 0 somehow
-      if(totalAccounts <= 1 && accountNumber === 1 && !migrateAccountTo) {
-        await Promise.all([
-          (async() => {
-            const keys: Parameters<typeof sessionStorage['delete']>[0][] = [
-              'account1',
-              'dc',
-              'server_time_offset',
-              'xt_instance',
-              'user_auth',
-              // 'state_id',
-              'k_build',
-              'auth_key_fingerprint'
-            ];
-            for(let i = 1; i <= 5; ++i) {
-              keys.push(`dc${i as TrueDcId}_server_salt`);
-              keys.push(`dc${i as TrueDcId}_auth_key`);
-              keys.push(`dc${i as TrueDcId}_hash`); // only for WebA
-            }
-
-            return Promise.all(keys.map((key) => sessionStorage.delete(key)));
-          })(),
-          AppStoragesManager.clearAllStoresForAccount(1),
-          AppStoragesManager.clearSessionStores(),
-          commonStateStorage.clear(),
-          EncryptedStorageLayer.getInstance(getCommonDatabaseState(), 'localStorage__encrypted').clear(),
-          CacheStorageController.deleteAllStorages()
-        ]);
-      } else {
-        await AccountController.shiftAccounts(accountNumber);
-        await AppStoragesManager.shiftStorages(accountNumber);
-
-        if(await DeferredIsUsingPasscode.isUsingPasscode()) {
-          // Keep the screen unlocked even if the user logs out — tab-scoped, never on disk
-          await saveEncryptionKeyForHandoff();
-        }
+      try {
+        await clearGuestCredentialsForAccount(accountData.userId, accountNumber);
+      } catch(error) {
+        this.log.error('failed to clear guest credentials during logout', error);
+        await clearAllGuestCredentials();
       }
-      IDB.closeDatabases();
+
+      this.baseDcId = undefined;
+      await clearGuestAccountLocalState(accountNumber, totalAccounts, migrateAccountTo);
       this.rootScope.dispatchEvent('logging_out', {accountNumber, migrateTo: migrateAccountTo});
     };
 
@@ -382,12 +352,23 @@ export class ApiManager extends ApiManagerMethods {
     }) */;
   }
 
+  public async clearInvalidatedGuestAccount(accountNumber: ActiveAccountNumber, userId?: PeerId) {
+    if(this.getAccountNumber() !== accountNumber) {
+      throw Object.assign(new Error('Guest account context changed before local cleanup'), {type: 'GUEST_ACCOUNT_CONTEXT_CHANGED'});
+    }
+
+    await clearInvalidatedGuestAccountLocally(accountNumber, userId);
+    this.baseDcId = undefined;
+    this.rootScope.dispatchEvent('logging_out', {accountNumber});
+  }
+
   public static async forceLogOutAll() {
     const clearAllStoresPromises = ([1, 2, 3, 4] as ActiveAccountNumber[])
     .map(accountNumber => AppStoragesManager.clearAllStoresForAccount(accountNumber));
 
     await Promise.all([
       sessionStorage.localStorageProxy('clear'),
+      clearAllGuestCredentials(),
       commonStateStorage.clear(),
       EncryptedStorageLayer.getInstance(getCommonDatabaseState(), 'localStorage__encrypted').clear(),
       ...clearAllStoresPromises,

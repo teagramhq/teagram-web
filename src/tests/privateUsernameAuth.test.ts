@@ -99,6 +99,47 @@ describe('private username sign-in', () => {
     expect(updatePasswordSettings).toHaveBeenCalledWith('StrongPassword123');
   });
 
+  it('persists the creating authorization before attempting password setup', async() => {
+    const user = {_: 'user', id: 42};
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockResolvedValueOnce({_: 'auth.authorization', user});
+    const calls: string[] = [];
+
+    await authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings: async() => {
+        calls.push('password');
+        return true;
+      },
+      onAuthorization: async() => { calls.push('authorization'); }
+    } as any);
+
+    expect(calls).toEqual(['authorization', 'password']);
+  });
+
+  it('can verify a saved password after sign-in requires one', async() => {
+    const user = {_: 'user', id: 42};
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'});
+    const checkPassword = vi.fn().mockResolvedValue(user);
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'closed',
+      displayName: '',
+      password: 'saved-password',
+      updatePasswordSettings: vi.fn(),
+      checkPassword
+    } as any)).resolves.toEqual({kind: 'authorized', user});
+
+    expect(checkPassword).toHaveBeenCalledWith('saved-password');
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
+  });
+
   it('retries sign-up with the Turnstile token requested by the server', async() => {
     const user = {_: 'user', id: 42};
     const invokeApi = vi.fn()
@@ -131,6 +172,23 @@ describe('private username sign-in', () => {
       }
     });
     expect(updatePasswordSettings).toHaveBeenCalledWith('StrongPassword123');
+  });
+
+  it('surfaces Turnstile cancellation without retrying registration', async() => {
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}});
+    const requestTurnstile = vi.fn(async() => { throw new Error('Turnstile challenge cancelled'); });
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings: vi.fn()
+    }, requestTurnstile, 'site-key')).resolves.toEqual({kind: 'cancelled'});
+
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
+    expect(requestTurnstile).toHaveBeenCalledOnce();
   });
 
   it('retries sendCode with a signin Turnstile token', async() => {
