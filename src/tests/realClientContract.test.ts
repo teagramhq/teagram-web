@@ -7908,6 +7908,16 @@ describe('real client poll option interaction', () => {
     }
   });
 
+  it('flags poll footer trace samples with multiple label children', () => {
+    expect(realClientBrowser.hasPollFooterLabelOverlap([
+      {footerInFlowLabelChildCount: 1},
+      {footerInFlowLabelChildCount: 2}
+    ])).toBe(true);
+    expect(realClientBrowser.hasPollFooterLabelOverlap([
+      {footerInFlowLabelChildCount: 1}
+    ])).toBe(false);
+  });
+
   it('reports a genuinely visible Vote control alongside visible results', async() => {
     const page = await browser.newPage();
     const question = 'browser-ci-poll-visible-vote-question';

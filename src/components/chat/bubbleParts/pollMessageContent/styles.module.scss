@@ -372,6 +372,10 @@
 
   color: #939fa9;
 
+  & > :not(:first-child):not(.c-ripple) {
+    position: absolute;
+  }
+
   &.outgoing {
     color: var(--secondary-text-color);
 
