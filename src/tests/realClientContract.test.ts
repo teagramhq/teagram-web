@@ -7908,6 +7908,77 @@ describe('real client poll option interaction', () => {
     }
   });
 
+  it('flags poll footer trace samples with multiple label children', () => {
+    expect(realClientBrowser.hasPollFooterLabelOverlap([
+      {footerInFlowLabelChildCount: 1},
+      {footerInFlowLabelChildCount: 2}
+    ])).toBe(true);
+    expect(realClientBrowser.hasPollFooterLabelOverlap([
+      {footerInFlowLabelChildCount: 1}
+    ])).toBe(false);
+  });
+
+  it('requires a visible results label in every accepted footer sample', () => {
+    const blankSample = {
+      branch: 'view_votes',
+      voteStatus: 'accepted',
+      footerTextVisible: false,
+      activeResultLabelVisible: false,
+      activeResultLabelInFlowVisible: false,
+      exitingResultLabelVisible: false,
+      transitionClasses: ['fade-2-enter-active'] as string[]
+    };
+    const visibleSample = {
+      ...blankSample,
+      footerTextVisible: true,
+      activeResultLabelVisible: true,
+      activeResultLabelInFlowVisible: true,
+      transitionClasses: [] as string[]
+    };
+
+    expect(realClientBrowser.hasMissingVisiblePollResultsLabel([blankSample, visibleSample])).toBe(true);
+    expect(realClientBrowser.hasMissingVisiblePollResultsLabel([visibleSample])).toBe(false);
+    expect(realClientBrowser.hasMissingVisiblePollResultsLabel([{
+      ...blankSample,
+      activeResultLabelVisible: false,
+      exitingResultLabelVisible: true
+    }])).toBe(false);
+    expect(realClientBrowser.hasMissingVisiblePollResultsLabel([{
+      ...blankSample,
+      footerTextVisible: true
+    }])).toBe(true);
+    expect(realClientBrowser.hasMissingVisiblePollResultsLabel([{
+      ...blankSample,
+      activeResultLabelVisible: true
+    }])).toBe(true);
+  });
+
+  it('requires the accepted results label to stay in flow and visible', () => {
+    const sample = {
+      branch: 'view_votes',
+      voteStatus: 'accepted',
+      resultLabelVisible: true,
+      activeResultLabelInFlowVisible: true,
+      footerActiveLabelChildCount: 1,
+      footerActiveInFlowLabelChildCount: 1,
+      footerActiveLabelVisible: true
+    };
+
+    expect(realClientBrowser.hasVisibleInFlowPollResultsLabel([sample])).toBe(true);
+    expect(realClientBrowser.hasVisibleInFlowPollResultsLabel([{
+      ...sample,
+      activeResultLabelInFlowVisible: false
+    }])).toBe(false);
+    expect(realClientBrowser.hasVisibleInFlowPollResultsLabel([{
+      ...sample,
+      footerActiveInFlowLabelChildCount: 0
+    }])).toBe(false);
+    expect(realClientBrowser.hasVisibleInFlowPollResultsLabel([{
+      ...sample,
+      footerActiveLabelVisible: false
+    }])).toBe(false);
+  });
+
   it('reports a genuinely visible Vote control alongside visible results', async() => {
     const page = await browser.newPage();
     const question = 'browser-ci-poll-visible-vote-question';

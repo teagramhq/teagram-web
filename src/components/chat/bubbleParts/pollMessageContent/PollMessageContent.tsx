@@ -635,7 +635,6 @@ export const PollMessageContent =
           >
             <Transition
               name='fade-2'
-              mode='inout'
               onAfterExit={() => {
                 setCanFooterBeClickable(willFooterBeClickable());
               }}
