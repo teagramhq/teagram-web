@@ -17,11 +17,11 @@ export type PrivateUsernameAuthResult =
   | {kind: 'invalidInvite'}
   | {kind: 'registrationClosed'}
   | {kind: 'weakPassword', user: User}
-  | {kind: 'passwordSetupError', user: User}
+  | {kind: 'passwordSetupError', user: User, errorType?: string}
   | {kind: 'password'}
   | {kind: 'authorized', user: User}
   | {kind: 'cancelled'}
-  | {kind: 'error'};
+  | {kind: 'error', errorType?: string};
 
 export type PrivateUsernameRegistrationMode = 'closed' | 'invite' | 'open';
 
@@ -30,7 +30,9 @@ export type PrivateUsernameRegistration = {
   displayName: string,
   password: string,
   inviteSecret?: string,
-  updatePasswordSettings: (password: string) => Promise<unknown>
+  updatePasswordSettings: (password: string) => Promise<unknown>,
+  onAuthorization?: (user: User) => Promise<void>,
+  checkPassword?: (password: string) => Promise<User | false | undefined>
 };
 
 export type PrivateUsernameRegistrationError = 'usernameTaken' | 'invalidUsername' | 'invalidDisplayName' | 'invalidInvite' | 'registrationClosed' | 'weakPassword' | 'error';
@@ -47,6 +49,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function getErrorType(error: unknown): unknown {
   return isRecord(error) ? error.type : undefined;
+}
+
+function getAuthErrorResult(error: unknown, includeType: boolean): PrivateUsernameAuthResult {
+  const errorType = getErrorType(error);
+  return includeType && typeof errorType === 'string' ? {kind: 'error', errorType} : {kind: 'error'};
+}
+
+function wasCancelled(error: unknown, isCancelled: () => boolean) {
+  return isCancelled() || (isRecord(error) && (error.type === 'GUEST_CANCELLED' || error.name === 'AbortError' ||
+    error.message === 'Turnstile challenge cancelled'));
 }
 
 export function isPrivateUsername(username: string): boolean {
@@ -100,8 +112,8 @@ export async function authenticatePrivateUsername(
       }
     }, 'signin', requestTurnstile);
   } catch(error) {
-    if(isCancelled()) return {kind: 'cancelled'};
-    return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : {kind: 'error'};
+    if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
+    return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : getAuthErrorResult(error, !!registration);
   }
 
   if(isCancelled()) return {kind: 'cancelled'};
@@ -120,9 +132,23 @@ export async function authenticatePrivateUsername(
       phone_code: phoneCode
     }, {ignoreErrors: true});
   } catch(error) {
-    if(isCancelled()) return {kind: 'cancelled'};
-    if(getErrorType(error) === 'SESSION_PASSWORD_NEEDED') return registration ? {kind: 'usernameTaken'} : {kind: 'password'};
-    return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : {kind: 'error'};
+    if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
+    if(getErrorType(error) === 'SESSION_PASSWORD_NEEDED') {
+      if(registration?.checkPassword) {
+        try {
+          const user = await registration.checkPassword(registration.password);
+          if(!user) return {kind: 'usernameTaken'};
+          if(isCancelled()) return {kind: 'cancelled'};
+          await registration.onAuthorization?.(user);
+          return {kind: 'authorized', user};
+        } catch(checkError) {
+          if(wasCancelled(checkError, isCancelled)) return {kind: 'cancelled'};
+          return getAuthErrorResult(checkError, true);
+        }
+      }
+      return registration ? {kind: 'usernameTaken'} : {kind: 'password'};
+    }
+    return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : getAuthErrorResult(error, !!registration);
   }
 
   if(isCancelled()) return {kind: 'cancelled'};
@@ -145,9 +171,9 @@ export async function authenticatePrivateUsername(
         turnstileSiteKey
       );
     } catch(error) {
-      if(isCancelled()) return {kind: 'cancelled'};
+      if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
       const errorKind = getPrivateUsernameRegistrationError(error);
-      return {kind: errorKind === 'weakPassword' ? 'error' : errorKind};
+      return errorKind === 'weakPassword' || errorKind === 'error' ? getAuthErrorResult(error, true) : {kind: errorKind};
     }
 
     if(!isRecord(signUpResponse) || signUpResponse._ !== 'auth.authorization' || !isRecord(signUpResponse.user)) {
@@ -155,14 +181,23 @@ export async function authenticatePrivateUsername(
     }
 
     const user = signUpResponse.user as User;
+    try {
+      await registration.onAuthorization?.(user);
+    } catch(error) {
+      if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
+      return getAuthErrorResult(error, true);
+    }
+
+    if(isCancelled()) return {kind: 'cancelled'};
     let passwordSettingsSaved: unknown;
     try {
       passwordSettingsSaved = await registration.updatePasswordSettings(registration.password);
     } catch(error) {
-      if(isCancelled()) return {kind: 'cancelled'};
+      if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
       const errorKind = getPrivateUsernameRegistrationError(error);
       if(errorKind === 'weakPassword') return {kind: 'weakPassword', user};
-      return {kind: 'passwordSetupError', user};
+      const errorType = getErrorType(error);
+      return typeof errorType === 'string' ? {kind: 'passwordSetupError', user, errorType} : {kind: 'passwordSetupError', user};
     }
 
     if(isCancelled()) return {kind: 'cancelled'};

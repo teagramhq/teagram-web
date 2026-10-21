@@ -1,5 +1,6 @@
 import type {MtprotoTarget} from '@config/mtprotoTarget';
 import {validatePrivateEndpoint, validateMtprotoTarget} from '@config/mtprotoTarget';
+import {notifyGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
 
 export const SERVER_CHOICE_KEY = 'teagram.server-choice.v1';
 export const SERVER_PINS_KEY = 'teagram.server-pins.v1';
@@ -312,6 +313,7 @@ export async function forgetServer(hostInput: string) {
   }
   const host = normalizeServerHost(hostInput);
   const id = 'custom-' + toHex(await sha256(new TextEncoder().encode(host)));
+  notifyGuestCredentialInvalidation(id);
   for(const key of Object.keys(localStorage)) {
     if(key.startsWith(`teagram-${id}:`)) localStorage.removeItem(key);
   }

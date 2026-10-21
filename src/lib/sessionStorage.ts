@@ -5,6 +5,7 @@ import type {AppInstance} from '@lib/singleInstance';
 import type {UserAuth} from '@appManagers/constants';
 import LocalStorageController from '@lib/localStorage';
 import {AccountSessionData} from '@lib/accounts/types';
+import type {GuestCredentialRecords} from '@lib/guestAccountTypes';
 
 
 type StorageValues = {
@@ -14,6 +15,7 @@ type StorageValues = {
   account2: AccountSessionData,
   account3: AccountSessionData,
   account4: AccountSessionData,
+  guestCredentials?: GuestCredentialRecords,
 
   // @deprecated the passcode key is handed over in window.sessionStorage now
   // (@lib/passcode/keyHandoff) — kept only so old, on-disk values can be purged
@@ -69,6 +71,7 @@ const sessionStorage = new LocalStorageController<StorageValues & DeprecatedStor
   'account2',
   'account3',
   'account4',
+  'guestCredentials',
   'auth_key_fingerprint',
   'user_auth',
   'dc'

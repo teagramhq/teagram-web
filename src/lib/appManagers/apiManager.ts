@@ -41,6 +41,7 @@ import {saveEncryptionKeyForHandoff} from '@lib/passcode/keyHandoff';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 import {MTAuthKey} from '@lib/mtproto/authKey';
 import {isPrivateMtprotoTarget} from '@config/mtprotoTarget';
+import {clearAllGuestCredentials, clearGuestCredentialsForAccount} from '@lib/guestCredentialStorage';
 /**
  * To not be used in an ApiManager instance as there is no account number attached to it
  */
@@ -277,7 +278,7 @@ export class ApiManager extends ApiManagerMethods {
       userAuth.dcID = assertValidDcId(+userAuth.dcID);
     }
 
-    AccountController.update(this.getAccountNumber(), {
+    await AccountController.update(this.getAccountNumber(), {
       date: (userAuth as UserAuth).date,
       userId: (userAuth as UserAuth).id,
       dcId: (userAuth as UserAuth).dcID as TrueDcId
@@ -328,6 +329,13 @@ export class ApiManager extends ApiManagerMethods {
     const clear = async() => {
       if(wasCleared) return;
       wasCleared = true;
+
+      try {
+        await clearGuestCredentialsForAccount(accountData.userId, accountNumber);
+      } catch(error) {
+        this.log.error('failed to clear guest credentials during logout', error);
+        await clearAllGuestCredentials();
+      }
 
       this.baseDcId = undefined;
       // * totalAccounts can be 0 somehow
@@ -388,6 +396,7 @@ export class ApiManager extends ApiManagerMethods {
 
     await Promise.all([
       sessionStorage.localStorageProxy('clear'),
+      clearAllGuestCredentials(),
       commonStateStorage.clear(),
       EncryptedStorageLayer.getInstance(getCommonDatabaseState(), 'localStorage__encrypted').clear(),
       ...clearAllStoresPromises,

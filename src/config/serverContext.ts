@@ -1,5 +1,6 @@
 type RuntimeGlobal = typeof globalThis & {
   __TEAGRAM_ACTIVE_SERVER_ID__?: string,
+  __TEAGRAM_ACTIVE_SERVER_HOST__?: string,
   __TEAGRAM_ACTIVE_MTPROTO_TARGET__?: unknown
 };
 
@@ -56,4 +57,8 @@ export function readWorkerMtprotoTarget() {
 
 export function getRuntimeServerId() {
   return runtimeGlobal.__TEAGRAM_ACTIVE_SERVER_ID__ || getActiveServerId();
+}
+
+export function getActiveServerHost() {
+  return runtimeGlobal.__TEAGRAM_ACTIVE_SERVER_HOST__;
 }

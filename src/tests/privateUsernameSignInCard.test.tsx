@@ -167,6 +167,17 @@ describe('private username sign-in card', () => {
     expect(mocks.pushToState).toHaveBeenCalledWith('authState', {_: 'authStateSignIn'});
   });
 
+  it.each([true, false])('keeps guest creation unreachable from the auth card when discovery advertises %s', async(guestSignUp) => {
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'closed', demo: {guest_sign_up: guestSignUp}});
+    mount();
+    await flushAuthFlow();
+
+    expect(document.body.textContent).not.toMatch(/guest/i);
+    expect(Array.from(document.querySelectorAll('button')).some((button) => /guest/i.test(button.textContent || ''))).toBe(false);
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    expect(mocks.invokeApi).not.toHaveBeenCalled();
+  });
+
   it('sends the username with an empty code and enters the existing password card', async() => {
     mocks.getAppConfig.mockResolvedValue({registration_mode: 'closed', turnstile: {site_key: 'signup-only-site-key'}});
     mocks.invokeApi
