@@ -188,16 +188,14 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
     return this.data;
   }
 
-  private async refreshFromIDB(entryNames: string[]) {
+  private async refreshFromIDB() {
     (this.saveToIDBThrottled as any).clear();
     await this.saveQueue;
     const storedData = await this.readFromIDB();
-    const requestedEntries = new Set(entryNames);
     const dirtyEntries = new Map(this.dirtyEntries);
     const dirtyValues = new Map<string, {exists: boolean, value: unknown}>();
 
     dirtyEntries.forEach((_version, entryName) => {
-      if(requestedEntries.has(entryName)) return;
       dirtyValues.set(entryName, {
         exists: Object.prototype.hasOwnProperty.call(this.data, entryName),
         value: this.data[entryName]
@@ -210,15 +208,7 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
       else delete this.data[entryName];
     });
 
-    dirtyEntries.forEach((version, entryName) => {
-      if(requestedEntries.has(entryName) && this.dirtyEntries.get(entryName) === version) {
-        this.dirtyEntries.delete(entryName);
-      }
-    });
-
-    if(Array.from(this.dirtyEntries.keys()).some((entryName) => !requestedEntries.has(entryName))) {
-      await this.flush();
-    }
+    if(this.dirtyEntries.size) await this.flush();
   }
 
   public async reEncrypt() {
@@ -246,7 +236,7 @@ export default class EncryptedStorageLayer<T extends Database<any>> implements S
 
   public async get<T>(entryNames: string[], useCache = true): Promise<T[]> {
     await this.waitToLoad();
-    if(!useCache) await this.refreshFromIDB(entryNames);
+    if(!useCache) await this.refreshFromIDB();
 
     return entryNames.map((entryName) => this.data[entryName]);
   }
