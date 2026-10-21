@@ -5,12 +5,12 @@ import {i18n} from '@lib/langPack';
 
 import styles from '@/pages/authFlow.module.scss';
 import {getTurnstileSiteKey} from '@/pages/turnstileSignup';
-import type {RequestTurnstileChallenge} from '@/pages/turnstileSignup';
+import type {RequestTurnstileChallenge, TurnstileAction} from '@/pages/turnstileSignup';
 
 type TurnstileAttemptResult = 'retry' | 'complete';
 type TurnstileCallbacks = {
   sitekey: string,
-  action: 'signup',
+  action: TurnstileAction,
   callback: (token: string) => void,
   'expired-callback': () => void,
   'error-callback': () => void
@@ -31,6 +31,7 @@ let turnstileScriptPromise: Promise<TurnstileApi> | undefined;
 
 export type TurnstileChallengeState = {
   siteKey: string,
+  action: TurnstileAction,
   onToken: (token: string) => Promise<TurnstileAttemptResult>
 };
 
@@ -38,7 +39,7 @@ export function useTurnstileChallenge() {
   const [challenge, setChallenge] = createSignal<TurnstileChallengeState>();
   let cancelPending: (() => void) | undefined;
 
-  const request: RequestTurnstileChallenge = (initialSiteKey, submit) => new Promise((resolve, reject) => {
+  const request: RequestTurnstileChallenge = (initialSiteKey, action, submit) => new Promise((resolve, reject) => {
     let settled = false;
     let siteKey = initialSiteKey;
 
@@ -55,11 +56,11 @@ export function useTurnstileChallenge() {
         const response = await submit(token);
         finish(() => resolve(response));
       } catch(error) {
-        const nextSiteKey = getTurnstileSiteKey(error);
+        const nextSiteKey = getTurnstileSiteKey(error, action);
         if(nextSiteKey) {
           if(nextSiteKey !== siteKey) {
             siteKey = nextSiteKey;
-            setChallenge({siteKey, onToken});
+            setChallenge({siteKey, action, onToken});
           }
           return 'retry';
         }
@@ -71,7 +72,7 @@ export function useTurnstileChallenge() {
     };
 
     cancelPending = () => finish(() => reject(new Error('Turnstile challenge cancelled')));
-    setChallenge({siteKey, onToken});
+    setChallenge({siteKey, action, onToken});
   });
 
   function cancel() {
@@ -105,7 +106,7 @@ export default function TurnstileChallenge(props: TurnstileChallengeState) {
 
       widgetId = api.render(container, {
         sitekey: props.siteKey,
-        action: 'signup',
+        action: props.action,
         callback: async(token) => {
           if(disposed || status() !== 'ready') return;
           setStatus('checking');

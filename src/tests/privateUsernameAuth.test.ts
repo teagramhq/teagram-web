@@ -107,8 +107,9 @@ describe('private username sign-in', () => {
     .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signup__test-site-key'})
     .mockResolvedValueOnce({_: 'auth.authorization', user});
     const updatePasswordSettings = vi.fn().mockResolvedValue(true);
-    const requestTurnstile = vi.fn((siteKey, submit) => {
+    const requestTurnstile = vi.fn((siteKey, action, submit) => {
       expect(siteKey).toBe('test-site-key');
+      expect(action).toBe('signup');
       return submit('turnstile-token');
     });
 
@@ -130,6 +131,28 @@ describe('private username sign-in', () => {
       }
     });
     expect(updatePasswordSettings).toHaveBeenCalledWith('StrongPassword123');
+  });
+
+  it('retries sendCode with a signin Turnstile token', async() => {
+    const invokeApi = vi.fn()
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__signin-site-key'})
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'});
+    const requestTurnstile = vi.fn((siteKey, action, submit) => {
+      expect(siteKey).toBe('signin-site-key');
+      expect(action).toBe('signin');
+      return submit('signin-token');
+    });
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, undefined, requestTurnstile))
+    .resolves.toEqual({kind: 'password'});
+
+    expect(invokeApi).toHaveBeenNthCalledWith(1, 'auth.sendCode', expect.any(Object));
+    expect(invokeApi).toHaveBeenNthCalledWith(2, 'invokeWithReCaptcha', {
+      token: 'signin-token',
+      query: expect.objectContaining({_: 'auth.sendCode', phone_number: USERNAME})
+    });
+    expect(invokeApi).toHaveBeenNthCalledWith(3, 'auth.signIn', expect.any(Object), {ignoreErrors: true});
   });
 
   it('does not request a challenge for an auth.sendCode error', async() => {

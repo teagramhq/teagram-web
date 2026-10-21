@@ -1,4 +1,4 @@
-import {createSignal, JSX, onCleanup, onMount} from 'solid-js';
+import {createSignal, JSX, onCleanup, onMount, Show} from 'solid-js';
 
 import Button from '@components/buttonTsx';
 import PasswordInputField from '@components/passwordInputField';
@@ -20,6 +20,8 @@ import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 
 import AuthCard from '@/pages/AuthCard';
 import {CardSpec, useAuthFlow} from '@/pages/authFlow';
+import TurnstileChallenge, {useTurnstileChallenge} from '@/pages/TurnstileChallenge';
+import {invokeTurnstileProtected} from '@/pages/turnstileSignup';
 import styles from '@/pages/authFlow.module.scss';
 
 if(import.meta.hot) import.meta.hot.accept();
@@ -35,6 +37,7 @@ const TEST = false;
  */
 export default function PasswordCard(_props: {spec: Spec}) {
   const {managers, navigate, toIm} = useAuthFlow();
+  const turnstile = useTurnstileChallenge();
 
   let monkey: PasswordMonkey | undefined;
   const monkeyContainer = document.createElement('div');
@@ -104,7 +107,7 @@ export default function PasswordCard(_props: {spec: Spec}) {
                 button: {langKey: 'OK'}
               });
             } else {
-              console.error(err);
+              console.error('Account reset failed');
               toastNew({langPackKey: 'Error.AnError'});
             }
           });
@@ -155,14 +158,22 @@ export default function PasswordCard(_props: {spec: Spec}) {
     passwordInputField.setValueSilently('' + Math.random()); // prevent saving suggestion
     passwordInputField.setValueSilently(value);
 
-    managers.passwordManager.check(value, state).then((response) => {
+    invokeTurnstileProtected<any>(
+      (method, params) => managers.apiManager.invokeApi(method as any, params as any),
+      'auth.checkPassword',
+      () => managers.passwordManager.getInputCheckPassword(value, state).then((password) => ({password})),
+      'signin',
+      turnstile.request
+    )
+    .then(async(response) => {
       switch(response._) {
         case 'auth.authorization':
           if(getStateInterval) {
             clearInterval(getStateInterval);
             getStateInterval = undefined;
           }
-          toIm();
+          await managers.apiManager.setUser(response.user);
+          await toIm();
           monkey?.remove();
           break;
         default:
@@ -201,7 +212,6 @@ export default function PasswordCard(_props: {spec: Spec}) {
   let cancelFocus: (() => void) | undefined;
   onMount(() => {
     managers.appStateManager.pushToState('authState', {_: 'authStatePassword'});
-
     monkey = new PasswordMonkey(passwordInputField, monkeySize);
     monkeyContainer.append(monkey.container);
     monkey.load();
@@ -212,6 +222,7 @@ export default function PasswordCard(_props: {spec: Spec}) {
   });
 
   onCleanup(() => {
+    turnstile.cancel();
     cancelFocus?.();
     monkey?.remove();
     if(getStateInterval) {
@@ -232,6 +243,9 @@ export default function PasswordCard(_props: {spec: Spec}) {
       }
     >
       {passwordInputField.container}
+      <Show when={turnstile.challenge()} keyed>
+        {(challenge) => <TurnstileChallenge {...challenge}/>}
+      </Show>
       {resetLink}
       <Button
         class="btn-primary btn-color-primary"

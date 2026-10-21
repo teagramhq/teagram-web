@@ -46,6 +46,7 @@ import {isPrivateMtprotoTarget} from '@config/mtprotoTarget';
  */
 import globalRootScope from '@lib/rootScope';
 import RepayRequestHandler from '@appManagers/utils/repayRequestHandler';
+import {AUTH_METHODS_WITH_RAW_ERRORS, AuthLogRedactor, getAuthMethod, secureAuthNetworker} from './authLogRedaction';
 
 const PREMIUM_FILE_NETWORKERS_COUNT = 6;
 const REGULAR_FILE_NETWORKERS_COUNT = 3;
@@ -76,6 +77,8 @@ export class ApiManager extends ApiManagerMethods {
   private transportType: TransportType;
 
   private loggingOut: boolean;
+
+  private authLogRedactor?: AuthLogRedactor;
 
   constructor() {
     super();
@@ -455,7 +458,7 @@ export class ApiManager extends ApiManagerMethods {
       }
 
       if(networker) {
-        return Promise.resolve(networker);
+        return Promise.resolve(secureAuthNetworker(networker));
       }
     }
 
@@ -562,6 +565,7 @@ export class ApiManager extends ApiManagerMethods {
 
       this.changeNetworkerTransport(networker, transport);
       // onTransport && await onTransport?.();
+      secureAuthNetworker(networker);
       networkers.unshift(networker);
       this.setOnDrainIfNeeded(networker);
       return networker;
@@ -615,6 +619,27 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public invokeApi<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {}, options: InvokeApiOptions = {}): CancellablePromise<MethodDeclMap[T]['res']> {
+    const methodName = String(method);
+    if(!getAuthMethod(methodName, params)) {
+      return this.invokeApiInternal(method, params, options);
+    }
+
+    const redactor = this.authLogRedactor ??= new AuthLogRedactor(this.log);
+    redactor.begin();
+    try {
+      const requestOptions = methodName === 'invokeWithReCaptcha' || AUTH_METHODS_WITH_RAW_ERRORS.has(methodName) ?
+        {...options, rawError: true} :
+        options;
+      const request = this.invokeApiInternal(method, params, requestOptions);
+      request.then(() => redactor.end(), () => redactor.end());
+      return request;
+    } catch(error) {
+      redactor.end();
+      throw error;
+    }
+  }
+
+  private invokeApiInternal<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'], options: InvokeApiOptions): CancellablePromise<MethodDeclMap[T]['res']> {
     // /////this.log('Invoke api', method, params, options);
 
     /* if(!this.lol) {
@@ -813,7 +838,7 @@ export class ApiManager extends ApiManagerMethods {
 
           options.waitTime = options.waitTime ? Math.min(60, options.waitTime * 1.5) : 1;
           return pause(options.waitTime * 1000).then(() => performRequest());
-        } else if(error.type === 'UNKNOWN' || error.type === 'MTPROTO_CLUSTER_INVALID') { // cluster invalid - request from regular user to premium endpoint
+        } else if(!options.rawError && (error.type === 'UNKNOWN' || error.type === 'MTPROTO_CLUSTER_INVALID')) { // cluster invalid - request from regular user to premium endpoint
           return pause(1000).then(() => performRequest());
         } else {
           if(RepayRequestHandler.canHandleError(error))

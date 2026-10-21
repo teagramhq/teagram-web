@@ -102,7 +102,7 @@ describe('private username sign-in card', () => {
   let dispose: VoidFunction;
   let storageWrites: ReturnType<typeof vi.spyOn>[];
   let consoleError: ReturnType<typeof vi.spyOn>;
-  let turnstileCallbacks: {callback: (token: string) => void, 'expired-callback': () => void};
+  let turnstileCallbacks: {action: 'signin' | 'signup', callback: (token: string) => void, 'expired-callback': () => void};
   let turnstileReset: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -116,7 +116,7 @@ describe('private username sign-in card', () => {
     turnstileCallbacks = undefined as any;
     turnstileReset = vi.fn();
     vi.stubGlobal('turnstile', {
-      render: vi.fn((_container: HTMLElement, callbacks: {callback: (token: string) => void, 'expired-callback': () => void}) => {
+      render: vi.fn((_container: HTMLElement, callbacks: {action: 'signin' | 'signup', callback: (token: string) => void, 'expired-callback': () => void}) => {
         turnstileCallbacks = callbacks;
         return 'test-widget';
       }),
@@ -168,6 +168,7 @@ describe('private username sign-in card', () => {
   });
 
   it('sends the username with an empty code and enters the existing password card', async() => {
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'closed', turnstile: {site_key: 'signup-only-site-key'}});
     mocks.invokeApi
     .mockResolvedValueOnce(SENT_CODE)
     .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'});
@@ -188,12 +189,38 @@ describe('private username sign-in card', () => {
     expect(isPrivateUsernameLogin()).toBe(true);
     expect(input.value).toBe('');
     expect(document.querySelector('script[src*="challenges.cloudflare.com"]')).toBeNull();
+    expect(document.querySelector('[data-testid="turnstile-challenge"]')).toBeNull();
+    expect(mocks.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
     expect(mocks.pushToState.mock.calls).toEqual([['authState', {_: 'authStateSignIn'}]]);
     const hasStoredUsername = storageWrites.some((spy) =>
       spy.mock.calls.some((call: unknown[]) => call.some((value: unknown) => String(value).includes(USERNAME)))
     );
     expect(hasStoredUsername).toBe(false);
     expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('protects username sign-in with the signin Turnstile action', async() => {
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'closed', turnstile: {site_key: 'test-site-key'}});
+    mocks.invokeApi
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__test-site-key'})
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'});
+    const input = mount();
+    await flushAuthFlow();
+    input.value = USERNAME;
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    (document.querySelector('button') as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(document.querySelector('[data-testid="turnstile-challenge"]')).not.toBeNull());
+    expect(turnstileCallbacks.action).toBe('signin');
+    turnstileCallbacks.callback('signin-token');
+    await vi.waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith({name: 'password'}));
+
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}));
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(2, 'invokeWithReCaptcha', expect.objectContaining({
+      token: 'signin-token',
+      query: expect.objectContaining({_: 'auth.sendCode', phone_number: USERNAME})
+    }));
   });
 
   it('finishes an authorization returned by username sign-in', async() => {
@@ -278,6 +305,7 @@ describe('private username sign-in card', () => {
     (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
 
     await vi.waitFor(() => expect(document.querySelector('[data-testid="turnstile-challenge"]')).not.toBeNull());
+    expect(turnstileCallbacks.action).toBe('signup');
     expect((document.querySelector('input[aria-label="Display name"]') as HTMLInputElement).value).toBe('Alice Example');
     expect((document.querySelector('[data-testid="turnstile-challenge"]') as HTMLElement).dataset.sitekey).toBe('test-site-key');
 
