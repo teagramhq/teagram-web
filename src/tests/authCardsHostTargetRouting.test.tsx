@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   renderRealQrCard: false,
   currentAccount: 1,
   invokeApi: vi.fn(),
+  getAppConfig: vi.fn(),
   setBaseDcId: vi.fn(),
   setUser: vi.fn(),
   pushToState: vi.fn(),
@@ -178,7 +179,12 @@ vi.mock('@lib/richTextProcessor/wrapEmojiText', () => ({default: vi.fn()}));
 vi.mock('@lib/rootScope', () => ({
   default: {
     managers: {
-      apiManager: {invokeApi: mocks.invokeApi, setBaseDcId: mocks.setBaseDcId, setUser: mocks.setUser},
+      apiManager: {
+        invokeApi: mocks.invokeApi,
+        getAppConfig: mocks.getAppConfig,
+        setBaseDcId: mocks.setBaseDcId,
+        setUser: mocks.setUser
+      },
       appStateManager: {pushToState: mocks.pushToState},
       timeManager: {getServerTimeOffset: mocks.getServerTimeOffset},
       passwordManager: {
@@ -191,6 +197,12 @@ vi.mock('@lib/rootScope', () => ({
     addEventListener: mocks.addEventListener,
     removeEventListener: mocks.removeEventListener
   }
+}));
+vi.mock('@lib/guestAccountLifecycle', () => ({
+  createCurrentGuestAccountLifecycle: () => ({
+    reauthenticate: async() => ({kind: 'noGuest'}),
+    create: async() => ({kind: 'noGuest'})
+  })
 }));
 vi.mock('@lib/sessionStorage', () => ({
   default: {get: mocks.sessionGet, set: mocks.sessionSet, delete: mocks.sessionDelete}
@@ -309,6 +321,7 @@ describe('AuthCardsHost target-specific routing', () => {
     mocks.renderRealQrCard = false;
     mocks.currentAccount = 1;
     mocks.invokeApi.mockReset();
+    mocks.getAppConfig.mockReset().mockResolvedValue({registration_mode: 'closed'});
     mocks.setUser.mockReset();
     mocks.pushToState.mockReset();
     mocks.getPasswordState.mockReset().mockResolvedValue({hint: ''});
@@ -452,6 +465,7 @@ describe('AuthCardsHost target-specific routing', () => {
     username.value = USERNAME;
     username.dispatchEvent(new Event('input', {bubbles: true}));
     Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Next')!.click();
+    await vi.waitFor(() => expect(mocks.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode']));
     navigateAuth({name: 'signQR'});
     await vi.waitFor(() => expect(document.body.textContent).toContain('Sign in with your username'));
     mocks.navigateCard.mockClear();

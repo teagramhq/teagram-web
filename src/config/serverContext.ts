@@ -1,7 +1,9 @@
 type RuntimeGlobal = typeof globalThis & {
   __TEAGRAM_ACTIVE_SERVER_ID__?: string,
   __TEAGRAM_ACTIVE_SERVER_HOST__?: string,
-  __TEAGRAM_ACTIVE_MTPROTO_TARGET__?: unknown
+  __TEAGRAM_ACTIVE_MTPROTO_TARGET__?: unknown,
+  __TEAGRAM_ACTIVE_GUEST_SIGN_UP__?: unknown,
+  __TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__?: unknown
 };
 
 const runtimeGlobal = globalThis as RuntimeGlobal;
@@ -61,4 +63,13 @@ export function getRuntimeServerId() {
 
 export function getActiveServerHost() {
   return runtimeGlobal.__TEAGRAM_ACTIVE_SERVER_HOST__;
+}
+
+export function isActiveGuestSignUpEnabled() {
+  return runtimeGlobal.__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ === true;
+}
+
+export function getActiveTurnstileSiteKey() {
+  const siteKey = runtimeGlobal.__TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__;
+  return typeof siteKey === 'string' && /^[A-Za-z0-9_-]{1,256}$/.test(siteKey) ? siteKey : undefined;
 }

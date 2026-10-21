@@ -173,6 +173,14 @@ $corner-button-size: 2.5rem;
   color: var(--secondary-text-color);
 }
 
+.guestDisclosure,
+.guestLoading {
+  margin: .75rem 0 0;
+  text-align: center;
+  font-size: 14px;
+  color: var(--secondary-text-color);
+}
+
 .turnstileChallenge {
   display: flex;
   flex-direction: column;

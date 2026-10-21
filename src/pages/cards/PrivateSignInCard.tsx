@@ -5,10 +5,15 @@ import InputField from '@components/inputField';
 import LanguageChangeButton from '@components/languageChangeButton';
 import MediaHeader from '@components/mediaHeader';
 import PasswordInputField from '@components/passwordInputField';
+import {wrapFormattedDuration} from '@components/wrappers/wrapDuration';
+import {getActiveTurnstileSiteKey, isActiveGuestSignUpEnabled} from '@config/serverContext';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import cancelEvent from '@helpers/dom/cancelEvent';
+import formatDuration from '@helpers/formatDuration';
 import focusWhenConnected from '@helpers/dom/focusWhenConnected';
 import type {User} from '@layer';
+import {createCurrentGuestAccountLifecycle} from '@lib/guestAccountLifecycle';
+import type {GuestAccountLifecycleResult, GuestAccountManagers} from '@lib/guestAccountLifecycle';
 import {i18n} from '@lib/langPack';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
 
@@ -37,11 +42,27 @@ type PrivateUsernameUiError =
   | 'registrationClosed'
   | 'passwordMismatch'
   | 'weakPassword'
-  | 'passwordSetupNetwork';
+  | 'passwordSetupNetwork'
+  | 'guestFlood'
+  | 'guestFloodWait'
+  | 'guestRestoreFlood'
+  | 'guestRestoreFloodWait'
+  | 'guestUnrecoverable'
+  | 'guestNetwork'
+  | 'guestRestoreNetwork'
+  | 'guestCollision'
+  | 'guestAccountInUse'
+  | 'guestSetupPending'
+  | 'guestChallenge';
 
 export default function PrivateSignInCard(_props: {spec: Spec}) {
   const {managers, navigate, toIm} = useAuthFlow();
   const turnstile = useTurnstileChallenge();
+  const guestSignUpAvailable = isActiveGuestSignUpEnabled();
+  const guestLifecycle = createCurrentGuestAccountLifecycle(managers as unknown as GuestAccountManagers, {
+    requestTurnstile: turnstile.request,
+    turnstileSiteKey: getActiveTurnstileSiteKey()
+  });
   const usernameField = new InputField({
     labelText: 'Username',
     maxLength: 32,
@@ -85,6 +106,9 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   const [submitting, setSubmitting] = createSignal(false);
   const [registrationMode, setRegistrationMode] = createSignal<PrivateUsernameRegistrationMode>('closed');
   const [creatingAccount, setCreatingAccount] = createSignal(false);
+  const [guestSubmitting, setGuestSubmitting] = createSignal(false);
+  const [restoringGuest, setRestoringGuest] = createSignal(true);
+  const [guestFloodWait, setGuestFloodWait] = createSignal<number>();
   const [registrationConfigUnavailable, setRegistrationConfigUnavailable] = createSignal(false);
   const [turnstileSiteKey, setTurnstileSiteKey] = createSignal<string>();
   const [pendingPasswordUser, setPendingPasswordUser] = createSignal<User>();
@@ -93,6 +117,9 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   let cancelled = false;
   let activeIdentifier = '';
   let cancelFocus: (() => void) | undefined;
+  let guestRestorePromise: Promise<void> = Promise.resolve();
+  let guestActionWaiting = false;
+  let guestAuthorized = false;
 
   function updateRegistrationValidity() {
     setHasValidRegistrationInput(
@@ -111,6 +138,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   const onInput = () => {
     updateSignInValidity();
     setError(undefined);
+    setGuestFloodWait(undefined);
     usernameInput.classList.remove('error');
     usernameInput.removeAttribute('aria-invalid');
     updateRegistrationValidity();
@@ -118,6 +146,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
   const onRegistrationInput = () => {
     setError(undefined);
+    setGuestFloodWait(undefined);
     updateRegistrationValidity();
   };
 
@@ -196,7 +225,11 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
   async function onSubmit(event?: Event): Promise<void> {
     if(event) cancelEvent(event);
-    if(cancelled || submitting()) return;
+    if(cancelled || submitting() || guestSubmitting() || guestActionWaiting) return;
+    guestActionWaiting = true;
+    await guestRestorePromise;
+    guestActionWaiting = false;
+    if(cancelled || guestAuthorized || submitting() || guestSubmitting()) return;
 
     const isCreatingAccount = creatingAccount();
     const username = usernameField.value;
@@ -219,6 +252,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     if(!isCreatingAccount) usernameField.setValueSilently('');
     setHasValidInput(false);
     setError(undefined);
+    setGuestFloodWait(undefined);
     setSubmitting(true);
 
     try {
@@ -303,10 +337,102 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     }
   }
 
+  function showGuestErrorType(errorType?: string, restoring = false) {
+    const wait = errorType && /FLOOD_WAIT_(\d+)/.exec(errorType);
+    if(wait && Number(wait[1]) > 0) {
+      setGuestFloodWait(Number(wait[1]));
+      showError(restoring ? 'guestRestoreFloodWait' : 'guestFloodWait');
+    } else if(errorType && /FLOOD|RATE_LIMIT|SIGNUP_LIMIT|TOO_MANY_SIGN_UPS/i.test(errorType)) {
+      showError(restoring ? 'guestRestoreFlood' : 'guestFlood');
+    } else if(errorType?.includes('RECAPTCHA_CHECK')) {
+      showError('guestChallenge');
+    } else {
+      showError(restoring ? 'guestRestoreNetwork' : 'guestNetwork');
+    }
+  }
+
+  function showGuestFailure(result: GuestAccountLifecycleResult, restoring = false) {
+    if(cancelled) return;
+    switch(result.kind) {
+      case 'unrecoverable':
+        showError('guestUnrecoverable');
+        return;
+      case 'collisionsExhausted':
+        showError('guestCollision');
+        return;
+      case 'accountInUse':
+        showError('guestAccountInUse');
+        return;
+      case 'setupPending':
+        if(result.errorType) {
+          showGuestErrorType(result.errorType, restoring);
+        } else {
+          showError('guestSetupPending');
+        }
+        return;
+      case 'error':
+        showGuestErrorType(result.errorType, restoring);
+        return;
+    }
+  }
+
+  async function handleGuestLifecycleResult(result: GuestAccountLifecycleResult, restoring = false) {
+    if(cancelled) return;
+    switch(result.kind) {
+      case 'authorized':
+      case 'resumed':
+        guestAuthorized = true;
+        await toIm();
+        return;
+      case 'error':
+      case 'unrecoverable':
+      case 'collisionsExhausted':
+      case 'accountInUse':
+      case 'setupPending':
+        showGuestFailure(result, restoring);
+        return;
+    }
+  }
+
+  async function restoreGuest(): Promise<void> {
+    try {
+      await handleGuestLifecycleResult(await guestLifecycle.reauthenticate(), true);
+    } catch{
+      if(!cancelled) showError('guestRestoreNetwork');
+    } finally {
+      if(!cancelled) setRestoringGuest(false);
+    }
+  }
+
+  async function tryAsGuest(): Promise<void> {
+    if(!guestSignUpAvailable || cancelled || guestSubmitting() || submitting() || guestActionWaiting) return;
+    guestActionWaiting = true;
+    await guestRestorePromise;
+    guestActionWaiting = false;
+    if(cancelled || guestAuthorized || guestSubmitting() || submitting()) return;
+
+    setError(undefined);
+    setGuestFloodWait(undefined);
+    setGuestSubmitting(true);
+    try {
+      const result = await guestLifecycle.create();
+      if(result.kind === 'existing') {
+        await handleGuestLifecycleResult(await guestLifecycle.reauthenticate());
+      } else {
+        await handleGuestLifecycleResult(result);
+      }
+    } catch{
+      if(!cancelled) showError('guestNetwork');
+    } finally {
+      if(!cancelled) setGuestSubmitting(false);
+    }
+  }
+
   function startRegistration() {
-    if(registrationMode() === 'closed') return;
+    if(registrationMode() === 'closed' || submitting() || guestSubmitting()) return;
     setCreatingAccount(true);
     setError(undefined);
+    setGuestFloodWait(undefined);
     updateRegistrationValidity();
   }
 
@@ -314,6 +440,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     if(pendingPasswordUser()) return;
     setCreatingAccount(false);
     setError(undefined);
+    setGuestFloodWait(undefined);
     updateSignInValidity();
     usernameInput.classList.remove('error');
     usernameInput.removeAttribute('aria-invalid');
@@ -349,11 +476,34 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         return i18n('Teagram.Registration.WeakPassword');
       case 'passwordSetupNetwork':
         return i18n('Teagram.Registration.PasswordNetwork');
+      case 'guestFlood':
+        return i18n('Teagram.Guest.Flood');
+      case 'guestFloodWait':
+        return i18n('Teagram.Guest.FloodWait', [wrapFormattedDuration(formatDuration(guestFloodWait() || 1), true)]);
+      case 'guestRestoreFlood':
+        return i18n('Teagram.Guest.RestoreFlood');
+      case 'guestRestoreFloodWait':
+        return i18n('Teagram.Guest.RestoreFloodWait', [wrapFormattedDuration(formatDuration(guestFloodWait() || 1), true)]);
+      case 'guestUnrecoverable':
+        return i18n('Teagram.Guest.Unrecoverable');
+      case 'guestNetwork':
+        return i18n('Teagram.Guest.Network');
+      case 'guestRestoreNetwork':
+        return i18n('Teagram.Guest.RestoreNetwork');
+      case 'guestCollision':
+        return i18n('Teagram.Guest.Collision');
+      case 'guestAccountInUse':
+        return i18n('Teagram.Guest.AccountInUse');
+      case 'guestSetupPending':
+        return i18n('Teagram.Guest.SetupPending');
+      case 'guestChallenge':
+        return i18n('Teagram.Registration.SecurityCheckFailed');
     }
   }
 
   onMount(() => {
     managers.appStateManager.pushToState('authState', {_: 'authStateSignIn'});
+    guestRestorePromise = restoreGuest();
     Promise.resolve(managers.apiManager.getAppConfig(true)).then((config) => {
       if(cancelled) return;
       const mode = config.registration_mode;
@@ -421,18 +571,36 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           {i18n('Teagram.Registration.ConfigNetwork')}
         </div>
       )}
+      {restoringGuest() && !creatingAccount() && (
+        <div class={styles.guestLoading} role="status" aria-live="polite">
+          {i18n('Teagram.Guest.Restoring')}
+        </div>
+      )}
+      {!creatingAccount() && guestSignUpAvailable && (
+        <p class={styles.guestDisclosure}>{i18n('Teagram.Guest.Disclosure')}</p>
+      )}
       <div class={styles.registrationActions}>
         {!creatingAccount() ? (
           <>
             <Button
-              class="btn-primary btn-color-primary"
-              disabled={!hasValidInput() || submitting()}
+              class={guestSignUpAvailable ? 'btn-secondary' : 'btn-primary btn-color-primary'}
+              disabled={!hasValidInput() || submitting() || guestSubmitting()}
               onClick={onSubmit}
             >
               {submitting() ? 'Please wait…' : 'Next'}
             </Button>
+            {guestSignUpAvailable && (
+              <Button
+                class="btn-primary btn-color-primary"
+                aria-label={(guestSubmitting() ? i18n('Teagram.Guest.Creating') : i18n('Teagram.Guest.Try')).textContent || 'Try it as a guest'}
+                disabled={submitting() || guestSubmitting() || restoringGuest()}
+                onClick={tryAsGuest}
+              >
+                {guestSubmitting() ? i18n('Teagram.Guest.Creating') : i18n('Teagram.Guest.Try')}
+              </Button>
+            )}
             {registrationMode() !== 'closed' && (
-              <Button class="btn-secondary" disabled={submitting()} onClick={startRegistration}>
+              <Button class="btn-secondary" disabled={submitting() || guestSubmitting()} onClick={startRegistration}>
                 {i18n('Teagram.Registration.CreateAccount')}
               </Button>
             )}
@@ -441,13 +609,13 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           <>
             <Button
               class="btn-primary btn-color-primary"
-              disabled={!hasValidRegistrationInput() || submitting()}
+              disabled={!hasValidRegistrationInput() || submitting() || guestSubmitting()}
               onClick={onSubmit}
             >
               {submitting() ? 'Please wait…' : i18n('Teagram.Registration.CreateAccount')}
             </Button>
             {!pendingPasswordUser() && (
-              <Button class="btn-secondary" disabled={submitting()} onClick={returnToSignIn}>
+              <Button class="btn-secondary" disabled={submitting() || guestSubmitting()} onClick={returnToSignIn}>
                 {i18n('Teagram.Registration.SignIn')}
               </Button>
             )}

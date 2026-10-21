@@ -19,7 +19,8 @@ function discovered(fingerprint: string): DiscoveredServer {
     id: 'custom-' + 'a'.repeat(64),
     target: {mode: 'private'} as any,
     pin,
-    spkiFingerprint: fingerprint
+    spkiFingerprint: fingerprint,
+    guestSignUpEnabled: false
   };
 }
 

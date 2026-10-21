@@ -38,7 +38,8 @@ export type DiscoveredServer = {
   target: MtprotoTarget,
   pin: ServerPin,
   spkiFingerprint: string,
-  turnstileSiteKey?: string
+  turnstileSiteKey?: string,
+  guestSignUpEnabled: boolean
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -198,7 +199,9 @@ export async function validateDiscoveryDocument(hostInput: string, value: unknow
   });
   const id = 'custom-' + toHex(await sha256(new TextEncoder().encode(host)));
   const pin = {host, endpoint: websocketEndpoint, dc_id, key_fingerprint: spkiFingerprint};
-  return {host, id, target, pin, spkiFingerprint, turnstileSiteKey};
+  const demo = record(value.demo) ? value.demo : undefined;
+  const guestSignUpEnabled = demo?.guest_sign_up === true;
+  return {host, id, target, pin, spkiFingerprint, turnstileSiteKey, guestSignUpEnabled};
 }
 
 export async function fetchServerDiscovery(hostInput: string, fetcher: typeof fetch = fetch): Promise<DiscoveredServer> {
