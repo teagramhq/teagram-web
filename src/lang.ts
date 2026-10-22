@@ -4257,6 +4257,7 @@ const lang = {
   'Teagram.Registration.Network': 'Unable to create your account. Try again.',
   'Teagram.Registration.PasswordNetwork': 'Unable to set your password. Try again.',
   'Teagram.Registration.ConfigNetwork': 'Unable to check whether account creation is available.',
+  'Teagram.TwoStep.SkipHint': 'Skip',
   'Teagram.Guest.Try': 'Try it as a guest',
   'Teagram.Guest.Creating': 'Creating a guest account…',
   'Teagram.Guest.Disclosure': 'Your guest account is wiped weekly, is lost after you sign out or clear browser data, and is visible to the server operator.',

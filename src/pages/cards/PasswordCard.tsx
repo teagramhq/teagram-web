@@ -3,16 +3,13 @@ import {createSignal, JSX, onCleanup, onMount, Show} from 'solid-js';
 import Button from '@components/buttonTsx';
 import PasswordInputField from '@components/passwordInputField';
 import PasswordMonkey from '@components/monkeys/password';
-import {SimpleConfirmationPopup} from '@components/popups/simpleConfirmation';
 import MediaHeader from '@components/mediaHeader';
 import {toastNew} from '@components/toast';
-import {wrapFormattedDuration} from '@components/wrappers/wrapDuration';
 import anchorCallback from '@helpers/dom/anchorCallback';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import focusWhenConnected from '@helpers/dom/focusWhenConnected';
 import htmlToSpan from '@helpers/dom/htmlToSpan';
 import replaceContent from '@helpers/dom/replaceContent';
-import formatDuration from '@helpers/formatDuration';
 import mediaSizes from '@helpers/mediaSizes';
 import {AccountPassword} from '@layer';
 import {LangPackKey, i18n} from '@lib/langPack';
@@ -20,6 +17,7 @@ import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 
 import AuthCard from '@/pages/AuthCard';
 import {CardSpec, useAuthFlow} from '@/pages/authFlow';
+import showPasswordRecoveryUnavailable from '@/pages/showPasswordRecoveryUnavailable';
 import TurnstileChallenge, {useTurnstileChallenge} from '@/pages/TurnstileChallenge';
 import {invokeTurnstileProtected} from '@/pages/turnstileSignup';
 import styles from '@/pages/authFlow.module.scss';
@@ -32,8 +30,8 @@ const TEST = false;
 
 /**
  * Card variant of `pagePassword`. Single password input over a `PasswordMonkey`
- * animation, with a "forgot password" link that leads to `emailRecover` (or to
- * full account reset if recovery isn't available).
+ * animation, with a "forgot password" link that leads to `emailRecover` or
+ * explains when recovery isn't available on the server.
  */
 export default function PasswordCard(_props: {spec: Spec}) {
   const {managers, navigate, toIm} = useAuthFlow();
@@ -71,46 +69,7 @@ export default function PasswordCard(_props: {spec: Spec}) {
         navigate({name: 'emailRecover', payload: {email_pattern: res.email_pattern}});
       }).catch(async(err: ApiError) => {
         if(err.type === 'PASSWORD_RECOVERY_NA') {
-          await SimpleConfirmationPopup.show({
-            titleLangKey: 'Login.ResetPassword.Title',
-            descriptionLangKey: 'Login.ResetPassword.NoEmailText',
-            button: {
-              langKey: 'Login.ResetPassword.ResetAccount',
-              isDanger: true
-            }
-          });
-
-          await SimpleConfirmationPopup.show({
-            titleLangKey: 'Login.ResetAccount.Title',
-            descriptionLangKey: 'Login.ResetAccount.Text',
-            button: {
-              langKey: 'Login.ResetPassword.ResetAccount',
-              isDanger: true
-            }
-          });
-
-          await managers.appAccountManager.deleteAccount('Forgot password').then(() => {
-            navigate({name: 'signIn'});
-          }).catch((err: ApiError) => {
-            if(err.type === '2FA_RECENT_CONFIRM') {
-              SimpleConfirmationPopup.show({
-                titleLangKey: 'Login.ResetAccountFail.Title',
-                descriptionLangKey: 'Login.ResetAccountFail.TextCancelled',
-                button: {langKey: 'OK'}
-              });
-            } else if(err.type.startsWith('2FA_CONFIRM_WAIT_')) {
-              const waitTime = +err.type.replace('2FA_CONFIRM_WAIT_', '');
-              SimpleConfirmationPopup.show({
-                titleLangKey: 'Login.ResetAccountFail.Title',
-                descriptionLangKey: 'Login.ResetAccountFail.TextWait',
-                descriptionArgs: [wrapFormattedDuration(formatDuration(waitTime))],
-                button: {langKey: 'OK'}
-              });
-            } else {
-              console.error('Account reset failed');
-              toastNew({langPackKey: 'Error.AnError'});
-            }
-          });
+          await showPasswordRecoveryUnavailable();
           return;
         }
 

@@ -242,24 +242,27 @@ describe('password cards', () => {
     expect(mocks.setUser).toHaveBeenCalledWith({_: 'user', id: 42});
   });
 
-  it('does not log a raw account reset failure from the private password flow', async() => {
-    markPrivateUsernameLogin();
-    await mount();
+  it.each([
+    ['private', mount, markPrivateUsernameLogin] as const,
+    ['standard', mountStandard, () => {}] as const
+  ])('explains unavailable recovery on the %s password card without resetting the account', async(_card, mountCard, setup) => {
+    setup();
+    await mountCard();
     mocks.requestRecovery.mockRejectedValue({type: 'PASSWORD_RECOVERY_NA'});
-    const resetError = {type: 'ACCOUNT_RESET_FAILED', code: 500, phone_number: 'Alice_123'};
-    mocks.deleteAccount.mockRejectedValue(resetError);
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     const onForgotPassword = mocks.anchorCallback.mock.calls[0]?.[0] as (() => void) | undefined;
 
     expect(onForgotPassword).toBeTypeOf('function');
     onForgotPassword!();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(mocks.showConfirmation).toHaveBeenCalledOnce());
 
-    expect(mocks.deleteAccount).toHaveBeenCalledWith('Forgot password');
-    expect(JSON.stringify(consoleError.mock.calls)).not.toContain('Alice_123');
-    expect(consoleError.mock.calls.flat()).not.toContain(resetError);
-    expect(mocks.toastNew).toHaveBeenCalledOnce();
-    consoleError.mockRestore();
+    expect(mocks.showConfirmation).toHaveBeenCalledWith({
+      titleLangKey: 'Teagram.PasswordRecovery.Title',
+      descriptionLangKey: 'Teagram.PasswordRecovery.Unavailable',
+      button: {langKey: 'OK'}
+    });
+    expect(mocks.deleteAccount).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    expect(mocks.toastNew).not.toHaveBeenCalled();
   });
 
   it('clears the transient username-flow marker when password card is cancelled', async() => {

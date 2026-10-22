@@ -5,7 +5,7 @@ import PopupPeer from '@components/popups/peer';
 import Section from '@components/section';
 import wrapStickerEmoji from '@components/wrappers/stickerEmoji';
 import {AppSettingsTab} from '@components/solidJsTabs';
-import {AppTwoStepVerificationEmailTab, AppTwoStepVerificationEnterPasswordTab} from '@components/solidJsTabs/tabs';
+import {AppTwoStepVerificationEnterPasswordTab} from '@components/solidJsTabs/tabs';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import type {AppTwoStepVerificationTab} from '@components/solidJsTabs/tabs';
 
@@ -74,18 +74,6 @@ const TwoStepVerification: Component = () => {
           icon="passwordoff"
           text="TwoStepAuth.RemovePassword"
           onClick={onDisablePassword}
-        />
-        <Button
-          class="btn-primary btn-transparent"
-          icon="email"
-          text={state.pFlags.has_recovery ? 'TwoStepAuth.ChangeEmail' : 'TwoStepAuth.SetupEmail'}
-          onClick={() => tab.slider.createTab(AppTwoStepVerificationEmailTab).open({
-            state,
-            hint: state.hint,
-            plainPassword,
-            newPassword: plainPassword,
-            isFirst: true
-          })}
         />
       </Show>
     </Section>
