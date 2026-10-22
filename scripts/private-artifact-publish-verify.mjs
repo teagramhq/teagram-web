@@ -171,7 +171,7 @@ function privateCsp(endpoint) {
     "media-src 'self' blob:",
     "worker-src 'self' blob:",
     "manifest-src 'self'",
-    `connect-src 'self' ${endpoint}`
+    "connect-src 'self' https: wss:"
   ].join('; ') + ';';
 }
 

@@ -1,7 +1,8 @@
 import {execFileSync} from 'node:child_process';
+import {createPublicKey} from 'node:crypto';
 import {existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {join, resolve} from 'node:path';
 import {request as httpRequest, type IncomingMessage, type ServerResponse} from 'node:http';
 import type {Duplex} from 'node:stream';
 import {createServer, request as httpsRequest} from 'node:https';
@@ -369,6 +370,152 @@ test('does not wait on a pending TLS upgrade after stopping the listener', async
 
   expect(hasOnlyConnectionResetErrors(requestErrors)).toBe(true);
   expect(socketTracker?.snapshot()).toEqual({https: 0, websocket: 0});
+});
+
+test('private artifact discovers a server from web.teagram.io without CSP violations', async({page}, testInfo) => {
+  test.skip(testInfo.project.name !== 'private-artifact-chromium', 'requires the production artifact preview');
+  const manifest = JSON.parse(readFileSync(resolve('dist/mtproto-target.json'), 'utf8')) as {mode: string, endpoint: string};
+  if(manifest.mode !== 'private') throw new Error('private artifact browser test requires a private build');
+  const privateEndpoint = new URL(manifest.endpoint);
+  const serverHost = privateEndpoint.hostname;
+  if(serverHost === APP_HOST) throw new Error('private artifact endpoint must differ from the picker host');
+
+  const appBaseUrl = new URL(testInfo.project.use.baseURL as string);
+  const appPort = Number(appBaseUrl.port);
+  const appOrigin = `https://${APP_HOST}`;
+  const edgeConfig = readFileSync(resolve('deploy/teagram-web/nginx.conf'), 'utf8');
+  const edgeCsp = edgeConfig.match(/add_header Content-Security-Policy "([^"]+)" always;/)?.[1];
+  if(!edgeCsp) throw new Error('deployment CSP is missing from deploy/teagram-web/nginx.conf');
+
+  const rsaPublicKey = createPublicKey(readFileSync(resolve('scripts/fixtures/private-mtproto-public.pem')));
+  const discovery = {
+    version: 1,
+    mtproto: {
+      endpoint: `${serverHost}:2443`,
+      dc_id: 2,
+      rsa_spki: rsaPublicKey.export({format: 'der', type: 'spki'}).toString('base64')
+    },
+    websocket: {endpoint: privateEndpoint.href}
+  };
+  const discoveryRequests: string[] = [];
+  let tlsServer: ReturnType<typeof createServer> | undefined;
+  let tlsSocketTracker: ReturnType<typeof trackTlsServerSockets> | undefined;
+  let webSocketServer: WebSocketServer | undefined;
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-private-artifact-discovery-'));
+
+  try {
+    const credentials = createTlsFixtureCredentials(temporaryDirectory, [APP_HOST, serverHost]);
+    tlsServer = createServer({
+      key: readFileSync(credentials.privateKeyPath),
+      cert: readFileSync(credentials.certificatePath)
+    }, (request, response) => {
+      const host = (request.headers.host || '').replace(/:\d+$/, '');
+      const url = new URL(request.url || '/', `https://${host}`);
+      if(host === serverHost && url.pathname === '/.well-known/teagramd/client') {
+        discoveryRequests.push(url.pathname);
+        response.writeHead(200, {
+          'access-control-allow-origin': '*',
+          'content-type': 'application/json'
+        });
+        response.end(JSON.stringify(discovery));
+        return;
+      }
+      if(host !== APP_HOST && host !== serverHost) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+
+      const upstream = httpRequest({
+        host: 'localhost',
+        port: appPort,
+        method: request.method,
+        path: request.url,
+        headers: {...request.headers, host: `localhost:${appPort}`}
+      }, (upstreamResponse) => {
+        const headers = {...upstreamResponse.headers, 'content-security-policy': edgeCsp};
+        response.writeHead(upstreamResponse.statusCode || 502, headers);
+        upstreamResponse.pipe(response);
+      });
+      upstream.on('error', () => response.destroy());
+      request.pipe(upstream);
+    });
+    tlsSocketTracker = trackTlsServerSockets(tlsServer);
+    webSocketServer = new WebSocketServer({noServer: true});
+    tlsServer.on('upgrade', (request, socket, head) => {
+      tlsSocketTracker!.markUpgrade(socket);
+      if(request.url !== privateEndpoint.pathname) {
+        socket.destroy();
+        return;
+      }
+      webSocketServer!.handleUpgrade(request, socket, head, (client) => {
+        client.on('error', () => {});
+      });
+    });
+
+    await new Promise<void>((resolveListen, reject) => {
+      tlsServer!.once('error', reject);
+      tlsServer!.listen(18443, '127.0.0.1', resolveListen);
+    });
+
+    const cspViolations: string[] = [];
+    page.on('console', (message) => {
+      if(message.type() === 'error' && /violates the following directive|Refused to .* because it violates/i.test(message.text())) {
+        cspViolations.push(message.text());
+      }
+    });
+    await page.goto(appOrigin, {waitUntil: 'domcontentloaded'});
+
+    const picker = page.getByRole('dialog');
+    await expect(picker.getByRole('heading', {name: 'Choose your server'})).toBeVisible();
+    await picker.getByRole('textbox', {name: 'Server host'}).fill(serverHost);
+    await picker.getByRole('button', {name: 'Continue'}).click();
+
+    const confirmation = page.getByRole('dialog');
+    await expect(confirmation.getByText(`Server: ${serverHost}`)).toBeVisible();
+    expect(discoveryRequests).toEqual(['/.well-known/teagramd/client']);
+    await confirmation.getByRole('button', {name: 'Confirm and use this server'}).click();
+
+    const returningPicker = page.getByRole('dialog');
+    await expect(returningPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(serverHost);
+    await returningPicker.getByRole('button', {name: 'Continue'}).click();
+    await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+    expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(serverHost);
+    expect(await page.locator('meta[data-server-policy]').getAttribute('content'))
+    .toBe(`connect-src 'self' https://${serverHost} ${privateEndpoint.href};`);
+    expect(discoveryRequests).toEqual(['/.well-known/teagramd/client', '/.well-known/teagramd/client']);
+    expect(cspViolations).toEqual([]);
+
+    const pinnedPage = await page.context().newPage();
+    const pinnedCspViolations: string[] = [];
+    pinnedPage.on('console', (message) => {
+      if(message.type() === 'error' && /violates the following directive|Refused to .* because it violates/i.test(message.text())) {
+        pinnedCspViolations.push(message.text());
+      }
+    });
+    await pinnedPage.goto(`https://${serverHost}`, {waitUntil: 'domcontentloaded'});
+    await expect(pinnedPage.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+    expect(await pinnedPage.getByRole('dialog').count()).toBe(0);
+    expect(await pinnedPage.locator('meta[data-server-policy]').getAttribute('content'))
+    .toBe(`connect-src 'self' ${privateEndpoint.href};`);
+    expect(pinnedCspViolations).toEqual([]);
+    await pinnedPage.close();
+  } finally {
+    try {
+      if(webSocketServer) {
+        for(const client of webSocketServer.clients) client.terminate();
+        await new Promise<void>((resolveClose, reject) => {
+          webSocketServer!.close((error) => error ? reject(error) : resolveClose());
+        });
+      }
+    } finally {
+      try {
+        if(tlsServer?.listening) await closeTlsServer(tlsServer, tlsSocketTracker);
+      } finally {
+        rmSync(temporaryDirectory, {recursive: true, force: true});
+      }
+    }
+  }
 });
 
 test('isolates two server tabs when a custom server worker takes control', async({page}, testInfo) => {
