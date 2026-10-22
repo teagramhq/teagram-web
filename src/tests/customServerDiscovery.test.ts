@@ -139,7 +139,7 @@ describe('custom server discovery', () => {
     const fetcher = vi.fn(async(_url: string, _options: RequestInit) => new Response(JSON.stringify(document)));
     await fetchServerDiscovery('demo.example', fetcher as any);
     expect(fetcher).toHaveBeenCalledWith(
-      'https://demo.example/.well-known/telegramd/client',
+      'https://demo.example/.well-known/teagramd/client',
       expect.objectContaining({redirect: 'error', credentials: 'omit'})
     );
 

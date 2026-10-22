@@ -209,7 +209,7 @@ export async function fetchServerDiscovery(hostInput: string, fetcher: typeof fe
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DISCOVERY_TIMEOUT_MS);
   try {
-    const response = await fetcher(`https://${host}/.well-known/telegramd/client`, {
+    const response = await fetcher(`https://${host}/.well-known/teagramd/client`, {
       redirect: 'error',
       credentials: 'omit',
       signal: controller.signal,

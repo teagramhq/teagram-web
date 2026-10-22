@@ -479,8 +479,8 @@ test('isolates two server tabs when a custom server worker takes control', async
           fixtureResponses.add(response);
           response.once('close', () => fixtureResponses.delete(response));
           holdTlsResponseOpen(response);
-        } else if(host === SERVER_HOST && url.pathname === '/.well-known/telegramd/client') {
-          void fetch(`${serverHttpUrl}/.well-known/telegramd/client`).then(async(upstreamResponse) => {
+        } else if(host === SERVER_HOST && url.pathname === '/.well-known/teagramd/client') {
+          void fetch(`${serverHttpUrl}/.well-known/teagramd/client`).then(async(upstreamResponse) => {
             const body = await upstreamResponse.text();
             if(!upstreamResponse.ok) throw new Error(`local server discovery returned ${upstreamResponse.status}`);
             const discovery = JSON.parse(body) as {websocket?: {endpoint?: string}};

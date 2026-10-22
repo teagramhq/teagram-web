@@ -177,7 +177,7 @@ jobs:
           ready=0
           for _ in $(seq 1 60); do
             if curl --max-time 2 --silent --show-error \
-              "$TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL/.well-known/telegramd/client" >/dev/null; then
+              "$TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL/.well-known/teagramd/client" >/dev/null; then
               ready=1
               break
             fi
