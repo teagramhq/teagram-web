@@ -194,10 +194,10 @@ jobs:
             .services.web.ports[0].target == 8080 and
             .services.web.ports[0].published == "8080" and
             (.services.web.networks | has("web")) and
-            (.services.web.networks | has("legacy_link_edge")) and
+            (.services.web.networks | has("legacy_link_edge") | not) and
             .networks.web.name == "teagram-web-edge-net" and
-            .networks.legacy_link_edge.name == "telegram-web-edge-net" and
-            .networks.legacy_link_edge.external == true and
+            (.networks | has("legacy_link_edge") | not) and
+            ([.networks[].name] | index("telegram-web-edge-net") | not) and
             (.networks.web.internal // false) == false and
             .volumes.nginx_cache.name == "teagram-web-edge-nginx-cache"
           ' <<<"$edge_config"
@@ -219,20 +219,11 @@ jobs:
           EOF
           compose_files+=(--file "$override_file")
 
-          legacy_network_created=false
           cleanup() {
             docker compose "${compose_files[@]}" down --remove-orphans >/dev/null 2>&1 || true
-            if [[ "$legacy_network_created" == true ]]; then
-              docker network rm telegram-web-edge-net >/dev/null
-            fi
             rm -f "$override_file"
           }
           trap cleanup EXIT
-
-          if ! docker network inspect telegram-web-edge-net >/dev/null 2>&1; then
-            docker network create telegram-web-edge-net >/dev/null
-            legacy_network_created=true
-          fi
 
           runtime_config="$(docker compose "${compose_files[@]}" config --format json)"
           jq -e '
@@ -283,10 +274,9 @@ jobs:
           new_version_content_type="$(curl --fail --silent --show-error \
             --output "$RUNNER_TEMP/teagram-version.txt" --write-out '%{content_type}' \
             http://127.0.0.1:18080/.well-known/teagram-web/version.txt)"
-          legacy_version_content_type="$(curl --fail --silent --show-error \
-            --output "$RUNNER_TEMP/telegram-version.txt" --write-out '%{content_type}' \
+          legacy_version_status="$(curl --silent --show-error \
+            --output /dev/null --write-out '%{http_code}' \
             http://127.0.0.1:18080/.well-known/telegram-web/version.txt)"
           test "$new_version_content_type" = "text/plain"
-          test "$legacy_version_content_type" = "text/plain"
+          test "$legacy_version_status" = "404"
           test -s "$RUNNER_TEMP/teagram-version.txt"
-          cmp --silent "$RUNNER_TEMP/teagram-version.txt" "$RUNNER_TEMP/telegram-version.txt"

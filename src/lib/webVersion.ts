@@ -1,5 +1,4 @@
 export const WEB_VERSION_RESOURCE_PATH = '/.well-known/teagram-web/version.txt';
-export const LEGACY_WEB_VERSION_RESOURCE_PATH = '/.well-known/telegram-web/version.txt';
 
 export async function hasWebVersionUpdate(currentVersion: string, fetcher: typeof fetch = fetch) {
   const response = await fetcher(new URL(WEB_VERSION_RESOURCE_PATH, location.origin), {cache: 'no-cache'});
