@@ -292,6 +292,33 @@ describe('password cards', () => {
     }
   });
 
+  it.each([
+    ['private', mount, markPrivateUsernameLogin] as const,
+    ['standard', mountStandard, () => {}] as const
+  ])('surfaces unexpected recovery popup errors on the %s password card', async(_card, mountCard, setup) => {
+    setup();
+    await mountCard();
+    mocks.requestRecovery.mockRejectedValueOnce({type: 'PASSWORD_RECOVERY_NA'});
+    mocks.showConfirmation.mockRejectedValueOnce(new Error('popup failed'));
+    const onForgotPassword = mocks.anchorCallback.mock.calls[0]?.[0] as (() => void) | undefined;
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    try {
+      onForgotPassword!();
+      await vi.waitFor(() => expect(mocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Error.AnError'}));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(unhandled).toEqual([]);
+
+      onForgotPassword!();
+      await vi.waitFor(() => expect(mocks.requestRecovery).toHaveBeenCalledTimes(2));
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+    }
+  });
+
   it('clears the transient username-flow marker when password card is cancelled', async() => {
     markPrivateUsernameLogin();
     await mount();

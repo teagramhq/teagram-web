@@ -11,7 +11,6 @@ import focusWhenConnected from '@helpers/dom/focusWhenConnected';
 import htmlToSpan from '@helpers/dom/htmlToSpan';
 import replaceContent from '@helpers/dom/replaceContent';
 import mediaSizes from '@helpers/mediaSizes';
-import noop from '@helpers/noop';
 import {AccountPassword} from '@layer';
 import {LangPackKey, i18n} from '@lib/langPack';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
@@ -76,7 +75,7 @@ export default function PasswordCard(_props: {spec: Spec}) {
         navigate({name: 'emailRecover', payload: {email_pattern: res.email_pattern}});
       }).catch(async(err: ApiError) => {
         if(err.type === 'PASSWORD_RECOVERY_NA') {
-          await showPasswordRecoveryUnavailable().catch(noop);
+          await showPasswordRecoveryUnavailable();
           return;
         }
 
