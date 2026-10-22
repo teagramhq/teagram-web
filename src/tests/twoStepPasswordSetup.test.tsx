@@ -62,15 +62,16 @@ vi.mock('@components/inputFieldTsx', () => ({
   InputFieldTsx: (props: any) => {
     const field = {
       value: '',
-      input: {
-        addEventListener: vi.fn(),
-        classList: {remove: vi.fn()}
-      }
+      input: undefined as unknown as HTMLInputElement
     };
     mocks.inputField = field;
     props.instanceRef(field);
 
-    return <input aria-label="Password hint" onInput={(event) => field.value = event.currentTarget.value}/>;
+    return <input
+      aria-label="Password hint"
+      ref={(element) => field.input = element}
+      onInput={(event) => field.value = event.currentTarget.value}
+    />;
   }
 }));
 vi.mock('@components/popups', () => ({
@@ -176,6 +177,27 @@ describe('two-step password settings', () => {
     });
     expect(mocks.updateSettings.mock.calls[0][0]).not.toHaveProperty('email');
     expect(mocks.createTab).toHaveBeenCalledWith(AppTwoStepVerificationSetTab);
+  });
+
+  it('ignores repeated Enter while the password update is pending', async() => {
+    let resolveUpdate!: () => void;
+    mocks.updateSettings.mockReturnValue(new Promise<void>((resolve) => {
+      resolveUpdate = resolve;
+    }));
+
+    const container = mountHint({newPassword: 'new-password'});
+    const input = container.querySelector('input') as HTMLInputElement;
+    input.value = 'tea hint';
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    input.dispatchEvent(new KeyboardEvent('keypress', {key: 'Enter', bubbles: true}));
+    input.dispatchEvent(new KeyboardEvent('keypress', {key: 'Enter', bubbles: true}));
+
+    expect(mocks.updateSettings).toHaveBeenCalledOnce();
+    expect(mocks.createTab).not.toHaveBeenCalled();
+
+    resolveUpdate();
+    await vi.waitFor(() => expect(mocks.createTab).toHaveBeenCalledOnce());
+    expect(mocks.openTab).toHaveBeenCalledWith({messageFor: 'password'});
   });
 
   it('keeps password change and removal while hiding recovery-email settings', async() => {

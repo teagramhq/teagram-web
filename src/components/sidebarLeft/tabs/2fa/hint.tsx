@@ -27,6 +27,7 @@ const TwoStepVerificationHint: Component = () => {
 
   let btnContinue!: HTMLButtonElement;
   let btnSkip!: HTMLButtonElement;
+  let isSavingPassword = false;
 
   const toggleButtons = (freeze: boolean) => {
     if(freeze) {
@@ -43,12 +44,15 @@ const TwoStepVerificationHint: Component = () => {
       cancelEvent(e);
     }
 
+    if(isSavingPassword) return;
+
     const hint = saveHint ? inputField.value : undefined;
     if(hint && newPassword === hint) {
       toastNew({langPackKey: 'PasswordAsHintError'});
       return;
     }
 
+    isSavingPassword = true;
     toggleButtons(true);
     const preloader = putPreloader(saveHint ? btnContinue : btnSkip);
 
@@ -59,6 +63,7 @@ const TwoStepVerificationHint: Component = () => {
     }).then(() => {
       tab.slider.createTab(AppTwoStepVerificationSetTab).open({messageFor: 'password'});
     }, () => {
+      isSavingPassword = false;
       toggleButtons(false);
       preloader.remove();
       toastNew({langPackKey: 'Error.AnError'});
