@@ -7,6 +7,10 @@ the repository root and from `/opt/teagram`. Its explicit
 `teagram-web-edge-nginx-cache` volume names keep a root-directory Compose
 invocation from selecting this stack by basename.
 
+The web container remains attached to the external `telegram-web-edge-net`
+network during the browser sign-in regression check. Remove this compatibility
+attachment only after the credentialed browser probe passes without it.
+
 The target checkout is `/opt/telegram-web`. Run the commands below from this
 directory:
 
