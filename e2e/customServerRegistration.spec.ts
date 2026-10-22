@@ -21,39 +21,44 @@ test('registers on a second server after a failed host selection', async({page},
   });
 
   await page.context().route('**/*', async(route) => {
-    const url = new URL(route.request().url());
-    if(url.origin === appOriginString && url.pathname === '/private-worker-fixture.js') {
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/javascript',
-        body: 'import {captured} from "./private-worker-context.js";postMessage(captured);'
-      });
-    } else if(url.origin === appOriginString && url.pathname === '/private-worker-context.js') {
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/javascript',
-        body: 'import {getActiveServerId,readWorkerMtprotoTarget,scopeServerDatabaseName} from "/src/config/serverContext.ts";export const captured={serverId:getActiveServerId(),commonDatabase:scopeServerDatabaseName("tweb-common"),target:readWorkerMtprotoTarget()};'
-      });
-    } else if(url.origin === appOriginString) {
-      url.protocol = 'http:';
-      url.hostname = 'localhost';
-      const response = await route.fetch({url: url.toString()});
-      if(url.pathname === '/') {
-        const headers = await response.headers();
-        headers['content-security-policy'] = "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:";
-        await route.fulfill({response, headers});
+    try {
+      const url = new URL(route.request().url());
+      if(url.origin === appOriginString && url.pathname === '/private-worker-fixture.js') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/javascript',
+          body: 'import {captured} from "./private-worker-context.js";postMessage(captured);'
+        });
+      } else if(url.origin === appOriginString && url.pathname === '/private-worker-context.js') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'text/javascript',
+          body: 'import {getActiveServerId,readWorkerMtprotoTarget,scopeServerDatabaseName} from "/src/config/serverContext.ts";export const captured={serverId:getActiveServerId(),commonDatabase:scopeServerDatabaseName("tweb-common"),target:readWorkerMtprotoTarget()};'
+        });
+      } else if(url.origin === appOriginString) {
+        url.protocol = 'http:';
+        url.hostname = 'localhost';
+        const response = await route.fetch({url: url.toString(), maxRetries: 1});
+        if(url.pathname === '/') {
+          const headers = await response.headers();
+          headers['content-security-policy'] = "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:";
+          await route.fulfill({response, headers});
+        } else {
+          await route.fulfill({response});
+        }
+      } else if(url.hostname === SERVER_HOST && url.pathname === '/.well-known/teagramd/client') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          headers: {'Access-Control-Allow-Origin': '*'},
+          body: discovery
+        });
       } else {
-        await route.fulfill({response});
+        await route.abort();
       }
-    } else if(url.hostname === SERVER_HOST && url.pathname === '/.well-known/telegramd/client') {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        headers: {'Access-Control-Allow-Origin': '*'},
-        body: discovery
-      });
-    } else {
-      await route.abort();
+    } catch(error) {
+      if(error instanceof Error && /Test ended|disposed/i.test(error.message)) return;
+      throw error;
     }
   });
   await page.context().routeWebSocket(/.*/, (socket) => {
@@ -248,5 +253,5 @@ test('registers on a second server after a failed host selection', async({page},
   expect(await page.evaluate(() => localStorage.getItem('teagram.active-server-id.v1'))).toBeNull();
   expect(await page.evaluate((id) => localStorage.getItem(`teagram-${id}:dc2_auth_key`), activeId)).toBeNull();
   await expect(page.getByRole('dialog').getByRole('textbox', {name: 'Server host'})).toHaveValue('demo.teagram.io');
-  await page.unrouteAll({behavior: 'wait'});
+  await page.context().unrouteAll({behavior: 'ignoreErrors'});
 });

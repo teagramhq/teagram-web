@@ -40,7 +40,7 @@ async function setupGuestServer(page: Page, testInfo: TestInfo, guestSignUp: boo
         } else {
           await route.fulfill({response});
         }
-      } else if(url.hostname === SERVER_HOST && url.pathname === '/.well-known/telegramd/client') {
+      } else if(url.hostname === SERVER_HOST && url.pathname === '/.well-known/teagramd/client') {
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
