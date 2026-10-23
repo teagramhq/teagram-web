@@ -349,7 +349,9 @@ export class AppReactionsManager extends AppManager {
     });
   }
 
-  private unshiftQuickReactionInner(peerAvailableReactions: PeerAvailableReactions, quickReaction: Reaction | AvailableReaction) {
+  private unshiftQuickReactionInner(peerAvailableReactions: PeerAvailableReactions, quickReaction?: Reaction | AvailableReaction) {
+    if(!quickReaction) return peerAvailableReactions;
+
     if(quickReaction._ === 'availableReaction') {
       quickReaction = availableReactionToReaction(quickReaction);
     }

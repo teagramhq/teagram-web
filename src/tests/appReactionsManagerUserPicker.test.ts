@@ -37,4 +37,23 @@ describe('AppReactionsManager private chat reactions', () => {
       reactions: [topReaction]
     });
   });
+
+  it('keeps the available reactions when there is no configured quick reaction', () => {
+    const availableReaction = {
+      _: 'availableReaction',
+      reaction: '👍',
+      title: 'Thumbs Up',
+      pFlags: {}
+    } as AvailableReaction;
+    const manager = Object.assign(Object.create(AppReactionsManager.prototype), {
+      getActiveAvailableReactions: (): AvailableReaction[] => [availableReaction],
+      getTopReactions: (): Reaction[] => [],
+      getQuickReaction: (): undefined => undefined
+    }) as AppReactionsManager;
+
+    expect(manager.getAvailableReactionsForPeer(userPeerId, true)).toEqual({
+      type: 'chatReactionsAll',
+      reactions: [{_: 'reactionEmoji', emoticon: '👍'}]
+    });
+  });
 });
