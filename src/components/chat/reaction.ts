@@ -1269,7 +1269,7 @@ export default class ReactionElement extends HTMLElement {
           deferred.resolve();
           // return;
           // if(!isInDOM(div)) return;
-          if(iconPlayer && iconPlayer !== aroundPlayer) {
+          if(iconPlayer && (iconPlayer !== aroundPlayer || assetName)) {
             iconPlayer.remove();
           }
           flightSourcePlayer?.remove();

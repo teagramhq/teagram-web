@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => {
     FakeLottiePlayer,
     getReaction: vi.fn(),
     getCacheContext: vi.fn(),
+    loadAnimationAsAsset: vi.fn(),
     wrapSticker: vi.fn(),
     wrapStickerAnimation: vi.fn()
   };
@@ -52,7 +53,7 @@ vi.mock('@lib/apiManagerProxy', () => ({
 vi.mock('@lib/liteMode', () => ({default: {isAvailable: () => true}}));
 vi.mock('@helpers/liteMode', () => ({default: {isAvailable: () => true}}));
 vi.mock('@environment/webpSupport', () => ({default: true}));
-vi.mock('@lib/lottie/lottieLoader', () => ({default: {}}));
+vi.mock('@lib/lottie/lottieLoader', () => ({default: {loadAnimationAsAsset: mocks.loadAnimationAsAsset}}));
 vi.mock('@lib/lottie/lottiePlayer', () => ({default: mocks.FakeLottiePlayer}));
 vi.mock('@lib/appDownloadManager', () => ({default: {downloadMediaURL: vi.fn()}}));
 vi.mock('@lib/customEmoji/element', () => ({default: {create: vi.fn()}}));
@@ -155,5 +156,40 @@ describe('reaction animation cleanup', () => {
 
     expect(callbackError).not.toHaveBeenCalled();
     expect(image.isConnected).toBe(false);
+  });
+
+  it('removes the paid reaction asset player when its overlay is destroyed', async() => {
+    const aroundPlayer = new mocks.FakeLottiePlayer();
+    const removePlayer = vi.spyOn(aroundPlayer, 'remove');
+    let overlay: HTMLElement | undefined;
+    mocks.loadAnimationAsAsset.mockImplementation(({container}: {container: HTMLElement}) => {
+      overlay = container;
+      return Promise.resolve(aroundPlayer);
+    });
+
+    const middlewareCallbacks: (() => void)[] = [];
+    const middleware = {onDestroy: (callback: () => void) => middlewareCallbacks.push(callback)} as any;
+    const cache = {} as any;
+    const container = document.createElement('div');
+
+    ReactionElement.fireAroundAnimation({
+      cache,
+      reaction: {_: 'reactionPaid'},
+      managers: {} as any,
+      middleware,
+      stickerContainer: container,
+      sizes: {genericEffect: 100, genericEffectSize: 100, size: 40, effectSize: 80}
+    });
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(mocks.loadAnimationAsAsset).toHaveBeenCalledOnce();
+    expect(middlewareCallbacks).toHaveLength(2);
+    expect(overlay).toBeDefined();
+    expect(container.contains(overlay!)).toBe(true);
+
+    middlewareCallbacks.forEach((callback) => callback());
+
+    expect(removePlayer).toHaveBeenCalledOnce();
+    expect(container.contains(overlay!)).toBe(false);
   });
 });
