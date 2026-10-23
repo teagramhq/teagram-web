@@ -804,7 +804,8 @@ export default class ReactionElement extends HTMLElement {
     if(reaction._ === 'reactionEmoji') {
       const availableReaction = apiManagerProxy.getReaction(reaction.emoticon);
       return callbackify(availableReaction, (availableReaction) => {
-        if(!availableReaction.center_icon) {
+        const doc = availableReaction.center_icon ?? availableReaction.static_icon;
+        if(!availableReaction.center_icon || doc.mime_type.startsWith('image/')) {
           this.stickerContainer.classList.add('is-static');
         } else {
           this.stickerContainer.classList.add('is-regular');
@@ -814,7 +815,6 @@ export default class ReactionElement extends HTMLElement {
           this.classList.add('is-inactive');
         }
 
-        const doc = availableReaction.center_icon ?? availableReaction.static_icon;
         this.renderDoc(doc);
 
         // customEmojiElement.static = true;

@@ -237,6 +237,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Run reaction artwork browser regression
+        run: pnpm run test:reaction-artwork
+
   deployment-workflow:
     name: Deployment workflow contract and actionlint
     runs-on: ubuntu-26.04
