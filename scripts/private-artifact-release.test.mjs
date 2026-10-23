@@ -1375,8 +1375,11 @@ describe('private artifact publication attestation', () => {
     const directory = mkdtempSync(join(tmpdir(), 'private-artifact-csp-duplicate-'));
     temporaryDirectories.push(directory);
     const endpoint = 'wss://private.example.test:2443/apiws';
-    const otherPolicy = privateContentSecurityPolicy('wss://other.example.test:2443/apiws');
     const expectedPolicy = privateContentSecurityPolicy(endpoint);
+    const otherPolicy = expectedPolicy.replace(
+      "connect-src 'self' https: wss:",
+      "connect-src 'self' https:"
+    );
     writeFileSync(join(directory, 'index.html'), [
       '<!doctype html><html><head>',
       `<meta http-equiv="Content-Security-Policy" content="${otherPolicy}" content="${expectedPolicy}">`,
