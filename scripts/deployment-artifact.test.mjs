@@ -86,17 +86,24 @@ describe('deployment artifact verification', () => {
     expect(nginx).toContain("frame-src 'self' https://challenges.cloudflare.com;");
   });
 
-  it('retains the legacy network during the browser sign-in regression check', () => {
+  it('attaches Web only to the teagram edge network', () => {
     const compose = readFileSync(resolve('deploy/teagram-web/compose.yaml'), 'utf8');
 
     expect(compose).toMatch(/^name: teagram-web-edge$/m);
     expect(compose).toMatch(/^    image: teagram-web:local$/m);
     expect(compose).toMatch(/^    name: teagram-web-edge-nginx-cache$/m);
     expect(compose).toMatch(/^    name: teagram-web-edge-net$/m);
-    expect(compose).toMatch(/^      - legacy_link_edge$/m);
-    expect(compose).toMatch(/^  legacy_link_edge:$/m);
-    expect(compose).toMatch(/^    external: true$/m);
-    expect(compose).toMatch(/^    name: telegram-web-edge-net$/m);
+    expect(compose).toMatch(/^      - web$/m);
+    expect(compose).not.toContain('legacy_link_edge');
+    expect(compose).not.toContain('telegram-web-edge-net');
+  });
+
+  it('checks the current and retired version paths after deployment', () => {
+    const deploy = readFileSync(resolve('deploy/teagram-web/deploy-main.sh'), 'utf8');
+
+    expect(deploy).toContain('/.well-known/teagram-web/version.txt');
+    expect(deploy).toContain('/.well-known/telegram-web/version.txt');
+    expect(deploy).toContain('if [[ "$legacy_version_status" != 404 ]]; then');
   });
 
   it('returns 404 for missing well-known resources instead of the SPA fallback', () => {
