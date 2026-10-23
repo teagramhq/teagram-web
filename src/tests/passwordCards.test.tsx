@@ -242,24 +242,81 @@ describe('password cards', () => {
     expect(mocks.setUser).toHaveBeenCalledWith({_: 'user', id: 42});
   });
 
-  it('does not log a raw account reset failure from the private password flow', async() => {
-    markPrivateUsernameLogin();
-    await mount();
+  it.each([
+    ['private', mount, markPrivateUsernameLogin] as const,
+    ['standard', mountStandard, () => {}] as const
+  ])('explains unavailable recovery on the %s password card without resetting the account', async(_card, mountCard, setup) => {
+    setup();
+    await mountCard();
     mocks.requestRecovery.mockRejectedValue({type: 'PASSWORD_RECOVERY_NA'});
-    const resetError = {type: 'ACCOUNT_RESET_FAILED', code: 500, phone_number: 'Alice_123'};
-    mocks.deleteAccount.mockRejectedValue(resetError);
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     const onForgotPassword = mocks.anchorCallback.mock.calls[0]?.[0] as (() => void) | undefined;
 
     expect(onForgotPassword).toBeTypeOf('function');
     onForgotPassword!();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => expect(mocks.showConfirmation).toHaveBeenCalledOnce());
 
-    expect(mocks.deleteAccount).toHaveBeenCalledWith('Forgot password');
-    expect(JSON.stringify(consoleError.mock.calls)).not.toContain('Alice_123');
-    expect(consoleError.mock.calls.flat()).not.toContain(resetError);
-    expect(mocks.toastNew).toHaveBeenCalledOnce();
-    consoleError.mockRestore();
+    expect(mocks.showConfirmation).toHaveBeenCalledWith({
+      titleLangKey: 'Teagram.PasswordRecovery.Title',
+      descriptionLangKey: 'Teagram.PasswordRecovery.Unavailable',
+      button: {langKey: 'OK', isCancel: true}
+    });
+    expect(mocks.deleteAccount).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    expect(mocks.toastNew).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['private', mount, markPrivateUsernameLogin] as const,
+    ['standard', mountStandard, () => {}] as const
+  ])('handles dismissing unavailable recovery on the %s password card', async(_card, mountCard, setup) => {
+    setup();
+    await mountCard();
+    mocks.requestRecovery.mockRejectedValueOnce({type: 'PASSWORD_RECOVERY_NA'});
+    mocks.showConfirmation.mockRejectedValueOnce(undefined);
+    const onForgotPassword = mocks.anchorCallback.mock.calls[0]?.[0] as (() => void) | undefined;
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    try {
+      onForgotPassword!();
+      await vi.waitFor(() => expect(mocks.showConfirmation).toHaveBeenCalledOnce());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(unhandled).toEqual([]);
+
+      onForgotPassword!();
+      await vi.waitFor(() => expect(mocks.requestRecovery).toHaveBeenCalledTimes(2));
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+    }
+  });
+
+  it.each([
+    ['private', mount, markPrivateUsernameLogin] as const,
+    ['standard', mountStandard, () => {}] as const
+  ])('surfaces unexpected recovery popup errors on the %s password card', async(_card, mountCard, setup) => {
+    setup();
+    await mountCard();
+    mocks.requestRecovery.mockRejectedValueOnce({type: 'PASSWORD_RECOVERY_NA'});
+    mocks.showConfirmation.mockRejectedValueOnce(new Error('popup failed'));
+    const onForgotPassword = mocks.anchorCallback.mock.calls[0]?.[0] as (() => void) | undefined;
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    try {
+      onForgotPassword!();
+      await vi.waitFor(() => expect(mocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Error.AnError'}));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(unhandled).toEqual([]);
+
+      onForgotPassword!();
+      await vi.waitFor(() => expect(mocks.requestRecovery).toHaveBeenCalledTimes(2));
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+    }
   });
 
   it('clears the transient username-flow marker when password card is cancelled', async() => {

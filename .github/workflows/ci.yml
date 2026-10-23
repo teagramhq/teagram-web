@@ -20,7 +20,7 @@ permissions:
 jobs:
   checks:
     name: Build, typecheck, lint and test
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     services:
@@ -245,6 +245,9 @@ jobs:
           path: ${{ steps.diagnostics.outputs.artifact_path }}
           if-no-files-found: error
           retention-days: 7
+
+      - name: Run reaction artwork browser regression
+        run: pnpm run test:reaction-artwork
 
   deployment-workflow:
     name: Deployment workflow contract and actionlint

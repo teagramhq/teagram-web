@@ -23,6 +23,7 @@
     "test:private-auth": "playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameSignInTurnstile.spec.ts e2e/privateUsernameRegistration.spec.ts e2e/guestSignup.spec.ts e2e/customServerRegistration.spec.ts e2e/customServerLocalSignIn.spec.ts && pnpm run test:standard-auth",
     "test:standard-auth": "playwright test -c playwright.standard-auth.config.ts e2e/standardSignupTurnstile.spec.ts e2e/standardPasswordTurnstile.spec.ts",
     "test:popups": "playwright test e2e/popupSandbox.spec.ts",
+    "test:reaction-artwork": "playwright test e2e/reactionArtwork.spec.ts",
     "whybundled": "pnpm run profile && whybundled stats.json",
     "generate-mtproto-types": "node ./src/scripts/generate_mtproto_types.js src/",
     "generate-changelog": "node ./src/scripts/generate_changelog.js",

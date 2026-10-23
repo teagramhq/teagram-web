@@ -2,7 +2,8 @@ import {Component, onMount} from 'solid-js';
 import Button from '@components/buttonTsx';
 import InputField from '@components/inputField';
 import {InputFieldTsx} from '@components/inputFieldTsx';
-import {AppTwoStepVerificationEmailTab} from '@components/solidJsTabs/tabs';
+import {putPreloader} from '@components/putPreloader';
+import {AppTwoStepVerificationSetTab} from '@components/solidJsTabs/tabs';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import wrapStickerEmoji from '@components/wrappers/stickerEmoji';
 import Section from '@components/section';
@@ -12,7 +13,7 @@ import type {AppTwoStepVerificationHintTab} from '@components/solidJsTabs/tabs';
 
 const TwoStepVerificationHint: Component = () => {
   const [tab] = useSuperTab<typeof AppTwoStepVerificationHintTab>();
-  const {state, plainPassword, newPassword} = tab.payload;
+  const {plainPassword, newPassword} = tab.payload;
 
   let inputField!: InputField;
 
@@ -24,10 +25,26 @@ const TwoStepVerificationHint: Component = () => {
     emoji: '💡'
   });
 
-  const goNext = (e?: Event, saveHint?: boolean) => {
+  let btnContinue!: HTMLButtonElement;
+  let btnSkip!: HTMLButtonElement;
+  let isSavingPassword = false;
+
+  const toggleButtons = (freeze: boolean) => {
+    if(freeze) {
+      btnContinue.setAttribute('disabled', 'true');
+      btnSkip.setAttribute('disabled', 'true');
+    } else {
+      btnContinue.removeAttribute('disabled');
+      btnSkip.removeAttribute('disabled');
+    }
+  };
+
+  const savePassword = (e?: Event, saveHint?: boolean) => {
     if(e) {
       cancelEvent(e);
     }
+
+    if(isSavingPassword) return;
 
     const hint = saveHint ? inputField.value : undefined;
     if(hint && newPassword === hint) {
@@ -35,17 +52,26 @@ const TwoStepVerificationHint: Component = () => {
       return;
     }
 
-    tab.slider.createTab(AppTwoStepVerificationEmailTab).open({
-      state,
-      plainPassword,
-      newPassword,
+    isSavingPassword = true;
+    toggleButtons(true);
+    const preloader = putPreloader(saveHint ? btnContinue : btnSkip);
+
+    tab.managers.passwordManager.updateSettings({
       hint,
-      justSetPasssword: true
+      currentPassword: plainPassword,
+      newPassword
+    }).then(() => {
+      tab.slider.createTab(AppTwoStepVerificationSetTab).open({messageFor: 'password'});
+    }, () => {
+      isSavingPassword = false;
+      toggleButtons(false);
+      preloader.remove();
+      toastNew({langPackKey: 'Error.AnError'});
     });
   };
 
-  const onContinueClick = (e?: Event) => goNext(e, true);
-  const onSkipClick = (e?: Event) => goNext(e, false);
+  const onContinueClick = (e?: Event) => savePassword(e, true);
+  const onSkipClick = (e?: Event) => savePassword(e, false);
 
   onMount(() => {
     tab.container.classList.add('two-step-verification', 'two-step-verification-hint');
@@ -71,10 +97,11 @@ const TwoStepVerificationHint: Component = () => {
           label="TwoStepAuth.SetupHintPlaceholder"
           instanceRef={(ref) => inputField = ref}
         />
-        <Button primaryFilled text="Continue" onClick={onContinueClick} />
+        <Button ref={btnContinue} primaryFilled text="Continue" onClick={onContinueClick} />
         <Button
+          ref={btnSkip}
           class="btn-primary btn-secondary btn-primary-transparent primary"
-          text="YourEmailSkip"
+          text="Teagram.TwoStep.SkipHint"
           onClick={onSkipClick}
         />
       </div>

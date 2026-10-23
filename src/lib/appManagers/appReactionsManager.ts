@@ -213,10 +213,14 @@ export class AppReactionsManager extends AppManager {
     const quickReaction = this.getQuickReaction();
     if(peerId.isUser()) {
       return callbackifyAll([
+        activeAvailableReactions,
         topReactions,
         quickReaction
-      ], ([topReactions, quickReaction]) => {
-        const p: PeerAvailableReactions = {type: 'chatReactionsAll', reactions: topReactions};
+      ], ([activeAvailableReactions, topReactions, quickReaction]) => {
+        const p: PeerAvailableReactions = {
+          type: 'chatReactionsAll',
+          reactions: topReactions.length ? topReactions : activeAvailableReactions.map(availableReactionToReaction)
+        };
         if(unshiftQuickReaction) {
           this.unshiftQuickReactionInner(p, quickReaction);
         }
@@ -345,7 +349,9 @@ export class AppReactionsManager extends AppManager {
     });
   }
 
-  private unshiftQuickReactionInner(peerAvailableReactions: PeerAvailableReactions, quickReaction: Reaction | AvailableReaction) {
+  private unshiftQuickReactionInner(peerAvailableReactions: PeerAvailableReactions, quickReaction?: Reaction | AvailableReaction) {
+    if(!quickReaction) return peerAvailableReactions;
+
     if(quickReaction._ === 'availableReaction') {
       quickReaction = availableReactionToReaction(quickReaction);
     }
