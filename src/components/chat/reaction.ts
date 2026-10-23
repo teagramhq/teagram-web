@@ -1245,7 +1245,7 @@ export default class ReactionElement extends HTMLElement {
         // This player's consumer grabs contexts[0], re-parents canvas[0] and
         // installs overrideRender after load.
         noOffscreen: true
-      }).then(({render}) => render as Promise<LottiePlayer>);
+      }).then(({render}) => render);
 
       return Promise.all([
         genericEffect ?
@@ -1257,9 +1257,10 @@ export default class ReactionElement extends HTMLElement {
         genericEffect && loadReactionGeneric(),
 
         options.waitPromise
-      ]).then(([iconPlayer, aroundPlayer, reactionGeneric, _]) => {
+      ]).then(([iconResult, aroundPlayer, reactionGeneric, _]) => {
+        let iconPlayer = iconResult instanceof LottiePlayer ? iconResult : undefined;
         if(onlyAround) {
-          iconPlayer = aroundPlayer;
+          iconPlayer = aroundPlayer as LottiePlayer;
         }
 
         let flightSourcePlayer: LottiePlayer;
@@ -1268,18 +1269,24 @@ export default class ReactionElement extends HTMLElement {
           deferred.resolve();
           // return;
           // if(!isInDOM(div)) return;
-          iconPlayer?.remove();
+          if(iconPlayer && iconPlayer !== aroundPlayer) {
+            iconPlayer.remove();
+          }
           flightSourcePlayer?.remove();
           div?.remove();
           options.stickerContainer.classList.remove('has-animation');
         };
 
-        if(!iconPlayer || !aroundPlayer) {
+        if((!iconResult && !onlyAround) || !aroundPlayer) {
           remove();
           return deferred;
         }
 
         if(genericEffect) {
+          if(!iconPlayer) {
+            remove();
+            return deferred;
+          }
           const canvas = iconPlayer.canvas[0];
           canvas.classList.add('hide');
           const context = iconPlayer.contexts[0];
@@ -1443,19 +1450,22 @@ export default class ReactionElement extends HTMLElement {
 
         options.middleware.onDestroy(removeOnFrame);
 
-        !genericEffect && iconPlayer.addEventListener('enterFrame', (frameNo) => {
-          if(frameNo === iconPlayer.maxFrame) {
-            if(options.cache.wrapStickerPromise) { // wait for fade in animation
-              options.cache.wrapStickerPromise.then(() => {
-                setTimeout(removeOnFrame, 1e3);
-              });
-            } else {
-              removeOnFrame();
+        if(!genericEffect) {
+          const animationPlayer = iconPlayer || aroundPlayer as LottiePlayer;
+          animationPlayer.addEventListener('enterFrame', (frameNo) => {
+            if(frameNo === animationPlayer.maxFrame) {
+              if(options.cache.wrapStickerPromise) { // wait for fade in animation
+                options.cache.wrapStickerPromise.then(() => {
+                  setTimeout(removeOnFrame, 1e3);
+                });
+              } else {
+                removeOnFrame();
+              }
             }
-          }
-        });
+          });
+        }
 
-        iconPlayer.onFirstFrame(() => {
+        const startAnimation = () => {
           // * has-animation hides the sticker (.media-sticker opacity: 0)
           // * while the activate overlay replaces it - the generic effect has
           // * no overlay, the sticker must stay visible under the flight
@@ -1464,9 +1474,10 @@ export default class ReactionElement extends HTMLElement {
             options.stickerContainer.classList.add('has-animation');
           }
 
-          iconPlayer.play();
+          iconPlayer?.play();
           aroundPlayer.play();
-        });
+        };
+        (iconPlayer || aroundPlayer as LottiePlayer).onFirstFrame(startAnimation);
 
         return deferred;
       });

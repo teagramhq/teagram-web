@@ -2707,6 +2707,46 @@ async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle)
   }
 }
 
+async function waitForMessageReaction(page, messageText, expectedCount, expectedChosen, stage) {
+  setPageScenarioStep(page, stage);
+  await page.waitForFunction(({messageText, expectedCount, expectedChosen}) => {
+    const messages = [...document.querySelectorAll('#column-center .bubble .message')]
+    .filter((message) => (message.textContent || '').trim() === messageText);
+    if(messages.length !== 1) return false;
+
+    const bubble = messages[0].closest('.bubble');
+    const thumbsUp = [...bubble.querySelectorAll('reaction-element')].find((reaction) => {
+      return reaction.reactionCount?.reaction?._ === 'reactionEmoji' &&
+        reaction.reactionCount.reaction.emoticon === '👍';
+    });
+    if(expectedCount === 0) return !thumbsUp;
+    return thumbsUp?.reactionCount.count === expectedCount && thumbsUp.classList.contains('is-chosen') === expectedChosen;
+  }, {messageText, expectedCount, expectedChosen}, {timeout: 30_000}).catch(() => failStage(`${stage}_state`));
+}
+
+async function toggleMessageReaction(page, otherPage, messageText, stage, expectedCount) {
+  const pageErrors = [page, otherPage].map((targetPage) => clientErrorCounts.get(targetPage)?.consoleErrors ?? 0);
+  setPageScenarioStep(page, `${stage}_message`);
+  const message = page.locator('#column-center .bubble .message').filter({hasText: messageText});
+  const messageCount = await message.count();
+  if(messageCount !== 1) failStage(`${stage}_message_count`);
+  await message.click({button: 'right'}).catch(() => failStage(`${stage}_context_menu`));
+
+  setPageScenarioStep(page, `${stage}_picker`);
+  const reactionButton = page.locator('#bubble-contextmenu .btn-menu-reactions-reaction').first();
+  await reactionButton.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_picker_visible`));
+  await reactionButton.click().catch(() => failStage(`${stage}_picker_click`));
+
+  await waitForMessageReaction(page, messageText, expectedCount, expectedCount > 0, `${stage}_sender`);
+  await waitForMessageReaction(otherPage, messageText, expectedCount, false, `${stage}_receiver`);
+  // Let the reaction effect finish so static reaction artwork also exercises its cleanup path.
+  await page.waitForTimeout(2_000);
+  const pages = [page, otherPage];
+  if(pages.some((targetPage, index) => (clientErrorCounts.get(targetPage)?.consoleErrors ?? 0) !== pageErrors[index])) {
+    failStage(`${stage}_console_errors`);
+  }
+}
+
 async function sendChannelText(page, channelName, screenshotDirectory, capturedScreenshots, timeoutMs = 30_000) {
   const activeChannel = resolveActiveGroupChat(page, channelName);
   setPageScenarioStep(page, 'alice_channel_post_chat');
@@ -6208,6 +6248,8 @@ async function main(dependencies = {}) {
     const directMessageFailure = await getSingleExactMessageTextFailure(bobDirectMessages, MESSAGE);
     if(directMessageFailure) failStage(`bob_direct_message_${directMessageFailure}`);
     await captureState(bob.page, runtime.screenshotDirectory, 'bob-direct-message', capturedScreenshots);
+    await toggleMessageReaction(bob.page, alice.page, MESSAGE, 'bob_direct_reaction_set', 1);
+    await toggleMessageReaction(bob.page, alice.page, MESSAGE, 'bob_direct_reaction_clear', 0);
     report.push({name: 'message', status: 'passed'});
 
     currentScenario = 'group';
@@ -6248,6 +6290,8 @@ async function main(dependencies = {}) {
     await waitForGroupMessageCount(bob.page, bobActiveGroup.chat, bobActiveGroup.title, bobGroupMessage, 'bob_group_message_count');
     currentStage = 'bob_group_message';
     await captureState(bob.page, runtime.screenshotDirectory, 'bob-group-message', capturedScreenshots);
+    await toggleMessageReaction(bob.page, alice.page, GROUP_MESSAGE, 'bob_group_reaction_set', 1);
+    await toggleMessageReaction(bob.page, alice.page, GROUP_MESSAGE, 'bob_group_reaction_clear', 0);
 
     await openBobGroupMembers(bob.page, bobGroupHeader, groupName, selectedBobPeerId, runtime.screenshotDirectory, capturedScreenshots);
     report.push({name: 'group', status: 'passed'});
