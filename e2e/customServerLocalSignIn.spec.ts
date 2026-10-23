@@ -6,7 +6,7 @@ import {join, resolve} from 'node:path';
 import {request as httpRequest, type IncomingMessage, type ServerResponse} from 'node:http';
 import type {Duplex} from 'node:stream';
 import {createServer, request as httpsRequest} from 'node:https';
-import {expect, test, type Page} from '@playwright/test';
+import {expect, test, type Page, type TestInfo} from '@playwright/test';
 import {WebSocket, WebSocketServer} from 'ws';
 import {createPhaseTracker, type PhaseDiagnostic} from './customServerPhaseTracker';
 
@@ -130,6 +130,54 @@ function createTlsFixtureCredentials(directory: string, hostnames: string[]) {
     '-addext', `subjectAltName=${hostnames.map((hostname) => `DNS:${hostname}`).join(',')}`
   ]);
   return {privateKeyPath, certificatePath};
+}
+
+async function withPrivateArtifactWebSocketFixture<T>(
+  endpoint: URL,
+  action: (fixture: {unrelatedRequests: string[], unrelatedUrl: string}) => Promise<T>
+) {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-private-artifact-websocket-'));
+  const credentials = createTlsFixtureCredentials(temporaryDirectory, [endpoint.hostname]);
+  const server = createServer({
+    key: readFileSync(credentials.privateKeyPath),
+    cert: readFileSync(credentials.certificatePath)
+  });
+  const socketTracker = trackTlsServerSockets(server);
+  const webSocketServer = new WebSocketServer({noServer: true});
+  const unrelatedRequests: string[] = [];
+  server.on('upgrade', (request, socket, head) => {
+    socketTracker.markUpgrade(socket);
+    const pathname = new URL(request.url || '/', `https://${endpoint.host}`).pathname;
+    if(pathname === '/unrelated') unrelatedRequests.push(request.url || '');
+    if(pathname !== endpoint.pathname && pathname !== '/unrelated') {
+      socket.destroy();
+      return;
+    }
+    webSocketServer.handleUpgrade(request, socket, head, (client) => {
+      client.on('error', () => {});
+    });
+  });
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(Number(endpoint.port), '127.0.0.1', resolve);
+    });
+    return await action({unrelatedRequests, unrelatedUrl: `${endpoint.origin}/unrelated`});
+  } finally {
+    try {
+      for(const client of webSocketServer.clients) client.terminate();
+      await new Promise<void>((resolve, reject) => {
+        webSocketServer.close((error) => error ? reject(error) : resolve());
+      });
+    } finally {
+      try {
+        if(server.listening) await closeTlsServer(server, socketTracker);
+      } finally {
+        rmSync(temporaryDirectory, {recursive: true, force: true});
+      }
+    }
+  }
 }
 
 function streamingDocument(id: string) {
@@ -517,6 +565,182 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     }
   }
 });
+
+async function expectUnrelatedConnectionsBlocked(page: Page, httpsRequests: string[], webSocketRequests: string[], webSocketUrl: string) {
+  const httpsRequestCount = httpsRequests.length;
+  const webSocketRequestCount = webSocketRequests.length;
+  const pageWebSocketRequests: string[] = [];
+  page.on('websocket', (socket) => {
+    if(socket.url() === webSocketUrl) pageWebSocketRequests.push(socket.url());
+  });
+  const blockedUris = await page.evaluate(async(url: string) => {
+    const blocked: string[] = [];
+    const listener = (event: SecurityPolicyViolationEvent) => {
+      if(event.effectiveDirective === 'connect-src') blocked.push(event.blockedURI);
+    };
+    document.addEventListener('securitypolicyviolation', listener);
+    const fetchAttempt = fetch('https://unrelated.example.test/probe', {mode: 'no-cors'}).catch((): void => {});
+    const webSocketAttempt = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 500);
+      const finish = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      try {
+        const socket = new WebSocket(url);
+        socket.addEventListener('open', () => {
+          socket.close();
+          finish();
+        }, {once: true});
+        socket.addEventListener('error', finish, {once: true});
+        socket.addEventListener('close', finish, {once: true});
+      } catch{
+        finish();
+      }
+    });
+    await Promise.all([fetchAttempt, webSocketAttempt]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    document.removeEventListener('securitypolicyviolation', listener);
+    return blocked;
+  }, webSocketUrl);
+
+  expect(httpsRequests.slice(httpsRequestCount)).toEqual([]);
+  expect(webSocketRequests.slice(webSocketRequestCount)).toEqual([]);
+  expect(pageWebSocketRequests).toEqual([]);
+  expect(blockedUris.some((uri) => uri.startsWith('https://unrelated.example.test'))).toBe(true);
+}
+
+test('private artifact blocks unrelated HTTPS and WSS in picker and pinned modes', async({page}, testInfo) => {
+  test.skip(testInfo.project.name !== 'private-artifact-firefox', 'requires Firefox');
+  const manifest = JSON.parse(readFileSync(resolve('dist/mtproto-target.json'), 'utf8')) as {mode: string, endpoint: string};
+  if(manifest.mode !== 'private') throw new Error('private artifact browser test requires a private build');
+  const privateEndpoint = new URL(manifest.endpoint);
+  const serverHost = privateEndpoint.hostname;
+  if(serverHost === APP_HOST) throw new Error('private artifact endpoint must differ from the picker host');
+
+  return withPrivateArtifactWebSocketFixture(new URL('wss://localhost:18443/apiws'), (fixture) =>
+    runPrivateArtifactFirefoxEgress(page, testInfo, privateEndpoint, fixture)
+  );
+});
+
+async function runPrivateArtifactFirefoxEgress(
+  page: Page,
+  testInfo: TestInfo,
+  privateEndpoint: URL,
+  webSocketFixture: {unrelatedRequests: string[], unrelatedUrl: string}
+) {
+  const serverHost = privateEndpoint.hostname;
+  const appBaseUrl = new URL(testInfo.project.use.baseURL as string);
+  const appOrigin = `https://${APP_HOST}`;
+  const edgeConfig = readFileSync(resolve('deploy/teagram-web/nginx.conf'), 'utf8');
+  const edgeCsp = edgeConfig.match(/add_header Content-Security-Policy "([^"]+)" always;/)?.[1];
+  if(!edgeCsp) throw new Error('deployment CSP is missing from deploy/teagram-web/nginx.conf');
+
+  const rsaPublicKey = createPublicKey(readFileSync(resolve('scripts/fixtures/private-mtproto-public.pem')));
+  const discovery = {
+    version: 1,
+    mtproto: {
+      endpoint: `${serverHost}:2443`,
+      dc_id: 2,
+      rsa_spki: rsaPublicKey.export({format: 'der', type: 'spki'}).toString('base64')
+    },
+    websocket: {endpoint: privateEndpoint.href}
+  };
+  const discoveryRequests: string[] = [];
+  const unrelatedHttpsRequests: string[] = [];
+  const unrelatedWebSocketUrl = webSocketFixture.unrelatedUrl;
+  const context = page.context();
+  await context.addInitScript((endpointUrl: string) => {
+    const NativeWebSocket = window.WebSocket;
+    window.WebSocket = new Proxy(NativeWebSocket, {
+      construct(target, args, newTarget) {
+        if(args[0] !== endpointUrl) return Reflect.construct(target, args, newTarget);
+        const socket = new EventTarget() as EventTarget & {readyState: number, close: () => void};
+        socket.readyState = 0;
+        socket.close = () => {
+          socket.readyState = 3;
+          socket.dispatchEvent(new Event('close'));
+        };
+        queueMicrotask(() => {
+          socket.readyState = 1;
+          socket.dispatchEvent(new Event('open'));
+        });
+        return socket;
+      }
+    });
+  }, privateEndpoint.href);
+  await context.route('**/*', async(route) => {
+    const url = new URL(route.request().url());
+    if(url.hostname === serverHost && url.pathname === '/.well-known/teagramd/client') {
+      discoveryRequests.push(url.pathname);
+      await route.fulfill({
+        status: 200,
+        headers: {
+          'access-control-allow-origin': '*',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify(discovery)
+      });
+      return;
+    }
+    if(url.protocol === 'https:' && [APP_HOST, serverHost].includes(url.hostname)) {
+      const upstreamUrl = new URL(`${url.pathname}${url.search}`, appBaseUrl.origin);
+      const response = await route.fetch({url: upstreamUrl.href, headers: {host: appBaseUrl.host}});
+      await route.fulfill({
+        response,
+        headers: {...response.headers(), 'content-security-policy': edgeCsp}
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await context.route('https://unrelated.example.test/**', async(route) => {
+    unrelatedHttpsRequests.push(route.request().url());
+    await route.fulfill({status: 200, body: 'unexpected HTTPS request'});
+  });
+  const cspViolations: string[] = [];
+  page.on('console', (message) => {
+    if(message.type() === 'error' && /violates the following directive|Refused to .* because it violates/i.test(message.text())) {
+      cspViolations.push(message.text());
+    }
+  });
+  await page.goto(appOrigin, {waitUntil: 'domcontentloaded'});
+
+  const picker = page.getByRole('dialog');
+  await expect(picker.getByRole('heading', {name: 'Choose your server'})).toBeVisible();
+  await picker.getByRole('textbox', {name: 'Server host'}).fill(serverHost);
+  await picker.getByRole('button', {name: 'Continue'}).click();
+
+  const confirmation = page.getByRole('dialog');
+  await expect(confirmation.getByText(`Server: ${serverHost}`)).toBeVisible();
+  expect(discoveryRequests).toEqual(['/.well-known/teagramd/client']);
+  await confirmation.getByRole('button', {name: 'Confirm and use this server'}).click();
+
+  const returningPicker = page.getByRole('dialog');
+  await expect(returningPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(serverHost);
+  await returningPicker.getByRole('button', {name: 'Continue'}).click();
+  await expect(page.locator('meta[data-server-policy]'))
+  .toHaveAttribute('content', `connect-src 'self' https://${serverHost} ${privateEndpoint.href};`);
+  expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(serverHost);
+  expect(discoveryRequests).toEqual(['/.well-known/teagramd/client', '/.well-known/teagramd/client']);
+  expect(cspViolations).toEqual([]);
+  await expectUnrelatedConnectionsBlocked(page, unrelatedHttpsRequests, webSocketFixture.unrelatedRequests, unrelatedWebSocketUrl);
+
+  const pinnedPage = await context.newPage();
+  const pinnedCspViolations: string[] = [];
+  pinnedPage.on('console', (message) => {
+    if(message.type() === 'error' && /violates the following directive|Refused to .* because it violates/i.test(message.text())) {
+      pinnedCspViolations.push(message.text());
+    }
+  });
+  await pinnedPage.goto(`https://${serverHost}`, {waitUntil: 'domcontentloaded'});
+  await expect(pinnedPage.locator('meta[data-server-policy]'))
+  .toHaveAttribute('content', `connect-src 'self' ${privateEndpoint.href};`);
+  expect(await pinnedPage.getByRole('dialog').count()).toBe(0);
+  expect(pinnedCspViolations).toEqual([]);
+  await expectUnrelatedConnectionsBlocked(pinnedPage, unrelatedHttpsRequests, webSocketFixture.unrelatedRequests, unrelatedWebSocketUrl);
+  await pinnedPage.close();
+}
 
 test('isolates two server tabs when a custom server worker takes control', async({page}, testInfo) => {
   const serverHttpUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL;

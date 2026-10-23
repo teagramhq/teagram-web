@@ -34,14 +34,17 @@ function setActiveContext(id: string, host: string, target: MtprotoTarget, disco
 
 function setConnectPolicy(host: string, target?: MtprotoTarget) {
   const sources = getServerConnectSources(host, target);
+  const content = `connect-src ${[...sources].join(' ')};`;
   let policy = document.querySelector<HTMLMetaElement>('meta[http-equiv="Content-Security-Policy"][data-server-policy]');
   if(!policy) {
     policy = document.createElement('meta');
     policy.httpEquiv = 'Content-Security-Policy';
     policy.dataset.serverPolicy = 'true';
+    policy.content = content;
     document.head.append(policy);
+    return;
   }
-  policy.content = `connect-src ${[...sources].join(' ')};`;
+  policy.content = content;
 }
 
 function createButton(label: string, onClick: () => void | Promise<void>, secondary = false) {

@@ -22,10 +22,18 @@ export default defineConfig({
     baseURL: `http://localhost:${PORT}/`,
     headless: true,
     ignoreHTTPSErrors: true,
-    launchOptions: {args: ['--ignore-certificate-errors', `--host-resolver-rules=${hostResolverRules}`]},
     viewport: {width: 1280, height: 800}
   },
-  projects: [{name: 'private-artifact-chromium', use: {...devices['Desktop Chrome']}}],
+  projects: [
+    {
+      name: 'private-artifact-chromium',
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: {args: ['--ignore-certificate-errors', `--host-resolver-rules=${hostResolverRules}`]}
+      }
+    },
+    {name: 'private-artifact-firefox', use: {...devices['Desktop Firefox']}}
+  ],
   webServer: {
     command: `corepack pnpm --config.verify-deps-before-run=false exec vite preview --port ${PORT} --strictPort`,
     url: `http://localhost:${PORT}/`,
