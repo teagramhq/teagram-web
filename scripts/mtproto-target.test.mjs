@@ -540,8 +540,24 @@ describe('MTProto build target', () => {
       artifactDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/)
     });
     const index = readFileSync(join(outputDirectory, 'index.html'), 'utf8').replaceAll('&#39;', "'");
+    const expectedCsp = [
+      "default-src 'self'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+      "frame-src 'self' https://challenges.cloudflare.com",
+      "object-src 'none'",
+      "script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self' data:",
+      "media-src 'self' blob:",
+      "worker-src 'self' blob:",
+      "manifest-src 'self'",
+      "connect-src 'self' https: wss:"
+    ].join('; ') + ';';
     expect(index).toContain('Content-Security-Policy');
-    expect(index).toContain("connect-src 'self' wss://private.example.test:2443/apiws");
+    expect(index).toContain(expectedCsp);
     expect(() => verifyPrivateArtifactCsp(outputDirectory, target.endpoint)).not.toThrow();
     const artifactFiles = findArtifactFiles(outputDirectory);
     expect(artifactFiles.some((file) => file.toLowerCase().endsWith('.map'))).toBe(false);

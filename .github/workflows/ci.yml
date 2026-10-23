@@ -59,8 +59,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Playwright Chromium
-        run: pnpm exec playwright install --with-deps chromium
+      - name: Install Playwright Chromium and Firefox
+        run: pnpm exec playwright install --with-deps chromium firefox
 
       - name: Read and validate the reviewed private target
         id: target
@@ -75,6 +75,15 @@ jobs:
           MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}
           MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}
         run: pnpm exec vite build && pnpm run check-bundle
+
+      - name: Test custom-server discovery in the private build
+        run: >-
+          pnpm exec playwright test
+          -c playwright.private-artifact.config.ts
+          e2e/customServerLocalSignIn.spec.ts
+          --project=private-artifact-chromium
+          --project=private-artifact-firefox
+          --grep "private artifact"
 
       - name: Audit default bindings in an isolated source-mapped build
         env:

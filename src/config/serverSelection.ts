@@ -20,8 +20,10 @@ export function getServerConnectSources(host: string, target?: MtprotoTarget) {
   const websocketOrigin = new URL(httpsOrigin);
   websocketOrigin.protocol = 'wss:';
 
-  const sources = new Set(['\u0027self\u0027', httpsOrigin.origin, websocketOrigin.origin]);
-  if(target?.mode === 'private') sources.add(new URL(target.endpoint).origin);
+  const sources = new Set(['\u0027self\u0027']);
+  if(httpsOrigin.origin !== location.origin) sources.add(httpsOrigin.origin);
+  if(target?.mode === 'private') sources.add(target.endpoint);
+  else sources.add(websocketOrigin.origin);
   return [...sources];
 }
 

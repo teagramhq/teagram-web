@@ -46,8 +46,7 @@ describe('custom server discovery', () => {
     } as any)).toEqual([
       '\u0027self\u0027',
       'https://demo.example',
-      'wss://demo.example',
-      'wss://demo.example:2443'
+      'wss://demo.example:2443/apiws'
     ]);
   });
 
