@@ -2711,7 +2711,11 @@ async function waitForMessageReaction(page, messageText, expectedCount, expected
   setPageScenarioStep(page, stage);
   await page.waitForFunction(({messageText, expectedCount, expectedChosen}) => {
     const messages = [...document.querySelectorAll('#column-center .bubble .message')]
-    .filter((message) => (message.textContent || '').trim() === messageText);
+    .filter((message) => {
+      const text = message.cloneNode(true);
+      text.querySelectorAll('.time, .reactions').forEach((chrome) => chrome.remove());
+      return (text.textContent || '').trim() === messageText;
+    });
     if(messages.length !== 1) return false;
 
     const bubble = messages[0].closest('.bubble');
