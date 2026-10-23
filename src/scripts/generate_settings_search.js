@@ -49,7 +49,8 @@ const DENY_KEY_SHAPE = /(Info\d*$|Caption|Desc$|Description|Help$|Notice|Hint$|S
 // Too generic to ever be a useful hit on its own.
 const STOP_KEYS = new Set([
   'On', 'Off', 'Delete', 'Clear', 'Save', 'Done', 'Cancel', 'OK', 'Ok', 'Edit', 'Add', 'Close',
-  'Loading', 'Terminate', 'Continue', 'Next', 'Back', 'Yes', 'No', 'Search'
+  'Loading', 'Terminate', 'Continue', 'Next', 'Back', 'Yes', 'No', 'Search',
+  'Teagram.TwoStep.SkipHint'
 ]);
 
 // A section's icon comes from the row that opens it. Edit Profile has no such
@@ -102,7 +103,6 @@ const LINK_HIGHLIGHTS = {
   'notifications/channels/show': 'NotificationsForChannels',
   'notifications/new-contacts': 'ContactJoined',
   'privacy/calls/p2p': 'PrivacyP2PHeader',
-  'privacy/2sv/change-email': 'TwoStepAuth.ChangeEmail',
   'privacy/passcode/change': 'PasscodeLock.ChangePasscode',
   'privacy/passcode/auto-lock': 'PasscodeLock.AutoLock',
   'privacy/messages/set-price': 'PaidMessages.SetPrice',

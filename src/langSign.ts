@@ -19,6 +19,8 @@ const lang = {
   'Login.ResetPassword.Subtitle': 'Enter the code we just sent\nto your email **%s**.',
   'Login.ResetPassword.Cancel': 'Cancel',
   'Login.ResetPassword.NoEmailText': 'Since you didn\'t provide a recovery email when setting up your password, your remaining options are either to remember your password or to reset your account.',
+  'Teagram.PasswordRecovery.Title': 'Password recovery',
+  'Teagram.PasswordRecovery.Unavailable': 'Password recovery isn\'t available on this server. Contact your server administrator.',
   'Login.ResetPassword.TroubleEmailText': 'If you can\'t restore access to your email, your remaining options are either to remember your password or to reset your account.',
   'Login.ResetPassword.ResetAccount': 'Reset Account',
   'Login.ResetAccount.Title': 'Warning',
