@@ -7,9 +7,11 @@ the repository root and from `/opt/teagram`. Its explicit
 `teagram-web-edge-nginx-cache` volume names keep a root-directory Compose
 invocation from selecting this stack by basename.
 
-The web container remains attached to the external `telegram-web-edge-net`
-network during the browser sign-in regression check. Remove this compatibility
-attachment only after the credentialed browser probe passes without it.
+The web container attaches only to `teagram-web-edge-net`. This stack no longer
+attaches to the legacy external `telegram-web-edge-net`. The credentialed
+browser sign-in probe passed on the served server and web commits before this
+change; run it again after deployment to verify WebSocket sign-in without the
+legacy network.
 
 The target checkout is `/opt/telegram-web`. Run the commands below from this
 directory:
@@ -118,7 +120,8 @@ the existing Nginx policy and serving layout intact.
 The only persistent volume is `teagram-web-edge-nginx-cache`, owned by this Compose
 project. `docker compose down` is safe and leaves that cache intact; never use
 `docker compose down -v` on this host. The web build emits the version file at
-`/.well-known/teagram-web/version.txt`.
+`/.well-known/teagram-web/version.txt` as plain text; the retired
+`/.well-known/telegram-web/version.txt` path returns 404.
 
 Each deployment records a private `rollback.sh` in the printed backup
 directory and invokes it automatically on failure. To restore manually, run

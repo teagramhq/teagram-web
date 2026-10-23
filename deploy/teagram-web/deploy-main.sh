@@ -62,7 +62,7 @@ verify_served_release() {
 }
 
 verify_version_path() {
-  local version_resource version_content_type
+  local version_resource version_content_type legacy_version_status
   version_resource=$(curl -q --noproxy '*' --fail --silent --show-error --max-time 10 \
     --write-out $'\n%{content_type}' "$BASE_URL/.well-known/teagram-web/version.txt") || {
     printf 'new version resource request failed\n' >&2
@@ -72,6 +72,17 @@ verify_version_path() {
   version_resource=${version_resource%$'\n'*}
   if [[ -z "$version_resource" || "$version_content_type" != text/plain* ]]; then
     printf 'new version resource is not non-empty plain text\n' >&2
+    return 1
+  fi
+
+  legacy_version_status=$(curl -q --noproxy '*' --silent --show-error --max-time 10 \
+    --output /dev/null --write-out '%{http_code}' \
+    "$BASE_URL/.well-known/telegram-web/version.txt") || {
+    printf 'legacy version resource request failed\n' >&2
+    return 1
+  }
+  if [[ "$legacy_version_status" != 404 ]]; then
+    printf 'legacy version resource returned HTTP %s instead of 404\n' "$legacy_version_status" >&2
     return 1
   fi
 }
