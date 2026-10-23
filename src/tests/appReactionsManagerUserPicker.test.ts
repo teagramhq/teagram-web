@@ -13,7 +13,7 @@ describe('AppReactionsManager private chat reactions', () => {
       pFlags: {}
     } as AvailableReaction;
     const manager = Object.assign(Object.create(AppReactionsManager.prototype), {
-      getActiveAvailableReactions: () => [availableReaction],
+      getActiveAvailableReactions: (): AvailableReaction[] => [availableReaction],
       getTopReactions: (): Reaction[] => [],
       getQuickReaction: () => ({_: 'reactionEmoji', emoticon: '👍'} as Reaction)
     }) as AppReactionsManager;
@@ -27,7 +27,7 @@ describe('AppReactionsManager private chat reactions', () => {
   it('keeps the server top reactions when they are available', async() => {
     const topReaction = {_: 'reactionEmoji', emoticon: '🔥'} as Reaction;
     const manager = Object.assign(Object.create(AppReactionsManager.prototype), {
-      getActiveAvailableReactions: () => [],
+      getActiveAvailableReactions: (): AvailableReaction[] => [],
       getTopReactions: () => [topReaction],
       getQuickReaction: () => ({_: 'reactionEmoji', emoticon: '👍'} as Reaction)
     }) as AppReactionsManager;
