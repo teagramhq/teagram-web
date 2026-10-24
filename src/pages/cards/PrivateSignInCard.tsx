@@ -334,7 +334,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           await toIm();
           break;
         case 'error':
-          if(!isCreatingAccount && (result.errorType === 'AUTH_KEY_UNKNOWN' || result.errorType === 'AUTH_KEY_RATE_LIMIT')) {
+          if(!isCreatingAccount && (result.authKeyRecoveryFailed || result.errorType === 'AUTH_KEY_UNKNOWN' || result.errorType === 'AUTH_KEY_RATE_LIMIT')) {
             if(!usernameField.value) usernameField.setValueSilently(username);
             updateSignInValidity();
           }

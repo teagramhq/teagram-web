@@ -231,14 +231,25 @@ export class ApiManager extends ApiManagerMethods {
   private async writeAuthKeyData(
     accountNumber: ActiveAccountNumber,
     dcId: DcId,
-    accountData: Record<string, any>,
-    authKeyHex: string,
-    serverSaltHex: string
+    authKeyHex?: string,
+    serverSaltHex?: string
   ) {
-    accountData[`dc${dcId}_auth_key`] = authKeyHex;
-    accountData[`dc${dcId}_server_salt`] = serverSaltHex;
-    if(dcId === App.baseDcId) accountData.auth_key_fingerprint = authKeyHex.slice(0, 8);
-    await this.writeAccountData(accountNumber, accountData);
+    await AccountController.withAccountWriteLock(accountNumber, async() => {
+      const accountData = await this.readAccountData(accountNumber);
+      const authKeyName = `dc${dcId}_auth_key`;
+      const serverSaltName = `dc${dcId}_server_salt`;
+      if(typeof authKeyHex === 'string') {
+        accountData[authKeyName] = authKeyHex;
+        if(typeof serverSaltHex === 'string') accountData[serverSaltName] = serverSaltHex;
+        else delete accountData[serverSaltName];
+        if(dcId === App.baseDcId) accountData.auth_key_fingerprint = authKeyHex.slice(0, 8);
+      } else {
+        delete accountData[authKeyName];
+        delete accountData[serverSaltName];
+        if(dcId === App.baseDcId) delete accountData.auth_key_fingerprint;
+      }
+      await this.writeAccountData(accountNumber, accountData);
+    });
   }
 
   private async getOrCreatePermanentAuthKey(accountNumber: ActiveAccountNumber, dcId: DcId) {
@@ -257,7 +268,6 @@ export class ApiManager extends ApiManagerMethods {
       await this.writeAuthKeyData(
         accountNumber,
         dcId,
-        accountData,
         bytesToHex(permanent.authKey.key),
         bytesToHex(permanent.serverSalt)
       );
@@ -276,7 +286,10 @@ export class ApiManager extends ApiManagerMethods {
       }
     });
 
-    matched.forEach((networker) => this.onNetworkerDrain(networker));
+    matched.forEach((networker) => {
+      if(networker !== rejectedNetworker) networker.onTransportError(-404);
+      this.onNetworkerDrain(networker);
+    });
   }
 
   public async recoverUnknownAuthKey(recoveryId: number, shouldRecover = true) {
@@ -295,18 +308,7 @@ export class ApiManager extends ApiManagerMethods {
       readAccount: () => this.readAccountData(accountNumber),
       writeAccount: async(accountData) => {
         const authKeyHex = accountData[`dc${dcId}_auth_key`];
-        if(typeof authKeyHex === 'string') {
-          await this.writeAuthKeyData(
-            accountNumber,
-            dcId,
-            accountData,
-            authKeyHex,
-            accountData[`dc${dcId}_server_salt`]
-          );
-        } else {
-          if(dcId === App.baseDcId) delete accountData.auth_key_fingerprint;
-          await this.writeAccountData(accountNumber, accountData);
-        }
+        await this.writeAuthKeyData(accountNumber, dcId, authKeyHex, accountData[`dc${dcId}_server_salt`]);
       },
       exchangeAuthKey: async() => {
         const permanent = await this.authorizer.auth(dcId, false, true);

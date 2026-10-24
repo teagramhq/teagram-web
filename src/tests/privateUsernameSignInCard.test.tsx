@@ -3,6 +3,7 @@ import {render} from 'solid-js/web';
 
 const mocks = vi.hoisted(() => ({
   invokeApi: vi.fn(),
+  recoverUnknownAuthKey: vi.fn(),
   getAppConfig: vi.fn(),
   updatePasswordSettings: vi.fn(),
   setUser: vi.fn(),
@@ -17,7 +18,12 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/pages/authFlow', () => ({
   useAuthFlow: () => ({
     managers: {
-      apiManager: {invokeApi: mocks.invokeApi, getAppConfig: mocks.getAppConfig, setUser: mocks.setUser},
+      apiManager: {
+        invokeApi: mocks.invokeApi,
+        recoverUnknownAuthKey: mocks.recoverUnknownAuthKey,
+        getAppConfig: mocks.getAppConfig,
+        setUser: mocks.setUser
+      },
       passwordManager: {updateSettings: mocks.updatePasswordSettings},
       appStateManager: {pushToState: mocks.pushToState}
     },
@@ -129,6 +135,7 @@ describe('private username sign-in card', () => {
 
   beforeEach(() => {
     mocks.invokeApi.mockReset();
+    mocks.recoverUnknownAuthKey.mockReset();
     mocks.getAppConfig.mockReset().mockResolvedValue({registration_mode: 'closed'});
     mocks.updatePasswordSettings.mockReset();
     mocks.setUser.mockReset();
@@ -334,6 +341,23 @@ describe('private username sign-in card', () => {
 
     next.click();
     await vi.waitFor(() => expect(mocks.invokeApi).toHaveBeenCalledTimes(2));
+  });
+
+  it('preserves the username when auth-key recovery exchange fails', async() => {
+    mocks.invokeApi.mockRejectedValueOnce({code: -404, type: 'AUTH_KEY_UNKNOWN', authKeyRecoveryId: 17});
+    mocks.recoverUnknownAuthKey.mockRejectedValueOnce({code: -500, type: 'MTPROTO_TRANSPORT_ERROR'});
+    const input = mount();
+    const next = document.querySelector('button') as HTMLButtonElement;
+    input.value = USERNAME;
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    next.click();
+
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toBe('Unable to sign in. Try again.'));
+
+    expect(mocks.recoverUnknownAuthKey).toHaveBeenCalledWith(17, true);
+    expect(input.value).toBe(USERNAME);
+    expect(next.disabled).toBe(false);
+    expect(next.textContent).toBe('Next');
   });
 
   it('protects username sign-in with the signin Turnstile action', async() => {

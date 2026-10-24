@@ -21,7 +21,7 @@ export type PrivateUsernameAuthResult =
   | {kind: 'password'}
   | {kind: 'authorized', user: User}
   | {kind: 'cancelled'}
-  | {kind: 'error', errorType?: string};
+  | {kind: 'error', errorType?: string, authKeyRecoveryFailed?: true};
 
 export type PrivateUsernameRegistrationMode = 'closed' | 'invite' | 'open';
 
@@ -53,7 +53,8 @@ function getErrorType(error: unknown): unknown {
   return isRecord(error) ? error.type : undefined;
 }
 
-function getAuthErrorResult(error: unknown, includeType: boolean): PrivateUsernameAuthResult {
+function getAuthErrorResult(error: unknown, includeType: boolean, authKeyRecoveryFailed = false): PrivateUsernameAuthResult {
+  if(authKeyRecoveryFailed) return {kind: 'error', authKeyRecoveryFailed: true};
   const errorType = getErrorType(error);
   const shouldIncludeType = includeType || errorType === 'AUTH_KEY_UNKNOWN' || errorType === 'AUTH_KEY_RATE_LIMIT';
   return shouldIncludeType && typeof errorType === 'string' ? {kind: 'error', errorType} : {kind: 'error'};
@@ -105,6 +106,7 @@ export async function authenticatePrivateUsername(
   if(registration?.mode === 'invite' && !registration.inviteSecret?.trim()) return {kind: 'invalidInput'};
 
   let didRecoverAuthKey = false;
+  let authKeyRecoveryFailed = false;
   const invokeAuthApi = async(
     method: Parameters<InvokeAuthApi>[0],
     params: Parameters<InvokeAuthApi>[1],
@@ -120,14 +122,25 @@ export async function authenticatePrivateUsername(
 
       const shouldRecover = !didRecoverAuthKey && !wasCancelled(error, isCancelled);
       if(shouldRecover) didRecoverAuthKey = true;
-      const recovered = await recoverAuthKey(error, shouldRecover);
+      let recovered: boolean;
+      try {
+        recovered = await recoverAuthKey(error, shouldRecover);
+      } catch(recoveryError) {
+        authKeyRecoveryFailed = true;
+        throw recoveryError;
+      }
       if(!shouldRecover || !recovered || isCancelled()) throw error;
 
       try {
         return await invoke();
       } catch(retryError) {
         if(getErrorType(retryError) === 'AUTH_KEY_UNKNOWN') {
-          await recoverAuthKey(retryError, false);
+          try {
+            await recoverAuthKey(retryError, false);
+          } catch(recoveryError) {
+            authKeyRecoveryFailed = true;
+            throw recoveryError;
+          }
         }
         throw retryError;
       }
@@ -147,7 +160,8 @@ export async function authenticatePrivateUsername(
     }, 'signin', requestTurnstile);
   } catch(error) {
     if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
-    return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : getAuthErrorResult(error, !!registration);
+    if(authKeyRecoveryFailed) return getAuthErrorResult(error, !!registration, true);
+    return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : getAuthErrorResult(error, !!registration, authKeyRecoveryFailed);
   }
 
   if(isCancelled()) return {kind: 'cancelled'};
@@ -167,6 +181,7 @@ export async function authenticatePrivateUsername(
     }, {ignoreErrors: true});
   } catch(error) {
     if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
+    if(authKeyRecoveryFailed) return getAuthErrorResult(error, !!registration, true);
     if(getErrorType(error) === 'SESSION_PASSWORD_NEEDED') {
       if(registration?.checkPassword) {
         try {
@@ -182,7 +197,7 @@ export async function authenticatePrivateUsername(
       }
       return registration ? {kind: 'usernameTaken'} : {kind: 'password'};
     }
-    return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : getAuthErrorResult(error, !!registration);
+    return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : getAuthErrorResult(error, !!registration, authKeyRecoveryFailed);
   }
 
   if(isCancelled()) return {kind: 'cancelled'};
@@ -206,6 +221,7 @@ export async function authenticatePrivateUsername(
       );
     } catch(error) {
       if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
+      if(authKeyRecoveryFailed) return getAuthErrorResult(error, true, true);
       const errorKind = getPrivateUsernameRegistrationError(error);
       return errorKind === 'weakPassword' || errorKind === 'error' ? getAuthErrorResult(error, true) : {kind: errorKind};
     }

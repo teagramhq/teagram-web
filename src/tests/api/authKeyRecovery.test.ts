@@ -6,6 +6,7 @@ import AccountController from '@lib/accounts/accountController';
 import {recoverRejectedAuthKey} from '@lib/mtproto/authKeyRecovery';
 import MTPNetworker from '@lib/mtproto/networker';
 import sessionStorage from '@lib/sessionStorage';
+import deferredPromise from '@helpers/cancellablePromise';
 
 const REJECTED_KEY = 'aa'.repeat(256);
 const REPLACEMENT_KEY = 'bb'.repeat(256);
@@ -246,6 +247,179 @@ describe('unknown auth-key recovery', () => {
     expect(set.mock.calls[0][0].account1).not.toHaveProperty('auth_key_fingerprint');
     expect(networkerFactory.removeNetworker).toHaveBeenCalledWith(networker);
     expect((manager as any).cachedNetworkers.websocket.client[2]).toEqual([]);
+  });
+
+  it('merges concurrent DC recoveries with account updates', async() => {
+    installLocks();
+    let accountData: Record<string, unknown> = {
+      dc2_auth_key: REJECTED_KEY,
+      dc2_server_salt: 'old-salt-2',
+      dc3_auth_key: 'cc'.repeat(256),
+      dc3_server_salt: 'old-salt-3',
+      auth_key_fingerprint: REJECTED_KEY.slice(0, 8),
+      push_key: 'existing-push-key'
+    };
+    let holdExchangeReads = false;
+    let heldExchangeReads = 0;
+    let resolveHeldExchangeReads: () => void;
+    let releaseHeldExchangeReads: () => void;
+    const heldExchangeReadsReady = new Promise<void>((resolve) => { resolveHeldExchangeReads = resolve; });
+    const heldExchangeReadsGate = new Promise<void>((resolve) => { releaseHeldExchangeReads = resolve; });
+    let holdReplacementWrite = true;
+    let resolveReplacementWriteStarted: () => void;
+    let releaseReplacementWrite: () => void;
+    const replacementWriteStarted = new Promise<void>((resolve) => { resolveReplacementWriteStarted = resolve; });
+    const replacementWriteGate = new Promise<void>((resolve) => { releaseReplacementWrite = resolve; });
+    vi.spyOn(sessionStorage, 'getFresh').mockImplementation(async() => {
+      const snapshot = structuredClone(accountData);
+      if(holdExchangeReads && heldExchangeReads < 2) {
+        heldExchangeReads++;
+        if(heldExchangeReads === 2) resolveHeldExchangeReads();
+        await heldExchangeReadsGate;
+      }
+      return snapshot as any;
+    });
+    vi.spyOn(sessionStorage, 'get').mockImplementation(async(key: any) => {
+      return key === 'account1' ? structuredClone(accountData) as any : {} as any;
+    });
+    vi.spyOn(sessionStorage, 'set').mockImplementation(async(data: any) => {
+      const account = data.account1;
+      if(holdReplacementWrite && account && (account.dc2_auth_key === '11'.repeat(256) || account.dc3_auth_key === '33'.repeat(256))) {
+        holdReplacementWrite = false;
+        resolveReplacementWriteStarted();
+        await replacementWriteGate;
+      }
+      if(data.account1) accountData = structuredClone(data.account1);
+    });
+    vi.spyOn(AccountController, 'updateStorageForLegacy').mockResolvedValue(undefined);
+
+    const makeNetworker = (dcId: number, keyByte: number) => {
+      const networker = Object.create(MTPNetworker.prototype) as MTPNetworker;
+      const transport = {destroy: vi.fn()};
+      Object.assign(networker, {
+        dcId,
+        permAuthKey: {key: new Uint8Array(256).fill(keyByte)},
+        transport,
+        changeTransport: vi.fn(function(this: MTPNetworker, nextTransport) { this.transport = nextTransport; }),
+        destroy: vi.fn()
+      });
+      return networker;
+    };
+    const networker2 = makeNetworker(2, 0xaa);
+    const networker3 = makeNetworker(3, 0xcc);
+    let exchangesStarted = 0;
+    let resolveExchangesStarted: () => void;
+    let releaseExchanges: () => void;
+    const exchangesReady = new Promise<void>((resolve) => { resolveExchangesStarted = resolve; });
+    const exchangeGate = new Promise<void>((resolve) => { releaseExchanges = resolve; });
+    const authorizer = {
+      auth: vi.fn(async(dcId: number) => {
+        exchangesStarted++;
+        if(exchangesStarted === 2) resolveExchangesStarted();
+        await exchangeGate;
+        return {
+          authKey: {key: new Uint8Array(256).fill(dcId === 2 ? 0x11 : 0x33)},
+          serverSalt: new Uint8Array(8).fill(dcId === 2 ? 0x22 : 0x44)
+        };
+      })
+    };
+    const manager = Object.create(ApiManager.prototype) as ApiManager;
+    Object.assign(manager, {
+      accountNumber: 1,
+      authKeyRecoveryTargets: new Map([
+        [17, {networker: networker2, transport: networker2.transport}],
+        [18, {networker: networker3, transport: networker3.transport}]
+      ]),
+      cachedNetworkers: {websocket: {client: {2: [networker2], 3: [networker3]}, download: {}, upload: {}}},
+      dcConfigurator: {chosenServers: {}},
+      networkerFactory: {removeNetworker: vi.fn()},
+      authorizer,
+      log: vi.fn()
+    });
+
+    const recoveries = Promise.all([
+      manager.recoverUnknownAuthKey(17),
+      manager.recoverUnknownAuthKey(18)
+    ]);
+    await exchangesReady;
+    holdExchangeReads = true;
+    releaseExchanges();
+    await heldExchangeReadsReady;
+    releaseHeldExchangeReads();
+    await replacementWriteStarted;
+    const accountUpdate = AccountController.update(1, {userId: 42});
+    releaseReplacementWrite();
+
+    await expect(Promise.all([recoveries, accountUpdate])).resolves.toEqual([[true, true], expect.objectContaining({userId: 42})]);
+    expect(accountData).toMatchObject({
+      userId: 42,
+      dc2_auth_key: '11'.repeat(256),
+      dc2_server_salt: '22'.repeat(8),
+      dc3_auth_key: '33'.repeat(256),
+      dc3_server_salt: '44'.repeat(8)
+    });
+  });
+
+  it('rejects pending RPCs on sibling networkers when retiring a rejected key', async() => {
+    installLocks();
+    let accountData: Record<string, unknown> = {
+      dc2_auth_key: REJECTED_KEY,
+      dc2_server_salt: 'old-salt',
+      auth_key_fingerprint: REJECTED_KEY.slice(0, 8)
+    };
+    vi.spyOn(sessionStorage, 'getFresh').mockImplementation(async() => structuredClone(accountData) as any);
+    vi.spyOn(sessionStorage, 'set').mockImplementation(async(data: any) => {
+      if(data.account1) accountData = structuredClone(data.account1);
+    });
+    vi.spyOn(AccountController, 'updateStorageForLegacy').mockResolvedValue(undefined);
+
+    const makeNetworker = () => {
+      const networker = Object.create(MTPNetworker.prototype) as MTPNetworker;
+      const transport = {destroy: vi.fn()};
+      Object.assign(networker, {
+        dcId: 2,
+        permAuthKey: {key: new Uint8Array(256).fill(0xaa)},
+        transport,
+        changeTransport: vi.fn(function(this: MTPNetworker, nextTransport) { this.transport = nextTransport; }),
+        destroy: vi.fn(),
+        isCurrentForDc: () => true
+      });
+      return networker;
+    };
+    const rejectedNetworker = makeNetworker();
+    const siblingNetworker = makeNetworker();
+    const pendingRequest = deferredPromise<void>();
+    Object.assign(siblingNetworker, {
+      log: vi.fn(),
+      sentMessages: {pending: {deferred: pendingRequest}},
+      pendingMessages: {pending: 0},
+      pendingAcks: [],
+      pendingResendReq: [],
+      sentResendReq: new Map(),
+      clearNextReq: vi.fn(),
+      scheduleRequest: vi.fn()
+    });
+    const manager = Object.create(ApiManager.prototype) as ApiManager;
+    Object.assign(manager, {
+      accountNumber: 1,
+      authKeyRecoveryTargets: new Map([[17, {networker: rejectedNetworker, transport: rejectedNetworker.transport}]]),
+      cachedNetworkers: {websocket: {client: {2: [rejectedNetworker, siblingNetworker]}, download: {}, upload: {}}},
+      dcConfigurator: {chosenServers: {}},
+      networkerFactory: {removeNetworker: vi.fn()},
+      authorizer: {
+        auth: vi.fn(async() => ({
+          authKey: {key: new Uint8Array(256).fill(0xbb)},
+          serverSalt: new Uint8Array(8).fill(0xcc)
+        }))
+      },
+      log: vi.fn()
+    });
+    await expect(manager.recoverUnknownAuthKey(17)).resolves.toBe(true);
+
+    expect(siblingNetworker.destroy).toHaveBeenCalledOnce();
+    expect(siblingNetworker.scheduleRequest).not.toHaveBeenCalled();
+    expect(pendingRequest.isRejected).toBe(true);
+    await expect(pendingRequest).rejects.toMatchObject({type: 'AUTH_KEY_UNKNOWN', code: -404});
   });
 
   it('creates a missing permanent auth key when Web Locks are unavailable', async() => {
