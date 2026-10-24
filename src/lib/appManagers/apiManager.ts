@@ -878,7 +878,7 @@ export class ApiManager extends ApiManagerMethods {
               this.setBaseDcId(newDcId);
             }
 
-            return this.invokeApi(method, params, options);
+            return this.invokeApi(method, params, {...options, authKeyRecovery});
           }
         } else if(error.code === 400 && error.type.indexOf('FILE_MIGRATE') === 0) {
           const match = error.type.match(/^(FILE_MIGRATE_)(\d+)/);
@@ -888,7 +888,7 @@ export class ApiManager extends ApiManagerMethods {
           const newDcId = assertValidDcId(+match[2]);
           if(newDcId !== dcId) {
             options.dcId = newDcId;
-            return this.invokeApi(method, params, options);
+            return this.invokeApi(method, params, {...options, authKeyRecovery});
           } else {
             throw error;
           }
