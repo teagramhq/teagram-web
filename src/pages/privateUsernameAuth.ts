@@ -53,7 +53,8 @@ function getErrorType(error: unknown): unknown {
 
 function getAuthErrorResult(error: unknown, includeType: boolean): PrivateUsernameAuthResult {
   const errorType = getErrorType(error);
-  return includeType && typeof errorType === 'string' ? {kind: 'error', errorType} : {kind: 'error'};
+  const shouldIncludeType = includeType || errorType === 'AUTH_KEY_UNKNOWN' || errorType === 'AUTH_KEY_RATE_LIMIT';
+  return shouldIncludeType && typeof errorType === 'string' ? {kind: 'error', errorType} : {kind: 'error'};
 }
 
 function wasCancelled(error: unknown, isCancelled: () => boolean) {

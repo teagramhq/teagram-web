@@ -327,6 +327,45 @@ describe('TcpObfuscated abridged receive path', () => {
     expect(connection.closeCount).toBe(0);
   });
 
+  it.each([-404, -429])('reports a four-byte transport error with code %s', async(code) => {
+    const onTransportError = vi.fn();
+    const onTransportData = vi.fn();
+    const networker = {
+      onTransportOpen: vi.fn(),
+      onTransportError,
+      onTransportData,
+      setConnectionStatus: vi.fn()
+    };
+    const {connection} = await createTransport(networker);
+
+    connection.message(packet(intPayload(code)));
+    await flushMicrotasks();
+
+    expect(onTransportError).toHaveBeenCalledOnce();
+    expect(onTransportError).toHaveBeenCalledWith(code);
+    expect(onTransportData).not.toHaveBeenCalled();
+    expect(connection.closeCount).toBe(0);
+  });
+
+  it('does not classify a larger packet that starts with a negative int32 as a transport error', async() => {
+    const onTransportError = vi.fn();
+    const onTransportData = vi.fn();
+    const networker = {
+      onTransportOpen: vi.fn(),
+      onTransportError,
+      onTransportData,
+      setConnectionStatus: vi.fn()
+    };
+    const {connection} = await createTransport(networker);
+    const payload = concat(intPayload(-404), new Uint8Array([1, 2, 3, 4]));
+
+    connection.message(packet(payload));
+    await flushMicrotasks();
+
+    expect(onTransportError).not.toHaveBeenCalled();
+    expect(onTransportData).toHaveBeenCalledOnce();
+  });
+
   it('deserializes a split short-header packet from an aligned payload', async() => {
     const values: number[] = [];
     const networker = createDeserializingNetworker(values);
@@ -390,16 +429,18 @@ describe('TcpObfuscated abridged receive path', () => {
   it('drops a delayed decode from a replaced connection', async() => {
     const oldDecode = deferred<Uint8Array>();
     const received: Uint8Array[] = [];
+    const onTransportError = vi.fn();
     const networker = {
       onTransportOpen: vi.fn(),
       onTransportData: vi.fn(async(data: Uint8Array) => {received.push(data.slice());}),
+      onTransportError,
       setConnectionStatus: vi.fn()
     };
     vi.spyOn(Obfuscation.prototype, 'decode')
     .mockImplementationOnce(() => oldDecode.promise)
     .mockImplementation(async data => data);
     const {transport, connection} = await createTransport(networker);
-    const oldPayload = new Uint8Array([1, 2, 3, 4]);
+    const oldPayload = intPayload(-404);
     connection.message(packet(oldPayload));
     await flushMicrotasks();
 
@@ -410,6 +451,7 @@ describe('TcpObfuscated abridged receive path', () => {
     await flushMicrotasks();
 
     expect(received).toEqual([]);
+    expect(onTransportError).not.toHaveBeenCalled();
 
     const replacementPayload = new Uint8Array([5, 6, 7, 8]);
     replacement.message(packet(replacementPayload));

@@ -6,6 +6,7 @@ import {secureAuthNetworker} from '../../lib/appManagers/authLogRedaction';
 import {clearLogBuffer, getLogEntries, isLogBufferEnabled, setLogBufferEnabled} from '@lib/debug/logsBuffer';
 import {LogTypes, logger} from '@lib/logger';
 import MTPNetworker from '@lib/mtproto/networker';
+import deferredPromise from '@helpers/cancellablePromise';
 
 const AUTH_METHODS = ['auth.sendCode', 'auth.signIn', 'auth.checkPassword'] as const;
 
@@ -152,6 +153,103 @@ describe('standard auth logging', () => {
     } finally {
       setLogBufferEnabled(originalBufferState);
     }
+  });
+});
+
+describe('networker transport errors', () => {
+  it('rejects every pending request with AUTH_KEY_UNKNOWN without logging key material or resending', async() => {
+    const networker = createNetworkerForCall() as any;
+    const first = deferredPromise<void>();
+    const second = deferredPromise<void>();
+    const keyMaterial = 'ab'.repeat(256);
+    const serverSalt = 'cd'.repeat(8);
+    const log = vi.fn();
+    Object.assign(log, {bindPrefix: () => ({debug: vi.fn()})});
+    Object.assign(networker, {
+      log,
+      isCurrentForDc: () => true,
+      permAuthKey: {key: keyMaterial},
+      serverSalt,
+      sentMessages: {
+        first: {deferred: first, body: keyMaterial},
+        second: {deferred: second, body: 'private-request-body'}
+      },
+      pendingMessages: {first: 0, second: 0},
+      pendingAcks: [],
+      pendingResendReq: ['first'],
+      sentResendReq: new Map([['response', {}]]),
+      nextReq: 0,
+      scheduleRequest: vi.fn()
+    });
+
+    networker.onTransportError(-404);
+
+    await expect(first).rejects.toMatchObject({type: 'AUTH_KEY_UNKNOWN', code: -404});
+    await expect(second).rejects.toMatchObject({type: 'AUTH_KEY_UNKNOWN', code: -404});
+    expect(networker.sentMessages).toEqual({});
+    expect(networker.pendingMessages).toEqual({});
+    expect(networker.pendingResendReq).toEqual([]);
+    expect(networker.sentResendReq.size).toBe(0);
+    expect(networker.scheduleRequest).not.toHaveBeenCalled();
+    expect(networker.permAuthKey.key).toBe(keyMaterial);
+    expect(networker.serverSalt).toBe(serverSalt);
+    expect(JSON.stringify(log.mock.calls)).not.toContain(keyMaterial);
+    expect(JSON.stringify(log.mock.calls)).not.toContain(serverSalt);
+  });
+
+  it('preserves pending requests when a stale networker receives a transport error', () => {
+    const networker = createNetworkerForCall() as any;
+    const pending = deferredPromise<void>();
+    const sentMessage = {deferred: pending};
+    const {manager} = createStandardManager(networker);
+    const cachedNetworkers = (manager as any).cachedNetworkers;
+    Object.assign(networker, {
+      isCurrentForDc: () => (manager as any).isNetworkerCurrentForDc(2, networker),
+      sentMessages: {pending: sentMessage},
+      pendingMessages: {pending: 0}
+    });
+    expect(networker.isCurrentForDc()).toBe(true);
+    for(const transportType of Object.keys(cachedNetworkers)) {
+      cachedNetworkers[transportType].client[2] = [];
+    }
+
+    networker.onTransportError(-404);
+
+    expect(pending.isRejected).toBe(false);
+    expect(networker.sentMessages.pending).toBe(sentMessage);
+    expect(networker.pendingMessages.pending).toBe(0);
+  });
+
+  it.each([
+    [-429, 'AUTH_KEY_RATE_LIMIT'],
+    [-400, 'MTPROTO_TRANSPORT_ERROR']
+  ])('classifies transport code %s without re-keying', async(code, type) => {
+    const networker = createNetworkerForCall() as any;
+    const pending = deferredPromise<void>();
+    const authKey = {key: 'stored-auth-key'};
+    const serverSalt = 'stored-server-salt';
+    const log = vi.fn();
+    Object.assign(log, {bindPrefix: () => ({debug: vi.fn()})});
+    Object.assign(networker, {
+      log,
+      isCurrentForDc: () => true,
+      permAuthKey: authKey,
+      serverSalt,
+      sentMessages: {pending: {deferred: pending}},
+      pendingMessages: {pending: 0},
+      pendingAcks: [],
+      pendingResendReq: [],
+      sentResendReq: new Map(),
+      nextReq: 0,
+      scheduleRequest: vi.fn()
+    });
+
+    networker.onTransportError(code);
+
+    await expect(pending).rejects.toMatchObject({type, code});
+    expect(networker.permAuthKey).toBe(authKey);
+    expect(networker.serverSalt).toBe(serverSalt);
+    expect(networker.scheduleRequest).not.toHaveBeenCalled();
   });
 });
 

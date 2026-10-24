@@ -205,6 +205,14 @@ export class ApiManager extends ApiManagerMethods {
     }
   }
 
+  private isNetworkerCurrentForDc(dcId: DcId, networker: MTPNetworker) {
+    let isCurrent = false;
+    this.iterateNetworkers((current) => {
+      if(current.dcId === dcId && current.networker === networker) isCurrent = true;
+    });
+    return isCurrent;
+  }
+
   private chooseServer(dcId: DcId, connectionType: ConnectionType, transportType: TransportType) {
     return this.dcConfigurator.chooseServer(dcId, connectionType, transportType, connectionType === 'client', this.rootScope.premium);
   }
@@ -509,7 +517,8 @@ export class ApiManager extends ApiManagerMethods {
           authKey: auth.authKey,
           serverSalt: auth.serverSalt,
           isFileDownload: connectionType === 'download',
-          isFileUpload: connectionType === 'upload'
+          isFileUpload: connectionType === 'upload',
+          isCurrentForDc: () => this.isNetworkerCurrentForDc(dcId, networker)
         });
 
         if(temporary) onTransport = async() => {
