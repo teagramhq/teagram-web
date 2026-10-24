@@ -11,8 +11,28 @@ import {AccountSessionData, ActiveAccountNumber} from '@lib/accounts/types';
 import {MAX_ACCOUNTS} from '@lib/accounts/constants';
 import bytesToHex from '@helpers/bytes/bytesToHex';
 import randomize from '@helpers/array/randomize';
+import {getServerStoragePrefix} from '@config/serverContext';
 
 export class AccountController extends StaticUtilityClass {
+  private static accountWriteQueues = new Map<string, Promise<void>>();
+
+  static withAccountWriteLock<T>(accountNumber: ActiveAccountNumber, callback: () => Promise<T>) {
+    const lockName = `${getServerStoragePrefix()}account-write:${accountNumber}`;
+    if(typeof navigator !== 'undefined' && navigator.locks) {
+      return navigator.locks.request(lockName, callback);
+    }
+
+    const previous = this.accountWriteQueues.get(lockName) || Promise.resolve();
+    let release: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => current);
+    this.accountWriteQueues.set(lockName, queued);
+    return previous.then(callback).finally(() => {
+      release();
+      if(this.accountWriteQueues.get(lockName) === queued) this.accountWriteQueues.delete(lockName);
+    });
+  }
+
   static async getTotalAccounts() {
     const promises = ([1, 2, 3, 4] as const).map((accountNumber) => this.get(accountNumber));
     const allAccountsData = await Promise.all(promises);
@@ -70,30 +90,34 @@ export class AccountController extends StaticUtilityClass {
   }
 
   static async update(accountNumber: ActiveAccountNumber, data: Partial<AccountSessionData>, overrideAll = false) {
-    const prevData = await this.get(accountNumber, true);
+    return this.withAccountWriteLock(accountNumber, async() => {
+      const prevData = await sessionStorage.getFresh(`account${accountNumber}`) || {} as AccountSessionData;
 
-    const updatedData = {
-      ...(overrideAll ? {} : prevData),
-      ...data
-    };
+      const updatedData = {
+        ...(overrideAll ? {} : prevData),
+        ...data
+      };
 
-    this.fillMissingData(updatedData);
+      this.fillMissingData(updatedData);
 
-    await sessionStorage.set({
-      [`account${accountNumber}`]: updatedData
-    });
-
-    if(accountNumber === 1) {
-      await this.updateStorageForLegacy(updatedData);
-    }
-
-    (async() => {
-      sessionStorage.set({
-        number_of_accounts: await this.getTotalAccounts()
+      await sessionStorage.set({
+        [`account${accountNumber}`]: updatedData
       });
-    })();
 
-    return updatedData;
+      if(accountNumber === 1) {
+        await this.updateStorageForLegacy(updatedData);
+      }
+
+      await sessionStorage.flush();
+
+      (async() => {
+        sessionStorage.set({
+          number_of_accounts: await this.getTotalAccounts()
+        });
+      })();
+
+      return updatedData;
+    });
   }
 
   /**

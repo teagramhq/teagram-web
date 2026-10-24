@@ -253,6 +253,104 @@ describe('networker transport errors', () => {
   });
 });
 
+describe('auth-key recovery request metadata', () => {
+  it('returns a recovery handle only to the flagged auth call and hides its flag from the networker', async() => {
+    const networker = createNetworkerForCall();
+    const wrapApiCall = vi.fn().mockRejectedValue({code: -404, type: 'AUTH_KEY_UNKNOWN'});
+    Object.assign(networker, {
+      dcId: 2,
+      permAuthKey: {key: new Uint8Array(256).fill(0xaa)},
+      wrapApiCall,
+      attachPromise: vi.fn()
+    });
+    const {manager} = createStandardManager(networker);
+
+    await expect(manager.invokeApi('auth.sendCode', {phone_number: 'Alice_123'} as any, {
+      dcId: 2,
+      ignoreErrors: true,
+      authKeyRecovery: true
+    })).rejects.toMatchObject({type: 'AUTH_KEY_UNKNOWN', authKeyRecoveryId: 1});
+
+    expect(wrapApiCall).toHaveBeenCalledWith(
+      'auth.sendCode',
+      {phone_number: 'Alice_123'},
+      expect.not.objectContaining({authKeyRecovery: true})
+    );
+
+    let unrelatedError: unknown;
+    await manager.invokeApi('auth.sendCode', {phone_number: 'Alice_123'} as any, {
+      dcId: 2,
+      ignoreErrors: true
+    }).catch((error) => { unrelatedError = error; });
+    expect(unrelatedError).toMatchObject({type: 'AUTH_KEY_UNKNOWN'});
+    expect(unrelatedError).not.toHaveProperty('authKeyRecoveryId');
+  });
+
+  it('keeps auth-key recovery enabled when a sign-in migrates to another DC', async() => {
+    const sourceNetworker = createNetworkerForCall();
+    const destinationNetworker = createNetworkerForCall();
+    const params = {phone_number: 'Alice_123'};
+    const sourceCall = vi.fn().mockRejectedValue({code: 303, type: 'PHONE_MIGRATE_4'});
+    const destinationCall = vi.fn().mockRejectedValue({code: -404, type: 'AUTH_KEY_UNKNOWN'});
+    Object.assign(sourceNetworker, {
+      dcId: 2,
+      wrapApiCall: sourceCall,
+      attachPromise: vi.fn()
+    });
+    Object.assign(destinationNetworker, {
+      dcId: 4,
+      wrapApiCall: destinationCall,
+      attachPromise: vi.fn()
+    });
+    const {manager} = createStandardManager(sourceNetworker);
+    const cachedNetworkers = (manager as any).cachedNetworkers;
+    for(const transportType of Object.keys(cachedNetworkers)) {
+      cachedNetworkers[transportType].client[4] = [destinationNetworker];
+    }
+
+    await expect(manager.invokeApi('auth.signIn', params as any, {
+      dcId: 2,
+      ignoreErrors: true,
+      authKeyRecovery: true
+    })).rejects.toMatchObject({type: 'AUTH_KEY_UNKNOWN', authKeyRecoveryId: 1});
+
+    expect(sourceCall).toHaveBeenCalledOnce();
+    expect(destinationCall).toHaveBeenCalledWith(
+      'auth.signIn',
+      params,
+      expect.not.objectContaining({authKeyRecovery: true})
+    );
+  });
+
+  it('does not return a recovery handle for a failure from a superseded transport', async() => {
+    const networker = createNetworkerForCall();
+    const oldTransport = {} as any;
+    const newTransport = {} as any;
+    const wrapApiCall = vi.fn().mockImplementation(async() => {
+      networker.transport = newTransport;
+      throw {code: -404, type: 'AUTH_KEY_UNKNOWN'};
+    });
+    Object.assign(networker, {
+      dcId: 2,
+      permAuthKey: {key: new Uint8Array(256).fill(0xaa)},
+      transport: oldTransport,
+      wrapApiCall,
+      attachPromise: vi.fn()
+    });
+    const {manager} = createStandardManager(networker);
+    let responseError: unknown;
+
+    await manager.invokeApi('auth.sendCode', {phone_number: 'Alice_123'} as any, {
+      dcId: 2,
+      ignoreErrors: true,
+      authKeyRecovery: true
+    }).catch((error) => { responseError = error; });
+
+    expect(responseError).toMatchObject({type: 'AUTH_KEY_UNKNOWN'});
+    expect(responseError).not.toHaveProperty('authKeyRecoveryId');
+  });
+});
+
 describe('standard wrapped auth transport failures', () => {
   it.each([
     ['auth.sendCode', 'UNKNOWN'],

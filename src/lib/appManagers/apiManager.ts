@@ -39,6 +39,7 @@ import EncryptedStorageLayer from '@lib/encryptedStorageLayer';
 import {getCommonDatabaseState} from '@config/databases/state';
 import {MTAuthKey} from '@lib/mtproto/authKey';
 import {isPrivateMtprotoTarget} from '@config/mtprotoTarget';
+import {recoverRejectedAuthKey, withAuthKeyRecoveryLock} from '@lib/mtproto/authKeyRecovery';
 import {clearAllGuestCredentials, clearGuestCredentialsForAccount} from '@lib/guestCredentialStorage';
 import {clearGuestAccountLocalState, clearInvalidatedGuestAccount as clearInvalidatedGuestAccountLocally} from '@lib/guestAccountLocalCleanup';
 /**
@@ -65,6 +66,8 @@ export class ApiManager extends ApiManagerMethods {
 
   private cachedExportPromise: {[x: number]: Promise<unknown>};
   private gettingNetworkers: {[dcIdAndType: string]: Promise<MTPNetworker>};
+  private authKeyRecoveryTargets: Map<number, {networker: MTPNetworker, transport: MTTransport}>;
+  private nextAuthKeyRecoveryId: number;
   private baseDcId: DcId;
 
   private afterMessageTempIds: {
@@ -87,6 +90,8 @@ export class ApiManager extends ApiManagerMethods {
     this.cachedNetworkers = {} as any;
     this.cachedExportPromise = {};
     this.gettingNetworkers = {};
+    this.authKeyRecoveryTargets = new Map();
+    this.nextAuthKeyRecoveryId = 0;
     this.baseDcId = 0;
     this.afterMessageTempIds = {};
 
@@ -211,6 +216,116 @@ export class ApiManager extends ApiManagerMethods {
       if(current.dcId === dcId && current.networker === networker) isCurrent = true;
     });
     return isCurrent;
+  }
+
+  private async readAccountData(accountNumber: ActiveAccountNumber) {
+    return await sessionStorage.getFresh(`account${accountNumber}`) as Record<string, any> || {};
+  }
+
+  private async writeAccountData(accountNumber: ActiveAccountNumber, accountData: Record<string, any>) {
+    AccountController.fillMissingData(accountData);
+    await sessionStorage.set({[`account${accountNumber}`]: accountData} as any);
+    if(accountNumber === 1) await AccountController.updateStorageForLegacy(accountData);
+    await sessionStorage.flush();
+  }
+
+  private async writeAuthKeyData(
+    accountNumber: ActiveAccountNumber,
+    dcId: DcId,
+    authKeyHex?: string,
+    serverSaltHex?: string,
+    onlyIfUnbound = false
+  ) {
+    return await AccountController.withAccountWriteLock(accountNumber, async() => {
+      const accountData = await this.readAccountData(accountNumber);
+      if(onlyIfUnbound && accountData.userId) return false;
+
+      const authKeyName = `dc${dcId}_auth_key`;
+      const serverSaltName = `dc${dcId}_server_salt`;
+      if(typeof authKeyHex === 'string') {
+        accountData[authKeyName] = authKeyHex;
+        if(typeof serverSaltHex === 'string') accountData[serverSaltName] = serverSaltHex;
+        else delete accountData[serverSaltName];
+        if(dcId === App.baseDcId) accountData.auth_key_fingerprint = authKeyHex.slice(0, 8);
+      } else {
+        delete accountData[authKeyName];
+        delete accountData[serverSaltName];
+        if(dcId === App.baseDcId) delete accountData.auth_key_fingerprint;
+      }
+      await this.writeAccountData(accountNumber, accountData);
+      return true;
+    });
+  }
+
+  private async getOrCreatePermanentAuthKey(accountNumber: ActiveAccountNumber, dcId: DcId) {
+    const createOrRead = async() => {
+      const accountData = await this.readAccountData(accountNumber);
+      const authKeyHex = accountData[`dc${dcId}_auth_key`];
+      const serverSaltHex = accountData[`dc${dcId}_server_salt`];
+      if(typeof authKeyHex === 'string' && authKeyHex.length === 512) {
+        return {
+          authKey: await this.getAuthKeyFromHex(authKeyHex),
+          serverSalt: bytesFromHex(serverSaltHex?.length === 16 ? serverSaltHex : 'AAAAAAAAAAAAAAAA')
+        };
+      }
+
+      const permanent = await this.authorizer.auth(dcId, false, true);
+      await this.writeAuthKeyData(
+        accountNumber,
+        dcId,
+        bytesToHex(permanent.authKey.key),
+        bytesToHex(permanent.serverSalt)
+      );
+      return permanent;
+    };
+
+    if(typeof navigator === 'undefined' || !navigator.locks) return createOrRead();
+    return withAuthKeyRecoveryLock(accountNumber, dcId, createOrRead);
+  }
+
+  private invalidateNetworkersForAuthKey(dcId: DcId, rejectedNetworker: MTPNetworker) {
+    const matched: MTPNetworker[] = [];
+    this.iterateNetworkers(({networker, dcId: networkerDcId}) => {
+      if(networkerDcId === dcId && networker.usesSamePermanentAuthKey(rejectedNetworker)) {
+        matched.push(networker);
+      }
+    });
+
+    matched.forEach((networker) => {
+      if(networker !== rejectedNetworker) networker.onTransportError(-404);
+      this.onNetworkerDrain(networker);
+    });
+  }
+
+  public async recoverUnknownAuthKey(recoveryId: number, shouldRecover = true) {
+    const target = this.authKeyRecoveryTargets?.get(recoveryId);
+    this.authKeyRecoveryTargets?.delete(recoveryId);
+    if(!target || !shouldRecover) return false;
+    const {networker} = target;
+
+    const accountNumber = this.getAccountNumber();
+    const dcId = networker.dcId;
+    return recoverRejectedAuthKey({
+      accountNumber,
+      dcId,
+      isRejectedAuthKey: (authKeyHex) => networker.usesPermanentAuthKeyHex(authKeyHex),
+      isNetworkerCurrent: () => networker.transport === target.transport && this.isNetworkerCurrentForDc(dcId, networker),
+      readAccount: () => this.readAccountData(accountNumber),
+      writeAccount: async(accountData) => {
+        const authKeyHex = accountData[`dc${dcId}_auth_key`];
+        return await this.writeAuthKeyData(accountNumber, dcId, authKeyHex, accountData[`dc${dcId}_server_salt`], true);
+      },
+      exchangeAuthKey: async() => {
+        const permanent = await this.authorizer.auth(dcId, false, true);
+        return {
+          authKeyHex: bytesToHex(permanent.authKey.key),
+          serverSaltHex: bytesToHex(permanent.serverSalt)
+        };
+      },
+      invalidateRejectedKey: () => this.invalidateNetworkersForAuthKey(dcId, networker)
+    }).finally(() => {
+      this.authKeyRecoveryTargets?.delete(recoveryId);
+    });
   }
 
   private chooseServer(dcId: DcId, connectionType: ConnectionType, transportType: TransportType) {
@@ -495,15 +610,13 @@ export class ApiManager extends ApiManagerMethods {
         temporary = await this.authorizer.auth(dcId, true);
       } else {
         try { // if no saved state
-          [permanent, temporary] = await Promise.all([this.authorizer.auth(dcId, false), this.authorizer.auth(dcId, true)]);
+          [permanent, temporary] = await Promise.all([
+            this.getOrCreatePermanentAuthKey(this.getAccountNumber(), dcId),
+            this.authorizer.auth(dcId, true)
+          ]);
 
           authKeyHex = bytesToHex(permanent.authKey.key);
           serverSaltHex = bytesToHex(permanent.serverSalt);
-
-          AccountController.update(this.getAccountNumber(), {
-            [ak]: authKeyHex,
-            [ss]: serverSaltHex
-          });
         } catch(_error) {
           error = _error;
         }
@@ -629,8 +742,12 @@ export class ApiManager extends ApiManagerMethods {
     }
   }
 
-  private invokeApiInternal<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'], options: InvokeApiOptions): CancellablePromise<MethodDeclMap[T]['res']> {
+  private invokeApiInternal<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'], apiOptions: InvokeApiOptions): CancellablePromise<MethodDeclMap[T]['res']> {
     // /////this.log('Invoke api', method, params, options);
+
+    const authKeyRecovery = apiOptions.authKeyRecovery;
+    const options = {...apiOptions};
+    delete options.authKeyRecovery;
 
     /* if(!this.lol) {
       networkerFactory.updatesProcessor({_: 'new_session_created'}, true);
@@ -710,6 +827,7 @@ export class ApiManager extends ApiManagerMethods {
         }
       }
 
+      const requestTransport = cachedNetworker.transport;
       const promise = cachedNetworker.wrapApiCall(method, params, options);
 
       if(prepareTempMessageId) {
@@ -720,6 +838,13 @@ export class ApiManager extends ApiManagerMethods {
       }
 
       return promise.catch((error: ApiError) => {
+        if(authKeyRecovery && error?.type === 'AUTH_KEY_UNKNOWN' && cachedNetworker &&
+          cachedNetworker.transport === requestTransport && this.isNetworkerCurrentForDc(cachedNetworker.dcId, cachedNetworker)) {
+          const recoveryId = this.nextAuthKeyRecoveryId = (this.nextAuthKeyRecoveryId || 0) + 1;
+          (this.authKeyRecoveryTargets ??= new Map()).set(recoveryId, {networker: cachedNetworker, transport: requestTransport});
+          error = {...error, authKeyRecoveryId: recoveryId};
+        }
+
         // if(!options.ignoreErrors) {
         if(error.type !== 'FILE_REFERENCE_EXPIRED' && error.type !== 'FILE_REFERENCE_INVALID'/*  && error.type !== 'MSG_WAIT_FAILED' */) {
           this.log.error('Error', error.code, error.type, this.baseDcId, dcId, method, params);
@@ -760,7 +885,7 @@ export class ApiManager extends ApiManagerMethods {
               this.setBaseDcId(newDcId);
             }
 
-            return this.invokeApi(method, params, options);
+            return this.invokeApi(method, params, {...options, authKeyRecovery});
           }
         } else if(error.code === 400 && error.type.indexOf('FILE_MIGRATE') === 0) {
           const match = error.type.match(/^(FILE_MIGRATE_)(\d+)/);
@@ -770,7 +895,7 @@ export class ApiManager extends ApiManagerMethods {
           const newDcId = assertValidDcId(+match[2]);
           if(newDcId !== dcId) {
             options.dcId = newDcId;
-            return this.invokeApi(method, params, options);
+            return this.invokeApi(method, params, {...options, authKeyRecovery});
           } else {
             throw error;
           }

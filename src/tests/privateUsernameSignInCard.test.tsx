@@ -3,6 +3,7 @@ import {render} from 'solid-js/web';
 
 const mocks = vi.hoisted(() => ({
   invokeApi: vi.fn(),
+  recoverUnknownAuthKey: vi.fn(),
   getAppConfig: vi.fn(),
   updatePasswordSettings: vi.fn(),
   setUser: vi.fn(),
@@ -17,7 +18,12 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/pages/authFlow', () => ({
   useAuthFlow: () => ({
     managers: {
-      apiManager: {invokeApi: mocks.invokeApi, getAppConfig: mocks.getAppConfig, setUser: mocks.setUser},
+      apiManager: {
+        invokeApi: mocks.invokeApi,
+        recoverUnknownAuthKey: mocks.recoverUnknownAuthKey,
+        getAppConfig: mocks.getAppConfig,
+        setUser: mocks.setUser
+      },
       passwordManager: {updateSettings: mocks.updatePasswordSettings},
       appStateManager: {pushToState: mocks.pushToState}
     },
@@ -129,6 +135,7 @@ describe('private username sign-in card', () => {
 
   beforeEach(() => {
     mocks.invokeApi.mockReset();
+    mocks.recoverUnknownAuthKey.mockReset();
     mocks.getAppConfig.mockReset().mockResolvedValue({registration_mode: 'closed'});
     mocks.updatePasswordSettings.mockReset();
     mocks.setUser.mockReset();
@@ -287,12 +294,14 @@ describe('private username sign-in card', () => {
     next.click();
     await flushAuthFlow();
 
-    expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}));
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}), {
+      authKeyRecovery: true
+    });
     expect(mocks.invokeApi).toHaveBeenNthCalledWith(2, 'auth.signIn', {
       phone_number: USERNAME,
       phone_code_hash: 'mock-code-hash',
       phone_code: ''
-    }, {ignoreErrors: true});
+    }, {ignoreErrors: true, authKeyRecovery: true});
     expect(mocks.navigate).toHaveBeenCalledWith({name: 'password'});
     expect(isPrivateUsernameLogin()).toBe(true);
     expect(input.value).toBe('');
@@ -334,6 +343,23 @@ describe('private username sign-in card', () => {
     await vi.waitFor(() => expect(mocks.invokeApi).toHaveBeenCalledTimes(2));
   });
 
+  it('preserves the username when auth-key recovery exchange fails', async() => {
+    mocks.invokeApi.mockRejectedValueOnce({code: -404, type: 'AUTH_KEY_UNKNOWN', authKeyRecoveryId: 17});
+    mocks.recoverUnknownAuthKey.mockRejectedValueOnce({code: -500, type: 'MTPROTO_TRANSPORT_ERROR'});
+    const input = mount();
+    const next = document.querySelector('button') as HTMLButtonElement;
+    input.value = USERNAME;
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    next.click();
+
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toBe('Unable to sign in. Try again.'));
+
+    expect(mocks.recoverUnknownAuthKey).toHaveBeenCalledWith(17, true);
+    expect(input.value).toBe(USERNAME);
+    expect(next.disabled).toBe(false);
+    expect(next.textContent).toBe('Next');
+  });
+
   it('protects username sign-in with the signin Turnstile action', async() => {
     mocks.getAppConfig.mockResolvedValue({registration_mode: 'closed', turnstile: {site_key: 'test-site-key'}});
     mocks.invokeApi
@@ -351,11 +377,13 @@ describe('private username sign-in card', () => {
     turnstileCallbacks.callback('signin-token');
     await vi.waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith({name: 'password'}));
 
-    expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}));
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}), {
+      authKeyRecovery: true
+    });
     expect(mocks.invokeApi).toHaveBeenNthCalledWith(2, 'invokeWithReCaptcha', expect.objectContaining({
       token: 'signin-token',
       query: expect.objectContaining({_: 'auth.sendCode', phone_number: USERNAME})
-    }));
+    }), {authKeyRecovery: true});
   });
 
   it('finishes an authorization returned by username sign-in', async() => {
@@ -457,8 +485,12 @@ describe('private username sign-in card', () => {
     turnstileCallbacks.callback('fresh-token');
     await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
 
-    expect(mocks.invokeApi).toHaveBeenNthCalledWith(4, 'invokeWithReCaptcha', expect.objectContaining({token: 'rejected-token'}));
-    expect(mocks.invokeApi).toHaveBeenNthCalledWith(5, 'invokeWithReCaptcha', expect.objectContaining({token: 'fresh-token'}));
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(4, 'invokeWithReCaptcha', expect.objectContaining({token: 'rejected-token'}), {
+      authKeyRecovery: true
+    });
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(5, 'invokeWithReCaptcha', expect.objectContaining({token: 'fresh-token'}), {
+      authKeyRecovery: true
+    });
   });
 
   it('lets the user sign in with the same username after registration reports it is taken', async() => {
@@ -499,7 +531,9 @@ describe('private username sign-in card', () => {
       'auth.sendCode',
       'auth.signIn'
     ]);
-    expect(mocks.invokeApi).toHaveBeenNthCalledWith(4, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}));
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(4, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}), {
+      authKeyRecovery: true
+    });
   });
 
   it('re-enables sign-in when the server closes registration during sign-up', async() => {

@@ -300,6 +300,7 @@ declare global {
     message?: string,
     code?: number,
     handled?: boolean,
+    authKeyRecoveryId?: number,
     originalError?: any,
   };
 

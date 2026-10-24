@@ -15,6 +15,7 @@ export type InvokeApiOptions = Partial<{
   fileUpload: true,
   gzipCompress: true,
   ignoreErrors: true,
+  authKeyRecovery: true,
   fileDownload: true,
   createNetworker: true,
   singleInRequest: true,

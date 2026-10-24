@@ -21,7 +21,7 @@ export type PrivateUsernameAuthResult =
   | {kind: 'password'}
   | {kind: 'authorized', user: User}
   | {kind: 'cancelled'}
-  | {kind: 'error', errorType?: string};
+  | {kind: 'error', errorType?: string, authKeyRecoveryFailed?: true};
 
 export type PrivateUsernameRegistrationMode = 'closed' | 'invite' | 'open';
 
@@ -40,8 +40,10 @@ export type PrivateUsernameRegistrationError = 'usernameTaken' | 'invalidUsernam
 type InvokeAuthApi = (
   method: 'auth.sendCode' | 'auth.signIn' | 'auth.checkPassword' | 'auth.signUp' | 'invokeWithReCaptcha',
   params: AuthSendCode | AuthSignIn | AuthCheckPassword | AuthSignUp | InvokeWithReCaptcha,
-  options?: {ignoreErrors: true}
+  options?: {ignoreErrors?: true, authKeyRecovery?: true}
 ) => Promise<unknown>;
+
+export type RecoverPrivateUsernameAuthKey = (error: unknown, shouldRecover: boolean) => Promise<boolean>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -51,7 +53,8 @@ function getErrorType(error: unknown): unknown {
   return isRecord(error) ? error.type : undefined;
 }
 
-function getAuthErrorResult(error: unknown, includeType: boolean): PrivateUsernameAuthResult {
+function getAuthErrorResult(error: unknown, includeType: boolean, authKeyRecoveryFailed = false): PrivateUsernameAuthResult {
+  if(authKeyRecoveryFailed) return {kind: 'error', authKeyRecoveryFailed: true};
   const errorType = getErrorType(error);
   const shouldIncludeType = includeType || errorType === 'AUTH_KEY_UNKNOWN' || errorType === 'AUTH_KEY_RATE_LIMIT';
   return shouldIncludeType && typeof errorType === 'string' ? {kind: 'error', errorType} : {kind: 'error'};
@@ -94,16 +97,59 @@ export async function authenticatePrivateUsername(
   isCancelled: () => boolean = () => false,
   registration?: PrivateUsernameRegistration,
   requestTurnstile?: RequestTurnstileChallenge,
-  turnstileSiteKey?: string
+  turnstileSiteKey?: string,
+  recoverAuthKey?: RecoverPrivateUsernameAuthKey
 ): Promise<PrivateUsernameAuthResult> {
   if(!isPrivateUsername(username)) return {kind: 'invalidInput'};
   if(registration && registration.mode !== 'closed' && !registration.displayName.trim()) return {kind: 'invalidInput'};
   if(registration && registration.mode !== 'closed' && !registration.password) return {kind: 'invalidInput'};
   if(registration?.mode === 'invite' && !registration.inviteSecret?.trim()) return {kind: 'invalidInput'};
 
+  let didRecoverAuthKey = false;
+  let authKeyRecoveryFailed = false;
+  const invokeAuthApi = async(
+    method: Parameters<InvokeAuthApi>[0],
+    params: Parameters<InvokeAuthApi>[1],
+    options?: Parameters<InvokeAuthApi>[2]
+  ) => {
+    const requestOptions: Parameters<InvokeAuthApi>[2] = recoverAuthKey ? {...options, authKeyRecovery: true as const} : options;
+    const invoke = () => requestOptions ? invokeApi(method, params, requestOptions) : invokeApi(method, params);
+
+    try {
+      return await invoke();
+    } catch(error) {
+      if(getErrorType(error) !== 'AUTH_KEY_UNKNOWN' || !recoverAuthKey) throw error;
+
+      const shouldRecover = !didRecoverAuthKey && !wasCancelled(error, isCancelled);
+      if(shouldRecover) didRecoverAuthKey = true;
+      let recovered: boolean;
+      try {
+        recovered = await recoverAuthKey(error, shouldRecover);
+      } catch(recoveryError) {
+        authKeyRecoveryFailed = true;
+        throw recoveryError;
+      }
+      if(!shouldRecover || !recovered || isCancelled()) throw error;
+
+      try {
+        return await invoke();
+      } catch(retryError) {
+        if(getErrorType(retryError) === 'AUTH_KEY_UNKNOWN') {
+          try {
+            await recoverAuthKey(retryError, false);
+          } catch(recoveryError) {
+            authKeyRecoveryFailed = true;
+            throw recoveryError;
+          }
+        }
+        throw retryError;
+      }
+    }
+  };
+
   let sentCode: unknown;
   try {
-    sentCode = await invokeTurnstileProtected(invokeApi, 'auth.sendCode', {
+    sentCode = await invokeTurnstileProtected(invokeAuthApi, 'auth.sendCode', {
       phone_number: username,
       api_id: App.id,
       api_hash: App.hash,
@@ -114,7 +160,8 @@ export async function authenticatePrivateUsername(
     }, 'signin', requestTurnstile);
   } catch(error) {
     if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
-    return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : getAuthErrorResult(error, !!registration);
+    if(authKeyRecoveryFailed) return getAuthErrorResult(error, !!registration, true);
+    return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : getAuthErrorResult(error, !!registration, authKeyRecoveryFailed);
   }
 
   if(isCancelled()) return {kind: 'cancelled'};
@@ -127,13 +174,14 @@ export async function authenticatePrivateUsername(
   let authorization: unknown;
   try {
     const phoneCode = registration?.mode === 'invite' ? registration.inviteSecret : '';
-    authorization = await invokeApi('auth.signIn', {
+    authorization = await invokeAuthApi('auth.signIn', {
       phone_number: username,
       phone_code_hash: sentCode.phone_code_hash,
       phone_code: phoneCode
     }, {ignoreErrors: true});
   } catch(error) {
     if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
+    if(authKeyRecoveryFailed) return getAuthErrorResult(error, !!registration, true);
     if(getErrorType(error) === 'SESSION_PASSWORD_NEEDED') {
       if(registration?.checkPassword) {
         try {
@@ -149,7 +197,7 @@ export async function authenticatePrivateUsername(
       }
       return registration ? {kind: 'usernameTaken'} : {kind: 'password'};
     }
-    return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : getAuthErrorResult(error, !!registration);
+    return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : getAuthErrorResult(error, !!registration, authKeyRecoveryFailed);
   }
 
   if(isCancelled()) return {kind: 'cancelled'};
@@ -166,13 +214,14 @@ export async function authenticatePrivateUsername(
         last_name: ''
       };
       signUpResponse = await invokeSignUpWithTurnstile(
-        (method, request) => invokeApi(method, request),
+        (method, request) => invokeAuthApi(method, request),
         params,
         requestTurnstile,
         turnstileSiteKey
       );
     } catch(error) {
       if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
+      if(authKeyRecoveryFailed) return getAuthErrorResult(error, true, true);
       const errorKind = getPrivateUsernameRegistrationError(error);
       return errorKind === 'weakPassword' || errorKind === 'error' ? getAuthErrorResult(error, true) : {kind: errorKind};
     }
