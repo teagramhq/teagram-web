@@ -253,6 +253,68 @@ describe('networker transport errors', () => {
   });
 });
 
+describe('auth-key recovery request metadata', () => {
+  it('returns a recovery handle only to the flagged auth call and hides its flag from the networker', async() => {
+    const networker = createNetworkerForCall();
+    const wrapApiCall = vi.fn().mockRejectedValue({code: -404, type: 'AUTH_KEY_UNKNOWN'});
+    Object.assign(networker, {
+      dcId: 2,
+      permAuthKey: {key: new Uint8Array(256).fill(0xaa)},
+      wrapApiCall,
+      attachPromise: vi.fn()
+    });
+    const {manager} = createStandardManager(networker);
+
+    await expect(manager.invokeApi('auth.sendCode', {phone_number: 'Alice_123'} as any, {
+      dcId: 2,
+      ignoreErrors: true,
+      authKeyRecovery: true
+    })).rejects.toMatchObject({type: 'AUTH_KEY_UNKNOWN', authKeyRecoveryId: 1});
+
+    expect(wrapApiCall).toHaveBeenCalledWith(
+      'auth.sendCode',
+      {phone_number: 'Alice_123'},
+      expect.not.objectContaining({authKeyRecovery: true})
+    );
+
+    let unrelatedError: unknown;
+    await manager.invokeApi('auth.sendCode', {phone_number: 'Alice_123'} as any, {
+      dcId: 2,
+      ignoreErrors: true
+    }).catch((error) => { unrelatedError = error; });
+    expect(unrelatedError).toMatchObject({type: 'AUTH_KEY_UNKNOWN'});
+    expect(unrelatedError).not.toHaveProperty('authKeyRecoveryId');
+  });
+
+  it('does not return a recovery handle for a failure from a superseded transport', async() => {
+    const networker = createNetworkerForCall();
+    const oldTransport = {} as any;
+    const newTransport = {} as any;
+    const wrapApiCall = vi.fn().mockImplementation(async() => {
+      networker.transport = newTransport;
+      throw {code: -404, type: 'AUTH_KEY_UNKNOWN'};
+    });
+    Object.assign(networker, {
+      dcId: 2,
+      permAuthKey: {key: new Uint8Array(256).fill(0xaa)},
+      transport: oldTransport,
+      wrapApiCall,
+      attachPromise: vi.fn()
+    });
+    const {manager} = createStandardManager(networker);
+    let responseError: unknown;
+
+    await manager.invokeApi('auth.sendCode', {phone_number: 'Alice_123'} as any, {
+      dcId: 2,
+      ignoreErrors: true,
+      authKeyRecovery: true
+    }).catch((error) => { responseError = error; });
+
+    expect(responseError).toMatchObject({type: 'AUTH_KEY_UNKNOWN'});
+    expect(responseError).not.toHaveProperty('authKeyRecoveryId');
+  });
+});
+
 describe('standard wrapped auth transport failures', () => {
   it.each([
     ['auth.sendCode', 'UNKNOWN'],

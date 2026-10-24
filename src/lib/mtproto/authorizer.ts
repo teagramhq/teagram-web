@@ -563,7 +563,7 @@ export class Authorizer {
       authKeyId = authKeyHash.slice(-8);
 
     if(DEBUG) {
-      this.log('Got Set_client_DH_params_answer', response._, authKey);
+      this.log('Got Set_client_DH_params_answer', response._);
     }
     switch(response._) {
       case 'dh_gen_ok': {
@@ -576,7 +576,7 @@ export class Authorizer {
 
         const serverSalt = bytesXor(auth.newNonce.slice(0, 8), auth.serverNonce.slice(0, 8));
         if(DEBUG) {
-          this.log('Auth successfull!', authKeyId, authKey, serverSalt);
+          this.log('Auth successfull!', authKeyId);
         }
 
         auth.authKey = new MTAuthKey(authKey, authKeyId, auth.expiresAt);
@@ -654,8 +654,9 @@ export class Authorizer {
     throw error;
   }
 
-  public auth(dcId: DcId, temp: boolean) {
+  public auth(dcId: DcId, temp: boolean, force = false) {
     const key = `${dcId}_${temp}` as const;
+    if(force) delete this.cached[key];
     return this.cached[key] ??= this._auth(dcId, temp).catch((err) => {
       delete this.cached[key];
       throw err;

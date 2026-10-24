@@ -52,4 +52,20 @@ describe('default server localStorage cleanup', () => {
 
     expect(await firstTabStorage.get('guestCredentials')).toBeUndefined();
   });
+
+  it('refreshes a cached account value from storage without writing it back', async() => {
+    type AccountStorage = {account1?: {dc2_auth_key: string}};
+    const firstTabStorage = new LocalStorageController<AccountStorage>();
+    const secondTabStorage = new LocalStorageController<AccountStorage>();
+    const oldAccount = {dc2_auth_key: 'old-auth-key'};
+    const newAccount = {dc2_auth_key: 'new-auth-key'};
+
+    await firstTabStorage.set({account1: oldAccount});
+    await secondTabStorage.set({account1: newAccount});
+
+    await expect(firstTabStorage.get('account1')).resolves.toEqual(oldAccount);
+    await expect(firstTabStorage.getFresh('account1')).resolves.toEqual(newAccount);
+    await expect(firstTabStorage.get('account1')).resolves.toEqual(newAccount);
+    expect(localStorage.getItem('account1')).toBe(JSON.stringify(newAccount));
+  });
 });

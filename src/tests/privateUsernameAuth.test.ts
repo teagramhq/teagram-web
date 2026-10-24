@@ -236,6 +236,77 @@ describe('private username sign-in', () => {
     expect(invokeApi.mock.calls[0][0]).toBe('auth.sendCode');
   });
 
+  it('rekeys once after AUTH_KEY_UNKNOWN and retries only the rejected sign-in call', async() => {
+    const unknownKey = {code: -404, type: 'AUTH_KEY_UNKNOWN', authKeyRecoveryId: 17};
+    const invokeApi = vi.fn()
+    .mockRejectedValueOnce(unknownKey)
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'});
+    const recoverAuthKey = vi.fn().mockResolvedValue(true);
+
+    await expect(authenticatePrivateUsername(
+      USERNAME,
+      invokeApi,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      recoverAuthKey
+    )).resolves.toEqual({kind: 'password'});
+
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual([
+      'auth.sendCode',
+      'auth.sendCode',
+      'auth.signIn'
+    ]);
+    expect(recoverAuthKey).toHaveBeenCalledOnce();
+    expect(recoverAuthKey).toHaveBeenCalledWith(unknownKey, true);
+  });
+
+  it('does not rekey or replay after AUTH_KEY_UNKNOWN on the replacement key', async() => {
+    const firstUnknownKey = {code: -404, type: 'AUTH_KEY_UNKNOWN', authKeyRecoveryId: 17};
+    const secondUnknownKey = {code: -404, type: 'AUTH_KEY_UNKNOWN', authKeyRecoveryId: 18};
+    const invokeApi = vi.fn()
+    .mockRejectedValueOnce(firstUnknownKey)
+    .mockRejectedValueOnce(secondUnknownKey);
+    const recoverAuthKey = vi.fn().mockResolvedValue(true);
+
+    await expect(authenticatePrivateUsername(
+      USERNAME,
+      invokeApi,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      recoverAuthKey
+    )).resolves.toEqual({kind: 'error', errorType: 'AUTH_KEY_UNKNOWN'});
+
+    expect(invokeApi).toHaveBeenCalledTimes(2);
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.sendCode']);
+    expect(recoverAuthKey.mock.calls).toEqual([
+      [firstUnknownKey, true],
+      [secondUnknownKey, false]
+    ]);
+  });
+
+  it('does not rekey an auth key rate-limit response', async() => {
+    const invokeApi = vi.fn().mockRejectedValue({code: -429, type: 'AUTH_KEY_RATE_LIMIT'});
+    const recoverAuthKey = vi.fn();
+
+    await expect(authenticatePrivateUsername(
+      USERNAME,
+      invokeApi,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      recoverAuthKey
+    )).resolves.toEqual({kind: 'error', errorType: 'AUTH_KEY_RATE_LIMIT'});
+
+    expect(invokeApi).toHaveBeenCalledOnce();
+    expect(recoverAuthKey).not.toHaveBeenCalled();
+  });
+
   it('sends the invite secret in sign-in phone_code before creating an invited account', async() => {
     const user = {_: 'user', id: 43};
     const invokeApi = vi.fn()

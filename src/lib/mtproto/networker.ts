@@ -24,6 +24,7 @@ import ctx from '@environment/ctx';
 import bufferConcats from '@helpers/bytes/bufferConcats';
 import bytesCmp from '@helpers/bytes/bytesCmp';
 import bytesCmpConstTime from '@helpers/bytes/bytesCmpConstTime';
+import bytesFromHex from '@helpers/bytes/bytesFromHex';
 import bytesToHex from '@helpers/bytes/bytesToHex';
 import isObject from '@helpers/object/isObject';
 import forEachReverse from '@helpers/array/forEachReverse';
@@ -162,6 +163,15 @@ export default class MTPNetworker {
       sentResendReq: this.sentResendReq.size,
       lastServerMessages: this.lastServerMessages.size
     };
+  }
+
+  public usesPermanentAuthKeyHex(authKeyHex: string) {
+    if(!/^[\da-f]{512}$/i.test(authKeyHex)) return false;
+    return bytesCmp(this.permAuthKey.key, bytesFromHex(authKeyHex));
+  }
+
+  public usesSamePermanentAuthKey(networker: MTPNetworker) {
+    return bytesCmp(this.permAuthKey.key, networker.permAuthKey.key);
   }
 
   private sentMessages: {

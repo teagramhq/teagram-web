@@ -16,6 +16,38 @@ const SERVER_WSS_ENDPOINT = `wss://${SERVER_HOST}/apiws`;
 const SERVER_USER = process.env.TEAGRAM_CUSTOM_SERVER_TEST_USER || 'custom_server_user';
 const SERVER_PASSWORD = process.env.TEAGRAM_CUSTOM_SERVER_TEST_PASSWORD || 'Teagram-Test-Password-123!';
 
+function deleteUnboundCustomServerAuthKeys() {
+  const databaseUrl = process.env.TG_POSTGRES_DSN;
+  if(process.env.CI !== 'true' || !databaseUrl) {
+    throw new Error('auth-key deletion requires the disposable CI Postgres fixture');
+  }
+
+  const target = new URL(databaseUrl);
+  if(!['localhost', '127.0.0.1', '::1'].includes(target.hostname) || target.pathname !== '/teagram') {
+    throw new Error('auth-key deletion requires the local teagram CI database');
+  }
+
+  const deletedCount = execFileSync('psql', [
+    '-X',
+    '-q',
+    '-t',
+    '-A',
+    '-v',
+    'ON_ERROR_STOP=1',
+    '-v',
+    `server_user=${SERVER_USER}`,
+    '-c',
+    "WITH deleted AS (DELETE FROM public.auth_keys WHERE user_id IS NULL AND pending_user_id = " +
+      "(SELECT id FROM public.users WHERE username = lower(:'server_user')) RETURNING 1) SELECT count(*) FROM deleted;",
+    databaseUrl
+  ], {encoding: 'utf8'}).trim();
+  const count = Number(deletedCount);
+  if(!Number.isSafeInteger(count) || count < 1) {
+    throw new Error(`expected to delete an unbound auth key, got ${deletedCount || 'no count'}`);
+  }
+  return count;
+}
+
 function trackTlsServerSockets(server: ReturnType<typeof createServer>) {
   const sockets = new Map<Duplex, 'https' | 'websocket'>();
   const track = (socket: Duplex, kind: 'https' | 'websocket') => {
@@ -1099,6 +1131,18 @@ test('isolates two server tabs when a custom server worker takes control', async
       await expect(auth.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
       expect(customPageNavigations.some((url) => new URL(url).searchParams.has('swfix'))).toBe(false);
       await expect(auth.getByText(`Server: ${SERVER_HOST}`, {exact: true})).toBeVisible();
+
+      const warmup = await customPage!.evaluate(async(username) => {
+        const moduleUrl = new URL('/src/pages/privateUsernameAuth.ts', window.location.origin).href;
+        const {authenticatePrivateUsername} = await import(moduleUrl);
+        const apiManager = (window as any).rootScope.managers.apiManager;
+        return authenticatePrivateUsername(username, (method: any, params: any, options?: any) => {
+          return options ? apiManager.invokeApi(method, params, options) : apiManager.invokeApi(method, params);
+        });
+      }, SERVER_USER);
+      expect(warmup).toMatchObject({kind: 'password'});
+      expect(deleteUnboundCustomServerAuthKeys()).toBeGreaterThan(0);
+
       await auth.getByRole('textbox', {name: 'Username'}).fill(SERVER_USER);
       await auth.getByRole('button', {name: 'Next'}).click();
 

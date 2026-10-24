@@ -285,6 +285,19 @@ export default class LocalStorageController<Storage extends Record<string, any>>
     return this.localStorageProxy<Storage[Key]>('get', key, useCache);
   }
 
+  public async getFresh<Key extends keyof Storage>(key: StringKey<Key>) {
+    await this.waitEncryptionToFinish();
+
+    if(await this.shouldUseEncryptableStorage(key)) {
+      const [value] = await this.encryptedStorageProxy('get', [key], false);
+      return value as Storage[Key];
+    }
+
+    const value = await this.localStorageProxy<Storage[Key]>('get', key, false);
+    await this.localStorageProxy<void>('set', {[key]: value}, true);
+    return value;
+  }
+
   public async set(obj: Partial<Storage>) {
     await this.waitEncryptionToFinish();
 

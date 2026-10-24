@@ -276,7 +276,15 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         () => cancelled,
         registration,
         turnstile.request,
-        turnstileSiteKey()
+        turnstileSiteKey(),
+        (error, shouldRecover) => {
+          const recoveryId = error && typeof error === 'object' && 'authKeyRecoveryId' in error ?
+            (error as {authKeyRecoveryId?: number}).authKeyRecoveryId :
+            undefined;
+          return typeof recoveryId === 'number' ?
+            managers.apiManager.recoverUnknownAuthKey(recoveryId, shouldRecover) :
+            Promise.resolve(false);
+        }
       );
       activeIdentifier = '';
 
