@@ -27,6 +27,17 @@ function deleteUnboundCustomServerAuthKeys() {
     throw new Error('auth-key deletion requires the local teagram CI database');
   }
 
+  const sql = `
+    WITH deleted AS (
+      DELETE FROM public.auth_keys
+      WHERE user_id IS NULL
+        AND pending_user_id = (
+          SELECT id FROM public.users WHERE username = lower(:'server_user')
+        )
+      RETURNING 1
+    )
+    SELECT count(*) FROM deleted;
+  `;
   const deletedCount = execFileSync('psql', [
     '-X',
     '-q',
@@ -36,11 +47,8 @@ function deleteUnboundCustomServerAuthKeys() {
     'ON_ERROR_STOP=1',
     '-v',
     `server_user=${SERVER_USER}`,
-    '-c',
-    "WITH deleted AS (DELETE FROM public.auth_keys WHERE user_id IS NULL AND pending_user_id = " +
-      "(SELECT id FROM public.users WHERE username = lower(:'server_user')) RETURNING 1) SELECT count(*) FROM deleted;",
     databaseUrl
-  ], {encoding: 'utf8'}).trim();
+  ], {encoding: 'utf8', input: sql}).trim();
   const count = Number(deletedCount);
   if(!Number.isSafeInteger(count) || count < 1) {
     throw new Error(`expected to delete an unbound auth key, got ${deletedCount || 'no count'}`);
