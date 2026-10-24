@@ -247,4 +247,27 @@ describe('unknown auth-key recovery', () => {
     expect(networkerFactory.removeNetworker).toHaveBeenCalledWith(networker);
     expect((manager as any).cachedNetworkers.websocket.client[2]).toEqual([]);
   });
+
+  it('creates a missing permanent auth key when Web Locks are unavailable', async() => {
+    vi.stubGlobal('navigator', {});
+    const permanent = {
+      authKey: {key: new Uint8Array(256).fill(0x12)},
+      serverSalt: new Uint8Array(8).fill(0x34)
+    };
+    const readAccountData = vi.fn(async() => ({}));
+    const writeAuthKeyData = vi.fn(async() => {});
+    const auth = vi.fn(async() => permanent);
+    const manager = Object.create(ApiManager.prototype) as ApiManager;
+    Object.assign(manager, {
+      readAccountData,
+      writeAuthKeyData,
+      authorizer: {auth}
+    });
+
+    await expect((manager as any).getOrCreatePermanentAuthKey(1, 2)).resolves.toBe(permanent);
+
+    expect(auth).toHaveBeenCalledOnce();
+    expect(auth).toHaveBeenCalledWith(2, false, true);
+    expect(writeAuthKeyData).toHaveBeenCalledOnce();
+  });
 });

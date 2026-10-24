@@ -242,7 +242,7 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   private async getOrCreatePermanentAuthKey(accountNumber: ActiveAccountNumber, dcId: DcId) {
-    return withAuthKeyRecoveryLock(accountNumber, dcId, async() => {
+    const createOrRead = async() => {
       const accountData = await this.readAccountData(accountNumber);
       const authKeyHex = accountData[`dc${dcId}_auth_key`];
       const serverSaltHex = accountData[`dc${dcId}_server_salt`];
@@ -262,7 +262,10 @@ export class ApiManager extends ApiManagerMethods {
         bytesToHex(permanent.serverSalt)
       );
       return permanent;
-    });
+    };
+
+    if(typeof navigator === 'undefined' || !navigator.locks) return createOrRead();
+    return withAuthKeyRecoveryLock(accountNumber, dcId, createOrRead);
   }
 
   private invalidateNetworkersForAuthKey(dcId: DcId, rejectedNetworker: MTPNetworker) {

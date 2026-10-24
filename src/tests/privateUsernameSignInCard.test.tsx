@@ -287,12 +287,14 @@ describe('private username sign-in card', () => {
     next.click();
     await flushAuthFlow();
 
-    expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}));
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}), {
+      authKeyRecovery: true
+    });
     expect(mocks.invokeApi).toHaveBeenNthCalledWith(2, 'auth.signIn', {
       phone_number: USERNAME,
       phone_code_hash: 'mock-code-hash',
       phone_code: ''
-    }, {ignoreErrors: true});
+    }, {ignoreErrors: true, authKeyRecovery: true});
     expect(mocks.navigate).toHaveBeenCalledWith({name: 'password'});
     expect(isPrivateUsernameLogin()).toBe(true);
     expect(input.value).toBe('');
@@ -351,11 +353,13 @@ describe('private username sign-in card', () => {
     turnstileCallbacks.callback('signin-token');
     await vi.waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith({name: 'password'}));
 
-    expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}));
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}), {
+      authKeyRecovery: true
+    });
     expect(mocks.invokeApi).toHaveBeenNthCalledWith(2, 'invokeWithReCaptcha', expect.objectContaining({
       token: 'signin-token',
       query: expect.objectContaining({_: 'auth.sendCode', phone_number: USERNAME})
-    }));
+    }), {authKeyRecovery: true});
   });
 
   it('finishes an authorization returned by username sign-in', async() => {
@@ -457,8 +461,12 @@ describe('private username sign-in card', () => {
     turnstileCallbacks.callback('fresh-token');
     await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
 
-    expect(mocks.invokeApi).toHaveBeenNthCalledWith(4, 'invokeWithReCaptcha', expect.objectContaining({token: 'rejected-token'}));
-    expect(mocks.invokeApi).toHaveBeenNthCalledWith(5, 'invokeWithReCaptcha', expect.objectContaining({token: 'fresh-token'}));
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(4, 'invokeWithReCaptcha', expect.objectContaining({token: 'rejected-token'}), {
+      authKeyRecovery: true
+    });
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(5, 'invokeWithReCaptcha', expect.objectContaining({token: 'fresh-token'}), {
+      authKeyRecovery: true
+    });
   });
 
   it('lets the user sign in with the same username after registration reports it is taken', async() => {
@@ -499,7 +507,9 @@ describe('private username sign-in card', () => {
       'auth.sendCode',
       'auth.signIn'
     ]);
-    expect(mocks.invokeApi).toHaveBeenNthCalledWith(4, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}));
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(4, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}), {
+      authKeyRecovery: true
+    });
   });
 
   it('re-enables sign-in when the server closes registration during sign-up', async() => {
