@@ -33,6 +33,7 @@ function createStandardManager(networker: MTPNetworker) {
     baseDcId: 2,
     cachedNetworkers,
     transportType: 'https',
+    rootScope: {myId: 0},
     log: {error: logError}
   });
   return {manager, logError};
