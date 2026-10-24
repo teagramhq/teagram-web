@@ -360,6 +360,59 @@ describe('unknown auth-key recovery', () => {
     });
   });
 
+  it('does not store a replacement key if the account is bound before the locked merge', async() => {
+    installLocks();
+    let accountData: Record<string, unknown> = {
+      dc2_auth_key: REJECTED_KEY,
+      dc2_server_salt: 'old-salt',
+      auth_key_fingerprint: REJECTED_KEY.slice(0, 8)
+    };
+    let freshReads = 0;
+    vi.spyOn(sessionStorage, 'getFresh').mockImplementation(async() => {
+      const snapshot = structuredClone(accountData);
+      freshReads++;
+      if(freshReads === 3) await AccountController.update(1, {userId: 42});
+      return snapshot as any;
+    });
+    vi.spyOn(sessionStorage, 'get').mockImplementation(async(key: any) => {
+      return key === 'account1' ? structuredClone(accountData) as any : {} as any;
+    });
+    vi.spyOn(sessionStorage, 'set').mockImplementation(async(data: any) => {
+      if(data.account1) accountData = structuredClone(data.account1);
+    });
+    vi.spyOn(AccountController, 'updateStorageForLegacy').mockResolvedValue(undefined);
+
+    const networker = Object.create(MTPNetworker.prototype) as MTPNetworker;
+    const transport = {destroy: vi.fn()};
+    Object.assign(networker, {
+      dcId: 2,
+      permAuthKey: {key: new Uint8Array(256).fill(0xaa)},
+      transport,
+      changeTransport: vi.fn(function(this: MTPNetworker, nextTransport) { this.transport = nextTransport; }),
+      destroy: vi.fn()
+    });
+    const manager = Object.create(ApiManager.prototype) as ApiManager;
+    Object.assign(manager, {
+      accountNumber: 1,
+      authKeyRecoveryTargets: new Map([[17, {networker, transport}]]),
+      cachedNetworkers: {websocket: {client: {2: [networker]}, download: {}, upload: {}}},
+      dcConfigurator: {chosenServers: {}},
+      networkerFactory: {removeNetworker: vi.fn()},
+      authorizer: {
+        auth: vi.fn(async() => ({
+          authKey: {key: new Uint8Array(256).fill(0xbb)},
+          serverSalt: new Uint8Array(8).fill(0xcc)
+        }))
+      },
+      log: vi.fn()
+    });
+
+    await expect(manager.recoverUnknownAuthKey(17)).resolves.toBe(false);
+
+    expect(accountData).toMatchObject({userId: 42});
+    expect(accountData).not.toHaveProperty('dc2_auth_key');
+  });
+
   it('rejects pending RPCs on sibling networkers when retiring a rejected key', async() => {
     installLocks();
     let accountData: Record<string, unknown> = {

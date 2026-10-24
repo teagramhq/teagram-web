@@ -232,10 +232,13 @@ export class ApiManager extends ApiManagerMethods {
     accountNumber: ActiveAccountNumber,
     dcId: DcId,
     authKeyHex?: string,
-    serverSaltHex?: string
+    serverSaltHex?: string,
+    onlyIfUnbound = false
   ) {
-    await AccountController.withAccountWriteLock(accountNumber, async() => {
+    return await AccountController.withAccountWriteLock(accountNumber, async() => {
       const accountData = await this.readAccountData(accountNumber);
+      if(onlyIfUnbound && accountData.userId) return false;
+
       const authKeyName = `dc${dcId}_auth_key`;
       const serverSaltName = `dc${dcId}_server_salt`;
       if(typeof authKeyHex === 'string') {
@@ -249,6 +252,7 @@ export class ApiManager extends ApiManagerMethods {
         if(dcId === App.baseDcId) delete accountData.auth_key_fingerprint;
       }
       await this.writeAccountData(accountNumber, accountData);
+      return true;
     });
   }
 
@@ -308,7 +312,7 @@ export class ApiManager extends ApiManagerMethods {
       readAccount: () => this.readAccountData(accountNumber),
       writeAccount: async(accountData) => {
         const authKeyHex = accountData[`dc${dcId}_auth_key`];
-        await this.writeAuthKeyData(accountNumber, dcId, authKeyHex, accountData[`dc${dcId}_server_salt`]);
+        return await this.writeAuthKeyData(accountNumber, dcId, authKeyHex, accountData[`dc${dcId}_server_salt`], true);
       },
       exchangeAuthKey: async() => {
         const permanent = await this.authorizer.auth(dcId, false, true);

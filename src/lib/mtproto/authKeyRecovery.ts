@@ -11,7 +11,7 @@ type RecoveryOptions = {
   isRejectedAuthKey: (authKeyHex: string) => boolean,
   isNetworkerCurrent: () => boolean,
   readAccount: () => Promise<AuthKeyAccount>,
-  writeAccount: (account: AuthKeyAccount) => Promise<void>,
+  writeAccount: (account: AuthKeyAccount) => Promise<boolean | void>,
   exchangeAuthKey: () => Promise<{authKeyHex: string, serverSaltHex: string}>,
   invalidateRejectedKey: () => void
 };
@@ -59,7 +59,7 @@ export function recoverRejectedAuthKey(options: RecoveryOptions): Promise<boolea
     if(isAuthKeyHex(storedAuthKey)) {
       delete account[authKeyName];
       delete account[serverSaltName];
-      await options.writeAccount(account);
+      if(await options.writeAccount(account) === false) return false;
     }
 
     options.invalidateRejectedKey();
@@ -82,7 +82,7 @@ export function recoverRejectedAuthKey(options: RecoveryOptions): Promise<boolea
 
     latestAccount[authKeyName] = replacement.authKeyHex;
     latestAccount[serverSaltName] = replacement.serverSaltHex;
-    await options.writeAccount(latestAccount);
+    if(await options.writeAccount(latestAccount) === false) return false;
     return true;
   });
 }
