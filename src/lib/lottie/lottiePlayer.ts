@@ -497,7 +497,11 @@ export default class LottiePlayer extends EventListenerBase<LottiePlayerEvents> 
 
       return this.onLoad(frameCount, fps);
     }).catch((err) => {
-      if(this.offscreen && !this.offscreenLoadFailed && !this.destroyed) {
+      if(this.destroyed) {
+        return;
+      }
+
+      if(this.offscreen && !this.offscreenLoadFailed) {
         // belt: retry once in legacy mode with fresh canvases (safe - nothing is DOM-appended before firstFrame)
         console.error('offscreen loadFromData error, retrying legacy:', err, this);
         this.offscreenLoadFailed = true;
