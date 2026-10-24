@@ -307,6 +307,33 @@ describe('private username sign-in card', () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
+  it.each(['AUTH_KEY_UNKNOWN', 'AUTH_KEY_RATE_LIMIT'])('shows a retryable sign-in error and re-enables submit after %s', async(type) => {
+    let rejectRequest!: (error: unknown) => void;
+    mocks.invokeApi.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRequest = reject; }));
+    const input = mount();
+    const next = document.querySelector('button') as HTMLButtonElement;
+    input.value = USERNAME;
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    next.click();
+
+    await vi.waitFor(() => {
+      expect(next.disabled).toBe(true);
+      expect(next.textContent).toBe('Please wait…');
+    });
+
+    rejectRequest({code: type === 'AUTH_KEY_UNKNOWN' ? -404 : -429, type});
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toBe('Unable to sign in. Try again.'));
+
+    expect(input.value).toBe(USERNAME);
+    expect(next.disabled).toBe(false);
+    expect(next.textContent).toBe('Next');
+    expect(mocks.invokeApi).toHaveBeenCalledOnce();
+    expect(consoleError).not.toHaveBeenCalled();
+
+    next.click();
+    await vi.waitFor(() => expect(mocks.invokeApi).toHaveBeenCalledTimes(2));
+  });
+
   it('protects username sign-in with the signin Turnstile action', async() => {
     mocks.getAppConfig.mockResolvedValue({registration_mode: 'closed', turnstile: {site_key: 'test-site-key'}});
     mocks.invokeApi

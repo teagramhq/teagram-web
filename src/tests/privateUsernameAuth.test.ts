@@ -225,6 +225,17 @@ describe('private username sign-in', () => {
     expect(invokeApi.mock.calls[0][0]).toBe('auth.sendCode');
   });
 
+  it.each([
+    [{code: -404, type: 'AUTH_KEY_UNKNOWN'}, 'AUTH_KEY_UNKNOWN'],
+    [{code: -429, type: 'AUTH_KEY_RATE_LIMIT'}, 'AUTH_KEY_RATE_LIMIT']
+  ])('returns a retryable classified error for %s without replaying auth.sendCode', async(error, errorType) => {
+    const invokeApi = vi.fn().mockRejectedValue(error);
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi)).resolves.toEqual({kind: 'error', errorType});
+    expect(invokeApi).toHaveBeenCalledOnce();
+    expect(invokeApi.mock.calls[0][0]).toBe('auth.sendCode');
+  });
+
   it('sends the invite secret in sign-in phone_code before creating an invited account', async() => {
     const user = {_: 'user', id: 43};
     const invokeApi = vi.fn()
