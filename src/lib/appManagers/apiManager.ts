@@ -226,6 +226,7 @@ export class ApiManager extends ApiManagerMethods {
     AccountController.fillMissingData(accountData);
     await sessionStorage.set({[`account${accountNumber}`]: accountData} as any);
     if(accountNumber === 1) await AccountController.updateStorageForLegacy(accountData);
+    await sessionStorage.flush();
   }
 
   private async writeAuthKeyData(

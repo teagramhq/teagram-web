@@ -413,6 +413,129 @@ describe('unknown auth-key recovery', () => {
     expect(accountData).not.toHaveProperty('dc2_auth_key');
   });
 
+  it('flushes delayed encrypted writes before releasing cross-tab recovery locks', async() => {
+    const request = installLocks();
+    let accountData: Record<string, unknown> = {
+      userId: undefined,
+      dc2_auth_key: REJECTED_KEY,
+      dc2_server_salt: 'old-salt',
+      auth_key_fingerprint: REJECTED_KEY.slice(0, 8),
+      push_key: 'existing-push-key'
+    };
+    const pendingAccountWrites: Record<string, unknown>[] = [];
+    let releaseClearWrite: () => void;
+    let releaseBoundWrite: () => void;
+    let releaseExchange: () => void;
+    let signalClearWriteStarted: () => void;
+    let signalBoundWriteStarted: () => void;
+    let signalExchangeStarted: () => void;
+    const clearWriteGate = new Promise<void>((resolve) => { releaseClearWrite = resolve; });
+    const boundWriteGate = new Promise<void>((resolve) => { releaseBoundWrite = resolve; });
+    const exchangeGate = new Promise<void>((resolve) => { releaseExchange = resolve; });
+    const clearWriteStarted = new Promise<void>((resolve) => { signalClearWriteStarted = resolve; });
+    const boundWriteStarted = new Promise<void>((resolve) => { signalBoundWriteStarted = resolve; });
+    const exchangeStarted = new Promise<void>((resolve) => { signalExchangeStarted = resolve; });
+    let didDelayClearWrite = false;
+    let didDelayBoundWrite = false;
+    vi.spyOn(sessionStorage, 'getFresh').mockImplementation(async() => structuredClone(accountData) as any);
+    vi.spyOn(sessionStorage, 'get').mockImplementation(async(key: any) => {
+      return key === 'account1' ? structuredClone(accountData) as any : {} as any;
+    });
+    vi.spyOn(sessionStorage, 'set').mockImplementation(async(data: any) => {
+      if(data.account1) pendingAccountWrites.push(structuredClone(data.account1));
+    });
+    vi.spyOn(sessionStorage, 'flush').mockImplementation(async() => {
+      const latestWrite = pendingAccountWrites[pendingAccountWrites.length - 1];
+      if(!didDelayClearWrite && latestWrite && !latestWrite.userId && !latestWrite.dc2_auth_key) {
+        didDelayClearWrite = true;
+        signalClearWriteStarted();
+        await clearWriteGate;
+      }
+      if(!didDelayBoundWrite && latestWrite?.userId === 42 && !accountData.userId) {
+        didDelayBoundWrite = true;
+        signalBoundWriteStarted();
+        await boundWriteGate;
+      }
+      while(pendingAccountWrites.length) accountData = pendingAccountWrites.shift();
+    });
+    vi.spyOn(AccountController, 'updateStorageForLegacy').mockResolvedValue(undefined);
+
+    const makeNetworker = () => {
+      const networker = Object.create(MTPNetworker.prototype) as MTPNetworker;
+      const transport = {destroy: vi.fn()};
+      Object.assign(networker, {
+        dcId: 2,
+        permAuthKey: {key: new Uint8Array(256).fill(0xaa)},
+        transport,
+        usesPermanentAuthKeyHex: (authKeyHex: string) => authKeyHex.toLowerCase() === REJECTED_KEY,
+        changeTransport: vi.fn(function(this: MTPNetworker, nextTransport) { this.transport = nextTransport; }),
+        destroy: vi.fn()
+      });
+      return {networker, transport};
+    };
+    const firstTarget = makeNetworker();
+    const secondTarget = makeNetworker();
+    const auth = vi.fn(async() => {
+      signalExchangeStarted();
+      await exchangeGate;
+      return {authKey: {key: new Uint8Array(256).fill(0xbb)}, serverSalt: new Uint8Array(8).fill(0xcc)};
+    });
+    const makeManager = (recoveryId: number, target: ReturnType<typeof makeNetworker>) => {
+      const manager = Object.create(ApiManager.prototype) as ApiManager;
+      Object.assign(manager, {
+        accountNumber: 1,
+        authKeyRecoveryTargets: new Map([[recoveryId, target]]),
+        cachedNetworkers: {websocket: {client: {2: [target.networker]}, download: {}, upload: {}}},
+        dcConfigurator: {chosenServers: {}},
+        networkerFactory: {removeNetworker: vi.fn()},
+        authorizer: {auth},
+        isNetworkerCurrentForDc: () => true,
+        invalidateNetworkersForAuthKey: vi.fn(),
+        log: vi.fn()
+      });
+      return manager;
+    };
+    const firstManager = makeManager(17, firstTarget);
+    const secondManager = makeManager(18, secondTarget);
+
+    const firstRecovery = firstManager.recoverUnknownAuthKey(17);
+    const firstProgress = await Promise.race([
+      clearWriteStarted.then(() => 'waiting-for-clear-persistence'),
+      exchangeStarted.then(() => 'exchange-started-before-clear-persistence')
+    ]);
+    const secondRecovery = secondManager.recoverUnknownAuthKey(18);
+    releaseClearWrite();
+    await exchangeStarted;
+
+    let accountUpdateFinished = false;
+    const accountUpdate = AccountController.update(1, {userId: 42}).then((updatedData) => {
+      accountUpdateFinished = true;
+      return updatedData;
+    });
+    const updateProgress = await Promise.race([
+      boundWriteStarted.then(() => 'waiting-for-bound-persistence'),
+      accountUpdate.then(() => 'account-update-finished-before-persistence')
+    ]);
+    releaseExchange();
+    await vi.waitFor(() => {
+      expect(request.mock.calls.filter(([name]) => String(name).endsWith('account-write:1')).length).toBeGreaterThanOrEqual(3);
+    });
+    releaseBoundWrite();
+
+    const [firstResult, secondResult] = await Promise.all([firstRecovery, secondRecovery]);
+    await accountUpdate;
+    await sessionStorage.flush();
+
+    expect(firstProgress).toBe('waiting-for-clear-persistence');
+    expect(updateProgress).toBe('waiting-for-bound-persistence');
+    expect(accountUpdateFinished).toBe(true);
+    expect(auth).toHaveBeenCalledOnce();
+    expect(firstResult).toBe(false);
+    expect(secondResult).toBe(false);
+    expect(accountData).toMatchObject({userId: 42, push_key: 'existing-push-key'});
+    expect(accountData).not.toHaveProperty('dc2_auth_key');
+  });
+
   it('rejects pending RPCs on sibling networkers when retiring a rejected key', async() => {
     installLocks();
     let accountData: Record<string, unknown> = {

@@ -108,6 +108,8 @@ export class AccountController extends StaticUtilityClass {
         await this.updateStorageForLegacy(updatedData);
       }
 
+      await sessionStorage.flush();
+
       (async() => {
         sessionStorage.set({
           number_of_accounts: await this.getTotalAccounts()
