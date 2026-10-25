@@ -344,7 +344,11 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
         }
       }
       if(result.kind === 'cancelled') return {kind: 'cancelled'} as const;
-      if(result.kind === 'termsDeclined') return {kind: 'termsDeclined'} as const;
+      if(result.kind === 'termsDeclined') {
+        await removeRecord(record);
+        record.password = '';
+        return {kind: 'termsDeclined'} as const;
+      }
       if(result.kind === 'usernameTaken') {
         if(record.accountUserId !== undefined) return {kind: 'unrecoverable', username: record.username} as const;
         if(attempt === 2) {

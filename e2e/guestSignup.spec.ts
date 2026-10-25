@@ -365,7 +365,7 @@ test('shows instance terms before guest sign-up and creates an account only afte
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
 
-test('declining guest terms leaves no account and returns focus to the guest button', async({page}, testInfo) => {
+test('declining guest terms leaves no account and remains recoverable after reload', async({page}, testInfo) => {
   await page.setViewportSize({width: 320, height: 720});
   await setupGuestServer(page, testInfo, true, undefined, 'These are the terms for this server.');
   await openSelectedServer(page, testInfo);
@@ -384,6 +384,16 @@ test('declining guest terms leaves no account and returns focus to the guest but
   const calls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
   expect(calls.filter((call) => call.method === 'auth.signUp' || call.method === 'invokeWithReCaptcha')).toHaveLength(0);
   await captureState(page, testInfo, 'guest-terms-declined');
+
+  await page.reload({waitUntil: 'domcontentloaded'});
+  const returningPicker = page.getByRole('dialog');
+  await expect(returningPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(SERVER_HOST);
+  await returningPicker.getByRole('button', {name: 'Continue'}).click();
+  const returningAuth = page.locator('#auth-pages');
+  await expect(returningAuth.getByRole('button', {name: 'Try it as a guest'})).toBeVisible({timeout: 30_000});
+  await expect(returningAuth.getByRole('alert')).toHaveCount(0);
+  await captureState(page, testInfo, 'guest-terms-declined-after-reload');
+
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
 
