@@ -21,7 +21,8 @@ async function setupGuestServer(
   autoGuest = false,
   turnstileEnabled = true,
   serverHost = SERVER_HOST,
-  appHost = 'web.teagram.io'
+  appHost = 'web.teagram.io',
+  serverPort = 2443
 ) {
   const appOrigin = new URL(testInfo.project.use.baseURL as string);
   appOrigin.hostname = appHost;
@@ -31,8 +32,8 @@ async function setupGuestServer(
   const rsaSpki = publicKey.export({type: 'spki', format: 'der'}).toString('base64');
   const discovery = JSON.stringify({
     version: 1,
-    mtproto: {endpoint: `${serverHost}:2443`, dc_id: 2, rsa_spki: rsaSpki},
-    websocket: {endpoint: `wss://${serverHost}:2443/apiws`},
+    mtproto: {endpoint: `${serverHost}:${serverPort}`, dc_id: 2, rsa_spki: rsaSpki},
+    websocket: {endpoint: `wss://${serverHost}${serverPort === 443 ? '' : `:${serverPort}`}/apiws`},
     ...(turnstileEnabled ? {turnstile: {site_key: 'guest-site-key'}} : {}),
     demo: {guest_sign_up: guestSignUp}
   });
@@ -275,7 +276,7 @@ test('creates a guest only when discovery advertises it and restores the same gu
 });
 
 test('auto-creates one guest from runtime config without a picker and restores it after reload', async({page}, testInfo) => {
-  const webSocketUrls = await setupGuestServer(page, testInfo, true, undefined, undefined, undefined, true, true, 'demo.teagram.io', 'demo.teagram.io');
+  const webSocketUrls = await setupGuestServer(page, testInfo, true, undefined, undefined, undefined, true, true, 'demo.teagram.io', 'demo.teagram.io', 443);
   const appOrigin = new URL(testInfo.project.use.baseURL as string);
   appOrigin.hostname = 'demo.teagram.io';
   appOrigin.protocol = 'https:';
@@ -294,9 +295,9 @@ test('auto-creates one guest from runtime config without a picker and restores i
   }) => call.method === 'auth.signUp' || (call.method === 'invokeWithReCaptcha' &&
     (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp')).length || 0))
     .toBe(1);
-  expect(webSocketUrls).toContain('wss://demo.teagram.io:2443/apiws');
+  expect(webSocketUrls).toContain('wss://demo.teagram.io/apiws');
   expect(webSocketUrls.filter((url) => new URL(url).pathname === '/apiws').every((url) =>
-    url === 'wss://demo.teagram.io:2443/apiws')).toBe(true);
+    url === 'wss://demo.teagram.io/apiws')).toBe(true);
 
   const signupCalls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{
     method: string,
@@ -334,7 +335,7 @@ test('auto-creates one guest from runtime config without a picker and restores i
 
 test('shows an auth error and an explicit retry after automatic guest sign-up fails', async({page}, testInfo) => {
   await page.setViewportSize({width: 320, height: 720});
-  await setupGuestServer(page, testInfo, true, 'NETWORK_ERROR', undefined, undefined, true, false, 'demo.teagram.io', 'demo.teagram.io');
+  await setupGuestServer(page, testInfo, true, 'NETWORK_ERROR', undefined, undefined, true, false, 'demo.teagram.io', 'demo.teagram.io', 443);
   const appOrigin = new URL(testInfo.project.use.baseURL as string);
   appOrigin.hostname = 'demo.teagram.io';
   appOrigin.protocol = 'https:';
