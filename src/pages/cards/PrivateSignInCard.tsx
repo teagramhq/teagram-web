@@ -79,7 +79,8 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
       });
       if(termsId) acceptedTermsId = termsId;
       return true;
-    } catch{
+    } catch(error) {
+      if(error !== undefined) throw error;
       return false;
     } finally {
       termsDialogReturnFocusTarget = undefined;

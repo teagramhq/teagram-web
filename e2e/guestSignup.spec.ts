@@ -387,6 +387,29 @@ test('declining guest terms leaves no account and returns focus to the guest but
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
 
+test('surfaces guest terms popup load failures as an auth error', async({page}, testInfo) => {
+  await page.setViewportSize({width: 390, height: 844});
+  await setupGuestServer(page, testInfo, true, undefined, 'These are the terms for this server.');
+  await openSelectedServer(page, testInfo);
+
+  let termsPopupLoadFailed = false;
+  await page.route('**/simpleConfirmation.ts*', async(route) => {
+    termsPopupLoadFailed = true;
+    await route.abort();
+  });
+
+  const auth = page.locator('#auth-pages');
+  await auth.getByRole('button', {name: 'Try it as a guest'}).click();
+
+  await expect(auth.getByRole('alert')).toHaveText('Unable to create your guest account. Check your connection and try again.');
+  expect(termsPopupLoadFailed).toBe(true);
+  await expect(auth.getByText('No account was created. Accept the terms to create one.')).toHaveCount(0);
+  const calls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
+  expect(calls.filter((call) => call.method === 'auth.signUp' || call.method === 'invokeWithReCaptcha')).toHaveLength(0);
+  await captureState(page, testInfo, 'guest-terms-popup-load-error');
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
 test('hides guest sign-up when the validated discovery flag is false', async({page}, testInfo) => {
   await page.setViewportSize({width: 320, height: 720});
   await setupGuestServer(page, testInfo, false);
