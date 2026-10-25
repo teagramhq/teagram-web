@@ -31,6 +31,7 @@ function setActiveContext(id: string, host: string, target: MtprotoTarget, disco
   runtime.__TEAGRAM_ACTIVE_MTPROTO_TARGET__ = target;
   runtime.__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = discovered?.guestSignUpEnabled === true;
   runtime.__TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__ = discovered?.turnstileSiteKey;
+  runtime.__TEAGRAM_ACTIVE_DEMO_WIPE_GENERATION__ = discovered?.wipeGeneration;
   runtime.__TEAGRAM_AUTO_GUEST__ = autoGuest === true;
 }
 

@@ -41,7 +41,8 @@ export type DiscoveredServer = {
   pin: ServerPin,
   spkiFingerprint: string,
   turnstileSiteKey?: string,
-  guestSignUpEnabled: boolean
+  guestSignUpEnabled: boolean,
+  wipeGeneration?: string
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -203,7 +204,8 @@ export async function validateDiscoveryDocument(hostInput: string, value: unknow
   const pin = {host, endpoint: websocketEndpoint, dc_id, key_fingerprint: spkiFingerprint};
   const demo = record(value.demo) ? value.demo : undefined;
   const guestSignUpEnabled = demo?.guest_sign_up === true;
-  return {host, id, target, pin, spkiFingerprint, turnstileSiteKey, guestSignUpEnabled};
+  const wipeGeneration = typeof demo?.wipe_generation === 'string' ? demo.wipe_generation : undefined;
+  return {host, id, target, pin, spkiFingerprint, turnstileSiteKey, guestSignUpEnabled, wipeGeneration};
 }
 
 export async function fetchServerDiscovery(hostInput: string, fetcher: typeof fetch = fetch): Promise<DiscoveredServer> {

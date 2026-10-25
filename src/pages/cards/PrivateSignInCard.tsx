@@ -5,6 +5,7 @@ import InputField from '@components/inputField';
 import LanguageChangeButton from '@components/languageChangeButton';
 import MediaHeader from '@components/mediaHeader';
 import PasswordInputField from '@components/passwordInputField';
+import {toastNew} from '@components/toast';
 import {wrapFormattedDuration} from '@components/wrappers/wrapDuration';
 import {getActiveServerHost, getActiveTurnstileSiteKey, isActiveGuestSignUpEnabled, isAutoGuestEnabled} from '@config/serverContext';
 import {DEMO_SERVER_HOST} from '@config/serverSelection';
@@ -17,7 +18,7 @@ import {createCurrentGuestAccountLifecycle} from '@lib/guestAccountLifecycle';
 import type {GuestAccountLifecycleResult, GuestAccountManagers} from '@lib/guestAccountLifecycle';
 import {i18n} from '@lib/langPack';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
-import {hasAutoGuestAttempted, markAutoGuestAttempted} from '@lib/autoGuest';
+import {clearAutoGuestResetNotice, hasAutoGuestAttempted, hasAutoGuestResetNotice, markAutoGuestAttempted, markAutoGuestResetDetected} from '@lib/autoGuest';
 
 import AuthCard from '@/pages/AuthCard';
 import {CardSpec, useAuthFlow} from '@/pages/authFlow';
@@ -444,6 +445,10 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         guestAuthorized = true;
         if(autoGuest) markAutoGuestAttempted();
         await toIm();
+        if(hasAutoGuestResetNotice()) {
+          clearAutoGuestResetNotice();
+          toastNew({langPackKey: 'Teagram.Demo.ResetNotice'});
+        }
         return;
       case 'termsDeclined':
         setTermsDeclined(true);
@@ -462,6 +467,11 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     try {
       const result = await guestLifecycle.reauthenticate();
       if(result.kind === 'noGuest') return true;
+      if(result.kind === 'wiped') {
+        markAutoGuestResetDetected();
+        if(autoGuest && guestSignUpAvailable) setAutoGuestPending(true);
+        return true;
+      }
       await handleGuestLifecycleResult(result, true);
     } catch{
       if(!cancelled) showError('guestRestoreNetwork');

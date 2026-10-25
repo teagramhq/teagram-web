@@ -12,7 +12,8 @@ const mocks = vi.hoisted(() => ({
   toIm: vi.fn(),
   createGuest: vi.fn(),
   reauthenticateGuest: vi.fn(),
-  guestLifecycleOptions: vi.fn()
+  guestLifecycleOptions: vi.fn(),
+  toastNew: vi.fn()
 }));
 
 vi.mock('@/pages/authFlow', () => ({
@@ -56,6 +57,7 @@ vi.mock('@components/mediaHeader', () => {
 });
 
 vi.mock('@components/languageChangeButton', () => ({default: (): null => null}));
+vi.mock('@components/toast', () => ({toastNew: mocks.toastNew}));
 vi.mock('@lib/langPack', async(importOriginal) => {
   const actual = await importOriginal<typeof import('@lib/langPack')>();
   return {
@@ -83,6 +85,7 @@ vi.mock('@lib/langPack', async(importOriginal) => {
       'Teagram.Guest.StartNew': 'Start a new guest',
       'Teagram.Demo.Banner.Title': 'Demo server: you\'re a guest.',
       'Teagram.Demo.Banner.Description': 'Everything is wiped every week. Use your own server at',
+      'Teagram.Demo.ResetNotice': 'The demo was reset this week, so you have a new guest account.',
       'Teagram.Guest.Creating': 'Creating a guest account…',
       'Teagram.Guest.Disclosure': 'Your guest account is wiped weekly, is lost after you sign out or clear browser data, and is visible to the server operator.',
       'Teagram.Guest.Flood': 'Guest sign-up is temporarily limited for this network. Try again later.',
@@ -148,11 +151,13 @@ describe('private username sign-in card', () => {
     mocks.createGuest.mockReset().mockResolvedValue({kind: 'error', errorType: 'NETWORK_ERROR'});
     mocks.reauthenticateGuest.mockReset().mockResolvedValue({kind: 'noGuest'});
     mocks.guestLifecycleOptions.mockReset();
+    mocks.toastNew.mockReset();
     delete (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__;
     (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__ = 'demo.teagram.io';
     delete (window as any).__TEAGRAM_AUTO_GUEST__;
     delete (window as any).__TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__;
     localStorage.removeItem('teagram.auto-guest-attempted.v1');
+    localStorage.removeItem('teagram.auto-guest-reset-notice.v1');
     turnstileCallbacks = undefined as any;
     turnstileReset = vi.fn();
     vi.stubGlobal('turnstile', {
@@ -178,6 +183,7 @@ describe('private username sign-in card', () => {
     delete (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__;
     storageWrites.forEach((spy) => spy.mockRestore());
     localStorage.removeItem('teagram.auto-guest-attempted.v1');
+    localStorage.removeItem('teagram.auto-guest-reset-notice.v1');
     consoleError.mockRestore();
     vi.unstubAllGlobals();
     document.body.replaceChildren();
@@ -287,6 +293,23 @@ describe('private username sign-in card', () => {
     await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
     expect(mocks.reauthenticateGuest).toHaveBeenCalledOnce();
     expect(mocks.createGuest).not.toHaveBeenCalled();
+    expect(localStorage.getItem('teagram.auto-guest-attempted.v1')).toBe('1');
+  });
+
+  it('creates one replacement guest after a wipe and shows the reset notice after sign-in', async() => {
+    (window as any).__TEAGRAM_AUTO_GUEST__ = true;
+    (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = true;
+    localStorage.setItem('teagram.auto-guest-attempted.v1', '1');
+    mocks.reauthenticateGuest.mockResolvedValueOnce({kind: 'wiped'});
+    mocks.createGuest.mockResolvedValueOnce({kind: 'authorized', user: {_: 'user', id: 42}});
+
+    mount();
+
+    await vi.waitFor(() => expect(mocks.createGuest).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
+
+    expect(mocks.toastNew).toHaveBeenCalledOnce();
+    expect(mocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Demo.ResetNotice'});
     expect(localStorage.getItem('teagram.auto-guest-attempted.v1')).toBe('1');
   });
 

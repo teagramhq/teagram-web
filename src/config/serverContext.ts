@@ -4,6 +4,7 @@ type RuntimeGlobal = typeof globalThis & {
   __TEAGRAM_ACTIVE_MTPROTO_TARGET__?: unknown,
   __TEAGRAM_ACTIVE_GUEST_SIGN_UP__?: unknown,
   __TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__?: unknown,
+  __TEAGRAM_ACTIVE_DEMO_WIPE_GENERATION__?: unknown,
   __TEAGRAM_AUTO_GUEST__?: unknown
 };
 
@@ -77,4 +78,9 @@ export function isAutoGuestEnabled() {
 export function getActiveTurnstileSiteKey() {
   const siteKey = runtimeGlobal.__TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__;
   return typeof siteKey === 'string' && /^[A-Za-z0-9_-]{1,256}$/.test(siteKey) ? siteKey : undefined;
+}
+
+export function getActiveDemoWipeGeneration() {
+  const generation = runtimeGlobal.__TEAGRAM_ACTIVE_DEMO_WIPE_GENERATION__;
+  return typeof generation === 'string' ? generation : undefined;
 }

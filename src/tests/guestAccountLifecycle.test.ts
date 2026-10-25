@@ -147,6 +147,16 @@ describe('guest account lifecycle', () => {
     expect(state.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
   });
 
+  it('stores the current demo wipe generation with a new guest credential', async() => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-42'} as GuestServerIdentity;
+
+    await expect(createGuestAccountLifecycle(state.dependencies).create()).resolves.toMatchObject({kind: 'authorized'});
+
+    expect(state.records).toHaveLength(1);
+    expect(state.records[0].wipeGeneration).toBe('week-42');
+  });
+
   it('resumes a timed out password setup with the same secret and reconciles PASSWORD_HASH_INVALID by SRP', async() => {
     const state = makeDependencies();
     state.dependencies.updatePasswordSettings = vi.fn()
@@ -342,6 +352,7 @@ describe('guest account lifecycle', () => {
 
   it('reauthenticates a returning guest through SRP without creating or adopting another account', async() => {
     const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-42'} as GuestServerIdentity;
     state.accountUserId = 42;
     state.records = [{
       version: 1,
@@ -350,6 +361,7 @@ describe('guest account lifecycle', () => {
       username: `guest_${'a'.repeat(16)}`,
       password: 'P'.repeat(43),
       status: 'committed',
+      wipeGeneration: 'week-42',
       accountUserId: 42,
       accountNumber: 1
     }];
@@ -364,6 +376,76 @@ describe('guest account lifecycle', () => {
     expect(state.dependencies.signInWithPassword).toHaveBeenCalledWith('P'.repeat(43));
     expect(state.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
     expect(state.records[0].status).toBe('committed');
+  });
+
+  it('discards a saved guest before authentication when the server wipe generation changed', async() => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-43'} as GuestServerIdentity;
+    state.accountUserId = 42;
+    state.records = [{
+      version: 1,
+      serverId: IDENTITY.serverId,
+      keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`,
+      password: 'P'.repeat(43),
+      status: 'committed',
+      wipeGeneration: 'week-42',
+      accountUserId: 42,
+      accountNumber: 1
+    }];
+
+    await expect(createGuestAccountLifecycle(state.dependencies).reauthenticate()).resolves.toEqual({kind: 'wiped'});
+
+    expect(state.invokeApi).not.toHaveBeenCalled();
+    expect(state.records).toHaveLength(0);
+    expect(state.clearInvalidatedAccount).toHaveBeenCalledWith(1, 42);
+  });
+
+  it('detects a changed wipe generation without clearing the active account during startup', async() => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-43'} as GuestServerIdentity;
+    state.accountUserId = 42;
+    state.records = [{
+      version: 1,
+      serverId: IDENTITY.serverId,
+      keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`,
+      password: 'P'.repeat(43),
+      status: 'committed',
+      wipeGeneration: 'week-42',
+      accountUserId: 42,
+      accountNumber: 1
+    }];
+
+    await expect(createGuestAccountLifecycle(state.dependencies).hasWipeGenerationChanged()).resolves.toBe(true);
+
+    expect(state.invokeApi).not.toHaveBeenCalled();
+    expect(state.records).toHaveLength(1);
+    expect(state.clearInvalidatedAccount).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['current generation absent', undefined, 'week-42'],
+    ['stored generation absent', 'week-42', undefined]
+  ])('does not discard credentials when the %s', async(_case, currentGeneration, storedGeneration) => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: currentGeneration} as GuestServerIdentity;
+    state.records = [{
+      version: 1,
+      serverId: IDENTITY.serverId,
+      keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`,
+      password: 'P'.repeat(43),
+      status: 'committed',
+      ...(storedGeneration ? {wipeGeneration: storedGeneration} : {}),
+      accountNumber: 1
+    }];
+    state.invokeApi.mockRejectedValueOnce({type: 'NETWORK_ERROR'});
+
+    await expect(createGuestAccountLifecycle(state.dependencies).reauthenticate()).resolves.toEqual({kind: 'error', errorType: 'NETWORK_ERROR'});
+
+    expect(state.records).toHaveLength(1);
+    expect(state.clearInvalidatedAccount).not.toHaveBeenCalled();
   });
 
   it('does not treat a missing username after a wipe as permission to attach or replace its cache', async() => {

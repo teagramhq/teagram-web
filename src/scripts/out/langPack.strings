@@ -3734,6 +3734,7 @@
 "Teagram.Guest.SetupPending" = "Guest account setup is incomplete. Try again to finish creating the account.";
 "Teagram.Demo.Banner.Title" = "Demo server: you're a guest.";
 "Teagram.Demo.Banner.Description" = "Everything is wiped every week. Use your own server at";
+"Teagram.Demo.ResetNotice" = "The demo was reset this week, so you have a new guest account.";
 "Teagram.Registration.SecurityCheck" = "Security check";
 "Teagram.Registration.SecurityCheckLoading" = "Loading security check…";
 "Teagram.Registration.SecurityCheckChecking" = "Checking…";

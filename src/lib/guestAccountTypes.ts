@@ -7,6 +7,7 @@ export type GuestCredentialRecord = {
   username: string,
   password: string,
   status: 'provisional' | 'committed',
+  wipeGeneration?: string,
   accountUserId?: PeerId,
   accountNumber?: ActiveAccountNumber
 };
