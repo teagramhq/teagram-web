@@ -11,7 +11,7 @@ import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import formatDuration from '@helpers/formatDuration';
 import focusWhenConnected from '@helpers/dom/focusWhenConnected';
-import type {User} from '@layer';
+import type {HelpTermsOfService, User} from '@layer';
 import {createCurrentGuestAccountLifecycle} from '@lib/guestAccountLifecycle';
 import type {GuestAccountLifecycleResult, GuestAccountManagers} from '@lib/guestAccountLifecycle';
 import {i18n} from '@lib/langPack';
@@ -59,9 +59,37 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   const {managers, navigate, toIm} = useAuthFlow();
   const turnstile = useTurnstileChallenge();
   const guestSignUpAvailable = isActiveGuestSignUpEnabled();
+  let termsDialogReturnFocusTarget: HTMLElement | undefined;
+  let acceptedTermsId: string | undefined;
+
+  async function requestTermsAcceptance(terms: HelpTermsOfService): Promise<boolean> {
+    const termsId = terms.id?.data;
+    if(termsId && acceptedTermsId === termsId) return true;
+
+    try {
+      const {SimpleConfirmationPopup} = await import('@components/popups/simpleConfirmation');
+      await SimpleConfirmationPopup.show({
+        titleLangKey: 'Teagram.Terms.Title',
+        descriptionText: terms.text,
+        descriptionEntities: terms.entities,
+        button: {langKey: 'Teagram.Terms.Accept'},
+        cancelLangKey: 'Decline',
+        termsDialog: true,
+        focusReturnTarget: termsDialogReturnFocusTarget
+      });
+      if(termsId) acceptedTermsId = termsId;
+      return true;
+    } catch{
+      return false;
+    } finally {
+      termsDialogReturnFocusTarget = undefined;
+    }
+  }
+
   const guestLifecycle = createCurrentGuestAccountLifecycle(managers as unknown as GuestAccountManagers, {
     requestTurnstile: turnstile.request,
-    turnstileSiteKey: getActiveTurnstileSiteKey()
+    turnstileSiteKey: getActiveTurnstileSiteKey(),
+    requestTermsAcceptance
   });
   const usernameField = new InputField({
     labelText: 'Username',
@@ -110,12 +138,15 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   const [restoringGuest, setRestoringGuest] = createSignal(true);
   const [guestFloodWait, setGuestFloodWait] = createSignal<number>();
   const [registrationConfigUnavailable, setRegistrationConfigUnavailable] = createSignal(false);
+  const [termsDeclined, setTermsDeclined] = createSignal(false);
   const [turnstileSiteKey, setTurnstileSiteKey] = createSignal<string>();
   const [pendingPasswordUser, setPendingPasswordUser] = createSignal<User>();
   const [error, setError] = createSignal<PrivateUsernameUiError>();
 
   let cancelled = false;
   let activeIdentifier = '';
+  let registrationCreateButton: HTMLElement;
+  let guestSignUpButton: HTMLElement;
   let cancelFocus: (() => void) | undefined;
   let guestRestorePromise: Promise<void> = Promise.resolve();
   let guestActionWaiting = false;
@@ -139,6 +170,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     updateSignInValidity();
     setError(undefined);
     setGuestFloodWait(undefined);
+    setTermsDeclined(false);
     usernameInput.classList.remove('error');
     usernameInput.removeAttribute('aria-invalid');
     updateRegistrationValidity();
@@ -147,6 +179,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   const onRegistrationInput = () => {
     setError(undefined);
     setGuestFloodWait(undefined);
+    setTermsDeclined(false);
     updateRegistrationValidity();
   };
 
@@ -226,6 +259,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   async function onSubmit(event?: Event): Promise<void> {
     if(event) cancelEvent(event);
     if(cancelled || submitting() || guestSubmitting() || guestActionWaiting) return;
+    setTermsDeclined(false);
     guestActionWaiting = true;
     await guestRestorePromise;
     guestActionWaiting = false;
@@ -248,6 +282,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
       if(registrationMode() === 'invite' && !inviteSecretField.value.trim()) return;
     }
 
+    termsDialogReturnFocusTarget = isCreatingAccount ? registrationCreateButton : undefined;
     activeIdentifier = username;
     if(!isCreatingAccount) usernameField.setValueSilently('');
     setHasValidInput(false);
@@ -266,6 +301,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         displayName: displayNameField.value,
         password: passwordInput.value,
         inviteSecret: inviteSecretField.value,
+        requestTermsAcceptance,
         updatePasswordSettings: (password: string) => managers.passwordManager.updateSettings({newPassword: password})
       } : undefined;
       const result = await authenticatePrivateUsername(
@@ -314,6 +350,9 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           setCreatingAccount(false);
           updateSignInValidity();
           showError('registrationClosed');
+          break;
+        case 'termsDeclined':
+          setTermsDeclined(true);
           break;
         case 'weakPassword':
           setPendingPasswordUser(result.user);
@@ -396,6 +435,9 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         guestAuthorized = true;
         await toIm();
         return;
+      case 'termsDeclined':
+        setTermsDeclined(true);
+        return;
       case 'error':
       case 'unrecoverable':
       case 'collisionsExhausted':
@@ -418,11 +460,13 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
   async function tryAsGuest(): Promise<void> {
     if(!guestSignUpAvailable || cancelled || guestSubmitting() || submitting() || guestActionWaiting) return;
+    setTermsDeclined(false);
     guestActionWaiting = true;
     await guestRestorePromise;
     guestActionWaiting = false;
     if(cancelled || guestAuthorized || guestSubmitting() || submitting()) return;
 
+    termsDialogReturnFocusTarget = guestSignUpButton;
     setError(undefined);
     setGuestFloodWait(undefined);
     setGuestSubmitting(true);
@@ -445,6 +489,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     setCreatingAccount(true);
     setError(undefined);
     setGuestFloodWait(undefined);
+    setTermsDeclined(false);
     updateRegistrationValidity();
   }
 
@@ -453,6 +498,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     setCreatingAccount(false);
     setError(undefined);
     setGuestFloodWait(undefined);
+    setTermsDeclined(false);
     updateSignInValidity();
     usernameInput.classList.remove('error');
     usernameInput.removeAttribute('aria-invalid');
@@ -583,6 +629,11 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           {i18n('Teagram.Registration.ConfigNetwork')}
         </div>
       )}
+      {termsDeclined() && (
+        <div class={styles.registrationConfigError} role="status">
+          {i18n('Teagram.Terms.Declined')}
+        </div>
+      )}
       {restoringGuest() && !creatingAccount() && (
         <div class={styles.guestLoading} role="status" aria-live="polite">
           {i18n('Teagram.Guest.Restoring')}
@@ -606,6 +657,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
                 class="btn-primary btn-color-primary"
                 aria-label={(guestSubmitting() ? i18n('Teagram.Guest.Creating') : i18n('Teagram.Guest.Try')).textContent || 'Try it as a guest'}
                 disabled={submitting() || guestSubmitting() || restoringGuest()}
+              ref={(element) => guestSignUpButton = element}
                 onClick={tryAsGuest}
               >
                 {guestSubmitting() ? i18n('Teagram.Guest.Creating') : i18n('Teagram.Guest.Try')}
@@ -622,6 +674,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
             <Button
               class="btn-primary btn-color-primary"
               disabled={!hasValidRegistrationInput() || submitting() || guestSubmitting()}
+              ref={(element) => registrationCreateButton = element}
               onClick={onSubmit}
             >
               {submitting() ? 'Please wait…' : i18n('Teagram.Registration.CreateAccount')}
