@@ -417,6 +417,19 @@ test('surfaces guest terms popup load failures as an auth error', async({page}, 
   const calls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
   expect(calls.filter((call) => call.method === 'auth.signUp' || call.method === 'invokeWithReCaptcha')).toHaveLength(0);
   await captureState(page, testInfo, 'guest-terms-popup-load-error');
+  await page.unroute('**/simpleConfirmation.ts*');
+
+  await page.reload({waitUntil: 'domcontentloaded'});
+  const returningPicker = page.getByRole('dialog');
+  await expect(returningPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(SERVER_HOST);
+  await returningPicker.getByRole('button', {name: 'Continue'}).click();
+  const returningAuth = page.locator('#auth-pages');
+  await expect(returningAuth.getByRole('button', {name: 'Try it as a guest'})).toBeVisible({timeout: 30_000});
+  await expect(returningAuth.getByRole('alert')).toHaveCount(0);
+  const returningCalls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
+  expect(returningCalls.filter((call) => call.method === 'auth.signUp' || call.method === 'invokeWithReCaptcha')).toHaveLength(0);
+  await captureState(page, testInfo, 'guest-terms-popup-load-error-after-reload');
+
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
 

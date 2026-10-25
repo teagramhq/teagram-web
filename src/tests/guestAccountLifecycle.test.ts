@@ -130,6 +130,23 @@ describe('guest account lifecycle', () => {
     expect(state.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
   });
 
+  it('removes provisional credentials when the terms dialog fails', async() => {
+    const state = makeDependencies({requestTermsAcceptance: async() => { throw new Error('Terms dialog failed to load'); }});
+    state.invokeApi.mockImplementation(async(method) => {
+      if(method === 'auth.sendCode') return SENT_CODE;
+      if(method === 'auth.signIn') return {
+        _: 'auth.authorizationSignUpRequired',
+        terms_of_service: {_: 'help.termsOfService', text: 'Terms for this server.'}
+      };
+      throw new Error(`Unexpected API method ${method}`);
+    });
+
+    await expect(createGuestAccountLifecycle(state.dependencies).create()).resolves.toEqual({kind: 'error'});
+
+    expect(state.records).toHaveLength(0);
+    expect(state.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
+  });
+
   it('resumes a timed out password setup with the same secret and reconciles PASSWORD_HASH_INVALID by SRP', async() => {
     const state = makeDependencies();
     state.dependencies.updatePasswordSettings = vi.fn()

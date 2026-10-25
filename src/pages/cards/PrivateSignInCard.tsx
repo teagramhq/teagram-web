@@ -355,6 +355,9 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         case 'termsDeclined':
           setTermsDeclined(true);
           break;
+        case 'termsAcceptanceError':
+          showError('network');
+          break;
         case 'weakPassword':
           setPendingPasswordUser(result.user);
           lockAccountFields();

@@ -125,7 +125,7 @@ function isCredentialRecord(value: unknown): value is GuestCredentialRecord {
 }
 
 function resultFromAuthError(result: PrivateUsernameAuthResult): GuestAccountLifecycleResult {
-  if(result.kind === 'error') {
+  if(result.kind === 'error' || result.kind === 'termsAcceptanceError') {
     return result.errorType ? {kind: 'error', errorType: result.errorType} : {kind: 'error'};
   }
   if(result.kind === 'termsDeclined') return {kind: 'termsDeclined'};
@@ -344,10 +344,10 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
         }
       }
       if(result.kind === 'cancelled') return {kind: 'cancelled'} as const;
-      if(result.kind === 'termsDeclined') {
+      if(result.kind === 'termsDeclined' || result.kind === 'termsAcceptanceError') {
         await removeRecord(record);
         record.password = '';
-        return {kind: 'termsDeclined'} as const;
+        return resultFromAuthError(result);
       }
       if(result.kind === 'usernameTaken') {
         if(record.accountUserId !== undefined) return {kind: 'unrecoverable', username: record.username} as const;

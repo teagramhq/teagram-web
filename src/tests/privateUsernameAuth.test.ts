@@ -155,6 +155,30 @@ describe('private username sign-in', () => {
     expect(invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
   });
 
+  it('distinguishes a terms dialog failure from a visitor declining terms', async() => {
+    const termsOfService: HelpTermsOfService = {
+      _: 'help.termsOfService',
+      id: {_ : 'dataJSON', data: '{"terms":"guest"}'},
+      text: 'Read these terms first.',
+      entities: [],
+      pFlags: {popup: true}
+    };
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: termsOfService});
+    const requestTermsAcceptance = vi.fn().mockRejectedValue(new Error('Terms dialog failed to load'));
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings: vi.fn().mockResolvedValue(true),
+      requestTermsAcceptance
+    })).resolves.toEqual({kind: 'termsAcceptanceError'});
+
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
+  });
+
   it('persists the creating authorization before attempting password setup', async() => {
     const user = {_: 'user', id: 42};
     const invokeApi = vi.fn()

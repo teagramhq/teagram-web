@@ -17,6 +17,7 @@ export type PrivateUsernameAuthResult =
   | {kind: 'invalidInvite'}
   | {kind: 'registrationClosed'}
   | {kind: 'termsDeclined'}
+  | {kind: 'termsAcceptanceError', errorType?: string}
   | {kind: 'weakPassword', user: User}
   | {kind: 'passwordSetupError', user: User, errorType?: string}
   | {kind: 'password'}
@@ -215,7 +216,8 @@ export async function authenticatePrivateUsername(
         accepted = await registration.requestTermsAcceptance(terms as unknown as HelpTermsOfService);
       } catch(error) {
         if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
-        return getAuthErrorResult(error, true);
+        const errorType = getErrorType(error);
+        return typeof errorType === 'string' ? {kind: 'termsAcceptanceError', errorType} : {kind: 'termsAcceptanceError'};
       }
       if(isCancelled()) return {kind: 'cancelled'};
       if(!accepted) return {kind: 'termsDeclined'};
