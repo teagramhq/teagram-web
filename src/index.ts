@@ -63,6 +63,8 @@ import useHasFoldersSidebar, {useIsSidebarCollapsed} from '@stores/foldersSideba
 import appNavigationController from '@components/appNavigationController';
 import {preventCrossTabDynamicImportDeadlock} from '@helpers/preventDeadlock';
 import appChatBackground from '@components/chat/bubbles/chatBackground';
+import {isAutoGuestEnabled} from '@config/serverContext';
+import {markAutoGuestAttempted} from '@lib/autoGuest';
 
 // import commonStateStorage from '@lib/commonStateStorage';
 // import { STATE_INIT } from '@config/state';
@@ -572,6 +574,7 @@ const onDocumentReady = async() => {
   setDocumentLangPackProperties(langPack);
 
   let authState = stateResult.state.authState;
+  if(authState._ === 'authStateSignedIn' && isAutoGuestEnabled()) markAutoGuestAttempted();
 
   const hash = location.hash;
   const splitted = hash.split('?');

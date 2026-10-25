@@ -1,4 +1,5 @@
 import './serverPicker.scss';
+import {fetchTeagramDeploymentConfig} from '@config/deploymentConfig';
 import {
   ACTIVE_SERVER_ID_KEY,
   DEFAULT_SERVER_HOST,
@@ -24,12 +25,13 @@ const runtime = window as any;
 const buildTarget = typeof __MTPROTO_TARGET__ === 'undefined' ? undefined : __MTPROTO_TARGET__;
 const pageHost = location.hostname.toLowerCase().replace(/\.+$/, '');
 
-function setActiveContext(id: string, host: string, target: MtprotoTarget, discovered?: DiscoveredServer) {
+function setActiveContext(id: string, host: string, target: MtprotoTarget, discovered?: DiscoveredServer, autoGuest = false) {
   runtime.__TEAGRAM_ACTIVE_SERVER_ID__ = id;
   runtime.__TEAGRAM_ACTIVE_SERVER_HOST__ = host;
   runtime.__TEAGRAM_ACTIVE_MTPROTO_TARGET__ = target;
   runtime.__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = discovered?.guestSignUpEnabled === true;
   runtime.__TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__ = discovered?.turnstileSiteKey;
+  runtime.__TEAGRAM_AUTO_GUEST__ = autoGuest === true;
 }
 
 function setConnectPolicy(host: string, target?: MtprotoTarget) {
@@ -120,7 +122,8 @@ async function activateServer(
   target: MtprotoTarget,
   rememberChoice: string,
   probeConnection = false,
-  discovered?: DiscoveredServer
+  discovered?: DiscoveredServer,
+  autoGuest = false
 ) {
   if(probeConnection && target.mode === 'private') {
     const connected = await probeWebSocket(target.endpoint);
@@ -148,7 +151,7 @@ async function activateServer(
     return;
   }
 
-  setActiveContext(id, host, target, discovered);
+  setActiveContext(id, host, target, discovered, autoGuest);
   setConnectPolicy(host, target);
   document.querySelector('.server-picker')?.remove();
   await import('./index');
@@ -247,25 +250,7 @@ async function showServerPicker() {
     const pin = getServerPin(host);
     const pinState = getServerPinState(discovered, pin);
     if(pinState === 'mismatch') {
-      const mismatch = showPanel('Server identity changed', 'This server no longer matches the identity you pinned. Teagram will not connect with the changed key.');
-      const hostLine = document.createElement('p');
-      hostLine.textContent = `Server: ${discovered.host}`;
-      const oldFingerprint = document.createElement('p');
-      oldFingerprint.className = 'server-picker__fingerprint';
-      oldFingerprint.textContent = `Pinned SPKI SHA-256: ${formatSPKIFingerprint(pin.key_fingerprint)}`;
-      const newFingerprint = document.createElement('p');
-      newFingerprint.className = 'server-picker__fingerprint';
-      newFingerprint.textContent = `Current SPKI SHA-256: ${formatSPKIFingerprint(discovered.spkiFingerprint)}`;
-      mismatch.card.append(hostLine, oldFingerprint, newFingerprint);
-      mismatch.card.append(createButton('Forget this server', async() => {
-        try {
-          await unregisterServiceWorkers(discovered.id);
-          await forgetServer(host);
-          location.reload();
-        } catch(error) {
-          addError(mismatch.card, error instanceof Error ? error.message : 'Could not remove this server data');
-        }
-      }));
+      showServerIdentityChanged(discovered, pin);
       return;
     }
 
@@ -276,6 +261,44 @@ async function showServerPicker() {
 
     showFirstUseConfirmation(discovered);
   }
+}
+
+function showServerIdentityChanged(discovered: DiscoveredServer, pin: NonNullable<ReturnType<typeof getServerPin>>, allowForget = true) {
+  const mismatch = showPanel('Server identity changed', 'This server no longer matches the identity you pinned. Teagram will not connect with the changed key.');
+  const hostLine = document.createElement('p');
+  hostLine.textContent = `Server: ${discovered.host}`;
+  const oldFingerprint = document.createElement('p');
+  oldFingerprint.className = 'server-picker__fingerprint';
+  oldFingerprint.textContent = `Pinned SPKI SHA-256: ${formatSPKIFingerprint(pin.key_fingerprint)}`;
+  const newFingerprint = document.createElement('p');
+  newFingerprint.className = 'server-picker__fingerprint';
+  newFingerprint.textContent = `Current SPKI SHA-256: ${formatSPKIFingerprint(discovered.spkiFingerprint)}`;
+  mismatch.card.append(hostLine, oldFingerprint, newFingerprint);
+  if(allowForget) {
+    mismatch.card.append(createButton('Forget this server', async() => {
+      try {
+        await unregisterServiceWorkers(discovered.id);
+        await forgetServer(discovered.host);
+        location.reload();
+      } catch(error) {
+        addError(mismatch.card, error instanceof Error ? error.message : 'Could not remove this server data');
+      }
+    }));
+  }
+}
+
+async function bootConfiguredServer(config: {server: string, autoGuest: boolean}) {
+  setConnectPolicy(config.server);
+  const discovered = await fetchServerDiscovery(config.server);
+  const pin = getServerPin(config.server);
+  const pinState = getServerPinState(discovered, pin);
+  if(pinState === 'mismatch') {
+    showServerIdentityChanged(discovered, pin!, false);
+    return;
+  }
+
+  if(!pin) await writeServerPin(discovered);
+  await activateServer(config.server, discovered.id, discovered.target, config.server, true, discovered, config.autoGuest);
 }
 
 function showFirstUseConfirmation(discovered: DiscoveredServer) {
@@ -301,6 +324,12 @@ function showFirstUseConfirmation(discovered: DiscoveredServer) {
 }
 
 async function boot() {
+  const config = await fetchTeagramDeploymentConfig();
+  if(config) {
+    await bootConfiguredServer(config);
+    return;
+  }
+
   if(shouldPromptForServerSelection(pageHost)) {
     await showServerPicker();
     return;

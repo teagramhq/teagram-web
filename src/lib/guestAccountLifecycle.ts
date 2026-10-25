@@ -587,6 +587,22 @@ function getActiveGuestServerIdentity(): GuestServerIdentity {
   return {serverId, keyFingerprint: pin.key_fingerprint};
 }
 
+export async function isCurrentAccountGuest() {
+  const identity = getActiveGuestServerIdentity();
+  const accountNumber = getCurrentAccount();
+  const [storedRecords, account] = await Promise.all([
+    sessionStorage.get('guestCredentials', false),
+    AccountController.get(accountNumber)
+  ]);
+  const record = chooseRecord(getRecords(storedRecords), {
+    ...identity,
+    accountNumber,
+    accountUserId: account.userId
+  });
+  return !!record && record.status === 'committed' && record.accountUserId !== undefined &&
+    account.userId !== undefined && sameUserId(record.accountUserId, account.userId);
+}
+
 export function createCurrentGuestAccountLifecycle(
   managers: GuestAccountManagers,
   options: {

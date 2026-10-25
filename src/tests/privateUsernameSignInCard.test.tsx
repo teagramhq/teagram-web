@@ -80,6 +80,9 @@ vi.mock('@lib/langPack', async(importOriginal) => {
       'Teagram.Registration.PasswordNetwork': 'Unable to set your password. Try again.',
       'Teagram.Registration.ConfigNetwork': 'Unable to check whether account creation is available.',
       'Teagram.Guest.Try': 'Try it as a guest',
+      'Teagram.Guest.StartNew': 'Start a new guest',
+      'Teagram.Demo.Banner.Title': 'Demo server: you\'re a guest.',
+      'Teagram.Demo.Banner.Description': 'Everything is wiped every week. Use your own server at',
       'Teagram.Guest.Creating': 'Creating a guest account…',
       'Teagram.Guest.Disclosure': 'Your guest account is wiped weekly, is lost after you sign out or clear browser data, and is visible to the server operator.',
       'Teagram.Guest.Flood': 'Guest sign-up is temporarily limited for this network. Try again later.',
@@ -146,7 +149,10 @@ describe('private username sign-in card', () => {
     mocks.reauthenticateGuest.mockReset().mockResolvedValue({kind: 'noGuest'});
     mocks.guestLifecycleOptions.mockReset();
     delete (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__;
+    (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__ = 'demo.teagram.io';
+    delete (window as any).__TEAGRAM_AUTO_GUEST__;
     delete (window as any).__TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__;
+    localStorage.removeItem('teagram.auto-guest-attempted.v1');
     turnstileCallbacks = undefined as any;
     turnstileReset = vi.fn();
     vi.stubGlobal('turnstile', {
@@ -169,7 +175,9 @@ describe('private username sign-in card', () => {
     dispose?.();
     dispose = undefined;
     clearPrivateUsernameLogin();
+    delete (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__;
     storageWrites.forEach((spy) => spy.mockRestore());
+    localStorage.removeItem('teagram.auto-guest-attempted.v1');
     consoleError.mockRestore();
     vi.unstubAllGlobals();
     document.body.replaceChildren();
@@ -245,6 +253,70 @@ describe('private username sign-in card', () => {
     await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
     expect(mocks.createGuest).not.toHaveBeenCalled();
     expect(mocks.invokeApi).not.toHaveBeenCalled();
+  });
+
+  it('starts one guest sign-up automatically when auto-guest mode and discovery are enabled', async() => {
+    (window as any).__TEAGRAM_AUTO_GUEST__ = true;
+    (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = true;
+    mocks.createGuest.mockResolvedValueOnce({kind: 'authorized', user: {_: 'user', id: 42}});
+
+    mount();
+
+    await vi.waitFor(() => expect(mocks.createGuest).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
+  });
+
+  it('keeps the demo guest notice hidden when discovery does not allow guest sign-up', async() => {
+    (window as any).__TEAGRAM_AUTO_GUEST__ = true;
+    (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = false;
+
+    mount();
+    await flushAuthFlow();
+
+    expect(document.body.textContent).not.toContain('Demo server: you\'re a guest.');
+    expect(mocks.createGuest).not.toHaveBeenCalled();
+  });
+
+  it('restores a returning auto guest without starting another guest sign-up', async() => {
+    (window as any).__TEAGRAM_AUTO_GUEST__ = true;
+    (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = true;
+    mocks.reauthenticateGuest.mockResolvedValueOnce({kind: 'authorized', user: {_: 'user', id: 42}});
+
+    mount();
+
+    await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
+    expect(mocks.reauthenticateGuest).toHaveBeenCalledOnce();
+    expect(mocks.createGuest).not.toHaveBeenCalled();
+    expect(localStorage.getItem('teagram.auto-guest-attempted.v1')).toBe('1');
+  });
+
+  it('offers an explicit new-guest action after auto-guest was already attempted', async() => {
+    (window as any).__TEAGRAM_AUTO_GUEST__ = true;
+    (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = true;
+    localStorage.setItem('teagram.auto-guest-attempted.v1', '1');
+
+    mount();
+    await flushAuthFlow();
+
+    const button = Array.from(document.querySelectorAll('button')).find((candidate) => candidate.textContent === 'Start a new guest');
+    expect(button).toBeDefined();
+    expect(document.body.textContent).toContain('Demo server: you\'re a guest. Everything is wiped every week. Use your own server at web.teagram.io');
+    expect(mocks.createGuest).not.toHaveBeenCalled();
+  });
+
+  it('shows the auto-sign-up error and a manual retry after automatic guest creation fails', async() => {
+    (window as any).__TEAGRAM_AUTO_GUEST__ = true;
+    (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = true;
+    mocks.createGuest.mockResolvedValueOnce({kind: 'error', errorType: 'NETWORK_ERROR'});
+
+    mount();
+
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent)
+      .toContain('Unable to create your guest account. Check your connection and try again.'));
+    expect(document.body.textContent).toContain('Demo server: you\'re a guest. Everything is wiped every week. Use your own server at web.teagram.io');
+    expect(document.body.textContent).toContain('Your guest account is wiped weekly, is lost after you sign out or clear browser data, and is visible to the server operator.');
+    expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Start a new guest')).toBe(true);
+    expect(mocks.createGuest).toHaveBeenCalledOnce();
   });
 
   it('reauthenticates an existing guest result before entering the app', async() => {

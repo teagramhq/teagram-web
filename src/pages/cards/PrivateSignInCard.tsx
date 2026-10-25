@@ -6,7 +6,8 @@ import LanguageChangeButton from '@components/languageChangeButton';
 import MediaHeader from '@components/mediaHeader';
 import PasswordInputField from '@components/passwordInputField';
 import {wrapFormattedDuration} from '@components/wrappers/wrapDuration';
-import {getActiveTurnstileSiteKey, isActiveGuestSignUpEnabled} from '@config/serverContext';
+import {getActiveServerHost, getActiveTurnstileSiteKey, isActiveGuestSignUpEnabled, isAutoGuestEnabled} from '@config/serverContext';
+import {DEMO_SERVER_HOST} from '@config/serverSelection';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import formatDuration from '@helpers/formatDuration';
@@ -16,6 +17,7 @@ import {createCurrentGuestAccountLifecycle} from '@lib/guestAccountLifecycle';
 import type {GuestAccountLifecycleResult, GuestAccountManagers} from '@lib/guestAccountLifecycle';
 import {i18n} from '@lib/langPack';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
+import {hasAutoGuestAttempted, markAutoGuestAttempted} from '@lib/autoGuest';
 
 import AuthCard from '@/pages/AuthCard';
 import {CardSpec, useAuthFlow} from '@/pages/authFlow';
@@ -59,6 +61,8 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   const {managers, navigate, toIm} = useAuthFlow();
   const turnstile = useTurnstileChallenge();
   const guestSignUpAvailable = isActiveGuestSignUpEnabled();
+  const autoGuest = isAutoGuestEnabled();
+  const showDemoGuestNotice = autoGuest && guestSignUpAvailable && getActiveServerHost() === DEMO_SERVER_HOST;
   let termsDialogReturnFocusTarget: HTMLElement | undefined;
   let acceptedTermsId: string | undefined;
 
@@ -137,6 +141,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   const [creatingAccount, setCreatingAccount] = createSignal(false);
   const [guestSubmitting, setGuestSubmitting] = createSignal(false);
   const [restoringGuest, setRestoringGuest] = createSignal(true);
+  const [autoGuestPending, setAutoGuestPending] = createSignal(autoGuest && guestSignUpAvailable && !hasAutoGuestAttempted());
   const [guestFloodWait, setGuestFloodWait] = createSignal<number>();
   const [registrationConfigUnavailable, setRegistrationConfigUnavailable] = createSignal(false);
   const [termsDeclined, setTermsDeclined] = createSignal(false);
@@ -149,7 +154,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   let registrationCreateButton: HTMLElement;
   let guestSignUpButton: HTMLElement;
   let cancelFocus: (() => void) | undefined;
-  let guestRestorePromise: Promise<void> = Promise.resolve();
+  let guestRestorePromise: Promise<boolean> = Promise.resolve(false);
   let guestActionWaiting = false;
   let guestAuthorized = false;
 
@@ -437,6 +442,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
       case 'authorized':
       case 'resumed':
         guestAuthorized = true;
+        if(autoGuest) markAutoGuestAttempted();
         await toIm();
         return;
       case 'termsDeclined':
@@ -452,25 +458,21 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     }
   }
 
-  async function restoreGuest(): Promise<void> {
+  async function restoreGuest(): Promise<boolean> {
     try {
-      await handleGuestLifecycleResult(await guestLifecycle.reauthenticate(), true);
+      const result = await guestLifecycle.reauthenticate();
+      if(result.kind === 'noGuest') return true;
+      await handleGuestLifecycleResult(result, true);
     } catch{
       if(!cancelled) showError('guestRestoreNetwork');
     } finally {
       if(!cancelled) setRestoringGuest(false);
     }
+    return false;
   }
 
-  async function tryAsGuest(): Promise<void> {
-    if(!guestSignUpAvailable || cancelled || guestSubmitting() || submitting() || guestActionWaiting) return;
-    setTermsDeclined(false);
-    guestActionWaiting = true;
-    await guestRestorePromise;
-    guestActionWaiting = false;
-    if(cancelled || guestAuthorized || guestSubmitting() || submitting()) return;
-
-    termsDialogReturnFocusTarget = guestSignUpButton;
+  async function createGuest(): Promise<void> {
+    if(!guestSignUpAvailable || cancelled || guestSubmitting() || submitting()) return;
     setError(undefined);
     setGuestFloodWait(undefined);
     setGuestSubmitting(true);
@@ -484,8 +486,30 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     } catch{
       if(!cancelled) showError('guestNetwork');
     } finally {
-      if(!cancelled) setGuestSubmitting(false);
+      if(!cancelled) {
+        setGuestSubmitting(false);
+        setAutoGuestPending(false);
+      }
     }
+  }
+
+  async function tryAsGuest(): Promise<void> {
+    if(!guestSignUpAvailable || cancelled || guestSubmitting() || submitting() || guestActionWaiting) return;
+    setTermsDeclined(false);
+    guestActionWaiting = true;
+    await guestRestorePromise;
+    guestActionWaiting = false;
+    if(cancelled || guestAuthorized || guestSubmitting() || submitting()) return;
+    termsDialogReturnFocusTarget = guestSignUpButton;
+    await createGuest();
+  }
+
+  async function startAutomaticGuest() {
+    if(!autoGuestPending() || !markAutoGuestAttempted()) {
+      setAutoGuestPending(false);
+      return;
+    }
+    await createGuest();
   }
 
   function startRegistration() {
@@ -566,6 +590,14 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   onMount(() => {
     managers.appStateManager.pushToState('authState', {_: 'authStateSignIn'});
     guestRestorePromise = restoreGuest();
+    void guestRestorePromise.then(async(noGuest) => {
+      if(cancelled) return;
+      if(noGuest && autoGuest && guestSignUpAvailable && autoGuestPending()) {
+        await startAutomaticGuest();
+      } else {
+        setAutoGuestPending(false);
+      }
+    });
     Promise.resolve(managers.apiManager.getAppConfig(true)).then((config) => {
       if(cancelled) return;
       const mode = config.registration_mode;
@@ -615,18 +647,27 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         </MediaHeader>
       }
     >
-      {usernameField.container}
-      {creatingAccount() && (
-        <div class={styles.registrationFields}>
-          {displayNameField.container}
-          {registrationMode() === 'invite' && inviteSecretField.container}
-          {passwordField.container}
-          {confirmPasswordField.container}
-        </div>
+      {!autoGuestPending() && (
+        <>
+          {usernameField.container}
+          {creatingAccount() && (
+            <div class={styles.registrationFields}>
+              {displayNameField.container}
+              {registrationMode() === 'invite' && inviteSecretField.container}
+              {passwordField.container}
+              {confirmPasswordField.container}
+            </div>
+          )}
+        </>
       )}
       <Show when={turnstile.challenge()} keyed>
         {(challenge) => <TurnstileChallenge {...challenge}/>}
       </Show>
+      {autoGuestPending() && (
+        <div class={styles.guestLoading} role="status" aria-live="polite">
+          {i18n(restoringGuest() ? 'Teagram.Guest.Restoring' : 'Teagram.Guest.Creating')}
+        </div>
+      )}
       {error() && <div class={styles.errorLabel} role="alert">{errorContent()}</div>}
       {registrationConfigUnavailable() && !creatingAccount() && (
         <div class={styles.registrationConfigError} role="status">
@@ -638,15 +679,22 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           {i18n('Teagram.Terms.Declined')}
         </div>
       )}
-      {restoringGuest() && !creatingAccount() && (
+      {restoringGuest() && !creatingAccount() && !autoGuestPending() && (
         <div class={styles.guestLoading} role="status" aria-live="polite">
           {i18n('Teagram.Guest.Restoring')}
         </div>
       )}
-      {!creatingAccount() && guestSignUpAvailable && (
+      {!autoGuestPending() && !creatingAccount() && guestSignUpAvailable && (
         <p class={styles.guestDisclosure}>{i18n('Teagram.Guest.Disclosure')}</p>
       )}
-      <div class={styles.registrationActions}>
+      {!autoGuestPending() && showDemoGuestNotice && (
+        <p class={styles.guestDisclosure}>
+          {i18n('Teagram.Demo.Banner.Title')}{' '}
+          {i18n('Teagram.Demo.Banner.Description')}{' '}
+          <a href="https://web.teagram.io" target="_blank" rel="noopener noreferrer">web.teagram.io</a>
+        </p>
+      )}
+      {!autoGuestPending() && <div class={styles.registrationActions}>
         {!creatingAccount() ? (
           <>
             <Button
@@ -659,12 +707,13 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
             {guestSignUpAvailable && (
               <Button
                 class="btn-primary btn-color-primary"
-                aria-label={(guestSubmitting() ? i18n('Teagram.Guest.Creating') : i18n('Teagram.Guest.Try')).textContent || 'Try it as a guest'}
+                aria-label={(guestSubmitting() ? i18n('Teagram.Guest.Creating') :
+                  i18n(autoGuest ? 'Teagram.Guest.StartNew' : 'Teagram.Guest.Try')).textContent || 'Try it as a guest'}
                 disabled={submitting() || guestSubmitting() || restoringGuest()}
-              ref={(element) => guestSignUpButton = element}
+                ref={(element) => guestSignUpButton = element}
                 onClick={tryAsGuest}
               >
-                {guestSubmitting() ? i18n('Teagram.Guest.Creating') : i18n('Teagram.Guest.Try')}
+                {guestSubmitting() ? i18n('Teagram.Guest.Creating') : i18n(autoGuest ? 'Teagram.Guest.StartNew' : 'Teagram.Guest.Try')}
               </Button>
             )}
             {registrationMode() !== 'closed' && (
@@ -690,8 +739,8 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
             )}
           </>
         )}
-      </div>
-      {!creatingAccount() && getCurrentAccount() === 1 && <LanguageChangeButton />}
+      </div>}
+      {!autoGuestPending() && !creatingAccount() && getCurrentAccount() === 1 && <LanguageChangeButton />}
     </AuthCard>
   );
 }
