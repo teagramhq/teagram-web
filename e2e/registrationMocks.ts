@@ -7,7 +7,8 @@ export async function setupRegistrationMocks(
   requireTurnstile = false,
   failFirstTurnstileScript = false,
   requireSignInTurnstile = false,
-  requirePasswordTurnstile = false
+  requirePasswordTurnstile = false,
+  termsText?: string
 ) {
   const appOrigin = new URL(testInfo.project.use.baseURL as string).origin;
   let turnstileScriptAttempts = 0;
@@ -99,7 +100,13 @@ export async function setupRegistrationMocks(
                 case 'auth.signIn':
                   if(options.requireSignInTurnstile) return Promise.resolve({_ : 'auth.authorization', user});
                   if(options.requirePasswordTurnstile) return Promise.reject({type: 'SESSION_PASSWORD_NEEDED'});
-                  return Promise.resolve({_ : 'auth.authorizationSignUpRequired'});
+                  return Promise.resolve({_ : 'auth.authorizationSignUpRequired', terms_of_service: options.termsText ? {
+                    _: 'help.termsOfService',
+                    id: {_ : 'dataJSON', data: '{"terms":"registration"}'},
+                    text: options.termsText,
+                    entities: [],
+                    pFlags: {popup: true}
+                  } : {}});
                 case 'auth.checkPassword':
                   if(options.requirePasswordTurnstile) return Promise.reject({type: 'RECAPTCHA_CHECK_signin__test-site-key'});
                   return Promise.reject({type: 'PASSWORD_HASH_INVALID'});
@@ -160,7 +167,7 @@ export async function setupRegistrationMocks(
         };
       }
     });
-  }, {registrationMode: mode, requireTurnstile, requireSignInTurnstile, requirePasswordTurnstile});
+  }, {registrationMode: mode, requireTurnstile, requireSignInTurnstile, requirePasswordTurnstile, termsText});
 }
 
 export async function captureState(page: Page, testInfo: TestInfo, name: string) {

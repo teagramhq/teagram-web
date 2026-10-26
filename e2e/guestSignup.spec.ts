@@ -11,7 +11,14 @@ async function fetchLocalAppRoute(route: import('@playwright/test').Route, url: 
   return route.fetch({url, maxRetries: 1});
 }
 
-async function setupGuestServer(page: Page, testInfo: TestInfo, guestSignUp: boolean, signupErrorType?: string) {
+async function setupGuestServer(
+  page: Page,
+  testInfo: TestInfo,
+  guestSignUp: boolean,
+  signupErrorType?: string,
+  termsText?: string,
+  termsEntities?: Array<{_: string, offset: number, length: number, url?: string}>
+) {
   const appOrigin = new URL(testInfo.project.use.baseURL as string);
   appOrigin.hostname = 'web.teagram.io';
   appOrigin.protocol = 'https:';
@@ -82,7 +89,7 @@ async function setupGuestServer(page: Page, testInfo: TestInfo, guestSignUp: boo
     socket.close();
   });
 
-  await page.addInitScript((guestSignupErrorType) => {
+  await page.addInitScript(({signupErrorType: guestSignupErrorType, termsText: guestTermsText, termsEntities: guestTermsEntities}) => {
     Object.defineProperty(window, 'apiManagerProxy', {
       configurable: true,
       set(proxy: any) {
@@ -120,7 +127,13 @@ async function setupGuestServer(page: Page, testInfo: TestInfo, guestSignUp: boo
                 if(params.phone_number === localStorage.getItem('__teagram_guest_username')) {
                   return Promise.reject({type: 'SESSION_PASSWORD_NEEDED'});
                 }
-                return Promise.resolve({_ : 'auth.authorizationSignUpRequired', terms_of_service: {}});
+                return Promise.resolve({_ : 'auth.authorizationSignUpRequired', terms_of_service: guestTermsText ? {
+                  _: 'help.termsOfService',
+                  id: {_ : 'dataJSON', data: '{"terms":"guest"}'},
+                  text: guestTermsText,
+                  entities: guestTermsEntities ?? [],
+                  pFlags: {popup: true}
+                } : {}});
               }
               if(method === 'auth.signUp') {
                 if(guestSignupErrorType) return Promise.reject({type: guestSignupErrorType});
@@ -165,7 +178,7 @@ async function setupGuestServer(page: Page, testInfo: TestInfo, guestSignUp: boo
         };
       }
     });
-  }, signupErrorType);
+  }, {signupErrorType, termsText, termsEntities});
 }
 
 async function openSelectedServer(page: Page, testInfo: TestInfo) {
@@ -207,6 +220,7 @@ test('creates a guest only when discovery advertises it and restores the same gu
   await page.keyboard.press('Enter');
   const challenge = auth.getByTestId('turnstile-challenge');
   await expect(challenge).toBeVisible();
+  await expect(auth.getByRole('dialog')).toHaveCount(0);
   await expect(challenge.getByRole('button', {name: 'Complete security check'})).toBeVisible();
   await captureState(page, testInfo, 'guest-signup-challenge');
   await challenge.getByRole('button', {name: 'Complete security check'}).click();
@@ -243,6 +257,179 @@ test('creates a guest only when discovery advertises it and restores the same gu
     .toBe(guestUsername);
   const returningCalls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
   expect(returningCalls.filter((call) => call.method === 'auth.signUp')).toHaveLength(0);
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
+test('shows instance terms before guest sign-up and creates an account only after acceptance', async({page}, testInfo) => {
+  const termsText = [
+    'These are the terms for this server.',
+    'Read each section before you create your guest account.',
+    'Visit https://terms.example.test for the full terms.',
+    'Contact support@example.test if you have questions.',
+    'Read the Terms page online.',
+    ...Array.from({length: 32}, (_, index) => `Section ${index + 1}: This server terms line keeps the document long enough to scroll.`)
+  ].join('\n');
+  const textUrlLabel = 'Terms page';
+  await page.setViewportSize({width: 320, height: 720});
+  await setupGuestServer(page, testInfo, true, undefined, termsText, [{
+    _: 'messageEntityTextUrl',
+    offset: termsText.indexOf(textUrlLabel),
+    length: textUrlLabel.length,
+    url: 'https://terms.example.test'
+  }]);
+  await openSelectedServer(page, testInfo);
+
+  const auth = page.locator('#auth-pages');
+  const guestButton = auth.getByRole('button', {name: 'Try it as a guest'});
+  await guestButton.click();
+  const dialog = page.getByRole('dialog', {name: 'Terms of service'});
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('These are the terms for this server.');
+  await expect.poll(async() => {
+    const titleBox = await dialog.locator('.popup-title').boundingBox();
+    const textBox = await dialog.locator('.terms-content').boundingBox();
+    return !!titleBox && !!textBox && titleBox.y + titleBox.height <= textBox.y;
+  }).toBe(true);
+  const declineBox = await dialog.getByRole('button', {name: 'Decline'}).boundingBox();
+  const acceptBox = await dialog.getByRole('button', {name: 'Accept'}).boundingBox();
+  expect(declineBox?.x).toBeLessThan(acceptBox?.x ?? 0);
+  const serverTermsLink = dialog.getByRole('link', {name: textUrlLabel});
+  await expect(serverTermsLink).toHaveAttribute('href', 'https://terms.example.test');
+  const bareWebLink = dialog.getByRole('link', {name: 'https://terms.example.test'});
+  const emailLink = dialog.getByRole('link', {name: 'support@example.test'});
+  for(const link of [serverTermsLink, bareWebLink, emailLink]) {
+    await expect(link).toHaveAttribute('target', '_blank');
+    await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  }
+  await expect(dialog.getByRole('button', {name: 'Decline'})).toBeVisible();
+  await expect(dialog.getByRole('button', {name: 'Accept'})).toBeVisible();
+  const canScroll = await page.locator('.popup-peer .scrollable-y-bordered').evaluate((element) => element.scrollHeight > element.clientHeight);
+  expect(canScroll).toBe(true);
+  const mobileWidths = await page.evaluate(() => ({document: document.documentElement.scrollWidth, viewport: document.documentElement.clientWidth}));
+  expect(mobileWidths.document).toBeLessThanOrEqual(mobileWidths.viewport);
+  const callsBeforeAccept = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
+  expect(callsBeforeAccept.filter((call) => call.method === 'auth.signUp' || call.method === 'invokeWithReCaptcha')).toHaveLength(0);
+  await captureState(page, testInfo, 'guest-terms-default');
+
+  const popupBox = await dialog.locator('.popup-container').boundingBox();
+  expect(popupBox?.height).toBeGreaterThan(600);
+  await page.setViewportSize({width: 1280, height: 900});
+  const desktopPopupBox = await dialog.locator('.popup-container').boundingBox();
+  expect(desktopPopupBox?.width).toBeLessThanOrEqual(400);
+  const desktopWidths = await page.evaluate(() => ({document: document.documentElement.scrollWidth, viewport: document.documentElement.clientWidth}));
+  expect(desktopWidths.document).toBeLessThanOrEqual(desktopWidths.viewport);
+  await captureState(page, testInfo, 'guest-terms-desktop');
+  await page.setViewportSize({width: 320, height: 720});
+  await dialog.click({position: {x: 2, y: 2}});
+  await expect(dialog).toBeVisible();
+  const text = dialog.locator('.terms-content');
+  const scroller = dialog.locator('.scrollable-y-bordered');
+  const links = dialog.getByRole('link');
+  await text.focus();
+  await page.keyboard.press('PageDown');
+  await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  const popupPromise = page.waitForEvent('popup');
+  await links.nth(0).focus();
+  await page.keyboard.press('Enter');
+  const termsTab = await popupPromise;
+  await expect(dialog).toBeVisible();
+  await termsTab.close();
+
+  await text.focus();
+  await page.keyboard.press('Tab');
+  await expect(links.nth(0)).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(links.nth(1)).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(links.nth(2)).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(dialog.getByRole('button', {name: 'Decline'})).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(dialog.getByRole('button', {name: 'Accept'})).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(text).toBeFocused();
+
+  await dialog.locator('.popup-description').focus();
+  await page.keyboard.press('Enter');
+  const challenge = auth.getByTestId('turnstile-challenge');
+  await expect(challenge).toBeVisible();
+  await captureState(page, testInfo, 'guest-terms-accepted-security-check');
+  await challenge.getByRole('button', {name: 'Complete security check'}).click();
+  await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
+  await captureState(page, testInfo, 'guest-terms-accepted-main-screen');
+
+  const calls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string, params?: Record<string, unknown>}>);
+  const turnstileSignUp = calls.find((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp');
+  expect(turnstileSignUp).toBeDefined();
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
+test('declining guest terms leaves no account and remains recoverable after reload', async({page}, testInfo) => {
+  await page.setViewportSize({width: 320, height: 720});
+  await setupGuestServer(page, testInfo, true, undefined, 'These are the terms for this server.');
+  await openSelectedServer(page, testInfo);
+
+  const auth = page.locator('#auth-pages');
+  const guestButton = auth.getByRole('button', {name: 'Try it as a guest'});
+  await guestButton.click();
+  const dialog = page.getByRole('dialog', {name: 'Terms of service'});
+  await expect(dialog).toBeVisible();
+  await captureState(page, testInfo, 'guest-terms-before-decline');
+  await page.keyboard.press('Escape');
+
+  await expect(dialog).toBeHidden();
+  await expect(auth.getByRole('status')).toHaveText('No account was created. Accept the terms to create one.');
+  await expect(guestButton).toBeFocused();
+  const calls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
+  expect(calls.filter((call) => call.method === 'auth.signUp' || call.method === 'invokeWithReCaptcha')).toHaveLength(0);
+  await captureState(page, testInfo, 'guest-terms-declined');
+
+  await page.reload({waitUntil: 'domcontentloaded'});
+  const returningPicker = page.getByRole('dialog');
+  await expect(returningPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(SERVER_HOST);
+  await returningPicker.getByRole('button', {name: 'Continue'}).click();
+  const returningAuth = page.locator('#auth-pages');
+  await expect(returningAuth.getByRole('button', {name: 'Try it as a guest'})).toBeVisible({timeout: 30_000});
+  await expect(returningAuth.getByRole('alert')).toHaveCount(0);
+  await captureState(page, testInfo, 'guest-terms-declined-after-reload');
+
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
+test('surfaces guest terms popup load failures as an auth error', async({page}, testInfo) => {
+  await page.setViewportSize({width: 390, height: 844});
+  await setupGuestServer(page, testInfo, true, undefined, 'These are the terms for this server.');
+  await openSelectedServer(page, testInfo);
+
+  let termsPopupLoadFailed = false;
+  await page.route('**/simpleConfirmation.ts*', async(route) => {
+    termsPopupLoadFailed = true;
+    await route.abort();
+  });
+
+  const auth = page.locator('#auth-pages');
+  await auth.getByRole('button', {name: 'Try it as a guest'}).click();
+
+  await expect(auth.getByRole('alert')).toHaveText('Unable to create your guest account. Check your connection and try again.');
+  expect(termsPopupLoadFailed).toBe(true);
+  await expect(auth.getByText('No account was created. Accept the terms to create one.')).toHaveCount(0);
+  const calls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
+  expect(calls.filter((call) => call.method === 'auth.signUp' || call.method === 'invokeWithReCaptcha')).toHaveLength(0);
+  await captureState(page, testInfo, 'guest-terms-popup-load-error');
+  await page.unroute('**/simpleConfirmation.ts*');
+
+  await page.reload({waitUntil: 'domcontentloaded'});
+  const returningPicker = page.getByRole('dialog');
+  await expect(returningPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(SERVER_HOST);
+  await returningPicker.getByRole('button', {name: 'Continue'}).click();
+  const returningAuth = page.locator('#auth-pages');
+  await expect(returningAuth.getByRole('button', {name: 'Try it as a guest'})).toBeVisible({timeout: 30_000});
+  await expect(returningAuth.getByRole('alert')).toHaveCount(0);
+  const returningCalls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
+  expect(returningCalls.filter((call) => call.method === 'auth.signUp' || call.method === 'invokeWithReCaptcha')).toHaveLength(0);
+  await captureState(page, testInfo, 'guest-terms-popup-load-error-after-reload');
+
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
 

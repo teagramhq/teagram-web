@@ -1,4 +1,4 @@
-import type {AuthCheckPassword, AuthSendCode, AuthSignIn, AuthSignUp, InvokeWithReCaptcha, User} from '@layer';
+import type {AuthCheckPassword, AuthSendCode, AuthSignIn, AuthSignUp, HelpTermsOfService, InvokeWithReCaptcha, User} from '@layer';
 import App from '@config/app';
 import {isPrivateUsernameCredentialError} from '@/pages/privateUsernameLoginState';
 import {invokeSignUpWithTurnstile, invokeTurnstileProtected} from '@/pages/turnstileSignup';
@@ -16,6 +16,8 @@ export type PrivateUsernameAuthResult =
   | {kind: 'invalidDisplayName'}
   | {kind: 'invalidInvite'}
   | {kind: 'registrationClosed'}
+  | {kind: 'termsDeclined'}
+  | {kind: 'termsAcceptanceError', errorType?: string}
   | {kind: 'weakPassword', user: User}
   | {kind: 'passwordSetupError', user: User, errorType?: string}
   | {kind: 'password'}
@@ -31,6 +33,7 @@ export type PrivateUsernameRegistration = {
   password: string,
   inviteSecret?: string,
   updatePasswordSettings: (password: string) => Promise<unknown>,
+  requestTermsAcceptance?: (terms: HelpTermsOfService) => Promise<boolean>,
   onAuthorization?: (user: User) => Promise<void>,
   checkPassword?: (password: string) => Promise<User | false | undefined>
 };
@@ -204,6 +207,21 @@ export async function authenticatePrivateUsername(
   if(!isRecord(authorization)) return {kind: 'error'};
   if(authorization._ === 'auth.authorizationSignUpRequired') {
     if(!registration || registration.mode === 'closed') return {kind: 'invalidCredentials'};
+
+    const terms = authorization.terms_of_service;
+    if(isRecord(terms) && typeof terms.text === 'string' && terms.text.trim()) {
+      if(!registration.requestTermsAcceptance) return {kind: 'termsDeclined'};
+      let accepted: boolean;
+      try {
+        accepted = await registration.requestTermsAcceptance(terms as unknown as HelpTermsOfService);
+      } catch(error) {
+        if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
+        const errorType = getErrorType(error);
+        return typeof errorType === 'string' ? {kind: 'termsAcceptanceError', errorType} : {kind: 'termsAcceptanceError'};
+      }
+      if(isCancelled()) return {kind: 'cancelled'};
+      if(!accepted) return {kind: 'termsDeclined'};
+    }
 
     let signUpResponse: unknown;
     try {

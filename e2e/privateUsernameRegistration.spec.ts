@@ -146,3 +146,61 @@ test('retries username registration when the server requests Turnstile', async({
   });
   expect(turnstileRequests).toHaveLength(2);
 });
+
+test('requires instance terms before account creation and preserves the form when declined', async({page}, testInfo) => {
+  const termsText = [
+    'These are the terms for this server.',
+    'Read each section before you create your account.',
+    'Visit https://terms.example.test for the full terms.',
+    ...Array.from({length: 32}, (_, index) => `Section ${index + 1}: This server terms line keeps the document long enough to scroll.`)
+  ].join('\n');
+  await page.setViewportSize({width: 320, height: 720});
+  await setupRegistrationMocks(page, testInfo, 'open', false, false, false, false, termsText);
+
+  await page.goto('/?noWorker=1&noServiceWorker=1', {waitUntil: 'domcontentloaded'});
+  const registration = page.locator('#auth-pages');
+  await expect(registration.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
+  await registration.getByRole('button', {name: 'Create account'}).click();
+  await registration.locator('input[aria-label="Username"]').fill('test_user_terms');
+  await registration.locator('input[aria-label="Display name"]').fill('CI Terms');
+  await registration.locator('input[aria-label="Password"]').fill('Teagram-Test-Password-123!');
+  await registration.locator('input[aria-label="Confirm password"]').fill('Teagram-Test-Password-123!');
+  await registration.locator('input[aria-label="Confirm password"]').press('Enter');
+
+  const dialog = page.getByRole('dialog', {name: 'Terms of service'});
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText('These are the terms for this server.');
+  const termsLink = dialog.getByRole('link', {name: 'https://terms.example.test'});
+  await expect(termsLink).toHaveAttribute('target', '_blank');
+  await expect(termsLink).toHaveAttribute('rel', 'noopener noreferrer');
+  await expect(dialog.getByRole('button', {name: 'Decline'})).toBeVisible();
+  await expect(dialog.getByRole('button', {name: 'Accept'})).toBeVisible();
+  const canScroll = await page.locator('.popup-peer .scrollable-y-bordered').evaluate((element) => element.scrollHeight > element.clientHeight);
+  expect(canScroll).toBe(true);
+  const callsBeforeDecline = await page.evaluate(() => (window as any).__registrationCalls as Array<{method: string}>);
+  expect(callsBeforeDecline.filter((call) => call.method === 'auth.signUp')).toHaveLength(0);
+  await captureState(page, testInfo, 'registration-terms-default');
+
+  await dialog.getByRole('button', {name: 'Decline'}).click();
+  await expect(dialog).toBeHidden();
+  await expect(registration.getByRole('status')).toHaveText('No account was created. Accept the terms to create one.');
+  await expect(registration.locator('input[aria-label="Username"]')).toHaveValue('test_user_terms');
+  await expect(registration.locator('input[aria-label="Display name"]')).toHaveValue('CI Terms');
+  await expect(registration.locator('input[aria-label="Password"]')).toHaveValue('Teagram-Test-Password-123!');
+  await expect(registration.getByRole('button', {name: 'Create account'})).toBeFocused();
+  await captureState(page, testInfo, 'registration-terms-declined');
+  const callsAfterDecline = await page.evaluate(() => (window as any).__registrationCalls as Array<{method: string}>);
+  expect(callsAfterDecline.filter((call) => call.method === 'auth.signUp')).toHaveLength(0);
+
+  await registration.getByRole('button', {name: 'Create account'}).click();
+  await expect(registration.getByRole('status')).toHaveCount(0);
+  await expect(dialog).toBeVisible();
+  await captureState(page, testInfo, 'registration-terms-reopened');
+  await dialog.locator('.popup-description').focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
+  await captureState(page, testInfo, 'registration-terms-accepted');
+
+  const acceptedCalls = await page.evaluate(() => (window as any).__registrationCalls as Array<{method: string}>);
+  expect(acceptedCalls.filter((call) => call.method === 'auth.signUp')).toHaveLength(1);
+});

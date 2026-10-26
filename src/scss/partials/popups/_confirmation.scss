@@ -3,3 +3,25 @@
     margin: .75rem .75rem .5rem;
   }
 }
+
+.popup-terms {
+  --popup-max-height: 100%;
+
+  .popup-body {
+    min-height: 0;
+  }
+
+  .scrollable {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .popup-buttons {
+    flex-direction: row;
+    justify-content: flex-end;
+  }
+
+  .terms-content {
+    overflow-wrap: anywhere;
+  }
+}

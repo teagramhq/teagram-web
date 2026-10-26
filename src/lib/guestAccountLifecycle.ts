@@ -1,4 +1,4 @@
-import type {AccountPassword, InputCheckPasswordSRP, User} from '@layer';
+import type {AccountPassword, HelpTermsOfService, InputCheckPasswordSRP, User} from '@layer';
 import type {ActiveAccountNumber} from '@lib/accounts/types';
 import {authenticatePrivateUsername} from '@/pages/privateUsernameAuth';
 import type {PrivateUsernameAuthResult, PrivateUsernameRegistration} from '@/pages/privateUsernameAuth';
@@ -37,6 +37,7 @@ export type GuestAccountLifecycleResult =
   | {kind: 'accountInUse'}
   | {kind: 'noGuest'}
   | {kind: 'setupPending', username: string, errorType?: string}
+  | {kind: 'termsDeclined'}
   | {kind: 'cancelled'}
   | {kind: 'error', errorType?: string};
 
@@ -62,6 +63,7 @@ export type GuestAccountLifecycleDependencies = {
   signInWithPassword: (password: string) => Promise<User | false | undefined>,
   requestTurnstile?: RequestTurnstileChallenge,
   turnstileSiteKey?: string,
+  requestTermsAcceptance?: (terms: HelpTermsOfService) => Promise<boolean>,
   logOut?: (accountNumber: ActiveAccountNumber) => Promise<unknown>,
   notifyInvalidation?: (serverId: string) => void,
   subscribeInvalidation?: (serverId: string, callback: () => void) => () => void
@@ -123,9 +125,10 @@ function isCredentialRecord(value: unknown): value is GuestCredentialRecord {
 }
 
 function resultFromAuthError(result: PrivateUsernameAuthResult): GuestAccountLifecycleResult {
-  if(result.kind === 'error') {
+  if(result.kind === 'error' || result.kind === 'termsAcceptanceError') {
     return result.errorType ? {kind: 'error', errorType: result.errorType} : {kind: 'error'};
   }
+  if(result.kind === 'termsDeclined') return {kind: 'termsDeclined'};
   return {kind: 'error'};
 }
 
@@ -300,6 +303,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
         displayName: 'Guest',
         password: record.password,
         updatePasswordSettings: updatePassword,
+        requestTermsAcceptance: dependencies.requestTermsAcceptance,
         onAuthorization,
         checkPassword: resuming ? async(password) => {
           await assertContext(context, boundUserId, cancelled);
@@ -340,6 +344,11 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
         }
       }
       if(result.kind === 'cancelled') return {kind: 'cancelled'} as const;
+      if(result.kind === 'termsDeclined' || result.kind === 'termsAcceptanceError') {
+        await removeRecord(record);
+        record.password = '';
+        return resultFromAuthError(result);
+      }
       if(result.kind === 'usernameTaken') {
         if(record.accountUserId !== undefined) return {kind: 'unrecoverable', username: record.username} as const;
         if(attempt === 2) {
@@ -580,7 +589,11 @@ function getActiveGuestServerIdentity(): GuestServerIdentity {
 
 export function createCurrentGuestAccountLifecycle(
   managers: GuestAccountManagers,
-  options: {requestTurnstile?: RequestTurnstileChallenge, turnstileSiteKey?: string} = {}
+  options: {
+    requestTurnstile?: RequestTurnstileChallenge,
+    turnstileSiteKey?: string,
+    requestTermsAcceptance?: (terms: HelpTermsOfService) => Promise<boolean>
+  } = {}
 ) {
   const apiManager = managers.apiManager;
   const passwordManager = managers.passwordManager;
@@ -626,6 +639,7 @@ export function createCurrentGuestAccountLifecycle(
     },
     requestTurnstile: options.requestTurnstile,
     turnstileSiteKey: options.turnstileSiteKey,
+    requestTermsAcceptance: options.requestTermsAcceptance,
     logOut: async(accountNumber) => {
       if(getCurrentAccount() !== accountNumber) {
         throw Object.assign(new Error('Select this guest account before forgetting it'), {type: 'GUEST_ACCOUNT_CONTEXT_CHANGED'});

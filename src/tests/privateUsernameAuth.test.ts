@@ -1,4 +1,5 @@
 import {describe, expect, it, vi} from 'vitest';
+import type {HelpTermsOfService} from '@layer';
 
 import {authenticatePrivateUsername, isPrivateUsername, isPrivateUsernameCredentialError} from '@/pages/privateUsernameAuth';
 
@@ -97,6 +98,85 @@ describe('private username sign-in', () => {
       last_name: ''
     });
     expect(updatePasswordSettings).toHaveBeenCalledWith('StrongPassword123');
+  });
+
+  it('waits for server terms acceptance before creating an account', async() => {
+    const user = {_: 'user', id: 42};
+    const termsOfService: HelpTermsOfService = {
+      _: 'help.termsOfService',
+      id: {_ : 'dataJSON', data: '{"terms":"guest"}'},
+      text: 'Read these terms first.',
+      entities: [],
+      pFlags: {popup: true}
+    };
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: termsOfService})
+    .mockResolvedValueOnce({_: 'auth.authorization', user});
+    const requestTermsAcceptance = vi.fn().mockResolvedValue(true);
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings: vi.fn().mockResolvedValue(true),
+      requestTermsAcceptance
+    })).resolves.toEqual({kind: 'authorized', user});
+
+    expect(requestTermsAcceptance).toHaveBeenCalledWith(termsOfService);
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual([
+      'auth.sendCode',
+      'auth.signIn',
+      'auth.signUp'
+    ]);
+  });
+
+  it('does not create an account when the server terms are declined', async() => {
+    const termsOfService: HelpTermsOfService = {
+      _: 'help.termsOfService',
+      id: {_ : 'dataJSON', data: '{"terms":"guest"}'},
+      text: 'Read these terms first.',
+      entities: [],
+      pFlags: {popup: true}
+    };
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: termsOfService});
+    const requestTermsAcceptance = vi.fn().mockResolvedValue(false);
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings: vi.fn().mockResolvedValue(true),
+      requestTermsAcceptance
+    })).resolves.toEqual({kind: 'termsDeclined'});
+
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
+  });
+
+  it('distinguishes a terms dialog failure from a visitor declining terms', async() => {
+    const termsOfService: HelpTermsOfService = {
+      _: 'help.termsOfService',
+      id: {_ : 'dataJSON', data: '{"terms":"guest"}'},
+      text: 'Read these terms first.',
+      entities: [],
+      pFlags: {popup: true}
+    };
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: termsOfService});
+    const requestTermsAcceptance = vi.fn().mockRejectedValue(new Error('Terms dialog failed to load'));
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings: vi.fn().mockResolvedValue(true),
+      requestTermsAcceptance
+    })).resolves.toEqual({kind: 'termsAcceptanceError'});
+
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
   });
 
   it('persists the creating authorization before attempting password setup', async() => {
