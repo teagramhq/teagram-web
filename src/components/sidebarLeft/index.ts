@@ -804,11 +804,11 @@ export class AppSidebarLeft extends SidebarSlider {
             return '' + user;
           }
 
-          let name = user.first_name;
-          if(user.last_name) name += ' ' + user.last_name;
+          const name = [user.first_name, user.last_name]
+            .filter((part): part is string => typeof part === 'string' && !!part)
+            .join(' ') || (typeof user.username === 'string' ? user.username : '');
 
-          name = limitSymbols(name, 15, 18);
-          return wrapEmojiText(name);
+          return wrapEmojiText(limitSymbols(name, 15, 18));
         }
 
         const targetIdx = buttons.findIndex((btn) => btn.id === 'settings');
