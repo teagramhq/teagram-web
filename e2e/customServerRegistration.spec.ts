@@ -8,6 +8,9 @@ const INVITE_SECRET = 'test-invite-secret';
 const PASSWORD = 'Teagram-Test-Password-123!';
 
 test('registers on a second server after a failed host selection', async({page}, testInfo) => {
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+
   const appOrigin = new URL(testInfo.project.use.baseURL as string);
   appOrigin.hostname = 'web.teagram.io';
   appOrigin.protocol = 'https:';
@@ -81,7 +84,7 @@ test('registers on a second server after a failed host selection', async({page},
         const invoke = proxy.invoke.bind(proxy);
         const calls: Array<{method: string, params?: Record<string, unknown>}> =
           ((window as any).__customRegistrationCalls = []);
-        const user = {_ : 'user', id: 8282, first_name: 'Local Server'};
+        const user = {_ : 'user', id: 8282, username: 'second_server_user'};
 
         proxy.invoke = (type: string, payload: any, ...args: any[]) => {
           if(type === 'manager' && payload?.name === 'apiManager') {
@@ -207,6 +210,35 @@ test('registers on a second server after a failed host selection', async({page},
   await auth.getByRole('button', {name: 'Create account'}).click();
   await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
 
+  const self = await page.evaluate(() => (window as any).apiManagerProxy.getUser(8282));
+  expect(self).toMatchObject({_: 'user', id: 8282, username: 'second_server_user'});
+  expect(self.first_name).toBeUndefined();
+  expect(self.last_name).toBeUndefined();
+
+  await page.locator('.sidebar-tools-button').click();
+  await expect.poll(async() => pageErrors.length > 0 ||
+    await page.getByText('Settings', {exact: true}).isVisible().catch(() => false)
+  ).toBe(true);
+  expect(pageErrors).toEqual([]);
+  const settingsMenuItem = page.getByText('Settings', {exact: true});
+  await expect(settingsMenuItem).toBeVisible();
+  await page.screenshot({path: testInfo.outputPath('main-menu.png')});
+
+  await settingsMenuItem.click();
+
+  const generalSettings = page.getByText('General Settings', {exact: true});
+  await expect(generalSettings).toBeVisible();
+  await page.screenshot({path: testInfo.outputPath('settings-home.png')});
+  await generalSettings.click({force: true});
+  const chooseAnotherServer = page.getByText('Choose another server', {exact: true});
+  await expect(chooseAnotherServer).toBeVisible();
+  await page.setViewportSize({width: 375, height: 812});
+  await chooseAnotherServer.scrollIntoViewIfNeeded();
+  await expect(chooseAnotherServer).toBeVisible();
+  await page.screenshot({path: testInfo.outputPath('general-server-settings.png')});
+  await page.keyboard.press('Escape');
+  await expect(chooseAnotherServer).toHaveCount(0);
+
   const calls = await page.evaluate(() => (window as any).__customRegistrationCalls as Array<{
     method: string,
     params?: Record<string, unknown>
@@ -222,12 +254,6 @@ test('registers on a second server after a failed host selection', async({page},
     last_name: ''
   });
   expect(calls.find((call) => call.method === 'auth.signIn')?.params?.phone_code).toBe(INVITE_SECRET);
-  await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(8282))).toMatchObject({
-    _: 'user',
-    id: 8282,
-    first_name: 'Local Server'
-  });
-
   const activeId = await page.evaluate(() => localStorage.getItem('teagram.active-server-id.v1'));
   expect(activeId).toMatch(/^custom-[0-9a-f]{64}$/);
   await page.evaluate((id) => localStorage.setItem(`teagram-${id}:dc2_auth_key`, 'server-a-auth-key'), activeId);
