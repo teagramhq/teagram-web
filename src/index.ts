@@ -57,7 +57,9 @@ import PasscodeLockScreenController from '@components/passcodeLock/passcodeLockS
 import type {LangPackDifference} from '@layer';
 import commonStateStorage from '@lib/commonStateStorage';
 import {useAppSettings, setAppSettingsSilent} from '@stores/appSettings';
+import {unwrap} from 'solid-js/store';
 import {SETTINGS_INIT} from '@config/state';
+import type {AppTheme} from '@config/state';
 import {isUserCollapsedLeft} from '@helpers/updateColumnWidths';
 import {useMediaSizes} from '@helpers/mediaSizes';
 import useHasFoldersSidebar, {useIsSidebarCollapsed} from '@stores/foldersSidebar';
@@ -459,7 +461,18 @@ const onDocumentReady = async() => {
     setDocumentLangPackProperties(langPack);
 
     const {mountAuthFlow} = await import('./pages/mountAuthFlow');
-    mountAuthFlow({_ : 'authStateSignIn'}, {persistThemeToCommonState: true});
+    // The account worker is not running yet, so auth-screen theme changes go straight to common state.
+    const persistTheme = async(name: AppTheme['name']) => {
+      const [settings] = useAppSettings();
+      setAppSettingsSilent('theme', name);
+      if(name === 'night' || name === 'tinted') {
+        setAppSettingsSilent('lastThemeNames', 'dark', name);
+      } else if(name === 'day' || name === 'light') {
+        setAppSettingsSilent('lastThemeNames', 'light', name);
+      }
+      await commonStateStorage.set({settings: unwrap(settings)});
+    };
+    mountAuthFlow({_ : 'authStateSignIn'}, {persistTheme});
     return;
   }
 

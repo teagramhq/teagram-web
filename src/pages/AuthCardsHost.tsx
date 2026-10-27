@@ -1,5 +1,4 @@
 import {JSX, Match, Show, Switch, children, createMemo, lazy, onMount} from 'solid-js';
-import {unwrap} from 'solid-js/store';
 
 import Scrollable from '@components/scrollable2';
 import type {AppTheme} from '@config/state';
@@ -14,10 +13,8 @@ import themeController from '@helpers/themeController';
 import {changeAccount} from '@lib/accounts/changeAccount';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
 import {getValidatedAccount} from '@lib/accounts/getValidatedAccount';
-import commonStateStorage from '@lib/commonStateStorage';
 import rootScope from '@lib/rootScope';
 import sessionStorage from '@lib/sessionStorage';
-import {setAppSettingsSilent, useAppSettings} from '@stores/appSettings';
 
 import {Transition} from '@vendor/solid-transition-group';
 
@@ -68,7 +65,7 @@ const SignImportCard = lazy(() => import('@/pages/cards/SignImportCard'));
  * for the leaving card's exit animation before the new card enters. There's
  * no keep-alive: every card runs `onMount` / `onCleanup` on each visit.
  */
-export default function AuthCardsHost(props: {persistThemeToCommonState?: boolean}): JSX.Element {
+export default function AuthCardsHost(props: {persistTheme?: (name: AppTheme['name']) => Promise<void>}): JSX.Element {
   const showBackButton = getCurrentAccount() !== 1;
 
   let hostEl!: HTMLDivElement;
@@ -117,20 +114,10 @@ export default function AuthCardsHost(props: {persistThemeToCommonState?: boolea
     const target = e.currentTarget as HTMLElement;
     const icon = target.querySelector('.tgico') ?? target;
     const rect = icon.getBoundingClientRect();
-    const persistThemeToCommonState = async(name: AppTheme['name']) => {
-      const [settings] = useAppSettings();
-      setAppSettingsSilent('theme', name);
-      if(name === 'night' || name === 'tinted') {
-        setAppSettingsSilent('lastThemeNames', 'dark', name);
-      } else if(name === 'day' || name === 'light') {
-        setAppSettingsSilent('lastThemeNames', 'light', name);
-      }
-      await commonStateStorage.set({settings: unwrap(settings)});
-    };
     themeController.switchTheme(undefined, {
       x: rect.left + rect.width / 2,
       y: rect.top + rect.height / 2
-    }, props.persistThemeToCommonState ? persistThemeToCommonState : undefined).catch((error) => {
+    }, props.persistTheme).catch((error) => {
       console.error('Could not save authentication theme', error);
     });
   }

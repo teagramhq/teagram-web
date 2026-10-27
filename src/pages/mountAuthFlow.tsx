@@ -1,5 +1,6 @@
 import {render} from 'solid-js/web';
 
+import type {AppTheme} from '@config/state';
 import {AuthState} from '@types';
 
 import AuthCardsHost from '@/pages/AuthCardsHost';
@@ -22,7 +23,7 @@ import {CardSpec, navigateAuth} from '@/pages/authFlow';
  * ```
  */
 export type MountAuthFlowState = Exclude<AuthState, AuthState.signedIn>;
-type MountAuthFlowOptions = {persistThemeToCommonState?: boolean};
+type MountAuthFlowOptions = {persistTheme?: (name: AppTheme['name']) => Promise<void>};
 
 let activeDispose: (() => void) | null = (import.meta.hot?.data as any)?.activeDispose ?? null;
 
@@ -42,7 +43,7 @@ export function mountAuthFlow(authState: MountAuthFlowState, options: MountAuthF
   root.style.display = 'contents';
   document.body.appendChild(root);
 
-  const dispose = render(() => <AuthCardsHost persistThemeToCommonState={options.persistThemeToCommonState}/>, root);
+  const dispose = render(() => <AuthCardsHost persistTheme={options.persistTheme}/>, root);
 
   activeDispose = () => {
     dispose();
