@@ -5823,6 +5823,10 @@ export class AppMessagesManager extends AppManager {
               !((update as Update.updateNewMessage).message as MyMessage).pFlags.out
             ));
             const hasDialog = dialogs.some((dialog) => dialog._ === 'dialog' && this.dialogsStorage.getDialogPeerId(dialog) === peerId);
+            if(hasNewInboundUserMessage) {
+              // This exact peer reload is authoritative even when its folder page has not loaded yet.
+              ignoreOffsetDatePeerIds.add(peerId);
+            }
             // A queued post can fill a missing dialog only while cached membership is still active.
             if(
               hasDialog ||
@@ -5845,7 +5849,6 @@ export class AppMessagesManager extends AppManager {
               dialog.top_message = message.mid;
               dialog.unread_count = message.pFlags.unread ? 1 : 0;
               dialog.unread_mentions_count = message.pFlags.unread && isMentionUnread(message) ? 1 : 0;
-              ignoreOffsetDatePeerIds.add(peerId);
             }
             dialogs.push(dialog);
           }

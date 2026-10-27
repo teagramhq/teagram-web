@@ -130,6 +130,8 @@ describe('first inbound private messages', () => {
     const peer = {_: 'peerUser', user_id: userId};
     let peerDialogsRequestCount = 0;
 
+    client.managers.dialogsStorage.setDialogsLoaded(FOLDER_ID_ARCHIVE, false);
+
     vi.spyOn(messages.apiUpdatesManager, 'isInitialSync').mockReturnValue(true);
     vi.spyOn(messages, 'getNotifyPeerSettings').mockResolvedValue({
       muted: false,
