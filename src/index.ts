@@ -64,6 +64,7 @@ import appNavigationController from '@components/appNavigationController';
 import {preventCrossTabDynamicImportDeadlock} from '@helpers/preventDeadlock';
 import appChatBackground from '@components/chat/bubbles/chatBackground';
 import {isAutoGuestEnabled} from '@config/serverContext';
+import {getServerSelectionAction} from '@config/serverSelection';
 import {createCurrentGuestAccountLifecycle, type GuestAccountManagers} from '@lib/guestAccountLifecycle';
 import {markAutoGuestAttempted, markAutoGuestResetDetected} from '@lib/autoGuest';
 
@@ -445,6 +446,17 @@ const onDocumentReady = async() => {
   }
 
   rootScope.managers = getProxiedManagers();
+  const selectionState = getServerSelectionAction()?.getState();
+  const serverSelectionPending = !!selectionState && (selectionState.phase !== 'connected' || !!selectionState.changing);
+  if(serverSelectionPending) {
+    const langPack = await I18n.loadLocalLangPackAndApply();
+    setDocumentLangPackProperties(langPack);
+
+    const {mountAuthFlow} = await import('./pages/mountAuthFlow');
+    mountAuthFlow({_ : 'authStateSignIn'});
+    return;
+  }
+
   await checkLastActiveAccountFromTMe();
 
   if(IS_INSTALL_PROMPT_SUPPORTED) {

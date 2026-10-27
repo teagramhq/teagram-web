@@ -9,7 +9,6 @@ const PASSWORD = 'Teagram-Test-Password-123!';
 
 test('registers on a second server after a failed host selection', async({page}, testInfo) => {
   const pageErrors: string[] = [];
-  page.on('pageerror', (error) => pageErrors.push(error.message));
 
   const appOrigin = new URL(testInfo.project.use.baseURL as string);
   appOrigin.hostname = 'web.teagram.io';
@@ -66,13 +65,8 @@ test('registers on a second server after a failed host selection', async({page},
   });
   await page.context().routeWebSocket(/.*/, (socket) => {
     const url = new URL(socket.url());
-    if(url.hostname === SERVER_HOST && url.pathname === '/apiws') {
-      return;
-    } else if(url.hostname === 'web.teagram.io') {
-      socket.close();
-    } else {
-      socket.close();
-    }
+    if((url.hostname === SERVER_HOST && url.pathname === '/apiws') || url.hostname === 'web.teagram.io') return;
+    socket.close();
   });
 
   await page.addInitScript((registrationMode) => {
@@ -128,8 +122,14 @@ test('registers on a second server after a failed host selection', async({page},
     });
   }, 'invite');
 
-  await page.goto(`${appOriginString}/?noWorker=1`, {waitUntil: 'domcontentloaded'});
+  await page.goto(`${appOriginString}/?noWorker=1&noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
   expect(await page.evaluate(() => isSecureContext && !!crypto.subtle)).toBe(true);
+
+  const hostInput = page.getByRole('textbox', {name: 'Server address'});
+  await expect(hostInput).toHaveValue('', {timeout: 30_000});
+  await expect(page.locator('.input-field-placeholder')).toHaveText('your.server.host');
+  await expect(page.getByRole('button', {name: 'Continue', exact: true})).toBeVisible();
+
   const workerContext = await page.evaluate(async({helperUrl, workerUrl, serverId, target}) => {
     const {createPrivateWorkerBlobURL} = await import(helperUrl);
     const blobUrl = await createPrivateWorkerBlobURL(workerUrl, serverId, target);
@@ -164,25 +164,19 @@ test('registers on a second server after a failed host selection', async({page},
     commonDatabase: 'tweb-custom-' + 'b'.repeat(64) + '-common',
     target: {mode: 'private', endpoint: `wss://${SERVER_HOST}:2443/apiws`}
   });
-
-  const picker = page.getByRole('dialog');
-  const hostInput = picker.getByRole('textbox', {name: 'Server host'});
-  await expect(hostInput).toHaveValue('');
-  await expect(hostInput).toHaveAttribute('placeholder', 'your.server.host');
-  await expect(picker.getByRole('button', {name: 'Continue'})).toBeVisible();
   await hostInput.fill('unreachable-server.example.test');
-  await picker.getByRole('button', {name: 'Continue'}).click();
-  await expect(picker.getByRole('alert')).toContainText('Could not reach unreachable-server.example.test');
+  await page.getByRole('button', {name: 'Continue', exact: true}).click();
+  await expect(page.getByRole('alert')).toHaveText('Could not connect to this server. Check the address and your connection, then try again.');
 
   await hostInput.fill(SERVER_HOST);
-  await picker.getByRole('button', {name: 'Continue'}).click();
+  await page.getByRole('button', {name: 'Continue', exact: true}).click();
 
   const confirm = page.getByRole('dialog');
-  await expect(confirm.getByText(`Server: ${SERVER_HOST}`)).toBeVisible();
-  await expect(confirm.getByText(/SPKI SHA-256:/)).toBeVisible();
-  await expect(confirm.getByText(/operator of this server can read all non-secret chats/i)).toBeVisible();
-  expect(await page.evaluate(() => localStorage.getItem('teagram.server-pins.v1'))).toBeNull();
-  await confirm.getByRole('button', {name: 'Confirm and use this server'}).click();
+  await expect(confirm.getByText(SERVER_HOST, {exact: true})).toBeVisible();
+  await expect(confirm.getByText('Server fingerprint')).toBeVisible();
+  await expect(confirm.getByText(/Whoever runs this server can read your messages/)).toBeVisible();
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}'))).toEqual({});
+  await confirm.getByRole('button', {name: 'Confirm', exact: true}).click();
 
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}')))
@@ -194,8 +188,9 @@ test('registers on a second server after a failed host selection', async({page},
 
   const auth = page.locator('#auth-pages');
   await expect(auth.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
-  await expect(auth.getByText(`Server: ${SERVER_HOST}`, {exact: true})).toBeVisible();
+  await expect(auth.getByRole('textbox', {name: 'Server address'})).toHaveValue(SERVER_HOST);
   await expect(auth.getByRole('button', {name: 'Create account'})).toBeVisible();
+  page.on('pageerror', (error) => pageErrors.push(error.message));
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}')))
     .toMatchObject({[SERVER_HOST]: expect.any(Object)});
 
@@ -252,16 +247,15 @@ test('registers on a second server after a failed host selection', async({page},
   const switchReload = page.waitForNavigation({waitUntil: 'domcontentloaded'});
   await chooseAnotherServer.click({force: true});
   await switchReload;
-  const switchPicker = page.getByRole('dialog');
-  const switchHost = switchPicker.getByRole('textbox', {name: 'Server host'});
+  const switchHost = page.getByRole('textbox', {name: 'Server address'});
   await expect(switchHost).toHaveValue('');
-  await expect(switchHost).toHaveAttribute('placeholder', 'your.server.host');
+  await expect(page.locator('.input-field-placeholder')).toHaveText('your.server.host');
   expect(await page.evaluate(() => localStorage.getItem('teagram.server-choice.v1'))).toBeNull();
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}')))
     .toMatchObject({[SERVER_HOST]: expect.any(Object)});
-  await page.screenshot({path: testInfo.outputPath('server-picker-after-switch.png')});
+  await page.screenshot({path: testInfo.outputPath('server-sign-in-after-switch.png')});
   await switchHost.fill(SERVER_HOST);
-  await switchPicker.getByRole('button', {name: 'Continue'}).click();
+  await page.getByRole('button', {name: 'Continue', exact: true}).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
 
@@ -277,16 +271,32 @@ test('registers on a second server after a failed host selection', async({page},
   await page.reload({waitUntil: 'domcontentloaded'});
   const mismatch = page.getByRole('dialog');
   await expect(mismatch.getByText('Server identity changed')).toBeVisible();
-  await expect(mismatch.getByRole('button', {name: 'Forget this server'})).toBeVisible();
+  await expect(mismatch.getByRole('button', {name: 'Continue to confirmation'})).toBeVisible();
+  await expect(mismatch.getByRole('button', {name: 'Cancel', exact: true})).toBeVisible();
+  await expect(mismatch.getByRole('button', {name: 'Delete server data'})).toHaveCount(0);
   await expect(mismatch.getByRole('button', {name: 'Confirm and use this server'})).toHaveCount(0);
-  await expect(mismatch.getByRole('button', {name: 'Continue'})).toHaveCount(0);
+  await mismatch.getByRole('button', {name: 'Continue to confirmation'}).click();
 
-  const forgetReload = page.waitForNavigation({waitUntil: 'domcontentloaded'});
-  await mismatch.getByRole('button', {name: 'Forget this server'}).click();
-  await forgetReload;
+  const deletion = page.getByRole('dialog');
+  await expect(deletion.getByText('Confirm data deletion')).toBeVisible();
+  await expect(deletion.getByText(/This is the final confirmation\. Accepting permanently deletes/)).toBeVisible();
+  await expect(deletion.getByText(/A guest account used here can't be recovered/)).toBeVisible();
+  await deletion.getByRole('button', {name: 'Delete server data'}).click();
+
+  const newIdentity = page.getByRole('dialog', {name: 'Confirm this server'});
+  await expect(newIdentity).toBeVisible();
+  await expect(newIdentity.getByText(SERVER_HOST, {exact: true})).toBeVisible();
+  await expect(newIdentity.getByText('Server fingerprint')).toBeVisible();
+  await newIdentity.getByRole('button', {name: 'Cancel', exact: true}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+
   expect(await page.evaluate(() => localStorage.getItem('teagram.active-server-id.v1'))).toBeNull();
-  expect(await page.evaluate((id) => localStorage.getItem(`teagram-${id}:dc2_auth_key`), activeId)).toBeNull();
-  await expect(page.getByRole('dialog').getByRole('textbox', {name: 'Server host'})).toHaveValue('');
-  await expect(page.getByRole('dialog').getByRole('textbox', {name: 'Server host'})).toHaveAttribute('placeholder', 'your.server.host');
+  expect(await page.evaluate(() => localStorage.getItem('teagram.server-choice.v1'))).toBeNull();
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}'))).toEqual({});
+  expect(await page.evaluate(() => localStorage.getItem('teagram.server-target.v1'))).toBeNull();
+  const forgottenHost = page.getByRole('textbox', {name: 'Server address'});
+  await expect(forgottenHost).toHaveValue(SERVER_HOST);
+  await expect(forgottenHost).not.toHaveAttribute('readonly', '');
+  await expect(page.getByRole('button', {name: 'Continue', exact: true})).toBeEnabled();
   await page.context().unrouteAll({behavior: 'ignoreErrors'});
 });

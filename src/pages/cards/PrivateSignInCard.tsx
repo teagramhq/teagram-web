@@ -709,7 +709,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   }
 
   onMount(() => {
-    managers.appStateManager.pushToState('authState', {_: 'authStateSignIn'});
+    if(!serverSelectionPending()) managers.appStateManager.pushToState('authState', {_: 'authStateSignIn'});
     if(serverSelectionPending()) {
       setRestoringGuest(false);
     } else {

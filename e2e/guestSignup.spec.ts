@@ -206,15 +206,17 @@ async function openSelectedServer(page: Page, testInfo: TestInfo) {
   appOrigin.protocol = 'https:';
   await page.goto(`${appOrigin.origin}/?noWorker=1&noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
 
-  const picker = page.getByRole('dialog');
-  const hostInput = picker.getByRole('textbox', {name: 'Server host'});
-  await expect(hostInput).toHaveValue('');
-  await expect(hostInput).toHaveAttribute('placeholder', 'your.server.host');
+  const hostInput = page.getByRole('textbox', {name: 'Server address'});
+  await expect(hostInput).toHaveValue('', {timeout: 30_000});
+  await expect(page.locator('.input-field-placeholder')).toHaveText('your.server.host');
+  await expect(page.getByRole('button', {name: 'Continue', exact: true})).toBeVisible();
   await hostInput.fill(SERVER_HOST);
-  await picker.getByRole('button', {name: 'Continue'}).click();
-  const confirmation = page.getByRole('dialog');
-  await expect(confirmation.getByText(`Server: ${SERVER_HOST}`)).toBeVisible();
-  await confirmation.getByRole('button', {name: 'Confirm and use this server'}).click();
+  await page.getByRole('button', {name: 'Continue', exact: true}).click();
+  const confirmation = page.getByRole('dialog', {name: 'Confirm this server'});
+  await expect(confirmation.getByText(SERVER_HOST, {exact: true})).toBeVisible();
+  await expect(confirmation.getByText('Server fingerprint')).toBeVisible();
+  await expect(confirmation.getByText(/Whoever runs this server can read your messages/)).toBeVisible();
+  await confirmation.getByRole('button', {name: 'Confirm', exact: true}).click();
 
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('#auth-pages')).toBeAttached({timeout: 30_000});

@@ -174,6 +174,14 @@ namespace I18n {
     });
   }
 
+  export function loadLocalLangPackAndApply() {
+    return loadLocalLangPack().then((langPack) => {
+      setLangCode(langPack.lang_code);
+      applyLangPack(langPack);
+      return langPack;
+    });
+  }
+
   export function loadLangPack(langCode: string, web?: boolean, ignoreCache?: boolean) {
     web = true;
     const managers = rootScope.managers;

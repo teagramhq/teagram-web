@@ -1218,9 +1218,11 @@ test('isolates two server tabs when a custom server worker takes control', async
       await page.goto(appOriginString, {waitUntil: 'domcontentloaded'});
       expect(await page.evaluate(() => isSecureContext && !!crypto.subtle)).toBe(true);
 
-      const defaultPicker = page.getByRole('dialog');
-      await defaultPicker.getByRole('textbox', {name: 'Server host'}).fill(APP_HOST);
-      await defaultPicker.getByRole('button', {name: 'Continue'}).click();
+      await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+      const defaultHostInput = page.getByRole('textbox', {name: 'Server address'});
+      await expect(defaultHostInput).toHaveValue('');
+      await defaultHostInput.fill(APP_HOST);
+      await page.getByRole('button', {name: 'Continue', exact: true}).click();
       await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
       await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
     });
@@ -1243,16 +1245,17 @@ test('isolates two server tabs when a custom server worker takes control', async
       await customPage.goto(appOriginString, {waitUntil: 'domcontentloaded'});
       expect(await customPage.evaluate(() => isSecureContext && !!crypto.subtle)).toBe(true);
 
-      const picker = customPage.getByRole('dialog');
-      const hostInput = picker.getByRole('textbox', {name: 'Server host'});
+      await expect(customPage.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+      const hostInput = customPage.getByRole('textbox', {name: 'Server address'});
+      await expect(hostInput).toHaveValue('');
       await hostInput.fill(SERVER_HOST);
-      await picker.getByRole('button', {name: 'Continue'}).click();
+      await customPage.getByRole('button', {name: 'Continue', exact: true}).click();
 
-      const confirm = customPage.getByRole('dialog');
-      await expect(confirm.getByText(`Server: ${SERVER_HOST}`)).toBeVisible();
+      const confirm = customPage.getByRole('dialog', {name: 'Confirm this server'});
+      await expect(confirm.getByText(SERVER_HOST, {exact: true})).toBeVisible();
       expect(discoveryErrors).toEqual([]);
-      await expect(confirm.getByText(/SPKI SHA-256:/)).toBeVisible();
-      await confirm.getByRole('button', {name: 'Confirm and use this server'}).click();
+      await expect(confirm.getByText('Server fingerprint')).toBeVisible();
+      await confirm.getByRole('button', {name: 'Confirm', exact: true}).click();
 
       await expect(customPage.getByRole('dialog')).toHaveCount(0);
       await expect.poll(() => customPage!.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__ || ''), {timeout: 20_000})
