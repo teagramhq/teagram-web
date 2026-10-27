@@ -807,33 +807,24 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await expect(page.getByRole('alert')).toHaveText('This server no longer matches the identity pinned in this browser, so the connection is blocked. Contact your server administrator.');
     await page.screenshot({path: join(screenshots, 'S11.png')});
     await page.getByRole('button', {name: 'Continue', exact: true}).click();
-    await expect(page.getByRole('dialog', {name: 'Server identity changed'})).toBeVisible();
-    await page.getByRole('dialog').getByRole('button', {name: 'Cancel', exact: true}).click();
-
-    const chooseAnotherServer = mismatch.getByRole('button', {name: 'Choose another server'});
-    await expect(chooseAnotherServer).toBeVisible();
+    const retryMismatch = page.getByRole('dialog', {name: 'Server identity changed'});
+    await expect(retryMismatch).toBeVisible();
+    await retryMismatch.getByRole('button', {name: 'Cancel', exact: true}).click();
+    await expect(retryMismatch).toBeHidden();
+    await expect(page.getByRole('alert')).toHaveText('This server no longer matches the identity pinned in this browser, so the connection is blocked. Contact your server administrator.');
+    await expect(hostInput).toHaveValue(serverHost);
+    await expect(hostInput).toBeEditable();
     await page.setViewportSize({width: 320, height: 720});
-    await expect(mismatch).toBeInViewport();
-    await expect(chooseAnotherServer).toBeInViewport();
-    await expect(mismatch.getByRole('button', {name: 'Forget this server'})).toBeInViewport();
-    await page.screenshot({path: testInfo.outputPath('server-identity-mismatch-mobile.png')});
+    await expect(hostInput).toBeInViewport();
+    await expect(page.getByRole('alert')).toBeInViewport();
+    await page.screenshot({path: testInfo.outputPath('server-sign-in-identity-mismatch-mobile.png')});
     await page.setViewportSize({width: 1280, height: 800});
-    await chooseAnotherServer.focus();
-    await page.keyboard.press('Enter');
-
-    const pickerAfterMismatch = page.getByRole('dialog');
-    await expect(pickerAfterMismatch.getByRole('heading', {name: 'Choose your server'})).toBeVisible();
-    const mismatchHostInput = pickerAfterMismatch.getByRole('textbox', {name: 'Server host'});
-    await expect(mismatchHostInput).toHaveValue('');
-    await page.screenshot({path: testInfo.outputPath('server-picker-after-identity-mismatch.png')});
-    expect(await page.evaluate(() => localStorage.getItem('teagram.server-choice.v1'))).toBeNull();
-    expect(await page.evaluate((host) => JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}')[host], serverHost))
-    .toEqual(mismatchedPin);
-    await mismatchHostInput.fill(serverHost);
-    await pickerAfterMismatch.getByRole('button', {name: 'Continue'}).click();
-    const mismatchAgain = page.getByRole('dialog');
-    await expect(mismatchAgain.getByRole('heading', {name: 'Server identity changed'})).toBeVisible();
-    await expect(mismatchAgain.getByRole('button', {name: 'Choose another server'})).toBeVisible();
+    await hostInput.fill(CANCEL_SERVER_HOST);
+    await page.getByRole('button', {name: 'Continue', exact: true}).click();
+    await expect(page.getByRole('button', {name: 'Change server'})).toBeVisible();
+    await expect(hostInput).toHaveValue(CANCEL_SERVER_HOST);
+    expect(await page.evaluate(() => localStorage.getItem('teagram.server-choice.v1'))).toBe(CANCEL_SERVER_HOST);
+    expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(CANCEL_SERVER_HOST);
     expect(await page.evaluate((host) => JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}')[host], serverHost))
     .toEqual(mismatchedPin);
 
@@ -913,7 +904,7 @@ async function expectUnrelatedConnectionsBlocked(page: Page, httpsRequests: stri
   expect(blockedUris.some((uri) => uri.startsWith('https://unrelated.example.test'))).toBe(true);
 }
 
-test('private artifact blocks unrelated HTTPS and WSS after server selection and in pinned mode', async({page}, testInfo) => {
+test('private artifact blocks unrelated HTTPS and WSS in a private-target sign-in', async({page}, testInfo) => {
   test.skip(testInfo.project.name !== 'private-artifact-firefox', 'requires Firefox');
   const manifest = JSON.parse(readFileSync(resolve('dist/mtproto-target.json'), 'utf8')) as {mode: string, endpoint: string};
   if(manifest.mode !== 'private') throw new Error('private artifact browser test requires a private build');
@@ -934,7 +925,7 @@ async function runPrivateArtifactFirefoxEgress(
 ) {
   const serverHost = privateEndpoint.hostname;
   const appBaseUrl = new URL(testInfo.project.use.baseURL as string);
-  const appOrigin = `https://${APP_HOST}`;
+  const appOrigin = appBaseUrl.origin;
   const edgeConfig = readFileSync(resolve('deploy/teagram-web/nginx.conf'), 'utf8');
   const edgeCsp = edgeConfig.match(/add_header Content-Security-Policy "([^"]+)" always;/)?.[1];
   if(!edgeCsp) throw new Error('deployment CSP is missing from deploy/teagram-web/nginx.conf');
@@ -1009,21 +1000,12 @@ async function runPrivateArtifactFirefoxEgress(
   });
   await page.goto(appOrigin, {waitUntil: 'domcontentloaded'});
 
-  const picker = page.getByRole('dialog');
-  await expect(picker.getByRole('heading', {name: 'Choose your server'})).toBeVisible();
-  await picker.getByRole('textbox', {name: 'Server host'}).fill(serverHost);
-  await picker.getByRole('button', {name: 'Continue'}).click();
-
-  const confirmation = page.getByRole('dialog');
-  await expect(confirmation.getByText(`Server: ${serverHost}`)).toBeVisible();
-  expect(discoveryRequests).toEqual(['/.well-known/teagramd/client']);
-  await confirmation.getByRole('button', {name: 'Confirm and use this server'}).click();
-
+  await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('meta[data-server-policy]'))
   .toHaveAttribute('content', `connect-src 'self' https://${serverHost} ${privateEndpoint.href};`);
   expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(serverHost);
-  expect(discoveryRequests).toEqual(['/.well-known/teagramd/client', '/.well-known/teagramd/client']);
+  expect(discoveryRequests).toEqual([]);
   expect(cspViolations).toEqual([]);
   await expectUnrelatedConnectionsBlocked(page, unrelatedHttpsRequests, webSocketFixture.unrelatedRequests, unrelatedWebSocketUrl);
 
@@ -1034,9 +1016,9 @@ async function runPrivateArtifactFirefoxEgress(
       pinnedCspViolations.push(message.text());
     }
   });
-  await pinnedPage.goto(`https://${serverHost}`, {waitUntil: 'domcontentloaded'});
+  await pinnedPage.goto(appOrigin, {waitUntil: 'domcontentloaded'});
   await expect(pinnedPage.locator('meta[data-server-policy]'))
-  .toHaveAttribute('content', `connect-src 'self' ${privateEndpoint.href};`);
+  .toHaveAttribute('content', `connect-src 'self' https://${serverHost} ${privateEndpoint.href};`);
   expect(await pinnedPage.getByRole('dialog').count()).toBe(0);
   expect(pinnedCspViolations).toEqual([]);
   await expectUnrelatedConnectionsBlocked(pinnedPage, unrelatedHttpsRequests, webSocketFixture.unrelatedRequests, unrelatedWebSocketUrl);
