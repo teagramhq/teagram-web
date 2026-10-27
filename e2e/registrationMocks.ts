@@ -8,7 +8,10 @@ export async function setupRegistrationMocks(
   failFirstTurnstileScript = false,
   requireSignInTurnstile = false,
   requirePasswordTurnstile = false,
-  termsText?: string
+  termsText?: string,
+  takenUsername?: string,
+  delayAuthResponse = false,
+  reservedUsername?: string
 ) {
   const appOrigin = new URL(testInfo.project.use.baseURL as string).origin;
   let turnstileScriptAttempts = 0;
@@ -88,6 +91,14 @@ export async function setupRegistrationMocks(
               calls.push({method, params});
               switch(method) {
                 case 'auth.sendCode':
+                  if(options.delayAuthResponse) {
+                    return new Promise((resolve) => window.setTimeout(() => resolve({
+                      _: 'auth.sentCode',
+                      phone_code_hash: 'mock-registration-code-hash',
+                      type: {_ : 'auth.sentCodeTypeApp', length: 5},
+                      timeout: 60
+                    }), 400));
+                  }
                   if(options.requireSignInTurnstile) {
                     return Promise.reject({type: 'RECAPTCHA_CHECK_signin__test-site-key'});
                   }
@@ -114,6 +125,8 @@ export async function setupRegistrationMocks(
                   if(options.requireTurnstile) {
                     return Promise.reject({type: 'RECAPTCHA_CHECK_signup__test-site-key'});
                   }
+                  if(options.reservedUsername === params?.phone_number) return Promise.reject({type: 'USERNAME_INVALID'});
+                  if(options.takenUsername === params?.phone_number) return Promise.reject({type: 'USERNAME_OCCUPIED'});
                   return Promise.resolve({_ : 'auth.authorization', user});
                 case 'help.getNearestDc':
                   return Promise.resolve({_ : 'nearestDc', country: 'US', this_dc: 1, nearest_dc: 1});
@@ -167,7 +180,7 @@ export async function setupRegistrationMocks(
         };
       }
     });
-  }, {registrationMode: mode, requireTurnstile, requireSignInTurnstile, requirePasswordTurnstile, termsText});
+  }, {registrationMode: mode, requireTurnstile, requireSignInTurnstile, requirePasswordTurnstile, termsText, takenUsername, delayAuthResponse, reservedUsername});
 }
 
 export async function captureState(page: Page, testInfo: TestInfo, name: string) {
