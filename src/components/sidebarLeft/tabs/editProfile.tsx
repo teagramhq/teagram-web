@@ -78,7 +78,6 @@ const EditProfileForm = (props: {
   connectedBot: MaybePromise<ConnectedBot.connectedBot | undefined>
 }) => {
   const [tab] = useSuperTab<AppEditProfileTabType>();
-  const appConfig = useAppConfig();
   const {user, userFull, bioMaxLength} = props.data;
   const profilePeerId = rootScope.myId;
 
@@ -99,6 +98,8 @@ const EditProfileForm = (props: {
   let lastNameInputField: InputField;
   let bioInputField: InputField;
   let usernameInputField: UsernameInputField;
+  const displayNameMaxLength = () => useAppConfig()?.display_name_max_length;
+  const configuredBioMaxLength = () => useAppConfig()?.bio_max_length ?? bioMaxLength;
 
   const trackInputField = (field: InputField) => {
     inputFields.push(field);
@@ -413,7 +414,7 @@ const EditProfileForm = (props: {
           <InputFieldTsx
             label="EditProfile.FirstNameLabel"
             name="first-name"
-            maxLength={appConfig.display_name_max_length}
+            maxLength={displayNameMaxLength()}
             instanceRef={(ref) => {
               firstNameInputField = ref;
               trackInputField(ref);
@@ -422,7 +423,7 @@ const EditProfileForm = (props: {
           <InputFieldTsx
             label="Login.Register.LastName.Placeholder"
             name="last-name"
-            maxLength={appConfig.display_name_max_length}
+            maxLength={displayNameMaxLength()}
             instanceRef={(ref) => {
               lastNameInputField = ref;
               trackInputField(ref);
@@ -431,7 +432,7 @@ const EditProfileForm = (props: {
           <InputFieldTsx
             label="EditProfile.BioLabel"
             name="bio"
-            maxLength={appConfig.bio_max_length ?? bioMaxLength}
+            maxLength={configuredBioMaxLength()}
             instanceRef={(ref) => {
               bioInputField = ref;
               trackInputField(ref);

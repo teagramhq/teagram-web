@@ -163,7 +163,7 @@ function EditChatForm(props: {
   onMigrate: (chatId: ChatId) => void
 }) {
   const [tab] = useSuperTab<typeof AppEditChatTab>();
-  const appConfig = useAppConfig();
+  const appConfig = () => useAppConfig() ?? props.data.appConfig;
   const {
     AvatarNewTsx,
     ChatType,
@@ -236,9 +236,9 @@ function EditChatForm(props: {
       about() !== (props.data.chatFull.about || '') ||
       hasAvatarPreview();
   });
-  const titleMinLength = () => isChannel() ? appConfig.channel_title_min_length : appConfig.group_title_min_length;
-  const titleMaxLength = () => isChannel() ? appConfig.channel_title_max_length : appConfig.group_title_max_length;
-  const aboutMaxLength = () => isChannel() ? appConfig.channel_about_max_length : appConfig.group_about_max_length;
+  const titleMinLength = () => isChannel() ? appConfig().channel_title_min_length : appConfig().group_title_min_length;
+  const titleMaxLength = () => isChannel() ? appConfig().channel_title_max_length : appConfig().group_title_max_length;
+  const aboutMaxLength = () => isChannel() ? appConfig().channel_about_max_length : appConfig().group_about_max_length;
   const isWithinLengthLimit = (value: string, minLength?: number, maxLength?: number) => {
     const length = [...value].length;
     return (minLength === undefined || length >= minLength) &&

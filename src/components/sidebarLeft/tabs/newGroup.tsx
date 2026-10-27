@@ -34,7 +34,6 @@ const NewGroup: Component = () => {
   const [tab] = useSuperTab<typeof AppNewGroupTab>();
   const {appImManager} = useHotReloadGuard();
   const promiseCollector = usePromiseCollector();
-  const appConfig = useAppConfig();
 
   const {peerIds, isGeoChat = false, onCreate, openAfter = true, title, asChannel = false} = tab.payload;
 
@@ -52,8 +51,9 @@ const NewGroup: Component = () => {
   });
 
   createEffect(() => {
-    const minLength = asChannel || isGeoChat ? appConfig.channel_title_min_length : appConfig.group_title_min_length;
-    const maxLength = asChannel || isGeoChat ? appConfig.channel_title_max_length : appConfig.group_title_max_length;
+    const appConfig = useAppConfig();
+    const minLength = asChannel || isGeoChat ? appConfig?.channel_title_min_length : appConfig?.group_title_min_length;
+    const maxLength = asChannel || isGeoChat ? appConfig?.channel_title_max_length : appConfig?.group_title_max_length;
     groupNameInputField.setLengthLimits(maxLength, minLength);
   });
 

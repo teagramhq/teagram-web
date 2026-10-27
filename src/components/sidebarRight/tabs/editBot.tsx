@@ -77,7 +77,6 @@ export default EditBot;
 
 function EditBotForm(props: {data: EditBotData}) {
   const [tab] = useSuperTab<typeof AppEditBotTab>();
-  const appConfig = useAppConfig();
   const initialUsername = getPeerEditableUsername(props.data.user);
   const [firstName, setFirstName] = createSignal(props.data.user.first_name);
   const [about, setAbout] = createSignal(props.data.botInfo.about || '');
@@ -104,9 +103,10 @@ function EditBotForm(props: {data: EditBotData}) {
       hasAvatarPreview() ||
       !!usernameField()?.isValidToChange();
   });
-  const bioMaxLength = () => appConfig.bio_max_length ?? props.data.bioMaxLength;
+  const displayNameMaxLength = () => useAppConfig()?.display_name_max_length;
+  const bioMaxLength = () => useAppConfig()?.bio_max_length ?? props.data.bioMaxLength;
   const canSave = () => isDirty() && !saving() &&
-    (appConfig.display_name_max_length === undefined || [...firstName()].length <= appConfig.display_name_max_length) &&
+    (displayNameMaxLength() === undefined || [...firstName()].length <= displayNameMaxLength()) &&
     (bioMaxLength() === undefined || [...about()].length <= bioMaxLength());
 
   onCleanup(() => {
@@ -188,7 +188,7 @@ function EditBotForm(props: {data: EditBotData}) {
           <InputFieldTsx
             label="EditProfile.FirstNameLabel"
             name="first-name"
-            maxLength={appConfig.display_name_max_length}
+            maxLength={displayNameMaxLength()}
             value={firstName()}
             onRawInput={setFirstName}
           />

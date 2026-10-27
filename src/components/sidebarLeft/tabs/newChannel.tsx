@@ -18,7 +18,6 @@ const NewChannel = () => {
   const [tab] = useSuperTab<typeof AppNewChannelTab>();
   const {appImManager, appSidebarLeft} = useHotReloadGuard();
   const {onCreate, openAfter = true} = tab.payload;
-  const appConfig = useAppConfig();
 
   let uploadAvatar: AvatarEditPayload | null = null;
   let nameField!: InputField;
@@ -93,13 +92,13 @@ const NewChannel = () => {
       <div class="input-wrapper">
         <InputFieldTsx
           label="EnterChannelName"
-          maxLength={appConfig.channel_title_max_length}
-          minLength={appConfig.channel_title_min_length}
+          maxLength={useAppConfig()?.channel_title_max_length}
+          minLength={useAppConfig()?.channel_title_min_length}
           instanceRef={(ref) => nameField = ref}
         />
         <InputFieldTsx
           label="DescriptionOptionalPlaceholder"
-          maxLength={appConfig.channel_about_max_length}
+          maxLength={useAppConfig()?.channel_about_max_length}
           withLinebreaks
           instanceRef={(ref) => descField = ref}
         />
