@@ -134,6 +134,18 @@ describe('custom server discovery', () => {
     }
   });
 
+  it('preserves the opaque demo wipe generation only when discovery provides a string', async() => {
+    await expect(validateDiscoveryDocument('demo.example', {
+      ...document,
+      demo: {wipe_generation: 'week-42'}
+    })).resolves.toMatchObject({wipeGeneration: 'week-42'});
+    await expect(validateDiscoveryDocument('demo.example', document)).resolves.toMatchObject({wipeGeneration: undefined});
+    await expect(validateDiscoveryDocument('demo.example', {
+      ...document,
+      demo: {wipe_generation: 42}
+    })).resolves.toMatchObject({wipeGeneration: undefined});
+  });
+
   it('fetches directly with redirect rejection and no credentials, and bounds response bytes', async() => {
     const fetcher = vi.fn(async(_url: string, _options: RequestInit) => new Response(JSON.stringify(document)));
     await fetchServerDiscovery('demo.example', fetcher as any);

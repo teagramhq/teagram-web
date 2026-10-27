@@ -63,6 +63,9 @@ import useHasFoldersSidebar, {useIsSidebarCollapsed} from '@stores/foldersSideba
 import appNavigationController from '@components/appNavigationController';
 import {preventCrossTabDynamicImportDeadlock} from '@helpers/preventDeadlock';
 import appChatBackground from '@components/chat/bubbles/chatBackground';
+import {isAutoGuestEnabled} from '@config/serverContext';
+import {createCurrentGuestAccountLifecycle, type GuestAccountManagers} from '@lib/guestAccountLifecycle';
+import {markAutoGuestAttempted, markAutoGuestResetDetected} from '@lib/autoGuest';
 
 // import commonStateStorage from '@lib/commonStateStorage';
 // import { STATE_INIT } from '@config/state';
@@ -572,6 +575,22 @@ const onDocumentReady = async() => {
   setDocumentLangPackProperties(langPack);
 
   let authState = stateResult.state.authState;
+  if(isAutoGuestEnabled()) {
+    try {
+      if(await createCurrentGuestAccountLifecycle(rootScope.managers as unknown as GuestAccountManagers).hasWipeGenerationChanged()) {
+        markAutoGuestResetDetected();
+        if(authState._ === 'authStateSignedIn') {
+          rootScope.managers.appStateManager.pushToState('authState', authState = {_: 'authStateSignIn'});
+        }
+      } else if(authState._ === 'authStateSignedIn') {
+        markAutoGuestAttempted();
+      }
+    } catch{
+      if(authState._ === 'authStateSignedIn') {
+        rootScope.managers.appStateManager.pushToState('authState', authState = {_: 'authStateSignIn'});
+      }
+    }
+  }
 
   const hash = location.hash;
   const splitted = hash.split('?');

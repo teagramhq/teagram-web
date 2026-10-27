@@ -7,7 +7,7 @@ import type {GuestCredentialRecord, GuestCredentialRecords} from '@lib/guestAcco
 import {listenForGuestCredentialInvalidation, notifyGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
 import AccountController from '@lib/accounts/accountController';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
-import {getActiveServerHost, getRuntimeServerId} from '@config/serverContext';
+import {getActiveDemoWipeGeneration, getActiveServerHost, getRuntimeServerId} from '@config/serverContext';
 import {getServerPin} from '@config/serverSelection';
 import {getMtprotoTarget} from '@config/mtprotoTarget';
 import {saveGuestCredentials} from '@lib/guestCredentialStorage';
@@ -19,7 +19,8 @@ const BASE32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567';
 
 export type GuestServerIdentity = {
   serverId: string,
-  keyFingerprint: string
+  keyFingerprint: string,
+  wipeGeneration?: string
 };
 
 export type GuestAccountContext = GuestServerIdentity & {
@@ -36,6 +37,7 @@ export type GuestAccountLifecycleResult =
   | {kind: 'collisionsExhausted'}
   | {kind: 'accountInUse'}
   | {kind: 'noGuest'}
+  | {kind: 'wiped'}
   | {kind: 'setupPending', username: string, errorType?: string}
   | {kind: 'termsDeclined'}
   | {kind: 'cancelled'}
@@ -119,6 +121,7 @@ function isCredentialRecord(value: unknown): value is GuestCredentialRecord {
     typeof value.username === 'string' && GUEST_USERNAME_PATTERN.test(value.username) &&
     typeof value.password === 'string' && GUEST_PASSWORD_PATTERN.test(value.password) &&
     (value.status === 'provisional' || value.status === 'committed') &&
+    (value.wipeGeneration === undefined || typeof value.wipeGeneration === 'string') &&
     (value.accountUserId === undefined || typeof value.accountUserId === 'string' || typeof value.accountUserId === 'number') &&
     (value.accountNumber === undefined || value.accountNumber === 1 || value.accountNumber === 2 ||
       value.accountNumber === 3 || value.accountNumber === 4);
@@ -238,6 +241,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
         username: generated.username,
         password: generated.password,
         status: 'provisional',
+        ...(identity.wipeGeneration !== undefined ? {wipeGeneration: identity.wipeGeneration} : {}),
         accountNumber
       };
       await assertContext(context, accountUserId, cancelled);
@@ -270,12 +274,19 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
       if(expectedUserId !== undefined && !sameUserId(expectedUserId, user.id as PeerId)) {
         throw Object.assign(new Error('Guest account identity changed'), {type: 'GUEST_ACCOUNT_MISMATCH'});
       }
-      await dependencies.setUser(user);
-      boundUserId = user.id as PeerId;
-      record = {...record!, accountUserId: boundUserId, accountNumber: context.accountNumber};
+      const authorizedUserId = user.id as PeerId;
+      record = {
+        ...record!,
+        accountUserId: authorizedUserId,
+        accountNumber: context.accountNumber,
+        ...(identity.wipeGeneration !== undefined ? {wipeGeneration: identity.wipeGeneration} : {})
+      };
       cancelled.record = record;
-      await assertContext(context, boundUserId, cancelled);
       await saveRecord(record);
+      await assertContext(context, boundUserId, cancelled);
+      await dependencies.setUser(user);
+      boundUserId = authorizedUserId;
+      await assertContext(context, boundUserId, cancelled);
     };
 
     if(record.status === 'provisional' && activeUserId !== undefined && sameUserId(activeUserId, recordUserId)) {
@@ -363,6 +374,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
           password: generated.password,
           accountUserId: undefined,
           accountNumber: context.accountNumber,
+          ...(identity.wipeGeneration !== undefined ? {wipeGeneration: identity.wipeGeneration} : {}),
           status: 'provisional'
         };
         cancelled.record = record;
@@ -441,6 +453,13 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
             return {kind: 'accountInUse'} as const;
           }
 
+          if(identity.wipeGeneration !== undefined && record.wipeGeneration !== undefined &&
+            identity.wipeGeneration !== record.wipeGeneration) {
+            cancelled.record = record;
+            await clearInvalidatedRecord(record, context, cancelled);
+            return {kind: 'wiped'} as const;
+          }
+
           cancelled.record = record;
           let boundUserId = accountUserId;
           const registration: PrivateUsernameRegistration = {
@@ -459,12 +478,15 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
               if(expectedUserId !== undefined && !sameUserId(expectedUserId, user.id as PeerId)) {
                 throw Object.assign(new Error('Guest account identity changed'), {type: 'GUEST_ACCOUNT_MISMATCH'});
               }
-              await dependencies.setUser(user);
-              boundUserId = user.id as PeerId;
-              record.accountUserId = boundUserId;
+              const authorizedUserId = user.id as PeerId;
               record.accountNumber = context.accountNumber;
-              await assertContext(context, boundUserId, cancelled);
+              if(identity.wipeGeneration !== undefined) record.wipeGeneration = identity.wipeGeneration;
+              record.accountUserId = authorizedUserId;
               await saveRecord(record);
+              await assertContext(context, boundUserId, cancelled);
+              await dependencies.setUser(user);
+              boundUserId = authorizedUserId;
+              await assertContext(context, boundUserId, cancelled);
             }
           };
           cancelled.registration = registration;
@@ -479,6 +501,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
           if(result.kind === 'authorized') {
             await assertContext(context, boundUserId, cancelled);
             record.status = 'committed';
+            if(identity.wipeGeneration !== undefined) record.wipeGeneration = identity.wipeGeneration;
             await saveRecord(record);
             return {kind: 'authorized', user: result.user, username: record.username} as const;
           }
@@ -504,6 +527,22 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
         const errorType = getErrorType(error);
         return errorType ? {kind: 'error', errorType} as const : {kind: 'error'} as const;
       }
+    },
+
+    async hasWipeGenerationChanged() {
+      const identity = dependencies.getServerIdentity();
+      return runLocked(identity, async(cancelled) => {
+        const accountNumber = dependencies.getCurrentAccountNumber();
+        const accountUserId = await dependencies.getAccountUserId(accountNumber);
+        const context: GuestAccountContext = {...identity, accountNumber, accountUserId};
+        if(!isContextCurrent(context)) return false;
+        const records = await readRecords();
+        if(cancelled.value || !isContextCurrent(context)) return false;
+        const record = chooseRecord(records, context);
+        if(!record || identity.wipeGeneration === undefined || record.wipeGeneration === undefined ||
+          identity.wipeGeneration === record.wipeGeneration) return false;
+        return true;
+      });
     },
 
     async forget() {
@@ -572,7 +611,8 @@ function getActiveGuestServerIdentity(): GuestServerIdentity {
     const target = getMtprotoTarget();
     return {
       serverId,
-      keyFingerprint: target.mode === 'private' ? target.fingerprint : 'telegram-default'
+      keyFingerprint: target.mode === 'private' ? target.fingerprint : 'telegram-default',
+      wipeGeneration: getActiveDemoWipeGeneration()
     };
   }
 
@@ -584,7 +624,24 @@ function getActiveGuestServerIdentity(): GuestServerIdentity {
   if(!host || !pin || pin.host !== host || !/^[0-9a-f]{64}$/.test(pin.key_fingerprint)) {
     throw Object.assign(new Error('The selected server is not pinned'), {type: 'GUEST_SERVER_NOT_PINNED'});
   }
-  return {serverId, keyFingerprint: pin.key_fingerprint};
+  return {serverId, keyFingerprint: pin.key_fingerprint, wipeGeneration: getActiveDemoWipeGeneration()};
+}
+
+export async function isCurrentAccountGuest(authorizedUserId?: PeerId) {
+  const identity = getActiveGuestServerIdentity();
+  const accountNumber = getCurrentAccount();
+  const [storedRecords, account] = await Promise.all([
+    sessionStorage.get('guestCredentials', false),
+    authorizedUserId === undefined ? AccountController.get(accountNumber) : Promise.resolve({userId: authorizedUserId})
+  ]);
+  if(getCurrentAccount() !== accountNumber) return false;
+  const record = chooseRecord(getRecords(storedRecords), {
+    ...identity,
+    accountNumber,
+    accountUserId: account.userId
+  });
+  return !!record && record.accountUserId !== undefined &&
+    account.userId !== undefined && sameUserId(record.accountUserId, account.userId);
 }
 
 export function createCurrentGuestAccountLifecycle(
@@ -608,7 +665,8 @@ export function createCurrentGuestAccountLifecycle(
     isServerIdentityCurrent: (identity) => {
       try {
         const current = getActiveGuestServerIdentity();
-        return current.serverId === identity.serverId && current.keyFingerprint === identity.keyFingerprint;
+        return current.serverId === identity.serverId && current.keyFingerprint === identity.keyFingerprint &&
+          current.wipeGeneration === identity.wipeGeneration;
       } catch{
         return false;
       }

@@ -66,6 +66,12 @@ function makeDependencies(overrides: Partial<GuestAccountLifecycleDependencies> 
   };
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return {promise, resolve};
+}
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe('guest account lifecycle', () => {
@@ -145,6 +151,16 @@ describe('guest account lifecycle', () => {
 
     expect(state.records).toHaveLength(0);
     expect(state.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
+  });
+
+  it('stores the current demo wipe generation with a new guest credential', async() => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-42'} as GuestServerIdentity;
+
+    await expect(createGuestAccountLifecycle(state.dependencies).create()).resolves.toMatchObject({kind: 'authorized'});
+
+    expect(state.records).toHaveLength(1);
+    expect(state.records[0].wipeGeneration).toBe('week-42');
   });
 
   it('resumes a timed out password setup with the same secret and reconciles PASSWORD_HASH_INVALID by SRP', async() => {
@@ -323,6 +339,30 @@ describe('guest account lifecycle', () => {
     expect(state.records[0].accountUserId).toBeUndefined();
   });
 
+  it('does not authorize the account slot after it changes during the authorization record write', async() => {
+    const state = makeDependencies();
+    const delayedWrite = createDeferred<void>();
+    const writeReached = createDeferred<void>();
+    const writeCredentials = state.dependencies.writeCredentials;
+    let writeCount = 0;
+    state.dependencies.writeCredentials = async(records) => {
+      if(++writeCount === 2) {
+        writeReached.resolve(undefined);
+        await delayedWrite.promise;
+      }
+      await writeCredentials(records);
+    };
+    const lifecycle = createGuestAccountLifecycle(state.dependencies);
+    const creating = lifecycle.create();
+
+    await writeReached.promise;
+    state.currentAccountNumber = 2;
+    delayedWrite.resolve(undefined);
+
+    await expect(creating).resolves.toEqual({kind: 'cancelled'});
+    expect(state.dependencies.setUser).not.toHaveBeenCalled();
+  });
+
   it('cancels when another tab forgets the guest while password setup is pending', async() => {
     const state = makeDependencies();
     let invalidate = () => {};
@@ -342,6 +382,72 @@ describe('guest account lifecycle', () => {
 
   it('reauthenticates a returning guest through SRP without creating or adopting another account', async() => {
     const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-42'} as GuestServerIdentity;
+    state.accountUserId = 42;
+    state.records = [{
+      version: 1,
+      serverId: IDENTITY.serverId,
+      keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`,
+      password: 'P'.repeat(43),
+      status: 'committed',
+      wipeGeneration: 'week-42',
+      accountUserId: 42,
+      accountNumber: 1
+    }];
+    state.dependencies.signInWithPassword = vi.fn().mockResolvedValue(USER);
+    state.invokeApi.mockImplementation(async(method) => {
+      if(method === 'auth.sendCode') return SENT_CODE;
+      if(method === 'auth.signIn') throw {type: 'SESSION_PASSWORD_NEEDED'};
+      throw new Error(`Unexpected API method ${method}`);
+    });
+
+    await expect(createGuestAccountLifecycle(state.dependencies).reauthenticate()).resolves.toMatchObject({kind: 'authorized', user: USER});
+    expect(state.dependencies.signInWithPassword).toHaveBeenCalledWith('P'.repeat(43));
+    expect(state.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
+    expect(state.records[0].status).toBe('committed');
+  });
+
+  it('does not authorize a switched account slot after reauthentication record persistence', async() => {
+    const state = makeDependencies();
+    state.accountUserId = 42;
+    state.records = [{
+      version: 1,
+      serverId: IDENTITY.serverId,
+      keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`,
+      password: 'P'.repeat(43),
+      status: 'committed',
+      accountUserId: 42,
+      accountNumber: 1
+    }];
+    const delayedWrite = createDeferred<void>();
+    const writeReached = createDeferred<void>();
+    const writeCredentials = state.dependencies.writeCredentials;
+    state.dependencies.writeCredentials = async(records) => {
+      writeReached.resolve(undefined);
+      await delayedWrite.promise;
+      await writeCredentials(records);
+    };
+    state.dependencies.signInWithPassword = vi.fn().mockResolvedValue(USER);
+    state.invokeApi.mockImplementation(async(method) => {
+      if(method === 'auth.sendCode') return SENT_CODE;
+      if(method === 'auth.signIn') throw {type: 'SESSION_PASSWORD_NEEDED'};
+      throw new Error(`Unexpected API method ${method}`);
+    });
+    const reauthenticating = createGuestAccountLifecycle(state.dependencies).reauthenticate();
+
+    await writeReached.promise;
+    state.currentAccountNumber = 2;
+    delayedWrite.resolve(undefined);
+
+    await expect(reauthenticating).resolves.toEqual({kind: 'cancelled'});
+    expect(state.dependencies.setUser).not.toHaveBeenCalled();
+  });
+
+  it('adds the verified wipe generation to a legacy guest credential after reauthentication', async() => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-42'} as GuestServerIdentity;
     state.accountUserId = 42;
     state.records = [{
       version: 1,
@@ -361,9 +467,105 @@ describe('guest account lifecycle', () => {
     });
 
     await expect(createGuestAccountLifecycle(state.dependencies).reauthenticate()).resolves.toMatchObject({kind: 'authorized', user: USER});
-    expect(state.dependencies.signInWithPassword).toHaveBeenCalledWith('P'.repeat(43));
-    expect(state.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
-    expect(state.records[0].status).toBe('committed');
+
+    expect(state.records[0].wipeGeneration).toBe('week-42');
+  });
+
+  it('discards a saved guest before authentication when the server wipe generation changed', async() => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-43'} as GuestServerIdentity;
+    state.accountUserId = 42;
+    state.records = [{
+      version: 1,
+      serverId: IDENTITY.serverId,
+      keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`,
+      password: 'P'.repeat(43),
+      status: 'committed',
+      wipeGeneration: 'week-42',
+      accountUserId: 42,
+      accountNumber: 1
+    }];
+
+    await expect(createGuestAccountLifecycle(state.dependencies).reauthenticate()).resolves.toEqual({kind: 'wiped'});
+
+    expect(state.invokeApi).not.toHaveBeenCalled();
+    expect(state.records).toHaveLength(0);
+    expect(state.clearInvalidatedAccount).toHaveBeenCalledWith(1, 42);
+  });
+
+  it('detects a changed wipe generation without clearing the active account during startup', async() => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-43'} as GuestServerIdentity;
+    state.accountUserId = 42;
+    state.records = [{
+      version: 1,
+      serverId: IDENTITY.serverId,
+      keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`,
+      password: 'P'.repeat(43),
+      status: 'committed',
+      wipeGeneration: 'week-42',
+      accountUserId: 42,
+      accountNumber: 1
+    }];
+
+    await expect(createGuestAccountLifecycle(state.dependencies).hasWipeGenerationChanged()).resolves.toBe(true);
+
+    expect(state.invokeApi).not.toHaveBeenCalled();
+    expect(state.records).toHaveLength(1);
+    expect(state.clearInvalidatedAccount).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a server lock failure while checking the wipe generation', async() => {
+    const state = makeDependencies();
+    state.dependencies.withServerLock = async<T>() => {
+      throw new Error('Server lock failed');
+    };
+
+    await expect(createGuestAccountLifecycle(state.dependencies).hasWipeGenerationChanged()).rejects.toThrow('Server lock failed');
+  });
+
+  it('surfaces an account lookup failure while checking the wipe generation', async() => {
+    const state = makeDependencies();
+    state.dependencies.getAccountUserId = async() => {
+      throw new Error('Account lookup failed');
+    };
+
+    await expect(createGuestAccountLifecycle(state.dependencies).hasWipeGenerationChanged()).rejects.toThrow('Account lookup failed');
+  });
+
+  it('surfaces a credential read failure while checking the wipe generation', async() => {
+    const state = makeDependencies();
+    state.dependencies.readCredentials = async() => {
+      throw new Error('Credential read failed');
+    };
+
+    await expect(createGuestAccountLifecycle(state.dependencies).hasWipeGenerationChanged()).rejects.toThrow('Credential read failed');
+  });
+
+  it.each([
+    ['current generation absent', undefined, 'week-42'],
+    ['stored generation absent', 'week-42', undefined]
+  ])('does not discard credentials when the %s', async(_case, currentGeneration, storedGeneration) => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: currentGeneration} as GuestServerIdentity;
+    state.records = [{
+      version: 1,
+      serverId: IDENTITY.serverId,
+      keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`,
+      password: 'P'.repeat(43),
+      status: 'committed',
+      ...(storedGeneration ? {wipeGeneration: storedGeneration} : {}),
+      accountNumber: 1
+    }];
+    state.invokeApi.mockRejectedValueOnce({type: 'NETWORK_ERROR'});
+
+    await expect(createGuestAccountLifecycle(state.dependencies).reauthenticate()).resolves.toEqual({kind: 'error', errorType: 'NETWORK_ERROR'});
+
+    expect(state.records).toHaveLength(1);
+    expect(state.clearInvalidatedAccount).not.toHaveBeenCalled();
   });
 
   it('does not treat a missing username after a wipe as permission to attach or replace its cache', async() => {

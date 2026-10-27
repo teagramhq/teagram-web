@@ -1,4 +1,5 @@
 import {createEffect, createRoot, createSignal, on} from 'solid-js';
+import {render} from 'solid-js/web';
 import appImManager from '@lib/appImManager';
 import rootScope from '@lib/rootScope';
 import {createSearchGroup, SearchGroup} from '@components/searchGroup';
@@ -107,6 +108,7 @@ import {useCollapsedCommunityDialogsKey} from '@stores/communities';
 import {openEmojiStatusPicker} from '@components/sidebarLeft/emojiStatusPicker';
 import IS_CONFERENCE_CALL_SUPPORTED from '@environment/conferenceCallSupport';
 import IS_CALL_SUPPORTED from '@environment/callSupport';
+import DemoGuestBanner from '@components/sidebarLeft/demoGuestBanner';
 
 export const LEFT_COLUMN_ACTIVE_CLASSNAME = 'is-left-column-shown';
 
@@ -173,6 +175,9 @@ export class AppSidebarLeft extends SidebarSlider {
 
     const [allNotificationsCount, setAllNotificationsCount] = createSignal(0);
     const mainMiddleware = this.middlewareHelper.get();
+    const bannerContainer = document.createElement('div');
+    this.chatListContainer.prepend(bannerContainer);
+    mainMiddleware.onClean(render(() => DemoGuestBanner(), bannerContainer));
     // renderFoldersSidebarContent creates the #folders-sidebar element
     // itself and inserts it as the first child of #main-columns.
     renderFoldersSidebarContent(

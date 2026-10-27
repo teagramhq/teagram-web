@@ -31,4 +31,26 @@ describe('Turnstile server discovery', () => {
       turnstile: {site_key: 'invalid key'}
     })).rejects.toThrow('invalid Turnstile site key');
   });
+
+  it('enables guest sign-up only for a literal true discovery flag', async() => {
+    const pair = await crypto.subtle.generateKey({
+      name: 'RSA-OAEP',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256'
+    }, true, ['encrypt', 'decrypt']);
+    const spki = new Uint8Array(await crypto.subtle.exportKey('spki', pair.publicKey));
+    const rsaSpki = btoa(String.fromCharCode(...spki));
+    const flags: Array<[unknown, boolean]> = [[true, true], [undefined, false], [false, false], ['true', false], [1, false]];
+
+    for(const [guestSignUp, expected] of flags) {
+      const discovered = await validateDiscoveryDocument('custom.example', {
+        version: 1,
+        mtproto: {endpoint: 'custom.example:443', dc_id: 2, rsa_spki: rsaSpki},
+        websocket: {endpoint: 'wss://custom.example/apiws'},
+        demo: {guest_sign_up: guestSignUp}
+      });
+      expect(discovered.guestSignUpEnabled).toBe(expected);
+    }
+  });
 });

@@ -29,6 +29,13 @@
   }
 }
 
+.demoGuestBanner {
+  :global(.row-title),
+  :global(.row-subtitle) {
+    z-index: 1;
+  }
+}
+
 .collapsed {
   width: 100%;
   height: 3.75rem;

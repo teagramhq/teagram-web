@@ -14,29 +14,51 @@ async function fetchLocalAppRoute(route: import('@playwright/test').Route, url: 
 async function setupGuestServer(
   page: Page,
   testInfo: TestInfo,
-  guestSignUp: boolean,
+  guestSignUp: unknown,
   signupErrorType?: string,
   termsText?: string,
-  termsEntities?: Array<{_: string, offset: number, length: number, url?: string}>
+  termsEntities?: Array<{_: string, offset: number, length: number, url?: string}>,
+  autoGuest = false,
+  turnstileEnabled = true,
+  serverHost = SERVER_HOST,
+  appHost = 'web.teagram.io',
+  serverPort = 2443,
+  wipeGeneration?: string
 ) {
   const appOrigin = new URL(testInfo.project.use.baseURL as string);
-  appOrigin.hostname = 'web.teagram.io';
+  appOrigin.hostname = appHost;
   appOrigin.protocol = 'https:';
   const appOriginString = appOrigin.origin;
   const publicKey = createPublicKey(readFileSync(resolve('scripts/fixtures/private-mtproto-public.pem')));
   const rsaSpki = publicKey.export({type: 'spki', format: 'der'}).toString('base64');
-  const discovery = JSON.stringify({
+  const createDiscovery = () => JSON.stringify({
     version: 1,
-    mtproto: {endpoint: `${SERVER_HOST}:2443`, dc_id: 2, rsa_spki: rsaSpki},
-    websocket: {endpoint: `wss://${SERVER_HOST}:2443/apiws`},
-    turnstile: {site_key: 'guest-site-key'},
-    demo: {guest_sign_up: guestSignUp}
+    mtproto: {endpoint: `${serverHost}:${serverPort}`, dc_id: 2, rsa_spki: rsaSpki},
+    websocket: {endpoint: `wss://${serverHost}${serverPort === 443 ? '' : `:${serverPort}`}/apiws`},
+    ...(turnstileEnabled ? {turnstile: {site_key: 'guest-site-key'}} : {}),
+    demo: {
+      guest_sign_up: guestSignUp,
+      ...(wipeGeneration !== undefined ? {wipe_generation: wipeGeneration} : {})
+    }
   });
 
   await page.context().route('**/*', async(route) => {
     try {
       const url = new URL(route.request().url());
+      if(url.hostname === serverHost && url.pathname === '/.well-known/teagramd/client') {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          headers: {'Access-Control-Allow-Origin': '*'},
+          body: createDiscovery()
+        });
+        return;
+      }
       if(url.origin === appOriginString) {
+        if(autoGuest && url.pathname === '/teagram-config.json') {
+          await route.fulfill({json: {server: serverHost, autoGuest: true}});
+          return;
+        }
         url.protocol = 'http:';
         url.hostname = 'localhost';
         const response = await fetchLocalAppRoute(route, url.toString());
@@ -47,13 +69,6 @@ async function setupGuestServer(
         } else {
           await route.fulfill({response});
         }
-      } else if(url.hostname === SERVER_HOST && url.pathname === '/.well-known/teagramd/client') {
-        await route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          headers: {'Access-Control-Allow-Origin': '*'},
-          body: discovery
-        });
       } else if(url.hostname === 'challenges.cloudflare.com' && url.pathname === '/turnstile/v0/api.js') {
         await route.fulfill({
           status: 200,
@@ -83,9 +98,11 @@ async function setupGuestServer(
     }
   });
 
+  const webSocketUrls: string[] = [];
   await page.context().routeWebSocket(/.*/, (socket) => {
+    webSocketUrls.push(socket.url());
     const url = new URL(socket.url());
-    if(url.hostname === SERVER_HOST && url.pathname === '/apiws') return;
+    if(url.hostname === serverHost && url.pathname === '/apiws') return;
     socket.close();
   });
 
@@ -179,6 +196,8 @@ async function setupGuestServer(
       }
     });
   }, {signupErrorType, termsText, termsEntities});
+
+  return webSocketUrls;
 }
 
 async function openSelectedServer(page: Page, testInfo: TestInfo) {
@@ -257,6 +276,103 @@ test('creates a guest only when discovery advertises it and restores the same gu
     .toBe(guestUsername);
   const returningCalls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
   expect(returningCalls.filter((call) => call.method === 'auth.signUp')).toHaveLength(0);
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
+test('auto-creates one guest from runtime config without a picker and restores it after reload', async({page}, testInfo) => {
+  const webSocketUrls = await setupGuestServer(page, testInfo, true, undefined, undefined, undefined, true, true, 'demo.teagram.io', 'demo.teagram.io', 443, 'week-42');
+  const appOrigin = new URL(testInfo.project.use.baseURL as string);
+  appOrigin.hostname = 'demo.teagram.io';
+  appOrigin.protocol = 'https:';
+
+  await page.goto(`${appOrigin.origin}/?noWorker=1&noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
+  const auth = page.locator('#auth-pages');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(auth.getByRole('status').filter({hasText: 'Creating a guest account…'})).toBeVisible({timeout: 30_000});
+  await expect(auth.getByRole('textbox', {name: 'Username'})).toHaveCount(0);
+  await expect(auth.getByText('Your guest account is wiped weekly, is lost after you sign out or clear browser data, and is visible to the server operator.'))
+    .toBeVisible();
+  const challenge = auth.getByTestId('turnstile-challenge');
+  await expect(challenge).toBeVisible();
+  await captureState(page, testInfo, 'guest-auto-turnstile-challenge');
+  await challenge.getByRole('button', {name: 'Complete security check'}).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__customGuestCalls?.filter((call: {
+    method: string,
+    params?: Record<string, unknown>
+  }) => call.method === 'auth.signUp' || (call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp')).length || 0))
+    .toBe(1);
+  expect(webSocketUrls).toContain('wss://demo.teagram.io/apiws');
+  expect(webSocketUrls.filter((url) => new URL(url).pathname === '/apiws').every((url) =>
+    url === 'wss://demo.teagram.io/apiws')).toBe(true);
+
+  const signupCalls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{
+    method: string,
+    params?: Record<string, unknown>
+  }>);
+  const turnstileSignUp = signupCalls.find((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp');
+  const signup = turnstileSignUp?.params?.query as Record<string, unknown> | undefined;
+  const guestUsername = signup?.phone_number as string;
+  expect(guestUsername).toMatch(/^guest_[a-z2-7]{16}$/);
+  expect(turnstileSignUp?.params?.token).toBe('guest-turnstile-token');
+  expect(signupCalls.filter((call) => call.method === 'auth.signUp' || (call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp'))).toHaveLength(1);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('__teagram_guest_username')))
+    .toBe(guestUsername);
+  await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
+  const chatList = page.locator('#chatlist-container');
+  const demoGuestBanner = chatList.locator('[role="status"]');
+  await expect(demoGuestBanner.getByText('Demo server: you\'re a guest.', {exact: true}))
+    .toBeVisible({timeout: 30_000});
+  await expect(demoGuestBanner.getByText(/Everything is wiped every week\. Use your own server at/)).toBeVisible();
+  await demoGuestBanner.evaluate((element) => element.scrollIntoView({block: 'center'}));
+  await expect(demoGuestBanner).toBeInViewport();
+  await expect(demoGuestBanner.locator('.row-title')).toHaveCSS('z-index', '1');
+  await expect(demoGuestBanner.locator('.row-subtitle')).toHaveCSS('z-index', '1');
+  await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(8282)?.username))
+    .toBe(guestUsername);
+  const bannerScreenshot = testInfo.outputPath('guest-chat-list-banner.png');
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await page.screenshot({path: bannerScreenshot, fullPage: false, animations: 'disabled'});
+  await testInfo.attach('guest-chat-list-banner', {path: bannerScreenshot, contentType: 'image/png'});
+
+  await page.reload({waitUntil: 'domcontentloaded'});
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
+  await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(8282)?.username))
+    .toBe(guestUsername);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('__teagram_guest_username')))
+    .toBe(guestUsername);
+  const returningCalls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{
+    method: string,
+    params?: Record<string, unknown>
+  }> || []);
+  expect(returningCalls.filter((call) => call.method === 'auth.signUp' || (call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp'))).toHaveLength(0);
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
+test('shows an auth error and an explicit retry after automatic guest sign-up fails', async({page}, testInfo) => {
+  await page.setViewportSize({width: 320, height: 720});
+  await setupGuestServer(page, testInfo, true, 'NETWORK_ERROR', undefined, undefined, true, false, 'demo.teagram.io', 'demo.teagram.io', 443);
+  const appOrigin = new URL(testInfo.project.use.baseURL as string);
+  appOrigin.hostname = 'demo.teagram.io';
+  appOrigin.protocol = 'https:';
+
+  await page.goto(`${appOrigin.origin}/?noWorker=1&noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
+  const auth = page.locator('#auth-pages');
+  await expect(auth.getByRole('alert')).toContainText('Unable to create your guest account. Check your connection and try again.', {timeout: 30_000});
+  const retryButton = auth.getByRole('button', {name: 'Start a new guest'});
+  await expect(retryButton).toBeEnabled();
+  await retryButton.focus();
+  await expect(retryButton).toBeFocused();
+  await expect(auth.getByText('Demo server: you\'re a guest. Everything is wiped every week. Use your own server at web.teagram.io')).toBeVisible();
+  await expect(auth.getByText('Your guest account is wiped weekly, is lost after you sign out or clear browser data, and is visible to the server operator.')).toBeVisible();
+  await captureState(page, testInfo, 'guest-auto-signup-error');
+
+  const signupCalls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
+  expect(signupCalls.filter((call) => call.method === 'auth.signUp')).toHaveLength(1);
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
 
@@ -430,6 +546,30 @@ test('surfaces guest terms popup load failures as an auth error', async({page}, 
   expect(returningCalls.filter((call) => call.method === 'auth.signUp' || call.method === 'invokeWithReCaptcha')).toHaveLength(0);
   await captureState(page, testInfo, 'guest-terms-popup-load-error-after-reload');
 
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
+test('shows one Turnstile challenge failure without retrying automatically', async({page}, testInfo) => {
+  await setupGuestServer(page, testInfo, true, 'RECAPTCHA_CHECK_FAILED', undefined, undefined, true, true, 'demo.teagram.io', 'demo.teagram.io', 443);
+  const appOrigin = new URL(testInfo.project.use.baseURL as string);
+  appOrigin.hostname = 'demo.teagram.io';
+  appOrigin.protocol = 'https:';
+
+  await page.goto(`${appOrigin.origin}/?noWorker=1&noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
+  const auth = page.locator('#auth-pages');
+  await expect(auth.locator('[role="status"]')).toContainText('Creating a guest account…', {timeout: 30_000});
+  const challenge = auth.getByTestId('turnstile-challenge');
+  await expect(challenge).toBeVisible();
+  await challenge.getByRole('button', {name: 'Complete security check'}).click();
+  await expect(auth.getByRole('alert')).toContainText('The security check failed. Try again.');
+  await expect(auth.getByRole('button', {name: 'Start a new guest'})).toBeEnabled();
+  const calls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{
+    method: string,
+    params?: Record<string, unknown>
+  }>);
+  expect(calls.filter((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp')).toHaveLength(1);
+  await captureState(page, testInfo, 'guest-auto-turnstile-failure');
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
 
