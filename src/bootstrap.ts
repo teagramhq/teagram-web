@@ -78,6 +78,50 @@ function setConnectPolicyContent(sources: string, enforceInCurrentDocument = fal
   }
 }
 
+function createButton(label: string, onClick: () => void | Promise<void>, secondary = false) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  if(secondary) button.classList.add('server-picker__secondary');
+  button.addEventListener('click', () => { void onClick(); });
+  return button;
+}
+
+function showPanel(title: string, description?: string) {
+  document.querySelector('.server-picker')?.remove();
+  const shell = document.createElement('main');
+  shell.className = 'server-picker';
+  shell.setAttribute('role', 'dialog');
+  shell.setAttribute('aria-modal', 'true');
+  const card = document.createElement('section');
+  card.className = 'server-picker__card';
+  const heading = document.createElement('h1');
+  heading.textContent = title;
+  card.append(heading);
+  if(description) {
+    const body = document.createElement('p');
+    body.textContent = description;
+    card.append(body);
+  }
+  shell.append(card);
+  document.body.append(shell);
+  return {shell, card};
+}
+
+function addError(card: HTMLElement, message: string) {
+  const error = document.createElement('p');
+  error.className = 'server-picker__error';
+  error.setAttribute('role', 'alert');
+  error.textContent = message;
+  card.append(error);
+}
+
+function serverDiscoveryErrorMessage(host: string, error: unknown) {
+  const message = error instanceof Error ? error.message : '';
+  return /not a Teagram server/i.test(message) ? message :
+    `Could not reach ${host}. Check that it is online and publishes Teagram discovery.`;
+}
+
 async function unregisterServiceWorkers(serverId?: string): Promise<void> {
   if(!('serviceWorker' in navigator)) return;
   const registrations = await navigator.serviceWorker.getRegistrations();
@@ -183,6 +227,81 @@ function probeWebSocket(endpoint: string, signal = new AbortController().signal)
       finish(false);
     }
   });
+}
+
+async function showServerPicker(initialError?: string) {
+  let savedChoice = '';
+  try {
+    savedChoice = localStorage.getItem(SERVER_CHOICE_KEY) || '';
+  } catch{}
+
+  const {card} = showPanel(
+    'Choose your server',
+    'The server operator can read all non-secret chats. Choose a server you trust. Your account and stored data stay with the server you select.'
+  );
+  if(initialError) addError(card, initialError);
+  const form = document.createElement('form');
+  const label = document.createElement('label');
+  label.textContent = 'Server host';
+  const input = document.createElement('input');
+  input.autocomplete = 'off';
+  input.inputMode = 'url';
+  input.spellcheck = false;
+  input.value = savedChoice;
+  input.placeholder = 'your.server.host';
+  label.append(input);
+  const submit = document.createElement('button');
+  submit.type = 'submit';
+  submit.textContent = 'Continue';
+  form.append(label, submit);
+  card.append(form);
+
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    void chooseHost(input.value).finally(() => { submit.disabled = false; });
+  });
+
+  async function chooseHost(value: string) {
+    let host: string;
+    try {
+      host = normalizeServerHost(value);
+    } catch(error) {
+      addError(card, error instanceof Error ? error.message : 'Enter a valid server host');
+      return;
+    }
+
+    if(host === DEFAULT_SERVER_HOST) {
+      if(!buildTarget) {
+        addError(card, 'The default server target is not available in this build.');
+        return;
+      }
+      await activateServer(DEFAULT_SERVER_HOST, 'default', buildTarget, DEFAULT_SERVER_HOST);
+      return;
+    }
+
+    let discovered: DiscoveredServer;
+    try {
+      discovered = await fetchServerDiscovery(host);
+    } catch(error) {
+      addError(card, serverDiscoveryErrorMessage(host, error));
+      return;
+    }
+
+    const pin = getServerPin(host);
+    const pinState = getServerPinState(discovered, pin);
+    if(pinState === 'mismatch') {
+      showServerIdentityChanged(discovered, pin!);
+      return;
+    }
+
+    if(pinState === 'match') {
+      await activateServer(host, discovered.id, discovered.target, host, true, discovered);
+      return;
+    }
+
+    showFirstUseConfirmation(discovered);
+  }
 }
 
 function discoveryErrorKey(error: unknown) {
