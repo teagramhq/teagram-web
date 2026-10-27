@@ -681,7 +681,7 @@ async function expectUnrelatedConnectionsBlocked(page: Page, httpsRequests: stri
   expect(blockedUris.some((uri) => uri.startsWith('https://unrelated.example.test'))).toBe(true);
 }
 
-test('private artifact blocks unrelated HTTPS and WSS in picker and pinned modes', async({page}, testInfo) => {
+test('private artifact blocks unrelated HTTPS and WSS after server selection and in pinned mode', async({page}, testInfo) => {
   test.skip(testInfo.project.name !== 'private-artifact-firefox', 'requires Firefox');
   const manifest = JSON.parse(readFileSync(resolve('dist/mtproto-target.json'), 'utf8')) as {mode: string, endpoint: string};
   if(manifest.mode !== 'private') throw new Error('private artifact browser test requires a private build');
@@ -787,9 +787,7 @@ async function runPrivateArtifactFirefoxEgress(
   expect(discoveryRequests).toEqual(['/.well-known/teagramd/client']);
   await confirmation.getByRole('button', {name: 'Confirm and use this server'}).click();
 
-  const returningPicker = page.getByRole('dialog');
-  await expect(returningPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(serverHost);
-  await returningPicker.getByRole('button', {name: 'Continue'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('meta[data-server-policy]'))
   .toHaveAttribute('content', `connect-src 'self' https://${serverHost} ${privateEndpoint.href};`);
   expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(serverHost);
