@@ -5,7 +5,14 @@ const mocks = vi.hoisted(() => ({
   activeHost: 'demo.teagram.io',
   autoGuest: true,
   isCurrentAccountGuest: vi.fn(),
-  markAutoGuestAttempted: vi.fn()
+  markAutoGuestAttempted: vi.fn(),
+  accountLoggedInListener: undefined as ((payload: {accountNumber: number, userId: number}) => void) | undefined,
+  addEventListener: vi.fn((event: string, listener: (payload: any) => void) => {
+    if(event === 'account_logged_in') mocks.accountLoggedInListener = listener;
+  }),
+  removeEventListener: vi.fn((event: string, listener: (payload: any) => void) => {
+    if(event === 'account_logged_in' && mocks.accountLoggedInListener === listener) mocks.accountLoggedInListener = undefined;
+  })
 }));
 
 vi.mock('@components/sidebarLeft/pendingSuggestionItem', () => {
@@ -25,6 +32,11 @@ vi.mock('@lib/langPack', () => ({
 }));
 vi.mock('@lib/guestAccountLifecycle', () => ({isCurrentAccountGuest: mocks.isCurrentAccountGuest}));
 vi.mock('@lib/autoGuest', () => ({markAutoGuestAttempted: mocks.markAutoGuestAttempted}));
+vi.mock('@lib/rootScope', () => ({default: {
+  addEventListener: mocks.addEventListener,
+  removeEventListener: mocks.removeEventListener
+}}));
+vi.mock('@lib/accounts/getCurrentAccount', () => ({getCurrentAccount: () => 1}));
 
 import DemoGuestBanner from '@components/sidebarLeft/demoGuestBanner';
 
@@ -36,6 +48,9 @@ describe('demo guest banner', () => {
     mocks.autoGuest = true;
     mocks.isCurrentAccountGuest.mockReset().mockResolvedValue(true);
     mocks.markAutoGuestAttempted.mockReset();
+    mocks.addEventListener.mockClear();
+    mocks.removeEventListener.mockClear();
+    mocks.accountLoggedInListener = undefined;
     document.body.replaceChildren();
   });
 
@@ -71,5 +86,18 @@ describe('demo guest banner', () => {
 
     expect(document.body.textContent).not.toContain('Demo server: you\'re a guest.');
     expect(mocks.markAutoGuestAttempted).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the active account after authentication', async() => {
+    mocks.isCurrentAccountGuest.mockResolvedValue(false);
+    dispose = render(() => <DemoGuestBanner/>, document.body);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.body.textContent).not.toContain('Demo server: you\'re a guest.');
+
+    mocks.isCurrentAccountGuest.mockResolvedValue(true);
+    mocks.accountLoggedInListener?.({accountNumber: 1, userId: 42});
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain('Demo server: you\'re a guest.'));
+    expect(mocks.markAutoGuestAttempted).toHaveBeenCalledOnce();
   });
 });

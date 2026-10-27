@@ -286,10 +286,13 @@ test('auto-creates one guest from runtime config without a picker and restores i
   appOrigin.protocol = 'https:';
 
   await page.goto(`${appOrigin.origin}/?noWorker=1&noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
+  const auth = page.locator('#auth-pages');
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.locator('#auth-pages [role="status"]')).toContainText('Creating a guest account…', {timeout: 30_000});
-  await expect(page.locator('#auth-pages').getByRole('textbox', {name: 'Username'})).toHaveCount(0);
-  const challenge = page.locator('#auth-pages').getByTestId('turnstile-challenge');
+  await expect(auth.getByRole('status')).toContainText('Creating a guest account…', {timeout: 30_000});
+  await expect(auth.getByRole('textbox', {name: 'Username'})).toHaveCount(0);
+  await expect(auth.getByText('Your guest account is wiped weekly, is lost after you sign out or clear browser data, and is visible to the server operator.'))
+    .toBeVisible();
+  const challenge = auth.getByTestId('turnstile-challenge');
   await expect(challenge).toBeVisible();
   await captureState(page, testInfo, 'guest-auto-turnstile-challenge');
   await challenge.getByRole('button', {name: 'Complete security check'}).click();
@@ -318,8 +321,19 @@ test('auto-creates one guest from runtime config without a picker and restores i
   await expect.poll(() => page.evaluate(() => localStorage.getItem('__teagram_guest_username')))
     .toBe(guestUsername);
   await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
+  const chatList = page.locator('#chatlist-container');
+  const demoGuestBanner = chatList.locator('[role="status"]');
+  await expect(demoGuestBanner.getByText('Demo server: you\'re a guest.', {exact: true}))
+    .toBeVisible({timeout: 30_000});
+  await expect(demoGuestBanner.getByText(/Everything is wiped every week\. Use your own server at/)).toBeVisible();
+  await demoGuestBanner.evaluate((element) => element.scrollIntoView({block: 'center'}));
+  await expect(demoGuestBanner).toBeInViewport();
   await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(8282)?.username))
     .toBe(guestUsername);
+  const bannerScreenshot = testInfo.outputPath('guest-chat-list-banner.png');
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await page.screenshot({path: bannerScreenshot, fullPage: false, animations: 'disabled'});
+  await testInfo.attach('guest-chat-list-banner', {path: bannerScreenshot, contentType: 'image/png'});
 
   await page.reload({waitUntil: 'domcontentloaded'});
   await expect(page.getByRole('dialog')).toHaveCount(0);

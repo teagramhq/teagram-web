@@ -694,7 +694,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           {i18n('Teagram.Guest.Restoring')}
         </div>
       )}
-      {!autoGuestPending() && !creatingAccount() && guestSignUpAvailable && (
+      {guestSignUpAvailable && (
         <p class={styles.guestDisclosure}>{i18n('Teagram.Guest.Disclosure')}</p>
       )}
       {!autoGuestPending() && showDemoGuestNotice && (

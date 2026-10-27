@@ -586,7 +586,9 @@ const onDocumentReady = async() => {
         markAutoGuestAttempted();
       }
     } catch{
-      if(authState._ === 'authStateSignedIn') markAutoGuestAttempted();
+      if(authState._ === 'authStateSignedIn') {
+        rootScope.managers.appStateManager.pushToState('authState', authState = {_: 'authStateSignIn'});
+      }
     }
   }
 

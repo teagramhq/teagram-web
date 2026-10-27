@@ -264,11 +264,18 @@ describe('private username sign-in card', () => {
   it('starts one guest sign-up automatically when auto-guest mode and discovery are enabled', async() => {
     (window as any).__TEAGRAM_AUTO_GUEST__ = true;
     (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = true;
-    mocks.createGuest.mockResolvedValueOnce({kind: 'authorized', user: {_: 'user', id: 42}});
+    let disclosureVisibleWhenCreationStarts = false;
+    mocks.createGuest.mockImplementationOnce(async() => {
+      disclosureVisibleWhenCreationStarts = document.body.textContent?.includes(
+        'Your guest account is wiped weekly, is lost after you sign out or clear browser data, and is visible to the server operator.'
+      ) || false;
+      return {kind: 'authorized', user: {_: 'user', id: 42}};
+    });
 
     mount();
 
     await vi.waitFor(() => expect(mocks.createGuest).toHaveBeenCalledOnce());
+    expect(disclosureVisibleWhenCreationStarts).toBe(true);
     await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
   });
 
@@ -340,6 +347,18 @@ describe('private username sign-in card', () => {
     expect(document.body.textContent).toContain('Your guest account is wiped weekly, is lost after you sign out or clear browser data, and is visible to the server operator.');
     expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Start a new guest')).toBe(true);
     expect(mocks.createGuest).toHaveBeenCalledOnce();
+  });
+
+  it('surfaces a saved-guest restore error without auto-creating a replacement', async() => {
+    (window as any).__TEAGRAM_AUTO_GUEST__ = true;
+    (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = true;
+    mocks.reauthenticateGuest.mockResolvedValueOnce({kind: 'error', errorType: 'GUEST_LOCK_UNAVAILABLE'});
+
+    mount();
+
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent)
+      .toContain('Unable to sign you back into your guest account. Check your connection and try again.'));
+    expect(mocks.createGuest).not.toHaveBeenCalled();
   });
 
   it('reauthenticates an existing guest result before entering the app', async() => {

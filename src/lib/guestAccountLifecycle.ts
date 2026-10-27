@@ -274,12 +274,18 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
       if(expectedUserId !== undefined && !sameUserId(expectedUserId, user.id as PeerId)) {
         throw Object.assign(new Error('Guest account identity changed'), {type: 'GUEST_ACCOUNT_MISMATCH'});
       }
-      await dependencies.setUser(user);
-      boundUserId = user.id as PeerId;
-      record = {...record!, accountUserId: boundUserId, accountNumber: context.accountNumber};
+      const authorizedUserId = user.id as PeerId;
+      record = {
+        ...record!,
+        accountUserId: authorizedUserId,
+        accountNumber: context.accountNumber,
+        ...(identity.wipeGeneration !== undefined ? {wipeGeneration: identity.wipeGeneration} : {})
+      };
       cancelled.record = record;
-      await assertContext(context, boundUserId, cancelled);
       await saveRecord(record);
+      await dependencies.setUser(user);
+      boundUserId = authorizedUserId;
+      await assertContext(context, boundUserId, cancelled);
     };
 
     if(record.status === 'provisional' && activeUserId !== undefined && sameUserId(activeUserId, recordUserId)) {
@@ -471,12 +477,14 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
               if(expectedUserId !== undefined && !sameUserId(expectedUserId, user.id as PeerId)) {
                 throw Object.assign(new Error('Guest account identity changed'), {type: 'GUEST_ACCOUNT_MISMATCH'});
               }
-              await dependencies.setUser(user);
-              boundUserId = user.id as PeerId;
-              record.accountUserId = boundUserId;
+              const authorizedUserId = user.id as PeerId;
               record.accountNumber = context.accountNumber;
-              await assertContext(context, boundUserId, cancelled);
+              if(identity.wipeGeneration !== undefined) record.wipeGeneration = identity.wipeGeneration;
+              record.accountUserId = authorizedUserId;
               await saveRecord(record);
+              await dependencies.setUser(user);
+              boundUserId = authorizedUserId;
+              await assertContext(context, boundUserId, cancelled);
             }
           };
           cancelled.registration = registration;
@@ -491,6 +499,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
           if(result.kind === 'authorized') {
             await assertContext(context, boundUserId, cancelled);
             record.status = 'committed';
+            if(identity.wipeGeneration !== undefined) record.wipeGeneration = identity.wipeGeneration;
             await saveRecord(record);
             return {kind: 'authorized', user: result.user, username: record.username} as const;
           }
@@ -519,28 +528,19 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
     },
 
     async hasWipeGenerationChanged() {
-      let identity: GuestServerIdentity;
-      try {
-        identity = dependencies.getServerIdentity();
-      } catch{
-        return false;
-      }
-      try {
-        return await runLocked(identity, async(cancelled) => {
-          const accountNumber = dependencies.getCurrentAccountNumber();
-          const accountUserId = await dependencies.getAccountUserId(accountNumber);
-          const context: GuestAccountContext = {...identity, accountNumber, accountUserId};
-          if(!isContextCurrent(context)) return false;
-          const records = await readRecords();
-          if(cancelled.value || !isContextCurrent(context)) return false;
-          const record = chooseRecord(records, context);
-          if(!record || identity.wipeGeneration === undefined || record.wipeGeneration === undefined ||
-            identity.wipeGeneration === record.wipeGeneration) return false;
-          return true;
-        });
-      } catch{
-        return false;
-      }
+      const identity = dependencies.getServerIdentity();
+      return runLocked(identity, async(cancelled) => {
+        const accountNumber = dependencies.getCurrentAccountNumber();
+        const accountUserId = await dependencies.getAccountUserId(accountNumber);
+        const context: GuestAccountContext = {...identity, accountNumber, accountUserId};
+        if(!isContextCurrent(context)) return false;
+        const records = await readRecords();
+        if(cancelled.value || !isContextCurrent(context)) return false;
+        const record = chooseRecord(records, context);
+        if(!record || identity.wipeGeneration === undefined || record.wipeGeneration === undefined ||
+          identity.wipeGeneration === record.wipeGeneration) return false;
+        return true;
+      });
     },
 
     async forget() {
@@ -625,19 +625,20 @@ function getActiveGuestServerIdentity(): GuestServerIdentity {
   return {serverId, keyFingerprint: pin.key_fingerprint, wipeGeneration: getActiveDemoWipeGeneration()};
 }
 
-export async function isCurrentAccountGuest() {
+export async function isCurrentAccountGuest(authorizedUserId?: PeerId) {
   const identity = getActiveGuestServerIdentity();
   const accountNumber = getCurrentAccount();
   const [storedRecords, account] = await Promise.all([
     sessionStorage.get('guestCredentials', false),
-    AccountController.get(accountNumber)
+    authorizedUserId === undefined ? AccountController.get(accountNumber) : Promise.resolve({userId: authorizedUserId})
   ]);
+  if(getCurrentAccount() !== accountNumber) return false;
   const record = chooseRecord(getRecords(storedRecords), {
     ...identity,
     accountNumber,
     accountUserId: account.userId
   });
-  return !!record && record.status === 'committed' && record.accountUserId !== undefined &&
+  return !!record && record.accountUserId !== undefined &&
     account.userId !== undefined && sameUserId(record.accountUserId, account.userId);
 }
 
