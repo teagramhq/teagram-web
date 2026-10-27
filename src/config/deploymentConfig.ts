@@ -46,10 +46,28 @@ export async function fetchTeagramDeploymentConfig(fetcher: typeof fetch = fetch
     throw new Error('Teagram deployment configuration is too large');
   }
 
-  const body = await response.text();
-  if(new TextEncoder().encode(body).byteLength > DEPLOYMENT_CONFIG_MAX_BYTES) {
-    throw new Error('Teagram deployment configuration is too large');
+  const reader = response.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if(reader) {
+    while(true) {
+      const {done, value} = await reader.read();
+      if(done) break;
+      size += value.byteLength;
+      if(size > DEPLOYMENT_CONFIG_MAX_BYTES) {
+        await reader.cancel();
+        throw new Error('Teagram deployment configuration is too large');
+      }
+      if(value.byteLength) chunks.push(value);
+    }
   }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for(const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  const body = new TextDecoder().decode(bytes);
 
   let value: unknown;
   try {

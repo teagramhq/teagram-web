@@ -27,6 +27,26 @@ describe('Teagram deployment config', () => {
     await expect(fetchTeagramDeploymentConfig(async() => new Response('', {status: 503}))).rejects.toThrow('503');
   });
 
+  it('cancels an oversized config stream before reading the rest of the body', async() => {
+    let pullCount = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if(pullCount++ === 0) controller.enqueue(new Uint8Array(4096));
+        else if(pullCount === 2) controller.enqueue(new Uint8Array(1));
+        else controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      }
+    }, {highWaterMark: 0});
+    const response = new Response(body, {headers: {'content-type': 'application/json'}});
+
+    await expect(fetchTeagramDeploymentConfig(async() => response)).rejects.toThrow('too large');
+    expect(pullCount).toBe(2);
+    expect(cancelled).toBe(true);
+  });
+
   it('requests the runtime config without caching or following redirects', async() => {
     const fetcher = vi.fn(async() => new Response('{"server":"demo.teagram.io","autoGuest":true}', {
       headers: {'content-type': 'application/json'}
