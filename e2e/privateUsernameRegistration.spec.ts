@@ -59,6 +59,84 @@ for(const mode of ['open', 'invite'] as const) {
   });
 }
 
+test('shows username and password feedback in the registration form', async({page}, testInfo) => {
+  await page.setViewportSize({width: 320, height: 720});
+  await setupRegistrationMocks(page, testInfo, 'open', false, false, false, false, undefined, 'adam', true, 'admin');
+  await page.goto('/?noWorker=1&noServiceWorker=1', {waitUntil: 'domcontentloaded'});
+
+  const registration = page.locator('#auth-pages');
+  await expect(registration.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
+  await registration.getByRole('button', {name: 'Create account'}).click();
+
+  const username = registration.getByRole('textbox', {name: 'Username'});
+  const displayName = registration.getByRole('textbox', {name: 'Display name'});
+  const password = registration.getByRole('textbox', {name: 'Password', exact: true});
+  const confirmPassword = registration.getByRole('textbox', {name: 'Confirm password'});
+  const create = registration.getByRole('button').filter({hasText: /Create account|Please wait…/});
+
+  await username.focus();
+  await page.keyboard.press('Tab');
+  await expect(displayName).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(password).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(confirmPassword).toBeFocused();
+
+  await expect(registration.locator('#registration-username-status')).toHaveText('Use 2–32 characters, start with a letter, and use letters, numbers, or underscores.');
+  await expect(create).toBeDisabled();
+  await username.fill('a');
+  await expect(registration.locator('#registration-username-status')).toHaveText('Use at least 2 characters.');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+  await captureState(page, testInfo, 'registration-username-too-short');
+
+  await username.fill('adam');
+  await expect(registration.locator('#registration-username-status')).toHaveText('Use 2–32 characters, start with a letter, and use letters, numbers, or underscores.');
+  await expect(username).not.toHaveAttribute('aria-invalid', 'true');
+
+  await username.fill('adam-name');
+  await expect(registration.locator('#registration-username-status')).toHaveText('Use letters, numbers, and underscores only.');
+  await captureState(page, testInfo, 'registration-username-invalid-character');
+
+  await username.fill('admin');
+  await displayName.fill('CI Registration');
+  await password.fill('x');
+  await expect(registration.locator('#registration-password-status')).toHaveCount(0);
+  await expect(registration.locator('#registration-password-rules')).toHaveCount(0);
+  await expect(registration.locator('#registration-confirm-password-status')).toHaveText('Enter your password again.');
+
+  await confirmPassword.fill('y');
+  await expect(registration.locator('#registration-confirm-password-status')).toHaveText('Those passwords don\'t match.');
+  await expect(create).toBeDisabled();
+  await captureState(page, testInfo, 'registration-password-mismatch');
+
+  await confirmPassword.fill('x');
+  await expect(registration.locator('#registration-confirm-password-status')).toHaveText('Passwords match.');
+  await expect(create).toBeEnabled();
+  await captureState(page, testInfo, 'registration-password-match');
+  await confirmPassword.focus();
+  await page.keyboard.press('Tab');
+  await expect(create).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(create).toHaveText('Please wait…');
+  await captureState(page, testInfo, 'registration-submitting');
+  await expect(registration.locator('#registration-username-status')).toHaveText('Choose a valid username.', {timeout: 30_000});
+  await expect(username).toHaveAttribute('aria-invalid', 'true');
+  await captureState(page, testInfo, 'registration-username-reserved');
+
+  await username.fill('adam');
+  await expect(registration.locator('#registration-username-status')).toHaveText('Use 2–32 characters, start with a letter, and use letters, numbers, or underscores.');
+  await create.click();
+  await expect(registration.locator('#registration-username-status')).toHaveText('That username is taken.', {timeout: 30_000});
+  await expect(username).toHaveAttribute('aria-invalid', 'true');
+  await captureState(page, testInfo, 'registration-username-taken');
+
+  const calls = await page.evaluate(() => (window as any).__registrationCalls as Array<{method: string}>);
+  expect(calls.filter((call) => call.method.startsWith('auth.')).map((call) => call.method)).toEqual([
+    'auth.sendCode', 'auth.signIn', 'auth.signUp',
+    'auth.sendCode', 'auth.signIn', 'auth.signUp'
+  ]);
+});
+
 test('retries username registration when the server requests Turnstile', async({page}, testInfo) => {
   const turnstileRequests: string[] = [];
   page.on('request', (request) => {

@@ -6,7 +6,7 @@ import type {RequestTurnstileChallenge} from '@/pages/turnstileSignup';
 
 export {isPrivateUsernameCredentialError} from '@/pages/privateUsernameLoginState';
 
-const USERNAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_]{4,31}$/;
+const USERNAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_]{1,31}$/;
 
 export type PrivateUsernameAuthResult =
   | {kind: 'invalidInput'}
@@ -18,7 +18,6 @@ export type PrivateUsernameAuthResult =
   | {kind: 'registrationClosed'}
   | {kind: 'termsDeclined'}
   | {kind: 'termsAcceptanceError', errorType?: string}
-  | {kind: 'weakPassword', user: User}
   | {kind: 'passwordSetupError', user: User, errorType?: string}
   | {kind: 'password'}
   | {kind: 'authorized', user: User}
@@ -38,7 +37,7 @@ export type PrivateUsernameRegistration = {
   checkPassword?: (password: string) => Promise<User | false | undefined>
 };
 
-export type PrivateUsernameRegistrationError = 'usernameTaken' | 'invalidUsername' | 'invalidDisplayName' | 'invalidInvite' | 'registrationClosed' | 'weakPassword' | 'error';
+export type PrivateUsernameRegistrationError = 'usernameTaken' | 'invalidUsername' | 'invalidDisplayName' | 'invalidInvite' | 'registrationClosed' | 'error';
 
 type InvokeAuthApi = (
   method: 'auth.sendCode' | 'auth.signIn' | 'auth.checkPassword' | 'auth.signUp' | 'invokeWithReCaptcha',
@@ -85,10 +84,6 @@ export function getPrivateUsernameRegistrationError(error: unknown): PrivateUser
       return 'invalidInvite';
     case 'INPUT_REQUEST_INVALID':
       return 'registrationClosed';
-    case 'PASSWORD_TOO_WEAK':
-    case 'NEW_PASSWORD_BAD':
-    case 'NEW_SALT_INVALID':
-      return 'weakPassword';
     default:
       return 'error';
   }
@@ -241,7 +236,7 @@ export async function authenticatePrivateUsername(
       if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
       if(authKeyRecoveryFailed) return getAuthErrorResult(error, true, true);
       const errorKind = getPrivateUsernameRegistrationError(error);
-      return errorKind === 'weakPassword' || errorKind === 'error' ? getAuthErrorResult(error, true) : {kind: errorKind};
+      return errorKind === 'error' ? getAuthErrorResult(error, true) : {kind: errorKind};
     }
 
     if(!isRecord(signUpResponse) || signUpResponse._ !== 'auth.authorization' || !isRecord(signUpResponse.user)) {
@@ -263,7 +258,6 @@ export async function authenticatePrivateUsername(
     } catch(error) {
       if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
       const errorKind = getPrivateUsernameRegistrationError(error);
-      if(errorKind === 'weakPassword') return {kind: 'weakPassword', user};
       const errorType = getErrorType(error);
       return typeof errorType === 'string' ? {kind: 'passwordSetupError', user, errorType} : {kind: 'passwordSetupError', user};
     }

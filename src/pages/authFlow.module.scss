@@ -153,11 +153,26 @@ $corner-button-size: 2.5rem;
 .registrationFields {
   display: flex;
   flex-direction: column;
-  gap: .5rem;
+  gap: .25rem;
 
   :global(.input-wrapper) {
     margin-top: .75rem;
   }
+}
+
+.registrationFieldStatus,
+.registrationFieldStatusError {
+  margin: -.25rem .75rem 0;
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.registrationFieldStatus {
+  color: var(--secondary-text-color);
+}
+
+.registrationFieldStatusError {
+  color: var(--danger-color);
 }
 
 .registrationActions {
