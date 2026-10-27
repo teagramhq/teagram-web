@@ -29,6 +29,7 @@ from '@components/sidebarLeft/tabs/purchaseUsernameCaption';
 import type {User} from '@layer';
 import {i18n, LangPackKey} from '@lib/langPack';
 import wrapUrl from '@lib/richTextProcessor/wrapUrl';
+import {useAppConfig} from '@stores/appState';
 
 async function loadEditBotData(
   tab: InstanceType<typeof AppEditBotTab>,
@@ -102,7 +103,11 @@ function EditBotForm(props: {data: EditBotData}) {
       hasAvatarPreview() ||
       !!usernameField()?.isValidToChange();
   });
-  const canSave = () => isDirty() && !saving();
+  const displayNameMaxLength = () => useAppConfig()?.display_name_max_length;
+  const bioMaxLength = () => useAppConfig()?.bio_max_length ?? props.data.bioMaxLength;
+  const canSave = () => isDirty() && !saving() &&
+    (displayNameMaxLength() === undefined || [...firstName()].length <= displayNameMaxLength()) &&
+    (bioMaxLength() === undefined || [...about()].length <= bioMaxLength());
 
   onCleanup(() => {
     avatarEdit.clear();
@@ -183,14 +188,14 @@ function EditBotForm(props: {data: EditBotData}) {
           <InputFieldTsx
             label="EditProfile.FirstNameLabel"
             name="first-name"
-            maxLength={70}
+            maxLength={displayNameMaxLength()}
             value={firstName()}
             onRawInput={setFirstName}
           />
           <InputFieldTsx
             label="DescriptionPlaceholder"
             name="bio"
-            maxLength={props.data.bioMaxLength}
+            maxLength={bioMaxLength()}
             value={about()}
             onRawInput={setAbout}
           />

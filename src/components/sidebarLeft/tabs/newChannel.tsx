@@ -12,6 +12,7 @@ import toggleDisability from '@helpers/dom/toggleDisability';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import {useHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
 import type {AppNewChannelTab} from '@components/solidJsTabs/tabs';
+import {useAppConfig} from '@stores/appState';
 
 const NewChannel = () => {
   const [tab] = useSuperTab<typeof AppNewChannelTab>();
@@ -91,12 +92,13 @@ const NewChannel = () => {
       <div class="input-wrapper">
         <InputFieldTsx
           label="EnterChannelName"
-          maxLength={128}
+          maxLength={useAppConfig()?.channel_title_max_length}
+          minLength={useAppConfig()?.channel_title_min_length}
           instanceRef={(ref) => nameField = ref}
         />
         <InputFieldTsx
           label="DescriptionOptionalPlaceholder"
-          maxLength={255}
+          maxLength={useAppConfig()?.channel_about_max_length}
           withLinebreaks
           instanceRef={(ref) => descField = ref}
         />

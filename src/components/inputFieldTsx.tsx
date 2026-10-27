@@ -23,7 +23,7 @@ export const InputFieldTsx = <T extends typeof InputField>(inProps: InputFieldTs
 
   const [, options] = splitProps(props, ['class', 'value', 'InputFieldClass', 'errorLabel', 'errorLabelOptions', 'disabled'])
 
-  const obj = new props.InputFieldClass(options)
+  const obj = new props.InputFieldClass({...options})
   props.instanceRef?.(obj as InstanceOf<T>)
 
   createEffect(on(
@@ -51,6 +51,11 @@ export const InputFieldTsx = <T extends typeof InputField>(inProps: InputFieldTs
         obj.value = value
       }
     }
+  ))
+
+  createEffect(on(
+    () => [props.maxLength, props.minLength] as const,
+    ([maxLength, minLength]) => obj.setLengthLimits(maxLength, minLength)
   ))
 
   createEffect(on(

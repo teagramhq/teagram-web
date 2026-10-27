@@ -49,13 +49,25 @@ export interface MTAppConfig {
   channels_public_limit_premium?:            number;
   caption_length_limit_default?:             number;
   caption_length_limit_premium?:             number;
+  caption_max_length?:                       number;
   upload_max_fileparts_default?:             number;
   upload_max_fileparts_premium?:             number;
+  upload_max_part_bytes?:                    number;
+  upload_max_file_bytes?:                   number;
   upload_premium_speedup_download?:          number;
   upload_premium_speedup_notify_period?:     number;
   upload_premium_speedup_upload?:            number;
   about_length_limit_default?:               number;
   about_length_limit_premium?:               number;
+  bio_max_length?:                           number;
+  display_name_max_length?:                  number;
+  group_title_min_length?:                   number;
+  group_title_max_length?:                   number;
+  group_about_max_length?:                   number;
+  channel_title_min_length?:                 number;
+  channel_title_max_length?:                 number;
+  channel_about_max_length?:                 number;
+  message_max_length?:                       number;
   stickers_premium_by_emoji_num?:            number;
   stickers_normal_by_emoji_per_premium_num?: number;
   message_animated_emoji_max?:               number;
@@ -170,6 +182,9 @@ export interface MTAppConfig {
   aicompose_tone_saved_limit_premium?:        number;
   community_peers_limit?:                     number;
   community_bot_peers_limit?:                 number;
+  username_min_length?:                       number;
+  username_max_length?:                       number;
+  username_pattern?:                          string;
   registration_mode?:                         'closed' | 'invite' | 'open';
   turnstile?:                                 {site_key?: string};
 }

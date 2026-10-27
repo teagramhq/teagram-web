@@ -59,14 +59,23 @@ export default function SignUpCard(props: {spec: Spec}) {
   /* ---------- inputs ---------- */
 
   const nameInputField = new InputField({
-    label: 'FirstName',
-    maxLength: 70
+    label: 'FirstName'
   });
 
   const lastNameInputField = new InputField({
-    label: 'LastName',
-    maxLength: 64
+    label: 'LastName'
   });
+
+  let appConfigPromise: Promise<Awaited<ReturnType<typeof managers.apiManager.getAppConfig>>> | undefined;
+  const loadAppConfig = () => {
+    return appConfigPromise ||= Promise.resolve(managers.apiManager.getAppConfig()).then((config) => {
+      if(!cancelled) {
+        nameInputField.setLengthLimits(config.display_name_max_length);
+        lastNameInputField.setLengthLimits(config.display_name_max_length);
+      }
+      return config;
+    });
+  };
 
   /* ---------- live full-name preview (drives MediaHeader.Title) ---------- */
 
@@ -96,17 +105,22 @@ export default function SignUpCard(props: {spec: Spec}) {
     });
   }
 
-  function onSubmit() {
+  async function onSubmit() {
+    if(submitting()) return;
+    setSubmitting(true);
+
+    await loadAppConfig().catch((): undefined => undefined);
+    if(cancelled) return;
     if(nameInputField.input.classList.contains('error') || lastNameInputField.input.classList.contains('error')) {
+      setSubmitting(false);
       return;
     }
 
     if(!nameInputField.value.length) {
       nameInputField.input.classList.add('error');
+      setSubmitting(false);
       return;
     }
-
-    setSubmitting(true);
 
     const name = nameInputField.value.trim();
     const lastName = lastNameInputField.value.trim();
@@ -153,6 +167,10 @@ export default function SignUpCard(props: {spec: Spec}) {
   /* ---------- lifecycle ---------- */
 
   onMount(() => {
+    void loadAppConfig().catch((error) => {
+      console.error('sign-up config error', error);
+    });
+
     managers.appStateManager.pushToState('authState', {
       _: 'authStateSignUp',
       authCode: props.spec.payload

@@ -9,6 +9,7 @@ export class UsernameInputField extends InputField {
   private checkUsernamePromise: Promise<any>;
   private checkUsernameDebounced: (username: string) => void;
   private saveError = false;
+  private appConfig: MTAppConfig;
   public options: InputFieldOptions & {
     peerId?: PeerId,
     listenerSetter: ListenerSetter,
@@ -28,6 +29,16 @@ export class UsernameInputField extends InputField {
     super(options);
 
     this.checkUsernameDebounced = debounce(this.checkUsername.bind(this), 150, false, true);
+    this.managers.apiManager?.getAppConfig?.().then((appConfig) => {
+      if(!this.isActive()) return;
+
+      this.appConfig = appConfig;
+      const value = this.getValue();
+      if(value !== this.originalValue && value.length && !isUsernameValid(value, this.appConfig)) {
+        this.setError(this.options.invalidText);
+        this.options.onChange?.();
+      }
+    }, () => {});
 
     options.listenerSetter.add(this.input)('input', () => {
       const value = this.getValue();
@@ -38,7 +49,7 @@ export class UsernameInputField extends InputField {
         this.setState(InputState.Neutral);
         this.options.onChange?.();
         return;
-      } else if(!isUsernameValid(value)) {
+      } else if(!isUsernameValid(value, this.appConfig)) {
         this.setError(this.options.invalidText);
       } else {
         this.setState(InputState.Neutral);
@@ -65,6 +76,7 @@ export class UsernameInputField extends InputField {
 
   private checkUsername(username: string) {
     if(!this.isActive() || this.saveError || this.checkUsernamePromise) return;
+    if(!isUsernameValid(username, this.appConfig)) return;
 
     this.error = undefined;
     let checkPromise: Promise<any>
@@ -77,7 +89,9 @@ export class UsernameInputField extends InputField {
     const promise = this.checkUsernamePromise = checkPromise.then((available) => {
       if(!this.isActive() || this.saveError || this.getValue() !== username) return;
 
-      if(available) {
+      if(!isUsernameValid(username, this.appConfig)) {
+        this.setError(this.options.invalidText);
+      } else if(available) {
         this.setState(InputState.Valid, this.options.availableText);
       } else {
         this.setError(this.options.takenText);
@@ -108,7 +122,7 @@ export class UsernameInputField extends InputField {
       this.options.onChange?.();
 
       const value = this.getValue();
-      if(value !== username && this.isValidToChange() && isUsernameValid(value)) {
+      if(value !== username && this.isValidToChange() && isUsernameValid(value, this.appConfig)) {
         this.checkUsername(value);
       }
     });

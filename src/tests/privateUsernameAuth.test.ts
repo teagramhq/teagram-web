@@ -12,20 +12,31 @@ const SENT_CODE = {
 };
 
 describe('private username sign-in', () => {
-  it('accepts only the server username syntax', () => {
-    expect(isPrivateUsername('Alice_123')).toBe(true);
-    expect(isPrivateUsername('a1234')).toBe(true);
-    expect(isPrivateUsername('1Alice')).toBe(false);
-    expect(isPrivateUsername('_Alice1')).toBe(false);
-    expect(isPrivateUsername('Abc1')).toBe(true);
-    expect(isPrivateUsername('A'.repeat(33))).toBe(false);
-    expect(isPrivateUsername('Alice-123')).toBe(false);
+  it('applies the username limits and pattern supplied by appConfig', () => {
+    const appConfig = {
+      username_min_length: 2,
+      username_max_length: 4,
+      username_pattern: '^[a-z][a-z0-9_]{1,3}$'
+    };
+
+    expect(isPrivateUsername('ab', appConfig)).toBe(true);
+    expect(isPrivateUsername('a_1b', appConfig)).toBe(true);
+    expect(isPrivateUsername('a', appConfig)).toBe(false);
+    expect(isPrivateUsername('abcde', appConfig)).toBe(false);
+    expect(isPrivateUsername('1a', appConfig)).toBe(false);
+    expect(isPrivateUsername('a-b', appConfig)).toBe(false);
+  });
+
+  it('allows a non-empty username when an older server omits username rules', () => {
+    expect(isPrivateUsername('a')).toBe(true);
+    expect(isPrivateUsername('A'.repeat(40))).toBe(true);
+    expect(isPrivateUsername('')).toBe(false);
   });
 
   it('rejects malformed input before making an authentication RPC', async() => {
     const invokeApi = vi.fn();
 
-    await expect(authenticatePrivateUsername('a', invokeApi)).resolves.toEqual({kind: 'invalidInput'});
+    await expect(authenticatePrivateUsername('', invokeApi)).resolves.toEqual({kind: 'invalidInput'});
     expect(invokeApi).not.toHaveBeenCalled();
   });
 

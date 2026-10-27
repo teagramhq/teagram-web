@@ -3879,6 +3879,7 @@ export default class ChatInput {
     container,
     sendingFew,
     textOverflow,
+    messageMaxLength,
     emoticonsDropdown: _emoticonsDropdown
   }: {
     peerId: PeerId,
@@ -3887,6 +3888,7 @@ export default class ChatInput {
     container?: HTMLElement,
     sendingFew?: boolean,
     textOverflow?: boolean,
+    messageMaxLength?: number,
     emoticonsDropdown?: EmoticonsDropdown
   }) {
     if(peerId.isUser()) {
@@ -3942,7 +3944,8 @@ export default class ChatInput {
     return {
       element: this.btnSendContainer,
       peerId: this.chat.peerId,
-      managers: this.managers
+      managers: this.managers,
+      messageMaxLength: this.chat.appConfig.message_max_length
     };
   }
 
@@ -4277,7 +4280,8 @@ export default class ChatInput {
     }
 
     const config = await this.managers.apiManager.getConfig();
-    const splitted = splitStringByLength(value, config.message_length_max);
+    const maxLength = this.chat?.appConfig.message_max_length ?? config.message_length_max;
+    const splitted = splitStringByLength(value, maxLength);
 
     this.inputState.set({messageCount: splitted.length});
   }, 120);
@@ -4357,7 +4361,7 @@ export default class ChatInput {
     forwarding?: ChatInput['forwarding'],
     sendTextParams?: Parameters<AppMessagesManager['sendText']>[0],
     forwardParams?: Pick<Parameters<AppMessagesManager['forwardMessages']>[0], 'dropAuthor' | 'dropCaptions'>,
-    slowModeParams: Pick<Parameters<typeof ChatInput['showSlowModeTooltipIfNeeded']>[0], 'peerId' | 'managers' | 'element'>,
+    slowModeParams: Pick<Parameters<typeof ChatInput['showSlowModeTooltipIfNeeded']>[0], 'peerId' | 'managers' | 'element' | 'messageMaxLength'>,
     paidMessageInterceptor?: PaidMessagesInterceptor,
     ephemeral?: boolean,
     text?: LocalTextWithOptionalEntities
@@ -4383,7 +4387,7 @@ export default class ChatInput {
       }
 
       const config = await rootScope.managers.apiManager.getConfig();
-      const MAX_LENGTH = config.message_length_max;
+      const MAX_LENGTH = slowModeParams.messageMaxLength ?? config.message_length_max;
       const textOverflow = value.length > MAX_LENGTH;
 
       messageCount += trimmedValue ?

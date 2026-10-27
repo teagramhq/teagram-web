@@ -57,12 +57,12 @@ export const URL_REG_EXP = URL_PROTOCOL_REG_EXP_PART +
   // resource path
   '(?:/(?:\\S{0,255}[^\\s.;,(\\[\\]{}<>"\'])?)?';
 export const URL_PROTOCOL_REG_EXP = new RegExp('^' + URL_PROTOCOL_REG_EXP_PART.slice(0, -1), 'i');
-export const USERNAME_REG_EXP = '[a-zA-Z\\d_]{5,32}';
+const TOKEN_REG_EXP = '[^\\s@.,!?;:()\\[\\]{}<>"\']+';
 // export const TIMESTAMP_REG_EXP = '(?:\\s|^)((?:\\d{1,2}:)?(?:[0-5]?[0-9]):(?:[0-5][0-9]))(?:\\s|$)';
 export const TIMESTAMP_REG_EXP = '(?:\\s|^)((?:(\\d{1,2}):(?:[0-5]?[0-9])|(?:\\d{1,2}|\\d{3,})):(?:[0-5][0-9]))(?:\\s|$)';
-export const BOT_COMMAND_REG_EXP = '\\/([a-zA-Z\\d_]{1,32})(?:@(' + USERNAME_REG_EXP + '))?(\\b|$)';
-const TAG_REG_EXP = '(?:#[' + ALPHA_NUMERIC_REG_EXP + ']{2,64}|\\$[A-Z]{1,8}(?![A-Z\\d_]))(?:@' + USERNAME_REG_EXP + ')?';
-export const FULL_REG_EXP = new RegExp('(^| )(@)(' + USERNAME_REG_EXP + ')|(' + URL_REG_EXP + ')|(\\n)|(' + emojiRegExp + ')|(^|[\\s\\(\\]])(' + TAG_REG_EXP + ')|(^|\\s)' + BOT_COMMAND_REG_EXP + '|' + TIMESTAMP_REG_EXP + '', 'i');
+export const BOT_COMMAND_REG_EXP = '\\/([a-zA-Z\\d_]{1,32})(?:@(' + TOKEN_REG_EXP + '))?(\\b|$)';
+const TAG_REG_EXP = '(?:#[' + ALPHA_NUMERIC_REG_EXP + ']{2,64}|\\$[A-Z]{1,8}(?![A-Z\\d_]))(?:@' + TOKEN_REG_EXP + ')?';
+export const FULL_REG_EXP = new RegExp('(^| )(@)(' + TOKEN_REG_EXP + ')|(' + URL_REG_EXP + ')|(\\n)|(' + emojiRegExp + ')|(^|[\\s\\(\\]])(' + TAG_REG_EXP + ')|(^|\\s)' + BOT_COMMAND_REG_EXP + '|' + TIMESTAMP_REG_EXP + '', 'i');
 export const EMAIL_REG_EXP = /^(([^<>()[\]\\.,;:\s@\"]+(\.[^<>()[\]\\.,;:\s@\"]+)*)|(\".+\"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
 // const markdownTestRegExp = /[`_*@~]/;
 export const MARKDOWN_REG_EXP = /(^|\s|\n)(````?)([\s\S]+?)(````?)([\s\n\.,:?!;]|$)|(^|\s|\x01)(`|~~|\*\*|__|_-_|\|\|)([^\n]+?)\7([\x01\s\.,:?!;]|$)|@(\d+)\s*\((.+?)\)|(\[(.+?)\]\((.+?)\))/m;

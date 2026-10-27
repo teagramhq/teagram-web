@@ -1,27 +1,15 @@
 // https://github.com/tdlib/td/blob/c95598e5e1493881d31211c1329bdbe4630f6136/td/telegram/misc.cpp#L246
-export function isUsernameValid(username: string) {
-  if(username.length < 3 || username.length > 32) {
-    return false;
-  }
+import type {MTAppConfig} from '@/appConfig';
 
-  if(!/[a-zA-Z]/.test(username.charAt(0))) {
-    return false;
-  }
-
-  for(let i = 0; i < username.length; i++) {
-    const c = username.charAt(i);
-    if(!/[a-zA-Z0-9_]/.test(c)) {
-      return false;
-    }
-  }
-
-  if(username.charAt(username.length - 1) === '_') {
-    return false;
-  }
-
-  for(let i = 1; i < username.length; i++) {
-    if(username.charAt(i - 1) === '_' && username.charAt(i) === '_') {
-      return false;
+export function isUsernameValid(username: string, appConfig?: Partial<MTAppConfig>) {
+  if(!username) return false;
+  if(appConfig?.username_min_length !== undefined && username.length < appConfig.username_min_length) return false;
+  if(appConfig?.username_max_length !== undefined && username.length > appConfig.username_max_length) return false;
+  if(appConfig?.username_pattern !== undefined) {
+    try {
+      if(!new RegExp(appConfig.username_pattern).test(username)) return false;
+    } catch{
+      // Let the server validate usernames when its configured pattern is malformed.
     }
   }
 
@@ -29,5 +17,19 @@ export function isUsernameValid(username: string) {
 }
 
 export function isWebAppNameValid(name: string) {
-  return name.length >= 3 && isUsernameValid(name);
+  if(name.length < 3 || name.length > 32) return false;
+  if(!/[a-zA-Z]/.test(name.charAt(0))) return false;
+
+  for(let i = 0; i < name.length; i++) {
+    const char = name.charAt(i);
+    if(!/[a-zA-Z0-9_]/.test(char)) return false;
+  }
+
+  if(name.charAt(name.length - 1) === '_') return false;
+
+  for(let i = 1; i < name.length; i++) {
+    if(name.charAt(i - 1) === '_' && name.charAt(i) === '_') return false;
+  }
+
+  return true;
 }
