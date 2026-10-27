@@ -1147,11 +1147,10 @@ test('isolates two server tabs when a custom server worker takes control', async
         form.action = action;
         form.submit();
       }, `${appOriginString}/share/`);
-      // web.teagram.io always opens on the server prompt, with the remembered server preselected.
-      const sharePicker = sharePage.getByRole('dialog');
-      await expect(sharePicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(SERVER_HOST, {timeout: 30_000});
-      await sharePicker.getByRole('button', {name: 'Continue'}).click();
+      // The remembered, pinned server opens directly, without a second prompt.
       await expect(sharePage.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+      await expect(sharePage.getByRole('dialog')).toHaveCount(0);
+      expect(await sharePage.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(SERVER_HOST);
       await expect.poll(() => sharePage!.evaluate(() => {
         const share = (window as any).apiManagerProxy.share;
         return share && {title: share.title, text: share.text, url: share.url};
