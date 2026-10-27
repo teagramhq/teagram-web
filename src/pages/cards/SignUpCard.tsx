@@ -106,18 +106,21 @@ export default function SignUpCard(props: {spec: Spec}) {
   }
 
   async function onSubmit() {
+    if(submitting()) return;
+    setSubmitting(true);
+
     await loadAppConfig().catch((): undefined => undefined);
     if(cancelled) return;
     if(nameInputField.input.classList.contains('error') || lastNameInputField.input.classList.contains('error')) {
+      setSubmitting(false);
       return;
     }
 
     if(!nameInputField.value.length) {
       nameInputField.input.classList.add('error');
+      setSubmitting(false);
       return;
     }
-
-    setSubmitting(true);
 
     const name = nameInputField.value.trim();
     const lastName = lastNameInputField.value.trim();
