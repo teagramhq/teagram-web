@@ -619,6 +619,9 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await themeButton.click();
     await expect(page.locator('html')).toHaveClass(/night/);
     await page.screenshot({path: join(screenshots, 'N1.png')});
+    await page.reload({waitUntil: 'domcontentloaded'});
+    await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+    await expect(page.locator('html')).toHaveClass(/night/);
     await themeButton.click();
     await expect(page.locator('html')).not.toHaveClass(/night/);
 

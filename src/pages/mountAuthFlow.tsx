@@ -22,10 +22,11 @@ import {CardSpec, navigateAuth} from '@/pages/authFlow';
  * ```
  */
 export type MountAuthFlowState = Exclude<AuthState, AuthState.signedIn>;
+type MountAuthFlowOptions = {persistThemeToCommonState?: boolean};
 
 let activeDispose: (() => void) | null = (import.meta.hot?.data as any)?.activeDispose ?? null;
 
-export function mountAuthFlow(authState: MountAuthFlowState): () => void {
+export function mountAuthFlow(authState: MountAuthFlowState, options: MountAuthFlowOptions = {}): () => void {
   // Auth flow can only mount once at a time — clean up any previous instance.
   if(activeDispose) {
     activeDispose();
@@ -41,7 +42,7 @@ export function mountAuthFlow(authState: MountAuthFlowState): () => void {
   root.style.display = 'contents';
   document.body.appendChild(root);
 
-  const dispose = render(() => <AuthCardsHost/>, root);
+  const dispose = render(() => <AuthCardsHost persistThemeToCommonState={options.persistThemeToCommonState}/>, root);
 
   activeDispose = () => {
     dispose();

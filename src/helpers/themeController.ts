@@ -454,7 +454,8 @@ export class ThemeController {
 
   public async switchTheme(
     name?: AppTheme['name'],
-    coordinates?: {x: number, y: number}
+    coordinates?: {x: number, y: number},
+    persistTheme?: (name: AppTheme['name']) => Promise<void>
   ) {
     const [appSettings, setAppSettings] = useAppSettings();
     if(name === undefined) {
@@ -467,7 +468,11 @@ export class ThemeController {
         (last?.light ?? 'day') :
         (last?.dark ?? 'night');
     }
-    await setAppSettings('theme', name);
+    if(persistTheme) {
+      await persistTheme(name);
+    } else {
+      await setAppSettings('theme', name);
+    }
     rootScope.dispatchEvent('theme_change', coordinates);
   }
 
