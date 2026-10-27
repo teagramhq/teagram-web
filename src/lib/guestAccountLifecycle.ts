@@ -283,6 +283,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
       };
       cancelled.record = record;
       await saveRecord(record);
+      await assertContext(context, boundUserId, cancelled);
       await dependencies.setUser(user);
       boundUserId = authorizedUserId;
       await assertContext(context, boundUserId, cancelled);
@@ -482,6 +483,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
               if(identity.wipeGeneration !== undefined) record.wipeGeneration = identity.wipeGeneration;
               record.accountUserId = authorizedUserId;
               await saveRecord(record);
+              await assertContext(context, boundUserId, cancelled);
               await dependencies.setUser(user);
               boundUserId = authorizedUserId;
               await assertContext(context, boundUserId, cancelled);

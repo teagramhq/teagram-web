@@ -66,6 +66,12 @@ function makeDependencies(overrides: Partial<GuestAccountLifecycleDependencies> 
   };
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return {promise, resolve};
+}
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe('guest account lifecycle', () => {
@@ -333,6 +339,30 @@ describe('guest account lifecycle', () => {
     expect(state.records[0].accountUserId).toBeUndefined();
   });
 
+  it('does not authorize the account slot after it changes during the authorization record write', async() => {
+    const state = makeDependencies();
+    const delayedWrite = createDeferred<void>();
+    const writeReached = createDeferred<void>();
+    const writeCredentials = state.dependencies.writeCredentials;
+    let writeCount = 0;
+    state.dependencies.writeCredentials = async(records) => {
+      if(++writeCount === 2) {
+        writeReached.resolve(undefined);
+        await delayedWrite.promise;
+      }
+      await writeCredentials(records);
+    };
+    const lifecycle = createGuestAccountLifecycle(state.dependencies);
+    const creating = lifecycle.create();
+
+    await writeReached.promise;
+    state.currentAccountNumber = 2;
+    delayedWrite.resolve(undefined);
+
+    await expect(creating).resolves.toEqual({kind: 'cancelled'});
+    expect(state.dependencies.setUser).not.toHaveBeenCalled();
+  });
+
   it('cancels when another tab forgets the guest while password setup is pending', async() => {
     const state = makeDependencies();
     let invalidate = () => {};
@@ -376,6 +406,43 @@ describe('guest account lifecycle', () => {
     expect(state.dependencies.signInWithPassword).toHaveBeenCalledWith('P'.repeat(43));
     expect(state.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
     expect(state.records[0].status).toBe('committed');
+  });
+
+  it('does not authorize a switched account slot after reauthentication record persistence', async() => {
+    const state = makeDependencies();
+    state.accountUserId = 42;
+    state.records = [{
+      version: 1,
+      serverId: IDENTITY.serverId,
+      keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`,
+      password: 'P'.repeat(43),
+      status: 'committed',
+      accountUserId: 42,
+      accountNumber: 1
+    }];
+    const delayedWrite = createDeferred<void>();
+    const writeReached = createDeferred<void>();
+    const writeCredentials = state.dependencies.writeCredentials;
+    state.dependencies.writeCredentials = async(records) => {
+      writeReached.resolve(undefined);
+      await delayedWrite.promise;
+      await writeCredentials(records);
+    };
+    state.dependencies.signInWithPassword = vi.fn().mockResolvedValue(USER);
+    state.invokeApi.mockImplementation(async(method) => {
+      if(method === 'auth.sendCode') return SENT_CODE;
+      if(method === 'auth.signIn') throw {type: 'SESSION_PASSWORD_NEEDED'};
+      throw new Error(`Unexpected API method ${method}`);
+    });
+    const reauthenticating = createGuestAccountLifecycle(state.dependencies).reauthenticate();
+
+    await writeReached.promise;
+    state.currentAccountNumber = 2;
+    delayedWrite.resolve(undefined);
+
+    await expect(reauthenticating).resolves.toEqual({kind: 'cancelled'});
+    expect(state.dependencies.setUser).not.toHaveBeenCalled();
   });
 
   it('adds the verified wipe generation to a legacy guest credential after reauthentication', async() => {

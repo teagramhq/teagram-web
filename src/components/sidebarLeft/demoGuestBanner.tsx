@@ -8,6 +8,7 @@ import {markAutoGuestAttempted} from '@lib/autoGuest';
 import rootScope from '@lib/rootScope';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
 import {ActiveAccountNumber} from '@lib/accounts/types';
+import classNames from '@helpers/string/classNames';
 import styles from '@components/sidebarLeft/pendingSuggestion.module.scss';
 
 export default function DemoGuestBanner() {
@@ -36,7 +37,7 @@ export default function DemoGuestBanner() {
 
   return (
     <Show when={visible()}>
-      <div class={styles.suggestionContainer} role="status">
+      <div class={classNames(styles.suggestionContainer, styles.demoGuestBanner)} role="status">
         <PendingSuggestion class={styles.secondary}>
           <PendingSuggestion.Title>{i18n('Teagram.Demo.Banner.Title')}</PendingSuggestion.Title>
           <PendingSuggestion.Subtitle>

@@ -288,7 +288,7 @@ test('auto-creates one guest from runtime config without a picker and restores i
   await page.goto(`${appOrigin.origin}/?noWorker=1&noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
   const auth = page.locator('#auth-pages');
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(auth.getByRole('status')).toContainText('Creating a guest account…', {timeout: 30_000});
+  await expect(auth.getByRole('status').filter({hasText: 'Creating a guest account…'})).toBeVisible({timeout: 30_000});
   await expect(auth.getByRole('textbox', {name: 'Username'})).toHaveCount(0);
   await expect(auth.getByText('Your guest account is wiped weekly, is lost after you sign out or clear browser data, and is visible to the server operator.'))
     .toBeVisible();
@@ -328,6 +328,8 @@ test('auto-creates one guest from runtime config without a picker and restores i
   await expect(demoGuestBanner.getByText(/Everything is wiped every week\. Use your own server at/)).toBeVisible();
   await demoGuestBanner.evaluate((element) => element.scrollIntoView({block: 'center'}));
   await expect(demoGuestBanner).toBeInViewport();
+  await expect(demoGuestBanner.locator('.row-title')).toHaveCSS('z-index', '1');
+  await expect(demoGuestBanner.locator('.row-subtitle')).toHaveCSS('z-index', '1');
   await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(8282)?.username))
     .toBe(guestUsername);
   const bannerScreenshot = testInfo.outputPath('guest-chat-list-banner.png');
