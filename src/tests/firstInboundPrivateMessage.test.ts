@@ -1,5 +1,6 @@
 import {createTestClient} from './api/harness';
 import type {Message} from '@layer';
+import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 
 describe('first inbound private messages', () => {
   let client: Awaited<ReturnType<typeof createTestClient>>;
@@ -15,25 +16,38 @@ describe('first inbound private messages', () => {
     client?.dispose();
   });
 
-  test('creates a dialog and queues a notification for an unknown sender', async() => {
-    const senderId = 990101 as UserId;
-    const peerId = senderId.toPeerId();
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test.each([
+    {caseName: 'live update', senderId: 990101, isInitialSync: false, notificationCount: 1},
+    {caseName: 'active-tab initial sync', senderId: 990102, isInitialSync: true, notificationCount: 0}
+  ])('creates a dialog and preserves notification routing for $caseName', async({senderId, isInitialSync, notificationCount}) => {
+    const userId = senderId as UserId;
+    const peerId = userId.toPeerId();
     const messages: any = client.managers.appMessagesManager;
     const users: any = client.managers.appUsersManager;
-    const notified: Message.message[] = [];
+    const notifications: any = client.managers.appNotificationsManager;
+    const peers: any = client.managers.appPeersManager;
+    const port = MTProtoMessagePort.getInstance<false>();
 
-    messages.getNotifyPeerSettings = () => Promise.resolve({
+    vi.spyOn(messages.apiUpdatesManager, 'isInitialSync').mockReturnValue(isInitialSync);
+    vi.spyOn(messages, 'getNotifyPeerSettings').mockResolvedValue({
       muted: false,
       peerTypeNotifySettings: {show_previews: false}
     });
-    messages.notifyAboutMessage = (message: Message.message) => {
-      notified.push(message);
-      return Promise.resolve();
-    };
+    vi.spyOn(peers, 'isPeerRestricted').mockResolvedValue(false);
+    vi.spyOn(notifications, 'getNotificationTab').mockResolvedValue({
+      state: {idleStartTime: 0},
+      source: undefined
+    });
+    const routeNotification = vi.spyOn(notifications, 'routeNotification');
+    const invokeVoid = vi.spyOn(port, 'invokeVoid').mockImplementation(() => undefined);
 
     users.saveApiUsers([{
       _: 'user',
-      id: senderId,
+      id: userId,
       access_hash: '1',
       first_name: 'Alice',
       pFlags: {}
@@ -46,8 +60,8 @@ describe('first inbound private messages', () => {
       message: {
         _: 'message',
         id: 1,
-        peer_id: {_: 'peerUser', user_id: senderId},
-        from_id: {_: 'peerUser', user_id: senderId},
+        peer_id: {_: 'peerUser', user_id: userId},
+        from_id: {_: 'peerUser', user_id: userId},
         date: 1,
         message: 'Hello from Alice',
         pFlags: {unread: true}
@@ -63,9 +77,9 @@ describe('first inbound private messages', () => {
     expect(dialog?.top_message).not.toBe(0);
     expect((messages.getMessageByPeer(peerId, dialog!.top_message) as Message.message).message).toBe('Hello from Alice');
     expect(dialog?.unread_count).toBe(1);
-    expect(Object.keys(messages.notificationsToHandle)).toContain(String(peerId));
-    expect(messages.notificationsToHandle[String(peerId)].isInitialSync).toBe(false);
-    await vi.waitFor(() => expect(notified).toHaveLength(1));
-    expect(notified[0].message).toBe('Hello from Alice');
+    await vi.waitFor(() => expect(routeNotification).toHaveBeenCalledTimes(1));
+    await routeNotification.mock.results[0].value;
+    expect(routeNotification.mock.calls[0][2]).toBe(isInitialSync);
+    expect(invokeVoid.mock.calls.filter(([type]) => type === 'notificationBuild')).toHaveLength(notificationCount);
   });
 });

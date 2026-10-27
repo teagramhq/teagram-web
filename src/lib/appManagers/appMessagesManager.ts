@@ -9445,6 +9445,7 @@ export class AppMessagesManager extends AppManager {
   private onUpdateNewMessage = (update: Update.updateNewDiscussionMessage | Update.updateNewMessage | Update.updateNewChannelMessage) => {
     const message = update.message as MyMessage;
     if(this.isMessageUnavailableByChannelCutoff(message)) return;
+    const isInitialSync = this.apiUpdatesManager.isInitialSync();
     const peerId = this.getMessagePeer(message);
     const storage = this.getHistoryMessagesStorage(peerId);
 
@@ -9484,12 +9485,10 @@ export class AppMessagesManager extends AppManager {
     }
 
     let dialog = this.dialogsStorage.getAnyDialog(peerId, isLocalThreadUpdate ? threadId : undefined);
-    let isFirstInboundUserMessage = false;
 
 
     if((!dialog || this.reloadConversationsPeers.has(peerId)) && !isLocalThreadUpdate) {
       if(!dialog && peerId.isUser() && !message.pFlags.out) {
-        isFirstInboundUserMessage = true;
         dialog = this.dialogsStorage.generateDialog(peerId);
         dialog.peerId = peerId;
         dialog.folder_id = FOLDER_ID_ALL;
@@ -9736,7 +9735,7 @@ export class AppMessagesManager extends AppManager {
       const notifyPeerToHandle = this.notificationsToHandle[notifyPeer] ??= {
         fwdCount: 0,
         fromId: NULL_PEER_ID,
-        isInitialSync: isFirstInboundUserMessage ? false : this.apiUpdatesManager.isInitialSync()
+        isInitialSync
       };
 
       if(notifyPeerToHandle.fromId !== fromId) {
