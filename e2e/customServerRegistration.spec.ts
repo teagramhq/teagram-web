@@ -212,6 +212,21 @@ test('registers on a second server after a failed host selection', async({page},
   expect(self).toMatchObject({_: 'user', id: 8282, username: 'second_server_user'});
   expect(self.first_name).toBeUndefined();
   expect(self.last_name).toBeUndefined();
+  const calls = await page.evaluate(() => (window as any).__customRegistrationCalls as Array<{
+    method: string,
+    params?: Record<string, unknown>
+  }>);
+  expect(calls.map((call) => call.method).filter((method) => method.startsWith('auth.'))).toEqual([
+    'auth.sendCode',
+    'auth.signIn',
+    'auth.signUp'
+  ]);
+  expect(calls.find((call) => call.method === 'auth.signUp')?.params).toMatchObject({
+    phone_number: 'second_server_user',
+    first_name: 'Local Server',
+    last_name: ''
+  });
+  expect(calls.find((call) => call.method === 'auth.signIn')?.params?.phone_code).toBe(INVITE_SECRET);
 
   await page.locator('.sidebar-tools-button').click();
   await expect.poll(async() => pageErrors.length > 0 ||
@@ -234,24 +249,22 @@ test('registers on a second server after a failed host selection', async({page},
   await chooseAnotherServer.scrollIntoViewIfNeeded();
   await expect(chooseAnotherServer).toBeVisible();
   await page.screenshot({path: testInfo.outputPath('general-server-settings.png')});
-  await page.keyboard.press('Escape');
-  await expect(chooseAnotherServer).toHaveCount(0);
+  const switchReload = page.waitForNavigation({waitUntil: 'domcontentloaded'});
+  await chooseAnotherServer.click({force: true});
+  await switchReload;
+  const switchPicker = page.getByRole('dialog');
+  const switchHost = switchPicker.getByRole('textbox', {name: 'Server host'});
+  await expect(switchHost).toHaveValue('');
+  await expect(switchHost).toHaveAttribute('placeholder', 'your.server.host');
+  expect(await page.evaluate(() => localStorage.getItem('teagram.server-choice.v1'))).toBeNull();
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}')))
+    .toMatchObject({[SERVER_HOST]: expect.any(Object)});
+  await page.screenshot({path: testInfo.outputPath('server-picker-after-switch.png')});
+  await switchHost.fill(SERVER_HOST);
+  await switchPicker.getByRole('button', {name: 'Continue'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
 
-  const calls = await page.evaluate(() => (window as any).__customRegistrationCalls as Array<{
-    method: string,
-    params?: Record<string, unknown>
-  }>);
-  expect(calls.map((call) => call.method).filter((method) => method.startsWith('auth.'))).toEqual([
-    'auth.sendCode',
-    'auth.signIn',
-    'auth.signUp'
-  ]);
-  expect(calls.find((call) => call.method === 'auth.signUp')?.params).toMatchObject({
-    phone_number: 'second_server_user',
-    first_name: 'Local Server',
-    last_name: ''
-  });
-  expect(calls.find((call) => call.method === 'auth.signIn')?.params?.phone_code).toBe(INVITE_SECRET);
   const activeId = await page.evaluate(() => localStorage.getItem('teagram.active-server-id.v1'));
   expect(activeId).toMatch(/^custom-[0-9a-f]{64}$/);
   await page.evaluate((id) => localStorage.setItem(`teagram-${id}:dc2_auth_key`, 'server-a-auth-key'), activeId);

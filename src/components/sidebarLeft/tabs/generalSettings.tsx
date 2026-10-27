@@ -24,6 +24,7 @@ import fastSmoothScroll from '@helpers/fastSmoothScroll';
 import ChatThemesPicker from '@components/chatThemesPicker';
 import ChatBackgroundStore from '@lib/chatBackgroundStore';
 import appDownloadManager from '@lib/appDownloadManager';
+import {SERVER_CHOICE_KEY} from '@config/serverSelection';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Section 1 — text size, chat background, animations toggle, lite mode entry
@@ -101,7 +102,10 @@ const ServerSettingsSection = () => {
         <Row.Title>{host}</Row.Title>
       </Row>
       <Show when={location.hostname.toLowerCase().replace(/\.+$/, '') === 'web.teagram.io'}>
-        <Row clickable={() => location.reload()}>
+        <Row clickable={() => {
+          localStorage.removeItem(SERVER_CHOICE_KEY);
+          location.reload();
+        }}>
           <Row.Icon icon="devices_filled" />
           <Row.Title>Choose another server</Row.Title>
         </Row>
