@@ -4,7 +4,7 @@ import {basename, dirname, isAbsolute} from 'node:path';
 
 import observation from './observation.cjs';
 
-export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'message', 'group']);
+export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group']);
 export const OPTIONAL_SCENARIOS = Object.freeze(['channel', 'poll']);
 const AVAILABLE_SCENARIOS = Object.freeze([...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS]);
 export const POLL_NEGATIVE_CONTROL_SERVER_REVISION = '586403c1f4c92c09b006652278bdd02fd40ddf2d';
@@ -30,7 +30,7 @@ const PAGE_ERROR_MESSAGE_LIMIT = 512;
 const PAGE_ERROR_STACK_FRAME_LIMIT = 16;
 const PAGE_ERROR_FUNCTION_NAME_LIMIT = 128;
 const PAGE_ERROR_STACK_STATES = Object.freeze(['unavailable', 'non_string', 'no_frames', 'unclassified_frames', 'captured', 'partial', 'truncated']);
-const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'channel', 'poll', 'unknown']);
+const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'unknown']);
 const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 const PAGE_DIAGNOSTIC_LIMIT = 16;
 const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
@@ -129,7 +129,7 @@ export function expectedScreenshotCount({pollCreationNegativeControl = false, sc
   }
   const channelScreenshots = hasScenarios && scenarios.includes('channel') ? 10 : 0;
   const pollScreenshots = hasPollScenario ? (pollCreationNegativeControl ? 4 : 14) : 0;
-  return 16 + channelScreenshots + pollScreenshots;
+  return 20 + channelScreenshots + pollScreenshots;
 }
 
 export function parseRealClientArgs(argv) {

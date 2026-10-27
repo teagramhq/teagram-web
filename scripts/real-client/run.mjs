@@ -27,7 +27,7 @@ For the legacy poll regression control, add --poll-creation-negative-control and
 
 The fixture must remain running after artifact-ready. The command validates its immutable pins,
 protected synthetic credentials, internal browser network, audited artifact evidence, per-context
-shared-worker observation, sign-in/message/group plus independently optional channel and poll scenarios,
+shared-worker observation, sign-in/first-message/message/group plus independently optional channel and poll scenarios,
 or one bounded Username submission. The opt-in page-error diagnostics include bounded, sanitized
 source frames, private page path, fixed scenario and stage labels, and optional RPC error type/code.
 Raw page-error messages and stack text are never serialized.

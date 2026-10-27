@@ -9483,18 +9483,27 @@ export class AppMessagesManager extends AppManager {
       threadId = (message as MyMessage).mid;
     }
 
-    const dialog = this.dialogsStorage.getAnyDialog(peerId, isLocalThreadUpdate ? threadId : undefined);
+    let dialog = this.dialogsStorage.getAnyDialog(peerId, isLocalThreadUpdate ? threadId : undefined);
+    let isFirstInboundUserMessage = false;
 
 
     if((!dialog || this.reloadConversationsPeers.has(peerId)) && !isLocalThreadUpdate) {
-      let good = true;
-      if(peerId.isAnyChat()) {
-        good = this.appChatsManager.isInChat(peerId.toChatId());
-      }
+      if(!dialog && peerId.isUser() && !message.pFlags.out) {
+        isFirstInboundUserMessage = true;
+        dialog = this.dialogsStorage.generateDialog(peerId);
+        dialog.peerId = peerId;
+        dialog.folder_id = FOLDER_ID_ALL;
+        this.dialogsStorage.pushDialog({dialog, ignoreOffsetDate: true});
+      } else {
+        let good = true;
+        if(peerId.isAnyChat()) {
+          good = this.appChatsManager.isInChat(peerId.toChatId());
+        }
 
-      if(good) {
-        this.handleNewUpdateAfterReload(peerId, update);
-        return;
+        if(good) {
+          this.handleNewUpdateAfterReload(peerId, update);
+          return;
+        }
       }
 
       // return;
@@ -9705,7 +9714,7 @@ export class AppMessagesManager extends AppManager {
       // the after-reload queue, or a duplicated update bypassing pts dedup).
       const readInboxMaxId = (dialog as MTDialog.dialog).read_inbox_max_id;
       const isPastReadCursor = readInboxMaxId !== undefined && message.mid <= readInboxMaxId;
-      if(inboxUnread && message.mid > dialog.top_message && !isSaved && !isPastReadCursor) {
+      if(inboxUnread && message.mid > dialog.top_message && !isSavedDialog(dialog) && !isPastReadCursor) {
         const releaseUnreadCount = this.dialogsStorage.prepareDialogUnreadCountModifying(dialog);
 
         ++dialog.unread_count;
@@ -9727,7 +9736,7 @@ export class AppMessagesManager extends AppManager {
       const notifyPeerToHandle = this.notificationsToHandle[notifyPeer] ??= {
         fwdCount: 0,
         fromId: NULL_PEER_ID,
-        isInitialSync: this.apiUpdatesManager.isInitialSync()
+        isInitialSync: isFirstInboundUserMessage ? false : this.apiUpdatesManager.isInitialSync()
       };
 
       if(notifyPeerToHandle.fromId !== fromId) {
