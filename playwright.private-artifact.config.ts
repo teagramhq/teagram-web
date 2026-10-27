@@ -9,7 +9,9 @@ const endpoint = new URL(manifest.endpoint);
 const targetPorts = new Set([443, Number(endpoint.port || 443)]);
 const hostResolverRules = [
   'MAP web.teagram.io:443 127.0.0.1:18443',
-  ...[...targetPorts].map((port) => `MAP ${endpoint.hostname}:${port} 127.0.0.1:18443`)
+  ...[...targetPorts].map((port) => `MAP ${endpoint.hostname}:${port} 127.0.0.1:18443`),
+  'MAP cancel-server.example.test:443 127.0.0.1:18443',
+  'MAP cancel-server.example.test:18443 127.0.0.1:18443'
 ].join(', ');
 
 export default defineConfig({

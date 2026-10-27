@@ -137,7 +137,7 @@ async function activateServer(
   await import('./index');
 }
 
-function probeWebSocket(endpoint: string) {
+function probeWebSocket(endpoint: string, signal = new AbortController().signal) {
   return new Promise<boolean>((resolve) => {
     let settled = false;
     let socket: WebSocket;
@@ -145,6 +145,7 @@ function probeWebSocket(endpoint: string) {
       if(settled) return;
       settled = true;
       clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
       if(socket) {
         socket.removeEventListener('open', onOpen);
         socket.removeEventListener('error', onError);
@@ -155,7 +156,13 @@ function probeWebSocket(endpoint: string) {
     };
     const onOpen = () => finish(true);
     const onError = () => finish(false);
+    const onAbort = () => finish(false);
     const timer = setTimeout(() => finish(false), 8000);
+    if(signal.aborted) {
+      finish(false);
+      return;
+    }
+    signal.addEventListener('abort', onAbort, {once: true});
     try {
       socket = new WebSocket(endpoint, 'binary');
       socket.addEventListener('open', onOpen);
@@ -240,6 +247,8 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
   const setFailure = (errorKey: string, host: string, retryable = false) => {
     publish({phase: 'selecting', host, changing: current.changing, errorKey, retryable});
   };
+
+  const isCurrentRun = (run: number, signal: AbortSignal) => !signal.aborted && run === sequence;
 
   async function showFirstUseConfirmation(discovered: DiscoveredServer, target: HTMLElement | undefined) {
     const extraContent = popupContent(
@@ -326,7 +335,8 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
     }
   }
 
-  async function saveAndReload(host: string, server?: DiscoveredServer) {
+  async function saveAndReload(host: string, signal: AbortSignal, run: number, server?: DiscoveredServer) {
+    if(!isCurrentRun(run, signal)) return;
     const id = server?.id || 'default';
     let previousId = 'default';
     try {
@@ -340,12 +350,15 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
       try {
         await unregisterServiceWorkers();
       } catch(error) {
+        if(!isCurrentRun(run, signal)) return;
         console.error('Could not close the previous server session', error);
         setFailure('Teagram.Server.SaveFailed', host);
         return;
       }
+      if(!isCurrentRun(run, signal)) return;
     }
 
+    if(!isCurrentRun(run, signal)) return;
     try {
       localStorage.setItem(SERVER_CHOICE_KEY, host);
       localStorage.setItem(ACTIVE_SERVER_ID_KEY, id);
@@ -353,10 +366,12 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
       else localStorage.removeItem(SERVER_TARGET_KEY);
       sessionStorage.setItem(SERVER_READY_KEY, host);
     } catch(error) {
+      if(!isCurrentRun(run, signal)) return;
       console.error('Could not save server choice', error);
       setFailure('Teagram.Server.SaveFailed', host);
       return;
     }
+    if(!isCurrentRun(run, signal)) return;
     location.reload();
   }
 
@@ -382,7 +397,7 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
         if(run === sequence) setFailure('Teagram.Server.Unsupported', host);
         return;
       }
-      await saveAndReload(host);
+      await saveAndReload(host, signal, run);
       return;
     }
 
@@ -433,11 +448,13 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
       return;
     }
     publish({phase: 'connecting', host, changing, locked: true});
-    if(!await probeWebSocket(discovered.target.endpoint)) {
+    const connected = await probeWebSocket(discovered.target.endpoint, signal);
+    if(!isCurrentRun(run, signal)) return;
+    if(!connected) {
       setFailure('Teagram.Server.WebSocketFailed', host, true);
       return;
     }
-    await saveAndReload(host, discovered);
+    await saveAndReload(host, signal, run, discovered);
   }
 
   const action: ServerSelectionAction = {
