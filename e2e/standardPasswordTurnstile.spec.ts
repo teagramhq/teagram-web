@@ -26,7 +26,7 @@ test('retries standard phone 2FA with the Turnstile token', async({page}, testIn
   await page.setViewportSize({width: 412, height: 915});
 
   await password.fill('mock-password');
-  await password.press('Enter');
+  await auth.getByRole('button', {name: 'Next'}).click();
   const challenge = auth.getByTestId('turnstile-challenge');
   await expect(challenge).toBeVisible({timeout: 30_000});
   await expect(challenge.locator('[role="status"]')).toBeVisible();
