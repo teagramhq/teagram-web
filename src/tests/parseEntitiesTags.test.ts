@@ -50,6 +50,33 @@ describe('parseEntities tags', () => {
     }]);
   });
 
+  test('keeps bot-command captures stable after a chat-specific tag', () => {
+    expect(parseEntities('#test@username /start@helper')).toEqual([{
+      _: 'messageEntityHashtag',
+      offset: 0,
+      length: 14
+    }, {
+      _: 'messageEntityBotCommand',
+      offset: 15,
+      length: 13,
+      unsafe: true
+    }]);
+  });
+
+  test('keeps timestamp captures stable after a chat-specific tag', () => {
+    expect(parseEntities('#test@username 1:23')).toEqual([{
+      _: 'messageEntityHashtag',
+      offset: 0,
+      length: 14
+    }, {
+      _: 'messageEntityTimestamp',
+      offset: 15,
+      length: 4,
+      raw: '1:23',
+      time: 83
+    }]);
+  });
+
   test('only recognizes uppercase cashtags', () => {
     expect(parseEntities('$ton@username')).toEqual([]);
   });

@@ -68,30 +68,6 @@ for(const mode of ['open', 'invite'] as const) {
   });
 }
 
-test('shows the server username error when appConfig omits username rules', async({page}, testInfo) => {
-  await setupRegistrationMocks(page, testInfo, 'open', false, false, false, false, undefined, {
-    includeUsernamePolicy: false,
-    signUpError: 'USERNAME_INVALID'
-  });
-
-  await page.goto('/?noWorker=1&noServiceWorker=1', {waitUntil: 'domcontentloaded'});
-  const registration = page.locator('#auth-pages');
-  await expect(registration.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
-  await registration.getByRole('button', {name: 'Create account'}).click();
-  await registration.locator('input[aria-label="Username"]').fill('a');
-  await registration.locator('input[aria-label="Display name"]').fill('CI Registration');
-  await registration.locator('input[aria-label="Password"]').fill('Teagram-Test-Password-123!');
-  await registration.locator('input[aria-label="Confirm password"]').fill('Teagram-Test-Password-123!');
-  await expect(registration.getByRole('button', {name: 'Create account'})).toBeEnabled();
-  await registration.getByRole('button', {name: 'Create account'}).click();
-
-  const username = registration.getByRole('textbox', {name: 'Username'});
-  await expect(registration.getByRole('alert')).toHaveText('Choose a valid username.');
-  await expect(username).toHaveAttribute('aria-invalid', 'true');
-  await expect(username).toHaveValue('a');
-  await captureState(page, testInfo, 'registration-server-username-error');
-});
-
 test('applies the configured display-name maximum during registration', async({page}, testInfo) => {
   await setupRegistrationMocks(page, testInfo, 'open', false, false, false, false, undefined, {
     displayNameMaxLength: 4
@@ -115,6 +91,30 @@ test('applies the configured display-name maximum during registration', async({p
   await displayName.fill('1234');
   await expect(createAccount).toBeEnabled();
   await captureState(page, testInfo, 'registration-display-name-at-limit');
+});
+
+test('shows the server username error when appConfig omits username rules', async({page}, testInfo) => {
+  await setupRegistrationMocks(page, testInfo, 'open', false, false, false, false, undefined, {
+    includeUsernamePolicy: false,
+    signUpError: 'USERNAME_INVALID'
+  });
+
+  await page.goto('/?noWorker=1&noServiceWorker=1', {waitUntil: 'domcontentloaded'});
+  const registration = page.locator('#auth-pages');
+  await expect(registration.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
+  await registration.getByRole('button', {name: 'Create account'}).click();
+  await registration.locator('input[aria-label="Username"]').fill('a');
+  await registration.locator('input[aria-label="Display name"]').fill('CI Registration');
+  await registration.locator('input[aria-label="Password"]').fill('Teagram-Test-Password-123!');
+  await registration.locator('input[aria-label="Confirm password"]').fill('Teagram-Test-Password-123!');
+  await expect(registration.getByRole('button', {name: 'Create account'})).toBeEnabled();
+  await registration.getByRole('button', {name: 'Create account'}).click();
+
+  const username = registration.getByRole('textbox', {name: 'Username'});
+  await expect(registration.getByRole('alert')).toHaveText('Choose a valid username.');
+  await expect(username).toHaveAttribute('aria-invalid', 'true');
+  await expect(username).toHaveValue('a');
+  await captureState(page, testInfo, 'registration-server-username-error');
 });
 
 test('shows username and password feedback in the registration form', async({page}, testInfo) => {

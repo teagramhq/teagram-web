@@ -108,7 +108,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   usernameInput.autocomplete = 'off';
   usernameInput.spellcheck = false;
 
-  const displayNameField = new InputField({label: 'Teagram.Registration.DisplayName', maxLength: 70, plainText: true, autocomplete: 'name'});
+  const displayNameField = new InputField({label: 'Teagram.Registration.DisplayName', plainText: true, autocomplete: 'name'});
   const displayNameInput = displayNameField.input as HTMLInputElement;
   displayNameInput.setAttribute('aria-label', i18n('Teagram.Registration.DisplayName').textContent || 'Display name');
 
@@ -202,6 +202,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     setHasValidRegistrationInput(
       isPrivateUsername(usernameField.value, usernameAppConfig()) &&
       hasDisplayName &&
+      !displayNameInput.classList.contains('error') &&
       hasPassword &&
       passwordMatches &&
       (registrationMode() !== 'invite' || hasInviteSecret)
@@ -357,7 +358,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     if(!isPrivateUsername(username, appConfig)) return;
 
     if(isCreatingAccount) {
-      if(!displayNameField.value.trim()) {
+      if(!displayNameField.value.trim() || displayNameInput.classList.contains('error')) {
         showError('invalidDisplayName');
         return;
       }
@@ -692,6 +693,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
       if(cancelled) return;
       setUsernameAppConfig(config);
       usernameField.setLengthLimits(config.username_max_length, config.username_min_length);
+      displayNameField.setLengthLimits(config.display_name_max_length);
       const mode = config.registration_mode;
       setRegistrationMode(mode === 'open' || mode === 'invite' ? mode : 'closed');
       setTurnstileSiteKey(config.turnstile?.site_key);

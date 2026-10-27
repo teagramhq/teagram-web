@@ -284,6 +284,37 @@ describe('private username sign-in card', () => {
     expect(status?.textContent).toBe('Choose a valid username.');
   });
 
+  it('uses appConfig display-name maximum when enabling registration', async() => {
+    mocks.getAppConfig.mockResolvedValue({
+      registration_mode: 'open',
+      username_min_length: 2,
+      username_max_length: 32,
+      username_pattern: '^[a-zA-Z][a-zA-Z0-9_]{1,31}$',
+      display_name_max_length: 4
+    });
+    const username = mount();
+    await vi.waitFor(() => expect(mocks.getAppConfig).toHaveBeenCalledOnce());
+    const createAccount = () => Array.from(document.querySelectorAll('button'))
+      .find((button) => button.textContent === 'Create account') as HTMLButtonElement;
+    createAccount().click();
+
+    const fill = (label: string, value: string) => {
+      const field = document.querySelector(`input[aria-label="${label}"]`) as HTMLInputElement;
+      field.value = value;
+      field.dispatchEvent(new Event('input', {bubbles: true}));
+      return field;
+    };
+    fill('Username', 'ab');
+    const displayName = fill('Display name', '12345');
+    fill('Password', 'StrongPassword123');
+    fill('Confirm password', 'StrongPassword123');
+
+    expect(displayName.classList.contains('error')).toBe(true);
+    expect(createAccount().disabled).toBe(true);
+    fill('Display name', '1234');
+    expect(createAccount().disabled).toBe(false);
+  });
+
   it('shows the server username error when appConfig omits username rules', async() => {
     mocks.getAppConfig.mockResolvedValue({registration_mode: 'open'});
     mocks.invokeApi

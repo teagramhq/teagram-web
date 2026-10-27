@@ -54,6 +54,7 @@ import type {LangPackKey} from '@lib/langPack';
 import rootScope from '@lib/rootScope';
 import {useHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
 import {appSettings} from '@stores/appSettings';
+import {useAppConfig} from '@stores/appState';
 
 const PERMISSION_FLAGS = [
   'send_stickers',
@@ -162,6 +163,7 @@ function EditChatForm(props: {
   onMigrate: (chatId: ChatId) => void
 }) {
   const [tab] = useSuperTab<typeof AppEditChatTab>();
+  const appConfig = useAppConfig();
   const {
     AvatarNewTsx,
     ChatType,
@@ -234,8 +236,19 @@ function EditChatForm(props: {
       about() !== (props.data.chatFull.about || '') ||
       hasAvatarPreview();
   });
+  const titleMinLength = () => isChannel() ? appConfig.channel_title_min_length : appConfig.group_title_min_length;
+  const titleMaxLength = () => isChannel() ? appConfig.channel_title_max_length : appConfig.group_title_max_length;
+  const aboutMaxLength = () => isChannel() ? appConfig.channel_about_max_length : appConfig.group_about_max_length;
+  const isWithinLengthLimit = (value: string, minLength?: number, maxLength?: number) => {
+    const length = [...value].length;
+    return (minLength === undefined || length >= minLength) &&
+      (maxLength === undefined || length <= maxLength);
+  };
   const canSave = createMemo(() => {
-    return isDirty() && !!title().trim() && !saving();
+    return isDirty() && !!title().trim() &&
+      isWithinLengthLimit(title(), titleMinLength(), titleMaxLength()) &&
+      isWithinLengthLimit(about(), undefined, aboutMaxLength()) &&
+      !saving();
   });
   const showTopics = createMemo(() => {
     return canToggleForum() &&
@@ -665,7 +678,8 @@ function EditChatForm(props: {
           <InputFieldTsx
             label={isBroadcast() ? 'EnterChannelName' : 'CreateGroup.NameHolder'}
             name="chat-name"
-            maxLength={255}
+            maxLength={titleMaxLength()}
+            minLength={titleMinLength()}
             required
             value={title()}
             onRawInput={setTitle}
@@ -674,7 +688,7 @@ function EditChatForm(props: {
           <InputFieldTsx
             label="DescriptionPlaceholder"
             name="chat-description"
-            maxLength={255}
+            maxLength={aboutMaxLength()}
             withLinebreaks
             value={about()}
             onRawInput={setAbout}

@@ -415,6 +415,7 @@ export type InputFieldOptions = {
   labelText?: string | DocumentFragment,
   name?: string,
   maxLength?: number,
+  minLength?: number,
   showLengthOn?: number,
   plainText?: true,
   required?: boolean,
@@ -508,6 +509,9 @@ export default class InputField {
   public allowStartingSpace: boolean;
 
   private isInputHidden = false;
+  private usesDefaultShowLengthOn: boolean;
+  private lengthLimitError = false;
+  private showingLength = false;
 
   constructor(public options: InputFieldOptions = {}) {
     this.container = document.createElement('div');
@@ -515,12 +519,13 @@ export default class InputField {
 
     this.required = options.required;
     this.validate = options.validate;
+    this.usesDefaultShowLengthOn = options.showLengthOn === undefined;
 
     if(options.maxLength !== undefined && options.showLengthOn === undefined) {
       options.showLengthOn = Math.min(40, Math.round(options.maxLength / 3));
     }
 
-    const {placeholder, maxLength, showLengthOn, name, plainText, canBeEdited = true, autocomplete, withBorder, allowStartingSpace, canHaveFormatting, canWrapCustomEmojis} = options;
+    const {placeholder, name, plainText, canBeEdited = true, autocomplete, withBorder, allowStartingSpace, canHaveFormatting, canWrapCustomEmojis} = options;
     const label = options.label || options.labelText;
     this.allowStartingSpace = allowStartingSpace;
 
@@ -673,32 +678,7 @@ export default class InputField {
       this.container.append(this.label);
     }
 
-    if(maxLength) {
-      const labelEl = this.container.lastElementChild as HTMLLabelElement;
-      let showingLength = false;
-
-      const onInput = () => {
-        const wasError = input.classList.contains('error');
-        // * https://stackoverflow.com/a/54369605 #2 to count emoji as 1 symbol
-        const inputLength = plainText ? (input as HTMLInputElement).value.length : [...getRichValueWithCaret(input, false, false).value].length;
-        const diff = maxLength - inputLength;
-        const isError = diff < 0;
-        input.classList.toggle('error', isError);
-
-        // this.onLengthChange && this.onLengthChange(inputLength, isError);
-
-        if(isError || diff <= showLengthOn) {
-          this.setLabel();
-          labelEl.append(` (${maxLength - inputLength})`);
-          if(!showingLength) showingLength = true;
-        } else if((wasError && !isError) || showingLength) {
-          this.setLabel();
-          showingLength = false;
-        }
-      };
-
-      onInputCallbacks.push(onInput);
-    }
+    onInputCallbacks.push(() => this.updateLengthState());
 
     const noLinebreaks = !options.withLinebreaks;
     if(noLinebreaks && !plainText) {
@@ -727,6 +707,57 @@ export default class InputField {
 
     this.input = input;
     this.setEmpty(true);
+  }
+
+  public setLengthLimits(maxLength?: number, minLength?: number) {
+    const changed = this.options.maxLength !== maxLength || this.options.minLength !== minLength;
+    this.options.maxLength = maxLength;
+    this.options.minLength = minLength;
+    if(this.usesDefaultShowLengthOn) {
+      this.options.showLengthOn = maxLength === undefined ? undefined : Math.min(40, Math.round(maxLength / 3));
+    }
+    this.updateLengthState();
+    if(changed) this.simulateInputEvent();
+  }
+
+  private updateLengthState() {
+    const {maxLength, minLength} = this.options;
+    const wasError = this.input.classList.contains('error');
+    const hasOtherError = wasError && !this.lengthLimitError;
+    if(maxLength === undefined && minLength === undefined) {
+      this.lengthLimitError = false;
+      this.input.classList.toggle('error', hasOtherError);
+      if(this.showingLength) {
+        this.setLabel();
+        this.showingLength = false;
+      }
+      return;
+    }
+
+    // * https://stackoverflow.com/a/54369605 #2 to count emoji as 1 symbol
+    const inputLength = this.options.plainText ? (this.input as HTMLInputElement).value.length : [...getRichValueWithCaret(this.input, false, false).value].length;
+    const isTooShort = minLength !== undefined && inputLength > 0 && inputLength < minLength;
+    const isTooLong = maxLength !== undefined && inputLength > maxLength;
+    this.lengthLimitError = isTooShort || isTooLong;
+    this.input.classList.toggle('error', hasOtherError || this.lengthLimitError);
+
+    if(maxLength === undefined || !this.label) {
+      if(this.showingLength) {
+        this.setLabel();
+        this.showingLength = false;
+      }
+      return;
+    }
+
+    const diff = maxLength - inputLength;
+    if(isTooLong || diff <= (this.options.showLengthOn ?? 0)) {
+      this.setLabel();
+      this.label.append(` (${diff})`);
+      this.showingLength = true;
+    } else if((wasError && !this.lengthLimitError) || this.showingLength) {
+      this.setLabel();
+      this.showingLength = false;
+    }
   }
 
   public select() {

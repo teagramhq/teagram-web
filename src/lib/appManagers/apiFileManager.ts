@@ -180,6 +180,8 @@ export class ApiFileManager extends AppManager {
 
   private maxUploadParts = 4000;
   private maxDownloadParts = 8000;
+  private maxUploadPartSize = MAX_UPLOAD_FILE_PART_SIZE;
+  private maxUploadFileBytes?: number;
   private webFileDcId: DcId;
 
   constructor() {
@@ -205,6 +207,9 @@ export class ApiFileManager extends AppManager {
     this.rootScope.addEventListener('app_config', (appConfig) => {
       this.maxUploadParts = this.rootScope.premium ? appConfig.upload_max_fileparts_premium : appConfig.upload_max_fileparts_default;
       this.maxDownloadParts = appConfig.upload_max_fileparts_premium;
+      const maxUploadPartSize = Math.max(MIN_PART_SIZE, Math.min(appConfig.upload_max_part_bytes ?? MAX_UPLOAD_FILE_PART_SIZE, MAX_UPLOAD_FILE_PART_SIZE));
+      this.maxUploadPartSize = 2 ** Math.floor(Math.log2(maxUploadPartSize));
+      this.maxUploadFileBytes = appConfig.upload_max_file_bytes;
     });
 
     if(PREPARE_CACHE) {
@@ -522,7 +527,7 @@ export class ApiFileManager extends AppManager {
     let bytes = MIN_PART_SIZE;
 
     const maxParts = isUpload ? this.maxUploadParts : this.maxDownloadParts;
-    const maxPartSize = isUpload ? MAX_UPLOAD_FILE_PART_SIZE : MAX_DOWNLOAD_FILE_PART_SIZE;
+    const maxPartSize = isUpload ? this.maxUploadPartSize : MAX_DOWNLOAD_FILE_PART_SIZE;
     // usually it will stick to 512Kb size if the file is too big
     while((size / bytes) > maxParts && bytes < maxPartSize) {
       bytes *= 2;
@@ -1088,6 +1093,12 @@ export class ApiFileManager extends AppManager {
     fileName ||= getFileNameForUpload(file);
 
     const fileSize = file.size;
+    const deferred = deferredPromise<InputFile>();
+    if(this.maxUploadFileBytes !== undefined && fileSize > this.maxUploadFileBytes) {
+      deferred.reject(makeError('FILE_TOO_BIG'));
+      return deferred;
+    }
+
     const isBigFile = fileSize >= 10485760;
     const partSize = this.getLimitPart(fileSize, true);
     const activeDelta = this.getDelta(partSize);
@@ -1101,7 +1112,6 @@ export class ApiFileManager extends AppManager {
       md5_checksum: ''
     };
 
-    const deferred = deferredPromise<typeof resultInputFile>();
     if(totalParts > this.maxUploadParts) {
       deferred.reject(makeError('FILE_TOO_BIG'));
       return deferred;

@@ -29,6 +29,7 @@ from '@components/sidebarLeft/tabs/purchaseUsernameCaption';
 import type {User} from '@layer';
 import {i18n, LangPackKey} from '@lib/langPack';
 import wrapUrl from '@lib/richTextProcessor/wrapUrl';
+import {useAppConfig} from '@stores/appState';
 
 async function loadEditBotData(
   tab: InstanceType<typeof AppEditBotTab>,
@@ -76,6 +77,7 @@ export default EditBot;
 
 function EditBotForm(props: {data: EditBotData}) {
   const [tab] = useSuperTab<typeof AppEditBotTab>();
+  const appConfig = useAppConfig();
   const initialUsername = getPeerEditableUsername(props.data.user);
   const [firstName, setFirstName] = createSignal(props.data.user.first_name);
   const [about, setAbout] = createSignal(props.data.botInfo.about || '');
@@ -102,7 +104,10 @@ function EditBotForm(props: {data: EditBotData}) {
       hasAvatarPreview() ||
       !!usernameField()?.isValidToChange();
   });
-  const canSave = () => isDirty() && !saving();
+  const bioMaxLength = () => appConfig.bio_max_length ?? props.data.bioMaxLength;
+  const canSave = () => isDirty() && !saving() &&
+    (appConfig.display_name_max_length === undefined || [...firstName()].length <= appConfig.display_name_max_length) &&
+    (bioMaxLength() === undefined || [...about()].length <= bioMaxLength());
 
   onCleanup(() => {
     avatarEdit.clear();
@@ -183,14 +188,14 @@ function EditBotForm(props: {data: EditBotData}) {
           <InputFieldTsx
             label="EditProfile.FirstNameLabel"
             name="first-name"
-            maxLength={70}
+            maxLength={appConfig.display_name_max_length}
             value={firstName()}
             onRawInput={setFirstName}
           />
           <InputFieldTsx
             label="DescriptionPlaceholder"
             name="bio"
-            maxLength={props.data.bioMaxLength}
+            maxLength={bioMaxLength()}
             value={about()}
             onRawInput={setAbout}
           />

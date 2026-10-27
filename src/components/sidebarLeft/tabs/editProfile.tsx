@@ -22,6 +22,7 @@ import {attachClickEvent} from '@helpers/dom/clickEvent';
 import {purchaseUsernameCaption} from '@components/sidebarLeft/tabs/purchaseUsernameCaption';
 import {ConnectedBot, User, UserFull} from '@layer';
 import {trackAvatarUpload} from '@stores/avatarUpload';
+import {useAppConfig} from '@stores/appState';
 
 type AppEditProfileTabType = typeof AppEditProfileTab;
 
@@ -77,6 +78,7 @@ const EditProfileForm = (props: {
   connectedBot: MaybePromise<ConnectedBot.connectedBot | undefined>
 }) => {
   const [tab] = useSuperTab<AppEditProfileTabType>();
+  const appConfig = useAppConfig();
   const {user, userFull, bioMaxLength} = props.data;
   const profilePeerId = rootScope.myId;
 
@@ -411,7 +413,7 @@ const EditProfileForm = (props: {
           <InputFieldTsx
             label="EditProfile.FirstNameLabel"
             name="first-name"
-            maxLength={70}
+            maxLength={appConfig.display_name_max_length}
             instanceRef={(ref) => {
               firstNameInputField = ref;
               trackInputField(ref);
@@ -420,7 +422,7 @@ const EditProfileForm = (props: {
           <InputFieldTsx
             label="Login.Register.LastName.Placeholder"
             name="last-name"
-            maxLength={64}
+            maxLength={appConfig.display_name_max_length}
             instanceRef={(ref) => {
               lastNameInputField = ref;
               trackInputField(ref);
@@ -429,7 +431,7 @@ const EditProfileForm = (props: {
           <InputFieldTsx
             label="EditProfile.BioLabel"
             name="bio"
-            maxLength={bioMaxLength}
+            maxLength={appConfig.bio_max_length ?? bioMaxLength}
             instanceRef={(ref) => {
               bioInputField = ref;
               trackInputField(ref);

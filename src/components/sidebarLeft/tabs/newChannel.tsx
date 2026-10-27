@@ -12,11 +12,13 @@ import toggleDisability from '@helpers/dom/toggleDisability';
 import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import {useHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
 import type {AppNewChannelTab} from '@components/solidJsTabs/tabs';
+import {useAppConfig} from '@stores/appState';
 
 const NewChannel = () => {
   const [tab] = useSuperTab<typeof AppNewChannelTab>();
   const {appImManager, appSidebarLeft} = useHotReloadGuard();
   const {onCreate, openAfter = true} = tab.payload;
+  const appConfig = useAppConfig();
 
   let uploadAvatar: AvatarEditPayload | null = null;
   let nameField!: InputField;
@@ -91,12 +93,13 @@ const NewChannel = () => {
       <div class="input-wrapper">
         <InputFieldTsx
           label="EnterChannelName"
-          maxLength={128}
+          maxLength={appConfig.channel_title_max_length}
+          minLength={appConfig.channel_title_min_length}
           instanceRef={(ref) => nameField = ref}
         />
         <InputFieldTsx
           label="DescriptionOptionalPlaceholder"
-          maxLength={255}
+          maxLength={appConfig.channel_about_max_length}
           withLinebreaks
           instanceRef={(ref) => descField = ref}
         />

@@ -389,6 +389,10 @@ export default abstract class ApiManagerMethods extends AppManager {
 
       isPremium ??= this.rootScope.premium;
 
+      const configuredLimit = type === 'bio' ? appConfig.bio_max_length :
+        type === 'caption' ? appConfig.caption_max_length : undefined;
+      if(configuredLimit !== undefined) return configuredLimit;
+
       const a = map[type];
       const key = Array.isArray(a) ? a[isPremium ? 1 : 0] : a;
       return appConfig[key] as number;

@@ -2258,7 +2258,7 @@ export class AppMessagesManager extends AppManager {
       });
     }
 
-    const MAX_LENGTH = config.message_length_max;
+    const MAX_LENGTH = appConfig.message_max_length ?? config.message_length_max;
     const splitted = splitStringByLength(text, MAX_LENGTH);
     text = splitted[0];
     if(splitted.length > 1) {

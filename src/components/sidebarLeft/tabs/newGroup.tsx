@@ -1,4 +1,4 @@
-import {Component, onCleanup, onMount} from 'solid-js';
+import {Component, createEffect, onCleanup, onMount} from 'solid-js';
 import {MissingInvitee} from '@layer';
 import appDialogsManager from '@lib/appDialogsManager';
 import InputField from '@components/inputField';
@@ -16,6 +16,7 @@ import {useSuperTab} from '@components/solidJsTabs/superTabProvider';
 import {usePromiseCollector} from '@components/solidJsTabs/promiseCollector';
 import {useHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
 import type {AppNewGroupTab} from '@components/solidJsTabs/tabs';
+import {useAppConfig} from '@stores/appState';
 
 interface OpenStreetMapInterface {
   place_id?: number;
@@ -33,6 +34,7 @@ const NewGroup: Component = () => {
   const [tab] = useSuperTab<typeof AppNewGroupTab>();
   const {appImManager} = useHotReloadGuard();
   const promiseCollector = usePromiseCollector();
+  const appConfig = useAppConfig();
 
   const {peerIds, isGeoChat = false, onCreate, openAfter = true, title, asChannel = false} = tab.payload;
 
@@ -46,8 +48,13 @@ const NewGroup: Component = () => {
   });
 
   const groupNameInputField = new InputField({
-    label: 'CreateGroup.NameHolder',
-    maxLength: 128
+    label: 'CreateGroup.NameHolder'
+  });
+
+  createEffect(() => {
+    const minLength = asChannel || isGeoChat ? appConfig.channel_title_min_length : appConfig.group_title_min_length;
+    const maxLength = asChannel || isGeoChat ? appConfig.channel_title_max_length : appConfig.group_title_max_length;
+    groupNameInputField.setLengthLimits(maxLength, minLength);
   });
 
   const groupLocationInputField = new InputField({
