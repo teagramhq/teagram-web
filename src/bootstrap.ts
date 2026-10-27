@@ -32,6 +32,7 @@ import styles from '@/pages/authFlow.module.scss';
 declare const __MTPROTO_TARGET__: MtprotoTarget | undefined;
 
 const SERVER_READY_KEY = 'teagram.server-ready.v1';
+const SERVER_CHANGE_KEY = 'teagram.server-change.v1';
 const runtime = window as any;
 const buildTarget = typeof __MTPROTO_TARGET__ === 'undefined' ? undefined : __MTPROTO_TARGET__;
 const pageHost = location.hostname.toLowerCase().replace(/\.+$/, '');
@@ -46,25 +47,35 @@ function setActiveContext(id: string, host: string, target: MtprotoTarget, disco
   runtime.__TEAGRAM_AUTO_GUEST__ = autoGuest === true;
 }
 
-function setConnectPolicy(host: string, target?: MtprotoTarget) {
+function setConnectPolicy(host: string, target?: MtprotoTarget, enforceInCurrentDocument = false) {
   const sources = getServerConnectSources(host, target);
-  setConnectPolicyContent([...sources].join(' '));
+  setConnectPolicyContent([...sources].join(' '), enforceInCurrentDocument);
 }
 
 function setServerSelectionPolicy() {
   setConnectPolicyContent('\'self\' https: wss:');
 }
 
-function setConnectPolicyContent(sources: string) {
+function setConnectPolicyContent(sources: string, enforceInCurrentDocument = false) {
   const content = `connect-src ${sources};`;
   let policy = document.querySelector<HTMLMetaElement>('meta[http-equiv="Content-Security-Policy"][data-server-policy]');
   if(!policy) {
     policy = document.createElement('meta');
     policy.httpEquiv = 'Content-Security-Policy';
     policy.dataset.serverPolicy = 'true';
-    document.head.append(policy);
   }
   policy.content = content;
+  if(!policy.isConnected) document.head.append(policy);
+  if(enforceInCurrentDocument) {
+    let enforcementPolicy = document.querySelector<HTMLMetaElement>('meta[http-equiv="Content-Security-Policy"][data-server-policy-enforcement]');
+    if(!enforcementPolicy) {
+      enforcementPolicy = document.createElement('meta');
+      enforcementPolicy.httpEquiv = 'Content-Security-Policy';
+      enforcementPolicy.dataset.serverPolicyEnforcement = 'true';
+    }
+    enforcementPolicy.content = content;
+    if(!enforcementPolicy.isConnected) document.head.append(enforcementPolicy);
+  }
 }
 
 async function unregisterServiceWorkers(serverId?: string): Promise<void> {
@@ -250,6 +261,20 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
 
   const isCurrentRun = (run: number, signal: AbortSignal) => !signal.aborted && run === sequence;
 
+  function restoreActiveServer() {
+    const host = activeHost || current.host;
+    try {
+      sessionStorage.removeItem(SERVER_READY_KEY);
+      sessionStorage.removeItem(SERVER_CHANGE_KEY);
+    } catch(error) {
+      console.error('Could not clear server change state', error);
+    }
+    const target = host === DEFAULT_SERVER_HOST ? buildTarget : getSavedServerTarget(host)?.target;
+    if(target) setConnectPolicy(host, target, true);
+    publish({phase: 'connected', host, changing: false});
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('[aria-label="Change server"]')?.focus());
+  }
+
   async function showFirstUseConfirmation(discovered: DiscoveredServer, target: HTMLElement | undefined) {
     const extraContent = popupContent(
       fingerprintBlock('Teagram.Server.Fingerprint', discovered.spkiFingerprint),
@@ -386,8 +411,7 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
     }
 
     if(changing && activeHost === host) {
-      publish({phase: 'connected', host: activeHost, changing: false});
-      requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('[aria-label="Change server"]')?.focus());
+      restoreActiveServer();
       return;
     }
 
@@ -479,13 +503,21 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
     },
     change() {
       if(current.phase !== 'connected') return;
-      publish({phase: 'selecting', host: activeHost || current.host, changing: true});
+      const host = activeHost || current.host;
+      try {
+        sessionStorage.setItem(SERVER_READY_KEY, host);
+        sessionStorage.setItem(SERVER_CHANGE_KEY, host);
+      } catch(error) {
+        console.error('Could not prepare server change', error);
+        publish({...current, errorKey: 'Teagram.Server.SaveFailed'});
+        return;
+      }
+      location.reload();
     },
     cancelChange() {
       if(!current.changing) return;
       sequence++;
-      publish({phase: 'connected', host: activeHost || current.host, changing: false});
-      requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('[aria-label="Change server"]')?.focus());
+      restoreActiveServer();
     },
     continueBlocked() {
       if(blockedServer && blockedPin) void showIdentityConfirmation(blockedServer, blockedPin);
@@ -586,9 +618,11 @@ async function boot() {
   if(isServerSelectionOrigin(pageHost)) {
     let savedChoice = '';
     let readyChoice = '';
+    let changeChoice = '';
     try {
       savedChoice = localStorage.getItem(SERVER_CHOICE_KEY) || '';
       readyChoice = sessionStorage.getItem(SERVER_READY_KEY) || '';
+      changeChoice = sessionStorage.getItem(SERVER_CHANGE_KEY) || '';
     } catch{}
 
     if(savedChoice && readyChoice === savedChoice) {
@@ -601,14 +635,24 @@ async function boot() {
       const discovered = host && host !== DEFAULT_SERVER_HOST ? getSavedServerTarget(host) : undefined;
       const target = host === DEFAULT_SERVER_HOST ? buildTarget : discovered?.target;
       if(host && target) {
-        try { sessionStorage.removeItem(SERVER_READY_KEY); } catch{}
-        const action = createServerSelectionAction({phase: 'connected', host}, host);
+        const changing = changeChoice === savedChoice;
+        try {
+          sessionStorage.removeItem(SERVER_CHANGE_KEY);
+          if(!changing) sessionStorage.removeItem(SERVER_READY_KEY);
+        } catch{}
+        const action = createServerSelectionAction(changing ?
+          {phase: 'selecting', host, changing: true} : {phase: 'connected', host}, host);
         setActiveContext(localStorage.getItem(ACTIVE_SERVER_ID_KEY) || discovered?.id || 'default', host, target, discovered);
-        setConnectPolicy(host, target);
+        if(changing) setServerSelectionPolicy();
+        else setConnectPolicy(host, target);
         setServerSelectionAction(action);
         void import('./index');
         return;
       }
+    }
+
+    if(changeChoice) {
+      try { sessionStorage.removeItem(SERVER_CHANGE_KEY); } catch{}
     }
 
     const initialState: ServerSelectionState = savedChoice ?

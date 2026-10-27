@@ -586,19 +586,6 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await page.goto(appOrigin, {waitUntil: 'domcontentloaded'});
     await page.setViewportSize({width: 1280, height: 800});
     await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
-    await page.addInitScript(() => {
-      // Keep this fixture's policy broad so a host change reaches the probe path.
-      const descriptor = Object.getOwnPropertyDescriptor(HTMLMetaElement.prototype, 'content');
-      if(!descriptor?.get || !descriptor.set) throw new Error('HTMLMetaElement.content is unavailable');
-      Object.defineProperty(HTMLMetaElement.prototype, 'content', {
-        configurable: true,
-        enumerable: descriptor.enumerable,
-        get: descriptor.get,
-        set(value: string) {
-          descriptor.set!.call(this, this.dataset.serverPolicy === 'true' ? "connect-src 'self' https: wss:;" : value);
-        }
-      });
-    });
     const screenshots = resolve('test-results/main-2778-built');
     mkdirSync(screenshots, {recursive: true});
     const themeButton = page.locator('#auth-pages button.btn-icon');
@@ -607,6 +594,12 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await expect(page.locator('html')).not.toHaveClass(/night/);
     const hostInput = page.getByRole('textbox', {name: 'Server address'});
     const usernameInput = page.getByRole('textbox', {name: 'Username'});
+    const enterServerChange = async() => {
+      const navigation = page.waitForNavigation({waitUntil: 'domcontentloaded', timeout: 5000});
+      await page.getByRole('button', {name: 'Change server'}).click();
+      await navigation;
+      await expect(hostInput).not.toHaveAttribute('readonly', '');
+    };
     await expect(hostInput).toHaveValue('');
     await expect(page.locator('.input-field-placeholder')).toHaveText('your.server.host');
     await expect(usernameInput).toBeDisabled();
@@ -677,12 +670,11 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await page.screenshot({path: join(screenshots, 'S7.png')});
     expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(serverHost);
     expect(await page.locator('meta[data-server-policy]').getAttribute('content'))
-    .toBe("connect-src 'self' https: wss:;");
+    .toBe(`connect-src 'self' https://${serverHost} ${privateEndpoint.href};`);
     expect(discoveryRequests).toEqual(['/.well-known/teagramd/client']);
     expect(cspViolations).toEqual([]);
 
-    await page.getByRole('button', {name: 'Change server'}).click();
-    await expect(hostInput).not.toHaveAttribute('readonly', '');
+    await enterServerChange();
     await expect(page.locator('meta[data-server-policy]')).toHaveAttribute('content', "connect-src 'self' https: wss:;");
     await expect(usernameInput).toBeDisabled();
     expect(await page.evaluate(() => {
@@ -692,14 +684,36 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     })).toBe(true);
     await expect(page.getByRole('button', {name: 'Cancel', exact: true})).toBeVisible();
     await page.screenshot({path: join(screenshots, 'S8.png')});
+
+    await page.reload({waitUntil: 'domcontentloaded'});
+    await expect(page.getByRole('button', {name: 'Change server'})).toBeVisible();
+    await expect(hostInput).toHaveAttribute('readonly', '');
+    await expect(usernameInput).toBeEnabled();
+    await expect(usernameInput).toBeFocused();
+
+    await enterServerChange();
     await page.getByRole('button', {name: 'Cancel', exact: true}).click();
     await expect(page.getByRole('button', {name: 'Change server'})).toBeFocused();
     await expect(usernameInput).toBeEnabled();
+    await expect(page.locator('meta[data-server-policy-enforcement]'))
+    .toHaveAttribute('content', `connect-src 'self' https://${serverHost} ${privateEndpoint.href};`);
+    const requestsBeforePolicyCheck = discoveryRequests.length;
+    const unrelatedDiscovery = await page.evaluate(async(url) => {
+      try {
+        await fetch(url);
+        return 'allowed';
+      } catch{
+        return 'blocked';
+      }
+    }, `https://${CANCEL_SERVER_HOST}/.well-known/teagramd/client`);
+    expect(unrelatedDiscovery).toBe('blocked');
+    expect(discoveryRequests.length).toBe(requestsBeforePolicyCheck);
+    expect(cspViolations.some((message) => message.includes(CANCEL_SERVER_HOST))).toBe(true);
 
     const probeStarted = new Promise<void>((resolveProbe) => { resolveWebSocketProbeStarted = resolveProbe; });
     const probeClosed = new Promise<void>((resolveProbe) => { resolveWebSocketProbeClosed = resolveProbe; });
     delayNextWebSocketProbe = true;
-    await page.getByRole('button', {name: 'Change server'}).click();
+    await enterServerChange();
     await hostInput.fill(CANCEL_SERVER_HOST);
     await hostInput.press('Enter');
     await expect.poll(() => discoveryRequests.length).toBe(2);
@@ -719,6 +733,7 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     releaseWebSocketProbe?.();
     expect(await page.evaluate(() => localStorage.getItem('teagram.server-choice.v1'))).toBe(serverHost);
 
+    await enterServerChange();
     await page.evaluate(() => {
       const serviceWorker = navigator.serviceWorker;
       Object.defineProperty(serviceWorker, 'getRegistrations', {
@@ -728,7 +743,6 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
         })
       });
     });
-    await page.getByRole('button', {name: 'Change server'}).click();
     await hostInput.fill(CANCEL_SERVER_HOST);
     await hostInput.press('Enter');
     await expect.poll(() => discoveryRequests.length).toBe(3);
