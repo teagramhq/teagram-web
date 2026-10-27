@@ -34,6 +34,22 @@ describe('parseEntities tags', () => {
     }]);
   });
 
+  test('recognizes a short username mention allowed by the server', () => {
+    expect(parseEntities('@ab')).toEqual([{
+      _: 'messageEntityMention',
+      offset: 0,
+      length: 3
+    }]);
+  });
+
+  test('leaves punctuation outside a username mention', () => {
+    expect(parseEntities('@ab,')).toEqual([{
+      _: 'messageEntityMention',
+      offset: 0,
+      length: 3
+    }]);
+  });
+
   test('only recognizes uppercase cashtags', () => {
     expect(parseEntities('$ton@username')).toEqual([]);
   });

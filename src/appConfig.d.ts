@@ -170,6 +170,9 @@ export interface MTAppConfig {
   aicompose_tone_saved_limit_premium?:        number;
   community_peers_limit?:                     number;
   community_bot_peers_limit?:                 number;
+  username_min_length?:                       number;
+  username_max_length?:                       number;
+  username_pattern?:                          string;
   registration_mode?:                         'closed' | 'invite' | 'open';
   turnstile?:                                 {site_key?: string};
 }

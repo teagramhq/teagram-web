@@ -1,12 +1,12 @@
 import type {AuthCheckPassword, AuthSendCode, AuthSignIn, AuthSignUp, HelpTermsOfService, InvokeWithReCaptcha, User} from '@layer';
 import App from '@config/app';
+import type {MTAppConfig} from '@/appConfig';
 import {isPrivateUsernameCredentialError} from '@/pages/privateUsernameLoginState';
 import {invokeSignUpWithTurnstile, invokeTurnstileProtected} from '@/pages/turnstileSignup';
 import type {RequestTurnstileChallenge} from '@/pages/turnstileSignup';
+import {isUsernameValid} from '@lib/richTextProcessor/validators';
 
 export {isPrivateUsernameCredentialError} from '@/pages/privateUsernameLoginState';
-
-const USERNAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_]{1,31}$/;
 
 export type PrivateUsernameAuthResult =
   | {kind: 'invalidInput'}
@@ -67,8 +67,8 @@ function wasCancelled(error: unknown, isCancelled: () => boolean) {
     error.message === 'Turnstile challenge cancelled'));
 }
 
-export function isPrivateUsername(username: string): boolean {
-  return USERNAME_PATTERN.test(username);
+export function isPrivateUsername(username: string, appConfig?: Partial<MTAppConfig>): boolean {
+  return isUsernameValid(username, appConfig);
 }
 
 export function getPrivateUsernameRegistrationError(error: unknown): PrivateUsernameRegistrationError {
@@ -96,9 +96,10 @@ export async function authenticatePrivateUsername(
   registration?: PrivateUsernameRegistration,
   requestTurnstile?: RequestTurnstileChallenge,
   turnstileSiteKey?: string,
-  recoverAuthKey?: RecoverPrivateUsernameAuthKey
+  recoverAuthKey?: RecoverPrivateUsernameAuthKey,
+  appConfig?: MTAppConfig
 ): Promise<PrivateUsernameAuthResult> {
-  if(!isPrivateUsername(username)) return {kind: 'invalidInput'};
+  if(!isPrivateUsername(username, appConfig)) return {kind: 'invalidInput'};
   if(registration && registration.mode !== 'closed' && !registration.displayName.trim()) return {kind: 'invalidInput'};
   if(registration && registration.mode !== 'closed' && !registration.password) return {kind: 'invalidInput'};
   if(registration?.mode === 'invite' && !registration.inviteSecret?.trim()) return {kind: 'invalidInput'};
@@ -159,6 +160,8 @@ export async function authenticatePrivateUsername(
   } catch(error) {
     if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
     if(authKeyRecoveryFailed) return getAuthErrorResult(error, !!registration, true);
+    const errorKind = getPrivateUsernameRegistrationError(error);
+    if(errorKind === 'usernameTaken' || errorKind === 'invalidUsername') return {kind: errorKind};
     return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : getAuthErrorResult(error, !!registration, authKeyRecoveryFailed);
   }
 
@@ -180,6 +183,8 @@ export async function authenticatePrivateUsername(
   } catch(error) {
     if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
     if(authKeyRecoveryFailed) return getAuthErrorResult(error, !!registration, true);
+    const errorKind = getPrivateUsernameRegistrationError(error);
+    if(errorKind === 'usernameTaken' || errorKind === 'invalidUsername') return {kind: errorKind};
     if(getErrorType(error) === 'SESSION_PASSWORD_NEEDED') {
       if(registration?.checkPassword) {
         try {

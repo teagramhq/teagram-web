@@ -14,6 +14,7 @@ import cancelEvent from '@helpers/dom/cancelEvent';
 import formatDuration from '@helpers/formatDuration';
 import focusWhenConnected from '@helpers/dom/focusWhenConnected';
 import type {HelpTermsOfService, User} from '@layer';
+import type {MTAppConfig} from '@/appConfig';
 import {createCurrentGuestAccountLifecycle} from '@lib/guestAccountLifecycle';
 import type {GuestAccountLifecycleResult, GuestAccountManagers} from '@lib/guestAccountLifecycle';
 import {i18n} from '@lib/langPack';
@@ -98,7 +99,6 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   });
   const usernameField = new InputField({
     labelText: 'Username',
-    maxLength: 32,
     plainText: true,
     autocomplete: 'off'
   });
@@ -136,7 +136,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
   const [hasValidInput, setHasValidInput] = createSignal(false);
   const [hasValidRegistrationInput, setHasValidRegistrationInput] = createSignal(false);
-  const [usernameIssue, setUsernameIssue] = createSignal<'tooShort' | 'tooLong' | 'start' | 'characters'>();
+  const [usernameIssue, setUsernameIssue] = createSignal<'invalid'>();
   const [displayNameEntered, setDisplayNameEntered] = createSignal(false);
   const [confirmPasswordState, setConfirmPasswordState] = createSignal<'required' | 'match' | 'mismatch'>('required');
   const [inviteSecretEntered, setInviteSecretEntered] = createSignal(false);
@@ -147,6 +147,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   const [restoringGuest, setRestoringGuest] = createSignal(true);
   const [autoGuestPending, setAutoGuestPending] = createSignal(autoGuest && guestSignUpAvailable && !hasAutoGuestAttempted());
   const [guestFloodWait, setGuestFloodWait] = createSignal<number>();
+  const [usernameAppConfig, setUsernameAppConfig] = createSignal<MTAppConfig>();
   const [registrationConfigUnavailable, setRegistrationConfigUnavailable] = createSignal(false);
   const [termsDeclined, setTermsDeclined] = createSignal(false);
   const [turnstileSiteKey, setTurnstileSiteKey] = createSignal<string>();
@@ -162,12 +163,9 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   let guestActionWaiting = false;
   let guestAuthorized = false;
 
-  function getUsernameIssue(username: string): 'tooShort' | 'tooLong' | 'start' | 'characters' | undefined {
-    if(!username) return;
-    if(username.length < 2) return 'tooShort';
-    if(username.length > 32) return 'tooLong';
-    if(!/^[a-zA-Z]/.test(username)) return 'start';
-    if(!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(username)) return 'characters';
+  function getUsernameIssue(username: string): 'invalid' | undefined {
+    if(!username || isPrivateUsername(username, usernameAppConfig())) return;
+    return 'invalid';
   }
 
   function updateRegistrationValidity() {
@@ -202,7 +200,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     }
 
     setHasValidRegistrationInput(
-      isPrivateUsername(usernameField.value) &&
+      isPrivateUsername(usernameField.value, usernameAppConfig()) &&
       hasDisplayName &&
       hasPassword &&
       passwordMatches &&
@@ -211,7 +209,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   }
 
   function updateSignInValidity() {
-    setHasValidInput(isPrivateUsername(usernameField.value));
+    setHasValidInput(isPrivateUsername(usernameField.value, usernameAppConfig()));
   }
 
   const onInput = () => {
@@ -275,16 +273,10 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     }
 
     switch(usernameIssue()) {
-      case 'tooShort':
-        return i18n('Teagram.Registration.UsernameTooShort');
-      case 'tooLong':
-        return i18n('Teagram.Registration.UsernameTooLong');
-      case 'start':
-        return i18n('Teagram.Registration.UsernameStart');
-      case 'characters':
-        return i18n('Teagram.Registration.UsernameCharacters');
+      case 'invalid':
+        return i18n('Teagram.Registration.InvalidUsername');
       default:
-        return i18n('Teagram.Registration.UsernameHint');
+        return '';
     }
   }
 
@@ -361,7 +353,8 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
     const isCreatingAccount = creatingAccount();
     const username = usernameField.value;
-    if(!isPrivateUsername(username)) return;
+    const appConfig = usernameAppConfig();
+    if(!isPrivateUsername(username, appConfig)) return;
 
     if(isCreatingAccount) {
       if(!displayNameField.value.trim()) {
@@ -414,7 +407,8 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           return typeof recoveryId === 'number' ?
             managers.apiManager.recoverUnknownAuthKey(recoveryId, shouldRecover) :
             Promise.resolve(false);
-        }
+        },
+        appConfig
       );
       activeIdentifier = '';
 
@@ -696,9 +690,12 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     });
     Promise.resolve(managers.apiManager.getAppConfig(true)).then((config) => {
       if(cancelled) return;
+      setUsernameAppConfig(config);
+      usernameField.setLengthLimits(config.username_max_length, config.username_min_length);
       const mode = config.registration_mode;
       setRegistrationMode(mode === 'open' || mode === 'invite' ? mode : 'closed');
       setTurnstileSiteKey(config.turnstile?.site_key);
+      updateSignInValidity();
       updateRegistrationValidity();
     }).catch(() => {
       if(!cancelled) {

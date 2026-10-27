@@ -205,9 +205,9 @@ describe('private username sign-in card', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
-  it('rejects invalid input without an authentication call', () => {
+  it('rejects an empty username without an authentication call', () => {
     const input = mount();
-    input.value = 'a';
+    input.value = '';
     input.dispatchEvent(new Event('input', {bubbles: true}));
 
     const next = document.querySelector('button') as HTMLButtonElement;
@@ -222,35 +222,93 @@ describe('private username sign-in card', () => {
     expect(mocks.pushToState).toHaveBeenCalledWith('authState', {_: 'authStateSignIn'});
   });
 
-  it('matches the server username requirements and explains invalid input while registering', async() => {
-    mocks.getAppConfig.mockResolvedValue({registration_mode: 'open'});
+  it('uses appConfig username rules for sign-in validation', async() => {
+    mocks.getAppConfig.mockResolvedValue({
+      registration_mode: 'closed',
+      username_min_length: 2,
+      username_max_length: 4,
+      username_pattern: '^[a-z][a-z0-9_]{1,3}$'
+    });
+    mocks.invokeApi
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'});
+    const input = mount();
+    await vi.waitFor(() => expect(mocks.getAppConfig).toHaveBeenCalledOnce());
+    const next = document.querySelector('button') as HTMLButtonElement;
+    const setUsername = (value: string) => {
+      input.value = value;
+      input.dispatchEvent(new Event('input', {bubbles: true}));
+    };
+
+    setUsername('a');
+    expect(next.disabled).toBe(true);
+    setUsername('1a');
+    expect(next.disabled).toBe(true);
+    setUsername('abcde');
+    expect(next.disabled).toBe(true);
+    setUsername('ab');
+    expect(next.disabled).toBe(false);
+    next.click();
+
+    await vi.waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith({name: 'password'}));
+    expect(mocks.invokeApi).toHaveBeenCalledWith('auth.sendCode', expect.objectContaining({phone_number: 'ab'}), {
+      authKeyRecovery: true
+    });
+  });
+
+  it('uses appConfig username rules and generic feedback while registering', async() => {
+    mocks.getAppConfig.mockResolvedValue({
+      registration_mode: 'open',
+      username_min_length: 2,
+      username_max_length: 4,
+      username_pattern: '^a[a-z0-9_]{1,3}$'
+    });
     const input = mount();
     await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Create account')).toBe(true));
     (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
 
     const status = document.getElementById('registration-username-status');
-    expect(status?.textContent).toBe('Use 2–32 characters, start with a letter, and use letters, numbers, or underscores.');
+    expect(status?.textContent).toBe('');
 
     input.value = 'a';
     input.dispatchEvent(new Event('input', {bubbles: true}));
-    expect(status?.textContent).toBe('Use at least 2 characters.');
+    expect(status?.textContent).toBe('Choose a valid username.');
 
-    input.value = 'adam';
+    input.value = 'ab';
     input.dispatchEvent(new Event('input', {bubbles: true}));
-    expect(status?.textContent).toBe('Use 2–32 characters, start with a letter, and use letters, numbers, or underscores.');
+    expect(status?.textContent).toBe('');
     expect(input.getAttribute('aria-invalid')).not.toBe('true');
 
-    input.value = '1adam';
+    input.value = 'a-b';
     input.dispatchEvent(new Event('input', {bubbles: true}));
-    expect(status?.textContent).toBe('Start with a letter.');
+    expect(status?.textContent).toBe('Choose a valid username.');
+  });
 
-    input.value = 'adam-name';
-    input.dispatchEvent(new Event('input', {bubbles: true}));
-    expect(status?.textContent).toBe('Use letters, numbers, and underscores only.');
+  it('shows the server username error when appConfig omits username rules', async() => {
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'open'});
+    mocks.invokeApi
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockRejectedValueOnce({type: 'USERNAME_INVALID'});
+    const input = mount();
+    await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Create account')).toBe(true));
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
 
-    input.value = 'a'.repeat(33);
-    input.dispatchEvent(new Event('input', {bubbles: true}));
-    expect(status?.textContent).toBe('Use no more than 32 characters.');
+    const fill = (label: string, value: string) => {
+      const field = document.querySelector(`input[aria-label="${label}"]`) as HTMLInputElement;
+      field.value = value;
+      field.dispatchEvent(new Event('input', {bubbles: true}));
+    };
+    fill('Username', 'a');
+    fill('Display name', 'Alice Example');
+    fill('Password', 'StrongPassword123');
+    fill('Confirm password', 'StrongPassword123');
+    (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toBe('Choose a valid username.'));
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(3, 'auth.signUp', expect.objectContaining({phone_number: 'a'}), {
+      authKeyRecovery: true
+    });
   });
 
   it('explains why Create is disabled while required registration fields are empty', async() => {
@@ -261,7 +319,7 @@ describe('private username sign-in card', () => {
     const create = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement;
 
     expect(create.disabled).toBe(true);
-    expect(document.getElementById('registration-username-status')?.textContent).toBe('Use 2–32 characters, start with a letter, and use letters, numbers, or underscores.');
+    expect(document.getElementById('registration-username-status')?.textContent).toBe('');
     expect(document.getElementById('registration-display-name-status')?.textContent).toBe('Enter a display name.');
     expect(document.getElementById('registration-password-status')).toBeNull();
     expect(document.getElementById('registration-password-rules')).toBeNull();
