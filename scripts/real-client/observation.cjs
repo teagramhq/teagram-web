@@ -18,8 +18,8 @@
 const PRIVATE_CSP_ORIGIN = 'https://teagramd.test';
 
 const LIMITS = Object.freeze({
-  attachedTargets: 32,
-  countedEventsPerContext: 4096,
+  attachedTargets: 64,
+  countedEventsPerContext: 16384,
   cdpMessageBytes: 256 * 1024,
   commandTimeoutMs: 5000
 });
@@ -296,6 +296,7 @@ function createContextObserver(name, options = {}) {
     observerErrorTargetIds: new Set(),
     foreignTargets: 0,
     overflow: false,
+    overflowReason: 'none',
     discoveryActive: false,
     pageCoverageComplete: false,
     windowElapsed: false,
@@ -309,8 +310,11 @@ function createContextObserver(name, options = {}) {
     workerErrorCounts: new Map()
   };
 
-  function recordOverflow() {
-    if(!state.overflow) state.observerErrors++;
+  function recordOverflow(reason) {
+    if(!state.overflow) {
+      state.observerErrors++;
+      state.overflowReason = reason;
+    }
     state.overflow = true;
     requestLabels.clear();
     workerSourceRequestTargets.clear();
@@ -333,7 +337,7 @@ function createContextObserver(name, options = {}) {
     state.sequence++;
     if(state.countedEvents >= LIMITS.countedEventsPerContext) {
       state.countedEvents = LIMITS.countedEventsPerContext;
-      recordOverflow();
+      recordOverflow('event_limit');
       return false;
     }
     state.countedEvents++;
@@ -357,7 +361,7 @@ function createContextObserver(name, options = {}) {
     let sessionRequests = webSocket101RequestStates.get(sessionId);
     if(sessionRequests?.has(requestId)) return true;
     if(webSocket101RequestCount >= LIMITS.countedEventsPerContext) {
-      recordOverflow();
+      recordOverflow('websocket_request_limit');
       return false;
     }
     if(!sessionRequests) {
@@ -490,7 +494,7 @@ function createContextObserver(name, options = {}) {
     if(!countEvent()) return false;
     if(typeof targetId === 'string' && attachedTargetIds.has(targetId)) return true;
     if(attachedTargetIds.size + anonymousAttachedTargets >= LIMITS.attachedTargets) {
-      recordOverflow();
+      recordOverflow('attached_target_limit');
       return false;
     }
     if(typeof targetId === 'string') attachedTargetIds.add(targetId);

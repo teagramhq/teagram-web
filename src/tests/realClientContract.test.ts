@@ -29,7 +29,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
-const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, getClientErrorDiagnostics, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword, waitForUnreadCount} = realClientBrowser;
+const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, getClientErrorDiagnostics, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, emitReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword, waitForUnreadCount} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://teagramd.test';
@@ -420,7 +420,8 @@ function replayContext(events: any[], options: any = {}) {
     if(event.kind === 'worker') observer.noteWorkerEvent(event.targetId, event.method, event.params);
   }
   observer.state.windowElapsed = options.windowElapsed !== false;
-  return observer.summary();
+  const summary = observer.summary();
+  return options.includeOverflowReason ? {...summary, overflowReason: observer.state.overflowReason} : summary;
 }
 
 function appContextEvents(): any[] {
@@ -1243,19 +1244,21 @@ describe('confined runner shared-worker observation contract', () => {
       attachEvents.push({kind: 'target', target: sharedWorker(`worker-${index}`, HOSTILE.blobUrl)});
       attachEvents.push({kind: 'attach', targetId: `worker-${index}`});
     }
-    const attachOverflow = replayContext(attachEvents);
+    const attachOverflow = replayContext(attachEvents, {includeOverflowReason: true});
 
     const floodEvents: any[] = [{kind: 'target', target: pageTarget()}];
     for(let index = 0; index < observation.LIMITS.countedEventsPerContext + 20; index++) {
       floodEvents.push({kind: 'page', method: 'Network.webSocketCreated', params: {url: HOSTILE.url}});
     }
-    const eventOverflow = replayContext(floodEvents);
+    const eventOverflow = replayContext(floodEvents, {includeOverflowReason: true});
 
     expect(attachOverflow.attachedTargets).toBe(observation.LIMITS.attachedTargets);
     expect(attachOverflow.observerOverflow).toBe(1);
+    expect(attachOverflow.overflowReason).toBe('attached_target_limit');
     expect(attachOverflow.coverageComplete).toBe(0);
     expect(attachOverflow.sharedWorkerState).toBe('unknown');
     expect(eventOverflow.observerOverflow).toBe(1);
+    expect(eventOverflow.overflowReason).toBe('event_limit');
     expect(eventOverflow.countedEvents).toBe(observation.LIMITS.countedEventsPerContext);
     expect(eventOverflow.mtprotoWorker).toBe('unknown');
 
@@ -1884,7 +1887,7 @@ describe('confined runner shared-worker observation contract', () => {
   });
 
   it('keeps the resource bounds and page count that the report depends on', () => {
-    expect(observation.LIMITS).toEqual({attachedTargets: 32, countedEventsPerContext: 4096, cdpMessageBytes: 262_144, commandTimeoutMs: 5000});
+    expect(observation.LIMITS).toEqual({attachedTargets: 64, countedEventsPerContext: 16384, cdpMessageBytes: 262_144, commandTimeoutMs: 5000});
 
     const twoPages = replayContext([
       {kind: 'target', target: pageTarget()},
@@ -4506,6 +4509,77 @@ function passwordStageMarkup({
     </script>
   </body></html>`;
 }
+
+describe('real client cleanup reports', () => {
+  it('keeps the original browser failure stage and names cleanup failures', () => {
+    const originalExitCode = process.exitCode;
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      process.exitCode = 0;
+      emitReport({
+        status: 'failed',
+        stage: 'browser_worker_observation_incomplete',
+        workerCoverageBreakdown: {alice: {coverageComplete: 1}, bob: {coverageComplete: 0}}
+      }, true, ['playwright_trace_cleanup']);
+
+      expect(JSON.parse(String(write.mock.calls[0]?.[0]))).toEqual({
+        status: 'failed',
+        stage: 'browser_worker_observation_incomplete',
+        workerCoverageBreakdown: {alice: {coverageComplete: 1}, bob: {coverageComplete: 0}},
+        cleanupFailures: ['playwright_trace_cleanup']
+      });
+      expect(process.exitCode).toBe(1);
+    } finally {
+      write.mockRestore();
+      process.exitCode = originalExitCode;
+    }
+  });
+
+  it('reports cleanup as the failure stage when scenarios passed', () => {
+    const originalExitCode = process.exitCode;
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      process.exitCode = 0;
+      emitReport({status: 'passed'}, true, ['browser_close_cleanup']);
+
+      expect(JSON.parse(String(write.mock.calls[0]?.[0]))).toEqual({
+        status: 'failed',
+        stage: 'cleanup',
+        cleanupFailures: ['browser_close_cleanup']
+      });
+      expect(process.exitCode).toBe(1);
+    } finally {
+      write.mockRestore();
+      process.exitCode = originalExitCode;
+    }
+  });
+
+  it('includes only known cleanup failure codes in the browser failure message', () => {
+    expect(formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'bob_poll_input_answer_vote_submit',
+      cleanupFailures: ['playwright_trace_cleanup']
+    })).toBe('real client scenario failed at bob_poll_input_answer_vote_submit; cleanup failures ["playwright_trace_cleanup"]');
+    expect(() => formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'cleanup',
+      cleanupFailures: ['private-path-/tmp/secret']
+    })).toThrow('cleanup failure evidence is invalid');
+  });
+
+  it('formats observer overflow reasons as closed-schema evidence', () => {
+    expect(formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'cleanup',
+      workerOverflowReasons: {alice: 'none', bob: 'event_limit'}
+    })).toBe('real client scenario failed at cleanup; worker overflow reasons {"alice":"none","bob":"event_limit"}');
+    expect(() => formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'cleanup',
+      workerOverflowReasons: {alice: 'none', bob: HOSTILE.phrase}
+    })).toThrow('worker overflow reason evidence is invalid');
+  });
+});
 
 describe('real client password evidence contract', () => {
   it('preserves cleanup failure reports that omit password evidence', () => {

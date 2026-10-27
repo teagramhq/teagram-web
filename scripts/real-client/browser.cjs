@@ -5797,17 +5797,20 @@ async function cleanupBrowserRun({registry, observers, contexts, browser, screen
       await observer.stop();
     } catch {
       cleanupFailed = true;
+      cleanupIssues.push('observer_cleanup');
     }
   }
   try {
     await Promise.all(contexts.map((context) => context.close()));
   } catch {
     cleanupFailed = true;
+    cleanupIssues.push('context_cleanup');
   }
   try {
     await browser?.close();
   } catch {
     cleanupFailed = true;
+    cleanupIssues.push('browser_close_cleanup');
   }
   try {
     if(screenshotDirectory && preserveTrace) {
@@ -5819,6 +5822,7 @@ async function cleanupBrowserRun({registry, observers, contexts, browser, screen
     }
   } catch {
     cleanupFailed = true;
+    cleanupIssues.push('screenshot_cleanup');
   }
   if(cleanupIssues.length > 0) cleanupFailed = true;
   return cleanupFailed;
@@ -6541,7 +6545,12 @@ async function main(dependencies = {}) {
         ...(pollFooterTransitions.length ? {pollFooterTransitions} : {}),
         ...(currentScenario ? {gateBreakdown} : {}),
         ...(currentStage === 'browser_worker_observation_incomplete' && registry
-          ? {workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers)}
+          ? {
+            workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers),
+            workerOverflowReasons: Object.fromEntries(Object.keys(appObservers)
+            .filter((name) => APP_CONTEXTS.includes(name))
+            .map((name) => [name, appObservers[name].state.overflowReason || 'none']))
+          }
           : {}),
         // On failure the closed-schema evidence is still the point, validated the
         // same way: any schema violation collapses it to `unclassified`.
@@ -6595,19 +6604,23 @@ async function main(dependencies = {}) {
     if(runtime?.authProgressOneSubmission === true) {
       (dependencies.emitAuthProgressReport || emitAuthProgressReport)(report, cleanupFailed);
     } else {
-      (dependencies.emitReport || emitReport)(report, cleanupFailed);
+      (dependencies.emitReport || emitReport)(report, cleanupFailed, cleanupIssues);
     }
   }
 }
 
 // Emitted from the cleanup block, so the synthetic-only path that returns
 // early and the scenario path that runs to completion report identically.
-function emitReport(report, cleanupFailed) {
+function emitReport(report, cleanupFailed, cleanupIssues = []) {
   if(cleanupFailed) {
+    const cleanupFailures = [...new Set(cleanupIssues)].slice(0, 8);
     process.stdout.write(`${JSON.stringify({
       status: 'failed',
-      stage: 'cleanup',
+      stage: report?.status === 'failed' && typeof report.stage === 'string' ? report.stage : 'cleanup',
+      ...(cleanupFailures.length > 0 ? {cleanupFailures} : {}),
       ...(report?.failureTraceReady === true ? {failureTraceReady: true} : {}),
+      ...(report?.workerCoverageBreakdown ? {workerCoverageBreakdown: report.workerCoverageBreakdown} : {}),
+      ...(report?.workerOverflowReasons ? {workerOverflowReasons: report.workerOverflowReasons} : {}),
       ...(report?.gateBreakdown ? {gateBreakdown: report.gateBreakdown} : {})
     })}\n`);
     process.exitCode = 1;
@@ -6626,7 +6639,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
