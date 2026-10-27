@@ -167,7 +167,8 @@ test('registers on a second server after a failed host selection', async({page},
 
   const picker = page.getByRole('dialog');
   const hostInput = picker.getByRole('textbox', {name: 'Server host'});
-  await expect(hostInput).toHaveValue('demo.teagram.io');
+  await expect(hostInput).toHaveValue('');
+  await expect(hostInput).toHaveAttribute('placeholder', 'your.server.host');
   await expect(picker.getByRole('button', {name: 'Continue'})).toBeVisible();
   await hostInput.fill('unreachable-server.example.test');
   await picker.getByRole('button', {name: 'Continue'}).click();
@@ -183,14 +184,11 @@ test('registers on a second server after a failed host selection', async({page},
   expect(await page.evaluate(() => localStorage.getItem('teagram.server-pins.v1'))).toBeNull();
   await confirm.getByRole('button', {name: 'Confirm and use this server'}).click();
 
-  const returningPicker = page.getByRole('dialog');
-  const rememberedHost = returningPicker.getByRole('textbox', {name: 'Server host'});
-  await expect(rememberedHost).toHaveValue(SERVER_HOST);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}')))
     .toMatchObject({[SERVER_HOST]: expect.any(Object)});
   expect(await page.evaluate(() => localStorage.getItem('teagram.active-server-id.v1')))
     .toMatch(/^custom-[0-9a-f]{64}$/);
-  await returningPicker.getByRole('button', {name: 'Continue'}).click();
   await expect.poll(() => page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__ || ''), {timeout: 10_000})
     .toBe(SERVER_HOST);
 
@@ -214,6 +212,21 @@ test('registers on a second server after a failed host selection', async({page},
   expect(self).toMatchObject({_: 'user', id: 8282, username: 'second_server_user'});
   expect(self.first_name).toBeUndefined();
   expect(self.last_name).toBeUndefined();
+  const calls = await page.evaluate(() => (window as any).__customRegistrationCalls as Array<{
+    method: string,
+    params?: Record<string, unknown>
+  }>);
+  expect(calls.map((call) => call.method).filter((method) => method.startsWith('auth.'))).toEqual([
+    'auth.sendCode',
+    'auth.signIn',
+    'auth.signUp'
+  ]);
+  expect(calls.find((call) => call.method === 'auth.signUp')?.params).toMatchObject({
+    phone_number: 'second_server_user',
+    first_name: 'Local Server',
+    last_name: ''
+  });
+  expect(calls.find((call) => call.method === 'auth.signIn')?.params?.phone_code).toBe(INVITE_SECRET);
 
   await page.locator('.sidebar-tools-button').click();
   await expect.poll(async() => pageErrors.length > 0 ||
@@ -236,24 +249,22 @@ test('registers on a second server after a failed host selection', async({page},
   await chooseAnotherServer.scrollIntoViewIfNeeded();
   await expect(chooseAnotherServer).toBeVisible();
   await page.screenshot({path: testInfo.outputPath('general-server-settings.png')});
-  await page.keyboard.press('Escape');
-  await expect(chooseAnotherServer).toHaveCount(0);
+  const switchReload = page.waitForNavigation({waitUntil: 'domcontentloaded'});
+  await chooseAnotherServer.click({force: true});
+  await switchReload;
+  const switchPicker = page.getByRole('dialog');
+  const switchHost = switchPicker.getByRole('textbox', {name: 'Server host'});
+  await expect(switchHost).toHaveValue('');
+  await expect(switchHost).toHaveAttribute('placeholder', 'your.server.host');
+  expect(await page.evaluate(() => localStorage.getItem('teagram.server-choice.v1'))).toBeNull();
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}')))
+    .toMatchObject({[SERVER_HOST]: expect.any(Object)});
+  await page.screenshot({path: testInfo.outputPath('server-picker-after-switch.png')});
+  await switchHost.fill(SERVER_HOST);
+  await switchPicker.getByRole('button', {name: 'Continue'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
 
-  const calls = await page.evaluate(() => (window as any).__customRegistrationCalls as Array<{
-    method: string,
-    params?: Record<string, unknown>
-  }>);
-  expect(calls.map((call) => call.method).filter((method) => method.startsWith('auth.'))).toEqual([
-    'auth.sendCode',
-    'auth.signIn',
-    'auth.signUp'
-  ]);
-  expect(calls.find((call) => call.method === 'auth.signUp')?.params).toMatchObject({
-    phone_number: 'second_server_user',
-    first_name: 'Local Server',
-    last_name: ''
-  });
-  expect(calls.find((call) => call.method === 'auth.signIn')?.params?.phone_code).toBe(INVITE_SECRET);
   const activeId = await page.evaluate(() => localStorage.getItem('teagram.active-server-id.v1'));
   expect(activeId).toMatch(/^custom-[0-9a-f]{64}$/);
   await page.evaluate((id) => localStorage.setItem(`teagram-${id}:dc2_auth_key`, 'server-a-auth-key'), activeId);
@@ -264,9 +275,6 @@ test('registers on a second server after a failed host selection', async({page},
   discovery = JSON.stringify(changedDiscovery);
 
   await page.reload({waitUntil: 'domcontentloaded'});
-  const changedServerPicker = page.getByRole('dialog');
-  await expect(changedServerPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(SERVER_HOST);
-  await changedServerPicker.getByRole('button', {name: 'Continue'}).click();
   const mismatch = page.getByRole('dialog');
   await expect(mismatch.getByText('Server identity changed')).toBeVisible();
   await expect(mismatch.getByRole('button', {name: 'Forget this server'})).toBeVisible();
@@ -278,6 +286,7 @@ test('registers on a second server after a failed host selection', async({page},
   await forgetReload;
   expect(await page.evaluate(() => localStorage.getItem('teagram.active-server-id.v1'))).toBeNull();
   expect(await page.evaluate((id) => localStorage.getItem(`teagram-${id}:dc2_auth_key`), activeId)).toBeNull();
-  await expect(page.getByRole('dialog').getByRole('textbox', {name: 'Server host'})).toHaveValue('demo.teagram.io');
+  await expect(page.getByRole('dialog').getByRole('textbox', {name: 'Server host'})).toHaveValue('');
+  await expect(page.getByRole('dialog').getByRole('textbox', {name: 'Server host'})).toHaveAttribute('placeholder', 'your.server.host');
   await page.context().unrouteAll({behavior: 'ignoreErrors'});
 });
