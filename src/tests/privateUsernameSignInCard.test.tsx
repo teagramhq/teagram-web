@@ -52,7 +52,7 @@ vi.mock('@components/mediaHeader', () => {
   const Header = (props: any) => <header>{props.children}</header>;
   Header.Sticker = (props: any) => <div>{props.element}</div>;
   Header.Title = (props: any) => <h1>{props.children}</h1>;
-  Header.Subtitle = (props: any) => <p>{props.children}</p>;
+  Header.Subtitle = (props: any) => <p id={props.id}>{props.children}</p>;
   return {default: Header};
 });
 
@@ -62,6 +62,11 @@ vi.mock('@lib/langPack', async(importOriginal) => {
   const actual = await importOriginal<typeof import('@lib/langPack')>();
   return {
     ...actual,
+    _i18n: (element: HTMLElement, key: string) => {
+      element.textContent = key === 'Teagram.Server.Placeholder' || key === 'Teagram.ServerSelection.HostPlaceholder' ? 'your.server.host' :
+        key === 'Teagram.Server.Address' ? 'Server address' : key;
+      return element;
+    },
     i18n: (key: string, args?: unknown[]) => {
     const copy: Record<string, string> = {
       'Teagram.Registration.CreateAccount': 'Create account',
@@ -88,6 +93,20 @@ vi.mock('@lib/langPack', async(importOriginal) => {
       'Teagram.Registration.Network': 'Unable to create your account. Try again.',
       'Teagram.Registration.PasswordNetwork': 'Unable to set your password. Try again.',
       'Teagram.Registration.ConfigNetwork': 'Unable to check whether account creation is available.',
+      'Teagram.Server.Address': 'Server address',
+      'Teagram.Server.Placeholder': 'your.server.host',
+      'Teagram.Server.Subtitle': 'Choose your server, then sign in',
+      'Teagram.Server.Change': 'Change',
+      'Teagram.Server.ChangeA11y': 'Change server',
+      'Teagram.Server.Continue': 'Continue',
+      'Teagram.Server.TryAgain': 'Try again',
+      'Teagram.Server.Checking': 'Checking…',
+      'Teagram.Server.Connecting': 'Connecting…',
+      'Teagram.ServerSelection.Host': 'Server host',
+      'Teagram.ServerSelection.HostPlaceholder': 'your.server.host',
+      'Teagram.ServerSelection.Notice': 'The server operator can read all non-secret chats. Choose a server you trust. Your account and stored data stay with the server you select.',
+      'Teagram.ServerSelection.Continue': 'Continue',
+      'Teagram.ServerSelection.Checking': 'Checking…',
       'Teagram.Guest.Try': 'Try it as a guest',
       'Teagram.Guest.StartNew': 'Start a new guest',
       'Teagram.Demo.Banner.Title': 'Demo server: you\'re a guest.',
@@ -130,6 +149,8 @@ vi.mock('@lib/richTextProcessor/wrapRichText', () => ({
 
 import PrivateSignInCard from '@/pages/cards/PrivateSignInCard';
 import {clearPrivateUsernameLogin, isPrivateUsernameLogin} from '@/pages/privateUsernameLoginState';
+import {SERVER_CHOICE_KEY, setServerSelectionAction} from '@config/serverSelection';
+import type {ServerSelectionAction, ServerSelectionState} from '@config/serverSelection';
 
 const SENT_CODE = {
   _: 'auth.sentCode',
@@ -139,6 +160,27 @@ const SENT_CODE = {
 };
 const USERNAME = 'Alice_123';
 
+function createSelectionAction(select: ServerSelectionAction['select'], initial: ServerSelectionState = {phase: 'selecting', host: ''}) {
+  let state = initial;
+  const listeners = new Set<(state: ServerSelectionState) => void>();
+  const publish = (next: ServerSelectionState) => {
+    state = next;
+    listeners.forEach((listener) => listener(state));
+  };
+  return {
+    getState: () => state,
+    subscribe(listener: (state: ServerSelectionState) => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    setHost(host: string) { publish({...state, phase: state.changing ? 'selecting' : state.phase, host, errorKey: undefined}); },
+    select,
+    change() { publish({phase: 'selecting', host: state.host, changing: true}); },
+    cancelChange() { publish({phase: 'connected', host: state.host, changing: false}); },
+    continueBlocked() {}
+  } satisfies ServerSelectionAction;
+}
+
 describe('private username sign-in card', () => {
   let dispose: VoidFunction;
   let storageWrites: ReturnType<typeof vi.spyOn>[];
@@ -147,6 +189,8 @@ describe('private username sign-in card', () => {
   let turnstileReset: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    setServerSelectionAction(undefined);
+    localStorage.removeItem(SERVER_CHOICE_KEY);
     mocks.invokeApi.mockReset();
     mocks.recoverUnknownAuthKey.mockReset();
     mocks.getAppConfig.mockReset().mockResolvedValue({registration_mode: 'closed'});
@@ -184,6 +228,7 @@ describe('private username sign-in card', () => {
   });
 
   afterEach(() => {
+    setServerSelectionAction(undefined);
     dispose?.();
     dispose = undefined;
     clearPrivateUsernameLogin();
@@ -447,6 +492,27 @@ describe('private username sign-in card', () => {
     await vi.waitFor(() => expect(document.getElementById('registration-username-status')?.textContent).toBe('Choose a valid username.'));
     expect(username.getAttribute('aria-invalid')).toBe('true');
     expect(mocks.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn', 'auth.signUp']);
+  });
+
+  it('shows an empty server field before username and lets the visitor continue with a host', async() => {
+    const selectServer = vi.fn(async(_host: string, _signal: AbortSignal, _focus?: HTMLElement) => {});
+    setServerSelectionAction(createSelectionAction(selectServer));
+    mount();
+
+    const serverInput = document.querySelector<HTMLInputElement>('input[aria-label="Server address"]');
+    const usernameInput = document.querySelector<HTMLInputElement>('input[aria-label="Username"]');
+    expect(serverInput).toBeInstanceOf(HTMLInputElement);
+    expect(serverInput.value).toBe('');
+    const serverPlaceholder = serverInput.parentElement!.querySelector<HTMLElement>('.input-field-placeholder')!;
+    expect(serverPlaceholder.textContent).toBe('your.server.host');
+    expect(serverInput.compareDocumentPosition(usernameInput) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    serverInput.value = 'second-server.example';
+    serverInput.dispatchEvent(new Event('input', {bubbles: true}));
+    const continueButton = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Continue')!;
+    expect(continueButton.disabled).toBe(false);
+    continueButton.click();
+    await vi.waitFor(() => expect(selectServer).toHaveBeenCalledWith('second-server.example', expect.any(AbortSignal), serverInput));
   });
 
   it.each([undefined, false, 'true', 1, null])('hides guest creation unless validated discovery is literal true (%s)', async(guestSignUp) => {

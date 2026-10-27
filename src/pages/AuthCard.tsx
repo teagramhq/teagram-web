@@ -43,6 +43,8 @@ export type AuthCardProps = {
    * its own input-wrapper, signImport just shows a preloader).
    */
   inputWrapper?: boolean;
+  /** Hide the server line when the sign-in server field replaces it. */
+  hideActiveServer?: boolean;
   /** Form fields, buttons, anything that goes after the header. */
   children?: JSX.Element;
 };
@@ -53,7 +55,7 @@ export default function AuthCard(props: AuthCardProps): JSX.Element {
 
   return (
     <div class={classNames(styles.card, props.class)}>
-      <Show when={activeHost() && activeHost() !== 'web.teagram.io'}>
+      <Show when={!props.hideActiveServer && activeHost() && activeHost() !== 'web.teagram.io'}>
         <div class={styles.activeServer}>Server: {activeHost()}</div>
       </Show>
       {props.header}

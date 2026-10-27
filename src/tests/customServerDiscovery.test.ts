@@ -3,9 +3,14 @@ import {webcrypto} from 'node:crypto';
 import {
   DISCOVERY_MAX_BYTES,
   DISCOVERY_TIMEOUT_MS,
+  SERVER_CHOICE_KEY,
+  cleanServerHost,
   fetchServerDiscovery,
+  formatServerKeyId,
+  getSavedServerChoice,
   getServerConnectSources,
   getServerPinState,
+  isServerSelectionOrigin,
   normalizeServerHost,
   pinMatches,
   shouldPromptForServerSelection,
@@ -37,8 +42,16 @@ beforeAll(async() => {
 });
 
 describe('custom server discovery', () => {
+  it('formats the SPKI fingerprint as the server key_id', () => {
+    expect(formatServerKeyId('30863C14188A34A4286DE6DA8E801EE5DC56AE7EB6388FE3E268C2A4CDD92684'))
+    .toBe('3086-3c14-188a-34a4-286d-e6da-8e80-1ee5-dc56-ae7e-b638-8fe3-e268-c2a4-cdd9-2684');
+  });
+
   it('only prompts on the public multi-server origin and narrows connections to the active server', () => {
+    expect(isServerSelectionOrigin('web.teagram.io')).toBe(true);
+    expect(isServerSelectionOrigin('teagram.tailaa4918.ts.net')).toBe(false);
     expect(shouldPromptForServerSelection('web.teagram.io')).toBe(true);
+    expect(shouldPromptForServerSelection('web.teagram.io', 'second-server.example')).toBe(false);
     expect(shouldPromptForServerSelection('teagram.tailaa4918.ts.net')).toBe(false);
     expect(getServerConnectSources('demo.example', {
       mode: 'private',
@@ -50,8 +63,20 @@ describe('custom server discovery', () => {
     ]);
   });
 
+  it('keeps the server field empty until a visitor saves a choice', () => {
+    localStorage.removeItem(SERVER_CHOICE_KEY);
+    expect(getSavedServerChoice()).toBeUndefined();
+
+    localStorage.setItem(SERVER_CHOICE_KEY, 'second-server.example');
+    expect(getSavedServerChoice()).toBe('second-server.example');
+  });
+
   it('normalizes hosts to lower-case ASCII and removes a trailing dot', () => {
     expect(normalizeServerHost('BÜCHER.Example.')).toBe('xn--bcher-kva.example');
+  });
+
+  it('silently cleans a URL-like server address before validation', () => {
+    expect(cleanServerHost('  HTTPS://Example.COM./  ')).toBe('example.com');
   });
 
   it.each([

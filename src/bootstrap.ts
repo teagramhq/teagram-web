@@ -4,22 +4,34 @@ import {
   ACTIVE_SERVER_ID_KEY,
   DEFAULT_SERVER_HOST,
   SERVER_CHOICE_KEY,
+  SERVER_TARGET_KEY,
   DiscoveredServer,
+  cleanServerHost,
   fetchServerDiscovery,
-  formatSPKIFingerprint,
   forgetServer,
+  formatServerKeyId,
+  formatSPKIFingerprint,
+  getSavedServerTarget,
   getServerConnectSources,
   getServerPin,
   getServerPinState,
+  isServerSelectionOrigin,
   normalizeServerHost,
-  shouldPromptForServerSelection,
+  setServerSelectionAction,
+  storeSavedServerTarget,
   websocketConnectionFailureMessage,
   writeServerPin
 } from '@config/serverSelection';
+import type {ServerSelectionAction, ServerSelectionState} from '@config/serverSelection';
 import type {MtprotoTarget} from '@config/mtprotoTarget';
+import type {FormatterArguments, LangPackKey} from '@lib/langPack';
+import {i18n} from '@lib/langPack';
+
+import styles from '@/pages/authFlow.module.scss';
 
 declare const __MTPROTO_TARGET__: MtprotoTarget | undefined;
 
+const SERVER_READY_KEY = 'teagram.server-ready.v1';
 const runtime = window as any;
 const buildTarget = typeof __MTPROTO_TARGET__ === 'undefined' ? undefined : __MTPROTO_TARGET__;
 const pageHost = location.hostname.toLowerCase().replace(/\.+$/, '');
@@ -36,65 +48,27 @@ function setActiveContext(id: string, host: string, target: MtprotoTarget, disco
 
 function setConnectPolicy(host: string, target?: MtprotoTarget) {
   const sources = getServerConnectSources(host, target);
-  const content = `connect-src ${[...sources].join(' ')};`;
+  setConnectPolicyContent([...sources].join(' '));
+}
+
+function setServerSelectionPolicy() {
+  setConnectPolicyContent('\'self\' https: wss:');
+}
+
+function setConnectPolicyContent(sources: string) {
+  const content = `connect-src ${sources};`;
   let policy = document.querySelector<HTMLMetaElement>('meta[http-equiv="Content-Security-Policy"][data-server-policy]');
   if(!policy) {
     policy = document.createElement('meta');
     policy.httpEquiv = 'Content-Security-Policy';
     policy.dataset.serverPolicy = 'true';
-    policy.content = content;
     document.head.append(policy);
-    return;
   }
   policy.content = content;
 }
 
-function createButton(label: string, onClick: () => void | Promise<void>, secondary = false) {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.textContent = label;
-  if(secondary) button.classList.add('server-picker__secondary');
-  button.addEventListener('click', () => { void onClick(); });
-  return button;
-}
-
-function showPanel(title: string, description?: string) {
-  document.querySelector('.server-picker')?.remove();
-  const shell = document.createElement('main');
-  shell.className = 'server-picker';
-  shell.setAttribute('role', 'dialog');
-  shell.setAttribute('aria-modal', 'true');
-  const card = document.createElement('section');
-  card.className = 'server-picker__card';
-  const heading = document.createElement('h1');
-  heading.textContent = title;
-  card.append(heading);
-  if(description) {
-    const body = document.createElement('p');
-    body.textContent = description;
-    card.append(body);
-  }
-  shell.append(card);
-  document.body.append(shell);
-  return {shell, card};
-}
-
-function addError(card: HTMLElement, message: string) {
-  const error = document.createElement('p');
-  error.className = 'server-picker__error';
-  error.setAttribute('role', 'alert');
-  error.textContent = message;
-  card.append(error);
-}
-
-function serverDiscoveryErrorMessage(host: string, error: unknown) {
-  const message = error instanceof Error ? error.message : '';
-  return /not a Teagram server/i.test(message) ? message :
-    `Could not reach ${host}. Check that it is online and publishes Teagram discovery.`;
-}
-
 async function unregisterServiceWorkers(serverId?: string): Promise<void> {
-  if(!('serviceWorker' in navigator)) return Promise.resolve();
+  if(!('serviceWorker' in navigator)) return;
   const registrations = await navigator.serviceWorker.getRegistrations();
   await Promise.all(registrations.map(async(registration) => {
     const worker = registration.active || registration.waiting || registration.installing;
@@ -193,79 +167,315 @@ function probeWebSocket(endpoint: string) {
   });
 }
 
-async function showServerPicker(initialError?: string) {
-  let savedChoice = '';
-  try {
-    savedChoice = localStorage.getItem(SERVER_CHOICE_KEY) || '';
-  } catch{}
+function discoveryErrorKey(error: unknown) {
+  const message = error instanceof Error ? error.message : '';
+  const status = /Server discovery failed \((\d+)\)/.exec(message);
+  if(status) return Number(status[1]) >= 500 ? 'Teagram.Server.Unreachable' : 'Teagram.Server.Unsupported';
+  if(/not a Teagram server/i.test(message)) return 'Teagram.Server.Unsupported';
+  return 'Teagram.Server.Unreachable';
+}
 
-  const {card} = showPanel(
-    'Choose your server',
-    'The server operator can read all non-secret chats. Choose a server you trust. Your account and stored data stay with the server you select.'
-  );
-  if(initialError) addError(card, initialError);
-  const form = document.createElement('form');
-  const label = document.createElement('label');
-  label.textContent = 'Server host';
-  const input = document.createElement('input');
-  input.autocomplete = 'off';
-  input.inputMode = 'url';
-  input.spellcheck = false;
-  input.value = savedChoice;
-  input.placeholder = 'your.server.host';
-  label.append(input);
-  const submit = document.createElement('button');
-  submit.type = 'submit';
-  submit.textContent = 'Continue';
-  form.append(label, submit);
-  card.append(form);
+function localizedHost(host: string) {
+  const strong = document.createElement('strong');
+  strong.textContent = host;
+  return strong;
+}
 
-  form.addEventListener('submit', (event) => {
-    event.preventDefault();
-    submit.disabled = true;
-    void chooseHost(input.value).finally(() => { submit.disabled = false; });
-  });
+function fingerprintBlock(labelKey: LangPackKey, fingerprint: string) {
+  const block = document.createElement('div');
+  const label = document.createElement('p');
+  label.className = styles.serverSelectionFingerprintLabel;
+  label.append(i18n(labelKey));
+  const value = document.createElement('p');
+  value.className = styles.serverSelectionFingerprint;
+  value.dir = 'ltr';
+  const groups = formatServerKeyId(fingerprint).split('-');
+  for(let index = 0; index < groups.length; index += 4) {
+    const line = document.createElement('span');
+    line.className = styles.serverSelectionFingerprintGroup;
+    line.textContent = groups.slice(index, index + 4).join('-') + (index + 4 < groups.length ? '-' : '');
+    value.append(line);
+    if(index + 4 < groups.length) value.append(document.createElement('wbr'));
+  }
+  block.append(label, value);
+  return block;
+}
 
-  async function chooseHost(value: string) {
-    let host: string;
+function popupContent(...children: Node[]) {
+  const content = document.createElement('div');
+  content.className = styles.serverSelectionPopupContent;
+  content.append(...children);
+  return content;
+}
+
+function popupParagraph(key: LangPackKey, args?: FormatterArguments) {
+  const paragraph = document.createElement('p');
+  paragraph.className = styles.serverSelectionPopupParagraph;
+  paragraph.append(i18n(key, args));
+  return paragraph;
+}
+
+function selectionError(error: unknown) {
+  const code = error instanceof Error ? error.message : '';
+  if(/without a port/i.test(code)) return 'Teagram.Server.AddressPort';
+  if(/not allowed/i.test(code)) return 'Teagram.Server.AddressNotAllowed';
+  if(/valid server host/i.test(code)) return 'Teagram.Server.AddressInvalid';
+  return 'Teagram.Server.SaveFailed';
+}
+
+function createServerSelectionAction(initial: ServerSelectionState, initialActiveHost?: string): ServerSelectionAction {
+  let current = initial;
+  let sequence = 0;
+  const activeHost = initialActiveHost;
+  let blockedServer: DiscoveredServer | undefined;
+  let blockedPin: ReturnType<typeof getServerPin>;
+  let focusReturnTarget: HTMLElement | undefined;
+  const listeners = new Set<(state: ServerSelectionState) => void>();
+
+  const publish = (state: ServerSelectionState) => {
+    current = state;
+    listeners.forEach((listener) => listener(current));
+  };
+
+  const setFailure = (errorKey: string, host: string, retryable = false) => {
+    publish({phase: 'selecting', host, changing: current.changing, errorKey, retryable});
+  };
+
+  async function showFirstUseConfirmation(discovered: DiscoveredServer, target: HTMLElement | undefined) {
+    const extraContent = popupContent(
+      fingerprintBlock('Teagram.Server.Fingerprint', discovered.spkiFingerprint),
+      popupParagraph('Teagram.Server.ConfirmNote')
+    );
+    const {SimpleConfirmationPopup} = await import('@components/popups/simpleConfirmation');
+    await SimpleConfirmationPopup.show({
+      titleLangKey: 'Teagram.Server.ConfirmTitle',
+      descriptionLangKey: 'Teagram.Server.ConfirmText',
+      descriptionArgs: [localizedHost(discovered.host)],
+      button: {langKey: 'Teagram.Server.Confirm'},
+      cancelLangKey: 'Cancel',
+      focusTrap: true,
+      disableTextEnterConfirm: true,
+      scrollable: true,
+      extraContent,
+      focusReturnTarget: target
+    });
     try {
-      host = normalizeServerHost(value);
+      await writeServerPin(discovered);
     } catch(error) {
-      addError(card, error instanceof Error ? error.message : 'Enter a valid server host');
+      console.error('Could not safely pin server fingerprint', error);
+      throw new Error(typeof navigator !== 'undefined' && !navigator.locks ? 'Teagram.Server.PinUnavailable' : 'Teagram.Server.SaveFailed');
+    }
+  }
+
+  async function showIdentityConfirmation(discovered: DiscoveredServer, pin: NonNullable<ReturnType<typeof getServerPin>>) {
+    const extraContent = popupContent(
+      fingerprintBlock('Teagram.Server.PinnedFingerprint', pin.key_fingerprint),
+      fingerprintBlock('Teagram.Server.PresentedFingerprint', discovered.spkiFingerprint),
+      popupParagraph('Teagram.Server.IdentityBlocked'),
+      popupParagraph('Teagram.Server.IdentityCancel')
+    );
+    const {SimpleConfirmationPopup} = await import('@components/popups/simpleConfirmation');
+    try {
+      await SimpleConfirmationPopup.show({
+        titleLangKey: 'Teagram.Server.IdentityTitle',
+        descriptionLangKey: 'Teagram.Server.IdentityChanged',
+        descriptionArgs: [localizedHost(discovered.host)],
+        button: {langKey: 'Teagram.Server.IdentityContinue'},
+        cancelLangKey: 'Cancel',
+        focusTrap: true,
+        disableTextEnterConfirm: true,
+        scrollable: true,
+        verticalButtons: true,
+        extraContent,
+        focusReturnTarget
+      });
+    } catch{
+      setFailure('Teagram.Server.KeyMismatch', discovered.host);
       return;
     }
 
-    if(host === DEFAULT_SERVER_HOST) {
-      if(!buildTarget) {
-        addError(card, 'The default server target is not available in this build.');
+    try {
+      await SimpleConfirmationPopup.show({
+        titleLangKey: 'Teagram.Server.DeleteTitle',
+        descriptionLangKey: 'Teagram.Server.DeleteText',
+        descriptionArgs: [localizedHost(discovered.host)],
+        button: {langKey: 'Teagram.Server.DeleteConfirm', isDanger: true},
+        cancelLangKey: 'Cancel',
+        focusTrap: true,
+        disableTextEnterConfirm: true,
+        scrollable: true,
+        verticalButtons: true,
+        focusReturnTarget
+      });
+    } catch{
+      setFailure('Teagram.Server.KeyMismatch', discovered.host);
+      return;
+    }
+
+    const run = ++sequence;
+    publish({phase: 'checking', host: discovered.host, changing: current.changing, locked: true});
+    try {
+      await unregisterServiceWorkers(discovered.id);
+      await forgetServer(discovered.host);
+      blockedServer = undefined;
+      blockedPin = undefined;
+      await selectHost(discovered.host, new AbortController().signal, run, false);
+    } catch(error) {
+      console.error('Could not delete saved server data', error);
+      if(run === sequence) setFailure('Teagram.Server.DeleteFailed', discovered.host);
+    }
+  }
+
+  async function saveAndReload(host: string, server?: DiscoveredServer) {
+    const id = server?.id || 'default';
+    let previousId = 'default';
+    try {
+      previousId = localStorage.getItem(ACTIVE_SERVER_ID_KEY) || 'default';
+    } catch(error) {
+      console.error('Could not read the active server', error);
+      setFailure('Teagram.Server.SaveFailed', host);
+      return;
+    }
+    if(previousId !== id) {
+      try {
+        await unregisterServiceWorkers();
+      } catch(error) {
+        console.error('Could not close the previous server session', error);
+        setFailure('Teagram.Server.SaveFailed', host);
         return;
       }
-      await activateServer(DEFAULT_SERVER_HOST, 'default', buildTarget, DEFAULT_SERVER_HOST);
+    }
+
+    try {
+      localStorage.setItem(SERVER_CHOICE_KEY, host);
+      localStorage.setItem(ACTIVE_SERVER_ID_KEY, id);
+      if(server) storeSavedServerTarget(server);
+      else localStorage.removeItem(SERVER_TARGET_KEY);
+      sessionStorage.setItem(SERVER_READY_KEY, host);
+    } catch(error) {
+      console.error('Could not save server choice', error);
+      setFailure('Teagram.Server.SaveFailed', host);
+      return;
+    }
+    location.reload();
+  }
+
+  async function selectHost(hostInput: string, signal: AbortSignal, run: number, changing: boolean) {
+    const cleaned = cleanServerHost(hostInput);
+    let host: string;
+    try {
+      host = normalizeServerHost(cleaned);
+    } catch(error) {
+      if(run === sequence) setFailure(selectionError(error), cleaned, false);
+      return;
+    }
+
+    if(changing && activeHost === host) {
+      publish({phase: 'connected', host: activeHost, changing: false});
+      requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('[aria-label="Change server"]')?.focus());
+      return;
+    }
+
+    publish({phase: 'checking', host, changing, locked: !!current.locked && !changing});
+    if(host === DEFAULT_SERVER_HOST) {
+      if(!buildTarget) {
+        if(run === sequence) setFailure('Teagram.Server.Unsupported', host);
+        return;
+      }
+      await saveAndReload(host);
       return;
     }
 
     let discovered: DiscoveredServer;
     try {
-      discovered = await fetchServerDiscovery(host);
+      discovered = await fetchServerDiscovery(host, fetch, signal);
     } catch(error) {
-      addError(card, serverDiscoveryErrorMessage(host, error));
+      if(signal.aborted || run !== sequence) return;
+      console.error('Server discovery failed', error);
+      setFailure(discoveryErrorKey(error), host, discoveryErrorKey(error) === 'Teagram.Server.Unreachable');
       return;
     }
+    if(signal.aborted || run !== sequence) return;
 
     const pin = getServerPin(host);
     const pinState = getServerPinState(discovered, pin);
     if(pinState === 'mismatch') {
-      showServerIdentityChanged(discovered, pin!);
+      blockedServer = discovered;
+      blockedPin = pin;
+      publish({phase: 'checking', host, changing, locked: true});
+      await showIdentityConfirmation(discovered, pin);
       return;
     }
 
-    if(pinState === 'match') {
-      await activateServer(host, discovered.id, discovered.target, host, true, discovered);
-      return;
+    if(pinState === 'first-use') {
+      if(typeof navigator === 'undefined' || !navigator.locks) {
+        setFailure('Teagram.Server.PinUnavailable', host);
+        return;
+      }
+      try {
+        await showFirstUseConfirmation(discovered, focusReturnTarget);
+      } catch(error) {
+        if(run !== sequence) return;
+        if(error === undefined) {
+          publish({phase: 'selecting', host, changing});
+          return;
+        }
+        console.error('Could not confirm server fingerprint', error);
+        setFailure(error instanceof Error && error.message === 'Teagram.Server.PinUnavailable' ?
+          'Teagram.Server.PinUnavailable' : 'Teagram.Server.SaveFailed', host);
+        return;
+      }
     }
 
-    showFirstUseConfirmation(discovered);
+    if(signal.aborted || run !== sequence) return;
+    if(discovered.target.mode !== 'private') {
+      setFailure('Teagram.Server.Unsupported', host);
+      return;
+    }
+    publish({phase: 'connecting', host, changing, locked: true});
+    if(!await probeWebSocket(discovered.target.endpoint)) {
+      setFailure('Teagram.Server.WebSocketFailed', host, true);
+      return;
+    }
+    await saveAndReload(host, discovered);
   }
+
+  const action: ServerSelectionAction = {
+    getState: () => current,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    setHost(host) {
+      sequence++;
+      publish({
+        phase: current.changing ? 'selecting' : current.phase === 'connected' ? 'connected' : 'selecting',
+        host,
+        changing: current.changing,
+        retryable: false
+      });
+    },
+    async select(host, signal, returnTarget) {
+      sequence++;
+      focusReturnTarget = returnTarget || document.querySelector<HTMLElement>('#server-address') || undefined;
+      await selectHost(host, signal, sequence, !!current.changing);
+    },
+    change() {
+      if(current.phase !== 'connected') return;
+      publish({phase: 'selecting', host: activeHost || current.host, changing: true});
+    },
+    cancelChange() {
+      if(!current.changing) return;
+      sequence++;
+      publish({phase: 'connected', host: activeHost || current.host, changing: false});
+      requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('[aria-label="Change server"]')?.focus());
+    },
+    continueBlocked() {
+      if(blockedServer && blockedPin) void showIdentityConfirmation(blockedServer, blockedPin);
+    }
+  };
+
+  return action;
 }
 
 function showServerIdentityChanged(
@@ -342,6 +552,13 @@ function showFirstUseConfirmation(discovered: DiscoveredServer) {
   card.append(createButton('Back', () => showServerPicker(), true));
 }
 
+async function startSelectionApp(action: ServerSelectionAction) {
+  setServerSelectionAction(action);
+  setServerSelectionPolicy();
+  if(buildTarget) setActiveContext('server-selection', pageHost, buildTarget);
+  await import('./index');
+}
+
 async function boot() {
   const config = await fetchTeagramDeploymentConfig();
   if(config) {
@@ -349,61 +566,59 @@ async function boot() {
     return;
   }
 
-  if(shouldPromptForServerSelection(pageHost)) {
+  if(isServerSelectionOrigin(pageHost)) {
     let savedChoice = '';
+    let readyChoice = '';
     try {
       savedChoice = localStorage.getItem(SERVER_CHOICE_KEY) || '';
+      readyChoice = sessionStorage.getItem(SERVER_READY_KEY) || '';
     } catch{}
 
-    if(savedChoice) {
+    if(savedChoice && readyChoice === savedChoice) {
       let host: string;
       try {
         host = normalizeServerHost(savedChoice);
-      } catch(error) {
-        await showServerPicker(error instanceof Error ? error.message : 'Enter a valid server host');
-        return;
+      } catch{
+        host = '';
       }
-
-      if(host === DEFAULT_SERVER_HOST && buildTarget) {
-        await activateServer(DEFAULT_SERVER_HOST, 'default', buildTarget, DEFAULT_SERVER_HOST);
+      const discovered = host && host !== DEFAULT_SERVER_HOST ? getSavedServerTarget(host) : undefined;
+      const target = host === DEFAULT_SERVER_HOST ? buildTarget : discovered?.target;
+      if(host && target) {
+        try { sessionStorage.removeItem(SERVER_READY_KEY); } catch{}
+        const action = createServerSelectionAction({phase: 'connected', host}, host);
+        setActiveContext(localStorage.getItem(ACTIVE_SERVER_ID_KEY) || discovered?.id || 'default', host, target, discovered);
+        setConnectPolicy(host, target);
+        setServerSelectionAction(action);
+        void import('./index');
         return;
-      }
-
-      if(host !== DEFAULT_SERVER_HOST) {
-        let discovered: DiscoveredServer;
-        try {
-          discovered = await fetchServerDiscovery(host);
-        } catch(error) {
-          await showServerPicker(serverDiscoveryErrorMessage(host, error));
-          return;
-        }
-
-        const pin = getServerPin(host);
-        const pinState = getServerPinState(discovered, pin);
-        if(pinState === 'mismatch') {
-          showServerIdentityChanged(discovered, pin!);
-          return;
-        }
-        if(pinState === 'match') {
-          await activateServer(host, discovered.id, discovered.target, host, true, discovered);
-          return;
-        }
       }
     }
 
-    await showServerPicker();
+    const initialState: ServerSelectionState = savedChoice ?
+      {phase: 'checking', host: savedChoice, locked: true} :
+      {phase: 'selecting', host: ''};
+    const action = createServerSelectionAction(initialState);
+    await startSelectionApp(action);
+    if(savedChoice) {
+      const controller = new AbortController();
+      void action.select(savedChoice, controller.signal);
+    }
     return;
   }
 
   if(!buildTarget) {
+    setServerSelectionAction(undefined);
     await import('./index');
     return;
   }
   const endpointHost = buildTarget.mode === 'private' ? new URL(buildTarget.endpoint).hostname : pageHost;
-  await activateServer(endpointHost, 'default', buildTarget, DEFAULT_SERVER_HOST);
+  setActiveContext('default', endpointHost, buildTarget);
+  setConnectPolicy(endpointHost, buildTarget);
+  await import('./index');
 }
 
 void boot().catch((error) => {
-  const {card} = showPanel('Could not start Teagram Web');
-  addError(card, error instanceof Error ? error.message : 'The selected server could not be started.');
+  console.error('Could not start Teagram Web', error);
+  setServerSelectionAction(undefined);
+  void import('./index');
 });

@@ -27,7 +27,7 @@ bindMouseDownTracker(getAppWindow());
 onAppWindowChange((win) => bindMouseDownTracker(win));
 
 export function hasMouseMovedSinceDown(e: Event) {
-  if(e.isTrusted && e.type === 'click' && e.target !== lastMouseDownElement) {
+  if(e.isTrusted && e.type === 'click' && (e as MouseEvent).detail !== 0 && e.target !== lastMouseDownElement) {
     return true;
   }
 }
@@ -70,6 +70,30 @@ export function attachClickEvent(elem: HTMLElement | Window, callback: (e: /* To
   if(options.cancelMouseDown) {
     (elem as HTMLElement).setAttribute('cancel-mouse-down', '');
     // (elem as any).cancelMouseDown = true;
+  }
+
+  if(CLICK_EVENT_NAME === 'mousedown') {
+    const keyboardOptions = {...options, once: false};
+    let invoked = false;
+    const onMouseDown = (event: MouseEvent) => {
+      if(options.once && invoked) return;
+      if(options.once) {
+        invoked = true;
+        remove('click', keyboardClick, keyboardOptions);
+      }
+      callback(event);
+    };
+    const keyboardClick = (event: MouseEvent) => {
+      if(!event.isTrusted || event.detail !== 0) return;
+      if(options.once) remove(CLICK_EVENT_NAME, onMouseDown, options);
+      onMouseDown(event);
+    };
+    add(CLICK_EVENT_NAME, onMouseDown, options);
+    add('click', keyboardClick, keyboardOptions);
+    return () => {
+      remove(CLICK_EVENT_NAME, onMouseDown, options);
+      remove('click', keyboardClick, keyboardOptions);
+    };
   }
 
   if(CLICK_EVENT_NAME === 'click' && !options.ignoreMove) {

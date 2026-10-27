@@ -1,6 +1,6 @@
 import {execFileSync} from 'node:child_process';
 import {createPublicKey} from 'node:crypto';
-import {existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {request as httpRequest, type IncomingMessage, type ServerResponse} from 'node:http';
@@ -486,6 +486,7 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     websocket: {endpoint: privateEndpoint.href}
   };
   const discoveryRequests: string[] = [];
+  let delayNextDiscovery = false;
   let tlsServer: ReturnType<typeof createServer> | undefined;
   let tlsSocketTracker: ReturnType<typeof trackTlsServerSockets> | undefined;
   let webSocketServer: WebSocketServer | undefined;
@@ -501,11 +502,19 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
       const url = new URL(request.url || '/', `https://${host}`);
       if(host === serverHost && url.pathname === '/.well-known/teagramd/client') {
         discoveryRequests.push(url.pathname);
-        response.writeHead(200, {
-          'access-control-allow-origin': '*',
-          'content-type': 'application/json'
-        });
-        response.end(JSON.stringify(discovery));
+        const sendDiscovery = () => {
+          response.writeHead(200, {
+            'access-control-allow-origin': '*',
+            'content-type': 'application/json'
+          });
+          response.end(JSON.stringify(discovery));
+        };
+        if(delayNextDiscovery) {
+          delayNextDiscovery = false;
+          setTimeout(sendDiscovery, 1800);
+        } else {
+          sendDiscovery();
+        }
         return;
       }
       if(host !== APP_HOST && host !== serverHost) {
@@ -553,42 +562,115 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
       }
     });
     await page.goto(appOrigin, {waitUntil: 'domcontentloaded'});
-
-    const picker = page.getByRole('dialog');
-    await expect(picker.getByRole('heading', {name: 'Choose your server'})).toBeVisible();
-    const hostInput = picker.getByRole('textbox', {name: 'Server host'});
-    await page.setViewportSize({width: 320, height: 720});
-    await expect(picker).toBeInViewport();
     await page.setViewportSize({width: 1280, height: 800});
-    await page.screenshot({path: testInfo.outputPath('server-picker.png')});
+    await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+    const screenshots = resolve('test-results/main-2778-built');
+    mkdirSync(screenshots, {recursive: true});
+    const themeButton = page.locator('#auth-pages button.btn-icon');
+    const isNight = () => page.locator('html').evaluate((element) => element.classList.contains('night'));
+    if(await isNight()) await themeButton.click();
+    await expect(page.locator('html')).not.toHaveClass(/night/);
+    const hostInput = page.getByRole('textbox', {name: 'Server address'});
+    const usernameInput = page.getByRole('textbox', {name: 'Username'});
     await expect(hostInput).toHaveValue('');
-    await expect(hostInput).toHaveAttribute('placeholder', 'your.server.host');
+    await expect(page.locator('.input-field-placeholder')).toHaveText('your.server.host');
+    await expect(usernameInput).toBeDisabled();
+    await expect(usernameInput).toHaveAttribute('aria-disabled', 'true');
+    await expect(usernameInput).toHaveAttribute('tabindex', '-1');
+    await expect(page.getByRole('button', {name: 'Continue', exact: true})).toBeDisabled();
+    expect(await page.evaluate(() => {
+      const username = document.querySelector('input[aria-label="Username"]');
+      const continueButton = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Continue');
+      return !!username && !!continueButton && !!(username.compareDocumentPosition(continueButton) & Node.DOCUMENT_POSITION_FOLLOWING);
+    })).toBe(true);
+    await page.screenshot({path: join(screenshots, 'S1.png')});
+    await page.setViewportSize({width: 360, height: 760});
+    await page.screenshot({path: join(screenshots, 'P1.png')});
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.setViewportSize({width: 1280, height: 800});
+    await themeButton.click();
+    await expect(page.locator('html')).toHaveClass(/night/);
+    await page.screenshot({path: join(screenshots, 'N1.png')});
+    await themeButton.click();
+    await expect(page.locator('html')).not.toHaveClass(/night/);
+
+    await hostInput.fill('invalid.example.test/path');
+    await hostInput.press('Enter');
+    await expect(page.getByRole('alert')).toHaveText('This is not a valid address. Use a host name, for example server.example.com.');
+    await expect(hostInput).toHaveAttribute('aria-invalid', 'true');
+    expect(discoveryRequests).toEqual([]);
+
     await hostInput.fill(serverHost);
     await hostInput.press('Enter');
 
-    const confirmation = page.getByRole('dialog');
-    await expect(confirmation.getByText(`Server: ${serverHost}`)).toBeVisible();
-    await page.screenshot({path: testInfo.outputPath('server-confirmation.png')});
+    const confirmation = page.getByRole('dialog', {name: 'Confirm this server'});
+    await expect(confirmation).toBeVisible();
+    await expect(confirmation.locator('.popup-description')).toHaveCSS('outline-style', 'none');
+    await expect(confirmation.getByText(`This browser hasn't connected to ${serverHost} before. Whoever runs this server can read your messages, so continue only if you trust them.`)).toBeVisible();
+    await expect(confirmation.getByText(/^(?:[0-9a-f]{4}-){15}[0-9a-f]{4}$/)).toHaveCount(1);
+    const fingerprint = confirmation.locator('[dir="ltr"]');
+    await expect(fingerprint.locator('span')).toHaveText([
+      '3086-3c14-188a-34a4-',
+      '286d-e6da-8e80-1ee5-',
+      'dc56-ae7e-b638-8fe3-',
+      'e268-c2a4-cdd9-2684'
+    ]);
+    await page.screenshot({path: join(screenshots, 'S5.png')});
     expect(discoveryRequests).toEqual(['/.well-known/teagramd/client']);
+    await confirmation.locator('.popup-description').focus();
+    await page.keyboard.press('Enter');
+    await expect(confirmation).toBeVisible();
+    await expect(confirmation.getByRole('button', {name: 'Confirm', exact: true})).toBeVisible();
     const selectionReload = page.waitForNavigation({waitUntil: 'domcontentloaded'});
-    await confirmation.getByRole('button', {name: 'Confirm and use this server'}).click();
+    await confirmation.getByRole('button', {name: 'Confirm', exact: true}).focus();
+    await page.keyboard.press('Enter');
     await selectionReload;
 
     await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
     await expect(page.getByRole('dialog')).toHaveCount(0);
-    await page.screenshot({path: testInfo.outputPath('post-confirm-sign-in.png')});
+    await expect(hostInput).toHaveValue(serverHost);
+    await expect(hostInput).toHaveAttribute('readonly', '');
+    await expect(page.getByRole('button', {name: 'Change server'})).toBeVisible();
+    await expect(usernameInput).toBeEnabled();
+    await expect(usernameInput).toBeFocused();
+    await expect(hostInput).toHaveCSS('text-overflow', 'ellipsis');
+    expect(await hostInput.evaluate((input) => {
+      const hostField = input.closest('[class*="serverSelectionReadOnly"]');
+      const inputField = input.closest('.input-field');
+      return [hostField, inputField].map((element) => element ? getComputedStyle(element).minWidth : undefined);
+    })).toEqual(['0px', '0px']);
+    await page.screenshot({path: join(screenshots, 'S7.png')});
     expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(serverHost);
     expect(await page.locator('meta[data-server-policy]').getAttribute('content'))
     .toBe(`connect-src 'self' https://${serverHost} ${privateEndpoint.href};`);
-    expect(discoveryRequests).toEqual(['/.well-known/teagramd/client', '/.well-known/teagramd/client']);
+    expect(discoveryRequests).toEqual(['/.well-known/teagramd/client']);
     expect(cspViolations).toEqual([]);
 
+    await page.getByRole('button', {name: 'Change server'}).click();
+    await expect(hostInput).not.toHaveAttribute('readonly', '');
+    await expect(usernameInput).toBeDisabled();
+    expect(await page.evaluate(() => {
+      const username = document.querySelector('input[aria-label="Username"]');
+      const continueButton = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Continue');
+      return !!username && !!continueButton && !!(username.compareDocumentPosition(continueButton) & Node.DOCUMENT_POSITION_FOLLOWING);
+    })).toBe(true);
+    await expect(page.getByRole('button', {name: 'Cancel', exact: true})).toBeVisible();
+    await page.screenshot({path: join(screenshots, 'S8.png')});
+    await page.getByRole('button', {name: 'Cancel', exact: true}).click();
+    await expect(page.getByRole('button', {name: 'Change server'})).toBeFocused();
+    await expect(usernameInput).toBeEnabled();
+
+    delayNextDiscovery = true;
     await page.reload({waitUntil: 'domcontentloaded'});
     await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+    await expect(page.getByRole('button', {name: /Checking/})).toBeVisible();
+    await expect(hostInput).toHaveAttribute('readonly', '');
+    await page.screenshot({path: join(screenshots, 'S6.png')});
     await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(hostInput).toHaveValue(serverHost);
+    await expect(usernameInput).toBeFocused();
     expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(serverHost);
     expect(discoveryRequests).toEqual([
-      '/.well-known/teagramd/client',
       '/.well-known/teagramd/client',
       '/.well-known/teagramd/client'
     ]);
@@ -596,15 +678,41 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     const mismatchedPin = await page.evaluate((host) => {
       const pins = JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}');
       if(!pins[host]) throw new Error('confirmed server pin was not saved');
-      pins[host].key_fingerprint = '0'.repeat(64);
+      pins[host].key_fingerprint = '9b1f04c277ae51d0c3e82f96a41b0d7c6e25b9f31a84e07d5c62d8a93f1784b0';
       localStorage.setItem('teagram.server-pins.v1', JSON.stringify(pins));
       return pins[host];
     }, serverHost);
     await page.reload({waitUntil: 'domcontentloaded'});
-    const mismatch = page.getByRole('dialog');
-    await expect(mismatch.getByRole('heading', {name: 'Server identity changed'})).toBeVisible();
-    await page.screenshot({path: testInfo.outputPath('server-identity-mismatch.png')});
-    await expect(page.locator('#auth-pages')).toHaveCount(0);
+    const mismatch = page.getByRole('dialog', {name: 'Server identity changed'});
+    await expect(mismatch).toBeVisible();
+    await expect(mismatch.getByText(`The identity of ${serverHost}, pinned in this browser, has changed.`)).toBeVisible();
+    await expect(mismatch.getByText(/^(?:[0-9a-f]{4}-){15}[0-9a-f]{4}$/)).toHaveCount(2);
+    const mismatchFingerprints = mismatch.locator('[dir="ltr"]');
+    await expect(mismatchFingerprints).toHaveCount(2);
+    await expect(mismatchFingerprints.nth(0).locator('span')).toHaveText([
+      '9b1f-04c2-77ae-51d0-',
+      'c3e8-2f96-a41b-0d7c-',
+      '6e25-b9f3-1a84-e07d-',
+      '5c62-d8a9-3f17-84b0'
+    ]);
+    await expect(mismatchFingerprints.nth(1).locator('span')).toHaveText([
+      '3086-3c14-188a-34a4-',
+      '286d-e6da-8e80-1ee5-',
+      'dc56-ae7e-b638-8fe3-',
+      'e268-c2a4-cdd9-2684'
+    ]);
+    await page.screenshot({path: join(screenshots, 'S9.png')});
+    await mismatch.getByRole('button', {name: 'Continue to confirmation'}).click();
+    const deletion = page.getByRole('dialog', {name: 'Confirm data deletion'});
+    await expect(deletion).toBeVisible();
+    await expect(deletion.getByText(`This is the final confirmation. Accepting permanently deletes the keys, sessions, cached messages and peers, endpoint, and server identity this browser keeps for ${serverHost}, before returning to server selection. A guest account used here can't be recovered. This cannot be undone.`)).toBeVisible();
+    await deletion.getByRole('button', {name: 'Cancel', exact: true}).click();
+    await expect(deletion).toBeHidden();
+    await expect(page.getByRole('alert')).toHaveText('This server no longer matches the identity pinned in this browser, so the connection is blocked. Contact your server administrator.');
+    await page.screenshot({path: join(screenshots, 'S11.png')});
+    await page.getByRole('button', {name: 'Continue', exact: true}).click();
+    await expect(page.getByRole('dialog', {name: 'Server identity changed'})).toBeVisible();
+    await page.getByRole('dialog').getByRole('button', {name: 'Cancel', exact: true}).click();
 
     const chooseAnotherServer = mismatch.getByRole('button', {name: 'Choose another server'});
     await expect(chooseAnotherServer).toBeVisible();

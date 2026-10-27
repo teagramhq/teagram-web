@@ -6,8 +6,10 @@ import LanguageChangeButton from '@components/languageChangeButton';
 import PasskeyLoginButton from '@components/passkeyLoginButton';
 import MediaHeader from '@components/mediaHeader';
 import TelInputField from '@components/telInputField';
-import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import App from '@config/app';
+import {getServerSelectionAction} from '@config/serverSelection';
+import type {ServerSelectionState} from '@config/serverSelection';
+import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import focusWhenConnected from '@helpers/dom/focusWhenConnected';
 import placeCaretAtEnd from '@helpers/dom/placeCaretAtEnd';
@@ -22,6 +24,7 @@ import {TrueDcId} from '@types';
 
 import AuthCard from '@/pages/AuthCard';
 import {CardSpec, useAuthFlow} from '@/pages/authFlow';
+import ServerSelectionField from '@/pages/ServerSelectionField';
 import TurnstileChallenge, {useTurnstileChallenge} from '@/pages/TurnstileChallenge';
 import {invokeTurnstileProtected} from '@/pages/turnstileSignup';
 import styles from '@/pages/authFlow.module.scss';
@@ -40,6 +43,10 @@ type Spec = Extract<CardSpec, {name: 'signIn'}>;
 export default function SignInCard(_props: {spec: Spec}) {
   const {managers, navigate, toIm} = useAuthFlow();
   const turnstile = useTurnstileChallenge();
+  const serverSelectionAction = getServerSelectionAction();
+  const [serverSelectionState, setServerSelectionState] = createSignal<ServerSelectionState | undefined>(serverSelectionAction?.getState());
+  const serverSelectionPending = () => !!serverSelectionAction &&
+    (serverSelectionState()?.phase !== 'connected' || !!serverSelectionState()?.changing);
 
   let cancelled = false;
 
@@ -97,8 +104,33 @@ export default function SignInCard(_props: {spec: Spec}) {
   });
 
   const telEl = telInputField.input;
+  function syncServerSelectionFields(state = serverSelectionAction?.getState()) {
+    if(state) setServerSelectionState(state);
+    const disabled = !!serverSelectionAction &&
+      (state?.phase !== 'connected' || !!state.changing);
+    [countryInputField.input, telEl].forEach((field) => {
+      const input = field as HTMLInputElement;
+      input.disabled = disabled;
+      if(disabled) {
+        input.setAttribute('aria-disabled', 'true');
+        input.tabIndex = -1;
+        input.setAttribute('aria-describedby', 'server-selection-subtitle');
+      } else {
+        input.removeAttribute('aria-disabled');
+        input.removeAttribute('tabindex');
+        input.removeAttribute('aria-describedby');
+      }
+      const fieldContainer = input === countryInputField.input ? countryInputField.container : telInputField.container;
+      fieldContainer.classList.toggle(styles.serverSelectionDisabledField, disabled);
+    });
+  }
+
+  const unsubscribeServerSelection = serverSelectionAction?.subscribe(syncServerSelectionFields);
+  syncServerSelectionFields();
+  if(unsubscribeServerSelection) onCleanup(unsubscribeServerSelection);
+
   telEl.addEventListener('keypress', (e) => {
-    if(hasValidInput() && !submitting() && e.key === 'Enter') {
+    if(!serverSelectionPending() && hasValidInput() && !submitting() && e.key === 'Enter') {
       return onSubmit();
     }
   });
@@ -227,11 +259,11 @@ export default function SignInCard(_props: {spec: Spec}) {
   let cancelFocus: (() => void) | undefined;
   onMount(() => {
     managers.appStateManager.pushToState('authState', {_: 'authStateSignIn'});
-    if(!IS_TOUCH_SUPPORTED) {
-      cancelFocus = focusWhenConnected(telEl, () => !cancelled);
-    }
-
-    tryAgain();
+    if(!IS_TOUCH_SUPPORTED) cancelFocus = focusWhenConnected(
+      serverSelectionPending() ? document.querySelector<HTMLInputElement>('#server-address') : telEl,
+      () => !cancelled
+    );
+    if(!serverSelectionPending()) tryAgain();
   });
 
   onCleanup(() => {
@@ -245,6 +277,7 @@ export default function SignInCard(_props: {spec: Spec}) {
   return (
     <AuthCard
       class={styles.pageSignIn}
+      hideActiveServer={!!serverSelectionAction}
       header={
         <MediaHeader>
           <MediaHeader.Sticker
@@ -255,33 +288,41 @@ export default function SignInCard(_props: {spec: Spec}) {
             }
           />
           <MediaHeader.Title>{i18n('Login.Title')}</MediaHeader.Title>
-          <MediaHeader.Subtitle class="secondary">{i18n('Login.StartText')}</MediaHeader.Subtitle>
+          <MediaHeader.Subtitle class="secondary" id={serverSelectionAction ? 'server-selection-subtitle' : undefined}>
+            {serverSelectionPending() ? i18n('Teagram.Server.Subtitle') : i18n('Login.StartText')}
+          </MediaHeader.Subtitle>
         </MediaHeader>
       }
       inputWrapper={false}
     >
       <div class="input-wrapper">
-        {countryInputField.container}
-        {telInputField.container}
-        <Show when={turnstile.challenge()} keyed>
-          {(challenge) => <TurnstileChallenge {...challenge}/>}
-        </Show>
-        <Button
-          class="btn-primary btn-color-primary"
-          disabled={!hasValidInput() || submitting()}
-          onClick={onSubmit}
-        >
-          {nextContent()}
-        </Button>
-        {getCurrentAccount() === 1 && <LanguageChangeButton />}
+        <ServerSelectionField>
+          {countryInputField.container}
+          {telInputField.container}
+          <Show when={!serverSelectionPending()}>
+            <Show when={turnstile.challenge()} keyed>
+              {(challenge) => <TurnstileChallenge {...challenge}/>}
+            </Show>
+            <Button
+              class="btn-primary btn-color-primary"
+              disabled={!hasValidInput() || submitting()}
+              onClick={onSubmit}
+            >
+              {nextContent()}
+            </Button>
+            {getCurrentAccount() === 1 && <LanguageChangeButton />}
+          </Show>
+        </ServerSelectionField>
       </div>
-      <Button
-        class="btn-primary btn-secondary btn-primary-transparent primary"
-        disabled={submitting()}
-        onClick={() => navigate({name: 'signQR'})}
-        text="Login.QR.Login"
-      />
-      <PasskeyLoginButton disabled={submitting()} />
+      <Show when={!serverSelectionPending()}>
+        <Button
+          class="btn-primary btn-secondary btn-primary-transparent primary"
+          disabled={submitting()}
+          onClick={() => navigate({name: 'signQR'})}
+          text="Login.QR.Login"
+        />
+        <PasskeyLoginButton disabled={submitting()} />
+      </Show>
     </AuthCard>
   );
 }
