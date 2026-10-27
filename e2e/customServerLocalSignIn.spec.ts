@@ -1019,6 +1019,8 @@ test('isolates two server tabs when a custom server worker takes control', async
     });
 
     await runPhase('worker takeover', async() => {
+      // Keep the running tab's active context but let the next tab start a fresh server choice.
+      await page.evaluate(() => localStorage.removeItem('teagram.server-choice.v1'));
       customPage = await page.context().newPage();
       const customPageMainFrame = customPage.mainFrame();
       customPage.on('framenavigated', (frame) => {
@@ -1038,9 +1040,7 @@ test('isolates two server tabs when a custom server worker takes control', async
       await expect(confirm.getByText(/SPKI SHA-256:/)).toBeVisible();
       await confirm.getByRole('button', {name: 'Confirm and use this server'}).click();
 
-      const returningPicker = customPage.getByRole('dialog');
-      await expect(returningPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(SERVER_HOST);
-      await returningPicker.getByRole('button', {name: 'Continue'}).click();
+      await expect(customPage.getByRole('dialog')).toHaveCount(0);
       await expect.poll(() => customPage!.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__ || ''), {timeout: 20_000})
         .toBe(SERVER_HOST);
       customServerId = await customPage.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__ as string);

@@ -208,16 +208,15 @@ async function openSelectedServer(page: Page, testInfo: TestInfo) {
 
   const picker = page.getByRole('dialog');
   const hostInput = picker.getByRole('textbox', {name: 'Server host'});
-  await expect(hostInput).toHaveValue('demo.teagram.io');
+  await expect(hostInput).toHaveValue('');
+  await expect(hostInput).toHaveAttribute('placeholder', 'your.server.host');
   await hostInput.fill(SERVER_HOST);
   await picker.getByRole('button', {name: 'Continue'}).click();
   const confirmation = page.getByRole('dialog');
   await expect(confirmation.getByText(`Server: ${SERVER_HOST}`)).toBeVisible();
   await confirmation.getByRole('button', {name: 'Confirm and use this server'}).click();
 
-  const rememberedPicker = page.getByRole('dialog');
-  await expect(rememberedPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(SERVER_HOST);
-  await rememberedPicker.getByRole('button', {name: 'Continue'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('#auth-pages')).toBeAttached({timeout: 30_000});
   await expect(page.locator('#auth-pages').getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
 }
@@ -268,9 +267,7 @@ test('creates a guest only when discovery advertises it and restores the same gu
     .toBe(guestUsername);
 
   await page.reload({waitUntil: 'domcontentloaded'});
-  const returningPicker = page.getByRole('dialog');
-  await expect(returningPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(SERVER_HOST);
-  await returningPicker.getByRole('button', {name: 'Continue'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
   await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(8282)?.username))
     .toBe(guestUsername);
@@ -502,9 +499,7 @@ test('declining guest terms leaves no account and remains recoverable after relo
   await captureState(page, testInfo, 'guest-terms-declined');
 
   await page.reload({waitUntil: 'domcontentloaded'});
-  const returningPicker = page.getByRole('dialog');
-  await expect(returningPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(SERVER_HOST);
-  await returningPicker.getByRole('button', {name: 'Continue'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   const returningAuth = page.locator('#auth-pages');
   await expect(returningAuth.getByRole('button', {name: 'Try it as a guest'})).toBeVisible({timeout: 30_000});
   await expect(returningAuth.getByRole('alert')).toHaveCount(0);
@@ -536,9 +531,7 @@ test('surfaces guest terms popup load failures as an auth error', async({page}, 
   await page.unroute('**/simpleConfirmation.ts*');
 
   await page.reload({waitUntil: 'domcontentloaded'});
-  const returningPicker = page.getByRole('dialog');
-  await expect(returningPicker.getByRole('textbox', {name: 'Server host'})).toHaveValue(SERVER_HOST);
-  await returningPicker.getByRole('button', {name: 'Continue'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   const returningAuth = page.locator('#auth-pages');
   await expect(returningAuth.getByRole('button', {name: 'Try it as a guest'})).toBeVisible({timeout: 30_000});
   await expect(returningAuth.getByRole('alert')).toHaveCount(0);
