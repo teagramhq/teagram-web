@@ -3,7 +3,6 @@ import {fetchTeagramDeploymentConfig} from '@config/deploymentConfig';
 import {
   ACTIVE_SERVER_ID_KEY,
   DEFAULT_SERVER_HOST,
-  DEMO_SERVER_HOST,
   SERVER_CHOICE_KEY,
   DiscoveredServer,
   fetchServerDiscovery,
@@ -86,6 +85,12 @@ function addError(card: HTMLElement, message: string) {
   error.setAttribute('role', 'alert');
   error.textContent = message;
   card.append(error);
+}
+
+function serverDiscoveryErrorMessage(host: string, error: unknown) {
+  const message = error instanceof Error ? error.message : '';
+  return /not a Teagram server/i.test(message) ? message :
+    `Could not reach ${host}. Check that it is online and publishes Teagram discovery.`;
 }
 
 async function unregisterServiceWorkers(serverId?: string): Promise<void> {
@@ -188,16 +193,17 @@ function probeWebSocket(endpoint: string) {
   });
 }
 
-async function showServerPicker() {
-  let savedChoice = DEMO_SERVER_HOST;
+async function showServerPicker(initialError?: string) {
+  let savedChoice = '';
   try {
-    savedChoice = localStorage.getItem(SERVER_CHOICE_KEY) || DEMO_SERVER_HOST;
+    savedChoice = localStorage.getItem(SERVER_CHOICE_KEY) || '';
   } catch{}
 
   const {card} = showPanel(
     'Choose your server',
     'The server operator can read all non-secret chats. Choose a server you trust. Your account and stored data stay with the server you select.'
   );
+  if(initialError) addError(card, initialError);
   const form = document.createElement('form');
   const label = document.createElement('label');
   label.textContent = 'Server host';
@@ -206,7 +212,7 @@ async function showServerPicker() {
   input.inputMode = 'url';
   input.spellcheck = false;
   input.value = savedChoice;
-  input.placeholder = DEMO_SERVER_HOST;
+  input.placeholder = 'your.server.host';
   label.append(input);
   const submit = document.createElement('button');
   submit.type = 'submit';
@@ -242,16 +248,14 @@ async function showServerPicker() {
     try {
       discovered = await fetchServerDiscovery(host);
     } catch(error) {
-      const message = error instanceof Error ? error.message : '';
-      addError(card, /not a Teagram server/i.test(message) ? message :
-        `Could not reach ${host}. Check that it is online and publishes Teagram discovery.`);
+      addError(card, serverDiscoveryErrorMessage(host, error));
       return;
     }
 
     const pin = getServerPin(host);
     const pinState = getServerPinState(discovered, pin);
     if(pinState === 'mismatch') {
-      showServerIdentityChanged(discovered, pin);
+      showServerIdentityChanged(discovered, pin!);
       return;
     }
 
@@ -332,6 +336,47 @@ async function boot() {
   }
 
   if(shouldPromptForServerSelection(pageHost)) {
+    let savedChoice = '';
+    try {
+      savedChoice = localStorage.getItem(SERVER_CHOICE_KEY) || '';
+    } catch{}
+
+    if(savedChoice) {
+      let host: string;
+      try {
+        host = normalizeServerHost(savedChoice);
+      } catch(error) {
+        await showServerPicker(error instanceof Error ? error.message : 'Enter a valid server host');
+        return;
+      }
+
+      if(host === DEFAULT_SERVER_HOST && buildTarget) {
+        await activateServer(DEFAULT_SERVER_HOST, 'default', buildTarget, DEFAULT_SERVER_HOST);
+        return;
+      }
+
+      if(host !== DEFAULT_SERVER_HOST) {
+        let discovered: DiscoveredServer;
+        try {
+          discovered = await fetchServerDiscovery(host);
+        } catch(error) {
+          await showServerPicker(serverDiscoveryErrorMessage(host, error));
+          return;
+        }
+
+        const pin = getServerPin(host);
+        const pinState = getServerPinState(discovered, pin);
+        if(pinState === 'mismatch') {
+          showServerIdentityChanged(discovered, pin!);
+          return;
+        }
+        if(pinState === 'match') {
+          await activateServer(host, discovered.id, discovered.target, host, true, discovered);
+          return;
+        }
+      }
+    }
+
     await showServerPicker();
     return;
   }
