@@ -593,17 +593,45 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
       '/.well-known/teagramd/client'
     ]);
 
-    await page.evaluate((host) => {
+    const mismatchedPin = await page.evaluate((host) => {
       const pins = JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}');
       if(!pins[host]) throw new Error('confirmed server pin was not saved');
       pins[host].key_fingerprint = '0'.repeat(64);
       localStorage.setItem('teagram.server-pins.v1', JSON.stringify(pins));
+      return pins[host];
     }, serverHost);
     await page.reload({waitUntil: 'domcontentloaded'});
     const mismatch = page.getByRole('dialog');
     await expect(mismatch.getByRole('heading', {name: 'Server identity changed'})).toBeVisible();
     await page.screenshot({path: testInfo.outputPath('server-identity-mismatch.png')});
     await expect(page.locator('#auth-pages')).toHaveCount(0);
+
+    const chooseAnotherServer = mismatch.getByRole('button', {name: 'Choose another server'});
+    await expect(chooseAnotherServer).toBeVisible();
+    await page.setViewportSize({width: 320, height: 720});
+    await expect(mismatch).toBeInViewport();
+    await expect(chooseAnotherServer).toBeInViewport();
+    await expect(mismatch.getByRole('button', {name: 'Forget this server'})).toBeInViewport();
+    await page.screenshot({path: testInfo.outputPath('server-identity-mismatch-mobile.png')});
+    await page.setViewportSize({width: 1280, height: 800});
+    await chooseAnotherServer.focus();
+    await page.keyboard.press('Enter');
+
+    const pickerAfterMismatch = page.getByRole('dialog');
+    await expect(pickerAfterMismatch.getByRole('heading', {name: 'Choose your server'})).toBeVisible();
+    const mismatchHostInput = pickerAfterMismatch.getByRole('textbox', {name: 'Server host'});
+    await expect(mismatchHostInput).toHaveValue('');
+    await page.screenshot({path: testInfo.outputPath('server-picker-after-identity-mismatch.png')});
+    expect(await page.evaluate(() => localStorage.getItem('teagram.server-choice.v1'))).toBeNull();
+    expect(await page.evaluate((host) => JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}')[host], serverHost))
+    .toEqual(mismatchedPin);
+    await mismatchHostInput.fill(serverHost);
+    await pickerAfterMismatch.getByRole('button', {name: 'Continue'}).click();
+    const mismatchAgain = page.getByRole('dialog');
+    await expect(mismatchAgain.getByRole('heading', {name: 'Server identity changed'})).toBeVisible();
+    await expect(mismatchAgain.getByRole('button', {name: 'Choose another server'})).toBeVisible();
+    expect(await page.evaluate((host) => JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}')[host], serverHost))
+    .toEqual(mismatchedPin);
 
     const pinnedPage = await page.context().newPage();
     const pinnedCspViolations: string[] = [];

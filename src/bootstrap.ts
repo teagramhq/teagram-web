@@ -268,7 +268,11 @@ async function showServerPicker(initialError?: string) {
   }
 }
 
-function showServerIdentityChanged(discovered: DiscoveredServer, pin: NonNullable<ReturnType<typeof getServerPin>>, allowForget = true) {
+function showServerIdentityChanged(
+  discovered: DiscoveredServer,
+  pin: NonNullable<ReturnType<typeof getServerPin>>,
+  {allowForget = true, allowChooseAnother = true}: {allowForget?: boolean, allowChooseAnother?: boolean} = {}
+) {
   const mismatch = showPanel('Server identity changed', 'This server no longer matches the identity you pinned. Teagram will not connect with the changed key.');
   const hostLine = document.createElement('p');
   hostLine.textContent = `Server: ${discovered.host}`;
@@ -279,6 +283,16 @@ function showServerIdentityChanged(discovered: DiscoveredServer, pin: NonNullabl
   newFingerprint.className = 'server-picker__fingerprint';
   newFingerprint.textContent = `Current SPKI SHA-256: ${formatSPKIFingerprint(discovered.spkiFingerprint)}`;
   mismatch.card.append(hostLine, oldFingerprint, newFingerprint);
+  if(allowChooseAnother) {
+    mismatch.card.append(createButton('Choose another server', async() => {
+      try {
+        localStorage.removeItem(SERVER_CHOICE_KEY);
+        await showServerPicker();
+      } catch{
+        addError(mismatch.card, 'Browser storage is unavailable');
+      }
+    }));
+  }
   if(allowForget) {
     mismatch.card.append(createButton('Forget this server', async() => {
       try {
@@ -288,7 +302,7 @@ function showServerIdentityChanged(discovered: DiscoveredServer, pin: NonNullabl
       } catch(error) {
         addError(mismatch.card, error instanceof Error ? error.message : 'Could not remove this server data');
       }
-    }));
+    }, true));
   }
 }
 
@@ -298,7 +312,7 @@ async function bootConfiguredServer(config: {server: string, autoGuest: boolean}
   const pin = getServerPin(config.server);
   const pinState = getServerPinState(discovered, pin);
   if(pinState === 'mismatch') {
-    showServerIdentityChanged(discovered, pin!, false);
+    showServerIdentityChanged(discovered, pin!, {allowForget: false, allowChooseAnother: false});
     return;
   }
 
