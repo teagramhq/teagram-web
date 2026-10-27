@@ -382,7 +382,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
         await saveRecord(record, previousUsername);
         continue;
       }
-      if(result.kind === 'passwordSetupError' || result.kind === 'weakPassword') {
+      if(result.kind === 'passwordSetupError') {
         return {kind: 'setupPending', username: record.username, ...('errorType' in result && result.errorType ? {errorType: result.errorType} : {})} as const;
       }
       if(record.status === 'provisional' && (result.kind === 'invalidCredentials' ||

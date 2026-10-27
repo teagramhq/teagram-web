@@ -17,7 +17,7 @@ describe('private username sign-in', () => {
     expect(isPrivateUsername('a1234')).toBe(true);
     expect(isPrivateUsername('1Alice')).toBe(false);
     expect(isPrivateUsername('_Alice1')).toBe(false);
-    expect(isPrivateUsername('Abc1')).toBe(false);
+    expect(isPrivateUsername('Abc1')).toBe(true);
     expect(isPrivateUsername('A'.repeat(33))).toBe(false);
     expect(isPrivateUsername('Alice-123')).toBe(false);
   });
@@ -25,7 +25,7 @@ describe('private username sign-in', () => {
   it('rejects malformed input before making an authentication RPC', async() => {
     const invokeApi = vi.fn();
 
-    await expect(authenticatePrivateUsername('ab', invokeApi)).resolves.toEqual({kind: 'invalidInput'});
+    await expect(authenticatePrivateUsername('a', invokeApi)).resolves.toEqual({kind: 'invalidInput'});
     expect(invokeApi).not.toHaveBeenCalled();
   });
 
@@ -415,20 +415,20 @@ describe('private username sign-in', () => {
     ]);
   });
 
-  it('does not authorize an account when password setup fails', async() => {
+  it('does not authorize an account when the server rejects the password verifier', async() => {
     const user = {_: 'user', id: 44};
     const invokeApi = vi.fn()
     .mockResolvedValueOnce(SENT_CODE)
     .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
     .mockResolvedValueOnce({_: 'auth.authorization', user});
-    const updatePasswordSettings = vi.fn().mockRejectedValue({type: 'PASSWORD_TOO_WEAK'});
+    const updatePasswordSettings = vi.fn().mockRejectedValue({type: 'NEW_PASSWORD_BAD'});
 
     await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
       mode: 'open',
       displayName: 'Alice Example',
       password: 'weak',
       updatePasswordSettings
-    })).resolves.toEqual({kind: 'weakPassword', user});
+    })).resolves.toEqual({kind: 'passwordSetupError', user, errorType: 'NEW_PASSWORD_BAD'});
   });
 
   it.each(['PHONE_NUMBER_INVALID', 'INPUT_REQUEST_INVALID', 'PASSWORD_HASH_INVALID'])(

@@ -44,7 +44,6 @@ type PrivateUsernameUiError =
   | 'invalidInvite'
   | 'registrationClosed'
   | 'passwordMismatch'
-  | 'weakPassword'
   | 'passwordSetupNetwork'
   | 'guestFlood'
   | 'guestFloodWait'
@@ -137,6 +136,10 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
   const [hasValidInput, setHasValidInput] = createSignal(false);
   const [hasValidRegistrationInput, setHasValidRegistrationInput] = createSignal(false);
+  const [usernameIssue, setUsernameIssue] = createSignal<'tooShort' | 'tooLong' | 'start' | 'characters'>();
+  const [displayNameEntered, setDisplayNameEntered] = createSignal(false);
+  const [confirmPasswordState, setConfirmPasswordState] = createSignal<'required' | 'match' | 'mismatch'>('required');
+  const [inviteSecretEntered, setInviteSecretEntered] = createSignal(false);
   const [submitting, setSubmitting] = createSignal(false);
   const [registrationMode, setRegistrationMode] = createSignal<PrivateUsernameRegistrationMode>('closed');
   const [creatingAccount, setCreatingAccount] = createSignal(false);
@@ -159,13 +162,51 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   let guestActionWaiting = false;
   let guestAuthorized = false;
 
+  function getUsernameIssue(username: string): 'tooShort' | 'tooLong' | 'start' | 'characters' | undefined {
+    if(!username) return;
+    if(username.length < 2) return 'tooShort';
+    if(username.length > 32) return 'tooLong';
+    if(!/^[a-zA-Z]/.test(username)) return 'start';
+    if(!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(username)) return 'characters';
+  }
+
   function updateRegistrationValidity() {
+    const isCreatingAccount = creatingAccount();
+    const issue = isCreatingAccount ? getUsernameIssue(usernameField.value) : undefined;
+    const hasDisplayName = !!displayNameField.value.trim();
+    const hasPassword = !!passwordInput.value;
+    const hasConfirmation = !!confirmPasswordInput.value;
+    const passwordMatches = hasConfirmation && passwordInput.value === confirmPasswordInput.value;
+    const confirmState = !hasConfirmation ? 'required' : passwordMatches ? 'match' : 'mismatch';
+    const hasInviteSecret = !!inviteSecretField.value.trim();
+
+    setUsernameIssue(issue);
+    setDisplayNameEntered(hasDisplayName);
+    setConfirmPasswordState(confirmState);
+    setInviteSecretEntered(hasInviteSecret);
+
+    if(issue) {
+      usernameInput.classList.add('error');
+      usernameInput.setAttribute('aria-invalid', 'true');
+    } else if(error() !== 'usernameTaken' && error() !== 'invalidUsername') {
+      usernameInput.classList.remove('error');
+      usernameInput.removeAttribute('aria-invalid');
+    }
+
+    if(confirmState === 'mismatch') {
+      confirmPasswordInput.classList.add('error');
+      confirmPasswordInput.setAttribute('aria-invalid', 'true');
+    } else if(error() !== 'passwordMismatch') {
+      confirmPasswordInput.classList.remove('error');
+      confirmPasswordInput.removeAttribute('aria-invalid');
+    }
+
     setHasValidRegistrationInput(
       isPrivateUsername(usernameField.value) &&
-      !!displayNameField.value.trim() &&
-      !!passwordInput.value &&
-      !!confirmPasswordInput.value &&
-      (registrationMode() !== 'invite' || !!inviteSecretField.value.trim())
+      hasDisplayName &&
+      hasPassword &&
+      passwordMatches &&
+      (registrationMode() !== 'invite' || hasInviteSecret)
     );
   }
 
@@ -219,6 +260,56 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
       usernameInput.classList.add('error');
       usernameInput.setAttribute('aria-invalid', 'true');
     }
+    if(errorKind === 'passwordMismatch') {
+      confirmPasswordInput.classList.add('error');
+      confirmPasswordInput.setAttribute('aria-invalid', 'true');
+    }
+  }
+
+  function usernameStatusText() {
+    switch(error()) {
+      case 'usernameTaken':
+        return i18n('Teagram.Registration.UsernameTaken');
+      case 'invalidUsername':
+        return i18n('Teagram.Registration.InvalidUsername');
+    }
+
+    switch(usernameIssue()) {
+      case 'tooShort':
+        return i18n('Teagram.Registration.UsernameTooShort');
+      case 'tooLong':
+        return i18n('Teagram.Registration.UsernameTooLong');
+      case 'start':
+        return i18n('Teagram.Registration.UsernameStart');
+      case 'characters':
+        return i18n('Teagram.Registration.UsernameCharacters');
+      default:
+        return i18n('Teagram.Registration.UsernameHint');
+    }
+  }
+
+  function confirmPasswordStatusText() {
+    if(error() === 'passwordMismatch') return i18n('Teagram.Registration.PasswordMismatch');
+    switch(confirmPasswordState()) {
+      case 'match':
+        return i18n('Teagram.Registration.PasswordMatch');
+      case 'mismatch':
+        return i18n('Teagram.Registration.PasswordMismatch');
+      default:
+        return i18n('Teagram.Registration.ConfirmPasswordRequired');
+    }
+  }
+
+  function isUsernameStatusError() {
+    return !!usernameIssue() || ['usernameTaken', 'invalidUsername'].includes(error() || '');
+  }
+
+  function isConfirmPasswordStatusError() {
+    return confirmPasswordState() === 'mismatch' || error() === 'passwordMismatch';
+  }
+
+  function isInlineRegistrationError() {
+    return ['usernameTaken', 'invalidUsername', 'passwordMismatch'].includes(error() || '');
   }
 
   async function finishPendingPasswordSetup(): Promise<void> {
@@ -241,10 +332,6 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
       setPendingPasswordUser(undefined);
     } catch(error) {
       if(cancelled) return;
-      if(getPrivateUsernameRegistrationError(error) === 'weakPassword') {
-        showError('weakPassword');
-        return;
-      }
 
       try {
         const passwordState = await managers.passwordManager.getState();
@@ -363,11 +450,6 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           break;
         case 'termsAcceptanceError':
           showError('network');
-          break;
-        case 'weakPassword':
-          setPendingPasswordUser(result.user);
-          lockAccountFields();
-          showError('weakPassword');
           break;
         case 'passwordSetupError':
           setPendingPasswordUser(result.user);
@@ -528,6 +610,10 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     setError(undefined);
     setGuestFloodWait(undefined);
     setTermsDeclined(false);
+    usernameInput.setAttribute('aria-describedby', 'registration-username-status');
+    displayNameInput.setAttribute('aria-describedby', 'registration-display-name-status');
+    if(registrationMode() === 'invite') inviteSecretInput.setAttribute('aria-describedby', 'registration-invite-secret-status');
+    confirmPasswordInput.setAttribute('aria-describedby', 'registration-confirm-password-status');
     updateRegistrationValidity();
   }
 
@@ -538,6 +624,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     setGuestFloodWait(undefined);
     setTermsDeclined(false);
     updateSignInValidity();
+    usernameInput.removeAttribute('aria-describedby');
     usernameInput.classList.remove('error');
     usernameInput.removeAttribute('aria-invalid');
     usernameInput.disabled = false;
@@ -548,6 +635,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     passwordField.setValueSilently('');
     confirmPasswordField.setValueSilently('');
     setHasValidRegistrationInput(false);
+    updateRegistrationValidity();
   }
 
   function errorContent() {
@@ -568,8 +656,6 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         return i18n('Teagram.Registration.Closed');
       case 'passwordMismatch':
         return i18n('Teagram.Registration.PasswordMismatch');
-      case 'weakPassword':
-        return i18n('Teagram.Registration.WeakPassword');
       case 'passwordSetupNetwork':
         return i18n('Teagram.Registration.PasswordNetwork');
       case 'guestFlood':
@@ -661,12 +747,36 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         <>
           {usernameField.container}
           {creatingAccount() && (
-            <div class={styles.registrationFields}>
-              {displayNameField.container}
-              {registrationMode() === 'invite' && inviteSecretField.container}
-              {passwordField.container}
-              {confirmPasswordField.container}
-            </div>
+            <>
+              <p
+                id="registration-username-status"
+                class={isUsernameStatusError() ? styles.registrationFieldStatusError : styles.registrationFieldStatus}
+                role={isUsernameStatusError() ? 'alert' : 'status'}
+              >
+                {usernameStatusText()}
+              </p>
+              <div class={styles.registrationFields}>
+                {displayNameField.container}
+                <p id="registration-display-name-status" class={styles.registrationFieldStatus} role="status">
+                  {displayNameEntered() ? '' : i18n('Teagram.Registration.InvalidDisplayName')}
+                </p>
+                {registrationMode() === 'invite' && inviteSecretField.container}
+                {registrationMode() === 'invite' && (
+                  <p id="registration-invite-secret-status" class={styles.registrationFieldStatus} role="status">
+                    {inviteSecretEntered() ? '' : i18n('Teagram.Registration.InviteRequired')}
+                  </p>
+                )}
+                {passwordField.container}
+                {confirmPasswordField.container}
+                <p
+                  id="registration-confirm-password-status"
+                  class={isConfirmPasswordStatusError() ? styles.registrationFieldStatusError : styles.registrationFieldStatus}
+                  role={isConfirmPasswordStatusError() ? 'alert' : 'status'}
+                >
+                  {confirmPasswordStatusText()}
+                </p>
+              </div>
+            </>
           )}
         </>
       )}
@@ -678,7 +788,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           {i18n(restoringGuest() ? 'Teagram.Guest.Restoring' : 'Teagram.Guest.Creating')}
         </div>
       )}
-      {error() && <div class={styles.errorLabel} role="alert">{errorContent()}</div>}
+      {error() && !(creatingAccount() && isInlineRegistrationError()) && <div class={styles.errorLabel} role="alert">{errorContent()}</div>}
       {registrationConfigUnavailable() && !creatingAccount() && (
         <div class={styles.registrationConfigError} role="status">
           {i18n('Teagram.Registration.ConfigNetwork')}
