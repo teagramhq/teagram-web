@@ -557,7 +557,7 @@ test('shows one Turnstile challenge failure without retrying automatically', asy
 
   await page.goto(`${appOrigin.origin}/?noWorker=1&noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
   const auth = page.locator('#auth-pages');
-  await expect(auth.locator('[role="status"]')).toContainText('Creating a guest account…', {timeout: 30_000});
+  await expect(auth.getByRole('status').filter({hasText: 'Creating a guest account…'})).toBeVisible({timeout: 30_000});
   const challenge = auth.getByTestId('turnstile-challenge');
   await expect(challenge).toBeVisible();
   await challenge.getByRole('button', {name: 'Complete security check'}).click();
