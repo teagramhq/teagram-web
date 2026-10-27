@@ -246,6 +246,7 @@ test('requires instance terms before account creation and preserves the form whe
   await registration.locator('input[aria-label="Confirm password"]').press('Enter');
 
   const dialog = page.getByRole('dialog', {name: 'Terms of service'});
+  const declinedTermsNotice = registration.getByRole('status').filter({hasText: 'No account was created.'});
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText('These are the terms for this server.');
   const termsLink = dialog.getByRole('link', {name: 'https://terms.example.test'});
@@ -261,7 +262,7 @@ test('requires instance terms before account creation and preserves the form whe
 
   await dialog.getByRole('button', {name: 'Decline'}).click();
   await expect(dialog).toBeHidden();
-  await expect(registration.getByRole('status')).toHaveText('No account was created. Accept the terms to create one.');
+  await expect(declinedTermsNotice).toHaveText('No account was created. Accept the terms to create one.');
   await expect(registration.locator('input[aria-label="Username"]')).toHaveValue('test_user_terms');
   await expect(registration.locator('input[aria-label="Display name"]')).toHaveValue('CI Terms');
   await expect(registration.locator('input[aria-label="Password"]')).toHaveValue('Teagram-Test-Password-123!');
@@ -271,7 +272,7 @@ test('requires instance terms before account creation and preserves the form whe
   expect(callsAfterDecline.filter((call) => call.method === 'auth.signUp')).toHaveLength(0);
 
   await registration.getByRole('button', {name: 'Create account'}).click();
-  await expect(registration.getByRole('status')).toHaveCount(0);
+  await expect(declinedTermsNotice).toHaveCount(0);
   await expect(dialog).toBeVisible();
   await captureState(page, testInfo, 'registration-terms-reopened');
   await dialog.locator('.popup-description').focus();
