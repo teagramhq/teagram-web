@@ -5814,25 +5814,44 @@ export class AppMessagesManager extends AppManager {
           }
 
           const dialogs = [...result.dialogs];
+          const ignoreOffsetDatePeerIds = new Set<PeerId>();
           for(const peerId of reloadConversationsPeers.keys()) {
             const updates = this.newUpdatesAfterReloadToHandle[this.getUpdateAfterReloadKey(peerId)];
             const hasNewChannelMessage = updates && [...updates].some((update) => update._ === 'updateNewChannelMessage');
+            const hasNewInboundUserMessage = updates && peerId.isUser() && [...updates].some((update) => (
+              update._ === 'updateNewMessage' &&
+              !((update as Update.updateNewMessage).message as MyMessage).pFlags.out
+            ));
+            const hasDialog = dialogs.some((dialog) => dialog._ === 'dialog' && this.dialogsStorage.getDialogPeerId(dialog) === peerId);
             // A queued post can fill a missing dialog only while cached membership is still active.
             if(
-              !hasNewChannelMessage ||
-              !this.appPeersManager.isChannel(peerId) ||
-              !this.appChatsManager.isInChat(peerId.toChatId()) ||
-              dialogs.some((dialog) => dialog._ === 'dialog' && this.dialogsStorage.getDialogPeerId(dialog) === peerId)
+              hasDialog ||
+              !(
+                (hasNewChannelMessage && this.appPeersManager.isChannel(peerId) && this.appChatsManager.isInChat(peerId.toChatId())) ||
+                hasNewInboundUserMessage
+              )
             ) {
               continue;
             }
 
             const cachedDialog = this.dialogsStorage.getDialogOnly(peerId);
-            dialogs.push(cachedDialog ? copy(cachedDialog) : this.dialogsStorage.generateDialog(peerId));
+            const dialog = cachedDialog ? copy(cachedDialog) : this.dialogsStorage.generateDialog(peerId);
+            if(!cachedDialog && hasNewInboundUserMessage) {
+              const update = [...updates].find((update) => (
+                update._ === 'updateNewMessage' &&
+                !((update as Update.updateNewMessage).message as MyMessage).pFlags.out
+              )) as Update.updateNewMessage;
+              const message = update.message as MyMessage;
+              dialog.top_message = message.mid;
+              dialog.unread_count = message.pFlags.unread ? 1 : 0;
+              dialog.unread_mentions_count = message.pFlags.unread && isMentionUnread(message) ? 1 : 0;
+              ignoreOffsetDatePeerIds.add(peerId);
+            }
+            dialogs.push(dialog);
           }
 
           const resultToApply = dialogs.length === result.dialogs.length ? result : {...result, dialogs};
-          this.dialogsStorage.applyDialogs(resultToApply);
+          this.dialogsStorage.applyDialogs(resultToApply, undefined, ignoreOffsetDatePeerIds);
 
           resultToApply.dialogs.forEach((dialog) => {
             if(dialog._ !== 'dialog') {
@@ -9445,7 +9464,8 @@ export class AppMessagesManager extends AppManager {
   private onUpdateNewMessage = (update: Update.updateNewDiscussionMessage | Update.updateNewMessage | Update.updateNewChannelMessage) => {
     const message = update.message as MyMessage;
     if(this.isMessageUnavailableByChannelCutoff(message)) return;
-    const isInitialSync = this.apiUpdatesManager.isInitialSync();
+    const updateWithSyncState = update as Update & {isInitialSync?: boolean};
+    const isInitialSync = updateWithSyncState.isInitialSync ?? this.apiUpdatesManager.isInitialSync();
     const peerId = this.getMessagePeer(message);
     const storage = this.getHistoryMessagesStorage(peerId);
 
@@ -9484,25 +9504,19 @@ export class AppMessagesManager extends AppManager {
       threadId = (message as MyMessage).mid;
     }
 
-    let dialog = this.dialogsStorage.getAnyDialog(peerId, isLocalThreadUpdate ? threadId : undefined);
+    const dialog = this.dialogsStorage.getAnyDialog(peerId, isLocalThreadUpdate ? threadId : undefined);
 
 
     if((!dialog || this.reloadConversationsPeers.has(peerId)) && !isLocalThreadUpdate) {
-      if(!dialog && peerId.isUser() && !message.pFlags.out) {
-        dialog = this.dialogsStorage.generateDialog(peerId);
-        dialog.peerId = peerId;
-        dialog.folder_id = FOLDER_ID_ALL;
-        this.dialogsStorage.pushDialog({dialog, ignoreOffsetDate: true});
-      } else {
-        let good = true;
-        if(peerId.isAnyChat()) {
-          good = this.appChatsManager.isInChat(peerId.toChatId());
-        }
+      let good = true;
+      if(peerId.isAnyChat()) {
+        good = this.appChatsManager.isInChat(peerId.toChatId());
+      }
 
-        if(good) {
-          this.handleNewUpdateAfterReload(peerId, update);
-          return;
-        }
+      if(good) {
+        updateWithSyncState.isInitialSync ??= isInitialSync;
+        this.handleNewUpdateAfterReload(peerId, update);
+        return;
       }
 
       // return;
