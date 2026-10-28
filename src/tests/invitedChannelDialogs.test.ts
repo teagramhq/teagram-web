@@ -10,6 +10,26 @@ describe('invited channel dialogs', () => {
       seed: {userId: 990000, dcId: 2, authKeys: {}},
       testDc: true
     });
+    // Keep unrelated manager side effects from sending real MTProto requests.
+    const apiManager: any = client.apiManager;
+    apiManager.invokeApi = (method: string) => {
+      throw new Error(`Unexpected API request in invited channel dialog tests: ${method}`);
+    };
+    apiManager.invokeApiSingleProcess = (options: any) => {
+      throw new Error(`Unexpected API request in invited channel dialog tests: ${options.method}`);
+    };
+    const appMessagesManager: any = client.managers.appMessagesManager;
+    const appDraftsManager: any = client.managers.appDraftsManager;
+    const appStickersManager: any = client.managers.appStickersManager;
+    const appNotificationsManager: any = client.managers.appNotificationsManager;
+    vi.spyOn(appMessagesManager, 'getNotifyPeerSettings').mockResolvedValue({
+      muted: false,
+      peerTypeNotifySettings: {show_previews: true}
+    });
+    vi.spyOn(appNotificationsManager, 'routeNotification').mockResolvedValue(undefined);
+    vi.spyOn(appDraftsManager, 'addMissedDialogs').mockResolvedValue(undefined);
+    vi.spyOn(appStickersManager, 'getAnimatedEmojiSounds').mockResolvedValue(undefined);
+    vi.spyOn(appStickersManager, 'getLocalStickerSet').mockResolvedValue(undefined);
   }, 60_000);
 
   afterAll(() => {
