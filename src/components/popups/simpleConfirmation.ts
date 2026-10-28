@@ -16,10 +16,14 @@ type SimpleConfirmationPopupOptions = {
   descriptionArgs?: FormatterArguments,
   buttons: PopupButton[],
   termsDialog?: boolean,
-  scrollable?: boolean
+  focusTrap?: boolean,
+  scrollable?: boolean,
+  disableTextEnterConfirm?: boolean,
+  verticalButtons?: boolean,
+  extraContent?: HTMLElement
 };
 
-type SimpleConfirmationPopupShowOptions = Omit<SimpleConfirmationPopupOptions, 'buttons' | 'scrollable'> & {
+type SimpleConfirmationPopupShowOptions = Omit<SimpleConfirmationPopupOptions, 'buttons'> & {
   button: PopupButton,
   cancelLangKey?: LangPackKey,
   focusReturnTarget?: HTMLElement
@@ -33,16 +37,20 @@ export class SimpleConfirmationPopup extends PopupElement {
   private description: HTMLParagraphElement;
   private acceptButton: PopupButton;
   private declineButton: PopupButton;
-  private termsDialog: boolean;
+  private focusTrap: boolean;
+  private disableTextEnterConfirm: boolean;
 
   constructor(options: SimpleConfirmationPopupOptions) {
     const termsDialog = options.termsDialog || false;
+    const focusTrap = termsDialog || options.focusTrap || false;
     super('popup-peer popup-confirmation' + (termsDialog ? ' popup-terms' : ''), {
       title: options.titleLangKey,
       buttons: options.buttons,
       body: options.scrollable,
       scrollable: options.scrollable
     });
+    this.disableTextEnterConfirm = options.disableTextEnterConfirm || false;
+    this.focusTrap = focusTrap;
 
     const description = document.createElement('p');
     description.classList.add('popup-description');
@@ -73,10 +81,9 @@ export class SimpleConfirmationPopup extends PopupElement {
       description.append(i18n(options.descriptionLangKey, options.descriptionArgs));
     }
 
-    if(termsDialog) {
-      this.termsDialog = true;
+    if(focusTrap) {
       this.description = description;
-      this.description.classList.add('terms-content');
+      if(termsDialog) this.description.classList.add('terms-content');
       this.description.tabIndex = 0;
       this.title.id = `simple-confirmation-title-${++termsPopupId}`;
       this.element.setAttribute('role', 'dialog');
@@ -85,8 +92,12 @@ export class SimpleConfirmationPopup extends PopupElement {
       this.acceptButton = options.buttons.find((button) => !button.isCancel);
       this.declineButton = options.buttons.find((button) => button.isCancel);
       this.btnConfirmOnEnter = undefined;
-      this.listenerSetter.add(document.body)('keydown', this.onTermsKeyDown);
+      this.listenerSetter.add(document.body)('keydown', this.onDialogKeyDown);
       this.listenerSetter.add(document.body)('focusin', this.keepFocusInside);
+    }
+    if(this.disableTextEnterConfirm) {
+      this.btnConfirmOnEnter = undefined;
+      this.element.classList.add('popup-key-confirmation');
     }
 
     if(options.scrollable) {
@@ -94,16 +105,19 @@ export class SimpleConfirmationPopup extends PopupElement {
     } else {
       this.header.after(description);
     }
+    if(options.extraContent) description.after(options.extraContent);
+    if(options.verticalButtons) this.buttonsEl?.classList.add('is-vertical-layout');
   }
 
   public show(animate = true) {
     super.show(animate);
-    if(!this.termsDialog) return;
-    this.navigationItem.onEscape = () => {
-      this.declineButton?.element?.click();
-      return false;
-    };
-    this.description.focus();
+    if(this.focusTrap) {
+      this.navigationItem.onEscape = () => {
+        this.declineButton?.element?.click();
+        return false;
+      };
+      this.description.focus();
+    }
   }
 
   private keepFocusInside = (event: FocusEvent) => {
@@ -111,7 +125,7 @@ export class SimpleConfirmationPopup extends PopupElement {
     this.description.focus();
   };
 
-  private onTermsKeyDown = (event: KeyboardEvent) => {
+  private onDialogKeyDown = (event: KeyboardEvent) => {
     if(!this.element.classList.contains('active')) return;
 
     if(event.key === 'Tab') {
@@ -132,7 +146,7 @@ export class SimpleConfirmationPopup extends PopupElement {
 
     if(event.key === 'Enter' && !(event.target as HTMLElement).closest('a, button')) {
       cancelEvent(event);
-      this.acceptButton?.element?.click();
+      if(!this.disableTextEnterConfirm) this.acceptButton?.element?.click();
     }
   }
 
@@ -140,7 +154,7 @@ export class SimpleConfirmationPopup extends PopupElement {
     return new Promise<void>((resolve, reject) => {
       let resolved = false
       let accepted = false;
-      const opener = options.termsDialog ? options.focusReturnTarget ?? (document.activeElement instanceof HTMLElement ? document.activeElement : undefined) : undefined;
+      const opener = options.focusReturnTarget ?? (options.termsDialog && document.activeElement instanceof HTMLElement ? document.activeElement : undefined);
 
       const buttons = options.termsDialog ? [
         {langKey: options.cancelLangKey || 'Decline', isCancel: true},
@@ -169,7 +183,11 @@ export class SimpleConfirmationPopup extends PopupElement {
         descriptionArgs: options.descriptionArgs,
         buttons,
         termsDialog: options.termsDialog,
-        scrollable: options.termsDialog
+        focusTrap: options.focusTrap,
+        scrollable: options.scrollable || options.termsDialog,
+        disableTextEnterConfirm: options.disableTextEnterConfirm,
+        verticalButtons: options.verticalButtons,
+        extraContent: options.extraContent
       })
 
       popup.addEventListener('closeAfterTimeout', () => {
@@ -177,7 +195,7 @@ export class SimpleConfirmationPopup extends PopupElement {
           reject();
           resolved = true;
         }
-        if(options.termsDialog && !accepted) opener?.focus();
+        if(!accepted) opener?.focus();
       })
 
       popup.show()

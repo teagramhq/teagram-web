@@ -112,6 +112,7 @@ MediaHeader.Title = function MediaHeaderTitle(props: MediaHeaderTitleProps): JSX
 
 export type MediaHeaderSubtitleProps = {
   class?: string,
+  id?: string,
   /** Render in the smaller secondary-text variant (used by intro popups). */
   secondary?: boolean,
   children?: JSX.Element
@@ -120,6 +121,7 @@ export type MediaHeaderSubtitleProps = {
 MediaHeader.Subtitle = function MediaHeaderSubtitle(props: MediaHeaderSubtitleProps): JSX.Element {
   return (
     <div
+      id={props.id}
       class={classNames(
         styles.subtitle,
         props.secondary && styles.secondary,

@@ -181,6 +181,175 @@ $corner-button-size: 2.5rem;
   margin-top: 1rem;
 }
 
+.serverSelection {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  min-width: 0;
+  width: 100%;
+
+  :global(.btn-secondary) {
+    margin-top: 0;
+  }
+}
+
+.serverSelectionActions {
+  display: grid;
+  gap: .5rem;
+}
+
+.serverSelectionHostRow {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+}
+
+.serverSelectionHostRow :global(.input-field) {
+  min-width: 0;
+}
+
+.serverSelectionReadOnly {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+
+  :global(.input-field) {
+    min-width: 0;
+  }
+}
+
+.serverSelectionHostRow :global(.input-field-input) {
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+
+.serverSelectionReadOnly :global(.input-field-input) {
+  min-width: 0;
+  padding-inline-end: 5.5rem;
+  text-overflow: ellipsis;
+}
+
+.serverSelectionProgress {
+  opacity: 1 !important;
+  cursor: wait;
+}
+
+.serverSelectionProgress :global(.preloader-circular) {
+  width: 1rem;
+  height: 1rem;
+  margin-inline-end: .5rem;
+  vertical-align: middle;
+}
+
+.serverSelectionVisuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.serverSelectionChange {
+  position: absolute;
+  top: 0;
+  inset-inline-end: 0;
+  z-index: 1;
+  height: 40px;
+  min-width: 40px;
+  max-width: 50%;
+  padding: 0 .75rem;
+  overflow: hidden;
+  border: 0;
+  border-radius: $border-radius;
+  background: transparent;
+  color: var(--primary-color);
+  font-size: 16px;
+  font-weight: var(--font-weight-bold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+
+  @include hover() {
+    background-color: var(--light-primary-color);
+  }
+}
+
+.serverSelectionError {
+  margin: 8px 16px 0;
+  text-align: start;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--danger-color);
+}
+
+.serverSelectionPopupContent {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.serverSelectionPopupParagraph {
+  margin: 0;
+}
+
+:global(.popup-key-confirmation .popup-description:focus) {
+  outline: none;
+}
+
+.serverSelectionFingerprintLabel {
+  margin: 0 0 4px;
+  color: var(--secondary-text-color);
+  font-size: 14px;
+}
+
+.serverSelectionFingerprint {
+  display: block;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: $border-radius;
+  background-color: var(--surface-color);
+  color: var(--primary-text-color);
+  font-family: var(--font-monospace);
+  font-size: 13px;
+  line-height: 20px;
+  text-align: start;
+  direction: ltr;
+  user-select: text;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.serverSelectionFingerprintGroup {
+  white-space: nowrap;
+}
+
+.serverSelectionDisabledField {
+  opacity: .5;
+}
+
+.serverSelectionSubmit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: .5rem;
+  margin-top: 1rem;
+}
+
+.serverSelectionSpinner {
+  flex: none;
+  width: 1.125rem;
+  height: 1.125rem;
+  animation: serverSelectionSpin .9s linear infinite;
+}
+
+@keyframes serverSelectionSpin {
+  to { transform: rotate(360deg); }
+}
+
 .registrationConfigError {
   margin-top: .75rem;
   text-align: center;

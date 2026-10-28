@@ -7,6 +7,8 @@ import MediaHeader from '@components/mediaHeader';
 import PasswordInputField from '@components/passwordInputField';
 import {toastNew} from '@components/toast';
 import {wrapFormattedDuration} from '@components/wrappers/wrapDuration';
+import {getServerSelectionAction} from '@config/serverSelection';
+import type {ServerSelectionState} from '@config/serverSelection';
 import {getActiveServerHost, getActiveTurnstileSiteKey, isActiveGuestSignUpEnabled, isAutoGuestEnabled} from '@config/serverContext';
 import {DEMO_SERVER_HOST} from '@config/serverSelection';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
@@ -23,6 +25,7 @@ import {clearAutoGuestResetNotice, hasAutoGuestAttempted, hasAutoGuestResetNotic
 
 import AuthCard from '@/pages/AuthCard';
 import {CardSpec, useAuthFlow} from '@/pages/authFlow';
+import ServerSelectionField from '@/pages/ServerSelectionField';
 import TurnstileChallenge, {useTurnstileChallenge} from '@/pages/TurnstileChallenge';
 import {
   authenticatePrivateUsername,
@@ -64,6 +67,10 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   const guestSignUpAvailable = isActiveGuestSignUpEnabled();
   const autoGuest = isAutoGuestEnabled();
   const showDemoGuestNotice = autoGuest && guestSignUpAvailable && getActiveServerHost() === DEMO_SERVER_HOST;
+  const serverSelectionAction = getServerSelectionAction();
+  const [serverSelectionState, setServerSelectionState] = createSignal<ServerSelectionState | undefined>(serverSelectionAction?.getState());
+  const serverSelectionPending = () => !!serverSelectionAction &&
+    (serverSelectionState()?.phase !== 'connected' || !!serverSelectionState()?.changing);
   let termsDialogReturnFocusTarget: HTMLElement | undefined;
   let acceptedTermsId: string | undefined;
 
@@ -107,6 +114,28 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   usernameInput.autocapitalize = 'none';
   usernameInput.autocomplete = 'off';
   usernameInput.spellcheck = false;
+  let accountFieldsLocked = false;
+
+  function syncServerSelectionFields(state = serverSelectionAction?.getState()) {
+    if(state) setServerSelectionState(state);
+    const disabled = accountFieldsLocked || (!!serverSelectionAction &&
+      (state?.phase !== 'connected' || !!state.changing));
+    usernameInput.disabled = disabled;
+    if(disabled) {
+      usernameInput.setAttribute('aria-disabled', 'true');
+      usernameInput.tabIndex = -1;
+      usernameInput.setAttribute('aria-describedby', 'server-selection-subtitle');
+    } else {
+      usernameInput.removeAttribute('aria-disabled');
+      usernameInput.removeAttribute('tabindex');
+      usernameInput.removeAttribute('aria-describedby');
+    }
+    usernameField.container.classList.toggle(styles.serverSelectionDisabledField, disabled);
+  }
+
+  const unsubscribeServerSelection = serverSelectionAction?.subscribe(syncServerSelectionFields);
+  syncServerSelectionFields();
+  if(unsubscribeServerSelection) onCleanup(unsubscribeServerSelection);
 
   const displayNameField = new InputField({label: 'Teagram.Registration.DisplayName', plainText: true, autocomplete: 'name'});
   const displayNameInput = displayNameField.input as HTMLInputElement;
@@ -248,6 +277,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   });
 
   function lockAccountFields() {
+    accountFieldsLocked = true;
     usernameInput.disabled = true;
     displayNameInput.disabled = true;
     inviteSecretInput.disabled = true;
@@ -679,34 +709,39 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   }
 
   onMount(() => {
-    managers.appStateManager.pushToState('authState', {_: 'authStateSignIn'});
-    guestRestorePromise = restoreGuest();
-    void guestRestorePromise.then(async(noGuest) => {
-      if(cancelled) return;
-      if(noGuest && autoGuest && guestSignUpAvailable && autoGuestPending()) {
-        await startAutomaticGuest();
-      } else {
-        setAutoGuestPending(false);
-      }
-    });
-    Promise.resolve(managers.apiManager.getAppConfig(true)).then((config) => {
-      if(cancelled) return;
-      setUsernameAppConfig(config);
-      usernameField.setLengthLimits(config.username_max_length, config.username_min_length);
-      displayNameField.setLengthLimits(config.display_name_max_length);
-      const mode = config.registration_mode;
-      setRegistrationMode(mode === 'open' || mode === 'invite' ? mode : 'closed');
-      setTurnstileSiteKey(config.turnstile?.site_key);
-      updateSignInValidity();
-      updateRegistrationValidity();
-    }).catch(() => {
-      if(!cancelled) {
-        setRegistrationMode('closed');
-        setRegistrationConfigUnavailable(true);
-      }
-    });
+    if(!serverSelectionPending()) managers.appStateManager.pushToState('authState', {_: 'authStateSignIn'});
+    if(serverSelectionPending()) {
+      setRestoringGuest(false);
+    } else {
+      guestRestorePromise = restoreGuest();
+      void guestRestorePromise.then(async(noGuest) => {
+        if(cancelled) return;
+        if(noGuest && autoGuest && guestSignUpAvailable && autoGuestPending()) {
+          await startAutomaticGuest();
+        } else {
+          setAutoGuestPending(false);
+        }
+      });
+      Promise.resolve(managers.apiManager.getAppConfig(true)).then((config) => {
+        if(cancelled) return;
+        setUsernameAppConfig(config);
+        usernameField.setLengthLimits(config.username_max_length, config.username_min_length);
+        displayNameField.setLengthLimits(config.display_name_max_length);
+        const mode = config.registration_mode;
+        setRegistrationMode(mode === 'open' || mode === 'invite' ? mode : 'closed');
+        setTurnstileSiteKey(config.turnstile?.site_key);
+        updateSignInValidity();
+        updateRegistrationValidity();
+      }).catch(() => {
+        if(!cancelled) {
+          setRegistrationMode('closed');
+          setRegistrationConfigUnavailable(true);
+        }
+      });
+    }
     if(!IS_TOUCH_SUPPORTED) {
-      cancelFocus = focusWhenConnected(usernameInput, () => !cancelled);
+      const serverInput = serverSelectionPending() ? document.querySelector<HTMLInputElement>('#server-address') : undefined;
+      cancelFocus = focusWhenConnected(serverInput ?? usernameInput, () => !cancelled);
     }
   });
 
@@ -726,6 +761,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   return (
     <AuthCard
       class={styles.pageSignIn}
+      hideActiveServer={!!serverSelectionAction}
       header={
         <MediaHeader>
           <MediaHeader.Sticker
@@ -736,130 +772,135 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
             }
           />
           <MediaHeader.Title>Teagram</MediaHeader.Title>
-          <MediaHeader.Subtitle class="secondary">
-            {creatingAccount() ? i18n('Teagram.Registration.Subtitle') : 'Sign in with your username'}
+          <MediaHeader.Subtitle class="secondary" id={serverSelectionAction ? 'server-selection-subtitle' : undefined}>
+            {serverSelectionPending() ? i18n('Teagram.Server.Subtitle') :
+              creatingAccount() ? i18n('Teagram.Registration.Subtitle') : 'Sign in with your username'}
           </MediaHeader.Subtitle>
         </MediaHeader>
       }
     >
-      {!autoGuestPending() && (
-        <>
-          {usernameField.container}
-          {creatingAccount() && (
-            <>
-              <p
-                id="registration-username-status"
-                class={isUsernameStatusError() ? styles.registrationFieldStatusError : styles.registrationFieldStatus}
-                role={isUsernameStatusError() ? 'alert' : 'status'}
-              >
-                {usernameStatusText()}
-              </p>
-              <div class={styles.registrationFields}>
-                {displayNameField.container}
-                <p id="registration-display-name-status" class={styles.registrationFieldStatus} role="status">
-                  {displayNameEntered() ? '' : i18n('Teagram.Registration.InvalidDisplayName')}
-                </p>
-                {registrationMode() === 'invite' && inviteSecretField.container}
-                {registrationMode() === 'invite' && (
-                  <p id="registration-invite-secret-status" class={styles.registrationFieldStatus} role="status">
-                    {inviteSecretEntered() ? '' : i18n('Teagram.Registration.InviteRequired')}
-                  </p>
-                )}
-                {passwordField.container}
-                {confirmPasswordField.container}
+      <ServerSelectionField readOnly={creatingAccount()}>
+        {!autoGuestPending() && (
+          <>
+            {usernameField.container}
+            {creatingAccount() && (
+              <>
                 <p
-                  id="registration-confirm-password-status"
-                  class={isConfirmPasswordStatusError() ? styles.registrationFieldStatusError : styles.registrationFieldStatus}
-                  role={isConfirmPasswordStatusError() ? 'alert' : 'status'}
+                  id="registration-username-status"
+                  class={isUsernameStatusError() ? styles.registrationFieldStatusError : styles.registrationFieldStatus}
+                  role={isUsernameStatusError() ? 'alert' : 'status'}
                 >
-                  {confirmPasswordStatusText()}
+                  {usernameStatusText()}
                 </p>
-              </div>
-            </>
-          )}
-        </>
-      )}
-      <Show when={turnstile.challenge()} keyed>
-        {(challenge) => <TurnstileChallenge {...challenge}/>}
-      </Show>
-      {autoGuestPending() && (
-        <div class={styles.guestLoading} role="status" aria-live="polite">
-          {i18n(restoringGuest() ? 'Teagram.Guest.Restoring' : 'Teagram.Guest.Creating')}
-        </div>
-      )}
-      {error() && !(creatingAccount() && isInlineRegistrationError()) && <div class={styles.errorLabel} role="alert">{errorContent()}</div>}
-      {registrationConfigUnavailable() && !creatingAccount() && (
-        <div class={styles.registrationConfigError} role="status">
-          {i18n('Teagram.Registration.ConfigNetwork')}
-        </div>
-      )}
-      {termsDeclined() && (
-        <div class={styles.registrationConfigError} role="status">
-          {i18n('Teagram.Terms.Declined')}
-        </div>
-      )}
-      {restoringGuest() && !creatingAccount() && !autoGuestPending() && (
-        <div class={styles.guestLoading} role="status" aria-live="polite">
-          {i18n('Teagram.Guest.Restoring')}
-        </div>
-      )}
-      {guestSignUpAvailable && (
-        <p class={styles.guestDisclosure}>{i18n('Teagram.Guest.Disclosure')}</p>
-      )}
-      {!autoGuestPending() && showDemoGuestNotice && (
-        <p class={styles.guestDisclosure}>
-          {i18n('Teagram.Demo.Banner.Title')}{' '}
-          {i18n('Teagram.Demo.Banner.Description')}{' '}
-          <a href="https://web.teagram.io" target="_blank" rel="noopener noreferrer">web.teagram.io</a>
-        </p>
-      )}
-      {!autoGuestPending() && <div class={styles.registrationActions}>
-        {!creatingAccount() ? (
-          <>
-            <Button
-              class={guestSignUpAvailable ? 'btn-secondary' : 'btn-primary btn-color-primary'}
-              disabled={!hasValidInput() || submitting() || guestSubmitting()}
-              onClick={onSubmit}
-            >
-              {submitting() ? 'Please wait…' : 'Next'}
-            </Button>
-            {guestSignUpAvailable && (
-              <Button
-                class="btn-primary btn-color-primary"
-                aria-label={(guestSubmitting() ? i18n('Teagram.Guest.Creating') :
-                  i18n(autoGuest ? 'Teagram.Guest.StartNew' : 'Teagram.Guest.Try')).textContent || 'Try it as a guest'}
-                disabled={submitting() || guestSubmitting() || restoringGuest()}
-                ref={(element) => guestSignUpButton = element}
-                onClick={tryAsGuest}
-              >
-                {guestSubmitting() ? i18n('Teagram.Guest.Creating') : i18n(autoGuest ? 'Teagram.Guest.StartNew' : 'Teagram.Guest.Try')}
-              </Button>
-            )}
-            {registrationMode() !== 'closed' && (
-              <Button class="btn-secondary" disabled={submitting() || guestSubmitting()} onClick={startRegistration}>
-                {i18n('Teagram.Registration.CreateAccount')}
-              </Button>
-            )}
-          </>
-        ) : (
-          <>
-            <Button
-              class="btn-primary btn-color-primary"
-              disabled={!hasValidRegistrationInput() || submitting() || guestSubmitting()}
-              ref={(element) => registrationCreateButton = element}
-              onClick={onSubmit}
-            >
-              {submitting() ? 'Please wait…' : i18n('Teagram.Registration.CreateAccount')}
-            </Button>
-            {!pendingPasswordUser() && (
-              <Button class="btn-secondary" disabled={submitting() || guestSubmitting()} onClick={returnToSignIn}>
-                {i18n('Teagram.Registration.SignIn')}
-              </Button>
+                <div class={styles.registrationFields}>
+                  {displayNameField.container}
+                  <p id="registration-display-name-status" class={styles.registrationFieldStatus} role="status">
+                    {displayNameEntered() ? '' : i18n('Teagram.Registration.InvalidDisplayName')}
+                  </p>
+                  {registrationMode() === 'invite' && inviteSecretField.container}
+                  {registrationMode() === 'invite' && (
+                    <p id="registration-invite-secret-status" class={styles.registrationFieldStatus} role="status">
+                      {inviteSecretEntered() ? '' : i18n('Teagram.Registration.InviteRequired')}
+                    </p>
+                  )}
+                  {passwordField.container}
+                  {confirmPasswordField.container}
+                  <p
+                    id="registration-confirm-password-status"
+                    class={isConfirmPasswordStatusError() ? styles.registrationFieldStatusError : styles.registrationFieldStatus}
+                    role={isConfirmPasswordStatusError() ? 'alert' : 'status'}
+                  >
+                    {confirmPasswordStatusText()}
+                  </p>
+                </div>
+              </>
             )}
           </>
         )}
-      </div>}
-      {!autoGuestPending() && !creatingAccount() && getCurrentAccount() === 1 && <LanguageChangeButton />}
+        <Show when={!serverSelectionPending()}>
+          <Show when={turnstile.challenge()} keyed>
+            {(challenge) => <TurnstileChallenge {...challenge}/>}
+          </Show>
+          {autoGuestPending() && (
+            <div class={styles.guestLoading} role="status" aria-live="polite">
+              {i18n(restoringGuest() ? 'Teagram.Guest.Restoring' : 'Teagram.Guest.Creating')}
+            </div>
+          )}
+          {error() && !(creatingAccount() && isInlineRegistrationError()) && <div class={styles.errorLabel} role="alert">{errorContent()}</div>}
+          {registrationConfigUnavailable() && !creatingAccount() && (
+            <div class={styles.registrationConfigError} role="status">
+              {i18n('Teagram.Registration.ConfigNetwork')}
+            </div>
+          )}
+          {termsDeclined() && (
+            <div class={styles.registrationConfigError} role="status">
+              {i18n('Teagram.Terms.Declined')}
+            </div>
+          )}
+          {restoringGuest() && !creatingAccount() && !autoGuestPending() && (
+            <div class={styles.guestLoading} role="status" aria-live="polite">
+              {i18n('Teagram.Guest.Restoring')}
+            </div>
+          )}
+          {guestSignUpAvailable && (
+            <p class={styles.guestDisclosure}>{i18n('Teagram.Guest.Disclosure')}</p>
+          )}
+          {!autoGuestPending() && showDemoGuestNotice && (
+            <p class={styles.guestDisclosure}>
+              {i18n('Teagram.Demo.Banner.Title')}{' '}
+              {i18n('Teagram.Demo.Banner.Description')}{' '}
+              <a href="https://web.teagram.io" target="_blank" rel="noopener noreferrer">web.teagram.io</a>
+            </p>
+          )}
+          {!autoGuestPending() && <div class={styles.registrationActions}>
+            {!creatingAccount() ? (
+              <>
+                <Button
+                  class={guestSignUpAvailable ? 'btn-secondary' : 'btn-primary btn-color-primary'}
+                  disabled={!hasValidInput() || submitting() || guestSubmitting()}
+                  onClick={onSubmit}
+                >
+                  {submitting() ? 'Please wait…' : 'Next'}
+                </Button>
+                {guestSignUpAvailable && (
+                  <Button
+                    class="btn-primary btn-color-primary"
+                    aria-label={(guestSubmitting() ? i18n('Teagram.Guest.Creating') :
+                      i18n(autoGuest ? 'Teagram.Guest.StartNew' : 'Teagram.Guest.Try')).textContent || 'Try it as a guest'}
+                    disabled={submitting() || guestSubmitting() || restoringGuest()}
+                    ref={(element) => guestSignUpButton = element}
+                    onClick={tryAsGuest}
+                  >
+                    {guestSubmitting() ? i18n('Teagram.Guest.Creating') : i18n(autoGuest ? 'Teagram.Guest.StartNew' : 'Teagram.Guest.Try')}
+                  </Button>
+                )}
+                {registrationMode() !== 'closed' && (
+                  <Button class="btn-secondary" disabled={submitting() || guestSubmitting()} onClick={startRegistration}>
+                    {i18n('Teagram.Registration.CreateAccount')}
+                  </Button>
+                )}
+              </>
+            ) : (
+              <>
+                <Button
+                  class="btn-primary btn-color-primary"
+                  disabled={!hasValidRegistrationInput() || submitting() || guestSubmitting()}
+                  ref={(element) => registrationCreateButton = element}
+                  onClick={onSubmit}
+                >
+                  {submitting() ? 'Please wait…' : i18n('Teagram.Registration.CreateAccount')}
+                </Button>
+                {!pendingPasswordUser() && (
+                  <Button class="btn-secondary" disabled={submitting() || guestSubmitting()} onClick={returnToSignIn}>
+                    {i18n('Teagram.Registration.SignIn')}
+                  </Button>
+                )}
+              </>
+            )}
+          </div>}
+          {!autoGuestPending() && !creatingAccount() && getCurrentAccount() === 1 && <LanguageChangeButton />}
+        </Show>
+      </ServerSelectionField>
     </AuthCard>
   );
 }

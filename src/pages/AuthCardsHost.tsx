@@ -1,6 +1,7 @@
 import {JSX, Match, Show, Switch, children, createMemo, lazy, onMount} from 'solid-js';
 
 import Scrollable from '@components/scrollable2';
+import type {AppTheme} from '@config/state';
 import {isPrivateMtprotoTarget} from '@config/mtprotoTarget';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import {IS_MOBILE_SAFARI} from '@environment/userAgent';
@@ -64,7 +65,7 @@ const SignImportCard = lazy(() => import('@/pages/cards/SignImportCard'));
  * for the leaving card's exit animation before the new card enters. There's
  * no keep-alive: every card runs `onMount` / `onCleanup` on each visit.
  */
-export default function AuthCardsHost(): JSX.Element {
+export default function AuthCardsHost(props: {persistTheme?: (name: AppTheme['name']) => Promise<void>}): JSX.Element {
   const showBackButton = getCurrentAccount() !== 1;
 
   let hostEl!: HTMLDivElement;
@@ -116,6 +117,8 @@ export default function AuthCardsHost(): JSX.Element {
     themeController.switchTheme(undefined, {
       x: rect.left + rect.width / 2,
       y: rect.top + rect.height / 2
+    }, props.persistTheme).catch((error) => {
+      console.error('Could not save authentication theme', error);
     });
   }
 

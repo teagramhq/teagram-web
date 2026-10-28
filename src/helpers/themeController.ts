@@ -11,6 +11,7 @@ import {changeColorAccent, ColorRgb, getAccentColor, getAverageColor, getRgbColo
 import {SETTINGS_INIT} from '@config/state';
 import {MOUNT_CLASS_TO} from '@config/debug';
 import customProperties from '@helpers/dom/customProperties';
+import {saveBootShellTheme} from '@config/bootShell';
 import {TelegramWebViewTheme} from '@types';
 import windowSize from '@helpers/windowSize';
 import liteMode from '@helpers/liteMode';
@@ -329,6 +330,7 @@ export class ThemeController {
     this.setThemeColor();
     const theme = this.getTheme();
     this.applyTheme(theme);
+    saveBootShellTheme(isNight, document.documentElement.style.cssText);
 
     let style = this.styleElement;
     if(!style) {
@@ -454,7 +456,8 @@ export class ThemeController {
 
   public async switchTheme(
     name?: AppTheme['name'],
-    coordinates?: {x: number, y: number}
+    coordinates?: {x: number, y: number},
+    persistTheme?: (name: AppTheme['name']) => Promise<void>
   ) {
     const [appSettings, setAppSettings] = useAppSettings();
     if(name === undefined) {
@@ -467,7 +470,11 @@ export class ThemeController {
         (last?.light ?? 'day') :
         (last?.dark ?? 'night');
     }
-    await setAppSettings('theme', name);
+    if(persistTheme) {
+      await persistTheme(name);
+    } else {
+      await setAppSettings('theme', name);
+    }
     rootScope.dispatchEvent('theme_change', coordinates);
   }
 

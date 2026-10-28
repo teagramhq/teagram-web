@@ -2,6 +2,7 @@ import type lang from '@/lang';
 import type langSign from '@/langSign';
 import type {State} from '@config/state';
 import {IS_BETA, MOUNT_CLASS_TO} from '@config/debug';
+import {BOOT_SHELL_STRINGS, saveBootShellStrings} from '@config/bootShell';
 import {HelpCountry, LangPackDifference, LangPackString} from '@layer';
 import App from '@config/app';
 import rootScope from '@lib/rootScope';
@@ -174,6 +175,14 @@ namespace I18n {
     });
   }
 
+  export function loadLocalLangPackAndApply() {
+    return loadLocalLangPack().then((langPack) => {
+      setLangCode(langPack.lang_code);
+      applyLangPack(langPack);
+      return langPack;
+    });
+  }
+
   export function loadLangPack(langCode: string, web?: boolean, ignoreCache?: boolean) {
     web = true;
     const managers = rootScope.managers;
@@ -324,6 +333,9 @@ namespace I18n {
       }
     });
 
+    const bootShellStrings = {} as Parameters<typeof saveBootShellStrings>[0];
+    for(const key of BOOT_SHELL_STRINGS) bootShellStrings[key] = format(key, true);
+    saveBootShellStrings(bootShellStrings);
     rootScope.dispatchEventSingle('language_apply');
   }
 

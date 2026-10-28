@@ -3,6 +3,7 @@ import {validatePrivateEndpoint, validateMtprotoTarget} from '@config/mtprotoTar
 import {notifyGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
 
 export const SERVER_CHOICE_KEY = 'teagram.server-choice.v1';
+export const SERVER_TARGET_KEY = 'teagram.server-target.v1';
 export const SERVER_PINS_KEY = 'teagram.server-pins.v1';
 export const ACTIVE_SERVER_ID_KEY = 'teagram.active-server-id.v1';
 const SERVER_PINS_LOCK = 'teagram.server-pins.v1';
@@ -11,8 +12,102 @@ export const DEMO_SERVER_HOST = 'demo.teagram.io';
 export const DISCOVERY_MAX_BYTES = 16 * 1024;
 export const DISCOVERY_TIMEOUT_MS = 8000;
 
-export function shouldPromptForServerSelection(host: string) {
+export type ServerSelectionPhase = 'selecting' | 'checking' | 'connecting' | 'connected';
+
+export type ServerSelectionState = {
+  phase: ServerSelectionPhase,
+  host: string,
+  changing?: boolean,
+  locked?: boolean,
+  retryable?: boolean,
+  errorKey?: string
+};
+
+export type ServerSelectionAction = {
+  getState: () => ServerSelectionState,
+  subscribe: (listener: (state: ServerSelectionState) => void) => () => void,
+  setHost: (host: string) => void,
+  select: (host: string, signal: AbortSignal, focusReturnTarget?: HTMLElement) => Promise<void>,
+  change: () => void,
+  cancelChange: () => void,
+  continueBlocked: () => void
+};
+
+let serverSelectionAction: ServerSelectionAction | undefined;
+
+export function setServerSelectionAction(action?: ServerSelectionAction) {
+  serverSelectionAction = action;
+}
+
+export function getServerSelectionAction() {
+  return serverSelectionAction;
+}
+
+export function getSavedServerChoice() {
+  try {
+    return localStorage.getItem(SERVER_CHOICE_KEY) || undefined;
+  } catch{
+    return undefined;
+  }
+}
+
+export function isServerSelectionOrigin(host: string) {
   return host.toLowerCase().replace(/\.+$/, '') === DEFAULT_SERVER_HOST;
+}
+
+export function formatServerKeyId(fingerprint: string) {
+  const keyId = fingerprint.toLowerCase();
+  if(!/^[a-f0-9]{64}$/.test(keyId)) throw new Error('Invalid server key fingerprint');
+  return keyId.match(/.{4}/g)!.join('-');
+}
+
+export function cleanServerHost(input: string) {
+  return input.trim().replace(/^https?:\/\//i, '').replace(/\/$/, '').trim().toLowerCase().replace(/\.+$/, '');
+}
+
+export function getSavedServerTarget(hostInput: string): DiscoveredServer | undefined {
+  try {
+    const host = normalizeServerHost(hostInput);
+    const value: unknown = JSON.parse(localStorage.getItem(SERVER_TARGET_KEY) || 'null');
+    if(!record(value) || value.host !== host || typeof value.id !== 'string' ||
+      !record(value.pin) || !record(value.target) || typeof value.spkiFingerprint !== 'string') {
+      return;
+    }
+
+    const target = validateMtprotoTarget(value.target);
+    if(target.mode !== 'private' || new URL(target.endpoint).hostname.toLowerCase() !== host) return;
+    const pin = value.pin;
+    if(pin.host !== host || pin.endpoint !== target.endpoint || typeof pin.dc_id !== 'number' ||
+      typeof pin.key_fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(pin.key_fingerprint) ||
+      value.spkiFingerprint !== pin.key_fingerprint) {
+      return;
+    }
+
+    return {
+      host,
+      id: value.id,
+      target,
+      pin: {
+        host,
+        endpoint: target.endpoint,
+        dc_id: pin.dc_id,
+        key_fingerprint: pin.key_fingerprint
+      },
+      spkiFingerprint: value.spkiFingerprint,
+      turnstileSiteKey: typeof value.turnstileSiteKey === 'string' ? value.turnstileSiteKey : undefined,
+      guestSignUpEnabled: value.guestSignUpEnabled === true
+    };
+  } catch{
+    return;
+  }
+}
+
+export function storeSavedServerTarget(server: DiscoveredServer) {
+  localStorage.setItem(SERVER_TARGET_KEY, JSON.stringify(server));
+}
+
+export function shouldPromptForServerSelection(host: string, savedChoice?: string) {
+  return isServerSelectionOrigin(host) && !savedChoice?.trim();
 }
 
 export function getServerConnectSources(host: string, target?: MtprotoTarget) {
@@ -101,8 +196,11 @@ async function sha1(bytes: Uint8Array) {
 
 export function normalizeServerHost(input: string) {
   const value = input.trim();
-  if(!value || /[\/?#@\\\s]/.test(value) || value.includes(':')) {
-    throw new Error('Enter a host name without a scheme, path, port, query, or fragment');
+  if(value.includes(':')) {
+    throw new Error('Enter the address without a port');
+  }
+  if(!value || /[\/?#@\\\s]/.test(value)) {
+    throw new Error('Enter a valid server host');
   }
 
   let url: URL;
@@ -113,11 +211,13 @@ export function normalizeServerHost(input: string) {
   }
 
   const host = url.hostname.toLowerCase().replace(/\.+$/, '');
-  if(!host || url.username || url.password || url.pathname !== '/' || url.search || url.hash ||
-    host.length > 253 || host === 'telegram.org' || host.endsWith('.telegram.org') ||
-    host.split('.').some((label) => !label || label.length > 63 ||
-      !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))) {
+  if(host === 'telegram.org' || host.endsWith('.telegram.org')) {
     throw new Error('This server host is not allowed');
+  }
+  if(!host || url.username || url.password || url.pathname !== '/' || url.search || url.hash ||
+    host.length > 253 || host.split('.').some((label) => !label || label.length > 63 ||
+      !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))) {
+    throw new Error('Enter a valid server host');
   }
   return host;
 }
@@ -208,9 +308,12 @@ export async function validateDiscoveryDocument(hostInput: string, value: unknow
   return {host, id, target, pin, spkiFingerprint, turnstileSiteKey, guestSignUpEnabled, wipeGeneration};
 }
 
-export async function fetchServerDiscovery(hostInput: string, fetcher: typeof fetch = fetch): Promise<DiscoveredServer> {
+export async function fetchServerDiscovery(hostInput: string, fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<DiscoveredServer> {
   const host = normalizeServerHost(hostInput);
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  if(signal?.aborted) controller.abort();
+  else signal?.addEventListener('abort', abort, {once: true});
   const timer = setTimeout(() => controller.abort(), DISCOVERY_TIMEOUT_MS);
   try {
     const response = await fetcher(`https://${host}/.well-known/teagramd/client`, {
@@ -254,6 +357,7 @@ export async function fetchServerDiscovery(hostInput: string, fetcher: typeof fe
     return await validateDiscoveryDocument(host, document);
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
   }
 }
 
@@ -353,4 +457,10 @@ export async function forgetServer(hostInput: string) {
   await updateServerPins((pins) => { delete pins[host]; });
   if(localStorage.getItem(SERVER_CHOICE_KEY) === host) localStorage.removeItem(SERVER_CHOICE_KEY);
   if(localStorage.getItem(ACTIVE_SERVER_ID_KEY) === id) localStorage.removeItem(ACTIVE_SERVER_ID_KEY);
+  try {
+    const savedTarget: unknown = JSON.parse(localStorage.getItem(SERVER_TARGET_KEY) || 'null');
+    if(!record(savedTarget) || savedTarget.host === host) localStorage.removeItem(SERVER_TARGET_KEY);
+  } catch{
+    localStorage.removeItem(SERVER_TARGET_KEY);
+  }
 }
