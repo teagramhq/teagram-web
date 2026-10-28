@@ -234,4 +234,100 @@ describe('first inbound private messages', () => {
       apiManager.invokeApi = originalInvoke;
     }
   });
+
+  test('catches up on missed updates when the dialog reload reports a newer pts', async() => {
+    const userId = 990104 as UserId;
+    const peerId = userId.toPeerId();
+    const messages: any = client.managers.appMessagesManager;
+    const users: any = client.managers.appUsersManager;
+    const peers: any = client.managers.appPeersManager;
+    const notifications: any = client.managers.appNotificationsManager;
+    const apiManager: any = messages.apiManager;
+    const updatesState = messages.apiUpdatesManager.updatesState;
+    const port = MTProtoMessagePort.getInstance<false>();
+    const originalInvoke = apiManager.invokeApi;
+    const originalPts = updatesState.pts;
+    const serverState = {_: 'updates.state', date: 1, pts: 2, qts: 0, seq: 0, unread_count: 0};
+    const differenceRequests: number[] = [];
+
+    expect(messages.apiUpdatesManager.apiManager).toBe(apiManager);
+
+    vi.spyOn(messages.apiUpdatesManager, 'isInitialSync').mockReturnValue(false);
+    vi.spyOn(messages, 'getNotifyPeerSettings').mockResolvedValue({
+      muted: false,
+      peerTypeNotifySettings: {show_previews: false}
+    });
+    vi.spyOn(peers, 'isPeerRestricted').mockResolvedValue(false);
+    vi.spyOn(notifications, 'getNotificationTab').mockResolvedValue({
+      state: {idleStartTime: 0},
+      source: undefined
+    });
+    vi.spyOn(port, 'invokeVoid').mockImplementation(() => undefined);
+
+    users.saveApiUsers([{
+      _: 'user',
+      id: userId,
+      access_hash: '1',
+      first_name: 'Alice',
+      pFlags: {}
+    }]);
+
+    // * the server already counted an event after the message (a read receipt) that was never pushed
+    updatesState.pts = 1;
+    apiManager.invokeApi = (method: string, params: any, ...args: any[]) => {
+      if(method === 'updates.getDifference') {
+        differenceRequests.push(params.pts);
+        return Promise.resolve({
+          _: 'updates.difference',
+          new_messages: [],
+          new_encrypted_messages: [],
+          other_updates: [],
+          chats: [],
+          users: [],
+          state: serverState
+        });
+      }
+
+      if(method !== 'messages.getPeerDialogs') {
+        return originalInvoke.apply(apiManager, [method, params, ...args]);
+      }
+
+      return Promise.resolve({
+        _: 'messages.peerDialogs',
+        dialogs: [],
+        messages: [],
+        users: [],
+        chats: [],
+        state: serverState
+      });
+    };
+
+    try {
+      messages.onUpdateNewMessage({
+        _: 'updateNewMessage',
+        message: {
+          _: 'message',
+          id: 1,
+          peer_id: {_: 'peerUser', user_id: userId},
+          from_id: {_: 'peerUser', user_id: userId},
+          date: 1,
+          message: 'Hello after a missed update',
+          pFlags: {unread: true}
+        },
+        pts: 1,
+        pts_count: 1
+      } as any);
+
+      await vi.waitFor(() => {
+        expect(client.managers.dialogsStorage.getDialogOnly(peerId)).toBeDefined();
+      }, {timeout: 5_000});
+      expect(differenceRequests).toEqual([1]);
+      expect(updatesState.pts).toBe(2);
+      const dialog = client.managers.dialogsStorage.getDialogOnly(peerId);
+      expect((messages.getMessageByPeer(peerId, dialog!.top_message) as Message.message).message).toBe('Hello after a missed update');
+    } finally {
+      apiManager.invokeApi = originalInvoke;
+      updatesState.pts = originalPts;
+    }
+  });
 });

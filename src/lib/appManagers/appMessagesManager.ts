@@ -5797,6 +5797,10 @@ export class AppMessagesManager extends AppManager {
           const {state} = result;
           if(currentState.pts && currentState.pts !== state.pts) {
             this.log.warn('current pts is different, will try again', currentState.pts, state.pts);
+            if(state.pts > currentState.pts) {
+              // * the server is ahead, and an event it does not push would keep it ahead forever
+              this.apiUpdatesManager.forceGetDifference();
+            }
             await pause(500);
             continue;
           }
