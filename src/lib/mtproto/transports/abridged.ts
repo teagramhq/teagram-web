@@ -138,7 +138,7 @@ class AbridgedPacketCodec implements Codec {
   public tag = 0xef;
   public obfuscateTag = new Uint8Array([this.tag, this.tag, this.tag, this.tag]);
 
-  public encodePacket(data: Uint8Array) {
+  public encodePacket(data: Uint8Array): Uint8Array {
     const len = data.byteLength >> 2;
     let header: Uint8Array;
     if(len < 127) {
@@ -149,8 +149,10 @@ class AbridgedPacketCodec implements Codec {
       // console.log('got nobody cause im braindead', header, len);
     }
 
-    return header.concat(data);
-    // return new Uint8Array([...header, ...data]);
+    const packet = new Uint8Array(header.length + data.length);
+    packet.set(header);
+    packet.set(data, header.length);
+    return packet;
   }
 
   public readPacket(data: Uint8Array) {
