@@ -7,6 +7,7 @@ import {AppManager} from '@appManagers/manager';
 import rootScope from '@lib/rootScope';
 import {UserAuth} from '@appManagers/constants';
 import {MTMessage} from '@lib/mtproto/networker';
+import AccountController from '@lib/accounts/accountController';
 
 type HashResult = {
   hash: number,
@@ -70,17 +71,21 @@ export default abstract class ApiManagerMethods extends AppManager {
     return promise;
   }
 
-  abstract setUserAuth(userAuth: UserAuth | UserId): Promise<void>;
+  abstract setUserAuth(userAuth: UserAuth | UserId, isNewAccount?: boolean): Promise<void>;
 
-  public setUser(user: User) {
+  public async setUser(user: User, isNewAccount = false) {
     this.appUsersManager.saveApiUser(user);
+
+    const accountData = isNewAccount ? undefined : await AccountController.get(this.getAccountNumber());
+    const isNewAccountSession = isNewAccount || accountData?.newAccountUserId === user.id;
 
     rootScope.dispatchEvent('account_logged_in', {
       accountNumber: this.getAccountNumber(),
-      userId: user.id
+      userId: user.id,
+      isNewAccount: isNewAccountSession
     });
 
-    return this.setUserAuth(user.id);
+    return this.setUserAuth(user.id, isNewAccount);
   }
 
   abstract invokeApi<T extends keyof MethodDeclMap>(method: T, params?: MethodDeclMap[T]['req'], options?: InvokeApiOptions): Promise<MethodDeclMap[T]['res']>;

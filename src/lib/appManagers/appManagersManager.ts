@@ -151,11 +151,11 @@ export class AppManagersManager {
       return urls;
     });
 
-    rootScope.addEventListener('account_logged_in', async({accountNumber, userId}) => {
+    rootScope.addEventListener('account_logged_in', async({accountNumber, userId, isNewAccount}) => {
       for(let i = 1; i < accountNumber; i++) {
         const otherAccountNumber = i as ActiveAccountNumber;
         const accountData = await AccountController.get(otherAccountNumber);
-        if(accountData.userId === userId) {
+        if(accountData.userId === userId && !isNewAccount) {
           const managersByAccount = await this.getManagersByAccount();
           managersByAccount[accountNumber].apiManager.logOut(otherAccountNumber);
         }

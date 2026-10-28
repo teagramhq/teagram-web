@@ -13,13 +13,20 @@ export async function saveGuestCredentials(records: GuestCredentialRecords) {
   await sessionStorage.flush();
 }
 
-export async function clearGuestCredentialsForAccount(userId?: PeerId, accountNumber?: ActiveAccountNumber) {
+export async function clearGuestCredentialsForAccount(
+  userId?: PeerId,
+  accountNumber?: ActiveAccountNumber,
+  accountNumberOnly = false
+) {
   const records = await sessionStorage.get('guestCredentials', false) || [];
   const remaining = records.filter((record: GuestCredentialRecord) => {
     const sameUser = userId !== undefined && record.accountUserId !== undefined && String(record.accountUserId) === String(userId);
+    const sameAccountNumber = accountNumber !== undefined && record.accountNumber === accountNumber;
     const sameAccount = accountNumber !== undefined && record.accountNumber === accountNumber &&
       (userId === undefined || record.accountUserId === undefined);
-    return !sameUser && !sameAccount;
+    // Legacy records without a slot still use their user ID for cleanup.
+    const matches = accountNumberOnly ? sameAccountNumber || (record.accountNumber === undefined && sameUser) : sameUser || sameAccount;
+    return !matches;
   });
 
   if(remaining.length === records.length) return;

@@ -9,6 +9,7 @@ type A = Record<DcAuthKey, string> &
     push_key?: string,
     push_key_fingerprint?: string,
     userId: PeerId,
+    newAccountUserId?: PeerId | null,
     dcId: TrueDcId,
     date: number
   };

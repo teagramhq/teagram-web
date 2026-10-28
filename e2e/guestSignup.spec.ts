@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {expect, test} from '@playwright/test';
 import type {Page, TestInfo} from '@playwright/test';
-import {captureState} from './registrationMocks';
+import {captureState, seedPriorAccountUserId} from './registrationMocks';
 
 const SERVER_HOST = 'second-server.example.test';
 
@@ -124,6 +124,10 @@ async function setupGuestServer(
 
         proxy.invoke = (type: string, payload: any, ...args: any[]) => {
           if(type === 'manager' && payload?.name === 'apiManager') {
+            if(payload.method === 'logOut') {
+              localStorage.setItem('__guestManagerLogOuts', String(Number(localStorage.getItem('__guestManagerLogOuts') || 0) + 1));
+            }
+
             if(payload.method === 'getAppConfig') {
               calls.push({method: 'help.getAppConfig'});
               return Promise.resolve({registration_mode: 'closed'});
@@ -132,6 +136,10 @@ async function setupGuestServer(
             if(payload.method === 'invokeApi') {
               const [method, params] = payload.args;
               calls.push({method, params});
+              if(method === 'auth.logOut') {
+                localStorage.setItem('__guestAuthLogOuts', String(Number(localStorage.getItem('__guestAuthLogOuts') || 0) + 1));
+                return Promise.resolve({_ : 'auth.loggedOut'});
+              }
               if(method === 'auth.sendCode') {
                 return Promise.resolve({
                   _: 'auth.sentCode',
@@ -175,7 +183,8 @@ async function setupGuestServer(
             }
 
             if(payload.method === 'setUser') {
-              calls.push({method: 'apiManager.setUser'});
+              calls.push({method: 'apiManager.setUser', params: {isNewAccount: payload.args?.[1]}});
+              localStorage.setItem('__guestRegistrationCallSnapshot', JSON.stringify(calls));
               return invoke(type, payload, ...args);
             }
           }
@@ -200,11 +209,12 @@ async function setupGuestServer(
   return webSocketUrls;
 }
 
-async function openSelectedServer(page: Page, testInfo: TestInfo) {
+async function openSelectedServer(page: Page, testInfo: TestInfo, accountNumber = 1) {
   const appOrigin = new URL(testInfo.project.use.baseURL as string);
   appOrigin.hostname = 'web.teagram.io';
   appOrigin.protocol = 'https:';
-  await page.goto(`${appOrigin.origin}/?noWorker=1&noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
+  const account = accountNumber === 1 ? '' : `account=${accountNumber}&`;
+  await page.goto(`${appOrigin.origin}/?${account}noWorker=1&noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
 
   const hostInput = page.getByRole('textbox', {name: 'Server address'});
   await expect(hostInput).toHaveValue('', {timeout: 30_000});
@@ -222,6 +232,41 @@ async function openSelectedServer(page: Page, testInfo: TestInfo) {
   await expect(page.locator('#auth-pages')).toBeAttached({timeout: 30_000});
   await expect(page.locator('#auth-pages').getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
 }
+
+test('keeps a new guest signed in when the pinned server reuses a stale account ID', async({page}, testInfo) => {
+  await page.setViewportSize({width: 320, height: 720});
+  await seedPriorAccountUserId(page, 8282);
+  await setupGuestServer(page, testInfo, true);
+  await openSelectedServer(page, testInfo, 2);
+
+  const auth = page.locator('#auth-pages');
+  const guestButton = auth.getByRole('button', {name: 'Try it as a guest'});
+  await expect(guestButton).toBeVisible();
+  await captureState(page, testInfo, 'guest-reused-id-ready');
+  await guestButton.click();
+  const challenge = auth.getByTestId('turnstile-challenge');
+  await expect(challenge).toBeVisible();
+  await captureState(page, testInfo, 'guest-reused-id-challenge');
+  await challenge.getByRole('button', {name: 'Complete security check'}).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('__teagram_guest_username')))
+    .toMatch(/^guest_[a-z2-7]{16}$/);
+  await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
+  expect(new URL(page.url()).searchParams.get('account')).toBe('2');
+  expect(await page.evaluate(() => Number(localStorage.getItem('__guestManagerLogOuts') || 0))).toBe(0);
+  expect(await page.evaluate(() => Number(localStorage.getItem('__guestAuthLogOuts') || 0))).toBe(0);
+  const calls = await page.evaluate(() => JSON.parse(localStorage.getItem('__guestRegistrationCallSnapshot') || '[]') as Array<{method: string}>);
+  expect(calls.some((call) => call.method === 'auth.logOut')).toBe(false);
+  expect(calls.find((call) => call.method === 'apiManager.setUser')).toMatchObject({params: {isNewAccount: true}});
+  const username = await page.evaluate(() => (window as any).apiManagerProxy.getUser(8282)?.username);
+  expect(username).toMatch(/^guest_[a-z2-7]{16}$/);
+  await captureState(page, testInfo, 'guest-reused-id-chat-list');
+
+  await page.reload({waitUntil: 'domcontentloaded'});
+  await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
+  await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(8282)?.username)).toBe(username);
+  expect(await page.evaluate(() => Number(localStorage.getItem('__guestAuthLogOuts') || 0))).toBe(0);
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
 
 test('creates a guest only when discovery advertises it and restores the same guest after reload', async({page}, testInfo) => {
   await page.setViewportSize({width: 320, height: 720});
@@ -372,6 +417,24 @@ test('shows an auth error and an explicit retry after automatic guest sign-up fa
 
   const signupCalls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
   expect(signupCalls.filter((call) => call.method === 'auth.signUp')).toHaveLength(1);
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
+test('explains when the guest account context changes', async({page}, testInfo) => {
+  await page.setViewportSize({width: 1280, height: 800});
+  await setupGuestServer(page, testInfo, true, 'GUEST_CONTEXT_CHANGED');
+  await openSelectedServer(page, testInfo);
+
+  const auth = page.locator('#auth-pages');
+  await auth.getByRole('button', {name: 'Try it as a guest'}).click();
+  const challenge = auth.getByTestId('turnstile-challenge');
+  await expect(challenge).toBeVisible();
+  await challenge.getByRole('button', {name: 'Complete security check'}).click();
+
+  const error = auth.getByRole('alert');
+  await expect(error).toHaveText('Your account or server changed. Start the guest sign-in again.', {timeout: 30_000});
+  await expect(error).not.toContainText('Check your connection');
+  await captureState(page, testInfo, 'guest-auth-context-changed');
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
 

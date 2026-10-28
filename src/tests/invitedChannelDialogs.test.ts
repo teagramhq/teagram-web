@@ -28,8 +28,8 @@ describe('invited channel dialogs', () => {
     });
     vi.spyOn(appNotificationsManager, 'routeNotification').mockResolvedValue(undefined);
     vi.spyOn(appDraftsManager, 'addMissedDialogs').mockResolvedValue(undefined);
-    vi.spyOn(appStickersManager, 'getAnimatedEmojiSounds').mockResolvedValue(undefined);
-    vi.spyOn(appStickersManager, 'getLocalStickerSet').mockResolvedValue(undefined);
+    appStickersManager.getAnimatedEmojiSounds = () => Promise.resolve(undefined);
+    appStickersManager.getLocalStickerSet = () => Promise.resolve(undefined);
   }, 60_000);
 
   afterAll(() => {

@@ -121,6 +121,7 @@ vi.mock('@lib/langPack', async(importOriginal) => {
       'Teagram.Guest.RestoreNetwork': 'Unable to sign you back into your guest account. Check your connection and try again.',
       'Teagram.Guest.Unrecoverable': 'This guest account can\'t be recovered. Use a different account.',
       'Teagram.Guest.Network': 'Unable to create your guest account. Check your connection and try again.',
+      'Teagram.Guest.ContextChanged': 'Your account or server changed. Start the guest sign-in again.',
       'Teagram.Guest.AccountInUse': 'This account is already in use. Sign out before creating a guest account.',
       'Teagram.Guest.Collision': 'Guest sign-up couldn\'t find an available username. Try again.',
       'Teagram.Registration.SecurityCheckRetry': 'Try again',
@@ -683,6 +684,7 @@ describe('private username sign-in card', () => {
     [{kind: 'unrecoverable', username: 'guest_aaaaaaaaaaaaaaaa'}, 'This guest account can\'t be recovered. Use a different account.'],
     [{kind: 'collisionsExhausted'}, 'Guest sign-up couldn\'t find an available username. Try again.'],
     [{kind: 'error', errorType: 'RECAPTCHA_CHECK_FAILED'}, 'The security check failed. Try again.'],
+    [{kind: 'error', errorType: 'GUEST_CONTEXT_CHANGED'}, 'Your account or server changed. Start the guest sign-in again.'],
     [{kind: 'error', errorType: 'NETWORK_ERROR'}, 'Unable to create your guest account. Check your connection and try again.']
   ])('shows an actionable guest sign-up error for %s', async(result, expected) => {
     (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = true;
@@ -811,7 +813,7 @@ describe('private username sign-in card', () => {
     (document.querySelector('button') as HTMLButtonElement).click();
     await flushAuthFlow();
 
-    expect(mocks.setUser).toHaveBeenCalledWith(user);
+    expect(mocks.setUser).toHaveBeenCalledWith(user, false);
     expect(mocks.toIm).toHaveBeenCalledOnce();
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
@@ -1006,7 +1008,7 @@ describe('private username sign-in card', () => {
 
     expect(mocks.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn', 'auth.signUp']);
     expect(mocks.updatePasswordSettings).toHaveBeenCalledWith({newPassword: 'StrongPassword123'});
-    expect(mocks.setUser).toHaveBeenCalledWith(user);
+    expect(mocks.setUser).toHaveBeenCalledWith(user, true);
   });
 
   it('keeps a provisional account in the registration form when password verifier setup fails and lets the user retry', async() => {
@@ -1041,6 +1043,6 @@ describe('private username sign-in card', () => {
     await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
     expect(mocks.invokeApi).toHaveBeenCalledTimes(3);
     expect(mocks.updatePasswordSettings).toHaveBeenCalledTimes(2);
-    expect(mocks.setUser).toHaveBeenCalledWith(user);
+    expect(mocks.setUser).toHaveBeenCalledWith(user, true);
   });
 });

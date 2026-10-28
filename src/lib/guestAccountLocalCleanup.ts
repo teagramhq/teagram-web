@@ -59,8 +59,10 @@ export async function clearGuestAccountLocalState(
 
 export async function clearInvalidatedGuestAccount(accountNumber: ActiveAccountNumber, userId?: PeerId) {
   const totalAccounts = await AccountController.getTotalAccounts();
+  const accountNumberOnlyCredentialCleanup = userId === undefined ? false :
+    await AccountController.hasUserIdInOtherAccounts(accountNumber, userId);
   await Promise.all([
-    clearGuestCredentialsForAccount(userId, accountNumber),
+    clearGuestCredentialsForAccount(userId, accountNumber, accountNumberOnlyCredentialCleanup),
     clearGuestAccountLocalState(accountNumber, totalAccounts)
   ]);
 }

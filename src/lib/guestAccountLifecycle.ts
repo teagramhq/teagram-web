@@ -59,7 +59,7 @@ export type GuestAccountLifecycleDependencies = {
   withServerLock: <T>(name: string, callback: () => Promise<T>) => Promise<T>,
   generateCredentials?: () => GuestCredentialPair,
   invokeApi: (method: any, params?: any, options?: any) => Promise<any>,
-  setUser: (user: User) => Promise<void>,
+  setUser: (user: User, isNewAccount: boolean) => Promise<void>,
   updatePasswordSettings: (password: string) => Promise<unknown>,
   verifyPassword: (password: string) => Promise<boolean>,
   signInWithPassword: (password: string) => Promise<User | false | undefined>,
@@ -207,6 +207,19 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
     }
   }
 
+  async function assertPostAuthorizationContext(context: GuestAccountContext, accountUserId: PeerId, cancelled: {value: boolean}) {
+    if(cancelled.value) {
+      throw Object.assign(new Error('Guest account flow was cancelled'), {type: 'GUEST_CANCELLED'});
+    }
+    const currentUserId = await dependencies.getAccountUserId(context.accountNumber);
+    if(cancelled.value) {
+      throw Object.assign(new Error('Guest account flow was cancelled'), {type: 'GUEST_CANCELLED'});
+    }
+    if(!sameUserId(currentUserId, accountUserId) || !isContextCurrent(context)) {
+      throw Object.assign(new Error('Guest account context changed'), {type: 'GUEST_CONTEXT_CHANGED'});
+    }
+  }
+
   async function createOrResumeLocked(identity: GuestServerIdentity, cancelled: {value: boolean, record?: GuestCredentialRecord, registration?: PrivateUsernameRegistration}) {
     if(!dependencies.isServerIdentityCurrent(identity)) return {kind: 'cancelled'} as const;
     const accountNumber = dependencies.getCurrentAccountNumber();
@@ -268,7 +281,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
       return true;
     };
 
-    const onAuthorization = async(user: User) => {
+    const onAuthorization = async(user: User, isNewAccount: boolean) => {
       await assertContext(context, boundUserId, cancelled);
       const expectedUserId = boundUserId ?? record!.accountUserId;
       if(expectedUserId !== undefined && !sameUserId(expectedUserId, user.id as PeerId)) {
@@ -284,9 +297,9 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
       cancelled.record = record;
       await saveRecord(record);
       await assertContext(context, boundUserId, cancelled);
-      await dependencies.setUser(user);
+      await dependencies.setUser(user, isNewAccount);
       boundUserId = authorizedUserId;
-      await assertContext(context, boundUserId, cancelled);
+      await assertPostAuthorizationContext(context, boundUserId, cancelled);
     };
 
     if(record.status === 'provisional' && activeUserId !== undefined && sameUserId(activeUserId, recordUserId)) {
@@ -339,6 +352,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
         if(errorType === 'GUEST_CANCELLED') return {kind: 'cancelled'} as const;
         return errorType ? {kind: 'error', errorType} as const : {kind: 'error'} as const;
       }
+      if(result.kind === 'error' && result.errorType === 'GUEST_CONTEXT_CHANGED') return result;
       if(cancelled.value || !isContextCurrent(context)) return {kind: 'cancelled'} as const;
 
       if(result.kind === 'authorized') {
@@ -351,7 +365,9 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
           await saveRecord(record);
           return {kind: 'authorized', user: result.user, username: record.username} as const;
         } catch(error) {
-          return getErrorType(error) === 'GUEST_CANCELLED' ? {kind: 'cancelled'} as const : {kind: 'error'} as const;
+          if(getErrorType(error) === 'GUEST_CANCELLED') return {kind: 'cancelled'} as const;
+          const errorType = getErrorType(error);
+          return errorType ? {kind: 'error', errorType} as const : {kind: 'error'} as const;
         }
       }
       if(result.kind === 'cancelled') return {kind: 'cancelled'} as const;
@@ -472,7 +488,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
               const user = await dependencies.signInWithPassword(password);
               return user || false;
             },
-            onAuthorization: async(user) => {
+            onAuthorization: async(user, isNewAccount) => {
               await assertContext(context, boundUserId, cancelled);
               const expectedUserId = boundUserId ?? record.accountUserId;
               if(expectedUserId !== undefined && !sameUserId(expectedUserId, user.id as PeerId)) {
@@ -484,7 +500,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
               record.accountUserId = authorizedUserId;
               await saveRecord(record);
               await assertContext(context, boundUserId, cancelled);
-              await dependencies.setUser(user);
+              await dependencies.setUser(user, isNewAccount);
               boundUserId = authorizedUserId;
               await assertContext(context, boundUserId, cancelled);
             }
@@ -594,7 +610,7 @@ export function createGuestAccountServerLock<T>(name: string, callback: () => Pr
 export type GuestAccountManagers = {
   apiManager: {
     invokeApi: (method: any, params?: any, options?: any) => Promise<any>,
-    setUser: (user: User) => Promise<void>,
+    setUser: (user: User, isNewAccount: boolean) => Promise<void>,
     logOut: () => Promise<unknown>,
     clearInvalidatedGuestAccount: (accountNumber: ActiveAccountNumber, userId?: PeerId) => Promise<void>
   },
@@ -677,7 +693,7 @@ export function createCurrentGuestAccountLifecycle(
     writeCredentials: saveGuestCredentials,
     withServerLock: createGuestAccountServerLock,
     invokeApi: (method, params, invokeOptions) => apiManager.invokeApi(method, params, invokeOptions),
-    setUser: (user) => apiManager.setUser(user),
+    setUser: (user, isNewAccount) => apiManager.setUser(user, isNewAccount),
     clearInvalidatedAccount: (accountNumber, userId) => apiManager.clearInvalidatedGuestAccount(accountNumber, userId),
     updatePasswordSettings: (password) => passwordManager.updateSettings({newPassword: password}),
     verifyPassword: async(password) => {

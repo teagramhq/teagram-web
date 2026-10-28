@@ -49,6 +49,13 @@ export class AccountController extends StaticUtilityClass {
     return allAccountsData.map((accountData) => accountData.userId).filter(Boolean);
   }
 
+  static async hasUserIdInOtherAccounts(accountNumber: ActiveAccountNumber, userId: PeerId) {
+    const otherAccounts = await Promise.all(([1, 2, 3, 4] as ActiveAccountNumber[])
+    .filter((otherAccountNumber) => otherAccountNumber !== accountNumber)
+    .map((otherAccountNumber) => this.get(otherAccountNumber)));
+    return otherAccounts.some((otherAccountData) => String(otherAccountData.userId) === String(userId));
+  }
+
   static async get(accountNumber: ActiveAccountNumber, updating?: boolean) {
     const data = await sessionStorage.get(`account${accountNumber}`) || {} as AccountSessionData;
 
