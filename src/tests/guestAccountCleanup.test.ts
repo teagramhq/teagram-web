@@ -2,6 +2,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   getTotalAccounts: vi.fn(async() => 1),
+  hasUserIdInOtherAccounts: vi.fn(async() => false),
   shiftAccounts: vi.fn(async() => {}),
   clearAccountStores: vi.fn(async() => {}),
   clearSessionStores: vi.fn(async() => {}),
@@ -16,6 +17,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@lib/accounts/accountController', () => ({default: {
   getTotalAccounts: mocks.getTotalAccounts,
+  hasUserIdInOtherAccounts: mocks.hasUserIdInOtherAccounts,
   shiftAccounts: mocks.shiftAccounts
 }}));
 vi.mock('@appManagers/appStoragesManager', () => ({AppStoragesManager: {

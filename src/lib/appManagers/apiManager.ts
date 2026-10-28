@@ -456,8 +456,18 @@ export class ApiManager extends ApiManagerMethods {
       if(wasCleared) return;
       wasCleared = true;
 
+      let accountNumberOnlyCredentialCleanup = false;
+      if(totalAccounts > 1 && accountData.userId !== undefined) {
+        try {
+          accountNumberOnlyCredentialCleanup = await AccountController.hasUserIdInOtherAccounts(accountNumber, accountData.userId);
+        } catch(error) {
+          this.log.error('failed to inspect account slots before credential cleanup', error);
+          accountNumberOnlyCredentialCleanup = true;
+        }
+      }
+
       try {
-        await clearGuestCredentialsForAccount(accountData.userId, accountNumber);
+        await clearGuestCredentialsForAccount(accountData.userId, accountNumber, accountNumberOnlyCredentialCleanup);
       } catch(error) {
         this.log.error('failed to clear guest credentials during logout', error);
         await clearAllGuestCredentials();

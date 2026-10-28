@@ -8,6 +8,15 @@ import sessionStorage from '@lib/sessionStorage';
 afterEach(() => vi.restoreAllMocks());
 
 describe('account reauthorization', () => {
+  it('detects a user ID in another account slot', async() => {
+    vi.spyOn(AccountController, 'get').mockImplementation(async(accountNumber) => ({
+      userId: accountNumber === 2 ? 17 : 22
+    }) as any);
+
+    await expect(AccountController.hasUserIdInOtherAccounts(1, 17 as any)).resolves.toBe(true);
+    await expect(AccountController.hasUserIdInOtherAccounts(1, 99 as any)).resolves.toBe(false);
+  });
+
   it('persists the new-account marker through reauthorization', async() => {
     const accountData: Record<string, any> = {dcId: 2};
     vi.spyOn(rootScope, 'dispatchEvent').mockImplementation(() => undefined as any);
