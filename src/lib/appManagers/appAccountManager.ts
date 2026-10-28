@@ -271,19 +271,19 @@ export default class AppAccountManager extends AppManager {
 
   public async finishPasskeyLogin(credential: InputPasskeyCredential, fromDcId?: TrueDcId) {
     const fromAuthKey = fromDcId ? await this.apiManager.getAuthKeyFromHex((await AccountController.get(this.getAccountNumber()))[`dc${fromDcId as TrueDcId}_auth_key`]) : undefined;
-    return this.apiManager.invokeApi('auth.finishPasskeyLogin', {
+    const authorization = await this.apiManager.invokeApi('auth.finishPasskeyLogin', {
       credential,
       ...(fromDcId ? {
         from_dc_id: fromDcId,
         from_auth_key_id: bigIntFromBytes(fromAuthKey.id.reverse()).toString()
       } : {})
-    }, {ignoreErrors: true}).then((authorization) => {
-      if(authorization._ === 'auth.authorization') {
-        this.apiManager.setUser(authorization.user);
-      }
+    }, {ignoreErrors: true});
 
-      return authorization;
-    });
+    if(authorization._ === 'auth.authorization') {
+      await this.apiManager.setUser(authorization.user);
+    }
+
+    return authorization;
   }
 
   public sendVerifyEmailCode(purpose: EmailVerifyPurpose, email: string) {
