@@ -727,6 +727,49 @@ async function startSelectionApp(action: ServerSelectionAction) {
   await import('./index');
 }
 
+// A new tab on a pinned, already active server connects in place. Reloading would give the
+// page a new client id and drop what the service worker holds for it, such as a share target.
+async function connectSavedServer(savedChoice: string) {
+  let host: string;
+  let previousId: string;
+  try {
+    host = normalizeServerHost(savedChoice);
+    previousId = localStorage.getItem(ACTIVE_SERVER_ID_KEY) || 'default';
+  } catch{
+    return false;
+  }
+
+  setServerSelectionPolicy();
+  let id = 'default';
+  let target = buildTarget;
+  let discovered: DiscoveredServer | undefined;
+  if(host !== DEFAULT_SERVER_HOST) {
+    try {
+      discovered = await fetchServerDiscovery(host);
+    } catch{
+      return false;
+    }
+    if(getServerPinState(discovered, getServerPin(host)) !== 'match' || discovered.target.mode !== 'private') return false;
+    if(!await probeWebSocket(discovered.target.endpoint)) return false;
+    id = discovered.id;
+    target = discovered.target;
+  }
+  if(!target || previousId !== id) return false;
+
+  if(discovered) {
+    try {
+      storeSavedServerTarget(discovered);
+    } catch{
+      return false;
+    }
+  }
+  setActiveContext(id, host, target, discovered);
+  setConnectPolicy(host, target, true);
+  setServerSelectionAction(createServerSelectionAction({phase: 'connected', host}, host));
+  await import('./index');
+  return true;
+}
+
 async function boot() {
   const config = await fetchTeagramDeploymentConfig();
   if(config) {
@@ -772,6 +815,8 @@ async function boot() {
 
     if(changeChoice) {
       try { sessionStorage.removeItem(SERVER_CHANGE_KEY); } catch{}
+    } else if(savedChoice && await connectSavedServer(savedChoice)) {
+      return;
     }
 
     const initialState: ServerSelectionState = savedChoice ?
