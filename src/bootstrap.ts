@@ -425,14 +425,25 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
     }
   }
 
-  async function showIdentityConfirmation(discovered: DiscoveredServer, pin: NonNullable<ReturnType<typeof getServerPin>>) {
+  async function showIdentityConfirmation(
+    discovered: DiscoveredServer,
+    pin: NonNullable<ReturnType<typeof getServerPin>>,
+    isCurrent: () => boolean = () => true
+  ) {
     const extraContent = popupContent(
       fingerprintBlock('Teagram.Server.PinnedFingerprint', pin.key_fingerprint),
       fingerprintBlock('Teagram.Server.PresentedFingerprint', discovered.spkiFingerprint),
       popupParagraph('Teagram.Server.IdentityBlocked'),
       popupParagraph('Teagram.Server.IdentityCancel')
     );
-    const {SimpleConfirmationPopup} = await import('@components/popups/simpleConfirmation');
+    let SimpleConfirmationPopup: typeof import('@components/popups/simpleConfirmation').SimpleConfirmationPopup;
+    try {
+      ({SimpleConfirmationPopup} = await import('@components/popups/simpleConfirmation'));
+    } catch(error) {
+      console.error('Could not load server identity confirmation', error);
+      if(isCurrent()) setFailure('Teagram.Server.KeyMismatch', discovered.host);
+      return;
+    }
     try {
       await SimpleConfirmationPopup.show({
         titleLangKey: 'Teagram.Server.IdentityTitle',
@@ -566,7 +577,7 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
       blockedServer = discovered;
       blockedPin = pin;
       publish({phase: 'checking', host, changing, locked: true});
-      await showIdentityConfirmation(discovered, pin);
+      await showIdentityConfirmation(discovered, pin, () => isCurrentRun(run, signal));
       return;
     }
 
@@ -644,7 +655,10 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
       restoreActiveServer();
     },
     continueBlocked() {
-      if(blockedServer && blockedPin) void showIdentityConfirmation(blockedServer, blockedPin);
+      if(blockedServer && blockedPin) {
+        const run = sequence;
+        void showIdentityConfirmation(blockedServer, blockedPin, () => run === sequence);
+      }
     }
   };
 

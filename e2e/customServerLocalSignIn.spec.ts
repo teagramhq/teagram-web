@@ -1526,3 +1526,70 @@ for(const failure of [
     await testInfo.attach('startup-error', {path: screenshot, contentType: 'image/png'});
   });
 }
+
+test('unlocks server selection when the pinned-key popup import fails', async({page}, testInfo) => {
+  const appPort = Number(new URL(testInfo.project.use.baseURL as string).port);
+  const websocketEndpoint = `wss://${SERVER_HOST}:2443/apiws`;
+  const rsaPublicKey = createPublicKey(readFileSync(resolve('scripts/fixtures/private-mtproto-public.pem')));
+  const discovery = {
+    version: 1,
+    mtproto: {
+      endpoint: `${SERVER_HOST}:2443`,
+      dc_id: 2,
+      rsa_spki: rsaPublicKey.export({format: 'der', type: 'spki'}).toString('base64')
+    },
+    websocket: {endpoint: websocketEndpoint}
+  };
+  let failPopupImport = true;
+  const popupImportRequests: string[] = [];
+
+  await page.addInitScript(({host, endpoint}) => {
+    localStorage.setItem('teagram.server-pins.v1', JSON.stringify({
+      [host]: {host, endpoint, dc_id: 2, key_fingerprint: '0'.repeat(64)}
+    }));
+  }, {host: SERVER_HOST, endpoint: websocketEndpoint});
+  await page.route(`https://${APP_HOST}/**`, async(route) => {
+    const url = new URL(route.request().url());
+    const response = await route.fetch({url: `http://localhost:${appPort}${url.pathname}${url.search}`});
+    await route.fulfill({response});
+  });
+  await page.route(`https://${SERVER_HOST}/**`, (route) => {
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      headers: {'access-control-allow-origin': '*'},
+      body: JSON.stringify(discovery)
+    });
+  });
+  await page.route('**/simpleConfirmation.ts*', async(route) => {
+    popupImportRequests.push(route.request().url());
+    if(failPopupImport) {
+      failPopupImport = false;
+      await route.abort('failed');
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto(`https://${APP_HOST}/`, {waitUntil: 'domcontentloaded'});
+  await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+  await page.setViewportSize({width: 1280, height: 800});
+  const hostInput = page.getByRole('textbox', {name: 'Server address'});
+  await hostInput.fill(SERVER_HOST);
+  await hostInput.press('Enter');
+
+  await expect.poll(() => popupImportRequests.length, {timeout: 15_000}).toBe(1);
+  await expect(page.getByRole('alert')).toHaveText(
+    'This server no longer matches the identity pinned in this browser, so the connection is blocked. Contact your server administrator.'
+  );
+  await expect(hostInput).toHaveValue(SERVER_HOST);
+  await expect(hostInput).toBeEditable();
+  await expect(hostInput).toHaveAttribute('aria-invalid', 'true');
+  await expect(page.getByRole('button', {name: 'Continue', exact: true})).toBeEnabled();
+  await expect(page.getByRole('button', {name: 'Checking…'})).toHaveCount(0);
+
+  await hostInput.fill(CANCEL_SERVER_HOST);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(hostInput).toHaveValue(CANCEL_SERVER_HOST);
+  await expect(page.getByRole('button', {name: 'Continue', exact: true})).toBeEnabled();
+});
