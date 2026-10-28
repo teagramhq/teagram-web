@@ -38,6 +38,7 @@ declare const __MTPROTO_TARGET__: MtprotoTarget | undefined;
 
 const SERVER_READY_KEY = 'teagram.server-ready.v1';
 const SERVER_CHANGE_KEY = 'teagram.server-change.v1';
+const SERVER_RESTORE_FOCUS_KEY = 'teagram.server-restore-focus.v1';
 const runtime = window as any;
 const buildTarget = typeof __MTPROTO_TARGET__ === 'undefined' ? undefined : __MTPROTO_TARGET__;
 const pageHost = location.hostname.toLowerCase().replace(/\.+$/, '');
@@ -59,6 +60,27 @@ function setConnectPolicy(host: string, target?: MtprotoTarget, enforceInCurrent
 
 function setServerSelectionPolicy() {
   setConnectPolicyContent('\'self\' https: wss:');
+}
+
+function focusChangeServerButtonWhenMounted() {
+  const focusButton = (observer: MutationObserver) => {
+    const button = document.querySelector<HTMLButtonElement>('[aria-label="Change server"]');
+    if(button) {
+      observer.disconnect();
+      requestAnimationFrame(() => {
+        if(button.isConnected) button.focus();
+      });
+      return true;
+    }
+    return false;
+  };
+  const observer = new MutationObserver((_, currentObserver) => {
+    if(!focusButton(currentObserver) && !document.body.classList.contains('has-auth-pages')) {
+      currentObserver.disconnect();
+    }
+  });
+  observer.observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ['class']});
+  focusButton(observer);
 }
 
 function setConnectPolicyContent(sources: string, enforceInCurrentDocument = false) {
@@ -388,15 +410,21 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
   function restoreActiveServer() {
     const host = activeHost || current.host;
     try {
-      sessionStorage.removeItem(SERVER_READY_KEY);
       sessionStorage.removeItem(SERVER_CHANGE_KEY);
+      sessionStorage.setItem(SERVER_READY_KEY, host);
     } catch(error) {
-      console.error('Could not clear server change state', error);
+      console.error('Could not prepare server restore', error);
+      setFailure('Teagram.Server.SaveFailed', host);
+      return;
+    }
+    try {
+      sessionStorage.setItem(SERVER_RESTORE_FOCUS_KEY, '1');
+    } catch(error) {
+      console.error('Could not preserve focus while restoring the server', error);
     }
     const target = host === DEFAULT_SERVER_HOST ? buildTarget : getSavedServerTarget(host)?.target;
     if(target) setConnectPolicy(host, target, true);
-    publish({phase: 'connected', host, changing: false});
-    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('[aria-label="Change server"]')?.focus());
+    location.reload();
   }
 
   async function showFirstUseConfirmation(discovered: DiscoveredServer, target: HTMLElement | undefined) {
@@ -881,17 +909,21 @@ async function boot() {
       const target = host === DEFAULT_SERVER_HOST ? buildTarget : discovered?.target;
       if(host && target) {
         const changing = changeChoice === savedChoice;
+        let restoreFocus = false;
         try {
           sessionStorage.removeItem(SERVER_CHANGE_KEY);
           if(!changing) sessionStorage.removeItem(SERVER_READY_KEY);
+          restoreFocus = sessionStorage.getItem(SERVER_RESTORE_FOCUS_KEY) === '1';
+          sessionStorage.removeItem(SERVER_RESTORE_FOCUS_KEY);
         } catch{}
         const action = createServerSelectionAction(changing ?
           {phase: 'selecting', host, changing: true} : {phase: 'connected', host}, host);
         setActiveContext(localStorage.getItem(ACTIVE_SERVER_ID_KEY) || discovered?.id || 'default', host, target, discovered);
         if(changing) setServerSelectionPolicy();
-        else setConnectPolicy(host, target);
+        else setConnectPolicy(host, target, true);
         setServerSelectionAction(action);
-        void import('./index');
+        await import('./index');
+        if(restoreFocus) focusChangeServerButtonWhenMounted();
         return;
       }
     }

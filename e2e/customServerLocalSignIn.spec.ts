@@ -695,7 +695,9 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await expect(usernameInput).toBeFocused();
 
     await enterServerChange();
+    const restoreReload = page.waitForNavigation({waitUntil: 'domcontentloaded', timeout: 5000});
     await page.getByRole('button', {name: 'Cancel', exact: true}).click();
+    await restoreReload;
     await expect(page.getByRole('button', {name: 'Change server'})).toBeFocused();
     await expect(usernameInput).toBeEnabled();
     await expect(page.locator('meta[data-server-policy-enforcement]'))
@@ -751,11 +753,13 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await expect.poll(() => discoveryRequests.length).toBe(3);
     await expect(page.getByRole('button', {name: 'Connecting…'})).toBeVisible();
     await expect.poll(() => page.evaluate(() => !!(window as any).__resolvePendingRegistrations)).toBe(true);
+    const pendingRestoreReload = page.waitForNavigation({waitUntil: 'domcontentloaded', timeout: 5000});
     await page.locator('#auth-pages').getByRole('button', {name: 'Cancel', exact: true}).click();
+    await pendingRestoreReload;
     await expect(page.getByRole('button', {name: 'Change server'})).toBeFocused();
-    await page.evaluate(() => (window as any).__resolvePendingRegistrations());
     await expect(hostInput).toHaveValue(serverHost);
     expect(await page.evaluate(() => localStorage.getItem('teagram.server-choice.v1'))).toBe(serverHost);
+    expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(serverHost);
 
     delayNextDiscovery = true;
     await page.reload({waitUntil: 'domcontentloaded'});
@@ -1390,6 +1394,12 @@ test('isolates two server tabs when a custom server worker takes control', async
       await expect(pinnedServerField).toHaveValue(SERVER_HOST);
       await expect(pinnedServerField).toHaveJSProperty('readOnly', true);
       await expect(auth.getByRole('button', {name: 'Change server'})).toBeVisible();
+
+      await auth.getByRole('button', {name: 'Change server'}).click();
+      await expect(auth.getByRole('button', {name: 'Cancel', exact: true})).toBeVisible();
+      await auth.getByRole('button', {name: 'Cancel', exact: true}).click();
+      await expect(auth.getByRole('button', {name: 'Change server'})).toBeVisible();
+      await expect(auth.getByRole('textbox', {name: 'Username'})).toBeEnabled();
 
       const warmup = await customPage!.evaluate(async(username) => {
         const moduleUrl = new URL('/src/pages/privateUsernameAuth.ts', window.location.origin).href;
