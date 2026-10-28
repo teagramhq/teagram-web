@@ -914,5 +914,6 @@ async function boot() {
 void boot().catch((error) => {
   console.error('Could not start Teagram Web', error);
   setServerSelectionAction(undefined);
-  void import('./index');
+  const {card} = showPanel('Could not start Teagram Web');
+  addError(card, error instanceof Error ? error.message : String(error));
 });

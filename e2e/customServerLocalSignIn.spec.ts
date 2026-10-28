@@ -1504,3 +1504,25 @@ test('isolates two server tabs when a custom server worker takes control', async
     .map((annotation) => annotation.description))
     .toEqual(phaseDiagnostics.map((diagnostic) => JSON.stringify(diagnostic)));
 });
+
+for(const failure of [
+  {name: 'HTTP failure', status: 503, body: '{}', message: 'Teagram deployment configuration failed (503)'},
+  {name: 'invalid JSON', status: 200, body: '{', message: 'Teagram deployment configuration is invalid JSON'}
+]) {
+  test(`fails closed on deployment config ${failure.name}`, async({page}, testInfo) => {
+    await page.route('**/teagram-config.json', (route) => route.fulfill({
+      status: failure.status,
+      contentType: 'application/json',
+      body: failure.body
+    }));
+
+    await page.goto('/', {waitUntil: 'domcontentloaded'});
+
+    await expect(page.getByRole('heading', {name: 'Could not start Teagram Web'})).toBeVisible({timeout: 10_000});
+    await expect(page.getByRole('alert')).toHaveText(failure.message);
+    await expect(page.locator('#auth-pages')).toHaveCount(0);
+    const screenshot = testInfo.outputPath('startup-error.png');
+    await page.screenshot({path: screenshot});
+    await testInfo.attach('startup-error', {path: screenshot, contentType: 'image/png'});
+  });
+}
