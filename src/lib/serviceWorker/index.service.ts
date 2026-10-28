@@ -10,7 +10,7 @@ import listenMessagePort from '@helpers/listenMessagePort';
 import {getWindowClients} from '@helpers/context';
 import {MessageSendPort} from '@lib/superMessagePort';
 import handleDownload from '@lib/serviceWorker/download';
-import onShareFetch, {checkWindowClientForDeferredShare, claimDeferredShare} from '@lib/serviceWorker/share';
+import onShareFetch, {checkWindowClientForDeferredShare} from '@lib/serviceWorker/share';
 import {onRtmpFetch, onRtmpLeftCall} from '@lib/serviceWorker/rtmp';
 import {onHlsQualityFileFetch} from '@lib/hls/onHlsQualityFileFetch';
 import {get500ErrorResponse} from '@lib/serviceWorker/errors';
@@ -284,7 +284,6 @@ ctx.addEventListener('message', (event: ExtendableMessageEvent) => {
     if(accepted) {
       pendingServerIds.delete(source.id);
       connectedServerIds.set(source.id, serverId);
-      claimDeferredShare(source.id, data.shareToken);
       connectServerClient(source, 'server handshake');
     }
     event.ports[0]?.postMessage({serverId, accepted});

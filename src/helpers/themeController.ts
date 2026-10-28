@@ -11,6 +11,7 @@ import {changeColorAccent, ColorRgb, getAccentColor, getAverageColor, getRgbColo
 import {SETTINGS_INIT} from '@config/state';
 import {MOUNT_CLASS_TO} from '@config/debug';
 import customProperties from '@helpers/dom/customProperties';
+import {saveBootShellTheme} from '@config/bootShell';
 import {TelegramWebViewTheme} from '@types';
 import windowSize from '@helpers/windowSize';
 import liteMode from '@helpers/liteMode';
@@ -329,6 +330,7 @@ export class ThemeController {
     this.setThemeColor();
     const theme = this.getTheme();
     this.applyTheme(theme);
+    saveBootShellTheme(isNight, document.documentElement.style.cssText);
 
     let style = this.styleElement;
     if(!style) {

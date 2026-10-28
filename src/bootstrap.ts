@@ -1,6 +1,5 @@
 import './serverPicker.scss';
 import {fetchTeagramDeploymentConfig} from '@config/deploymentConfig';
-import {takeShareTokenFromUrl} from '@config/shareToken';
 import {
   ACTIVE_SERVER_ID_KEY,
   DEFAULT_SERVER_HOST,
@@ -29,6 +28,11 @@ import type {FormatterArguments, LangPackKey} from '@lib/langPack';
 import {i18n} from '@lib/langPack';
 
 import styles from '@/pages/authFlow.module.scss';
+import '@/materialize.scss';
+import '@/scss/style.scss';
+import mediaHeaderStyles from '@components/mediaHeader.module.scss';
+import {putPreloader} from '@components/putPreloader';
+import {getBootShell, type BootShell} from '@config/bootShell';
 
 declare const __MTPROTO_TARGET__: MtprotoTarget | undefined;
 
@@ -728,8 +732,114 @@ async function startSelectionApp(action: ServerSelectionAction) {
   await import('./index');
 }
 
+// The checking state of the sign-in card, drawn before the app loads: its components and the
+// workers they start are bound to a server, so they wait until the saved one is verified.
+function showServerCheckShell(host: string) {
+  const bootShell = getBootShell();
+  if(!bootShell) return () => {};
+
+  const root = document.documentElement;
+  root.style.cssText = bootShell.cssText;
+  root.classList.toggle('night', bootShell.night);
+
+  const shell = document.createElement('div');
+  shell.id = 'auth-pages';
+  shell.className = `whole ${styles.host}`;
+  shell.innerHTML = `<div class="scrollable scrollable-y no-scrollbar ${styles.scrollable}">
+  <div class="${styles.placeholder} ${styles.placeholderTop}"></div>
+  <div class="${styles.cardsContainer}"><div class="${styles.card}">
+    <div>
+      <div class="${mediaHeaderStyles.sticker} ${styles.logoContainer}" style="--sticker-size: 120px;"><img class="${styles.logo}" src="assets/img/logo.svg" alt="" aria-hidden="true"></div>
+      <div class="${mediaHeaderStyles.title} text-center text-overflow-wrap">Teagram</div>
+      <div class="${mediaHeaderStyles.subtitle} text-center secondary" data-text="Teagram.Server.Subtitle"></div>
+    </div>
+    <div class="input-wrapper"><div class="${styles.serverSelection}">
+      <div class="${styles.serverSelectionHostRow}"><div class="input-field">
+        <input type="text" class="input-field-input" dir="ltr" id="server-address" readonly required>
+        <span class="input-field-placeholder" data-text="Teagram.Server.Placeholder"></span>
+        <div class="input-field-border"></div><label><span data-text="Teagram.Server.Address"></span></label>
+      </div></div>
+      <div class="input-field ${styles.serverSelectionDisabledField}">
+        <input type="text" class="input-field-input is-empty" dir="auto" aria-label="Username" disabled aria-disabled="true" tabindex="-1" required>
+        <div class="input-field-border"></div><label dir="auto">Username</label>
+      </div>
+      <div class="${styles.serverSelectionActions}"><button class="btn-primary btn-color-primary ${styles.serverSelectionProgress}" aria-disabled="true"><span data-text="Teagram.Server.Checking"></span></button></div>
+      <span aria-live="polite" class="${styles.serverSelectionVisuallyHidden}" data-text="Teagram.Server.Checking"></span>
+    </div></div>
+  </div></div>
+  <div class="${styles.placeholder}"></div>
+</div>`;
+  shell.querySelectorAll<HTMLElement>('[data-text]').forEach((element) => {
+    element.textContent = bootShell.strings[element.dataset.text as keyof BootShell['strings']];
+  });
+  const input = shell.querySelector<HTMLInputElement>('#server-address');
+  input.value = input.title = host;
+  input.setAttribute('aria-label', bootShell.strings['Teagram.Server.Address']);
+  const button = shell.querySelector('button');
+  putPreloader(button);
+  const preloader = button.lastElementChild;
+  preloader.setAttribute('aria-hidden', 'true');
+  button.prepend(preloader);
+  document.body.prepend(shell);
+
+  // The app's own sign-in card or chat list replaces the shell in the same task it appears.
+  const observer = new MutationObserver(() => {
+    const authPages = document.querySelectorAll('#auth-pages');
+    if(authPages.length > 1 || !document.body.classList.contains('has-auth-pages')) remove();
+  });
+  function remove() {
+    observer.disconnect();
+    shell.remove();
+  }
+  observer.observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ['class']});
+  return remove;
+}
+
+// A new tab on a pinned, already active server connects in place. Reloading would give the
+// page a new client id and drop what the service worker holds for it, such as a share target.
+async function connectSavedServer(savedChoice: string) {
+  let host: string;
+  let previousId: string;
+  try {
+    host = normalizeServerHost(savedChoice);
+    previousId = localStorage.getItem(ACTIVE_SERVER_ID_KEY) || 'default';
+  } catch{
+    return false;
+  }
+
+  setServerSelectionPolicy();
+  let id = 'default';
+  let target = buildTarget;
+  let discovered: DiscoveredServer | undefined;
+  if(host !== DEFAULT_SERVER_HOST) {
+    // A check that settles within a second goes straight to the sign-in card.
+    let removeShell = () => {};
+    const shellTimeout = window.setTimeout(() => removeShell = showServerCheckShell(host), 1000);
+    try {
+      discovered = await fetchServerDiscovery(host);
+      if(getServerPinState(discovered, getServerPin(host)) !== 'match' || discovered.target.mode !== 'private') throw undefined;
+      if(!await probeWebSocket(discovered.target.endpoint)) throw undefined;
+      if(previousId !== discovered.id) throw undefined;
+      storeSavedServerTarget(discovered);
+    } catch{
+      removeShell();
+      return false;
+    } finally {
+      clearTimeout(shellTimeout);
+    }
+    id = discovered.id;
+    target = discovered.target;
+  }
+  if(!target || previousId !== id) return false;
+
+  setActiveContext(id, host, target, discovered);
+  setConnectPolicy(host, target, true);
+  setServerSelectionAction(createServerSelectionAction({phase: 'connected', host}, host));
+  await import('./index');
+  return true;
+}
+
 async function boot() {
-  takeShareTokenFromUrl();
   const config = await fetchTeagramDeploymentConfig();
   if(config) {
     await bootConfiguredServer(config);
@@ -774,6 +884,8 @@ async function boot() {
 
     if(changeChoice) {
       try { sessionStorage.removeItem(SERVER_CHANGE_KEY); } catch{}
+    } else if(savedChoice && await connectSavedServer(savedChoice)) {
+      return;
     }
 
     const initialState: ServerSelectionState = savedChoice ?

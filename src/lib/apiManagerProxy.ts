@@ -76,7 +76,6 @@ import tabId from '@config/tabId';
 import Modes from '@config/modes';
 import {getMtprotoTarget, isPrivateMtprotoTarget} from '@config/mtprotoTarget';
 import {getActiveServerId, getActiveServerQuery} from '@config/serverContext';
-import {clearPendingShareToken, getPendingShareToken} from '@config/shareToken';
 import {waitForMtprotoWorkerReady} from '@helpers/mtprotoWorkerReady';
 import {toast} from '@components/toast';
 import appNavigationController from '@components/appNavigationController';
@@ -811,14 +810,12 @@ class ApiManagerProxy extends MTProtoMessagePort {
     }
 
     this.serviceWorkerServerIds.set(serviceWorker, serverId);
-    const shareToken = getPendingShareToken();
-    const acknowledgment = await this.requestServiceWorkerHandshake(serviceWorker, 'teagram:server-handshake-ack', serverId, shareToken);
+    const acknowledgment = await this.requestServiceWorkerHandshake(serviceWorker, 'teagram:server-handshake-ack', serverId);
     if(!acknowledgment?.accepted || acknowledgment.serverId !== serverId) {
       this.serviceWorkerServerIds.delete(serviceWorker);
       this.log.warn('service worker identity acknowledgment failed', acknowledgment?.serverId, serverId);
       return this.rejectServiceWorkerAttachment();
     }
-    if(shareToken) clearPendingShareToken();
 
     this.serviceMessagePort.attachSendPort(this.lastServiceWorker = serviceWorker);
     this.invokeVoid('serviceWorkerOnline', true);
@@ -869,8 +866,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
   private requestServiceWorkerHandshake(
     serviceWorker: ServiceWorker,
     type: 'teagram:server-handshake' | 'teagram:server-handshake-ack',
-    serverId: string,
-    shareToken?: string
+    serverId: string
   ) {
     return new Promise<{serverId: string, accepted: boolean}>((resolve) => {
       let channel: MessageChannel;
@@ -900,7 +896,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
       }, {once: true});
       channel.port1.start();
       try {
-        serviceWorker.postMessage({type, serverId, shareToken}, [channel.port2]);
+        serviceWorker.postMessage({type, serverId}, [channel.port2]);
       } catch{
         finish();
       }
