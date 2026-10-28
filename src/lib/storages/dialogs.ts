@@ -1393,7 +1393,8 @@ export default class DialogsStorage extends AppManager {
 
   public applyDialogs(
     result: MessagesPeerDialogs | MessagesForumTopics | ({_: 'messages.savedDialogs', dialogs: SavedDialog[]} & Parameters<AppMessagesManager['saveApiResult']>[0]),
-    peerId?: PeerId
+    peerId?: PeerId,
+    ignoreOffsetDatePeerIds?: Set<PeerId>
   ) {
     // * В эту функцию попадут только те диалоги, в которых есть read_inbox_max_id и read_outbox_max_id, в отличие от тех, что будут в getTopMessages
 
@@ -1455,7 +1456,7 @@ export default class DialogsStorage extends AppManager {
       const isEmptyChannelDialog = isDialog && !topMid && !hasDraft &&
         this.canSaveEmptyChannelDialog(peerId, dialog as Dialog);
       if(topMid || hasDraft || isEmptyChannelDialog) {
-        if(this.saveDialog({dialog})) {
+        if(this.saveDialog({dialog, ignoreOffsetDate: ignoreOffsetDatePeerIds?.has(peerId)})) {
           const cache = getUpdateCache(peerId);
 
           if(isForum) {

@@ -4,7 +4,7 @@ import {basename, dirname, isAbsolute} from 'node:path';
 
 import observation from './observation.cjs';
 
-export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'message', 'group']);
+export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group']);
 export const OPTIONAL_SCENARIOS = Object.freeze(['channel', 'poll']);
 const AVAILABLE_SCENARIOS = Object.freeze([...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS]);
 export const POLL_NEGATIVE_CONTROL_SERVER_REVISION = '586403c1f4c92c09b006652278bdd02fd40ddf2d';
@@ -30,7 +30,12 @@ const PAGE_ERROR_MESSAGE_LIMIT = 512;
 const PAGE_ERROR_STACK_FRAME_LIMIT = 16;
 const PAGE_ERROR_FUNCTION_NAME_LIMIT = 128;
 const PAGE_ERROR_STACK_STATES = Object.freeze(['unavailable', 'non_string', 'no_frames', 'unclassified_frames', 'captured', 'partial', 'truncated']);
-const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'message', 'group', 'channel', 'poll', 'unknown']);
+const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'unknown']);
+const CLEANUP_FAILURE_CODES = Object.freeze([
+  'browser_close_cleanup', 'context_cleanup', 'observer_cleanup', 'observer_control_cleanup',
+  'playwright_trace_cleanup', 'screenshot_cleanup', 'worker_discovery_cleanup'
+]);
+const WORKER_OVERFLOW_REASONS = Object.freeze(['none', 'event_limit', 'attached_target_limit', 'websocket_request_limit']);
 const RPC_ERROR_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 const PAGE_DIAGNOSTIC_LIMIT = 16;
 const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
@@ -129,7 +134,7 @@ export function expectedScreenshotCount({pollCreationNegativeControl = false, sc
   }
   const channelScreenshots = hasScenarios && scenarios.includes('channel') ? 10 : 0;
   const pollScreenshots = hasPollScenario ? (pollCreationNegativeControl ? 4 : 14) : 0;
-  return 16 + channelScreenshots + pollScreenshots;
+  return 20 + channelScreenshots + pollScreenshots;
 }
 
 export function parseRealClientArgs(argv) {
@@ -738,6 +743,23 @@ export function parseChannelMembershipState(state) {
   return Object.fromEntries(keys.map((key) => [key, state[key]]));
 }
 
+function parseCleanupFailureCodes(value) {
+  if(value === undefined) return [];
+  if(!Array.isArray(value) || value.length > CLEANUP_FAILURE_CODES.length ||
+      value.some((entry) => !CLEANUP_FAILURE_CODES.includes(entry)) || new Set(value).size !== value.length) {
+    throw new Error('cleanup failure evidence is invalid');
+  }
+  return [...value].sort();
+}
+
+function parseWorkerOverflowReasons(value) {
+  if(!hasExactOwnKeys(value, ['alice', 'bob']) ||
+      Object.values(value).some((reason) => !WORKER_OVERFLOW_REASONS.includes(reason))) {
+    throw new Error('worker overflow reason evidence is invalid');
+  }
+  return value;
+}
+
 export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const hasPasswordEvidence = report.passwordEvidence !== undefined;
   const failedPasswordEvidence = controlsOnly || !hasPasswordEvidence
@@ -770,6 +792,13 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
   const gateBreakdownSummary = report.gateBreakdown === undefined
     ? ''
     : `; browser egress/page errors ${JSON.stringify(parseBrowserGateBreakdown(report.gateBreakdown))}`;
+  const cleanupFailures = parseCleanupFailureCodes(report.cleanupFailures);
+  const cleanupSummary = cleanupFailures.length > 0
+    ? `; cleanup failures ${JSON.stringify(cleanupFailures)}`
+    : '';
+  const workerOverflowSummary = report.workerOverflowReasons === undefined
+    ? ''
+    : `; worker overflow reasons ${JSON.stringify(parseWorkerOverflowReasons(report.workerOverflowReasons))}`;
   let workerCoverageSummary = '';
   if(report.stage === 'browser_worker_observation_incomplete' && report.status === 'failed') {
     try {
@@ -778,7 +807,7 @@ export function formatBrowserFailureMessage(report, controlsOnly = false) {
       throw new Error('worker coverage evidence is invalid');
     }
   }
-  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}${groupMemberSummary}${groupMessageSummary}${channelMembershipSummary}${gateBreakdownSummary}${workerCoverageSummary}`;
+  return `real client scenario failed at ${report.stage || 'unknown stage'}${evidenceSummary}${centerColumnSummary}${groupNameFormSummary}${groupCreatedSummary}${groupMemberSummary}${groupMessageSummary}${channelMembershipSummary}${gateBreakdownSummary}${workerCoverageSummary}${cleanupSummary}${workerOverflowSummary}`;
 }
 
 function parseWorkerCoverageBreakdown(value) {

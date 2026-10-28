@@ -4,13 +4,14 @@ const {createHash} = require('node:crypto');
 const {chromium} = require('playwright');
 const observation = require('./observation.cjs');
 
-const REQUIRED_SCENARIOS = ['sign-in', 'message', 'group'];
+const REQUIRED_SCENARIOS = ['sign-in', 'first-message', 'message', 'group'];
 const OPTIONAL_SCENARIOS = ['channel', 'poll'];
 const AVAILABLE_SCENARIOS = [...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS];
 const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
 const PRIVATE_CSP_WSS = 'wss://teagramd.test/apiws';
 const PROBE_PATH = '/_fixture_probe/';
 const MESSAGE = 'browser-ci-hello';
+const FIRST_MESSAGE = 'browser-ci-first-inbound-hello';
 const GROUP_MESSAGE = 'browser-ci-group-hello';
 const CHANNEL_MESSAGE = 'browser-channel-post';
 const POLL_DESCRIPTION = 'Description stuff';
@@ -55,7 +56,7 @@ const PAGE_DIAGNOSTIC_LIMIT = 16;
 const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
 const PAGE_DIAGNOSTIC_FIELD_LIMIT = 256;
 const PAGE_DIAGNOSTIC_VALUE_TYPES = new Set(['undefined', 'null', 'boolean', 'number', 'string', 'object', 'function']);
-const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'message', 'group', 'channel', 'poll', 'unknown']);
+const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'unknown']);
 const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set(AVAILABLE_SCENARIOS);
 const PAGE_ERROR_EVENT_CAPTURE_KEY = '__teagramPageErrorEvents';
 const pageErrorDiagnosticCounts = new WeakMap();
@@ -1425,6 +1426,26 @@ async function captureState(page, screenshotDirectory, name, capturedScreenshots
   const filePath = path.join(screenshotDirectory, `${name}.png`);
   await page.screenshot({path: filePath, fullPage: false, animations: 'disabled'});
   capturedScreenshots.count++;
+}
+
+async function installFixtureNotificationCapture(page) {
+  await page.addInitScript(() => {
+    const notifications = [];
+    class FixtureNotification {
+      static permission = 'granted';
+      constructor(title, options = {}) {
+        this.title = title;
+        this.body = options.body || '';
+        this.tag = options.tag || '';
+        notifications.push({title: this.title, body: this.body, tag: this.tag});
+      }
+      close() {}
+      show() {}
+    }
+
+    Object.defineProperty(window, '__fixtureNotifications', {value: notifications});
+    Object.defineProperty(window, 'Notification', {configurable: true, writable: true, value: FixtureNotification});
+  });
 }
 
 async function waitForUsernameField(page, name) {
@@ -5776,17 +5797,20 @@ async function cleanupBrowserRun({registry, observers, contexts, browser, screen
       await observer.stop();
     } catch {
       cleanupFailed = true;
+      cleanupIssues.push('observer_cleanup');
     }
   }
   try {
     await Promise.all(contexts.map((context) => context.close()));
   } catch {
     cleanupFailed = true;
+    cleanupIssues.push('context_cleanup');
   }
   try {
     await browser?.close();
   } catch {
     cleanupFailed = true;
+    cleanupIssues.push('browser_close_cleanup');
   }
   try {
     if(screenshotDirectory && preserveTrace) {
@@ -5798,6 +5822,7 @@ async function cleanupBrowserRun({registry, observers, contexts, browser, screen
     }
   } catch {
     cleanupFailed = true;
+    cleanupIssues.push('screenshot_cleanup');
   }
   if(cleanupIssues.length > 0) cleanupFailed = true;
   return cleanupFailed;
@@ -6183,6 +6208,9 @@ async function main(dependencies = {}) {
       traceContexts.push({context: bob.context, name: 'bob', active: false});
     }
     bob.page = await bob.context.newPage();
+    await bob.context.grantPermissions(['notifications'], {origin: PRIVATE_CSP_ORIGIN})
+    .catch(() => failStage('bob_notification_permission'));
+    await installFixtureNotificationCapture(bob.page);
     appPages.bob = bob.page;
     await installPageErrorEventCapture(bob.page);
     bob.observer = observation.createContextObserver('bob');
@@ -6225,6 +6253,63 @@ async function main(dependencies = {}) {
     await waitForWorkerTargets(alice.page, alice.networkObserver, alice.observer);
     await waitForWorkerTargets(bob.page, bob.networkObserver, bob.observer);
     report = [{name: 'sign-in', status: 'passed'}];
+
+    currentScenario = 'first-message';
+    const bobNotificationCountBeforeFirstMessage = await bob.page.evaluate(() => window.__fixtureNotifications?.length || 0);
+    await selectUniquePeer(
+      alice.page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      accounts[1].username,
+      'alice_first_message_chat'
+    );
+    await openComposer(alice.page, 'alice_first_message_chat');
+    await sendText(alice.page, FIRST_MESSAGE, 'alice_first_message_send');
+    await captureState(alice.page, runtime.screenshotDirectory, 'alice-first-message', capturedScreenshots);
+
+    const bobFirstMessageRows = bob.page.locator('#chatlist-container .chatlist-chat').filter({hasText: FIRST_MESSAGE});
+    await bobFirstMessageRows.first().waitFor({state: 'visible', timeout: 30_000})
+    .catch(() => failStage('bob_first_message_chatlist_entry'));
+    if(await bobFirstMessageRows.count() !== 1) failStage('bob_first_message_chatlist_entry_count');
+    await captureState(bob.page, runtime.screenshotDirectory, 'bob-first-message-chatlist', capturedScreenshots);
+
+    const notificationHandle = await bob.page.waitForFunction((count) => {
+      const notifications = window.__fixtureNotifications || [];
+      return notifications.length > count ? notifications[notifications.length - 1] : false;
+    }, bobNotificationCountBeforeFirstMessage, {timeout: 30_000})
+    .catch(() => failStage('bob_first_message_notification'));
+    const notification = await notificationHandle.jsonValue();
+    await notificationHandle.dispose();
+    if(!notification?.title || !notification?.tag) failStage('bob_first_message_notification');
+
+    await bobFirstMessageRows.first().click().catch(() => failStage('bob_first_message_chat_open'));
+    const bobFirstMessages = bob.page.locator('#column-center .bubble .message').filter({hasText: FIRST_MESSAGE});
+    await bobFirstMessages.first().waitFor({state: 'visible', timeout: 30_000})
+    .catch(() => failStage('bob_first_message_visible'));
+    if(await getSingleExactMessageTextFailure(bobFirstMessages, FIRST_MESSAGE)) {
+      failStage('bob_first_message_content');
+    }
+    await captureState(bob.page, runtime.screenshotDirectory, 'bob-first-message', capturedScreenshots);
+
+    currentStage = 'bob_first_message_reload';
+    await bob.page.reload({waitUntil: 'domcontentloaded', timeout: 30_000})
+    .catch(() => failStage('bob_first_message_reload'));
+    await bob.page.waitForFunction(() => {
+      const chats = document.querySelector('#page-chats');
+      return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+    }, null, {timeout: 45_000}).catch(() => failStage('bob_first_message_reload_chats'));
+    const bobFirstMessageRowsAfterReload = bob.page.locator('#chatlist-container .chatlist-chat').filter({hasText: FIRST_MESSAGE});
+    await bobFirstMessageRowsAfterReload.first().waitFor({state: 'visible', timeout: 30_000})
+    .catch(() => failStage('bob_first_message_after_reload_chatlist_entry'));
+    await bobFirstMessageRowsAfterReload.first().click().catch(() => failStage('bob_first_message_after_reload_chat_open'));
+    const bobFirstMessagesAfterReload = bob.page.locator('#column-center .bubble .message').filter({hasText: FIRST_MESSAGE});
+    await bobFirstMessagesAfterReload.first().waitFor({state: 'visible', timeout: 30_000})
+    .catch(() => failStage('bob_first_message_after_reload_visible'));
+    if(await getSingleExactMessageTextFailure(bobFirstMessagesAfterReload, FIRST_MESSAGE)) {
+      failStage('bob_first_message_after_reload_content');
+    }
+    await captureState(bob.page, runtime.screenshotDirectory, 'bob-first-message-after-reload', capturedScreenshots);
+    report.push({name: 'first-message', status: 'passed'});
 
     currentScenario = 'message';
     await selectUniquePeer(
@@ -6460,7 +6545,12 @@ async function main(dependencies = {}) {
         ...(pollFooterTransitions.length ? {pollFooterTransitions} : {}),
         ...(currentScenario ? {gateBreakdown} : {}),
         ...(currentStage === 'browser_worker_observation_incomplete' && registry
-          ? {workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers)}
+          ? {
+            workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers),
+            workerOverflowReasons: Object.fromEntries(Object.keys(appObservers)
+            .filter((name) => APP_CONTEXTS.includes(name))
+            .map((name) => [name, appObservers[name].state.overflowReason || 'none']))
+          }
           : {}),
         // On failure the closed-schema evidence is still the point, validated the
         // same way: any schema violation collapses it to `unclassified`.
@@ -6514,19 +6604,23 @@ async function main(dependencies = {}) {
     if(runtime?.authProgressOneSubmission === true) {
       (dependencies.emitAuthProgressReport || emitAuthProgressReport)(report, cleanupFailed);
     } else {
-      (dependencies.emitReport || emitReport)(report, cleanupFailed);
+      (dependencies.emitReport || emitReport)(report, cleanupFailed, cleanupIssues);
     }
   }
 }
 
 // Emitted from the cleanup block, so the synthetic-only path that returns
 // early and the scenario path that runs to completion report identically.
-function emitReport(report, cleanupFailed) {
+function emitReport(report, cleanupFailed, cleanupIssues = []) {
   if(cleanupFailed) {
+    const cleanupFailures = [...new Set(cleanupIssues)].slice(0, 8);
     process.stdout.write(`${JSON.stringify({
       status: 'failed',
-      stage: 'cleanup',
+      stage: report?.status === 'failed' && typeof report.stage === 'string' ? report.stage : 'cleanup',
+      ...(cleanupFailures.length > 0 ? {cleanupFailures} : {}),
       ...(report?.failureTraceReady === true ? {failureTraceReady: true} : {}),
+      ...(report?.workerCoverageBreakdown ? {workerCoverageBreakdown: report.workerCoverageBreakdown} : {}),
+      ...(report?.workerOverflowReasons ? {workerOverflowReasons: report.workerOverflowReasons} : {}),
       ...(report?.gateBreakdown ? {gateBreakdown: report.gateBreakdown} : {})
     })}\n`);
     process.exitCode = 1;
@@ -6545,7 +6639,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
