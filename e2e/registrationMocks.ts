@@ -1,5 +1,7 @@
 import type {Page, TestInfo} from '@playwright/test';
 
+export const TEST_TURNSTILE_SITE_KEY = '1x00000000000000000000AA';
+
 export async function setupRegistrationMocks(
   page: Page,
   testInfo: TestInfo,
@@ -48,7 +50,11 @@ export async function setupRegistrationMocks(
               expire.type = 'button';
               expire.textContent = 'Expire security check';
               expire.onclick = () => callbacks['expired-callback']();
-              container.append(complete, expire);
+              const close = document.createElement('button');
+              close.type = 'button';
+              close.textContent = 'Close security check';
+              close.onclick = () => callbacks['error-callback']();
+              container.append(complete, expire, close);
               return 'test-widget';
             },
             reset() {},
@@ -91,7 +97,7 @@ export async function setupRegistrationMocks(
                   username_pattern: '^[a-zA-Z][a-zA-Z0-9_]{1,31}$'
                 }),
                 display_name_max_length: options.displayNameMaxLength ?? 64,
-                ...(options.requireSignInTurnstile || options.requirePasswordTurnstile ? {turnstile: {site_key: 'test-site-key'}} : {})
+                ...(options.requireSignInTurnstile || options.requirePasswordTurnstile ? {turnstile: {site_key: options.turnstileSiteKey}} : {})
               };
               calls.push({method: 'help.getAppConfig', params: config});
               return Promise.resolve(config);
@@ -111,7 +117,7 @@ export async function setupRegistrationMocks(
                     }), 400));
                   }
                   if(options.requireSignInTurnstile) {
-                    return Promise.reject({type: 'RECAPTCHA_CHECK_signin__test-site-key'});
+                    return Promise.reject({type: `RECAPTCHA_CHECK_signin__${options.turnstileSiteKey}`});
                   }
                   return Promise.resolve({
                     _: 'auth.sentCode',
@@ -130,12 +136,12 @@ export async function setupRegistrationMocks(
                     pFlags: {popup: true}
                   } : {}});
                 case 'auth.checkPassword':
-                  if(options.requirePasswordTurnstile) return Promise.reject({type: 'RECAPTCHA_CHECK_signin__test-site-key'});
+                  if(options.requirePasswordTurnstile) return Promise.reject({type: `RECAPTCHA_CHECK_signin__${options.turnstileSiteKey}`});
                   return Promise.reject({type: 'PASSWORD_HASH_INVALID'});
                 case 'auth.signUp':
                   if(options.signUpError) return Promise.reject({type: options.signUpError});
                   if(options.requireTurnstile) {
-                    return Promise.reject({type: 'RECAPTCHA_CHECK_signup__test-site-key'});
+                    return Promise.reject({type: `RECAPTCHA_CHECK_signup__${options.turnstileSiteKey}`});
                   }
                   if(options.reservedUsername === params?.phone_number) return Promise.reject({type: 'USERNAME_INVALID'});
                   if(options.takenUsername === params?.phone_number) return Promise.reject({type: 'USERNAME_OCCUPIED'});
@@ -145,13 +151,13 @@ export async function setupRegistrationMocks(
                 case 'invokeWithReCaptcha':
                   if(params?.query?._ === 'auth.checkPassword') {
                     if(params.token === 'rejected-turnstile-token') {
-                      return Promise.reject({type: 'RECAPTCHA_CHECK_signin__test-site-key'});
+                      return Promise.reject({type: `RECAPTCHA_CHECK_signin__${options.turnstileSiteKey}`});
                     }
                     return Promise.resolve({_ : 'auth.authorization', user});
                   }
                   if(params?.query?._ === 'auth.sendCode') {
                     if(params.token === 'rejected-turnstile-token') {
-                      return Promise.reject({type: 'RECAPTCHA_CHECK_signin__test-site-key'});
+                      return Promise.reject({type: `RECAPTCHA_CHECK_signin__${options.turnstileSiteKey}`});
                     }
                     return Promise.resolve({
                       _: 'auth.sentCode',
@@ -162,7 +168,7 @@ export async function setupRegistrationMocks(
                   }
                   if(calls.filter((call) => call.method === 'invokeWithReCaptcha').length === 1) {
                     return new Promise((_resolve, reject) => {
-                      window.setTimeout(() => reject({type: 'RECAPTCHA_CHECK_signup__test-site-key'}), 800);
+                      window.setTimeout(() => reject({type: `RECAPTCHA_CHECK_signup__${options.turnstileSiteKey}`}), 800);
                     });
                   }
                   return Promise.resolve({_ : 'auth.authorization', user});
@@ -192,7 +198,7 @@ export async function setupRegistrationMocks(
         };
       }
     });
-  }, {registrationMode: mode, requireTurnstile, requireSignInTurnstile, requirePasswordTurnstile, termsText, ...overrides});
+  }, {registrationMode: mode, requireTurnstile, requireSignInTurnstile, requirePasswordTurnstile, termsText, turnstileSiteKey: TEST_TURNSTILE_SITE_KEY, ...overrides});
 }
 
 export async function captureState(page: Page, testInfo: TestInfo, name: string) {

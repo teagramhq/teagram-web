@@ -1,5 +1,5 @@
 import {expect, test} from '@playwright/test';
-import {captureState, setupRegistrationMocks} from './registrationMocks';
+import {captureState, setupRegistrationMocks, TEST_TURNSTILE_SITE_KEY} from './registrationMocks';
 
 for(const mode of ['open', 'invite'] as const) {
   test(`registers a username account in ${mode} mode without a live server`, async({page}, testInfo) => {
@@ -220,7 +220,7 @@ test('retries username registration when the server requests Turnstile', async({
 
   const challenge = registration.getByTestId('turnstile-challenge');
   await expect(challenge).toBeVisible();
-  await expect(challenge).toHaveAttribute('data-sitekey', 'test-site-key');
+  await expect(challenge).toHaveAttribute('data-sitekey', TEST_TURNSTILE_SITE_KEY);
   await expect(challenge.getByRole('alert')).toHaveText("The security check couldn't load. Try again.");
   await captureState(page, testInfo, 'turnstile-unavailable');
   await expect.poll(() => turnstileRequests).toHaveLength(1);

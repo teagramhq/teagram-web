@@ -1739,7 +1739,7 @@ export default class MTPNetworker {
   }
 
   private processError(rawError: {error_message: string, error_code: number}) {
-    const matches = (rawError.error_message || '').match(/^([A-Z_0-9]+\b)(: (.+))?/) || [];
+    const matches = (rawError.error_message || '').match(/^([A-Z_0-9]+\b|RECAPTCHA_CHECK_(?:signin|signup)__[A-Za-z0-9_-]{1,256})(: (.+))?/) || [];
     rawError.error_code = rawError.error_code;
 
     const error = makeError(

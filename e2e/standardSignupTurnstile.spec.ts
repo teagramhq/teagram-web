@@ -1,5 +1,5 @@
 import {expect, test} from '@playwright/test';
-import {captureState, setupRegistrationMocks} from './registrationMocks';
+import {captureState, setupRegistrationMocks, TEST_TURNSTILE_SITE_KEY} from './registrationMocks';
 
 test('retries phone sign-up with the Turnstile token and opens the account', async({page}, testInfo) => {
   const turnstileRequests: string[] = [];
@@ -26,7 +26,7 @@ test('retries phone sign-up with the Turnstile token and opens the account', asy
 
   const challenge = registration.getByTestId('turnstile-challenge');
   await expect(challenge).toBeVisible();
-  await expect(challenge).toHaveAttribute('data-sitekey', 'test-site-key');
+  await expect(challenge).toHaveAttribute('data-sitekey', TEST_TURNSTILE_SITE_KEY);
   await expect(registration.getByRole('button', {name: 'Complete security check'})).toBeVisible();
   expect(await page.evaluate(() => (window as any).__turnstileCallbacks.action)).toBe('signup');
   await captureState(page, testInfo, 'standard-signup-turnstile');
