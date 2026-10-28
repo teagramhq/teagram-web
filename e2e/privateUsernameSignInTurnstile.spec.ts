@@ -1,5 +1,5 @@
 import {expect, test} from '@playwright/test';
-import {captureState, setupRegistrationMocks} from './registrationMocks';
+import {captureState, setupRegistrationMocks, TEST_TURNSTILE_SITE_KEY} from './registrationMocks';
 
 test('protects username sign-in with a signin Turnstile challenge', async({page}, testInfo) => {
   await setupRegistrationMocks(page, testInfo, 'open', false, false, true);
@@ -14,14 +14,19 @@ test('protects username sign-in with a signin Turnstile challenge', async({page}
 
   const challenge = auth.getByTestId('turnstile-challenge');
   await expect(challenge).toBeVisible();
-  await expect(challenge).toHaveAttribute('data-sitekey', 'test-site-key');
+  await expect(challenge).toHaveAttribute('data-sitekey', TEST_TURNSTILE_SITE_KEY);
   await expect(challenge.getByRole('status')).toContainText('Loading security check');
   await captureState(page, testInfo, 'signin-challenge-loading');
   await expect(challenge.getByRole('button', {name: 'Complete security check'})).toBeVisible();
   await captureState(page, testInfo, 'signin-challenge-ready');
   expect(await page.evaluate(() => (window as any).__turnstileCallbacks.action)).toBe('signin');
+  await challenge.getByRole('button', {name: 'Close security check'}).click();
+  await expect(challenge.getByRole('alert')).toHaveText('The security check failed. Try again.');
+  await captureState(page, testInfo, 'signin-challenge-closed');
+  await challenge.getByRole('button', {name: /try again/i}).click();
+  await expect(challenge.getByRole('button', {name: 'Complete security check'})).toBeVisible();
   await challenge.getByRole('button', {name: 'Complete security check'}).click();
-  await expect(challenge.getByRole('alert')).toBeVisible();
+  await expect(challenge.getByRole('alert')).toHaveText('The security check failed. Try again.');
   await expect(challenge.getByRole('button', {name: /try again/i})).toBeVisible();
   await captureState(page, testInfo, 'signin-challenge-rejected');
   await challenge.getByRole('button', {name: /try again/i}).click();
