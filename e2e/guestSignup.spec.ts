@@ -420,6 +420,24 @@ test('shows an auth error and an explicit retry after automatic guest sign-up fa
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
 
+test('explains when the guest account context changes', async({page}, testInfo) => {
+  await page.setViewportSize({width: 1280, height: 800});
+  await setupGuestServer(page, testInfo, true, 'GUEST_CONTEXT_CHANGED');
+  await openSelectedServer(page, testInfo);
+
+  const auth = page.locator('#auth-pages');
+  await auth.getByRole('button', {name: 'Try it as a guest'}).click();
+  const challenge = auth.getByTestId('turnstile-challenge');
+  await expect(challenge).toBeVisible();
+  await challenge.getByRole('button', {name: 'Complete security check'}).click();
+
+  const error = auth.getByRole('alert');
+  await expect(error).toHaveText('Your account or server changed. Start the guest sign-in again.', {timeout: 30_000});
+  await expect(error).not.toContainText('Check your connection');
+  await captureState(page, testInfo, 'guest-auth-context-changed');
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
 test('shows instance terms before guest sign-up and creates an account only after acceptance', async({page}, testInfo) => {
   const termsText = [
     'These are the terms for this server.',

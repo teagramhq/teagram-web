@@ -3770,6 +3770,7 @@
 "Teagram.Guest.Unrecoverable" = "This guest account can't be recovered. Use a different account.";
 "Teagram.Guest.Network" = "Unable to create your guest account. Check your connection and try again.";
 "Teagram.Guest.RestoreNetwork" = "Unable to sign you back into your guest account. Check your connection and try again.";
+"Teagram.Guest.ContextChanged" = "Your account or server changed. Start the guest sign-in again.";
 "Teagram.Guest.Collision" = "Guest sign-up couldn't find an available username. Try again.";
 "Teagram.Guest.AccountInUse" = "This account is already in use. Sign out before creating a guest account.";
 "Teagram.Guest.SetupPending" = "Guest account setup is incomplete. Try again to finish creating the account.";

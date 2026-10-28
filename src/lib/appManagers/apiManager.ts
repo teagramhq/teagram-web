@@ -386,7 +386,7 @@ export class ApiManager extends ApiManagerMethods {
     return this.baseDcId as TrueDcId;
   }
 
-  public async setUserAuth(userAuth: UserAuth | UserId) {
+  public async setUserAuth(userAuth: UserAuth | UserId, isNewAccount = false) {
     if(typeof(userAuth) === 'string' || typeof(userAuth) === 'number') {
       userAuth = {dcID: 0, date: tsNow(true), id: userAuth.toPeerId(false)};
     }
@@ -400,10 +400,14 @@ export class ApiManager extends ApiManagerMethods {
       userAuth.dcID = assertValidDcId(+userAuth.dcID);
     }
 
-    await AccountController.update(this.getAccountNumber(), {
+    const accountNumber = this.getAccountNumber();
+    const accountData = isNewAccount ? undefined : await AccountController.get(accountNumber);
+    await AccountController.update(accountNumber, {
       date: (userAuth as UserAuth).date,
       userId: (userAuth as UserAuth).id,
-      dcId: (userAuth as UserAuth).dcID as TrueDcId
+      dcId: (userAuth as UserAuth).dcID as TrueDcId,
+      newAccountUserId: isNewAccount ? userAuth.id :
+        accountData?.newAccountUserId === userAuth.id ? userAuth.id : null
     });
   }
 

@@ -56,6 +56,7 @@ type PrivateUsernameUiError =
   | 'guestUnrecoverable'
   | 'guestNetwork'
   | 'guestRestoreNetwork'
+  | 'guestContextChanged'
   | 'guestCollision'
   | 'guestAccountInUse'
   | 'guestSetupPending'
@@ -506,6 +507,11 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   }
 
   function showGuestErrorType(errorType?: string, restoring = false) {
+    if(errorType?.includes('GUEST_CONTEXT_CHANGED')) {
+      showError('guestContextChanged');
+      return;
+    }
+
     const wait = errorType && /FLOOD_WAIT_(\d+)/.exec(errorType);
     if(wait && Number(wait[1]) > 0) {
       setGuestFloodWait(Number(wait[1]));
@@ -697,6 +703,8 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         return i18n('Teagram.Guest.Network');
       case 'guestRestoreNetwork':
         return i18n('Teagram.Guest.RestoreNetwork');
+      case 'guestContextChanged':
+        return i18n('Teagram.Guest.ContextChanged');
       case 'guestCollision':
         return i18n('Teagram.Guest.Collision');
       case 'guestAccountInUse':
