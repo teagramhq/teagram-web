@@ -811,7 +811,7 @@ describe('private username sign-in card', () => {
     (document.querySelector('button') as HTMLButtonElement).click();
     await flushAuthFlow();
 
-    expect(mocks.setUser).toHaveBeenCalledWith(user);
+    expect(mocks.setUser).toHaveBeenCalledWith(user, false);
     expect(mocks.toIm).toHaveBeenCalledOnce();
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
@@ -1006,7 +1006,7 @@ describe('private username sign-in card', () => {
 
     expect(mocks.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn', 'auth.signUp']);
     expect(mocks.updatePasswordSettings).toHaveBeenCalledWith({newPassword: 'StrongPassword123'});
-    expect(mocks.setUser).toHaveBeenCalledWith(user);
+    expect(mocks.setUser).toHaveBeenCalledWith(user, true);
   });
 
   it('keeps a provisional account in the registration form when password verifier setup fails and lets the user retry', async() => {
@@ -1041,6 +1041,6 @@ describe('private username sign-in card', () => {
     await vi.waitFor(() => expect(mocks.toIm).toHaveBeenCalledOnce());
     expect(mocks.invokeApi).toHaveBeenCalledTimes(3);
     expect(mocks.updatePasswordSettings).toHaveBeenCalledTimes(2);
-    expect(mocks.setUser).toHaveBeenCalledWith(user);
+    expect(mocks.setUser).toHaveBeenCalledWith(user, true);
   });
 });
