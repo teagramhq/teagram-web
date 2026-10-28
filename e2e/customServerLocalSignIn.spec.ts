@@ -1386,7 +1386,10 @@ test('isolates two server tabs when a custom server worker takes control', async
       const auth = customPage!.locator('#auth-pages');
       await expect(auth.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
       expect(customPageNavigations.some((url) => new URL(url).searchParams.has('swfix'))).toBe(false);
-      await expect(auth.getByText(`Server: ${SERVER_HOST}`, {exact: true})).toBeVisible();
+      const pinnedServerField = auth.getByRole('textbox', {name: 'Server address'});
+      await expect(pinnedServerField).toHaveValue(SERVER_HOST);
+      await expect(pinnedServerField).toHaveJSProperty('readOnly', true);
+      await expect(auth.getByRole('button', {name: 'Change server'})).toBeVisible();
 
       const warmup = await customPage!.evaluate(async(username) => {
         const moduleUrl = new URL('/src/pages/privateUsernameAuth.ts', window.location.origin).href;
