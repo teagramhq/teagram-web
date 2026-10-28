@@ -350,7 +350,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         return;
       }
       if(cancelled) return;
-      await managers.apiManager.setUser(user);
+      await managers.apiManager.setUser(user, true);
       await toIm();
       setPendingPasswordUser(undefined);
     } catch(error) {
@@ -359,7 +359,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
       try {
         const passwordState = await managers.passwordManager.getState();
         if(passwordState.current_algo) {
-          await managers.apiManager.setUser(user);
+          await managers.apiManager.setUser(user, true);
           await toIm();
           setPendingPasswordUser(undefined);
           return;
@@ -486,7 +486,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           navigate({name: 'password'});
           break;
         case 'authorized':
-          await managers.apiManager.setUser(result.user);
+          await managers.apiManager.setUser(result.user, isCreatingAccount);
           await toIm();
           break;
         case 'error':

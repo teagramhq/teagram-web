@@ -2,12 +2,14 @@ import {createPublicKey, generateKeyPairSync} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {expect, test} from '@playwright/test';
+import type {Page, TestInfo} from '@playwright/test';
+import {captureState, seedPriorAccountUserId} from './registrationMocks';
 
 const SERVER_HOST = 'second-server.example.test';
 const INVITE_SECRET = 'test-invite-secret';
 const PASSWORD = 'Teagram-Test-Password-123!';
 
-test('registers on a second server after a failed host selection', async({page}, testInfo) => {
+async function setupCustomRegistrationPage(page: Page, testInfo: TestInfo, accountNumber = 1, seedPriorAccount = false) {
   const pageErrors: string[] = [];
 
   const appOrigin = new URL(testInfo.project.use.baseURL as string);
@@ -82,6 +84,10 @@ test('registers on a second server after a failed host selection', async({page},
 
         proxy.invoke = (type: string, payload: any, ...args: any[]) => {
           if(type === 'manager' && payload?.name === 'apiManager') {
+            if(payload.method === 'logOut') {
+              localStorage.setItem('__customManagerLogOuts', String(Number(localStorage.getItem('__customManagerLogOuts') || 0) + 1));
+            }
+
             if(payload.method === 'getAppConfig') {
               calls.push({method: 'help.getAppConfig', params: {registration_mode: registrationMode}});
               return Promise.resolve({registration_mode: registrationMode});
@@ -90,6 +96,10 @@ test('registers on a second server after a failed host selection', async({page},
             if(payload.method === 'invokeApi') {
               const [method, params] = payload.args;
               calls.push({method, params});
+              if(method === 'auth.logOut') {
+                localStorage.setItem('__customAuthLogOuts', String(Number(localStorage.getItem('__customAuthLogOuts') || 0) + 1));
+                return Promise.resolve({_ : 'auth.loggedOut'});
+              }
               switch(method) {
                 case 'auth.sendCode':
                   return Promise.resolve({
@@ -106,7 +116,8 @@ test('registers on a second server after a failed host selection', async({page},
             }
 
             if(payload.method === 'setUser') {
-              calls.push({method: 'apiManager.setUser'});
+              calls.push({method: 'apiManager.setUser', params: {isNewAccount: payload.args?.[1]}});
+              localStorage.setItem('__customRegistrationCallSnapshot', JSON.stringify(calls));
               return invoke(type, payload, ...args);
             }
           }
@@ -122,7 +133,9 @@ test('registers on a second server after a failed host selection', async({page},
     });
   }, 'invite');
 
-  await page.goto(`${appOriginString}/?noWorker=1&noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
+  if(seedPriorAccount) await seedPriorAccountUserId(page, 8282);
+  const accountQuery = accountNumber === 1 ? '' : `account=${accountNumber}&`;
+  await page.goto(`${appOriginString}/?${accountQuery}noWorker=1&noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
   expect(await page.evaluate(() => isSecureContext && !!crypto.subtle)).toBe(true);
 
   const hostInput = page.getByRole('textbox', {name: 'Server address'});
@@ -194,6 +207,17 @@ test('registers on a second server after a failed host selection', async({page},
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('teagram.server-pins.v1') || '{}')))
     .toMatchObject({[SERVER_HOST]: expect.any(Object)});
 
+  return {
+    pageErrors,
+    getDiscovery: () => discovery,
+    setDiscovery: (value: string) => { discovery = value; }
+  };
+}
+
+test('registers on a second server after a failed host selection', async({page}, testInfo) => {
+  const {pageErrors, getDiscovery, setDiscovery} = await setupCustomRegistrationPage(page, testInfo);
+  const auth = page.locator('#auth-pages');
+
   await auth.getByRole('button', {name: 'Create account'}).click();
   await auth.locator('input[aria-label="Username"]').fill('second_server_user');
   await auth.locator('input[aria-label="Display name"]').fill('Local Server');
@@ -207,7 +231,7 @@ test('registers on a second server after a failed host selection', async({page},
   expect(self).toMatchObject({_: 'user', id: 8282, username: 'second_server_user'});
   expect(self.first_name).toBeUndefined();
   expect(self.last_name).toBeUndefined();
-  const calls = await page.evaluate(() => (window as any).__customRegistrationCalls as Array<{
+  const calls = await page.evaluate(() => JSON.parse(localStorage.getItem('__customRegistrationCallSnapshot') || '[]') as Array<{
     method: string,
     params?: Record<string, unknown>
   }>);
@@ -222,6 +246,15 @@ test('registers on a second server after a failed host selection', async({page},
     last_name: ''
   });
   expect(calls.find((call) => call.method === 'auth.signIn')?.params?.phone_code).toBe(INVITE_SECRET);
+  expect(calls.some((call) => call.method === 'auth.logOut')).toBe(false);
+  expect(await page.evaluate(() => Number(localStorage.getItem('__customManagerLogOuts') || 0))).toBe(0);
+  expect(await page.evaluate(() => Number(localStorage.getItem('__customAuthLogOuts') || 0))).toBe(0);
+
+  await page.reload({waitUntil: 'domcontentloaded'});
+  await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
+  const reloadedSelf = await page.evaluate(() => (window as any).apiManagerProxy.getUser(8282));
+  expect(reloadedSelf).toMatchObject({_: 'user', id: 8282, username: 'second_server_user'});
+  expect(await page.evaluate(() => Number(localStorage.getItem('__customAuthLogOuts') || 0))).toBe(0);
 
   await page.locator('.sidebar-tools-button').click();
   await expect.poll(async() => pageErrors.length > 0 ||
@@ -264,9 +297,9 @@ test('registers on a second server after a failed host selection', async({page},
   await page.evaluate((id) => localStorage.setItem(`teagram-${id}:dc2_auth_key`, 'server-a-auth-key'), activeId);
   const changedKey = generateKeyPairSync('rsa', {modulusLength: 2048, publicExponent: 0x10001})
     .publicKey.export({type: 'spki', format: 'der'}).toString('base64');
-  const changedDiscovery = JSON.parse(discovery);
+  const changedDiscovery = JSON.parse(getDiscovery());
   changedDiscovery.mtproto.rsa_spki = changedKey;
-  discovery = JSON.stringify(changedDiscovery);
+  setDiscovery(JSON.stringify(changedDiscovery));
 
   await page.reload({waitUntil: 'domcontentloaded'});
   const mismatch = page.getByRole('dialog');
@@ -299,4 +332,41 @@ test('registers on a second server after a failed host selection', async({page},
   await expect(forgottenHost).not.toHaveAttribute('readonly', '');
   await expect(page.getByRole('button', {name: 'Continue', exact: true})).toBeEnabled();
   await page.context().unrouteAll({behavior: 'ignoreErrors'});
+});
+
+test('keeps a new account signed in on a pinned server when the server reuses a stale account ID', async({page}, testInfo) => {
+  await setupCustomRegistrationPage(page, testInfo, 2, true);
+  expect(new URL(page.url()).searchParams.get('account')).toBe('2');
+  const auth = page.locator('#auth-pages');
+  await captureState(page, testInfo, 'custom-registration-reused-id-form');
+
+  await auth.getByRole('button', {name: 'Create account'}).click();
+  await auth.locator('input[aria-label="Username"]').fill('second_server_user');
+  await auth.locator('input[aria-label="Display name"]').fill('Local Server');
+  await auth.locator('input[aria-label="Password"]').fill(PASSWORD);
+  await auth.locator('input[aria-label="Confirm password"]').fill(PASSWORD);
+  await auth.locator('input[aria-label="Invite secret"]').fill(INVITE_SECRET);
+  await auth.getByRole('button', {name: 'Create account'}).click();
+  await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
+  await captureState(page, testInfo, 'custom-registration-reused-id-chats');
+  expect(new URL(page.url()).searchParams.get('account')).toBe('2');
+
+  const calls = await page.evaluate(() => JSON.parse(localStorage.getItem('__customRegistrationCallSnapshot') || '[]') as Array<{
+    method: string,
+    params?: Record<string, unknown>
+  }>);
+  expect(calls.find((call) => call.method === 'apiManager.setUser')).toMatchObject({params: {isNewAccount: true}});
+  expect(calls.some((call) => call.method === 'auth.logOut')).toBe(false);
+  expect(await page.evaluate(() => Number(localStorage.getItem('__customManagerLogOuts') || 0))).toBe(0);
+  expect(await page.evaluate(() => Number(localStorage.getItem('__customAuthLogOuts') || 0))).toBe(0);
+  const username = await page.evaluate(() => (window as any).apiManagerProxy.getUser(8282)?.username);
+  expect(username).toBe('second_server_user');
+
+  await page.reload({waitUntil: 'domcontentloaded'});
+  await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
+  await captureState(page, testInfo, 'custom-registration-reused-id-reloaded-chats');
+  await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(8282)?.username)).toBe(username);
+  expect(new URL(page.url()).searchParams.get('account')).toBe('2');
+  expect(await page.evaluate(() => Number(localStorage.getItem('__customAuthLogOuts') || 0))).toBe(0);
+  await page.unrouteAll({behavior: 'ignoreErrors'});
 });

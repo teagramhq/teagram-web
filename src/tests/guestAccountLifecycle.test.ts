@@ -115,6 +115,7 @@ describe('guest account lifecycle', () => {
     expect(result).toMatchObject({kind: 'authorized', username: state.records[0].username});
 
     expect(writeSpy).toHaveBeenCalledTimes(3);
+    expect(state.dependencies.setUser).toHaveBeenCalledWith(USER, true);
     expect(state.records).toHaveLength(1);
     expect(state.records[0]).toMatchObject({status: 'committed', accountUserId: 42, serverId: IDENTITY.serverId, keyFingerprint: IDENTITY.keyFingerprint});
   });
@@ -320,6 +321,21 @@ describe('guest account lifecycle', () => {
     await expect(createGuestAccountLifecycle(state.dependencies).create()).resolves.toEqual({kind: 'cancelled'});
     expect(state.records[0]).toMatchObject({status: 'provisional'});
     expect(state.records[0].accountUserId).toBeUndefined();
+  });
+
+  it('reports a changed server after authorization instead of silently cancelling', async() => {
+    const state = makeDependencies();
+    const setUser = vi.fn(async(user: any) => {
+      state.accountUserId = Number(user.id);
+      state.currentIdentity = {...IDENTITY, keyFingerprint: 'c'.repeat(64)};
+    });
+    state.dependencies.setUser = setUser;
+
+    await expect(createGuestAccountLifecycle(state.dependencies).create()).resolves.toEqual({
+      kind: 'error',
+      errorType: 'GUEST_CONTEXT_CHANGED'
+    });
+    expect(setUser).toHaveBeenCalledOnce();
   });
 
   it('cancels when the account slot changes while sign-up is pending', async() => {

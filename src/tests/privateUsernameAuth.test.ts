@@ -197,6 +197,7 @@ describe('private username sign-in', () => {
     .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
     .mockResolvedValueOnce({_: 'auth.authorization', user});
     const calls: string[] = [];
+    const onAuthorization = vi.fn(async() => { calls.push('authorization'); });
 
     await authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
       mode: 'open',
@@ -206,10 +207,11 @@ describe('private username sign-in', () => {
         calls.push('password');
         return true;
       },
-      onAuthorization: async() => { calls.push('authorization'); }
+      onAuthorization
     } as any);
 
     expect(calls).toEqual(['authorization', 'password']);
+    expect(onAuthorization).toHaveBeenCalledWith(user, true);
   });
 
   it('can verify a saved password after sign-in requires one', async() => {
@@ -218,16 +220,19 @@ describe('private username sign-in', () => {
     .mockResolvedValueOnce(SENT_CODE)
     .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'});
     const checkPassword = vi.fn().mockResolvedValue(user);
+    const onAuthorization = vi.fn();
 
     await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
       mode: 'closed',
       displayName: '',
       password: 'saved-password',
       updatePasswordSettings: vi.fn(),
-      checkPassword
+      checkPassword,
+      onAuthorization
     } as any)).resolves.toEqual({kind: 'authorized', user});
 
     expect(checkPassword).toHaveBeenCalledWith('saved-password');
+    expect(onAuthorization).toHaveBeenCalledWith(user, false);
     expect(invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
   });
 

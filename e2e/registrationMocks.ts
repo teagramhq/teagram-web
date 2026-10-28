@@ -2,6 +2,20 @@ import type {Page, TestInfo} from '@playwright/test';
 
 export const TEST_TURNSTILE_SITE_KEY = '1x00000000000000000000AA';
 
+export async function seedPriorAccountUserId(page: Page, userId: number) {
+  await page.addInitScript((staleUserId) => {
+    const originalSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function(key, value) {
+      originalSetItem.call(this, key, value);
+      if(key === 'teagram.active-server-id.v1' && /^custom-[0-9a-f]{64}$/.test(value) &&
+        !this.getItem('__seeded-prior-account-user-id')) {
+        originalSetItem.call(this, `teagram-${value}:account1`, JSON.stringify({userId: staleUserId}));
+        originalSetItem.call(this, '__seeded-prior-account-user-id', 'true');
+      }
+    };
+  }, userId);
+}
+
 export async function setupRegistrationMocks(
   page: Page,
   testInfo: TestInfo,

@@ -33,7 +33,7 @@ export type PrivateUsernameRegistration = {
   inviteSecret?: string,
   updatePasswordSettings: (password: string) => Promise<unknown>,
   requestTermsAcceptance?: (terms: HelpTermsOfService) => Promise<boolean>,
-  onAuthorization?: (user: User) => Promise<void>,
+  onAuthorization?: (user: User, isNewAccount: boolean) => Promise<void>,
   checkPassword?: (password: string) => Promise<User | false | undefined>
 };
 
@@ -191,9 +191,10 @@ export async function authenticatePrivateUsername(
           const user = await registration.checkPassword(registration.password);
           if(!user) return {kind: 'usernameTaken'};
           if(isCancelled()) return {kind: 'cancelled'};
-          await registration.onAuthorization?.(user);
+          await registration.onAuthorization?.(user, false);
           return {kind: 'authorized', user};
         } catch(checkError) {
+          if(getErrorType(checkError) === 'GUEST_CONTEXT_CHANGED') return getAuthErrorResult(checkError, true);
           if(wasCancelled(checkError, isCancelled)) return {kind: 'cancelled'};
           return getAuthErrorResult(checkError, true);
         }
@@ -250,8 +251,9 @@ export async function authenticatePrivateUsername(
 
     const user = signUpResponse.user as User;
     try {
-      await registration.onAuthorization?.(user);
+      await registration.onAuthorization?.(user, true);
     } catch(error) {
+      if(getErrorType(error) === 'GUEST_CONTEXT_CHANGED') return getAuthErrorResult(error, true);
       if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
       return getAuthErrorResult(error, true);
     }

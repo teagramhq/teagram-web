@@ -72,12 +72,13 @@ export default abstract class ApiManagerMethods extends AppManager {
 
   abstract setUserAuth(userAuth: UserAuth | UserId): Promise<void>;
 
-  public setUser(user: User) {
+  public setUser(user: User, isNewAccount = false) {
     this.appUsersManager.saveApiUser(user);
 
     rootScope.dispatchEvent('account_logged_in', {
       accountNumber: this.getAccountNumber(),
-      userId: user.id
+      userId: user.id,
+      isNewAccount
     });
 
     return this.setUserAuth(user.id);
