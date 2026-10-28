@@ -11956,7 +11956,7 @@ export class AppMessagesManager extends AppManager {
         offsetIdOffset = isTopEnd ? count - topLoaded : bottomLoaded - +isOffsetIncluded;
       }
     } else if(messages.length >= count) {
-      isTopEnd = true;
+      isTopEnd = historyResult._ !== 'messages.messages' || messages.length < limit;
       isBottomEnd = true;
     }
 

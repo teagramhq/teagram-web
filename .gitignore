@@ -29,6 +29,7 @@ ignore
 /test-results/
 /playwright-report/
 /blob-report/
+/.performance-history/
 
 .claude/bugs-cache
 .pnpm-store/

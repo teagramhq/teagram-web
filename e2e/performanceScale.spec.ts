@@ -1,0 +1,368 @@
+import {readFileSync, writeFileSync} from 'node:fs';
+import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
+
+type Fixture = {
+  owner: number,
+  partner: number,
+  middle_date: number
+};
+
+type Metric = {
+  ms: number,
+  requests: number,
+  domNodes: number,
+  bundleBytes: number,
+  longTasksOver50Ms: number,
+  droppedFramePercent?: number
+};
+
+type VariantRun = {
+  variant: 'base' | 'head',
+  origin: string,
+  storageState: Awaited<ReturnType<BrowserContext['storageState']>>
+};
+
+const fixturePath = process.env.PERF_FIXTURE_FILE;
+const fixture = fixturePath ? JSON.parse(readFileSync(fixturePath, 'utf8')) as Fixture : undefined;
+const username = process.env.PERF_USERNAME;
+const password = process.env.PERF_PASSWORD;
+const reportPath = process.env.PERF_REPORT_PATH;
+const report: {fixtureVersion: string, serverCommit: string, variants: Record<string, Record<string, Metric[]>>} = {
+  fixtureVersion: process.env.PERF_FIXTURE_VERSION || '',
+  serverCommit: process.env.PERF_SERVER_COMMIT || '',
+  variants: {base: {}, head: {}}
+};
+
+const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
+
+test.afterAll(() => {
+  if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+});
+
+function installInstrumentation(page: Page, requestCounter: {value: number}) {
+  page.on('request', (request) => {
+    if(request.resourceType() !== 'websocket') ++requestCounter.value;
+  });
+  return page.addInitScript(() => {
+    const perf: any = (window as any).__teagramPerf = {
+      longTasks: [] as Array<{startTime: number, duration: number}>,
+      frameIntervals: [] as number[],
+      frameActive: false,
+      started: 0
+    };
+    try {
+      const observer = new PerformanceObserver((list) => {
+        perf.longTasks.push(...list.getEntries().filter((entry) => entry.duration > 50).map((entry) => ({
+          startTime: entry.startTime,
+          duration: entry.duration
+        })));
+      });
+      observer.observe({type: 'longtask', buffered: true});
+    } catch{}
+    perf.startFrames = () => {
+      perf.frameActive = true;
+      perf.lastFrame = performance.now();
+      const sampleFrame = (time: number) => {
+        if(!perf.frameActive) return;
+        perf.frameIntervals.push(time - perf.lastFrame);
+        perf.lastFrame = time;
+        requestAnimationFrame(sampleFrame);
+      };
+      requestAnimationFrame(sampleFrame);
+    };
+    perf.stopFrames = () => perf.frameActive = false;
+  });
+}
+
+async function begin(page: Page, requests: {value: number}) {
+  requests.value = 0;
+  await page.evaluate(() => {
+    const perf = (window as any).__teagramPerf;
+    perf.longTasks = [];
+    perf.frameIntervals = [];
+    perf.started = performance.now();
+    performance.clearResourceTimings();
+  });
+}
+
+async function capture(page: Page, requests: {value: number}, ms: number, scroll = false): Promise<Metric> {
+  await page.waitForTimeout(150);
+  return page.evaluate(({ms, requests, scroll}) => {
+    const perf = (window as any).__teagramPerf;
+    const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
+    const bundleBytes = resources.filter((entry) => {
+      return new URL(entry.name).origin === location.origin && /\.(js|css)(?:[?#]|$)/i.test(entry.name);
+    }).reduce((total, entry) => total + entry.decodedBodySize, 0);
+    const intervals = scroll ? perf.frameIntervals : [];
+    const droppedFrames = intervals.reduce((total: number, interval: number) => total + Math.max(0, Math.round(interval / (1000 / 60)) - 1), 0);
+    const droppedFramePercent = intervals.length ? droppedFrames / (droppedFrames + intervals.length) * 100 : 0;
+    return {
+      ms,
+      requests,
+      domNodes: document.querySelectorAll('*').length,
+      bundleBytes,
+      longTasksOver50Ms: perf.longTasks.filter((entry: {startTime: number}) => entry.startTime >= perf.started).length,
+      droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined
+    };
+  }, {ms, requests: requests.value, scroll});
+}
+
+async function elapsed(page: Page) {
+  return page.evaluate(() => performance.now() - (window as any).__teagramPerf.started);
+}
+
+async function signIn(page: Page, origin: string) {
+  await page.goto(origin, {waitUntil: 'domcontentloaded'});
+  const auth = page.locator('#auth-pages');
+  await expect(auth.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
+  await auth.getByRole('textbox', {name: 'Username'}).fill(username!);
+  await auth.getByRole('button', {name: 'Next'}).click();
+  const passwordInput = auth.locator('input[name="notsearch_password"]');
+  await expect(passwordInput).toBeVisible({timeout: 30_000});
+  await passwordInput.fill(password!);
+  await auth.getByRole('button', {name: 'Next'}).click();
+  await expect(page.locator('#page-chats #chatlist-container .chatlist-chat').first()).toBeVisible({timeout: 120_000});
+}
+
+async function waitForChatList(page: Page) {
+  await expect(page.locator('#page-chats #chatlist-container .chatlist-chat').first()).toBeVisible({timeout: 120_000});
+}
+
+async function reloadChatList(page: Page, requests: {value: number}) {
+  await begin(page, requests);
+  await page.reload({waitUntil: 'domcontentloaded'});
+  await waitForChatList(page);
+  return capture(page, requests, await elapsed(page));
+}
+
+async function openPartnerChat(page: Page, requests: {value: number}) {
+  const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture!.partner}"]`).first();
+  await expect(row).toBeVisible({timeout: 60_000});
+  await begin(page, requests);
+  await row.click();
+  await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
+  return capture(page, requests, await elapsed(page));
+}
+
+async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean) {
+  const hasPendingHistory = () => page.evaluate(() => {
+    const bubbles = (window as any).appImManager.chat.bubbles;
+    return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
+  });
+
+  await begin(page, requests);
+  await page.evaluate(() => (window as any).__teagramPerf.startFrames());
+  const initial = await page.evaluate(() => {
+    const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));
+    return {min: Math.min(...mids), max: Math.max(...mids)};
+  });
+  const targetMid = Math.max(1, initial.max - 2_000);
+  let previousMin = initial.min;
+  let stagnant = 0;
+  let currentMin = initial.min;
+  const scrollable = page.locator('.bubbles-scrollable');
+  const box = await scrollable.boundingBox();
+  expect(box).toBeTruthy();
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  for(let attempt = 0; attempt < 120 && currentMin > targetMid; ++attempt) {
+    const before = currentMin;
+    const scrollTop = await scrollable.evaluate((element) => element.scrollTop);
+    if(scrollTop < 2) await scrollable.evaluate((element) => element.scrollTop = 2);
+    await page.mouse.wheel(0, -2_000);
+    await page.waitForTimeout(120);
+    currentMin = await page.evaluate(() => {
+      const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));
+      return Math.min(...mids);
+    });
+    if(currentMin >= before && await hasPendingHistory()) {
+      await expect.poll(hasPendingHistory, {timeout: 120_000}).toBe(false);
+      currentMin = await page.evaluate(() => {
+        const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));
+        return Math.min(...mids);
+      });
+    }
+    stagnant = currentMin < previousMin ? 0 : stagnant + 1;
+    previousMin = currentMin;
+    if(stagnant >= 12) break;
+  }
+  await page.evaluate(() => (window as any).__teagramPerf.stopFrames());
+  const scrollState = await page.evaluate(() => {
+    const chat = (window as any).appImManager.chat;
+    const bubbles = chat?.bubbles;
+    return {
+      loadedAll: bubbles?.scrollable.loadedAll,
+      scrollTop: bubbles?.scrollable.scrollPosition,
+      scrollHeight: bubbles?.scrollable.scrollSize,
+      lastScrollDirection: bubbles?.scrollable.lastScrollDirection,
+      historyTopPending: !!bubbles?.getHistoryTopPromise,
+      peerId: chat?.peerId
+    };
+  });
+  if(currentMin > targetMid) {
+    if(required) throw new Error(`scroll reached message ${currentMin}, expected ${targetMid}: ${JSON.stringify(scrollState)}`);
+    return undefined;
+  }
+  return capture(page, requests, await elapsed(page), true);
+}
+
+async function jumpToFixtureDate(page: Page, requests: {value: number}) {
+  await begin(page, requests);
+  const beforeMids = await page.locator('.bubbles .bubble[data-mid]').evaluateAll((elements) => elements.map((element) => Number((element as HTMLElement).dataset.mid)));
+  await page.locator('#page-chats .topbar .btn-icon.search').click();
+  await expect(page.locator('.chat-search')).toBeVisible();
+  await page.locator('.chat-search-calendar').click();
+  await expect(page.locator('.date-picker-scrollable')).toBeVisible();
+
+  const targetDate = new Date(fixture!.middle_date * 1000);
+  targetDate.setHours(0, 0, 0, 0);
+  const now = new Date();
+  const monthDelta = (targetDate.getFullYear() - now.getFullYear()) * 12 + targetDate.getMonth() - now.getMonth();
+  const nav = page.locator(monthDelta < 0 ? '.date-picker-prev' : '.date-picker-next');
+  const title = page.locator('.date-picker-month-title');
+  for(let step = 0; step < Math.abs(monthDelta); ++step) {
+    const previousMonth = (await title.textContent())?.trim();
+    await nav.click();
+    await expect(title).not.toHaveText(previousMonth || '', {timeout: 5_000});
+  }
+
+  const expectedMonth = new Intl.DateTimeFormat('en-US', {month: 'long', year: 'numeric'}).format(targetDate);
+  await page.waitForFunction((month) => {
+    const normalize = (value: string | null) => value?.replace(/\s+/g, ' ').trim();
+    return [...document.querySelectorAll('.date-picker-month-section .date-picker-month-label')].some((label) => normalize(label.textContent) === month);
+  }, expectedMonth, {timeout: 15_000});
+  const selected = await page.evaluate(({month, day}) => {
+    const normalize = (value: string | null) => value?.replace(/\s+/g, ' ').trim();
+    const section = [...document.querySelectorAll<HTMLElement>('.date-picker-month-section')].find((item) => {
+      return normalize(item.querySelector('.date-picker-month-label')?.textContent || null) === month;
+    });
+    const button = [...(section?.querySelectorAll<HTMLButtonElement>('.date-picker-month-date') || [])].find((item) => item.textContent?.trim() === String(day));
+    if(!button || button.disabled) return false;
+    button.click();
+    return true;
+  }, {month: expectedMonth, day: targetDate.getDate()});
+  expect(selected).toBe(true);
+  await page.getByRole('button', {name: 'Jump to Date'}).click();
+  await page.waitForFunction((oldMids) => {
+    const old = new Set(oldMids);
+    return [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].some((bubble) => !old.has(Number(bubble.dataset.mid)));
+  }, beforeMids, {timeout: 60_000});
+  return capture(page, requests, await elapsed(page));
+}
+
+async function openContacts(page: Page, requests: {value: number}) {
+  await begin(page, requests);
+  await page.locator('.sidebar-tools-button').click();
+  await page.getByText('Contacts', {exact: true}).last().click();
+  await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
+  return capture(page, requests, await elapsed(page));
+}
+
+async function searchContacts(page: Page, requests: {value: number}) {
+  await begin(page, requests);
+  const input = page.locator('#contacts-container .input-search-input');
+  await input.fill('k09999');
+  await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
+  await expect(page.locator('#contacts-container .chatlist-chat')).toHaveCount(1, {timeout: 60_000});
+  return capture(page, requests, await elapsed(page));
+}
+
+async function globalSearch(page: Page, requests: {value: number}) {
+  await page.locator('.sidebar-back-button').click();
+  await begin(page, requests);
+  await page.keyboard.press('Control+f');
+  const input = page.locator('#search-container .input-search-input');
+  await expect(input).toBeVisible();
+  await input.fill('needle 500000');
+  await expect(page.locator('#search-container .chatlist-chat').first()).toBeVisible({timeout: 90_000});
+  return capture(page, requests, await elapsed(page));
+}
+
+async function sendMessage(page: Page, requests: {value: number}) {
+  await page.keyboard.press('Escape');
+  await page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture!.partner}"]`).first().click();
+  await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible();
+  await begin(page, requests);
+  const text = `web-perf-${process.env.GITHUB_RUN_ID || 'local'}-${Date.now()}`;
+  const composer = page.locator('.input-message-input:not(.input-field-input-fake)[contenteditable="true"]');
+  await composer.fill(text);
+  await composer.press('Enter');
+  await expect(page.locator('#page-chats .bubbles .bubble.is-out').filter({hasText: text})).toBeVisible({timeout: 60_000});
+  return capture(page, requests, await elapsed(page));
+}
+
+async function prepareVariant(browser: Browser, variant: 'base' | 'head', origin: string): Promise<VariantRun> {
+  const context = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 800}});
+  try {
+    const page = await context.newPage();
+    await signIn(page, origin);
+    return {variant, origin, storageState: await context.storageState({indexedDB: true})};
+  } finally {
+    await context.close();
+  }
+}
+
+async function runVariant(browser: Browser, run: VariantRun) {
+  const {variant, origin} = run;
+  const measured = report.variants[variant];
+  for(const scenario of scenarios) measured[scenario] ||= [];
+
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+  const page = await context.newPage();
+  const requests = {value: 0};
+  await installInstrumentation(page, requests);
+
+  try {
+    await page.goto(origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    measured.coldChatList.push(await test.step('cold chat list', async() => capture(page, requests, await elapsed(page))));
+    measured.warmChatList.push(await test.step('warm chat list', () => reloadChatList(page, requests)));
+
+    measured.chatOpen.push(await test.step('open million-message chat', () => openPartnerChat(page, requests)));
+    const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(page, requests, variant === 'head'));
+    if(scroll) {
+      measured.scrollBack2k.push(scroll);
+    } else {
+      console.warn('Base build cannot load 2,000 older messages; omitted its scroll timing baseline.');
+    }
+    measured.dateJump.push(await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests), {timeout: 120_000}));
+    measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
+    measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests)));
+    measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests)));
+    measured.sendMessage.push(await test.step('send a message', () => sendMessage(page, requests)));
+  } finally {
+    await context.close();
+  }
+}
+
+test('measures the scale fixture in interleaved base and head runs', async({browser}) => {
+  expect(fixture).toBeTruthy();
+  expect(Number.isSafeInteger(fixture?.partner)).toBe(true);
+  expect(Number.isSafeInteger(fixture?.middle_date)).toBe(true);
+  expect(username).toBeTruthy();
+  expect(password).toBeTruthy();
+  expect(reportPath).toBeTruthy();
+
+  const headOrigin = process.env.PERF_HEAD_ORIGIN;
+  const baseOrigin = process.env.PERF_BASE_ORIGIN;
+  expect(headOrigin).toBeTruthy();
+  const variants: Array<['base' | 'head', string]> = baseOrigin ? [
+    ['base', baseOrigin],
+    ['head', headOrigin!]
+  ] : [['head', headOrigin!]];
+
+  const prepared = new Map<'base' | 'head', VariantRun>();
+  for(const [variant, origin] of variants) {
+    prepared.set(variant, await prepareVariant(browser, variant, origin));
+  }
+
+  for(let round = 0; round < 2; ++round) {
+    const order = round % 2 === 0 ? variants : [...variants].reverse();
+    for(const [variant] of order) {
+      await test.step(`${variant} round ${round + 1}`, () => runVariant(browser, prepared.get(variant)!));
+    }
+  }
+});
