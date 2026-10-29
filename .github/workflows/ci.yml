@@ -288,6 +288,7 @@ jobs:
           node --check .github/scripts/smoke-k8s-web.mjs
           bash -n .github/scripts/install-kubectl.sh
           bash -n .github/scripts/start-k3d-cluster.sh
+          bash -n .github/scripts/test-private-artifact-image.sh
           node --check scripts/real-client/browser.cjs
           node --check scripts/real-client/run.mjs
 

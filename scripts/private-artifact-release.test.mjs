@@ -316,17 +316,30 @@ describe('private artifact workflow Node runtime', () => {
   });
 
   it('publishes the reviewed web image from a separate permissioned job', () => {
-    const privatePublisher = privateWorkflowJob(privateArtifactWorkflowText, 'private-publish');
+    const privatePublisher = privateWorkflowJob(privateArtifactWorkflowText, 'publish-private-artifact');
     const imagePublisher = privateWorkflowJob(privateArtifactWorkflowText, 'publish-teagram-web-image');
     const verifyImage = privateWorkflowStep(imagePublisher, 'Load and verify the reviewed web image');
     const authenticate = privateWorkflowStep(imagePublisher, 'Authenticate to GitHub Container Registry');
     const pushImage = privateWorkflowStep(imagePublisher, 'Publish the reviewed web image and record its digest');
 
-    expect(imagePublisher).toContain('      - private-publish\n');
+    expect(imagePublisher).toContain('      - publish-private-artifact\n');
     expect(imagePublisher).toContain('packages: write');
     expect(privatePublisher).not.toContain('packages: write');
     expect(imagePublisher.indexOf(verifyImage)).toBeLessThan(imagePublisher.indexOf(authenticate));
     expect(imagePublisher.indexOf(authenticate)).toBeLessThan(imagePublisher.indexOf(pushImage));
+  });
+
+  it('builds and publisher-verifies the reviewed web image in pull request CI', () => {
+    const job = privateWorkflowJob(privateArtifactWorkflowText, 'check-private-artifact');
+    const artifactVerification = privateWorkflowStep(job, 'Verify private manifest, CSP, digest, and PR head');
+    const imageVerification = privateWorkflowStep(job, 'Build and publisher-verify the reviewed web image');
+    const imageVerificationScript = readFileSync(join(repositoryRoot, '.github/scripts/test-private-artifact-image.sh'), 'utf8');
+
+    expect(job.indexOf(artifactVerification)).toBeLessThan(job.indexOf(imageVerification));
+    expect(imageVerification).toContain('bash .github/scripts/test-private-artifact-image.sh');
+    expect(imageVerificationScript).toContain('docker build');
+    expect(imageVerificationScript).toContain('docker cp');
+    expect(imageVerificationScript).toContain('publisher-verify.mjs');
   });
 
   it('selects Node after the credential-free checkout in publication preparation', () => {

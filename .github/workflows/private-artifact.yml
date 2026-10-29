@@ -113,6 +113,12 @@ jobs:
           console.log(`[private-artifact] keyFingerprint=${target.fingerprint}`);
           NODE
 
+      - name: Build and publisher-verify the reviewed web image
+        env:
+          IMAGE_REF: teagram-web:private-artifact-check
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha }}
+        run: bash .github/scripts/test-private-artifact-image.sh
+
   check-publication-request:
     name: 'check: publication-request'
     if: >-
