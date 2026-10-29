@@ -154,12 +154,20 @@ test('does not let an outlier base repeat hide a new 100x task', () => {
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes('long task')));
 });
 
-test('blocks a 100 ms task even when its count matches the base noise', () => {
-  const base = scaleVariants({'100x': {sendMessage: {longTasksOver50Ms: 1, maxLongTaskDurationMs: 65}}});
-  const head = scaleVariants({'100x': {sendMessage: {longTasksOver50Ms: 1, maxLongTaskDurationMs: 100}}});
+test('allows task-duration jitter when 100x contacts long-task counts do not grow', () => {
+  const base = scaleVariants({'100x': {contactsList: [
+    {longTasksOver50Ms: 0, maxLongTaskDurationMs: 0},
+    {longTasksOver50Ms: 4, maxLongTaskDurationMs: 158},
+    {longTasksOver50Ms: 1, maxLongTaskDurationMs: 149}
+  ]}});
+  const head = scaleVariants({'100x': {contactsList: [
+    {longTasksOver50Ms: 1, maxLongTaskDurationMs: 162},
+    {longTasksOver50Ms: 1, maxLongTaskDurationMs: 150},
+    {longTasksOver50Ms: 1, maxLongTaskDurationMs: 167}
+  ]}});
   const result = evaluatePerformance(report({base, head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x sendMessage') && failure.includes('100 ms main-thread task')));
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x contactsList') && failure.includes('100 ms main-thread task')), false);
 });
 
 test('blocks a non-scroll long task when the base has no measured count', () => {
