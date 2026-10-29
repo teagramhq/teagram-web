@@ -295,3 +295,23 @@ jobs:
 
       - name: Exercise deployment stack migration and rollback
         run: bash .github/scripts/test-deploy-stack-migration-rollback.sh
+
+  ci:
+    name: ci
+    if: always()
+    needs:
+      - checks
+      - deployment-workflow
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Require every pull request job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        shell: bash
+        run: |
+          if jq -e 'all(.[]; .result == "success")' <<<"$NEEDS" >/dev/null; then
+            exit 0
+          fi
+
+          jq -r 'to_entries[] | select(.value.result != "success") | "\(.key): \(.value.result)"' <<<"$NEEDS" >&2
+          exit 1
