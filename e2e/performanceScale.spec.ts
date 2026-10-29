@@ -18,6 +18,7 @@ type Metric = {
   domNodes: number,
   bundleBytes: number,
   longTasksOver50Ms: number,
+  maxLongTaskDurationMs: number,
   droppedFramePercent?: number,
   droppedFrames?: number,
   frameIntervals?: number
@@ -79,12 +80,17 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
       });
       observer.observe({type: 'longtask', buffered: true});
     } catch{}
+    const inject = () => {
+      const started = performance.now();
+      while(performance.now() - started < 100) {}
+      perf.injectedLongTask = {started, duration: performance.now() - started};
+    };
     if(injectLongTask) {
-      window.addEventListener('wheel', (event) => {
-        if(perf.injectedLongTask || !(event.target instanceof Element) || !event.target.closest('.bubbles-scrollable')) return;
-        const started = performance.now();
-        while(performance.now() - started < 100) {}
-        perf.injectedLongTask = {started, duration: performance.now() - started};
+      perf.armInjectedLongTask = () => perf.injectLongTaskArmed = true;
+      window.addEventListener('click', (event) => {
+        if(!perf.injectLongTaskArmed || !event.isTrusted || perf.injectedLongTask) return;
+        perf.injectLongTaskArmed = false;
+        inject();
       }, {capture: true});
     }
     perf.startFrames = () => {
@@ -124,12 +130,14 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
     const intervals = scroll ? perf.frameIntervals : [];
     const droppedFrames = intervals.reduce((total: number, interval: number) => total + Math.max(0, Math.round(interval / (1000 / 60)) - 1), 0);
     const droppedFramePercent = intervals.length ? droppedFrames / (droppedFrames + intervals.length) * 100 : 0;
+    const longTasks = perf.longTasks.filter((entry: {startTime: number}) => entry.startTime >= perf.started);
     return {
       ms,
       requests,
       domNodes: document.querySelectorAll('*').length,
       bundleBytes,
-      longTasksOver50Ms: perf.longTasks.filter((entry: {startTime: number}) => entry.startTime >= perf.started).length,
+      longTasksOver50Ms: longTasks.length,
+      maxLongTaskDurationMs: longTasks.reduce((max: number, entry: {duration: number}) => Math.max(max, entry.duration), 0),
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
@@ -235,8 +243,9 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   return capture(page, requests, await elapsed(page), true);
 }
 
-async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture) {
+async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture, injectLongTask = false) {
   await begin(page, requests);
+  if(injectLongTask) await page.evaluate(() => (window as any).__teagramPerf.armInjectedLongTask());
   const beforeMids = await page.locator('.bubbles .bubble[data-mid]').evaluateAll((elements) => elements.map((element) => Number((element as HTMLElement).dataset.mid)));
   const searchIcon = String.fromCharCode(parseInt(Icons.search, 16));
   await page.locator('#page-chats .chat-utils > .btn-icon').filter({hasText: searchIcon}).click();
@@ -412,7 +421,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   }
 });
 
-test('measures a 100 ms task during app scrolling and blocks the negative control', async({browser}) => {
+test('measures a 100 ms task during date jump and blocks the negative control', async({browser}) => {
   expect(username).toBeTruthy();
   expect(password).toBeTruthy();
   const fixture = fixtures['100x'];
@@ -434,8 +443,7 @@ test('measures a 100 ms task during app scrolling and blocks the negative contro
     await page.goto(origin!, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
     await openPartnerChat(page, requests, fixture!);
-    const negativeSample = await scrollBackTwoThousand(page, requests, true);
-    expect(negativeSample).toBeTruthy();
+    const negativeSample = await jumpToFixtureDate(page, requests, fixture!, true);
     expect(negativeSample.longTasksOver50Ms).toBeGreaterThan(0);
     const injectedTask = await page.evaluate(() => {
       const perf = (window as any).__teagramPerf;
@@ -447,21 +455,22 @@ test('measures a 100 ms task during app scrolling and blocks the negative contro
     });
     expect(injectedTask.duration).toBeGreaterThanOrEqual(100);
     expect(injectedTask.observed).toBe(true);
-    const existingScrollSamples = report.variants.head['100x'].scrollBack2k;
-    expect(existingScrollSamples).toHaveLength(PERFORMANCE_REPEATS);
+    expect(negativeSample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
+    const existingDateJumpSamples = report.variants.head['100x'].dateJump;
+    expect(existingDateJumpSamples).toHaveLength(PERFORMANCE_REPEATS);
 
     const head = {
       ...report.variants.head,
       '100x': {
         ...report.variants.head['100x'],
-        scrollBack2k: [...existingScrollSamples, negativeSample]
+        dateJump: [...existingDateJumpSamples, negativeSample]
       }
     };
     const evaluation = evaluatePerformance({
       ...report,
       variants: {...report.variants, head}
     });
-    expect(evaluation.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task'))).toBe(true);
+    expect(evaluation.blockingFailures.some((failure) => failure.includes('100x dateJump') && failure.includes('long task'))).toBe(true);
   } finally {
     await context.close();
   }

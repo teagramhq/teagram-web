@@ -20,6 +20,7 @@ function scaleSamples(overrides = {}) {
       domNodes: 300,
       bundleBytes: 100_000,
       longTasksOver50Ms: 0,
+      maxLongTaskDurationMs: 0,
       frameIntervals: 100,
       droppedFrames: 0,
       droppedFramePercent: 0,
@@ -103,17 +104,84 @@ test('blocks a long task in any 100x scroll repeat', () => {
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')));
 });
 
-test('does not block long tasks outside 100x scrolling', () => {
-  for(const {key} of SCENARIOS.filter(({key}) => key !== 'scrollBack2k')) {
-    const head = scaleVariants({'100x': {[key]: [
-      {longTasksOver50Ms: 0},
+test('blocks new long tasks across 100x scenarios', () => {
+  for(const {key} of SCENARIOS) {
+    const base = scaleVariants({'100x': {[key]: [
+      {longTasksOver50Ms: 1},
       {longTasksOver50Ms: 1},
       {longTasksOver50Ms: 0}
     ]}});
-    const result = evaluatePerformance(report({head}));
+    const head = scaleVariants({'100x': {[key]: [
+      {longTasksOver50Ms: 1},
+      {longTasksOver50Ms: 2},
+      {longTasksOver50Ms: 0}
+    ]}});
+    const result = evaluatePerformance(report({base, head}));
 
-    assert.equal(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes('long task')), false);
+    assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes('long task')));
   }
+});
+
+test('allows existing 100x base long tasks when the head count does not grow', () => {
+  const base = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 1},
+    {longTasksOver50Ms: 0},
+    {longTasksOver50Ms: 1}
+  ]}});
+  const head = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 0},
+    {longTasksOver50Ms: 1},
+    {longTasksOver50Ms: 1}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('long task')), false);
+});
+
+test('does not let an outlier base repeat hide a new 100x task', () => {
+  const base = scaleVariants({'100x': {chatOpen: [
+    {longTasksOver50Ms: 16},
+    {longTasksOver50Ms: 0},
+    {longTasksOver50Ms: 0}
+  ]}});
+  const head = scaleVariants({'100x': {chatOpen: [
+    {longTasksOver50Ms: 0},
+    {longTasksOver50Ms: 1},
+    {longTasksOver50Ms: 0}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes('long task')));
+});
+
+test('blocks a 100 ms task even when its count matches the base noise', () => {
+  const base = scaleVariants({'100x': {sendMessage: {longTasksOver50Ms: 1, maxLongTaskDurationMs: 65}}});
+  const head = scaleVariants({'100x': {sendMessage: {longTasksOver50Ms: 1, maxLongTaskDurationMs: 100}}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x sendMessage') && failure.includes('100 ms main-thread task')));
+});
+
+test('blocks a non-scroll long task when the base has no measured count', () => {
+  const base = scaleVariants();
+  base['100x'].dateJump = Array.from({length: 3}, () => ({bundleBytes: 100_000}));
+  const head = scaleVariants({'100x': {dateJump: {longTasksOver50Ms: 1}}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x dateJump') && failure.includes('long task')));
+});
+
+test('compares 100x long tasks with compatible main history when a push has no base', () => {
+  const head = scaleVariants({'100x': {globalSearch: [
+    {longTasksOver50Ms: 1},
+    {longTasksOver50Ms: 1},
+    {longTasksOver50Ms: 2}
+  ]}});
+  const result = evaluatePerformance(report({head, requireBase: false}), mainHistory(1, {
+    '100x': {globalSearch: {longTasksOver50Ms: 1}}
+  }));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x globalSearch') && failure.includes('long task')));
 });
 
 test('does not block for a long task measured only at 1x', () => {

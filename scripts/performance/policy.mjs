@@ -21,7 +21,8 @@ const REQUIRED_METRICS = [
   ['requests', 'requests'],
   ['domNodes', 'DOM nodes'],
   ['bundleBytes', 'bundle bytes'],
-  ['longTasksOver50Ms', 'long task counter']
+  ['longTasksOver50Ms', 'long task counter'],
+  ['maxLongTaskDurationMs', 'maximum long task duration']
 ];
 
 function median(values) {
@@ -67,6 +68,25 @@ function historyFor(history, scale, key, report) {
     const value = median(samples.map((sample) => sample.ms).filter(Number.isFinite));
     return Number.isFinite(value) ? [value] : [];
   });
+}
+
+function medianLongTasks(samples) {
+  if(!Array.isArray(samples) || !samples.length) return undefined;
+  return median(samples.map((sample) => Number.isFinite(sample?.longTasksOver50Ms) ? sample.longTasksOver50Ms : 0));
+}
+
+function medianLongTaskDuration(samples) {
+  if(!Array.isArray(samples) || !samples.length) return undefined;
+  return median(samples.map((sample) => Number.isFinite(sample?.maxLongTaskDurationMs) ? sample.maxLongTaskDurationMs : 0));
+}
+
+function historyLongTaskBaseline(history, scale, key, report) {
+  const counts = history.flatMap((run) => {
+    if(!matchesFixture(run, report)) return [];
+    const count = medianLongTasks(run.variants?.head?.[scale]?.[key]);
+    return Number.isFinite(count) ? [count] : [];
+  });
+  return median(counts);
 }
 
 function addFailure(failures, scale, key, message) {
@@ -141,12 +161,25 @@ export function evaluatePerformance(report, history = []) {
         });
       }
 
-      if(scale === '100x' && scenario.key === 'scrollBack2k') {
-        headSamples.forEach((sample, index) => {
-          if(Number.isFinite(sample?.longTasksOver50Ms) && sample.longTasksOver50Ms > 0) {
-            addFailure(blockingFailures, scale, scenario.key, `${sample.longTasksOver50Ms} long task(s) over 50 ms in head sample ${index + 1}`);
-          }
-        });
+      if(scale === '100x') {
+        if(scenario.key === 'scrollBack2k') {
+          headSamples.forEach((sample, index) => {
+            if(Number.isFinite(sample?.longTasksOver50Ms) && sample.longTasksOver50Ms > 0) {
+              addFailure(blockingFailures, scale, scenario.key, `${sample.longTasksOver50Ms} long task(s) over 50 ms in head sample ${index + 1}`);
+            }
+          });
+        } else {
+          const baselineLongTasks = report.requireBase ? medianLongTasks(baseSamples) ?? 0 : historyLongTaskBaseline(history, scale, scenario.key, report);
+          const baselineLongTaskDuration = report.requireBase ? medianLongTaskDuration(baseSamples) ?? 0 : undefined;
+          headSamples.forEach((sample, index) => {
+            if(Number.isFinite(baselineLongTasks) && Number.isFinite(sample?.longTasksOver50Ms) && sample.longTasksOver50Ms > baselineLongTasks) {
+              addFailure(blockingFailures, scale, scenario.key, `${sample.longTasksOver50Ms} long task(s) over 50 ms in head sample ${index + 1} exceeded baseline ${baselineLongTasks}`);
+            }
+            if(Number.isFinite(baselineLongTaskDuration) && Number.isFinite(sample?.maxLongTaskDurationMs) && sample.maxLongTaskDurationMs >= 100 && sample.maxLongTaskDurationMs > baselineLongTaskDuration) {
+              addFailure(blockingFailures, scale, scenario.key, `100 ms main-thread task lasted ${sample.maxLongTaskDurationMs.toFixed(1)} ms in head sample ${index + 1}`);
+            }
+          });
+        }
       }
       if(scale === '100x' && scenario.key === 'scrollBack2k' && Number.isFinite(head.droppedFramePercent) && head.droppedFramePercent >= 1) {
         addFailure(blockingFailures, scale, scenario.key, `dropped frames reached ${head.droppedFramePercent.toFixed(2)}%`);
