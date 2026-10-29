@@ -1456,13 +1456,13 @@ describe('confined runner shared-worker observation contract', () => {
 
   it('accepts a page target that closes during observer detach', async() => {
     const contextObserver = observation.createContextObserver('closing-session');
-    let cdp: any;
-    const detach = vi.fn(async() => {
-      cdp.emit('close');
-      throw new Error('target closed during detach');
+    const detachFailure = new Error('target closed during detach');
+    const harness = createNetworkObserverHarness(contextObserver, {
+      detach: async() => {
+        harness.cdp.emit('close');
+        throw detachFailure;
+      }
     });
-    const harness = createNetworkObserverHarness(contextObserver, {detach});
-    cdp = harness.cdp;
     await harness.networkObserver.start();
 
     await expect(harness.networkObserver.stop()).resolves.toBeUndefined();
