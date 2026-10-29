@@ -1,7 +1,13 @@
 import {describe, expect, it, vi} from 'vitest';
 import type {HelpTermsOfService} from '@layer';
 
-import {authenticatePrivateUsername, isPrivateUsername, isPrivateUsernameCredentialError} from '@/pages/privateUsernameAuth';
+import {authenticatePrivateUsername, isPrivateUsername, isPrivateUsernameCredentialError, parsePrivateUsernameInviteSecret} from '@/pages/privateUsernameAuth';
+import {
+  capturePrivateUsernameInviteSecretFromFragment,
+  restorePrivateUsernameInviteSecretForRetry,
+  storePrivateUsernameInviteSecretForAccountSwitch,
+  takePrivateUsernameInviteSecretFromFragment
+} from '@/pages/privateUsernameInvite';
 
 const USERNAME = 'Alice_123';
 const SENT_CODE = {
@@ -12,6 +18,101 @@ const SENT_CODE = {
 };
 
 describe('private username sign-in', () => {
+  it('normalizes invite codes and invite links to a 64-character secret', () => {
+    const secret = 'a'.repeat(64);
+
+    expect(parsePrivateUsernameInviteSecret(secret)).toBe(secret);
+    expect(parsePrivateUsernameInviteSecret(secret.toUpperCase())).toBe(secret);
+    expect(parsePrivateUsernameInviteSecret(`https://teagram.example/#${secret}`)).toBe(secret);
+    expect(parsePrivateUsernameInviteSecret(`https://teagram.example/?invite=${secret}`)).toBeUndefined();
+    expect(parsePrivateUsernameInviteSecret('not-an-invite')).toBeUndefined();
+  });
+
+  it('strips a valid invite fragment before handing it to the auth card', () => {
+    const secret = 'b'.repeat(64);
+    window.history.replaceState(window.history.state, '', `/?keep=1#${secret}`);
+
+    capturePrivateUsernameInviteSecretFromFragment();
+
+    expect(window.location.search).toBe('?keep=1');
+    expect(window.location.hash).toBe('');
+    expect(takePrivateUsernameInviteSecretFromFragment()).toBe(secret);
+    expect(takePrivateUsernameInviteSecretFromFragment()).toBeUndefined();
+  });
+
+  it('clears an older pending secret when a fresh fragment arrives', () => {
+    const secret = 'e'.repeat(64);
+    window.sessionStorage.setItem('teagram-invite-secret', 'f'.repeat(64));
+    window.history.replaceState(window.history.state, '', `/?keep=1#${secret}`);
+
+    capturePrivateUsernameInviteSecretFromFragment();
+
+    expect(takePrivateUsernameInviteSecretFromFragment()).toBe(secret);
+    expect(window.sessionStorage.getItem('teagram-invite-secret')).toBeNull();
+  });
+
+  it('passes an invite across an account switch through session storage once', () => {
+    const secret = 'c'.repeat(64);
+
+    expect(storePrivateUsernameInviteSecretForAccountSwitch(secret.toUpperCase())).toBe(true);
+    expect(window.sessionStorage.getItem('teagram-invite-secret')).toBe(secret);
+    expect(takePrivateUsernameInviteSecretFromFragment()).toBe(secret);
+    expect(window.sessionStorage.getItem('teagram-invite-secret')).toBeNull();
+    expect(takePrivateUsernameInviteSecretFromFragment()).toBeUndefined();
+  });
+
+  it('requires session storage to hand an invite across an account switch', () => {
+    const secret = 'd'.repeat(64);
+    const sessionStorage = Object.getOwnPropertyDescriptor(window, 'sessionStorage');
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      get() {
+        throw new DOMException('Storage unavailable', 'SecurityError');
+      }
+    });
+
+    try {
+      expect(storePrivateUsernameInviteSecretForAccountSwitch(secret)).toBe(false);
+      expect(takePrivateUsernameInviteSecretFromFragment()).toBeUndefined();
+    } finally {
+      if(sessionStorage) Object.defineProperty(window, 'sessionStorage', sessionStorage);
+      else delete (window as any).sessionStorage;
+    }
+  });
+
+  it('keeps a failed account-switch invite in session storage without restoring the fragment', () => {
+    const secret = 'a'.repeat(64);
+    window.history.replaceState(window.history.state, '', '/invite?keep=1');
+
+    expect(restorePrivateUsernameInviteSecretForRetry(secret.toUpperCase())).toBe(true);
+    expect(window.location.search).toBe('?keep=1');
+    expect(window.location.hash).toBe('');
+    expect(window.sessionStorage.getItem('teagram-invite-secret')).toBe(secret);
+    expect(takePrivateUsernameInviteSecretFromFragment()).toBe(secret);
+    expect(window.sessionStorage.getItem('teagram-invite-secret')).toBeNull();
+  });
+
+  it('keeps an in-memory retry secret and leaves the URL clean when session storage is unavailable', () => {
+    const secret = 'b'.repeat(64);
+    const sessionStorage = Object.getOwnPropertyDescriptor(window, 'sessionStorage');
+    window.history.replaceState(window.history.state, '', '/invite?keep=1');
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      get() {
+        throw new DOMException('Storage unavailable', 'SecurityError');
+      }
+    });
+
+    try {
+      expect(restorePrivateUsernameInviteSecretForRetry(secret)).toBe(false);
+      expect(window.location.hash).toBe('');
+      expect(takePrivateUsernameInviteSecretFromFragment()).toBe(secret);
+    } finally {
+      if(sessionStorage) Object.defineProperty(window, 'sessionStorage', sessionStorage);
+      else delete (window as any).sessionStorage;
+    }
+  });
+
   it('applies the username limits and pattern supplied by appConfig', () => {
     const appConfig = {
       username_min_length: 2,
@@ -37,6 +138,20 @@ describe('private username sign-in', () => {
     const invokeApi = vi.fn();
 
     await expect(authenticatePrivateUsername('', invokeApi)).resolves.toEqual({kind: 'invalidInput'});
+    expect(invokeApi).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed invite secret before making an authentication RPC', async() => {
+    const invokeApi = vi.fn();
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'invite',
+      inviteSecret: 'not-an-invite',
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings: vi.fn()
+    })).resolves.toEqual({kind: 'invalidInput'});
+
     expect(invokeApi).not.toHaveBeenCalled();
   });
 
@@ -413,7 +528,7 @@ describe('private username sign-in', () => {
 
     await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
       mode: 'invite',
-      inviteSecret: 'invite-secret',
+      inviteSecret: 'a'.repeat(64),
       displayName: 'Alice Example',
       password: 'StrongPassword123',
       updatePasswordSettings
@@ -422,7 +537,7 @@ describe('private username sign-in', () => {
     expect(invokeApi).toHaveBeenNthCalledWith(2, 'auth.signIn', {
       phone_number: USERNAME,
       phone_code_hash: 'mock-code-hash',
-      phone_code: 'invite-secret'
+      phone_code: 'a'.repeat(64)
     }, {ignoreErrors: true});
     expect(invokeApi.mock.calls.map(([method]) => method)).toEqual([
       'auth.sendCode',

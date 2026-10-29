@@ -94,13 +94,14 @@ MediaHeader.Sticker = function MediaHeaderSticker(props: MediaHeaderStickerProps
 /* ------------------------------------------------------------------ */
 
 export type MediaHeaderTitleProps = {
+  id?: string,
   class?: string,
   children?: JSX.Element
 };
 
 MediaHeader.Title = function MediaHeaderTitle(props: MediaHeaderTitleProps): JSX.Element {
   return (
-    <div class={classNames(styles.title, 'text-center text-overflow-wrap', props.class)}>
+    <div id={props.id} class={classNames(styles.title, 'text-center text-overflow-wrap', props.class)}>
       {props.children}
     </div>
   );

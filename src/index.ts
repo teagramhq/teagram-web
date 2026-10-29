@@ -6,6 +6,13 @@
 // a non-painting tab still boots
 import '@helpers/dom/previewUnfreeze';
 import '@helpers/dom/previewRaf';
+
+// Capture valid invite fragments before app modules can inspect the URL.
+import {
+  restorePrivateUsernameInviteSecretForRetry,
+  storePrivateUsernameInviteSecretForAccountSwitch,
+  takePrivateUsernameInviteSecretFromFragment
+} from '@/pages/privateUsernameInvite';
 import App from '@config/app';
 import blurActiveElement from '@helpers/dom/blurActiveElement';
 import {IS_STICKY_INPUT_BUGGED} from '@helpers/dom/fixSafariStickyInputFocusing';
@@ -53,6 +60,7 @@ import replaceChildrenPolyfill from '@helpers/dom/replaceChildrenPolyfill';
 import listenForWindowPrint from '@helpers/dom/windowPrint';
 import cancelImageEvents from '@helpers/dom/cancelImageEvents';
 import PopupElement from '@components/popups';
+import {toastNew} from '@components/toast';
 import PasscodeLockScreenController from '@components/passcodeLock/passcodeLockScreenController'; PasscodeLockScreenController;
 import type {LangPackDifference} from '@layer';
 import commonStateStorage from '@lib/commonStateStorage';
@@ -66,11 +74,10 @@ import useHasFoldersSidebar, {useIsSidebarCollapsed} from '@stores/foldersSideba
 import appNavigationController from '@components/appNavigationController';
 import {preventCrossTabDynamicImportDeadlock} from '@helpers/preventDeadlock';
 import appChatBackground from '@components/chat/bubbles/chatBackground';
-import {isAutoGuestEnabled} from '@config/serverContext';
+import {getActiveServerHost, isAutoGuestEnabled} from '@config/serverContext';
 import {getServerSelectionAction} from '@config/serverSelection';
 import {createCurrentGuestAccountLifecycle, type GuestAccountManagers} from '@lib/guestAccountLifecycle';
 import {markAutoGuestAttempted, markAutoGuestResetDetected} from '@lib/autoGuest';
-
 // import commonStateStorage from '@lib/commonStateStorage';
 // import { STATE_INIT } from '@config/state';
 
@@ -129,6 +136,57 @@ async function checkLastActiveAccountFromTMe() {
       }
     }
   } catch(err) {}
+}
+
+async function handleSignedInInviteLink(inviteSecret: string) {
+  const [totalAccounts, hasSomeonePremium] = await Promise.all([
+    AccountController.getTotalAccounts(),
+    apiManagerProxy.hasSomeonePremium()
+  ]);
+
+  const restoreInviteForRetry = () => restorePrivateUsernameInviteSecretForRetry(inviteSecret);
+  const showInviteRetryMessage = () => {
+    toastNew({langPackKey: restoreInviteForRetry() ? 'Teagram.Invite.Retry' : 'Teagram.Invite.RetryUnavailable'});
+  };
+
+  if(
+    totalAccounts >= MAX_ACCOUNTS_PREMIUM ||
+    (totalAccounts === MAX_ACCOUNTS_FREE && !hasSomeonePremium)
+  ) {
+    if(!restoreInviteForRetry()) toastNew({langPackKey: 'Teagram.Invite.RetryUnavailable'});
+    const {default: AccountsLimitPopup} = await import('./components/sidebarLeft/accountsLimitPopup');
+    new AccountsLimitPopup().show();
+    return;
+  }
+
+  const {default: confirmationPopup} = await import('@components/confirmationPopup');
+  try {
+    await confirmationPopup({
+      titleLangKey: 'Teagram.Invite.AddTitle',
+      descriptionLangKey: 'Teagram.Invite.AddText',
+      descriptionLangArgs: [getActiveServerHost()],
+      button: {langKey: 'Teagram.Invite.AddAccount'}
+    });
+  } catch(err) {
+    if(!restoreInviteForRetry()) toastNew({langPackKey: 'Teagram.Invite.RetryUnavailable'});
+    return;
+  }
+
+  if(!storePrivateUsernameInviteSecretForAccountSwitch(inviteSecret)) {
+    showInviteRetryMessage();
+    return;
+  }
+
+  const {default: appSidebarLeft} = await import('./components/sidebarLeft');
+  const result = await appSidebarLeft.addAccount(undefined, true);
+  if(result !== 'added') {
+    if(result === 'max') {
+      const retryStored = restoreInviteForRetry();
+      toastNew({langPackKey: retryStored ? 'Error.AnError' : 'Teagram.Invite.RetryUnavailable'});
+    } else {
+      showInviteRetryMessage();
+    }
+  }
 }
 
 function setManifest() {
@@ -720,6 +778,13 @@ const onDocumentReady = async() => {
     } else {
       await bootstrapIm();
     }
+  }
+
+  if(authState._ === 'authStateSignedIn') {
+    const inviteSecret = takePrivateUsernameInviteSecretFromFragment();
+    if(inviteSecret) void handleSignedInInviteLink(inviteSecret).catch(() => {
+      toastNew({langPackKey: restorePrivateUsernameInviteSecretForRetry(inviteSecret) ? 'Teagram.Invite.Retry' : 'Teagram.Invite.RetryUnavailable'});
+    });
   }
 };
 

@@ -2,7 +2,7 @@ import App from '@config/app';
 import ctx from '@environment/ctx';
 import {bigIntFromBytes} from '@helpers/bigInt/bigIntConversion';
 import tsNow from '@helpers/tsNow';
-import {AccountAuthorizations, Authorization, EmailVerification, EmailVerifyPurpose, InputCheckPasswordSRP, InputPasskeyCredential, Update} from '@layer';
+import {AccountAuthorizations, Authorization, EmailVerification, EmailVerifyPurpose, InputCheckPasswordSRP, InputPasskeyCredential, TeagramUserInviteLink, TeagramUserInvites, Update} from '@layer';
 import {DcId, TrueDcId} from '@types';
 import AccountController from '@lib/accounts/accountController';
 import {AppManager} from '@appManagers/manager';
@@ -260,6 +260,18 @@ export default class AppAccountManager extends AppManager {
 
   public deletePasskey(id: string) {
     return this.apiManager.invokeApiSingle('account.deletePasskey', {id});
+  }
+
+  public createUserInvite() {
+    return this.apiManager.invokeApi('teagram.createUserInvite') as Promise<TeagramUserInviteLink>;
+  }
+
+  public listUserInvites() {
+    return this.apiManager.invokeApi('teagram.listUserInvites') as Promise<TeagramUserInvites>;
+  }
+
+  public revokeUserInvite(id: string | number) {
+    return this.apiManager.invokeApiSingle('teagram.revokeUserInvite', {id});
   }
 
   public initPasskeyLogin() {

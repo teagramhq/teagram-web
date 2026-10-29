@@ -14,6 +14,7 @@ import {
 import {getSettingsLink} from '@lib/settingsSearch/link';
 import {getRecentSettingsSearch, removeRecentSettingsSearch} from '@lib/settingsSearch/recent';
 import {settingsSearchVersion} from '@lib/settingsSearch/registry';
+import {useAppConfig} from '@stores/appState';
 
 if(import.meta.hot) import.meta.hot.accept();
 
@@ -71,6 +72,7 @@ const SettingsSearchResults = (props: {
   onSelect: (item: SettingsSearchItem) => void
 }) => {
   const query = createMemo(() => props.query.trim());
+  const appConfig = useAppConfig();
 
   // Picking a result puts it in front of the recents, but reordering the list
   // the user is looking at makes it jump under the cursor — so what is on screen
@@ -83,7 +85,8 @@ const SettingsSearchResults = (props: {
 
   const items = createMemo(() => {
     settingsSearchVersion(); // re-run when the index is rebuilt (hot reload, language change)
-    return query() ? searchSettings(query()) : getSettingsSearchSuggestions(recentIds());
+    const results = query() ? searchSettings(query()) : getSettingsSearchSuggestions(recentIds());
+    return appConfig?.user_invites_enabled ? results : results.filter((item) => item.id !== 'AppSettingsTab:Teagram.Invite.Title');
   });
 
   return (

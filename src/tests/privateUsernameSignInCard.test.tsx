@@ -75,7 +75,7 @@ vi.mock('@lib/langPack', async(importOriginal) => {
       'Teagram.Registration.DisplayName': 'Display name',
       'Teagram.Registration.Password': 'Password',
       'Teagram.Registration.ConfirmPassword': 'Confirm password',
-      'Teagram.Registration.InviteSecret': 'Invite secret',
+      'Teagram.Registration.InviteSecret': 'Invite link or code',
       'Teagram.Registration.PasswordMismatch': 'Those passwords don\'t match.',
       'Teagram.Registration.UsernameHint': 'Use 2–32 characters, start with a letter, and use letters, numbers, or underscores.',
       'Teagram.Registration.UsernameTooShort': 'Use at least 2 characters.',
@@ -85,14 +85,17 @@ vi.mock('@lib/langPack', async(importOriginal) => {
       'Teagram.Registration.UsernameTaken': 'That username is taken.',
       'Teagram.Registration.InvalidUsername': 'Choose a valid username.',
       'Teagram.Registration.InvalidDisplayName': 'Enter a display name.',
-      'Teagram.Registration.InvalidInvite': 'That invite secret is invalid.',
-      'Teagram.Registration.InviteRequired': 'Enter an invite secret.',
+      'Teagram.Registration.InvalidInvite': 'This invite can\'t be used. Ask whoever invited you for a new one.',
+      'Teagram.Registration.InviteRequired': 'Paste the invite link or code you were sent.',
+      'Teagram.Registration.InviteFromLink': 'Filled in from your invite link.',
+      'Teagram.Registration.InviteMalformed': 'That\'s not a complete invite link or code. Copy the whole link and paste it again.',
       'Teagram.Registration.ConfirmPasswordRequired': 'Enter your password again.',
       'Teagram.Registration.PasswordMatch': 'Passwords match.',
       'Teagram.Registration.Closed': 'Account creation is closed on this server.',
       'Teagram.Registration.Network': 'Unable to create your account. Try again.',
       'Teagram.Registration.PasswordNetwork': 'Unable to set your password. Try again.',
       'Teagram.Registration.ConfigNetwork': 'Unable to check whether account creation is available.',
+      'Teagram.Invite.RetryUnavailable': 'Invite storage is unavailable. Open the original invite link again to try again.',
       'Teagram.Server.Address': 'Server address',
       'Teagram.Server.Placeholder': 'your.server.host',
       'Teagram.Server.Subtitle': 'Sign in with your username',
@@ -150,6 +153,7 @@ vi.mock('@lib/richTextProcessor/wrapRichText', () => ({
 
 import PrivateSignInCard from '@/pages/cards/PrivateSignInCard';
 import {clearPrivateUsernameLogin, isPrivateUsernameLogin} from '@/pages/privateUsernameLoginState';
+import {capturePrivateUsernameInviteSecretFromFragment, takePrivateUsernameInviteSecretFromFragment} from '@/pages/privateUsernameInvite';
 import {
   SERVER_CHOICE_KEY,
   SERVER_LOGIN_USERNAME_KEY,
@@ -201,6 +205,7 @@ describe('private username sign-in card', () => {
     sessionStorage.removeItem(SERVER_LOGIN_USERNAME_KEY);
     sessionStorage.removeItem(SERVER_REGISTER_AFTER_SELECTION_KEY);
     sessionStorage.removeItem(SERVER_USERNAME_DRAFT_KEY);
+    sessionStorage.removeItem('teagram-invite-secret');
     localStorage.removeItem(SERVER_CHOICE_KEY);
     mocks.invokeApi.mockReset();
     mocks.recoverUnknownAuthKey.mockReset();
@@ -243,6 +248,7 @@ describe('private username sign-in card', () => {
     sessionStorage.removeItem(SERVER_LOGIN_USERNAME_KEY);
     sessionStorage.removeItem(SERVER_REGISTER_AFTER_SELECTION_KEY);
     sessionStorage.removeItem(SERVER_USERNAME_DRAFT_KEY);
+    sessionStorage.removeItem('teagram-invite-secret');
     dispose?.();
     dispose = undefined;
     clearPrivateUsernameLogin();
@@ -618,6 +624,69 @@ describe('private username sign-in card', () => {
     expect(mocks.reauthenticateGuest).not.toHaveBeenCalled();
   });
 
+  it('preserves an invite across initial server selection and consumes it when registration resumes', async() => {
+    const secret = 'f'.repeat(64);
+    window.history.replaceState(window.history.state, '', `/invite#${secret}`);
+    capturePrivateUsernameInviteSecretFromFragment();
+    let finishSelection!: () => void;
+    const selectServer = vi.fn(() => new Promise<void>((resolve) => { finishSelection = resolve; }));
+    setServerSelectionAction(createSelectionAction(selectServer, {phase: 'selecting', host: 'second-server.example'}));
+    mount();
+
+    const createAccount = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement;
+    createAccount.click();
+    await vi.waitFor(() => expect(selectServer).toHaveBeenCalledOnce());
+    expect(sessionStorage.getItem('teagram-invite-secret')).toBe(secret);
+    expect(sessionStorage.getItem(SERVER_REGISTER_AFTER_SELECTION_KEY)).toBe('1');
+
+    dispose();
+    setServerSelectionAction(createSelectionAction(vi.fn(async() => {}), {phase: 'connected', host: 'second-server.example'}));
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'invite'});
+    mount();
+
+    const inviteInput = await vi.waitFor(() => {
+      const input = document.querySelector<HTMLInputElement>('input[aria-label="Invite link or code"]');
+      expect(input?.value).toBe(secret);
+      return input;
+    });
+    expect(inviteInput.value).toBe(secret);
+    expect(sessionStorage.getItem('teagram-invite-secret')).toBeNull();
+    expect(document.getElementById('registration-invite-secret-status')?.textContent).toBe('Filled in from your invite link.');
+    finishSelection();
+  });
+
+  it('keeps the invite flow on the current screen and explains how to retry when storage is unavailable', async() => {
+    const secret = 'e'.repeat(64);
+    window.history.replaceState(window.history.state, '', `/invite#${secret}`);
+    capturePrivateUsernameInviteSecretFromFragment();
+    const selectServer = vi.fn(async() => {});
+    setServerSelectionAction(createSelectionAction(selectServer, {phase: 'selecting', host: 'second-server.example'}));
+    const sessionStorageDescriptor = Object.getOwnPropertyDescriptor(window, 'sessionStorage');
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      get() {
+        throw new DOMException('Storage unavailable', 'SecurityError');
+      }
+    });
+    let createAccount: HTMLButtonElement | undefined;
+
+    try {
+      mount();
+      createAccount = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement;
+      createAccount.click();
+      await vi.waitFor(() => expect(mocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Invite.RetryUnavailable'}));
+      expect(selectServer).not.toHaveBeenCalled();
+      expect(window.location.hash).toBe('');
+    } finally {
+      if(sessionStorageDescriptor) Object.defineProperty(window, 'sessionStorage', sessionStorageDescriptor);
+      else delete (window as any).sessionStorage;
+    }
+
+    createAccount!.click();
+    await vi.waitFor(() => expect(selectServer).toHaveBeenCalledOnce());
+    expect(window.sessionStorage.getItem('teagram-invite-secret')).toBe(secret);
+  });
+
   it.each([undefined, false, 'true', 1, null])('hides guest creation unless validated discovery is literal true (%s)', async(guestSignUp) => {
     mocks.getAppConfig.mockResolvedValue({registration_mode: 'closed', demo: {guest_sign_up: true}});
     (window as any).__TEAGRAM_ACTIVE_GUEST_SIGN_UP__ = guestSignUp;
@@ -948,7 +1017,7 @@ describe('private username sign-in card', () => {
     expect(document.querySelector('input[aria-label="Display name"]')).not.toBeNull();
     expect(document.querySelector('input[aria-label="Password"]')).not.toBeNull();
     expect(document.querySelector('input[aria-label="Confirm password"]')).not.toBeNull();
-    expect(document.querySelector('input[aria-label="Invite secret"]')).toBeNull();
+    expect(document.querySelector('input[aria-label="Invite link or code"]')).toBeNull();
   });
 
   it('asks for an invite secret in invite registration mode', async() => {
@@ -957,10 +1026,10 @@ describe('private username sign-in card', () => {
     await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Create account')).toBe(true));
     (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
 
-    const inviteSecret = document.querySelector('input[aria-label="Invite secret"]') as HTMLInputElement;
+    const inviteSecret = document.querySelector('input[aria-label="Invite link or code"]') as HTMLInputElement;
     expect(inviteSecret).not.toBeNull();
     expect(inviteSecret.getAttribute('aria-describedby')).toBe('registration-invite-secret-status');
-    expect(document.getElementById('registration-invite-secret-status')?.textContent).toBe('Enter an invite secret.');
+    expect(document.getElementById('registration-invite-secret-status')?.textContent).toBe('Paste the invite link or code you were sent.');
   });
 
   it('keeps registration fields and allows a retry after an expired or rejected Turnstile token', async() => {

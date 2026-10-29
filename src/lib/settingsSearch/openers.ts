@@ -28,6 +28,9 @@ export const NON_NAVIGABLE_SECTIONS = new Set([
   'AppEditFolderTab',
   // its list is a store owned by the Privacy tab
   'AppPasskeysTab',
+  // The invite panel contains one-time secrets and create/list actions; only
+  // the Settings row is a useful search destination.
+  'AppInviteFriendsTab',
   'AppIncludedChatsTab',
   'AppSharedFolderTab',
   'AppAddMembersTab',

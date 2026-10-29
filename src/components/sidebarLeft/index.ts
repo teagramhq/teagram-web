@@ -1763,22 +1763,22 @@ export class AppSidebarLeft extends SidebarSlider {
     });
   }
 
-  public addAccount = async(e?: MouseEvent | TouchEvent) => {
+  public addAccount = async(e?: MouseEvent | TouchEvent, forceSameTab = false): Promise<'added' | 'limit' | 'max'> => {
     const totalAccounts = await AccountController.getTotalAccounts();
-    if(totalAccounts >= MAX_ACCOUNTS) return;
+    if(totalAccounts >= MAX_ACCOUNTS) return 'max';
 
     const hasSomeonePremium = await apiManagerProxy.hasSomeonePremium();
 
     if(totalAccounts === MAX_ACCOUNTS_FREE && !hasSomeonePremium) {
       new AccountsLimitPopup().show();
-      return;
+      return 'limit';
     }
 
       localStorage.setItem(scopeServerStorageKey('previous-account'), getCurrentAccount() + '');
     const isUsingPasscode = await DeferredIsUsingPasscode.isUsingPasscode();
     const openTabs = apiManagerProxy.getOpenTabsCount();
 
-    const newTab = e?.ctrlKey || e?.metaKey || (openTabs <= 1 && isUsingPasscode);
+    const newTab = !forceSameTab && (e?.ctrlKey || e?.metaKey || (openTabs <= 1 && isUsingPasscode));
     if(!newTab) {
       appImManager.goOffline();
 
@@ -1792,6 +1792,7 @@ export class AppSidebarLeft extends SidebarSlider {
     }
 
     changeAccount((totalAccounts + 1) as ActiveAccountNumber, newTab);
+    return 'added';
   };
 }
 

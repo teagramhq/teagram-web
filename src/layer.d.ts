@@ -17211,6 +17211,51 @@ export namespace MessagesComposedRichMessageWithAI {
   };
 }
 
+/**
+ * @link https://core.telegram.org/type/teagram.UserInviteLink
+ */
+export type TeagramUserInviteLink = TeagramUserInviteLink.teagramUserInviteLink;
+
+export namespace TeagramUserInviteLink {
+  export type teagramUserInviteLink = {
+    _: 'teagram.userInviteLink',
+    id: string | number,
+    link: string,
+    expires_at: number
+  };
+}
+
+/**
+ * @link https://core.telegram.org/type/teagram.UserInvite
+ */
+export type TeagramUserInvite = TeagramUserInvite.teagramUserInvite;
+
+export namespace TeagramUserInvite {
+  export type teagramUserInvite = {
+    _: 'teagram.userInvite',
+    id: string | number,
+    state: string,
+    created_at: number,
+    expires_at: number
+  };
+}
+
+/**
+ * @link https://core.telegram.org/type/teagram.UserInvites
+ */
+export type TeagramUserInvites = TeagramUserInvites.teagramUserInvites;
+
+export namespace TeagramUserInvites {
+  export type teagramUserInvites = {
+    _: 'teagram.userInvites',
+    invites: Array<TeagramUserInvite>,
+    quota: string | number,
+    weekly_count: string | number,
+    flags?: number,
+    next_available_at?: string | number
+  };
+}
+
 export interface ConstructorDeclMap {
   'error': Error.error,
   'inputPeerEmpty': InputPeer.inputPeerEmpty,
@@ -18851,6 +18896,9 @@ export interface ConstructorDeclMap {
   'dialogPeerCommunity': DialogPeer.dialogPeerCommunity,
   'inputAiComposeToneSingleUse': InputAiComposeTone.inputAiComposeToneSingleUse,
   'updateBotStarsSubscription': Update.updateBotStarsSubscription,
+  'teagram.userInviteLink': TeagramUserInviteLink.teagramUserInviteLink,
+  'teagram.userInvite': TeagramUserInvite.teagramUserInvite,
+  'teagram.userInvites': TeagramUserInvites.teagramUserInvites,
   'messageEntityEmoji': MessageEntity.messageEntityEmoji,
   'messageEntityHighlight': MessageEntity.messageEntityHighlight,
   'messageEntityLinebreak': MessageEntity.messageEntityLinebreak,
@@ -23697,6 +23745,18 @@ export type MessagesRequestChatJoinWebView = {
   platform: string
 };
 
+export type TeagramCreateUserInvite = {
+
+};
+
+export type TeagramListUserInvites = {
+
+};
+
+export type TeagramRevokeUserInvite = {
+  id: string | number
+};
+
 export interface MethodDeclMap {
   'invokeAfterMsg': {req: InvokeAfterMsg, res: any},
   'invokeAfterMsgs': {req: InvokeAfterMsgs, res: any},
@@ -24505,4 +24565,7 @@ export interface MethodDeclMap {
   'messages.translateRichMessage': {req: MessagesTranslateRichMessage, res: MessagesTranslatedRichMessage},
   'messages.composeRichMessageWithAI': {req: MessagesComposeRichMessageWithAI, res: MessagesComposedRichMessageWithAI},
   'messages.requestChatJoinWebView': {req: MessagesRequestChatJoinWebView, res: WebViewResult},
+  'teagram.createUserInvite': {req: TeagramCreateUserInvite, res: TeagramUserInviteLink},
+  'teagram.listUserInvites': {req: TeagramListUserInvites, res: TeagramUserInvites},
+  'teagram.revokeUserInvite': {req: TeagramRevokeUserInvite, res: boolean},
 }

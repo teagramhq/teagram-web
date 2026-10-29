@@ -287,11 +287,20 @@ export class AppNavigationController {
     // this.pushState();
   }
 
-  private handleItem(item: NavigationItem, wasIndex = this.navigations.indexOf(item)) {
+  private handleItem(
+    item: NavigationItem,
+    wasIndex = this.navigations.indexOf(item),
+    preserveHistoryOnVeto = false
+  ) {
     const good = item.onPop(!this.manual ? false : undefined);
     this.debug && this.log('popstate, navigation:', item, this.navigations);
     if(good === false) { // insert item on the same place, because .push can have different index if new item has appeared
-      this.spliceItems(Math.min(this.navigations.length, wasIndex), 0, item);
+      const index = Math.min(this.navigations.length, wasIndex);
+      if(preserveHistoryOnVeto) {
+        this.navigations.splice(index, 0, item);
+      } else {
+        this.spliceItems(index, 0, item);
+      }
     } else if(!item.noBlurOnPop) {
       blurActiveElement(); // no better place for it
     }
@@ -360,8 +369,8 @@ export class AppNavigationController {
     this.manual = true;
     // ! commented because 'popstate' event will be fired with delay
     // if(index !== (this.navigations.length - 1)) {
-    this.spliceItems(index, 1);
-    this.handleItem(item, index);
+    this.navigations.splice(index, 1);
+    this.handleItem(item, index, true);
     // }
   }
 

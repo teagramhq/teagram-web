@@ -5,8 +5,10 @@ import {isPrivateUsernameCredentialError} from '@/pages/privateUsernameLoginStat
 import {invokeSignUpWithTurnstile, invokeTurnstileProtected} from '@/pages/turnstileSignup';
 import type {RequestTurnstileChallenge} from '@/pages/turnstileSignup';
 import {isUsernameValid} from '@lib/richTextProcessor/validators';
+import {parsePrivateUsernameInviteSecret} from '@/pages/privateUsernameInvite';
 
 export {isPrivateUsernameCredentialError} from '@/pages/privateUsernameLoginState';
+export {parsePrivateUsernameInviteSecret} from '@/pages/privateUsernameInvite';
 
 export type PrivateUsernameAuthResult =
   | {kind: 'invalidInput'}
@@ -102,7 +104,8 @@ export async function authenticatePrivateUsername(
   if(!isPrivateUsername(username, appConfig)) return {kind: 'invalidInput'};
   if(registration && registration.mode !== 'closed' && !registration.displayName.trim()) return {kind: 'invalidInput'};
   if(registration && registration.mode !== 'closed' && !registration.password) return {kind: 'invalidInput'};
-  if(registration?.mode === 'invite' && !registration.inviteSecret?.trim()) return {kind: 'invalidInput'};
+  const inviteSecret = registration?.mode === 'invite' ? parsePrivateUsernameInviteSecret(registration.inviteSecret || '') : undefined;
+  if(registration?.mode === 'invite' && !inviteSecret) return {kind: 'invalidInput'};
 
   let didRecoverAuthKey = false;
   let authKeyRecoveryFailed = false;
@@ -174,7 +177,7 @@ export async function authenticatePrivateUsername(
 
   let authorization: unknown;
   try {
-    const phoneCode = registration?.mode === 'invite' ? registration.inviteSecret : '';
+    const phoneCode = registration?.mode === 'invite' ? inviteSecret : '';
     authorization = await invokeAuthApi('auth.signIn', {
       phone_number: username,
       phone_code_hash: sentCode.phone_code_hash,

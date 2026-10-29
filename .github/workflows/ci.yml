@@ -202,7 +202,7 @@ jobs:
           printf 'stage=wait_for_readiness result=success\n'
 
       - name: Run private username auth browser smoke
-        run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameSignInTurnstile.spec.ts e2e/privateUsernameRegistration.spec.ts e2e/guestSignup.spec.ts e2e/customServerRegistration.spec.ts
+        run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameSignInTurnstile.spec.ts e2e/privateUsernameRegistration.spec.ts e2e/userInvites.spec.ts e2e/guestSignup.spec.ts e2e/customServerRegistration.spec.ts
 
       - name: Run disposable custom-server sign-in browser smoke
         id: custom-server-smoke
