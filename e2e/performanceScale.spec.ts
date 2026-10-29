@@ -59,11 +59,11 @@ test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 });
 
-function installInstrumentation(page: Page, requestCounter: {value: number}) {
+function installInstrumentation(page: Page, requestCounter: {value: number}, injectLongTask = false) {
   page.on('request', (request) => {
     if(request.resourceType() !== 'websocket') ++requestCounter.value;
   });
-  return page.addInitScript(() => {
+  return page.addInitScript((injectLongTask) => {
     const perf: any = (window as any).__teagramPerf = {
       longTasks: [] as Array<{startTime: number, duration: number}>,
       frameIntervals: [] as number[],
@@ -79,6 +79,14 @@ function installInstrumentation(page: Page, requestCounter: {value: number}) {
       });
       observer.observe({type: 'longtask', buffered: true});
     } catch{}
+    if(injectLongTask) {
+      window.addEventListener('wheel', (event) => {
+        if(perf.injectedLongTask || !(event.target instanceof Element) || !event.target.closest('.bubbles-scrollable')) return;
+        const started = performance.now();
+        while(performance.now() - started < 100) {}
+        perf.injectedLongTask = {started, duration: performance.now() - started};
+      }, {capture: true});
+    }
     perf.startFrames = () => {
       perf.frameActive = true;
       perf.lastFrame = performance.now();
@@ -91,7 +99,7 @@ function installInstrumentation(page: Page, requestCounter: {value: number}) {
       requestAnimationFrame(sampleFrame);
     };
     perf.stopFrames = () => perf.frameActive = false;
-  });
+  }, injectLongTask);
 }
 
 async function begin(page: Page, requests: {value: number}) {
@@ -166,7 +174,7 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   return capture(page, requests, await elapsed(page));
 }
 
-async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, injectLongTask = false) {
+async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean) {
   const hasPendingHistory = () => page.evaluate(() => {
     const bubbles = (window as any).appImManager.chat.bubbles;
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
@@ -182,7 +190,6 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   let previousMin = initial.min;
   let stagnant = 0;
   let currentMin = initial.min;
-  let injectedLongTask = false;
   const scrollable = page.locator('.bubbles-scrollable');
   const box = await scrollable.boundingBox();
   expect(box).toBeTruthy();
@@ -192,15 +199,6 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     const scrollTop = await scrollable.evaluate((element) => element.scrollTop);
     if(scrollTop < 2) await scrollable.evaluate((element) => element.scrollTop = 2);
     await page.mouse.wheel(0, -2_000);
-    if(injectLongTask && !injectedLongTask) {
-      const blockedFor = await page.evaluate(() => {
-        const started = performance.now();
-        while(performance.now() - started < 100) {}
-        return performance.now() - started;
-      });
-      expect(blockedFor).toBeGreaterThanOrEqual(100);
-      injectedLongTask = true;
-    }
     await page.waitForTimeout(120);
     currentMin = await page.evaluate(() => {
       const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));
@@ -217,7 +215,6 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     previousMin = currentMin;
     if(stagnant >= 12) break;
   }
-  if(injectLongTask) expect(injectedLongTask).toBe(true);
   await page.evaluate(() => (window as any).__teagramPerf.stopFrames());
   const scrollState = await page.evaluate(() => {
     const chat = (window as any).appImManager.chat;
@@ -431,15 +428,25 @@ test('measures a 100 ms task during app scrolling and blocks the negative contro
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests);
+  await installInstrumentation(page, requests, true);
 
   try {
     await page.goto(origin!, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
     await openPartnerChat(page, requests, fixture!);
-    const negativeSample = await scrollBackTwoThousand(page, requests, true, true);
+    const negativeSample = await scrollBackTwoThousand(page, requests, true);
     expect(negativeSample).toBeTruthy();
     expect(negativeSample.longTasksOver50Ms).toBeGreaterThan(0);
+    const injectedTask = await page.evaluate(() => {
+      const perf = (window as any).__teagramPerf;
+      const task = perf.injectedLongTask;
+      return {
+        duration: task?.duration,
+        observed: task && perf.longTasks.some((entry: {startTime: number, duration: number}) => entry.startTime <= task.started && entry.startTime + entry.duration >= task.started && entry.duration > 50)
+      };
+    });
+    expect(injectedTask.duration).toBeGreaterThanOrEqual(100);
+    expect(injectedTask.observed).toBe(true);
     const existingScrollSamples = report.variants.head['100x'].scrollBack2k;
     expect(existingScrollSamples).toHaveLength(PERFORMANCE_REPEATS);
 
