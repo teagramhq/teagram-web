@@ -28,7 +28,7 @@ For the legacy poll regression control, add --poll-creation-negative-control and
 
 The fixture must remain running after artifact-ready. The command validates its immutable pins,
 protected synthetic credentials, internal browser network, audited artifact evidence, per-context
-shared-worker observation, sign-in/first-message/message/group plus independently optional channel, poll and guest-signup scenarios,
+shared-worker observation, sign-in/first-message/message/group plus independently optional channel and poll scenarios,
 or one bounded Username submission. The opt-in page-error diagnostics include bounded, sanitized
 source frames, private page path, fixed scenario and stage labels, and optional RPC error type/code.
 Raw page-error messages and stack text are never serialized.
@@ -329,7 +329,7 @@ if(args?.help) {
       browserResult.gateBreakdown = parsePassedBrowserGateBreakdown(browserResult);
       const expectedScreenshots = expectedScreenshotCount(args);
       const incompleteEvidence = [];
-      if(browserResult.contextCount !== expectedBrowserContextCount(args)) incompleteEvidence.push('contexts');
+      if(browserResult.contextCount !== expectedBrowserContextCount()) incompleteEvidence.push('contexts');
       if(browserResult.screenshotsCaptured !== expectedScreenshots) {
         incompleteEvidence.push(`screenshots_${Number.isSafeInteger(browserResult.screenshotsCaptured) ? browserResult.screenshotsCaptured : 'unavailable'}_expected_${expectedScreenshots}`);
       }
@@ -348,7 +348,7 @@ if(args?.help) {
       // The page-session observer cannot see shared workers, so the shared-worker
       // evidence is the browser-level observation block: synthetic controls, per-context
       // attribution by browser context, and complete coverage.
-      parseWorkerObservation(browserResult.workerObservation, args.scenarios);
+      parseWorkerObservation(browserResult.workerObservation);
     }
   } catch(error) {
     operationError = error;

@@ -29,7 +29,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
-const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, getClientErrorDiagnostics, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, emitReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, runGuestSignupScenario, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword, waitForUnreadCount} = realClientBrowser;
+const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, getClientErrorDiagnostics, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, emitReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword, waitForUnreadCount} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://teagramd.test';
@@ -1910,19 +1910,6 @@ describe('confined runner shared-worker observation contract', () => {
     expect(() => parseWorkerObservation(tampered((block: any) => {
       block.contexts.alice.workerFailure = HOSTILE.phrase;
     }))).toThrow('isolated browser worker observation does not match the closed schema');
-  });
-
-  it('requires complete worker discovery evidence for the optional guest context', () => {
-    const scenarios = ['sign-in', 'first-message', 'message', 'group', 'guest-signup'];
-    const block = observationBlock();
-    block.contexts.guest = replayContext([{kind: 'target', target: pageTarget('guest-page', 'guest-context')}]);
-
-    expect(parseWorkerObservation(block, scenarios)).toStrictEqual(block);
-    expect(() => parseWorkerObservation(block)).toThrow('worker observation app contexts are incomplete');
-    expect(() => parseWorkerObservation({
-      ...block,
-      contexts: {...block.contexts, guest: {...block.contexts.guest, coverageComplete: 0}}
-    }, scenarios)).toThrow('guest shared-worker observation coverage is incomplete');
   });
 
   it('keeps the resource bounds and page count that the report depends on', () => {
@@ -3893,6 +3880,11 @@ describe('real client scenario contract', () => {
     expect(() => parseRequiredScenarios(' , ')).toThrow('scenario selection is required');
   });
 
+  it('rejects guest signup because private artifacts do not expose discovery', () => {
+    expect(() => parseRequiredScenarios('sign-in,first-message,message,group,guest-signup'))
+    .toThrow('unknown scenario: guest-signup');
+  });
+
   it('requires every scenario exactly once', () => {
     expect(() => parseRequiredScenarios('sign-in,message')).toThrow('required scenarios are missing');
     expect(() => parseRequiredScenarios('sign-in,first-message,message,group,group')).toThrow('duplicate scenario');
@@ -3901,7 +3893,6 @@ describe('real client scenario contract', () => {
     expect(parseRequiredScenarios('sign-in,first-message,message,group,channel')).toEqual(['sign-in', 'first-message', 'message', 'group', 'channel']);
     expect(parseRequiredScenarios('sign-in,first-message,message,group,poll')).toEqual(['sign-in', 'first-message', 'message', 'group', 'poll']);
     expect(parseRequiredScenarios('sign-in,first-message,message,group,channel,poll')).toEqual(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']);
-    expect(parseRequiredScenarios('sign-in,first-message,message,group,guest-signup')).toEqual(['sign-in', 'first-message', 'message', 'group', 'guest-signup']);
     expect(parseRequiredScenarios('channel,poll,group,message,first-message,sign-in')).toEqual(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']);
   });
 
@@ -3942,7 +3933,6 @@ describe('real client scenario contract', () => {
   it('counts poll and optional channel screenshots separately for positive and negative runs', () => {
     expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group']})).toBe(20);
     expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel']})).toBe(30);
-    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'guest-signup']})).toBe(20);
     expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll']})).toBe(34);
     expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']})).toBe(44);
     expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll']})).toBe(24);
@@ -3950,83 +3940,8 @@ describe('real client scenario contract', () => {
     expect(() => realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'group']})).toThrow('negative control requires poll');
   });
 
-  it('expects one browser context for guest signup in addition to the two account contexts', () => {
+  it('expects the two account contexts for supported scenarios', () => {
     expect(realClientContract.expectedBrowserContextCount()).toBe(2);
-    expect(realClientContract.expectedBrowserContextCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll']})).toBe(2);
-    expect(realClientContract.expectedBrowserContextCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'guest-signup']})).toBe(3);
-  });
-
-  it('registers the guest page and its network observer with worker discovery', async() => {
-    const cdp: any = new EventEmitter();
-    cdp.send = async(method: string) => method === 'Target.getTargetInfo'
-      ? {targetInfo: {targetId: 'guest-page', browserContextId: 'guest-context'}}
-      : {};
-    cdp.detach = async() => {};
-
-    const page: any = new EventEmitter();
-    const context = {
-      newCDPSession: async() => cdp,
-      newPage: async() => page,
-      close: async() => {}
-    };
-    const waitFor = vi.fn(async(options: {timeout?: number}) => { void options; });
-    const locator = {
-      waitFor,
-      click: async() => {},
-      getByRole: () => locator,
-      getByText: () => locator,
-      count: async() => 0
-    };
-    Object.assign(page, {
-      context: () => context,
-      mainFrame: () => ({}),
-      exposeBinding: async() => {},
-      addInitScript: async() => {},
-      goto: async() => ({status: () => 200}),
-      getByRole: () => locator,
-      getByTestId: () => locator,
-      locator: () => locator,
-      waitForFunction: async() => {},
-      evaluate: vi.fn(async() => true)
-    });
-
-    const registrations: any[] = [];
-    const registry = {
-      discoveryActive: true,
-      registerContext: (browserContextId: string, observer: any, networkSink: any) => {
-        registrations.push({browserContextId, observer, networkSink});
-        observer.state.discoveryActive = true;
-        observer.registerTarget({targetId: 'guest-page', type: 'page'});
-      }
-    };
-    const contexts: any[] = [];
-    const observers: any[] = [];
-    const appObservers: any = {};
-
-    try {
-      await expect(runGuestSignupScenario(
-        {newContext: async() => context},
-        {scenarios: ['guest-signup']},
-        contexts,
-        registry,
-        observers,
-        appObservers
-      )).resolves.toEqual({name: 'guest-signup', status: 'passed'});
-
-      expect(contexts).toEqual([context]);
-      expect(observers).toHaveLength(1);
-      expect(registrations).toHaveLength(1);
-      expect(registrations[0].browserContextId).toBe('guest-context');
-      expect(registrations[0].observer).toBe(appObservers.guest);
-      expect(typeof registrations[0].networkSink.observeTarget).toBe('function');
-      expect(appObservers.guest.summary()).toMatchObject({pageTargets: 1, coverageComplete: 1, discoveryActive: 1});
-      const guestStorageRead = String(page.evaluate.mock.calls[0][0]);
-      expect(guestStorageRead).toContain('appStorage.get');
-      expect(guestStorageRead).toContain('guestCredentials');
-      expect(waitFor.mock.calls[1]?.[0]?.timeout).toBe(30_000);
-    } finally {
-      await Promise.all(observers.map((observer) => observer.stop()));
-    }
   });
 
   it('pins the poll creation negative control to the pre-MAIN-2111 server and fixed evidence', () => {
