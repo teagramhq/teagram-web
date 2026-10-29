@@ -157,24 +157,16 @@ async function reloadChatList(page: Page, requests: {value: number}) {
   return capture(page, requests, await elapsed(page));
 }
 
-async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, injectLongTask = false) {
+async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
   await begin(page, requests);
   await row.click();
-  if(injectLongTask) {
-    const blockedFor = await page.evaluate(() => {
-      const started = performance.now();
-      while(performance.now() - started < 100) {}
-      return performance.now() - started;
-    });
-    expect(blockedFor).toBeGreaterThanOrEqual(100);
-  }
   await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
   return capture(page, requests, await elapsed(page));
 }
 
-async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean) {
+async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, injectLongTask = false) {
   const hasPendingHistory = () => page.evaluate(() => {
     const bubbles = (window as any).appImManager.chat.bubbles;
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
@@ -190,6 +182,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   let previousMin = initial.min;
   let stagnant = 0;
   let currentMin = initial.min;
+  let injectedLongTask = false;
   const scrollable = page.locator('.bubbles-scrollable');
   const box = await scrollable.boundingBox();
   expect(box).toBeTruthy();
@@ -199,6 +192,15 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     const scrollTop = await scrollable.evaluate((element) => element.scrollTop);
     if(scrollTop < 2) await scrollable.evaluate((element) => element.scrollTop = 2);
     await page.mouse.wheel(0, -2_000);
+    if(injectLongTask && !injectedLongTask) {
+      const blockedFor = await page.evaluate(() => {
+        const started = performance.now();
+        while(performance.now() - started < 100) {}
+        return performance.now() - started;
+      });
+      expect(blockedFor).toBeGreaterThanOrEqual(100);
+      injectedLongTask = true;
+    }
     await page.waitForTimeout(120);
     currentMin = await page.evaluate(() => {
       const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));
@@ -215,6 +217,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     previousMin = currentMin;
     if(stagnant >= 12) break;
   }
+  if(injectLongTask) expect(injectedLongTask).toBe(true);
   await page.evaluate(() => (window as any).__teagramPerf.stopFrames());
   const scrollState = await page.evaluate(() => {
     const chat = (window as any).appImManager.chat;
@@ -412,7 +415,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   }
 });
 
-test('measures a 100 ms task during app chat open and blocks the negative control', async({browser}) => {
+test('measures a 100 ms task during app scrolling and blocks the negative control', async({browser}) => {
   expect(username).toBeTruthy();
   expect(password).toBeTruthy();
   const fixture = fixtures['100x'];
@@ -433,23 +436,25 @@ test('measures a 100 ms task during app chat open and blocks the negative contro
   try {
     await page.goto(origin!, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
-    const negativeSample = await openPartnerChat(page, requests, fixture!, true);
+    await openPartnerChat(page, requests, fixture!);
+    const negativeSample = await scrollBackTwoThousand(page, requests, true, true);
+    expect(negativeSample).toBeTruthy();
     expect(negativeSample.longTasksOver50Ms).toBeGreaterThan(0);
-    const existingChatOpenSamples = report.variants.head['100x'].chatOpen;
-    expect(existingChatOpenSamples).toHaveLength(PERFORMANCE_REPEATS);
+    const existingScrollSamples = report.variants.head['100x'].scrollBack2k;
+    expect(existingScrollSamples).toHaveLength(PERFORMANCE_REPEATS);
 
     const head = {
       ...report.variants.head,
       '100x': {
         ...report.variants.head['100x'],
-        chatOpen: [...existingChatOpenSamples, negativeSample]
+        scrollBack2k: [...existingScrollSamples, negativeSample]
       }
     };
     const evaluation = evaluatePerformance({
       ...report,
       variants: {...report.variants, head}
     });
-    expect(evaluation.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes('long task'))).toBe(true);
+    expect(evaluation.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task'))).toBe(true);
   } finally {
     await context.close();
   }

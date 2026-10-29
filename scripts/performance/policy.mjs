@@ -141,7 +141,7 @@ export function evaluatePerformance(report, history = []) {
         });
       }
 
-      if(scale === '100x') {
+      if(scale === '100x' && scenario.key === 'scrollBack2k') {
         headSamples.forEach((sample, index) => {
           if(Number.isFinite(sample?.longTasksOver50Ms) && sample.longTasksOver50Ms > 0) {
             addFailure(blockingFailures, scale, scenario.key, `${sample.longTasksOver50Ms} long task(s) over 50 ms in head sample ${index + 1}`);

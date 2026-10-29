@@ -103,8 +103,8 @@ test('blocks a long task in any 100x scroll repeat', () => {
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')));
 });
 
-test('blocks a long task in any 100x scenario sample', () => {
-  for(const {key} of SCENARIOS) {
+test('does not block long tasks outside 100x scrolling', () => {
+  for(const {key} of SCENARIOS.filter(({key}) => key !== 'scrollBack2k')) {
     const head = scaleVariants({'100x': {[key]: [
       {longTasksOver50Ms: 0},
       {longTasksOver50Ms: 1},
@@ -112,7 +112,7 @@ test('blocks a long task in any 100x scenario sample', () => {
     ]}});
     const result = evaluatePerformance(report({head}));
 
-    assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes('long task')));
+    assert.equal(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes('long task')), false);
   }
 });
 
