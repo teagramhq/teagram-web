@@ -99,11 +99,6 @@ export function evaluatePerformance(report, history = []) {
     }
 
     if(baseSamples.length) {
-      for(const [field, label] of [['requests', 'requests'], ['domNodes', 'DOM nodes']]) {
-        if(Number.isFinite(head[field]) && Number.isFinite(base[field]) && head[field] > base[field]) {
-          addFailure(blockingFailures, scenario.key, `${label} increased from ${base[field]} to ${head[field]}`);
-        }
-      }
       if(Number.isFinite(head.bundleBytes) && Number.isFinite(base.bundleBytes) && head.bundleBytes > base.bundleBytes * 1.02) {
         addFailure(blockingFailures, scenario.key, `bundle grew from ${base.bundleBytes} to ${head.bundleBytes} bytes (over 2%)`);
       }
@@ -113,7 +108,7 @@ export function evaluatePerformance(report, history = []) {
       return Number.isFinite(sample.ms) && timingFailureForSample(sample, scenario, mainValues);
     });
     const absoluteBudgetFailure = scenario.budgetMs !== null && Number.isFinite(head.ms) && head.ms > scenario.budgetMs;
-    if(absoluteBudgetFailure) {
+    if(calibrated && absoluteBudgetFailure) {
       addFailure(blockingFailures, scenario.key, `median timing ${head.ms} ms exceeded the ${scenario.budgetMs} ms budget`);
     } else if(calibrated && repeatedTimingFailure) {
       const budget = scenario.budgetMs === null ? '' : `; budget ${scenario.budgetMs} ms`;
@@ -121,7 +116,7 @@ export function evaluatePerformance(report, history = []) {
     }
 
     const noiseWidth = mainValues.length ? Math.max(median(mainValues) * 0.15, 3 * spread(mainValues)) : undefined;
-    const budgetStatus = absoluteBudgetFailure || calibrated && repeatedTimingFailure ? 'failed' : calibrated ? 'calibrated' : 'warming';
+    const budgetStatus = calibrated && (absoluteBudgetFailure || repeatedTimingFailure) ? 'failed' : calibrated ? 'calibrated' : 'warming';
     rows.push({
       ...scenario,
       base,

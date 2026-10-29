@@ -41,7 +41,7 @@ const summary = [
   '',
   table,
   '',
-  evaluation.calibratedScenarios === 0 ? 'Relative timing checks warm up until 20 successful main runs calibrate each scenario. Fixed budgets, counters, bundle growth, long tasks and dropped frames block immediately.' : `Relative timing calibration is active for ${evaluation.calibratedScenarios} scenario(s).`,
+  evaluation.calibratedScenarios === 0 ? 'Timing budgets and relative timing checks are report-only until each scenario has 20 successful main runs. Bundle growth, long tasks and dropped frames block immediately.' : `Timing calibration is active for ${evaluation.calibratedScenarios} scenario(s); uncalibrated timing rows remain report-only until each reaches 20 successful main runs. Bundle growth, long tasks and dropped frames block immediately.`,
   failures.length ? `\nBlocking findings:\n${failures.map((failure) => `- ${failure}`).join('\n')}` : '\nNo blocking performance findings.'
 ].join('\n');
 

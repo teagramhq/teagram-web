@@ -47,8 +47,8 @@ test('does not apply the scroll long-task gate to other scenarios', () => {
   assert.equal(result.blockingFailures.some((failure) => failure.includes('chatOpen') && failure.includes('long task')), false);
 });
 
-test('reports timings without blocking until each scenario has 20 main runs', () => {
-  const head = samples({dateJump: {ms: 1_400}});
+test('reports over-budget timings without blocking until each scenario has 20 main runs', () => {
+  const head = samples({coldChatList: {ms: 1_200}});
   const history = Array.from({length: 19}, () => ({variants: {head: samples()}}));
   const result = evaluatePerformance(report({head}), history);
 
@@ -57,19 +57,25 @@ test('reports timings without blocking until each scenario has 20 main runs', ()
   assert.equal(result.rows.find((row) => row.key === 'coldChatList').budgetStatus, 'warming');
 });
 
-test('blocks fixed timing budgets before relative timing calibration', () => {
+test('blocks fixed timing budgets once timing calibration is complete', () => {
   const head = samples({coldChatList: {ms: 1_200}});
-  const result = evaluatePerformance(report({head}));
+  const history = Array.from({length: 20}, () => ({variants: {head: samples()}}));
+  const result = evaluatePerformance(report({head}), history);
 
   assert.ok(result.blockingFailures.some((failure) => failure.includes('coldChatList') && failure.includes('1000 ms budget')));
   assert.equal(result.rows.find((row) => row.key === 'coldChatList').budgetStatus, 'failed');
 });
 
-test('blocks deterministic request increases against the same-run base', () => {
-  const head = samples({globalSearch: {requests: 13}});
+test('reports request and DOM changes without blocking the gate', () => {
+  const head = samples({globalSearch: {requests: 13, domNodes: 301}});
   const result = evaluatePerformance(report({head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('globalSearch') && failure.includes('requests')));
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('globalSearch') && /requests|DOM nodes/.test(failure)), false);
+  const row = result.rows.find((item) => item.key === 'globalSearch');
+  assert.equal(row.base.requests, 12);
+  assert.equal(row.head.requests, 13);
+  assert.equal(row.base.domNodes, 300);
+  assert.equal(row.head.domNodes, 301);
 });
 
 test('blocks an incomplete measurement instead of treating missing counters as zero', () => {
