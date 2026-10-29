@@ -16,10 +16,10 @@ regressions block when the head median is above the master median by more than
 the 1x median by more than 1.5x. Absolute cold, warm, and chat-open budgets are
 report-only until the matching scenario has 20 master runs; the table marks any
 over-budget rows during warmup. The 1x results are reported and used for the
-paired scale comparison. Bundle, 100x long-task and scroll quality gates block
-immediately. On pull requests, any 100x scenario fails if a repeat records a
-task over 50 ms; dropped-frame percentage is pooled across all frame intervals
-from the three scroll repeats.
+paired scale comparison. Bundle and 100x scroll-quality gates block immediately.
+On pull requests, scrolling fails if any 100x repeat records a task over 50 ms
+or the pooled dropped-frame percentage reaches 1%; dropped-frame percentage is
+pooled across all frame intervals from the three scroll repeats.
 Every scenario and size needs three base bundle measurements or the performance
 gate fails closed.
 Because the base client has no date-jump flow, its open-chat

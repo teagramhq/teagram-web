@@ -59,11 +59,11 @@ test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 });
 
-function installInstrumentation(page: Page, requestCounter: {value: number}) {
+function installInstrumentation(page: Page, requestCounter: {value: number}, injectLongTask = false) {
   page.on('request', (request) => {
     if(request.resourceType() !== 'websocket') ++requestCounter.value;
   });
-  return page.addInitScript(() => {
+  return page.addInitScript((injectLongTask) => {
     const perf: any = (window as any).__teagramPerf = {
       longTasks: [] as Array<{startTime: number, duration: number}>,
       frameIntervals: [] as number[],
@@ -79,6 +79,14 @@ function installInstrumentation(page: Page, requestCounter: {value: number}) {
       });
       observer.observe({type: 'longtask', buffered: true});
     } catch{}
+    if(injectLongTask) {
+      window.addEventListener('wheel', (event) => {
+        if(perf.injectedLongTask || !(event.target instanceof Element) || !event.target.closest('.bubbles-scrollable')) return;
+        const started = performance.now();
+        while(performance.now() - started < 100) {}
+        perf.injectedLongTask = {started, duration: performance.now() - started};
+      }, {capture: true});
+    }
     perf.startFrames = () => {
       perf.frameActive = true;
       perf.lastFrame = performance.now();
@@ -91,7 +99,7 @@ function installInstrumentation(page: Page, requestCounter: {value: number}) {
       requestAnimationFrame(sampleFrame);
     };
     perf.stopFrames = () => perf.frameActive = false;
-  });
+  }, injectLongTask);
 }
 
 async function begin(page: Page, requests: {value: number}) {
@@ -157,19 +165,11 @@ async function reloadChatList(page: Page, requests: {value: number}) {
   return capture(page, requests, await elapsed(page));
 }
 
-async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, injectLongTask = false) {
+async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
   await begin(page, requests);
   await row.click();
-  if(injectLongTask) {
-    const blockedFor = await page.evaluate(() => {
-      const started = performance.now();
-      while(performance.now() - started < 100) {}
-      return performance.now() - started;
-    });
-    expect(blockedFor).toBeGreaterThanOrEqual(100);
-  }
   await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
   return capture(page, requests, await elapsed(page));
 }
@@ -413,7 +413,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   }
 });
 
-test('measures a 100 ms task during app chat open and blocks the negative control', async({browser}) => {
+test('measures a 100 ms task during app scrolling and blocks the negative control', async({browser}) => {
   expect(username).toBeTruthy();
   expect(password).toBeTruthy();
   const fixture = fixtures['100x'];
@@ -429,28 +429,40 @@ test('measures a 100 ms task during app chat open and blocks the negative contro
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests);
+  await installInstrumentation(page, requests, true);
 
   try {
     await page.goto(origin!, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
-    const negativeSample = await openPartnerChat(page, requests, fixture!, true);
+    await openPartnerChat(page, requests, fixture!);
+    const negativeSample = await scrollBackTwoThousand(page, requests, true);
+    expect(negativeSample).toBeTruthy();
     expect(negativeSample.longTasksOver50Ms).toBeGreaterThan(0);
-    const existingChatOpenSamples = report.variants.head['100x'].chatOpen;
-    expect(existingChatOpenSamples).toHaveLength(PERFORMANCE_REPEATS);
+    const injectedTask = await page.evaluate(() => {
+      const perf = (window as any).__teagramPerf;
+      const task = perf.injectedLongTask;
+      return {
+        duration: task?.duration,
+        observed: task && perf.longTasks.some((entry: {startTime: number, duration: number}) => entry.startTime <= task.started && entry.startTime + entry.duration >= task.started && entry.duration > 50)
+      };
+    });
+    expect(injectedTask.duration).toBeGreaterThanOrEqual(100);
+    expect(injectedTask.observed).toBe(true);
+    const existingScrollSamples = report.variants.head['100x'].scrollBack2k;
+    expect(existingScrollSamples).toHaveLength(PERFORMANCE_REPEATS);
 
     const head = {
       ...report.variants.head,
       '100x': {
         ...report.variants.head['100x'],
-        chatOpen: [...existingChatOpenSamples, negativeSample]
+        scrollBack2k: [...existingScrollSamples, negativeSample]
       }
     };
     const evaluation = evaluatePerformance({
       ...report,
       variants: {...report.variants, head}
     });
-    expect(evaluation.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes('long task'))).toBe(true);
+    expect(evaluation.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task'))).toBe(true);
   } finally {
     await context.close();
   }

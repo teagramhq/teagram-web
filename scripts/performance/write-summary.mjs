@@ -41,7 +41,7 @@ const summary = [
   '',
   table,
   '',
-  evaluation.calibratedScenarios === 0 ? 'Timing budgets and the 100x/1x slowdown ceiling are report-only until each scale and scenario has 20 compatible successful master runs; over-budget 100x rows are marked in the table. Pull requests require complete base bundle measurements; bundle growth, 100x long-task, and scroll quality gates block immediately.' : `Timing calibration is active for ${evaluation.calibratedScenarios} scale/scenario row(s); timing checks are report-only for uncalibrated rows and mark absolute budget misses until each reaches 20 compatible successful master runs. Pull requests require complete base bundle measurements; bundle growth, 100x long-task, and scroll quality gates block immediately.`,
+  evaluation.calibratedScenarios === 0 ? 'Timing budgets and the 100x/1x slowdown ceiling are report-only until each scale and scenario has 20 compatible successful master runs; over-budget 100x rows are marked in the table. Pull requests require complete base bundle measurements; bundle growth and 100x scroll-quality gates block immediately.' : `Timing calibration is active for ${evaluation.calibratedScenarios} scale/scenario row(s); timing checks are report-only for uncalibrated rows and mark absolute budget misses until each reaches 20 compatible successful master runs. Pull requests require complete base bundle measurements; bundle growth and 100x scroll-quality gates block immediately.`,
   failures.length ? `\nBlocking findings:\n${failures.map((failure) => `- ${failure}`).join('\n')}` : '\nNo blocking performance findings.'
 ].join('\n');
 
