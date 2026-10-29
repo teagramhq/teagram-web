@@ -280,7 +280,10 @@ jobs:
           "$(go env GOPATH)/bin/actionlint" -ignore 'label "ubuntu-26.04" is unknown' \
             .github/workflows/ci.yml \
             .github/workflows/deploy.yml \
+            .github/workflows/private-artifact.yml \
             .github/workflows/real-client-browser-flow.yml
+          node --check .github/scripts/smoke-k8s-web.mjs
+          bash -n .github/scripts/install-kubectl.sh
           node --check scripts/real-client/browser.cjs
           node --check scripts/real-client/run.mjs
 
@@ -296,12 +299,211 @@ jobs:
       - name: Exercise deployment stack migration and rollback
         run: bash .github/scripts/test-deploy-stack-migration-rollback.sh
 
+  check-k8s-manifests:
+    name: 'check: k8s-manifests'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.27.2'
+
+      - name: Install kubeconform
+        run: go install github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0
+
+      - name: Install kubectl for the pinned Kubernetes version
+        env:
+          KUBERNETES_VERSION: 1.37.0
+        run: bash .github/scripts/install-kubectl.sh
+
+      - name: Render and validate production and CI overlays
+        env:
+          KUBERNETES_VERSION: 1.37.0
+        run: |
+          set -euo pipefail
+          source_commit="$(printf '%040d' 1)"
+          image_digest="$(printf '%064d' 1)"
+          artifact_digest="$(printf '%064d' 2)"
+          pin="$RUNNER_TEMP/teagram-web-image-pin.json"
+          jq -n \
+            --arg image "ghcr.io/teagramhq/teagram-web@sha256:$image_digest" \
+            --arg source_commit "$source_commit" \
+            --arg artifact_digest "sha256:$artifact_digest" \
+            '{image: $image, sourceCommit: $source_commit, artifactDigest: $artifact_digest}' \
+            >"$pin"
+          python3 deploy/k8s/render.py --pin "$pin" --source-commit "$source_commit" \
+            >"$RUNNER_TEMP/teagram-web-prod.yaml"
+          grep -Fq "ghcr.io/teagramhq/teagram-web@sha256:$image_digest" \
+            "$RUNNER_TEMP/teagram-web-prod.yaml"
+          ci_manifest="$RUNNER_TEMP/teagram-web-ci.yaml"
+          kubectl kustomize deploy/k8s/overlays/ci >"$ci_manifest"
+          "$(go env GOPATH)/bin/kubeconform" \
+            -strict \
+            -summary \
+            -kubernetes-version "$KUBERNETES_VERSION" \
+            "$ci_manifest"
+          kubectl apply --dry-run=client --validate=false -f "$ci_manifest"
+          prod_manifest="$RUNNER_TEMP/teagram-web-prod.yaml"
+          "$(go env GOPATH)/bin/kubeconform" \
+            -strict \
+            -summary \
+            -kubernetes-version "$KUBERNETES_VERSION" \
+            "$prod_manifest"
+          kubectl apply --dry-run=client --validate=false -f "$prod_manifest"
+
+  test-k8s-deploy:
+    name: 'test: k8s-deploy'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47 # v4.0.0
+        with:
+          version: 11.16.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Resolve the checked out source commit
+        id: source
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Read and validate the reviewed target
+        id: target
+        run: node scripts/private-artifact-release.mjs write-target-outputs
+
+      - name: Build and audit the private web artifact
+        env:
+          MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}
+          MTPROTO_PRIVATE_ENDPOINT: ${{ steps.target.outputs.endpoint }}
+          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ steps.target.outputs.key_file }}
+          PRIVATE_ARTIFACT_COMMIT: ${{ steps.source.outputs.commit }}
+        run: |
+          set -euo pipefail
+          pnpm exec vite build --outDir dist-private
+          pnpm run check-bundle -- dist-private
+          pnpm run check:private-artifact-assets -- dist-private
+          node scripts/verify-deployment-artifact.mjs --dist dist-private --commit "$PRIVATE_ARTIFACT_COMMIT"
+
+      - name: Build the reviewed web image
+        env:
+          IMAGE_REF: ghcr.io/teagramhq/teagram-web:ci
+          PRIVATE_ARTIFACT_COMMIT: ${{ steps.source.outputs.commit }}
+        run: >-
+          docker build
+          --platform linux/amd64
+          --file deploy/teagram-web/Dockerfile
+          --build-arg PRIVATE_ARTIFACT_COMMIT="$PRIVATE_ARTIFACT_COMMIT"
+          --tag "$IMAGE_REF"
+          .
+
+      - name: Set up k3d
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.27.2'
+
+      - name: Install kubectl for the pinned Kubernetes version
+        env:
+          KUBERNETES_VERSION: 1.37.0
+        run: bash .github/scripts/install-kubectl.sh
+
+      - name: Install k3d
+        run: go install github.com/k3d-io/k3d/v5@v5.8.3
+
+      - name: Start the pinned throwaway k3s cluster
+        env:
+          K3D_CLUSTER: teagram-web-test
+        run: |
+          set -euo pipefail
+          "$(go env GOPATH)/bin/k3d" cluster create "$K3D_CLUSTER" \
+            --servers 1 \
+            --agents 0 \
+            --wait \
+            --image rancher/k3s:v1.37.0-k3s1 \
+            --k3s-arg '--disable=traefik,servicelb,metrics-server@server:*'
+          kubectl config use-context "k3d-$K3D_CLUSTER"
+          kubectl wait --for=condition=Ready node --all --timeout=120s
+
+      - name: Apply the web image to the throwaway cluster
+        env:
+          K3D_CLUSTER: teagram-web-test
+          IMAGE_REF: ghcr.io/teagramhq/teagram-web:ci
+        run: |
+          set -euo pipefail
+          "$(go env GOPATH)/bin/k3d" image import "$IMAGE_REF" --cluster "$K3D_CLUSTER"
+          kubectl create namespace teagram
+          kubectl apply --dry-run=server -k deploy/k8s/overlays/ci
+          kubectl apply -k deploy/k8s/overlays/ci
+          kubectl rollout status deployment/teagram-web --namespace teagram --timeout=180s
+          kubectl wait --for=condition=Ready pod \
+            --namespace teagram \
+            --selector app.kubernetes.io/name=teagram-web \
+            --timeout=60s
+
+      - name: Smoke test the web root and JavaScript bundle
+        run: |
+          set -euo pipefail
+          kubectl port-forward --namespace teagram --address 127.0.0.1 service/teagram-web 18080:80 \
+            >"$RUNNER_TEMP/teagram-web-port-forward.log" 2>&1 &
+          port_forward_pid=$!
+          trap 'kill "$port_forward_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl --fail --silent --show-error --max-time 2 http://127.0.0.1:18080/healthz >/dev/null; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$port_forward_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/teagram-web-port-forward.log" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            cat "$RUNNER_TEMP/teagram-web-port-forward.log" >&2
+            echo 'teagram-web service did not become reachable' >&2
+            exit 1
+          fi
+          node .github/scripts/smoke-k8s-web.mjs http://127.0.0.1:18080/
+
+      - name: Delete the throwaway k3s cluster
+        if: always()
+        continue-on-error: true
+        env:
+          K3D_CLUSTER: teagram-web-test
+        run: >-
+          "$(go env GOPATH)/bin/k3d" cluster delete "$K3D_CLUSTER"
+
   ci:
     name: ci
     if: always()
     needs:
       - test-web
       - check-deploy-workflow
+      - check-k8s-manifests
+      - test-k8s-deploy
     runs-on: ubuntu-26.04
     steps:
       - name: Require every pull request job to succeed
