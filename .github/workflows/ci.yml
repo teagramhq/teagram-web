@@ -10,6 +10,9 @@ on:
   pull_request:
     branches:
       - master
+  merge_group:
+    types:
+      - checks_requested
   push:
     branches:
       - master
