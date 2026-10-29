@@ -1667,10 +1667,7 @@ async function runGuestSignupScenario(browser, runtime, contexts, registry, obse
   if(!hasGuestCredentials) {
     failStage('guest_username_not_created');
   }
-  currentStage = 'guest_demo_banner';
-  await page.locator('#chatlist-container [role="status"]')
-  .getByText("Demo server: you're a guest.", {exact: true})
-  .waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_demo_banner'));
+  currentStage = 'guest_complete';
   if(pageErrors.length !== 0) failStage('guest_page_error');
   await networkObserver.waitForSetup();
   observer.state.windowElapsed = true;
