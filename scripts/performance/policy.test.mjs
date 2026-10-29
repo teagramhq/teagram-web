@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {evaluatePerformance, SCENARIOS} from './policy.mjs';
+import {evaluatePerformance, formatPerformanceTable, SCENARIOS} from './policy.mjs';
 
 const SCALES = ['1x', '100x'];
 const CURRENT_FIXTURE = {
@@ -110,13 +110,36 @@ test('does not apply the scroll long-task gate to other scenarios', () => {
   assert.equal(result.blockingFailures.some((failure) => failure.includes('chatOpen') && failure.includes('long task')), false);
 });
 
-test('reports over-budget timings without blocking until each scale has 20 matching main runs', () => {
-  const head = scaleVariants({'100x': {coldChatList: {ms: 1_200}}});
+test('blocks fixed 100x timing budgets before calibration', () => {
+  const overBudget = Object.fromEntries(SCENARIOS.filter(({budgetMs}) => budgetMs !== null).map((scenario) => [scenario.key, {ms: scenario.budgetMs + 1}]));
+  const head = scaleVariants({'100x': overBudget});
   const result = evaluatePerformance(report({head}), mainHistory(19));
 
   assert.equal(result.calibratedScenarios, 0);
-  assert.equal(result.blockingFailures.length, 0);
-  assert.equal(result.rows.find((row) => row.scale === '100x' && row.key === 'coldChatList').budgetStatus, 'warming');
+  for(const scenario of SCENARIOS.filter(({budgetMs}) => budgetMs !== null)) {
+    assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x ${scenario.key}`) && failure.includes(`${scenario.budgetMs} ms budget`)));
+    assert.equal(result.rows.find((row) => row.scale === '100x' && row.key === scenario.key).budgetStatus, 'failed');
+  }
+});
+
+test('defers relative timing comparisons until calibration', () => {
+  const head = scaleVariants({'100x': {dateJump: {ms: 121}}});
+  const result = evaluatePerformance(report({head}), mainHistory(19));
+  const row = result.rows.find((item) => item.scale === '100x' && item.key === 'dateJump');
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('dateJump') && failure.includes('regressed beyond')), false);
+  assert.equal(row.budgetStatus, 'warming');
+});
+
+test('reports the fixed timing budget while historical comparisons warm up', () => {
+  const head = scaleVariants({'100x': {coldChatList: {ms: 900}}});
+  const result = evaluatePerformance(report({head}), mainHistory(19));
+  const table = formatPerformanceTable(result);
+  const coldRow = table.split('\n').find((line) => line.includes('Cold interactive chat list (100x)'));
+  const dateJumpRow = table.split('\n').find((line) => line.includes('Jump to a date (100x)'));
+
+  assert.match(coldRow, /fixed budget/);
+  assert.match(dateJumpRow, /report only/);
 });
 
 test('blocks fixed 100x timing budgets once that scenario is calibrated', () => {

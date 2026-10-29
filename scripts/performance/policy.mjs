@@ -155,14 +155,14 @@ export function evaluatePerformance(report, history = []) {
       const budgetMs = scale === '100x' ? scenario.budgetMs : null;
       const absoluteBudgetFailure = budgetMs !== null && Number.isFinite(head.ms) && head.ms > budgetMs;
       const relativeTimingFailure = hasTimingRegression(headSamples, mainValues);
-      if(calibrated && absoluteBudgetFailure) {
+      if(absoluteBudgetFailure) {
         addFailure(blockingFailures, scale, scenario.key, `median timing ${head.ms} ms exceeded the ${budgetMs} ms budget`);
       } else if(calibrated && relativeTimingFailure) {
         addFailure(blockingFailures, scale, scenario.key, `median timing ${head.ms} ms regressed beyond the main noise band`);
       }
 
       const noiseWidth = calibrated ? timingNoise(mainValues) : undefined;
-      const budgetStatus = calibrated && (absoluteBudgetFailure || relativeTimingFailure) ? 'failed' : calibrated ? 'calibrated' : 'warming';
+      const budgetStatus = absoluteBudgetFailure || (calibrated && relativeTimingFailure) ? 'failed' : calibrated ? 'calibrated' : 'warming';
       rows.push({
         ...scenario,
         scale,
@@ -204,7 +204,7 @@ export function formatPerformanceTable(evaluation) {
     const noise = row.noiseBand ? `${show(row.noiseBand[0], 1)}–${show(row.noiseBand[1], 1)}` : `warming ${row.historyRuns}/${CALIBRATION_RUNS}`;
     const smallHistoryRuns = evaluation.rows.find((item) => item.scale === '1x' && item.key === row.key)?.historyRuns || 0;
     const ratio = row.scale !== '100x' ? '—' : Number.isFinite(row.scaleRatio) ? `${show(row.scaleRatio, 2)}x` : `warming ${Math.min(row.historyRuns, smallHistoryRuns)}/${CALIBRATION_RUNS}`;
-    const gate = row.budgetStatus === 'failed' ? 'failed' : row.budgetStatus === 'warming' ? 'report only' : 'calibrated';
+    const gate = row.budgetStatus === 'failed' ? 'failed' : row.budgetStatus === 'warming' ? row.budgetMs === null ? 'report only' : 'fixed budget' : 'calibrated';
     lines.push(`| ${row.label} (${row.scale}) | ${show(row.head.ms, 1)} | ${budget} | ${noise} | ${ratio} | ${show(row.base.ms, 1)} | ${show(row.head.requests)} | ${show(row.head.domNodes)} | ${show(row.head.longTasksOver50Ms)} | ${show(row.head.droppedFramePercent, 2)}% | ${show(row.head.bundleBytes)} | ${gate} |`);
   }
   return lines.join('\n');

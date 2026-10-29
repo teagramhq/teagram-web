@@ -13,9 +13,10 @@ same measurement version, fixture version, fixture seed commit, and pinned
 server runtime contribute to a noise band. After 20 matching runs, timing
 regressions block when the head median is above the main median by more than
 `max(15%, 3σ)` and at least 2 ms; the 100x median also fails when it exceeds
-the 1x median by more than 1.5x. Absolute timing budgets and scroll quality
-gates apply to the 100x snapshot; 1x is reported and used for the paired scale
-comparison. On pull requests, the 100x scroll gate fails if any repeat records
+the 1x median by more than 1.5x. The fixed cold, warm, and chat-open timing
+budgets and scroll quality gates block immediately on the 100x snapshot, before
+calibration; 1x is reported and used for the paired scale comparison. On pull
+requests, the 100x scroll gate fails if any repeat records
 a task over 50 ms; dropped-frame percentage is pooled across all frame intervals
 from the three repeats.
 Every scenario and size needs three base bundle measurements or the performance
