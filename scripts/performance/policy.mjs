@@ -141,8 +141,12 @@ export function evaluatePerformance(report, history = []) {
         });
       }
 
-      if(scale === '100x' && scenario.key === 'scrollBack2k' && Number.isFinite(head.longTasksOver50Ms) && head.longTasksOver50Ms > 0) {
-        addFailure(blockingFailures, scale, scenario.key, `${head.longTasksOver50Ms} long task(s) over 50 ms`);
+      if(scale === '100x') {
+        headSamples.forEach((sample, index) => {
+          if(Number.isFinite(sample?.longTasksOver50Ms) && sample.longTasksOver50Ms > 0) {
+            addFailure(blockingFailures, scale, scenario.key, `${sample.longTasksOver50Ms} long task(s) over 50 ms in head sample ${index + 1}`);
+          }
+        });
       }
       if(scale === '100x' && scenario.key === 'scrollBack2k' && Number.isFinite(head.droppedFramePercent) && head.droppedFramePercent >= 1) {
         addFailure(blockingFailures, scale, scenario.key, `dropped frames reached ${head.droppedFramePercent.toFixed(2)}%`);

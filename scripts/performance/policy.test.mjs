@@ -103,11 +103,24 @@ test('blocks a long task in any 100x scroll repeat', () => {
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')));
 });
 
-test('does not apply the scroll long-task gate to other scenarios', () => {
-  const head = scaleVariants({'100x': {chatOpen: {longTasksOver50Ms: 2}}});
+test('blocks a long task in any 100x scenario sample', () => {
+  for(const {key} of SCENARIOS) {
+    const head = scaleVariants({'100x': {[key]: [
+      {longTasksOver50Ms: 0},
+      {longTasksOver50Ms: 1},
+      {longTasksOver50Ms: 0}
+    ]}});
+    const result = evaluatePerformance(report({head}));
+
+    assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes('long task')));
+  }
+});
+
+test('does not block for a long task measured only at 1x', () => {
+  const head = scaleVariants({'1x': {chatOpen: {longTasksOver50Ms: 1}}});
   const result = evaluatePerformance(report({head}));
 
-  assert.equal(result.blockingFailures.some((failure) => failure.includes('chatOpen') && failure.includes('long task')), false);
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('1x chatOpen') && failure.includes('long task')), false);
 });
 
 test('reports fixed 100x timing budget misses before calibration', () => {

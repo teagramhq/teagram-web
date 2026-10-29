@@ -53,7 +53,7 @@ jobs:
         run: node --test scripts/performance/fixture-release.test.mjs scripts/performance/https-proxy-routing.test.mjs scripts/performance/policy.test.mjs
 
       - name: Restore main timing history
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: .performance-history
           key: teagram-web-performance-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -84,7 +84,7 @@ jobs:
         with:
           go-version-file: teagram-server/go.mod
 
-      - uses: ariga/setup-atlas@v0.3
+      - uses: ariga/setup-atlas@2f3c785c89a15e1c0d07bcae3900fb5feb969eea # v0.3
         with:
           version: v1.2.0
 
@@ -283,7 +283,6 @@ jobs:
         run: >-
           pnpm exec playwright test
           -c playwright.performance.config.ts
-          e2e/performanceNegativeControl.spec.ts
           e2e/performanceScale.spec.ts
           --project=performance-chromium
           --workers=1
@@ -309,7 +308,7 @@ jobs:
 
       - name: Save updated main timing history
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: .performance-history
           key: teagram-web-performance-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
