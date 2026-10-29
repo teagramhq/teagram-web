@@ -1,5 +1,5 @@
 import {expect, test} from '@playwright/test';
-import {evaluatePerformance, SCENARIOS} from '../scripts/performance/policy.mjs';
+import {evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS} from '../scripts/performance/policy.mjs';
 
 test('100 ms main-thread negative control is detected and blocks the gate', async({page}) => {
   await page.goto('data:text/html,<title>performance negative control</title>');
@@ -29,10 +29,13 @@ test('100 ms main-thread negative control is detected and blocks the gate', asyn
     longTasksOver50Ms,
     droppedFramePercent: 0
   });
-  const samples = Object.fromEntries(SCENARIOS.map(({key}) => [key, [
-    sample(key === 'scrollBack2k' ? 1 : 0),
-    sample(key === 'scrollBack2k' ? 1 : 0)
-  ]]));
-  const result = evaluatePerformance({variants: {head: {'1x': samples, '100x': samples}}});
-  expect(result.blockingFailures.some((failure) => failure.includes('scrollBack2k') && failure.includes('long task'))).toBe(true);
+  const samples = Object.fromEntries(SCENARIOS.map(({key}) => [key, Array.from(
+    {length: PERFORMANCE_REPEATS},
+    () => sample(key === 'scrollBack2k' ? 1 : 0)
+  )]));
+  const result = evaluatePerformance({
+    measurementVersion: PERFORMANCE_MEASUREMENT_VERSION,
+    variants: {head: {'1x': samples, '100x': samples}}
+  });
+  expect(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task'))).toBe(true);
 });

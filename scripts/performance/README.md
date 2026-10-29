@@ -9,13 +9,15 @@ history for calibration.
 ## Performance gates
 
 The 1x and 100x scenarios are calibrated separately. Only main runs with the
-same fixture version, fixture seed commit, and pinned server runtime contribute
-to a noise band. After 20 matching runs, timing regressions block when the head
-median is above the main median by more than `max(15%, 3σ)` and at least 2 ms;
-the 100x median also fails when it exceeds the 1x median by more than 1.5x.
-Absolute timing budgets apply to the 100x snapshot. On pull requests, every
-scenario and size needs two base bundle measurements or the performance gate
-fails closed. Because the base client has no date-jump flow, its open-chat
+same measurement version, fixture version, fixture seed commit, and pinned
+server runtime contribute to a noise band. After 20 matching runs, timing
+regressions block when the head median is above the main median by more than
+`max(15%, 3σ)` and at least 2 ms; the 100x median also fails when it exceeds
+the 1x median by more than 1.5x. Absolute timing budgets and scroll quality
+gates apply to the 100x snapshot; 1x is reported and used for the paired scale
+comparison. Scroll gates use the median of three repeats. On pull requests,
+every scenario and size needs three base bundle measurements or the performance
+gate fails closed. Because the base client has no date-jump flow, its open-chat
 bundle is the date-jump baseline; that row has no base timing sample. If the
 base client cannot load 2,000 older messages, its open-chat bundle is the scroll
 bundle baseline; that row has no base scroll timing sample.

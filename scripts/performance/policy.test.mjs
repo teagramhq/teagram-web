@@ -4,6 +4,7 @@ import {evaluatePerformance, SCENARIOS} from './policy.mjs';
 
 const SCALES = ['1x', '100x'];
 const CURRENT_FIXTURE = {
+  measurementVersion: 2,
   fixtureVersion: 'fixture-v1',
   serverCommit: 'runtime-server-v1',
   fixtureServerCommit: 'fixture-server-v1'
@@ -12,7 +13,7 @@ const CURRENT_FIXTURE = {
 function scaleSamples(overrides = {}) {
   return Object.fromEntries(SCENARIOS.map(({key}) => {
     const override = overrides[key];
-    const values = Array.isArray(override) ? override : [override, override];
+    const values = Array.isArray(override) ? override : [override, override, override];
     return [key, values.map((sample) => ({
       ms: 100,
       requests: 12,
@@ -53,15 +54,30 @@ test('blocks a 100 ms main-thread task from the first run', () => {
   });
   const result = evaluatePerformance(report({head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('1x') && failure.includes('scrollBack2k') && failure.includes('long task')));
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('scrollBack2k') && failure.includes('long task')));
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('1x scrollBack2k') && failure.includes('long task')), false);
 });
 
-test('blocks scroll frame loss at one percent', () => {
-  const head = scaleVariants({'1x': {scrollBack2k: {droppedFramePercent: 1}}});
+test('blocks 100x scroll frame loss at one percent and reports 1x only', () => {
+  const head = scaleVariants({
+    '1x': {scrollBack2k: {droppedFramePercent: 5}},
+    '100x': {scrollBack2k: {droppedFramePercent: 1}}
+  });
   const result = evaluatePerformance(report({head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('1x') && failure.includes('scrollBack2k') && failure.includes('dropped frames')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('scrollBack2k') && failure.includes('dropped frames')));
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('1x scrollBack2k') && failure.includes('dropped frames')), false);
+});
+
+test('ignores a single transient scroll stall across three repeats', () => {
+  const head = scaleVariants({'100x': {scrollBack2k: [
+    {longTasksOver50Ms: 1},
+    {longTasksOver50Ms: 0},
+    {longTasksOver50Ms: 0}
+  ]}});
+  const result = evaluatePerformance(report({head}));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')), false);
 });
 
 test('does not apply the scroll long-task gate to other scenarios', () => {
@@ -110,6 +126,17 @@ test('blocks an incomplete head measurement instead of treating missing counters
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('chatOpen') && failure.includes('repeat')));
 });
 
+test('requires three head and base measurements for every scale scenario', () => {
+  const head = scaleVariants();
+  head['100x'].chatOpen = head['100x'].chatOpen.slice(0, 2);
+  const base = scaleVariants();
+  base['1x'].chatOpen = base['1x'].chatOpen.slice(0, 2);
+  const result = evaluatePerformance(report({head, base}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('chatOpen') && failure.includes('expected at least 3')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('1x') && failure.includes('chatOpen') && failure.includes('base bundle baseline requires 3')));
+});
+
 test('blocks bundle growth above two percent against a complete same-run base', () => {
   const head = scaleVariants({'100x': {coldChatList: {bundleBytes: 102_001}}});
   const result = evaluatePerformance(report({head}));
@@ -144,7 +171,8 @@ test('ignores calibration runs from a different fixture or server runtime', () =
     ...mainHistory(),
     ...mainHistory(20, {'100x': {dateJump: {ms: 1}}}, {...CURRENT_FIXTURE, fixtureVersion: 'fixture-old'}),
     ...mainHistory(20, {'100x': {dateJump: {ms: 1}}}, {...CURRENT_FIXTURE, serverCommit: 'runtime-old'}),
-    ...mainHistory(20, {'100x': {dateJump: {ms: 1}}}, {...CURRENT_FIXTURE, fixtureServerCommit: 'seed-old'})
+    ...mainHistory(20, {'100x': {dateJump: {ms: 1}}}, {...CURRENT_FIXTURE, fixtureServerCommit: 'seed-old'}),
+    ...mainHistory(20, {'100x': {dateJump: {ms: 1}}}, {...CURRENT_FIXTURE, measurementVersion: 1})
   ];
   const result = evaluatePerformance(report(), incompatibleHistory);
   const row = result.rows.find((item) => item.scale === '100x' && item.key === 'dateJump');

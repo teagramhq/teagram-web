@@ -1,6 +1,7 @@
 import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
 import Icons from '../src/icons';
+import {PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 
 type Fixture = {
   owner: number,
@@ -39,6 +40,7 @@ const username = process.env.PERF_USERNAME;
 const password = process.env.PERF_PASSWORD;
 const reportPath = process.env.PERF_REPORT_PATH;
 const report = {
+  measurementVersion: PERFORMANCE_MEASUREMENT_VERSION,
   fixtureVersion: process.env.PERF_FIXTURE_VERSION || '',
   serverCommit: process.env.PERF_SERVER_COMMIT || '',
   fixtureServerCommit: process.env.PERF_FIXTURE_SERVER_COMMIT || '',
@@ -389,7 +391,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       prepared.set(variant, await prepareVariant(browser, variant, origin));
     }
 
-    for(let round = 0; round < 2; ++round) {
+    for(let round = 0; round < PERFORMANCE_REPEATS; ++round) {
       const order = round % 2 === 0 ? variants : [...variants].reverse();
       for(const [variant] of order) {
         await test.step(`${scale} ${variant} round ${round + 1}`, () => runVariant(browser, prepared.get(variant)!, scale, fixture!));

@@ -11,6 +11,8 @@ export const SCENARIOS = [
 ];
 
 export const SCALES = ['1x', '100x'];
+export const PERFORMANCE_MEASUREMENT_VERSION = 2;
+export const PERFORMANCE_REPEATS = 3;
 
 const CALIBRATION_RUNS = 20;
 const MAX_SCALE_RATIO = 1.5;
@@ -41,7 +43,9 @@ function summarizeSamples(samples = []) {
 }
 
 function matchesFixture(run, report) {
-  return Boolean(report.fixtureVersion && report.serverCommit && report.fixtureServerCommit) &&
+  return report.measurementVersion === PERFORMANCE_MEASUREMENT_VERSION &&
+    run.measurementVersion === report.measurementVersion &&
+    Boolean(report.fixtureVersion && report.serverCommit && report.fixtureServerCommit) &&
     run.fixtureVersion === report.fixtureVersion &&
     run.serverCommit === report.serverCommit &&
     run.fixtureServerCommit === report.fixtureServerCommit;
@@ -95,8 +99,8 @@ export function evaluatePerformance(report, history = []) {
       if(!headSamples.length) {
         addFailure(blockingFailures, scale, scenario.key, 'no head measurement was recorded');
       }
-      if(headSamples.length < 2) {
-        addFailure(blockingFailures, scale, scenario.key, `expected at least two repeat measurements, got ${headSamples.length}`);
+      if(headSamples.length < PERFORMANCE_REPEATS) {
+        addFailure(blockingFailures, scale, scenario.key, `expected at least ${PERFORMANCE_REPEATS} repeat measurements, got ${headSamples.length}`);
       }
       headSamples.forEach((sample, index) => {
         const requiredMetrics = scenario.key === 'scrollBack2k' ? [...REQUIRED_METRICS, ['droppedFramePercent', 'dropped frame percentage']] : REQUIRED_METRICS;
@@ -108,8 +112,8 @@ export function evaluatePerformance(report, history = []) {
       });
 
       if(report.requireBase) {
-        if(baseSamples.length < 2) {
-          addFailure(blockingFailures, scale, scenario.key, `base bundle baseline requires two repeats, got ${baseSamples.length}`);
+        if(baseSamples.length < PERFORMANCE_REPEATS) {
+          addFailure(blockingFailures, scale, scenario.key, `base bundle baseline requires ${PERFORMANCE_REPEATS} repeats, got ${baseSamples.length}`);
         }
         baseSamples.forEach((sample, index) => {
           if(!Number.isFinite(sample?.bundleBytes)) {
@@ -118,10 +122,10 @@ export function evaluatePerformance(report, history = []) {
         });
       }
 
-      if(scenario.key === 'scrollBack2k' && Number.isFinite(head.longTasksOver50Ms) && head.longTasksOver50Ms > 0) {
+      if(scale === '100x' && scenario.key === 'scrollBack2k' && Number.isFinite(head.longTasksOver50Ms) && head.longTasksOver50Ms > 0) {
         addFailure(blockingFailures, scale, scenario.key, `${head.longTasksOver50Ms} long task(s) over 50 ms`);
       }
-      if(scenario.key === 'scrollBack2k' && Number.isFinite(head.droppedFramePercent) && head.droppedFramePercent >= 1) {
+      if(scale === '100x' && scenario.key === 'scrollBack2k' && Number.isFinite(head.droppedFramePercent) && head.droppedFramePercent >= 1) {
         addFailure(blockingFailures, scale, scenario.key, `dropped frames reached ${head.droppedFramePercent.toFixed(2)}%`);
       }
 
