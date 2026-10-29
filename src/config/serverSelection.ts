@@ -361,6 +361,26 @@ export async function fetchServerDiscovery(hostInput: string, fetcher: typeof fe
   }
 }
 
+export async function fetchEmbeddedServerDiscovery(
+  target: MtprotoTarget,
+  fetcher: typeof fetch = fetch,
+  signal?: AbortSignal
+): Promise<DiscoveredServer | undefined> {
+  if(target.mode !== 'private') return undefined;
+
+  const host = new URL(target.endpoint).hostname;
+  const discovered = await fetchServerDiscovery(host, fetcher, signal);
+  if(discovered.host !== host || discovered.target.mode !== 'private' ||
+    discovered.target.endpoint !== target.endpoint ||
+    discovered.target.fingerprint !== target.fingerprint ||
+    discovered.target.publicKeyHex.modulus !== target.publicKeyHex.modulus ||
+    discovered.target.publicKeyHex.exponent !== target.publicKeyHex.exponent) {
+    throw new Error('not a Teagram server: discovery identity does not match the embedded private target');
+  }
+
+  return discovered;
+}
+
 export function formatSPKIFingerprint(fingerprint: string) {
   return fingerprint.match(/.{1,4}/g)?.join(':').toUpperCase() || fingerprint.toUpperCase();
 }

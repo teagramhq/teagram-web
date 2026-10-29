@@ -7,6 +7,7 @@ import {
   SERVER_TARGET_KEY,
   DiscoveredServer,
   cleanServerHost,
+  fetchEmbeddedServerDiscovery,
   fetchServerDiscovery,
   forgetServer,
   formatServerKeyId,
@@ -952,8 +953,16 @@ async function boot() {
     return;
   }
   const endpointHost = buildTarget.mode === 'private' ? new URL(buildTarget.endpoint).hostname : pageHost;
-  setActiveContext('default', endpointHost, buildTarget);
   setConnectPolicy(endpointHost, buildTarget);
+  let discovered: DiscoveredServer | undefined;
+  if(buildTarget.mode === 'private') {
+    try {
+      discovered = await fetchEmbeddedServerDiscovery(buildTarget);
+    } catch(error) {
+      console.error('Could not verify embedded private-server discovery', error);
+    }
+  }
+  setActiveContext('default', endpointHost, buildTarget, discovered);
   await import('./index');
 }
 
