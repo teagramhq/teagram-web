@@ -1442,6 +1442,32 @@ describe('confined runner shared-worker observation contract', () => {
     await expect(networkObserver.stop()).rejects.toBe(detachFailure);
   });
 
+  it('does not detach a page session already closed with its target', async() => {
+    const contextObserver = observation.createContextObserver('closed-session');
+    const detach = vi.fn(async() => {});
+    const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver, {detach});
+    await networkObserver.start();
+
+    cdp.emit('close');
+    await networkObserver.stop();
+
+    expect(detach).not.toHaveBeenCalled();
+  });
+
+  it('accepts a page target that closes during observer detach', async() => {
+    const contextObserver = observation.createContextObserver('closing-session');
+    let cdp: any;
+    const detach = vi.fn(async() => {
+      cdp.emit('close');
+      throw new Error('target closed during detach');
+    });
+    const harness = createNetworkObserverHarness(contextObserver, {detach});
+    cdp = harness.cdp;
+    await harness.networkObserver.start();
+
+    await expect(harness.networkObserver.stop()).resolves.toBeUndefined();
+  });
+
   it('times out a stalled page observer cleanup command', async() => {
     const contextObserver = observation.createContextObserver('stalled-detach');
     const {networkObserver} = createNetworkObserverHarness(contextObserver, {detach: () => new Promise(() => {})});

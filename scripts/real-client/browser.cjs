@@ -901,6 +901,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
   const maxPendingReleases = observation.LIMITS.attachedTargets;
   let nextCommandId = 0;
   let cdp;
+  let cdpClosed = false;
   const pageScriptUrls = new Map();
   const pageScriptExecutionContexts = new Map();
   let pageTargetId;
@@ -1227,6 +1228,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
 
   async function start(registry) {
     cdp = await withCommandTimeout(() => page.context().newCDPSession(page));
+    cdp.on('close', () => { cdpClosed = true; });
     send = createGatedSender('page', cdp, contextObserver, () => pageTargetId,
       typeof onPageException === 'function' ? PAGE_ERROR_DEBUGGER_METHODS : []);
     // Page-session identity mapping only: the browser context this page lives
@@ -1399,12 +1401,21 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     },
     async stop() {
       cdp?.removeAllListeners();
+      if(cdp && !cdpClosed) cdp.once('close', () => { cdpClosed = true; });
       try {
         await waitForOverflowCleanup();
-        if(cdp && !overflowContextClosed) await withCommandTimeout(() => cdp.detach());
+        if(cdp && !overflowContextClosed && !cdpClosed && page.isClosed?.() !== true) {
+          try {
+            await withCommandTimeout(() => cdp.detach());
+          } catch(error) {
+            if(!cdpClosed && page.isClosed?.() !== true) throw error;
+          }
+        }
       } catch(error) {
         contextObserver?.recordObserverError(pageTargetId);
         throw error;
+      } finally {
+        cdp?.removeAllListeners();
       }
     }
   };
