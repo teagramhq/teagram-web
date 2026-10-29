@@ -39,7 +39,10 @@ function spread(values) {
 
 function summarizeSamples(samples = []) {
   const keys = ['ms', 'requests', 'domNodes', 'bundleBytes', 'longTasksOver50Ms', 'droppedFramePercent'];
-  return Object.fromEntries(keys.map((key) => [key, median(samples.map((sample) => sample[key]).filter(Number.isFinite))]));
+  return Object.fromEntries(keys.map((key) => {
+    const values = samples.map((sample) => sample[key]).filter(Number.isFinite);
+    return [key, key === 'longTasksOver50Ms' && values.length ? Math.max(...values) : median(values)];
+  }));
 }
 
 function matchesFixture(run, report) {

@@ -15,9 +15,11 @@ regressions block when the head median is above the main median by more than
 `max(15%, 3σ)` and at least 2 ms; the 100x median also fails when it exceeds
 the 1x median by more than 1.5x. Absolute timing budgets and scroll quality
 gates apply to the 100x snapshot; 1x is reported and used for the paired scale
-comparison. Scroll gates use the median of three repeats. On pull requests,
-every scenario and size needs three base bundle measurements or the performance
-gate fails closed. Because the base client has no date-jump flow, its open-chat
+comparison. On pull requests, the 100x scroll gate fails if any repeat records
+a task over 50 ms; dropped-frame percentage uses the median of three repeats.
+Every scenario and size needs three base bundle measurements or the performance
+gate fails closed.
+Because the base client has no date-jump flow, its open-chat
 bundle is the date-jump baseline; that row has no base timing sample. If the
 base client cannot load 2,000 older messages, its open-chat bundle is the scroll
 bundle baseline; that row has no base scroll timing sample.

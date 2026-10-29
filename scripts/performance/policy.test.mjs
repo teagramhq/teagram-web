@@ -69,7 +69,7 @@ test('blocks 100x scroll frame loss at one percent and reports 1x only', () => {
   assert.equal(result.blockingFailures.some((failure) => failure.includes('1x scrollBack2k') && failure.includes('dropped frames')), false);
 });
 
-test('ignores a single transient scroll stall across three repeats', () => {
+test('blocks a long task in any 100x scroll repeat', () => {
   const head = scaleVariants({'100x': {scrollBack2k: [
     {longTasksOver50Ms: 1},
     {longTasksOver50Ms: 0},
@@ -77,7 +77,7 @@ test('ignores a single transient scroll stall across three repeats', () => {
   ]}});
   const result = evaluatePerformance(report({head}));
 
-  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')), false);
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')));
 });
 
 test('does not apply the scroll long-task gate to other scenarios', () => {
