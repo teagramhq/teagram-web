@@ -354,7 +354,8 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     measured.coldChatList.push(await test.step('cold chat list', async() => capture(page, requests, await elapsed(page))));
     measured.warmChatList.push(await test.step('warm chat list', () => reloadChatList(page, requests)));
 
-    const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture));
+    const injectLongTask = variant === 'head' && scale === '100x';
+    const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture, injectLongTask));
     measured.chatOpen.push(chatOpen);
     const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(page, requests, variant === 'head'));
     if(scroll) {
