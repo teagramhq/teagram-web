@@ -71,12 +71,12 @@ the host. These host-side controls are prerequisites and are not installed by
 this PR.
 
 GitHub's production environment policy permits `master`. The `master` branch
-also requires the `Build, typecheck, lint and test`, `docker`, `compose`, and
-`pr-title` checks, including for administrators, and blocks force pushes and
-deletion. GitHub cannot require PR approvals here because every seat uses the
-same account, so review remains gated in Multica. Repository administrators,
-the publisher workflow, production secrets, and the runner remain trusted parts
-of the deployment chain.
+requires the `ci`, `build: web-image`, `test: compose`, `pr-title`, and
+`real-client-browser-flow` checks, including for administrators, and blocks
+force pushes and deletion. GitHub cannot require PR approvals here because
+every seat uses the same account, so review remains gated in Multica.
+Repository administrators, the publisher workflow, production secrets, and the
+runner remain trusted parts of the deployment chain.
 
 The host script verifies the artifact manifest and content digest using the
 Dockerfile's `artifact-verification` stage before changing the live checkout.

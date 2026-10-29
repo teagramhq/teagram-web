@@ -4,7 +4,7 @@ set -euo pipefail
 
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 expected_if="\${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
-expected_deploy_if="\${{ needs.resolve.outputs.skip == 'false' }}"
+expected_deploy_if="\${{ needs.check-published-artifact.outputs.skip == 'false' }}"
 expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
 expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Leave empty for no report.'
 
@@ -21,8 +21,8 @@ check_target_selection() (
   set -euo pipefail
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  query '.jobs.resolve.steps[] | select(.id == "target") | .run' >"$tmp/target.sh"
-  query '.jobs.deploy.steps[] | select(.id == "refresh") | .run' >"$tmp/refresh.sh"
+  query '.jobs.check-published-artifact.steps[] | select(.id == "target") | .run' >"$tmp/target.sh"
+  query '.jobs.deploy-web.steps[] | select(.id == "refresh") | .run' >"$tmp/refresh.sh"
   cat >"$tmp/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -254,61 +254,61 @@ check_contract() {
     fail 'workflow_run must be limited to branches: [master]'
   [[ "$(query '.permissions | to_entries | map(.key + "=" + .value) | sort | join(",")')" == 'actions=read,contents=read' ]] ||
     fail 'workflow permissions must be contents: read and actions: read'
-  [[ "$(query '.jobs | keys | sort | join(",")')" == 'deploy,resolve' ]] || fail 'workflow must define resolve and deploy jobs'
-  [[ "$(query '.jobs.resolve.if')" == "$expected_if" ]] ||
+  [[ "$(query '.jobs | keys | sort | join(",")')" == 'check-published-artifact,deploy-web' ]] || fail 'workflow must define resolve and deploy jobs'
+  [[ "$(query '.jobs.check-published-artifact.if')" == "$expected_if" ]] ||
     fail 'resolve must run only on a master dispatch or a successful push publication'
-  [[ "$(query '.jobs.deploy.needs')" == 'resolve' ]] || fail 'deploy must wait for artifact resolution'
-  [[ "$(query '.jobs.deploy.if')" == "$expected_deploy_if" ]] ||
+  [[ "$(query '.jobs.deploy-web.needs')" == 'check-published-artifact' ]] || fail 'deploy must wait for artifact resolution'
+  [[ "$(query '.jobs.deploy-web.if')" == "$expected_deploy_if" ]] ||
     fail 'deploy must skip before concurrency when resolution finds no publication'
-  [[ "$(query '.jobs.resolve.outputs.skip')" == '${{ steps.target.outputs.skip }}' ]] ||
+  [[ "$(query '.jobs.check-published-artifact.outputs.skip')" == '${{ steps.target.outputs.skip }}' ]] ||
     fail 'resolve must expose the non-publication skip result to the deploy job'
-  [[ "$(query '.jobs.resolve.outputs.sha')" == '${{ steps.target.outputs.sha }}' ]] ||
+  [[ "$(query '.jobs.check-published-artifact.outputs.sha')" == '${{ steps.target.outputs.sha }}' ]] ||
     fail 'resolve must expose the selected artifact SHA'
-  [[ "$(query '.jobs.resolve.outputs.run_id')" == '${{ steps.target.outputs.run_id }}' ]] ||
+  [[ "$(query '.jobs.check-published-artifact.outputs.run_id')" == '${{ steps.target.outputs.run_id }}' ]] ||
     fail 'resolve must expose the selected artifact run'
-  [[ "$(query '.jobs.resolve.outputs.artifact_name')" == '${{ steps.target.outputs.artifact_name }}' ]] ||
+  [[ "$(query '.jobs.check-published-artifact.outputs.artifact_name')" == '${{ steps.target.outputs.artifact_name }}' ]] ||
     fail 'resolve must expose the selected artifact name'
-  [[ "$(query '.jobs.resolve.outputs.artifact_digest')" == '${{ steps.target.outputs.artifact_digest }}' ]] ||
+  [[ "$(query '.jobs.check-published-artifact.outputs.artifact_digest')" == '${{ steps.target.outputs.artifact_digest }}' ]] ||
     fail 'resolve must expose the selected artifact digest'
   [[ "$(query '.concurrency // {} | length')" == 0 ]] || fail 'workflow-level concurrency must not queue resolver jobs'
-  [[ "$(query '.jobs.resolve.concurrency // {} | length')" == 0 ]] || fail 'artifact resolution must run before deployment concurrency'
-  [[ "$(query '.jobs.deploy.concurrency.group')" == 'deploy-teagram-web' ]] ||
+  [[ "$(query '.jobs.check-published-artifact.concurrency // {} | length')" == 0 ]] || fail 'artifact resolution must run before deployment concurrency'
+  [[ "$(query '.jobs.deploy-web.concurrency.group')" == 'deploy-teagram-web' ]] ||
     fail 'deploy concurrency group must be deploy-teagram-web'
-  [[ "$(query '.jobs.deploy.concurrency."cancel-in-progress"')" == 'false' ]] ||
+  [[ "$(query '.jobs.deploy-web.concurrency."cancel-in-progress"')" == 'false' ]] ||
     fail 'deploy concurrency must not cancel the running deployment'
-  [[ "$(query '.jobs.deploy.environment')" == 'production' ]] ||
+  [[ "$(query '.jobs.deploy-web.environment')" == 'production' ]] ||
     fail 'deploy must use environment: production'
-  [[ "$(query '.jobs.resolve.environment // ""')" == '' ]] || fail 'artifact resolution must not request production environment secrets'
-  [[ "$(query '.jobs.resolve.permissions.actions')" == 'read' ]] || fail 'resolve job must grant actions: read'
-  [[ "$(query '.jobs.resolve.permissions.contents')" == 'read' ]] || fail 'resolve job must grant contents: read'
-  [[ "$(query '.jobs.deploy.permissions.actions')" == 'read' ]] ||
+  [[ "$(query '.jobs.check-published-artifact.environment // ""')" == '' ]] || fail 'artifact resolution must not request production environment secrets'
+  [[ "$(query '.jobs.check-published-artifact.permissions.actions')" == 'read' ]] || fail 'resolve job must grant actions: read'
+  [[ "$(query '.jobs.check-published-artifact.permissions.contents')" == 'read' ]] || fail 'resolve job must grant contents: read'
+  [[ "$(query '.jobs.deploy-web.permissions.actions')" == 'read' ]] ||
     fail 'deploy job must grant actions: read'
-  [[ "$(query '.jobs.deploy.permissions.contents')" == 'read' ]] ||
+  [[ "$(query '.jobs.deploy-web.permissions.contents')" == 'read' ]] ||
     fail 'deploy job must grant contents: read'
-  [[ "$(query '.jobs.deploy.permissions | to_entries | map(select(.value != "read")) | length')" == 0 ]] ||
+  [[ "$(query '.jobs.deploy-web.permissions | to_entries | map(select(.value != "read")) | length')" == 0 ]] ||
     fail 'deploy job must not request write permissions'
 
   local checkout_count download_count ssh_count uses
   checkout_count="$(query '[.jobs[].steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
   [[ "$checkout_count" == 0 ]] || fail 'deploy workflow must not use actions/checkout'
-  [[ "$(query '.jobs.deploy.steps[0].id')" == refresh ]] ||
+  [[ "$(query '.jobs.deploy-web.steps[0].id')" == refresh ]] ||
     fail 'deployment must refresh the selected publication after acquiring its concurrency slot'
-  download_count="$(query '[.jobs.deploy.steps[] | select((.uses // "" | test("^actions/download-artifact@")) and .with.name == "${{ steps.refresh.outputs.artifact_name }}" and .with."run-id" == "${{ steps.refresh.outputs.run_id }}" and .with."github-token" == "${{ github.token }}")] | length')"
+  download_count="$(query '[.jobs.deploy-web.steps[] | select((.uses // "" | test("^actions/download-artifact@")) and .with.name == "${{ steps.refresh.outputs.artifact_name }}" and .with."run-id" == "${{ steps.refresh.outputs.run_id }}" and .with."github-token" == "${{ github.token }}")] | length')"
   [[ "$download_count" == 1 ]] || fail 'artifact download must use the refreshed artifact name, run and github token'
-  [[ "$(query '[.jobs.deploy.steps[] | select(.name == "Verify the artifact identity") | .env.DEPLOY_SHA][0]')" == '${{ steps.refresh.outputs.sha }}' ]] ||
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Verify the artifact identity") | .env.DEPLOY_SHA][0]')" == '${{ steps.refresh.outputs.sha }}' ]] ||
     fail 'artifact identity verification must use the refreshed SHA'
-  [[ "$(query '[.jobs.deploy.steps[] | select(.name == "Verify the artifact identity") | .env.ARTIFACT_DIGEST][0]')" == '${{ steps.refresh.outputs.artifact_digest }}' ]] ||
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Verify the artifact identity") | .env.ARTIFACT_DIGEST][0]')" == '${{ steps.refresh.outputs.artifact_digest }}' ]] ||
     fail 'artifact identity verification must use the refreshed digest'
-  [[ "$(query '[.jobs.deploy.steps[] | select(.name == "Deploy the published artifact") | .env.DEPLOY_SHA][0]')" == '${{ steps.refresh.outputs.sha }}' ]] ||
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy the published artifact") | .env.DEPLOY_SHA][0]')" == '${{ steps.refresh.outputs.sha }}' ]] ||
     fail 'the forced command must receive the refreshed SHA'
-  cleanup_condition="$(query '[.jobs.deploy.steps[] | select(.name == "Remove the deploy key") | .if][0]')"
+  cleanup_condition="$(query '[.jobs.deploy-web.steps[] | select(.name == "Remove the deploy key") | .if][0]')"
   [[ "$cleanup_condition" == '${{ always() }}' ]] || fail 'deploy-key cleanup must run after deployment attempts'
-  ssh_count="$(query '[.jobs.deploy.steps[] | select(.run // "" | test("(^|\\s)ssh\\s"))] | length')"
+  ssh_count="$(query '[.jobs.deploy-web.steps[] | select(.run // "" | test("(^|\\s)ssh\\s"))] | length')"
   [[ "$ssh_count" == 1 ]] || fail "expected one ssh step, found $ssh_count"
-  query '.jobs.deploy.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run' |
+  query '.jobs.deploy-web.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run' |
     grep -Fq 'root@100.124.236.66 "$DEPLOY_SHA" < "$RUNNER_TEMP/private-artifact.zip"' ||
     fail 'ssh must send the selected SHA and packaged artifact to the forced command'
-  if query '.jobs.deploy.steps[].run // ""' | grep -Fq '${{'; then
+  if query '.jobs.deploy-web.steps[].run // ""' | grep -Fq '${{'; then
     fail 'run blocks must pass GitHub values through environment variables'
   fi
 
@@ -332,26 +332,26 @@ self_test() {
     'del(."run-name")'
     'del(.on.workflow_run.branches)'
     '.on.workflow_run.branches = ["master", "dev"]'
-    '.jobs.resolve.if = "wrong"'
-    'del(.jobs.resolve.if)'
-    '.jobs.deploy.if = "wrong"'
-    'del(.jobs.deploy.if)'
-    'del(.jobs.deploy.needs)'
-    'del(.jobs.resolve.outputs.skip)'
-    '.jobs.deploy.environment = "staging"'
-    'del(.jobs.deploy.environment)'
+    '.jobs.check-published-artifact.if = "wrong"'
+    'del(.jobs.check-published-artifact.if)'
+    '.jobs.deploy-web.if = "wrong"'
+    'del(.jobs.deploy-web.if)'
+    'del(.jobs.deploy-web.needs)'
+    'del(.jobs.check-published-artifact.outputs.skip)'
+    '.jobs.deploy-web.environment = "staging"'
+    'del(.jobs.deploy-web.environment)'
     '.concurrency = {"group":"deploy-teagram-web","cancel-in-progress":false}'
-    '.jobs.resolve.concurrency.group = "deploy-teagram-web"'
-    'del(.jobs.deploy.concurrency)'
-    '.jobs.deploy.concurrency.group = "deploy"'
-    '.jobs.deploy.concurrency."cancel-in-progress" = true'
-    '.jobs.deploy.steps = [{"uses": "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"}] + .jobs.deploy.steps'
-    '(.jobs.deploy.steps[] | select(.uses | test("^actions/download-artifact@")) | .with."run-id") = "${{ github.run_id }}"'
-    '(.jobs.deploy.steps[] | select(.uses | test("^actions/download-artifact@")) | .with.name) = "${{ needs.resolve.outputs.artifact_name }}"'
-    '.jobs.deploy.steps[0].id = "wrong"'
-    '(.jobs.deploy.steps[] | select(.uses | test("^tailscale/github-action@")) | .uses) = "tailscale/github-action@v4"'
+    '.jobs.check-published-artifact.concurrency.group = "deploy-teagram-web"'
+    'del(.jobs.deploy-web.concurrency)'
+    '.jobs.deploy-web.concurrency.group = "deploy"'
+    '.jobs.deploy-web.concurrency."cancel-in-progress" = true'
+    '.jobs.deploy-web.steps = [{"uses": "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"}] + .jobs.deploy-web.steps'
+    '(.jobs.deploy-web.steps[] | select(.uses | test("^actions/download-artifact@")) | .with."run-id") = "${{ github.run_id }}"'
+    '(.jobs.deploy-web.steps[] | select(.uses | test("^actions/download-artifact@")) | .with.name) = "${{ needs.check-published-artifact.outputs.artifact_name }}"'
+    '.jobs.deploy-web.steps[0].id = "wrong"'
+    '(.jobs.deploy-web.steps[] | select(.uses | test("^tailscale/github-action@")) | .uses) = "tailscale/github-action@v4"'
     '.permissions.contents = "write"'
-    'del(.jobs.deploy.permissions.actions)'
+    'del(.jobs.deploy-web.permissions.actions)'
   )
 
   for mutation in "${mutations[@]}"; do

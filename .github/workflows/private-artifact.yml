@@ -19,8 +19,8 @@ permissions:
   contents: read
 
 jobs:
-  private-pull-request:
-    name: Validate private artifact on pull request
+  check-private-artifact:
+    name: 'check: private-artifact'
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -113,8 +113,8 @@ jobs:
           console.log(`[private-artifact] keyFingerprint=${target.fingerprint}`);
           NODE
 
-  publication-prepare:
-    name: Validate reviewed publication request
+  check-publication-request:
+    name: 'check: publication-request'
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'workflow_run' &&
@@ -187,37 +187,37 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  repository-ci:
-    name: Repository CI gate
-    needs: publication-prepare
+  check-repository-ci:
+    name: 'check: repository-ci'
+    needs: check-publication-request
     if: >-
-      needs.publication-prepare.result == 'success' &&
-      needs.publication-prepare.outputs.publish_private_artifact == 'true'
+      needs.check-publication-request.result == 'success' &&
+      needs.check-publication-request.outputs.publish_private_artifact == 'true'
     uses: ./.github/workflows/ci.yml
     with:
-      checkout_ref: ${{ needs.publication-prepare.outputs.source_commit }}
+      checkout_ref: ${{ needs.check-publication-request.outputs.source_commit }}
 
-  deployment-stack:
-    name: Deployment stack gate
-    needs: publication-prepare
+  check-deployment-stack:
+    name: 'check: deployment-stack'
+    needs: check-publication-request
     if: >-
-      needs.publication-prepare.result == 'success' &&
-      needs.publication-prepare.outputs.publish_private_artifact == 'true'
+      needs.check-publication-request.result == 'success' &&
+      needs.check-publication-request.outputs.publish_private_artifact == 'true'
     uses: ./.github/workflows/deployment-stack-checks.yml
     with:
-      checkout_ref: ${{ needs.publication-prepare.outputs.source_commit }}
+      checkout_ref: ${{ needs.check-publication-request.outputs.source_commit }}
 
-  private-build:
-    name: Build and stage audited private artifact
+  build-private-artifact:
+    name: 'build: private-artifact'
     needs:
-      - publication-prepare
-      - repository-ci
-      - deployment-stack
+      - check-publication-request
+      - check-repository-ci
+      - check-deployment-stack
     if: >-
-      needs.publication-prepare.result == 'success' &&
-      needs.publication-prepare.outputs.publish_private_artifact == 'true' &&
-      needs.repository-ci.result == 'success' &&
-      needs.deployment-stack.result == 'success'
+      needs.check-publication-request.result == 'success' &&
+      needs.check-publication-request.outputs.publish_private_artifact == 'true' &&
+      needs.check-repository-ci.result == 'success' &&
+      needs.check-deployment-stack.result == 'success'
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     permissions:
@@ -229,14 +229,14 @@ jobs:
       - name: Check out the allowlisted target commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ needs.publication-prepare.outputs.source_commit }}
+          ref: ${{ needs.check-publication-request.outputs.source_commit }}
           fetch-depth: 1
           persist-credentials: false
 
       - name: Download the immutable target snapshot
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ${{ needs.publication-prepare.outputs.snapshot_artifact_name }}
+          name: ${{ needs.check-publication-request.outputs.snapshot_artifact_name }}
           path: ${{ runner.temp }}/private-target-snapshot
 
       - name: Set up Node.js 24.18.0 before target validation
@@ -246,9 +246,9 @@ jobs:
 
       - name: Validate the immutable target before installation
         env:
-          MTPROTO_TARGET_MODE: ${{ needs.publication-prepare.outputs.target_mode }}
-          MTPROTO_PRIVATE_ENDPOINT: ${{ needs.publication-prepare.outputs.private_endpoint }}
-          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.publication-prepare.outputs.private_key_file }}
+          MTPROTO_TARGET_MODE: ${{ needs.check-publication-request.outputs.target_mode }}
+          MTPROTO_PRIVATE_ENDPOINT: ${{ needs.check-publication-request.outputs.private_endpoint }}
+          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.check-publication-request.outputs.private_key_file }}
         run: |
           test "$(node --version)" = 'v24.18.0' || { echo "::error::expected Node v24.18.0, got $(node --version)"; exit 1; }
           node scripts/private-artifact-release.mjs validate-target --snapshot "$RUNNER_TEMP/private-target-snapshot"
@@ -269,9 +269,9 @@ jobs:
 
       - name: Revalidate the immutable target after installation
         env:
-          MTPROTO_TARGET_MODE: ${{ needs.publication-prepare.outputs.target_mode }}
-          MTPROTO_PRIVATE_ENDPOINT: ${{ needs.publication-prepare.outputs.private_endpoint }}
-          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.publication-prepare.outputs.private_key_file }}
+          MTPROTO_TARGET_MODE: ${{ needs.check-publication-request.outputs.target_mode }}
+          MTPROTO_PRIVATE_ENDPOINT: ${{ needs.check-publication-request.outputs.private_endpoint }}
+          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.check-publication-request.outputs.private_key_file }}
         run: |
           test "$(node --version)" = 'v24.18.0' || { echo "::error::expected Node v24.18.0, got $(node --version)"; exit 1; }
           node scripts/private-artifact-release.mjs validate-target --snapshot "$RUNNER_TEMP/private-target-snapshot"
@@ -288,9 +288,9 @@ jobs:
 
       - name: Build reviewed private artifact
         env:
-          MTPROTO_TARGET_MODE: ${{ needs.publication-prepare.outputs.target_mode }}
-          MTPROTO_PRIVATE_ENDPOINT: ${{ needs.publication-prepare.outputs.private_endpoint }}
-          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.publication-prepare.outputs.private_key_file }}
+          MTPROTO_TARGET_MODE: ${{ needs.check-publication-request.outputs.target_mode }}
+          MTPROTO_PRIVATE_ENDPOINT: ${{ needs.check-publication-request.outputs.private_endpoint }}
+          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.check-publication-request.outputs.private_key_file }}
         run: pnpm exec vite build --outDir dist-private
 
       - name: Require the reviewed font assets in the private artifact
@@ -300,9 +300,9 @@ jobs:
 
       - name: Audit bundle routes, keys, and digest
         env:
-          MTPROTO_TARGET_MODE: ${{ needs.publication-prepare.outputs.target_mode }}
-          MTPROTO_PRIVATE_ENDPOINT: ${{ needs.publication-prepare.outputs.private_endpoint }}
-          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.publication-prepare.outputs.private_key_file }}
+          MTPROTO_TARGET_MODE: ${{ needs.check-publication-request.outputs.target_mode }}
+          MTPROTO_PRIVATE_ENDPOINT: ${{ needs.check-publication-request.outputs.private_endpoint }}
+          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.check-publication-request.outputs.private_key_file }}
         run: pnpm run check-bundle -- dist-private
 
       - name: Audit runtime public assets
@@ -311,34 +311,34 @@ jobs:
       - name: Verify CSP, manifest, digest, and source commit
         id: verify
         env:
-          MTPROTO_TARGET_MODE: ${{ needs.publication-prepare.outputs.target_mode }}
-          MTPROTO_PRIVATE_ENDPOINT: ${{ needs.publication-prepare.outputs.private_endpoint }}
-          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.publication-prepare.outputs.private_key_file }}
+          MTPROTO_TARGET_MODE: ${{ needs.check-publication-request.outputs.target_mode }}
+          MTPROTO_PRIVATE_ENDPOINT: ${{ needs.check-publication-request.outputs.private_endpoint }}
+          MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: ${{ runner.temp }}/private-target-snapshot/${{ needs.check-publication-request.outputs.private_key_file }}
         run: >-
           pnpm run verify-private-artifact --
           --dist dist-private
           --snapshot "$RUNNER_TEMP/private-target-snapshot"
-          --ref "${{ needs.publication-prepare.outputs.source_ref }}"
-          --commit "${{ needs.publication-prepare.outputs.source_commit }}"
+          --ref "${{ needs.check-publication-request.outputs.source_ref }}"
+          --commit "${{ needs.check-publication-request.outputs.source_commit }}"
 
       - name: Stage audited artifact for the isolated publisher
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: private-mtproto-staged-${{ needs.publication-prepare.outputs.source_commit }}-${{ steps.verify.outputs.artifact_digest_hex }}
+          name: private-mtproto-staged-${{ needs.check-publication-request.outputs.source_commit }}-${{ steps.verify.outputs.artifact_digest_hex }}
           path: dist-private
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 
-  private-publish:
-    name: Publish audited private artifact
+  publish-private-artifact:
+    name: 'publish: private-artifact'
     needs:
-      - publication-prepare
-      - private-build
+      - check-publication-request
+      - build-private-artifact
     if: >-
-      needs.publication-prepare.result == 'success' &&
-      needs.publication-prepare.outputs.publish_private_artifact == 'true' &&
-      needs.private-build.result == 'success'
+      needs.check-publication-request.result == 'success' &&
+      needs.check-publication-request.outputs.publish_private_artifact == 'true' &&
+      needs.build-private-artifact.result == 'success'
     runs-on: ubuntu-26.04
     permissions:
       actions: write
@@ -352,13 +352,13 @@ jobs:
       - name: Download the verified artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: private-mtproto-staged-${{ needs.publication-prepare.outputs.source_commit }}-${{ needs.private-build.outputs.artifact_digest_hex }}
+          name: private-mtproto-staged-${{ needs.check-publication-request.outputs.source_commit }}-${{ needs.build-private-artifact.outputs.artifact_digest_hex }}
           path: dist-private
 
       - name: Download the immutable target snapshot
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ${{ needs.publication-prepare.outputs.snapshot_artifact_name }}
+          name: ${{ needs.check-publication-request.outputs.snapshot_artifact_name }}
           path: ${{ runner.temp }}/private-target-snapshot
 
       - name: Reverify the downloaded unit in the isolated publisher
@@ -367,14 +367,14 @@ jobs:
           node "$RUNNER_TEMP/private-target-snapshot/publisher-verify.mjs" \
             --dist dist-private \
             --snapshot "$RUNNER_TEMP/private-target-snapshot" \
-            --ref "${{ needs.publication-prepare.outputs.source_ref }}" \
-            --commit "${{ needs.publication-prepare.outputs.source_commit }}" \
-            --digest "${{ needs.private-build.outputs.artifact_digest_hex }}"
+            --ref "${{ needs.check-publication-request.outputs.source_ref }}" \
+            --commit "${{ needs.check-publication-request.outputs.source_commit }}" \
+            --digest "${{ needs.build-private-artifact.outputs.artifact_digest_hex }}"
 
       - name: Publish artifact and sidecar as one release unit
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: private-mtproto-${{ needs.publication-prepare.outputs.source_commit }}-${{ needs.private-build.outputs.artifact_digest_hex }}
+          name: private-mtproto-${{ needs.check-publication-request.outputs.source_commit }}-${{ needs.build-private-artifact.outputs.artifact_digest_hex }}
           path: dist-private
           include-hidden-files: true
           if-no-files-found: error

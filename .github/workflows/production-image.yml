@@ -6,7 +6,8 @@ on:
       - 'tag/build-docker-image/*'
 
 jobs:
-  build:
+  publish-web-image:
+    name: 'publish: web-image'
     runs-on: ubuntu-26.04
 
     steps:
@@ -47,8 +48,9 @@ jobs:
           docker push ${{ vars.DOCKERHUB_USERNAME}}/tweb:latest
 
 
-  test:
-    needs: build
+  test-web-image:
+    name: 'test: web-image'
+    needs: publish-web-image
     runs-on: ubuntu-26.04
 
     steps:
