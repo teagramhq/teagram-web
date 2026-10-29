@@ -4,9 +4,14 @@ import {resolve} from 'node:path';
 import {test} from 'node:test';
 
 const workflow = readFileSync(new URL('../../.github/workflows/performance.yml', import.meta.url), 'utf8');
+const viteConfig = readFileSync(new URL('../../vite.config.ts', import.meta.url), 'utf8');
 const serverCheckout = process.env.PERF_SERVER_CHECKOUT || 'teagram-server';
 const serverTestHelpers = readFileSync(resolve(serverCheckout, 'internal/pgtest/pgtest.go'), 'utf8');
 const runtimeCommitPath = new URL('../../.github/perf-server-commit', import.meta.url);
+
+test('the Vitest suite leaves native performance tests to node:test', () => {
+  assert.match(viteConfig, /exclude:[\s\S]*?'scripts\/performance\/\*\*\/\*\.test\.mjs'/);
+});
 
 test('the restored fixture server uses the seeder auth-key encryption key', () => {
   const fixtureKey = serverTestHelpers.match(/func EncKey\(\) \[\]byte \{\s*return bytes\.Repeat\(\[\]byte\{0x([a-f0-9]{2})\}, (\d+)\)\s*\}/i);
