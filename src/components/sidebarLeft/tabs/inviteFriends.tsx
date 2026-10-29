@@ -393,17 +393,18 @@ const InviteFriends = () => {
     setCreating(true);
     try {
       const created = await rootScope.managers.appAccountManager.createUserInvite();
-      if(cancelled) return;
-      setInvites((current) => [{
-        _: 'teagram.userInvite',
-        id: created.id,
-        state: 'pending',
-        created_at: tsNow(true),
-        expires_at: created.expires_at
-      }, ...current]);
-      setWeeklyCount((count) => count + 1);
+      if(!cancelled) {
+        setInvites((current) => [{
+          _: 'teagram.userInvite',
+          id: created.id,
+          state: 'pending',
+          created_at: tsNow(true),
+          expires_at: created.expires_at
+        }, ...current]);
+        setWeeklyCount((count) => count + 1);
+      }
       showCreatedLink(created);
-      void loadInvites();
+      if(!cancelled) void loadInvites();
     } catch(error) {
       if(cancelled) return;
       const type = getErrorType(error);
