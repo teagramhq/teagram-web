@@ -1640,7 +1640,7 @@ async function runGuestSignupScenario(browser, runtime, contexts, registry, obse
   await guestButton.click().catch(() => failStage('guest_signup_submit'));
 
   const termsDialog = page.getByRole('dialog', {name: 'Terms of service'});
-  const termsVisible = await termsDialog.waitFor({state: 'visible', timeout: 3_000}).then(() => true).catch((error) => {
+  const termsVisible = await termsDialog.waitFor({state: 'visible', timeout: 30_000}).then(() => true).catch((error) => {
     if(error?.name === 'TimeoutError') return false;
     throw error;
   });

@@ -3943,8 +3943,9 @@ describe('real client scenario contract', () => {
       newPage: async() => page,
       close: async() => {}
     };
+    const waitFor = vi.fn(async(options: {timeout?: number}) => { void options; });
     const locator = {
-      waitFor: async() => {},
+      waitFor,
       click: async() => {},
       getByRole: () => locator,
       getByText: () => locator,
@@ -3996,6 +3997,7 @@ describe('real client scenario contract', () => {
       const guestStorageRead = String(page.evaluate.mock.calls[0][0]);
       expect(guestStorageRead).toContain('appStorage.get');
       expect(guestStorageRead).toContain('guestCredentials');
+      expect(waitFor.mock.calls[1]?.[0]?.timeout).toBe(30_000);
     } finally {
       await Promise.all(observers.map((observer) => observer.stop()));
     }
