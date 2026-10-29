@@ -1,5 +1,6 @@
 import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
+import Icons from '../src/icons';
 
 type Fixture = {
   owner: number,
@@ -27,9 +28,10 @@ const fixture = fixturePath ? JSON.parse(readFileSync(fixturePath, 'utf8')) as F
 const username = process.env.PERF_USERNAME;
 const password = process.env.PERF_PASSWORD;
 const reportPath = process.env.PERF_REPORT_PATH;
-const report: {fixtureVersion: string, serverCommit: string, variants: Record<string, Record<string, Metric[]>>} = {
+const report: {fixtureVersion: string, serverCommit: string, fixtureServerCommit: string, variants: Record<string, Record<string, Metric[]>>} = {
   fixtureVersion: process.env.PERF_FIXTURE_VERSION || '',
   serverCommit: process.env.PERF_SERVER_COMMIT || '',
+  fixtureServerCommit: process.env.PERF_FIXTURE_SERVER_COMMIT || '',
   variants: {base: {}, head: {}}
 };
 
@@ -208,9 +210,12 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
 async function jumpToFixtureDate(page: Page, requests: {value: number}) {
   await begin(page, requests);
   const beforeMids = await page.locator('.bubbles .bubble[data-mid]').evaluateAll((elements) => elements.map((element) => Number((element as HTMLElement).dataset.mid)));
-  await page.locator('#page-chats .topbar .btn-icon.search').click();
-  await expect(page.locator('.chat-search')).toBeVisible();
-  await page.locator('.chat-search-calendar').click();
+  const searchIcon = String.fromCharCode(parseInt(Icons.search, 16));
+  await page.locator('#page-chats .chat-utils > .btn-icon').filter({hasText: searchIcon}).click();
+  const calendarIcon = String.fromCharCode(parseInt(Icons.calendar, 16));
+  const searchCalendar = page.locator('#page-chats .topbar-search-container .topbar-search-right-filter > .btn-icon').filter({hasText: calendarIcon});
+  await expect(searchCalendar).toBeVisible();
+  await searchCalendar.click();
   await expect(page.locator('.date-picker-scrollable')).toBeVisible();
 
   const targetDate = new Date(fixture!.middle_date * 1000);
@@ -267,10 +272,10 @@ async function searchContacts(page: Page, requests: {value: number}) {
 }
 
 async function globalSearch(page: Page, requests: {value: number}) {
-  await page.locator('.sidebar-back-button').click();
+  await page.locator('#contacts-container .sidebar-close-button').click();
   await begin(page, requests);
   await page.keyboard.press('Control+f');
-  const input = page.locator('#search-container .input-search-input');
+  const input = page.locator('#column-left .item-main .sidebar-header .input-search-input');
   await expect(input).toBeVisible();
   await input.fill('needle 500000');
   await expect(page.locator('#search-container .chatlist-chat').first()).toBeVisible({timeout: 90_000});

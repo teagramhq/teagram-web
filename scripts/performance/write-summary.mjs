@@ -37,7 +37,7 @@ const table = formatPerformanceTable(evaluation);
 const summary = [
   '## Web performance at scale',
   '',
-  `Fixture: \`${report.fixtureVersion || 'not recorded'}\`; server commit: \`${report.serverCommit || 'not recorded'}\`.`,
+  `Fixture: \`${report.fixtureVersion || 'not recorded'}\`; server runtime commit: \`${report.serverCommit || 'not recorded'}\`; fixture seed commit: \`${report.fixtureServerCommit || 'not recorded'}\`.`,
   '',
   table,
   '',

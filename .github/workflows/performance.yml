@@ -64,11 +64,15 @@ jobs:
         id: fixture
         run: node scripts/performance/fixture-release.mjs download --version "$(cat .github/perf-fixture-version)" --output "$PERF_FIXTURE_DIRECTORY"
 
-      - name: Check out server at the fixture seed commit
+      - name: Pin performance server runtime
+        id: runtime-server
+        run: echo "server_commit=$(cat .github/perf-server-commit)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out pinned server runtime
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: teagramhq/teagram-server
-          ref: ${{ steps.fixture.outputs.server_commit }}
+          ref: ${{ steps.runtime-server.outputs.server_commit }}
           path: teagram-server
           persist-credentials: false
 
@@ -79,6 +83,10 @@ jobs:
         uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: teagram-server/go.mod
+
+      - uses: ariga/setup-atlas@v0.3
+        with:
+          version: v1.2.0
 
       - name: Read fixture owner credentials
         run: node scripts/performance/read-credentials.mjs teagram-server/test/perf/README.md
@@ -118,6 +126,11 @@ jobs:
           if [ -d "$PERF_FIXTURE_DIRECTORY/snapshot/blobs-100x" ]; then
             cp -a "$PERF_FIXTURE_DIRECTORY/snapshot/blobs-100x/." "$RUNNER_TEMP/teagram-perf-blobs/"
           fi
+
+      - name: Apply pinned runtime server migrations
+        env:
+          TG_POSTGRES_DSN: postgres://postgres:perf@localhost:5432/teagram?sslmode=disable
+        run: atlas migrate apply --url "$TG_POSTGRES_DSN" --dir file://teagram-server/migrations
 
       - name: Configure isolated server and browser origins
         shell: bash
@@ -225,7 +238,8 @@ jobs:
           PERF_FIXTURE_FILE: ${{ runner.temp }}/teagram-perf-fixture/snapshot/fixture-100x.json
           PERF_REPORT_PATH: ${{ runner.temp }}/teagram-web-performance.json
           PERF_FIXTURE_VERSION: ${{ steps.fixture.outputs.fixture_version }}
-          PERF_SERVER_COMMIT: ${{ steps.fixture.outputs.server_commit }}
+          PERF_SERVER_COMMIT: ${{ steps.runtime-server.outputs.server_commit }}
+          PERF_FIXTURE_SERVER_COMMIT: ${{ steps.fixture.outputs.server_commit }}
           PERF_BASE_ORIGIN: ${{ github.event_name == 'pull_request' && 'http://localhost:4173' || '' }}
           PERF_HEAD_ORIGIN: http://localhost:4174
         run: >-
