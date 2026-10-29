@@ -39,10 +39,15 @@ function spread(values) {
 
 function summarizeSamples(samples = []) {
   const keys = ['ms', 'requests', 'domNodes', 'bundleBytes', 'longTasksOver50Ms', 'droppedFramePercent'];
-  return Object.fromEntries(keys.map((key) => {
+  const summary = Object.fromEntries(keys.map((key) => {
     const values = samples.map((sample) => sample[key]).filter(Number.isFinite);
     return [key, key === 'longTasksOver50Ms' && values.length ? Math.max(...values) : median(values)];
   }));
+  const frameIntervals = samples.reduce((total, sample) => total + (Number.isFinite(sample?.frameIntervals) ? sample.frameIntervals : 0), 0);
+  const droppedFrames = samples.reduce((total, sample) => total + (Number.isFinite(sample?.droppedFrames) ? sample.droppedFrames : 0), 0);
+  const totalFrames = frameIntervals + droppedFrames;
+  if(totalFrames > 0) summary.droppedFramePercent = droppedFrames / totalFrames * 100;
+  return summary;
 }
 
 function matchesFixture(run, report) {
@@ -106,11 +111,22 @@ export function evaluatePerformance(report, history = []) {
         addFailure(blockingFailures, scale, scenario.key, `expected at least ${PERFORMANCE_REPEATS} repeat measurements, got ${headSamples.length}`);
       }
       headSamples.forEach((sample, index) => {
-        const requiredMetrics = scenario.key === 'scrollBack2k' ? [...REQUIRED_METRICS, ['droppedFramePercent', 'dropped frame percentage']] : REQUIRED_METRICS;
+        const requiredMetrics = scenario.key === 'scrollBack2k' ? [
+          ...REQUIRED_METRICS,
+          ['frameIntervals', 'frame interval count'],
+          ['droppedFrames', 'dropped frame count'],
+          ['droppedFramePercent', 'dropped frame percentage']
+        ] : REQUIRED_METRICS;
         for(const [field, label] of requiredMetrics) {
           if(!Number.isFinite(sample?.[field])) {
             addFailure(blockingFailures, scale, scenario.key, `${label} is missing or invalid in head sample ${index + 1}`);
           }
+        }
+        if(scenario.key === 'scrollBack2k' && Number.isFinite(sample?.frameIntervals) && sample.frameIntervals <= 0) {
+          addFailure(blockingFailures, scale, scenario.key, `frame interval count must be positive in head sample ${index + 1}`);
+        }
+        if(scenario.key === 'scrollBack2k' && Number.isFinite(sample?.droppedFrames) && sample.droppedFrames < 0) {
+          addFailure(blockingFailures, scale, scenario.key, `dropped frame count cannot be negative in head sample ${index + 1}`);
         }
       });
 

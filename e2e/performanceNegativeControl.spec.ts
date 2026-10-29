@@ -27,7 +27,9 @@ test('100 ms main-thread negative control is detected and blocks the gate', asyn
     domNodes: 1,
     bundleBytes: 0,
     longTasksOver50Ms,
-    droppedFramePercent: 0
+    droppedFramePercent: 0,
+    droppedFrames: 0,
+    frameIntervals: 100
   });
   const samples = Object.fromEntries(SCENARIOS.map(({key}) => [key, Array.from(
     {length: PERFORMANCE_REPEATS},

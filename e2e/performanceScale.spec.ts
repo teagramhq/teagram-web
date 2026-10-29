@@ -18,7 +18,9 @@ type Metric = {
   domNodes: number,
   bundleBytes: number,
   longTasksOver50Ms: number,
-  droppedFramePercent?: number
+  droppedFramePercent?: number,
+  droppedFrames?: number,
+  frameIntervals?: number
 };
 
 type VariantRun = {
@@ -120,7 +122,9 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
       domNodes: document.querySelectorAll('*').length,
       bundleBytes,
       longTasksOver50Ms: perf.longTasks.filter((entry: {startTime: number}) => entry.startTime >= perf.started).length,
-      droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined
+      droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
+      droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
+      frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
   }, {ms, requests: requests.value, scroll});
 }

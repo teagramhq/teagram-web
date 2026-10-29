@@ -20,6 +20,8 @@ function scaleSamples(overrides = {}) {
       domNodes: 300,
       bundleBytes: 100_000,
       longTasksOver50Ms: 0,
+      frameIntervals: 100,
+      droppedFrames: 0,
       droppedFramePercent: 0,
       ...sample
     }))];
@@ -60,13 +62,34 @@ test('blocks a 100 ms main-thread task from the first run', () => {
 
 test('blocks 100x scroll frame loss at one percent and reports 1x only', () => {
   const head = scaleVariants({
-    '1x': {scrollBack2k: {droppedFramePercent: 5}},
-    '100x': {scrollBack2k: {droppedFramePercent: 1}}
+    '1x': {scrollBack2k: {droppedFrames: 50, frameIntervals: 950, droppedFramePercent: 5}},
+    '100x': {scrollBack2k: {droppedFrames: 2, frameIntervals: 198, droppedFramePercent: 1}}
   });
   const result = evaluatePerformance(report({head}));
 
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('scrollBack2k') && failure.includes('dropped frames')));
   assert.equal(result.blockingFailures.some((failure) => failure.includes('1x scrollBack2k') && failure.includes('dropped frames')), false);
+});
+
+test('pools dropped frame counts across all scroll repeats', () => {
+  const head = scaleVariants({'100x': {scrollBack2k: [
+    {droppedFrames: 4, frameIntervals: 774, droppedFramePercent: 0.5141388174807198},
+    {droppedFrames: 9, frameIntervals: 881, droppedFramePercent: 1.0112359550561798},
+    {droppedFrames: 8, frameIntervals: 767, droppedFramePercent: 1.032258064516129}
+  ]}});
+  const result = evaluatePerformance(report({head}));
+  const row = result.rows.find((item) => item.scale === '100x' && item.key === 'scrollBack2k');
+
+  assert.ok(row.head.droppedFramePercent < 1);
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('dropped frames')), false);
+});
+
+test('fails closed when scroll frame counters are missing', () => {
+  const head = scaleVariants();
+  delete head['100x'].scrollBack2k[1].frameIntervals;
+  const result = evaluatePerformance(report({head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('frame interval count is missing')));
 });
 
 test('blocks a long task in any 100x scroll repeat', () => {
