@@ -6,6 +6,7 @@ import {isIPv4} from 'node:net';
 
 import {
   assertAllScenariosPassed,
+  expectedBrowserContextCount,
   expectedScreenshotCount,
   formatBrowserFailureMessage,
   parsePassedBrowserGateBreakdown,
@@ -328,7 +329,7 @@ if(args?.help) {
       browserResult.gateBreakdown = parsePassedBrowserGateBreakdown(browserResult);
       const expectedScreenshots = expectedScreenshotCount(args);
       const incompleteEvidence = [];
-      if(browserResult.contextCount !== 2) incompleteEvidence.push('contexts');
+      if(browserResult.contextCount !== expectedBrowserContextCount(args)) incompleteEvidence.push('contexts');
       if(browserResult.screenshotsCaptured !== expectedScreenshots) {
         incompleteEvidence.push(`screenshots_${Number.isSafeInteger(browserResult.screenshotsCaptured) ? browserResult.screenshotsCaptured : 'unavailable'}_expected_${expectedScreenshots}`);
       }
@@ -347,7 +348,7 @@ if(args?.help) {
       // The page-session observer cannot see shared workers, so the shared-worker
       // evidence is the browser-level observation block: synthetic controls, per-context
       // attribution by browser context, and complete coverage.
-      parseWorkerObservation(browserResult.workerObservation);
+      parseWorkerObservation(browserResult.workerObservation, args.scenarios);
     }
   } catch(error) {
     operationError = error;

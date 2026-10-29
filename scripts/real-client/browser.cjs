@@ -1610,11 +1610,16 @@ async function signIn(page, account, name, screenshotDirectory, capturedScreensh
   .catch(() => failStage(`${name}_service_worker_controller`));
 }
 
-async function runGuestSignupScenario(browser, runtime, contexts) {
+async function runGuestSignupScenario(browser, runtime, contexts, registry, observers, appObservers) {
   currentStage = 'guest_context';
   const context = await browser.newContext({viewport: {width: 1280, height: 900}});
   contexts.push(context);
   const page = await context.newPage();
+  const observer = observation.createContextObserver('guest');
+  appObservers.guest = observer;
+  const networkObserver = createNetworkObserver(page, 'guest', observer);
+  observers.push(networkObserver);
+  await networkObserver.start(registry);
   const turnstileRequests = [];
   const pageErrors = [];
   page.on('request', (request) => {
@@ -1662,6 +1667,8 @@ async function runGuestSignupScenario(browser, runtime, contexts) {
   .getByText("Demo server: you're a guest.", {exact: true})
   .waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_demo_banner'));
   if(pageErrors.length !== 0) failStage('guest_page_error');
+  await networkObserver.waitForSetup();
+  observer.state.windowElapsed = true;
   if(runtime.scenarios.includes('guest-signup')) return {name: 'guest-signup', status: 'passed'};
   return undefined;
 }
@@ -5736,7 +5743,7 @@ function buildObservationBlock(registry, appObservers, controls, egress) {
 }
 
 function buildWorkerCoverageFailureBreakdown(registry, appObservers) {
-  const contexts = Object.fromEntries(Object.keys(appObservers).filter((name) => APP_CONTEXTS.includes(name)).map((name) => {
+  const contexts = Object.fromEntries(Object.keys(appObservers).map((name) => {
     const observer = appObservers[name];
     const summary = observer.summary();
     return [name, {
@@ -6478,7 +6485,7 @@ async function main(dependencies = {}) {
     }
     if(runtime.scenarios.includes('guest-signup')) {
       currentScenario = 'guest-signup';
-      report.push(await runGuestSignupScenario(browser, runtime, contexts));
+      report.push(await runGuestSignupScenario(browser, runtime, contexts, registry, observers, appObservers));
       currentScenario = undefined;
     }
     if(JSON.stringify(report.map((scenario) => scenario.name)) !== JSON.stringify(runtime.scenarios)) {
@@ -6609,7 +6616,6 @@ async function main(dependencies = {}) {
           ? {
             workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers),
             workerOverflowReasons: Object.fromEntries(Object.keys(appObservers)
-            .filter((name) => APP_CONTEXTS.includes(name))
             .map((name) => [name, appObservers[name].state.overflowReason || 'none']))
           }
           : {}),
@@ -6700,7 +6706,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, runGuestSignupScenario, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

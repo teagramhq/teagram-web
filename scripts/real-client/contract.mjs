@@ -137,6 +137,11 @@ export function expectedScreenshotCount({pollCreationNegativeControl = false, sc
   return 20 + channelScreenshots + pollScreenshots;
 }
 
+export function expectedBrowserContextCount({scenarios = REQUIRED_SCENARIOS} = {}) {
+  if(!Array.isArray(scenarios)) throw new Error('scenarios must be an array');
+  return REQUIRED_OBSERVATION_CONTEXTS.length + (scenarios.includes('guest-signup') ? 1 : 0);
+}
+
 export function parseRealClientArgs(argv) {
   const argumentsList = argv[0] === '--' ? argv.slice(1) : argv;
   if(argumentsList.includes('--help') || argumentsList.includes('-h')) {
@@ -406,8 +411,11 @@ function assertArtifactReadyEvidence(ready) {
 // report does not prove is a failure of the evidence, never a pass: an
 // `unclassified` block, a missing control, an unknown coverage state, a foreign
 // target, an overflow, or a context owning more than one page.
-export function parseWorkerObservation(block) {
-  return parseWorkerObservationForContexts(block, REQUIRED_OBSERVATION_CONTEXTS);
+export function parseWorkerObservation(block, scenarios = REQUIRED_SCENARIOS) {
+  const expectedContexts = scenarios.includes('guest-signup')
+    ? [...REQUIRED_OBSERVATION_CONTEXTS, 'guest']
+    : REQUIRED_OBSERVATION_CONTEXTS;
+  return parseWorkerObservationForContexts(block, expectedContexts);
 }
 
 export function parseAuthProgressWorkerObservation(block) {
@@ -473,6 +481,7 @@ function parseWorkerObservationForContexts(block, expectedContexts) {
     const context = block.contexts[name];
     if(context.pageTargets !== 1) throw new Error(`${name} does not own exactly one page`);
     if(context.coverageComplete !== 1) throw new Error(`${name} shared-worker observation coverage is incomplete`);
+    if(name === 'guest') continue;
     if(context.mtprotoSourceFetch === 'not_requested') throw new Error(`${name} never fetched the MTProto worker source`);
     if(context.mtprotoSourceChunk !== 'mtproto_worker') throw new Error(`${name} MTProto worker source is not an allowlisted chunk`);
     if(context.mtprotoWorker === 'unknown') throw new Error(`${name} MTProto shared-worker state is unknown`);
@@ -753,7 +762,8 @@ function parseCleanupFailureCodes(value) {
 }
 
 function parseWorkerOverflowReasons(value) {
-  if(!hasExactOwnKeys(value, ['alice', 'bob']) ||
+  if(!(hasExactOwnKeys(value, ['alice']) || hasExactOwnKeys(value, ['alice', 'bob']) ||
+      hasExactOwnKeys(value, ['alice', 'bob', 'guest'])) ||
       Object.values(value).some((reason) => !WORKER_OVERFLOW_REASONS.includes(reason))) {
     throw new Error('worker overflow reason evidence is invalid');
   }
@@ -827,9 +837,14 @@ function parseWorkerCoverageBreakdown(value) {
   ];
   const targetTypes = ['page', 'iframe', 'service_worker', 'shared_worker', 'dedicated_worker', 'other'];
   const causes = ['multiple_pages', 'foreign', 'contextless', 'observer_overflow', 'observer_error'];
+  const workerContexts = Object.keys(value?.contexts || {}).sort();
   if(!hasExactOwnKeys(value, ['registry', 'contexts', 'targets']) ||
       !hasExactOwnKeys(value.registry, registryKeys) ||
-      !(hasExactOwnKeys(value.contexts, ['alice']) || hasExactOwnKeys(value.contexts, ['alice', 'bob'])) ||
+      !([
+        ['alice'],
+        ['alice', 'bob'],
+        ['alice', 'bob', 'guest']
+      ].some((contextNames) => JSON.stringify(workerContexts) === JSON.stringify(contextNames))) ||
       !Array.isArray(value.targets) || value.targets.length > 1024) {
     throw new Error('worker coverage evidence is invalid');
   }
@@ -858,7 +873,7 @@ function parseWorkerCoverageBreakdown(value) {
   for(const target of value.targets) {
     if(!hasExactOwnKeys(target, ['targetType', 'owningContext', 'scriptAsset', 'causes']) ||
         !targetTypes.includes(target.targetType) ||
-        !(target.owningContext === null || ['alice', 'bob', 'control'].includes(target.owningContext)) ||
+        !(target.owningContext === null || ['alice', 'bob', 'guest', 'control'].includes(target.owningContext)) ||
         typeof target.scriptAsset !== 'string' || !SCRIPT_ASSET.test(target.scriptAsset) ||
         !Array.isArray(target.causes) || target.causes.length < 1 || target.causes.length > causes.length ||
         target.causes.some((cause) => !causes.includes(cause)) || new Set(target.causes).size !== target.causes.length) {
