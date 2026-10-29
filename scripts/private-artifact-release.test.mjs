@@ -310,7 +310,23 @@ describe('private artifact workflow Node runtime', () => {
     expect(job).not.toContain('actions/checkout@');
     expect(job).not.toContain('pnpm install');
     expect(job).not.toContain('pnpm/action-setup@');
+    expect(job).not.toContain('packages: write');
+    expect(job).not.toContain('docker login ghcr.io');
     expect(job.indexOf(upload)).toBe(job.indexOf(reverify) + reverify.length);
+  });
+
+  it('publishes the reviewed web image from a separate permissioned job', () => {
+    const privatePublisher = privateWorkflowJob(privateArtifactWorkflowText, 'private-publish');
+    const imagePublisher = privateWorkflowJob(privateArtifactWorkflowText, 'publish-teagram-web-image');
+    const verifyImage = privateWorkflowStep(imagePublisher, 'Load and verify the reviewed web image');
+    const authenticate = privateWorkflowStep(imagePublisher, 'Authenticate to GitHub Container Registry');
+    const pushImage = privateWorkflowStep(imagePublisher, 'Publish the reviewed web image and record its digest');
+
+    expect(imagePublisher).toContain('      - private-publish\n');
+    expect(imagePublisher).toContain('packages: write');
+    expect(privatePublisher).not.toContain('packages: write');
+    expect(imagePublisher.indexOf(verifyImage)).toBeLessThan(imagePublisher.indexOf(authenticate));
+    expect(imagePublisher.indexOf(authenticate)).toBeLessThan(imagePublisher.indexOf(pushImage));
   });
 
   it('selects Node after the credential-free checkout in publication preparation', () => {

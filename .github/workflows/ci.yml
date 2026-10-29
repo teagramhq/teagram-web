@@ -386,14 +386,12 @@ jobs:
             -summary \
             -kubernetes-version "$KUBERNETES_VERSION" \
             "$ci_manifest"
-          kubectl apply --dry-run=client --validate=false -f "$ci_manifest"
           prod_manifest="$RUNNER_TEMP/teagram-web-prod.yaml"
           "$(go env GOPATH)/bin/kubeconform" \
             -strict \
             -summary \
             -kubernetes-version "$KUBERNETES_VERSION" \
             "$prod_manifest"
-          kubectl apply --dry-run=client --validate=false -f "$prod_manifest"
 
   test-k8s-deploy:
     name: 'test: k8s-deploy'
@@ -493,6 +491,8 @@ jobs:
           set -euo pipefail
           "$(go env GOPATH)/bin/k3d" image import "$IMAGE_REF" --cluster "$K3D_CLUSTER"
           kubectl create namespace teagram
+          kubectl apply --dry-run=client --validate=false -k deploy/k8s/overlays/ci
+          kubectl apply --dry-run=client --validate=false -k deploy/k8s/overlays/prod
           kubectl apply --dry-run=server -k deploy/k8s/overlays/ci
           kubectl apply -k deploy/k8s/overlays/ci
           kubectl rollout status deployment/teagram-web --namespace teagram --timeout=180s
