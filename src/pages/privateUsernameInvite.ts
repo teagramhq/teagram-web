@@ -27,9 +27,9 @@ export function takePrivateUsernameInviteSecretFromFragment() {
   let secret = inviteSecretFromFragment;
   inviteSecretFromFragment = undefined;
 
-  if(!secret && typeof window !== 'undefined') {
+  if(typeof window !== 'undefined') {
     try {
-      secret = window.sessionStorage.getItem(INVITE_SECRET_SESSION_KEY) || undefined;
+      if(!secret) secret = window.sessionStorage.getItem(INVITE_SECRET_SESSION_KEY) || undefined;
       window.sessionStorage.removeItem(INVITE_SECRET_SESSION_KEY);
     } catch(err) {}
   }
@@ -46,6 +46,25 @@ export function storePrivateUsernameInviteSecretForAccountSwitch(secret: string)
     return true;
   } catch(err) {
     return false;
+  }
+}
+
+export function restorePrivateUsernameInviteSecretForRetry(
+  secret: string,
+  restoreFragment = (normalizedSecret: string) => window.history.replaceState(
+    window.history.state,
+    '',
+    `${window.location.pathname}${window.location.search}#${normalizedSecret}`
+  )
+) {
+  if(!INVITE_SECRET_PATTERN.test(secret)) return false;
+
+  const normalizedSecret = secret.toLowerCase();
+  try {
+    restoreFragment(normalizedSecret);
+    return true;
+  } catch(err) {
+    return storePrivateUsernameInviteSecretForAccountSwitch(normalizedSecret);
   }
 }
 

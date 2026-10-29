@@ -31,6 +31,9 @@ const screenshotSizes: Record<string, {width: number, height: number}> = {
   'invite-friends-create-failed': {width: 360, height: 738},
   'invite-friends-account-too-new': {width: 360, height: 467},
   'invite-registration-signed-in-confirm': {width: 520, height: 421},
+  'invite-registration-add-failed': {width: 800, height: 600},
+  'invite-registration-storage-unavailable': {width: 800, height: 600},
+  'invite-registration-account-switch-failed': {width: 800, height: 600},
   'invite-registration-prefilled': {width: 520, height: 1061},
   'invite-registration-prefilled-mobile': {width: 360, height: 761},
   'invite-registration-ready': {width: 520, height: 1061},
@@ -68,7 +71,7 @@ async function openInviteSettings(page: import('@playwright/test').Page) {
   return inviteRow;
 }
 
-test('an existing user creates an invite that a new user redeems from its link', async({page}, testInfo) => {
+test('an existing user can retry an invite after a failure and blocked session storage', async({page}, testInfo) => {
   const baseURL = new URL(testInfo.project.use.baseURL as string);
   const inviteSecret = 'c'.repeat(64);
   const inviteURL = new URL('/invite', baseURL);
@@ -79,6 +82,20 @@ test('an existing user creates an invite that a new user redeems from its link',
     userInvitesEnabled: true,
     signInAsExistingUser: true,
     inviteLink: inviteURL.toString(),
+    failSignedInInviteLookup: true
+  });
+  await page.addInitScript(() => {
+    const setItem = Storage.prototype.setItem;
+    (window as any).__failAccountSwitchForTest = false;
+    Storage.prototype.setItem = function(key, value) {
+      if(key === 'teagram-invite-secret' && new URL(location.href).searchParams.has('block-invite-storage')) {
+        throw new DOMException('Storage unavailable', 'SecurityError');
+      }
+      if(key.endsWith('previous-account') && (window as any).__failAccountSwitchForTest) {
+        throw new DOMException('Account switch failed', 'SecurityError');
+      }
+      setItem.call(this, key, value);
+    };
   });
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
   await page.goto('/?noWorker=1&noServiceWorker=1', {waitUntil: 'domcontentloaded'});
@@ -145,11 +162,43 @@ test('an existing user creates an invite that a new user redeems from its link',
   await captureInviteState(page, testInfo, 'invite-friends-with-pending-link');
 
   await page.setViewportSize({width: 800, height: 600});
-  await page.goto(createdLink, {waitUntil: 'domcontentloaded'});
+  const failedInviteURL = new URL(createdLink);
+  failedInviteURL.searchParams.set('fail-invite-lookup', '1');
+  await page.goto(failedInviteURL.toString(), {waitUntil: 'domcontentloaded'});
+  await expect(page.getByText('An error occurred. Please try again later.', {exact: true})).toBeVisible({timeout: 30_000});
+  await expect(page.locator('#page-chats')).toBeVisible();
+  await captureInviteState(page, testInfo, 'invite-registration-add-failed');
+
+  const blockedStorageURL = new URL(createdLink);
+  blockedStorageURL.searchParams.set('block-invite-storage', '1');
+  await page.goto(blockedStorageURL.toString(), {waitUntil: 'domcontentloaded'});
   await expect(page.getByText('This invite link creates a new account on', {exact: false})).toBeVisible({timeout: 30_000});
-  await expect(page).toHaveURL(/\/invite$/);
+  await expect(page).toHaveURL(/\/invite(?:\?|$)/);
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('');
   await captureInviteState(page, testInfo, 'invite-registration-signed-in-confirm');
+  await page.getByRole('button', {name: 'Add account'}).click();
+  await expect(page.getByText('An error occurred. Please try again later.', {exact: true})).toBeVisible({timeout: 30_000});
+  await expect(page.locator('#page-chats')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#${inviteSecret}`);
+  await captureInviteState(page, testInfo, 'invite-registration-storage-unavailable');
+
+  const retryURL = await page.evaluate(() => {
+    const url = new URL(location.href);
+    url.searchParams.delete('block-invite-storage');
+    return url.toString();
+  });
+  await page.goto(retryURL, {waitUntil: 'domcontentloaded'});
+  await expect(page.getByText('This invite link creates a new account on', {exact: false})).toBeVisible({timeout: 30_000});
+  await page.evaluate(() => (window as any).__failAccountSwitchForTest = true);
+  await page.getByRole('button', {name: 'Add account'}).click();
+  await expect(page.getByText('An error occurred. Please try again later.', {exact: true})).toBeVisible({timeout: 30_000});
+  await expect(page.locator('#page-chats')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#${inviteSecret}`);
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('teagram-invite-secret'))).toBe(inviteSecret);
+  await captureInviteState(page, testInfo, 'invite-registration-account-switch-failed');
+
+  await page.reload({waitUntil: 'domcontentloaded'});
+  await expect(page.getByText('This invite link creates a new account on', {exact: false})).toBeVisible({timeout: 30_000});
   await page.getByRole('button', {name: 'Add account'}).click();
 
   const registration = page.locator('#auth-pages');

@@ -44,7 +44,8 @@ export async function setupRegistrationMocks(
     inviteListDelay?: number,
     createInviteError?: string,
     createInviteDelay?: number,
-    revokeInviteError?: string
+    revokeInviteError?: string,
+    failSignedInInviteLookup?: boolean
   } = {}
 ) {
   const appOrigin = new URL(testInfo.project.use.baseURL as string).origin;
@@ -109,6 +110,12 @@ export async function setupRegistrationMocks(
         delete (window as any).apiManagerProxy;
         (window as any).apiManagerProxy = proxy;
         const invoke = proxy.invoke.bind(proxy);
+        const hasSomeonePremium = proxy.hasSomeonePremium?.bind(proxy);
+        if(options.failSignedInInviteLookup && hasSomeonePremium) {
+          proxy.hasSomeonePremium = () => new URL(location.href).searchParams.has('fail-invite-lookup') ?
+            Promise.reject(new Error('Invite capacity lookup failed')) :
+            hasSomeonePremium();
+        }
         const calls: Array<{method: string, params?: Record<string, unknown>}> =
           ((window as any).__registrationCalls = []);
         (window as any).__registrationMockOptions = options;

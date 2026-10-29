@@ -4,6 +4,7 @@ import type {HelpTermsOfService} from '@layer';
 import {authenticatePrivateUsername, isPrivateUsername, isPrivateUsernameCredentialError, parsePrivateUsernameInviteSecret} from '@/pages/privateUsernameAuth';
 import {
   capturePrivateUsernameInviteSecretFromFragment,
+  restorePrivateUsernameInviteSecretForRetry,
   storePrivateUsernameInviteSecretForAccountSwitch,
   takePrivateUsernameInviteSecretFromFragment
 } from '@/pages/privateUsernameInvite';
@@ -39,6 +40,17 @@ describe('private username sign-in', () => {
     expect(takePrivateUsernameInviteSecretFromFragment()).toBeUndefined();
   });
 
+  it('clears an older pending secret when a fresh fragment arrives', () => {
+    const secret = 'e'.repeat(64);
+    window.sessionStorage.setItem('teagram-invite-secret', 'f'.repeat(64));
+    window.history.replaceState(window.history.state, '', `/?keep=1#${secret}`);
+
+    capturePrivateUsernameInviteSecretFromFragment();
+
+    expect(takePrivateUsernameInviteSecretFromFragment()).toBe(secret);
+    expect(window.sessionStorage.getItem('teagram-invite-secret')).toBeNull();
+  });
+
   it('passes an invite across an account switch through session storage once', () => {
     const secret = 'c'.repeat(64);
 
@@ -47,6 +59,63 @@ describe('private username sign-in', () => {
     expect(takePrivateUsernameInviteSecretFromFragment()).toBe(secret);
     expect(window.sessionStorage.getItem('teagram-invite-secret')).toBeNull();
     expect(takePrivateUsernameInviteSecretFromFragment()).toBeUndefined();
+  });
+
+  it('requires session storage to hand an invite across an account switch', () => {
+    const secret = 'd'.repeat(64);
+    const sessionStorage = Object.getOwnPropertyDescriptor(window, 'sessionStorage');
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      get() {
+        throw new DOMException('Storage unavailable', 'SecurityError');
+      }
+    });
+
+    try {
+      expect(storePrivateUsernameInviteSecretForAccountSwitch(secret)).toBe(false);
+      expect(takePrivateUsernameInviteSecretFromFragment()).toBeUndefined();
+    } finally {
+      if(sessionStorage) Object.defineProperty(window, 'sessionStorage', sessionStorage);
+      else delete (window as any).sessionStorage;
+    }
+  });
+
+  it('restores an invite fragment after a failed account switch for retry', () => {
+    const secret = 'a'.repeat(64);
+    window.history.replaceState(window.history.state, '', '/invite?keep=1');
+    window.sessionStorage.setItem('teagram-invite-secret', secret);
+
+    expect(restorePrivateUsernameInviteSecretForRetry(secret.toUpperCase())).toBe(true);
+    expect(window.location.search).toBe('?keep=1');
+    expect(window.location.hash).toBe(`#${secret}`);
+    expect(window.sessionStorage.getItem('teagram-invite-secret')).toBe(secret);
+  });
+
+  it('restores through app navigation when session storage is unavailable', () => {
+    const secret = 'b'.repeat(64);
+    const sessionStorage = Object.getOwnPropertyDescriptor(window, 'sessionStorage');
+    const restoreFragment = vi.fn((normalizedSecret: string) => {
+      window.history.replaceState(
+        window.history.state,
+        '',
+        `${window.location.pathname}${window.location.search}#${normalizedSecret}`
+      );
+    });
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      get() {
+        throw new DOMException('Storage unavailable', 'SecurityError');
+      }
+    });
+
+    try {
+      expect(restorePrivateUsernameInviteSecretForRetry(secret, restoreFragment)).toBe(true);
+      expect(restoreFragment).toHaveBeenCalledWith(secret);
+      expect(window.location.hash).toBe(`#${secret}`);
+    } finally {
+      if(sessionStorage) Object.defineProperty(window, 'sessionStorage', sessionStorage);
+      else delete (window as any).sessionStorage;
+    }
   });
 
   it('applies the username limits and pattern supplied by appConfig', () => {
