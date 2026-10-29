@@ -219,9 +219,9 @@ async function openSelectedServer(page: Page, testInfo: TestInfo, accountNumber 
   const hostInput = page.getByRole('textbox', {name: 'Server address'});
   await expect(hostInput).toHaveValue('', {timeout: 30_000});
   await expect(page.locator('.input-field-placeholder')).toHaveText('your.server.host');
-  await expect(page.getByRole('button', {name: 'Continue', exact: true})).toBeVisible();
+  await expect(page.getByRole('button', {name: 'Create account', exact: true})).toBeVisible();
   await hostInput.fill(SERVER_HOST);
-  await page.getByRole('button', {name: 'Continue', exact: true}).click();
+  await page.getByRole('button', {name: 'Create account', exact: true}).click();
   const confirmation = page.getByRole('dialog', {name: 'Confirm this server'});
   await expect(confirmation.getByText(SERVER_HOST, {exact: true})).toBeVisible();
   await expect(confirmation.getByText('Server fingerprint')).toBeVisible();

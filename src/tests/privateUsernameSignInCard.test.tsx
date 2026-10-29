@@ -95,7 +95,7 @@ vi.mock('@lib/langPack', async(importOriginal) => {
       'Teagram.Registration.ConfigNetwork': 'Unable to check whether account creation is available.',
       'Teagram.Server.Address': 'Server address',
       'Teagram.Server.Placeholder': 'your.server.host',
-      'Teagram.Server.Subtitle': 'Choose your server, then sign in',
+      'Teagram.Server.Subtitle': 'Sign in with your username',
       'Teagram.Server.Change': 'Change',
       'Teagram.Server.ChangeA11y': 'Change server',
       'Teagram.Server.Continue': 'Continue',
@@ -150,7 +150,14 @@ vi.mock('@lib/richTextProcessor/wrapRichText', () => ({
 
 import PrivateSignInCard from '@/pages/cards/PrivateSignInCard';
 import {clearPrivateUsernameLogin, isPrivateUsernameLogin} from '@/pages/privateUsernameLoginState';
-import {SERVER_CHOICE_KEY, setServerSelectionAction} from '@config/serverSelection';
+import {
+  SERVER_CHOICE_KEY,
+  SERVER_LOGIN_USERNAME_KEY,
+  SERVER_PINS_KEY,
+  SERVER_REGISTER_AFTER_SELECTION_KEY,
+  SERVER_USERNAME_DRAFT_KEY,
+  setServerSelectionAction
+} from '@config/serverSelection';
 import type {ServerSelectionAction, ServerSelectionState} from '@config/serverSelection';
 
 const SENT_CODE = {
@@ -178,7 +185,7 @@ function createSelectionAction(select: ServerSelectionAction['select'], initial:
     select,
     change() { publish({phase: 'selecting', host: state.host, changing: true}); },
     cancelChange() { publish({phase: 'connected', host: state.host, changing: false}); },
-    continueBlocked() {}
+    async continueBlocked() {}
   } satisfies ServerSelectionAction;
 }
 
@@ -191,6 +198,9 @@ describe('private username sign-in card', () => {
 
   beforeEach(() => {
     setServerSelectionAction(undefined);
+    sessionStorage.removeItem(SERVER_LOGIN_USERNAME_KEY);
+    sessionStorage.removeItem(SERVER_REGISTER_AFTER_SELECTION_KEY);
+    sessionStorage.removeItem(SERVER_USERNAME_DRAFT_KEY);
     localStorage.removeItem(SERVER_CHOICE_KEY);
     mocks.invokeApi.mockReset();
     mocks.recoverUnknownAuthKey.mockReset();
@@ -230,6 +240,9 @@ describe('private username sign-in card', () => {
 
   afterEach(() => {
     setServerSelectionAction(undefined);
+    sessionStorage.removeItem(SERVER_LOGIN_USERNAME_KEY);
+    sessionStorage.removeItem(SERVER_REGISTER_AFTER_SELECTION_KEY);
+    sessionStorage.removeItem(SERVER_USERNAME_DRAFT_KEY);
     dispose?.();
     dispose = undefined;
     clearPrivateUsernameLogin();
@@ -495,7 +508,7 @@ describe('private username sign-in card', () => {
     expect(mocks.invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn', 'auth.signUp']);
   });
 
-  it('shows an empty server field before username and lets the visitor continue with a host', async() => {
+  it('lets the visitor enter a username before confirming a server and continue in one step', async() => {
     const selectServer = vi.fn(async(_host: string, _signal: AbortSignal, _focus?: HTMLElement) => {});
     setServerSelectionAction(createSelectionAction(selectServer));
     mount();
@@ -507,13 +520,102 @@ describe('private username sign-in card', () => {
     const serverPlaceholder = serverInput.parentElement!.querySelector<HTMLElement>('.input-field-placeholder')!;
     expect(serverPlaceholder.textContent).toBe('your.server.host');
     expect(serverInput.compareDocumentPosition(usernameInput) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(usernameInput.disabled).toBe(false);
+    expect(usernameInput.getAttribute('aria-disabled')).toBeNull();
+    expect(document.body.textContent).toContain('Sign in with your username');
+
+    usernameInput.value = USERNAME;
+    usernameInput.dispatchEvent(new Event('input', {bubbles: true}));
 
     serverInput.value = 'second-server.example';
     serverInput.dispatchEvent(new Event('input', {bubbles: true}));
-    const continueButton = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Continue')!;
+    const continueButton = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Next')!;
     expect(continueButton.disabled).toBe(false);
+    expect(Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account')?.disabled).toBe(false);
     continueButton.click();
     await vi.waitFor(() => expect(selectServer).toHaveBeenCalledWith('second-server.example', expect.any(AbortSignal), serverInput));
+  });
+
+  it('lets the visitor reconnect to a previously pinned server without re-entering a username', async() => {
+    const selectServer = vi.fn(async(_host: string, _signal: AbortSignal, _focus?: HTMLElement) => {});
+    localStorage.setItem(SERVER_PINS_KEY, JSON.stringify({
+      'second-server.example': {
+        host: 'second-server.example',
+        endpoint: 'wss://second-server.example/apiws',
+        dc_id: 2,
+        key_fingerprint: 'a'.repeat(64)
+      }
+    }));
+    setServerSelectionAction(createSelectionAction(selectServer));
+    mount();
+
+    const serverInput = document.querySelector<HTMLInputElement>('input[aria-label="Server address"]')!;
+    const nextButton = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Next')!;
+    serverInput.value = 'second-server.example';
+    serverInput.dispatchEvent(new Event('input', {bubbles: true}));
+
+    expect(nextButton.disabled).toBe(false);
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Username"]')?.value).toBe('');
+    nextButton.click();
+    await vi.waitFor(() => expect(selectServer).toHaveBeenCalledWith('second-server.example', expect.any(AbortSignal), serverInput));
+    expect(sessionStorage.getItem(SERVER_LOGIN_USERNAME_KEY)).toBeNull();
+  });
+
+  it('keeps the submitted username pending when changing servers', async() => {
+    const selectServer = vi.fn(async() => {
+      expect(sessionStorage.getItem(SERVER_LOGIN_USERNAME_KEY)).toBe(USERNAME);
+    });
+    setServerSelectionAction(createSelectionAction(selectServer, {
+      phase: 'selecting',
+      host: 'old-server.example',
+      changing: true
+    }));
+    mount();
+
+    const serverInput = document.querySelector<HTMLInputElement>('input[aria-label="Server address"]')!;
+    const usernameInput = document.querySelector<HTMLInputElement>('input[aria-label="Username"]')!;
+    usernameInput.value = USERNAME;
+    usernameInput.dispatchEvent(new Event('input', {bubbles: true}));
+    serverInput.value = 'second-server.example';
+    serverInput.dispatchEvent(new Event('input', {bubbles: true}));
+    const nextButton = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Next')!;
+
+    nextButton.click();
+
+    await vi.waitFor(() => expect(selectServer).toHaveBeenCalledWith('second-server.example', expect.any(AbortSignal), serverInput));
+  });
+
+  it('resumes the submitted username after the first server is confirmed', async() => {
+    sessionStorage.setItem(SERVER_LOGIN_USERNAME_KEY, USERNAME);
+    setServerSelectionAction(createSelectionAction(vi.fn(async() => {}), {phase: 'connected', host: 'second-server.example'}));
+    mocks.invokeApi
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'});
+
+    mount();
+
+    await vi.waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith({name: 'password'}));
+    expect(mocks.invokeApi).toHaveBeenNthCalledWith(1, 'auth.sendCode', expect.objectContaining({phone_number: USERNAME}), {
+      authKeyRecovery: true
+    });
+    expect(sessionStorage.getItem(SERVER_LOGIN_USERNAME_KEY)).toBeNull();
+    expect(mocks.reauthenticateGuest).not.toHaveBeenCalled();
+  });
+
+  it('opens account creation after the first server is confirmed', async() => {
+    sessionStorage.setItem(SERVER_REGISTER_AFTER_SELECTION_KEY, '1');
+    sessionStorage.setItem(SERVER_USERNAME_DRAFT_KEY, USERNAME);
+    setServerSelectionAction(createSelectionAction(vi.fn(async() => {}), {phase: 'connected', host: 'second-server.example'}));
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'open', username_max_length: 32, username_min_length: 2});
+
+    mount();
+
+    await vi.waitFor(() => expect(document.querySelector('input[aria-label="Display name"]')).not.toBeNull());
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Username"]')?.value).toBe(USERNAME);
+    expect(document.body.textContent).toContain('Create your account');
+    expect(sessionStorage.getItem(SERVER_REGISTER_AFTER_SELECTION_KEY)).toBeNull();
+    expect(sessionStorage.getItem(SERVER_USERNAME_DRAFT_KEY)).toBeNull();
+    expect(mocks.reauthenticateGuest).not.toHaveBeenCalled();
   });
 
   it.each([undefined, false, 'true', 1, null])('hides guest creation unless validated discovery is literal true (%s)', async(guestSignUp) => {

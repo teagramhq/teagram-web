@@ -461,7 +461,7 @@ test('does not wait on a pending TLS upgrade after stopping the listener', async
   expect(socketTracker?.snapshot()).toEqual({https: 0, websocket: 0});
 });
 
-test('private artifact discovers a server from web.teagram.io without CSP violations', async({page}, testInfo) => {
+test('private artifact discovers a server from web.teagram.io without CSP violations', async({browser, page}, testInfo) => {
   test.skip(testInfo.project.name !== 'private-artifact-chromium', 'requires the production artifact preview');
   const manifest = JSON.parse(readFileSync(resolve('dist/mtproto-target.json'), 'utf8')) as {mode: string, endpoint: string};
   if(manifest.mode !== 'private') throw new Error('private artifact browser test requires a private build');
@@ -577,6 +577,53 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
       tlsServer!.listen(18443, '127.0.0.1', resolveListen);
     });
 
+    const referenceContext = await browser.newContext({
+      viewport: {width: 689, height: 750},
+      deviceScaleFactor: 2,
+      colorScheme: 'dark',
+      ignoreHTTPSErrors: true
+    });
+    try {
+      await referenceContext.addInitScript(() => {
+        Object.defineProperty(window, 'apiManagerProxy', {
+          configurable: true,
+          set(proxy: any) {
+            delete (window as any).apiManagerProxy;
+            (window as any).apiManagerProxy = proxy;
+            const invoke = proxy.invoke.bind(proxy);
+            proxy.invoke = (type: string, payload: any, ...args: any[]) => {
+              if(type === 'manager' && payload?.name === 'apiManager' && payload.method === 'getAppConfig') {
+                return Promise.resolve({registration_mode: 'open', username_min_length: 2, username_max_length: 32});
+              }
+              return invoke(type, payload, ...args);
+            };
+          }
+        });
+      });
+      const referencePage = await referenceContext.newPage();
+      await referencePage.goto(appOrigin, {waitUntil: 'domcontentloaded'});
+      await expect(referencePage.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+      await expect(referencePage.locator('html')).toHaveClass(/night/);
+      await expect(referencePage.getByRole('textbox', {name: 'Username'})).toBeEnabled();
+      await expect.poll(() => referencePage.locator('canvas').count()).toBeGreaterThan(0);
+      const referenceHost = referencePage.getByRole('textbox', {name: 'Server address'});
+      await referenceHost.fill(serverHost);
+      await referencePage.getByRole('button', {name: 'Create account', exact: true}).click();
+      const referenceConfirmation = referencePage.getByRole('dialog', {name: 'Confirm this server'});
+      await expect(referenceConfirmation).toBeVisible();
+      await referenceConfirmation.getByRole('button', {name: 'Confirm', exact: true}).click();
+      await expect(referencePage.getByRole('textbox', {name: 'Display name'})).toBeVisible({timeout: 30_000});
+      await referencePage.getByRole('button', {name: 'Sign in', exact: true}).click();
+      await expect(referencePage.getByRole('button', {name: 'Change server'})).toBeVisible();
+      await expect(referencePage.getByRole('button', {name: 'Create account', exact: true})).toBeVisible();
+      await expect(referenceHost).toHaveValue(serverHost);
+      await referencePage.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      await referencePage.screenshot({path: testInfo.outputPath('built-target-first-screen.png')});
+    } finally {
+      await referenceContext.close();
+    }
+    discoveryRequests.length = 0;
+
     const cspViolations: string[] = [];
     page.on('console', (message) => {
       if(message.type() === 'error' && /violates the following directive|Refused to .* because it violates/i.test(message.text())) {
@@ -594,6 +641,18 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await expect(page.locator('html')).not.toHaveClass(/night/);
     const hostInput = page.getByRole('textbox', {name: 'Server address'});
     const usernameInput = page.getByRole('textbox', {name: 'Username'});
+    const expectThemeButtonInsideViewport = async() => {
+      const bounds = await themeButton.evaluate((element) => {
+        const {left, top, right, bottom} = element.getBoundingClientRect();
+        return {left, top, right, bottom, width: window.innerWidth, height: window.innerHeight};
+      });
+      expect(bounds.left).toBeGreaterThanOrEqual(0);
+      expect(bounds.top).toBeGreaterThanOrEqual(0);
+      expect(bounds.right).toBeLessThanOrEqual(bounds.width);
+      expect(bounds.bottom).toBeLessThanOrEqual(bounds.height);
+    };
+    await expectThemeButtonInsideViewport();
+    await expect(themeButton).toHaveAttribute('aria-label', 'Switch to dark theme');
     const enterServerChange = async() => {
       const navigation = page.waitForNavigation({waitUntil: 'domcontentloaded', timeout: 5000});
       await page.getByRole('button', {name: 'Change server'}).click();
@@ -602,37 +661,63 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     };
     await expect(hostInput).toHaveValue('');
     await expect(page.locator('.input-field-placeholder')).toHaveText('your.server.host');
-    await expect(usernameInput).toBeDisabled();
-    await expect(usernameInput).toHaveAttribute('aria-disabled', 'true');
-    await expect(usernameInput).toHaveAttribute('tabindex', '-1');
-    await expect(page.getByRole('button', {name: 'Continue', exact: true})).toBeDisabled();
+    await expect(usernameInput).toBeEnabled();
+    await expect(usernameInput).not.toHaveAttribute('aria-disabled', 'true');
+    await expect(page.getByText('Sign in with your username')).toBeVisible();
+    await expect(page.getByRole('button', {name: 'Next', exact: true})).toBeDisabled();
+    await expect(page.getByRole('button', {name: 'Create account', exact: true})).toBeDisabled();
+    await expect(page.getByRole('button', {name: 'Continue', exact: true})).toHaveCount(0);
+    await expect.poll(() => page.locator('canvas').count()).toBeGreaterThan(0);
+    const authCard = page.locator('#auth-pages .input-wrapper').locator('xpath=..');
+    await expect.poll(() => authCard.evaluate((card) => getComputedStyle(card).backgroundColor))
+    .toBe('rgb(255, 255, 255)');
     expect(await page.evaluate(() => {
       const username = document.querySelector('input[aria-label="Username"]');
-      const continueButton = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Continue');
-      return !!username && !!continueButton && !!(username.compareDocumentPosition(continueButton) & Node.DOCUMENT_POSITION_FOLLOWING);
+      const nextButton = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Next');
+      return !!username && !!nextButton && !!(username.compareDocumentPosition(nextButton) & Node.DOCUMENT_POSITION_FOLLOWING);
     })).toBe(true);
     await page.screenshot({path: join(screenshots, 'S1.png')});
-    await page.setViewportSize({width: 360, height: 760});
+    await hostInput.focus();
+    await page.keyboard.press('Tab');
+    await expect(usernameInput).toBeFocused();
+    await page.setViewportSize({width: 390, height: 844});
+    await expectThemeButtonInsideViewport();
     await page.screenshot({path: join(screenshots, 'P1.png')});
+    await page.setViewportSize({width: 768, height: 900});
+    await expectThemeButtonInsideViewport();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.setViewportSize({width: 1280, height: 800});
     await themeButton.click();
     await expect(page.locator('html')).toHaveClass(/night/);
+    await expect(themeButton).toHaveAttribute('aria-label', 'Switch to light theme');
+    await expect(page.locator('html')).not.toHaveClass(/no-view-transition/);
+    await expect.poll(() => authCard.evaluate((card) => getComputedStyle(card).backgroundColor))
+    .not.toBe('rgb(255, 255, 255)');
     await page.screenshot({path: join(screenshots, 'N1.png')});
+    await page.setViewportSize({width: 390, height: 844});
+    await expectThemeButtonInsideViewport();
+    await page.screenshot({path: join(screenshots, 'N1-phone.png')});
+    await page.setViewportSize({width: 1280, height: 800});
     await page.reload({waitUntil: 'domcontentloaded'});
     await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
     await expect(page.locator('html')).toHaveClass(/night/);
+    await expect.poll(() => page.locator('canvas').count()).toBeGreaterThan(0);
+    await page.screenshot({path: join(screenshots, 'S1-night-first-paint.png')});
     await themeButton.click();
     await expect(page.locator('html')).not.toHaveClass(/night/);
 
+    await usernameInput.fill('Alice_123');
     await hostInput.fill('invalid.example.test/path');
-    await hostInput.press('Enter');
+    await usernameInput.focus();
+    await page.keyboard.press('Tab');
+    await expect(page.getByRole('button', {name: 'Next', exact: true})).toBeFocused();
+    await page.getByRole('button', {name: 'Next', exact: true}).click();
     await expect(page.getByRole('alert')).toHaveText('This is not a valid address. Use a host name, for example server.example.com.');
     await expect(hostInput).toHaveAttribute('aria-invalid', 'true');
     expect(discoveryRequests).toEqual([]);
 
     await hostInput.fill(serverHost);
-    await hostInput.press('Enter');
+    await page.getByRole('button', {name: 'Next', exact: true}).click();
 
     const confirmation = page.getByRole('dialog', {name: 'Confirm this server'});
     await expect(confirmation).toBeVisible();
@@ -646,7 +731,27 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
       'dc56-ae7e-b638-8fe3-',
       'e268-c2a4-cdd9-2684'
     ]);
+    const confirmationPadding = await confirmation.evaluate((dialog) => {
+      const selectors = [
+        '.popup-title',
+        '.popup-description',
+        '[class*="serverSelectionFingerprintLabel"]',
+        '[class*="serverSelectionPopupParagraph"]'
+      ];
+      return selectors.map((selector) => {
+        const element = dialog.querySelector<HTMLElement>(selector);
+        if(!element) throw new Error(`Missing confirmation content: ${selector}`);
+        const style = getComputedStyle(element);
+        return element.getBoundingClientRect().left + parseFloat(style.paddingInlineStart || '0');
+      });
+    });
+    expect(Math.max(...confirmationPadding) - Math.min(...confirmationPadding)).toBeLessThanOrEqual(1);
     await page.screenshot({path: join(screenshots, 'S5.png')});
+    await page.setViewportSize({width: 390, height: 844});
+    await expectThemeButtonInsideViewport();
+    await page.screenshot({path: join(screenshots, 'S5-phone.png')});
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.setViewportSize({width: 1280, height: 800});
     expect(discoveryRequests).toEqual(['/.well-known/teagramd/client']);
     await confirmation.locator('.popup-description').focus();
     await page.keyboard.press('Enter');
@@ -657,6 +762,9 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await page.keyboard.press('Enter');
     await selectionReload;
 
+    await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+    await expect(page.getByRole('button', {name: 'Please wait…'})).toBeVisible({timeout: 10_000});
+    await page.reload({waitUntil: 'domcontentloaded'});
     await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(hostInput).toHaveValue(serverHost);
@@ -671,20 +779,55 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
       return [hostField, inputField].map((element) => element ? getComputedStyle(element).minWidth : undefined);
     })).toEqual(['0px', '0px']);
     await page.screenshot({path: join(screenshots, 'S7.png')});
+    const expectServerChangeToBeCentered = async() => {
+      const alignment = await page.evaluate(() => {
+        const input = document.querySelector<HTMLInputElement>('#server-address');
+        const change = document.querySelector<HTMLButtonElement>('button[aria-label="Change server"]');
+        if(!input || !change) throw new Error('server address field or Change button is missing');
+        const center = (element: HTMLElement) => {
+          const {top, height} = element.getBoundingClientRect();
+          return top + height / 2;
+        };
+        return {input: center(input), change: center(change)};
+      });
+      expect(Math.abs(alignment.input - alignment.change)).toBeLessThanOrEqual(0.5);
+    };
+    await expectServerChangeToBeCentered();
+    await page.setViewportSize({width: 390, height: 844});
+    await expectServerChangeToBeCentered();
+    await page.screenshot({path: join(screenshots, 'S7-phone.png')});
+    await page.evaluate(() => document.documentElement.style.setProperty('font-size', '20px'));
+    await expectServerChangeToBeCentered();
+    await page.evaluate(() => document.documentElement.style.removeProperty('font-size'));
+    await page.setViewportSize({width: 1280, height: 800});
+    await themeButton.click();
+    await expect(page.locator('html')).toHaveClass(/night/);
+    await expect(page.locator('html')).not.toHaveClass(/no-view-transition/);
+    await expect.poll(() => authCard.evaluate((card) => getComputedStyle(card).backgroundColor))
+    .not.toBe('rgb(255, 255, 255)');
+    await page.screenshot({path: join(screenshots, 'S7-dark.png')});
+    await page.setViewportSize({width: 390, height: 844});
+    await expectThemeButtonInsideViewport();
+    await page.screenshot({path: join(screenshots, 'S7-dark-phone.png')});
+    await page.setViewportSize({width: 1280, height: 800});
     expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(serverHost);
     expect(await page.locator('meta[data-server-policy]').getAttribute('content'))
     .toBe(`connect-src 'self' https://${serverHost} ${privateEndpoint.href};`);
-    expect(discoveryRequests).toEqual(['/.well-known/teagramd/client']);
+    expect(discoveryRequests).toEqual([
+      '/.well-known/teagramd/client',
+      '/.well-known/teagramd/client'
+    ]);
     expect(cspViolations).toEqual([]);
 
     await enterServerChange();
     await expect(page.locator('meta[data-server-policy]')).toHaveAttribute('content', "connect-src 'self' https: wss:;");
-    await expect(usernameInput).toBeDisabled();
+    await expect(usernameInput).toBeEnabled();
     expect(await page.evaluate(() => {
       const username = document.querySelector('input[aria-label="Username"]');
-      const continueButton = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Continue');
-      return !!username && !!continueButton && !!(username.compareDocumentPosition(continueButton) & Node.DOCUMENT_POSITION_FOLLOWING);
+      const nextButton = [...document.querySelectorAll('button')].find((button) => button.textContent?.trim() === 'Next');
+      return !!username && !!nextButton && !!(username.compareDocumentPosition(nextButton) & Node.DOCUMENT_POSITION_FOLLOWING);
     })).toBe(true);
+    await expect(page.getByRole('button', {name: 'Next', exact: true})).toBeEnabled();
     await expect(page.getByRole('button', {name: 'Cancel', exact: true})).toBeVisible();
     await page.screenshot({path: join(screenshots, 'S8.png')});
 
@@ -721,9 +864,14 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await enterServerChange();
     await hostInput.fill(CANCEL_SERVER_HOST);
     await hostInput.press('Enter');
-    await expect.poll(() => discoveryRequests.length).toBe(2);
+    await expect.poll(() => discoveryRequests.length).toBe(3);
     const cancelServerConfirmation = page.getByRole('dialog', {name: 'Confirm this server'});
     await expect(cancelServerConfirmation).toBeVisible();
+    await page.screenshot({path: join(screenshots, 'S5-dark.png')});
+    await page.setViewportSize({width: 390, height: 844});
+    await expectThemeButtonInsideViewport();
+    await page.screenshot({path: join(screenshots, 'S5-dark-phone.png')});
+    await page.setViewportSize({width: 1280, height: 800});
     await cancelServerConfirmation.getByRole('button', {name: 'Confirm', exact: true}).click();
     await expect(page.getByRole('button', {name: 'Connecting…'})).toBeVisible();
     await probeStarted;
@@ -750,7 +898,7 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     });
     await hostInput.fill(CANCEL_SERVER_HOST);
     await hostInput.press('Enter');
-    await expect.poll(() => discoveryRequests.length).toBe(3);
+    await expect.poll(() => discoveryRequests.length).toBe(4);
     await expect(page.getByRole('button', {name: 'Connecting…'})).toBeVisible();
     await expect.poll(() => page.evaluate(() => !!(window as any).__resolvePendingRegistrations)).toBe(true);
     const pendingRestoreReload = page.waitForNavigation({waitUntil: 'domcontentloaded', timeout: 5000});
@@ -772,6 +920,7 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await expect(usernameInput).toBeFocused();
     expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(serverHost);
     expect(discoveryRequests).toEqual([
+      '/.well-known/teagramd/client',
       '/.well-known/teagramd/client',
       '/.well-known/teagramd/client',
       '/.well-known/teagramd/client',
@@ -813,7 +962,7 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await expect(deletion).toBeHidden();
     await expect(page.getByRole('alert')).toHaveText('This server no longer matches the identity pinned in this browser, so the connection is blocked. Contact your server administrator.');
     await page.screenshot({path: join(screenshots, 'S11.png')});
-    await page.getByRole('button', {name: 'Continue', exact: true}).click();
+    await page.getByRole('button', {name: 'Next', exact: true}).click();
     const retryMismatch = page.getByRole('dialog', {name: 'Server identity changed'});
     await expect(retryMismatch).toBeVisible();
     await retryMismatch.getByRole('button', {name: 'Cancel', exact: true}).click();
@@ -827,7 +976,8 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await page.screenshot({path: testInfo.outputPath('server-sign-in-identity-mismatch-mobile.png')});
     await page.setViewportSize({width: 1280, height: 800});
     await hostInput.fill(CANCEL_SERVER_HOST);
-    await page.getByRole('button', {name: 'Continue', exact: true}).click();
+    await usernameInput.fill('Alice_123');
+    await page.getByRole('button', {name: 'Next', exact: true}).click();
     await expect(page.getByRole('button', {name: 'Change server'})).toBeVisible();
     await expect(hostInput).toHaveValue(CANCEL_SERVER_HOST);
     expect(await page.evaluate(() => localStorage.getItem('teagram.server-choice.v1'))).toBe(CANCEL_SERVER_HOST);
@@ -1229,7 +1379,7 @@ test('isolates two server tabs when a custom server worker takes control', async
       const defaultHostInput = page.getByRole('textbox', {name: 'Server address'});
       await expect(defaultHostInput).toHaveValue('');
       await defaultHostInput.fill(APP_HOST);
-      await page.getByRole('button', {name: 'Continue', exact: true}).click();
+      await page.getByRole('button', {name: 'Create account', exact: true}).click();
       await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
       await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
     });
@@ -1256,7 +1406,7 @@ test('isolates two server tabs when a custom server worker takes control', async
       const hostInput = customPage.getByRole('textbox', {name: 'Server address'});
       await expect(hostInput).toHaveValue('');
       await hostInput.fill(SERVER_HOST);
-      await customPage.getByRole('button', {name: 'Continue', exact: true}).click();
+      await customPage.getByRole('button', {name: 'Create account', exact: true}).click();
 
       const confirm = customPage.getByRole('dialog', {name: 'Confirm this server'});
       await expect(confirm.getByText(SERVER_HOST, {exact: true})).toBeVisible();
@@ -1595,11 +1745,11 @@ test('unlocks server selection when the pinned-key popup import fails', async({p
   await expect(hostInput).toHaveValue(SERVER_HOST);
   await expect(hostInput).toBeEditable();
   await expect(hostInput).toHaveAttribute('aria-invalid', 'true');
-  await expect(page.getByRole('button', {name: 'Continue', exact: true})).toBeEnabled();
+  await expect(page.getByRole('button', {name: 'Next', exact: true})).toBeEnabled();
   await expect(page.getByRole('button', {name: 'Checking…'})).toHaveCount(0);
 
   await hostInput.fill(CANCEL_SERVER_HOST);
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(hostInput).toHaveValue(CANCEL_SERVER_HOST);
-  await expect(page.getByRole('button', {name: 'Continue', exact: true})).toBeEnabled();
+  await expect(page.getByRole('button', {name: 'Next', exact: true})).toBeEnabled();
 });

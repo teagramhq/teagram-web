@@ -460,6 +460,11 @@ const onDocumentReady = async() => {
     themeController.setThemeListener();
     setDocumentLangPackProperties(langPack);
 
+    appChatBackground.attach();
+    await appChatBackground.setBackground({transition: 'instant'}).catch((error) => {
+      console.error('Could not load the authentication wallpaper', error);
+    });
+
     const {mountAuthFlow} = await import('./pages/mountAuthFlow');
     // The account worker is not running yet, so auth-screen theme changes go straight to common state.
     const persistTheme = async(name: AppTheme['name']) => {
