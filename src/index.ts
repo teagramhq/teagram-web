@@ -6,6 +6,12 @@
 // a non-painting tab still boots
 import '@helpers/dom/previewUnfreeze';
 import '@helpers/dom/previewRaf';
+
+// Capture valid invite fragments before app modules can inspect the URL.
+import {
+  storePrivateUsernameInviteSecretForAccountSwitch,
+  takePrivateUsernameInviteSecretFromFragment
+} from '@/pages/privateUsernameInvite';
 import App from '@config/app';
 import blurActiveElement from '@helpers/dom/blurActiveElement';
 import {IS_STICKY_INPUT_BUGGED} from '@helpers/dom/fixSafariStickyInputFocusing';
@@ -66,11 +72,10 @@ import useHasFoldersSidebar, {useIsSidebarCollapsed} from '@stores/foldersSideba
 import appNavigationController from '@components/appNavigationController';
 import {preventCrossTabDynamicImportDeadlock} from '@helpers/preventDeadlock';
 import appChatBackground from '@components/chat/bubbles/chatBackground';
-import {isAutoGuestEnabled} from '@config/serverContext';
+import {getActiveServerHost, isAutoGuestEnabled} from '@config/serverContext';
 import {getServerSelectionAction} from '@config/serverSelection';
 import {createCurrentGuestAccountLifecycle, type GuestAccountManagers} from '@lib/guestAccountLifecycle';
 import {markAutoGuestAttempted, markAutoGuestResetDetected} from '@lib/autoGuest';
-
 // import commonStateStorage from '@lib/commonStateStorage';
 // import { STATE_INIT } from '@config/state';
 
@@ -129,6 +134,39 @@ async function checkLastActiveAccountFromTMe() {
       }
     }
   } catch(err) {}
+}
+
+async function handleSignedInInviteLink(inviteSecret: string) {
+  const [totalAccounts, hasSomeonePremium] = await Promise.all([
+    AccountController.getTotalAccounts(),
+    apiManagerProxy.hasSomeonePremium()
+  ]);
+
+  if(
+    totalAccounts >= MAX_ACCOUNTS_PREMIUM ||
+    (totalAccounts === MAX_ACCOUNTS_FREE && !hasSomeonePremium)
+  ) {
+    const {default: AccountsLimitPopup} = await import('./components/sidebarLeft/accountsLimitPopup');
+    new AccountsLimitPopup().show();
+    return;
+  }
+
+  const {default: confirmationPopup} = await import('@components/confirmationPopup');
+  try {
+    await confirmationPopup({
+      titleLangKey: 'Teagram.Invite.AddTitle',
+      descriptionLangKey: 'Teagram.Invite.AddText',
+      descriptionLangArgs: [getActiveServerHost()],
+      button: {langKey: 'Teagram.Invite.AddAccount'}
+    });
+  } catch(err) {
+    return;
+  }
+
+  if(!storePrivateUsernameInviteSecretForAccountSwitch(inviteSecret)) return;
+
+  const {default: appSidebarLeft} = await import('./components/sidebarLeft');
+  await appSidebarLeft.addAccount(undefined, true);
 }
 
 function setManifest() {
@@ -720,6 +758,11 @@ const onDocumentReady = async() => {
     } else {
       await bootstrapIm();
     }
+  }
+
+  if(authState._ === 'authStateSignedIn') {
+    const inviteSecret = takePrivateUsernameInviteSecretFromFragment();
+    if(inviteSecret) void handleSignedInInviteLink(inviteSecret).catch(() => {});
   }
 };
 

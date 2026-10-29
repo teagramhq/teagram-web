@@ -37,10 +37,12 @@ import TurnstileChallenge, {useTurnstileChallenge} from '@/pages/TurnstileChalle
 import {
   authenticatePrivateUsername,
   getPrivateUsernameRegistrationError,
-  isPrivateUsername
+  isPrivateUsername,
+  parsePrivateUsernameInviteSecret
 } from '@/pages/privateUsernameAuth';
 import type {PrivateUsernameRegistrationMode} from '@/pages/privateUsernameAuth';
 import {markPrivateUsernameLogin} from '@/pages/privateUsernameLoginState';
+import {takePrivateUsernameInviteSecretFromFragment} from '@/pages/privateUsernameInvite';
 import styles from '@/pages/authFlow.module.scss';
 
 if(import.meta.hot) import.meta.hot.accept();
@@ -53,6 +55,7 @@ type PrivateUsernameUiError =
   | 'invalidUsername'
   | 'invalidDisplayName'
   | 'invalidInvite'
+  | 'malformedInvite'
   | 'registrationClosed'
   | 'passwordMismatch'
   | 'passwordSetupNetwork'
@@ -71,6 +74,7 @@ type PrivateUsernameUiError =
 
 export default function PrivateSignInCard(_props: {spec: Spec}) {
   const {managers, navigate, toIm} = useAuthFlow();
+  const inviteSecretFromLink = takePrivateUsernameInviteSecretFromFragment();
   const turnstile = useTurnstileChallenge();
   const guestSignUpAvailable = isActiveGuestSignUpEnabled();
   const autoGuest = isAutoGuestEnabled();
@@ -173,12 +177,12 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
   const inviteSecretField = new InputField({
     label: 'Teagram.Registration.InviteSecret',
-    maxLength: 256,
+    maxLength: 2048,
     plainText: true,
     autocomplete: 'off'
   });
   const inviteSecretInput = inviteSecretField.input as HTMLInputElement;
-  inviteSecretInput.setAttribute('aria-label', i18n('Teagram.Registration.InviteSecret').textContent || 'Invite secret');
+  inviteSecretInput.setAttribute('aria-label', i18n('Teagram.Registration.InviteSecret').textContent || 'Invite link or code');
   inviteSecretInput.autocapitalize = 'none';
   inviteSecretInput.autocomplete = 'off';
   inviteSecretInput.spellcheck = false;
@@ -199,6 +203,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   const [displayNameEntered, setDisplayNameEntered] = createSignal(false);
   const [confirmPasswordState, setConfirmPasswordState] = createSignal<'required' | 'match' | 'mismatch'>('required');
   const [inviteSecretEntered, setInviteSecretEntered] = createSignal(false);
+  const [inviteSecretFromLinkShown, setInviteSecretFromLinkShown] = createSignal(false);
   const [submitting, setSubmitting] = createSignal(false);
   const [registrationMode, setRegistrationMode] = createSignal<PrivateUsernameRegistrationMode>('closed');
   const [creatingAccount, setCreatingAccount] = createSignal(false);
@@ -283,10 +288,13 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     updateRegistrationValidity();
   };
 
-  const onRegistrationInput = () => {
+  const onRegistrationInput = (event: Event) => {
     setError(undefined);
     setGuestFloodWait(undefined);
     setTermsDeclined(false);
+    inviteSecretInput.classList.remove('error');
+    inviteSecretInput.removeAttribute('aria-invalid');
+    if(event.currentTarget === inviteSecretInput) setInviteSecretFromLinkShown(false);
     updateRegistrationValidity();
   };
 
@@ -323,6 +331,12 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     if(errorKind === 'passwordMismatch') {
       confirmPasswordInput.classList.add('error');
       confirmPasswordInput.setAttribute('aria-invalid', 'true');
+    }
+    if(errorKind === 'malformedInvite' || errorKind === 'invalidInvite') {
+      inviteSecretInput.classList.add('error');
+      inviteSecretInput.setAttribute('aria-invalid', 'true');
+      inviteSecretInput.focus();
+      if(errorKind === 'invalidInvite') inviteSecretInput.select();
     }
   }
 
@@ -363,7 +377,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   }
 
   function isInlineRegistrationError() {
-    return ['usernameTaken', 'invalidUsername', 'passwordMismatch'].includes(error() || '');
+    return ['usernameTaken', 'invalidUsername', 'passwordMismatch', 'malformedInvite', 'invalidInvite'].includes(error() || '');
   }
 
   async function finishPendingPasswordSetup(): Promise<void> {
@@ -522,7 +536,13 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         showError('passwordMismatch');
         return;
       }
-      if(registrationMode() === 'invite' && !inviteSecretField.value.trim()) return;
+      if(registrationMode() === 'invite') {
+        if(!inviteSecretField.value.trim()) return;
+        if(!parsePrivateUsernameInviteSecret(inviteSecretField.value)) {
+          showError('malformedInvite');
+          return;
+        }
+      }
     }
 
     termsDialogReturnFocusTarget = isCreatingAccount ? registrationCreateButton : undefined;
@@ -787,6 +807,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     inviteSecretInput.disabled = false;
     displayNameField.setValueSilently('');
     inviteSecretField.setValueSilently('');
+    setInviteSecretFromLinkShown(false);
     passwordField.setValueSilently('');
     confirmPasswordField.setValueSilently('');
     setHasValidRegistrationInput(false);
@@ -807,6 +828,8 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         return i18n('Teagram.Registration.InvalidDisplayName');
       case 'invalidInvite':
         return i18n('Teagram.Registration.InvalidInvite');
+      case 'malformedInvite':
+        return i18n('Teagram.Registration.InviteMalformed');
       case 'registrationClosed':
         return i18n('Teagram.Registration.Closed');
       case 'passwordMismatch':
@@ -873,9 +896,20 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         setTurnstileSiteKey(config.turnstile?.site_key);
         updateSignInValidity();
         updateRegistrationValidity();
-        if(resumeRegistration) {
-          if(mode === 'open' || mode === 'invite') startRegistration();
-          else showError('registrationClosed');
+        if(resumeRegistration && mode !== 'open' && mode !== 'invite') {
+          showError('registrationClosed');
+        } else {
+          const shouldStartInviteRegistration = mode === 'invite' && !!inviteSecretFromLink;
+          if(shouldStartInviteRegistration) {
+            inviteSecretField.setValueSilently(inviteSecretFromLink);
+            setInviteSecretFromLinkShown(true);
+          }
+          if(resumeRegistration || shouldStartInviteRegistration) startRegistration();
+          if(shouldStartInviteRegistration) {
+            requestAnimationFrame(() => {
+              if(!cancelled) usernameInput.focus();
+            });
+          }
         }
       }).catch(() => {
         if(!cancelled) {
@@ -968,8 +1002,15 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
                   </p>
                   {registrationMode() === 'invite' && inviteSecretField.container}
                   {registrationMode() === 'invite' && (
-                    <p id="registration-invite-secret-status" class={styles.registrationFieldStatus} role="status">
-                      {inviteSecretEntered() ? '' : i18n('Teagram.Registration.InviteRequired')}
+                    <p
+                      id="registration-invite-secret-status"
+                      class={['invalidInvite', 'malformedInvite'].includes(error() || '') ? styles.registrationFieldStatusError : styles.registrationFieldStatus}
+                      role={['invalidInvite', 'malformedInvite'].includes(error() || '') ? 'alert' : 'status'}
+                    >
+                      {error() === 'invalidInvite' ? i18n('Teagram.Registration.InvalidInvite') :
+                        error() === 'malformedInvite' ? i18n('Teagram.Registration.InviteMalformed') :
+                          inviteSecretFromLinkShown() ? i18n('Teagram.Registration.InviteFromLink') :
+                            inviteSecretEntered() ? '' : i18n('Teagram.Registration.InviteRequired')}
                     </p>
                   )}
                   {passwordField.container}

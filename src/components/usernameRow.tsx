@@ -10,8 +10,14 @@ export default function UsernameRow(props: {
   sortable?: boolean,
   sortingEnabled?: boolean,
   dragging?: boolean,
+  role?: JSX.HTMLAttributes<HTMLElement>['role'],
+  tabIndex?: number,
+  'aria-haspopup'?: JSX.HTMLAttributes<HTMLElement>['aria-haspopup'],
+  disabled?: boolean,
   sortHandlePointerDown?: JSX.EventHandler<HTMLSpanElement, PointerEvent>,
   clickable?: boolean | JSX.HTMLAttributes<HTMLElement>['onClick'],
+  contextMenu?: Parameters<typeof Row>[0]['contextMenu'],
+  openContextMenuRef?: Parameters<typeof Row>[0]['openContextMenuRef'],
   isLink?: boolean,
   icon?: Icon,
   color?: string,
@@ -28,6 +34,10 @@ export default function UsernameRow(props: {
   return (
     <Row
       ref={props.ref}
+      role={props.role}
+      tabIndex={props.tabIndex}
+      aria-haspopup={props['aria-haspopup']}
+      disabled={props.disabled}
       class={`${CLASS_NAME}-username`}
       style={props.style}
       classList={{
@@ -39,6 +49,8 @@ export default function UsernameRow(props: {
         'is-dragging': !!props.dragging
       }}
       clickable={props.clickable ?? true}
+      contextMenu={props.contextMenu}
+      openContextMenuRef={props.openContextMenuRef}
     >
       <Row.Title
         ref={props.titleRef}

@@ -5,6 +5,7 @@ import {AppChatFoldersTab} from '@components/solidJsTabs/tabs';
 import {
   AppEditProfileTab,
   AppGeneralSettingsTab,
+  AppInviteFriendsTab,
   AppKeyboardShortcutsTab,
   AppLanguageTab,
   AppNotificationsTab,
@@ -48,6 +49,7 @@ import {SettingsSearchItem} from '@lib/settingsSearch';
 import {openSettingsSearchItem} from '@lib/settingsSearch/navigate';
 import {ROOT_SECTION_ID} from '@lib/settingsSearch/registry';
 import {bumpRecentSettingsSearch} from '@lib/settingsSearch/recent';
+import {useAppConfig} from '@stores/appState';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — wraps a sub-tab declaration. If the tab has a static `getInitArgs`,
@@ -92,6 +94,7 @@ const makeSubTabConfig = (
 const Settings = () => {
   const promiseCollector = usePromiseCollector();
   const [tab] = useSuperTab();
+  const appConfig = useAppConfig();
 
   // ── Header: search and the overflow menu, the way tdesktop keeps it — editing
   //    the profile and the QR code are rare enough to live in the menu.
@@ -416,6 +419,14 @@ const Settings = () => {
           </Row>
         </div>
       </Section>
+      <Show when={appConfig.user_invites_enabled}>
+        <Section>
+          <Row clickable={() => tab.slider.createTab(AppInviteFriendsTab).open()}>
+            <Row.Icon icon="addmember_filled" />
+            <Row.Title>{i18n('Teagram.Invite.Title')}</Row.Title>
+          </Row>
+        </Section>
+      </Show>
       <Show when={!premiumBlocked()}>
         <Section>
           <Row clickable={() => PopupPremium.show()}>

@@ -6,7 +6,7 @@ import type {Page, TestInfo} from '@playwright/test';
 import {captureState, seedPriorAccountUserId} from './registrationMocks';
 
 const SERVER_HOST = 'second-server.example.test';
-const INVITE_SECRET = 'test-invite-secret';
+const INVITE_SECRET = 'b'.repeat(64);
 const PASSWORD = 'Teagram-Test-Password-123!';
 
 async function setupCustomRegistrationPage(page: Page, testInfo: TestInfo, accountNumber = 1, seedPriorAccount = false) {
@@ -222,7 +222,7 @@ test('registers on a second server after a failed host selection', async({page},
   await auth.locator('input[aria-label="Display name"]').fill('Local Server');
   await auth.locator('input[aria-label="Password"]').fill(PASSWORD);
   await auth.locator('input[aria-label="Confirm password"]').fill(PASSWORD);
-  await auth.locator('input[aria-label="Invite secret"]').fill(INVITE_SECRET);
+  await auth.locator('input[aria-label="Invite link or code"]').fill(INVITE_SECRET);
   await auth.getByRole('button', {name: 'Create account'}).click();
   await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
 
@@ -347,7 +347,7 @@ test('keeps a new account signed in on a pinned server when the server reuses a 
   await auth.locator('input[aria-label="Display name"]').fill('Local Server');
   await auth.locator('input[aria-label="Password"]').fill(PASSWORD);
   await auth.locator('input[aria-label="Confirm password"]').fill(PASSWORD);
-  await auth.locator('input[aria-label="Invite secret"]').fill(INVITE_SECRET);
+  await auth.locator('input[aria-label="Invite link or code"]').fill(INVITE_SECRET);
   await auth.getByRole('button', {name: 'Create account'}).click();
   await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
   await captureState(page, testInfo, 'custom-registration-reused-id-chats');

@@ -75,7 +75,7 @@ vi.mock('@lib/langPack', async(importOriginal) => {
       'Teagram.Registration.DisplayName': 'Display name',
       'Teagram.Registration.Password': 'Password',
       'Teagram.Registration.ConfirmPassword': 'Confirm password',
-      'Teagram.Registration.InviteSecret': 'Invite secret',
+      'Teagram.Registration.InviteSecret': 'Invite link or code',
       'Teagram.Registration.PasswordMismatch': 'Those passwords don\'t match.',
       'Teagram.Registration.UsernameHint': 'Use 2–32 characters, start with a letter, and use letters, numbers, or underscores.',
       'Teagram.Registration.UsernameTooShort': 'Use at least 2 characters.',
@@ -85,8 +85,10 @@ vi.mock('@lib/langPack', async(importOriginal) => {
       'Teagram.Registration.UsernameTaken': 'That username is taken.',
       'Teagram.Registration.InvalidUsername': 'Choose a valid username.',
       'Teagram.Registration.InvalidDisplayName': 'Enter a display name.',
-      'Teagram.Registration.InvalidInvite': 'That invite secret is invalid.',
-      'Teagram.Registration.InviteRequired': 'Enter an invite secret.',
+      'Teagram.Registration.InvalidInvite': 'This invite can\'t be used. Ask whoever invited you for a new one.',
+      'Teagram.Registration.InviteRequired': 'Paste the invite link or code you were sent.',
+      'Teagram.Registration.InviteFromLink': 'Filled in from your invite link.',
+      'Teagram.Registration.InviteMalformed': 'That\'s not a complete invite link or code. Copy the whole link and paste it again.',
       'Teagram.Registration.ConfirmPasswordRequired': 'Enter your password again.',
       'Teagram.Registration.PasswordMatch': 'Passwords match.',
       'Teagram.Registration.Closed': 'Account creation is closed on this server.',
@@ -948,7 +950,7 @@ describe('private username sign-in card', () => {
     expect(document.querySelector('input[aria-label="Display name"]')).not.toBeNull();
     expect(document.querySelector('input[aria-label="Password"]')).not.toBeNull();
     expect(document.querySelector('input[aria-label="Confirm password"]')).not.toBeNull();
-    expect(document.querySelector('input[aria-label="Invite secret"]')).toBeNull();
+    expect(document.querySelector('input[aria-label="Invite link or code"]')).toBeNull();
   });
 
   it('asks for an invite secret in invite registration mode', async() => {
@@ -957,10 +959,10 @@ describe('private username sign-in card', () => {
     await vi.waitFor(() => expect(Array.from(document.querySelectorAll('button')).some((button) => button.textContent === 'Create account')).toBe(true));
     (Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement).click();
 
-    const inviteSecret = document.querySelector('input[aria-label="Invite secret"]') as HTMLInputElement;
+    const inviteSecret = document.querySelector('input[aria-label="Invite link or code"]') as HTMLInputElement;
     expect(inviteSecret).not.toBeNull();
     expect(inviteSecret.getAttribute('aria-describedby')).toBe('registration-invite-secret-status');
-    expect(document.getElementById('registration-invite-secret-status')?.textContent).toBe('Enter an invite secret.');
+    expect(document.getElementById('registration-invite-secret-status')?.textContent).toBe('Paste the invite link or code you were sent.');
   });
 
   it('keeps registration fields and allows a retry after an expired or rejected Turnstile token', async() => {

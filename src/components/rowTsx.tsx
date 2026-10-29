@@ -76,6 +76,7 @@ const Row = (props: {children: JSX.Element} & Partial<{
   role: JSX.HTMLAttributes<HTMLElement>['role'],
   tabIndex: number,
   'aria-label': string,
+  'aria-haspopup': JSX.HTMLAttributes<HTMLElement>['aria-haspopup'],
   'on:keydown': JSX.HTMLAttributes<HTMLElement>['on:keydown'],
   havePadding: boolean,
   noRipple: boolean,
@@ -189,6 +190,7 @@ const Row = (props: {children: JSX.Element} & Partial<{
       }}
       onClick={typeof(props.clickable) === 'function' || props.contextMenu ? onClick : undefined}
       aria-label={props['aria-label']}
+      aria-haspopup={props['aria-haspopup']}
       style={props.style}
       onKeyDown={!props['on:keydown'] && props.tabIndex !== undefined && props.clickable ? (event: KeyboardEvent) => {
         if(event.key !== 'Enter' && event.key !== ' ') {
