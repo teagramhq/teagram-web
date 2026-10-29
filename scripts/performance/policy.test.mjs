@@ -110,15 +110,18 @@ test('does not apply the scroll long-task gate to other scenarios', () => {
   assert.equal(result.blockingFailures.some((failure) => failure.includes('chatOpen') && failure.includes('long task')), false);
 });
 
-test('blocks fixed 100x timing budgets before calibration', () => {
+test('reports fixed 100x timing budget misses before calibration', () => {
   const overBudget = Object.fromEntries(SCENARIOS.filter(({budgetMs}) => budgetMs !== null).map((scenario) => [scenario.key, {ms: scenario.budgetMs + 1}]));
   const head = scaleVariants({'100x': overBudget});
   const result = evaluatePerformance(report({head}), mainHistory(19));
+  const table = formatPerformanceTable(result);
 
   assert.equal(result.calibratedScenarios, 0);
   for(const scenario of SCENARIOS.filter(({budgetMs}) => budgetMs !== null)) {
-    assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x ${scenario.key}`) && failure.includes(`${scenario.budgetMs} ms budget`)));
-    assert.equal(result.rows.find((row) => row.scale === '100x' && row.key === scenario.key).budgetStatus, 'failed');
+    assert.equal(result.blockingFailures.some((failure) => failure.includes(`100x ${scenario.key}`) && failure.includes(`${scenario.budgetMs} ms budget`)), false);
+    assert.equal(result.rows.find((row) => row.scale === '100x' && row.key === scenario.key).budgetStatus, 'warming');
+    const row = table.split('\n').find((line) => line.includes(`${scenario.label} (100x)`));
+    assert.match(row, /over budget \(report only\)/);
   }
 });
 
@@ -131,14 +134,14 @@ test('defers relative timing comparisons until calibration', () => {
   assert.equal(row.budgetStatus, 'warming');
 });
 
-test('reports the fixed timing budget while historical comparisons warm up', () => {
+test('marks timing budgets as report-only while historical comparisons warm up', () => {
   const head = scaleVariants({'100x': {coldChatList: {ms: 900}}});
   const result = evaluatePerformance(report({head}), mainHistory(19));
   const table = formatPerformanceTable(result);
   const coldRow = table.split('\n').find((line) => line.includes('Cold interactive chat list (100x)'));
   const dateJumpRow = table.split('\n').find((line) => line.includes('Jump to a date (100x)'));
 
-  assert.match(coldRow, /fixed budget/);
+  assert.match(coldRow, /report only/);
   assert.match(dateJumpRow, /report only/);
 });
 

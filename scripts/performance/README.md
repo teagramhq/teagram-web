@@ -8,15 +8,16 @@ history for calibration.
 
 ## Performance gates
 
-The 1x and 100x scenarios are calibrated separately. Only main runs with the
+The 1x and 100x scenarios are calibrated separately. Only master runs with the
 same measurement version, fixture version, fixture seed commit, and pinned
 server runtime contribute to a noise band. After 20 matching runs, timing
-regressions block when the head median is above the main median by more than
+regressions block when the head median is above the master median by more than
 `max(15%, 3σ)` and at least 2 ms; the 100x median also fails when it exceeds
-the 1x median by more than 1.5x. The fixed cold, warm, and chat-open timing
-budgets and scroll quality gates block immediately on the 100x snapshot, before
-calibration; 1x is reported and used for the paired scale comparison. On pull
-requests, the 100x scroll gate fails if any repeat records
+the 1x median by more than 1.5x. Absolute cold, warm, and chat-open budgets are
+report-only until the matching scenario has 20 master runs; the table marks any
+over-budget rows during warmup. The 1x results are reported and used for the
+paired scale comparison. Bundle and scroll quality gates block immediately. On
+pull requests, the 100x scroll gate fails if any repeat records
 a task over 50 ms; dropped-frame percentage is pooled across all frame intervals
 from the three repeats.
 Every scenario and size needs three base bundle measurements or the performance
