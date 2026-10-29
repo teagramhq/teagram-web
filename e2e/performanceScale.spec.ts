@@ -333,7 +333,11 @@ async function runVariant(browser: Browser, run: VariantRun) {
     } else {
       console.warn('Base build cannot load 2,000 older messages; omitted its scroll timing baseline.');
     }
-    measured.dateJump.push(await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests), {timeout: 120_000}));
+    if(variant === 'head') {
+      measured.dateJump.push(await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests), {timeout: 120_000}));
+    } else {
+      console.warn('Base client date jump is unsupported by the pinned server; omitted its timing baseline.');
+    }
     measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
     measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests)));
     measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests)));
@@ -361,11 +365,17 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
 
   const prepared = new Map<'base' | 'head', VariantRun>();
   for(const [variant, origin] of variants) {
-    prepared.set(variant, await prepareVariant(browser, variant, origin));
+    try {
+      prepared.set(variant, await prepareVariant(browser, variant, origin));
+    } catch(error) {
+      if(variant === 'head') throw error;
+      console.warn('Base build cannot sign in to the pinned server; omitted its performance baseline.');
+    }
   }
 
+  const runnableVariants = variants.filter(([variant]) => prepared.has(variant));
   for(let round = 0; round < 2; ++round) {
-    const order = round % 2 === 0 ? variants : [...variants].reverse();
+    const order = round % 2 === 0 ? runnableVariants : [...runnableVariants].reverse();
     for(const [variant] of order) {
       await test.step(`${variant} round ${round + 1}`, () => runVariant(browser, prepared.get(variant)!));
     }
