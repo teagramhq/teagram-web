@@ -346,7 +346,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests);
+  await installInstrumentation(page, requests, variant === 'head' && scale === '100x');
 
   try {
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
@@ -354,8 +354,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     measured.coldChatList.push(await test.step('cold chat list', async() => capture(page, requests, await elapsed(page))));
     measured.warmChatList.push(await test.step('warm chat list', () => reloadChatList(page, requests)));
 
-    const injectLongTask = variant === 'head' && scale === '100x';
-    const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture, injectLongTask));
+    const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture));
     measured.chatOpen.push(chatOpen);
     const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(page, requests, variant === 'head'));
     if(scroll) {
