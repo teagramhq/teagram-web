@@ -80,27 +80,22 @@ describe('private username sign-in', () => {
     }
   });
 
-  it('restores an invite fragment after a failed account switch for retry', () => {
+  it('keeps a failed account-switch invite in session storage without restoring the fragment', () => {
     const secret = 'a'.repeat(64);
     window.history.replaceState(window.history.state, '', '/invite?keep=1');
-    window.sessionStorage.setItem('teagram-invite-secret', secret);
 
     expect(restorePrivateUsernameInviteSecretForRetry(secret.toUpperCase())).toBe(true);
     expect(window.location.search).toBe('?keep=1');
-    expect(window.location.hash).toBe(`#${secret}`);
+    expect(window.location.hash).toBe('');
     expect(window.sessionStorage.getItem('teagram-invite-secret')).toBe(secret);
+    expect(takePrivateUsernameInviteSecretFromFragment()).toBe(secret);
+    expect(window.sessionStorage.getItem('teagram-invite-secret')).toBeNull();
   });
 
-  it('restores through app navigation when session storage is unavailable', () => {
+  it('keeps an in-memory retry secret and leaves the URL clean when session storage is unavailable', () => {
     const secret = 'b'.repeat(64);
     const sessionStorage = Object.getOwnPropertyDescriptor(window, 'sessionStorage');
-    const restoreFragment = vi.fn((normalizedSecret: string) => {
-      window.history.replaceState(
-        window.history.state,
-        '',
-        `${window.location.pathname}${window.location.search}#${normalizedSecret}`
-      );
-    });
+    window.history.replaceState(window.history.state, '', '/invite?keep=1');
     Object.defineProperty(window, 'sessionStorage', {
       configurable: true,
       get() {
@@ -109,9 +104,9 @@ describe('private username sign-in', () => {
     });
 
     try {
-      expect(restorePrivateUsernameInviteSecretForRetry(secret, restoreFragment)).toBe(true);
-      expect(restoreFragment).toHaveBeenCalledWith(secret);
-      expect(window.location.hash).toBe(`#${secret}`);
+      expect(restorePrivateUsernameInviteSecretForRetry(secret)).toBe(false);
+      expect(window.location.hash).toBe('');
+      expect(takePrivateUsernameInviteSecretFromFragment()).toBe(secret);
     } finally {
       if(sessionStorage) Object.defineProperty(window, 'sessionStorage', sessionStorage);
       else delete (window as any).sessionStorage;

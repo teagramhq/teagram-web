@@ -95,6 +95,7 @@ vi.mock('@lib/langPack', async(importOriginal) => {
       'Teagram.Registration.Network': 'Unable to create your account. Try again.',
       'Teagram.Registration.PasswordNetwork': 'Unable to set your password. Try again.',
       'Teagram.Registration.ConfigNetwork': 'Unable to check whether account creation is available.',
+      'Teagram.Invite.RetryUnavailable': 'Invite storage is unavailable. Open the original invite link again to try again.',
       'Teagram.Server.Address': 'Server address',
       'Teagram.Server.Placeholder': 'your.server.host',
       'Teagram.Server.Subtitle': 'Sign in with your username',
@@ -152,6 +153,7 @@ vi.mock('@lib/richTextProcessor/wrapRichText', () => ({
 
 import PrivateSignInCard from '@/pages/cards/PrivateSignInCard';
 import {clearPrivateUsernameLogin, isPrivateUsernameLogin} from '@/pages/privateUsernameLoginState';
+import {capturePrivateUsernameInviteSecretFromFragment, takePrivateUsernameInviteSecretFromFragment} from '@/pages/privateUsernameInvite';
 import {
   SERVER_CHOICE_KEY,
   SERVER_LOGIN_USERNAME_KEY,
@@ -203,6 +205,7 @@ describe('private username sign-in card', () => {
     sessionStorage.removeItem(SERVER_LOGIN_USERNAME_KEY);
     sessionStorage.removeItem(SERVER_REGISTER_AFTER_SELECTION_KEY);
     sessionStorage.removeItem(SERVER_USERNAME_DRAFT_KEY);
+    sessionStorage.removeItem('teagram-invite-secret');
     localStorage.removeItem(SERVER_CHOICE_KEY);
     mocks.invokeApi.mockReset();
     mocks.recoverUnknownAuthKey.mockReset();
@@ -245,6 +248,7 @@ describe('private username sign-in card', () => {
     sessionStorage.removeItem(SERVER_LOGIN_USERNAME_KEY);
     sessionStorage.removeItem(SERVER_REGISTER_AFTER_SELECTION_KEY);
     sessionStorage.removeItem(SERVER_USERNAME_DRAFT_KEY);
+    sessionStorage.removeItem('teagram-invite-secret');
     dispose?.();
     dispose = undefined;
     clearPrivateUsernameLogin();
@@ -618,6 +622,69 @@ describe('private username sign-in card', () => {
     expect(sessionStorage.getItem(SERVER_REGISTER_AFTER_SELECTION_KEY)).toBeNull();
     expect(sessionStorage.getItem(SERVER_USERNAME_DRAFT_KEY)).toBeNull();
     expect(mocks.reauthenticateGuest).not.toHaveBeenCalled();
+  });
+
+  it('preserves an invite across initial server selection and consumes it when registration resumes', async() => {
+    const secret = 'f'.repeat(64);
+    window.history.replaceState(window.history.state, '', `/invite#${secret}`);
+    capturePrivateUsernameInviteSecretFromFragment();
+    let finishSelection!: () => void;
+    const selectServer = vi.fn(() => new Promise<void>((resolve) => { finishSelection = resolve; }));
+    setServerSelectionAction(createSelectionAction(selectServer, {phase: 'selecting', host: 'second-server.example'}));
+    mount();
+
+    const createAccount = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement;
+    createAccount.click();
+    await vi.waitFor(() => expect(selectServer).toHaveBeenCalledOnce());
+    expect(sessionStorage.getItem('teagram-invite-secret')).toBe(secret);
+    expect(sessionStorage.getItem(SERVER_REGISTER_AFTER_SELECTION_KEY)).toBe('1');
+
+    dispose();
+    setServerSelectionAction(createSelectionAction(vi.fn(async() => {}), {phase: 'connected', host: 'second-server.example'}));
+    mocks.getAppConfig.mockResolvedValue({registration_mode: 'invite'});
+    mount();
+
+    const inviteInput = await vi.waitFor(() => {
+      const input = document.querySelector<HTMLInputElement>('input[aria-label="Invite link or code"]');
+      expect(input?.value).toBe(secret);
+      return input;
+    });
+    expect(inviteInput.value).toBe(secret);
+    expect(sessionStorage.getItem('teagram-invite-secret')).toBeNull();
+    expect(document.getElementById('registration-invite-secret-status')?.textContent).toBe('Filled in from your invite link.');
+    finishSelection();
+  });
+
+  it('keeps the invite flow on the current screen and explains how to retry when storage is unavailable', async() => {
+    const secret = 'e'.repeat(64);
+    window.history.replaceState(window.history.state, '', `/invite#${secret}`);
+    capturePrivateUsernameInviteSecretFromFragment();
+    const selectServer = vi.fn(async() => {});
+    setServerSelectionAction(createSelectionAction(selectServer, {phase: 'selecting', host: 'second-server.example'}));
+    const sessionStorageDescriptor = Object.getOwnPropertyDescriptor(window, 'sessionStorage');
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      get() {
+        throw new DOMException('Storage unavailable', 'SecurityError');
+      }
+    });
+    let createAccount: HTMLButtonElement | undefined;
+
+    try {
+      mount();
+      createAccount = Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Create account') as HTMLButtonElement;
+      createAccount.click();
+      await vi.waitFor(() => expect(mocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Invite.RetryUnavailable'}));
+      expect(selectServer).not.toHaveBeenCalled();
+      expect(window.location.hash).toBe('');
+    } finally {
+      if(sessionStorageDescriptor) Object.defineProperty(window, 'sessionStorage', sessionStorageDescriptor);
+      else delete (window as any).sessionStorage;
+    }
+
+    createAccount!.click();
+    await vi.waitFor(() => expect(selectServer).toHaveBeenCalledOnce());
+    expect(window.sessionStorage.getItem('teagram-invite-secret')).toBe(secret);
   });
 
   it.each([undefined, false, 'true', 1, null])('hides guest creation unless validated discovery is literal true (%s)', async(guestSignUp) => {

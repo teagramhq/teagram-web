@@ -50,22 +50,13 @@ export function storePrivateUsernameInviteSecretForAccountSwitch(secret: string)
 }
 
 export function restorePrivateUsernameInviteSecretForRetry(
-  secret: string,
-  restoreFragment = (normalizedSecret: string) => window.history.replaceState(
-    window.history.state,
-    '',
-    `${window.location.pathname}${window.location.search}#${normalizedSecret}`
-  )
+  secret: string
 ) {
   if(!INVITE_SECRET_PATTERN.test(secret)) return false;
 
   const normalizedSecret = secret.toLowerCase();
-  try {
-    restoreFragment(normalizedSecret);
-    return true;
-  } catch(err) {
-    return storePrivateUsernameInviteSecretForAccountSwitch(normalizedSecret);
-  }
+  inviteSecretFromFragment = normalizedSecret;
+  return storePrivateUsernameInviteSecretForAccountSwitch(normalizedSecret);
 }
 
 // `src/index.ts` imports this dependency before the rest of the app graph so

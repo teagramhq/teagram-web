@@ -42,7 +42,10 @@ import {
 } from '@/pages/privateUsernameAuth';
 import type {PrivateUsernameRegistrationMode} from '@/pages/privateUsernameAuth';
 import {markPrivateUsernameLogin} from '@/pages/privateUsernameLoginState';
-import {takePrivateUsernameInviteSecretFromFragment} from '@/pages/privateUsernameInvite';
+import {
+  storePrivateUsernameInviteSecretForAccountSwitch,
+  takePrivateUsernameInviteSecretFromFragment
+} from '@/pages/privateUsernameInvite';
 import styles from '@/pages/authFlow.module.scss';
 
 if(import.meta.hot) import.meta.hot.accept();
@@ -483,6 +486,10 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
     const serverInput = document.querySelector<HTMLInputElement>('#server-address');
     if(!serverInput?.value.trim()) return;
+    if(inviteSecretFromLink && !storePrivateUsernameInviteSecretForAccountSwitch(inviteSecretFromLink)) {
+      toastNew({langPackKey: 'Teagram.Invite.RetryUnavailable'});
+      return;
+    }
     persistServerUsernameDraft();
     try {
       window.sessionStorage.setItem(SERVER_REGISTER_AFTER_SELECTION_KEY, '1');

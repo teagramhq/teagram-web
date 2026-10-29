@@ -165,7 +165,7 @@ test('an existing user can retry an invite after a failure and blocked session s
   const failedInviteURL = new URL(createdLink);
   failedInviteURL.searchParams.set('fail-invite-lookup', '1');
   await page.goto(failedInviteURL.toString(), {waitUntil: 'domcontentloaded'});
-  await expect(page.getByText('An error occurred. Please try again later.', {exact: true})).toBeVisible({timeout: 30_000});
+  await expect(page.getByText('Couldn\'t add this account. Reload this page to try again.', {exact: true})).toBeVisible({timeout: 30_000});
   await expect(page.locator('#page-chats')).toBeVisible();
   await captureInviteState(page, testInfo, 'invite-registration-add-failed');
 
@@ -177,23 +177,19 @@ test('an existing user can retry an invite after a failure and blocked session s
   await expect.poll(() => page.evaluate(() => location.hash)).toBe('');
   await captureInviteState(page, testInfo, 'invite-registration-signed-in-confirm');
   await page.getByRole('button', {name: 'Add account'}).click();
-  await expect(page.getByText('An error occurred. Please try again later.', {exact: true})).toBeVisible({timeout: 30_000});
+  await expect(page.getByText('Invite storage is unavailable. Open the original invite link again to try again.', {exact: true})).toBeVisible({timeout: 30_000});
   await expect(page.locator('#page-chats')).toBeVisible();
-  await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#${inviteSecret}`);
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('');
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem('teagram-invite-secret'))).toBeNull();
   await captureInviteState(page, testInfo, 'invite-registration-storage-unavailable');
 
-  const retryURL = await page.evaluate(() => {
-    const url = new URL(location.href);
-    url.searchParams.delete('block-invite-storage');
-    return url.toString();
-  });
-  await page.goto(retryURL, {waitUntil: 'domcontentloaded'});
+  await page.goto(createdLink, {waitUntil: 'domcontentloaded'});
   await expect(page.getByText('This invite link creates a new account on', {exact: false})).toBeVisible({timeout: 30_000});
   await page.evaluate(() => (window as any).__failAccountSwitchForTest = true);
   await page.getByRole('button', {name: 'Add account'}).click();
-  await expect(page.getByText('An error occurred. Please try again later.', {exact: true})).toBeVisible({timeout: 30_000});
+  await expect(page.getByText('Couldn\'t add this account. Reload this page to try again.', {exact: true})).toBeVisible({timeout: 30_000});
   await expect(page.locator('#page-chats')).toBeVisible();
-  await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#${inviteSecret}`);
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('');
   await expect.poll(() => page.evaluate(() => sessionStorage.getItem('teagram-invite-secret'))).toBe(inviteSecret);
   await captureInviteState(page, testInfo, 'invite-registration-account-switch-failed');
 

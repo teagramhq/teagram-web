@@ -4284,6 +4284,8 @@ const lang = {
   'Teagram.Invite.AddTitle': 'New account',
   'Teagram.Invite.AddText': 'This invite link creates a new account on %s. Teagram Web adds it next to the accounts you use now.',
   'Teagram.Invite.AddAccount': 'Add account',
+  'Teagram.Invite.Retry': 'Couldn\'t add this account. Reload this page to try again.',
+  'Teagram.Invite.RetryUnavailable': 'Invite storage is unavailable. Open the original invite link again to try again.',
   'Login.Register.LastName.Placeholder': 'Last Name',
   'Teagram.Registration.CreateAccount': 'Create account',
   'Teagram.Registration.SignIn': 'Sign in',
