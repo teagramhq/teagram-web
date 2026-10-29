@@ -287,6 +287,7 @@ jobs:
             .github/workflows/real-client-browser-flow.yml
           node --check .github/scripts/smoke-k8s-web.mjs
           bash -n .github/scripts/install-kubectl.sh
+          bash -n .github/scripts/start-k3d-cluster.sh
           node --check scripts/real-client/browser.cjs
           node --check scripts/real-client/run.mjs
 
@@ -305,7 +306,7 @@ jobs:
   check-k8s-manifests:
     name: 'check: k8s-manifests'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     outputs:
       run_deploy_test: ${{ steps.scope.outputs.run_deploy_test }}
 
@@ -360,6 +361,15 @@ jobs:
           KUBERNETES_VERSION: 1.37.0
         run: bash .github/scripts/install-kubectl.sh
 
+      - name: Install k3d
+        run: go install github.com/k3d-io/k3d/v5@v5.8.3
+
+      - name: Start a throwaway Kubernetes API for client dry-runs
+        env:
+          K3D_CLUSTER: teagram-web-manifest-check
+          KUBERNETES_VERSION: 1.37.0
+        run: bash .github/scripts/start-k3d-cluster.sh
+
       - name: Render and validate production and CI overlays
         env:
           KUBERNETES_VERSION: 1.37.0
@@ -392,6 +402,16 @@ jobs:
             -summary \
             -kubernetes-version "$KUBERNETES_VERSION" \
             "$prod_manifest"
+          kubectl apply --dry-run=client --validate=false -k deploy/k8s/overlays/ci
+          kubectl apply --dry-run=client --validate=false -k deploy/k8s/overlays/prod
+
+      - name: Delete the throwaway Kubernetes API
+        if: always()
+        continue-on-error: true
+        env:
+          K3D_CLUSTER: teagram-web-manifest-check
+        run: >-
+          "$(go env GOPATH)/bin/k3d" cluster delete "$K3D_CLUSTER"
 
   test-k8s-deploy:
     name: 'test: k8s-deploy'
@@ -472,16 +492,8 @@ jobs:
       - name: Start the pinned throwaway k3s cluster
         env:
           K3D_CLUSTER: teagram-web-test
-        run: |
-          set -euo pipefail
-          "$(go env GOPATH)/bin/k3d" cluster create "$K3D_CLUSTER" \
-            --servers 1 \
-            --agents 0 \
-            --wait \
-            --image rancher/k3s:v1.37.0-k3s1 \
-            --k3s-arg '--disable=traefik,servicelb,metrics-server@server:*'
-          kubectl config use-context "k3d-$K3D_CLUSTER"
-          kubectl wait --for=condition=Ready node --all --timeout=120s
+          KUBERNETES_VERSION: 1.37.0
+        run: bash .github/scripts/start-k3d-cluster.sh
 
       - name: Apply the web image to the throwaway cluster
         env:
@@ -491,8 +503,6 @@ jobs:
           set -euo pipefail
           "$(go env GOPATH)/bin/k3d" image import "$IMAGE_REF" --cluster "$K3D_CLUSTER"
           kubectl create namespace teagram
-          kubectl apply --dry-run=client --validate=false -k deploy/k8s/overlays/ci
-          kubectl apply --dry-run=client --validate=false -k deploy/k8s/overlays/prod
           kubectl apply --dry-run=server -k deploy/k8s/overlays/ci
           kubectl apply -k deploy/k8s/overlays/ci
           kubectl rollout status deployment/teagram-web --namespace teagram --timeout=180s
