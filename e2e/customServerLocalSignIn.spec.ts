@@ -1751,5 +1751,8 @@ test('unlocks server selection when the pinned-key popup import fails', async({p
   await hostInput.fill(CANCEL_SERVER_HOST);
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(hostInput).toHaveValue(CANCEL_SERVER_HOST);
+  const usernameInput = page.getByRole('textbox', {name: 'Username'});
+  await expect(page.getByRole('button', {name: 'Next', exact: true})).toBeDisabled();
+  await usernameInput.fill('Alice_123');
   await expect(page.getByRole('button', {name: 'Next', exact: true})).toBeEnabled();
 });
