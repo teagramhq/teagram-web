@@ -3960,7 +3960,7 @@ describe('real client scenario contract', () => {
       getByTestId: () => locator,
       locator: () => locator,
       waitForFunction: async() => {},
-      evaluate: async() => `guest_${'a'.repeat(16)}`
+      evaluate: vi.fn(async() => true)
     });
 
     const registrations: any[] = [];
@@ -3993,6 +3993,9 @@ describe('real client scenario contract', () => {
       expect(registrations[0].observer).toBe(appObservers.guest);
       expect(typeof registrations[0].networkSink.observeTarget).toBe('function');
       expect(appObservers.guest.summary()).toMatchObject({pageTargets: 1, coverageComplete: 1, discoveryActive: 1});
+      const guestStorageRead = String(page.evaluate.mock.calls[0][0]);
+      expect(guestStorageRead).toContain('appStorage.get');
+      expect(guestStorageRead).toContain('guestCredentials');
     } finally {
       await Promise.all(observers.map((observer) => observer.stop()));
     }

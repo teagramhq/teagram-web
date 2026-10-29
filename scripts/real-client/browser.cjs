@@ -1658,8 +1658,13 @@ async function runGuestSignupScenario(browser, runtime, contexts, registry, obse
   if(await page.getByTestId('turnstile-challenge').count() !== 0 || turnstileRequests.length !== 0) {
     failStage('guest_turnstile_widget_loaded_without_site_key');
   }
-  const guestUsername = await page.evaluate(() => localStorage.getItem('__teagram_guest_username'));
-  if(typeof guestUsername !== 'string' || !/^guest_[a-z2-7]{16}$/.test(guestUsername)) {
+  const hasGuestCredentials = await page.evaluate(async() => {
+    const credentials = await window.appStorage.get('guestCredentials', false);
+    return Array.isArray(credentials) && credentials.some((record) =>
+      typeof record?.username === 'string' && /^guest_[a-z2-7]{16}$/.test(record.username)
+    );
+  });
+  if(!hasGuestCredentials) {
     failStage('guest_username_not_created');
   }
   currentStage = 'guest_demo_banner';
