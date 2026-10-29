@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: teagram-web
+  labels:
+    app.kubernetes.io/name: teagram-web
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: teagram-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

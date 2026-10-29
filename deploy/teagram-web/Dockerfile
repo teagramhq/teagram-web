@@ -16,7 +16,9 @@ FROM nginx:stable-alpine3.20
 
 # Only the audited static artifact crosses from the Node verification stage.
 # The final serving image remains an Nginx-only runtime.
-RUN rm -f /etc/nginx/conf.d/default.conf \
+RUN rm -rf /usr/share/nginx/html \
+  && mkdir -p /usr/share/nginx/html \
+  && rm -f /etc/nginx/conf.d/default.conf \
   && mkdir -p /var/cache/nginx \
   && chown -R nginx:nginx /var/cache/nginx
 

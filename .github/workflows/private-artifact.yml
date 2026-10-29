@@ -113,6 +113,12 @@ jobs:
           console.log(`[private-artifact] keyFingerprint=${target.fingerprint}`);
           NODE
 
+      - name: Build and publisher-verify the reviewed web image
+        env:
+          IMAGE_REF: teagram-web:private-artifact-check
+          SOURCE_COMMIT: ${{ github.event.pull_request.head.sha }}
+        run: bash .github/scripts/test-private-artifact-image.sh
+
   check-publication-request:
     name: 'check: publication-request'
     if: >-
@@ -321,12 +327,38 @@ jobs:
           --ref "${{ needs.check-publication-request.outputs.source_ref }}"
           --commit "${{ needs.check-publication-request.outputs.source_commit }}"
 
+      - name: Build the reviewed web image for publication
+        env:
+          IMAGE_REF: ghcr.io/teagramhq/teagram-web:${{ needs.check-publication-request.outputs.source_commit }}
+          PRIVATE_ARTIFACT_COMMIT: ${{ needs.check-publication-request.outputs.source_commit }}
+          PRIVATE_ARTIFACT_DIGEST: sha256:${{ steps.verify.outputs.artifact_digest_hex }}
+        run: |
+          set -euo pipefail
+          docker build \
+            --platform linux/amd64 \
+            --file deploy/teagram-web/Dockerfile \
+            --build-arg PRIVATE_ARTIFACT_COMMIT="$PRIVATE_ARTIFACT_COMMIT" \
+            --label "org.opencontainers.image.source=https://github.com/teagramhq/teagram-web" \
+            --label "org.opencontainers.image.revision=$PRIVATE_ARTIFACT_COMMIT" \
+            --label "com.teagram.private-artifact.digest=$PRIVATE_ARTIFACT_DIGEST" \
+            --tag "$IMAGE_REF" \
+            .
+          docker save --output "$RUNNER_TEMP/teagram-web-image.tar" "$IMAGE_REF"
+
       - name: Stage audited artifact for the isolated publisher
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: private-mtproto-staged-${{ needs.check-publication-request.outputs.source_commit }}-${{ steps.verify.outputs.artifact_digest_hex }}
           path: dist-private
           include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Stage reviewed web image for the isolated publisher
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: teagram-web-image-staged-${{ needs.check-publication-request.outputs.source_commit }}-${{ steps.verify.outputs.artifact_digest_hex }}
+          path: ${{ runner.temp }}/teagram-web-image.tar
           if-no-files-found: error
           retention-days: 1
 
@@ -379,3 +411,102 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
+
+  publish-teagram-web-image:
+    name: 'publish: teagram-web-image'
+    needs:
+      - check-publication-request
+      - build-private-artifact
+      - publish-private-artifact
+    if: >-
+      needs.check-publication-request.result == 'success' &&
+      needs.check-publication-request.outputs.publish_private_artifact == 'true' &&
+      needs.build-private-artifact.result == 'success' &&
+      needs.publish-private-artifact.result == 'success'
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: read
+      packages: write
+
+    steps:
+      - name: Set up Node.js 24.18.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.18.0
+
+      - name: Download the immutable target snapshot
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.check-publication-request.outputs.snapshot_artifact_name }}
+          path: ${{ runner.temp }}/private-target-snapshot
+
+      - name: Download the staged reviewed web image
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: teagram-web-image-staged-${{ needs.check-publication-request.outputs.source_commit }}-${{ needs.build-private-artifact.outputs.artifact_digest_hex }}
+          path: ${{ runner.temp }}/teagram-web-image
+
+      - name: Load and verify the reviewed web image
+        env:
+          IMAGE_REF: ghcr.io/teagramhq/teagram-web:${{ needs.check-publication-request.outputs.source_commit }}
+          SOURCE_COMMIT: ${{ needs.check-publication-request.outputs.source_commit }}
+          ARTIFACT_DIGEST: sha256:${{ needs.build-private-artifact.outputs.artifact_digest_hex }}
+        run: |
+          set -euo pipefail
+          docker load --input "$RUNNER_TEMP/teagram-web-image/teagram-web-image.tar"
+          image_labels="$(docker image inspect "$IMAGE_REF" --format '{{ json .Config.Labels }}')"
+          jq -e \
+            --arg commit "$SOURCE_COMMIT" \
+            --arg digest "$ARTIFACT_DIGEST" \
+            '."org.opencontainers.image.revision" == $commit and ."com.teagram.private-artifact.digest" == $digest' \
+            <<<"$image_labels" >/dev/null
+          container_id="$(docker create "$IMAGE_REF")"
+          trap 'docker rm "$container_id" >/dev/null' EXIT
+          mkdir -p "$RUNNER_TEMP/teagram-web-image-content"
+          docker cp "$container_id:/usr/share/nginx/html/." "$RUNNER_TEMP/teagram-web-image-content/"
+          node "$RUNNER_TEMP/private-target-snapshot/publisher-verify.mjs" \
+            --dist "$RUNNER_TEMP/teagram-web-image-content" \
+            --snapshot "$RUNNER_TEMP/private-target-snapshot" \
+            --ref "${{ needs.check-publication-request.outputs.source_ref }}" \
+            --commit "$SOURCE_COMMIT" \
+            --digest "${{ needs.build-private-artifact.outputs.artifact_digest_hex }}"
+
+      - name: Authenticate to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Publish the reviewed web image and record its digest
+        id: web-image-push
+        env:
+          IMAGE_REF: ghcr.io/teagramhq/teagram-web:${{ needs.check-publication-request.outputs.source_commit }}
+          SOURCE_COMMIT: ${{ needs.check-publication-request.outputs.source_commit }}
+          ARTIFACT_DIGEST: sha256:${{ needs.build-private-artifact.outputs.artifact_digest_hex }}
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE_REF" | tee "$RUNNER_TEMP/teagram-web-image-push.log"
+          image_digest="$(sed -nE 's/.*digest: (sha256:[0-9a-f]{64}) size:.*/\1/p' "$RUNNER_TEMP/teagram-web-image-push.log" | tail -n 1)"
+          if [[ ! "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo 'container registry did not report a valid image digest' >&2
+            exit 1
+          fi
+          image_digest_hex="${image_digest#sha256:}"
+          jq -n \
+            --arg image "ghcr.io/teagramhq/teagram-web@$image_digest" \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --arg artifact_digest "$ARTIFACT_DIGEST" \
+            '{image: $image, sourceCommit: $source_commit, artifactDigest: $artifact_digest}' \
+            >"$RUNNER_TEMP/teagram-web-image-pin.json"
+          printf 'image_digest_hex=%s\n' "$image_digest_hex" >>"$GITHUB_OUTPUT"
+
+      - name: Publish the immutable web image pin
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: teagram-web-image-pin-${{ needs.check-publication-request.outputs.source_commit }}-${{ steps.web-image-push.outputs.image_digest_hex }}
+          path: ${{ runner.temp }}/teagram-web-image-pin.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Log out of GitHub Container Registry
+        if: always()
+        run: docker logout ghcr.io
