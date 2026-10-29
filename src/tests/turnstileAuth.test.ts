@@ -1,6 +1,10 @@
-import {describe, expect, it, vi} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {getTurnstileSiteKey, invokeTurnstileProtected} from '@/pages/turnstileSignup';
+
+const QA_BYPASS_KEY = '__teagram_turnstile_qa_bypass_token';
+
+afterEach(() => localStorage.removeItem(QA_BYPASS_KEY));
 
 describe('Turnstile auth challenge', () => {
   it('accepts signin and signup challenges only for their matching action', () => {
@@ -67,6 +71,55 @@ describe('Turnstile auth challenge', () => {
     expect(requestChallenge).toHaveBeenCalledOnce();
     expect(invokeApi).toHaveBeenCalledWith('invokeWithReCaptcha', {
       token: 'fresh-signup-token',
+      query: {_: 'auth.signUp', ...params}
+    });
+  });
+
+  it('sends a test-only QA token instead of rendering Turnstile for signup', async() => {
+    const response = {_: 'auth.authorization'};
+    const invokeApi = vi.fn().mockResolvedValue(response);
+    const requestChallenge = vi.fn();
+    const params = {phone_number: 'Alice_123', first_name: 'Teagram'} as any;
+    localStorage.setItem(QA_BYPASS_KEY, 'qa-bypass-token');
+
+    await expect(invokeTurnstileProtected(
+      invokeApi,
+      'auth.signUp',
+      params,
+      'signup',
+      requestChallenge,
+      'signup-site-key'
+    )).resolves.toEqual(response);
+
+    expect(requestChallenge).not.toHaveBeenCalled();
+    expect(invokeApi).toHaveBeenCalledOnce();
+    expect(invokeApi).toHaveBeenCalledWith('invokeWithReCaptcha', {
+      token: 'qa-bypass-token',
+      query: {_: 'auth.signUp', ...params}
+    });
+  });
+
+  it('uses a test-only QA token when signup first receives a challenge error', async() => {
+    const response = {_: 'auth.authorization'};
+    const invokeApi = vi.fn()
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signup__server-site-key'})
+    .mockResolvedValueOnce(response);
+    const requestChallenge = vi.fn();
+    const params = {phone_number: 'Alice_123', first_name: 'Teagram'} as any;
+    localStorage.setItem(QA_BYPASS_KEY, 'qa-bypass-token');
+
+    await expect(invokeTurnstileProtected(
+      invokeApi,
+      'auth.signUp',
+      params,
+      'signup',
+      requestChallenge
+    )).resolves.toEqual(response);
+
+    expect(requestChallenge).not.toHaveBeenCalled();
+    expect(invokeApi).toHaveBeenNthCalledWith(1, 'auth.signUp', params);
+    expect(invokeApi).toHaveBeenNthCalledWith(2, 'invokeWithReCaptcha', {
+      token: 'qa-bypass-token',
       query: {_: 'auth.signUp', ...params}
     });
   });

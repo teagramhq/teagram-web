@@ -5,7 +5,7 @@ import {basename, dirname, isAbsolute} from 'node:path';
 import observation from './observation.cjs';
 
 export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group']);
-export const OPTIONAL_SCENARIOS = Object.freeze(['channel', 'poll']);
+export const OPTIONAL_SCENARIOS = Object.freeze(['channel', 'poll', 'guest-signup']);
 const AVAILABLE_SCENARIOS = Object.freeze([...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS]);
 export const POLL_NEGATIVE_CONTROL_SERVER_REVISION = '586403c1f4c92c09b006652278bdd02fd40ddf2d';
 export const POLL_NEGATIVE_CONTROL_EVIDENCE = Object.freeze([
@@ -30,7 +30,7 @@ const PAGE_ERROR_MESSAGE_LIMIT = 512;
 const PAGE_ERROR_STACK_FRAME_LIMIT = 16;
 const PAGE_ERROR_FUNCTION_NAME_LIMIT = 128;
 const PAGE_ERROR_STACK_STATES = Object.freeze(['unavailable', 'non_string', 'no_frames', 'unclassified_frames', 'captured', 'partial', 'truncated']);
-const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'unknown']);
+const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'guest-signup', 'unknown']);
 const CLEANUP_FAILURE_CODES = Object.freeze([
   'browser_close_cleanup', 'context_cleanup', 'observer_cleanup', 'observer_control_cleanup',
   'playwright_trace_cleanup', 'screenshot_cleanup', 'worker_discovery_cleanup'

@@ -4,6 +4,8 @@ export type TurnstileAction = 'signin' | 'signup';
 export type TurnstileAuthMethod = 'auth.sendCode' | 'auth.checkPassword' | 'auth.signUp';
 export type TurnstileAuthParams = AuthSendCode | AuthCheckPassword | AuthSignUp;
 
+export const TURNSTILE_QA_BYPASS_LOCAL_STORAGE_KEY = '__teagram_turnstile_qa_bypass_token';
+
 export type InvokeTurnstileApi<TResponse = unknown> = (
   method: TurnstileAuthMethod | 'invokeWithReCaptcha',
   params: TurnstileAuthParams | InvokeWithReCaptcha
@@ -37,6 +39,9 @@ export async function invokeTurnstileProtected<TResponse = unknown>(
   siteKey?: string
 ): Promise<TResponse> {
   const getParams = typeof params === 'function' ? params : () => params;
+  const qaBypassToken = action === 'signup' && typeof localStorage !== 'undefined'
+    ? localStorage.getItem(TURNSTILE_QA_BYPASS_LOCAL_STORAGE_KEY)?.trim() || undefined
+    : undefined;
   const submit = async(token?: string) => {
     const currentParams = await getParams();
     if(token === undefined) return await invokeApi(method, currentParams);
@@ -47,6 +52,10 @@ export async function invokeTurnstileProtected<TResponse = unknown>(
     });
   };
 
+  if(action === 'signup' && siteKey && qaBypassToken) {
+    return await submit(qaBypassToken) as TResponse;
+  }
+
   if(action === 'signup' && siteKey && requestChallenge) {
     return await requestChallenge(siteKey, action, (token) => submit(token)) as TResponse;
   }
@@ -56,6 +65,7 @@ export async function invokeTurnstileProtected<TResponse = unknown>(
   } catch(error) {
     const challengeSiteKey = getTurnstileSiteKey(error, action);
     if(!challengeSiteKey || !requestChallenge) throw error;
+    if(action === 'signup' && qaBypassToken) return await submit(qaBypassToken) as TResponse;
 
     return await requestChallenge(challengeSiteKey, action, (token) => submit(token)) as TResponse;
   }

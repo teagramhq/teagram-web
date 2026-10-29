@@ -3862,6 +3862,7 @@ describe('real client scenario contract', () => {
     expect(parseRequiredScenarios('sign-in,first-message,message,group,channel')).toEqual(['sign-in', 'first-message', 'message', 'group', 'channel']);
     expect(parseRequiredScenarios('sign-in,first-message,message,group,poll')).toEqual(['sign-in', 'first-message', 'message', 'group', 'poll']);
     expect(parseRequiredScenarios('sign-in,first-message,message,group,channel,poll')).toEqual(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']);
+    expect(parseRequiredScenarios('sign-in,first-message,message,group,guest-signup')).toEqual(['sign-in', 'first-message', 'message', 'group', 'guest-signup']);
     expect(parseRequiredScenarios('channel,poll,group,message,first-message,sign-in')).toEqual(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']);
   });
 
@@ -3902,6 +3903,7 @@ describe('real client scenario contract', () => {
   it('counts poll and optional channel screenshots separately for positive and negative runs', () => {
     expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group']})).toBe(20);
     expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel']})).toBe(30);
+    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'guest-signup']})).toBe(20);
     expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll']})).toBe(34);
     expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']})).toBe(44);
     expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll']})).toBe(24);

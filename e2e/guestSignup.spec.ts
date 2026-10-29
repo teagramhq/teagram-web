@@ -323,6 +323,26 @@ test('creates a guest only when discovery advertises it and restores the same gu
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
 
+test('creates a guest without loading Turnstile when discovery has no site key', async({page}, testInfo) => {
+  const turnstileRequests: string[] = [];
+  page.on('request', (request) => {
+    if(request.url().includes('challenges.cloudflare.com')) turnstileRequests.push(request.url());
+  });
+  await setupGuestServer(page, testInfo, true, undefined, undefined, undefined, false, false);
+  await openSelectedServer(page, testInfo);
+
+  const auth = page.locator('#auth-pages');
+  await auth.getByRole('button', {name: 'Try it as a guest'}).click();
+  await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
+  await expect(auth.getByTestId('turnstile-challenge')).toHaveCount(0);
+  expect(turnstileRequests).toHaveLength(0);
+
+  const signupCalls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
+  expect(signupCalls.filter((call) => call.method === 'auth.signUp')).toHaveLength(1);
+  expect(signupCalls.filter((call) => call.method === 'invokeWithReCaptcha')).toHaveLength(0);
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
 test('auto-creates one guest from runtime config without a picker and restores it after reload', async({page}, testInfo) => {
   const webSocketUrls = await setupGuestServer(page, testInfo, true, undefined, undefined, undefined, true, true, 'demo.teagram.io', 'demo.teagram.io', 443, 'week-42');
   const appOrigin = new URL(testInfo.project.use.baseURL as string);

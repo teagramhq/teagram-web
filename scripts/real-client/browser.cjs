@@ -5,7 +5,7 @@ const {chromium} = require('playwright');
 const observation = require('./observation.cjs');
 
 const REQUIRED_SCENARIOS = ['sign-in', 'first-message', 'message', 'group'];
-const OPTIONAL_SCENARIOS = ['channel', 'poll'];
+const OPTIONAL_SCENARIOS = ['channel', 'poll', 'guest-signup'];
 const AVAILABLE_SCENARIOS = [...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS];
 const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
 const PRIVATE_CSP_WSS = 'wss://teagramd.test/apiws';
@@ -56,7 +56,7 @@ const PAGE_DIAGNOSTIC_LIMIT = 16;
 const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
 const PAGE_DIAGNOSTIC_FIELD_LIMIT = 256;
 const PAGE_DIAGNOSTIC_VALUE_TYPES = new Set(['undefined', 'null', 'boolean', 'number', 'string', 'object', 'function']);
-const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'unknown']);
+const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'guest-signup', 'unknown']);
 const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set(AVAILABLE_SCENARIOS);
 const PAGE_ERROR_EVENT_CAPTURE_KEY = '__teagramPageErrorEvents';
 const pageErrorDiagnosticCounts = new WeakMap();
@@ -1608,6 +1608,62 @@ async function signIn(page, account, name, screenshotDirectory, capturedScreensh
 
   await page.waitForFunction(() => Boolean(navigator.serviceWorker?.controller), null, {timeout: 20_000})
   .catch(() => failStage(`${name}_service_worker_controller`));
+}
+
+async function runGuestSignupScenario(browser, runtime, contexts) {
+  currentStage = 'guest_context';
+  const context = await browser.newContext({viewport: {width: 1280, height: 900}});
+  contexts.push(context);
+  const page = await context.newPage();
+  const turnstileRequests = [];
+  const pageErrors = [];
+  page.on('request', (request) => {
+    if(request.url().includes('challenges.cloudflare.com')) turnstileRequests.push(request.url());
+  });
+  page.on('pageerror', (error) => pageErrors.push(error));
+
+  currentStage = 'guest_artifact_load';
+  const response = await page.goto(`${PRIVATE_CSP_ORIGIN}/?noWorker=1&noServiceWorker=1`, {
+    waitUntil: 'domcontentloaded',
+    timeout: 30_000
+  }).catch(() => failStage('guest_artifact_load'));
+  if(response?.status() !== 200) failStage('guest_artifact_load');
+
+  currentStage = 'guest_signup_button';
+  const guestButton = page.getByRole('button', {name: 'Try it as a guest'});
+  await guestButton.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_signup_button'));
+  await guestButton.click().catch(() => failStage('guest_signup_submit'));
+
+  const termsDialog = page.getByRole('dialog', {name: 'Terms of service'});
+  const termsVisible = await termsDialog.waitFor({state: 'visible', timeout: 3_000}).then(() => true).catch((error) => {
+    if(error?.name === 'TimeoutError') return false;
+    throw error;
+  });
+  if(termsVisible) {
+    currentStage = 'guest_terms_accept';
+    await termsDialog.getByRole('button', {name: 'Accept', exact: true}).click()
+    .catch(() => failStage('guest_terms_accept'));
+  }
+
+  currentStage = 'guest_chats_list';
+  await page.waitForFunction(() => {
+    const chats = document.querySelector('#page-chats');
+    return chats && getComputedStyle(chats).display !== 'none';
+  }, null, {timeout: 45_000}).catch(() => failStage('guest_chats_list'));
+  if(await page.getByTestId('turnstile-challenge').count() !== 0 || turnstileRequests.length !== 0) {
+    failStage('guest_turnstile_widget_loaded_without_site_key');
+  }
+  const guestUsername = await page.evaluate(() => localStorage.getItem('__teagram_guest_username'));
+  if(typeof guestUsername !== 'string' || !/^guest_[a-z2-7]{16}$/.test(guestUsername)) {
+    failStage('guest_username_not_created');
+  }
+  currentStage = 'guest_demo_banner';
+  await page.locator('#chatlist-container [role="status"]')
+  .getByText("Demo server: you're a guest.", {exact: true})
+  .waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_demo_banner'));
+  if(pageErrors.length !== 0) failStage('guest_page_error');
+  if(runtime.scenarios.includes('guest-signup')) return {name: 'guest-signup', status: 'passed'};
+  return undefined;
 }
 
 async function submitUsernameOnceAndWaitForPassword(page, account, expected, name, passwordEvidence, actionCounts, timeoutMs = PASSWORD_FIELD_TIMEOUT_MS, webSocket101Observer) {
@@ -6419,6 +6475,11 @@ async function main(dependencies = {}) {
         pollFooterTransitions = pollRun.footerTransitions;
       }
       report.push({name: 'poll', status: 'passed'});
+    }
+    if(runtime.scenarios.includes('guest-signup')) {
+      currentScenario = 'guest-signup';
+      report.push(await runGuestSignupScenario(browser, runtime, contexts));
+      currentScenario = undefined;
     }
     if(JSON.stringify(report.map((scenario) => scenario.name)) !== JSON.stringify(runtime.scenarios)) {
       failStage('scenario_report_incomplete');
