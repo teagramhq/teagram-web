@@ -185,37 +185,37 @@ describe('private artifact workflow Node runtime', () => {
   const guardedInvocations = [
     [
       'publication preparation',
-      'publication-prepare',
+      'check-publication-request',
       'Set up Node.js 24.18.0',
       'Enforce the reviewed allowlist before installation',
       'node scripts/private-artifact-release.mjs prepare'
     ],
     [
       'pre-install target validation',
-      'private-build',
+      'build-private-artifact',
       'Set up Node.js 24.18.0 before target validation',
       'Validate the immutable target before installation',
       'node scripts/private-artifact-release.mjs validate-target'
     ],
     [
       'post-install target validation',
-      'private-build',
+      'build-private-artifact',
       'Set up Node.js 24.18.0 before target validation',
       'Revalidate the immutable target after installation',
       'node scripts/private-artifact-release.mjs validate-target'
     ],
     [
       'isolated publisher verification',
-      'private-publish',
+      'publish-private-artifact',
       'Set up Node.js 24.18.0',
       'Reverify the downloaded unit in the isolated publisher',
       'node "$RUNNER_TEMP/private-target-snapshot/publisher-verify.mjs"'
     ]
   ];
   const primaryRuntimeSetups = [
-    ['publication-prepare', 'Set up Node.js 24.18.0'],
-    ['private-build', 'Set up Node.js 24.18.0 before target validation'],
-    ['private-publish', 'Set up Node.js 24.18.0']
+    ['check-publication-request', 'Set up Node.js 24.18.0'],
+    ['build-private-artifact', 'Set up Node.js 24.18.0 before target validation'],
+    ['publish-private-artifact', 'Set up Node.js 24.18.0']
   ];
 
   it.each(guardedInvocations)('pins and checks Node before %s', (_label, jobName, setupName, invocationName, command) => {
@@ -262,7 +262,7 @@ describe('private artifact workflow Node runtime', () => {
   });
 
   it('keeps pnpm setup and its supported cache after immutable target validation', () => {
-    const job = privateWorkflowJob(privateArtifactWorkflowText, 'private-build');
+    const job = privateWorkflowJob(privateArtifactWorkflowText, 'build-private-artifact');
     assertPrivateBuildDependencyBoundary(job);
 
     const cachedSetup = privateWorkflowStep(job, 'Set up Node.js with pnpm cache');
@@ -273,7 +273,7 @@ describe('private artifact workflow Node runtime', () => {
   it.each(['Set up pnpm', 'Set up Node.js with pnpm cache', 'Install dependencies'])(
     'rejects moving %s before immutable target validation',
     (stepName) => {
-      const job = privateWorkflowJob(privateArtifactWorkflowText, 'private-build');
+      const job = privateWorkflowJob(privateArtifactWorkflowText, 'build-private-artifact');
       const unsafeOrder = movePrivateWorkflowStepBefore(job, stepName, 'Validate the immutable target before installation');
 
       expect(() => assertPrivateBuildDependencyBoundary(unsafeOrder)).toThrow(/order is unsafe/);
@@ -289,7 +289,7 @@ describe('private artifact workflow Node runtime', () => {
     ['corepack command', '      - name: Enable Corepack\n        run: corepack enable\n'],
     ['unnamed command step', '      - run: corepack enable\n']
   ])('rejects a pre-validation %s step', (_label, earlyStep) => {
-    const job = privateWorkflowJob(privateArtifactWorkflowText, 'private-build');
+    const job = privateWorkflowJob(privateArtifactWorkflowText, 'build-private-artifact');
     const withEarlyStep = job.replace(
       '      - name: Validate the immutable target before installation\n',
       `${earlyStep}\n      - name: Validate the immutable target before installation\n`
@@ -300,7 +300,7 @@ describe('private artifact workflow Node runtime', () => {
   });
 
   it('keeps the isolated publisher credential-free and adjacent to upload after verification', () => {
-    const job = privateWorkflowJob(privateArtifactWorkflowText, 'private-publish');
+    const job = privateWorkflowJob(privateArtifactWorkflowText, 'publish-private-artifact');
     const runtimeSetup = privateWorkflowStep(job, 'Set up Node.js 24.18.0');
     const firstDownload = privateWorkflowStep(job, 'Download the verified artifact');
     const reverify = privateWorkflowStep(job, 'Reverify the downloaded unit in the isolated publisher');
@@ -314,7 +314,7 @@ describe('private artifact workflow Node runtime', () => {
   });
 
   it('selects Node after the credential-free checkout in publication preparation', () => {
-    const job = privateWorkflowJob(privateArtifactWorkflowText, 'publication-prepare');
+    const job = privateWorkflowJob(privateArtifactWorkflowText, 'check-publication-request');
     const checkout = privateWorkflowStep(job, 'Check out the reviewed workflow commit');
     const setup = privateWorkflowStep(job, 'Set up Node.js 24.18.0');
 
@@ -670,7 +670,7 @@ describe('private artifact runtime public assets', () => {
 
   it('runs the runtime public asset audit in both private artifact workflows', () => {
     const workflow = readFileSync(privateArtifactWorkflowPath, 'utf8');
-    for(const jobName of ['private-pull-request', 'private-build']) {
+    for(const jobName of ['check-private-artifact', 'build-private-artifact']) {
       const job = privateWorkflowJob(workflow, jobName);
       expect(privateWorkflowStep(job, 'Audit runtime public assets'))
       .toContain('pnpm run check:private-artifact-assets -- dist-private');
@@ -1228,7 +1228,7 @@ describe('private artifact publication attestation', () => {
       sourceCommit: commit
     });
     const publisherWorkflow = readFileSync(join(repositoryRoot, '.github/workflows/private-artifact.yml'), 'utf8');
-    expect(publisherWorkflow).toContain("needs.publication-prepare.outputs.publish_private_artifact == 'true'");
+    expect(publisherWorkflow).toContain("needs.check-publication-request.outputs.publish_private_artifact == 'true'");
     expect(publisherWorkflow).toContain("steps.prepare.outputs.publish_private_artifact == 'true'");
   });
 

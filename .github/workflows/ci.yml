@@ -18,8 +18,8 @@ permissions:
   contents: read
 
 jobs:
-  checks:
-    name: Build, typecheck, lint and test
+  test-web:
+    name: 'test: web'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -249,8 +249,8 @@ jobs:
       - name: Run reaction artwork browser regression
         run: pnpm run test:reaction-artwork
 
-  deployment-workflow:
-    name: Deployment workflow contract and actionlint
+  check-deploy-workflow:
+    name: 'check: deploy-workflow'
     runs-on: ubuntu-26.04
     timeout-minutes: 10
 
@@ -300,8 +300,8 @@ jobs:
     name: ci
     if: always()
     needs:
-      - checks
-      - deployment-workflow
+      - test-web
+      - check-deploy-workflow
     runs-on: ubuntu-26.04
     steps:
       - name: Require every pull request job to succeed

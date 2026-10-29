@@ -18,8 +18,8 @@ permissions:
   contents: read
 
 jobs:
-  private-artifact:
-    name: Build reviewed deployment artifact
+  build-deployment-artifact:
+    name: 'build: deployment-artifact'
     runs-on: ubuntu-26.04
     timeout-minutes: 30
 
@@ -57,9 +57,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  docker:
-    name: docker
-    needs: private-artifact
+  build-web-image:
+    name: 'build: web-image'
+    needs: build-deployment-artifact
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
@@ -153,9 +153,9 @@ jobs:
             grep --fixed-strings --quiet "connect-src 'self'" <<<"$worker_headers"
           done <<<"$worker_paths"
 
-  compose:
-    name: compose
-    needs: private-artifact
+  test-compose:
+    name: 'test: compose'
+    needs: build-deployment-artifact
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     env:
