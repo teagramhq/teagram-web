@@ -60,6 +60,14 @@ $corner-button-size: 2.5rem;
 
 .themeButton {
   right: $corner-button-inset;
+
+  // `.btn-icon` sets `position: relative` later in the global stylesheet. Keep
+  // this corner control fixed within the viewport and clear device safe areas.
+  :global(#auth-pages) & {
+    position: fixed;
+    top: max(#{$corner-button-inset}, env(safe-area-inset-top, 0px));
+    right: max(#{$corner-button-inset}, env(safe-area-inset-right, 0px));
+  }
 }
 
 // `toIm()` sets `.leaving` on the host when the IM page takes over: the cards
@@ -209,11 +217,13 @@ $corner-button-size: 2.5rem;
 }
 
 .serverSelectionReadOnly {
-  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   width: 100%;
 
   :global(.input-field) {
+    grid-area: 1 / 1;
     min-width: 0;
   }
 }
@@ -254,9 +264,9 @@ $corner-button-size: 2.5rem;
 }
 
 .serverSelectionChange {
-  position: absolute;
-  top: 0;
-  inset-inline-end: 0;
+  grid-area: 1 / 1;
+  align-self: center;
+  justify-self: end;
   z-index: 1;
   height: 40px;
   min-width: 40px;
@@ -290,6 +300,7 @@ $corner-button-size: 2.5rem;
   display: grid;
   gap: 12px;
   margin-top: 12px;
+  padding-inline: 1rem;
 }
 
 .serverSelectionPopupParagraph {

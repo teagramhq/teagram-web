@@ -10,7 +10,16 @@ import type {LangPackKey} from '@lib/langPack';
 
 import styles from '@/pages/authFlow.module.scss';
 
-export default function ServerSelectionField(props: {readOnly?: boolean, children?: JSX.Element}) {
+export default function ServerSelectionField(props: {
+  readOnly?: boolean,
+  children?: JSX.Element,
+  continueLabel?: string,
+  canContinue?: () => boolean,
+  onContinue?: () => void | Promise<void>,
+  beforeChange?: () => void,
+  beforeCancelChange?: () => void,
+  pendingActions?: JSX.Element
+}) {
   const action = getServerSelectionAction();
   if(!action) return props.children;
 
@@ -42,7 +51,7 @@ export default function ServerSelectionField(props: {readOnly?: boolean, childre
   const isLocked = () => !!state().locked || state().phase === 'connecting' || props.readOnly;
   const submitLabel = () => state().phase === 'connecting' ? i18n('Teagram.Server.Connecting') :
     state().phase === 'checking' ? i18n('Teagram.Server.Checking') :
-      state().retryable ? i18n('Teagram.Server.TryAgain') : i18n('Teagram.Server.Continue');
+      state().retryable ? i18n('Teagram.Server.TryAgain') : props.continueLabel || i18n('Teagram.Server.Continue');
 
   function sync(current: ServerSelectionState) {
     const wasChanging = !!state().changing;
@@ -79,6 +88,10 @@ export default function ServerSelectionField(props: {readOnly?: boolean, childre
 
   async function useServer() {
     if(isProgress() || isLocked()) return;
+    if(props.onContinue) {
+      await props.onContinue();
+      return;
+    }
     abortController?.abort();
     abortController = new AbortController();
     try {
@@ -107,6 +120,7 @@ export default function ServerSelectionField(props: {readOnly?: boolean, childre
   });
   const onCancelChange = () => {
     abortController?.abort();
+    props.beforeCancelChange?.();
     action.cancelChange();
   };
   onMount(() => {
@@ -130,7 +144,10 @@ export default function ServerSelectionField(props: {readOnly?: boolean, childre
             type="button"
             aria-label={i18n('Teagram.Server.ChangeA11y').textContent || 'Change server'}
             aria-describedby="server-address"
-            onClick={() => action.change()}
+            onClick={() => {
+              props.beforeChange?.();
+              action.change();
+            }}
           >
             {i18n('Teagram.Server.Change')}
           </button>
@@ -145,7 +162,7 @@ export default function ServerSelectionField(props: {readOnly?: boolean, childre
           <Button
             class={isProgress() ? `btn-primary btn-color-primary ${styles.serverSelectionProgress}` : 'btn-primary btn-color-primary'}
             aria-disabled={isProgress() ? 'true' : undefined}
-            disabled={!isProgress() && (!state().host.trim() || isLocked())}
+            disabled={!isProgress() && (!state().host.trim() || isLocked() || props.canContinue?.() === false)}
             onClick={useServer}
           >
             {isProgress() && <svg xmlns="http://www.w3.org/2000/svg" class="preloader-circular" viewBox="25 25 50 50" aria-hidden="true">
@@ -153,6 +170,7 @@ export default function ServerSelectionField(props: {readOnly?: boolean, childre
             </svg>}
             {submitLabel()}
           </Button>
+          {props.pendingActions}
           <Show when={changing()}>
             <Button
               class="btn-primary btn-secondary btn-primary-transparent primary"

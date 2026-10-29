@@ -141,7 +141,7 @@ async function setupCustomRegistrationPage(page: Page, testInfo: TestInfo, accou
   const hostInput = page.getByRole('textbox', {name: 'Server address'});
   await expect(hostInput).toHaveValue('', {timeout: 30_000});
   await expect(page.locator('.input-field-placeholder')).toHaveText('your.server.host');
-  await expect(page.getByRole('button', {name: 'Continue', exact: true})).toBeVisible();
+  await expect(page.getByRole('button', {name: 'Create account', exact: true})).toBeVisible();
 
   const workerContext = await page.evaluate(async({helperUrl, workerUrl, serverId, target}) => {
     const {createPrivateWorkerBlobURL} = await import(helperUrl);
@@ -178,11 +178,11 @@ async function setupCustomRegistrationPage(page: Page, testInfo: TestInfo, accou
     target: {mode: 'private', endpoint: `wss://${SERVER_HOST}:2443/apiws`}
   });
   await hostInput.fill('unreachable-server.example.test');
-  await page.getByRole('button', {name: 'Continue', exact: true}).click();
+  await page.getByRole('button', {name: 'Create account', exact: true}).click();
   await expect(page.getByRole('alert')).toHaveText('Could not connect to this server. Check the address and your connection, then try again.');
 
   await hostInput.fill(SERVER_HOST);
-  await page.getByRole('button', {name: 'Continue', exact: true}).click();
+  await page.getByRole('button', {name: 'Create account', exact: true}).click();
 
   const confirm = page.getByRole('dialog');
   await expect(confirm.getByText(SERVER_HOST, {exact: true})).toBeVisible();
@@ -218,7 +218,6 @@ test('registers on a second server after a failed host selection', async({page},
   const {pageErrors, getDiscovery, setDiscovery} = await setupCustomRegistrationPage(page, testInfo);
   const auth = page.locator('#auth-pages');
 
-  await auth.getByRole('button', {name: 'Create account'}).click();
   await auth.locator('input[aria-label="Username"]').fill('second_server_user');
   await auth.locator('input[aria-label="Display name"]').fill('Local Server');
   await auth.locator('input[aria-label="Password"]').fill(PASSWORD);
@@ -288,7 +287,7 @@ test('registers on a second server after a failed host selection', async({page},
     .toMatchObject({[SERVER_HOST]: expect.any(Object)});
   await page.screenshot({path: testInfo.outputPath('server-sign-in-after-switch.png')});
   await switchHost.fill(SERVER_HOST);
-  await page.getByRole('button', {name: 'Continue', exact: true}).click();
+  await page.getByRole('button', {name: 'Next', exact: true}).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
 
@@ -330,7 +329,11 @@ test('registers on a second server after a failed host selection', async({page},
   const forgottenHost = page.getByRole('textbox', {name: 'Server address'});
   await expect(forgottenHost).toHaveValue(SERVER_HOST);
   await expect(forgottenHost).not.toHaveAttribute('readonly', '');
-  await expect(page.getByRole('button', {name: 'Continue', exact: true})).toBeEnabled();
+  const usernameInput = page.getByRole('textbox', {name: 'Username'});
+  const nextButton = page.getByRole('button', {name: 'Next', exact: true});
+  await expect(nextButton).toBeDisabled();
+  await usernameInput.fill('second_server_user');
+  await expect(nextButton).toBeEnabled();
   await page.context().unrouteAll({behavior: 'ignoreErrors'});
 });
 
@@ -340,7 +343,6 @@ test('keeps a new account signed in on a pinned server when the server reuses a 
   const auth = page.locator('#auth-pages');
   await captureState(page, testInfo, 'custom-registration-reused-id-form');
 
-  await auth.getByRole('button', {name: 'Create account'}).click();
   await auth.locator('input[aria-label="Username"]').fill('second_server_user');
   await auth.locator('input[aria-label="Display name"]').fill('Local Server');
   await auth.locator('input[aria-label="Password"]').fill(PASSWORD);

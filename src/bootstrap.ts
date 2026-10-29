@@ -424,6 +424,7 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
     }
     const target = host === DEFAULT_SERVER_HOST ? buildTarget : getSavedServerTarget(host)?.target;
     if(target) setConnectPolicy(host, target, true);
+    publish({phase: 'connected', host, changing: false});
     location.reload();
   }
 
@@ -682,10 +683,10 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
       sequence++;
       restoreActiveServer();
     },
-    continueBlocked() {
+    async continueBlocked() {
       if(blockedServer && blockedPin) {
         const run = sequence;
-        void showIdentityConfirmation(blockedServer, blockedPin, () => run === sequence);
+        await showIdentityConfirmation(blockedServer, blockedPin, () => run === sequence);
       }
     }
   };
