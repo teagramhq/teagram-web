@@ -16,7 +16,9 @@ the 100x median also fails when it exceeds the 1x median by more than 1.5x.
 Absolute timing budgets apply to the 100x snapshot. On pull requests, every
 scenario and size needs two base bundle measurements or the performance gate
 fails closed. Because the base client has no date-jump flow, its open-chat
-bundle is the date-jump baseline; that row has no base timing sample.
+bundle is the date-jump baseline; that row has no base timing sample. If the
+base client cannot load 2,000 older messages, its open-chat bundle is the scroll
+bundle baseline; that row has no base scroll timing sample.
 
 ## Fixture credentials and runner threat model
 

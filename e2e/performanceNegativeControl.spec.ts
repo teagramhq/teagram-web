@@ -29,10 +29,10 @@ test('100 ms main-thread negative control is detected and blocks the gate', asyn
     longTasksOver50Ms,
     droppedFramePercent: 0
   });
-  const head = Object.fromEntries(SCENARIOS.map(({key}) => [key, [
+  const samples = Object.fromEntries(SCENARIOS.map(({key}) => [key, [
     sample(key === 'scrollBack2k' ? 1 : 0),
     sample(key === 'scrollBack2k' ? 1 : 0)
   ]]));
-  const result = evaluatePerformance({variants: {head}});
+  const result = evaluatePerformance({variants: {head: {'1x': samples, '100x': samples}}});
   expect(result.blockingFailures.some((failure) => failure.includes('scrollBack2k') && failure.includes('long task'))).toBe(true);
 });

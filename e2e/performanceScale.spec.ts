@@ -160,7 +160,7 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   return capture(page, requests, await elapsed(page));
 }
 
-async function scrollBackTwoThousand(page: Page, requests: {value: number}) {
+async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean) {
   const hasPendingHistory = () => page.evaluate(() => {
     const bubbles = (window as any).appImManager.chat.bubbles;
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
@@ -215,6 +215,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}) {
     };
   });
   if(currentMin > targetMid) {
+    if(!required) return undefined;
     throw new Error(`scroll reached message ${currentMin}, expected ${targetMid}: ${JSON.stringify(scrollState)}`);
   }
   return capture(page, requests, await elapsed(page), true);
@@ -341,7 +342,13 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
 
     const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture));
     measured.chatOpen.push(chatOpen);
-    measured.scrollBack2k.push(await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(page, requests)));
+    const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(page, requests, variant === 'head'));
+    if(scroll) {
+      measured.scrollBack2k.push(scroll);
+    } else {
+      // The base build may not reach the older history window. Its open-chat bundle is still the route baseline.
+      measured.scrollBack2k.push({bundleBytes: chatOpen.bundleBytes});
+    }
     if(variant === 'head') {
       measured.dateJump.push(await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture), {timeout: 120_000}));
     } else {
