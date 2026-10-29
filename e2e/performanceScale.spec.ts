@@ -8,6 +8,9 @@ type Fixture = {
   middle_date: number
 };
 
+type Scale = '1x' | '100x';
+type Variant = 'base' | 'head';
+
 type Metric = {
   ms: number,
   requests: number,
@@ -18,21 +21,32 @@ type Metric = {
 };
 
 type VariantRun = {
-  variant: 'base' | 'head',
+  variant: Variant,
   origin: string,
   storageState: Awaited<ReturnType<BrowserContext['storageState']>>
 };
 
-const fixturePath = process.env.PERF_FIXTURE_FILE;
-const fixture = fixturePath ? JSON.parse(readFileSync(fixturePath, 'utf8')) as Fixture : undefined;
+const scales: Scale[] = ['1x', '100x'];
+const fixturePaths: Record<Scale, string | undefined> = {
+  '1x': process.env.PERF_FIXTURE_FILE_1X,
+  '100x': process.env.PERF_FIXTURE_FILE_100X
+};
+const fixtures: Record<Scale, Fixture | undefined> = Object.fromEntries(scales.map((scale) => [
+  scale,
+  fixturePaths[scale] ? JSON.parse(readFileSync(fixturePaths[scale]!, 'utf8')) as Fixture : undefined
+])) as Record<Scale, Fixture | undefined>;
 const username = process.env.PERF_USERNAME;
 const password = process.env.PERF_PASSWORD;
 const reportPath = process.env.PERF_REPORT_PATH;
-const report: {fixtureVersion: string, serverCommit: string, fixtureServerCommit: string, variants: Record<string, Record<string, Metric[]>>} = {
+const report = {
   fixtureVersion: process.env.PERF_FIXTURE_VERSION || '',
   serverCommit: process.env.PERF_SERVER_COMMIT || '',
   fixtureServerCommit: process.env.PERF_FIXTURE_SERVER_COMMIT || '',
-  variants: {base: {}, head: {}}
+  requireBase: process.env.PERF_REQUIRE_BASE === 'true',
+  variants: {
+    base: {'1x': {}, '100x': {}},
+    head: {'1x': {}, '100x': {}}
+  } as Record<Variant, Record<Scale, Record<string, Partial<Metric>[]>>>
 };
 
 const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
@@ -137,8 +151,8 @@ async function reloadChatList(page: Page, requests: {value: number}) {
   return capture(page, requests, await elapsed(page));
 }
 
-async function openPartnerChat(page: Page, requests: {value: number}) {
-  const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture!.partner}"]`).first();
+async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture) {
+  const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
   await begin(page, requests);
   await row.click();
@@ -146,7 +160,7 @@ async function openPartnerChat(page: Page, requests: {value: number}) {
   return capture(page, requests, await elapsed(page));
 }
 
-async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean) {
+async function scrollBackTwoThousand(page: Page, requests: {value: number}) {
   const hasPendingHistory = () => page.evaluate(() => {
     const bubbles = (window as any).appImManager.chat.bubbles;
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
@@ -201,13 +215,12 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     };
   });
   if(currentMin > targetMid) {
-    if(required) throw new Error(`scroll reached message ${currentMin}, expected ${targetMid}: ${JSON.stringify(scrollState)}`);
-    return undefined;
+    throw new Error(`scroll reached message ${currentMin}, expected ${targetMid}: ${JSON.stringify(scrollState)}`);
   }
   return capture(page, requests, await elapsed(page), true);
 }
 
-async function jumpToFixtureDate(page: Page, requests: {value: number}) {
+async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture) {
   await begin(page, requests);
   const beforeMids = await page.locator('.bubbles .bubble[data-mid]').evaluateAll((elements) => elements.map((element) => Number((element as HTMLElement).dataset.mid)));
   const searchIcon = String.fromCharCode(parseInt(Icons.search, 16));
@@ -218,7 +231,7 @@ async function jumpToFixtureDate(page: Page, requests: {value: number}) {
   await searchCalendar.click();
   await expect(page.locator('.date-picker-scrollable')).toBeVisible();
 
-  const targetDate = new Date(fixture!.middle_date * 1000);
+  const targetDate = new Date(fixture.middle_date * 1000);
   targetDate.setHours(0, 0, 0, 0);
   const now = new Date();
   const monthDelta = (targetDate.getFullYear() - now.getFullYear()) * 12 + targetDate.getMonth() - now.getMonth();
@@ -262,29 +275,29 @@ async function openContacts(page: Page, requests: {value: number}) {
   return capture(page, requests, await elapsed(page));
 }
 
-async function searchContacts(page: Page, requests: {value: number}) {
+async function searchContacts(page: Page, requests: {value: number}, scale: Scale) {
   await begin(page, requests);
   const input = page.locator('#contacts-container .input-search-input');
-  await input.fill('k09999');
+  await input.fill(scale === '1x' ? 'k00099' : 'k09999');
   await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
   await expect(page.locator('#contacts-container .chatlist-chat')).toHaveCount(1, {timeout: 60_000});
   return capture(page, requests, await elapsed(page));
 }
 
-async function globalSearch(page: Page, requests: {value: number}) {
+async function globalSearch(page: Page, requests: {value: number}, scale: Scale) {
   await page.locator('#contacts-container .sidebar-close-button').click();
   await begin(page, requests);
   await page.keyboard.press('Control+f');
   const input = page.locator('#column-left .item-main .sidebar-header .input-search-input');
   await expect(input).toBeVisible();
-  await input.fill('needle 500000');
+  await input.fill(`needle ${scale === '1x' ? '5000' : '500000'}`);
   await expect(page.locator('#search-container .chatlist-chat').first()).toBeVisible({timeout: 90_000});
   return capture(page, requests, await elapsed(page));
 }
 
-async function sendMessage(page: Page, requests: {value: number}) {
+async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture) {
   await page.keyboard.press('Escape');
-  await page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture!.partner}"]`).first().click();
+  await page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first().click();
   await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible();
   await begin(page, requests);
   const text = `web-perf-${process.env.GITHUB_RUN_ID || 'local'}-${Date.now()}`;
@@ -295,7 +308,7 @@ async function sendMessage(page: Page, requests: {value: number}) {
   return capture(page, requests, await elapsed(page));
 }
 
-async function prepareVariant(browser: Browser, variant: 'base' | 'head', origin: string): Promise<VariantRun> {
+async function prepareVariant(browser: Browser, variant: Variant, origin: string): Promise<VariantRun> {
   const context = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 800}});
   try {
     const page = await context.newPage();
@@ -306,9 +319,9 @@ async function prepareVariant(browser: Browser, variant: 'base' | 'head', origin
   }
 }
 
-async function runVariant(browser: Browser, run: VariantRun) {
+async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixture: Fixture) {
   const {variant, origin} = run;
-  const measured = report.variants[variant];
+  const measured = report.variants[variant][scale];
   for(const scenario of scenarios) measured[scenario] ||= [];
 
   const context = await browser.newContext({
@@ -326,58 +339,54 @@ async function runVariant(browser: Browser, run: VariantRun) {
     measured.coldChatList.push(await test.step('cold chat list', async() => capture(page, requests, await elapsed(page))));
     measured.warmChatList.push(await test.step('warm chat list', () => reloadChatList(page, requests)));
 
-    measured.chatOpen.push(await test.step('open million-message chat', () => openPartnerChat(page, requests)));
-    const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(page, requests, variant === 'head'));
-    if(scroll) {
-      measured.scrollBack2k.push(scroll);
-    } else {
-      console.warn('Base build cannot load 2,000 older messages; omitted its scroll timing baseline.');
-    }
+    const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture));
+    measured.chatOpen.push(chatOpen);
+    measured.scrollBack2k.push(await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(page, requests)));
     if(variant === 'head') {
-      measured.dateJump.push(await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests), {timeout: 120_000}));
+      measured.dateJump.push(await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture), {timeout: 120_000}));
     } else {
-      console.warn('Base client date jump is unsupported by the pinned server; omitted its timing baseline.');
+      measured.dateJump.push({bundleBytes: chatOpen.bundleBytes});
     }
     measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
-    measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests)));
-    measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests)));
-    measured.sendMessage.push(await test.step('send a message', () => sendMessage(page, requests)));
+    measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
+    measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
+    measured.sendMessage.push(await test.step('send a message', () => sendMessage(page, requests, fixture)));
   } finally {
     await context.close();
   }
 }
 
 test('measures the scale fixture in interleaved base and head runs', async({browser}) => {
-  expect(fixture).toBeTruthy();
-  expect(Number.isSafeInteger(fixture?.partner)).toBe(true);
-  expect(Number.isSafeInteger(fixture?.middle_date)).toBe(true);
   expect(username).toBeTruthy();
   expect(password).toBeTruthy();
   expect(reportPath).toBeTruthy();
 
-  const headOrigin = process.env.PERF_HEAD_ORIGIN;
-  const baseOrigin = process.env.PERF_BASE_ORIGIN;
-  expect(headOrigin).toBeTruthy();
-  const variants: Array<['base' | 'head', string]> = baseOrigin ? [
-    ['base', baseOrigin],
-    ['head', headOrigin!]
-  ] : [['head', headOrigin!]];
+  for(const scale of scales) {
+    const fixture = fixtures[scale];
+    expect(fixture, `${scale} fixture was not supplied`).toBeTruthy();
+    expect(Number.isSafeInteger(fixture?.partner), `${scale} fixture partner is invalid`).toBe(true);
+    expect(Number.isSafeInteger(fixture?.middle_date), `${scale} fixture date is invalid`).toBe(true);
 
-  const prepared = new Map<'base' | 'head', VariantRun>();
-  for(const [variant, origin] of variants) {
-    try {
+    const suffix = scale.toUpperCase();
+    const headOrigin = process.env[`PERF_HEAD_ORIGIN_${suffix}`];
+    const baseOrigin = process.env[`PERF_BASE_ORIGIN_${suffix}`];
+    expect(headOrigin, `${scale} head origin is missing`).toBeTruthy();
+    if(report.requireBase) expect(baseOrigin, `${scale} base origin is missing`).toBeTruthy();
+
+    const variants: Array<[Variant, string]> = report.requireBase ? [
+      ['base', baseOrigin!],
+      ['head', headOrigin!]
+    ] : [['head', headOrigin!]];
+    const prepared = new Map<Variant, VariantRun>();
+    for(const [variant, origin] of variants) {
       prepared.set(variant, await prepareVariant(browser, variant, origin));
-    } catch(error) {
-      if(variant === 'head') throw error;
-      console.warn('Base build cannot sign in to the pinned server; omitted its performance baseline.');
     }
-  }
 
-  const runnableVariants = variants.filter(([variant]) => prepared.has(variant));
-  for(let round = 0; round < 2; ++round) {
-    const order = round % 2 === 0 ? runnableVariants : [...runnableVariants].reverse();
-    for(const [variant] of order) {
-      await test.step(`${variant} round ${round + 1}`, () => runVariant(browser, prepared.get(variant)!));
+    for(let round = 0; round < 2; ++round) {
+      const order = round % 2 === 0 ? variants : [...variants].reverse();
+      for(const [variant] of order) {
+        await test.step(`${scale} ${variant} round ${round + 1}`, () => runVariant(browser, prepared.get(variant)!, scale, fixture!));
+      }
     }
   }
 });

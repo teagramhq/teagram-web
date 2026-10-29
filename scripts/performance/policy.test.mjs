@@ -2,104 +2,183 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {evaluatePerformance, SCENARIOS} from './policy.mjs';
 
-function samples(overrides = {}) {
-  return Object.fromEntries(SCENARIOS.map(({key}) => [key, [{
-    ms: 100,
-    requests: 12,
-    domNodes: 300,
-    bundleBytes: 100_000,
-    longTasksOver50Ms: 0,
-    droppedFramePercent: 0,
-    ...overrides[key]
-  }, {
-    ms: 100,
-    requests: 12,
-    domNodes: 300,
-    bundleBytes: 100_000,
-    longTasksOver50Ms: 0,
-    droppedFramePercent: 0,
-    ...overrides[key]
-  }]]));
+const SCALES = ['1x', '100x'];
+const CURRENT_FIXTURE = {
+  fixtureVersion: 'fixture-v1',
+  serverCommit: 'runtime-server-v1',
+  fixtureServerCommit: 'fixture-server-v1'
+};
+
+function scaleSamples(overrides = {}) {
+  return Object.fromEntries(SCENARIOS.map(({key}) => {
+    const override = overrides[key];
+    const values = Array.isArray(override) ? override : [override, override];
+    return [key, values.map((sample) => ({
+      ms: 100,
+      requests: 12,
+      domNodes: 300,
+      bundleBytes: 100_000,
+      longTasksOver50Ms: 0,
+      droppedFramePercent: 0,
+      ...sample
+    }))];
+  }));
 }
 
-function report({base = samples(), head = samples()} = {}) {
-  return {variants: {base, head}};
+function scaleVariants(overrides = {}) {
+  return {
+    '1x': scaleSamples(overrides['1x']),
+    '100x': scaleSamples(overrides['100x'])
+  };
+}
+
+function report({base = scaleVariants(), head = scaleVariants(), requireBase = true, ...metadata} = {}) {
+  return {
+    ...CURRENT_FIXTURE,
+    ...metadata,
+    requireBase,
+    variants: {base, head}
+  };
+}
+
+function mainHistory(count = 20, overrides = {}, metadata = CURRENT_FIXTURE) {
+  const head = scaleVariants(overrides);
+  return Array.from({length: count}, () => ({...metadata, variants: {head}}));
 }
 
 test('blocks a 100 ms main-thread task from the first run', () => {
-  const metrics = samples({scrollBack2k: {longTasksOver50Ms: 1}});
-  const result = evaluatePerformance(report({head: metrics}));
+  const head = scaleVariants({
+    '1x': {scrollBack2k: {longTasksOver50Ms: 1}},
+    '100x': {scrollBack2k: {longTasksOver50Ms: 1}}
+  });
+  const result = evaluatePerformance(report({head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('scrollBack2k') && failure.includes('long task')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('1x') && failure.includes('scrollBack2k') && failure.includes('long task')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('scrollBack2k') && failure.includes('long task')));
 });
 
 test('blocks scroll frame loss at one percent', () => {
-  const metrics = samples({scrollBack2k: {droppedFramePercent: 1}});
-  const result = evaluatePerformance(report({head: metrics}));
+  const head = scaleVariants({'1x': {scrollBack2k: {droppedFramePercent: 1}}});
+  const result = evaluatePerformance(report({head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('scrollBack2k') && failure.includes('dropped frames')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('1x') && failure.includes('scrollBack2k') && failure.includes('dropped frames')));
 });
 
 test('does not apply the scroll long-task gate to other scenarios', () => {
-  const metrics = samples({chatOpen: {longTasksOver50Ms: 2}});
-  const result = evaluatePerformance(report({head: metrics}));
+  const head = scaleVariants({'100x': {chatOpen: {longTasksOver50Ms: 2}}});
+  const result = evaluatePerformance(report({head}));
 
   assert.equal(result.blockingFailures.some((failure) => failure.includes('chatOpen') && failure.includes('long task')), false);
 });
 
-test('reports over-budget timings without blocking until each scenario has 20 main runs', () => {
-  const head = samples({coldChatList: {ms: 1_200}});
-  const history = Array.from({length: 19}, () => ({variants: {head: samples()}}));
-  const result = evaluatePerformance(report({head}), history);
+test('reports over-budget timings without blocking until each scale has 20 matching main runs', () => {
+  const head = scaleVariants({'100x': {coldChatList: {ms: 1_200}}});
+  const result = evaluatePerformance(report({head}), mainHistory(19));
 
   assert.equal(result.calibratedScenarios, 0);
   assert.equal(result.blockingFailures.length, 0);
-  assert.equal(result.rows.find((row) => row.key === 'coldChatList').budgetStatus, 'warming');
+  assert.equal(result.rows.find((row) => row.scale === '100x' && row.key === 'coldChatList').budgetStatus, 'warming');
 });
 
-test('blocks fixed timing budgets once timing calibration is complete', () => {
-  const head = samples({coldChatList: {ms: 1_200}});
-  const history = Array.from({length: 20}, () => ({variants: {head: samples()}}));
-  const result = evaluatePerformance(report({head}), history);
+test('blocks fixed 100x timing budgets once that scenario is calibrated', () => {
+  const head = scaleVariants({'100x': {coldChatList: {ms: 1_200}}});
+  const result = evaluatePerformance(report({head}), mainHistory());
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('coldChatList') && failure.includes('1000 ms budget')));
-  assert.equal(result.rows.find((row) => row.key === 'coldChatList').budgetStatus, 'failed');
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('coldChatList') && failure.includes('1000 ms budget')));
+  assert.equal(result.rows.find((row) => row.scale === '100x' && row.key === 'coldChatList').budgetStatus, 'failed');
 });
 
 test('reports request and DOM changes without blocking the gate', () => {
-  const head = samples({globalSearch: {requests: 13, domNodes: 301}});
+  const head = scaleVariants({'100x': {globalSearch: {requests: 13, domNodes: 301}}});
   const result = evaluatePerformance(report({head}));
 
   assert.equal(result.blockingFailures.some((failure) => failure.includes('globalSearch') && /requests|DOM nodes/.test(failure)), false);
-  const row = result.rows.find((item) => item.key === 'globalSearch');
+  const row = result.rows.find((item) => item.scale === '100x' && item.key === 'globalSearch');
   assert.equal(row.base.requests, 12);
   assert.equal(row.head.requests, 13);
   assert.equal(row.base.domNodes, 300);
   assert.equal(row.head.domNodes, 301);
 });
 
-test('blocks an incomplete measurement instead of treating missing counters as zero', () => {
-  const head = samples();
-  head.chatOpen = [head.chatOpen[0]];
-  delete head.chatOpen[0].requests;
+test('blocks an incomplete head measurement instead of treating missing counters as zero', () => {
+  const head = scaleVariants();
+  head['100x'].chatOpen = [head['100x'].chatOpen[0]];
+  delete head['100x'].chatOpen[0].requests;
   const result = evaluatePerformance(report({head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('chatOpen') && failure.includes('requests')));
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('chatOpen') && failure.includes('repeat')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('chatOpen') && failure.includes('requests')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('chatOpen') && failure.includes('repeat')));
 });
 
-test('blocks bundle growth above two percent against the same-run base', () => {
-  const head = samples({coldChatList: {bundleBytes: 102_001}});
+test('blocks bundle growth above two percent against a complete same-run base', () => {
+  const head = scaleVariants({'100x': {coldChatList: {bundleBytes: 102_001}}});
   const result = evaluatePerformance(report({head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('bundle') && failure.includes('coldChatList')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('bundle') && failure.includes('coldChatList')));
 });
 
-test('requires two repeated calibrated timing failures before blocking', () => {
-  const historyMetric = {ms: 100};
-  const history = Array.from({length: 20}, () => ({variants: {head: {dateJump: [historyMetric]}}}));
-  const twoSlow = samples({dateJump: {ms: 220}});
-  const result = evaluatePerformance(report({head: twoSlow}), history);
+test('fails closed when a required base bundle measurement is unavailable', () => {
+  const result = evaluatePerformance(report({base: {'1x': {}, '100x': {}}}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('dateJump') && failure.includes('timing')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('base') && failure.includes('bundle') && failure.includes('100x') && failure.includes('coldChatList')));
+});
+
+test('compares the median head time with the calibrated main median', () => {
+  const head = scaleVariants({'100x': {dateJump: [{ms: 121}, {ms: 114}]}});
+  const result = evaluatePerformance(report({head}), mainHistory());
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('dateJump') && failure.includes('regressed beyond')));
+});
+
+test('applies a two millisecond minimum relative timing threshold', () => {
+  const history = mainHistory(20, {'100x': {dateJump: {ms: 10}}});
+  const withinFloor = scaleVariants({'100x': {dateJump: {ms: 11.9}}});
+  const aboveFloor = scaleVariants({'100x': {dateJump: {ms: 12}}});
+
+  assert.equal(evaluatePerformance(report({head: withinFloor}), history).blockingFailures.some((failure) => failure.includes('dateJump') && failure.includes('regressed beyond')), false);
+  assert.ok(evaluatePerformance(report({head: aboveFloor}), history).blockingFailures.some((failure) => failure.includes('dateJump') && failure.includes('regressed beyond')));
+});
+
+test('ignores calibration runs from a different fixture or server runtime', () => {
+  const incompatibleHistory = [
+    ...mainHistory(),
+    ...mainHistory(20, {'100x': {dateJump: {ms: 1}}}, {...CURRENT_FIXTURE, fixtureVersion: 'fixture-old'}),
+    ...mainHistory(20, {'100x': {dateJump: {ms: 1}}}, {...CURRENT_FIXTURE, serverCommit: 'runtime-old'}),
+    ...mainHistory(20, {'100x': {dateJump: {ms: 1}}}, {...CURRENT_FIXTURE, fixtureServerCommit: 'seed-old'})
+  ];
+  const result = evaluatePerformance(report(), incompatibleHistory);
+  const row = result.rows.find((item) => item.scale === '100x' && item.key === 'dateJump');
+
+  assert.equal(row.historyRuns, 20);
+  assert.deepEqual(row.noiseBand, [85, 115]);
+});
+
+test('blocks a calibrated 100x scenario above the 1.5x slowdown ceiling', () => {
+  const head = scaleVariants({
+    '1x': {coldChatList: {ms: 100}},
+    '100x': {coldChatList: {ms: 151}}
+  });
+  const result = evaluatePerformance(report({head}), mainHistory());
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('coldChatList') && failure.includes('1.5x') && failure.includes('151')));
+});
+
+test('allows a calibrated scenario at the 1.5x slowdown ceiling', () => {
+  const head = scaleVariants({
+    '1x': {coldChatList: {ms: 100}},
+    '100x': {coldChatList: {ms: 150}}
+  });
+  const result = evaluatePerformance(report({head}), mainHistory());
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('coldChatList') && failure.includes('1.5x')), false);
+});
+
+test('keeps the 1.5x scale ceiling report-only until both scales are calibrated', () => {
+  const head = scaleVariants({
+    '1x': {coldChatList: {ms: 100}},
+    '100x': {coldChatList: {ms: 200}}
+  });
+  const result = evaluatePerformance(report({head}), mainHistory(19));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('coldChatList') && failure.includes('1.5x')), false);
 });

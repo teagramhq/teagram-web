@@ -28,6 +28,30 @@ test('the performance workflow migrates the fixture with a pinned runtime server
   assert.match(runtimeCommit, /^[a-f0-9]{40}$/i, 'runtime server commit pin must be a full SHA');
   assert.match(workflow, /id: runtime-server[\s\S]*?server_commit=.*perf-server-commit/);
   assert.match(workflow, /ref: \$\{\{ steps\.runtime-server\.outputs\.server_commit \}\}/);
-  assert.match(workflow, /atlas migrate apply --url "\$TG_POSTGRES_DSN" --dir file:\/\/teagram-server\/migrations/);
+  assert.match(workflow, /atlas migrate apply --url "postgres:\/\/postgres:perf@localhost:5432\/teagram_\$scale\?sslmode=disable" --dir file:\/\/teagram-server\/migrations/);
   assert.match(workflow, /PERF_FIXTURE_SERVER_COMMIT: \$\{\{ steps\.fixture\.outputs\.server_commit \}\}/);
+});
+
+test('the performance workflow restores and migrates both scale snapshots', () => {
+  assert.match(workflow, /for scale in 1x 100x/);
+  assert.match(workflow, /snapshot\/perf_\$scale\.dump/);
+  assert.match(workflow, /pg_restore[^\n]*-d "teagram_\$scale"/);
+  assert.match(workflow, /atlas migrate apply --url "postgres:\/\/postgres:perf@localhost:5432\/teagram_\$scale/);
+  assert.match(workflow, /fixture-1x\.json/);
+  assert.match(workflow, /fixture-100x\.json/);
+});
+
+test('the performance workflow assigns the 1x and 100x browser origins to separate servers', () => {
+  assert.match(workflow, /PERF_BASE_ORIGIN_1X/);
+  assert.match(workflow, /PERF_HEAD_ORIGIN_1X/);
+  assert.match(workflow, /PERF_BASE_ORIGIN_100X/);
+  assert.match(workflow, /PERF_HEAD_ORIGIN_100X/);
+  assert.match(workflow, /2443/);
+  assert.match(workflow, /2444/);
+  assert.match(workflow, /2445/);
+  assert.match(workflow, /2446/);
+});
+
+test('PR performance runs require complete base bundle measurements', () => {
+  assert.match(workflow, /PERF_REQUIRE_BASE: \$\{\{ github\.event_name == 'pull_request' \}\}/);
 });

@@ -50,7 +50,7 @@ jobs:
           pnpm exec playwright install --with-deps chromium
 
       - name: Test fixture and performance gate helpers
-        run: node --test scripts/performance/fixture-release.test.mjs scripts/performance/policy.test.mjs
+        run: node --test scripts/performance/fixture-release.test.mjs scripts/performance/https-proxy-routing.test.mjs scripts/performance/policy.test.mjs
 
       - name: Restore main timing history
         uses: actions/cache/restore@v4
@@ -91,7 +91,7 @@ jobs:
       - name: Read fixture owner credentials
         run: node scripts/performance/read-credentials.mjs teagram-server/test/perf/README.md
 
-      - name: Restore the scale fixture database
+      - name: Restore the 1x and 100x fixture databases
         shell: bash
         run: |
           set -euo pipefail
@@ -112,39 +112,44 @@ jobs:
             exit 1
           fi
           docker exec teagram-perf-postgres psql -v ON_ERROR_STOP=1 -U postgres -c 'CREATE ROLE browser_acceptance_probe NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS'
-          docker exec teagram-perf-postgres psql -v ON_ERROR_STOP=1 -U postgres -c 'CREATE DATABASE teagram'
-          docker cp "$PERF_FIXTURE_DIRECTORY/snapshot/perf_100x.dump" teagram-perf-postgres:/tmp/perf_100x.dump
-          docker exec teagram-perf-postgres pg_restore -U postgres -d teagram -j 4 --no-owner --no-acl /tmp/perf_100x.dump
-          docker exec teagram-perf-postgres vacuumdb -U postgres -q --analyze -j 4 -d teagram
           expected_revision="$(jq -r '.migration_revision' "$PERF_FIXTURE_DIRECTORY/manifest.json")"
-          actual_revision="$(docker exec teagram-perf-postgres psql -U postgres -d teagram -qAt -c 'SELECT version FROM atlas_schema_revisions.atlas_schema_revisions ORDER BY version DESC LIMIT 1')"
-          if [ "$actual_revision" != "$expected_revision" ]; then
-            echo "restored fixture migration revision $actual_revision does not match manifest $expected_revision"
-            exit 1
-          fi
-          mkdir -p "$RUNNER_TEMP/teagram-perf-blobs"
-          if [ -d "$PERF_FIXTURE_DIRECTORY/snapshot/blobs-100x" ]; then
-            cp -a "$PERF_FIXTURE_DIRECTORY/snapshot/blobs-100x/." "$RUNNER_TEMP/teagram-perf-blobs/"
-          fi
+          for scale in 1x 100x; do
+            docker exec teagram-perf-postgres psql -v ON_ERROR_STOP=1 -U postgres -c "CREATE DATABASE teagram_$scale"
+            docker cp "$PERF_FIXTURE_DIRECTORY/snapshot/perf_$scale.dump" "teagram-perf-postgres:/tmp/perf_$scale.dump"
+            docker exec teagram-perf-postgres pg_restore -U postgres -d "teagram_$scale" -j 4 --no-owner --no-acl "/tmp/perf_$scale.dump"
+            docker exec teagram-perf-postgres vacuumdb -U postgres -q --analyze -j 4 -d "teagram_$scale"
+            actual_revision="$(docker exec teagram-perf-postgres psql -U postgres -d "teagram_$scale" -qAt -c 'SELECT version FROM atlas_schema_revisions.atlas_schema_revisions ORDER BY version DESC LIMIT 1')"
+            if [ "$actual_revision" != "$expected_revision" ]; then
+              echo "restored $scale fixture migration revision $actual_revision does not match manifest $expected_revision"
+              exit 1
+            fi
+            blob_dir="$RUNNER_TEMP/teagram-perf-blobs-$scale"
+            mkdir -p "$blob_dir"
+            if [ -d "$PERF_FIXTURE_DIRECTORY/snapshot/blobs-$scale" ]; then
+              cp -a "$PERF_FIXTURE_DIRECTORY/snapshot/blobs-$scale/." "$blob_dir/"
+            fi
+          done
 
       - name: Apply pinned runtime server migrations
-        env:
-          TG_POSTGRES_DSN: postgres://postgres:perf@localhost:5432/teagram?sslmode=disable
-        run: atlas migrate apply --url "$TG_POSTGRES_DSN" --dir file://teagram-server/migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          for scale in 1x 100x; do
+            atlas migrate apply --url "postgres://postgres:perf@localhost:5432/teagram_$scale?sslmode=disable" --dir file://teagram-server/migrations
+          done
 
       - name: Configure isolated server and browser origins
         shell: bash
         run: |
           cat >> "$GITHUB_ENV" <<EOF
-          TG_POSTGRES_DSN=postgres://postgres:perf@localhost:5432/teagram?sslmode=disable
+          TG_POSTGRES_DSN_1X=postgres://postgres:perf@localhost:5432/teagram_1x?sslmode=disable
+          TG_POSTGRES_DSN_100X=postgres://postgres:perf@localhost:5432/teagram_100x?sslmode=disable
           TG_AUTHKEY_ENC_KEY=2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a
           TG_PUBLIC_LINK_PREFIX=https://links.example.test/
           TG_RSA_KEY_PATH=$RUNNER_TEMP/teagram-perf-server-key.pem
-          TG_BLOB_DIR=$RUNNER_TEMP/teagram-perf-blobs
-          TG_LISTEN_ADDR=127.0.0.1:2443
-          TG_ADVERTISE_ADDR=teagramd.test:2443
-          TG_WEBSOCKET_LISTEN_ADDR=127.0.0.1:2445
-          TG_WEBSOCKET_ALLOWED_ORIGINS=http://localhost:4173,http://localhost:4174
+          TG_BLOB_DIR_1X=$RUNNER_TEMP/teagram-perf-blobs-1x
+          TG_BLOB_DIR_100X=$RUNNER_TEMP/teagram-perf-blobs-100x
+          TG_WEBSOCKET_ALLOWED_ORIGINS=http://localhost:4173,http://localhost:4174,http://localhost:4175,http://localhost:4176
           TG_REGISTRATION=closed
           TG_RATE_LIMIT_SEND_CODE_IP=100
           TG_RATE_LIMIT_SEND_CODE_IP_PHONES=100
@@ -172,20 +177,39 @@ jobs:
         run: |
           set -euo pipefail
           go -C teagram-server build -o "$RUNNER_TEMP/teagramd" ./cmd/teagramd
-          nohup "$RUNNER_TEMP/teagramd" > "$RUNNER_TEMP/teagram-perf-server.log" 2>&1 < /dev/null &
-          echo "$!" > "$PERF_SERVER_PID_FILE"
-          ready=0
-          for _ in $(seq 1 60); do
-            if curl --max-time 2 --silent --show-error http://127.0.0.1:2445/.well-known/teagramd/client >/dev/null; then
-              ready=1
-              break
+          : > "$PERF_SERVER_PID_FILE"
+          for scale in 1x 100x; do
+            if [ "$scale" = 1x ]; then
+              dsn="$TG_POSTGRES_DSN_1X"
+              blob_dir="$TG_BLOB_DIR_1X"
+              listen_port=2443
+              websocket_port=2445
+            else
+              dsn="$TG_POSTGRES_DSN_100X"
+              blob_dir="$TG_BLOB_DIR_100X"
+              listen_port=2444
+              websocket_port=2446
             fi
-            sleep 1
+            nohup env TG_POSTGRES_DSN="$dsn" TG_BLOB_DIR="$blob_dir" \
+              TG_LISTEN_ADDR="127.0.0.1:$listen_port" TG_ADVERTISE_ADDR="teagramd.test:$listen_port" \
+              TG_WEBSOCKET_LISTEN_ADDR="127.0.0.1:$websocket_port" \
+              "$RUNNER_TEMP/teagramd" > "$RUNNER_TEMP/teagram-perf-server-$scale.log" 2>&1 < /dev/null &
+            echo "$!" >> "$PERF_SERVER_PID_FILE"
           done
-          if [ "$ready" -ne 1 ]; then
-            cat "$RUNNER_TEMP/teagram-perf-server.log"
-            exit 1
-          fi
+          for port in 2445 2446; do
+            ready=0
+            for _ in $(seq 1 60); do
+              if curl --max-time 2 --silent --show-error "http://127.0.0.1:$port/.well-known/teagramd/client" >/dev/null; then
+                ready=1
+                break
+              fi
+              sleep 1
+            done
+            if [ "$ready" -ne 1 ]; then
+              cat "$RUNNER_TEMP/teagram-perf-server-1x.log" "$RUNNER_TEMP/teagram-perf-server-100x.log"
+              exit 1
+            fi
+          done
 
       - name: Build current and base private client bundles
         shell: bash
@@ -200,12 +224,16 @@ jobs:
             ln -s "$GITHUB_WORKSPACE/node_modules" "$base_directory/node_modules"
             (cd "$base_directory" && pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-dist")
             echo "PERF_BASE_DIST=$RUNNER_TEMP/teagram-web-base-dist" >> "$GITHUB_ENV"
-            echo "PERF_BASE_ORIGIN=http://localhost:4173" >> "$GITHUB_ENV"
+            echo 'PERF_BASE_ORIGIN_1X=http://localhost:4173' >> "$GITHUB_ENV"
+            echo 'PERF_BASE_ORIGIN_100X=http://localhost:4175' >> "$GITHUB_ENV"
           else
             echo "PERF_BASE_DIST=$RUNNER_TEMP/teagram-web-head-dist" >> "$GITHUB_ENV"
-            echo 'PERF_BASE_ORIGIN=' >> "$GITHUB_ENV"
+            echo 'PERF_BASE_ORIGIN_1X=' >> "$GITHUB_ENV"
+            echo 'PERF_BASE_ORIGIN_100X=' >> "$GITHUB_ENV"
           fi
           echo "PERF_HEAD_DIST=$RUNNER_TEMP/teagram-web-head-dist" >> "$GITHUB_ENV"
+          echo 'PERF_HEAD_ORIGIN_1X=http://localhost:4174' >> "$GITHUB_ENV"
+          echo 'PERF_HEAD_ORIGIN_100X=http://localhost:4176' >> "$GITHUB_ENV"
 
       - name: Start local HTTPS and static app servers
         shell: bash
@@ -216,12 +244,22 @@ jobs:
           echo "$!" >> "$PERF_SERVICE_PID_FILE"
           nohup node scripts/performance/serve-dist.mjs "$PERF_HEAD_DIST" 4174 > "$RUNNER_TEMP/teagram-perf-head-web.log" 2>&1 < /dev/null &
           echo "$!" >> "$PERF_SERVICE_PID_FILE"
+          nohup node scripts/performance/serve-dist.mjs "$PERF_BASE_DIST" 4175 > "$RUNNER_TEMP/teagram-perf-base-web-100x.log" 2>&1 < /dev/null &
+          echo "$!" >> "$PERF_SERVICE_PID_FILE"
+          nohup node scripts/performance/serve-dist.mjs "$PERF_HEAD_DIST" 4176 > "$RUNNER_TEMP/teagram-perf-head-web-100x.log" 2>&1 < /dev/null &
+          echo "$!" >> "$PERF_SERVICE_PID_FILE"
           nohup node scripts/performance/https-proxy.mjs > "$RUNNER_TEMP/teagram-perf-proxy.log" 2>&1 < /dev/null &
           echo "$!" >> "$PERF_SERVICE_PID_FILE"
           ready=0
           for _ in $(seq 1 30); do
           if curl -fsS http://localhost:4174/ >/dev/null && \
-            curl -kfsS --resolve teagramd.test:18443:127.0.0.1 https://teagramd.test:18443/.well-known/teagramd/client >/dev/null; then
+            curl -fsS http://localhost:4176/ >/dev/null && \
+            curl -kfsS --resolve teagramd.test:18443:127.0.0.1 \
+              -H 'Origin: http://localhost:4174' \
+              https://teagramd.test:18443/.well-known/teagramd/client >/dev/null && \
+            curl -kfsS --resolve teagramd.test:18443:127.0.0.1 \
+              -H 'Origin: http://localhost:4176' \
+              https://teagramd.test:18443/.well-known/teagramd/client >/dev/null; then
               ready=1
               break
             fi
@@ -235,13 +273,13 @@ jobs:
       - name: Run scale browser scenarios and 100 ms negative control
         id: browser
         env:
-          PERF_FIXTURE_FILE: ${{ runner.temp }}/teagram-perf-fixture/snapshot/fixture-100x.json
+          PERF_FIXTURE_FILE_1X: ${{ runner.temp }}/teagram-perf-fixture/snapshot/fixture-1x.json
+          PERF_FIXTURE_FILE_100X: ${{ runner.temp }}/teagram-perf-fixture/snapshot/fixture-100x.json
           PERF_REPORT_PATH: ${{ runner.temp }}/teagram-web-performance.json
           PERF_FIXTURE_VERSION: ${{ steps.fixture.outputs.fixture_version }}
           PERF_SERVER_COMMIT: ${{ steps.runtime-server.outputs.server_commit }}
           PERF_FIXTURE_SERVER_COMMIT: ${{ steps.fixture.outputs.server_commit }}
-          PERF_BASE_ORIGIN: ${{ github.event_name == 'pull_request' && 'http://localhost:4173' || '' }}
-          PERF_HEAD_ORIGIN: http://localhost:4174
+          PERF_REQUIRE_BASE: ${{ github.event_name == 'pull_request' }}
         run: >-
           pnpm exec playwright test
           -c playwright.performance.config.ts
@@ -286,6 +324,7 @@ jobs:
             done < "$PERF_SERVICE_PID_FILE"
           fi
           if [ -f "$PERF_SERVER_PID_FILE" ]; then
-            server_pid="$(cat "$PERF_SERVER_PID_FILE")"
-            kill "$server_pid" 2>/dev/null || true
+            while IFS= read -r server_pid; do
+              kill "$server_pid" 2>/dev/null || true
+            done < "$PERF_SERVER_PID_FILE"
           fi
