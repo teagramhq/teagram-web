@@ -388,6 +388,22 @@ test('fails closed when the measured 100x base omits blocking time', () => {
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes('base long-task blocking time')));
 });
 
+test('blocks a 100 ms cold-load stall when noisy repeats overlap', () => {
+  const base = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 2, blockingTimeMs: 175},
+    {longTasksOver50Ms: 2, blockingTimeMs: 184},
+    {longTasksOver50Ms: 2, blockingTimeMs: 230}
+  ]}});
+  const head = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 2, blockingTimeMs: 225},
+    {longTasksOver50Ms: 2, blockingTimeMs: 228},
+    {longTasksOver50Ms: 2, blockingTimeMs: 181}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')));
+});
+
 test('blocks an 80 ms increase in blocking time when a 100x task count matches base', () => {
   const base = scaleVariants({'100x': {coldChatList: [
     {longTasksOver50Ms: 2, blockingTimeMs: 100},

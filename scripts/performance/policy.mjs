@@ -262,8 +262,21 @@ export function evaluatePerformance(report, history = []) {
             if(separatedRegression(headSamples, baseSamples, 'longTasksOver50Ms')) {
               addFailure(blockingFailures, scale, scenario.key, `long task count rose in every head repeat above every same-run base repeat`);
             }
-            if(separatedRegression(headSamples, baseSamples, 'blockingTimeMs', MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS)) {
-              addFailure(blockingFailures, scale, scenario.key, `long-task blocking time rose in every head repeat above every same-run base repeat, median ${medianBlockingTime(headSamples).toFixed(1)} ms vs ${medianBlockingTime(baseSamples).toFixed(1)} ms`);
+            const medianHeadBlockingTime = medianBlockingTime(headSamples);
+            const medianBaseBlockingTime = medianBlockingTime(baseSamples);
+            // Cold-load noise overlaps individual repeats, so retain the stall threshold but compare medians.
+            const coldLoadBlockingTimeRegression = scenario.key === 'coldChatList' &&
+              Number.isFinite(medianHeadBlockingTime) &&
+              Number.isFinite(medianBaseBlockingTime) &&
+              medianHeadBlockingTime - medianBaseBlockingTime >= MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS;
+            const blockingTimeRegression = scenario.key === 'coldChatList'
+              ? coldLoadBlockingTimeRegression
+              : separatedRegression(headSamples, baseSamples, 'blockingTimeMs', MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS);
+            if(blockingTimeRegression) {
+              const message = scenario.key === 'coldChatList'
+                ? `median long-task blocking time ${medianHeadBlockingTime.toFixed(1)} ms vs ${medianBaseBlockingTime.toFixed(1)} ms increased by at least ${MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS} ms`
+                : `long-task blocking time rose in every head repeat above every same-run base repeat, median ${medianHeadBlockingTime.toFixed(1)} ms vs ${medianBaseBlockingTime.toFixed(1)} ms`;
+              addFailure(blockingFailures, scale, scenario.key, message);
             }
           } else {
             const baselineLongTasks = report.requireBase ? 0 : historyLongTaskBaseline(history, scale, scenario.key, report);

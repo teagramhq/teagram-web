@@ -62,16 +62,16 @@ test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 });
 
-function installInstrumentation(page: Page, requestCounter: {value: number}) {
+function installInstrumentation(page: Page, requestCounter: {value: number}, injectColdStall = false) {
   page.on('request', (request) => {
     if(request.resourceType() !== 'websocket') ++requestCounter.value;
   });
-  return page.addInitScript(() => {
+  return page.addInitScript((injectColdStall: boolean) => {
     const perf: any = (window as any).__teagramPerf = {
       longTasks: [] as Array<{startTime: number, duration: number}>,
       frameIntervals: [] as number[],
       frameActive: false,
-      started: 0
+      started: performance.now()
     };
     try {
       const observer = new PerformanceObserver((list) => {
@@ -88,6 +88,7 @@ function installInstrumentation(page: Page, requestCounter: {value: number}) {
       perf.injectedLongTask = {started, duration: performance.now() - started};
       return perf.injectedLongTask;
     };
+    if(injectColdStall) setTimeout(() => perf.injectLongTask(100), 0);
     perf.startFrames = () => {
       perf.frameActive = true;
       perf.lastFrame = performance.now();
@@ -100,7 +101,7 @@ function installInstrumentation(page: Page, requestCounter: {value: number}) {
       requestAnimationFrame(sampleFrame);
     };
     perf.stopFrames = () => perf.frameActive = false;
-  });
+  }, injectColdStall);
 }
 
 async function begin(page: Page, requests: {value: number}) {
@@ -382,16 +383,11 @@ async function measureColdControlWindow(browser: Browser, run: VariantRun, injec
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests);
+  await installInstrumentation(page, requests, injectStall);
 
   try {
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
-    await begin(page, requests);
-    if(injectStall) {
-      // Script evaluated over the DevTools protocol is not reported as a long task; run the stall as a page task.
-      await page.evaluate(() => new Promise((resolve) => setTimeout(() => resolve((window as any).__teagramPerf.injectLongTask(100)), 0)));
-    }
     const sample = await capture(page, requests, await elapsed(page));
     return {sample, injectedTask: injectStall ? await injectedLongTask(page) : undefined};
   } finally {
@@ -503,14 +499,14 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   }
 });
 
-test('blocks repeated injected 100 ms main-thread stalls after cold chat list load', async({browser}) => {
+test('blocks repeated injected 100 ms main-thread stalls during cold chat list load', async({browser}) => {
   test.skip(!report.requireBase, 'negative control requires same-run base measurements');
   const preparedBase = preparedVariants['100x'].base;
   const preparedHead = preparedVariants['100x'].head;
   expect(preparedBase, '100x base sign-in snapshot was not prepared').toBeTruthy();
   expect(preparedHead, '100x head sign-in snapshot was not prepared').toBeTruthy();
 
-  // Each repeat loads in a fresh context, then resets instrumentation so cold-start noise cannot hide the injected task.
+  // Each repeat captures from document initialization so cold-start noise remains in the control window.
   const baseControlSamples: Metric[] = [];
   const negativeSamples: Metric[] = [];
   for(let repeat = 0; repeat < PERFORMANCE_REPEATS; ++repeat) {
@@ -519,23 +515,15 @@ test('blocks repeated injected 100 ms main-thread stalls after cold chat list lo
       const isHead = variant === 'head';
       const run = isHead ? preparedHead! : preparedBase!;
       const {sample, injectedTask} = await measureColdControlWindow(browser, run, isHead);
-      const measured = report.variants[variant]['100x'].coldChatList[repeat];
-      expect(measured, `${variant} cold chat-list sample ${repeat + 1} is missing`).toBeTruthy();
-      const controlSample = {
-        ...(measured as Metric),
-        longTasksOver50Ms: sample.longTasksOver50Ms,
-        blockingTimeMs: sample.blockingTimeMs,
-        maxLongTaskDurationMs: sample.maxLongTaskDurationMs
-      };
 
       if(isHead) {
         expect(sample.longTasksOver50Ms).toBeGreaterThan(0);
         expect(injectedTask?.duration).toBeGreaterThanOrEqual(100);
         expect(injectedTask?.observed).toBe(true);
         expect(sample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
-        negativeSamples.push(controlSample);
+        negativeSamples.push(sample);
       } else {
-        baseControlSamples.push(controlSample);
+        baseControlSamples.push(sample);
       }
     }
   }
