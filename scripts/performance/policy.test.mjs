@@ -404,6 +404,22 @@ test('blocks a 100 ms cold-load stall when noisy repeats overlap', () => {
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')));
 });
 
+test('allows a lone noisy cold-load pair to cross the blocking-time threshold', () => {
+  const base = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 3, blockingTimeMs: 73},
+    {longTasksOver50Ms: 3, blockingTimeMs: 82},
+    {longTasksOver50Ms: 2, blockingTimeMs: 115}
+  ]}});
+  const head = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 2, blockingTimeMs: 86},
+    {longTasksOver50Ms: 2, blockingTimeMs: 123},
+    {longTasksOver50Ms: 3, blockingTimeMs: 138}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')), false);
+});
+
 test('blocks an 80 ms increase in blocking time when a 100x task count matches base', () => {
   const base = scaleVariants({'100x': {coldChatList: [
     {longTasksOver50Ms: 2, blockingTimeMs: 100},

@@ -80,12 +80,18 @@ function medianLongTasks(samples) {
 }
 
 // Same-run base repeats on the hosted runner swing by whole long tasks and over 100 ms of blocking time,
-// so a head regression must separate from every base repeat rather than from one paired sample or median.
+// so non-cold-load regressions must separate from every base repeat.
 function separatedRegression(headSamples, baseSamples, field, minMedianIncrease = 0) {
   const headValues = headSamples.map((sample) => sample?.[field]);
   const baseValues = baseSamples.map((sample) => sample?.[field]);
   if(!headValues.length || !baseValues.length || ![...headValues, ...baseValues].every(Number.isFinite)) return false;
   return Math.min(...headValues) > Math.max(...baseValues) && median(headValues) - median(baseValues) >= minMedianIncrease;
+}
+
+function medianPairedDifference(headSamples, baseSamples, field) {
+  if(!headSamples.length || headSamples.length !== baseSamples.length) return undefined;
+  const differences = headSamples.map((sample, index) => sample?.[field] - baseSamples[index]?.[field]);
+  return differences.every(Number.isFinite) ? median(differences) : undefined;
 }
 
 function medianMetric(samples, field) {
@@ -264,17 +270,15 @@ export function evaluatePerformance(report, history = []) {
             }
             const medianHeadBlockingTime = medianBlockingTime(headSamples);
             const medianBaseBlockingTime = medianBlockingTime(baseSamples);
-            // Cold-load noise overlaps individual repeats, so retain the stall threshold but compare medians.
+            // Variants run in interleaved rounds; compare their paired cold-load deltas to cancel runner drift.
             const coldLoadBlockingTimeRegression = scenario.key === 'coldChatList' &&
-              Number.isFinite(medianHeadBlockingTime) &&
-              Number.isFinite(medianBaseBlockingTime) &&
-              medianHeadBlockingTime - medianBaseBlockingTime >= MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS;
+              medianPairedDifference(headSamples, baseSamples, 'blockingTimeMs') >= MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS;
             const blockingTimeRegression = scenario.key === 'coldChatList'
               ? coldLoadBlockingTimeRegression
               : separatedRegression(headSamples, baseSamples, 'blockingTimeMs', MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS);
             if(blockingTimeRegression) {
               const message = scenario.key === 'coldChatList'
-                ? `median long-task blocking time ${medianHeadBlockingTime.toFixed(1)} ms vs ${medianBaseBlockingTime.toFixed(1)} ms increased by at least ${MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS} ms`
+                ? `median paired long-task blocking time increase was at least ${MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS} ms (${medianHeadBlockingTime.toFixed(1)} ms vs ${medianBaseBlockingTime.toFixed(1)} ms medians)`
                 : `long-task blocking time rose in every head repeat above every same-run base repeat, median ${medianHeadBlockingTime.toFixed(1)} ms vs ${medianBaseBlockingTime.toFixed(1)} ms`;
               addFailure(blockingFailures, scale, scenario.key, message);
             }
