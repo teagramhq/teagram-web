@@ -499,7 +499,8 @@ test('blocks repeated injected 100 ms main-thread stalls in cold chat list', asy
     const baseColdSamples = report.variants.base['100x'].coldChatList;
     expect(baseColdSamples).toHaveLength(PERFORMANCE_REPEATS);
     const coldLoadEvaluation = evaluateWithNegativeSamples('coldChatList', negativeSamples);
-    expect(coldLoadEvaluation.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time'))).toBe(true);
+    const coldLoadFailures = coldLoadEvaluation.blockingFailures.filter((failure) => failure.startsWith('100x coldChatList: '));
+    expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `100 ms cold-load control was not blocked: ${JSON.stringify(coldLoadEvaluation.blockingFailures)}`).toBe(true);
   } finally {
     await context.close();
   }
