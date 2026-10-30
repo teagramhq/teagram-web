@@ -1,7 +1,6 @@
 import assumeType from '@helpers/assumeType';
 import {AccountThemes, AccountWallPapers, InputWallPaper, WallPaper} from '@layer';
 import {AppManager} from '@appManagers/manager';
-import afterInteractiveList from '@appManagers/afterInteractiveList';
 
 type WallPaperId = WallPaper['id'];
 
@@ -14,7 +13,7 @@ export default class AppThemesManager extends AppManager {
     this.wallPapersBySlug = {};
 
     this.rootScope.addEventListener('user_auth', () => {
-      afterInteractiveList(() => this.getThemes(), this.rootScope);
+      this.getThemes();
     });
 
     return this.appStateManager.getState().then((state) => {

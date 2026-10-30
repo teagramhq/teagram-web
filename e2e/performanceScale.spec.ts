@@ -157,7 +157,10 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
         outcome: 'pending' | 'success' | 'error'
       }>
     };
-    const workerPhases = includePhases ? await (window as any).rootScope.managers.apiManager.getPerformancePhaseTrace() : undefined;
+    const workerPhases = includePhases ? (await (window as any).rootScope.managers.apiManager.getPerformancePhaseTrace() as Array<{name: string, startedAtEpochMs: number, durationMs: number | null, accountNumber?: number}>).map((phase) => ({
+      ...phase,
+      startMs: Math.max(0, phase.startedAtEpochMs - performance.timeOrigin)
+    })) : undefined;
     const rpcCalls = rpcTrace.calls.map((call) => ({
       method: call.method,
       startedAtMs: Math.max(0, call.startedAtEpochMs - performance.timeOrigin),

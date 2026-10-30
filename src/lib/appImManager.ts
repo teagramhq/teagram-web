@@ -9,7 +9,6 @@ import mediaSizes, {ScreenSize} from '@helpers/mediaSizes';
 import {bindActiveWindowListener, getAppWindow, getOverlayRoot} from '@helpers/appWindow';
 import {logger, LogTypes} from '@lib/logger';
 import rootScope from '@lib/rootScope';
-import afterInteractiveList from '@appManagers/afterInteractiveList';
 import Chat, {ChatSearchKeys} from '@components/chat/chat';
 import {ChatType} from '@components/chat/chatType';
 import PopupNewMedia, {getCurrentNewMediaPopup} from '@components/popups/newMedia';
@@ -1494,10 +1493,8 @@ export class AppImManager extends EventListenerBase<{
     let appConfig: MTAppConfig, config: Config.config;
     rootScope.addEventListener('app_config', (_appConfig) => appConfig = _appConfig);
     rootScope.addEventListener('config', (_config) => config = _config);
-    afterInteractiveList(() => {
-      this.managers.apiManager.getAppConfig().then((_appConfig) => appConfig = _appConfig);
-      this.managers.apiManager.getConfig().then((_config) => config = _config);
-    });
+    this.managers.apiManager.getAppConfig().then((_appConfig) => appConfig = _appConfig);
+    this.managers.apiManager.getConfig().then((_config) => config = _config);
 
     const onAuthAnchorClick = (element: HTMLAnchorElement) => {
       if(!appConfig) {

@@ -75,7 +75,6 @@ export type BroadcastEvents = {
   'dialog_migrate': {migrateFrom: PeerId, migrateTo: PeerId},
   // 'dialog_top': Dialog,
   'dialog_notify_settings': Dialog | ForumTopic,
-  'chat_list_interactive': void,
   // 'dialog_order': {dialog: Dialog, pos: number},
   'dialogs_multiupdate': Map<PeerId, {dialog?: Dialog, topics?: Map<number, ForumTopic>, saved?: Map<PeerId, SavedDialog>}>,
 

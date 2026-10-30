@@ -51,7 +51,6 @@ import defineNotNumerableProperties from '@helpers/object/defineNotNumerableProp
 import getDocumentMediaInput from '@appManagers/utils/docs/getDocumentMediaInput';
 import getFileNameForUpload from '@helpers/getFileNameForUpload';
 import noop from '@helpers/noop';
-import afterInteractiveList from '@appManagers/afterInteractiveList';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import getGroupedText from '@appManagers/utils/messages/getGroupedText';
 import pause from '@helpers/schedulers/pause';
@@ -724,9 +723,7 @@ export class AppMessagesManager extends AppManager {
     this.clear(true);
 
     this.rootScope.addEventListener('app_config', this.setStreamedMessageDraftTtl);
-    afterInteractiveList(() => {
-      Promise.resolve(this.apiManager.getAppConfig()).then(this.setStreamedMessageDraftTtl, noop);
-    }, this.rootScope);
+    Promise.resolve(this.apiManager.getAppConfig()).then(this.setStreamedMessageDraftTtl, noop);
 
     this.repayRequestHandler = new RepayRequestHandler({
       rootScope: this.rootScope

@@ -30,6 +30,8 @@ import {AppStoragesManager} from '@appManagers/appStoragesManager';
 import defineNotNumerableProperties from '@helpers/object/defineNotNumerableProperties';
 import setDialogIndex from '@appManagers/utils/dialogs/setDialogIndex';
 import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
+import {performancePhaseTrace} from '@appManagers/performanceTrace';
+import noop from '@helpers/noop';
 import pause from '@helpers/schedulers/pause';
 import {BroadcastEvents} from '@lib/rootScope';
 import assumeType from '@helpers/assumeType';
@@ -1900,6 +1902,18 @@ export default class DialogsStorage extends AppManager {
     isTopEnd: boolean,
     isEnd: boolean
   }> {
+    if(!options.recursion && !options.query && options.offsetIndex === undefined) {
+      const finish = performancePhaseTrace.start('worker.dialogs.firstPage');
+      const result = this.getDialogsInner(options);
+      if(result instanceof Promise) result.finally(finish).catch(noop);
+      else finish();
+      return result;
+    }
+
+    return this.getDialogsInner(options);
+  }
+
+  private getDialogsInner(options: Parameters<DialogsStorage['getDialogs']>[0]): ReturnType<DialogsStorage['getDialogs']> {
     const {
       query = '',
       offsetIndex,
@@ -1929,7 +1943,7 @@ export default class DialogsStorage extends AppManager {
 
       if(promises.length) {
         return Promise.all(promises).then(() => {
-          return this.getDialogs(options);
+          return this.getDialogsInner(options);
         });
       }
     }

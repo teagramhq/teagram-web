@@ -736,7 +736,6 @@ const TEST_TOP_NOTIFICATION = true ? undefined : (): ChatlistsChatlistUpdates =>
 
 export class AppDialogsManager {
   public chatsContainer = document.getElementById('chatlist-container') as HTMLDivElement;
-  private hasDispatchedInteractiveList = false;
 
   private log = logger('DIALOGS', LogTypes.Log | LogTypes.Error | LogTypes.Warn | LogTypes.Debug);
 
@@ -1713,11 +1712,6 @@ export class AppDialogsManager {
     // return;
     const chatList = this.chatList;
     const count = this.xd?.sortedList.itemsLength() || 0;
-
-    if(count > 0 && !this.hasDispatchedInteractiveList) {
-      this.hasDispatchedInteractiveList = true;
-      rootScope.dispatchEvent('chat_list_interactive');
-    }
 
     const parts = chatList.parentElement.parentElement;
     const bottom = chatList.parentElement.nextElementSibling as HTMLElement;
