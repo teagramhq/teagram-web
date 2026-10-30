@@ -285,6 +285,29 @@ test('blocks repeated dropped frames above the calibrated master band', () => {
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('dropped frames')));
 });
 
+test('blocks repeated dropped-frame regressions above a stable nonzero master baseline', () => {
+  const masterSamples = Array.from({length: 3}, () => ({
+    longTasksOver50Ms: 0,
+    blockingTimeMs: 0,
+    maxLongTaskDurationMs: 0,
+    droppedFrames: 2,
+    frameIntervals: 98,
+    droppedFramePercent: 2
+  }));
+  const head = scaleVariants({'100x': {scrollBack2k: Array.from({length: 3}, () => ({
+    longTasksOver50Ms: 0,
+    blockingTimeMs: 0,
+    droppedFrames: 6,
+    frameIntervals: 94,
+    droppedFramePercent: 6
+  }))}});
+  const result = evaluatePerformance(report({head}), scrollHistory(20, masterSamples));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('dropped frames')));
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')), false);
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('blocking time')), false);
+});
+
 test('allows blocking-time jitter below 80 ms when 100x contacts long-task counts do not grow', () => {
   const base = scaleVariants({'100x': {contactsList: [
     {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0},
