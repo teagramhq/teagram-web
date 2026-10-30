@@ -51,26 +51,43 @@ function mainHistory(count = 20, overrides = {}, metadata = CURRENT_FIXTURE) {
   return Array.from({length: count}, () => ({...metadata, variants: {head}}));
 }
 
-test('blocks a 100 ms main-thread task from the first run', () => {
+function cleanScrollSamples() {
+  return Array.from({length: 3}, () => ({
+    longTasksOver50Ms: 0,
+    blockingTimeMs: 0,
+    maxLongTaskDurationMs: 0,
+    droppedFrames: 0,
+    frameIntervals: 100,
+    droppedFramePercent: 0
+  }));
+}
+
+function scrollHistory(count = 20, samples = cleanScrollSamples()) {
+  return mainHistory(count, {'100x': {scrollBack2k: samples}});
+}
+
+test('blocks a 100 ms main-thread task on 100x cold load from the first run', () => {
   const head = scaleVariants({
-    '1x': {scrollBack2k: {longTasksOver50Ms: 1}},
-    '100x': {scrollBack2k: {longTasksOver50Ms: 1}}
+    '1x': {coldChatList: {longTasksOver50Ms: 1}},
+    '100x': {coldChatList: {longTasksOver50Ms: 1}}
   });
   const result = evaluatePerformance(report({head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('scrollBack2k') && failure.includes('long task')));
-  assert.equal(result.blockingFailures.some((failure) => failure.includes('1x scrollBack2k') && failure.includes('long task')), false);
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('coldChatList') && failure.includes('long task')));
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('1x coldChatList') && failure.includes('long task')), false);
 });
 
-test('blocks 100x scroll frame loss at one percent and reports 1x only', () => {
+test('reports 100x scroll frame loss during master calibration', () => {
   const head = scaleVariants({
     '1x': {scrollBack2k: {droppedFrames: 50, frameIntervals: 950, droppedFramePercent: 5}},
     '100x': {scrollBack2k: {droppedFrames: 2, frameIntervals: 198, droppedFramePercent: 1}}
   });
   const result = evaluatePerformance(report({head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('scrollBack2k') && failure.includes('dropped frames')));
-  assert.equal(result.blockingFailures.some((failure) => failure.includes('1x scrollBack2k') && failure.includes('dropped frames')), false);
+  const row = result.rows.find((item) => item.scale === '100x' && item.key === 'scrollBack2k');
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k')), false);
+  assert.equal(row.scrollHistoryRuns, 0);
+  assert.match(row.scrollGateStatus, /report only.*0\/20/);
 });
 
 test('pools dropped frame counts across all scroll repeats', () => {
@@ -110,15 +127,17 @@ test('reports a lone 100x scroll task against a base that misses absolute limits
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')), false);
 });
 
-test('blocks repeated 100x scroll long tasks against a clean base', () => {
+test('reports repeated 100x scroll long tasks during master calibration', () => {
   const head = scaleVariants({'100x': {scrollBack2k: [
     {longTasksOver50Ms: 1},
     {longTasksOver50Ms: 1},
     {longTasksOver50Ms: 0}
   ]}});
   const result = evaluatePerformance(report({head}));
+  const row = result.rows.find((item) => item.scale === '100x' && item.key === 'scrollBack2k');
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')));
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k')), false);
+  assert.match(row.scrollGateStatus, /report only.*0\/20/);
 });
 
 test('blocks new long tasks across 100x scenarios', () => {
@@ -133,7 +152,8 @@ test('blocks new long tasks across 100x scenarios', () => {
       {longTasksOver50Ms: 2},
       {longTasksOver50Ms: 0}
     ]}});
-    const result = evaluatePerformance(report({base, head}));
+    const history = key === 'scrollBack2k' ? scrollHistory() : [];
+    const result = evaluatePerformance(report({base, head}), history);
 
     assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes('long task')));
   }
@@ -182,25 +202,25 @@ test('allows one 100x contacts long-task and blocking-time outlier', () => {
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x contactsList') && /long task|blocking time/.test(failure)), false);
 });
 
-test('reports absolute scroll misses while the same-run base also misses them', () => {
+test('reports scroll misses while master calibration warms up', () => {
   const base = scaleVariants({'100x': {scrollBack2k: [
     {longTasksOver50Ms: 10, blockingTimeMs: 35, maxLongTaskDurationMs: 60, droppedFrames: 202, frameIntervals: 865, droppedFramePercent: 18.93},
     {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0, droppedFrames: 2, frameIntervals: 701, droppedFramePercent: 0.28},
     {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0, droppedFrames: 2, frameIntervals: 755, droppedFramePercent: 0.26}
   ]}});
   const head = scaleVariants({'100x': {scrollBack2k: [
-    {longTasksOver50Ms: 0, droppedFrames: 3, frameIntervals: 819, droppedFramePercent: 0.36},
-    {longTasksOver50Ms: 0, droppedFrames: 1, frameIntervals: 510, droppedFramePercent: 0.20},
-    {longTasksOver50Ms: 0, droppedFrames: 1, frameIntervals: 516, droppedFramePercent: 0.19}
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 0, frameIntervals: 100, droppedFramePercent: 0},
+    {longTasksOver50Ms: 6, blockingTimeMs: 120, maxLongTaskDurationMs: 100, droppedFrames: 113, frameIntervals: 755, droppedFramePercent: 13.02},
+    {longTasksOver50Ms: 5, blockingTimeMs: 166, maxLongTaskDurationMs: 135, droppedFrames: 136, frameIntervals: 805, droppedFramePercent: 14.45}
   ]}});
-  const result = evaluatePerformance(report({base, head}));
+  const result = evaluatePerformance(report({base, head}), scrollHistory(19));
   const row = formatPerformanceTable(result).split('\n').find((line) => line.includes('Scroll back 2,000 messages (100x)'));
 
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k')), false);
-  assert.match(row, /report only \(base misses absolute scroll limits\)/);
+  assert.match(row, /report only.*19\/20/);
 });
 
-test('does not compare scroll stalls when the base could not reach the history window', () => {
+test('reports scroll misses when base history measurements are unavailable', () => {
   const base = scaleVariants();
   base['100x'].scrollBack2k = Array.from({length: 3}, () => ({bundleBytes: 100_000}));
   const head = scaleVariants({'100x': {scrollBack2k: {longTasksOver50Ms: 1}}});
@@ -208,53 +228,59 @@ test('does not compare scroll stalls when the base could not reach the history w
   const row = formatPerformanceTable(result).split('\n').find((line) => line.includes('Scroll back 2,000 messages (100x)'));
 
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k')), false);
-  assert.match(row, /report only \(base scroll measurements unavailable\)/);
+  assert.match(row, /report only.*0\/20/);
 });
 
-test('blocks repeated scroll regressions against the paired base despite base misses', () => {
+test('blocks calibrated scroll regressions against the master noise band', () => {
   const base = scaleVariants({'100x': {scrollBack2k: [
-    {longTasksOver50Ms: 10, blockingTimeMs: 35, maxLongTaskDurationMs: 60, droppedFrames: 202, frameIntervals: 865, droppedFramePercent: 18.93},
-    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0, droppedFrames: 2, frameIntervals: 701, droppedFramePercent: 0.28},
-    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0, droppedFrames: 2, frameIntervals: 755, droppedFramePercent: 0.26}
+    {longTasksOver50Ms: 10, blockingTimeMs: 300, maxLongTaskDurationMs: 100, droppedFrames: 202, frameIntervals: 865, droppedFramePercent: 18.93},
+    {longTasksOver50Ms: 10, blockingTimeMs: 300, maxLongTaskDurationMs: 100, droppedFrames: 2, frameIntervals: 701, droppedFramePercent: 0.28},
+    {longTasksOver50Ms: 10, blockingTimeMs: 300, maxLongTaskDurationMs: 100, droppedFrames: 2, frameIntervals: 755, droppedFramePercent: 0.26}
   ]}});
   const head = scaleVariants({'100x': {scrollBack2k: [
-    {longTasksOver50Ms: 0, droppedFrames: 3, frameIntervals: 819, droppedFramePercent: 0.36},
-    {longTasksOver50Ms: 10, droppedFrames: 165, frameIntervals: 832, droppedFramePercent: 16.55},
-    {longTasksOver50Ms: 13, droppedFrames: 177, frameIntervals: 874, droppedFramePercent: 16.84}
+    {longTasksOver50Ms: 1, blockingTimeMs: 100, droppedFrames: 2, frameIntervals: 98, droppedFramePercent: 2},
+    {longTasksOver50Ms: 1, blockingTimeMs: 100, droppedFrames: 6, frameIntervals: 94, droppedFramePercent: 6},
+    {longTasksOver50Ms: 1, blockingTimeMs: 100, droppedFrames: 6, frameIntervals: 94, droppedFramePercent: 6}
   ]}});
-  const result = evaluatePerformance(report({base, head}));
+  const result = evaluatePerformance(report({base, head}), scrollHistory());
+  const table = formatPerformanceTable(result);
+  const row = table.split('\n').find((line) => line.includes('Scroll back 2,000 messages (100x)'));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('worse than same-run base')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('blocking time')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('dropped frames')));
+  assert.match(table, /Scroll noise band/);
+  assert.match(row, /tasks 0\.0–0\.0; blocking 0\.0–0\.0 ms; frames 0\.00–0\.00%/);
 });
 
-test('allows one noisy head scroll repeat within same-run base frame noise', () => {
+test('allows one noisy head scroll repeat against the calibrated master band', () => {
   const base = scaleVariants({'100x': {scrollBack2k: [
     {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0, droppedFrames: 53, frameIntervals: 872, droppedFramePercent: 6.08},
     {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0, droppedFrames: 11, frameIntervals: 967, droppedFramePercent: 1.14},
     {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0, droppedFrames: 15, frameIntervals: 787, droppedFramePercent: 1.91}
   ]}});
   const head = scaleVariants({'100x': {scrollBack2k: [
-    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 37, frameIntervals: 860, droppedFramePercent: 4.3},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 0, frameIntervals: 100, droppedFramePercent: 0},
     {longTasksOver50Ms: 23, blockingTimeMs: 582, droppedFrames: 225, frameIntervals: 942, droppedFramePercent: 23.89},
-    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 8, frameIntervals: 666, droppedFramePercent: 1.2}
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 0, frameIntervals: 100, droppedFramePercent: 0}
   ]}});
-  const result = evaluatePerformance(report({base, head}));
+  const result = evaluatePerformance(report({base, head}), scrollHistory());
 
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k')), false);
 });
 
-test('blocks a repeated dropped-frame regression against a stable same-run base', () => {
+test('blocks repeated dropped frames above the calibrated master band', () => {
   const base = scaleVariants({'100x': {scrollBack2k: [
-    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 2, frameIntervals: 98, droppedFramePercent: 2},
-    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 2, frameIntervals: 98, droppedFramePercent: 2},
-    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 2, frameIntervals: 98, droppedFramePercent: 2}
+    {longTasksOver50Ms: 10, blockingTimeMs: 300, droppedFrames: 202, frameIntervals: 865, droppedFramePercent: 18.93},
+    {longTasksOver50Ms: 10, blockingTimeMs: 300, droppedFrames: 2, frameIntervals: 701, droppedFramePercent: 0.28},
+    {longTasksOver50Ms: 10, blockingTimeMs: 300, droppedFrames: 2, frameIntervals: 755, droppedFramePercent: 0.26}
   ]}});
   const head = scaleVariants({'100x': {scrollBack2k: [
     {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 6, frameIntervals: 94, droppedFramePercent: 6},
     {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 6, frameIntervals: 94, droppedFramePercent: 6},
     {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 6, frameIntervals: 94, droppedFramePercent: 6}
   ]}});
-  const result = evaluatePerformance(report({base, head}));
+  const result = evaluatePerformance(report({base, head}), scrollHistory());
 
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('dropped frames')));
 });
