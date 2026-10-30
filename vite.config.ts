@@ -212,7 +212,9 @@ const baseConfig = defineConfig({
       // a `**/e2e/**` glob also swallowed src/lib/calls/e2e/tests/, silently
       // dropping the whole TdE2E suite (blockchain, call, crypto, keys, …) from
       // `pnpm test`.
-      'e2e/**'
+      'e2e/**',
+      // These integration helpers use node:test and are run by the performance workflow.
+      'scripts/performance/**/*.test.mjs'
     ],
     // coverage: {
     //   provider: 'v8',
