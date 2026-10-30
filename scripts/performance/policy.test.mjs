@@ -166,7 +166,7 @@ test('blocks new long tasks across 100x scenarios', () => {
     const head = scaleVariants({'100x': {[key]: [
       {longTasksOver50Ms: 2},
       {longTasksOver50Ms: 2},
-      {longTasksOver50Ms: 0}
+      {longTasksOver50Ms: 2}
     ]}});
     const history = key === 'scrollBack2k' ? scrollHistory() : [];
     const result = evaluatePerformance(report({base, head}), history);
@@ -207,20 +207,36 @@ test('allows existing 100x base long tasks when the head count does not grow', (
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('long task')), false);
 });
 
-test('does not let an outlier base repeat hide a new 100x task', () => {
+test('allows head chat-open task noise that stays inside the same-run base repeats', () => {
   const base = scaleVariants({'100x': {chatOpen: [
-    {longTasksOver50Ms: 16},
-    {longTasksOver50Ms: 0},
-    {longTasksOver50Ms: 0}
+    {longTasksOver50Ms: 2, blockingTimeMs: 165, maxLongTaskDurationMs: 206},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0}
   ]}});
   const head = scaleVariants({'100x': {chatOpen: [
-    {longTasksOver50Ms: 0},
-    {longTasksOver50Ms: 1},
-    {longTasksOver50Ms: 1}
+    {longTasksOver50Ms: 1, blockingTimeMs: 6, maxLongTaskDurationMs: 56},
+    {longTasksOver50Ms: 1, blockingTimeMs: 3, maxLongTaskDurationMs: 53},
+    {longTasksOver50Ms: 1, blockingTimeMs: 7, maxLongTaskDurationMs: 57}
   ]}});
   const result = evaluatePerformance(report({base, head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes('long task')));
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x chatOpen')), false);
+});
+
+test('blocks an added 100 ms task by blocking time when base task counts vary', () => {
+  const base = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 2, blockingTimeMs: 70},
+    {longTasksOver50Ms: 3, blockingTimeMs: 134},
+    {longTasksOver50Ms: 3, blockingTimeMs: 147}
+  ]}});
+  const head = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 3, blockingTimeMs: 184},
+    {longTasksOver50Ms: 4, blockingTimeMs: 186},
+    {longTasksOver50Ms: 4, blockingTimeMs: 198}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')));
 });
 
 test('allows one 100x contacts long-task and blocking-time outlier', () => {

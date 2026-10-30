@@ -17,6 +17,8 @@ export const PERFORMANCE_REPEATS = 3;
 const CALIBRATION_RUNS = 20;
 const MAX_SCALE_RATIO = 1.5;
 const MIN_BLOCKING_TIME_REGRESSION_MS = 80;
+// A 100 ms task adds 50 ms of blocking time to every repeat.
+const MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS = 40;
 const REQUIRED_METRICS = [
   ['ms', 'timing'],
   ['requests', 'requests'],
@@ -77,13 +79,13 @@ function medianLongTasks(samples) {
   return median(samples.map((sample) => Number.isFinite(sample?.longTasksOver50Ms) ? sample.longTasksOver50Ms : 0));
 }
 
-function repeatedLongTaskRegressionCount(headSamples, baseSamples) {
-  return headSamples.reduce((count, sample, index) => {
-    const headCount = sample?.longTasksOver50Ms;
-    const rawBaseCount = baseSamples[index]?.longTasksOver50Ms;
-    const baseCount = Number.isFinite(rawBaseCount) ? rawBaseCount : 0;
-    return Number.isFinite(headCount) && Number.isFinite(baseCount) && headCount > baseCount ? count + 1 : count;
-  }, 0);
+// Same-run base repeats on the hosted runner swing by whole long tasks and over 100 ms of blocking time,
+// so a head regression must separate from every base repeat rather than from one paired sample or median.
+function separatedRegression(headSamples, baseSamples, field, minMedianIncrease = 0) {
+  const headValues = headSamples.map((sample) => sample?.[field]);
+  const baseValues = baseSamples.map((sample) => sample?.[field]);
+  if(!headValues.length || !baseValues.length || ![...headValues, ...baseValues].every(Number.isFinite)) return false;
+  return Math.min(...headValues) > Math.max(...baseValues) && median(headValues) - median(baseValues) >= minMedianIncrease;
 }
 
 function medianMetric(samples, field) {
@@ -255,20 +257,25 @@ export function evaluatePerformance(report, history = []) {
             }
           }
         } else {
-          const baselineLongTasks = report.requireBase ? medianLongTasks(baseSamples) ?? 0 : historyLongTaskBaseline(history, scale, scenario.key, report);
-          const baselineBlockingTime = report.requireBase ? medianBlockingTime(baseSamples) : historyBlockingTimeBaseline(history, scale, scenario.key, report);
-          const headLongTasks = medianLongTasks(headSamples);
-          const headBlockingTime = medianBlockingTime(headSamples);
-          const pairedLongTaskRegressions = report.requireBase ? repeatedLongTaskRegressionCount(headSamples, baseSamples) : 0;
-          const longTaskRegression = report.requireBase ? pairedLongTaskRegressions >= Math.ceil(headSamples.length / 2) :
-            Number.isFinite(baselineLongTasks) && Number.isFinite(headLongTasks) && headLongTasks > baselineLongTasks;
-          if(longTaskRegression) {
-            const message = report.requireBase ? `long task count increased in ${pairedLongTaskRegressions} of ${headSamples.length} paired repeats over the corresponding base samples` :
-              `median long task count ${headLongTasks} exceeded baseline ${baselineLongTasks}`;
-            addFailure(blockingFailures, scale, scenario.key, message);
-          }
-          if(Number.isFinite(baselineBlockingTime) && Number.isFinite(headBlockingTime) && headBlockingTime - baselineBlockingTime >= MIN_BLOCKING_TIME_REGRESSION_MS) {
-            addFailure(blockingFailures, scale, scenario.key, `median long-task blocking time ${headBlockingTime.toFixed(1)} ms exceeded base median ${baselineBlockingTime.toFixed(1)} ms by at least ${MIN_BLOCKING_TIME_REGRESSION_MS} ms`);
+          const baseMeasured = report.requireBase && baseSamples.length > 0 && baseSamples.every((sample) => Number.isFinite(sample?.longTasksOver50Ms));
+          if(baseMeasured) {
+            if(separatedRegression(headSamples, baseSamples, 'longTasksOver50Ms')) {
+              addFailure(blockingFailures, scale, scenario.key, `long task count rose in every head repeat above every same-run base repeat`);
+            }
+            if(separatedRegression(headSamples, baseSamples, 'blockingTimeMs', MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS)) {
+              addFailure(blockingFailures, scale, scenario.key, `long-task blocking time rose in every head repeat above every same-run base repeat, median ${medianBlockingTime(headSamples).toFixed(1)} ms vs ${medianBlockingTime(baseSamples).toFixed(1)} ms`);
+            }
+          } else {
+            const baselineLongTasks = report.requireBase ? 0 : historyLongTaskBaseline(history, scale, scenario.key, report);
+            const baselineBlockingTime = report.requireBase ? undefined : historyBlockingTimeBaseline(history, scale, scenario.key, report);
+            const headLongTasks = medianLongTasks(headSamples);
+            const headBlockingTime = medianBlockingTime(headSamples);
+            if(Number.isFinite(baselineLongTasks) && Number.isFinite(headLongTasks) && headLongTasks > baselineLongTasks) {
+              addFailure(blockingFailures, scale, scenario.key, `median long task count ${headLongTasks} exceeded baseline ${baselineLongTasks}`);
+            }
+            if(Number.isFinite(baselineBlockingTime) && Number.isFinite(headBlockingTime) && headBlockingTime - baselineBlockingTime >= MIN_BLOCKING_TIME_REGRESSION_MS) {
+              addFailure(blockingFailures, scale, scenario.key, `median long-task blocking time ${headBlockingTime.toFixed(1)} ms exceeded base median ${baselineBlockingTime.toFixed(1)} ms by at least ${MIN_BLOCKING_TIME_REGRESSION_MS} ms`);
+            }
           }
         }
       }

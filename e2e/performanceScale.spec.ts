@@ -482,7 +482,8 @@ test('blocks repeated injected 100 ms main-thread stalls in cold chat list', asy
       requests.value = 0;
       await page.goto(preparedHead!.origin, {waitUntil: 'domcontentloaded'});
       await waitForChatList(page);
-      await page.evaluate(() => (window as any).__teagramPerf.injectLongTask(100));
+      // Script evaluated over the DevTools protocol is not reported as a long task; run the stall as a page task.
+      await page.evaluate(() => new Promise((resolve) => setTimeout(() => resolve((window as any).__teagramPerf.injectLongTask(100)), 0)));
       const negativeSample = await capture(page, requests, await elapsed(page));
       const injectedTask = await injectedLongTask(page);
       expect(negativeSample.longTasksOver50Ms).toBeGreaterThan(0);
