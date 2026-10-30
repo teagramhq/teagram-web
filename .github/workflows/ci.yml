@@ -28,10 +28,6 @@ jobs:
   test-web:
     name: 'test: web'
     runs-on: ubuntu-24.04
-    permissions:
-      actions: write
-      contents: read
-
     timeout-minutes: 45
 
     services:
@@ -260,19 +256,9 @@ jobs:
       - name: Run reaction artwork browser regression
         run: pnpm run test:reaction-artwork
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   check-deploy-workflow:
     name: 'check: deploy-workflow'
     runs-on: ubuntu-26.04
-    permissions:
-      actions: write
-      contents: read
-
     timeout-minutes: 10
 
     steps:
@@ -295,9 +281,6 @@ jobs:
 
       - name: Install yq
         run: go install github.com/mikefarah/yq/v4@v4.54.1
-
-      - name: Check PR CI fail-fast contract
-        run: PATH="$(go env GOPATH)/bin:$PATH" bash .github/scripts/test_pr_ci_fail_fast.sh
 
       - name: Lint deployment and real-client workflows
         run: |
@@ -325,19 +308,9 @@ jobs:
       - name: Exercise deployment stack migration and rollback
         run: bash .github/scripts/test-deploy-stack-migration-rollback.sh
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   check-k8s-manifests:
     name: 'check: k8s-manifests'
     runs-on: ubuntu-24.04
-    permissions:
-      actions: write
-      contents: read
-
     timeout-minutes: 30
     outputs:
       run_deploy_test: ${{ steps.scope.outputs.run_deploy_test }}
@@ -445,22 +418,12 @@ jobs:
         run: >-
           "$(go env GOPATH)/bin/k3d" cluster delete "$K3D_CLUSTER"
 
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
-
   test-k8s-deploy:
     name: 'test: k8s-deploy'
     needs:
       - check-k8s-manifests
     if: needs.check-k8s-manifests.outputs.run_deploy_test == 'true'
     runs-on: ubuntu-24.04
-    permissions:
-      actions: write
-      contents: read
-
     timeout-minutes: 45
 
     steps:
@@ -586,12 +549,6 @@ jobs:
           K3D_CLUSTER: teagram-web-test
         run: >-
           "$(go env GOPATH)/bin/k3d" cluster delete "$K3D_CLUSTER"
-
-      - name: Cancel PR workflow run after job failure
-        if: ${{ failure() && github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" --repo "$GITHUB_REPOSITORY"
 
   ci:
     name: ci

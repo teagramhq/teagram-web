@@ -203,9 +203,6 @@ jobs:
     if: >-
       needs.check-publication-request.result == 'success' &&
       needs.check-publication-request.outputs.publish_private_artifact == 'true'
-    permissions:
-      actions: write
-      contents: read
     uses: ./.github/workflows/ci.yml
     with:
       checkout_ref: ${{ needs.check-publication-request.outputs.source_commit }}
