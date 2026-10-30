@@ -2484,7 +2484,7 @@ export default class ChatInput {
       this.chat.canManageAutoDelete(),
       this.managers.appNotificationsManager.isPeerLocalMuted({peerId, respectType: false}),
       this.btnSendGift ?
-        modifyAckedPromise(this.managers.acknowledged.appPrivacyManager.getGlobalPrivacySettings()) :
+        modifyAckedPromise(this.managers.acknowledged.appPrivacyManager.getGlobalPrivacySettingsIfLoaded()) :
         undefined
     ]);
 
@@ -2649,10 +2649,8 @@ export default class ChatInput {
 
       if(this.btnSendGift) {
         // Default to hidden so the previous chat's state never leaks.
-        // Cached acked.result → callbackify fires synchronously inside
-        // this render closure (same tick as the hide above → no visible
-        // flicker, button settles into the correct state immediately).
-        // Cold first-load → async toggle once both fetches resolve.
+        // Only use cached privacy here. The first fetch runs after the chat
+        // list becomes interactive and dispatches global_privacy_update.
         this.btnSendGift.classList.add('hide');
         if(this.giftButtonBasePeerEligible(peerId) && !isBot) {
           callbackify(ackedPeerFull.result, (peerFull) => {

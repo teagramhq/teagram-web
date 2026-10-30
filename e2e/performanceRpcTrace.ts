@@ -26,6 +26,22 @@ export type PerformanceCpuSummary = {
   topFrames: Array<{functionName: string, script: string, selfMs: number}>
 };
 
+export type PerformancePhaseSummary = {
+  name: string,
+  durationMs: number | null,
+  accountNumber?: number,
+  startMs?: number
+};
+
+export function summarizePerformancePhases<T extends {name: string, durationMs: number | null, accountNumber?: number, startMs?: number}>(phases: T[]): PerformancePhaseSummary[] {
+  return phases.map(({name, durationMs, accountNumber, startMs}) => ({
+    name,
+    durationMs: Number.isFinite(durationMs) ? Number(durationMs!.toFixed(2)) : null,
+    ...(accountNumber === undefined ? {} : {accountNumber}),
+    ...(startMs === undefined ? {} : {startMs: Number(startMs.toFixed(2))})
+  }));
+}
+
 export function summarizeRpcTrace(rpcCalls: PerformanceRpcCall[], elapsedMs: number): PerformanceRpcSummary {
   const intervals = rpcCalls.map(({startedAtMs, durationMs}) => {
     const start = Math.max(0, Math.min(elapsedMs, startedAtMs));

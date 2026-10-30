@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {summarizeCpuProfile, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
+import {summarizeCpuProfile, summarizePerformancePhases, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
 
 describe('performance RPC trace summary', () => {
   test('counts RPC calls and subtracts overlapping waits only once', () => {
@@ -37,5 +37,20 @@ describe('performance RPC trace summary', () => {
       {functionName: 'renderBubble', script: '/assets/app.js', selfMs: 2}
     ]);
     expect(JSON.stringify(summary)).not.toContain('private');
+  });
+
+  test('summarizes worker and peer-change phases without retaining trace details', () => {
+    const summary = summarizePerformancePhases([
+      {name: 'worker.storage.load', durationMs: 38.125, accountNumber: 1},
+      {name: 'chat.finishPeerChange.input', durationMs: 91.4},
+      {name: 'chat.finishPeerChange.bubbles', durationMs: 22.2, peerId: 12345}
+    ]);
+
+    expect(summary).toEqual([
+      {name: 'worker.storage.load', durationMs: 38.13, accountNumber: 1},
+      {name: 'chat.finishPeerChange.input', durationMs: 91.4},
+      {name: 'chat.finishPeerChange.bubbles', durationMs: 22.2}
+    ]);
+    expect(JSON.stringify(summary)).not.toContain('peerId');
   });
 });

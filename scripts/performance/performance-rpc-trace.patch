@@ -21,32 +21,40 @@ index 0c886d5..1e17345 100644
  export class ApiManager extends ApiManagerMethods {
    private static fillTimeManagerOffsetPromise: Promise<void>;
  
-@@ -83,6 +95,8 @@ export class ApiManager extends ApiManagerMethods {
+@@ -83,6 +95,10 @@ export class ApiManager extends ApiManagerMethods {
  
    private authLogRedactor?: AuthLogRedactor;
  
 +  private performanceRpcTrace = import.meta.env.VITE_PERF_TRACE === '1' ? [] as PerformanceRpcTrace[] : undefined;
++  private performanceRpcCallCount = 0;
++  private performanceRpcRecording = import.meta.env.VITE_PERF_TRACE === '1';
 +
    constructor() {
      super();
      this.name = 'API';
-@@ -735,10 +749,57 @@ export class ApiManager extends ApiManagerMethods {
+@@ -735,10 +751,63 @@ export class ApiManager extends ApiManagerMethods {
      this.networkerFactory.setUpdatesProcessor(callback);
    }
  
 +  public getPerformanceRpcTrace() {
 +    return {
 +      enabled: !!this.performanceRpcTrace,
++      recording: this.performanceRpcRecording,
++      callCount: this.performanceRpcCallCount,
 +      calls: this.performanceRpcTrace?.map((trace) => ({...trace})) || []
 +    };
 +  }
 +
-+  public resetPerformanceRpcTrace() {
++  public resetPerformanceRpcTrace(recordSpans = true) {
 +    this.performanceRpcTrace?.splice(0);
++    this.performanceRpcCallCount = 0;
++    this.performanceRpcRecording = !!this.performanceRpcTrace && recordSpans;
 +  }
 +
 +  private startPerformanceRpcTrace(method: string): PerformanceRpcTraceHandle | undefined {
 +    if(!this.performanceRpcTrace) return;
++    ++this.performanceRpcCallCount;
++    if(!this.performanceRpcRecording) return;
 +
 +    const started = performance.now();
 +    const trace: PerformanceRpcTrace = {
@@ -89,7 +97,7 @@ index 0c886d5..1e17345 100644
      }
  
      const redactor = this.authLogRedactor ??= new AuthLogRedactor(this.log);
-@@ -749,8 +810,9 @@ export class ApiManager extends ApiManagerMethods {
+@@ -749,8 +818,9 @@ export class ApiManager extends ApiManagerMethods {
          options;
        const request = this.invokeApiInternal(method, params, requestOptions);
        request.then(() => redactor.end(), () => redactor.end());

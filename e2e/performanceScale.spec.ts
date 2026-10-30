@@ -2,7 +2,7 @@ import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
 import Icons from '../src/icons';
 import {evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
-import {summarizeCpuProfile, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceRpcCall} from './performanceRpcTrace';
+import {summarizeCpuProfile, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -21,10 +21,13 @@ type Metric = {
   longTasksOver50Ms: number,
   maxLongTaskDurationMs: number,
   rpcCallCount: number,
-  rpcWallMs: number,
-  nonRpcElapsedMs: number,
+  rpcWallMs: number | null,
+  nonRpcElapsedMs: number | null,
   rpcTraceEnabled: boolean,
+  rpcSpansRecorded: boolean,
   rpcCalls: PerformanceRpcCall[],
+  workerPhases?: PerformancePhaseSummary[],
+  peerChangePhases?: PerformancePhaseSummary[],
   droppedFramePercent?: number,
   droppedFrames?: number,
   frameIntervals?: number
@@ -115,21 +118,25 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
   }, injectLongTask);
 }
 
-async function begin(page: Page, requests: {value: number}) {
+async function begin(page: Page, requests: {value: number}, recordRpcSpans = true) {
   requests.value = 0;
-  await page.evaluate(async() => {
-    await (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace();
+  await page.evaluate(async(recordSpans) => {
+    await (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace(recordSpans);
     const perf = (window as any).__teagramPerf;
     perf.longTasks = [];
     perf.frameIntervals = [];
     perf.started = performance.now();
     performance.clearResourceTimings();
-  });
+  }, recordRpcSpans);
 }
 
-async function capture(page: Page, requests: {value: number}, ms: number, scroll = false): Promise<Metric> {
+async function capture(page: Page, requests: {value: number}, ms: number, scroll = false, includePhases = false): Promise<Metric> {
+  const countOnlyRpcCallCount = scroll ? await page.evaluate(async() => {
+    const trace = await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace();
+    return trace.callCount as number;
+  }) : undefined;
   await page.waitForTimeout(150);
-  const captured = await page.evaluate(async({ms, requests, scroll}) => {
+  const captured = await page.evaluate(async({ms, requests, scroll, includePhases}) => {
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
     const bundleBytes = resources.filter((entry) => {
@@ -141,6 +148,8 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
     const longTasks = perf.longTasks.filter((entry: {startTime: number}) => entry.startTime >= perf.started);
     const rpcTrace = await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace() as {
       enabled: boolean,
+      recording: boolean,
+      callCount: number,
       calls: Array<{
         method: string,
         startedAtEpochMs: number,
@@ -148,6 +157,13 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
         outcome: 'pending' | 'success' | 'error'
       }>
     };
+    const workerPhases = includePhases ? await (window as any).rootScope.managers.apiManager.getPerformancePhaseTrace() : undefined;
+    const rpcCalls = rpcTrace.calls.map((call) => ({
+      method: call.method,
+      startedAtMs: Math.max(0, call.startedAtEpochMs - performance.timeOrigin),
+      durationMs: call.durationMs,
+      outcome: call.outcome
+    })).filter((call) => call.startedAtMs <= ms);
     return {
       ms,
       requests,
@@ -156,22 +172,70 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
       longTasksOver50Ms: longTasks.length,
       maxLongTaskDurationMs: longTasks.reduce((max: number, entry: {duration: number}) => Math.max(max, entry.duration), 0),
       rpcTraceEnabled: rpcTrace.enabled,
-      rpcCalls: rpcTrace.calls.map((call) => ({
-        method: call.method,
-        startedAtMs: Math.max(0, call.startedAtEpochMs - performance.timeOrigin),
-        durationMs: call.durationMs,
-        outcome: call.outcome
-      })).filter((call) => call.startedAtMs <= ms),
+      rpcSpansRecorded: rpcTrace.recording,
+      rpcCallCount: rpcTrace.recording ? rpcCalls.length : countOnlyRpcCallCount ?? rpcTrace.callCount,
+      rpcCalls,
+      workerPhases,
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
-  }, {ms, requests: requests.value, scroll});
+  }, {ms, requests: requests.value, scroll, includePhases});
   expect(captured.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the client build').toBe(true);
+  const rpcSummary = summarizeRpcTrace(captured.rpcCalls as PerformanceRpcCall[], ms);
   return {
     ...captured,
-    ...summarizeRpcTrace(captured.rpcCalls as PerformanceRpcCall[], ms)
+    rpcCallCount: captured.rpcCallCount,
+    rpcWallMs: captured.rpcSpansRecorded ? rpcSummary.rpcWallMs : null,
+    nonRpcElapsedMs: captured.rpcSpansRecorded ? rpcSummary.nonRpcElapsedMs : null,
+    workerPhases: includePhases ? summarizePerformancePhases(captured.workerPhases || []) : undefined
   };
+}
+
+async function installPeerChangeTracing(page: Page) {
+  return page.evaluate(() => {
+    const perf = (window as any).__teagramPerf;
+    const phases: Array<{name: string, startMs: number, durationMs: number}> = [];
+    const base = performance.now();
+    const wrap = (target: any, method: string, name: string) => {
+      if(!target || typeof target[method] !== 'function') return;
+      const original = target[method];
+      target[method] = function(...args: any[]) {
+        const started = performance.now();
+        const finish = () => phases.push({
+          name,
+          startMs: started - base,
+          durationMs: Number((performance.now() - started).toFixed(2))
+        });
+        let result: any;
+        try {
+          result = original.apply(this, args);
+        } catch(error) {
+          finish();
+          throw error;
+        }
+        if(result && typeof result.then === 'function') {
+          result.then(finish, finish);
+        } else {
+          finish();
+        }
+        return result;
+      };
+    };
+    const chat = (window as any).appImManager?.chat;
+    if(!chat) return [];
+    wrap(chat, 'setPeer', 'chat.setPeer');
+    wrap(chat, 'onChangePeer', 'chat.onChangePeer');
+    wrap(chat, 'finishPeerChange', 'chat.finishPeerChange');
+    wrap(chat.bubbles, 'setPeer', 'bubbles.setPeer');
+    wrap(chat.bubbles, 'getHistory1', 'bubbles.getHistory1');
+    wrap(chat.bubbles, 'performHistoryResult', 'bubbles.performHistoryResult');
+    wrap(chat.bubbles, 'finishPeerChange', 'bubbles.finishPeerChange');
+    wrap(chat.input, 'finishPeerChange', 'input.finishPeerChange');
+    wrap(chat.topbar, 'finishPeerChange', 'topbar.finishPeerChange');
+    perf.peerChangePhases = phases;
+    return phases;
+  });
 }
 
 async function elapsed(page: Page) {
@@ -231,7 +295,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
   });
 
-  await begin(page, requests);
+  await begin(page, requests, false);
   await page.evaluate(() => (window as any).__teagramPerf.startFrames());
   const initial = await page.evaluate(() => {
     const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));
@@ -445,25 +509,34 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
     await waitForChatList(page);
     const coldMs = await elapsed(page);
     const coldCpu = await finishCpuProfile(coldProfile);
-    const coldChatList = {...await capture(page, requests, coldMs), cpu: coldCpu};
+    const coldChatList = {...await capture(page, requests, coldMs, false, true), cpu: coldCpu};
 
     await begin(page, requests);
+    await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
     const warmProfile = await startCpuProfile(page);
     await page.reload({waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
     const warmMs = await elapsed(page);
     const warmCpu = await finishCpuProfile(warmProfile);
-    const warmChatList = {...await capture(page, requests, warmMs), cpu: warmCpu};
+    const warmChatList = {...await capture(page, requests, warmMs, false, true), cpu: warmCpu};
 
     const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
     await expect(row).toBeVisible({timeout: 60_000});
     await begin(page, requests);
+    await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
+    await installPeerChangeTracing(page);
     const chatProfile = await startCpuProfile(page);
     await row.click();
     await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
     const chatOpenMs = await elapsed(page);
     const chatCpu = await finishCpuProfile(chatProfile);
-    const chatOpen = {...await capture(page, requests, chatOpenMs), cpu: chatCpu};
+    const chatOpenCapture = await capture(page, requests, chatOpenMs, false, true);
+    const peerChangePhases = await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []);
+    const chatOpen = {
+      ...chatOpenCapture,
+      cpu: chatCpu,
+      peerChangePhases: summarizePerformancePhases(peerChangePhases)
+    };
 
     return {coldChatList, warmChatList, chatOpen};
   } finally {

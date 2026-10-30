@@ -48,22 +48,11 @@ import {clearGuestAccountLocalState, clearInvalidatedGuestAccount as clearInvali
 import globalRootScope from '@lib/rootScope';
 import RepayRequestHandler from '@appManagers/utils/repayRequestHandler';
 import {AUTH_METHODS_WITH_RAW_ERRORS, AuthLogRedactor, getAuthMethod, secureAuthNetworker} from './authLogRedaction';
+import {PerformanceRpcTrace, performancePhaseTrace, type PerformanceRpcHandle} from '@appManagers/performanceTrace';
 
 const PREMIUM_FILE_NETWORKERS_COUNT = 6;
 const REGULAR_FILE_NETWORKERS_COUNT = 3;
 const DESTROY_NETWORKERS = true;
-
-type PerformanceRpcTrace = {
-  method: string,
-  startedAtEpochMs: number,
-  durationMs: number | null,
-  outcome: 'pending' | 'success' | 'error'
-};
-
-type PerformanceRpcTraceHandle = {
-  trace: PerformanceRpcTrace,
-  started: number
-};
 
 export class ApiManager extends ApiManagerMethods {
   private static fillTimeManagerOffsetPromise: Promise<void>;
@@ -95,7 +84,7 @@ export class ApiManager extends ApiManagerMethods {
 
   private authLogRedactor?: AuthLogRedactor;
 
-  private performanceRpcTrace = import.meta.env.VITE_PERF_TRACE === '1' ? [] as PerformanceRpcTrace[] : undefined;
+  private performanceRpcTrace = new PerformanceRpcTrace(import.meta.env.VITE_PERF_TRACE === '1');
 
   constructor() {
     super();
@@ -750,44 +739,31 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public getPerformanceRpcTrace() {
-    return {
-      enabled: !!this.performanceRpcTrace,
-      calls: this.performanceRpcTrace?.map((trace) => ({...trace})) || []
-    };
+    return this.performanceRpcTrace.getSnapshot();
   }
 
-  public resetPerformanceRpcTrace() {
-    this.performanceRpcTrace?.splice(0);
+  public resetPerformanceRpcTrace(recordSpans = true) {
+    this.performanceRpcTrace.reset(recordSpans);
   }
 
-  private startPerformanceRpcTrace(method: string): PerformanceRpcTraceHandle | undefined {
-    if(!this.performanceRpcTrace) return;
-
-    const started = performance.now();
-    const trace: PerformanceRpcTrace = {
-      method,
-      startedAtEpochMs: performance.timeOrigin + started,
-      durationMs: null,
-      outcome: 'pending'
-    };
-    this.performanceRpcTrace.push(trace);
-    return {trace, started};
+  public getPerformancePhaseTrace() {
+    return performancePhaseTrace.getSnapshot();
   }
 
-  private finishPerformanceRpcTrace(handle: PerformanceRpcTraceHandle | undefined, outcome: 'success' | 'error') {
-    if(!handle) return;
-    handle.trace.durationMs = Number((performance.now() - handle.started).toFixed(2));
-    handle.trace.outcome = outcome;
+  public resetPerformancePhaseTrace() {
+    performancePhaseTrace.reset();
   }
 
-  private trackPerformanceRpc<T>(handle: PerformanceRpcTraceHandle | undefined, request: CancellablePromise<T>) {
-    if(handle) {
-      request.then(
-        () => this.finishPerformanceRpcTrace(handle, 'success'),
-        () => this.finishPerformanceRpcTrace(handle, 'error')
-      );
-    }
-    return request;
+  private startPerformanceRpcTrace(method: string): PerformanceRpcHandle | undefined {
+    return this.performanceRpcTrace.start(method);
+  }
+
+  private finishPerformanceRpcTrace(handle: PerformanceRpcHandle | undefined, outcome: 'success' | 'error') {
+    this.performanceRpcTrace.finish(handle, outcome);
+  }
+
+  private trackPerformanceRpc<T>(handle: PerformanceRpcHandle | undefined, request: CancellablePromise<T>) {
+    return this.performanceRpcTrace.track(handle, request);
   }
 
   public invokeApi<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {}, options: InvokeApiOptions = {}): CancellablePromise<MethodDeclMap[T]['res']> {

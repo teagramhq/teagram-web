@@ -1,5 +1,6 @@
 import type {MessageSendingParams} from '@appManagers/appMessagesManager';
 import {AppManager} from '@appManagers/manager';
+import afterInteractiveList from '@appManagers/afterInteractiveList';
 import {AttachMenuBots, AttachMenuBot, Update, DataJSON, BotApp} from '@layer';
 import assumeType from '@helpers/assumeType';
 import makeError from '@helpers/makeError';
@@ -48,11 +49,13 @@ export default class AppAttachMenuBotsManager extends AppManager {
     });
 
     this.rootScope.addEventListener('user_auth', () => {
-      this.appAttachMenuBotsManager.getAttachMenuBots();
+      afterInteractiveList(() => {
+        this.appAttachMenuBotsManager.getAttachMenuBots();
 
-      setInterval(() => {
-        this.onUpdateAttachMenuBots({_: 'updateAttachMenuBots'});
-      }, 30 * 60e3);
+        setInterval(() => {
+          this.onUpdateAttachMenuBots({_: 'updateAttachMenuBots'});
+        }, 30 * 60e3);
+      }, this.rootScope);
     });
   }
 

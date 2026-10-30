@@ -1,8 +1,10 @@
 import {InputPrivacyKey, InputPrivacyRule, PrivacyRule, PrivacyKey, GlobalPrivacySettings, AccountSetContentSettings, AccountContentSettings} from '@layer';
 import convertInputKeyToKey from '@helpers/string/convertInputKeyToKey';
 import {AppManager} from '@appManagers/manager';
+import afterInteractiveList from '@appManagers/afterInteractiveList';
 import App from '@config/app';
 import Schema from '@lib/mtproto/schema';
+import noop from '@helpers/noop';
 
 export class AppPrivacyManager extends AppManager {
   private privacy: Partial<{
@@ -18,12 +20,14 @@ export class AppPrivacyManager extends AppManager {
       }
     });
 
-    // * preload content settings and global privacy so the chat-open
-    // * gift-button visibility check can resolve synchronously via the
-    // * acknowledged pattern (avoids a render flicker).
+    // * Content settings affect message visibility, so keep them on auth.
+    // * Global privacy only affects the optional gift button and can load after
+    // * the chat list becomes interactive.
     this.rootScope.addEventListener('user_auth', () => {
       this.getContentSettings();
-      this.getGlobalPrivacySettings();
+      afterInteractiveList(() => {
+        Promise.resolve(this.getGlobalPrivacySettings()).catch(noop);
+      }, this.rootScope);
     });
   }
 
@@ -90,8 +94,14 @@ export class AppPrivacyManager extends AppManager {
     }
     if(this.globalPrivacy) return this.globalPrivacy;
     return this.globalPrivacy = this.apiManager.invokeApi('account.getGlobalPrivacySettings').then((settings) => {
-      return this.globalPrivacy = settings;
+      this.globalPrivacy = settings;
+      this.rootScope.dispatchEvent('global_privacy_update', settings);
+      return settings;
     });
+  }
+
+  public getGlobalPrivacySettingsIfLoaded() {
+    return this.globalPrivacy instanceof Promise ? undefined : this.globalPrivacy;
   }
 
   public setGlobalPrivacySettings(settings: GlobalPrivacySettings) {
