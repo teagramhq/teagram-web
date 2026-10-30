@@ -55,3 +55,10 @@ test('the performance workflow assigns the 1x and 100x browser origins to separa
 test('PR performance runs require complete base bundle measurements', () => {
   assert.match(workflow, /PERF_REQUIRE_BASE: \$\{\{ github\.event_name == 'pull_request' \}\}/);
 });
+
+test('performance traces are enabled in both head and patched base bundles', () => {
+  assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir .*teagram-web-head-dist/);
+  assert.match(workflow, /git -C "\$base_directory" apply "\$GITHUB_WORKSPACE\/scripts\/performance\/performance-rpc-trace\.patch"/);
+  assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir .*teagram-web-base-dist/);
+  assert.ok(existsSync(new URL('./performance-rpc-trace.patch', import.meta.url)));
+});

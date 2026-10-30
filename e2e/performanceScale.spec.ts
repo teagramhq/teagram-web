@@ -2,6 +2,7 @@ import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
 import Icons from '../src/icons';
 import {evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
+import {summarizeCpuProfile, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceRpcCall} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -19,6 +20,11 @@ type Metric = {
   bundleBytes: number,
   longTasksOver50Ms: number,
   maxLongTaskDurationMs: number,
+  rpcCallCount: number,
+  rpcWallMs: number,
+  nonRpcElapsedMs: number,
+  rpcTraceEnabled: boolean,
+  rpcCalls: PerformanceRpcCall[],
   droppedFramePercent?: number,
   droppedFrames?: number,
   frameIntervals?: number
@@ -48,6 +54,7 @@ const report = {
   serverCommit: process.env.PERF_SERVER_COMMIT || '',
   fixtureServerCommit: process.env.PERF_FIXTURE_SERVER_COMMIT || '',
   requireBase: process.env.PERF_REQUIRE_BASE === 'true',
+  diagnostics: {} as Record<string, Record<string, unknown>>,
   variants: {
     base: {'1x': {}, '100x': {}},
     head: {'1x': {}, '100x': {}}
@@ -69,7 +76,7 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
       longTasks: [] as Array<{startTime: number, duration: number}>,
       frameIntervals: [] as number[],
       frameActive: false,
-      started: 0
+      started: performance.now()
     };
     try {
       const observer = new PerformanceObserver((list) => {
@@ -110,7 +117,8 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
 
 async function begin(page: Page, requests: {value: number}) {
   requests.value = 0;
-  await page.evaluate(() => {
+  await page.evaluate(async() => {
+    await (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace();
     const perf = (window as any).__teagramPerf;
     perf.longTasks = [];
     perf.frameIntervals = [];
@@ -121,7 +129,7 @@ async function begin(page: Page, requests: {value: number}) {
 
 async function capture(page: Page, requests: {value: number}, ms: number, scroll = false): Promise<Metric> {
   await page.waitForTimeout(150);
-  return page.evaluate(({ms, requests, scroll}) => {
+  const captured = await page.evaluate(async({ms, requests, scroll}) => {
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
     const bundleBytes = resources.filter((entry) => {
@@ -131,6 +139,15 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
     const droppedFrames = intervals.reduce((total: number, interval: number) => total + Math.max(0, Math.round(interval / (1000 / 60)) - 1), 0);
     const droppedFramePercent = intervals.length ? droppedFrames / (droppedFrames + intervals.length) * 100 : 0;
     const longTasks = perf.longTasks.filter((entry: {startTime: number}) => entry.startTime >= perf.started);
+    const rpcTrace = await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace() as {
+      enabled: boolean,
+      calls: Array<{
+        method: string,
+        startedAtEpochMs: number,
+        durationMs: number | null,
+        outcome: 'pending' | 'success' | 'error'
+      }>
+    };
     return {
       ms,
       requests,
@@ -138,15 +155,41 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
       bundleBytes,
       longTasksOver50Ms: longTasks.length,
       maxLongTaskDurationMs: longTasks.reduce((max: number, entry: {duration: number}) => Math.max(max, entry.duration), 0),
+      rpcTraceEnabled: rpcTrace.enabled,
+      rpcCalls: rpcTrace.calls.map((call) => ({
+        method: call.method,
+        startedAtMs: Math.max(0, call.startedAtEpochMs - performance.timeOrigin),
+        durationMs: call.durationMs,
+        outcome: call.outcome
+      })).filter((call) => call.startedAtMs <= ms),
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
   }, {ms, requests: requests.value, scroll});
+  expect(captured.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the client build').toBe(true);
+  return {
+    ...captured,
+    ...summarizeRpcTrace(captured.rpcCalls as PerformanceRpcCall[], ms)
+  };
 }
 
 async function elapsed(page: Page) {
   return page.evaluate(() => performance.now() - (window as any).__teagramPerf.started);
+}
+
+async function startCpuProfile(page: Page) {
+  const session = await page.context().newCDPSession(page);
+  await session.send('Profiler.enable');
+  await session.send('Profiler.setSamplingInterval', {interval: 1_000});
+  await session.send('Profiler.start');
+  return session;
+}
+
+async function finishCpuProfile(session: Awaited<ReturnType<typeof startCpuProfile>>) {
+  const {profile} = await session.send('Profiler.stop');
+  await session.detach();
+  return summarizeCpuProfile(profile as PerformanceCpuProfile);
 }
 
 async function signIn(page: Page, origin: string) {
@@ -386,11 +429,54 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   }
 }
 
+async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+  const page = await context.newPage();
+  const requests = {value: 0};
+  await installInstrumentation(page, requests);
+
+  try {
+    const coldProfile = await startCpuProfile(page);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    const coldMs = await elapsed(page);
+    const coldCpu = await finishCpuProfile(coldProfile);
+    const coldChatList = {...await capture(page, requests, coldMs), cpu: coldCpu};
+
+    await begin(page, requests);
+    const warmProfile = await startCpuProfile(page);
+    await page.reload({waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    const warmMs = await elapsed(page);
+    const warmCpu = await finishCpuProfile(warmProfile);
+    const warmChatList = {...await capture(page, requests, warmMs), cpu: warmCpu};
+
+    const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
+    await expect(row).toBeVisible({timeout: 60_000});
+    await begin(page, requests);
+    const chatProfile = await startCpuProfile(page);
+    await row.click();
+    await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
+    const chatOpenMs = await elapsed(page);
+    const chatCpu = await finishCpuProfile(chatProfile);
+    const chatOpen = {...await capture(page, requests, chatOpenMs), cpu: chatCpu};
+
+    return {coldChatList, warmChatList, chatOpen};
+  } finally {
+    await context.close();
+  }
+}
+
 test('measures the scale fixture in interleaved base and head runs', async({browser}) => {
   expect(username).toBeTruthy();
   expect(password).toBeTruthy();
   expect(reportPath).toBeTruthy();
 
+  let traceRun: VariantRun | undefined;
   for(const scale of scales) {
     const fixture = fixtures[scale];
     expect(fixture, `${scale} fixture was not supplied`).toBeTruthy();
@@ -409,7 +495,9 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
     ] : [['head', headOrigin!]];
     const prepared = new Map<Variant, VariantRun>();
     for(const [variant, origin] of variants) {
-      prepared.set(variant, await prepareVariant(browser, variant, origin));
+      const run = await prepareVariant(browser, variant, origin);
+      prepared.set(variant, run);
+      if(scale === '100x' && variant === 'head') traceRun = run;
     }
 
     for(let round = 0; round < PERFORMANCE_REPEATS; ++round) {
@@ -419,6 +507,9 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       }
     }
   }
+
+  expect(traceRun, '100x head trace setup was not created').toBeTruthy();
+  report.diagnostics['100x'] = await test.step('trace 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRun!, fixtures['100x']!));
 });
 
 test('measures a 100 ms task during date jump and blocks the negative control', async({browser}) => {
