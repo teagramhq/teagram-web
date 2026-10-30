@@ -58,6 +58,7 @@ const report = {
     head: {'1x': {}, '100x': {}}
   } as Record<Variant, Record<Scale, Record<string, Partial<Metric>[]>>>
 };
+const preparedVariants: Record<Scale, Partial<Record<Variant, VariantRun>>> = {'1x': {}, '100x': {}};
 
 const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
 
@@ -378,6 +379,34 @@ function withOrigin(run: VariantRun, variant: Variant, origin: string): VariantR
   };
 }
 
+test.beforeAll(async({browser}) => {
+  expect(username).toBeTruthy();
+  expect(password).toBeTruthy();
+
+  for(const scale of scales) {
+    const fixture = fixtures[scale];
+    expect(fixture, `${scale} fixture was not supplied`).toBeTruthy();
+    expect(Number.isSafeInteger(fixture?.partner), `${scale} fixture partner is invalid`).toBe(true);
+    expect(Number.isSafeInteger(fixture?.middle_date), `${scale} fixture date is invalid`).toBe(true);
+
+    const suffix = scale.toUpperCase();
+    const headOrigin = process.env[`PERF_HEAD_ORIGIN_${suffix}`];
+    const baseOrigin = process.env[`PERF_BASE_ORIGIN_${suffix}`];
+    expect(headOrigin, `${scale} head origin is missing`).toBeTruthy();
+    if(report.requireBase) expect(baseOrigin, `${scale} base origin is missing`).toBeTruthy();
+
+    const variants: Array<[Variant, string]> = report.requireBase ? [
+      ['base', baseOrigin!],
+      ['head', headOrigin!]
+    ] : [['head', headOrigin!]];
+    const [[firstVariant, firstOrigin]] = variants;
+    const signedIn = await prepareVariant(browser, firstVariant, firstOrigin);
+    for(const [variant, origin] of variants) {
+      preparedVariants[scale][variant] = withOrigin(signedIn, variant, origin);
+    }
+  }
+});
+
 async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixture: Fixture) {
   const {variant, origin} = run;
   const measured = report.variants[variant][scale];
@@ -422,70 +451,49 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
 }
 
 test('measures the scale fixture in interleaved base and head runs', async({browser}) => {
-  expect(username).toBeTruthy();
-  expect(password).toBeTruthy();
   expect(reportPath).toBeTruthy();
 
   for(const scale of scales) {
     const fixture = fixtures[scale];
-    expect(fixture, `${scale} fixture was not supplied`).toBeTruthy();
-    expect(Number.isSafeInteger(fixture?.partner), `${scale} fixture partner is invalid`).toBe(true);
-    expect(Number.isSafeInteger(fixture?.middle_date), `${scale} fixture date is invalid`).toBe(true);
-
-    const suffix = scale.toUpperCase();
-    const headOrigin = process.env[`PERF_HEAD_ORIGIN_${suffix}`];
-    const baseOrigin = process.env[`PERF_BASE_ORIGIN_${suffix}`];
-    expect(headOrigin, `${scale} head origin is missing`).toBeTruthy();
-    if(report.requireBase) expect(baseOrigin, `${scale} base origin is missing`).toBeTruthy();
-
-    const variants: Array<[Variant, string]> = report.requireBase ? [
-      ['base', baseOrigin!],
-      ['head', headOrigin!]
-    ] : [['head', headOrigin!]];
-    const [[firstVariant, firstOrigin]] = variants;
-    const signedIn = await prepareVariant(browser, firstVariant, firstOrigin);
-    const prepared = new Map<Variant, VariantRun>(variants.map(([variant, origin]) => [variant, withOrigin(signedIn, variant, origin)]));
+    const variants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
 
     for(let round = 0; round < PERFORMANCE_REPEATS; ++round) {
       const order = round % 2 === 0 ? variants : [...variants].reverse();
-      for(const [variant] of order) {
-        await test.step(`${scale} ${variant} round ${round + 1}`, () => runVariant(browser, prepared.get(variant)!, scale, fixture!));
+      for(const variant of order) {
+        await test.step(`${scale} ${variant} round ${round + 1}`, () => runVariant(browser, preparedVariants[scale][variant]!, scale, fixture!));
       }
     }
   }
 });
 
-test('blocks repeated injected 200 ms main-thread stalls in cold chat list', async({browser}) => {
+test('blocks repeated injected 100 ms main-thread stalls in cold chat list', async({browser}) => {
   test.skip(!report.requireBase, 'negative control requires same-run base measurements');
-  expect(username).toBeTruthy();
-  expect(password).toBeTruthy();
   const fixture = fixtures['100x'];
-  const origin = process.env.PERF_HEAD_ORIGIN_100X;
   expect(fixture, '100x fixture was not supplied').toBeTruthy();
-  expect(origin, '100x head origin is missing').toBeTruthy();
+  const preparedHead = preparedVariants['100x'].head;
+  expect(preparedHead, '100x head sign-in snapshot was not prepared').toBeTruthy();
 
-  const prepared = await prepareVariant(browser, 'head', origin!);
   const context = await browser.newContext({
     ignoreHTTPSErrors: true,
     viewport: {width: 1280, height: 800},
-    storageState: prepared.storageState
+    storageState: preparedHead!.storageState
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests, {durationMs: 200});
+  await installInstrumentation(page, requests, {durationMs: 100});
 
   try {
     const negativeSamples: Metric[] = [];
     for(let repeat = 0; repeat < PERFORMANCE_REPEATS; ++repeat) {
       requests.value = 0;
-      await page.goto(origin!, {waitUntil: 'domcontentloaded'});
+      await page.goto(preparedHead!.origin, {waitUntil: 'domcontentloaded'});
       await waitForChatList(page);
       const negativeSample = await capture(page, requests, await elapsed(page));
       const injectedTask = await injectedLongTask(page);
       expect(negativeSample.longTasksOver50Ms).toBeGreaterThan(0);
-      expect(injectedTask.duration).toBeGreaterThanOrEqual(200);
+      expect(injectedTask.duration).toBeGreaterThanOrEqual(100);
       expect(injectedTask.observed).toBe(true);
-      expect(negativeSample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(200);
+      expect(negativeSample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
       negativeSamples.push(negativeSample);
     }
     const baseColdSamples = report.variants.base['100x'].coldChatList;
