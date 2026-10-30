@@ -17,6 +17,8 @@ export const PERFORMANCE_REPEATS = 3;
 const CALIBRATION_RUNS = 20;
 const MAX_SCALE_RATIO = 1.5;
 const MIN_BLOCKING_TIME_REGRESSION_MS = 80;
+// Same-run base repeats on the hosted runner spread by about 5 points of dropped frames.
+const MIN_DROPPED_FRAME_REGRESSION_PERCENT = 5;
 const REQUIRED_METRICS = [
   ['ms', 'timing'],
   ['requests', 'requests'],
@@ -219,8 +221,10 @@ export function evaluatePerformance(report, history = []) {
             if(Number.isFinite(baselineLongTasks) && Number.isFinite(headLongTasks) && headLongTasks > baselineLongTasks) {
               addFailure(blockingFailures, scale, scenario.key, `median long task count ${headLongTasks} was worse than same-run base median ${baselineLongTasks}`);
             }
-            if(Number.isFinite(baselineDroppedFramePercent) && Number.isFinite(headDroppedFramePercent) && headDroppedFramePercent > baselineDroppedFramePercent) {
-              addFailure(blockingFailures, scale, scenario.key, `median dropped frames ${headDroppedFramePercent.toFixed(2)}% was worse than same-run base median ${baselineDroppedFramePercent.toFixed(2)}%`);
+            const droppedFrameLimit = baselineDroppedFramePercent + MIN_DROPPED_FRAME_REGRESSION_PERCENT;
+            const regressedRepeats = headSamples.filter((sample) => sample?.droppedFramePercent > droppedFrameLimit).length;
+            if(Number.isFinite(baselineDroppedFramePercent) && Number.isFinite(headDroppedFramePercent) && regressedRepeats >= 2) {
+              addFailure(blockingFailures, scale, scenario.key, `dropped frames in ${regressedRepeats} head repeats were worse than same-run base median ${baselineDroppedFramePercent.toFixed(2)}% by over ${MIN_DROPPED_FRAME_REGRESSION_PERCENT} points (head median ${headDroppedFramePercent.toFixed(2)}%)`);
             }
           }
           if(Number.isFinite(baselineBlockingTime) && Number.isFinite(headBlockingTime) && headBlockingTime - baselineBlockingTime >= MIN_BLOCKING_TIME_REGRESSION_MS) {
