@@ -25,10 +25,6 @@ type Metric = {
   frameIntervals?: number
 };
 
-type LongTaskInjection = {
-  durationMs: number
-};
-
 type VariantRun = {
   variant: Variant,
   origin: string,
@@ -66,11 +62,11 @@ test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 });
 
-function installInstrumentation(page: Page, requestCounter: {value: number}, injection: LongTaskInjection | false = false) {
+function installInstrumentation(page: Page, requestCounter: {value: number}) {
   page.on('request', (request) => {
     if(request.resourceType() !== 'websocket') ++requestCounter.value;
   });
-  return page.addInitScript(({injection}: {injection: LongTaskInjection | false}) => {
+  return page.addInitScript(() => {
     const perf: any = (window as any).__teagramPerf = {
       longTasks: [] as Array<{startTime: number, duration: number}>,
       frameIntervals: [] as number[],
@@ -86,14 +82,12 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
       });
       observer.observe({type: 'longtask', buffered: true});
     } catch{}
-    if(injection) {
-      const inject = () => {
-        const started = performance.now();
-        while(performance.now() - started < injection.durationMs) {}
-        perf.injectedLongTask = {started, duration: performance.now() - started};
-      };
-      window.addEventListener('DOMContentLoaded', inject, {once: true});
-    }
+    perf.injectLongTask = (durationMs: number) => {
+      const started = performance.now();
+      while(performance.now() - started < durationMs) {}
+      perf.injectedLongTask = {started, duration: performance.now() - started};
+      return perf.injectedLongTask;
+    };
     perf.startFrames = () => {
       perf.frameActive = true;
       perf.lastFrame = performance.now();
@@ -106,7 +100,7 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
       requestAnimationFrame(sampleFrame);
     };
     perf.stopFrames = () => perf.frameActive = false;
-  }, {injection});
+  });
 }
 
 async function begin(page: Page, requests: {value: number}) {
@@ -480,7 +474,7 @@ test('blocks repeated injected 100 ms main-thread stalls in cold chat list', asy
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests, {durationMs: 100});
+  await installInstrumentation(page, requests);
 
   try {
     const negativeSamples: Metric[] = [];
@@ -488,6 +482,7 @@ test('blocks repeated injected 100 ms main-thread stalls in cold chat list', asy
       requests.value = 0;
       await page.goto(preparedHead!.origin, {waitUntil: 'domcontentloaded'});
       await waitForChatList(page);
+      await page.evaluate(() => (window as any).__teagramPerf.injectLongTask(100));
       const negativeSample = await capture(page, requests, await elapsed(page));
       const injectedTask = await injectedLongTask(page);
       expect(negativeSample.longTasksOver50Ms).toBeGreaterThan(0);

@@ -77,6 +77,15 @@ function medianLongTasks(samples) {
   return median(samples.map((sample) => Number.isFinite(sample?.longTasksOver50Ms) ? sample.longTasksOver50Ms : 0));
 }
 
+function repeatedLongTaskRegressionCount(headSamples, baseSamples) {
+  return headSamples.reduce((count, sample, index) => {
+    const headCount = sample?.longTasksOver50Ms;
+    const rawBaseCount = baseSamples[index]?.longTasksOver50Ms;
+    const baseCount = Number.isFinite(rawBaseCount) ? rawBaseCount : 0;
+    return Number.isFinite(headCount) && Number.isFinite(baseCount) && headCount > baseCount ? count + 1 : count;
+  }, 0);
+}
+
 function medianMetric(samples, field) {
   if(!Array.isArray(samples) || !samples.length) return undefined;
   const values = samples.map((sample) => sample?.[field]);
@@ -250,8 +259,13 @@ export function evaluatePerformance(report, history = []) {
           const baselineBlockingTime = report.requireBase ? medianBlockingTime(baseSamples) : historyBlockingTimeBaseline(history, scale, scenario.key, report);
           const headLongTasks = medianLongTasks(headSamples);
           const headBlockingTime = medianBlockingTime(headSamples);
-          if(Number.isFinite(baselineLongTasks) && Number.isFinite(headLongTasks) && headLongTasks > baselineLongTasks) {
-            addFailure(blockingFailures, scale, scenario.key, `median long task count ${headLongTasks} exceeded baseline ${baselineLongTasks}`);
+          const pairedLongTaskRegressions = report.requireBase ? repeatedLongTaskRegressionCount(headSamples, baseSamples) : 0;
+          const longTaskRegression = report.requireBase ? pairedLongTaskRegressions >= Math.ceil(headSamples.length / 2) :
+            Number.isFinite(baselineLongTasks) && Number.isFinite(headLongTasks) && headLongTasks > baselineLongTasks;
+          if(longTaskRegression) {
+            const message = report.requireBase ? `long task count increased in ${pairedLongTaskRegressions} of ${headSamples.length} paired repeats over the corresponding base samples` :
+              `median long task count ${headLongTasks} exceeded baseline ${baselineLongTasks}`;
+            addFailure(blockingFailures, scale, scenario.key, message);
           }
           if(Number.isFinite(baselineBlockingTime) && Number.isFinite(headBlockingTime) && headBlockingTime - baselineBlockingTime >= MIN_BLOCKING_TIME_REGRESSION_MS) {
             addFailure(blockingFailures, scale, scenario.key, `median long-task blocking time ${headBlockingTime.toFixed(1)} ms exceeded base median ${baselineBlockingTime.toFixed(1)} ms by at least ${MIN_BLOCKING_TIME_REGRESSION_MS} ms`);

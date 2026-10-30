@@ -77,6 +77,22 @@ test('blocks a 100 ms main-thread task on 100x cold load from the first run', ()
   assert.equal(result.blockingFailures.some((failure) => failure.includes('1x coldChatList') && failure.includes('long task')), false);
 });
 
+test('blocks an added 100 ms task when the 100x cold-load base already has long tasks', () => {
+  const base = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 3, blockingTimeMs: 140, maxLongTaskDurationMs: 118},
+    {longTasksOver50Ms: 3, blockingTimeMs: 134, maxLongTaskDurationMs: 119},
+    {longTasksOver50Ms: 3, blockingTimeMs: 140, maxLongTaskDurationMs: 119}
+  ]}});
+  const head = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 4, blockingTimeMs: 190, maxLongTaskDurationMs: 118},
+    {longTasksOver50Ms: 4, blockingTimeMs: 184, maxLongTaskDurationMs: 119},
+    {longTasksOver50Ms: 4, blockingTimeMs: 190, maxLongTaskDurationMs: 119}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('long task')));
+});
+
 test('reports 100x scroll frame loss during master calibration', () => {
   const head = scaleVariants({
     '1x': {scrollBack2k: {droppedFrames: 50, frameIntervals: 950, droppedFramePercent: 5}},
@@ -157,6 +173,22 @@ test('blocks new long tasks across 100x scenarios', () => {
 
     assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes('long task')));
   }
+});
+
+test('allows send-message task noise when the corresponding base repeat is worse', () => {
+  const base = scaleVariants({'100x': {sendMessage: [
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0},
+    {longTasksOver50Ms: 4, blockingTimeMs: 68, maxLongTaskDurationMs: 82}
+  ]}});
+  const head = scaleVariants({'100x': {sendMessage: [
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0},
+    {longTasksOver50Ms: 1, blockingTimeMs: 14, maxLongTaskDurationMs: 64},
+    {longTasksOver50Ms: 1, blockingTimeMs: 27, maxLongTaskDurationMs: 77}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x sendMessage') && /long task|blocking time/.test(failure)), false);
 });
 
 test('allows existing 100x base long tasks when the head count does not grow', () => {
