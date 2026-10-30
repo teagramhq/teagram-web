@@ -16,12 +16,14 @@ export const PERFORMANCE_REPEATS = 3;
 
 const CALIBRATION_RUNS = 20;
 const MAX_SCALE_RATIO = 1.5;
+const MIN_BLOCKING_TIME_REGRESSION_MS = 80;
 const REQUIRED_METRICS = [
   ['ms', 'timing'],
   ['requests', 'requests'],
   ['domNodes', 'DOM nodes'],
   ['bundleBytes', 'bundle bytes'],
   ['longTasksOver50Ms', 'long task counter'],
+  ['blockingTimeMs', 'long-task blocking time'],
   ['maxLongTaskDurationMs', 'maximum long task duration']
 ];
 
@@ -39,7 +41,7 @@ function spread(values) {
 }
 
 function summarizeSamples(samples = []) {
-  const keys = ['ms', 'requests', 'domNodes', 'bundleBytes', 'longTasksOver50Ms', 'droppedFramePercent'];
+  const keys = ['ms', 'requests', 'domNodes', 'bundleBytes', 'longTasksOver50Ms', 'blockingTimeMs', 'droppedFramePercent'];
   const summary = Object.fromEntries(keys.map((key) => {
     const values = samples.map((sample) => sample[key]).filter(Number.isFinite);
     return [key, key === 'longTasksOver50Ms' && values.length ? Math.max(...values) : median(values)];
@@ -75,6 +77,12 @@ function medianLongTasks(samples) {
   return median(samples.map((sample) => Number.isFinite(sample?.longTasksOver50Ms) ? sample.longTasksOver50Ms : 0));
 }
 
+function medianBlockingTime(samples) {
+  if(!Array.isArray(samples) || !samples.length) return undefined;
+  const values = samples.map((sample) => sample?.blockingTimeMs);
+  return values.every(Number.isFinite) ? median(values) : undefined;
+}
+
 function historyLongTaskBaseline(history, scale, key, report) {
   const counts = history.flatMap((run) => {
     if(!matchesFixture(run, report)) return [];
@@ -82,6 +90,15 @@ function historyLongTaskBaseline(history, scale, key, report) {
     return Number.isFinite(count) ? [count] : [];
   });
   return median(counts);
+}
+
+function historyBlockingTimeBaseline(history, scale, key, report) {
+  const blockingTimes = history.flatMap((run) => {
+    if(!matchesFixture(run, report)) return [];
+    const value = medianBlockingTime(run.variants?.head?.[scale]?.[key]);
+    return Number.isFinite(value) ? [value] : [];
+  });
+  return median(blockingTimes);
 }
 
 function addFailure(failures, scale, key, message) {
@@ -153,6 +170,14 @@ export function evaluatePerformance(report, history = []) {
           if(!Number.isFinite(sample?.bundleBytes)) {
             addFailure(blockingFailures, scale, scenario.key, `base bundle measurement is missing or invalid in sample ${index + 1}`);
           }
+          if(scale === '100x' && scenario.key !== 'scrollBack2k' && scenario.key !== 'dateJump') {
+            if(!Number.isFinite(sample?.longTasksOver50Ms)) {
+              addFailure(blockingFailures, scale, scenario.key, `base long task counter is missing or invalid in sample ${index + 1}`);
+            }
+            if(!Number.isFinite(sample?.blockingTimeMs)) {
+              addFailure(blockingFailures, scale, scenario.key, `base long-task blocking time is missing or invalid in sample ${index + 1}`);
+            }
+          }
         });
       }
 
@@ -165,9 +190,13 @@ export function evaluatePerformance(report, history = []) {
           });
         } else {
           const baselineLongTasks = report.requireBase ? medianLongTasks(baseSamples) ?? 0 : historyLongTaskBaseline(history, scale, scenario.key, report);
+          const baselineBlockingTime = report.requireBase ? medianBlockingTime(baseSamples) : historyBlockingTimeBaseline(history, scale, scenario.key, report);
           headSamples.forEach((sample, index) => {
             if(Number.isFinite(baselineLongTasks) && Number.isFinite(sample?.longTasksOver50Ms) && sample.longTasksOver50Ms > baselineLongTasks) {
               addFailure(blockingFailures, scale, scenario.key, `${sample.longTasksOver50Ms} long task(s) over 50 ms in head sample ${index + 1} exceeded baseline ${baselineLongTasks}`);
+            }
+            if(Number.isFinite(baselineBlockingTime) && Number.isFinite(sample?.blockingTimeMs) && sample.blockingTimeMs - baselineBlockingTime >= MIN_BLOCKING_TIME_REGRESSION_MS) {
+              addFailure(blockingFailures, scale, scenario.key, `long-task blocking time ${sample.blockingTimeMs.toFixed(1)} ms in head sample ${index + 1} exceeded base median ${baselineBlockingTime.toFixed(1)} ms by at least ${MIN_BLOCKING_TIME_REGRESSION_MS} ms`);
             }
           });
         }
@@ -223,8 +252,8 @@ export function evaluatePerformance(report, history = []) {
 
 export function formatPerformanceTable(evaluation) {
   const lines = [
-    '| Scenario | Head (ms) | Budget (ms) | Main noise band (ms) | 100x/1x | Base (ms) | Requests | DOM nodes | Long tasks >50 ms | Dropped frames | Bundle (bytes) | Gate |',
-    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |'
+    '| Scenario | Head (ms) | Budget (ms) | Main noise band (ms) | 100x/1x | Base (ms) | Requests | DOM nodes | Long tasks >50 ms | Blocking time (ms) | Dropped frames | Bundle (bytes) | Gate |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |'
   ];
   for(const row of evaluation.rows) {
     const show = (value, digits = 0) => Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
@@ -234,7 +263,7 @@ export function formatPerformanceTable(evaluation) {
     const ratio = row.scale !== '100x' ? '—' : Number.isFinite(row.scaleRatio) ? `${show(row.scaleRatio, 2)}x` : `warming ${Math.min(row.historyRuns, smallHistoryRuns)}/${CALIBRATION_RUNS}`;
     const overBudget = row.budgetMs !== null && Number.isFinite(row.head.ms) && row.head.ms > row.budgetMs;
     const gate = row.budgetStatus === 'failed' ? 'failed' : row.budgetStatus === 'warming' ? overBudget ? 'over budget (report only)' : 'report only' : 'calibrated';
-    lines.push(`| ${row.label} (${row.scale}) | ${show(row.head.ms, 1)} | ${budget} | ${noise} | ${ratio} | ${show(row.base.ms, 1)} | ${show(row.head.requests)} | ${show(row.head.domNodes)} | ${show(row.head.longTasksOver50Ms)} | ${show(row.head.droppedFramePercent, 2)}% | ${show(row.head.bundleBytes)} | ${gate} |`);
+    lines.push(`| ${row.label} (${row.scale}) | ${show(row.head.ms, 1)} | ${budget} | ${noise} | ${ratio} | ${show(row.base.ms, 1)} | ${show(row.head.requests)} | ${show(row.head.domNodes)} | ${show(row.head.longTasksOver50Ms)} | ${show(row.head.blockingTimeMs, 1)} | ${show(row.head.droppedFramePercent, 2)}% | ${show(row.head.bundleBytes)} | ${gate} |`);
   }
   return lines.join('\n');
 }

@@ -18,6 +18,7 @@ type Metric = {
   domNodes: number,
   bundleBytes: number,
   longTasksOver50Ms: number,
+  blockingTimeMs: number,
   maxLongTaskDurationMs: number,
   droppedFramePercent?: number,
   droppedFrames?: number,
@@ -137,12 +138,37 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
       domNodes: document.querySelectorAll('*').length,
       bundleBytes,
       longTasksOver50Ms: longTasks.length,
+      blockingTimeMs: longTasks.reduce((total: number, entry: {duration: number}) => total + entry.duration - 50, 0),
       maxLongTaskDurationMs: longTasks.reduce((max: number, entry: {duration: number}) => Math.max(max, entry.duration), 0),
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
   }, {ms, requests: requests.value, scroll});
+}
+
+async function injectedLongTask(page: Page) {
+  return page.evaluate(() => {
+    const perf = (window as any).__teagramPerf;
+    const task = perf.injectedLongTask;
+    return {
+      duration: task?.duration,
+      observed: task && perf.longTasks.some((entry: {startTime: number, duration: number}) => entry.startTime <= task.started && entry.startTime + entry.duration >= task.started && entry.duration > 50)
+    };
+  });
+}
+
+function evaluateWithNegativeSample(key: string, sample: Metric) {
+  const existingSamples = report.variants.head['100x'][key];
+  expect(existingSamples).toHaveLength(PERFORMANCE_REPEATS);
+  const head = {
+    ...report.variants.head,
+    '100x': {
+      ...report.variants.head['100x'],
+      [key]: [...existingSamples, sample]
+    }
+  };
+  return evaluatePerformance({...report, variants: {...report.variants, head}});
 }
 
 async function elapsed(page: Page) {
@@ -173,10 +199,11 @@ async function reloadChatList(page: Page, requests: {value: number}) {
   return capture(page, requests, await elapsed(page));
 }
 
-async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture) {
+async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, injectLongTask = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
   await begin(page, requests);
+  if(injectLongTask) await page.evaluate(() => (window as any).__teagramPerf.armInjectedLongTask());
   await row.click();
   await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
   return capture(page, requests, await elapsed(page));
@@ -421,7 +448,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   }
 });
 
-test('measures a 100 ms task during date jump and blocks the negative control', async({browser}) => {
+test('blocks 100 ms tasks in date jump and chat open, including when base has existing stalls', async({browser}) => {
   expect(username).toBeTruthy();
   expect(password).toBeTruthy();
   const fixture = fixtures['100x'];
@@ -445,32 +472,31 @@ test('measures a 100 ms task during date jump and blocks the negative control', 
     await openPartnerChat(page, requests, fixture!);
     const negativeSample = await jumpToFixtureDate(page, requests, fixture!, true);
     expect(negativeSample.longTasksOver50Ms).toBeGreaterThan(0);
-    const injectedTask = await page.evaluate(() => {
-      const perf = (window as any).__teagramPerf;
-      const task = perf.injectedLongTask;
-      return {
-        duration: task?.duration,
-        observed: task && perf.longTasks.some((entry: {startTime: number, duration: number}) => entry.startTime <= task.started && entry.startTime + entry.duration >= task.started && entry.duration > 50)
-      };
-    });
+    const injectedTask = await injectedLongTask(page);
     expect(injectedTask.duration).toBeGreaterThanOrEqual(100);
     expect(injectedTask.observed).toBe(true);
     expect(negativeSample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
-    const existingDateJumpSamples = report.variants.head['100x'].dateJump;
-    expect(existingDateJumpSamples).toHaveLength(PERFORMANCE_REPEATS);
+    const dateJumpEvaluation = evaluateWithNegativeSample('dateJump', negativeSample);
+    expect(dateJumpEvaluation.blockingFailures.some((failure) => failure.includes('100x dateJump') && failure.includes('long task'))).toBe(true);
 
-    const head = {
-      ...report.variants.head,
-      '100x': {
-        ...report.variants.head['100x'],
-        dateJump: [...existingDateJumpSamples, negativeSample]
-      }
-    };
-    const evaluation = evaluatePerformance({
-      ...report,
-      variants: {...report.variants, head}
-    });
-    expect(evaluation.blockingFailures.some((failure) => failure.includes('100x dateJump') && failure.includes('long task'))).toBe(true);
+    await page.close();
+    const chatPage = await context.newPage();
+    const chatRequests = {value: 0};
+    await installInstrumentation(chatPage, chatRequests, true);
+    await chatPage.goto(origin!, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(chatPage);
+    const negativeChatOpen = await openPartnerChat(chatPage, chatRequests, fixture!, true);
+    expect(negativeChatOpen.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
+    const injectedChatTask = await injectedLongTask(chatPage);
+    expect(injectedChatTask.duration).toBeGreaterThanOrEqual(100);
+    expect(injectedChatTask.observed).toBe(true);
+
+    const baseChatSamples = report.variants.base['100x'].chatOpen;
+    expect(baseChatSamples).toHaveLength(PERFORMANCE_REPEATS);
+    const baseStalledChatSamples = baseChatSamples.filter((sample) => (sample.longTasksOver50Ms || 0) > 0 && (sample.blockingTimeMs || 0) > 0);
+    expect(baseStalledChatSamples.length).toBeGreaterThanOrEqual(Math.ceil(PERFORMANCE_REPEATS / 2));
+    const chatOpenEvaluation = evaluateWithNegativeSample('chatOpen', negativeChatOpen);
+    expect(chatOpenEvaluation.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes('blocking time'))).toBe(true);
   } finally {
     await context.close();
   }

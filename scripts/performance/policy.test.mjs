@@ -20,6 +20,7 @@ function scaleSamples(overrides = {}) {
       domNodes: 300,
       bundleBytes: 100_000,
       longTasksOver50Ms: 0,
+      blockingTimeMs: 0,
       maxLongTaskDurationMs: 0,
       frameIntervals: 100,
       droppedFrames: 0,
@@ -154,20 +155,52 @@ test('does not let an outlier base repeat hide a new 100x task', () => {
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes('long task')));
 });
 
-test('allows task-duration jitter when 100x contacts long-task counts do not grow', () => {
+test('allows blocking-time jitter below 80 ms when 100x contacts long-task counts do not grow', () => {
   const base = scaleVariants({'100x': {contactsList: [
-    {longTasksOver50Ms: 0, maxLongTaskDurationMs: 0},
-    {longTasksOver50Ms: 4, maxLongTaskDurationMs: 158},
-    {longTasksOver50Ms: 1, maxLongTaskDurationMs: 149}
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0},
+    {longTasksOver50Ms: 4, blockingTimeMs: 432, maxLongTaskDurationMs: 158},
+    {longTasksOver50Ms: 1, blockingTimeMs: 99, maxLongTaskDurationMs: 149}
   ]}});
   const head = scaleVariants({'100x': {contactsList: [
-    {longTasksOver50Ms: 1, maxLongTaskDurationMs: 162},
-    {longTasksOver50Ms: 1, maxLongTaskDurationMs: 150},
-    {longTasksOver50Ms: 1, maxLongTaskDurationMs: 167}
+    {longTasksOver50Ms: 1, blockingTimeMs: 112, maxLongTaskDurationMs: 162},
+    {longTasksOver50Ms: 1, blockingTimeMs: 100, maxLongTaskDurationMs: 150},
+    {longTasksOver50Ms: 1, blockingTimeMs: 117, maxLongTaskDurationMs: 167}
   ]}});
   const result = evaluatePerformance(report({base, head}));
 
-  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x contactsList') && failure.includes('100 ms main-thread task')), false);
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x contactsList') && failure.includes('blocking time')), false);
+});
+
+test('fails closed when head blocking-time instrumentation is missing', () => {
+  const head = scaleVariants();
+  delete head['100x'].chatOpen[0].blockingTimeMs;
+  const result = evaluatePerformance(report({head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes('long-task blocking time')));
+});
+
+test('fails closed when the measured 100x base omits blocking time', () => {
+  const base = scaleVariants();
+  delete base['100x'].chatOpen[0].blockingTimeMs;
+  const result = evaluatePerformance(report({base}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes('base long-task blocking time')));
+});
+
+test('blocks an 80 ms increase in blocking time when a 100x task count matches base', () => {
+  const base = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 2, blockingTimeMs: 100},
+    {longTasksOver50Ms: 2, blockingTimeMs: 100},
+    {longTasksOver50Ms: 2, blockingTimeMs: 100}
+  ]}});
+  const head = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 2, blockingTimeMs: 179},
+    {longTasksOver50Ms: 2, blockingTimeMs: 180},
+    {longTasksOver50Ms: 2, blockingTimeMs: 181}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')));
 });
 
 test('blocks a non-scroll long task when the base has no measured count', () => {
@@ -177,6 +210,18 @@ test('blocks a non-scroll long task when the base has no measured count', () => 
   const result = evaluatePerformance(report({base, head}));
 
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x dateJump') && failure.includes('long task')));
+});
+
+test('blocks added 100x blocking time against compatible main history when there is no base', () => {
+  const head = scaleVariants({'100x': {globalSearch: [
+    {longTasksOver50Ms: 1, blockingTimeMs: 180},
+    {longTasksOver50Ms: 1, blockingTimeMs: 180},
+    {longTasksOver50Ms: 1, blockingTimeMs: 180}
+  ]}});
+  const history = mainHistory(1, {'100x': {globalSearch: {longTasksOver50Ms: 1, blockingTimeMs: 100}}});
+  const result = evaluatePerformance(report({head, requireBase: false}), history);
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x globalSearch') && failure.includes('blocking time')));
 });
 
 test('compares 100x long tasks with compatible main history when a push has no base', () => {
@@ -206,6 +251,7 @@ test('reports fixed 100x timing budget misses before calibration', () => {
   const table = formatPerformanceTable(result);
 
   assert.equal(result.calibratedScenarios, 0);
+  assert.match(table, /Blocking time \(ms\)/);
   for(const scenario of SCENARIOS.filter(({budgetMs}) => budgetMs !== null)) {
     assert.equal(result.blockingFailures.some((failure) => failure.includes(`100x ${scenario.key}`) && failure.includes(`${scenario.budgetMs} ms budget`)), false);
     assert.equal(result.rows.find((row) => row.scale === '100x' && row.key === scenario.key).budgetStatus, 'warming');
