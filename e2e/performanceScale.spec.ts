@@ -366,6 +366,18 @@ async function prepareVariant(browser: Browser, variant: Variant, origin: string
   }
 }
 
+// Both variants start from one signed-in snapshot so they share the auth key and cached client state.
+function withOrigin(run: VariantRun, variant: Variant, origin: string): VariantRun {
+  return {
+    variant,
+    origin,
+    storageState: {
+      ...run.storageState,
+      origins: run.storageState.origins.map((entry) => entry.origin === run.origin ? {...entry, origin} : entry)
+    }
+  };
+}
+
 async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixture: Fixture) {
   const {variant, origin} = run;
   const measured = report.variants[variant][scale];
@@ -430,10 +442,9 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       ['base', baseOrigin!],
       ['head', headOrigin!]
     ] : [['head', headOrigin!]];
-    const prepared = new Map<Variant, VariantRun>();
-    for(const [variant, origin] of variants) {
-      prepared.set(variant, await prepareVariant(browser, variant, origin));
-    }
+    const [[firstVariant, firstOrigin]] = variants;
+    const signedIn = await prepareVariant(browser, firstVariant, firstOrigin);
+    const prepared = new Map<Variant, VariantRun>(variants.map(([variant, origin]) => [variant, withOrigin(signedIn, variant, origin)]));
 
     for(let round = 0; round < PERFORMANCE_REPEATS; ++round) {
       const order = round % 2 === 0 ? variants : [...variants].reverse();
