@@ -262,13 +262,18 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   return capture(page, requests, await elapsed(page), true);
 }
 
-async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture) {
+async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture, allowUnsupportedBase: boolean): Promise<Metric | undefined> {
   await begin(page, requests);
   const beforeMids = await page.locator('.bubbles .bubble[data-mid]').evaluateAll((elements) => elements.map((element) => Number((element as HTMLElement).dataset.mid)));
   const searchIcon = String.fromCharCode(parseInt(Icons.search, 16));
   await page.locator('#page-chats .chat-utils > .btn-icon').filter({hasText: searchIcon}).click();
   const calendarIcon = String.fromCharCode(parseInt(Icons.calendar, 16));
   const searchCalendar = page.locator('#page-chats .topbar-search-container .topbar-search-right-filter > .btn-icon').filter({hasText: calendarIcon});
+  await expect(page.locator('#page-chats .topbar-search-container')).toBeVisible();
+  if(!await searchCalendar.count()) {
+    if(allowUnsupportedBase) return undefined;
+    throw new Error('date-jump calendar control is missing from the head build');
+  }
   await expect(searchCalendar).toBeVisible();
   await searchCalendar.click();
   await expect(page.locator('.date-picker-scrollable')).toBeVisible();
@@ -430,14 +435,16 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       // The base build may not reach the older history window. Its open-chat bundle is still the route baseline.
       measured.scrollBack2k.push({bundleBytes: chatOpen.bundleBytes});
     }
-    // Both variants run the same scenario sequence so later scenarios start from the same page state.
-    const jump = test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture), {timeout: 120_000});
-    if(variant === 'head') {
-      measured.dateJump.push(await jump);
+    const jump = await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture, variant === 'base'), {timeout: 120_000});
+    if(jump) {
+      measured.dateJump.push(jump);
     } else {
-      // The base build may not support the date jump. Its open-chat bundle is still the route baseline.
-      measured.dateJump.push(await jump.catch(() => ({bundleBytes: chatOpen.bundleBytes})));
+      // The base build may lack the calendar control. Its open-chat bundle is still the route baseline.
+      measured.dateJump.push({bundleBytes: chatOpen.bundleBytes});
     }
+    // Reset both variants to the same signed-in chat-list state before contacts measurements.
+    await page.goto(origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
     measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
     measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
     measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
