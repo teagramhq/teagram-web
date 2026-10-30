@@ -430,10 +430,13 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       // The base build may not reach the older history window. Its open-chat bundle is still the route baseline.
       measured.scrollBack2k.push({bundleBytes: chatOpen.bundleBytes});
     }
+    // Both variants run the same scenario sequence so later scenarios start from the same page state.
+    const jump = test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture), {timeout: 120_000});
     if(variant === 'head') {
-      measured.dateJump.push(await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture), {timeout: 120_000}));
+      measured.dateJump.push(await jump);
     } else {
-      measured.dateJump.push({bundleBytes: chatOpen.bundleBytes});
+      // The base build may not support the date jump. Its open-chat bundle is still the route baseline.
+      measured.dateJump.push(await jump.catch(() => ({bundleBytes: chatOpen.bundleBytes})));
     }
     measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
     measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
