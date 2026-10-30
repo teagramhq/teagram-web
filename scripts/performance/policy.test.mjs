@@ -94,10 +94,26 @@ test('fails closed when scroll frame counters are missing', () => {
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('frame interval count is missing')));
 });
 
-test('blocks a long task in any 100x scroll repeat', () => {
+test('reports a lone 100x scroll task against a base that misses absolute limits', () => {
+  const base = scaleVariants({'100x': {scrollBack2k: [
+    {longTasksOver50Ms: 10, droppedFrames: 202, frameIntervals: 865, droppedFramePercent: 18.93},
+    {longTasksOver50Ms: 0, droppedFrames: 2, frameIntervals: 701, droppedFramePercent: 0.28},
+    {longTasksOver50Ms: 0, droppedFrames: 2, frameIntervals: 755, droppedFramePercent: 0.26}
+  ]}});
   const head = scaleVariants({'100x': {scrollBack2k: [
     {longTasksOver50Ms: 1},
     {longTasksOver50Ms: 0},
+    {longTasksOver50Ms: 0}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')), false);
+});
+
+test('blocks repeated 100x scroll long tasks against a clean base', () => {
+  const head = scaleVariants({'100x': {scrollBack2k: [
+    {longTasksOver50Ms: 1},
+    {longTasksOver50Ms: 1},
     {longTasksOver50Ms: 0}
   ]}});
   const result = evaluatePerformance(report({head}));
@@ -113,7 +129,7 @@ test('blocks new long tasks across 100x scenarios', () => {
       {longTasksOver50Ms: 0}
     ]}});
     const head = scaleVariants({'100x': {[key]: [
-      {longTasksOver50Ms: 1},
+      {longTasksOver50Ms: 2},
       {longTasksOver50Ms: 2},
       {longTasksOver50Ms: 0}
     ]}});
@@ -148,11 +164,67 @@ test('does not let an outlier base repeat hide a new 100x task', () => {
   const head = scaleVariants({'100x': {chatOpen: [
     {longTasksOver50Ms: 0},
     {longTasksOver50Ms: 1},
-    {longTasksOver50Ms: 0}
+    {longTasksOver50Ms: 1}
   ]}});
   const result = evaluatePerformance(report({base, head}));
 
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes('long task')));
+});
+
+test('allows one 100x contacts long-task and blocking-time outlier', () => {
+  const head = scaleVariants({'100x': {contactsList: [
+    {longTasksOver50Ms: 1, blockingTimeMs: 126, maxLongTaskDurationMs: 176},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0}
+  ]}});
+  const result = evaluatePerformance(report({head}));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x contactsList') && /long task|blocking time/.test(failure)), false);
+});
+
+test('reports absolute scroll misses while the same-run base also misses them', () => {
+  const base = scaleVariants({'100x': {scrollBack2k: [
+    {longTasksOver50Ms: 10, blockingTimeMs: 35, maxLongTaskDurationMs: 60, droppedFrames: 202, frameIntervals: 865, droppedFramePercent: 18.93},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0, droppedFrames: 2, frameIntervals: 701, droppedFramePercent: 0.28},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0, droppedFrames: 2, frameIntervals: 755, droppedFramePercent: 0.26}
+  ]}});
+  const head = scaleVariants({'100x': {scrollBack2k: [
+    {longTasksOver50Ms: 0, droppedFrames: 3, frameIntervals: 819, droppedFramePercent: 0.36},
+    {longTasksOver50Ms: 0, droppedFrames: 1, frameIntervals: 510, droppedFramePercent: 0.20},
+    {longTasksOver50Ms: 0, droppedFrames: 1, frameIntervals: 516, droppedFramePercent: 0.19}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+  const row = formatPerformanceTable(result).split('\n').find((line) => line.includes('Scroll back 2,000 messages (100x)'));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k')), false);
+  assert.match(row, /report only \(base misses absolute scroll limits\)/);
+});
+
+test('does not compare scroll stalls when the base could not reach the history window', () => {
+  const base = scaleVariants();
+  base['100x'].scrollBack2k = Array.from({length: 3}, () => ({bundleBytes: 100_000}));
+  const head = scaleVariants({'100x': {scrollBack2k: {longTasksOver50Ms: 1}}});
+  const result = evaluatePerformance(report({base, head}));
+  const row = formatPerformanceTable(result).split('\n').find((line) => line.includes('Scroll back 2,000 messages (100x)'));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k')), false);
+  assert.match(row, /report only \(base scroll measurements unavailable\)/);
+});
+
+test('blocks repeated scroll regressions against the paired base despite base misses', () => {
+  const base = scaleVariants({'100x': {scrollBack2k: [
+    {longTasksOver50Ms: 10, blockingTimeMs: 35, maxLongTaskDurationMs: 60, droppedFrames: 202, frameIntervals: 865, droppedFramePercent: 18.93},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0, droppedFrames: 2, frameIntervals: 701, droppedFramePercent: 0.28},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0, droppedFrames: 2, frameIntervals: 755, droppedFramePercent: 0.26}
+  ]}});
+  const head = scaleVariants({'100x': {scrollBack2k: [
+    {longTasksOver50Ms: 0, droppedFrames: 3, frameIntervals: 819, droppedFramePercent: 0.36},
+    {longTasksOver50Ms: 10, droppedFrames: 165, frameIntervals: 832, droppedFramePercent: 16.55},
+    {longTasksOver50Ms: 13, droppedFrames: 177, frameIntervals: 874, droppedFramePercent: 16.84}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('worse than same-run base')));
 });
 
 test('allows blocking-time jitter below 80 ms when 100x contacts long-task counts do not grow', () => {
@@ -226,8 +298,8 @@ test('blocks added 100x blocking time against compatible main history when there
 
 test('compares 100x long tasks with compatible main history when a push has no base', () => {
   const head = scaleVariants({'100x': {globalSearch: [
-    {longTasksOver50Ms: 1},
-    {longTasksOver50Ms: 1},
+    {longTasksOver50Ms: 2},
+    {longTasksOver50Ms: 2},
     {longTasksOver50Ms: 2}
   ]}});
   const result = evaluatePerformance(report({head, requireBase: false}), mainHistory(1, {

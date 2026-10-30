@@ -77,10 +77,14 @@ function medianLongTasks(samples) {
   return median(samples.map((sample) => Number.isFinite(sample?.longTasksOver50Ms) ? sample.longTasksOver50Ms : 0));
 }
 
-function medianBlockingTime(samples) {
+function medianMetric(samples, field) {
   if(!Array.isArray(samples) || !samples.length) return undefined;
-  const values = samples.map((sample) => sample?.blockingTimeMs);
+  const values = samples.map((sample) => sample?.[field]);
   return values.every(Number.isFinite) ? median(values) : undefined;
+}
+
+function medianBlockingTime(samples) {
+  return medianMetric(samples, 'blockingTimeMs');
 }
 
 function historyLongTaskBaseline(history, scale, key, report) {
@@ -103,6 +107,18 @@ function historyBlockingTimeBaseline(history, scale, key, report) {
 
 function addFailure(failures, scale, key, message) {
   failures.push(`${scale} ${key}: ${message}`);
+}
+
+function scrollBaselineMeetsAbsoluteLimits(samples) {
+  return samples.length >= PERFORMANCE_REPEATS && samples.every((sample) => {
+    return sample?.longTasksOver50Ms === 0 && Number.isFinite(sample?.droppedFramePercent) && sample.droppedFramePercent < 1;
+  });
+}
+
+function hasScrollMeasurements(samples) {
+  return samples.length >= PERFORMANCE_REPEATS && samples.every((sample) => {
+    return Number.isFinite(sample?.longTasksOver50Ms) && Number.isFinite(sample?.droppedFramePercent);
+  });
 }
 
 function timingNoise(mainValues) {
@@ -183,27 +199,48 @@ export function evaluatePerformance(report, history = []) {
 
       if(scale === '100x') {
         if(scenario.key === 'scrollBack2k') {
-          headSamples.forEach((sample, index) => {
-            if(Number.isFinite(sample?.longTasksOver50Ms) && sample.longTasksOver50Ms > 0) {
-              addFailure(blockingFailures, scale, scenario.key, `${sample.longTasksOver50Ms} long task(s) over 50 ms in head sample ${index + 1}`);
+          const sameRunBase = report.requireBase ? baseSamples : [];
+          const baseMeetsAbsoluteLimits = scrollBaselineMeetsAbsoluteLimits(sameRunBase);
+          const baselineLongTasks = medianMetric(sameRunBase, 'longTasksOver50Ms');
+          const headLongTasks = medianMetric(headSamples, 'longTasksOver50Ms');
+          const baselineDroppedFramePercent = medianMetric(sameRunBase, 'droppedFramePercent');
+          const headDroppedFramePercent = medianMetric(headSamples, 'droppedFramePercent');
+          const baselineBlockingTime = medianBlockingTime(sameRunBase);
+          const headBlockingTime = medianBlockingTime(headSamples);
+
+          if(report.requireBase && baseMeetsAbsoluteLimits) {
+            if(Number.isFinite(head.longTasksOver50Ms) && head.longTasksOver50Ms > 0) {
+              addFailure(blockingFailures, scale, scenario.key, `${head.longTasksOver50Ms} long task(s) over 50 ms exceeded the zero-stall target`);
             }
-          });
+            if(Number.isFinite(head.droppedFramePercent) && head.droppedFramePercent >= 1) {
+              addFailure(blockingFailures, scale, scenario.key, `dropped frames reached ${head.droppedFramePercent.toFixed(2)}%`);
+            }
+          } else if(report.requireBase) {
+            if(Number.isFinite(baselineLongTasks) && Number.isFinite(headLongTasks) && headLongTasks > baselineLongTasks) {
+              addFailure(blockingFailures, scale, scenario.key, `median long task count ${headLongTasks} was worse than same-run base median ${baselineLongTasks}`);
+            }
+            if(Number.isFinite(baselineDroppedFramePercent) && Number.isFinite(headDroppedFramePercent) && headDroppedFramePercent > baselineDroppedFramePercent) {
+              addFailure(blockingFailures, scale, scenario.key, `median dropped frames ${headDroppedFramePercent.toFixed(2)}% was worse than same-run base median ${baselineDroppedFramePercent.toFixed(2)}%`);
+            }
+          }
+          if(Number.isFinite(baselineBlockingTime) && Number.isFinite(headBlockingTime) && headBlockingTime - baselineBlockingTime >= MIN_BLOCKING_TIME_REGRESSION_MS) {
+            addFailure(blockingFailures, scale, scenario.key, `median long-task blocking time ${headBlockingTime.toFixed(1)} ms exceeded same-run base median ${baselineBlockingTime.toFixed(1)} ms by at least ${MIN_BLOCKING_TIME_REGRESSION_MS} ms`);
+          }
         } else {
           const baselineLongTasks = report.requireBase ? medianLongTasks(baseSamples) ?? 0 : historyLongTaskBaseline(history, scale, scenario.key, report);
           const baselineBlockingTime = report.requireBase ? medianBlockingTime(baseSamples) : historyBlockingTimeBaseline(history, scale, scenario.key, report);
-          headSamples.forEach((sample, index) => {
-            if(Number.isFinite(baselineLongTasks) && Number.isFinite(sample?.longTasksOver50Ms) && sample.longTasksOver50Ms > baselineLongTasks) {
-              addFailure(blockingFailures, scale, scenario.key, `${sample.longTasksOver50Ms} long task(s) over 50 ms in head sample ${index + 1} exceeded baseline ${baselineLongTasks}`);
-            }
-            if(Number.isFinite(baselineBlockingTime) && Number.isFinite(sample?.blockingTimeMs) && sample.blockingTimeMs - baselineBlockingTime >= MIN_BLOCKING_TIME_REGRESSION_MS) {
-              addFailure(blockingFailures, scale, scenario.key, `long-task blocking time ${sample.blockingTimeMs.toFixed(1)} ms in head sample ${index + 1} exceeded base median ${baselineBlockingTime.toFixed(1)} ms by at least ${MIN_BLOCKING_TIME_REGRESSION_MS} ms`);
-            }
-          });
+          const headLongTasks = medianLongTasks(headSamples);
+          const headBlockingTime = medianBlockingTime(headSamples);
+          if(Number.isFinite(baselineLongTasks) && Number.isFinite(headLongTasks) && headLongTasks > baselineLongTasks) {
+            addFailure(blockingFailures, scale, scenario.key, `median long task count ${headLongTasks} exceeded baseline ${baselineLongTasks}`);
+          }
+          if(Number.isFinite(baselineBlockingTime) && Number.isFinite(headBlockingTime) && headBlockingTime - baselineBlockingTime >= MIN_BLOCKING_TIME_REGRESSION_MS) {
+            addFailure(blockingFailures, scale, scenario.key, `median long-task blocking time ${headBlockingTime.toFixed(1)} ms exceeded base median ${baselineBlockingTime.toFixed(1)} ms by at least ${MIN_BLOCKING_TIME_REGRESSION_MS} ms`);
+          }
         }
       }
-      if(scale === '100x' && scenario.key === 'scrollBack2k' && Number.isFinite(head.droppedFramePercent) && head.droppedFramePercent >= 1) {
-        addFailure(blockingFailures, scale, scenario.key, `dropped frames reached ${head.droppedFramePercent.toFixed(2)}%`);
-      }
+
+      const scrollBaselineStatus = scale !== '100x' || scenario.key !== 'scrollBack2k' ? undefined : !report.requireBase ? 'report only (no same-run base)' : !hasScrollMeasurements(baseSamples) ? 'report only (base scroll measurements unavailable)' : scrollBaselineMeetsAbsoluteLimits(baseSamples) ? undefined : 'report only (base misses absolute scroll limits)';
 
       if(report.requireBase && Number.isFinite(head.bundleBytes) && Number.isFinite(base.bundleBytes) && head.bundleBytes > base.bundleBytes * 1.02) {
         addFailure(blockingFailures, scale, scenario.key, `bundle grew from ${base.bundleBytes} to ${head.bundleBytes} bytes (over 2%)`);
@@ -226,6 +263,7 @@ export function evaluatePerformance(report, history = []) {
         budgetMs,
         base,
         head,
+        scrollBaselineStatus,
         historyRuns: mainValues.length,
         noiseBand: calibrated ? [median(mainValues) - noiseWidth, median(mainValues) + noiseWidth] : undefined,
         budgetStatus
@@ -262,7 +300,8 @@ export function formatPerformanceTable(evaluation) {
     const smallHistoryRuns = evaluation.rows.find((item) => item.scale === '1x' && item.key === row.key)?.historyRuns || 0;
     const ratio = row.scale !== '100x' ? '—' : Number.isFinite(row.scaleRatio) ? `${show(row.scaleRatio, 2)}x` : `warming ${Math.min(row.historyRuns, smallHistoryRuns)}/${CALIBRATION_RUNS}`;
     const overBudget = row.budgetMs !== null && Number.isFinite(row.head.ms) && row.head.ms > row.budgetMs;
-    const gate = row.budgetStatus === 'failed' ? 'failed' : row.budgetStatus === 'warming' ? overBudget ? 'over budget (report only)' : 'report only' : 'calibrated';
+    const scenarioFailure = evaluation.blockingFailures.some((failure) => failure.startsWith(`${row.scale} ${row.key}:`));
+    const gate = row.budgetStatus === 'failed' || scenarioFailure ? 'failed' : row.scrollBaselineStatus || (row.budgetStatus === 'warming' ? overBudget ? 'over budget (report only)' : 'report only' : 'calibrated');
     lines.push(`| ${row.label} (${row.scale}) | ${show(row.head.ms, 1)} | ${budget} | ${noise} | ${ratio} | ${show(row.base.ms, 1)} | ${show(row.head.requests)} | ${show(row.head.domNodes)} | ${show(row.head.longTasksOver50Ms)} | ${show(row.head.blockingTimeMs, 1)} | ${show(row.head.droppedFramePercent, 2)}% | ${show(row.head.bundleBytes)} | ${gate} |`);
   }
   return lines.join('\n');

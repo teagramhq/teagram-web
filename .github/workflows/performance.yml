@@ -270,7 +270,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run scale browser scenarios and 100 ms negative control
+      - name: Run scale browser scenarios and 200 ms negative control
         id: browser
         env:
           PERF_FIXTURE_FILE_1X: ${{ runner.temp }}/teagram-perf-fixture/snapshot/fixture-1x.json

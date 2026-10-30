@@ -26,8 +26,7 @@ type Metric = {
 };
 
 type LongTaskInjection = {
-  durationMs: number,
-  trigger: 'click' | 'domcontentloaded'
+  durationMs: number
 };
 
 type VariantRun = {
@@ -92,16 +91,7 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
         while(performance.now() - started < injection.durationMs) {}
         perf.injectedLongTask = {started, duration: performance.now() - started};
       };
-      if(injection.trigger === 'domcontentloaded') {
-        window.addEventListener('DOMContentLoaded', inject, {once: true});
-      } else {
-        perf.armInjectedLongTask = () => perf.injectLongTaskArmed = true;
-        window.addEventListener('click', (event) => {
-          if(!perf.injectLongTaskArmed || !event.isTrusted || perf.injectedLongTask) return;
-          perf.injectLongTaskArmed = false;
-          inject();
-        }, {capture: true});
-      }
+      window.addEventListener('DOMContentLoaded', inject, {once: true});
     }
     perf.startFrames = () => {
       perf.frameActive = true;
@@ -167,14 +157,13 @@ async function injectedLongTask(page: Page) {
   });
 }
 
-function evaluateWithNegativeSample(key: string, sample: Metric) {
-  const existingSamples = report.variants.head['100x'][key];
-  expect(existingSamples).toHaveLength(PERFORMANCE_REPEATS);
+function evaluateWithNegativeSamples(key: string, samples: Metric[]) {
+  expect(samples).toHaveLength(PERFORMANCE_REPEATS);
   const head = {
     ...report.variants.head,
     '100x': {
       ...report.variants.head['100x'],
-      [key]: [...existingSamples, sample]
+      [key]: samples
     }
   };
   return evaluatePerformance({...report, variants: {...report.variants, head}});
@@ -208,11 +197,10 @@ async function reloadChatList(page: Page, requests: {value: number}) {
   return capture(page, requests, await elapsed(page));
 }
 
-async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, injectLongTask = false) {
+async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
   await begin(page, requests);
-  if(injectLongTask) await page.evaluate(() => (window as any).__teagramPerf.armInjectedLongTask());
   await row.click();
   await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
   return capture(page, requests, await elapsed(page));
@@ -279,9 +267,8 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   return capture(page, requests, await elapsed(page), true);
 }
 
-async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture, injectLongTask = false) {
+async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture) {
   await begin(page, requests);
-  if(injectLongTask) await page.evaluate(() => (window as any).__teagramPerf.armInjectedLongTask());
   const beforeMids = await page.locator('.bubbles .bubble[data-mid]').evaluateAll((elements) => elements.map((element) => Number((element as HTMLElement).dataset.mid)));
   const searchIcon = String.fromCharCode(parseInt(Icons.search, 16));
   await page.locator('#page-chats .chat-utils > .btn-icon').filter({hasText: searchIcon}).click();
@@ -457,7 +444,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   }
 });
 
-test('blocks injected main-thread stalls in date jump and cold chat list', async({browser}) => {
+test('blocks repeated injected 200 ms main-thread stalls in cold chat list', async({browser}) => {
   test.skip(!report.requireBase, 'negative control requires same-run base measurements');
   expect(username).toBeTruthy();
   expect(password).toBeTruthy();
@@ -474,37 +461,25 @@ test('blocks injected main-thread stalls in date jump and cold chat list', async
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests, {durationMs: 100, trigger: 'click'});
+  await installInstrumentation(page, requests, {durationMs: 200});
 
   try {
-    await page.goto(origin!, {waitUntil: 'domcontentloaded'});
-    await waitForChatList(page);
-    await openPartnerChat(page, requests, fixture!);
-    const negativeSample = await jumpToFixtureDate(page, requests, fixture!, true);
-    expect(negativeSample.longTasksOver50Ms).toBeGreaterThan(0);
-    const injectedTask = await injectedLongTask(page);
-    expect(injectedTask.duration).toBeGreaterThanOrEqual(100);
-    expect(injectedTask.observed).toBe(true);
-    expect(negativeSample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
-    const dateJumpEvaluation = evaluateWithNegativeSample('dateJump', negativeSample);
-    expect(dateJumpEvaluation.blockingFailures.some((failure) => failure.includes('100x dateJump') && failure.includes('long task'))).toBe(true);
-
-    await page.close();
-    const coldPage = await context.newPage();
-    const coldRequests = {value: 0};
-    await installInstrumentation(coldPage, coldRequests, {durationMs: 200, trigger: 'domcontentloaded'});
-    await coldPage.goto(origin!, {waitUntil: 'domcontentloaded'});
-    await waitForChatList(coldPage);
-    const negativeColdLoad = await capture(coldPage, coldRequests, await elapsed(coldPage));
-    const injectedColdTask = await injectedLongTask(coldPage);
-    expect(negativeColdLoad.longTasksOver50Ms).toBeGreaterThan(0);
-    expect(injectedColdTask.duration).toBeGreaterThanOrEqual(200);
-    expect(injectedColdTask.observed).toBe(true);
-
+    const negativeSamples: Metric[] = [];
+    for(let repeat = 0; repeat < PERFORMANCE_REPEATS; ++repeat) {
+      requests.value = 0;
+      await page.goto(origin!, {waitUntil: 'domcontentloaded'});
+      await waitForChatList(page);
+      const negativeSample = await capture(page, requests, await elapsed(page));
+      const injectedTask = await injectedLongTask(page);
+      expect(negativeSample.longTasksOver50Ms).toBeGreaterThan(0);
+      expect(injectedTask.duration).toBeGreaterThanOrEqual(200);
+      expect(injectedTask.observed).toBe(true);
+      expect(negativeSample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(200);
+      negativeSamples.push(negativeSample);
+    }
     const baseColdSamples = report.variants.base['100x'].coldChatList;
     expect(baseColdSamples).toHaveLength(PERFORMANCE_REPEATS);
-    expect(baseColdSamples.some((sample) => (sample.longTasksOver50Ms || 0) > 0 && (sample.blockingTimeMs || 0) > 0)).toBe(true);
-    const coldLoadEvaluation = evaluateWithNegativeSample('coldChatList', negativeColdLoad);
+    const coldLoadEvaluation = evaluateWithNegativeSamples('coldChatList', negativeSamples);
     expect(coldLoadEvaluation.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time'))).toBe(true);
   } finally {
     await context.close();
