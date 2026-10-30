@@ -18,6 +18,7 @@ type Metric = {
   domNodes: number,
   bundleBytes: number,
   longTasksOver50Ms: number,
+  blockingTimeMs: number,
   maxLongTaskDurationMs: number,
   droppedFramePercent?: number,
   droppedFrames?: number,
@@ -53,6 +54,7 @@ const report = {
     head: {'1x': {}, '100x': {}}
   } as Record<Variant, Record<Scale, Record<string, Partial<Metric>[]>>>
 };
+const preparedVariants: Record<Scale, Partial<Record<Variant, VariantRun>>> = {'1x': {}, '100x': {}};
 
 const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
 
@@ -60,11 +62,11 @@ test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 });
 
-function installInstrumentation(page: Page, requestCounter: {value: number}, injectLongTask = false) {
+function installInstrumentation(page: Page, requestCounter: {value: number}) {
   page.on('request', (request) => {
     if(request.resourceType() !== 'websocket') ++requestCounter.value;
   });
-  return page.addInitScript((injectLongTask) => {
+  return page.addInitScript(() => {
     const perf: any = (window as any).__teagramPerf = {
       longTasks: [] as Array<{startTime: number, duration: number}>,
       frameIntervals: [] as number[],
@@ -80,19 +82,12 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
       });
       observer.observe({type: 'longtask', buffered: true});
     } catch{}
-    const inject = () => {
+    perf.injectLongTask = (durationMs: number) => {
       const started = performance.now();
-      while(performance.now() - started < 100) {}
+      while(performance.now() - started < durationMs) {}
       perf.injectedLongTask = {started, duration: performance.now() - started};
+      return perf.injectedLongTask;
     };
-    if(injectLongTask) {
-      perf.armInjectedLongTask = () => perf.injectLongTaskArmed = true;
-      window.addEventListener('click', (event) => {
-        if(!perf.injectLongTaskArmed || !event.isTrusted || perf.injectedLongTask) return;
-        perf.injectLongTaskArmed = false;
-        inject();
-      }, {capture: true});
-    }
     perf.startFrames = () => {
       perf.frameActive = true;
       perf.lastFrame = performance.now();
@@ -105,7 +100,7 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
       requestAnimationFrame(sampleFrame);
     };
     perf.stopFrames = () => perf.frameActive = false;
-  }, injectLongTask);
+  });
 }
 
 async function begin(page: Page, requests: {value: number}) {
@@ -137,12 +132,36 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
       domNodes: document.querySelectorAll('*').length,
       bundleBytes,
       longTasksOver50Ms: longTasks.length,
+      blockingTimeMs: longTasks.reduce((total: number, entry: {duration: number}) => total + entry.duration - 50, 0),
       maxLongTaskDurationMs: longTasks.reduce((max: number, entry: {duration: number}) => Math.max(max, entry.duration), 0),
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
   }, {ms, requests: requests.value, scroll});
+}
+
+async function injectedLongTask(page: Page) {
+  return page.evaluate(() => {
+    const perf = (window as any).__teagramPerf;
+    const task = perf.injectedLongTask;
+    return {
+      duration: task?.duration,
+      observed: task && perf.longTasks.some((entry: {startTime: number, duration: number}) => entry.startTime <= task.started && entry.startTime + entry.duration >= task.started && entry.duration > 50)
+    };
+  });
+}
+
+function evaluateWithNegativeSamples(key: string, samples: Metric[]) {
+  expect(samples).toHaveLength(PERFORMANCE_REPEATS);
+  const head = {
+    ...report.variants.head,
+    '100x': {
+      ...report.variants.head['100x'],
+      [key]: samples
+    }
+  };
+  return evaluatePerformance({...report, variants: {...report.variants, head}});
 }
 
 async function elapsed(page: Page) {
@@ -243,14 +262,18 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   return capture(page, requests, await elapsed(page), true);
 }
 
-async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture, injectLongTask = false) {
+async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture, allowUnsupportedBase: boolean): Promise<Metric | undefined> {
   await begin(page, requests);
-  if(injectLongTask) await page.evaluate(() => (window as any).__teagramPerf.armInjectedLongTask());
   const beforeMids = await page.locator('.bubbles .bubble[data-mid]').evaluateAll((elements) => elements.map((element) => Number((element as HTMLElement).dataset.mid)));
   const searchIcon = String.fromCharCode(parseInt(Icons.search, 16));
   await page.locator('#page-chats .chat-utils > .btn-icon').filter({hasText: searchIcon}).click();
   const calendarIcon = String.fromCharCode(parseInt(Icons.calendar, 16));
   const searchCalendar = page.locator('#page-chats .topbar-search-container .topbar-search-right-filter > .btn-icon').filter({hasText: calendarIcon});
+  await expect(page.locator('#page-chats .topbar-search-container')).toBeVisible();
+  if(!await searchCalendar.count()) {
+    if(allowUnsupportedBase) return undefined;
+    throw new Error('date-jump calendar control is missing from the head build');
+  }
   await expect(searchCalendar).toBeVisible();
   await searchCalendar.click();
   await expect(page.locator('.date-picker-scrollable')).toBeVisible();
@@ -343,6 +366,46 @@ async function prepareVariant(browser: Browser, variant: Variant, origin: string
   }
 }
 
+// Both variants start from one signed-in snapshot so they share the auth key and cached client state.
+function withOrigin(run: VariantRun, variant: Variant, origin: string): VariantRun {
+  return {
+    variant,
+    origin,
+    storageState: {
+      ...run.storageState,
+      origins: run.storageState.origins.map((entry) => entry.origin === run.origin ? {...entry, origin} : entry)
+    }
+  };
+}
+
+test.beforeAll(async({browser}) => {
+  expect(username).toBeTruthy();
+  expect(password).toBeTruthy();
+
+  for(const scale of scales) {
+    const fixture = fixtures[scale];
+    expect(fixture, `${scale} fixture was not supplied`).toBeTruthy();
+    expect(Number.isSafeInteger(fixture?.partner), `${scale} fixture partner is invalid`).toBe(true);
+    expect(Number.isSafeInteger(fixture?.middle_date), `${scale} fixture date is invalid`).toBe(true);
+
+    const suffix = scale.toUpperCase();
+    const headOrigin = process.env[`PERF_HEAD_ORIGIN_${suffix}`];
+    const baseOrigin = process.env[`PERF_BASE_ORIGIN_${suffix}`];
+    expect(headOrigin, `${scale} head origin is missing`).toBeTruthy();
+    if(report.requireBase) expect(baseOrigin, `${scale} base origin is missing`).toBeTruthy();
+
+    const variants: Array<[Variant, string]> = report.requireBase ? [
+      ['base', baseOrigin!],
+      ['head', headOrigin!]
+    ] : [['head', headOrigin!]];
+    const [[firstVariant, firstOrigin]] = variants;
+    const signedIn = await prepareVariant(browser, firstVariant, firstOrigin);
+    for(const [variant, origin] of variants) {
+      preparedVariants[scale][variant] = withOrigin(signedIn, variant, origin);
+    }
+  }
+});
+
 async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixture: Fixture) {
   const {variant, origin} = run;
   const measured = report.variants[variant][scale];
@@ -372,11 +435,16 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       // The base build may not reach the older history window. Its open-chat bundle is still the route baseline.
       measured.scrollBack2k.push({bundleBytes: chatOpen.bundleBytes});
     }
-    if(variant === 'head') {
-      measured.dateJump.push(await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture), {timeout: 120_000}));
+    const jump = await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture, variant === 'base'), {timeout: 120_000});
+    if(jump) {
+      measured.dateJump.push(jump);
     } else {
+      // The base build may lack the calendar control. Its open-chat bundle is still the route baseline.
       measured.dateJump.push({bundleBytes: chatOpen.bundleBytes});
     }
+    // Reset both variants to the same signed-in chat-list state before contacts measurements.
+    await page.goto(origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
     measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
     measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
     measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
@@ -387,91 +455,59 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
 }
 
 test('measures the scale fixture in interleaved base and head runs', async({browser}) => {
-  expect(username).toBeTruthy();
-  expect(password).toBeTruthy();
   expect(reportPath).toBeTruthy();
 
   for(const scale of scales) {
     const fixture = fixtures[scale];
-    expect(fixture, `${scale} fixture was not supplied`).toBeTruthy();
-    expect(Number.isSafeInteger(fixture?.partner), `${scale} fixture partner is invalid`).toBe(true);
-    expect(Number.isSafeInteger(fixture?.middle_date), `${scale} fixture date is invalid`).toBe(true);
-
-    const suffix = scale.toUpperCase();
-    const headOrigin = process.env[`PERF_HEAD_ORIGIN_${suffix}`];
-    const baseOrigin = process.env[`PERF_BASE_ORIGIN_${suffix}`];
-    expect(headOrigin, `${scale} head origin is missing`).toBeTruthy();
-    if(report.requireBase) expect(baseOrigin, `${scale} base origin is missing`).toBeTruthy();
-
-    const variants: Array<[Variant, string]> = report.requireBase ? [
-      ['base', baseOrigin!],
-      ['head', headOrigin!]
-    ] : [['head', headOrigin!]];
-    const prepared = new Map<Variant, VariantRun>();
-    for(const [variant, origin] of variants) {
-      prepared.set(variant, await prepareVariant(browser, variant, origin));
-    }
+    const variants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
 
     for(let round = 0; round < PERFORMANCE_REPEATS; ++round) {
       const order = round % 2 === 0 ? variants : [...variants].reverse();
-      for(const [variant] of order) {
-        await test.step(`${scale} ${variant} round ${round + 1}`, () => runVariant(browser, prepared.get(variant)!, scale, fixture!));
+      for(const variant of order) {
+        await test.step(`${scale} ${variant} round ${round + 1}`, () => runVariant(browser, preparedVariants[scale][variant]!, scale, fixture!));
       }
     }
   }
 });
 
-test('measures a 100 ms task during date jump and blocks the negative control', async({browser}) => {
-  expect(username).toBeTruthy();
-  expect(password).toBeTruthy();
+test('blocks repeated injected 100 ms main-thread stalls in cold chat list', async({browser}) => {
+  test.skip(!report.requireBase, 'negative control requires same-run base measurements');
   const fixture = fixtures['100x'];
-  const origin = process.env.PERF_HEAD_ORIGIN_100X;
   expect(fixture, '100x fixture was not supplied').toBeTruthy();
-  expect(origin, '100x head origin is missing').toBeTruthy();
+  const preparedHead = preparedVariants['100x'].head;
+  expect(preparedHead, '100x head sign-in snapshot was not prepared').toBeTruthy();
 
-  const prepared = await prepareVariant(browser, 'head', origin!);
-  const context = await browser.newContext({
-    ignoreHTTPSErrors: true,
-    viewport: {width: 1280, height: 800},
-    storageState: prepared.storageState
-  });
-  const page = await context.newPage();
-  const requests = {value: 0};
-  await installInstrumentation(page, requests, true);
-
-  try {
-    await page.goto(origin!, {waitUntil: 'domcontentloaded'});
-    await waitForChatList(page);
-    await openPartnerChat(page, requests, fixture!);
-    const negativeSample = await jumpToFixtureDate(page, requests, fixture!, true);
-    expect(negativeSample.longTasksOver50Ms).toBeGreaterThan(0);
-    const injectedTask = await page.evaluate(() => {
-      const perf = (window as any).__teagramPerf;
-      const task = perf.injectedLongTask;
-      return {
-        duration: task?.duration,
-        observed: task && perf.longTasks.some((entry: {startTime: number, duration: number}) => entry.startTime <= task.started && entry.startTime + entry.duration >= task.started && entry.duration > 50)
-      };
+  // Each repeat loads in a fresh context, as the measured cold chat-list repeats do; a reload in one page is a warm load.
+  const negativeSamples: Metric[] = [];
+  for(let repeat = 0; repeat < PERFORMANCE_REPEATS; ++repeat) {
+    const context = await browser.newContext({
+      ignoreHTTPSErrors: true,
+      viewport: {width: 1280, height: 800},
+      storageState: preparedHead!.storageState
     });
-    expect(injectedTask.duration).toBeGreaterThanOrEqual(100);
-    expect(injectedTask.observed).toBe(true);
-    expect(negativeSample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
-    const existingDateJumpSamples = report.variants.head['100x'].dateJump;
-    expect(existingDateJumpSamples).toHaveLength(PERFORMANCE_REPEATS);
-
-    const head = {
-      ...report.variants.head,
-      '100x': {
-        ...report.variants.head['100x'],
-        dateJump: [...existingDateJumpSamples, negativeSample]
-      }
-    };
-    const evaluation = evaluatePerformance({
-      ...report,
-      variants: {...report.variants, head}
-    });
-    expect(evaluation.blockingFailures.some((failure) => failure.includes('100x dateJump') && failure.includes('long task'))).toBe(true);
-  } finally {
-    await context.close();
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests);
+    try {
+      await page.goto(preparedHead!.origin, {waitUntil: 'domcontentloaded'});
+      await waitForChatList(page);
+      // Script evaluated over the DevTools protocol is not reported as a long task; run the stall as a page task.
+      await page.evaluate(() => new Promise((resolve) => setTimeout(() => resolve((window as any).__teagramPerf.injectLongTask(100)), 0)));
+      const negativeSample = await capture(page, requests, await elapsed(page));
+      const injectedTask = await injectedLongTask(page);
+      expect(negativeSample.longTasksOver50Ms).toBeGreaterThan(0);
+      expect(injectedTask.duration).toBeGreaterThanOrEqual(100);
+      expect(injectedTask.observed).toBe(true);
+      expect(negativeSample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
+      negativeSamples.push(negativeSample);
+    } finally {
+      await context.close();
+    }
   }
+  const baseColdSamples = report.variants.base['100x'].coldChatList;
+  expect(baseColdSamples).toHaveLength(PERFORMANCE_REPEATS);
+  const coldLoadEvaluation = evaluateWithNegativeSamples('coldChatList', negativeSamples);
+  const coldLoadFailures = coldLoadEvaluation.blockingFailures.filter((failure) => failure.startsWith('100x coldChatList: '));
+  const blockingTimes = (samples: Partial<Metric>[]) => samples.map((sample) => sample.blockingTimeMs);
+  expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `100 ms cold-load control was not blocked: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs base ${JSON.stringify(blockingTimes(baseColdSamples))} ms`).toBe(true);
 });
