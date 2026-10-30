@@ -467,19 +467,18 @@ test('blocks repeated injected 100 ms main-thread stalls in cold chat list', asy
   const preparedHead = preparedVariants['100x'].head;
   expect(preparedHead, '100x head sign-in snapshot was not prepared').toBeTruthy();
 
-  const context = await browser.newContext({
-    ignoreHTTPSErrors: true,
-    viewport: {width: 1280, height: 800},
-    storageState: preparedHead!.storageState
-  });
-  const page = await context.newPage();
-  const requests = {value: 0};
-  await installInstrumentation(page, requests);
-
-  try {
-    const negativeSamples: Metric[] = [];
-    for(let repeat = 0; repeat < PERFORMANCE_REPEATS; ++repeat) {
-      requests.value = 0;
+  // Each repeat loads in a fresh context, as the measured cold chat-list repeats do; a reload in one page is a warm load.
+  const negativeSamples: Metric[] = [];
+  for(let repeat = 0; repeat < PERFORMANCE_REPEATS; ++repeat) {
+    const context = await browser.newContext({
+      ignoreHTTPSErrors: true,
+      viewport: {width: 1280, height: 800},
+      storageState: preparedHead!.storageState
+    });
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests);
+    try {
       await page.goto(preparedHead!.origin, {waitUntil: 'domcontentloaded'});
       await waitForChatList(page);
       // Script evaluated over the DevTools protocol is not reported as a long task; run the stall as a page task.
@@ -491,13 +490,14 @@ test('blocks repeated injected 100 ms main-thread stalls in cold chat list', asy
       expect(injectedTask.observed).toBe(true);
       expect(negativeSample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
       negativeSamples.push(negativeSample);
+    } finally {
+      await context.close();
     }
-    const baseColdSamples = report.variants.base['100x'].coldChatList;
-    expect(baseColdSamples).toHaveLength(PERFORMANCE_REPEATS);
-    const coldLoadEvaluation = evaluateWithNegativeSamples('coldChatList', negativeSamples);
-    const coldLoadFailures = coldLoadEvaluation.blockingFailures.filter((failure) => failure.startsWith('100x coldChatList: '));
-    expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `100 ms cold-load control was not blocked: ${JSON.stringify(coldLoadEvaluation.blockingFailures)}`).toBe(true);
-  } finally {
-    await context.close();
   }
+  const baseColdSamples = report.variants.base['100x'].coldChatList;
+  expect(baseColdSamples).toHaveLength(PERFORMANCE_REPEATS);
+  const coldLoadEvaluation = evaluateWithNegativeSamples('coldChatList', negativeSamples);
+  const coldLoadFailures = coldLoadEvaluation.blockingFailures.filter((failure) => failure.startsWith('100x coldChatList: '));
+  const blockingTimes = (samples: Partial<Metric>[]) => samples.map((sample) => sample.blockingTimeMs);
+  expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `100 ms cold-load control was not blocked: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs base ${JSON.stringify(blockingTimes(baseColdSamples))} ms`).toBe(true);
 });
