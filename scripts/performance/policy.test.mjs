@@ -243,6 +243,22 @@ test('allows one noisy head scroll repeat within same-run base frame noise', () 
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k')), false);
 });
 
+test('blocks a repeated dropped-frame regression against a stable same-run base', () => {
+  const base = scaleVariants({'100x': {scrollBack2k: [
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 2, frameIntervals: 98, droppedFramePercent: 2},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 2, frameIntervals: 98, droppedFramePercent: 2},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 2, frameIntervals: 98, droppedFramePercent: 2}
+  ]}});
+  const head = scaleVariants({'100x': {scrollBack2k: [
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 6, frameIntervals: 94, droppedFramePercent: 6},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 6, frameIntervals: 94, droppedFramePercent: 6},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0, droppedFrames: 6, frameIntervals: 94, droppedFramePercent: 6}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('dropped frames')));
+});
+
 test('allows blocking-time jitter below 80 ms when 100x contacts long-task counts do not grow', () => {
   const base = scaleVariants({'100x': {contactsList: [
     {longTasksOver50Ms: 0, blockingTimeMs: 0, maxLongTaskDurationMs: 0},

@@ -17,8 +17,6 @@ export const PERFORMANCE_REPEATS = 3;
 const CALIBRATION_RUNS = 20;
 const MAX_SCALE_RATIO = 1.5;
 const MIN_BLOCKING_TIME_REGRESSION_MS = 80;
-// Same-run base repeats on the hosted runner spread by about 5 points of dropped frames.
-const MIN_DROPPED_FRAME_REGRESSION_PERCENT = 5;
 const REQUIRED_METRICS = [
   ['ms', 'timing'],
   ['requests', 'requests'],
@@ -123,6 +121,12 @@ function hasScrollMeasurements(samples) {
   });
 }
 
+function maxDeviationFromMedian(values) {
+  if(!values.length) return undefined;
+  const center = median(values);
+  return Math.max(...values.map((value) => Math.abs(value - center)));
+}
+
 function timingNoise(mainValues) {
   const mainMedian = median(mainValues);
   return Math.max(mainMedian * 0.15, 3 * spread(mainValues));
@@ -207,6 +211,8 @@ export function evaluatePerformance(report, history = []) {
           const headLongTasks = medianMetric(headSamples, 'longTasksOver50Ms');
           const baselineDroppedFramePercent = medianMetric(sameRunBase, 'droppedFramePercent');
           const headDroppedFramePercent = medianMetric(headSamples, 'droppedFramePercent');
+          const baseDroppedFrameValues = sameRunBase.map((sample) => sample?.droppedFramePercent);
+          const droppedFrameAllowance = baseDroppedFrameValues.every(Number.isFinite) ? maxDeviationFromMedian(baseDroppedFrameValues) : undefined;
           const baselineBlockingTime = medianBlockingTime(sameRunBase);
           const headBlockingTime = medianBlockingTime(headSamples);
 
@@ -221,10 +227,10 @@ export function evaluatePerformance(report, history = []) {
             if(Number.isFinite(baselineLongTasks) && Number.isFinite(headLongTasks) && headLongTasks > baselineLongTasks) {
               addFailure(blockingFailures, scale, scenario.key, `median long task count ${headLongTasks} was worse than same-run base median ${baselineLongTasks}`);
             }
-            const droppedFrameLimit = baselineDroppedFramePercent + MIN_DROPPED_FRAME_REGRESSION_PERCENT;
+            const droppedFrameLimit = baselineDroppedFramePercent + droppedFrameAllowance;
             const regressedRepeats = headSamples.filter((sample) => sample?.droppedFramePercent > droppedFrameLimit).length;
-            if(Number.isFinite(baselineDroppedFramePercent) && Number.isFinite(headDroppedFramePercent) && regressedRepeats >= 2) {
-              addFailure(blockingFailures, scale, scenario.key, `dropped frames in ${regressedRepeats} head repeats were worse than same-run base median ${baselineDroppedFramePercent.toFixed(2)}% by over ${MIN_DROPPED_FRAME_REGRESSION_PERCENT} points (head median ${headDroppedFramePercent.toFixed(2)}%)`);
+            if(Number.isFinite(baselineDroppedFramePercent) && Number.isFinite(droppedFrameAllowance) && Number.isFinite(headDroppedFramePercent) && regressedRepeats >= 2) {
+              addFailure(blockingFailures, scale, scenario.key, `dropped frames in ${regressedRepeats} head repeats were worse than same-run base median ${baselineDroppedFramePercent.toFixed(2)}% by over its measured ${droppedFrameAllowance.toFixed(2)}-point spread (head median ${headDroppedFramePercent.toFixed(2)}%)`);
             }
           }
           if(Number.isFinite(baselineBlockingTime) && Number.isFinite(headBlockingTime) && headBlockingTime - baselineBlockingTime >= MIN_BLOCKING_TIME_REGRESSION_MS) {
