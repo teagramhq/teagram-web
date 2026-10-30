@@ -152,16 +152,24 @@ async function injectedLongTask(page: Page) {
   });
 }
 
-function evaluateWithNegativeSamples(key: string, samples: Metric[]) {
-  expect(samples).toHaveLength(PERFORMANCE_REPEATS);
+function evaluateWithControlSamples(key: string, baseSamples: Metric[], headSamples: Metric[]) {
+  expect(baseSamples).toHaveLength(PERFORMANCE_REPEATS);
+  expect(headSamples).toHaveLength(PERFORMANCE_REPEATS);
+  const base = {
+    ...report.variants.base,
+    '100x': {
+      ...report.variants.base['100x'],
+      [key]: baseSamples
+    }
+  };
   const head = {
     ...report.variants.head,
     '100x': {
       ...report.variants.head['100x'],
-      [key]: samples
+      [key]: headSamples
     }
   };
-  return evaluatePerformance({...report, variants: {...report.variants, head}});
+  return evaluatePerformance({...report, variants: {...report.variants, base, head}});
 }
 
 async function elapsed(page: Page) {
@@ -366,6 +374,31 @@ async function prepareVariant(browser: Browser, variant: Variant, origin: string
   }
 }
 
+async function measureColdControlWindow(browser: Browser, run: VariantRun, injectStall: boolean) {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+  const page = await context.newPage();
+  const requests = {value: 0};
+  await installInstrumentation(page, requests);
+
+  try {
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    await begin(page, requests);
+    if(injectStall) {
+      // Script evaluated over the DevTools protocol is not reported as a long task; run the stall as a page task.
+      await page.evaluate(() => new Promise((resolve) => setTimeout(() => resolve((window as any).__teagramPerf.injectLongTask(100)), 0)));
+    }
+    const sample = await capture(page, requests, await elapsed(page));
+    return {sample, injectedTask: injectStall ? await injectedLongTask(page) : undefined};
+  } finally {
+    await context.close();
+  }
+}
+
 // Both variants start from one signed-in snapshot so they share the auth key and cached client state.
 function withOrigin(run: VariantRun, variant: Variant, origin: string): VariantRun {
   return {
@@ -470,44 +503,44 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   }
 });
 
-test('blocks repeated injected 100 ms main-thread stalls in cold chat list', async({browser}) => {
+test('blocks repeated injected 100 ms main-thread stalls after cold chat list load', async({browser}) => {
   test.skip(!report.requireBase, 'negative control requires same-run base measurements');
-  const fixture = fixtures['100x'];
-  expect(fixture, '100x fixture was not supplied').toBeTruthy();
+  const preparedBase = preparedVariants['100x'].base;
   const preparedHead = preparedVariants['100x'].head;
+  expect(preparedBase, '100x base sign-in snapshot was not prepared').toBeTruthy();
   expect(preparedHead, '100x head sign-in snapshot was not prepared').toBeTruthy();
 
-  // Each repeat loads in a fresh context, as the measured cold chat-list repeats do; a reload in one page is a warm load.
+  // Each repeat loads in a fresh context, then resets instrumentation so cold-start noise cannot hide the injected task.
+  const baseControlSamples: Metric[] = [];
   const negativeSamples: Metric[] = [];
   for(let repeat = 0; repeat < PERFORMANCE_REPEATS; ++repeat) {
-    const context = await browser.newContext({
-      ignoreHTTPSErrors: true,
-      viewport: {width: 1280, height: 800},
-      storageState: preparedHead!.storageState
-    });
-    const page = await context.newPage();
-    const requests = {value: 0};
-    await installInstrumentation(page, requests);
-    try {
-      await page.goto(preparedHead!.origin, {waitUntil: 'domcontentloaded'});
-      await waitForChatList(page);
-      // Script evaluated over the DevTools protocol is not reported as a long task; run the stall as a page task.
-      await page.evaluate(() => new Promise((resolve) => setTimeout(() => resolve((window as any).__teagramPerf.injectLongTask(100)), 0)));
-      const negativeSample = await capture(page, requests, await elapsed(page));
-      const injectedTask = await injectedLongTask(page);
-      expect(negativeSample.longTasksOver50Ms).toBeGreaterThan(0);
-      expect(injectedTask.duration).toBeGreaterThanOrEqual(100);
-      expect(injectedTask.observed).toBe(true);
-      expect(negativeSample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
-      negativeSamples.push(negativeSample);
-    } finally {
-      await context.close();
+    const order: Variant[] = repeat % 2 === 0 ? ['base', 'head'] : ['head', 'base'];
+    for(const variant of order) {
+      const isHead = variant === 'head';
+      const run = isHead ? preparedHead! : preparedBase!;
+      const {sample, injectedTask} = await measureColdControlWindow(browser, run, isHead);
+      const measured = report.variants[variant]['100x'].coldChatList[repeat];
+      expect(measured, `${variant} cold chat-list sample ${repeat + 1} is missing`).toBeTruthy();
+      const controlSample = {
+        ...(measured as Metric),
+        longTasksOver50Ms: sample.longTasksOver50Ms,
+        blockingTimeMs: sample.blockingTimeMs,
+        maxLongTaskDurationMs: sample.maxLongTaskDurationMs
+      };
+
+      if(isHead) {
+        expect(sample.longTasksOver50Ms).toBeGreaterThan(0);
+        expect(injectedTask?.duration).toBeGreaterThanOrEqual(100);
+        expect(injectedTask?.observed).toBe(true);
+        expect(sample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
+        negativeSamples.push(controlSample);
+      } else {
+        baseControlSamples.push(controlSample);
+      }
     }
   }
-  const baseColdSamples = report.variants.base['100x'].coldChatList;
-  expect(baseColdSamples).toHaveLength(PERFORMANCE_REPEATS);
-  const coldLoadEvaluation = evaluateWithNegativeSamples('coldChatList', negativeSamples);
+  const coldLoadEvaluation = evaluateWithControlSamples('coldChatList', baseControlSamples, negativeSamples);
   const coldLoadFailures = coldLoadEvaluation.blockingFailures.filter((failure) => failure.startsWith('100x coldChatList: '));
-  const blockingTimes = (samples: Partial<Metric>[]) => samples.map((sample) => sample.blockingTimeMs);
-  expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `100 ms cold-load control was not blocked: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs base ${JSON.stringify(blockingTimes(baseColdSamples))} ms`).toBe(true);
+  const blockingTimes = (samples: Metric[]) => samples.map((sample) => sample.blockingTimeMs);
+  expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `100 ms control was not blocked: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs same-phase base ${JSON.stringify(blockingTimes(baseControlSamples))} ms`).toBe(true);
 });
