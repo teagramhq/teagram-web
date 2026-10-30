@@ -136,7 +136,7 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
     return trace.callCount as number;
   }) : undefined;
   await page.waitForTimeout(150);
-  const captured = await page.evaluate(async({ms, requests, scroll, includePhases}) => {
+  const captured = await page.evaluate(async({ms, requests, scroll, includePhases, countOnlyRpcCallCount}) => {
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
     const bundleBytes = resources.filter((entry) => {
@@ -180,7 +180,7 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
-  }, {ms, requests: requests.value, scroll, includePhases});
+  }, {ms, requests: requests.value, scroll, includePhases, countOnlyRpcCallCount});
   expect(captured.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the client build').toBe(true);
   const rpcSummary = summarizeRpcTrace(captured.rpcCalls as PerformanceRpcCall[], ms);
   return {

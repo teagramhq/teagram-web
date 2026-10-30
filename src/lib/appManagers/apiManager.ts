@@ -755,14 +755,16 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   private startPerformanceRpcTrace(method: string): PerformanceRpcHandle | undefined {
-    return this.performanceRpcTrace.start(method);
+    return this.performanceRpcTrace?.start(method);
   }
 
   private finishPerformanceRpcTrace(handle: PerformanceRpcHandle | undefined, outcome: 'success' | 'error') {
+    if(!handle || !this.performanceRpcTrace) return;
     this.performanceRpcTrace.finish(handle, outcome);
   }
 
   private trackPerformanceRpc<T>(handle: PerformanceRpcHandle | undefined, request: CancellablePromise<T>) {
+    if(!handle || !this.performanceRpcTrace) return request;
     return this.performanceRpcTrace.track(handle, request);
   }
 
