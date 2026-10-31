@@ -16,10 +16,12 @@ export const PERFORMANCE_REPEATS = 3;
 // Cold-load pairs need additional samples to outvote occasional runner long tasks.
 export const COLD_CHAT_LIST_REPEATS = 6;
 
-export function scenarioBundleBytes(resources, origin, startedAt) {
+export function scenarioBundleBytes(resources, origin, startedAt, previouslyLoadedUrls = []) {
+  const previousUrls = new Set(previouslyLoadedUrls);
   const bundleResources = new Map();
   resources.filter((entry) => {
     return entry.startTime >= startedAt &&
+      !previousUrls.has(entry.name) &&
       new URL(entry.name).origin === origin &&
       /\.(js|css)(?:[?#]|$)/i.test(entry.name);
   }).forEach((entry) => bundleResources.set(entry.name, entry.decodedBodySize));

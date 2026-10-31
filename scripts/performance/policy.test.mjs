@@ -70,6 +70,7 @@ function scrollHistory(count = 20, samples = cleanScrollSamples()) {
 test('counts only new same-origin bundle resources once per URL', () => {
   const resources = [
     {name: 'https://app.example/app.js', startTime: 5, decodedBodySize: 100},
+    {name: 'https://app.example/chat-list.js', startTime: 11, decodedBodySize: 100},
     {name: 'https://app.example/contacts.js', startTime: 12, decodedBodySize: 25},
     {name: 'https://app.example/contacts.js', startTime: 13, decodedBodySize: 25},
     {name: 'https://app.example/contacts.css?v=1', startTime: 14, decodedBodySize: 30},
@@ -77,7 +78,7 @@ test('counts only new same-origin bundle resources once per URL', () => {
     {name: 'https://app.example/avatar.png', startTime: 16, decodedBodySize: 500}
   ];
 
-  assert.equal(scenarioBundleBytes(resources, 'https://app.example', 10), 55);
+  assert.equal(scenarioBundleBytes(resources, 'https://app.example', 10, ['https://app.example/chat-list.js']), 55);
 });
 
 test('blocks a 100 ms main-thread task on 100x cold load from the first run', () => {
@@ -299,11 +300,24 @@ test('blocks contacts bundle measurements that vary across repeats', () => {
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x contactsList') && failure.includes('head bundle measurements vary')));
 });
 
-test('blocks stable contacts bundle growth above two percent', () => {
-  const head = scaleVariants({'100x': {contactsList: {bundleBytes: 102_001}}});
-  const result = evaluatePerformance(report({head}));
+test('blocks contacts-only bundle growth above two percent of the measured route bundle', () => {
+  const origin = 'https://app.example';
+  const chatListResources = [`${origin}/app.js`];
+  const baseBundleBytes = scenarioBundleBytes([
+    {name: `${origin}/app.js`, startTime: 11, decodedBodySize: 4_619_121},
+    {name: `${origin}/contacts.js`, startTime: 12, decodedBodySize: 1_583}
+  ], origin, 10, chatListResources);
+  const headBundleBytes = scenarioBundleBytes([
+    {name: `${origin}/app.js`, startTime: 11, decodedBodySize: 4_602_137},
+    {name: `${origin}/contacts.js`, startTime: 12, decodedBodySize: 1_615}
+  ], origin, 10, chatListResources);
+  const base = scaleVariants({'100x': {contactsList: {bundleBytes: baseBundleBytes}}});
+  const head = scaleVariants({'100x': {contactsList: {bundleBytes: headBundleBytes}}});
+  const result = evaluatePerformance(report({base, head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x contactsList') && failure.includes('bundle grew')));
+  assert.equal(baseBundleBytes, 1_583);
+  assert.equal(headBundleBytes, 1_615);
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x contactsList') && failure.includes('bundle grew from 1583 to 1615 bytes')));
 });
 
 test('reports scroll misses while master calibration warms up', () => {

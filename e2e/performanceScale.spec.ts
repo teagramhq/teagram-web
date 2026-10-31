@@ -73,7 +73,7 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
       frameIntervals: [] as number[],
       frameActive: false,
       started: 0,
-      bundleStartedAt: 0
+      resourceUrlBaseline: [] as string[]
     };
     try {
       const observer = new PerformanceObserver((list) => {
@@ -106,15 +106,16 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
   }, injectColdStall);
 }
 
-async function begin(page: Page, requests: {value: number}, includePageLoadBundleResources = false) {
+async function begin(page: Page, requests: {value: number}) {
   requests.value = 0;
-  await page.evaluate((includePageLoadBundleResources: boolean) => {
+  await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
     perf.longTasks = [];
     perf.frameIntervals = [];
+    perf.resourceUrlBaseline = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).map((entry) => entry.name);
+    performance.clearResourceTimings();
     perf.started = performance.now();
-    perf.bundleStartedAt = includePageLoadBundleResources ? 0 : perf.started;
-  }, includePageLoadBundleResources);
+  });
 }
 
 async function capture(page: Page, requests: {value: number}, ms: number, scroll = false): Promise<Metric> {
@@ -132,7 +133,8 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
       domNodes: document.querySelectorAll('*').length,
       bundleResources: resources.map((entry) => ({name: entry.name, startTime: entry.startTime, decodedBodySize: entry.decodedBodySize})),
       resourceOrigin: location.origin,
-      resourceStartedAt: perf.bundleStartedAt,
+      resourceStartedAt: perf.started,
+      resourceUrlBaseline: perf.resourceUrlBaseline,
       longTasksOver50Ms: longTasks.length,
       blockingTimeMs: longTasks.reduce((total: number, entry: {duration: number}) => total + entry.duration - 50, 0),
       maxLongTaskDurationMs: longTasks.reduce((max: number, entry: {duration: number}) => Math.max(max, entry.duration), 0),
@@ -141,8 +143,8 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
   }, {ms, requests: requests.value, scroll});
-  const {bundleResources, resourceOrigin, resourceStartedAt, ...metrics} = captured;
-  return {...metrics, bundleBytes: scenarioBundleBytes(bundleResources, resourceOrigin, resourceStartedAt)};
+  const {bundleResources, resourceOrigin, resourceStartedAt, resourceUrlBaseline, ...metrics} = captured;
+  return {...metrics, bundleBytes: scenarioBundleBytes(bundleResources, resourceOrigin, resourceStartedAt, resourceUrlBaseline)};
 }
 
 async function injectedLongTask(page: Page) {
@@ -327,8 +329,8 @@ async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture:
 }
 
 async function openContacts(page: Page, requests: {value: number}) {
-  // The caller navigates to a fresh document before this scenario, so count its preloaded chunks too.
-  await begin(page, requests, true);
+  await page.waitForLoadState('networkidle');
+  await begin(page, requests);
   await page.locator('.sidebar-tools-button').click();
   await page.getByText('Contacts', {exact: true}).last().click();
   await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
