@@ -300,7 +300,8 @@ describe('community pinned dialog order', () => {
     });
     Object.assign(manager as any, {
       apiManager: {
-        invokeApiSingleProcess: vi.fn(({processResult}) => Promise.resolve(processResult(response)))
+        invokeApiSingleProcess: vi.fn(({processResult}) => Promise.resolve(processResult(response))),
+        trackPerformanceRpcWait: (_method: string, request: Promise<any>) => request
       },
       appCommunitiesManager: communitiesManager,
       appDraftsManager: {addMissedDialogs: vi.fn()},
