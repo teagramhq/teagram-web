@@ -18,7 +18,7 @@ const CALIBRATION_RUNS = 20;
 const MAX_SCALE_RATIO = 1.5;
 const MIN_BLOCKING_TIME_REGRESSION_MS = 80;
 // A 100 ms task adds 50 ms of blocking time to every repeat.
-const MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS = 40;
+const MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS = 25;
 const REQUIRED_METRICS = [
   ['ms', 'timing'],
   ['requests', 'requests'],
