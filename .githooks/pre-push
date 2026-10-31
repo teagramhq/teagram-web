@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+local_oids=()
+remote_oids=()
+while read -r _ local_oid _ remote_oid; do
+  [ -n "${local_oid:-}" ] || continue
+  case "$local_oid" in
+    *[!0]*)
+      local_oids+=("$local_oid")
+      remote_oids+=("${remote_oid:-}")
+      ;;
+  esac
+done
+
+((${#local_oids[@]})) || exit 0
+
+base_ref=''
+for candidate in origin/master origin/HEAD origin/main; do
+  if git rev-parse --verify "$candidate^{commit}" >/dev/null 2>&1; then
+    base_ref=$candidate
+    break
+  fi
+done
+
+if [ -z "$base_ref" ]; then
+  printf 'error: cannot find origin/HEAD, origin/master, or origin/main for pre-push checks\n' >&2
+  exit 1
+fi
+
+gitleaks_ranges=()
+typecheck_needed=0
+lint_needed=0
+shellcheck_paths=()
+actionlint_paths=()
+
+for ((ref_index = 0; ref_index < ${#local_oids[@]}; ref_index++)); do
+  local_oid=${local_oids[$ref_index]}
+  remote_oid=${remote_oids[$ref_index]}
+  git cat-file -e "$local_oid^{commit}"
+  merge_base=$(git merge-base "$base_ref" "$local_oid" 2>/dev/null || true)
+  if [ -z "$merge_base" ]; then
+    merge_base=$(git rev-parse --verify "$base_ref^{commit}")
+  fi
+  [ "$merge_base" = "$local_oid" ] && continue
+
+  if [ -n "$remote_oid" ] && git cat-file -e "$remote_oid^{commit}" 2>/dev/null; then
+    push_range="$remote_oid..$local_oid"
+  else
+    push_range="$merge_base..$local_oid"
+  fi
+  pushed_commit=$(git rev-list -n 1 "$push_range" 2>/dev/null || true)
+  if [ -n "$pushed_commit" ]; then
+    gitleaks_ranges+=("$push_range")
+  fi
+
+  while IFS= read -r -d '' path; do
+    case "$path" in
+      *.js|*.jsx|*.ts|*.tsx|*.mjs|*.cjs|*.mts|*.cts|tsconfig*.json|package.json|pnpm-lock.yaml)
+        typecheck_needed=1
+        ;;
+    esac
+    case "$path" in
+      src/*.js|src/*.jsx|src/*.ts|src/*.tsx|src/*.mjs|src/*.cjs|src/*.mts|src/*.cts|.oxlintrc.json|package.json|pnpm-lock.yaml)
+        lint_needed=1
+        ;;
+    esac
+    case "$path" in
+      *.sh)
+        if [ -f "$path" ]; then
+          shellcheck_paths+=("./$path")
+        fi
+        ;;
+    esac
+    case "$path" in
+      .github/workflows/*.yml|.github/workflows/*.yaml)
+        if [ -f "$path" ]; then
+          actionlint_paths+=("$path")
+        fi
+        ;;
+    esac
+  done < <(git diff --name-only -z "$merge_base" "$local_oid")
+done
+
+if [ "$typecheck_needed" -eq 1 ]; then
+  if ! command -v pnpm >/dev/null 2>&1; then
+    printf 'warning: pnpm is missing; skipping typecheck\n' >&2
+  elif [ ! -x "$repo_root/node_modules/.bin/tsc" ]; then
+    printf 'warning: local TypeScript is missing; skipping typecheck\n' >&2
+  else
+    pnpm run typecheck
+  fi
+fi
+
+if [ "$lint_needed" -eq 1 ]; then
+  if ! command -v pnpm >/dev/null 2>&1; then
+    printf 'warning: pnpm is missing; skipping lint\n' >&2
+  elif [ ! -x "$repo_root/node_modules/.bin/oxlint" ]; then
+    printf 'warning: local oxlint is missing; skipping lint\n' >&2
+  else
+    pnpm run lint
+  fi
+fi
+
+if ((${#shellcheck_paths[@]})); then
+  if command -v shellcheck >/dev/null 2>&1; then
+    shellcheck "${shellcheck_paths[@]}"
+  else
+    printf 'warning: shellcheck is missing; skipping changed shell scripts\n' >&2
+  fi
+fi
+
+if ((${#actionlint_paths[@]})); then
+  if command -v actionlint >/dev/null 2>&1; then
+    actionlint -ignore 'label "ubuntu-26.04" is unknown' "${actionlint_paths[@]}"
+  else
+    printf 'warning: actionlint is missing; skipping changed workflows\n' >&2
+  fi
+fi
+
+if ((${#gitleaks_ranges[@]})); then
+  if command -v gitleaks >/dev/null 2>&1; then
+    for range in "${gitleaks_ranges[@]}"; do
+      gitleaks git --log-opts="$range"
+    done
+  else
+    printf 'warning: gitleaks is missing; skipping pushed commit scan\n' >&2
+  fi
+fi

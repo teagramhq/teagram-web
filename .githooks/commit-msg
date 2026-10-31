@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+message_file=${1:?commit message file is required}
+subject=$(sed -n '1p' "$message_file")
+
+case "$subject" in
+  "Merge "*|"Revert \""*|"fixup! "*|"squash! "*|"amend! "*)
+    exit 0
+    ;;
+esac
+
+merge_head=$(git rev-parse --git-path MERGE_HEAD)
+if [ -f "$merge_head" ]; then
+  exit 0
+fi
+
+rules=''
+
+add_rule() {
+  if [ -n "$rules" ]; then
+    rules="$rules; $1"
+  else
+    rules=$1
+  fi
+}
+
+if ! printf '%s\n' "$subject" | grep -Eq '^[a-z][a-z0-9-]*(\([^()[:space:]]+\))?!?: .+'; then
+  add_rule 'subject must follow Conventional Commits'
+fi
+
+if printf '%s\n' "$subject" | grep -Eq '(^|[^[:alnum:]])[A-Z][A-Z0-9]+-[0-9]+([^[:alnum:]]|$)'; then
+  add_rule 'subject must not contain an issue key'
+fi
+
+if grep -Eiq '^[[:space:]]*Co-Authored-By[[:space:]]*:' "$message_file"; then
+  add_rule 'message must not include a Co-Authored-By trailer'
+fi
+
+if grep -Eiq '^[[:space:]]*Generated with([[:space:]]|$)' "$message_file"; then
+  add_rule 'message must not include a Generated with line'
+fi
+
+if [ -n "$rules" ]; then
+  printf 'commit rejected: %s\n' "$rules" >&2
+  exit 1
+fi
