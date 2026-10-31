@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {summarizeCpuProfile, summarizePerformancePhases, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
+import {summarizeCpuProfile, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
 
 describe('performance RPC trace summary', () => {
   test('excludes long tasks that start outside the scenario measurement window', async() => {
@@ -18,6 +18,79 @@ describe('performance RPC trace summary', () => {
       blockingTimeMs: 35,
       maxLongTaskDurationMs: 75
     });
+  });
+
+  test('attributes measured long tasks to overlapping long-animation-frame scripts without URL queries', () => {
+    const trace = summarizeLongTaskTrace([
+      {startTime: 110, duration: 80},
+      {startTime: 190, duration: 51},
+      {startTime: 300, duration: 100}
+    ], [
+      {
+        startTime: 105,
+        duration: 100,
+        scripts: [{
+          sourceURL: 'https://localhost:4176/assets/app.js?token=private',
+          sourceFunctionName: 'renderMessages',
+          invoker: 'EventListener.handleEvent',
+          invokerType: 'event-listener',
+          executionStart: 125,
+          duration: 55,
+          forcedStyleAndLayoutDuration: 12
+        }]
+      },
+      {
+        startTime: 180,
+        duration: 80,
+        scripts: [{
+          sourceURL: 'https://localhost:4176/assets/scroll.js',
+          sourceFunctionName: 'onScroll',
+          invoker: 'Window.requestAnimationFrame',
+          invokerType: 'user-callback',
+          executionStart: 185,
+          duration: 60,
+          forcedStyleAndLayoutDuration: 20
+        }]
+      }
+    ], 100, 200);
+
+    expect(trace).toEqual([
+      {
+        startTimeMs: 10,
+        durationMs: 80,
+        scripts: [
+          {
+            functionName: 'renderMessages',
+            script: '/assets/app.js',
+            invoker: 'EventListener.handleEvent',
+            invokerType: 'event-listener',
+            durationMs: 55,
+            forcedStyleAndLayoutDurationMs: 12
+          },
+          {
+            functionName: 'onScroll',
+            script: '/assets/scroll.js',
+            invoker: 'Window.requestAnimationFrame',
+            invokerType: 'user-callback',
+            durationMs: 60,
+            forcedStyleAndLayoutDurationMs: 20
+          }
+        ]
+      },
+      {
+        startTimeMs: 90,
+        durationMs: 51,
+        scripts: [{
+          functionName: 'onScroll',
+          script: '/assets/scroll.js',
+          invoker: 'Window.requestAnimationFrame',
+          invokerType: 'user-callback',
+          durationMs: 60,
+          forcedStyleAndLayoutDurationMs: 20
+        }]
+      }
+    ]);
+    expect(JSON.stringify(trace)).not.toContain('private');
   });
 
   test('counts RPC calls and subtracts overlapping waits only once', () => {
