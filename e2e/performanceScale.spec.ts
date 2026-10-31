@@ -329,7 +329,7 @@ async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture:
 }
 
 async function openContacts(page: Page, requests: {value: number}) {
-  await page.waitForLoadState('networkidle');
+  await page.waitForLoadState('load', {timeout: 10_000});
   await begin(page, requests);
   await page.locator('.sidebar-tools-button').click();
   await page.getByText('Contacts', {exact: true}).last().click();
