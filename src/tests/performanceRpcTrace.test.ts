@@ -2,6 +2,24 @@ import {describe, expect, test} from 'vitest';
 import {summarizeCpuProfile, summarizePerformancePhases, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
 
 describe('performance RPC trace summary', () => {
+  test('excludes long tasks that start outside the scenario measurement window', async() => {
+    const trace = await import('../../e2e/performanceRpcTrace') as any;
+    const summary = trace.summarizeLongTaskWindow?.([
+      {startTime: 99, duration: 80},
+      {startTime: 100, duration: 60},
+      {startTime: 200, duration: 50},
+      {startTime: 349, duration: 75},
+      {startTime: 350, duration: 90},
+      {startTime: 420, duration: 150}
+    ], 100, 250);
+
+    expect(summary).toEqual({
+      longTasksOver50Ms: 2,
+      blockingTimeMs: 35,
+      maxLongTaskDurationMs: 75
+    });
+  });
+
   test('counts RPC calls and subtracts overlapping waits only once', () => {
     const summary = summarizeRpcTrace([
       {method: 'messages.getDialogs', startedAtMs: 0, durationMs: 30, outcome: 'success'},

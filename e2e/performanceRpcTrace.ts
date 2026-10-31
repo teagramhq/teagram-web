@@ -33,6 +33,16 @@ export type PerformancePhaseSummary = {
   startMs?: number
 };
 
+export function summarizeLongTaskWindow(entries: Array<{startTime: number, duration: number}>, startedAtMs: number, elapsedMs: number) {
+  const endAtMs = startedAtMs + elapsedMs;
+  const tasks = entries.filter(({startTime, duration}) => startTime >= startedAtMs && startTime < endAtMs && duration > 50);
+  return {
+    longTasksOver50Ms: tasks.length,
+    blockingTimeMs: tasks.reduce((total, {duration}) => total + duration - 50, 0),
+    maxLongTaskDurationMs: tasks.reduce((max, {duration}) => Math.max(max, duration), 0)
+  };
+}
+
 export function summarizePerformancePhases<T extends {name: string, durationMs: number | null, accountNumber?: number, startMs?: number}>(phases: T[]): PerformancePhaseSummary[] {
   return phases.map(({name, durationMs, accountNumber, startMs}) => ({
     name,
