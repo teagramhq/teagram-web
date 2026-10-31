@@ -42,6 +42,7 @@ vi.mock('@stores/contentSettings', () => ({
 vi.mock('@stores/stars', () => ({default: () => () => 0}));
 
 let ChatBubbles: typeof import('@components/chat/bubbles').default;
+let Chat: typeof import('@components/chat/chat').default;
 let BubbleGroups: typeof import('@components/chat/bubbleGroups').default;
 let BubbleGroup: typeof import('@components/chat/bubbleGroups').BubbleGroup;
 let cancelPendingHiddenLinksEvent: typeof import('@components/chat/bubbles').cancelPendingHiddenLinksEvent;
@@ -83,6 +84,7 @@ beforeAll(async() => {
     setBubbleHiddenLinksPending,
     shouldForceHideNonContactLinkTest
   } = await import('@components/chat/bubbles'));
+  Chat = (await import('@components/chat/chat')).default;
   ({default: BubbleGroups, BubbleGroup} = await import('@components/chat/bubbleGroups'));
   // Importing the whole bubbles graph costs far more than the default hook
   // budget once the rest of the suite is competing for the same CPU.
@@ -112,10 +114,13 @@ function makeSetPeerHarness(pendingHistory: Promise<void>, finishPeerChangePromi
     bubbles: {lazyLoadQueue: {queueId: 0}},
     onChangePeer: vi.fn(() => Promise.resolve()),
     finishPeerChange,
+    revealPreparedBackground: vi.fn(),
+    isPinnedMessagesNeeded: vi.fn(() => false),
+    dispatchEvent: vi.fn(),
     getHistoryStorage: () => historyStorage,
     isStartButtonNeeded,
     appImManager: {getChatSavedPosition: (): undefined => undefined}
-  };
+  } as any;
   const harness = Object.assign(Object.create(ChatBubbles.prototype), {
     setPeerTempId: 0,
     chat,
@@ -125,11 +130,22 @@ function makeSetPeerHarness(pendingHistory: Promise<void>, finishPeerChangePromi
     },
     log: Object.assign(vi.fn(), {bindPrefix: () => Object.assign(vi.fn(), {warn: vi.fn(), error: vi.fn()})}),
     followStack: [],
+    container: document.createElement('div'),
+    preloader: {attach: vi.fn(), detach: vi.fn()},
+    scrollable: {
+      lastScrollDirection: 0,
+      lastScrollPosition: 0,
+      replaceChildren: vi.fn(),
+      setScrollPositionSilently: vi.fn(),
+      updateThumb: vi.fn(),
+      onScroll: vi.fn()
+    },
+    dateMessages: {},
     destroyResizeObserver: vi.fn(),
     cleanup: vi.fn(),
     refreshTestPeerNonContactState: vi.fn(),
     createChatInner: () => document.createElement('div'),
-    lazyLoadQueue: {lock: vi.fn()},
+    lazyLoadQueue: {lock: vi.fn(), unlock: vi.fn()},
     getHistory1
   }) as any;
 
@@ -190,6 +206,34 @@ test('prepares cached peer completion while initial history renders', async() =>
   expect(finishPeerChange).toHaveBeenCalledTimes(1);
 });
 
+test('defers peer UI callbacks until the caller commits the new peer', async() => {
+  const callbacks: string[] = [];
+  const chat = Object.assign(Object.create(Chat.prototype), {
+    peerId,
+    peerChanged: false,
+    cleanup: vi.fn(),
+    topbar: {finishPeerChange: vi.fn(async() => () => callbacks.push('topbar'))},
+    bubbles: {finishPeerChange: vi.fn(async() => () => callbacks.push('bubbles'))},
+    input: {finishPeerChange: vi.fn(async() => () => callbacks.push('input'))},
+    handleBackgrounds: vi.fn(async() => undefined),
+    sharedMediaTab: undefined,
+    log: {warn: vi.fn(), setPrefix: vi.fn()},
+    type: 'chat',
+    isMainChat: false
+  }) as any;
+
+  const applyPeerChange = await Chat.prototype.finishPeerChange.call(chat, {
+    peerId,
+    middleware: () => true,
+    deferUiCallbacks: true
+  });
+
+  expect(callbacks).toEqual([]);
+  expect(applyPeerChange).toEqual(expect.any(Function));
+  applyPeerChange();
+  expect(callbacks).toEqual(['topbar', 'bubbles', 'input']);
+});
+
 test('prepares peer completion while the initial history request is pending', async() => {
   const pendingHistory = new Promise<void>(() => {});
   let resolveHistoryResult!: (result: {cached: boolean, promise: Promise<void>, waitPromise: Promise<void>}) => void;
@@ -207,6 +251,67 @@ test('prepares peer completion while the initial history request is pending', as
   await setPeerPromise;
 
   expect(preparedBeforeHistory).toBe(true);
+});
+
+test('applies peer UI callbacks only after replacing the old bubbles', async() => {
+  let resolveHistory!: () => void;
+  const pendingHistory = new Promise<void>((resolve) => {
+    resolveHistory = resolve;
+  });
+  const {harness, chat} = makeSetPeerHarness(pendingHistory);
+  const events: string[] = [];
+  let resolveUiApplied!: () => void;
+  const uiApplied = new Promise<void>((resolve) => {
+    resolveUiApplied = resolve;
+  });
+  let resolvePreparation!: (callback: () => void) => void;
+  const pendingPreparation = new Promise<() => void>((resolve) => {
+    resolvePreparation = resolve;
+  });
+  chat.finishPeerChange = vi.fn((options: {deferUiCallbacks?: boolean}) => {
+    if(options.deferUiCallbacks) {
+      return pendingPreparation;
+    }
+
+    events.push('apply');
+    return Promise.resolve();
+  });
+  chat.revealPreparedBackground = vi.fn();
+  chat.isPinnedMessagesNeeded = vi.fn(() => false);
+  chat.dispatchEvent = vi.fn();
+  chat.input = {startParam: undefined};
+  harness.chatInner = document.createElement('div');
+  harness.createChatInner = () => document.createElement('div');
+  harness.preloader = {detach: vi.fn(), attach: vi.fn()};
+  harness.container = document.createElement('div');
+  harness.dateMessages = {};
+  harness.scrollable = {
+    loadedAll: {bottom: false},
+    lastScrollDirection: 0,
+    lastScrollPosition: 0,
+    replaceChildren: vi.fn(() => events.push('replace')),
+    setScrollPositionSilently: vi.fn(),
+    updateThumb: vi.fn(),
+    onScroll: vi.fn()
+  };
+  harness.lazyLoadQueue.unlock = vi.fn();
+  harness.middlewareHelper = {get: () => () => true};
+  harness.onRenderScrollSet = vi.fn();
+  harness.onScroll = vi.fn();
+  harness.loadEphemeralHistory = vi.fn();
+
+  const result = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
+  expect(events).toEqual(['replace']);
+  resolvePreparation(() => {
+    events.push('apply');
+    resolveUiApplied();
+  });
+  await uiApplied;
+  expect(events).toEqual(['replace', 'apply']);
+  resolveHistory();
+  await result.promise;
+
+  expect(events).toEqual(['replace', 'apply']);
 });
 
 test('propagates prepared peer rejection before the initial history request resolves', async() => {
