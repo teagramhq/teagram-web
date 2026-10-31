@@ -52,7 +52,10 @@ for ((ref_index = 0; ref_index < ${#local_oids[@]}; ref_index++)); do
   else
     push_range="$merge_base..$local_oid"
   fi
-  pushed_commit=$(git rev-list -n 1 "$push_range" 2>/dev/null || true)
+  if ! pushed_commit=$(git rev-list -n 1 "$push_range"); then
+    printf 'error: failed to enumerate commits in push range %s\n' "$push_range" >&2
+    exit 1
+  fi
   if [ -n "$pushed_commit" ]; then
     gitleaks_ranges+=("$push_range")
   fi

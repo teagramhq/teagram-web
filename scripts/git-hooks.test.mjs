@@ -1,5 +1,5 @@
 import {execFileSync, spawnSync} from 'node:child_process';
-import {chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {delimiter, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -180,6 +180,46 @@ writeFileSync(paths[0], source.replace('const answer = 42;', 'const answer: numb
 });
 
 describe('pre-push hook', () => {
+  it('fails if Git cannot enumerate the commits in a push range', () => {
+    const directory = createDivergedRepository();
+    const localOid = git(directory, 'rev-parse', 'HEAD');
+    const mainOid = git(directory, 'rev-parse', 'main');
+    const fakeBin = join(directory, 'fake-bin');
+    const gitShimPath = join(fakeBin, 'git');
+    const gitExecutable = process.env.PATH.split(delimiter)
+    .map(path => join(path, 'git'))
+    .find(existsSync);
+    expect(gitExecutable).toBeTruthy();
+    git(directory, 'update-ref', 'refs/remotes/origin/main', mainOid);
+    mkdirSync(fakeBin);
+    writeFileSync(gitShimPath, `#!/usr/bin/env node
+const {spawnSync} = require('node:child_process');
+if(process.argv[2] === 'rev-list') {
+  console.error('injected git rev-list failure');
+  process.exit(42);
+}
+const result = spawnSync(${JSON.stringify(gitExecutable)}, process.argv.slice(2), {
+  encoding: 'utf8',
+  env: process.env
+});
+process.stdout.write(result.stdout || '');
+process.stderr.write(result.stderr || '');
+process.exit(result.status ?? 1);
+`);
+    chmodSync(gitShimPath, 0o755);
+
+    const hook = spawnSync(join(directory, '.githooks', 'pre-push'), [], {
+      cwd: directory,
+      encoding: 'utf8',
+      env: {...process.env, PATH: `${fakeBin}${delimiter}${process.env.PATH}`},
+      input: `refs/heads/feature ${localOid} refs/heads/feature ${'0'.repeat(40)}\n`
+    });
+
+    expect(hook.status).not.toBe(0);
+    expect(hook.stderr).toContain('injected git rev-list failure');
+    expect(hook.stderr).toContain('failed to enumerate commits in push range');
+  });
+
   it('rejects a push when typecheck reports a TypeScript error', () => {
     const {directory, remoteDirectory} = createPushRepository();
     const typeError = "src/type-error.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.";
