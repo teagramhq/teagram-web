@@ -58,7 +58,7 @@ test('PR performance runs require complete base bundle measurements', () => {
 
 test('matching performance traces are enabled in head and base bundles', () => {
   assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir .*teagram-web-head-dist/);
-  assert.match(workflow, /git -C "\$base_directory" apply "\$GITHUB_WORKSPACE\/scripts\/performance\/performance-trace\.patch"/);
+  assert.match(workflow, /if \[ ! -f "\$base_directory\/src\/lib\/appManagers\/performanceTrace\.ts" \]; then\s+git -C "\$base_directory" apply "\$GITHUB_WORKSPACE\/scripts\/performance\/performance-trace\.patch"\s+fi/);
   assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir .*teagram-web-base-dist/);
   assert.ok(existsSync(new URL('./performance-trace.patch', import.meta.url)));
 });
