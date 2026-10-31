@@ -22,6 +22,18 @@ export async function bootstrapIm(): Promise<void> {
   if(bootstrapped) return;
   bootstrapped = true;
 
+  const appDialogsManagerImport = import('@lib/appDialogsManager');
+  // Skip the opus-recorder fallback chunk entirely on browsers that have the
+  // WebCodecs-based native path. Saves ~80 KB of WASM-shipping JS on every
+  // sign-in for ~94% of users (May 2026 baseline).
+  const recorderImport: Promise<{default: unknown} | null> = isNativeVoiceRecorderSupported() ?
+    Promise.resolve(null) :
+    import('@vendor/recorder.min.js' as any);
+  const videoFramePolyfillImport = 'requestVideoFrameCallback' in HTMLVideoElement.prototype ?
+    Promise.resolve() :
+    import('@helpers/dom/requestVideoFrameCallbackPolyfill');
+  void loadFonts();
+
   await rootScope.managers.appStateManager.pushToState('authState', {_: 'authStateSignedIn'});
 
   const pageChatsEl = document.getElementById('page-chats');
@@ -29,21 +41,10 @@ export async function bootstrapIm(): Promise<void> {
 
   blurActiveElement();
 
-  // Skip the opus-recorder fallback chunk entirely on browsers that have the
-  // WebCodecs-based native path. Saves ~80 KB of WASM-shipping JS on every
-  // sign-in for ~94% of users (May 2026 baseline).
-  const recorderImport: Promise<{default: unknown} | null> = isNativeVoiceRecorderSupported() ?
-    Promise.resolve(null) :
-    import('@vendor/recorder.min.js' as any);
-  // Let the browser paint the chat list while its fonts load.
-  void loadFonts();
-
   const [{default: appDialogsManager}, recorder] = await Promise.all([
-    import('@lib/appDialogsManager'),
+    appDialogsManagerImport,
     recorderImport,
-    'requestVideoFrameCallback' in HTMLVideoElement.prototype ?
-      Promise.resolve() :
-      import('@helpers/dom/requestVideoFrameCallbackPolyfill')
+    videoFramePolyfillImport
   ]);
 
   if(recorder) {

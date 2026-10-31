@@ -750,7 +750,6 @@ const onDocumentReady = async() => {
     console.log('Will mount IM page:', Date.now() / 1000);
 
     const fontsPromise = loadFonts();
-    fadeInWhenFontsReady(document.getElementById('main-columns'), fontsPromise);
 
     const [{bootstrapIm}, shouldAnimate] = await Promise.all([
       import('./pages/bootstrapIm'),
@@ -760,6 +759,7 @@ const onDocumentReady = async() => {
     const pageChatsEl = document.getElementById('page-chats') as HTMLDivElement;
 
     if(shouldAnimate) {
+      fadeInWhenFontsReady(document.getElementById('main-columns'), fontsPromise);
       await sessionStorage.delete('should_animate_main');
       pageChatsEl.classList.add('main-screen-enter');
 

@@ -2,6 +2,7 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   start: vi.fn(),
+  appDialogsManagerImported: false,
   pushToState: vi.fn(() => Promise.resolve()),
   loadFonts: vi.fn()
 }));
@@ -10,7 +11,10 @@ vi.mock('@lib/rootScope', () => ({
   default: {managers: {appStateManager: {pushToState: mocks.pushToState}}}
 }));
 
-vi.mock('@lib/appDialogsManager', () => ({default: {start: mocks.start}}));
+vi.mock('@lib/appDialogsManager', () => {
+  mocks.appDialogsManagerImported = true;
+  return {default: {start: mocks.start}};
+});
 vi.mock('@helpers/dom/loadFonts', () => ({default: (types?: Record<string, unknown>) => mocks.loadFonts(types)}));
 vi.mock('@helpers/schedulers', () => ({doubleRaf: () => Promise.resolve()}));
 vi.mock('@helpers/voiceRecorder/isNativeSupported', () => ({default: () => true}));
@@ -24,7 +28,9 @@ describe('signed-in app bootstrap', () => {
   });
 
   it('starts the chat list without waiting for fonts', async() => {
+    let resolveState: () => void;
     let resolveFonts: () => void;
+    mocks.pushToState.mockImplementation(() => new Promise<void>((resolve) => resolveState = resolve));
     mocks.loadFonts.mockImplementation(() => new Promise<void>((resolve) => resolveFonts = resolve));
 
     Object.defineProperty(HTMLVideoElement.prototype, 'requestVideoFrameCallback', {
@@ -35,14 +41,23 @@ describe('signed-in app bootstrap', () => {
     const {bootstrapIm} = await import('@/pages/bootstrapIm');
     const bootstrap = bootstrapIm();
     let startedBeforeFonts = false;
+    let importsStartedBeforeState = false;
     try {
+      await vi.waitFor(() => expect(mocks.appDialogsManagerImported).toBe(true), {timeout: 100});
       await vi.waitFor(() => expect(mocks.loadFonts).toHaveBeenCalledTimes(1));
+      importsStartedBeforeState = true;
+      expect(mocks.pushToState).toHaveBeenCalledTimes(1);
+      expect(mocks.start).not.toHaveBeenCalled();
+      resolveState();
       await vi.waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1), {timeout: 100});
       startedBeforeFonts = true;
     } finally {
+      resolveState?.();
+      await vi.waitFor(() => expect(mocks.loadFonts).toHaveBeenCalledTimes(1));
       resolveFonts();
       await bootstrap;
     }
+    expect(importsStartedBeforeState).toBe(true);
     expect(startedBeforeFonts).toBe(true);
   });
 });
