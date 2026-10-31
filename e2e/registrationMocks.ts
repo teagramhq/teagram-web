@@ -31,7 +31,21 @@ export async function setupRegistrationMocks(
     displayNameMaxLength?: number,
     takenUsername?: string,
     delayAuthResponse?: boolean,
-    reservedUsername?: string
+    reservedUsername?: string,
+    userInvitesEnabled?: boolean,
+    inviteLink?: string,
+    signInAsExistingUser?: boolean,
+    registrationMode?: 'open' | 'invite' | 'closed',
+    initialInvites?: any[],
+    inviteQuota?: number,
+    inviteWeeklyCount?: number,
+    inviteNextAvailableAt?: number,
+    listInvitesError?: string,
+    inviteListDelay?: number,
+    createInviteError?: string,
+    createInviteDelay?: number,
+    revokeInviteError?: string,
+    failSignedInInviteLookup?: boolean
   } = {}
 ) {
   const appOrigin = new URL(testInfo.project.use.baseURL as string).origin;
@@ -96,15 +110,63 @@ export async function setupRegistrationMocks(
         delete (window as any).apiManagerProxy;
         (window as any).apiManagerProxy = proxy;
         const invoke = proxy.invoke.bind(proxy);
+        const hasSomeonePremium = proxy.hasSomeonePremium?.bind(proxy);
+        if(options.failSignedInInviteLookup && hasSomeonePremium) {
+          proxy.hasSomeonePremium = () => new URL(location.href).searchParams.has('fail-invite-lookup') ?
+            Promise.reject(new Error('Invite capacity lookup failed')) :
+            hasSomeonePremium();
+        }
         const calls: Array<{method: string, params?: Record<string, unknown>}> =
           ((window as any).__registrationCalls = []);
+        (window as any).__registrationMockOptions = options;
         const user = {_ : 'user', id: 4242, first_name: 'CI Registration'};
+        let createdInvite: any;
 
         proxy.invoke = (type: string, payload: any, ...args: any[]) => {
+          if(type === 'manager' && payload?.name === 'appAccountManager') {
+            calls.push({method: `appAccountManager.${payload.method}`, params: payload.args?.[0]});
+            if(payload.method === 'createUserInvite') {
+              if(options.createInviteError) return Promise.reject({type: options.createInviteError});
+              createdInvite = {
+                _: 'teagram.userInvite',
+                id: '9001',
+                state: 'pending',
+                created_at: Math.floor(Date.now() / 1000),
+                expires_at: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60
+              };
+              (window as any).__inviteLinkForTest = options.inviteLink;
+              const response = {
+                _: 'teagram.userInviteLink',
+                id: createdInvite.id,
+                link: options.inviteLink,
+                expires_at: createdInvite.expires_at
+              };
+              return options.createInviteDelay ? new Promise((resolve) => window.setTimeout(() => resolve(response), options.createInviteDelay)) : Promise.resolve(response);
+            }
+            if(payload.method === 'listUserInvites') {
+              if(options.listInvitesError) return Promise.reject({type: options.listInvitesError});
+              const response = {
+                _: 'teagram.userInvites',
+                invites: options.initialInvites || (createdInvite ? [createdInvite] : []),
+                quota: options.inviteQuota ?? 2,
+                weekly_count: options.inviteWeeklyCount ?? (createdInvite ? 1 : 0),
+                next_available_at: options.inviteNextAvailableAt,
+                flags: 0
+              };
+              return options.inviteListDelay ? new Promise((resolve) => window.setTimeout(() => resolve(response), options.inviteListDelay)) : Promise.resolve(response);
+            }
+            if(payload.method === 'revokeUserInvite') {
+              if(options.revokeInviteError) return Promise.reject({type: options.revokeInviteError});
+              if(createdInvite && String(payload.args?.[0]) === String(createdInvite.id)) createdInvite.state = 'revoked';
+              return Promise.resolve(true);
+            }
+          }
+
           if(type === 'manager' && payload?.name === 'apiManager') {
             if(payload.method === 'getAppConfig') {
               const config = {
                 registration_mode: options.registrationMode,
+                ...(options.userInvitesEnabled ? {user_invites_enabled: true, user_invite_quota: 2} : {}),
                 ...(options.includeUsernamePolicy === false ? {} : {
                   username_min_length: 2,
                   username_max_length: 32,
@@ -114,6 +176,13 @@ export async function setupRegistrationMocks(
                 ...(options.requireSignInTurnstile || options.requirePasswordTurnstile ? {turnstile: {site_key: options.turnstileSiteKey}} : {})
               };
               calls.push({method: 'help.getAppConfig', params: config});
+              if(options.userInvitesEnabled) {
+                Promise.resolve(invoke('manager', {
+                  name: 'appStateManager',
+                  method: 'pushToState',
+                  args: ['appConfig', config]
+                })).catch(() => {});
+              }
               return Promise.resolve(config);
             }
 
@@ -121,6 +190,41 @@ export async function setupRegistrationMocks(
               const [method, params] = payload.args;
               calls.push({method, params});
               switch(method) {
+                case 'teagram.createUserInvite': {
+                  if(options.createInviteError) return Promise.reject({type: options.createInviteError});
+                  createdInvite = {
+                    _: 'teagram.userInvite',
+                    id: '9001',
+                    state: 'pending',
+                    created_at: Math.floor(Date.now() / 1000),
+                    expires_at: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60
+                  };
+                  (window as any).__inviteLinkForTest = options.inviteLink;
+                  const response = {
+                    _: 'teagram.userInviteLink',
+                    id: createdInvite.id,
+                    link: options.inviteLink,
+                    expires_at: createdInvite.expires_at
+                  };
+                  return options.createInviteDelay ? new Promise((resolve) => window.setTimeout(() => resolve(response), options.createInviteDelay)) : Promise.resolve(response);
+                }
+                case 'teagram.listUserInvites':
+                  if(options.listInvitesError) return Promise.reject({type: options.listInvitesError});
+                  {
+                  const response = {
+                    _: 'teagram.userInvites',
+                    invites: options.initialInvites || (createdInvite ? [createdInvite] : []),
+                    quota: options.inviteQuota ?? 2,
+                    weekly_count: options.inviteWeeklyCount ?? (createdInvite ? 1 : 0),
+                    next_available_at: options.inviteNextAvailableAt,
+                    flags: 0
+                  };
+                  return options.inviteListDelay ? new Promise((resolve) => window.setTimeout(() => resolve(response), options.inviteListDelay)) : Promise.resolve(response);
+                  }
+                case 'teagram.revokeUserInvite':
+                  if(options.revokeInviteError) return Promise.reject({type: options.revokeInviteError});
+                  if(createdInvite && String(params?.id) === String(createdInvite.id)) createdInvite.state = 'revoked';
+                  return Promise.resolve(true);
                 case 'auth.sendCode':
                   if(options.delayAuthResponse) {
                     return new Promise((resolve) => window.setTimeout(() => resolve({
@@ -140,6 +244,7 @@ export async function setupRegistrationMocks(
                     timeout: 60
                   });
                 case 'auth.signIn':
+                  if(options.signInAsExistingUser && new URL(location.href).searchParams.get('account') !== '2') return Promise.resolve({_ : 'auth.authorization', user});
                   if(options.requireSignInTurnstile) return Promise.resolve({_ : 'auth.authorization', user});
                   if(options.requirePasswordTurnstile) return Promise.reject({type: 'SESSION_PASSWORD_NEEDED'});
                   return Promise.resolve({_ : 'auth.authorizationSignUpRequired', terms_of_service: options.termsText ? {
@@ -217,6 +322,6 @@ export async function setupRegistrationMocks(
 
 export async function captureState(page: Page, testInfo: TestInfo, name: string) {
   const path = testInfo.outputPath(`${name}.png`);
-  await page.screenshot({path, fullPage: true});
+  await page.screenshot({path, fullPage: true, animations: 'disabled', scale: 'css'});
   await testInfo.attach(name, {path, contentType: 'image/png'});
 }

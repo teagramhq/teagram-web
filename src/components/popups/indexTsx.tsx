@@ -171,7 +171,7 @@ const PopupElement = (props: {
           if(result) {
             Promise.resolve(result).then(() => {
               destroy();
-            });
+            }).catch(noop);
             return false;
           }
         }
@@ -451,6 +451,7 @@ PopupElement.Title = (props: {
 PopupElement.CloseButton = (props: {
   canGoBack?: boolean,
   onBackClick?: () => void | false
+  ariaLabel?: LangPackKey,
   class?: string
 }) => {
   const context = useContext(PopupContext);
@@ -466,6 +467,7 @@ PopupElement.CloseButton = (props: {
   return context.register('closeButton', (
     <button
       class={classNames('btn-icon popup-close', props.class)}
+      aria-label={props.ariaLabel ? i18n(props.ariaLabel).textContent || undefined : undefined}
       onClick={handleClick}
     >
       <Show when={props.onBackClick} fallback={<IconTsx icon="close" />}>

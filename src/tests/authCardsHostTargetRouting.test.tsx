@@ -155,7 +155,7 @@ vi.mock('qr-code-styling', async() => ({
 vi.mock('@helpers/string/classNames', () => ({
   default: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' ')
 }));
-vi.mock('@helpers/themeController', () => ({default: {switchTheme: vi.fn()}}));
+vi.mock('@helpers/themeController', () => ({default: {isNight: () => false, switchTheme: vi.fn()}}));
 vi.mock('@lib/accounts/changeAccount', () => ({changeAccount: vi.fn()}));
 vi.mock('@lib/accounts/accountController', () => ({default: {getUserIds: mocks.getUserIds}}));
 vi.mock('@lib/accounts/getCurrentAccount', () => ({getCurrentAccount: () => mocks.currentAccount}));

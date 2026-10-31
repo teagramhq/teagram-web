@@ -7,7 +7,14 @@ import MediaHeader from '@components/mediaHeader';
 import PasswordInputField from '@components/passwordInputField';
 import {toastNew} from '@components/toast';
 import {wrapFormattedDuration} from '@components/wrappers/wrapDuration';
-import {getServerSelectionAction} from '@config/serverSelection';
+import {
+  getServerSelectionAction,
+  getServerPin,
+  normalizeServerHost,
+  SERVER_LOGIN_USERNAME_KEY,
+  SERVER_REGISTER_AFTER_SELECTION_KEY,
+  SERVER_USERNAME_DRAFT_KEY
+} from '@config/serverSelection';
 import type {ServerSelectionState} from '@config/serverSelection';
 import {getActiveServerHost, getActiveTurnstileSiteKey, isActiveGuestSignUpEnabled, isAutoGuestEnabled} from '@config/serverContext';
 import {DEMO_SERVER_HOST} from '@config/serverSelection';
@@ -30,10 +37,15 @@ import TurnstileChallenge, {useTurnstileChallenge} from '@/pages/TurnstileChalle
 import {
   authenticatePrivateUsername,
   getPrivateUsernameRegistrationError,
-  isPrivateUsername
+  isPrivateUsername,
+  parsePrivateUsernameInviteSecret
 } from '@/pages/privateUsernameAuth';
 import type {PrivateUsernameRegistrationMode} from '@/pages/privateUsernameAuth';
 import {markPrivateUsernameLogin} from '@/pages/privateUsernameLoginState';
+import {
+  storePrivateUsernameInviteSecretForAccountSwitch,
+  takePrivateUsernameInviteSecretFromFragment
+} from '@/pages/privateUsernameInvite';
 import styles from '@/pages/authFlow.module.scss';
 
 if(import.meta.hot) import.meta.hot.accept();
@@ -46,6 +58,7 @@ type PrivateUsernameUiError =
   | 'invalidUsername'
   | 'invalidDisplayName'
   | 'invalidInvite'
+  | 'malformedInvite'
   | 'registrationClosed'
   | 'passwordMismatch'
   | 'passwordSetupNetwork'
@@ -64,6 +77,7 @@ type PrivateUsernameUiError =
 
 export default function PrivateSignInCard(_props: {spec: Spec}) {
   const {managers, navigate, toIm} = useAuthFlow();
+  const inviteSecretFromLink = takePrivateUsernameInviteSecretFromFragment();
   const turnstile = useTurnstileChallenge();
   const guestSignUpAvailable = isActiveGuestSignUpEnabled();
   const autoGuest = isAutoGuestEnabled();
@@ -116,11 +130,33 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   usernameInput.autocomplete = 'off';
   usernameInput.spellcheck = false;
   let accountFieldsLocked = false;
+  let pendingServerLoginUsername = '';
+  let serverUsernameDraft = '';
+  try {
+    pendingServerLoginUsername = window.sessionStorage.getItem(SERVER_LOGIN_USERNAME_KEY) || '';
+    serverUsernameDraft = window.sessionStorage.getItem(SERVER_USERNAME_DRAFT_KEY) || '';
+    window.sessionStorage.removeItem(SERVER_USERNAME_DRAFT_KEY);
+  } catch{}
+  const resumeServerLogin = !!pendingServerLoginUsername && !serverSelectionPending();
+  let resumeRegistration = false;
+  try {
+    resumeRegistration = window.sessionStorage.getItem(SERVER_REGISTER_AFTER_SELECTION_KEY) === '1' && !serverSelectionPending();
+    if(resumeRegistration) window.sessionStorage.removeItem(SERVER_REGISTER_AFTER_SELECTION_KEY);
+  } catch{}
+  if(pendingServerLoginUsername) {
+    usernameField.setValueSilently(pendingServerLoginUsername);
+    if(resumeServerLogin) {
+      try {
+        window.sessionStorage.removeItem(SERVER_LOGIN_USERNAME_KEY);
+      } catch{}
+    }
+  } else if(serverUsernameDraft) {
+    usernameField.setValueSilently(serverUsernameDraft);
+  }
 
   function syncServerSelectionFields(state = serverSelectionAction?.getState()) {
     if(state) setServerSelectionState(state);
-    const disabled = accountFieldsLocked || (!!serverSelectionAction &&
-      (state?.phase !== 'connected' || !!state.changing));
+    const disabled = accountFieldsLocked;
     usernameInput.disabled = disabled;
     if(disabled) {
       usernameInput.setAttribute('aria-disabled', 'true');
@@ -144,12 +180,12 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
   const inviteSecretField = new InputField({
     label: 'Teagram.Registration.InviteSecret',
-    maxLength: 256,
+    maxLength: 2048,
     plainText: true,
     autocomplete: 'off'
   });
   const inviteSecretInput = inviteSecretField.input as HTMLInputElement;
-  inviteSecretInput.setAttribute('aria-label', i18n('Teagram.Registration.InviteSecret').textContent || 'Invite secret');
+  inviteSecretInput.setAttribute('aria-label', i18n('Teagram.Registration.InviteSecret').textContent || 'Invite link or code');
   inviteSecretInput.autocapitalize = 'none';
   inviteSecretInput.autocomplete = 'off';
   inviteSecretInput.spellcheck = false;
@@ -170,12 +206,13 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   const [displayNameEntered, setDisplayNameEntered] = createSignal(false);
   const [confirmPasswordState, setConfirmPasswordState] = createSignal<'required' | 'match' | 'mismatch'>('required');
   const [inviteSecretEntered, setInviteSecretEntered] = createSignal(false);
+  const [inviteSecretFromLinkShown, setInviteSecretFromLinkShown] = createSignal(false);
   const [submitting, setSubmitting] = createSignal(false);
   const [registrationMode, setRegistrationMode] = createSignal<PrivateUsernameRegistrationMode>('closed');
   const [creatingAccount, setCreatingAccount] = createSignal(false);
   const [guestSubmitting, setGuestSubmitting] = createSignal(false);
   const [restoringGuest, setRestoringGuest] = createSignal(true);
-  const [autoGuestPending, setAutoGuestPending] = createSignal(autoGuest && guestSignUpAvailable && !hasAutoGuestAttempted());
+  const [autoGuestPending, setAutoGuestPending] = createSignal(autoGuest && guestSignUpAvailable && !resumeServerLogin && !resumeRegistration && !hasAutoGuestAttempted());
   const [guestFloodWait, setGuestFloodWait] = createSignal<number>();
   const [usernameAppConfig, setUsernameAppConfig] = createSignal<MTAppConfig>();
   const [registrationConfigUnavailable, setRegistrationConfigUnavailable] = createSignal(false);
@@ -186,6 +223,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
   let cancelled = false;
   let activeIdentifier = '';
+  let serverSelectionAbortController: AbortController | undefined;
   let registrationCreateButton: HTMLElement;
   let guestSignUpButton: HTMLElement;
   let cancelFocus: (() => void) | undefined;
@@ -253,10 +291,13 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     updateRegistrationValidity();
   };
 
-  const onRegistrationInput = () => {
+  const onRegistrationInput = (event: Event) => {
     setError(undefined);
     setGuestFloodWait(undefined);
     setTermsDeclined(false);
+    inviteSecretInput.classList.remove('error');
+    inviteSecretInput.removeAttribute('aria-invalid');
+    if(event.currentTarget === inviteSecretInput) setInviteSecretFromLinkShown(false);
     updateRegistrationValidity();
   };
 
@@ -293,6 +334,12 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     if(errorKind === 'passwordMismatch') {
       confirmPasswordInput.classList.add('error');
       confirmPasswordInput.setAttribute('aria-invalid', 'true');
+    }
+    if(errorKind === 'malformedInvite' || errorKind === 'invalidInvite') {
+      inviteSecretInput.classList.add('error');
+      inviteSecretInput.setAttribute('aria-invalid', 'true');
+      inviteSecretInput.focus();
+      if(errorKind === 'invalidInvite') inviteSecretInput.select();
     }
   }
 
@@ -333,7 +380,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
   }
 
   function isInlineRegistrationError() {
-    return ['usernameTaken', 'invalidUsername', 'passwordMismatch'].includes(error() || '');
+    return ['usernameTaken', 'invalidUsername', 'passwordMismatch', 'malformedInvite', 'invalidInvite'].includes(error() || '');
   }
 
   async function finishPendingPasswordSetup(): Promise<void> {
@@ -374,9 +421,107 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     }
   }
 
+  async function continueWithServer() {
+    if(cancelled || !serverSelectionAction || !serverSelectionPending()) return;
+    const state = serverSelectionAction.getState();
+    if(state.phase === 'checking' || state.phase === 'connecting') return;
+    const knownServer = isPinnedServer(state.host);
+    if(!state.changing && !state.errorKey && !knownServer && !isPrivateUsername(usernameField.value, usernameAppConfig())) return;
+
+    const serverInput = document.querySelector<HTMLInputElement>('#server-address');
+    if(!serverInput) return;
+    if(state.changing) persistServerUsernameDraft();
+    if(usernameField.value) {
+      try {
+        window.sessionStorage.setItem(SERVER_LOGIN_USERNAME_KEY, usernameField.value);
+      } catch{
+        showError('network');
+        return;
+      }
+    } else {
+      try {
+        window.sessionStorage.removeItem(SERVER_LOGIN_USERNAME_KEY);
+      } catch{}
+    }
+
+    serverSelectionAbortController?.abort();
+    const controller = serverSelectionAbortController = new AbortController();
+    try {
+      if(state.errorKey === 'Teagram.Server.KeyMismatch') await serverSelectionAction.continueBlocked();
+      else await serverSelectionAction.select(serverInput.value, controller.signal, serverInput);
+    } finally {
+      if(serverSelectionAbortController === controller) serverSelectionAbortController = undefined;
+    }
+
+    if(serverSelectionAction.getState().phase === 'selecting') {
+      try {
+        window.sessionStorage.removeItem(SERVER_LOGIN_USERNAME_KEY);
+        window.sessionStorage.removeItem(SERVER_USERNAME_DRAFT_KEY);
+      } catch{}
+    }
+  }
+
+  function isPinnedServer(host: string) {
+    try {
+      return !!getServerPin(normalizeServerHost(host));
+    } catch{
+      return false;
+    }
+  }
+
+  function persistServerUsernameDraft() {
+    try {
+      if(usernameField.value) window.sessionStorage.setItem(SERVER_USERNAME_DRAFT_KEY, usernameField.value);
+      else window.sessionStorage.removeItem(SERVER_USERNAME_DRAFT_KEY);
+    } catch{}
+  }
+
+  async function createAccountAfterServerSelection() {
+    if(!serverSelectionAction || !serverSelectionPending()) {
+      startRegistration();
+      return;
+    }
+    const state = serverSelectionAction.getState();
+    if(state.phase === 'checking' || state.phase === 'connecting' || state.locked) return;
+
+    const serverInput = document.querySelector<HTMLInputElement>('#server-address');
+    if(!serverInput?.value.trim()) return;
+    if(inviteSecretFromLink && !storePrivateUsernameInviteSecretForAccountSwitch(inviteSecretFromLink)) {
+      toastNew({langPackKey: 'Teagram.Invite.RetryUnavailable'});
+      return;
+    }
+    persistServerUsernameDraft();
+    try {
+      window.sessionStorage.setItem(SERVER_REGISTER_AFTER_SELECTION_KEY, '1');
+    } catch{
+      showError('network');
+      return;
+    }
+
+    serverSelectionAbortController?.abort();
+    const controller = serverSelectionAbortController = new AbortController();
+    try {
+      if(state.errorKey === 'Teagram.Server.KeyMismatch') await serverSelectionAction.continueBlocked();
+      else await serverSelectionAction.select(serverInput.value, controller.signal, serverInput);
+    } finally {
+      if(serverSelectionAbortController === controller) serverSelectionAbortController = undefined;
+    }
+
+    if(serverSelectionAction.getState().phase === 'selecting') {
+      try {
+        window.sessionStorage.removeItem(SERVER_REGISTER_AFTER_SELECTION_KEY);
+        window.sessionStorage.removeItem(SERVER_USERNAME_DRAFT_KEY);
+      } catch{}
+    }
+  }
+
   async function onSubmit(event?: Event): Promise<void> {
     if(event) cancelEvent(event);
     if(cancelled || submitting() || guestSubmitting() || guestActionWaiting) return;
+    if(serverSelectionPending()) {
+      await continueWithServer();
+      return;
+    }
     setTermsDeclined(false);
     guestActionWaiting = true;
     await guestRestorePromise;
@@ -398,7 +543,13 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         showError('passwordMismatch');
         return;
       }
-      if(registrationMode() === 'invite' && !inviteSecretField.value.trim()) return;
+      if(registrationMode() === 'invite') {
+        if(!inviteSecretField.value.trim()) return;
+        if(!parsePrivateUsernameInviteSecret(inviteSecretField.value)) {
+          showError('malformedInvite');
+          return;
+        }
+      }
     }
 
     termsDialogReturnFocusTarget = isCreatingAccount ? registrationCreateButton : undefined;
@@ -663,6 +814,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
     inviteSecretInput.disabled = false;
     displayNameField.setValueSilently('');
     inviteSecretField.setValueSilently('');
+    setInviteSecretFromLinkShown(false);
     passwordField.setValueSilently('');
     confirmPasswordField.setValueSilently('');
     setHasValidRegistrationInput(false);
@@ -683,6 +835,8 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         return i18n('Teagram.Registration.InvalidDisplayName');
       case 'invalidInvite':
         return i18n('Teagram.Registration.InvalidInvite');
+      case 'malformedInvite':
+        return i18n('Teagram.Registration.InviteMalformed');
       case 'registrationClosed':
         return i18n('Teagram.Registration.Closed');
       case 'passwordMismatch':
@@ -718,7 +872,14 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
   onMount(() => {
     if(!serverSelectionPending()) managers.appStateManager.pushToState('authState', {_: 'authStateSignIn'});
-    if(serverSelectionPending()) {
+    if(resumeServerLogin || resumeRegistration) {
+      guestRestorePromise = Promise.resolve(false);
+      setRestoringGuest(false);
+      if(resumeServerLogin) {
+        updateSignInValidity();
+        void onSubmit();
+      }
+    } else if(serverSelectionPending()) {
       setRestoringGuest(false);
     } else {
       guestRestorePromise = restoreGuest();
@@ -730,6 +891,8 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           setAutoGuestPending(false);
         }
       });
+    }
+    if(!serverSelectionPending()) {
       Promise.resolve(managers.apiManager.getAppConfig(true)).then((config) => {
         if(cancelled) return;
         setUsernameAppConfig(config);
@@ -740,6 +903,21 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
         setTurnstileSiteKey(config.turnstile?.site_key);
         updateSignInValidity();
         updateRegistrationValidity();
+        if(resumeRegistration && mode !== 'open' && mode !== 'invite') {
+          showError('registrationClosed');
+        } else {
+          const shouldStartInviteRegistration = mode === 'invite' && !!inviteSecretFromLink;
+          if(shouldStartInviteRegistration) {
+            inviteSecretField.setValueSilently(inviteSecretFromLink);
+            setInviteSecretFromLinkShown(true);
+          }
+          if(resumeRegistration || shouldStartInviteRegistration) startRegistration();
+          if(shouldStartInviteRegistration) {
+            requestAnimationFrame(() => {
+              if(!cancelled) usernameInput.focus();
+            });
+          }
+        }
       }).catch(() => {
         if(!cancelled) {
           setRegistrationMode('closed');
@@ -755,6 +933,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
 
   onCleanup(() => {
     cancelled = true;
+    serverSelectionAbortController?.abort();
     turnstile.cancel();
     activeIdentifier = '';
     setPendingPasswordUser(undefined);
@@ -781,13 +960,36 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
           />
           <MediaHeader.Title>Teagram</MediaHeader.Title>
           <MediaHeader.Subtitle class="secondary" id={serverSelectionAction ? 'server-selection-subtitle' : undefined}>
-            {serverSelectionPending() ? i18n('Teagram.Server.Subtitle') :
-              creatingAccount() ? i18n('Teagram.Registration.Subtitle') : 'Sign in with your username'}
+            {creatingAccount() ? i18n('Teagram.Registration.Subtitle') : 'Sign in with your username'}
           </MediaHeader.Subtitle>
         </MediaHeader>
       }
     >
-      <ServerSelectionField readOnly={creatingAccount()}>
+      <ServerSelectionField
+        readOnly={creatingAccount()}
+        continueLabel="Next"
+        canContinue={() => {
+          const state = serverSelectionAction?.getState();
+          return (!!state?.changing || !!state?.errorKey || (state?.host ? isPinnedServer(state.host) : false) || hasValidInput()) &&
+            !submitting() && !guestSubmitting();
+        }}
+        onContinue={continueWithServer}
+        beforeChange={persistServerUsernameDraft}
+        beforeCancelChange={persistServerUsernameDraft}
+        pendingActions={
+          <Show when={serverSelectionPending() && !creatingAccount()}>
+            <Button
+              class="btn-secondary"
+              disabled={!serverSelectionState()?.host.trim() || !!serverSelectionState()?.locked ||
+                serverSelectionState()?.phase === 'checking' || serverSelectionState()?.phase === 'connecting' ||
+                submitting() || guestSubmitting()}
+              onClick={createAccountAfterServerSelection}
+            >
+              {i18n('Teagram.Registration.CreateAccount')}
+            </Button>
+          </Show>
+        }
+      >
         {!autoGuestPending() && (
           <>
             {usernameField.container}
@@ -807,8 +1009,15 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
                   </p>
                   {registrationMode() === 'invite' && inviteSecretField.container}
                   {registrationMode() === 'invite' && (
-                    <p id="registration-invite-secret-status" class={styles.registrationFieldStatus} role="status">
-                      {inviteSecretEntered() ? '' : i18n('Teagram.Registration.InviteRequired')}
+                    <p
+                      id="registration-invite-secret-status"
+                      class={['invalidInvite', 'malformedInvite'].includes(error() || '') ? styles.registrationFieldStatusError : styles.registrationFieldStatus}
+                      role={['invalidInvite', 'malformedInvite'].includes(error() || '') ? 'alert' : 'status'}
+                    >
+                      {error() === 'invalidInvite' ? i18n('Teagram.Registration.InvalidInvite') :
+                        error() === 'malformedInvite' ? i18n('Teagram.Registration.InviteMalformed') :
+                          inviteSecretFromLinkShown() ? i18n('Teagram.Registration.InviteFromLink') :
+                            inviteSecretEntered() ? '' : i18n('Teagram.Registration.InviteRequired')}
                     </p>
                   )}
                   {passwordField.container}

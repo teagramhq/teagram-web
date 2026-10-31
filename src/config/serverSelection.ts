@@ -6,6 +6,9 @@ export const SERVER_CHOICE_KEY = 'teagram.server-choice.v1';
 export const SERVER_TARGET_KEY = 'teagram.server-target.v1';
 export const SERVER_PINS_KEY = 'teagram.server-pins.v1';
 export const ACTIVE_SERVER_ID_KEY = 'teagram.active-server-id.v1';
+export const SERVER_LOGIN_USERNAME_KEY = 'teagram.server-login-username.v1';
+export const SERVER_USERNAME_DRAFT_KEY = 'teagram.server-username-draft.v1';
+export const SERVER_REGISTER_AFTER_SELECTION_KEY = 'teagram.server-register-after-selection.v1';
 const SERVER_PINS_LOCK = 'teagram.server-pins.v1';
 export const DEFAULT_SERVER_HOST = 'web.teagram.io';
 export const DEMO_SERVER_HOST = 'demo.teagram.io';
@@ -30,7 +33,7 @@ export type ServerSelectionAction = {
   select: (host: string, signal: AbortSignal, focusReturnTarget?: HTMLElement) => Promise<void>,
   change: () => void,
   cancelChange: () => void,
-  continueBlocked: () => void
+  continueBlocked: () => Promise<void>
 };
 
 let serverSelectionAction: ServerSelectionAction | undefined;

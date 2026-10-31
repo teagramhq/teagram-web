@@ -140,6 +140,12 @@ export const AppPasskeysTab =
     getComponentModule: () => import('../sidebarLeft/tabs/passkeys')
   });
 
+export const AppInviteFriendsTab =
+  scaffoldSolidJSTab({
+    title: 'Teagram.Invite.Title',
+    getComponentModule: () => import('../sidebarLeft/tabs/inviteFriends')
+  });
+
 type AppMessagesAutoDeleteTabPayload = {
   period: number;
   onSaved: (period: number) => void;

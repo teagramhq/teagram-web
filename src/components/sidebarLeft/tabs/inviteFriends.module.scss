@@ -1,0 +1,83 @@
+.container {
+  .header {
+    padding-top: 1rem;
+  }
+}
+
+.createButton {
+  width: 100%;
+  justify-content: center;
+}
+
+.list {
+  min-height: 5rem;
+}
+
+.loading,
+.empty,
+.failed {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 5rem;
+  text-align: center;
+}
+
+.loading {
+  padding: 1.25rem;
+}
+
+.empty,
+.failed {
+  color: var(--secondary-text-color);
+  padding: 1.25rem 1rem;
+}
+
+.failed {
+  flex-direction: column;
+  gap: .5rem;
+}
+
+.retryButton {
+  width: 100%;
+  justify-content: center;
+}
+
+.popup {
+  --popup-width: 22.5rem;
+}
+
+.popupHeader {
+  position: absolute;
+}
+
+.popupBody {
+  padding-bottom: 1rem;
+}
+
+.popupMediaHeader {
+  padding-top: 1.5rem;
+}
+
+.inviteLink {
+  margin: 1rem .5rem 0;
+}
+
+.createdNote {
+  font-size: 1rem;
+  line-height: 1.4;
+  margin: 1rem 1rem 1.25rem;
+  text-align: center;
+}
+
+.popupButtons {
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  margin: 0 .5rem;
+}
+
+.popupButton {
+  justify-content: center;
+  width: 100%;
+}

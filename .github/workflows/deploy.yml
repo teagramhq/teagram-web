@@ -24,8 +24,8 @@ permissions:
   actions: read
 
 jobs:
-  resolve:
-    name: resolve published artifact
+  check-published-artifact:
+    name: 'check: published-artifact'
     if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -147,10 +147,10 @@ jobs:
             printf 'artifact_digest=%s\n' "$artifact_digest"
           } > "$GITHUB_OUTPUT"
 
-  deploy:
-    name: deploy teagram-web
-    needs: resolve
-    if: ${{ needs.resolve.outputs.skip == 'false' }}
+  deploy-web:
+    name: 'deploy: web (prod)'
+    needs: check-published-artifact
+    if: ${{ needs.check-published-artifact.outputs.skip == 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     concurrency:
@@ -166,10 +166,10 @@ jobs:
         id: refresh
         env:
           GH_TOKEN: ${{ github.token }}
-          BASE_SHA: ${{ needs.resolve.outputs.sha }}
-          BASE_RUN_ID: ${{ needs.resolve.outputs.run_id }}
-          BASE_ARTIFACT_NAME: ${{ needs.resolve.outputs.artifact_name }}
-          BASE_ARTIFACT_DIGEST: ${{ needs.resolve.outputs.artifact_digest }}
+          BASE_SHA: ${{ needs.check-published-artifact.outputs.sha }}
+          BASE_RUN_ID: ${{ needs.check-published-artifact.outputs.run_id }}
+          BASE_ARTIFACT_NAME: ${{ needs.check-published-artifact.outputs.artifact_name }}
+          BASE_ARTIFACT_DIGEST: ${{ needs.check-published-artifact.outputs.artifact_digest }}
         run: |
           artifact_for_run() {
             local candidate_run_id="$1" candidate_sha="$2" artifacts matches

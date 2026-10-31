@@ -10,8 +10,8 @@ on:
 permissions: {}
 
 jobs:
-  request:
-    name: Record data-only publication request
+  check-artifact-request:
+    name: 'check: artifact-request'
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-26.04
     permissions: {}

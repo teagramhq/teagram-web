@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+lint_paths=()
+language_sources=()
+
+while IFS= read -r -d '' path; do
+  case "$path" in
+    src/*.js|src/*.jsx|src/*.ts|src/*.tsx|src/*.mjs|src/*.cjs|src/*.mts|src/*.cts)
+      lint_paths+=("$path")
+      ;;
+  esac
+  case "$path" in
+    src/lang.ts|src/langSign.ts)
+      language_sources+=("$path")
+      ;;
+  esac
+done < <(git diff --cached --name-only --diff-filter=ACMRT -z)
+
+run_oxlint=0
+run_format_lang=0
+oxlint_bin="$repo_root/node_modules/.bin/oxlint"
+
+if ((${#lint_paths[@]})); then
+  if [ -x "$oxlint_bin" ]; then
+    run_oxlint=1
+  else
+    printf 'warning: local oxlint is missing; skipping staged src lint\n' >&2
+  fi
+fi
+
+if ((${#language_sources[@]})); then
+  if command -v pnpm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+    run_format_lang=1
+  else
+    printf 'warning: pnpm or node is missing; skipping format-lang\n' >&2
+  fi
+fi
+
+if [ "$run_oxlint" -eq 0 ] && [ "$run_format_lang" -eq 0 ]; then
+  exit 0
+fi
+
+affected_paths=()
+stage_paths=()
+
+if [ "$run_oxlint" -eq 1 ]; then
+  affected_paths+=("${lint_paths[@]}")
+  stage_paths+=("${lint_paths[@]}")
+fi
+
+if [ "$run_format_lang" -eq 1 ]; then
+  affected_paths+=("src/lang.ts" "src/langSign.ts" "src/scripts/out/langPack.strings")
+  stage_paths+=("src/scripts/out/langPack.strings")
+fi
+
+backup_dir=$(mktemp -d "${TMPDIR:-/tmp}/teagram-pre-commit.XXXXXX")
+original_paths=()
+original_exists=()
+original_unstaged=()
+successful=0
+
+restore_worktree() {
+  exit_status=$?
+  trap - EXIT
+  restore_failed=0
+
+  # Keep the index-formatted files on success while returning unstaged edits verbatim.
+  for ((i = 0; i < ${#original_paths[@]}; i++)); do
+    if [ "$successful" -eq 1 ] && [ "${original_unstaged[$i]}" -eq 0 ]; then
+      continue
+    fi
+
+    path=${original_paths[$i]}
+    backup="$backup_dir/$i"
+    if [ "${original_exists[$i]}" -eq 1 ]; then
+      if ! cp -p "$backup" "$path"; then
+        restore_failed=1
+      fi
+    elif ! rm -f "$path"; then
+      restore_failed=1
+    fi
+  done
+
+  if ! rm -rf "$backup_dir"; then
+    restore_failed=1
+  fi
+
+  if [ "$restore_failed" -eq 1 ]; then
+    printf 'error: could not restore the original worktree files\n' >&2
+    exit_status=1
+  fi
+  exit "$exit_status"
+}
+
+trap restore_worktree EXIT
+
+# Format the staged versions, then stage only formatter outputs.
+for path in "${affected_paths[@]}"; do
+  already_saved=0
+  for saved_path in "${original_paths[@]}"; do
+    if [ "$saved_path" = "$path" ]; then
+      already_saved=1
+      break
+    fi
+  done
+  if [ "$already_saved" -eq 1 ]; then
+    continue
+  fi
+
+  index=${#original_paths[@]}
+  original_paths+=("$path")
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    original_exists+=(1)
+    cp -p "$path" "$backup_dir/$index"
+  else
+    original_exists+=(0)
+  fi
+
+  if git ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+    if git diff --quiet -- "$path"; then
+      original_unstaged+=(0)
+    else
+      diff_status=$?
+      if [ "$diff_status" -ne 1 ]; then
+        exit "$diff_status"
+      fi
+      original_unstaged+=(1)
+    fi
+  else
+    original_unstaged+=(1)
+  fi
+done
+
+for path in "${affected_paths[@]}"; do
+  if git ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+    git checkout-index --force -- "$path"
+  else
+    rm -f "$path"
+  fi
+done
+
+if [ "$run_oxlint" -eq 1 ]; then
+  "$oxlint_bin" --fix "${lint_paths[@]}"
+fi
+
+if [ "$run_format_lang" -eq 1 ]; then
+  pnpm run format-lang
+fi
+
+git add -- "${stage_paths[@]}"
+successful=1

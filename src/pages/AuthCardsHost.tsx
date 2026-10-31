@@ -10,6 +10,7 @@ import {doubleRaf} from '@helpers/schedulers';
 import pause from '@helpers/schedulers/pause';
 import classNames from '@helpers/string/classNames';
 import themeController from '@helpers/themeController';
+import useIsNightTheme from '@hooks/useIsNightTheme';
 import {changeAccount} from '@lib/accounts/changeAccount';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
 import {getValidatedAccount} from '@lib/accounts/getValidatedAccount';
@@ -67,6 +68,7 @@ const SignImportCard = lazy(() => import('@/pages/cards/SignImportCard'));
  */
 export default function AuthCardsHost(props: {persistTheme?: (name: AppTheme['name']) => Promise<void>}): JSX.Element {
   const showBackButton = getCurrentAccount() !== 1;
+  const isNightTheme = useIsNightTheme();
 
   let hostEl!: HTMLDivElement;
   let scrollableEl!: HTMLDivElement;
@@ -165,7 +167,12 @@ export default function AuthCardsHost(props: {persistTheme?: (name: AppTheme['na
         {showBackButton && (
           <Button.Icon icon="back" class={styles.closeButton} onClick={back} />
         )}
-        <Button.Icon icon="darkmode_filled" class={styles.themeButton} onClick={toggleTheme} />
+        <Button.Icon
+          icon="darkmode_filled"
+          class={styles.themeButton}
+          aria-label={isNightTheme() ? 'Switch to light theme' : 'Switch to dark theme'}
+          onClick={toggleTheme}
+        />
         <Scrollable
           ref={scrollableEl}
           class={classNames(

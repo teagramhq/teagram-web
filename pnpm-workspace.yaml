@@ -36,3 +36,22 @@ minimumReleaseAgeExclude:
   - '@oxlint/binding-win32-arm64-msvc@1.75.0'
   - '@oxlint/binding-win32-ia32-msvc@1.75.0'
   - '@oxlint/binding-win32-x64-msvc@1.75.0'
+  - brace-expansion@5.0.8 || 5.0.9 || 5.0.10 || 5.0.11
+  - undici@7.29.0 || 7.29.1 || 7.30.1
+  - seroval@1.6.1 || 1.6.3 || 1.6.8
+  - source-map-js@1.2.2
+  - proxy-addr@2.0.8
+  - compression@1.8.2
+  - handlebars@4.7.10
+  - follow-redirects@1.16.1 || 1.16.2
+  - vite@8.2.4
+  - body-parser@2.4.0
+overrides:
+  brace-expansion@>=4.0.0 <5.0.10: ^5.0.10
+  brace-expansion@>=4.0.0 <5.0.11: ^5.0.11
+  brace-expansion@>=4.0.0 <5.0.8: ^5.0.8
+  brace-expansion@>=4.0.0 <5.0.9: ^5.0.9
+  seroval@<=1.6.2: ^1.6.3
+  seroval@<=1.6.7: ^1.6.8
+  seroval@>=0.12.0 <=1.6.0: ^1.6.1
+  seroval@>=1.4.1 <=1.6.7: ^1.6.8

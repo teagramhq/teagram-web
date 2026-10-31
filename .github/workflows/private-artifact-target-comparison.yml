@@ -20,8 +20,8 @@ permissions:
   contents: read
 
 jobs:
-  compare:
-    name: Compare ${{ matrix.runner }} (${{ matrix.node }} Node)
+  test-target-compare:
+    name: 'test: target-compare (${{ matrix.runner }}, node ${{ matrix.node }})'
     if: github.ref == 'refs/heads/master'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15

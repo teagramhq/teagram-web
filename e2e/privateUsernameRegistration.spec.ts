@@ -8,16 +8,22 @@ for(const mode of ['open', 'invite'] as const) {
       if(request.url().includes('challenges.cloudflare.com')) turnstileRequests.push(request.url());
     });
     const username = mode === 'open' ? 'ab' : 'test_user_invite';
-    const inviteSecret = 'test-invite-secret';
+    const inviteSecret = 'a'.repeat(64);
     const password = 'Teagram-Test-Password-123!';
 
     await setupRegistrationMocks(page, testInfo, mode);
 
-    await page.goto('/?noWorker=1&noServiceWorker=1', {waitUntil: 'domcontentloaded'});
+    await page.goto(`/?noWorker=1&noServiceWorker=1${mode === 'invite' ? `#${inviteSecret}` : ''}`, {waitUntil: 'domcontentloaded'});
     const registration = page.locator('#auth-pages');
     await expect(registration.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
     await expect(registration.getByRole('button', {name: 'Create account'})).toBeVisible({timeout: 30_000});
-    await registration.getByRole('button', {name: 'Create account'}).click();
+    if(mode === 'open') await registration.getByRole('button', {name: 'Create account'}).click();
+    if(mode === 'invite') {
+      await expect(page).toHaveURL(/noServiceWorker=1$/);
+      await expect(registration.locator('input[aria-label="Invite link or code"]')).toHaveValue(inviteSecret);
+      await expect(registration.locator('input[aria-label="Username"]')).toBeFocused();
+      await expect(registration.locator('#registration-invite-secret-status')).toHaveText('Filled in from your invite link.');
+    }
 
     const usernameInput = registration.locator('input[aria-label="Username"]');
     await usernameInput.fill(mode === 'open' ? 'a' : username);
@@ -25,9 +31,9 @@ for(const mode of ['open', 'invite'] as const) {
     await registration.locator('input[aria-label="Password"]').fill(password);
     await registration.locator('input[aria-label="Confirm password"]').fill(password);
     if(mode === 'invite') {
-      await registration.locator('input[aria-label="Invite secret"]').fill(inviteSecret);
+      await expect(registration.locator('input[aria-label="Invite link or code"]')).toHaveValue(inviteSecret);
     } else {
-      await expect(registration.locator('input[aria-label="Invite secret"]')).toHaveCount(0);
+      await expect(registration.locator('input[aria-label="Invite link or code"]')).toHaveCount(0);
     }
 
     const createAccount = registration.getByRole('button', {name: 'Create account'});
@@ -67,6 +73,28 @@ for(const mode of ['open', 'invite'] as const) {
     });
   });
 }
+
+test('rejects a malformed pasted invite locally without sending the secret', async({page}, testInfo) => {
+  await page.setViewportSize({width: 800, height: 600});
+  await setupRegistrationMocks(page, testInfo, 'invite');
+  await page.goto('/?noWorker=1&noServiceWorker=1', {waitUntil: 'domcontentloaded'});
+  const registration = page.locator('#auth-pages');
+  await expect(registration.getByRole('textbox', {name: 'Username'})).toBeVisible({timeout: 30_000});
+  await registration.getByRole('button', {name: 'Create account'}).click();
+  await registration.locator('input[aria-label="Username"]').fill('test_user_invite');
+  await registration.locator('input[aria-label="Display name"]').fill('CI Registration');
+  await registration.locator('input[aria-label="Password"]').fill('Teagram-Test-Password-123!');
+  await registration.locator('input[aria-label="Confirm password"]').fill('Teagram-Test-Password-123!');
+  await registration.locator('input[aria-label="Invite link or code"]').fill('https://server.example/invite#short');
+  await registration.getByRole('button', {name: 'Create account'}).click();
+
+  await expect(registration.locator('#registration-invite-secret-status')).toHaveText('That\'s not a complete invite link or code. Copy the whole link and paste it again.');
+  await expect(registration.locator('input[aria-label="Invite link or code"]')).toHaveAttribute('aria-invalid', 'true');
+  await expect(registration.locator('input[aria-label="Invite link or code"]')).toBeFocused();
+  await captureState(page, testInfo, 'invite-registration-malformed');
+  const calls = await page.evaluate(() => (window as any).__registrationCalls as Array<{method: string}>);
+  expect(calls.some((call) => call.method === 'auth.sendCode')).toBe(false);
+});
 
 test('applies the configured display-name maximum during registration', async({page}, testInfo) => {
   await setupRegistrationMocks(page, testInfo, 'open', false, false, false, false, undefined, {
