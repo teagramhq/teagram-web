@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {summarizeCpuProfile, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
+import {summarizeCpuProfile, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -34,7 +34,8 @@ type Metric = {
   cpu?: PerformanceCpuSummary,
   droppedFramePercent?: number,
   droppedFrames?: number,
-  frameIntervals?: number
+  frameIntervals?: number,
+  longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>
 };
 
 type VariantRun = {
@@ -112,6 +113,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
     performance.setResourceTimingBufferSize(1_000);
     const perf: any = (window as any).__teagramPerf = {
       longTasks: [] as Array<{startTime: number, duration: number}>,
+      longAnimationFrames: [] as Array<{startTime: number, duration: number, scripts: Array<Record<string, unknown>>}>,
       frameIntervals: [] as number[],
       frameActive: false,
       started: performance.now(),
@@ -125,6 +127,24 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
         })));
       });
       observer.observe({type: 'longtask', buffered: true});
+    } catch{}
+    try {
+      const observer = new PerformanceObserver((list) => {
+        perf.longAnimationFrames.push(...list.getEntries().map((entry: any) => ({
+          startTime: entry.startTime,
+          duration: entry.duration,
+          scripts: (entry.scripts || []).map((script: any) => ({
+            sourceURL: script.sourceURL,
+            sourceFunctionName: script.sourceFunctionName,
+            invoker: script.invoker,
+            invokerType: script.invokerType,
+            executionStart: script.executionStart,
+            duration: script.duration,
+            forcedStyleAndLayoutDuration: script.forcedStyleAndLayoutDuration
+          }))
+        })));
+      });
+      observer.observe({type: 'long-animation-frame', buffered: true} as any);
     } catch{}
     perf.injectLongTask = (durationMs: number) => {
       const started = performance.now();
@@ -222,6 +242,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       resourceCaptureEndedAt,
       resourceUrlBaseline: perf.resourceUrlBaseline,
       longTasks,
+      longAnimationFrames: scroll ? perf.longAnimationFrames : [],
       rpcTraceEnabled: rpcTrace.enabled,
       rpcSpansRecorded: rpcTrace.recording,
       rpcCallCount: rpcTrace.recording ? rpcInvocations.length : rpcTrace.callCount,
@@ -233,7 +254,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
   }, {boundary, scroll, includePhases});
-  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, ...metrics} = captured;
+  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, ...metrics} = captured;
   if(includePhases) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
   const rpcSummary = summarizeRpcTrace(metrics.rpcCalls as PerformanceRpcCall[], boundary.ms);
@@ -241,6 +262,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     ...metrics,
     bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
+    ...(scroll ? {longTaskTrace: summarizeLongTaskTrace(longTasks, longAnimationFrames, boundary.startedAtMs, boundary.ms)} : {}),
     ms: boundary.ms,
     requests: requestCount,
     domNodes: boundary.domNodes,
@@ -409,6 +431,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
   });
 
+  await waitForHistorySettled(page);
   await begin(page, requests, profileTrace);
   const cpuProfile = profileTrace ? await startCpuProfile(page) : undefined;
   await page.evaluate(() => (window as any).__teagramPerf.startFrames());

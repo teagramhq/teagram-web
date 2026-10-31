@@ -21,6 +21,22 @@ export type PerformanceCpuProfile = {
   timeDeltas?: number[]
 };
 
+type LongAnimationFrameScript = {
+  sourceURL?: string,
+  sourceFunctionName?: string,
+  invoker?: string,
+  invokerType?: string,
+  executionStart: number,
+  duration: number,
+  forcedStyleAndLayoutDuration?: number
+};
+
+type LongAnimationFrame = {
+  startTime: number,
+  duration: number,
+  scripts: LongAnimationFrameScript[]
+};
+
 export type PerformanceCpuSummary = {
   sampledCpuMs: number,
   topFrames: Array<{functionName: string, script: string, selfMs: number}>
@@ -41,6 +57,38 @@ export function summarizeLongTaskWindow(entries: Array<{startTime: number, durat
     blockingTimeMs: tasks.reduce((total, {duration}) => total + duration - 50, 0),
     maxLongTaskDurationMs: tasks.reduce((max, {duration}) => Math.max(max, duration), 0)
   };
+}
+
+export function summarizeLongTaskTrace(
+  entries: Array<{startTime: number, duration: number}>,
+  frames: LongAnimationFrame[],
+  startedAtMs: number,
+  elapsedMs: number
+) {
+  const endAtMs = startedAtMs + elapsedMs;
+  const round = (value: number) => Number(value.toFixed(2));
+  return entries.filter(({startTime, duration}) => startTime >= startedAtMs && startTime < endAtMs && duration > 50).map((task) => ({
+    startTimeMs: round(task.startTime - startedAtMs),
+    durationMs: round(task.duration),
+    scripts: frames.flatMap((frame) => {
+      const frameEnd = frame.startTime + frame.duration;
+      if(frame.startTime >= task.startTime + task.duration || frameEnd <= task.startTime) {
+        return [];
+      }
+
+      return frame.scripts.filter((script) => {
+        const scriptEnd = script.executionStart + script.duration;
+        return script.executionStart < task.startTime + task.duration && scriptEnd > task.startTime;
+      }).map((script) => ({
+        functionName: script.sourceFunctionName || '(anonymous)',
+        script: script.sourceURL ? new URL(script.sourceURL, 'https://trace.invalid').pathname : '/native',
+        invoker: script.invoker || '',
+        invokerType: script.invokerType || '',
+        durationMs: round(script.duration),
+        forcedStyleAndLayoutDurationMs: round(script.forcedStyleAndLayoutDuration || 0)
+      }));
+    })
+  }));
 }
 
 export function summarizePerformancePhases<T extends {name: string, durationMs: number | null, accountNumber?: number, startMs?: number}>(phases: T[]): PerformancePhaseSummary[] {
