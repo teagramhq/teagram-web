@@ -46,6 +46,7 @@ describe('dialogs cache-first loading', () => {
     expect(result).toMatchObject({dialogs: [dialog], isEnd: false});
     expect(getTopMessages).toHaveBeenCalledTimes(1);
     expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledWith(FOLDER_ID_ALL);
     expect(calls).toEqual(['reconcile', 'refresh']);
   });
 

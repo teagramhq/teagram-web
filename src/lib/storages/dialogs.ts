@@ -2030,7 +2030,7 @@ export default class DialogsStorage extends AppManager {
     });
 
     if(hasPartialCachedFirstPage && !this.cacheFirstPageRefresh) {
-      this.reconcileCachedChannelDialogs();
+      this.reconcileCachedChannelDialogs(realFolderId);
       this.cacheFirstPageRefresh = loadTopMessages()
         .then((result) => {
           this.getFolder(filterId, filterType).count = result.count;
@@ -2100,14 +2100,14 @@ export default class DialogsStorage extends AppManager {
    * channel is never fetched back. Until every listed channel is restored, the next cached first
    * page retries the comparison.
    */
-  private async reconcileCachedChannelDialogs() {
+  private async reconcileCachedChannelDialogs(folderId: number = FOLDER_ID_ALL) {
     if(this.cachedListReconciled) {
       return;
     }
 
     this.cachedListReconciled = true;
     try {
-      const missingPeerIds = await this.getServerChannelsMissingLocally();
+      const missingPeerIds = await this.getServerChannelsMissingLocally(folderId);
       await Promise.all(missingPeerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
       if(missingPeerIds.some((peerId) => !this.getDialogOnly(peerId) && this.appChatsManager.isInChat(peerId.toChatId()))) {
         this.cachedListReconciled = false;
@@ -2117,7 +2117,7 @@ export default class DialogsStorage extends AppManager {
     }
   }
 
-  private async getServerChannelsMissingLocally() {
+  private async getServerChannelsMissingLocally(folderId: number = FOLDER_ID_ALL) {
     const limit = 100;
     const missingPeerIds: PeerId[] = [];
     const seenPeerIds: Set<PeerId> = new Set();
@@ -2126,7 +2126,7 @@ export default class DialogsStorage extends AppManager {
       const result = await this.apiManager.invokeApiSingleProcess({
         method: 'messages.getDialogs',
         params: {
-          folder_id: FOLDER_ID_ALL,
+          folder_id: folderId,
           offset_date: offsetDate,
           offset_id: offsetId,
           offset_peer: offsetPeerId ? this.appPeersManager.getInputPeerById(offsetPeerId) : {_: 'inputPeerEmpty'},
