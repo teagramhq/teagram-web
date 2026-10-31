@@ -91,6 +91,46 @@ afterEach(() => {
 
 const peerId = 10 as PeerId;
 
+function makeSetPeerHarness(pendingHistory: Promise<void>) {
+  const isAnyGroup = vi.fn(() => Promise.resolve(false));
+  const isStartButtonNeeded = vi.fn(() => Promise.resolve(false));
+  const getHistory1 = vi.fn(() => Promise.resolve({cached: true, promise: pendingHistory}));
+  const finishPeerChange = vi.fn(() => Promise.resolve());
+  const historyStorage = {maxId: 0, history: {length: 0}};
+  const chat = {
+    peerId,
+    isAnyGroup: true,
+    isBot: false,
+    isBroadcast: false,
+    isMegagroup: false,
+    isRestricted: false,
+    bubbles: {lazyLoadQueue: {queueId: 0}},
+    onChangePeer: vi.fn(() => Promise.resolve()),
+    finishPeerChange,
+    getHistoryStorage: () => historyStorage,
+    isStartButtonNeeded,
+    appImManager: {getChatSavedPosition: (): undefined => undefined}
+  };
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    setPeerTempId: 0,
+    chat,
+    managers: {
+      appPeersManager: {isAnyGroup},
+      apiFileManager: {setQueueId: vi.fn()}
+    },
+    log: Object.assign(vi.fn(), {bindPrefix: () => Object.assign(vi.fn(), {warn: vi.fn()})}),
+    followStack: [],
+    destroyResizeObserver: vi.fn(),
+    cleanup: vi.fn(),
+    refreshTestPeerNonContactState: vi.fn(),
+    createChatInner: () => document.createElement('div'),
+    lazyLoadQueue: {lock: vi.fn()},
+    getHistory1
+  }) as any;
+
+  return {harness, chat, finishPeerChange, getHistory1, isAnyGroup, isStartButtonNeeded};
+}
+
 test('records the chat width from its initial resize observer entry', () => {
   let observeResize!: ResizeObserverCallback;
   const resizeObserverDescriptor = Object.getOwnPropertyDescriptor(window, 'ResizeObserver');
@@ -121,39 +161,7 @@ test('records the chat width from its initial resize observer entry', () => {
 
 test('reuses new-peer metadata and skips bot startup lookups for regular peers', async() => {
   const pendingHistory = new Promise<void>(() => {});
-  const isAnyGroup = vi.fn(() => Promise.resolve(false));
-  const isStartButtonNeeded = vi.fn(() => Promise.resolve(false));
-  const getHistory1 = vi.fn(() => Promise.resolve({cached: true, promise: pendingHistory}));
-  const historyStorage = {maxId: 0, history: {length: 0}};
-  const chat = {
-    peerId,
-    isAnyGroup: true,
-    isBot: false,
-    isBroadcast: false,
-    isMegagroup: false,
-    isRestricted: false,
-    bubbles: {lazyLoadQueue: {queueId: 0}},
-    onChangePeer: vi.fn(() => Promise.resolve()),
-    getHistoryStorage: () => historyStorage,
-    isStartButtonNeeded,
-    appImManager: {getChatSavedPosition: (): undefined => undefined}
-  };
-  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
-    setPeerTempId: 0,
-    chat,
-    managers: {
-      appPeersManager: {isAnyGroup},
-      apiFileManager: {setQueueId: vi.fn()}
-    },
-    log: Object.assign(vi.fn(), {bindPrefix: () => Object.assign(vi.fn(), {warn: vi.fn()})}),
-    followStack: [],
-    destroyResizeObserver: vi.fn(),
-    cleanup: vi.fn(),
-    refreshTestPeerNonContactState: vi.fn(),
-    createChatInner: () => document.createElement('div'),
-    lazyLoadQueue: {lock: vi.fn()},
-    getHistory1
-  }) as any;
+  const {harness, getHistory1, isAnyGroup, isStartButtonNeeded} = makeSetPeerHarness(pendingHistory);
 
   let setPeerError: unknown;
   const pending = harness.setPeer({peerId, samePeer: false, sameSearch: false}).catch((error: unknown) => {
@@ -166,6 +174,15 @@ test('reuses new-peer metadata and skips bot startup lookups for regular peers',
   expect(isStartButtonNeeded).not.toHaveBeenCalled();
   expect(isAnyGroup).not.toHaveBeenCalled();
   expect(harness.passEntities).toEqual({messageEntityBotCommand: true});
+});
+
+test('prepares cached peer completion while initial history renders', async() => {
+  const pendingHistory = new Promise<void>(() => {});
+  const {harness, finishPeerChange} = makeSetPeerHarness(pendingHistory);
+
+  await harness.setPeer({peerId, samePeer: false, sameSearch: false});
+
+  expect(finishPeerChange).toHaveBeenCalledTimes(1);
 });
 
 test('does not use previous-peer bubbles to enlarge the initial history request', async() => {

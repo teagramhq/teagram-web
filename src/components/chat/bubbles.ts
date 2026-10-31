@@ -6120,6 +6120,9 @@ export default class ChatBubbles {
       text: options.text,
       entities: options.entities
     };
+    const preparedPeerChange = cached && !samePeer ?
+      m(this.chat.finishPeerChange(finishPeerChangeOptions)) :
+      undefined;
 
     if(!cached && !samePeer) {
       await m(this.chat.finishPeerChange(finishPeerChangeOptions));
@@ -6139,7 +6142,7 @@ export default class ChatBubbles {
       const mountedByLastMsgId = haveToScrollToBubble ? await m(lastMsgFullMid !== EMPTY_FULL_MID ? this.getMountedBubble(lastMsgFullMid) : {bubble: this.getLastBubble()}) : undefined;
       if(cached && !samePeer) {
         log.warn('finishing peer change');
-        await m(this.chat.finishPeerChange(finishPeerChangeOptions)); // * костыль
+        await m(preparedPeerChange); // * костыль
         log.warn('finished peer change');
       }
 
