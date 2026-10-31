@@ -90,6 +90,76 @@ afterEach(() => {
 
 const peerId = 10 as PeerId;
 
+test('starts the bot-start check before new-peer metadata finishes', async() => {
+  let resolvePeerChange!: () => void;
+  const chat = {
+    onChangePeer: vi.fn(() => new Promise<void>((resolve) => {
+      resolvePeerChange = resolve;
+    })),
+    isStartButtonNeeded: vi.fn(() => Promise.resolve(false))
+  };
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    setPeerTempId: 0,
+    chat,
+    log: {bindPrefix: () => ({warn: vi.fn()})}
+  }) as any;
+
+  const pending = harness.setPeer({peerId, samePeer: false, sameSearch: false}).catch((): undefined => undefined);
+  await Promise.resolve();
+  const startedBeforePeerChangeFinished = chat.isStartButtonNeeded.mock.calls.length === 1;
+  resolvePeerChange();
+  await pending;
+
+  expect(startedBeforePeerChangeFinished).toBe(true);
+});
+
+test('uses the peer group classification already loaded for a new peer', async() => {
+  const pendingHistory = new Promise<void>(() => {});
+  const isAnyGroup = vi.fn(() => Promise.resolve(false));
+  const getHistory1 = vi.fn(() => Promise.resolve({cached: true, promise: pendingHistory}));
+  const historyStorage = {maxId: 0, history: {length: 0}};
+  const chat = {
+    peerId,
+    isAnyGroup: true,
+    isBot: false,
+    isBroadcast: false,
+    isMegagroup: false,
+    isRestricted: false,
+    bubbles: {lazyLoadQueue: {queueId: 0}},
+    onChangePeer: vi.fn(() => Promise.resolve()),
+    getHistoryStorage: () => historyStorage,
+    isStartButtonNeeded: () => Promise.resolve(false),
+    appImManager: {getChatSavedPosition: (): undefined => undefined}
+  };
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    setPeerTempId: 0,
+    chat,
+    managers: {
+      appPeersManager: {isAnyGroup},
+      apiFileManager: {setQueueId: vi.fn()}
+    },
+    log: Object.assign(vi.fn(), {bindPrefix: () => Object.assign(vi.fn(), {warn: vi.fn()})}),
+    followStack: [],
+    destroyResizeObserver: vi.fn(),
+    cleanup: vi.fn(),
+    refreshTestPeerNonContactState: vi.fn(),
+    createChatInner: () => document.createElement('div'),
+    lazyLoadQueue: {lock: vi.fn()},
+    getHistory1
+  }) as any;
+
+  let setPeerError: unknown;
+  const pending = harness.setPeer({peerId, samePeer: false, sameSearch: false}).catch((error: unknown) => {
+    setPeerError = error;
+  });
+  await pending;
+
+  expect(setPeerError).toBeUndefined();
+  expect(getHistory1).toHaveBeenCalled();
+  expect(isAnyGroup).not.toHaveBeenCalled();
+  expect(harness.passEntities).toEqual({messageEntityBotCommand: true});
+});
+
 function message(): Message.message {
   return {
     _: 'message',
