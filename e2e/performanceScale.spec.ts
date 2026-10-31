@@ -1,7 +1,8 @@
 import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
 import Icons from '../src/icons';
-import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, scenarioBundleBytes} from '../scripts/performance/policy.mjs';
+import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
+import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
 import {summarizeCpuProfile, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
 
 type Fixture = {
@@ -71,6 +72,7 @@ const report = {
   } as Record<Variant, Record<Scale, Record<string, Partial<Metric>[]>>>
 };
 const preparedVariants: Record<Scale, Partial<Record<Variant, VariantRun>>> = {'1x': {}, '100x': {}};
+const bundleRequestTrackers = new WeakMap<Page, BundleRequestTracker>();
 
 const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
 
@@ -78,10 +80,15 @@ test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 });
 
-function installInstrumentation(page: Page, requestCounter: {value: number}, injectColdStall = false) {
+function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false) {
+  const bundleRequests = createBundleRequestTracker(new URL(origin).origin);
+  bundleRequestTrackers.set(page, bundleRequests);
   page.on('request', (request) => {
     if(request.resourceType() !== 'websocket') ++requestCounter.value;
+    bundleRequests.requestStarted(request);
   });
+  page.on('requestfinished', (request) => bundleRequests.requestFinished(request));
+  page.on('requestfailed', (request) => bundleRequests.requestFailed(request));
   return page.addInitScript((injectColdStall: boolean) => {
     performance.setResourceTimingBufferSize(1_000);
     const perf: any = (window as any).__teagramPerf = {
@@ -89,9 +96,7 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
       frameIntervals: [] as number[],
       frameActive: false,
       started: performance.now(),
-      resourceUrlBaseline: [] as string[],
-      lastBundleResourceAt: performance.now(),
-      lastBundleResourceName: ''
+      resourceUrlBaseline: [] as string[]
     };
     try {
       const observer = new PerformanceObserver((list) => {
@@ -101,19 +106,6 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
         })));
       });
       observer.observe({type: 'longtask', buffered: true});
-    } catch{}
-    try {
-      const bundleObserver = new PerformanceObserver((list) => {
-        const bundles = list.getEntries().filter((entry) => {
-          const resource = entry as PerformanceResourceTiming;
-          return new URL(resource.name).origin === location.origin && /\.(js|css)(?:[?#]|$)/i.test(resource.name);
-        });
-        if(bundles.length) {
-          perf.lastBundleResourceAt = performance.now();
-          perf.lastBundleResourceName = bundles[bundles.length - 1].name;
-        }
-      });
-      bundleObserver.observe({type: 'resource', buffered: true});
     } catch{}
     perf.injectLongTask = (durationMs: number) => {
       const started = performance.now();
@@ -138,20 +130,9 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
 }
 
 async function waitForBundleResources(page: Page) {
-  const timeoutMs = 10_000;
-  const quietMs = 500;
-  try {
-    await page.waitForFunction((quietMs) => {
-      const perf = (window as any).__teagramPerf;
-      return performance.now() - perf.lastBundleResourceAt >= quietMs;
-    }, quietMs, {timeout: timeoutMs});
-  } catch{
-    const latest = await page.evaluate(() => {
-      const perf = (window as any).__teagramPerf;
-      return {quietForMs: performance.now() - perf.lastBundleResourceAt, url: perf.lastBundleResourceName};
-    });
-    throw new Error(`Same-origin JavaScript and CSS resources did not settle within ${timeoutMs} ms; last resource was ${latest.url} ${Math.round(latest.quietForMs)} ms ago`);
-  }
+  const bundleRequests = bundleRequestTrackers.get(page);
+  if(!bundleRequests) throw new Error('Bundle request tracking was not installed for this page');
+  await bundleRequests.waitForIdle(500, 10_000);
 }
 
 async function begin(page: Page, requests: {value: number}, recordRpcSpans = true) {
@@ -164,8 +145,6 @@ async function begin(page: Page, requests: {value: number}, recordRpcSpans = tru
     perf.resourceUrlBaseline = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).map((entry) => entry.name);
     performance.clearResourceTimings();
     perf.started = performance.now();
-    perf.lastBundleResourceAt = perf.started;
-    perf.lastBundleResourceName = '';
   }, recordRpcSpans);
 }
 
@@ -175,12 +154,13 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     const trace = await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace();
     return trace.callCount as number;
   }) : undefined;
-  await waitForBundleResources(page);
   await page.waitForTimeout(150);
+  await waitForBundleResources(page);
   const captured = await page.evaluate(async({boundary, scroll, includePhases, countOnlyRpcCallCount}) => {
     const {ms} = boundary;
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
+    const resourceCaptureEndedAt = performance.now();
     const intervals = scroll ? perf.frameIntervals : [];
     const droppedFrames = intervals.reduce((total: number, interval: number) => total + Math.max(0, Math.round(interval / (1000 / 60)) - 1), 0);
     const droppedFramePercent = intervals.length ? droppedFrames / (droppedFrames + intervals.length) * 100 : 0;
@@ -217,6 +197,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
         decodedBodySize: entry.decodedBodySize
       })),
       origin: location.origin,
+      resourceCaptureEndedAt,
       resourceUrlBaseline: perf.resourceUrlBaseline,
       longTasks,
       rpcTraceEnabled: rpcTrace.enabled,
@@ -229,13 +210,13 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
   }, {boundary, scroll, includePhases, countOnlyRpcCallCount});
-  const {bundleResources, origin, resourceUrlBaseline, longTasks, ...metrics} = captured;
+  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, ...metrics} = captured;
   expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the client build').toBe(true);
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
   const rpcSummary = summarizeRpcTrace(metrics.rpcCalls as PerformanceRpcCall[], boundary.ms);
   return {
     ...metrics,
-    bundleBytes: scenarioBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceUrlBaseline),
+    bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
     ms: boundary.ms,
     requests: requestCount,
@@ -584,7 +565,7 @@ async function runColdChatList(browser: Browser, run: VariantRun): Promise<Metri
   try {
     const page = await context.newPage();
     const requests = {value: 0};
-    await installInstrumentation(page, requests);
+    await installInstrumentation(page, requests, run.origin);
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     await waitForChatList(page);
@@ -602,7 +583,7 @@ async function measureColdControlWindow(browser: Browser, run: VariantRun, injec
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests, injectStall);
+  await installInstrumentation(page, requests, run.origin, injectStall);
 
   try {
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
@@ -664,7 +645,7 @@ async function runContactScenarios(browser: Browser, run: VariantRun, scale: Sca
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests);
+  await installInstrumentation(page, requests, run.origin);
 
   try {
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
@@ -691,7 +672,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests);
+  await installInstrumentation(page, requests, origin);
 
   try {
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
@@ -732,7 +713,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests);
+  await installInstrumentation(page, requests, run.origin);
 
   try {
     const coldProfile = await startCpuProfile(page);
