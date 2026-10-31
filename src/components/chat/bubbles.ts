@@ -2882,11 +2882,16 @@ export default class ChatBubbles {
   };
 
   private createResizeObserver() {
-    if(!('ResizeObserver' in window) || this.resizeObserver) {
+    const container = this.scrollable.container;
+    if(!('ResizeObserver' in window)) {
+      this.reflowWasWidth = container.offsetWidth || this.reflowWasWidth;
       return;
     }
 
-    const container = this.scrollable.container;
+    if(this.resizeObserver) {
+      return;
+    }
+
     let wasHeight = 0/* container.offsetHeight */;
     let resizing = false;
     let skip = false;
@@ -2944,6 +2949,7 @@ export default class ChatBubbles {
 
       if(!wasHeight) {
         wasHeight = height;
+        this.reflowWasWidth = Math.round(entry.contentRect.width) || this.reflowWasWidth;
         return;
       }
 
@@ -5871,7 +5877,7 @@ export default class ChatBubbles {
       }
     }
 
-    if(startParam === undefined && await m(this.chat.isStartButtonNeeded())) {
+    if(startParam === undefined && (samePeer || this.chat.isBot) && await m(this.chat.isStartButtonNeeded())) {
       startParam = BOT_START_PARAM;
     }
 
@@ -5942,9 +5948,10 @@ export default class ChatBubbles {
 
       this.followStack.length = 0;
 
-      this.passEntities = {
-        messageEntityBotCommand: await m(this.managers.appPeersManager.isAnyGroup(peerId)) || this.chat.isBot
-      };
+      const isAnyGroup = samePeer ?
+        await m(this.managers.appPeersManager.isAnyGroup(peerId)) :
+        this.chat.isAnyGroup;
+      this.passEntities = {messageEntityBotCommand: isAnyGroup || this.chat.isBot};
     }
 
     if(DEBUG) {
@@ -6113,6 +6120,9 @@ export default class ChatBubbles {
       text: options.text,
       entities: options.entities
     };
+    const preparedPeerChange = cached && !samePeer ?
+      m(this.chat.finishPeerChange(finishPeerChangeOptions)) :
+      undefined;
 
     if(!cached && !samePeer) {
       await m(this.chat.finishPeerChange(finishPeerChangeOptions));
@@ -6132,7 +6142,7 @@ export default class ChatBubbles {
       const mountedByLastMsgId = haveToScrollToBubble ? await m(lastMsgFullMid !== EMPTY_FULL_MID ? this.getMountedBubble(lastMsgFullMid) : {bubble: this.getLastBubble()}) : undefined;
       if(cached && !samePeer) {
         log.warn('finishing peer change');
-        await m(this.chat.finishPeerChange(finishPeerChangeOptions)); // * костыль
+        await m(preparedPeerChange); // * костыль
         log.warn('finished peer change');
       }
 
@@ -6550,9 +6560,6 @@ export default class ChatBubbles {
       });
 
       this.createResizeObserver();
-      // Baseline the container width now (the chat is laid out) so the very first window resize
-      // already detects the width change and re-pins scroll, instead of just setting the baseline.
-      this.reflowWasWidth = this.scrollable.container.offsetWidth || this.reflowWasWidth;
     };
   }
 
@@ -12806,8 +12813,11 @@ export default class ChatBubbles {
     const isBroadcast = this.chat.isBroadcast;
     // console.time('appImManager call getHistory');
     const pageCount = Math.min(40, windowSize.height / 40/*  * 1.25 */ | 0);
-    // const loadCount = Object.keys(this.bubbles).length > 0 ? 50 : pageCount;
-    const realLoadCount = isBroadcast ? 20 : (this.getRenderedHistory(undefined, true).length > 0 ? Math.max(35, pageCount) : pageCount);
+    // During a peer switch, old bubbles remain until finishPeerChange, so only use history
+    // already rendered for this peer to choose the larger follow-up page size.
+    const hasRenderedPeerHistory = !isBroadcast && !this.isFirstLoad &&
+      this.getRenderedHistory(undefined, true).some((fullMid) => splitFullMid(fullMid).peerId === peerId);
+    const realLoadCount = isBroadcast ? 20 : (hasRenderedPeerHistory ? Math.max(35, pageCount) : pageCount);
     // const realLoadCount = pageCount;//const realLoadCount = 50;
     let loadCount = realLoadCount;
 

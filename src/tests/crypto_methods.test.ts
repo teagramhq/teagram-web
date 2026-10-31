@@ -1,6 +1,8 @@
 import bytesFromHex from '@helpers/bytes/bytesFromHex';
 import bytesToHex from '@helpers/bytes/bytesToHex';
 import type {RSAPublicKeyHex} from '@lib/mtproto/rsaKeysManager';
+import CTR from '@lib/crypto/utils/aesCTR';
+import subtle from '@lib/crypto/subtle';
 import '../lib/crypto/crypto.worker';
 import cryptoWorker from '@lib/crypto/cryptoMessagePort';
 
@@ -284,6 +286,20 @@ describe('AES-CTR', () => {
 
   beforeAll(async() => {
     id = await prepare();
+  });
+
+  test('handles fragmented input without a typed-array concat extension', async() => {
+    const key = await subtle.importKey('raw', new Uint8Array(32), {name: 'AES-CTR'}, false, ['encrypt']);
+    const ctr = new CTR('encrypt', key, new Uint8Array(16));
+    const concatDescriptor = Object.getOwnPropertyDescriptor(Uint8Array.prototype, 'concat');
+
+    delete (Uint8Array.prototype as any).concat;
+    try {
+      await (ctr as any)._update(new Uint8Array([1]));
+      await expect((ctr as any)._update(new Uint8Array([2]))).resolves.toBeInstanceOf(Uint8Array);
+    } finally {
+      if(concatDescriptor) Object.defineProperty(Uint8Array.prototype, 'concat', concatDescriptor);
+    }
   });
 
   test('encrypt', async() => {
