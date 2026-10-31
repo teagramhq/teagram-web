@@ -1,6 +1,7 @@
 import type {Message, PeerSettings} from '@layer';
 import '@helpers/peerIdPolyfill';
 import {getMiddleware} from '@helpers/middleware';
+import windowSize from '@helpers/windowSize';
 import {render} from 'solid-js/web';
 import {makeFullMid} from '@appManagers/utils/messages/fullMid';
 import ejectBubble from '@components/chat/bubbles/ejectBubble';
@@ -82,7 +83,7 @@ beforeAll(async() => {
   BubbleGroups = (await import('@components/chat/bubbleGroups')).default;
   // Importing the whole bubbles graph costs far more than the default hook
   // budget once the rest of the suite is competing for the same CPU.
-}, 60_000);
+}, 120_000);
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -137,6 +138,26 @@ test('reuses new-peer metadata and skips bot startup lookups for regular peers',
   expect(isStartButtonNeeded).not.toHaveBeenCalled();
   expect(isAnyGroup).not.toHaveBeenCalled();
   expect(harness.passEntities).toEqual({messageEntityBotCommand: true});
+});
+
+test('does not use previous-peer bubbles to enlarge the initial history request', async() => {
+  const previousPeerId = 11 as PeerId;
+  const requestHistory = vi.fn((..._args: unknown[]) => Promise.resolve({
+    cached: true,
+    result: Promise.resolve({history: []})
+  }));
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chat: {peerId, isBroadcast: false},
+    getRenderedHistory: () => [makeFullMid(previousPeerId, 100)],
+    requestHistory,
+    scrollable: {onScroll: vi.fn()},
+    isFirstLoad: true,
+    log: vi.fn()
+  }) as any;
+
+  await harness.getHistory(undefined, true, undefined, undefined, true);
+
+  expect(requestHistory.mock.calls[0][1]).toBe(Math.min(40, windowSize.height / 40 | 0));
 });
 
 function message(): Message.message {

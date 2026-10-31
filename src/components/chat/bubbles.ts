@@ -12807,8 +12807,11 @@ export default class ChatBubbles {
     const isBroadcast = this.chat.isBroadcast;
     // console.time('appImManager call getHistory');
     const pageCount = Math.min(40, windowSize.height / 40/*  * 1.25 */ | 0);
-    // const loadCount = Object.keys(this.bubbles).length > 0 ? 50 : pageCount;
-    const realLoadCount = isBroadcast ? 20 : (this.getRenderedHistory(undefined, true).length > 0 ? Math.max(35, pageCount) : pageCount);
+    // During a peer switch, old bubbles remain until finishPeerChange, so only use history
+    // already rendered for this peer to choose the larger follow-up page size.
+    const hasRenderedPeerHistory = !isBroadcast &&
+      this.getRenderedHistory(undefined, true).some((fullMid) => splitFullMid(fullMid).peerId === peerId);
+    const realLoadCount = isBroadcast ? 20 : (hasRenderedPeerHistory ? Math.max(35, pageCount) : pageCount);
     // const realLoadCount = pageCount;//const realLoadCount = 50;
     let loadCount = realLoadCount;
 
