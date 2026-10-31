@@ -86,4 +86,13 @@ describe('AppManagersManager account startup', () => {
     expect(createdAccounts).toEqual([1, 2, 3, 4]);
     expect(Object.keys(managers)).toEqual(['1', '2', '3', '4']);
   });
+
+  it('returns started managers synchronously so manager calls keep their order', async() => {
+    const manager = new AppManagersManager();
+    const managers = await manager.getManagersByAccount(2);
+    const managersByAccount = await manager.getManagersByAccount();
+
+    expect(manager.getManagersByAccount(2)).toBe(managers);
+    expect(manager.getManagersByAccount()).toBe(managersByAccount);
+  });
 });

@@ -208,11 +208,18 @@ export class AppManagersManager {
     }
   }
 
-  public getManagersByAccount(accountNumber: ActiveAccountNumber): Promise<Managers>;
-  public getManagersByAccount(): Promise<ManagersByAccount>;
+  // * Started managers are returned as-is, not wrapped in a promise: callbackify then
+  // * runs a manager call in the same tick, keeping it ordered with update events.
+  public getManagersByAccount(accountNumber: ActiveAccountNumber): MaybePromise<Managers>;
+  public getManagersByAccount(): MaybePromise<ManagersByAccount>;
   public getManagersByAccount(accountNumber?: ActiveAccountNumber) {
     if(accountNumber !== undefined) {
-      return this.managersByAccountPromises[accountNumber] ??= this.createManagers(accountNumber);
+      return this.managersByAccount[accountNumber] ??
+        (this.managersByAccountPromises[accountNumber] ??= this.createManagers(accountNumber));
+    }
+
+    if(this.areManagersCreated) {
+      return this.managersByAccount as ManagersByAccount;
     }
 
     return Promise.all(([1, 2, 3, 4] as ActiveAccountNumber[]).map((accountNumber) => {
