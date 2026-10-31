@@ -1988,7 +1988,10 @@ describe('manager cache race guards', () => {
       const {invokeApiSingleProcess, requests} = singleProcessDedupHarness();
       const saveApiResult = vi.fn();
       Object.assign(manager, {
-        apiManager: {invokeApiSingleProcess},
+        apiManager: {
+          invokeApiSingleProcess,
+          trackPerformanceRpcWait: (_method: string, request: Promise<any>) => request
+        },
         middleware: {get: () => () => true},
         log: {bindPrefix: () => vi.fn()},
         dialogsStorage: {
@@ -2038,7 +2041,10 @@ describe('manager cache race guards', () => {
         mutationOrder.push('updateForumTopicsPaginationOffsets');
       });
       Object.assign(manager, {
-        apiManager: {invokeApiSingleProcess},
+        apiManager: {
+          invokeApiSingleProcess,
+          trackPerformanceRpcWait: (_method: string, request: Promise<any>) => request
+        },
         middleware: {get: () => () => true},
         log: {bindPrefix: () => vi.fn()},
         dialogsStorage: {

@@ -88,6 +88,13 @@ function readIdentifierAt(line, column) {
 }
 
 const SKIPPED_KEYS = new Set(['start', 'end', 'loc', 'range', 'parent']);
+const SCOPE_TYPES = new Set([
+  'Program',
+  'FunctionDeclaration',
+  'FunctionExpression',
+  'ArrowFunctionExpression',
+  'StaticBlock'
+]);
 
 function collectReferences(node, out) {
   if(!node || typeof node.type !== 'string') return;
@@ -154,12 +161,38 @@ function makeOffsetToPosition(code) {
   };
 }
 
+function collectScopesByPosition(ast, code) {
+  const scopes = new Map();
+  const toPosition = makeOffsetToPosition(code);
+  const visit = (node, parentScope) => {
+    if(!node || typeof node.type !== 'string') return;
+
+    const scope = SCOPE_TYPES.has(node.type) ? node : parentScope;
+    if(node.type === 'Identifier') {
+      const {line, column} = toPosition(node.start);
+      scopes.set(line + ':' + column, scope);
+    }
+
+    for(const key in node) {
+      if(SKIPPED_KEYS.has(key)) continue;
+      const value = node[key];
+      if(Array.isArray(value)) value.forEach((child) => visit(child, scope));
+      else visit(value, scope);
+    }
+  };
+
+  visit(ast, ast);
+  return scopes;
+}
+
 function checkDefaultBindings(dir, file) {
   const code = fs.readFileSync(path.join(dir, file), 'utf8');
   const lines = code.split('\n');
   const map = JSON.parse(fs.readFileSync(path.join(dir, file + '.map'), 'utf8'));
+  const ast = parseAst(code);
+  const scopesByPosition = collectScopesByPosition(ast, code);
 
-  // * how every source variable is spelled in this chunk: source|name -> spelling -> count
+  // * how each source variable is spelled in its generated lexical scope
   const spellings = new Map();
   // * genLine:genCol -> the source variable one emitted token came from
   const byPosition = new Map();
@@ -169,21 +202,29 @@ function checkDefaultBindings(dir, file) {
     if(!name || source === undefined) continue;
     const token = readIdentifierAt(lines[mapping.genLine - 1], mapping.genCol);
     if(!token || token === name) continue; // * not mangled: a property or a preserved name
-    byPosition.set(mapping.genLine + ':' + mapping.genCol, {source, name, line: mapping.srcLine + 1});
+    const position = mapping.genLine + ':' + mapping.genCol;
+    const scope = scopesByPosition.get(position) || ast;
+    byPosition.set(position, {source, name, line: mapping.srcLine + 1});
+    let variables = spellings.get(scope);
+    if(!variables) spellings.set(scope, variables = new Map());
     const key = source + '|' + name;
-    let counts = spellings.get(key);
-    if(!counts) spellings.set(key, counts = new Map());
+    let counts = variables.get(key);
+    if(!counts) variables.set(key, counts = new Map());
     counts.set(token, (counts.get(token) || 0) + 1);
   }
 
   const toPosition = makeOffsetToPosition(code);
   const offenders = [];
-  for(const reference of collectDefaultScopes(parseAst(code))) {
+  for(const reference of collectDefaultScopes(ast)) {
     const {line, column} = toPosition(reference.start);
-    const mapped = byPosition.get(line + ':' + column);
+    const position = line + ':' + column;
+    const mapped = byPosition.get(position);
     if(!mapped || mapped.name === reference.name) continue;
 
-    const counts = [...spellings.get(mapped.source + '|' + mapped.name)].sort((a, b) => b[1] - a[1]);
+    const scope = scopesByPosition.get(position) || ast;
+    const counts = [...(spellings.get(scope)?.get(mapped.source + '|' + mapped.name) || new Map())]
+    .sort((a, b) => b[1] - a[1]);
+    if(!counts.length) continue;
     const [dominant, dominantCount] = counts[0];
     if(dominant === reference.name || dominantCount < 5) continue;
 

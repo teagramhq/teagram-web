@@ -48,6 +48,7 @@ import {clearGuestAccountLocalState, clearInvalidatedGuestAccount as clearInvali
 import globalRootScope from '@lib/rootScope';
 import RepayRequestHandler from '@appManagers/utils/repayRequestHandler';
 import {AUTH_METHODS_WITH_RAW_ERRORS, AuthLogRedactor, getAuthMethod, secureAuthNetworker} from './authLogRedaction';
+import {PerformanceRpcTrace, performancePhaseTrace} from '@appManagers/performanceTrace';
 
 const PREMIUM_FILE_NETWORKERS_COUNT = 6;
 const REGULAR_FILE_NETWORKERS_COUNT = 3;
@@ -82,6 +83,8 @@ export class ApiManager extends ApiManagerMethods {
   private loggingOut: boolean;
 
   private authLogRedactor?: AuthLogRedactor;
+
+  private performanceRpcTrace = new PerformanceRpcTrace(import.meta.env.VITE_PERF_TRACE === '1');
 
   constructor() {
     super();
@@ -735,8 +738,29 @@ export class ApiManager extends ApiManagerMethods {
     this.networkerFactory.setUpdatesProcessor(callback);
   }
 
+  public getPerformanceRpcTrace() {
+    return this.performanceRpcTrace.getSnapshot();
+  }
+
+  public resetPerformanceRpcTrace(recordSpans = true) {
+    this.performanceRpcTrace.reset(recordSpans);
+  }
+
+  public getPerformancePhaseTrace() {
+    return performancePhaseTrace.getSnapshot();
+  }
+
+  public resetPerformancePhaseTrace() {
+    performancePhaseTrace.reset();
+  }
+
+  public trackPerformanceRpcWait<T, P extends Promise<T>>(method: string, request: P): P {
+    return this.performanceRpcTrace.trackWait(method, request);
+  }
+
   public invokeApi<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {}, options: InvokeApiOptions = {}): CancellablePromise<MethodDeclMap[T]['res']> {
     const methodName = String(method);
+    this.performanceRpcTrace.recordCall(methodName);
     if(!getAuthMethod(methodName, params)) {
       return this.invokeApiInternal(method, params, options);
     }

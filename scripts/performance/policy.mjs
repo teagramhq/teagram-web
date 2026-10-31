@@ -32,7 +32,7 @@ const CALIBRATION_RUNS = 20;
 const MAX_SCALE_RATIO = 1.5;
 const MIN_BLOCKING_TIME_REGRESSION_MS = 80;
 // A 100 ms task adds 50 ms of blocking time to every repeat.
-const MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS = 40;
+const MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS = 25;
 const REQUIRED_METRICS = [
   ['ms', 'timing'],
   ['requests', 'requests'],
@@ -60,7 +60,8 @@ function summarizeSamples(samples = []) {
   const keys = ['ms', 'requests', 'domNodes', 'bundleBytes', 'longTasksOver50Ms', 'blockingTimeMs', 'droppedFramePercent'];
   const summary = Object.fromEntries(keys.map((key) => {
     const values = samples.map((sample) => sample[key]).filter(Number.isFinite);
-    return [key, key === 'longTasksOver50Ms' && values.length ? Math.max(...values) : median(values)];
+    // Lazy chunks can load before a scenario clears resource timings, so preserve their largest observed byte count.
+    return [key, (key === 'longTasksOver50Ms' || key === 'bundleBytes') && values.length ? Math.max(...values) : median(values)];
   }));
   const frameIntervals = samples.reduce((total, sample) => total + (Number.isFinite(sample?.frameIntervals) ? sample.frameIntervals : 0), 0);
   const droppedFrames = samples.reduce((total, sample) => total + (Number.isFinite(sample?.droppedFrames) ? sample.droppedFrames : 0), 0);
