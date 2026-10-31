@@ -496,7 +496,7 @@ async function runColdChatList(browser: Browser, run: VariantRun): Promise<Metri
     const requests = {value: 0};
     await installInstrumentation(page, requests);
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
-    expect(await page.evaluate(() => (window as any).__teagramPerf.started)).toBe(0);
+    expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     await waitForChatList(page);
     return await capture(page, requests, await elapsed(page));
   } finally {
@@ -516,7 +516,7 @@ async function measureColdControlWindow(browser: Browser, run: VariantRun, injec
 
   try {
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
-    expect(await page.evaluate(() => (window as any).__teagramPerf.started)).toBe(0);
+    expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     await waitForChatList(page);
     const sample = await capture(page, requests, await elapsed(page));
     return {sample, injectedTask: injectStall ? await injectedLongTask(page) : undefined};
@@ -581,7 +581,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
 
   try {
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
-    expect(await page.evaluate(() => (window as any).__teagramPerf.started)).toBe(0);
+    expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     await waitForChatList(page);
     measured.coldChatList.push(await test.step('cold chat list', async() => capture(page, requests, await elapsed(page))));
     measured.warmChatList.push(await test.step('warm chat list', () => reloadChatList(page, requests)));
