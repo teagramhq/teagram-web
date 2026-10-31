@@ -91,11 +91,11 @@ afterEach(() => {
 
 const peerId = 10 as PeerId;
 
-function makeSetPeerHarness(pendingHistory: Promise<void>) {
+function makeSetPeerHarness(pendingHistory: Promise<void>, finishPeerChangePromise = Promise.resolve()) {
   const isAnyGroup = vi.fn(() => Promise.resolve(false));
   const isStartButtonNeeded = vi.fn(() => Promise.resolve(false));
   const getHistory1 = vi.fn(() => Promise.resolve({cached: true, promise: pendingHistory}));
-  const finishPeerChange = vi.fn(() => Promise.resolve());
+  const finishPeerChange = vi.fn(() => finishPeerChangePromise);
   const historyStorage = {maxId: 0, history: {length: 0}};
   const chat = {
     peerId,
@@ -118,7 +118,7 @@ function makeSetPeerHarness(pendingHistory: Promise<void>) {
       appPeersManager: {isAnyGroup},
       apiFileManager: {setQueueId: vi.fn()}
     },
-    log: Object.assign(vi.fn(), {bindPrefix: () => Object.assign(vi.fn(), {warn: vi.fn()})}),
+    log: Object.assign(vi.fn(), {bindPrefix: () => Object.assign(vi.fn(), {warn: vi.fn(), error: vi.fn()})}),
     followStack: [],
     destroyResizeObserver: vi.fn(),
     cleanup: vi.fn(),
@@ -183,6 +183,65 @@ test('prepares cached peer completion while initial history renders', async() =>
   await harness.setPeer({peerId, samePeer: false, sameSearch: false});
 
   expect(finishPeerChange).toHaveBeenCalledTimes(1);
+});
+
+test('prepares peer completion while the initial history request is pending', async() => {
+  const pendingHistory = new Promise<void>(() => {});
+  let resolveHistoryResult!: (result: {cached: boolean, promise: Promise<void>, waitPromise: Promise<void>}) => void;
+  const historyResult = new Promise<{cached: boolean, promise: Promise<void>, waitPromise: Promise<void>}>((resolve) => {
+    resolveHistoryResult = resolve;
+  });
+  const {harness, finishPeerChange, getHistory1} = makeSetPeerHarness(pendingHistory);
+  getHistory1.mockReturnValue(historyResult);
+
+  const setPeerPromise = harness.setPeer({peerId, samePeer: false, sameSearch: false});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const preparedBeforeHistory = finishPeerChange.mock.calls.length === 1;
+
+  resolveHistoryResult({cached: true, promise: pendingHistory, waitPromise: Promise.resolve()});
+  await setPeerPromise;
+
+  expect(preparedBeforeHistory).toBe(true);
+});
+
+test('propagates prepared peer rejection before the initial history request resolves', async() => {
+  let resolveHistory!: () => void;
+  const pendingHistory = new Promise<void>((resolve) => {
+    resolveHistory = resolve;
+  });
+  let rejectPreparation!: (error: Error) => void;
+  const preparation = new Promise<void>((_resolve, reject) => {
+    rejectPreparation = reject;
+  });
+  let resolveHistoryResult!: (result: {cached: boolean, promise: Promise<void>, waitPromise: Promise<void>}) => void;
+  const historyResult = new Promise<{cached: boolean, promise: Promise<void>, waitPromise: Promise<void>}>((resolve) => {
+    resolveHistoryResult = resolve;
+  });
+  const failure = new Error('peer setup failed');
+  const {harness, finishPeerChange, getHistory1} = makeSetPeerHarness(pendingHistory, preparation);
+  getHistory1.mockReturnValue(historyResult);
+
+  const setPeerResult: Promise<{error: unknown}> = harness.setPeer({peerId, samePeer: false, sameSearch: false}).then(
+    (_result: unknown) => ({error: undefined as unknown}),
+    (error: unknown) => ({error})
+  );
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const preparedBeforeHistory = finishPeerChange.mock.calls.length === 1;
+    if(preparedBeforeHistory) rejectPreparation(failure);
+
+    const propagatedBeforeHistory = preparedBeforeHistory && await Promise.race([
+      setPeerResult.then(({error}) => error === failure),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 0))
+    ]);
+
+    expect(preparedBeforeHistory).toBe(true);
+    expect(propagatedBeforeHistory).toBe(true);
+  } finally {
+    resolveHistoryResult({cached: true, promise: pendingHistory, waitPromise: Promise.resolve()});
+    resolveHistory();
+  }
 });
 
 test('does not use previous-peer bubbles to enlarge the initial history request', async() => {
