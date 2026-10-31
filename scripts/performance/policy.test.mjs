@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceTable, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS} from './policy.mjs';
+import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceTable, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS, scenarioBundleBytes} from './policy.mjs';
 
 const SCALES = ['1x', '100x'];
 const CURRENT_FIXTURE = {
@@ -66,6 +66,19 @@ function cleanScrollSamples() {
 function scrollHistory(count = 20, samples = cleanScrollSamples()) {
   return mainHistory(count, {'100x': {scrollBack2k: samples}});
 }
+
+test('counts only new same-origin bundle resources once per URL', () => {
+  const resources = [
+    {name: 'https://app.example/app.js', startTime: 5, decodedBodySize: 100},
+    {name: 'https://app.example/contacts.js', startTime: 12, decodedBodySize: 25},
+    {name: 'https://app.example/contacts.js', startTime: 13, decodedBodySize: 25},
+    {name: 'https://app.example/contacts.css?v=1', startTime: 14, decodedBodySize: 30},
+    {name: 'https://cdn.example/vendor.js', startTime: 15, decodedBodySize: 300},
+    {name: 'https://app.example/avatar.png', startTime: 16, decodedBodySize: 500}
+  ];
+
+  assert.equal(scenarioBundleBytes(resources, 'https://app.example', 10), 55);
+});
 
 test('blocks a 100 ms main-thread task on 100x cold load from the first run', () => {
   const head = scaleVariants({

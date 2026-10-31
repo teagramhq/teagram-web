@@ -1,7 +1,7 @@
 import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
 import Icons from '../src/icons';
-import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
+import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, scenarioBundleBytes} from '../scripts/performance/policy.mjs';
 
 type Fixture = {
   owner: number,
@@ -117,14 +117,9 @@ async function begin(page: Page, requests: {value: number}) {
 
 async function capture(page: Page, requests: {value: number}, ms: number, scroll = false): Promise<Metric> {
   await page.waitForTimeout(150);
-  return page.evaluate(({ms, requests, scroll}) => {
+  const captured = await page.evaluate(({ms, requests, scroll}) => {
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
-    const bundleResources = new Map<string, number>();
-    resources.filter((entry) => {
-      return new URL(entry.name).origin === location.origin && /\.(js|css)(?:[?#]|$)/i.test(entry.name);
-    }).forEach((entry) => bundleResources.set(entry.name, entry.decodedBodySize));
-    const bundleBytes = [...bundleResources.values()].reduce((total, bytes) => total + bytes, 0);
     const intervals = scroll ? perf.frameIntervals : [];
     const droppedFrames = intervals.reduce((total: number, interval: number) => total + Math.max(0, Math.round(interval / (1000 / 60)) - 1), 0);
     const droppedFramePercent = intervals.length ? droppedFrames / (droppedFrames + intervals.length) * 100 : 0;
@@ -133,7 +128,9 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
       ms,
       requests,
       domNodes: document.querySelectorAll('*').length,
-      bundleBytes,
+      bundleResources: resources.map((entry) => ({name: entry.name, startTime: entry.startTime, decodedBodySize: entry.decodedBodySize})),
+      resourceOrigin: location.origin,
+      resourceStartedAt: perf.started,
       longTasksOver50Ms: longTasks.length,
       blockingTimeMs: longTasks.reduce((total: number, entry: {duration: number}) => total + entry.duration - 50, 0),
       maxLongTaskDurationMs: longTasks.reduce((max: number, entry: {duration: number}) => Math.max(max, entry.duration), 0),
@@ -142,6 +139,8 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
   }, {ms, requests: requests.value, scroll});
+  const {bundleResources, resourceOrigin, resourceStartedAt, ...metrics} = captured;
+  return {...metrics, bundleBytes: scenarioBundleBytes(bundleResources, resourceOrigin, resourceStartedAt)};
 }
 
 async function injectedLongTask(page: Page) {
