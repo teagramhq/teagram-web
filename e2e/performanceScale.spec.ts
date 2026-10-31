@@ -304,6 +304,16 @@ async function waitForChatList(page: Page) {
   await expect(page.locator('#page-chats #chatlist-container .chatlist-chat').first()).toBeVisible({timeout: 120_000});
 }
 
+// Startup keeps fetching lazy chunks after the chat list paints; let them land before a scenario
+// clears resource timings, or its bundle bytes depend on how far that tail got.
+async function waitForAssetsSettled(page: Page) {
+  await expect.poll(async() => {
+    const before = await page.evaluate(() => performance.getEntriesByType('resource').length);
+    await page.waitForTimeout(1_000);
+    return await page.evaluate((count) => performance.getEntriesByType('resource').length === count, before);
+  }, {timeout: 60_000, intervals: [0]}).toBe(true);
+}
+
 async function reloadChatList(page: Page, requests: {value: number}) {
   await begin(page, requests);
   await page.reload({waitUntil: 'domcontentloaded'});
@@ -579,6 +589,7 @@ async function runContactScenarios(browser: Browser, run: VariantRun, scale: Sca
   try {
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
+    await waitForAssetsSettled(page);
     measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
     measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
     measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
