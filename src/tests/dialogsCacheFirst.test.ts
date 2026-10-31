@@ -1,7 +1,7 @@
 import DialogsStorage, {FilterType} from '@lib/storages/dialogs';
 import {FOLDER_ID_ALL} from '@appManagers/constants';
 
-function createStorage(getTopMessages: (...args: unknown[]) => Promise<unknown>) {
+function createStorage(getTopMessages: (...args: unknown[]) => Promise<unknown>, includeDialog = true) {
   const storage = new DialogsStorage();
   storage.clear(true);
   Object.assign(storage as any, {
@@ -18,15 +18,23 @@ function createStorage(getTopMessages: (...args: unknown[]) => Promise<unknown>)
     top_message: 1,
     pFlags: {}
   } as any;
-  storage.getFolder(FOLDER_ID_ALL, FilterType.Folder).dialogs.push(dialog);
+  if(includeDialog) storage.getFolder(FOLDER_ID_ALL, FilterType.Folder).dialogs.push(dialog);
 
   return {storage, dialog};
 }
 
 describe('dialogs cache-first loading', () => {
   it('returns a cached first page while its refresh request is still pending', () => {
-    const getTopMessages = vi.fn((): Promise<unknown> => new Promise(() => {}));
+    const calls: string[] = [];
+    const getTopMessages = vi.fn((): Promise<unknown> => {
+      calls.push('refresh');
+      return new Promise(() => {});
+    });
     const {storage, dialog} = createStorage(getTopMessages);
+    const reconcile = vi.spyOn(storage as any, 'reconcileCachedChannelDialogs').mockImplementation(() => {
+      calls.push('reconcile');
+      return Promise.resolve();
+    });
 
     const result = storage.getDialogs({
       filterId: FOLDER_ID_ALL,
@@ -36,6 +44,24 @@ describe('dialogs cache-first loading', () => {
     });
 
     expect(result).toMatchObject({dialogs: [dialog], isEnd: false});
+    expect(getTopMessages).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(['reconcile', 'refresh']);
+  });
+
+  it('returns an empty cold cache while its initial refresh is still pending', () => {
+    const getTopMessages = vi.fn((): Promise<unknown> => new Promise(() => {}));
+    const {storage} = createStorage(getTopMessages, false);
+
+    const result = storage.getDialogs({
+      filterId: FOLDER_ID_ALL,
+      filterType: FilterType.Folder,
+      limit: 20,
+      cacheFirst: true
+    });
+
+    expect(result).not.toBeInstanceOf(Promise);
+    expect(result).toMatchObject({dialogs: [], isEnd: false});
     expect(getTopMessages).toHaveBeenCalledTimes(1);
   });
 

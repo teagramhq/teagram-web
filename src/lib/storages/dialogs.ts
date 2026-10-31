@@ -2014,7 +2014,6 @@ export default class DialogsStorage extends AppManager {
       filterType === FilterType.Folder &&
       !query &&
       !offset &&
-      curDialogStorage.length > 0 &&
       !loadedAll &&
       !isEnoughDialogs &&
       !forceLocal;
@@ -2031,10 +2030,10 @@ export default class DialogsStorage extends AppManager {
     });
 
     if(hasPartialCachedFirstPage && !this.cacheFirstPageRefresh) {
+      this.reconcileCachedChannelDialogs();
       this.cacheFirstPageRefresh = loadTopMessages()
         .then((result) => {
           this.getFolder(filterId, filterType).count = result.count;
-          return this.reconcileCachedChannelDialogs();
         })
         .catch((err) => this.log.error('could not refresh cached dialog page', err))
         .finally(() => this.cacheFirstPageRefresh = undefined);
