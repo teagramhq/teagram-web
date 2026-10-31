@@ -34,4 +34,37 @@ describe('performance trace collectors', () => {
     expect(snapshot.calls[0].durationMs).toEqual(expect.any(Number));
     expect(JSON.stringify(snapshot)).not.toContain('params');
   });
+
+  test('tracks resolved RPC requests through completion', async() => {
+    const trace = new PerformanceRpcTrace(true);
+    const handle = trace.start('help.getAppConfig');
+    const request = Promise.resolve('config');
+    const tracked = trace.track(handle, request);
+
+    expect(tracked).toBe(request);
+    await expect(tracked).resolves.toBe('config');
+
+    const snapshot = trace.getSnapshot();
+    expect(snapshot.calls).toHaveLength(1);
+    expect(snapshot.calls[0]).toMatchObject({method: 'help.getAppConfig', outcome: 'success'});
+    expect(Number.isFinite(snapshot.calls[0].durationMs)).toBe(true);
+    expect(snapshot.calls[0].durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  test('tracks rejected RPC requests through completion without swallowing the error', async() => {
+    const trace = new PerformanceRpcTrace(true);
+    const handle = trace.start('messages.getHistory');
+    const error = new Error('request failed');
+    const request = Promise.reject(error);
+    const tracked = trace.track(handle, request);
+
+    expect(tracked).toBe(request);
+    await expect(tracked).rejects.toBe(error);
+
+    const snapshot = trace.getSnapshot();
+    expect(snapshot.calls).toHaveLength(1);
+    expect(snapshot.calls[0]).toMatchObject({method: 'messages.getHistory', outcome: 'error'});
+    expect(Number.isFinite(snapshot.calls[0].durationMs)).toBe(true);
+    expect(snapshot.calls[0].durationMs).toBeGreaterThanOrEqual(0);
+  });
 });
