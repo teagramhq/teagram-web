@@ -269,6 +269,30 @@ test('allows one 100x contacts long-task and blocking-time outlier', () => {
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x contactsList') && /long task|blocking time/.test(failure)), false);
 });
 
+test('blocks contacts bundle measurements that vary across repeats', () => {
+  const base = scaleVariants({'100x': {contactsList: [
+    {bundleBytes: 1_583},
+    {bundleBytes: 33_090},
+    {bundleBytes: 33_090}
+  ]}});
+  const head = scaleVariants({'100x': {contactsList: [
+    {bundleBytes: 1_583},
+    {bundleBytes: 33_090},
+    {bundleBytes: 33_090}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x contactsList') && failure.includes('base bundle measurements vary')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x contactsList') && failure.includes('head bundle measurements vary')));
+});
+
+test('blocks stable contacts bundle growth above two percent', () => {
+  const head = scaleVariants({'100x': {contactsList: {bundleBytes: 102_001}}});
+  const result = evaluatePerformance(report({head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x contactsList') && failure.includes('bundle grew')));
+});
+
 test('reports scroll misses while master calibration warms up', () => {
   const base = scaleVariants({'100x': {scrollBack2k: [
     {longTasksOver50Ms: 10, blockingTimeMs: 35, maxLongTaskDurationMs: 60, droppedFrames: 202, frameIntervals: 865, droppedFramePercent: 18.93},

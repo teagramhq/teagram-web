@@ -67,6 +67,7 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
     if(request.resourceType() !== 'websocket') ++requestCounter.value;
   });
   return page.addInitScript((injectColdStall: boolean) => {
+    performance.setResourceTimingBufferSize(1_000);
     const perf: any = (window as any).__teagramPerf = {
       longTasks: [] as Array<{startTime: number, duration: number}>,
       frameIntervals: [] as number[],
@@ -111,7 +112,6 @@ async function begin(page: Page, requests: {value: number}) {
     perf.longTasks = [];
     perf.frameIntervals = [];
     perf.started = performance.now();
-    performance.clearResourceTimings();
   });
 }
 
@@ -120,9 +120,11 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
   return page.evaluate(({ms, requests, scroll}) => {
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
-    const bundleBytes = resources.filter((entry) => {
+    const bundleResources = new Map<string, number>();
+    resources.filter((entry) => {
       return new URL(entry.name).origin === location.origin && /\.(js|css)(?:[?#]|$)/i.test(entry.name);
-    }).reduce((total, entry) => total + entry.decodedBodySize, 0);
+    }).forEach((entry) => bundleResources.set(entry.name, entry.decodedBodySize));
+    const bundleBytes = [...bundleResources.values()].reduce((total, bytes) => total + bytes, 0);
     const intervals = scroll ? perf.frameIntervals : [];
     const droppedFrames = intervals.reduce((total: number, interval: number) => total + Math.max(0, Math.round(interval / (1000 / 60)) - 1), 0);
     const droppedFramePercent = intervals.length ? droppedFrames / (droppedFrames + intervals.length) * 100 : 0;
@@ -527,6 +529,14 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       const run = preparedVariants[coldScale][variant]!;
       const sample = await test.step(`${coldScale} ${variant} cold chat list round ${repeat + 1}`, () => runColdChatList(browser, run));
       report.variants[variant][coldScale].coldChatList.push(sample);
+    }
+  }
+
+  for(const scale of scales) {
+    const variants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
+    for(const variant of variants) {
+      const bundleSizes = report.variants[variant][scale].contactsList.map(({bundleBytes}) => bundleBytes);
+      expect(new Set(bundleSizes).size, `${scale} ${variant} contacts bundle measurements vary across repeats`).toBe(1);
     }
   }
 });

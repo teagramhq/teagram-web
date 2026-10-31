@@ -202,6 +202,14 @@ export function evaluatePerformance(report, history = []) {
       if(headSamples.length < requiredRepeats) {
         addFailure(blockingFailures, scale, scenario.key, `expected at least ${requiredRepeats} repeat measurements, got ${headSamples.length}`);
       }
+      if(scenario.key === 'contactsList') {
+        for(const [variant, samples] of [['base', baseSamples], ['head', headSamples]]) {
+          const bundleSizes = samples.map((sample) => sample?.bundleBytes).filter(Number.isFinite);
+          if(new Set(bundleSizes).size > 1) {
+            addFailure(blockingFailures, scale, scenario.key, `${variant} bundle measurements vary across repeats`);
+          }
+        }
+      }
       headSamples.forEach((sample, index) => {
         const requiredMetrics = scenario.key === 'scrollBack2k' ? [
           ...REQUIRED_METRICS,
