@@ -5,6 +5,7 @@ import ListenerSetter from '@helpers/listenerSetter';
 import throttle from '@helpers/schedulers/throttle';
 import {SequentialCursorFetcher, SequentialCursorFetcherResult} from '@helpers/sequentialCursorFetcher';
 import windowSize from '@helpers/windowSize';
+import {FOLDER_ID_ALL} from '@appManagers/constants';
 import type {AppDialogsManager, DialogDom} from '@lib/appDialogsManager';
 import appImManager from '@lib/appImManager';
 import {AppManagers} from '@lib/managers';
@@ -258,6 +259,7 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
       limit: this.guessLoadCount(),
       filterId,
       filterType: this.getFilterType(),
+      cacheFirst: filterId === FOLDER_ID_ALL,
       skipMigrated: this.skipMigrated
     });
 
@@ -265,11 +267,13 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
   }
 
   protected async dialogsFetcher(offsetIndex: number, limit: number): Promise<{dialogs: PossibleDialog[], count: number, isEnd: boolean}> {
+    const filterId = this.getFilterId();
     const ackedResult = await this.managers.acknowledged.dialogsStorage.getDialogs({
       offsetIndex,
       limit,
-      filterId: this.getFilterId(),
+      filterId,
       filterType: this.getFilterType(),
+      cacheFirst: filterId === FOLDER_ID_ALL,
       skipMigrated: this.skipMigrated
     });
 

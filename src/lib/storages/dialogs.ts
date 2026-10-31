@@ -97,6 +97,7 @@ export default class DialogsStorage extends AppManager {
   private pinnedOrders: {[folder_id: number]: PeerId[]};
   private savedDialogsLoaded: boolean;
   private cachedListReconciled: boolean;
+  private cacheFirstPageRefresh?: Promise<void>;
   private savedDialogsOffsetDate: number;
   private savedDialogsPinnedOrder: PeerId[];
   private dialogsNum: number;
@@ -1895,7 +1896,8 @@ export default class DialogsStorage extends AppManager {
     skipMigrated?: boolean,
     forceLocal?: boolean,
     recursion?: boolean,
-    filterType?: FilterType
+    filterType?: FilterType,
+    cacheFirst?: boolean
   }): MaybePromise<{
     dialogs: Folder['dialogs'],
     count: number,
@@ -1922,7 +1924,8 @@ export default class DialogsStorage extends AppManager {
       filterType = this.getFilterType(filterId),
       skipMigrated = filterType === FilterType.Forum,
       forceLocal,
-      recursion
+      recursion,
+      cacheFirst
     } = options;
 
     const isForum = this.isFilterIdForForum(filterId);
@@ -2005,8 +2008,39 @@ export default class DialogsStorage extends AppManager {
 
     const loadedAll = this.isDialogsLoaded(realFolderId, filterType);
     const isEnoughDialogs = curDialogStorage.length >= (offset + limit);
-    if((isServerSearchSupported ? false : query) || loadedAll || isEnoughDialogs || forceLocal) {
-      if(!query && !offset && filterId === FOLDER_ID_ALL) {
+    const hasPartialCachedFirstPage =
+      cacheFirst &&
+      filterId === FOLDER_ID_ALL &&
+      filterType === FilterType.Folder &&
+      !query &&
+      !offset &&
+      !loadedAll &&
+      !isEnoughDialogs &&
+      !forceLocal;
+    const loadTopMessages = () => this.appMessagesManager.getTopMessages({
+      limit,
+      folderId: realFolderId,
+      query,
+      filterType,
+      // ! only server search pages by the local results' tail — the regular topic list is paged by
+      // ! the stored pagination offsets (see `updateForumTopicsPaginationOffsets`), because the
+      // ! locally sorted list is poisoned by drafts and by-id-fetched topics
+      offsetTopic: (isForum || isBotforum) && query ? curDialogStorage[curDialogStorage.length - 1] as ForumTopic : undefined,
+      excludeCommunityDialogs: filterType === FilterType.Folder && filterId === FOLDER_ID_ALL
+    });
+
+    if(hasPartialCachedFirstPage && !this.cacheFirstPageRefresh) {
+      this.reconcileCachedChannelDialogs(realFolderId);
+      this.cacheFirstPageRefresh = loadTopMessages()
+        .then((result) => {
+          this.getFolder(filterId, filterType).count = result.count;
+        })
+        .catch((err) => this.log.error('could not refresh cached dialog page', err))
+        .finally(() => this.cacheFirstPageRefresh = undefined);
+    }
+
+    if((isServerSearchSupported ? false : query) || loadedAll || isEnoughDialogs || forceLocal || hasPartialCachedFirstPage) {
+      if(!query && !offset && filterId === FOLDER_ID_ALL && !hasPartialCachedFirstPage) {
         this.reconcileCachedChannelDialogs();
       }
 
@@ -2019,17 +2053,7 @@ export default class DialogsStorage extends AppManager {
       };
     }
 
-    return this.appMessagesManager.getTopMessages({
-      limit,
-      folderId: realFolderId,
-      query,
-      filterType,
-      // ! only server search pages by the local results' tail — the regular topic list is paged by
-      // ! the stored pagination offsets (see `updateForumTopicsPaginationOffsets`), because the
-      // ! locally sorted list is poisoned by drafts and by-id-fetched topics
-      offsetTopic: (isForum || isBotforum) && query ? curDialogStorage[curDialogStorage.length - 1] as ForumTopic : undefined,
-      excludeCommunityDialogs: filterType === FilterType.Folder && filterId === FOLDER_ID_ALL
-    }).then((result) => {
+    return loadTopMessages().then((result) => {
       if(query) {
         return this.getDialogs({
           ...options,
@@ -2076,14 +2100,15 @@ export default class DialogsStorage extends AppManager {
    * channel is never fetched back. Until every listed channel is restored, the next cached first
    * page retries the comparison.
    */
-  private async reconcileCachedChannelDialogs() {
+  private async reconcileCachedChannelDialogs(folderId?: number) {
     if(this.cachedListReconciled) {
       return;
     }
 
+    const requestFolderId = arguments.length ? folderId : FOLDER_ID_ALL;
     this.cachedListReconciled = true;
     try {
-      const missingPeerIds = await this.getServerChannelsMissingLocally();
+      const missingPeerIds = await this.getServerChannelsMissingLocally(requestFolderId);
       await Promise.all(missingPeerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
       if(missingPeerIds.some((peerId) => !this.getDialogOnly(peerId) && this.appChatsManager.isInChat(peerId.toChatId()))) {
         this.cachedListReconciled = false;
@@ -2093,7 +2118,8 @@ export default class DialogsStorage extends AppManager {
     }
   }
 
-  private async getServerChannelsMissingLocally() {
+  private async getServerChannelsMissingLocally(folderId?: number) {
+    const requestFolderId = arguments.length ? folderId : FOLDER_ID_ALL;
     const limit = 100;
     const missingPeerIds: PeerId[] = [];
     const seenPeerIds: Set<PeerId> = new Set();
@@ -2102,7 +2128,7 @@ export default class DialogsStorage extends AppManager {
       const result = await this.apiManager.invokeApiSingleProcess({
         method: 'messages.getDialogs',
         params: {
-          folder_id: FOLDER_ID_ALL,
+          folder_id: requestFolderId,
           offset_date: offsetDate,
           offset_id: offsetId,
           offset_peer: offsetPeerId ? this.appPeersManager.getInputPeerById(offsetPeerId) : {_: 'inputPeerEmpty'},

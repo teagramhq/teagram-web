@@ -1,0 +1,147 @@
+import DialogsStorage, {FilterType} from '@lib/storages/dialogs';
+import {FOLDER_ID_ALL} from '@appManagers/constants';
+
+function createStorage(getTopMessages: (...args: unknown[]) => Promise<unknown>, includeDialog = true) {
+  const storage = new DialogsStorage();
+  storage.clear(true);
+  Object.assign(storage as any, {
+    appPeersManager: {isBotforum: () => false},
+    filtersStorage: {getFilter: (): undefined => undefined},
+    appMessagesManager: {getTopMessages}
+  });
+  (storage as any).cachedListReconciled = true;
+
+  const dialog = {
+    _: 'dialog',
+    peerId: 42 as PeerId,
+    folder_id: FOLDER_ID_ALL,
+    top_message: 1,
+    pFlags: {}
+  } as any;
+  if(includeDialog) storage.getFolder(FOLDER_ID_ALL, FilterType.Folder).dialogs.push(dialog);
+
+  return {storage, dialog};
+}
+
+describe('dialogs cache-first loading', () => {
+  it('returns a cached first page while its refresh request is still pending', () => {
+    const calls: string[] = [];
+    const getTopMessages = vi.fn((): Promise<unknown> => {
+      calls.push('refresh');
+      return new Promise(() => {});
+    });
+    const {storage, dialog} = createStorage(getTopMessages);
+    const reconcile = vi.spyOn(storage as any, 'reconcileCachedChannelDialogs').mockImplementation(() => {
+      calls.push('reconcile');
+      return Promise.resolve();
+    });
+
+    const result = storage.getDialogs({
+      filterId: FOLDER_ID_ALL,
+      filterType: FilterType.Folder,
+      limit: 20,
+      cacheFirst: true
+    });
+
+    expect(result).toMatchObject({dialogs: [dialog], isEnd: false});
+    expect(getTopMessages).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledWith(FOLDER_ID_ALL);
+    expect(calls).toEqual(['reconcile', 'refresh']);
+  });
+
+  it('returns an empty cold cache while its initial refresh is still pending', () => {
+    const getTopMessages = vi.fn((): Promise<unknown> => new Promise(() => {}));
+    const {storage} = createStorage(getTopMessages, false);
+
+    const result = storage.getDialogs({
+      filterId: FOLDER_ID_ALL,
+      filterType: FilterType.Folder,
+      limit: 20,
+      cacheFirst: true
+    });
+
+    expect(result).not.toBeInstanceOf(Promise);
+    expect(result).toMatchObject({dialogs: [], isEnd: false});
+    expect(getTopMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps non-chat-list callers waiting for an incomplete first page', () => {
+    const getTopMessages = vi.fn((): Promise<unknown> => new Promise(() => {}));
+    const {storage} = createStorage(getTopMessages);
+
+    const result = storage.getDialogs({
+      filterId: FOLDER_ID_ALL,
+      filterType: FilterType.Folder,
+      limit: 20
+    });
+
+    expect(result).toBeInstanceOf(Promise);
+  });
+
+  it('shares a pending refresh across cache-first callers', () => {
+    const getTopMessages = vi.fn((): Promise<unknown> => new Promise(() => {}));
+    const {storage} = createStorage(getTopMessages);
+    const options = {
+      filterId: FOLDER_ID_ALL,
+      filterType: FilterType.Folder,
+      limit: 20,
+      cacheFirst: true
+    };
+
+    storage.getDialogs(options);
+    storage.getDialogs(options);
+
+    expect(getTopMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves explicit undefined through channel reconciliation', async() => {
+    const {storage} = createStorage(() => Promise.resolve({count: 0}));
+    (storage as any).cachedListReconciled = false;
+    const getServerChannelsMissingLocally = vi.spyOn(storage as any, 'getServerChannelsMissingLocally').mockResolvedValue([]);
+
+    await (storage as any).reconcileCachedChannelDialogs(undefined);
+    expect(getServerChannelsMissingLocally).toHaveBeenLastCalledWith(undefined);
+
+    (storage as any).cachedListReconciled = false;
+    await (storage as any).reconcileCachedChannelDialogs();
+    expect(getServerChannelsMissingLocally).toHaveBeenLastCalledWith(FOLDER_ID_ALL);
+  });
+
+  it('omits folder_id for an explicit undefined reconciliation request', async() => {
+    const {storage} = createStorage(() => Promise.resolve({count: 0}));
+    const invokeApiSingleProcess = vi.fn().mockResolvedValue({
+      _: 'messages.dialogs',
+      dialogs: [],
+      messages: [],
+      chats: [],
+      users: []
+    });
+    Object.assign(storage as any, {
+      apiManager: {invokeApiSingleProcess},
+      appPeersManager: {saveApiPeers: vi.fn()}
+    });
+
+    await (storage as any).getServerChannelsMissingLocally(undefined);
+    const params = (invokeApiSingleProcess as any).mock.calls[0][0].params;
+    expect(JSON.stringify(params)).toBe('{"offset_date":0,"offset_id":0,"offset_peer":{"_":"inputPeerEmpty"},"limit":100,"hash":"0"}');
+
+    await (storage as any).getServerChannelsMissingLocally();
+    expect((invokeApiSingleProcess as any).mock.calls[1][0].params.folder_id).toBe(FOLDER_ID_ALL);
+  });
+
+  it('updates the cached folder count when its refresh completes', async() => {
+    const getTopMessages = vi.fn(() => Promise.resolve({count: 25}));
+    const {storage} = createStorage(getTopMessages);
+    const folder = storage.getFolder(FOLDER_ID_ALL, FilterType.Folder);
+
+    storage.getDialogs({
+      filterId: FOLDER_ID_ALL,
+      filterType: FilterType.Folder,
+      limit: 20,
+      cacheFirst: true
+    });
+
+    await vi.waitFor(() => expect(folder.count).toBe(25));
+  });
+});
