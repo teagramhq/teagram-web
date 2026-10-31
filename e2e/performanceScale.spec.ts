@@ -72,7 +72,8 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
       longTasks: [] as Array<{startTime: number, duration: number}>,
       frameIntervals: [] as number[],
       frameActive: false,
-      started: 0
+      started: 0,
+      bundleStartedAt: 0
     };
     try {
       const observer = new PerformanceObserver((list) => {
@@ -105,14 +106,15 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
   }, injectColdStall);
 }
 
-async function begin(page: Page, requests: {value: number}) {
+async function begin(page: Page, requests: {value: number}, includePageLoadBundleResources = false) {
   requests.value = 0;
-  await page.evaluate(() => {
+  await page.evaluate((includePageLoadBundleResources: boolean) => {
     const perf = (window as any).__teagramPerf;
     perf.longTasks = [];
     perf.frameIntervals = [];
     perf.started = performance.now();
-  });
+    perf.bundleStartedAt = includePageLoadBundleResources ? 0 : perf.started;
+  }, includePageLoadBundleResources);
 }
 
 async function capture(page: Page, requests: {value: number}, ms: number, scroll = false): Promise<Metric> {
@@ -130,7 +132,7 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
       domNodes: document.querySelectorAll('*').length,
       bundleResources: resources.map((entry) => ({name: entry.name, startTime: entry.startTime, decodedBodySize: entry.decodedBodySize})),
       resourceOrigin: location.origin,
-      resourceStartedAt: perf.started,
+      resourceStartedAt: perf.bundleStartedAt,
       longTasksOver50Ms: longTasks.length,
       blockingTimeMs: longTasks.reduce((total: number, entry: {duration: number}) => total + entry.duration - 50, 0),
       maxLongTaskDurationMs: longTasks.reduce((max: number, entry: {duration: number}) => Math.max(max, entry.duration), 0),
@@ -325,7 +327,8 @@ async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture:
 }
 
 async function openContacts(page: Page, requests: {value: number}) {
-  await begin(page, requests);
+  // The caller navigates to a fresh document before this scenario, so count its preloaded chunks too.
+  await begin(page, requests, true);
   await page.locator('.sidebar-tools-button').click();
   await page.getByText('Contacts', {exact: true}).last().click();
   await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
