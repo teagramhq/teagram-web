@@ -29,7 +29,7 @@ if ! printf '%s\n' "$subject" | grep -Eq '^[a-z][a-z0-9-]*(\([^()[:space:]]+\))?
   add_rule 'subject must follow Conventional Commits'
 fi
 
-if printf '%s\n' "$subject" | grep -Eq '(^|[^[:alnum:]])[A-Z][A-Z0-9]+-[0-9]+([^[:alnum:]]|$)'; then
+if printf '%s\n' "$subject" | grep -Eq '\bMAIN-[0-9]+\b'; then
   add_rule 'subject must not contain an issue key'
 fi
 
@@ -37,7 +37,7 @@ if grep -Eiq '^[[:space:]]*Co-Authored-By[[:space:]]*:' "$message_file"; then
   add_rule 'message must not include a Co-Authored-By trailer'
 fi
 
-if grep -Eiq '^[[:space:]]*Generated with([[:space:]]|$)' "$message_file"; then
+if grep -Eiq '^[^[:alnum:]]*Generated with([[:space:]]|$)' "$message_file"; then
   add_rule 'message must not include a Generated with line'
 fi
 
