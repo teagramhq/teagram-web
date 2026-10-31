@@ -370,13 +370,14 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   return capture(page, requests, await snapshotMeasurementBoundary(page));
 }
 
-async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean) {
+async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, profileTrace = false) {
   const hasPendingHistory = () => page.evaluate(() => {
     const bubbles = (window as any).appImManager.chat.bubbles;
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
   });
 
-  await begin(page, requests, false);
+  await begin(page, requests, profileTrace);
+  const cpuProfile = profileTrace ? await startCpuProfile(page) : undefined;
   await page.evaluate(() => (window as any).__teagramPerf.startFrames());
   const initial = await page.evaluate(() => {
     const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));
@@ -428,7 +429,10 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     if(!required) return undefined;
     throw new Error(`scroll reached message ${currentMin}, expected ${targetMid}: ${JSON.stringify(scrollState)}`);
   }
-  return capture(page, requests, await snapshotMeasurementBoundary(page), true);
+  const boundary = await snapshotMeasurementBoundary(page);
+  const cpu = cpuProfile ? await finishCpuProfile(cpuProfile) : undefined;
+  const metric = await capture(page, requests, boundary, true);
+  return cpu ? {...metric, cpu} : metric;
 }
 
 async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture, allowUnsupportedBase: boolean): Promise<Metric | undefined> {
@@ -730,7 +734,12 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
       peerChangePhases: summarizePerformancePhases(peerChangePhases)
     };
 
-    return {coldChatList, warmChatList, chatOpen};
+    const scrollBack2k = await test.step('profile 100x scroll back 2,000 messages', () => scrollBackTwoThousand(page, requests, true, true));
+    if(!scrollBack2k || !('cpu' in scrollBack2k)) throw new Error('scroll-back profile did not reach 2,000 messages');
+    expect(scrollBack2k.rpcSpansRecorded, 'scroll-back RPC spans were not recorded').toBe(true);
+    expect(scrollBack2k.cpu.sampledCpuMs, 'scroll-back CPU profile was empty').toBeGreaterThan(0);
+
+    return {coldChatList, warmChatList, chatOpen, scrollBack2k};
   } finally {
     await context.close();
   }
