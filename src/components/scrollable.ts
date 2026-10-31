@@ -227,29 +227,33 @@ export class ScrollableBase {
       this.onScrollMeasure = 0;
 
       const scrollPosition = this.scrollPosition;
+      // Keep geometry reads ahead of the chat callback's class changes.
+      const updateCustomThumb = !IS_OVERLAY_SCROLL_SUPPORTED() && this.thumb;
+      const scrollSize = updateCustomThumb ? this.scrollSize : undefined;
+      const clientSize = updateCustomThumb ? this.clientSize : undefined;
       this.lastScrollDirection = this.lastScrollPosition === scrollPosition ? 0 : (this.lastScrollPosition < scrollPosition ? 1 : -1); // * 1 - bottom, -1 - top
       this.lastScrollPosition = scrollPosition;
 
-      this.updateThumb(scrollPosition);
+      if(this.checkForTriggers) {
+        this.checkForTriggers();
+      }
 
       // lastScrollDirection check is useless here, every callback should decide on its own
       if(this.onAdditionalScroll/*  && this.lastScrollDirection !== 0 */) {
         this.onAdditionalScroll();
       }
 
-      if(this.checkForTriggers) {
-        this.checkForTriggers();
-      }
+      this.updateThumb(scrollPosition, scrollSize, clientSize);
     });
   };
 
-  public updateThumb(scrollPosition = this.scrollPosition) {
+  public updateThumb(scrollPosition = this.scrollPosition, scrollSize?: number, clientSize?: number) {
     if(IS_OVERLAY_SCROLL_SUPPORTED() || !this.thumb) {
       return;
     }
 
-    const scrollSize = this.container[this.scrollSizeProperty];
-    const clientSize = this.container[this.clientSizeProperty];
+    scrollSize ??= this.scrollSize;
+    clientSize ??= this.clientSize;
     const divider = scrollSize / clientSize / 0.75;
     const thumbSize = Math.max(20, clientSize / divider);
     const value = scrollPosition / (scrollSize - clientSize) * clientSize;
