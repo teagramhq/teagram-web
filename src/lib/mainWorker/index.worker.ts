@@ -359,7 +359,7 @@ port.addMultipleEventsListeners({
 log('MTProto start');
 
 appManagersManager.start();
-appManagersManager.getManagersByAccount();
+appManagersManager.getManagersByAccount(1);
 appTabsManager.start();
 
 let isFirst = true;
