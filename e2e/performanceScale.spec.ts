@@ -80,7 +80,7 @@ test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 });
 
-function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false) {
+async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false) {
   const bundleRequests = createBundleRequestTracker(new URL(origin).origin);
   bundleRequestTrackers.set(page, bundleRequests);
   page.on('request', (request) => {
@@ -89,8 +89,24 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, ori
   });
   page.on('requestfinished', (request) => bundleRequests.requestFinished(request));
   page.on('requestfailed', (request) => bundleRequests.requestFailed(request));
-  page.on('worker', (worker) => bundleRequests.workerCreated(worker.url()));
+  page.on('worker', (worker) => bundleRequests.workerReady(worker.url()));
+  await page.exposeBinding('__teagramBundleWorkerReady', (_source, url: string) => bundleRequests.workerReady(url));
   return page.addInitScript((injectColdStall: boolean) => {
+    // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
+    const SharedWorkerConstructor = (window as any).SharedWorker;
+    if(SharedWorkerConstructor) {
+      (window as any).SharedWorker = new Proxy(SharedWorkerConstructor, {
+        construct(target, args, newTarget) {
+          const worker = Reflect.construct(target, args, newTarget) as SharedWorker;
+          const url = new URL(String(args[0]), location.href).href;
+          worker.port.addEventListener('message', () => {
+            void (window as any).__teagramBundleWorkerReady(url);
+          }, {once: true});
+          worker.port.start();
+          return worker;
+        }
+      });
+    }
     performance.setResourceTimingBufferSize(1_000);
     const perf: any = (window as any).__teagramPerf = {
       longTasks: [] as Array<{startTime: number, duration: number}>,

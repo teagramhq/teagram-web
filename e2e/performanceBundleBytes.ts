@@ -8,7 +8,7 @@ export type BundleRequestTracker = {
   requestStarted: (request: BundleRequest) => void,
   requestFinished: (request: BundleRequest) => void,
   requestFailed: (request: BundleRequest) => void,
-  workerCreated: (url: string) => void,
+  workerReady: (url: string) => void,
   waitForIdle: (quietMs: number, timeoutMs: number) => Promise<void>
 };
 
@@ -47,7 +47,7 @@ export function createBundleRequestTracker(origin: string): BundleRequestTracker
     lastMatchedUrl = request.url();
     notify();
   };
-  const workerCreated = (url: string) => {
+  const workerReady = (url: string) => {
     const request = [...pendingRequests].find((pendingRequest) => pendingRequest.url() === url);
     if(request) requestFinished(request);
   };
@@ -93,7 +93,7 @@ export function createBundleRequestTracker(origin: string): BundleRequestTracker
     requestStarted,
     requestFinished,
     requestFailed: requestFinished,
-    workerCreated,
+    workerReady,
     waitForIdle
   };
 }
