@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Guards the publication-only production deploy workflow and exact-SHA choice.
+# Guards private-artifact publication and the production deploy flow.
 set -euo pipefail
 
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
@@ -7,6 +7,9 @@ expected_if="\${{ (github.event_name == 'workflow_dispatch' && github.ref == 're
 expected_deploy_if="\${{ needs.check-published-artifact.outputs.skip == 'false' }}"
 expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
 expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Leave empty for no report.'
+private_artifact_workflow="${PRIVATE_ARTIFACT_WORKFLOW:-.github/workflows/private-artifact.yml}"
+repository_ci_workflow="${REPOSITORY_CI_WORKFLOW:-.github/workflows/ci.yml}"
+deployment_stack_workflow="${DEPLOYMENT_STACK_WORKFLOW:-.github/workflows/deployment-stack-checks.yml}"
 
 fail() {
   printf '%s: %s\n' "$workflow" "$1" >&2
@@ -15,6 +18,74 @@ fail() {
 
 query() {
   yq -r "$1" "$workflow"
+}
+
+publication_query() {
+  yq -r "$2" "$1"
+}
+
+check_publication_call_graph() {
+  local ci_group private_group stack_group group cancel_in_progress caller_if build_if workflow_path
+
+  [[ "$(publication_query "$private_artifact_workflow" '.on.pull_request.branches | join(",")')" == master ]] ||
+    fail 'private artifact pull request checks must remain scoped to master'
+  [[ "$(publication_query "$private_artifact_workflow" '.on.push.branches | join(",")')" == master ]] ||
+    fail 'private artifact publication must retain its master push trigger'
+  [[ "$(publication_query "$private_artifact_workflow" '.on.workflow_run.workflows | join(",")')" == 'Private MTProto Artifact Request' ]] ||
+    fail 'private artifact publication must follow the request workflow'
+  [[ "$(publication_query "$private_artifact_workflow" '.on.workflow_run.types | join(",")')" == completed ]] ||
+    fail 'private artifact publication must wait for request completion'
+  [[ "$(publication_query "$private_artifact_workflow" '.on.workflow_run.branches | join(",")')" == master ]] ||
+    fail 'private artifact workflow-run publication must remain scoped to master'
+
+  [[ "$(publication_query "$private_artifact_workflow" '.jobs.check-repository-ci.uses')" == './.github/workflows/ci.yml' ]] ||
+    fail 'master publication must call repository CI'
+  [[ "$(publication_query "$private_artifact_workflow" '.jobs.check-deployment-stack.uses')" == './.github/workflows/deployment-stack-checks.yml' ]] ||
+    fail 'master publication must call deployment stack checks'
+  for job in check-repository-ci check-deployment-stack; do
+    caller_if="$(publication_query "$private_artifact_workflow" ".jobs.$job.if")"
+    [[ "$caller_if" == *"needs.check-publication-request.result == 'success'"* && \
+      "$caller_if" == *"needs.check-publication-request.outputs.publish_private_artifact == 'true'"* ]] ||
+      fail "$job must run only for an approved publication request"
+  done
+  [[ "$(publication_query "$private_artifact_workflow" '.jobs.build-private-artifact.needs | sort | join(",")')" == 'check-deployment-stack,check-publication-request,check-repository-ci' ]] ||
+    fail 'private artifact build must wait for the request, repository CI, and deployment stack checks'
+  build_if="$(publication_query "$private_artifact_workflow" '.jobs.build-private-artifact.if')"
+  [[ "$build_if" == *"needs.check-repository-ci.result == 'success'"* && \
+    "$build_if" == *"needs.check-deployment-stack.result == 'success'"* ]] ||
+    fail 'private artifact build must require both reusable workflows to pass'
+  [[ "$(publication_query "$private_artifact_workflow" '.jobs.publish-private-artifact.needs | sort | join(",")')" == 'build-private-artifact,check-publication-request' ]] ||
+    fail 'private artifact publication must wait for its verified build'
+  [[ "$(publication_query "$private_artifact_workflow" '.jobs.publish-teagram-web-image.needs | sort | join(",")')" == 'build-private-artifact,check-publication-request,publish-private-artifact' ]] ||
+    fail 'web image publication must wait for the verified private artifact'
+
+  ci_group="$(publication_query "$repository_ci_workflow" '.concurrency.group')"
+  private_group="$(publication_query "$private_artifact_workflow" '.concurrency.group')"
+  stack_group="$(publication_query "$deployment_stack_workflow" '.concurrency.group')"
+  [[ "$ci_group" == teagram-web-ci-* ]] ||
+    fail 'repository CI concurrency group must use literal prefix teagram-web-ci'
+  [[ "$private_group" == teagram-web-private-artifact-* ]] ||
+    fail 'private artifact concurrency group must use literal prefix teagram-web-private-artifact'
+  [[ "$stack_group" == teagram-web-deployment-stack-checks-* ]] ||
+    fail 'deployment stack concurrency group must use literal prefix teagram-web-deployment-stack-checks'
+  [[ "$ci_group" != "$private_group" && "$ci_group" != "$stack_group" && "$private_group" != "$stack_group" ]] ||
+    fail 'master publication workflows must have distinct concurrency groups'
+
+  for group in "$ci_group" "$private_group" "$stack_group"; do
+    [[ "$group" == *"github.event_name == 'pull_request'"* && "$group" == *'github.event.pull_request.number'* ]] ||
+      fail 'pull request concurrency groups must be scoped by pull request number'
+    [[ "$group" == *"format('pr-{0}', github.event.pull_request.number)"* ]] ||
+      fail 'pull request concurrency groups must include the pull request number'
+    [[ "$group" == *'github.run_id'* && "$group" == *'github.run_attempt'* ]] ||
+      fail 'non-PR concurrency groups must be unique to each run attempt'
+    [[ "$group" == *"format('run-{0}-{1}', github.run_id, github.run_attempt)"* ]] ||
+      fail 'non-PR concurrency groups must include the run ID and attempt'
+  done
+  for workflow_path in "$repository_ci_workflow" "$private_artifact_workflow" "$deployment_stack_workflow"; do
+    cancel_in_progress="$(publication_query "$workflow_path" '.concurrency."cancel-in-progress"')"
+    [[ "$cancel_in_progress" == *"github.event_name == 'pull_request'"* ]] ||
+      fail "$workflow_path must cancel superseded pull request runs only"
+  done
 }
 
 check_target_selection() (
@@ -231,7 +302,32 @@ SH
   fi
 )
 
+publication_call_graph_self_test() (
+  set -euo pipefail
+  local tmp private_group
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  cp "$private_artifact_workflow" "$tmp/private-artifact.yml"
+  cp "$repository_ci_workflow" "$tmp/ci.yml"
+  cp "$deployment_stack_workflow" "$tmp/deployment-stack-checks.yml"
+
+  private_group="$(publication_query "$tmp/private-artifact.yml" '.concurrency.group')"
+  TEST_CONCURRENCY_GROUP="$private_group" yq -i '.concurrency.group = strenv(TEST_CONCURRENCY_GROUP)' "$tmp/ci.yml"
+  if PRIVATE_ARTIFACT_WORKFLOW="$tmp/private-artifact.yml" \
+    REPOSITORY_CI_WORKFLOW="$tmp/ci.yml" \
+    DEPLOYMENT_STACK_WORKFLOW="$tmp/deployment-stack-checks.yml" \
+    bash "$0" --contract-only >"$tmp/collision.log" 2>&1; then
+    fail 'publication call-graph contract accepted reusable workflows with a shared concurrency group'
+  fi
+  grep -Fq 'repository CI concurrency group must use literal prefix teagram-web-ci' "$tmp/collision.log" ||
+    fail 'publication call-graph self-test failed for an unexpected reason'
+)
+
 check_contract() {
+  if [[ "${SKIP_PUBLICATION_CALL_GRAPH:-false}" != true ]]; then
+    check_publication_call_graph
+  fi
+
   [[ "$(query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
     fail 'triggers must be exactly workflow_run and workflow_dispatch'
   [[ "$(query '.on.workflow_dispatch.inputs | keys | join(",")')" == 'issue' ]] ||
@@ -356,11 +452,12 @@ self_test() {
 
   for mutation in "${mutations[@]}"; do
     yq "$mutation" "$workflow" >"$tmp/deploy.yml"
-    if DEPLOY_WORKFLOW="$tmp/deploy.yml" bash "$0" --contract-only >/dev/null 2>&1; then
+    if SKIP_PUBLICATION_CALL_GRAPH=true DEPLOY_WORKFLOW="$tmp/deploy.yml" bash "$0" --contract-only >/dev/null 2>&1; then
       printf 'contract accepted a broken workflow: %s\n' "$mutation" >&2
       exit 1
     fi
   done
+  publication_call_graph_self_test
 }
 
 check_contract
