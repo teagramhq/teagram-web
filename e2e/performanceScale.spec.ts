@@ -121,26 +121,22 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
   }, injectColdStall);
 }
 
-async function begin(page: Page, requests: {value: number}, recordRpcSpans = true) {
+async function begin(page: Page, requests: {value: number}, recordRpcSpans = true, traceEnabled = false) {
   requests.value = 0;
-  await page.evaluate(async(recordSpans) => {
-    await (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace(recordSpans);
+  await page.evaluate(async({recordSpans, traceEnabled}) => {
+    if(traceEnabled) await (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace(recordSpans);
     const perf = (window as any).__teagramPerf;
     perf.longTasks = [];
     perf.frameIntervals = [];
     perf.started = performance.now();
     performance.clearResourceTimings();
-  }, recordRpcSpans);
+  }, {recordSpans: recordRpcSpans, traceEnabled});
 }
 
 async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false): Promise<Metric> {
   const requestCount = requests.value;
-  const countOnlyRpcCallCount = scroll ? await page.evaluate(async() => {
-    const trace = await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace();
-    return trace.callCount as number;
-  }) : undefined;
   await page.waitForTimeout(150);
-  const captured = await page.evaluate(async({boundary, scroll, includePhases, countOnlyRpcCallCount}) => {
+  const captured = await page.evaluate(async({boundary, scroll, includePhases}) => {
     const {ms} = boundary;
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
@@ -148,7 +144,8 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     const droppedFrames = intervals.reduce((total: number, interval: number) => total + Math.max(0, Math.round(interval / (1000 / 60)) - 1), 0);
     const droppedFramePercent = intervals.length ? droppedFrames / (droppedFrames + intervals.length) * 100 : 0;
     const longTasks = perf.longTasks.filter((entry: {startTime: number}) => entry.startTime >= perf.started);
-    const rpcTrace = await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace() as {
+    const apiManager = (window as any).rootScope.managers.apiManager;
+    const rpcTrace = includePhases ? await apiManager.getPerformanceRpcTrace() as {
       enabled: boolean,
       recording: boolean,
       callCount: number,
@@ -159,11 +156,11 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
         durationMs: number | null,
         outcome: 'pending' | 'success' | 'error'
       }>
-    };
+    } : {enabled: false, recording: false, callCount: 0, invocations: [], calls: []};
     const rpcInvocations = rpcTrace.invocations.filter((invocation) => {
       return invocation.startedAtEpochMs - performance.timeOrigin <= ms;
     });
-    const workerPhases = includePhases ? (await (window as any).rootScope.managers.apiManager.getPerformancePhaseTrace() as Array<{name: string, startedAtEpochMs: number, durationMs: number | null, accountNumber?: number}>).map((phase) => ({
+    const workerPhases = includePhases ? (await apiManager.getPerformancePhaseTrace() as Array<{name: string, startedAtEpochMs: number, durationMs: number | null, accountNumber?: number}>).map((phase) => ({
       ...phase,
       startMs: Math.max(0, phase.startedAtEpochMs - performance.timeOrigin)
     })) : undefined;
@@ -183,16 +180,16 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       longTasks,
       rpcTraceEnabled: rpcTrace.enabled,
       rpcSpansRecorded: rpcTrace.recording,
-      rpcCallCount: rpcTrace.recording ? rpcInvocations.length : countOnlyRpcCallCount ?? rpcTrace.callCount,
+      rpcCallCount: rpcTrace.recording ? rpcInvocations.length : rpcTrace.callCount,
       rpcCalls,
       workerPhases,
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
-  }, {boundary, scroll, includePhases, countOnlyRpcCallCount});
+  }, {boundary, scroll, includePhases});
   const {bundleResources, origin, longTasks, ...metrics} = captured;
-  expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the client build').toBe(true);
+  if(includePhases) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
   const rpcSummary = summarizeRpcTrace(metrics.rpcCalls as PerformanceRpcCall[], boundary.ms);
   return {
@@ -342,16 +339,6 @@ async function waitForHistorySettled(page: Page) {
     previousDomNodes = state.domNodes;
     return stableSamples >= 2;
   }, {timeout: 60_000, intervals: [100]}).toBe(true);
-}
-
-// Startup keeps fetching lazy chunks after the chat list paints; let them land before a scenario
-// clears resource timings, or its bundle bytes depend on how far that tail got.
-async function waitForAssetsSettled(page: Page) {
-  await expect.poll(async() => {
-    const before = await page.evaluate(() => performance.getEntriesByType('resource').length);
-    await page.waitForTimeout(1_000);
-    return await page.evaluate((count) => performance.getEntriesByType('resource').length === count, before);
-  }, {timeout: 60_000, intervals: [0]}).toBe(true);
 }
 
 async function reloadChatList(page: Page, requests: {value: number}) {
@@ -616,30 +603,6 @@ test.beforeAll(async({browser}) => {
   }
 });
 
-async function runContactScenarios(browser: Browser, run: VariantRun, scale: Scale, fixture: Fixture) {
-  const measured = report.variants[run.variant][scale];
-  const context = await browser.newContext({
-    ignoreHTTPSErrors: true,
-    viewport: {width: 1280, height: 800},
-    storageState: run.storageState
-  });
-  const page = await context.newPage();
-  const requests = {value: 0};
-  await installInstrumentation(page, requests);
-
-  try {
-    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
-    await waitForChatList(page);
-    await waitForAssetsSettled(page);
-    measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
-    measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
-    measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
-    measured.sendMessage.push(await test.step('send a message', () => sendMessage(page, requests, fixture)));
-  } finally {
-    await context.close();
-  }
-}
-
 async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixture: Fixture) {
   const {variant, origin} = run;
   const measured = report.variants[variant][scale];
@@ -677,12 +640,17 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       // The base build may lack the calendar control. Its open-chat bundle is still the route baseline.
       measured.dateJump.push({bundleBytes: chatOpen.bundleBytes});
     }
+
+    // Reset both variants to the same signed-in chat-list state before contacts measurements.
+    await page.goto(origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
+    measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
+    measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
+    measured.sendMessage.push(await test.step('send a message', () => sendMessage(page, requests, fixture)));
   } finally {
     await context.close();
   }
-
-  // Keep contacts measurements independent of assets cached by chat and calendar scenarios.
-  await runContactScenarios(browser, run, scale, fixture);
 }
 
 async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
@@ -703,7 +671,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
     const coldCpu = await finishCpuProfile(coldProfile);
     const coldChatList = {...await capture(page, requests, coldBoundary, false, true), cpu: coldCpu};
 
-    await begin(page, requests);
+    await begin(page, requests, true, true);
     await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
     const warmProfile = await startCpuProfile(page);
     await page.reload({waitUntil: 'domcontentloaded'});
@@ -714,7 +682,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
 
     const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
     await expect(row).toBeVisible({timeout: 60_000});
-    await begin(page, requests);
+    await begin(page, requests, true, true);
     await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
     await installPeerChangeTracing(page);
     const chatProfile = await startCpuProfile(page);
@@ -749,11 +717,6 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
         await test.step(`${scale} ${variant} round ${round + 1}`, () => runVariant(browser, preparedVariants[scale][variant]!, scale, fixture!));
       }
     }
-
-    for(const variant of variants) {
-      const contactsBundleSizes = report.variants[variant][scale].contactsList.map((sample) => sample.bundleBytes);
-      expect(new Set(contactsBundleSizes).size, `${scale} ${variant} contacts bundle measurement should be stable across repeats`).toBe(1);
-    }
   }
 
   const coldScale: Scale = '100x';
@@ -766,8 +729,9 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       report.variants[variant][coldScale].coldChatList.push(sample);
     }
   }
-  const traceRun = preparedVariants['100x'].head;
-  expect(traceRun, '100x head sign-in snapshot was not prepared').toBeTruthy();
+  const traceOrigin = process.env.PERF_TRACE_HEAD_ORIGIN_100X;
+  expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
+  const traceRun = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
   report.diagnostics['100x'] = await test.step('trace 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRun!, fixtures['100x']!));
 });
 

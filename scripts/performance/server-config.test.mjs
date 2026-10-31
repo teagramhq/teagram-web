@@ -56,9 +56,9 @@ test('PR performance runs require complete base bundle measurements', () => {
   assert.match(workflow, /PERF_REQUIRE_BASE: \$\{\{ github\.event_name == 'pull_request' \}\}/);
 });
 
-test('matching performance traces are enabled in head and base bundles', () => {
-  assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir .*teagram-web-head-dist/);
-  assert.match(workflow, /if \[ ! -f "\$base_directory\/src\/lib\/appManagers\/performanceTrace\.ts" \]; then\s+git -C "\$base_directory" apply "\$GITHUB_WORKSPACE\/scripts\/performance\/performance-trace\.patch"\s+fi/);
-  assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir .*teagram-web-base-dist/);
-  assert.ok(existsSync(new URL('./performance-trace.patch', import.meta.url)));
+test('performance comparisons are uninstrumented and diagnostics use a traced bundle', () => {
+  assert.match(workflow, /pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
+  assert.match(workflow, /pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"/);
+  assert.doesNotMatch(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
+  assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
 });
