@@ -2100,14 +2100,15 @@ export default class DialogsStorage extends AppManager {
    * channel is never fetched back. Until every listed channel is restored, the next cached first
    * page retries the comparison.
    */
-  private async reconcileCachedChannelDialogs(folderId: number = FOLDER_ID_ALL) {
+  private async reconcileCachedChannelDialogs(folderId?: number) {
     if(this.cachedListReconciled) {
       return;
     }
 
+    const requestFolderId = arguments.length ? folderId : FOLDER_ID_ALL;
     this.cachedListReconciled = true;
     try {
-      const missingPeerIds = await this.getServerChannelsMissingLocally(folderId);
+      const missingPeerIds = await this.getServerChannelsMissingLocally(requestFolderId);
       await Promise.all(missingPeerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
       if(missingPeerIds.some((peerId) => !this.getDialogOnly(peerId) && this.appChatsManager.isInChat(peerId.toChatId()))) {
         this.cachedListReconciled = false;
@@ -2117,7 +2118,8 @@ export default class DialogsStorage extends AppManager {
     }
   }
 
-  private async getServerChannelsMissingLocally(folderId: number = FOLDER_ID_ALL) {
+  private async getServerChannelsMissingLocally(folderId?: number) {
+    const requestFolderId = arguments.length ? folderId : FOLDER_ID_ALL;
     const limit = 100;
     const missingPeerIds: PeerId[] = [];
     const seenPeerIds: Set<PeerId> = new Set();
@@ -2126,7 +2128,7 @@ export default class DialogsStorage extends AppManager {
       const result = await this.apiManager.invokeApiSingleProcess({
         method: 'messages.getDialogs',
         params: {
-          folder_id: folderId,
+          folder_id: requestFolderId,
           offset_date: offsetDate,
           offset_id: offsetId,
           offset_peer: offsetPeerId ? this.appPeersManager.getInputPeerById(offsetPeerId) : {_: 'inputPeerEmpty'},

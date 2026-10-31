@@ -95,6 +95,41 @@ describe('dialogs cache-first loading', () => {
     expect(getTopMessages).toHaveBeenCalledTimes(1);
   });
 
+  it('preserves explicit undefined through channel reconciliation', async() => {
+    const {storage} = createStorage(() => Promise.resolve({count: 0}));
+    (storage as any).cachedListReconciled = false;
+    const getServerChannelsMissingLocally = vi.spyOn(storage as any, 'getServerChannelsMissingLocally').mockResolvedValue([]);
+
+    await (storage as any).reconcileCachedChannelDialogs(undefined);
+    expect(getServerChannelsMissingLocally).toHaveBeenLastCalledWith(undefined);
+
+    (storage as any).cachedListReconciled = false;
+    await (storage as any).reconcileCachedChannelDialogs();
+    expect(getServerChannelsMissingLocally).toHaveBeenLastCalledWith(FOLDER_ID_ALL);
+  });
+
+  it('omits folder_id for an explicit undefined reconciliation request', async() => {
+    const {storage} = createStorage(() => Promise.resolve({count: 0}));
+    const invokeApiSingleProcess = vi.fn().mockResolvedValue({
+      _: 'messages.dialogs',
+      dialogs: [],
+      messages: [],
+      chats: [],
+      users: []
+    });
+    Object.assign(storage as any, {
+      apiManager: {invokeApiSingleProcess},
+      appPeersManager: {saveApiPeers: vi.fn()}
+    });
+
+    await (storage as any).getServerChannelsMissingLocally(undefined);
+    const params = (invokeApiSingleProcess as any).mock.calls[0][0].params;
+    expect(JSON.stringify(params)).toBe('{"offset_date":0,"offset_id":0,"offset_peer":{"_":"inputPeerEmpty"},"limit":100,"hash":"0"}');
+
+    await (storage as any).getServerChannelsMissingLocally();
+    expect((invokeApiSingleProcess as any).mock.calls[1][0].params.folder_id).toBe(FOLDER_ID_ALL);
+  });
+
   it('updates the cached folder count when its refresh completes', async() => {
     const getTopMessages = vi.fn(() => Promise.resolve({count: 25}));
     const {storage} = createStorage(getTopMessages);
