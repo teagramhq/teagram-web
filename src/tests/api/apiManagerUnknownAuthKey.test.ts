@@ -1,6 +1,7 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {ApiManager} from '@appManagers/apiManager';
+import {PerformanceRpcTrace} from '@appManagers/performanceTrace';
 import MTPNetworker from '@lib/mtproto/networker';
 import MTTransport from '@lib/mtproto/transports/transport';
 
@@ -22,6 +23,7 @@ function createManager(error: {code: number, type: string}, userId: number, isCu
   Object.assign(manager, {
     accountNumber: 1,
     baseDcId: 2,
+    performanceRpcTrace: new PerformanceRpcTrace(false),
     rootScope: {myId: userId},
     log: {error: vi.fn()}
   });

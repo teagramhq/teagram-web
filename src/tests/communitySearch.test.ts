@@ -17,7 +17,10 @@ describe('community message search', () => {
     });
     const manager = new AppMessagesManager();
     Object.assign(manager as any, {
-      apiManager: {invokeApiSingleProcess},
+      apiManager: {
+        invokeApiSingleProcess,
+        trackPerformanceRpcWait: (_method: string, request: Promise<any>) => request
+      },
       appChatsManager: {
         getChannelInput: (communityId: ChatId) => ({
           _: 'inputChannel',

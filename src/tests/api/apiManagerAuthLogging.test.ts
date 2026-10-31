@@ -1,6 +1,7 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
 import {ApiManager} from '@appManagers/apiManager';
+import {PerformanceRpcTrace} from '@appManagers/performanceTrace';
 import {ApiManager as BaseApiManager} from '../../lib/appManagers/apiManager';
 import {secureAuthNetworker} from '../../lib/appManagers/authLogRedaction';
 import {clearLogBuffer, getLogEntries, isLogBufferEnabled, setLogBufferEnabled} from '@lib/debug/logsBuffer';
@@ -15,6 +16,7 @@ function createPrivateManager(networker: Pick<MTPNetworker, 'wrapApiCall' | 'att
   const manager = Object.create(ApiManager.prototype) as ApiManager;
   Object.assign(manager, {
     baseDcId: 2,
+    performanceRpcTrace: new PerformanceRpcTrace(false),
     log: {error: logError}
   });
   vi.spyOn(BaseApiManager.prototype, 'getNetworker').mockImplementation(() => Promise.resolve(secureAuthNetworker(networker as MTPNetworker)));
@@ -32,6 +34,7 @@ function createStandardManager(networker: MTPNetworker) {
   Object.assign(manager, {
     baseDcId: 2,
     cachedNetworkers,
+    performanceRpcTrace: new PerformanceRpcTrace(false),
     transportType: 'https',
     rootScope: {myId: 0},
     log: {error: logError}

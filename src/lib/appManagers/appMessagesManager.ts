@@ -4987,7 +4987,7 @@ export class AppMessagesManager extends AppManager {
 
     log('invoke', method, params);
 
-    return promise;
+    return this.apiManager.trackPerformanceRpcWait(method, promise);
   }
 
   public async forwardMessagesInner(options: MessageForwardParams) {
@@ -12507,7 +12507,7 @@ export class AppMessagesManager extends AppManager {
       this.getChannelAvailableMinIdGeneration(peerId) :
       this.getChannelAvailableMinIdGeneration());
 
-    return this.apiManager.invokeApiSingleProcess({
+    return this.apiManager.trackPerformanceRpcWait(method, this.apiManager.invokeApiSingleProcess({
       method,
       params: options,
       options: {
@@ -12582,7 +12582,7 @@ export class AppMessagesManager extends AppManager {
 
         throw error;
       }
-    });
+    }));
   }
 
   private settleSingleMessageRequests(

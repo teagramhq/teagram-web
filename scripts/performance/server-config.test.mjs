@@ -55,3 +55,10 @@ test('the performance workflow assigns the 1x and 100x browser origins to separa
 test('PR performance runs require complete base bundle measurements', () => {
   assert.match(workflow, /PERF_REQUIRE_BASE: \$\{\{ github\.event_name == 'pull_request' \}\}/);
 });
+
+test('performance comparisons are uninstrumented and diagnostics use a traced bundle', () => {
+  assert.match(workflow, /pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
+  assert.match(workflow, /pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"/);
+  assert.doesNotMatch(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
+  assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
+});

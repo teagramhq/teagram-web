@@ -9,6 +9,7 @@ import {THREADED_WORKER_TYPES, ThreadedWorkerType} from '@lib/threadedWorkerType
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import {AppStoragesManager} from '@appManagers/appStoragesManager';
 import createManagers from '@appManagers/createManagers';
+import {performancePhaseTrace} from '@appManagers/performanceTrace';
 import {ActiveAccountNumber} from '@lib/accounts/types';
 import AppStateManager from '@appManagers/appStateManager';
 import rootScope from '@lib/rootScope';
@@ -174,30 +175,33 @@ export class AppManagersManager {
 
   private async createManagers() {
     const promises = ([1, 2, 3, 4] as ActiveAccountNumber[]).map(async(accountNumber) => {
+      const finishStartup = performancePhaseTrace.start('worker.account.startup', {accountNumber});
       const stateManager = this.stateManagersByAccount[accountNumber]
       const appStoragesManager = new AppStoragesManager(accountNumber, stateManager.resetStoragesPromise);
 
-      await Promise.all([
-        // new Promise(() => {}),
-        appStoragesManager.loadStorages(),
+      try {
+        const finishStorageLoad = performancePhaseTrace.start('worker.storage.load', {accountNumber});
+        const storageLoad = appStoragesManager.loadStorages().finally(finishStorageLoad);
         // In Modes.noWorker the crypto worker is never spawned — the registry
         // is imported into the main realm and cryptoMessagePort short-circuits
         // same-realm callers via invokeCryptoNew's early-out. There's nothing
         // to wait for and the threadedPort handshake never resolves, so skip.
-        Modes.noWorker ? Promise.resolve() : this.threadedSharedWorkers.crypto.promise
-      ]);
+        const finishCryptoReady = performancePhaseTrace.start('worker.crypto.ready', {accountNumber});
+        const cryptoReady = (Modes.noWorker ? Promise.resolve() : this.threadedSharedWorkers.crypto.promise).finally(finishCryptoReady);
+        await Promise.all([storageLoad, cryptoReady]);
 
-      const managers = await createManagers(
-        appStoragesManager,
-        stateManager,
-        accountNumber,
-        stateManager.userId
-      );
+        const finishManagerCreation = performancePhaseTrace.start('worker.managers.create', {accountNumber});
+        const managers = await createManagers(
+          appStoragesManager,
+          stateManager,
+          accountNumber,
+          stateManager.userId
+        ).finally(finishManagerCreation);
 
-      return [
-        accountNumber,
-        managers
-      ] as const;
+        return [accountNumber, managers] as const;
+      } finally {
+        finishStartup();
+      }
     });
 
     const accountNumberToManagersPairs = await Promise.all(promises);
