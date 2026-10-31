@@ -34,7 +34,9 @@ export async function bootstrapIm(): Promise<void> {
     import('@helpers/dom/requestVideoFrameCallbackPolyfill');
   void loadFonts();
 
-  await rootScope.managers.appStateManager.pushToState('authState', {_: 'authStateSignedIn'});
+  void rootScope.managers.appStateManager.pushToState('authState', {_: 'authStateSignedIn'}).catch((err) => {
+    console.error('Failed to persist signed-in app state', err);
+  });
 
   const pageChatsEl = document.getElementById('page-chats');
   if(pageChatsEl) pageChatsEl.style.display = '';

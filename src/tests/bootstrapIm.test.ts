@@ -27,7 +27,7 @@ describe('signed-in app bootstrap', () => {
     vi.clearAllMocks();
   });
 
-  it('starts the chat list without waiting for fonts', async() => {
+  it('starts the chat list without waiting for state persistence or fonts', async() => {
     let resolveState: () => void;
     let resolveFonts: () => void;
     mocks.pushToState.mockImplementation(() => new Promise<void>((resolve) => resolveState = resolve));
@@ -41,15 +41,15 @@ describe('signed-in app bootstrap', () => {
     const {bootstrapIm} = await import('@/pages/bootstrapIm');
     const bootstrap = bootstrapIm();
     let startedBeforeFonts = false;
+    let startedBeforeStatePersistence = false;
     let importsStartedBeforeState = false;
     try {
       await vi.waitFor(() => expect(mocks.appDialogsManagerImported).toBe(true), {timeout: 100});
       await vi.waitFor(() => expect(mocks.loadFonts).toHaveBeenCalledTimes(1));
       importsStartedBeforeState = true;
       expect(mocks.pushToState).toHaveBeenCalledTimes(1);
-      expect(mocks.start).not.toHaveBeenCalled();
-      resolveState();
       await vi.waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1), {timeout: 100});
+      startedBeforeStatePersistence = true;
       startedBeforeFonts = true;
     } finally {
       resolveState?.();
@@ -58,6 +58,7 @@ describe('signed-in app bootstrap', () => {
       await bootstrap;
     }
     expect(importsStartedBeforeState).toBe(true);
+    expect(startedBeforeStatePersistence).toBe(true);
     expect(startedBeforeFonts).toBe(true);
   });
 });
