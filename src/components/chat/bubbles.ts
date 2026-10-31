@@ -6099,29 +6099,6 @@ export default class ChatBubbles {
       }
     }
 
-    let result: Awaited<ReturnType<ChatBubbles['getHistory']>>;
-    if(!savedPosition?.mids) {
-      result = await m(this.getHistory1(
-        !isJump && !additionalFullMid && lastMsgFullMid === topMessageFullMid ? EMPTY_FULL_MID : lastMsgFullMid,
-        true,
-        isJump,
-        additionalFullMid
-      ));
-    } else {
-      result = {
-        promise: getHeavyAnimationPromise().then(() => {
-          return this.performHistoryResult({history: savedPosition.mids}, true, true);
-        }) as any,
-        cached: true,
-        waitPromise: Promise.resolve()
-      };
-    }
-
-    this.setPeerCached = result.cached;
-
-    log.warn('got history');// warning
-
-    const {promise, cached} = result;
     const finishPeerChangeOptions: Parameters<Chat['finishPeerChange']>[0] = {
       peerId,
       isTarget,
@@ -6132,12 +6109,44 @@ export default class ChatBubbles {
       text: options.text,
       entities: options.entities
     };
-    const preparedPeerChange = cached && !samePeer ?
+    const preparedPeerChange = !samePeer ?
       m(this.chat.finishPeerChange(finishPeerChangeOptions)) :
       undefined;
 
+    let historyRequest: Promise<Awaited<ReturnType<ChatBubbles['getHistory']>>>;
+    if(!savedPosition?.mids) {
+      historyRequest = this.getHistory1(
+        !isJump && !additionalFullMid && lastMsgFullMid === topMessageFullMid ? EMPTY_FULL_MID : lastMsgFullMid,
+        true,
+        isJump,
+        additionalFullMid
+      );
+    } else {
+      historyRequest = Promise.resolve({
+        promise: getHeavyAnimationPromise().then(() => {
+          return this.performHistoryResult({history: savedPosition.mids}, true, true);
+        }) as any,
+        cached: true,
+        waitPromise: Promise.resolve()
+      });
+    }
+    // Observe preparation failures during the request, while keeping cached setup concurrent.
+    const historyResultPromise = preparedPeerChange ?
+      Promise.race([historyRequest, preparedPeerChange.then(() => historyRequest)]) :
+      historyRequest;
+    const result = await m(historyResultPromise);
+
+    this.setPeerCached = result.cached;
+
+    log.warn('got history');// warning
+
+    const {promise, cached} = result;
+    const peerReadyPromise = preparedPeerChange ?
+      Promise.all([m(promise), preparedPeerChange]).then(([historyResult]) => historyResult) :
+      m(promise);
+
     if(!cached && !samePeer) {
-      await m(this.chat.finishPeerChange(finishPeerChangeOptions));
+      await preparedPeerChange;
       // Flip the staging-slot wallpaper that `finishPeerChange` prepared, in the same sync
       // block as clearing the old bubbles. Otherwise the bg DOM swap (running inside the
       // Solid effect's `await built.readyPromise`) can paint a frame ahead of the cleared
@@ -6148,15 +6157,10 @@ export default class ChatBubbles {
     }
 
     animationIntersector.lockGroup(this.chat.animationGroup);
-    const setPeerPromise = m(promise).then(async() => {
+    const setPeerPromise = peerReadyPromise.then(async() => {
       log.warn('promise fulfilled');
 
       const mountedByLastMsgId = haveToScrollToBubble ? await m(lastMsgFullMid !== EMPTY_FULL_MID ? this.getMountedBubble(lastMsgFullMid) : {bubble: this.getLastBubble()}) : undefined;
-      if(cached && !samePeer) {
-        log.warn('finishing peer change');
-        await m(preparedPeerChange); // * костыль
-        log.warn('finished peer change');
-      }
 
       this.preloader.detach();
 
