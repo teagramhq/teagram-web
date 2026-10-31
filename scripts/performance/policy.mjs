@@ -13,6 +13,8 @@ export const SCENARIOS = [
 export const SCALES = ['1x', '100x'];
 export const PERFORMANCE_MEASUREMENT_VERSION = 2;
 export const PERFORMANCE_REPEATS = 3;
+// Cold-load pairs need additional samples to outvote occasional runner long tasks.
+export const COLD_CHAT_LIST_REPEATS = 6;
 
 const CALIBRATION_RUNS = 20;
 const MAX_SCALE_RATIO = 1.5;
@@ -80,12 +82,18 @@ function medianLongTasks(samples) {
 }
 
 // Same-run base repeats on the hosted runner swing by whole long tasks and over 100 ms of blocking time,
-// so a head regression must separate from every base repeat rather than from one paired sample or median.
+// so non-cold-load regressions must separate from every base repeat.
 function separatedRegression(headSamples, baseSamples, field, minMedianIncrease = 0) {
   const headValues = headSamples.map((sample) => sample?.[field]);
   const baseValues = baseSamples.map((sample) => sample?.[field]);
   if(!headValues.length || !baseValues.length || ![...headValues, ...baseValues].every(Number.isFinite)) return false;
   return Math.min(...headValues) > Math.max(...baseValues) && median(headValues) - median(baseValues) >= minMedianIncrease;
+}
+
+function medianPairedDifference(headSamples, baseSamples, field) {
+  if(!headSamples.length || headSamples.length !== baseSamples.length) return undefined;
+  const differences = headSamples.map((sample, index) => sample?.[field] - baseSamples[index]?.[field]);
+  return differences.every(Number.isFinite) ? median(differences) : undefined;
 }
 
 function medianMetric(samples, field) {
@@ -175,6 +183,7 @@ export function evaluatePerformance(report, history = []) {
       const headSamples = Array.isArray(rawHeadSamples) ? rawHeadSamples : [];
       const base = summarizeSamples(baseSamples);
       const head = summarizeSamples(headSamples);
+      const requiredRepeats = scale === '100x' && scenario.key === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
       const mainValues = historyFor(history, scale, scenario.key, report);
       const calibrated = mainValues.length >= CALIBRATION_RUNS;
       const scrollHistory = scale === '100x' && scenario.key === 'scrollBack2k' ? historyScrollMetrics(history, report) : [];
@@ -190,8 +199,8 @@ export function evaluatePerformance(report, history = []) {
       if(!headSamples.length) {
         addFailure(blockingFailures, scale, scenario.key, 'no head measurement was recorded');
       }
-      if(headSamples.length < PERFORMANCE_REPEATS) {
-        addFailure(blockingFailures, scale, scenario.key, `expected at least ${PERFORMANCE_REPEATS} repeat measurements, got ${headSamples.length}`);
+      if(headSamples.length < requiredRepeats) {
+        addFailure(blockingFailures, scale, scenario.key, `expected at least ${requiredRepeats} repeat measurements, got ${headSamples.length}`);
       }
       headSamples.forEach((sample, index) => {
         const requiredMetrics = scenario.key === 'scrollBack2k' ? [
@@ -216,6 +225,9 @@ export function evaluatePerformance(report, history = []) {
       if(report.requireBase) {
         if(baseSamples.length < PERFORMANCE_REPEATS) {
           addFailure(blockingFailures, scale, scenario.key, `base bundle baseline requires ${PERFORMANCE_REPEATS} repeats, got ${baseSamples.length}`);
+        }
+        if(scale === '100x' && scenario.key === 'coldChatList' && baseSamples.length < COLD_CHAT_LIST_REPEATS) {
+          addFailure(blockingFailures, scale, scenario.key, `base cold-load baseline requires ${COLD_CHAT_LIST_REPEATS} repeats, got ${baseSamples.length}`);
         }
         baseSamples.forEach((sample, index) => {
           if(!Number.isFinite(sample?.bundleBytes)) {
@@ -262,8 +274,19 @@ export function evaluatePerformance(report, history = []) {
             if(separatedRegression(headSamples, baseSamples, 'longTasksOver50Ms')) {
               addFailure(blockingFailures, scale, scenario.key, `long task count rose in every head repeat above every same-run base repeat`);
             }
-            if(separatedRegression(headSamples, baseSamples, 'blockingTimeMs', MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS)) {
-              addFailure(blockingFailures, scale, scenario.key, `long-task blocking time rose in every head repeat above every same-run base repeat, median ${medianBlockingTime(headSamples).toFixed(1)} ms vs ${medianBlockingTime(baseSamples).toFixed(1)} ms`);
+            const medianHeadBlockingTime = medianBlockingTime(headSamples);
+            const medianBaseBlockingTime = medianBlockingTime(baseSamples);
+            // Variants run in interleaved rounds; compare their paired cold-load deltas to cancel runner drift.
+            const coldLoadBlockingTimeRegression = scenario.key === 'coldChatList' &&
+              medianPairedDifference(headSamples, baseSamples, 'blockingTimeMs') >= MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS;
+            const blockingTimeRegression = scenario.key === 'coldChatList'
+              ? coldLoadBlockingTimeRegression
+              : separatedRegression(headSamples, baseSamples, 'blockingTimeMs', MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS);
+            if(blockingTimeRegression) {
+              const message = scenario.key === 'coldChatList'
+                ? `median paired long-task blocking time increase was at least ${MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS} ms (${medianHeadBlockingTime.toFixed(1)} ms vs ${medianBaseBlockingTime.toFixed(1)} ms medians)`
+                : `long-task blocking time rose in every head repeat above every same-run base repeat, median ${medianHeadBlockingTime.toFixed(1)} ms vs ${medianBaseBlockingTime.toFixed(1)} ms`;
+              addFailure(blockingFailures, scale, scenario.key, message);
             }
           } else {
             const baselineLongTasks = report.requireBase ? 0 : historyLongTaskBaseline(history, scale, scenario.key, report);
