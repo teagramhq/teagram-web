@@ -502,7 +502,7 @@ jobs:
           IMAGE_REF: ghcr.io/teagramhq/teagram-web:ci
         run: |
           set -euo pipefail
-          "$(go env GOPATH)/bin/k3d" image import "$IMAGE_REF" --cluster "$K3D_CLUSTER"
+          "$(go env GOPATH)/bin/k3d" image import "$IMAGE_REF" --cluster "$K3D_CLUSTER" --mode direct
           kubectl create namespace teagram
           kubectl apply --dry-run=server -k deploy/k8s/overlays/ci
           kubectl apply -k deploy/k8s/overlays/ci
