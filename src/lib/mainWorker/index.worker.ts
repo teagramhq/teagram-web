@@ -104,10 +104,8 @@ port.addMultipleEventsListeners({
       searchStorages: 0
     };
 
-    // * Never force creation from a diagnostic - report zeroes instead if they are not up yet
-    const managersByAccount = appManagersManager.areManagersCreated ?
-      await appManagersManager.getManagersByAccount() :
-      {} as Awaited<ReturnType<typeof appManagersManager.getManagersByAccount>>;
+    // * Report the managers that are already initialized; diagnostics never starts more.
+    const managersByAccount = appManagersManager.getInitializedManagersByAccount();
     for(const accountNumber in managersByAccount) {
       const managers = managersByAccount[+accountNumber as ActiveAccountNumber];
       const fileStats = managers.apiFileManager.getMemoryStats();

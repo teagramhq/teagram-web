@@ -48,6 +48,20 @@ describe('AppManagersManager account startup', () => {
     expect(managers).toHaveProperty('accountNumber', 2);
   });
 
+  it('returns a non-creating snapshot of initialized accounts', async() => {
+    const manager = new AppManagersManager();
+
+    expect(manager.getInitializedManagersByAccount()).toEqual({});
+    expect(createdAccounts).toEqual([]);
+
+    const managers = await manager.getManagersByAccount(2);
+    const snapshot = manager.getInitializedManagersByAccount();
+
+    expect(snapshot).toEqual({2: managers});
+    expect(snapshot).not.toBe(manager.getInitializedManagersByAccount());
+    expect(createdAccounts).toEqual([2]);
+  });
+
   it('reuses an in-flight startup for concurrent requests to one account', async() => {
     const manager = new AppManagersManager();
     const [first, second] = await Promise.all([

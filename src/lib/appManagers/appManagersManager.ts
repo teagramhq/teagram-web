@@ -227,8 +227,11 @@ export class AppManagersManager {
     })).then(() => this.managersByAccount as ManagersByAccount);
   }
 
-  // * For diagnostics only (see memoryStats): reading a report must never be what CREATES the
-  // * managers - getManagersByAccount() would do exactly that.
+  // * Diagnostics can inspect initialized managers without starting the others.
+  public getInitializedManagersByAccount() {
+    return {...this.managersByAccount};
+  }
+
   public get areManagersCreated() {
     return Object.keys(this.managersByAccount).length === 4;
   }
