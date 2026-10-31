@@ -545,6 +545,17 @@ test('blocks bundle growth above two percent against a complete same-run base', 
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('bundle') && failure.includes('coldChatList')));
 });
 
+test('uses the largest bundle sample when a lazy chunk misses a measurement window', () => {
+  const base = scaleVariants({'100x': {contactsList: [1_583, 33_090, 1_583].map((bundleBytes) => ({bundleBytes}))}});
+  const head = scaleVariants({'100x': {contactsList: [33_291, 33_291, 33_291].map((bundleBytes) => ({bundleBytes}))}});
+  const result = evaluatePerformance(report({base, head}));
+  const contacts = result.rows.find((row) => row.scale === '100x' && row.key === 'contactsList');
+
+  assert.equal(contacts.base.bundleBytes, 33_090);
+  assert.equal(contacts.head.bundleBytes, 33_291);
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x contactsList: bundle')), false);
+});
+
 test('fails closed when a required base bundle measurement is unavailable', () => {
   const result = evaluatePerformance(report({base: {'1x': {}, '100x': {}}}));
 
