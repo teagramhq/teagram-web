@@ -550,6 +550,78 @@ jobs:
         run: >-
           "$(go env GOPATH)/bin/k3d" cluster delete "$K3D_CLUSTER"
 
+  check-security:
+    name: 'check: security'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.27.2'
+          cache: false
+
+      - name: Install pinned Gitleaks
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned OSV report dependency
+        run: |
+          python -m pip install --disable-pip-version-check --no-deps --require-hashes \
+            --target "$RUNNER_TEMP/osv-checker-deps" -r .github/scripts/requirements-osv.txt
+
+      - name: Test the OSV severity gate
+        env:
+          PYTHONPATH: ${{ runner.temp }}/osv-checker-deps
+        run: python .github/scripts/test_check_osv_report.py
+
+      - name: Scan all lockfiles with pinned OSV Scanner
+        shell: bash
+        run: |
+          set -euo pipefail
+          scanner_status=0
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src:ro" \
+            ghcr.io/google/osv-scanner:v2.7.0@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0 \
+            scan source --format json \
+            --lockfile /src/pnpm-lock.yaml \
+            --lockfile /src/snapshot-server/pnpm-lock.yaml \
+            --lockfile /src/src/scripts/icomoon/package-lock.json \
+            > "$RUNNER_TEMP/osv-report.json" || scanner_status=$?
+          if [ "$scanner_status" -gt 1 ]; then
+            echo "OSV Scanner failed with exit status $scanner_status" >&2
+            exit "$scanner_status"
+          fi
+          PYTHONPATH="$RUNNER_TEMP/osv-checker-deps" \
+            python .github/scripts/check_osv_report.py "$RUNNER_TEMP/osv-report.json"
+
+      - name: Scan pull request commits with Gitleaks
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          case "$BASE_SHA$HEAD_SHA" in
+            *[!0-9a-f]*) echo "pull request commit is not a hexadecimal SHA" >&2; exit 1 ;;
+          esac
+          gitleaks git --log-opts="$BASE_SHA..$HEAD_SHA" \
+            --redact=100 --no-banner --report-format=json \
+            --report-path="$RUNNER_TEMP/gitleaks-report.json"
+
   ci:
     name: ci
     if: always()
@@ -558,6 +630,7 @@ jobs:
       - check-deploy-workflow
       - check-k8s-manifests
       - test-k8s-deploy
+      - check-security
     runs-on: ubuntu-26.04
     steps:
       - name: Require every pull request job to succeed
