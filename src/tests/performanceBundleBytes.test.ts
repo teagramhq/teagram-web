@@ -45,4 +45,21 @@ describe('scenario bundle byte measurement', () => {
     await waiting;
     expect(settled).toBe(true);
   });
+
+  test('settles only a matching worker script request when Playwright observes its worker', async() => {
+    const tracker = createBundleRequestTracker('https://app.test');
+    const workerUrl = 'https://app.test/crypto.worker.js';
+    tracker.requestStarted({url: () => workerUrl});
+
+    let settled = false;
+    const waiting = tracker.waitForIdle(25, 500).then(() => settled = true);
+    tracker.workerCreated('https://app.test/other.worker.js');
+    await wait(40);
+    expect(settled).toBe(false);
+
+    tracker.workerCreated(workerUrl);
+    await waiting;
+
+    expect(settled).toBe(true);
+  });
 });

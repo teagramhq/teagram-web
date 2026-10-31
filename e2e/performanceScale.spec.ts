@@ -89,6 +89,7 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, ori
   });
   page.on('requestfinished', (request) => bundleRequests.requestFinished(request));
   page.on('requestfailed', (request) => bundleRequests.requestFailed(request));
+  page.on('worker', (worker) => bundleRequests.workerCreated(worker.url()));
   return page.addInitScript((injectColdStall: boolean) => {
     performance.setResourceTimingBufferSize(1_000);
     const perf: any = (window as any).__teagramPerf = {
