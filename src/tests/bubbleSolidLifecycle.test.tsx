@@ -90,32 +90,10 @@ afterEach(() => {
 
 const peerId = 10 as PeerId;
 
-test('starts the bot-start check before new-peer metadata finishes', async() => {
-  let resolvePeerChange!: () => void;
-  const chat = {
-    onChangePeer: vi.fn(() => new Promise<void>((resolve) => {
-      resolvePeerChange = resolve;
-    })),
-    isStartButtonNeeded: vi.fn(() => Promise.resolve(false))
-  };
-  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
-    setPeerTempId: 0,
-    chat,
-    log: {bindPrefix: () => ({warn: vi.fn()})}
-  }) as any;
-
-  const pending = harness.setPeer({peerId, samePeer: false, sameSearch: false}).catch((): undefined => undefined);
-  await Promise.resolve();
-  const startedBeforePeerChangeFinished = chat.isStartButtonNeeded.mock.calls.length === 1;
-  resolvePeerChange();
-  await pending;
-
-  expect(startedBeforePeerChangeFinished).toBe(true);
-});
-
-test('uses the peer group classification already loaded for a new peer', async() => {
+test('reuses new-peer metadata and skips bot startup lookups for regular peers', async() => {
   const pendingHistory = new Promise<void>(() => {});
   const isAnyGroup = vi.fn(() => Promise.resolve(false));
+  const isStartButtonNeeded = vi.fn(() => Promise.resolve(false));
   const getHistory1 = vi.fn(() => Promise.resolve({cached: true, promise: pendingHistory}));
   const historyStorage = {maxId: 0, history: {length: 0}};
   const chat = {
@@ -128,7 +106,7 @@ test('uses the peer group classification already loaded for a new peer', async()
     bubbles: {lazyLoadQueue: {queueId: 0}},
     onChangePeer: vi.fn(() => Promise.resolve()),
     getHistoryStorage: () => historyStorage,
-    isStartButtonNeeded: () => Promise.resolve(false),
+    isStartButtonNeeded,
     appImManager: {getChatSavedPosition: (): undefined => undefined}
   };
   const harness = Object.assign(Object.create(ChatBubbles.prototype), {
@@ -156,6 +134,7 @@ test('uses the peer group classification already loaded for a new peer', async()
 
   expect(setPeerError).toBeUndefined();
   expect(getHistory1).toHaveBeenCalled();
+  expect(isStartButtonNeeded).not.toHaveBeenCalled();
   expect(isAnyGroup).not.toHaveBeenCalled();
   expect(harness.passEntities).toEqual({messageEntityBotCommand: true});
 });
