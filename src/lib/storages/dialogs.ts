@@ -2030,7 +2030,10 @@ export default class DialogsStorage extends AppManager {
     });
 
     if(hasPartialCachedFirstPage && !this.cacheFirstPageRefresh) {
-      this.reconcileCachedChannelDialogs(realFolderId);
+      // An empty cache has no stale channel dialogs to reconcile before the refresh fills it.
+      if(curDialogStorage.length) {
+        this.reconcileCachedChannelDialogs(realFolderId);
+      }
       this.cacheFirstPageRefresh = loadTopMessages()
         .then((result) => {
           this.getFolder(filterId, filterType).count = result.count;

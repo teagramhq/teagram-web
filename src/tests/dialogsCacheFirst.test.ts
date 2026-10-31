@@ -53,6 +53,7 @@ describe('dialogs cache-first loading', () => {
   it('returns an empty cold cache while its initial refresh is still pending', () => {
     const getTopMessages = vi.fn((): Promise<unknown> => new Promise(() => {}));
     const {storage} = createStorage(getTopMessages, false);
+    const reconcile = vi.spyOn(storage as any, 'reconcileCachedChannelDialogs');
 
     const result = storage.getDialogs({
       filterId: FOLDER_ID_ALL,
@@ -64,6 +65,7 @@ describe('dialogs cache-first loading', () => {
     expect(result).not.toBeInstanceOf(Promise);
     expect(result).toMatchObject({dialogs: [], isEnd: false});
     expect(getTopMessages).toHaveBeenCalledTimes(1);
+    expect(reconcile).not.toHaveBeenCalled();
   });
 
   it('keeps non-chat-list callers waiting for an incomplete first page', () => {
