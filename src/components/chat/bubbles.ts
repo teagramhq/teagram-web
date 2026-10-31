@@ -5779,18 +5779,9 @@ export default class ChatBubbles {
 
     const m = middlewarePromise(middleware, PEER_CHANGED_ERROR);
 
-    let startButtonNeededPromise: Promise<boolean>;
     if(!samePeer) {
       // await pause(2000); // * test some bugs
-      const onChangePeerPromise = this.chat.onChangePeer(options, m);
-      if(startParam === undefined) {
-        // This only reads the selected peer and its current history cache. Run it
-        // alongside peer metadata instead of serializing its worker lookups after.
-        startButtonNeededPromise = this.chat.isStartButtonNeeded();
-        await m(Promise.all([onChangePeerPromise, startButtonNeededPromise]));
-      } else {
-        await m(onChangePeerPromise);
-      }
+      await m(this.chat.onChangePeer(options, m));
     }
 
     /* if(samePeer && this.chat.setPeerPromise) {
@@ -5880,7 +5871,7 @@ export default class ChatBubbles {
       }
     }
 
-    if(startParam === undefined && await m(startButtonNeededPromise ?? this.chat.isStartButtonNeeded())) {
+    if(startParam === undefined && (samePeer || this.chat.isBot) && await m(this.chat.isStartButtonNeeded())) {
       startParam = BOT_START_PARAM;
     }
 
