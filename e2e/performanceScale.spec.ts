@@ -565,6 +565,29 @@ test.beforeAll(async({browser}) => {
   }
 });
 
+async function runContactScenarios(browser: Browser, run: VariantRun, scale: Scale, fixture: Fixture) {
+  const measured = report.variants[run.variant][scale];
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+  const page = await context.newPage();
+  const requests = {value: 0};
+  await installInstrumentation(page, requests);
+
+  try {
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
+    measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
+    measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
+    measured.sendMessage.push(await test.step('send a message', () => sendMessage(page, requests, fixture)));
+  } finally {
+    await context.close();
+  }
+}
+
 async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixture: Fixture) {
   const {variant, origin} = run;
   const measured = report.variants[variant][scale];
@@ -602,16 +625,12 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       // The base build may lack the calendar control. Its open-chat bundle is still the route baseline.
       measured.dateJump.push({bundleBytes: chatOpen.bundleBytes});
     }
-    // Reset both variants to the same signed-in chat-list state before contacts measurements.
-    await page.goto(origin, {waitUntil: 'domcontentloaded'});
-    await waitForChatList(page);
-    measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
-    measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
-    measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
-    measured.sendMessage.push(await test.step('send a message', () => sendMessage(page, requests, fixture)));
   } finally {
     await context.close();
   }
+
+  // Keep contacts measurements independent of assets cached by chat and calendar scenarios.
+  await runContactScenarios(browser, run, scale, fixture);
 }
 
 async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
@@ -677,6 +696,11 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       for(const variant of order) {
         await test.step(`${scale} ${variant} round ${round + 1}`, () => runVariant(browser, preparedVariants[scale][variant]!, scale, fixture!));
       }
+    }
+
+    for(const variant of variants) {
+      const contactsBundleSizes = report.variants[variant][scale].contactsList.map((sample) => sample.bundleBytes);
+      expect(new Set(contactsBundleSizes).size, `${scale} ${variant} contacts bundle measurement should be stable across repeats`).toBe(1);
     }
   }
 
