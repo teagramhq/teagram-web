@@ -35,11 +35,12 @@ export async function bootstrapIm(): Promise<void> {
   const recorderImport: Promise<{default: unknown} | null> = isNativeVoiceRecorderSupported() ?
     Promise.resolve(null) :
     import('@vendor/recorder.min.js' as any);
+  // Let the browser paint the chat list while its fonts load.
+  void loadFonts();
 
   const [{default: appDialogsManager}, recorder] = await Promise.all([
     import('@lib/appDialogsManager'),
     recorderImport,
-    loadFonts(),
     'requestVideoFrameCallback' in HTMLVideoElement.prototype ?
       Promise.resolve() :
       import('@helpers/dom/requestVideoFrameCallbackPolyfill')
