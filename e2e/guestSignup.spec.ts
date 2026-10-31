@@ -12,7 +12,9 @@ test.beforeEach(async() => {
   localAppRequest = await request.newContext();
 });
 
-test.afterEach(async() => {
+test.afterEach(async({page}) => {
+  // setupGuestServer registers its catch-all on the context, not the page.
+  await page.context().unrouteAll({behavior: 'ignoreErrors'});
   await localAppRequest.dispose();
 });
 
