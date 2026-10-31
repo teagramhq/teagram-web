@@ -146,6 +146,7 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
       enabled: boolean,
       recording: boolean,
       callCount: number,
+      invocations: Array<{method: string, startedAtEpochMs: number}>,
       calls: Array<{
         method: string,
         startedAtEpochMs: number,
@@ -153,6 +154,9 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
         outcome: 'pending' | 'success' | 'error'
       }>
     };
+    const rpcInvocations = rpcTrace.invocations.filter((invocation) => {
+      return invocation.startedAtEpochMs - performance.timeOrigin <= ms;
+    });
     const workerPhases = includePhases ? (await (window as any).rootScope.managers.apiManager.getPerformancePhaseTrace() as Array<{name: string, startedAtEpochMs: number, durationMs: number | null, accountNumber?: number}>).map((phase) => ({
       ...phase,
       startMs: Math.max(0, phase.startedAtEpochMs - performance.timeOrigin)
@@ -173,7 +177,7 @@ async function capture(page: Page, requests: {value: number}, ms: number, scroll
       maxLongTaskDurationMs: longTasks.reduce((max: number, entry: {duration: number}) => Math.max(max, entry.duration), 0),
       rpcTraceEnabled: rpcTrace.enabled,
       rpcSpansRecorded: rpcTrace.recording,
-      rpcCallCount: rpcTrace.recording ? rpcCalls.length : countOnlyRpcCallCount ?? rpcTrace.callCount,
+      rpcCallCount: rpcTrace.recording ? rpcInvocations.length : countOnlyRpcCallCount ?? rpcTrace.callCount,
       rpcCalls,
       workerPhases,
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
@@ -302,6 +306,23 @@ async function signIn(page: Page, origin: string) {
 
 async function waitForChatList(page: Page) {
   await expect(page.locator('#page-chats #chatlist-container .chatlist-chat').first()).toBeVisible({timeout: 120_000});
+}
+
+async function waitForHistorySettled(page: Page) {
+  let previousDomNodes = -1;
+  let stableSamples = 0;
+  await expect.poll(async() => {
+    const state = await page.evaluate(() => {
+      const bubbles = (window as any).appImManager.chat.bubbles;
+      return {
+        pending: !!(bubbles?.getHistoryTopPromise || bubbles?.getHistoryBottomPromise),
+        domNodes: document.querySelectorAll('*').length
+      };
+    });
+    stableSamples = !state.pending && state.domNodes === previousDomNodes ? stableSamples + 1 : 0;
+    previousDomNodes = state.domNodes;
+    return stableSamples >= 2;
+  }, {timeout: 60_000, intervals: [100]}).toBe(true);
 }
 
 // Startup keeps fetching lazy chunks after the chat list paints; let them land before a scenario
@@ -440,6 +461,7 @@ async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture:
     const old = new Set(oldMids);
     return [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].some((bubble) => !old.has(Number(bubble.dataset.mid)));
   }, beforeMids, {timeout: 60_000});
+  await waitForHistorySettled(page);
   return capture(page, requests, await elapsed(page));
 }
 

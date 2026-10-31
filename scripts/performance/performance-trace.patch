@@ -11,30 +11,30 @@ index 4002724d..da47979a 100644
    readonly VITE_PREVIEW?: boolean;
    // injected via `define` by vite.preview.config.ts when start-preview.sh is
 diff --git a/src/lib/appManagers/apiManager.ts b/src/lib/appManagers/apiManager.ts
-index 0c886d59..f5d1e756 100644
+index 0c886d59..3e70e41b 100644
 --- a/src/lib/appManagers/apiManager.ts
 +++ b/src/lib/appManagers/apiManager.ts
 @@ -48,6 +48,7 @@ import {clearGuestAccountLocalState, clearInvalidatedGuestAccount as clearInvali
  import globalRootScope from '@lib/rootScope';
  import RepayRequestHandler from '@appManagers/utils/repayRequestHandler';
  import {AUTH_METHODS_WITH_RAW_ERRORS, AuthLogRedactor, getAuthMethod, secureAuthNetworker} from './authLogRedaction';
-+import {PerformanceRpcTrace, performancePhaseTrace, type PerformanceRpcHandle} from '@appManagers/performanceTrace';
- 
++import {PerformanceRpcTrace, performancePhaseTrace} from '@appManagers/performanceTrace';
+
  const PREMIUM_FILE_NETWORKERS_COUNT = 6;
  const REGULAR_FILE_NETWORKERS_COUNT = 3;
 @@ -83,6 +84,8 @@ export class ApiManager extends ApiManagerMethods {
- 
+
    private authLogRedactor?: AuthLogRedactor;
- 
+
 +  private performanceRpcTrace = new PerformanceRpcTrace(import.meta.env.VITE_PERF_TRACE === '1');
 +
    constructor() {
      super();
      this.name = 'API';
-@@ -735,10 +738,46 @@ export class ApiManager extends ApiManagerMethods {
+@@ -735,8 +738,29 @@ export class ApiManager extends ApiManagerMethods {
      this.networkerFactory.setUpdatesProcessor(callback);
    }
- 
+
 +  public getPerformanceRpcTrace() {
 +    return this.performanceRpcTrace.getSnapshot();
 +  }
@@ -51,44 +51,15 @@ index 0c886d59..f5d1e756 100644
 +    performancePhaseTrace.reset();
 +  }
 +
-+  private startPerformanceRpcTrace(method: string): PerformanceRpcHandle | undefined {
-+    return this.performanceRpcTrace?.start(method);
-+  }
-+
-+  private finishPerformanceRpcTrace(handle: PerformanceRpcHandle | undefined, outcome: 'success' | 'error') {
-+    if(!handle || !this.performanceRpcTrace) return;
-+    this.performanceRpcTrace.finish(handle, outcome);
-+  }
-+
-+  private trackPerformanceRpc<T>(handle: PerformanceRpcHandle | undefined, request: CancellablePromise<T>) {
-+    if(!handle || !this.performanceRpcTrace) return request;
-+    return this.performanceRpcTrace.track(handle, request);
++  public trackPerformanceRpcWait<T, P extends Promise<T>>(method: string, request: P): P {
++    return this.performanceRpcTrace.trackWait(method, request);
 +  }
 +
    public invokeApi<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {}, options: InvokeApiOptions = {}): CancellablePromise<MethodDeclMap[T]['res']> {
      const methodName = String(method);
-+    const trace = this.startPerformanceRpcTrace(methodName);
++    this.performanceRpcTrace.recordCall(methodName);
      if(!getAuthMethod(methodName, params)) {
--      return this.invokeApiInternal(method, params, options);
-+      try {
-+        return this.trackPerformanceRpc(trace, this.invokeApiInternal(method, params, options));
-+      } catch(error) {
-+        this.finishPerformanceRpcTrace(trace, 'error');
-+        throw error;
-+      }
-     }
- 
-     const redactor = this.authLogRedactor ??= new AuthLogRedactor(this.log);
-@@ -749,8 +788,9 @@ export class ApiManager extends ApiManagerMethods {
-         options;
-       const request = this.invokeApiInternal(method, params, requestOptions);
-       request.then(() => redactor.end(), () => redactor.end());
--      return request;
-+      return this.trackPerformanceRpc(trace, request);
-     } catch(error) {
-+      this.finishPerformanceRpcTrace(trace, 'error');
-       redactor.end();
-       throw error;
+       return this.invokeApiInternal(method, params, options);
      }
 diff --git a/src/lib/appManagers/appManagersManager.ts b/src/lib/appManagers/appManagersManager.ts
 index a10df0c2..d39c4611 100644
@@ -103,13 +74,13 @@ index a10df0c2..d39c4611 100644
  import AppStateManager from '@appManagers/appStateManager';
  import rootScope from '@lib/rootScope';
 @@ -174,30 +175,33 @@ export class AppManagersManager {
- 
+
    private async createManagers() {
      const promises = ([1, 2, 3, 4] as ActiveAccountNumber[]).map(async(accountNumber) => {
 +      const finishStartup = performancePhaseTrace.start('worker.account.startup', {accountNumber});
        const stateManager = this.stateManagersByAccount[accountNumber]
        const appStoragesManager = new AppStoragesManager(accountNumber, stateManager.resetStoragesPromise);
- 
+
 -      await Promise.all([
 -        // new Promise(() => {}),
 -        appStoragesManager.loadStorages(),
@@ -151,14 +122,61 @@ index a10df0c2..d39c4611 100644
 +        finishStartup();
 +      }
      });
- 
+
      const accountNumberToManagersPairs = await Promise.all(promises);
+diff --git a/src/lib/appManagers/appMessagesManager.ts b/src/lib/appManagers/appMessagesManager.ts
+index 41923efa..909dacc9 100644
+--- a/src/lib/appManagers/appMessagesManager.ts
++++ b/src/lib/appManagers/appMessagesManager.ts
+@@ -4987,7 +4987,7 @@ export class AppMessagesManager extends AppManager {
+
+     log('invoke', method, params);
+
+-    return promise;
++    return this.apiManager.trackPerformanceRpcWait(method, promise);
+   }
+
+   public async forwardMessagesInner(options: MessageForwardParams) {
+@@ -12507,7 +12507,7 @@ export class AppMessagesManager extends AppManager {
+       this.getChannelAvailableMinIdGeneration(peerId) :
+       this.getChannelAvailableMinIdGeneration());
+
+-    return this.apiManager.invokeApiSingleProcess({
++    return this.apiManager.trackPerformanceRpcWait(method, this.apiManager.invokeApiSingleProcess({
+       method,
+       params: options,
+       options: {
+@@ -12582,7 +12582,7 @@ export class AppMessagesManager extends AppManager {
+
+         throw error;
+       }
+-    });
++    }));
+   }
+
+   private settleSingleMessageRequests(
+diff --git a/src/lib/appManagers/appUsersManager.ts b/src/lib/appManagers/appUsersManager.ts
+index 9d4b0030..00a1135e 100644
+--- a/src/lib/appManagers/appUsersManager.ts
++++ b/src/lib/appManagers/appUsersManager.ts
+@@ -316,7 +316,10 @@ export class AppUsersManager extends AppManager {
+     this.updatedContactsList = true;
+
+     const promise = deferredPromise<Set<UserId>>();
+-    this.apiManager.invokeApi('contacts.getContacts').then((result) => {
++    this.apiManager.trackPerformanceRpcWait(
++      'contacts.getContacts',
++      this.apiManager.invokeApi('contacts.getContacts')
++    ).then((result) => {
+       if(result._ === 'contacts.contacts') {
+         this.contactsList.clear();
+
 diff --git a/src/lib/appManagers/performanceTrace.ts b/src/lib/appManagers/performanceTrace.ts
 new file mode 100644
-index 00000000..13307c7b
+index 00000000..b1e401d3
 --- /dev/null
 +++ b/src/lib/appManagers/performanceTrace.ts
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,138 @@
 +export type PerformancePhase = {
 +  name: string,
 +  startedAtEpochMs: number,
@@ -171,6 +189,11 @@ index 00000000..13307c7b
 +  startedAtEpochMs: number,
 +  durationMs: number | null,
 +  outcome: 'pending' | 'success' | 'error'
++};
++
++export type PerformanceRpcInvocation = {
++  method: string,
++  startedAtEpochMs: number
 +};
 +
 +export type PerformanceRpcHandle = {
@@ -219,6 +242,7 @@ index 00000000..13307c7b
 +  private readonly enabled: boolean;
 +  private recording: boolean;
 +  private callCount = 0;
++  private invocations: PerformanceRpcInvocation[] = [];
 +  private calls: PerformanceRpcCall[] = [];
 +
 +  constructor(enabled: boolean) {
@@ -227,14 +251,25 @@ index 00000000..13307c7b
 +  }
 +
 +  public reset(recordSpans = true) {
++    this.invocations = [];
 +    this.calls = [];
 +    this.callCount = 0;
 +    this.recording = this.enabled && recordSpans;
 +  }
 +
-+  public start(method: string): PerformanceRpcHandle | undefined {
++  public recordCall(method: string) {
 +    if(!this.enabled) return;
 +    ++this.callCount;
++    if(!this.recording) return;
++
++    this.invocations.push({
++      method,
++      startedAtEpochMs: performance.timeOrigin + performance.now()
++    });
++  }
++
++  public start(method: string): PerformanceRpcHandle | undefined {
++    if(!this.enabled) return;
 +    if(!this.recording) return;
 +
 +    const started = performance.now();
@@ -264,11 +299,16 @@ index 00000000..13307c7b
 +    return request;
 +  }
 +
++  public trackWait<T, P extends Promise<T>>(method: string, request: P): P {
++    return this.track(this.start(method), request);
++  }
++
 +  public getSnapshot() {
 +    return {
 +      enabled: this.enabled,
 +      recording: this.recording,
 +      callCount: this.callCount,
++      invocations: this.invocations.map((invocation) => ({...invocation})),
 +      calls: this.calls.map((trace) => ({...trace}))
 +    };
 +  }
@@ -308,7 +348,7 @@ index 1986f14d..512dd172 100644
        query = '',
        offsetIndex,
 @@ -1929,7 +1943,7 @@ export default class DialogsStorage extends AppManager {
- 
+
        if(promises.length) {
          return Promise.all(promises).then(() => {
 -          return this.getDialogs(options);

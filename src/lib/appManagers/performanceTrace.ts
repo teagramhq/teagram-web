@@ -12,6 +12,11 @@ export type PerformanceRpcCall = {
   outcome: 'pending' | 'success' | 'error'
 };
 
+export type PerformanceRpcInvocation = {
+  method: string,
+  startedAtEpochMs: number
+};
+
 export type PerformanceRpcHandle = {
   trace: PerformanceRpcCall,
   started: number
@@ -58,6 +63,7 @@ export class PerformanceRpcTrace {
   private readonly enabled: boolean;
   private recording: boolean;
   private callCount = 0;
+  private invocations: PerformanceRpcInvocation[] = [];
   private calls: PerformanceRpcCall[] = [];
 
   constructor(enabled: boolean) {
@@ -66,14 +72,25 @@ export class PerformanceRpcTrace {
   }
 
   public reset(recordSpans = true) {
+    this.invocations = [];
     this.calls = [];
     this.callCount = 0;
     this.recording = this.enabled && recordSpans;
   }
 
-  public start(method: string): PerformanceRpcHandle | undefined {
+  public recordCall(method: string) {
     if(!this.enabled) return;
     ++this.callCount;
+    if(!this.recording) return;
+
+    this.invocations.push({
+      method,
+      startedAtEpochMs: performance.timeOrigin + performance.now()
+    });
+  }
+
+  public start(method: string): PerformanceRpcHandle | undefined {
+    if(!this.enabled) return;
     if(!this.recording) return;
 
     const started = performance.now();
@@ -103,11 +120,16 @@ export class PerformanceRpcTrace {
     return request;
   }
 
+  public trackWait<T, P extends Promise<T>>(method: string, request: P): P {
+    return this.track(this.start(method), request);
+  }
+
   public getSnapshot() {
     return {
       enabled: this.enabled,
       recording: this.recording,
       callCount: this.callCount,
+      invocations: this.invocations.map((invocation) => ({...invocation})),
       calls: this.calls.map((trace) => ({...trace}))
     };
   }

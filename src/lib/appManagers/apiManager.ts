@@ -48,7 +48,7 @@ import {clearGuestAccountLocalState, clearInvalidatedGuestAccount as clearInvali
 import globalRootScope from '@lib/rootScope';
 import RepayRequestHandler from '@appManagers/utils/repayRequestHandler';
 import {AUTH_METHODS_WITH_RAW_ERRORS, AuthLogRedactor, getAuthMethod, secureAuthNetworker} from './authLogRedaction';
-import {PerformanceRpcTrace, performancePhaseTrace, type PerformanceRpcHandle} from '@appManagers/performanceTrace';
+import {PerformanceRpcTrace, performancePhaseTrace} from '@appManagers/performanceTrace';
 
 const PREMIUM_FILE_NETWORKERS_COUNT = 6;
 const REGULAR_FILE_NETWORKERS_COUNT = 3;
@@ -754,30 +754,15 @@ export class ApiManager extends ApiManagerMethods {
     performancePhaseTrace.reset();
   }
 
-  private startPerformanceRpcTrace(method: string): PerformanceRpcHandle | undefined {
-    return this.performanceRpcTrace?.start(method);
-  }
-
-  private finishPerformanceRpcTrace(handle: PerformanceRpcHandle | undefined, outcome: 'success' | 'error') {
-    if(!handle || !this.performanceRpcTrace) return;
-    this.performanceRpcTrace.finish(handle, outcome);
-  }
-
-  private trackPerformanceRpc<T>(handle: PerformanceRpcHandle | undefined, request: CancellablePromise<T>) {
-    if(!handle || !this.performanceRpcTrace) return request;
-    return this.performanceRpcTrace.track(handle, request);
+  public trackPerformanceRpcWait<T, P extends Promise<T>>(method: string, request: P): P {
+    return this.performanceRpcTrace.trackWait(method, request);
   }
 
   public invokeApi<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {}, options: InvokeApiOptions = {}): CancellablePromise<MethodDeclMap[T]['res']> {
     const methodName = String(method);
-    const trace = this.startPerformanceRpcTrace(methodName);
+    this.performanceRpcTrace.recordCall(methodName);
     if(!getAuthMethod(methodName, params)) {
-      try {
-        return this.trackPerformanceRpc(trace, this.invokeApiInternal(method, params, options));
-      } catch(error) {
-        this.finishPerformanceRpcTrace(trace, 'error');
-        throw error;
-      }
+      return this.invokeApiInternal(method, params, options);
     }
 
     const redactor = this.authLogRedactor ??= new AuthLogRedactor(this.log);
@@ -788,9 +773,8 @@ export class ApiManager extends ApiManagerMethods {
         options;
       const request = this.invokeApiInternal(method, params, requestOptions);
       request.then(() => redactor.end(), () => redactor.end());
-      return this.trackPerformanceRpc(trace, request);
+      return request;
     } catch(error) {
-      this.finishPerformanceRpcTrace(trace, 'error');
       redactor.end();
       throw error;
     }

@@ -16,19 +16,41 @@ describe('performance trace collectors', () => {
   test('counts RPC calls without recording their spans when detail tracing is disabled', () => {
     const trace = new PerformanceRpcTrace(true);
     trace.reset(false);
+    trace.recordCall('messages.getHistory');
     const handle = trace.start('messages.getHistory');
     trace.finish(handle, 'success');
 
-    expect(trace.getSnapshot()).toEqual({enabled: true, recording: false, callCount: 1, calls: []});
+    expect(trace.getSnapshot()).toEqual({enabled: true, recording: false, callCount: 1, invocations: [], calls: []});
   });
 
-  test('records method and duration spans without arguments', () => {
+  test('counts invocations without attributing an unconsumed wait span', () => {
     const trace = new PerformanceRpcTrace(true);
-    const handle = trace.start('help.getAppConfig');
-    trace.finish(handle, 'success');
+    trace.recordCall('messages.getHistory');
+
+    const snapshot = trace.getSnapshot();
+    expect(snapshot).toMatchObject({
+      enabled: true,
+      recording: true,
+      callCount: 1,
+      invocations: [{method: 'messages.getHistory'}],
+      calls: []
+    });
+    expect(Number.isFinite(snapshot.invocations[0].startedAtEpochMs)).toBe(true);
+  });
+
+  test('records explicit RPC waits without changing invocation counts', async() => {
+    const trace = new PerformanceRpcTrace(true);
+    trace.recordCall('help.getAppConfig');
+    const request = Promise.resolve('config');
+    const tracked = trace.trackWait('help.getAppConfig', request);
+
+    expect(tracked).toBe(request);
+    await expect(tracked).resolves.toBe('config');
+
     const snapshot = trace.getSnapshot();
 
     expect(snapshot.callCount).toBe(1);
+    expect(snapshot.invocations).toHaveLength(1);
     expect(snapshot.calls).toHaveLength(1);
     expect(snapshot.calls[0]).toMatchObject({method: 'help.getAppConfig', outcome: 'success'});
     expect(snapshot.calls[0].durationMs).toEqual(expect.any(Number));
@@ -37,9 +59,8 @@ describe('performance trace collectors', () => {
 
   test('tracks resolved RPC requests through completion', async() => {
     const trace = new PerformanceRpcTrace(true);
-    const handle = trace.start('help.getAppConfig');
     const request = Promise.resolve('config');
-    const tracked = trace.track(handle, request);
+    const tracked = trace.trackWait('help.getAppConfig', request);
 
     expect(tracked).toBe(request);
     await expect(tracked).resolves.toBe('config');
@@ -53,10 +74,9 @@ describe('performance trace collectors', () => {
 
   test('tracks rejected RPC requests through completion without swallowing the error', async() => {
     const trace = new PerformanceRpcTrace(true);
-    const handle = trace.start('messages.getHistory');
     const error = new Error('request failed');
     const request = Promise.reject(error);
-    const tracked = trace.track(handle, request);
+    const tracked = trace.trackWait('messages.getHistory', request);
 
     expect(tracked).toBe(request);
     await expect(tracked).rejects.toBe(error);
