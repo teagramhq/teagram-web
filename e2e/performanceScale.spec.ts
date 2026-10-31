@@ -2,6 +2,7 @@ import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
+import {sumBundleBytes} from './performanceBundleBytes';
 import {summarizeCpuProfile, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
 
 type Fixture = {
@@ -143,9 +144,6 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     const {ms} = boundary;
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
-    const bundleBytes = resources.filter((entry) => {
-      return new URL(entry.name).origin === location.origin && /\.(js|css)(?:[?#]|$)/i.test(entry.name);
-    }).reduce((total, entry) => total + entry.decodedBodySize, 0);
     const intervals = scroll ? perf.frameIntervals : [];
     const droppedFrames = intervals.reduce((total: number, interval: number) => total + Math.max(0, Math.round(interval / (1000 / 60)) - 1), 0);
     const droppedFramePercent = intervals.length ? droppedFrames / (droppedFrames + intervals.length) * 100 : 0;
@@ -176,7 +174,12 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       outcome: call.outcome
     })).filter((call) => call.startedAtMs <= ms);
     return {
-      bundleBytes,
+      bundleResources: resources.map((entry) => ({
+        name: entry.name,
+        startTime: entry.startTime,
+        decodedBodySize: entry.decodedBodySize
+      })),
+      origin: location.origin,
       longTasks,
       rpcTraceEnabled: rpcTrace.enabled,
       rpcSpansRecorded: rpcTrace.recording,
@@ -188,12 +191,13 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
   }, {boundary, scroll, includePhases, countOnlyRpcCallCount});
-  const {longTasks, ...metrics} = captured;
+  const {bundleResources, origin, longTasks, ...metrics} = captured;
   expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the client build').toBe(true);
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
   const rpcSummary = summarizeRpcTrace(metrics.rpcCalls as PerformanceRpcCall[], boundary.ms);
   return {
     ...metrics,
+    bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, boundary.startedAtMs + boundary.ms),
     ...longTaskSummary,
     ms: boundary.ms,
     requests: requestCount,
