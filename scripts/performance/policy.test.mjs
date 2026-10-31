@@ -100,6 +100,22 @@ test('blocks an added 100 ms task when the 100x cold-load base already has long 
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('long task')));
 });
 
+test('blocks a repeated 100 ms task despite cold-load variance seen in CI', () => {
+  const base = scaleVariants({'100x': {coldChatList: [66, 95, 82].map((blockingTimeMs) => ({
+    longTasksOver50Ms: 3,
+    blockingTimeMs,
+    maxLongTaskDurationMs: 119
+  }))}});
+  const head = scaleVariants({'100x': {coldChatList: [136, 112, 109].map((blockingTimeMs) => ({
+    longTasksOver50Ms: 3,
+    blockingTimeMs,
+    maxLongTaskDurationMs: 119
+  }))}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('long-task blocking time')));
+});
+
 test('reports 100x scroll frame loss during master calibration', () => {
   const head = scaleVariants({
     '1x': {scrollBack2k: {droppedFrames: 50, frameIntervals: 950, droppedFramePercent: 5}},
@@ -634,6 +650,17 @@ test('blocks bundle growth above two percent against a complete same-run base', 
   const result = evaluatePerformance(report({head}));
 
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('bundle') && failure.includes('coldChatList')));
+});
+
+test('uses the largest bundle sample when a lazy chunk misses a measurement window', () => {
+  const base = scaleVariants({'100x': {contactsList: [1_583, 33_090, 1_583].map((bundleBytes) => ({bundleBytes}))}});
+  const head = scaleVariants({'100x': {contactsList: [33_291, 33_291, 33_291].map((bundleBytes) => ({bundleBytes}))}});
+  const result = evaluatePerformance(report({base, head}));
+  const contacts = result.rows.find((row) => row.scale === '100x' && row.key === 'contactsList');
+
+  assert.equal(contacts.base.bundleBytes, 33_090);
+  assert.equal(contacts.head.bundleBytes, 33_291);
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x contactsList: bundle')), false);
 });
 
 test('fails closed when a required base bundle measurement is unavailable', () => {
