@@ -1,7 +1,7 @@
 import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
 import Icons from '../src/icons';
-import {COLD_CHAT_LIST_MEASUREMENT_VERSION, COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
+import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 
 type Fixture = {
   owner: number,
@@ -45,7 +45,6 @@ const password = process.env.PERF_PASSWORD;
 const reportPath = process.env.PERF_REPORT_PATH;
 const report = {
   measurementVersion: PERFORMANCE_MEASUREMENT_VERSION,
-  coldChatListMeasurementVersion: COLD_CHAT_LIST_MEASUREMENT_VERSION,
   fixtureVersion: process.env.PERF_FIXTURE_VERSION || '',
   serverCommit: process.env.PERF_SERVER_COMMIT || '',
   fixtureServerCommit: process.env.PERF_FIXTURE_SERVER_COMMIT || '',

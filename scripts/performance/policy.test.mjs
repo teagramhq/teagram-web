@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {COLD_CHAT_LIST_MEASUREMENT_VERSION, COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceTable, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS} from './policy.mjs';
+import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceTable, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS} from './policy.mjs';
 
 const SCALES = ['1x', '100x'];
 const CURRENT_FIXTURE = {
   measurementVersion: PERFORMANCE_MEASUREMENT_VERSION,
-  coldChatListMeasurementVersion: COLD_CHAT_LIST_MEASUREMENT_VERSION,
   fixtureVersion: 'fixture-v1',
   serverCommit: 'runtime-server-v1',
   fixtureServerCommit: 'fixture-server-v1'
@@ -674,15 +673,14 @@ test('ignores calibration runs from a different fixture or server runtime', () =
   assert.deepEqual(row.noiseBand, [85, 115]);
 });
 
-test('invalidates only cold-load history from before navigation-start timing', () => {
-  const {coldChatListMeasurementVersion, ...legacyFixture} = CURRENT_FIXTURE;
-  const oldHistory = mainHistory(20, {'100x': {coldChatList: {ms: 100}, dateJump: {ms: 100}}}, legacyFixture);
-  const result = evaluatePerformance(report(), oldHistory);
-  const coldRow = result.rows.find((item) => item.scale === '100x' && item.key === 'coldChatList');
-  const unchangedRow = result.rows.find((item) => item.scale === '100x' && item.key === 'dateJump');
+test('keeps master cold-load timing history at both scales', () => {
+  const history = mainHistory(20, {'1x': {coldChatList: {ms: 100}}, '100x': {coldChatList: {ms: 100}}});
+  const result = evaluatePerformance(report(), history);
 
-  assert.equal(coldRow.historyRuns, 0);
-  assert.equal(unchangedRow.historyRuns, 20);
+  for(const scale of SCALES) {
+    const coldRow = result.rows.find((item) => item.scale === scale && item.key === 'coldChatList');
+    assert.equal(coldRow.historyRuns, 20);
+  }
 });
 
 test('blocks a calibrated 100x scenario above the 1.5x slowdown ceiling', () => {

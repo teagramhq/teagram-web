@@ -12,7 +12,6 @@ export const SCENARIOS = [
 
 export const SCALES = ['1x', '100x'];
 export const PERFORMANCE_MEASUREMENT_VERSION = 2;
-export const COLD_CHAT_LIST_MEASUREMENT_VERSION = 1;
 export const PERFORMANCE_REPEATS = 3;
 // Cold-load pairs need additional samples to outvote occasional runner long tasks.
 export const COLD_CHAT_LIST_REPEATS = 6;
@@ -58,19 +57,18 @@ function summarizeSamples(samples = []) {
   return summary;
 }
 
-function matchesFixture(run, report, key) {
+function matchesFixture(run, report) {
   return report.measurementVersion === PERFORMANCE_MEASUREMENT_VERSION &&
     run.measurementVersion === report.measurementVersion &&
     Boolean(report.fixtureVersion && report.serverCommit && report.fixtureServerCommit) &&
     run.fixtureVersion === report.fixtureVersion &&
     run.serverCommit === report.serverCommit &&
-    run.fixtureServerCommit === report.fixtureServerCommit &&
-    (key !== 'coldChatList' || Number.isSafeInteger(report.coldChatListMeasurementVersion) && run.coldChatListMeasurementVersion === report.coldChatListMeasurementVersion);
+    run.fixtureServerCommit === report.fixtureServerCommit;
 }
 
 function historyFor(history, scale, key, report) {
   return history.flatMap((run) => {
-    if(!matchesFixture(run, report, key)) return [];
+    if(!matchesFixture(run, report)) return [];
     const samples = run.variants?.head?.[scale]?.[key];
     if(!Array.isArray(samples) || !samples.length) return [];
     const value = median(samples.map((sample) => sample.ms).filter(Number.isFinite));
@@ -110,7 +108,7 @@ function medianBlockingTime(samples) {
 
 function historyLongTaskBaseline(history, scale, key, report) {
   const counts = history.flatMap((run) => {
-    if(!matchesFixture(run, report, key)) return [];
+    if(!matchesFixture(run, report)) return [];
     const count = medianLongTasks(run.variants?.head?.[scale]?.[key]);
     return Number.isFinite(count) ? [count] : [];
   });
@@ -119,7 +117,7 @@ function historyLongTaskBaseline(history, scale, key, report) {
 
 function historyBlockingTimeBaseline(history, scale, key, report) {
   const blockingTimes = history.flatMap((run) => {
-    if(!matchesFixture(run, report, key)) return [];
+    if(!matchesFixture(run, report)) return [];
     const value = medianBlockingTime(run.variants?.head?.[scale]?.[key]);
     return Number.isFinite(value) ? [value] : [];
   });
@@ -132,7 +130,7 @@ function addFailure(failures, scale, key, message) {
 
 function historyScrollMetrics(history, report) {
   return history.flatMap((run) => {
-    if(!matchesFixture(run, report, 'scrollBack2k')) return [];
+    if(!matchesFixture(run, report)) return [];
     const samples = run.variants?.head?.['100x']?.scrollBack2k;
     if(!Array.isArray(samples) || samples.length < PERFORMANCE_REPEATS) return [];
     const complete = samples.every((sample) => {
