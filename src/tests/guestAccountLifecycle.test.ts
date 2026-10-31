@@ -92,6 +92,7 @@ describe('guest account lifecycle', () => {
 
   it('persists the provisional secret before sign-up and commits only after password setup', async() => {
     const state = makeDependencies();
+    const events: string[] = [];
     const write = state.dependencies.writeCredentials;
     const writeSpy = vi.fn(write);
     state.dependencies.writeCredentials = writeSpy;
@@ -99,16 +100,22 @@ describe('guest account lifecycle', () => {
       if(method === 'auth.sendCode') return SENT_CODE;
       if(method === 'auth.signIn') return SIGN_UP_REQUIRED;
       if(method === 'auth.signUp') {
+        events.push('sign-up');
         expect(state.records[0]?.status).toBe('provisional');
         return {_: 'auth.authorization', user: USER};
       }
       throw new Error(`Unexpected API method ${method}`);
     });
     state.dependencies.updatePasswordSettings = async() => {
+      events.push('password');
       expect(state.records[0]?.status).toBe('provisional');
       expect(state.records[0]?.accountUserId).toBe(42);
       return true;
     };
+    state.dependencies.setUser = vi.fn(async(user: any) => {
+      events.push('set-user');
+      state.accountUserId = Number(user.id);
+    });
 
     const lifecycle = createGuestAccountLifecycle(state.dependencies);
     const result = await lifecycle.create();
@@ -116,6 +123,7 @@ describe('guest account lifecycle', () => {
 
     expect(writeSpy).toHaveBeenCalledTimes(3);
     expect(state.dependencies.setUser).toHaveBeenCalledWith(USER, true);
+    expect(events).toEqual(['sign-up', 'password', 'set-user']);
     expect(state.records).toHaveLength(1);
     expect(state.records[0]).toMatchObject({status: 'committed', accountUserId: 42, serverId: IDENTITY.serverId, keyFingerprint: IDENTITY.keyFingerprint});
   });

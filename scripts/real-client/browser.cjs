@@ -5,10 +5,13 @@ const {chromium} = require('playwright');
 const observation = require('./observation.cjs');
 
 const REQUIRED_SCENARIOS = ['sign-in', 'first-message', 'message', 'group'];
-const OPTIONAL_SCENARIOS = ['channel', 'poll'];
+const OPTIONAL_SCENARIOS = ['channel', 'poll', 'guest-signup'];
 const AVAILABLE_SCENARIOS = [...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS];
 const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
 const PRIVATE_CSP_WSS = 'wss://teagramd.test/apiws';
+const TURNSTILE_API_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+const TURNSTILE_API_URL_PATTERN = /^https:\/\/challenges\.cloudflare\.com\/turnstile\/v0\/api\.js\?render=explicit$/;
+const TURNSTILE_TEST_TOKEN = 'fixture-turnstile-test-token';
 const PROBE_PATH = '/_fixture_probe/';
 const MESSAGE = 'browser-ci-hello';
 const FIRST_MESSAGE = 'browser-ci-first-inbound-hello';
@@ -56,7 +59,7 @@ const PAGE_DIAGNOSTIC_LIMIT = 16;
 const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
 const PAGE_DIAGNOSTIC_FIELD_LIMIT = 256;
 const PAGE_DIAGNOSTIC_VALUE_TYPES = new Set(['undefined', 'null', 'boolean', 'number', 'string', 'object', 'function']);
-const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'unknown']);
+const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'guest-signup', 'unknown']);
 const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set(AVAILABLE_SCENARIOS);
 const PAGE_ERROR_EVENT_CAPTURE_KEY = '__teagramPageErrorEvents';
 const pageErrorDiagnosticCounts = new WeakMap();
@@ -885,7 +888,7 @@ function createWorkerDiscovery() {
   };
 }
 
-function createNetworkObserver(page, contextName, contextObserver, pageErrorAssetResolver, onPageException) {
+function createNetworkObserver(page, contextName, contextObserver, pageErrorAssetResolver, onPageException, allowedSyntheticUrls = []) {
   const events = [];
   const gateEvents = [];
   const eventKeys = new Set();
@@ -901,6 +904,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
   const maxPendingReleases = observation.LIMITS.attachedTargets;
   let nextCommandId = 0;
   let cdp;
+  let cdpClosed = false;
   const pageScriptUrls = new Map();
   const pageScriptExecutionContexts = new Map();
   let pageTargetId;
@@ -1001,7 +1005,8 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     }
     if(!['http:', 'https:', 'ws:', 'wss:'].includes(parsed.protocol)) return;
 
-    const allowed = parsed.origin === PRIVATE_CSP_ORIGIN || (kind === 'websocket' && url === PRIVATE_CSP_WSS);
+    const allowed = parsed.origin === PRIVATE_CSP_ORIGIN || (kind === 'websocket' && url === PRIVATE_CSP_WSS) ||
+      (contextName === 'guest' && source === 'page' && kind === 'fetch' && allowedSyntheticUrls.includes(parsed.href));
     const key = kind === 'websocket' ? `${targetId}:${kind}:${url}` : undefined;
     if(key && eventKeys.has(key)) return;
     if(key) eventKeys.add(key);
@@ -1227,6 +1232,7 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
 
   async function start(registry) {
     cdp = await withCommandTimeout(() => page.context().newCDPSession(page));
+    cdp.on('close', () => { cdpClosed = true; });
     send = createGatedSender('page', cdp, contextObserver, () => pageTargetId,
       typeof onPageException === 'function' ? PAGE_ERROR_DEBUGGER_METHODS : []);
     // Page-session identity mapping only: the browser context this page lives
@@ -1399,12 +1405,21 @@ function createNetworkObserver(page, contextName, contextObserver, pageErrorAsse
     },
     async stop() {
       cdp?.removeAllListeners();
+      if(cdp && !cdpClosed) cdp.once('close', () => { cdpClosed = true; });
       try {
         await waitForOverflowCleanup();
-        if(cdp && !overflowContextClosed) await withCommandTimeout(() => cdp.detach());
+        if(cdp && !overflowContextClosed && !cdpClosed && page.isClosed?.() !== true) {
+          try {
+            await withCommandTimeout(() => cdp.detach());
+          } catch(error) {
+            if(!cdpClosed && page.isClosed?.() !== true) throw error;
+          }
+        }
       } catch(error) {
         contextObserver?.recordObserverError(pageTargetId);
         throw error;
+      } finally {
+        cdp?.removeAllListeners();
       }
     }
   };
@@ -5412,7 +5427,7 @@ function createPageErrorDiagnostic(error, options = {}) {
 
 
 function recordPageError(pageErrors, contextName, error, pageErrorAssetResolver, scenarioStep = {scenario: currentScenario, step: currentStage}, diagnosticOptions) {
-  if(!APP_CONTEXTS.includes(contextName) || !Array.isArray(pageErrors?.[contextName])) return;
+  if((!APP_CONTEXTS.includes(contextName) && contextName !== 'guest') || !Array.isArray(pageErrors?.[contextName])) return;
   if(!diagnosticOptions && scenarioStep?.captureDetails === true) {
     diagnosticOptions = scenarioStep;
     scenarioStep = {scenario: currentScenario, step: currentStage};
@@ -5680,7 +5695,7 @@ function buildObservationBlock(registry, appObservers, controls, egress) {
 }
 
 function buildWorkerCoverageFailureBreakdown(registry, appObservers) {
-  const contexts = Object.fromEntries(Object.keys(appObservers).filter((name) => APP_CONTEXTS.includes(name)).map((name) => {
+  const contexts = Object.fromEntries(Object.keys(appObservers).map((name) => {
     const observer = appObservers[name];
     const summary = observer.summary();
     return [name, {
@@ -6065,6 +6080,10 @@ function shouldRunPollScenario(runtimeConfig) {
   return runtimeConfig.scenarios.includes('poll');
 }
 
+function shouldRunGuestSignupScenario(runtimeConfig) {
+  return runtimeConfig.scenarios.includes('guest-signup');
+}
+
 async function main(dependencies = {}) {
   let report;
   let browser;
@@ -6076,9 +6095,9 @@ async function main(dependencies = {}) {
   const capturedScreenshots = {count: 0};
   const actionCounts = {usernameSubmissions: 0};
   const passwordEvidence = [];
-  const pageErrors = {alice: [], bob: []};
-  const appPages = {alice: undefined, bob: undefined};
-  const pageErrorAssets = Object.fromEntries(APP_CONTEXTS.map((name) => [name, createPageErrorAssetResolver()]));
+  const pageErrors = {alice: [], bob: [], guest: []};
+  const appPages = {alice: undefined, bob: undefined, guest: undefined};
+  const pageErrorAssets = Object.fromEntries([...APP_CONTEXTS, 'guest'].map((name) => [name, createPageErrorAssetResolver()]));
   const cleanupIssues = [];
   let cleanupFailed = false;
   let authProgressCleanupHandled = false;
@@ -6090,6 +6109,8 @@ async function main(dependencies = {}) {
   let clientErrorDiagnostics;
   let pollNegativeControlEvidence;
   let pollSendResults;
+  let guest;
+  let guestTurnstileScriptRequests = 0;
   centerColumnTrace = createCenterColumnTrace();
   groupNameFormTrace = {page: undefined, stepWait: 'none'};
   groupCreatedTrace = {page: undefined, groupName: undefined, stages: [], stepWait: 'none'};
@@ -6420,13 +6441,107 @@ async function main(dependencies = {}) {
       }
       report.push({name: 'poll', status: 'passed'});
     }
+
+    if(shouldRunGuestSignupScenario(runtime)) {
+      currentScenario = 'guest-signup';
+      currentStage = 'guest_context';
+      guest = {context: await browser.newContext({viewport: {width: 1280, height: 900}})};
+      contexts.push(guest.context);
+      if(runtime.traceDirectory) {
+        await guest.context.tracing.start({screenshots: true, snapshots: false, sources: false});
+        await guest.context.tracing.startChunk({title: 'real-client guest-signup scenario'});
+        traceContexts.push({context: guest.context, name: 'guest', active: true});
+      }
+      await guest.context.route(TURNSTILE_API_URL_PATTERN, async(route) => {
+        guestTurnstileScriptRequests++;
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/javascript',
+          headers: {'cache-control': 'no-store'},
+          body: `window.turnstile = {
+            render(container, callbacks) {
+              const complete = document.createElement('button');
+              complete.type = 'button';
+              complete.textContent = 'Complete security check';
+              complete.addEventListener('click', () => callbacks.callback('${TURNSTILE_TEST_TOKEN}'));
+              container.append(complete);
+              return 'fixture-test-widget';
+            },
+            reset() {},
+            remove() {}
+          };`
+        });
+      });
+      guest.page = await guest.context.newPage();
+      appPages.guest = guest.page;
+      await installPageErrorEventCapture(guest.page);
+      guest.observer = observation.createContextObserver('guest');
+      appObservers.guest = guest.observer;
+      guest.networkObserver = createNetworkObserver(
+        guest.page,
+        'guest',
+        guest.observer,
+        pageErrorAssets.guest,
+        runtime.pageErrorDiagnostics === true ? (details, source) => recordPageErrorProtocolEvent(
+          guest.page,
+          details,
+          source,
+          readPageScenarioStep(guest.page)
+        ) : undefined,
+        [TURNSTILE_API_URL]
+      );
+      appNetworkObservers.guest = guest.networkObserver;
+      observers.push(guest.networkObserver);
+      await guest.networkObserver.start(registry);
+      guest.page.on('pageerror', (error) => recordPageError(
+        pageErrors,
+        'guest',
+        error,
+        pageErrorAssets.guest,
+        readClientErrorScenarioStep(guest.page),
+        pageErrorDiagnosticOptions(guest.page)
+      ));
+      await countClientErrors(guest.page, () => readClientErrorScenarioStep(guest.page));
+
+      currentStage = 'guest_signup_load';
+      const guestResponse = await guest.page.goto(PRIVATE_CSP_ORIGIN, {waitUntil: 'domcontentloaded', timeout: 45_000})
+      .catch(() => failStage('guest_signup_load'));
+      if(!guestResponse || guestResponse.status() !== 200) failStage('guest_signup_load');
+      const guestButton = guest.page.getByRole('button', {name: 'Try it as a guest'});
+      await guestButton.waitFor({state: 'visible', timeout: 45_000}).catch(() => failStage('guest_signup_button'));
+      if(await guestButton.isDisabled()) failStage('guest_signup_button_disabled');
+      await guestButton.click().catch(() => failStage('guest_signup_submit'));
+
+      currentStage = 'guest_signup_terms';
+      const guestTerms = guest.page.getByRole('dialog', {name: 'Terms of service'});
+      await guestTerms.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_signup_terms'));
+      await guestTerms.getByRole('button', {name: 'Accept'}).click().catch(() => failStage('guest_signup_terms_accept'));
+
+      currentStage = 'guest_turnstile_challenge';
+      const challenge = guest.page.getByTestId('turnstile-challenge');
+      await challenge.waitFor({state: 'visible', timeout: 20_000}).catch(() => failStage('guest_turnstile_challenge'));
+      const completeChallenge = challenge.getByRole('button', {name: 'Complete security check'});
+      await completeChallenge.waitFor({state: 'visible', timeout: 20_000}).catch(() => failStage('guest_turnstile_widget'));
+      if(guestTurnstileScriptRequests !== 1) failStage('guest_turnstile_script');
+      await captureState(guest.page, runtime.screenshotDirectory, 'guest-signup-challenge', capturedScreenshots);
+      await completeChallenge.click().catch(() => failStage('guest_turnstile_complete'));
+
+      currentStage = 'guest_account_created';
+      await guest.page.locator('#page-chats').waitFor({state: 'visible', timeout: 45_000})
+      .catch(() => failStage('guest_account_created'));
+      await captureState(guest.page, runtime.screenshotDirectory, 'guest-signup-complete', capturedScreenshots);
+      await waitForWorkerTargets(guest.page, guest.networkObserver, guest.observer);
+      guest.observer.state.windowElapsed = true;
+      if(pageErrors.guest.length !== 0) failStage('guest_signup_page_errors');
+      report.push({name: 'guest-signup', status: 'passed'});
+    }
     if(JSON.stringify(report.map((scenario) => scenario.name)) !== JSON.stringify(runtime.scenarios)) {
       failStage('scenario_report_incomplete');
     }
 
     await Promise.all(observers.map((observer) => observer.waitForSetup()));
     await registry.waitForSetup();
-    const apps = {alice, bob};
+    const apps = {alice, bob, ...(guest ? {guest} : {})};
     const networkContexts = Object.fromEntries(Object.entries(apps).map(([name, app]) => {
       const summary = app.networkObserver.summary();
       return [name, {
@@ -6439,18 +6554,23 @@ async function main(dependencies = {}) {
     }));
     const egress = summarizeEgress(observers);
     const observationBlock = buildObservationBlock(registry, appObservers, controls, egress);
-    await waitForClientDiagnostics([alice.page, bob.page]);
-    clientErrorDiagnostics = {alice: getClientErrorDiagnostics(alice.page), bob: getClientErrorDiagnostics(bob.page)};
+    await waitForClientDiagnostics([alice.page, bob.page, ...(guest ? [guest.page] : [])]);
+    clientErrorDiagnostics = {
+      alice: getClientErrorDiagnostics(alice.page),
+      bob: getClientErrorDiagnostics(bob.page),
+      ...(guest ? {guest: getClientErrorDiagnostics(guest.page)} : {})
+    };
     gateBreakdown = runtime.pageErrorDiagnostics === true
       ? await enrichPageErrorReport(pageErrors, appPages, pageErrorAssets, appNetworkObservers, pageErrorRedactValues(), clientErrorDiagnostics)
       : summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors, clientErrorDiagnostics});
-    if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.alice.length + pageErrors.bob.length !== 0) {
+    if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.alice.length + pageErrors.bob.length + pageErrors.guest.length !== 0) {
       failStage('browser_egress_or_page_errors');
     }
     if(registry.foreignTargets !== 0 || registry.appContextlessTargets !== 0) failStage('browser_worker_observation_incomplete');
-    if(['alice', 'bob'].some((name) => observationBlock.contexts[name].coverageComplete !== 1)) failStage('browser_worker_observation_incomplete');
+    const observedContexts = ['alice', 'bob', ...(guest ? ['guest'] : [])];
+    if(observedContexts.some((name) => observationBlock.contexts[name].coverageComplete !== 1)) failStage('browser_worker_observation_incomplete');
     if(['alice', 'bob'].some((name) => observationBlock.contexts[name].sharedWorkerState !== 'created')) failStage('browser_worker_or_websocket_evidence');
-    if(['alice', 'bob'].some((name) => networkContexts[name].workerTargets.service_worker < 1 ||
+    if(observedContexts.some((name) => networkContexts[name].workerTargets.service_worker < 1 ||
         networkContexts[name].allowedWebSockets < 1)) {
       failStage('browser_worker_or_websocket_evidence');
     }
@@ -6465,6 +6585,7 @@ async function main(dependencies = {}) {
       passwordEvidence,
       ...(runtime.scenarios?.includes('channel') ? {channelMembership: await captureChannelMembershipState()} : {}),
       ...(pollNegativeControlEvidence ? {pollNegativeControl: pollNegativeControlEvidence} : {}),
+      ...(guest ? {guestSignupEvidence: {challengeScriptRequests: guestTurnstileScriptRequests, accountCreated: true}} : {}),
       ...(pollSendResults ? {pollSendResults} : {}),
       ...(pollFooterTransitions.length ? {pollFooterTransitions} : {}),
       gateBreakdown,
@@ -6504,7 +6625,8 @@ async function main(dependencies = {}) {
         const failedScenarioStep = {scenario: currentScenario, step: currentStage};
         clientErrorDiagnostics = {
           alice: getClientErrorDiagnostics(appPages.alice, failedScenarioStep),
-          bob: getClientErrorDiagnostics(appPages.bob, failedScenarioStep)
+          bob: getClientErrorDiagnostics(appPages.bob, failedScenarioStep),
+          ...(appPages.guest ? {guest: getClientErrorDiagnostics(appPages.guest, failedScenarioStep)} : {})
         };
         gateBreakdown = summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors, clientErrorDiagnostics});
       }
@@ -6548,7 +6670,6 @@ async function main(dependencies = {}) {
           ? {
             workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers),
             workerOverflowReasons: Object.fromEntries(Object.keys(appObservers)
-            .filter((name) => APP_CONTEXTS.includes(name))
             .map((name) => [name, appObservers[name].state.overflowReason || 'none']))
           }
           : {}),
@@ -6639,7 +6760,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunGuestSignupScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

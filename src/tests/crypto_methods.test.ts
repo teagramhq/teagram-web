@@ -353,6 +353,39 @@ describe('AES-CTR', () => {
     }
   );
 
+  test('encrypts fragmented writes when Uint8Array.concat is unavailable', async() => {
+    const singleCallId = await prepare();
+    const chunkedId = await prepare();
+    const data = new Uint8Array(Array.from({length: 20}, (_, index) => index));
+    const singleCall = await cryptoWorker.invokeCrypto('aes-ctr-process', {
+      id: singleCallId,
+      operation: 'encrypt',
+      data
+    });
+    const concat = Uint8Array.prototype.concat;
+
+    try {
+      delete (Uint8Array.prototype as any).concat;
+      const head = await cryptoWorker.invokeCrypto('aes-ctr-process', {
+        id: chunkedId,
+        operation: 'encrypt',
+        data: data.slice(0, 1)
+      });
+      const tail = await cryptoWorker.invokeCrypto('aes-ctr-process', {
+        id: chunkedId,
+        operation: 'encrypt',
+        data: data.slice(1)
+      });
+      const chunked = new Uint8Array(head.length + tail.length);
+      chunked.set(head);
+      chunked.set(tail, head.length);
+
+      expect(chunked).toEqual(singleCall);
+    } finally {
+      (Uint8Array.prototype as any).concat = concat;
+    }
+  });
+
   test('decrypt', async() => {
     type Encrypted = string;
     type Result = string;

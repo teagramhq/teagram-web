@@ -5,7 +5,7 @@ import {basename, dirname, isAbsolute} from 'node:path';
 import observation from './observation.cjs';
 
 export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group']);
-export const OPTIONAL_SCENARIOS = Object.freeze(['channel', 'poll']);
+export const OPTIONAL_SCENARIOS = Object.freeze(['channel', 'poll', 'guest-signup']);
 const AVAILABLE_SCENARIOS = Object.freeze([...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS]);
 export const POLL_NEGATIVE_CONTROL_SERVER_REVISION = '586403c1f4c92c09b006652278bdd02fd40ddf2d';
 export const POLL_NEGATIVE_CONTROL_EVIDENCE = Object.freeze([
@@ -30,7 +30,7 @@ const PAGE_ERROR_MESSAGE_LIMIT = 512;
 const PAGE_ERROR_STACK_FRAME_LIMIT = 16;
 const PAGE_ERROR_FUNCTION_NAME_LIMIT = 128;
 const PAGE_ERROR_STACK_STATES = Object.freeze(['unavailable', 'non_string', 'no_frames', 'unclassified_frames', 'captured', 'partial', 'truncated']);
-const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'unknown']);
+const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'guest-signup', 'unknown']);
 const CLEANUP_FAILURE_CODES = Object.freeze([
   'browser_close_cleanup', 'context_cleanup', 'observer_cleanup', 'observer_control_cleanup',
   'playwright_trace_cleanup', 'screenshot_cleanup', 'worker_discovery_cleanup'
@@ -134,7 +134,11 @@ export function expectedScreenshotCount({pollCreationNegativeControl = false, sc
   }
   const channelScreenshots = hasScenarios && scenarios.includes('channel') ? 10 : 0;
   const pollScreenshots = hasPollScenario ? (pollCreationNegativeControl ? 4 : 14) : 0;
-  return 20 + channelScreenshots + pollScreenshots;
+  return 20 + channelScreenshots + pollScreenshots + (hasScenarios && scenarios.includes('guest-signup') ? 2 : 0);
+}
+
+export function expectedBrowserContextCount({scenarios = []} = {}) {
+  return REQUIRED_OBSERVATION_CONTEXTS.length + (scenarios.includes('guest-signup') ? 1 : 0);
 }
 
 export function parseRealClientArgs(argv) {
@@ -275,7 +279,7 @@ export function parseFixtureReadiness(text, expected, options = {}) {
     throw new Error('fixture artifact identity is invalid');
   }
 
-  assertServerReadyEvidence(serverReady);
+  assertServerReadyEvidence(serverReady, options.guestSignup === true);
   if(requireArtifact) {
     assertArtifactReadyEvidence(artifactReady);
   }
@@ -337,14 +341,17 @@ function assertEventPins(event, name, expected) {
   }
 }
 
-function assertServerReadyEvidence(ready) {
+function assertServerReadyEvidence(ready, guestSignup = false) {
   const security = ready.security;
   const evidence = ready.evidence;
   const workers = evidence?.workerProbes;
   const observer = evidence?.observerControlledAttempts;
   const workerTypes = ['page', 'shared_worker', 'service_worker'];
 
-  if(security?.registrationClosed !== true || security.loginCodeLogging !== false ||
+  if(security?.registrationClosed !== !guestSignup ||
+      (guestSignup && (security.guestSignUpEnabled !== true || security.turnstileTestMode !== true)) ||
+      (!guestSignup && (security.guestSignUpEnabled === true || security.turnstileTestMode === true)) ||
+      security.loginCodeLogging !== false ||
       security.electionClosed !== true || security.administratorIsNull !== true ||
       security.ordinaryUsers !== 2 || security.usernameAccounts !== 2 ||
       security.passwordVerifiers !== 2 || security.initialAuthKeys !== 0 || security.initialMessages !== 0 || security.finalAuthKeys !== 2 ||
@@ -406,8 +413,8 @@ function assertArtifactReadyEvidence(ready) {
 // report does not prove is a failure of the evidence, never a pass: an
 // `unclassified` block, a missing control, an unknown coverage state, a foreign
 // target, an overflow, or a context owning more than one page.
-export function parseWorkerObservation(block) {
-  return parseWorkerObservationForContexts(block, REQUIRED_OBSERVATION_CONTEXTS);
+export function parseWorkerObservation(block, expectedContexts = REQUIRED_OBSERVATION_CONTEXTS) {
+  return parseWorkerObservationForContexts(block, expectedContexts);
 }
 
 export function parseAuthProgressWorkerObservation(block) {
@@ -473,6 +480,7 @@ function parseWorkerObservationForContexts(block, expectedContexts) {
     const context = block.contexts[name];
     if(context.pageTargets !== 1) throw new Error(`${name} does not own exactly one page`);
     if(context.coverageComplete !== 1) throw new Error(`${name} shared-worker observation coverage is incomplete`);
+    if(name === 'guest') continue;
     if(context.mtprotoSourceFetch === 'not_requested') throw new Error(`${name} never fetched the MTProto worker source`);
     if(context.mtprotoSourceChunk !== 'mtproto_worker') throw new Error(`${name} MTProto worker source is not an allowlisted chunk`);
     if(context.mtprotoWorker === 'unknown') throw new Error(`${name} MTProto shared-worker state is unknown`);
@@ -753,7 +761,8 @@ function parseCleanupFailureCodes(value) {
 }
 
 function parseWorkerOverflowReasons(value) {
-  if(!hasExactOwnKeys(value, ['alice', 'bob']) ||
+  if(!(hasExactOwnKeys(value, ['alice']) || hasExactOwnKeys(value, ['alice', 'bob']) ||
+      hasExactOwnKeys(value, ['alice', 'bob', 'guest'])) ||
       Object.values(value).some((reason) => !WORKER_OVERFLOW_REASONS.includes(reason))) {
     throw new Error('worker overflow reason evidence is invalid');
   }
@@ -827,9 +836,14 @@ function parseWorkerCoverageBreakdown(value) {
   ];
   const targetTypes = ['page', 'iframe', 'service_worker', 'shared_worker', 'dedicated_worker', 'other'];
   const causes = ['multiple_pages', 'foreign', 'contextless', 'observer_overflow', 'observer_error'];
+  const workerContexts = Object.keys(value?.contexts || {}).sort();
   if(!hasExactOwnKeys(value, ['registry', 'contexts', 'targets']) ||
       !hasExactOwnKeys(value.registry, registryKeys) ||
-      !(hasExactOwnKeys(value.contexts, ['alice']) || hasExactOwnKeys(value.contexts, ['alice', 'bob'])) ||
+      !([
+        ['alice'],
+        ['alice', 'bob'],
+        ['alice', 'bob', 'guest']
+      ].some((contextNames) => JSON.stringify(workerContexts) === JSON.stringify(contextNames))) ||
       !Array.isArray(value.targets) || value.targets.length > 1024) {
     throw new Error('worker coverage evidence is invalid');
   }
@@ -858,7 +872,7 @@ function parseWorkerCoverageBreakdown(value) {
   for(const target of value.targets) {
     if(!hasExactOwnKeys(target, ['targetType', 'owningContext', 'scriptAsset', 'causes']) ||
         !targetTypes.includes(target.targetType) ||
-        !(target.owningContext === null || ['alice', 'bob', 'control'].includes(target.owningContext)) ||
+        !(target.owningContext === null || ['alice', 'bob', 'guest', 'control'].includes(target.owningContext)) ||
         typeof target.scriptAsset !== 'string' || !SCRIPT_ASSET.test(target.scriptAsset) ||
         !Array.isArray(target.causes) || target.causes.length < 1 || target.causes.length > causes.length ||
         target.causes.some((cause) => !causes.includes(cause)) || new Set(target.causes).size !== target.causes.length) {

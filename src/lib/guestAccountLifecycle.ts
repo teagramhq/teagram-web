@@ -265,6 +265,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
     const activeUserId = accountUserId;
     const recordUserId = record.accountUserId;
     let boundUserId = activeUserId;
+    let authorizationIsNewAccount = false;
     const isCancelled = () => cancelled.value || !isContextCurrent(context);
 
     const updatePassword = async(password: string) => {
@@ -297,9 +298,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
       cancelled.record = record;
       await saveRecord(record);
       await assertContext(context, boundUserId, cancelled);
-      await dependencies.setUser(user, isNewAccount);
-      boundUserId = authorizedUserId;
-      await assertPostAuthorizationContext(context, boundUserId, cancelled);
+      authorizationIsNewAccount = isNewAccount;
     };
 
     if(record.status === 'provisional' && activeUserId !== undefined && sameUserId(activeUserId, recordUserId)) {
@@ -358,6 +357,9 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
       if(result.kind === 'authorized') {
         try {
           await assertContext(context, boundUserId, cancelled);
+          await dependencies.setUser(result.user, authorizationIsNewAccount);
+          boundUserId = result.user.id as PeerId;
+          await assertPostAuthorizationContext(context, boundUserId, cancelled);
           if(record.accountUserId === undefined) {
             record = {...record, accountUserId: result.user.id as PeerId, accountNumber: context.accountNumber};
           }
@@ -399,6 +401,10 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
         continue;
       }
       if(result.kind === 'passwordSetupError') {
+        await assertContext(context, boundUserId, cancelled);
+        await dependencies.setUser(result.user, authorizationIsNewAccount);
+        boundUserId = result.user.id as PeerId;
+        await assertPostAuthorizationContext(context, boundUserId, cancelled);
         return {kind: 'setupPending', username: record.username, ...('errorType' in result && result.errorType ? {errorType: result.errorType} : {})} as const;
       }
       if(record.status === 'provisional' && (result.kind === 'invalidCredentials' ||
@@ -478,6 +484,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
 
           cancelled.record = record;
           let boundUserId = accountUserId;
+          let authorizationIsNewAccount = false;
           const registration: PrivateUsernameRegistration = {
             mode: 'closed',
             displayName: '',
@@ -500,9 +507,7 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
               record.accountUserId = authorizedUserId;
               await saveRecord(record);
               await assertContext(context, boundUserId, cancelled);
-              await dependencies.setUser(user, isNewAccount);
-              boundUserId = authorizedUserId;
-              await assertContext(context, boundUserId, cancelled);
+              authorizationIsNewAccount = isNewAccount;
             }
           };
           cancelled.registration = registration;
@@ -516,6 +521,9 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
           );
           if(result.kind === 'authorized') {
             await assertContext(context, boundUserId, cancelled);
+            await dependencies.setUser(result.user, authorizationIsNewAccount);
+            boundUserId = result.user.id as PeerId;
+            await assertPostAuthorizationContext(context, boundUserId, cancelled);
             record.status = 'committed';
             if(identity.wipeGeneration !== undefined) record.wipeGeneration = identity.wipeGeneration;
             await saveRecord(record);
