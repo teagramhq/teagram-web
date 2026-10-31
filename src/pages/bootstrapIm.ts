@@ -8,6 +8,8 @@ import {disposeActiveAuthFlow} from '@/pages/mountAuthFlow';
 
 let bootstrapped = false;
 
+type AppDialogsManagerModule = typeof import('@lib/appDialogsManager');
+
 /**
  * Procedural replacement for the legacy `pageIm` `Page` instance.
  *
@@ -18,11 +20,11 @@ let bootstrapped = false;
  * once from `src/index.ts` on a directly-signed-in boot) is a no-op the second
  * time.
  */
-export async function bootstrapIm(): Promise<void> {
+export async function bootstrapIm(appDialogsManagerImport?: Promise<AppDialogsManagerModule>): Promise<void> {
   if(bootstrapped) return;
   bootstrapped = true;
 
-  const appDialogsManagerImport = import('@lib/appDialogsManager');
+  const appDialogsManagerModuleImport = appDialogsManagerImport || import('@lib/appDialogsManager');
   // Skip the opus-recorder fallback chunk entirely on browsers that have the
   // WebCodecs-based native path. Saves ~80 KB of WASM-shipping JS on every
   // sign-in for ~94% of users (May 2026 baseline).
@@ -44,7 +46,7 @@ export async function bootstrapIm(): Promise<void> {
   blurActiveElement();
 
   const [{default: appDialogsManager}, recorder] = await Promise.all([
-    appDialogsManagerImport,
+    appDialogsManagerModuleImport,
     recorderImport,
     videoFramePolyfillImport
   ]);

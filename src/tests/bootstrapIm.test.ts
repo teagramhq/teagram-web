@@ -61,4 +61,21 @@ describe('signed-in app bootstrap', () => {
     expect(startedBeforeStatePersistence).toBe(true);
     expect(startedBeforeFonts).toBe(true);
   });
+
+  it('waits for a preloaded chat-list manager before starting it', async() => {
+    let resolveManager: (module: {default: {start: typeof mocks.start}}) => void;
+    const managerImport = new Promise<unknown>((resolve) => {
+      resolveManager = resolve;
+    });
+    const {bootstrapIm} = await import('@/pages/bootstrapIm');
+    const bootstrap = bootstrapIm(managerImport as unknown as Promise<typeof import('@lib/appDialogsManager')>);
+
+    await vi.waitFor(() => expect(mocks.pushToState).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.start).not.toHaveBeenCalled();
+
+    resolveManager({default: {start: mocks.start}});
+    await bootstrap;
+    expect(mocks.start).toHaveBeenCalledTimes(1);
+  });
 });

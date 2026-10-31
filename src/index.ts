@@ -576,6 +576,12 @@ const onDocumentReady = async() => {
   // * (1)
   const allStates = await apiManagerProxy.loadAllStates();
   const stateResult = allStates[getCurrentAccount()];
+  const appDialogsManagerImport = stateResult.state.authState._ === 'authStateSignedIn' && !isAutoGuestEnabled() ?
+    import('@lib/appDialogsManager') :
+    undefined;
+  appDialogsManagerImport?.catch((error) => {
+    console.error('Failed to preload chat-list manager', error);
+  });
 
   // console.log(stateResult);
   // await pause(10000000);
@@ -763,7 +769,7 @@ const onDocumentReady = async() => {
       await sessionStorage.delete('should_animate_main');
       pageChatsEl.classList.add('main-screen-enter');
 
-      await bootstrapIm();
+      await bootstrapIm(appDialogsManagerImport);
       console.timeLog(TIME_LABEL, 'await bootstrapIm()');
 
       await fontsPromise;
@@ -776,7 +782,7 @@ const onDocumentReady = async() => {
 
       pageChatsEl.classList.remove('main-screen-enter', 'main-screen-entering');
     } else {
-      await bootstrapIm();
+      await bootstrapIm(appDialogsManagerImport);
     }
   }
 
