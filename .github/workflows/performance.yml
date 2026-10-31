@@ -217,12 +217,15 @@ jobs:
           PERF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
+          VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
           if [ -n "$PERF_BASE_SHA" ]; then
             base_directory="$RUNNER_TEMP/teagram-web-base"
             git worktree add --detach "$base_directory" "$PERF_BASE_SHA"
             ln -s "$GITHUB_WORKSPACE/node_modules" "$base_directory/node_modules"
-            (cd "$base_directory" && pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-dist")
+            if [ ! -f "$base_directory/src/lib/appManagers/performanceTrace.ts" ]; then
+              git -C "$base_directory" apply "$GITHUB_WORKSPACE/scripts/performance/performance-trace.patch"
+            fi
+            (cd "$base_directory" && VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-dist")
             echo "PERF_BASE_DIST=$RUNNER_TEMP/teagram-web-base-dist" >> "$GITHUB_ENV"
             echo 'PERF_BASE_ORIGIN_1X=http://localhost:4173' >> "$GITHUB_ENV"
             echo 'PERF_BASE_ORIGIN_100X=http://localhost:4175' >> "$GITHUB_ENV"

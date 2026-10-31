@@ -1,0 +1,358 @@
+diff --git a/src/env.d.ts b/src/env.d.ts
+index 4002724d..da47979a 100644
+--- a/src/env.d.ts
++++ b/src/env.d.ts
+@@ -16,6 +16,7 @@ interface ImportMetaEnv {
+   readonly VITE_MTPROTO_HAS_HTTP: string;
+   readonly VITE_MTPROTO_HAS_WS: string;
+   readonly VITE_SAFARI_PROXY_WEBSOCKET: string;
++  readonly VITE_PERF_TRACE?: string;
+   // injected via `define` by vite.preview.config.ts; absent in every other build
+   readonly VITE_PREVIEW?: boolean;
+   // injected via `define` by vite.preview.config.ts when start-preview.sh is
+diff --git a/src/lib/appManagers/apiManager.ts b/src/lib/appManagers/apiManager.ts
+index 0c886d59..3e70e41b 100644
+--- a/src/lib/appManagers/apiManager.ts
++++ b/src/lib/appManagers/apiManager.ts
+@@ -48,6 +48,7 @@ import {clearGuestAccountLocalState, clearInvalidatedGuestAccount as clearInvali
+ import globalRootScope from '@lib/rootScope';
+ import RepayRequestHandler from '@appManagers/utils/repayRequestHandler';
+ import {AUTH_METHODS_WITH_RAW_ERRORS, AuthLogRedactor, getAuthMethod, secureAuthNetworker} from './authLogRedaction';
++import {PerformanceRpcTrace, performancePhaseTrace} from '@appManagers/performanceTrace';
+
+ const PREMIUM_FILE_NETWORKERS_COUNT = 6;
+ const REGULAR_FILE_NETWORKERS_COUNT = 3;
+@@ -83,6 +84,8 @@ export class ApiManager extends ApiManagerMethods {
+
+   private authLogRedactor?: AuthLogRedactor;
+
++  private performanceRpcTrace = new PerformanceRpcTrace(import.meta.env.VITE_PERF_TRACE === '1');
++
+   constructor() {
+     super();
+     this.name = 'API';
+@@ -735,8 +738,29 @@ export class ApiManager extends ApiManagerMethods {
+     this.networkerFactory.setUpdatesProcessor(callback);
+   }
+
++  public getPerformanceRpcTrace() {
++    return this.performanceRpcTrace.getSnapshot();
++  }
++
++  public resetPerformanceRpcTrace(recordSpans = true) {
++    this.performanceRpcTrace.reset(recordSpans);
++  }
++
++  public getPerformancePhaseTrace() {
++    return performancePhaseTrace.getSnapshot();
++  }
++
++  public resetPerformancePhaseTrace() {
++    performancePhaseTrace.reset();
++  }
++
++  public trackPerformanceRpcWait<T, P extends Promise<T>>(method: string, request: P): P {
++    return this.performanceRpcTrace.trackWait(method, request);
++  }
++
+   public invokeApi<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {}, options: InvokeApiOptions = {}): CancellablePromise<MethodDeclMap[T]['res']> {
+     const methodName = String(method);
++    this.performanceRpcTrace.recordCall(methodName);
+     if(!getAuthMethod(methodName, params)) {
+       return this.invokeApiInternal(method, params, options);
+     }
+diff --git a/src/lib/appManagers/appManagersManager.ts b/src/lib/appManagers/appManagersManager.ts
+index a10df0c2..d39c4611 100644
+--- a/src/lib/appManagers/appManagersManager.ts
++++ b/src/lib/appManagers/appManagersManager.ts
+@@ -9,6 +9,7 @@ import {THREADED_WORKER_TYPES, ThreadedWorkerType} from '@lib/threadedWorkerType
+ import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
+ import {AppStoragesManager} from '@appManagers/appStoragesManager';
+ import createManagers from '@appManagers/createManagers';
++import {performancePhaseTrace} from '@appManagers/performanceTrace';
+ import {ActiveAccountNumber} from '@lib/accounts/types';
+ import AppStateManager from '@appManagers/appStateManager';
+ import rootScope from '@lib/rootScope';
+@@ -174,30 +175,33 @@ export class AppManagersManager {
+
+   private async createManagers() {
+     const promises = ([1, 2, 3, 4] as ActiveAccountNumber[]).map(async(accountNumber) => {
++      const finishStartup = performancePhaseTrace.start('worker.account.startup', {accountNumber});
+       const stateManager = this.stateManagersByAccount[accountNumber]
+       const appStoragesManager = new AppStoragesManager(accountNumber, stateManager.resetStoragesPromise);
+
+-      await Promise.all([
+-        // new Promise(() => {}),
+-        appStoragesManager.loadStorages(),
++      try {
++        const finishStorageLoad = performancePhaseTrace.start('worker.storage.load', {accountNumber});
++        const storageLoad = appStoragesManager.loadStorages().finally(finishStorageLoad);
+         // In Modes.noWorker the crypto worker is never spawned — the registry
+         // is imported into the main realm and cryptoMessagePort short-circuits
+         // same-realm callers via invokeCryptoNew's early-out. There's nothing
+         // to wait for and the threadedPort handshake never resolves, so skip.
+-        Modes.noWorker ? Promise.resolve() : this.threadedSharedWorkers.crypto.promise
+-      ]);
+-
+-      const managers = await createManagers(
+-        appStoragesManager,
+-        stateManager,
+-        accountNumber,
+-        stateManager.userId
+-      );
+-
+-      return [
+-        accountNumber,
+-        managers
+-      ] as const;
++        const finishCryptoReady = performancePhaseTrace.start('worker.crypto.ready', {accountNumber});
++        const cryptoReady = (Modes.noWorker ? Promise.resolve() : this.threadedSharedWorkers.crypto.promise).finally(finishCryptoReady);
++        await Promise.all([storageLoad, cryptoReady]);
++
++        const finishManagerCreation = performancePhaseTrace.start('worker.managers.create', {accountNumber});
++        const managers = await createManagers(
++          appStoragesManager,
++          stateManager,
++          accountNumber,
++          stateManager.userId
++        ).finally(finishManagerCreation);
++
++        return [accountNumber, managers] as const;
++      } finally {
++        finishStartup();
++      }
+     });
+
+     const accountNumberToManagersPairs = await Promise.all(promises);
+diff --git a/src/lib/appManagers/appMessagesManager.ts b/src/lib/appManagers/appMessagesManager.ts
+index 41923efa..909dacc9 100644
+--- a/src/lib/appManagers/appMessagesManager.ts
++++ b/src/lib/appManagers/appMessagesManager.ts
+@@ -4987,7 +4987,7 @@ export class AppMessagesManager extends AppManager {
+
+     log('invoke', method, params);
+
+-    return promise;
++    return this.apiManager.trackPerformanceRpcWait(method, promise);
+   }
+
+   public async forwardMessagesInner(options: MessageForwardParams) {
+@@ -12507,7 +12507,7 @@ export class AppMessagesManager extends AppManager {
+       this.getChannelAvailableMinIdGeneration(peerId) :
+       this.getChannelAvailableMinIdGeneration());
+
+-    return this.apiManager.invokeApiSingleProcess({
++    return this.apiManager.trackPerformanceRpcWait(method, this.apiManager.invokeApiSingleProcess({
+       method,
+       params: options,
+       options: {
+@@ -12582,7 +12582,7 @@ export class AppMessagesManager extends AppManager {
+
+         throw error;
+       }
+-    });
++    }));
+   }
+
+   private settleSingleMessageRequests(
+diff --git a/src/lib/appManagers/appUsersManager.ts b/src/lib/appManagers/appUsersManager.ts
+index 9d4b0030..00a1135e 100644
+--- a/src/lib/appManagers/appUsersManager.ts
++++ b/src/lib/appManagers/appUsersManager.ts
+@@ -316,7 +316,10 @@ export class AppUsersManager extends AppManager {
+     this.updatedContactsList = true;
+
+     const promise = deferredPromise<Set<UserId>>();
+-    this.apiManager.invokeApi('contacts.getContacts').then((result) => {
++    this.apiManager.trackPerformanceRpcWait(
++      'contacts.getContacts',
++      this.apiManager.invokeApi('contacts.getContacts')
++    ).then((result) => {
+       if(result._ === 'contacts.contacts') {
+         this.contactsList.clear();
+
+diff --git a/src/lib/appManagers/performanceTrace.ts b/src/lib/appManagers/performanceTrace.ts
+new file mode 100644
+index 00000000..b1e401d3
+--- /dev/null
++++ b/src/lib/appManagers/performanceTrace.ts
+@@ -0,0 +1,138 @@
++export type PerformancePhase = {
++  name: string,
++  startedAtEpochMs: number,
++  durationMs: number | null,
++  accountNumber?: number
++};
++
++export type PerformanceRpcCall = {
++  method: string,
++  startedAtEpochMs: number,
++  durationMs: number | null,
++  outcome: 'pending' | 'success' | 'error'
++};
++
++export type PerformanceRpcInvocation = {
++  method: string,
++  startedAtEpochMs: number
++};
++
++export type PerformanceRpcHandle = {
++  trace: PerformanceRpcCall,
++  started: number
++};
++
++export class PerformancePhaseTrace {
++  private readonly enabled: boolean;
++  private phases: PerformancePhase[] = [];
++
++  constructor(enabled: boolean) {
++    this.enabled = enabled;
++  }
++
++  public start(name: string, details: {accountNumber?: number} = {}) {
++    if(!this.enabled) return () => {};
++
++    const started = performance.now();
++    const phase: PerformancePhase = {
++      name,
++      startedAtEpochMs: performance.timeOrigin + started,
++      durationMs: null,
++      ...(details.accountNumber === undefined ? {} : {accountNumber: details.accountNumber})
++    };
++    this.phases.push(phase);
++
++    let finished = false;
++    return () => {
++      if(finished) return;
++      finished = true;
++      phase.durationMs = Number((performance.now() - started).toFixed(2));
++    };
++  }
++
++  public reset() {
++    this.phases = [];
++  }
++
++  public getSnapshot() {
++    return this.phases.map((phase) => ({...phase}));
++  }
++}
++
++export class PerformanceRpcTrace {
++  private readonly enabled: boolean;
++  private recording: boolean;
++  private callCount = 0;
++  private invocations: PerformanceRpcInvocation[] = [];
++  private calls: PerformanceRpcCall[] = [];
++
++  constructor(enabled: boolean) {
++    this.enabled = enabled;
++    this.recording = enabled;
++  }
++
++  public reset(recordSpans = true) {
++    this.invocations = [];
++    this.calls = [];
++    this.callCount = 0;
++    this.recording = this.enabled && recordSpans;
++  }
++
++  public recordCall(method: string) {
++    if(!this.enabled) return;
++    ++this.callCount;
++    if(!this.recording) return;
++
++    this.invocations.push({
++      method,
++      startedAtEpochMs: performance.timeOrigin + performance.now()
++    });
++  }
++
++  public start(method: string): PerformanceRpcHandle | undefined {
++    if(!this.enabled) return;
++    if(!this.recording) return;
++
++    const started = performance.now();
++    const trace: PerformanceRpcCall = {
++      method,
++      startedAtEpochMs: performance.timeOrigin + started,
++      durationMs: null,
++      outcome: 'pending'
++    };
++    this.calls.push(trace);
++    return {trace, started};
++  }
++
++  public finish(handle: PerformanceRpcHandle | undefined, outcome: 'success' | 'error') {
++    if(!handle) return;
++    handle.trace.durationMs = Number((performance.now() - handle.started).toFixed(2));
++    handle.trace.outcome = outcome;
++  }
++
++  public track<T, P extends Promise<T>>(handle: PerformanceRpcHandle | undefined, request: P): P {
++    if(handle) {
++      request.then(
++        () => this.finish(handle, 'success'),
++        () => this.finish(handle, 'error')
++      );
++    }
++    return request;
++  }
++
++  public trackWait<T, P extends Promise<T>>(method: string, request: P): P {
++    return this.track(this.start(method), request);
++  }
++
++  public getSnapshot() {
++    return {
++      enabled: this.enabled,
++      recording: this.recording,
++      callCount: this.callCount,
++      invocations: this.invocations.map((invocation) => ({...invocation})),
++      calls: this.calls.map((trace) => ({...trace}))
++    };
++  }
++}
++
++export const performancePhaseTrace = new PerformancePhaseTrace(import.meta.env.VITE_PERF_TRACE === '1');
+diff --git a/src/lib/storages/dialogs.ts b/src/lib/storages/dialogs.ts
+index 1986f14d..512dd172 100644
+--- a/src/lib/storages/dialogs.ts
++++ b/src/lib/storages/dialogs.ts
+@@ -30,6 +30,8 @@ import {AppStoragesManager} from '@appManagers/appStoragesManager';
+ import defineNotNumerableProperties from '@helpers/object/defineNotNumerableProperties';
+ import setDialogIndex from '@appManagers/utils/dialogs/setDialogIndex';
+ import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
++import {performancePhaseTrace} from '@appManagers/performanceTrace';
++import noop from '@helpers/noop';
+ import pause from '@helpers/schedulers/pause';
+ import {BroadcastEvents} from '@lib/rootScope';
+ import assumeType from '@helpers/assumeType';
+@@ -1900,6 +1902,18 @@ export default class DialogsStorage extends AppManager {
+     isTopEnd: boolean,
+     isEnd: boolean
+   }> {
++    if(!options.recursion && !options.query && options.offsetIndex === undefined) {
++      const finish = performancePhaseTrace.start('worker.dialogs.firstPage');
++      const result = this.getDialogsInner(options);
++      if(result instanceof Promise) result.finally(finish).catch(noop);
++      else finish();
++      return result;
++    }
++
++    return this.getDialogsInner(options);
++  }
++
++  private getDialogsInner(options: Parameters<DialogsStorage['getDialogs']>[0]): ReturnType<DialogsStorage['getDialogs']> {
+     const {
+       query = '',
+       offsetIndex,
+@@ -1929,7 +1943,7 @@ export default class DialogsStorage extends AppManager {
+
+       if(promises.length) {
+         return Promise.all(promises).then(() => {
+-          return this.getDialogs(options);
++          return this.getDialogsInner(options);
+         });
+       }
+     }

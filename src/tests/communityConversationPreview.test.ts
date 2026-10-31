@@ -55,6 +55,7 @@ describe('Community conversation previews', () => {
     const manager = Object.create(AppMessagesManager.prototype) as any;
     const error = {type: 'CHANNEL_PRIVATE'};
     manager.apiManager = {
+      trackPerformanceRpcWait: (_method: string, request: Promise<any>) => request,
       invokeApiSingleProcess: vi.fn(({processError}) => {
         return Promise.reject(error).catch(processError);
       })
