@@ -5,7 +5,7 @@ import {basename, dirname, isAbsolute} from 'node:path';
 import observation from './observation.cjs';
 
 export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group']);
-export const OPTIONAL_SCENARIOS = Object.freeze(['channel', 'poll']);
+export const OPTIONAL_SCENARIOS = Object.freeze(['channel', 'poll', 'guest-signup']);
 const AVAILABLE_SCENARIOS = Object.freeze([...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS]);
 export const POLL_NEGATIVE_CONTROL_SERVER_REVISION = '586403c1f4c92c09b006652278bdd02fd40ddf2d';
 export const POLL_NEGATIVE_CONTROL_EVIDENCE = Object.freeze([
@@ -30,7 +30,7 @@ const PAGE_ERROR_MESSAGE_LIMIT = 512;
 const PAGE_ERROR_STACK_FRAME_LIMIT = 16;
 const PAGE_ERROR_FUNCTION_NAME_LIMIT = 128;
 const PAGE_ERROR_STACK_STATES = Object.freeze(['unavailable', 'non_string', 'no_frames', 'unclassified_frames', 'captured', 'partial', 'truncated']);
-const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'unknown']);
+const PAGE_ERROR_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'guest-signup', 'unknown']);
 const CLEANUP_FAILURE_CODES = Object.freeze([
   'browser_close_cleanup', 'context_cleanup', 'observer_cleanup', 'observer_control_cleanup',
   'playwright_trace_cleanup', 'screenshot_cleanup', 'worker_discovery_cleanup'
@@ -134,11 +134,11 @@ export function expectedScreenshotCount({pollCreationNegativeControl = false, sc
   }
   const channelScreenshots = hasScenarios && scenarios.includes('channel') ? 10 : 0;
   const pollScreenshots = hasPollScenario ? (pollCreationNegativeControl ? 4 : 14) : 0;
-  return 20 + channelScreenshots + pollScreenshots;
+  return 20 + channelScreenshots + pollScreenshots + (hasScenarios && scenarios.includes('guest-signup') ? 2 : 0);
 }
 
-export function expectedBrowserContextCount() {
-  return REQUIRED_OBSERVATION_CONTEXTS.length;
+export function expectedBrowserContextCount({scenarios = []} = {}) {
+  return REQUIRED_OBSERVATION_CONTEXTS.length + (scenarios.includes('guest-signup') ? 1 : 0);
 }
 
 export function parseRealClientArgs(argv) {
@@ -279,7 +279,7 @@ export function parseFixtureReadiness(text, expected, options = {}) {
     throw new Error('fixture artifact identity is invalid');
   }
 
-  assertServerReadyEvidence(serverReady);
+  assertServerReadyEvidence(serverReady, options.guestSignup === true);
   if(requireArtifact) {
     assertArtifactReadyEvidence(artifactReady);
   }
@@ -341,14 +341,17 @@ function assertEventPins(event, name, expected) {
   }
 }
 
-function assertServerReadyEvidence(ready) {
+function assertServerReadyEvidence(ready, guestSignup = false) {
   const security = ready.security;
   const evidence = ready.evidence;
   const workers = evidence?.workerProbes;
   const observer = evidence?.observerControlledAttempts;
   const workerTypes = ['page', 'shared_worker', 'service_worker'];
 
-  if(security?.registrationClosed !== true || security.loginCodeLogging !== false ||
+  if(security?.registrationClosed !== !guestSignup ||
+      (guestSignup && (security.guestSignUpEnabled !== true || security.turnstileTestMode !== true)) ||
+      (!guestSignup && (security.guestSignUpEnabled === true || security.turnstileTestMode === true)) ||
+      security.loginCodeLogging !== false ||
       security.electionClosed !== true || security.administratorIsNull !== true ||
       security.ordinaryUsers !== 2 || security.usernameAccounts !== 2 ||
       security.passwordVerifiers !== 2 || security.initialAuthKeys !== 0 || security.initialMessages !== 0 || security.finalAuthKeys !== 2 ||
@@ -410,8 +413,8 @@ function assertArtifactReadyEvidence(ready) {
 // report does not prove is a failure of the evidence, never a pass: an
 // `unclassified` block, a missing control, an unknown coverage state, a foreign
 // target, an overflow, or a context owning more than one page.
-export function parseWorkerObservation(block) {
-  return parseWorkerObservationForContexts(block, REQUIRED_OBSERVATION_CONTEXTS);
+export function parseWorkerObservation(block, expectedContexts = REQUIRED_OBSERVATION_CONTEXTS) {
+  return parseWorkerObservationForContexts(block, expectedContexts);
 }
 
 export function parseAuthProgressWorkerObservation(block) {
