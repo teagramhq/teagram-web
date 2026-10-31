@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -95,6 +96,9 @@ def severity_score(vulnerability: dict[str, Any]) -> float | None:
         else:
             scores.append(float(candidate))
 
+    if any(not math.isfinite(score) for score in scores):
+        # Invalid numeric scores must not bypass the fixed high/critical gate.
+        return 10.0
     return max(scores) if scores else None
 
 

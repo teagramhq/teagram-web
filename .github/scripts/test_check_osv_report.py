@@ -102,6 +102,18 @@ class CheckOSVReportTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("GHSA-fixed-low", summary)
 
+    def test_fixed_non_finite_severity_fails_closed(self) -> None:
+        for score in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(score=score):
+                result, summary = self.run_checker(
+                    report(vulnerability("GHSA-fixed-non-finite", score, "1.0.1"))
+                )
+
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("GHSA-fixed-non-finite", result.stderr)
+                self.assertIn("GHSA-fixed-non-finite", summary)
+                self.assertIn("(critical)", result.stderr)
+
     def test_invalid_report_fails_closed(self) -> None:
         result, _ = self.run_checker({"results": None})
 
