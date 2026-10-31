@@ -1,7 +1,7 @@
 import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
 import Icons from '../src/icons';
-import {evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
+import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 
 type Fixture = {
   owner: number,
@@ -71,7 +71,7 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
       longTasks: [] as Array<{startTime: number, duration: number}>,
       frameIntervals: [] as number[],
       frameActive: false,
-      started: performance.now()
+      started: 0
     };
     try {
       const observer = new PerformanceObserver((list) => {
@@ -154,8 +154,8 @@ async function injectedLongTask(page: Page) {
 }
 
 function evaluateWithControlSamples(key: string, baseSamples: Metric[], headSamples: Metric[]) {
-  expect(baseSamples).toHaveLength(PERFORMANCE_REPEATS);
-  expect(headSamples).toHaveLength(PERFORMANCE_REPEATS);
+  expect(baseSamples).toHaveLength(COLD_CHAT_LIST_REPEATS);
+  expect(headSamples).toHaveLength(COLD_CHAT_LIST_REPEATS);
   const base = {
     ...report.variants.base,
     '100x': {
@@ -375,6 +375,25 @@ async function prepareVariant(browser: Browser, variant: Variant, origin: string
   }
 }
 
+async function runColdChatList(browser: Browser, run: VariantRun): Promise<Metric> {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    expect(await page.evaluate(() => (window as any).__teagramPerf.started)).toBe(0);
+    await waitForChatList(page);
+    return await capture(page, requests, await elapsed(page));
+  } finally {
+    await context.close();
+  }
+}
+
 async function measureColdControlWindow(browser: Browser, run: VariantRun, injectStall: boolean) {
   const context = await browser.newContext({
     ignoreHTTPSErrors: true,
@@ -387,6 +406,7 @@ async function measureColdControlWindow(browser: Browser, run: VariantRun, injec
 
   try {
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    expect(await page.evaluate(() => (window as any).__teagramPerf.started)).toBe(0);
     await waitForChatList(page);
     const sample = await capture(page, requests, await elapsed(page));
     return {sample, injectedTask: injectStall ? await injectedLongTask(page) : undefined};
@@ -451,6 +471,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
 
   try {
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
+    expect(await page.evaluate(() => (window as any).__teagramPerf.started)).toBe(0);
     await waitForChatList(page);
     measured.coldChatList.push(await test.step('cold chat list', async() => capture(page, requests, await elapsed(page))));
     measured.warmChatList.push(await test.step('warm chat list', () => reloadChatList(page, requests)));
@@ -497,6 +518,17 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       }
     }
   }
+
+  const coldScale: Scale = '100x';
+  const coldVariants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
+  for(let repeat = PERFORMANCE_REPEATS; repeat < COLD_CHAT_LIST_REPEATS; ++repeat) {
+    const order = repeat % 2 === 0 ? coldVariants : [...coldVariants].reverse();
+    for(const variant of order) {
+      const run = preparedVariants[coldScale][variant]!;
+      const sample = await test.step(`${coldScale} ${variant} cold chat list round ${repeat + 1}`, () => runColdChatList(browser, run));
+      report.variants[variant][coldScale].coldChatList.push(sample);
+    }
+  }
 });
 
 test('blocks repeated injected 100 ms main-thread stalls during cold chat list load', async({browser}) => {
@@ -509,7 +541,7 @@ test('blocks repeated injected 100 ms main-thread stalls during cold chat list l
   // Each repeat captures from document initialization so cold-start noise remains in the control window.
   const baseControlSamples: Metric[] = [];
   const negativeSamples: Metric[] = [];
-  for(let repeat = 0; repeat < PERFORMANCE_REPEATS; ++repeat) {
+  for(let repeat = 0; repeat < COLD_CHAT_LIST_REPEATS; ++repeat) {
     const order: Variant[] = repeat % 2 === 0 ? ['base', 'head'] : ['head', 'base'];
     for(const variant of order) {
       const isHead = variant === 'head';

@@ -1,19 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {evaluatePerformance, formatPerformanceTable, SCENARIOS} from './policy.mjs';
+import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceTable, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS} from './policy.mjs';
 
 const SCALES = ['1x', '100x'];
 const CURRENT_FIXTURE = {
-  measurementVersion: 2,
+  measurementVersion: PERFORMANCE_MEASUREMENT_VERSION,
   fixtureVersion: 'fixture-v1',
   serverCommit: 'runtime-server-v1',
   fixtureServerCommit: 'fixture-server-v1'
 };
 
-function scaleSamples(overrides = {}) {
+function scaleSamples(overrides = {}, scale) {
   return Object.fromEntries(SCENARIOS.map(({key}) => {
     const override = overrides[key];
-    const values = Array.isArray(override) ? override : [override, override, override];
+    const repeatCount = scale === '100x' && key === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
+    const values = Array.isArray(override) ? override : Array.from({length: repeatCount}, () => override);
     return [key, values.map((sample) => ({
       ms: 100,
       requests: 12,
@@ -32,8 +33,8 @@ function scaleSamples(overrides = {}) {
 
 function scaleVariants(overrides = {}) {
   return {
-    '1x': scaleSamples(overrides['1x']),
-    '100x': scaleSamples(overrides['100x'])
+    '1x': scaleSamples(overrides['1x'], '1x'),
+    '100x': scaleSamples(overrides['100x'], '100x')
   };
 }
 
@@ -81,9 +82,15 @@ test('blocks an added 100 ms task when the 100x cold-load base already has long 
   const base = scaleVariants({'100x': {coldChatList: [
     {longTasksOver50Ms: 3, blockingTimeMs: 140, maxLongTaskDurationMs: 118},
     {longTasksOver50Ms: 3, blockingTimeMs: 134, maxLongTaskDurationMs: 119},
+    {longTasksOver50Ms: 3, blockingTimeMs: 140, maxLongTaskDurationMs: 119},
+    {longTasksOver50Ms: 3, blockingTimeMs: 140, maxLongTaskDurationMs: 118},
+    {longTasksOver50Ms: 3, blockingTimeMs: 134, maxLongTaskDurationMs: 119},
     {longTasksOver50Ms: 3, blockingTimeMs: 140, maxLongTaskDurationMs: 119}
   ]}});
   const head = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 4, blockingTimeMs: 190, maxLongTaskDurationMs: 118},
+    {longTasksOver50Ms: 4, blockingTimeMs: 184, maxLongTaskDurationMs: 119},
+    {longTasksOver50Ms: 4, blockingTimeMs: 190, maxLongTaskDurationMs: 119},
     {longTasksOver50Ms: 4, blockingTimeMs: 190, maxLongTaskDurationMs: 118},
     {longTasksOver50Ms: 4, blockingTimeMs: 184, maxLongTaskDurationMs: 119},
     {longTasksOver50Ms: 4, blockingTimeMs: 190, maxLongTaskDurationMs: 119}
@@ -195,9 +202,15 @@ test('allows existing 100x base long tasks when the head count does not grow', (
   const base = scaleVariants({'100x': {coldChatList: [
     {longTasksOver50Ms: 1},
     {longTasksOver50Ms: 0},
+    {longTasksOver50Ms: 1},
+    {longTasksOver50Ms: 1},
+    {longTasksOver50Ms: 0},
     {longTasksOver50Ms: 1}
   ]}});
   const head = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 0},
+    {longTasksOver50Ms: 1},
+    {longTasksOver50Ms: 1},
     {longTasksOver50Ms: 0},
     {longTasksOver50Ms: 1},
     {longTasksOver50Ms: 1}
@@ -227,9 +240,15 @@ test('blocks an added 100 ms task by blocking time when base task counts vary', 
   const base = scaleVariants({'100x': {coldChatList: [
     {longTasksOver50Ms: 2, blockingTimeMs: 70},
     {longTasksOver50Ms: 3, blockingTimeMs: 134},
+    {longTasksOver50Ms: 3, blockingTimeMs: 147},
+    {longTasksOver50Ms: 2, blockingTimeMs: 70},
+    {longTasksOver50Ms: 3, blockingTimeMs: 134},
     {longTasksOver50Ms: 3, blockingTimeMs: 147}
   ]}});
   const head = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 3, blockingTimeMs: 184},
+    {longTasksOver50Ms: 4, blockingTimeMs: 186},
+    {longTasksOver50Ms: 4, blockingTimeMs: 198},
     {longTasksOver50Ms: 3, blockingTimeMs: 184},
     {longTasksOver50Ms: 4, blockingTimeMs: 186},
     {longTasksOver50Ms: 4, blockingTimeMs: 198}
@@ -392,9 +411,15 @@ test('blocks a 100 ms cold-load stall when noisy repeats overlap', () => {
   const base = scaleVariants({'100x': {coldChatList: [
     {longTasksOver50Ms: 2, blockingTimeMs: 175},
     {longTasksOver50Ms: 2, blockingTimeMs: 184},
+    {longTasksOver50Ms: 2, blockingTimeMs: 230},
+    {longTasksOver50Ms: 2, blockingTimeMs: 175},
+    {longTasksOver50Ms: 2, blockingTimeMs: 184},
     {longTasksOver50Ms: 2, blockingTimeMs: 230}
   ]}});
   const head = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 2, blockingTimeMs: 225},
+    {longTasksOver50Ms: 2, blockingTimeMs: 228},
+    {longTasksOver50Ms: 2, blockingTimeMs: 181},
     {longTasksOver50Ms: 2, blockingTimeMs: 225},
     {longTasksOver50Ms: 2, blockingTimeMs: 228},
     {longTasksOver50Ms: 2, blockingTimeMs: 181}
@@ -408,9 +433,15 @@ test('allows a lone noisy cold-load pair to cross the blocking-time threshold', 
   const base = scaleVariants({'100x': {coldChatList: [
     {longTasksOver50Ms: 3, blockingTimeMs: 73},
     {longTasksOver50Ms: 3, blockingTimeMs: 82},
+    {longTasksOver50Ms: 2, blockingTimeMs: 115},
+    {longTasksOver50Ms: 3, blockingTimeMs: 73},
+    {longTasksOver50Ms: 3, blockingTimeMs: 82},
     {longTasksOver50Ms: 2, blockingTimeMs: 115}
   ]}});
   const head = scaleVariants({'100x': {coldChatList: [
+    {longTasksOver50Ms: 2, blockingTimeMs: 86},
+    {longTasksOver50Ms: 2, blockingTimeMs: 123},
+    {longTasksOver50Ms: 3, blockingTimeMs: 138},
     {longTasksOver50Ms: 2, blockingTimeMs: 86},
     {longTasksOver50Ms: 2, blockingTimeMs: 123},
     {longTasksOver50Ms: 3, blockingTimeMs: 138}
@@ -418,6 +449,50 @@ test('allows a lone noisy cold-load pair to cross the blocking-time threshold', 
   const result = evaluatePerformance(report({base, head}));
 
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')), false);
+});
+
+test('requires six paired 100x cold-load measurements', () => {
+  const base = scaleVariants();
+  const head = scaleVariants();
+  base['100x'].coldChatList = base['100x'].coldChatList.slice(0, PERFORMANCE_REPEATS);
+  head['100x'].coldChatList = head['100x'].coldChatList.slice(0, PERFORMANCE_REPEATS);
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x coldChatList: expected at least ${COLD_CHAT_LIST_REPEATS} repeat measurements`)));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x coldChatList: base cold-load baseline requires ${COLD_CHAT_LIST_REPEATS} repeats`)));
+});
+
+function noChangeColdLoadSamples() {
+  // The first three pairs come from run 41079965617 attempt 2; the next three come from 41092394610 attempt 3.
+  const baseBlockingTimes = [73, 82, 115, 763, 82, 92];
+  const headBlockingTimes = [86, 123, 138, 80, 121, 82];
+  return {
+    base: scaleVariants({'100x': {coldChatList: baseBlockingTimes.map((blockingTimeMs) => ({blockingTimeMs}))}}),
+    head: scaleVariants({'100x': {coldChatList: headBlockingTimes.map((blockingTimeMs) => ({blockingTimeMs}))}})
+  };
+}
+
+test('allows observed no-change cold-load noise across six fresh contexts', () => {
+  assert.equal(COLD_CHAT_LIST_REPEATS, 6);
+  const {base, head} = noChangeColdLoadSamples();
+  assert.equal(base['100x'].coldChatList.length, COLD_CHAT_LIST_REPEATS);
+  assert.equal(head['100x'].coldChatList.length, COLD_CHAT_LIST_REPEATS);
+
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')), false);
+});
+
+test('blocks a 100 ms cold-load stall across six fresh contexts with observed runner noise', () => {
+  const {base, head} = noChangeColdLoadSamples();
+  head['100x'].coldChatList = head['100x'].coldChatList.map((sample) => ({
+    ...sample,
+    blockingTimeMs: sample.blockingTimeMs + 50
+  }));
+
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')));
 });
 
 test('blocks an 80 ms increase in blocking time when a 100x task count matches base', () => {
@@ -596,6 +671,14 @@ test('ignores calibration runs from a different fixture or server runtime', () =
 
   assert.equal(row.historyRuns, 20);
   assert.deepEqual(row.noiseBand, [85, 115]);
+});
+
+test('ignores cold-load calibration collected before navigation-start timing', () => {
+  const oldHistory = mainHistory(20, {'100x': {coldChatList: {ms: 100}}}, {...CURRENT_FIXTURE, measurementVersion: 2});
+  const result = evaluatePerformance(report(), oldHistory);
+  const row = result.rows.find((item) => item.scale === '100x' && item.key === 'coldChatList');
+
+  assert.equal(row.historyRuns, 0);
 });
 
 test('blocks a calibrated 100x scenario above the 1.5x slowdown ceiling', () => {

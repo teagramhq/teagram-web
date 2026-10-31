@@ -11,8 +11,10 @@ export const SCENARIOS = [
 ];
 
 export const SCALES = ['1x', '100x'];
-export const PERFORMANCE_MEASUREMENT_VERSION = 2;
+export const PERFORMANCE_MEASUREMENT_VERSION = 3;
 export const PERFORMANCE_REPEATS = 3;
+// Cold-load pairs need additional samples to outvote occasional runner long tasks.
+export const COLD_CHAT_LIST_REPEATS = 6;
 
 const CALIBRATION_RUNS = 20;
 const MAX_SCALE_RATIO = 1.5;
@@ -181,6 +183,7 @@ export function evaluatePerformance(report, history = []) {
       const headSamples = Array.isArray(rawHeadSamples) ? rawHeadSamples : [];
       const base = summarizeSamples(baseSamples);
       const head = summarizeSamples(headSamples);
+      const requiredRepeats = scale === '100x' && scenario.key === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
       const mainValues = historyFor(history, scale, scenario.key, report);
       const calibrated = mainValues.length >= CALIBRATION_RUNS;
       const scrollHistory = scale === '100x' && scenario.key === 'scrollBack2k' ? historyScrollMetrics(history, report) : [];
@@ -196,8 +199,8 @@ export function evaluatePerformance(report, history = []) {
       if(!headSamples.length) {
         addFailure(blockingFailures, scale, scenario.key, 'no head measurement was recorded');
       }
-      if(headSamples.length < PERFORMANCE_REPEATS) {
-        addFailure(blockingFailures, scale, scenario.key, `expected at least ${PERFORMANCE_REPEATS} repeat measurements, got ${headSamples.length}`);
+      if(headSamples.length < requiredRepeats) {
+        addFailure(blockingFailures, scale, scenario.key, `expected at least ${requiredRepeats} repeat measurements, got ${headSamples.length}`);
       }
       headSamples.forEach((sample, index) => {
         const requiredMetrics = scenario.key === 'scrollBack2k' ? [
@@ -222,6 +225,9 @@ export function evaluatePerformance(report, history = []) {
       if(report.requireBase) {
         if(baseSamples.length < PERFORMANCE_REPEATS) {
           addFailure(blockingFailures, scale, scenario.key, `base bundle baseline requires ${PERFORMANCE_REPEATS} repeats, got ${baseSamples.length}`);
+        }
+        if(scale === '100x' && scenario.key === 'coldChatList' && baseSamples.length < COLD_CHAT_LIST_REPEATS) {
+          addFailure(blockingFailures, scale, scenario.key, `base cold-load baseline requires ${COLD_CHAT_LIST_REPEATS} repeats, got ${baseSamples.length}`);
         }
         baseSamples.forEach((sample, index) => {
           if(!Number.isFinite(sample?.bundleBytes)) {
