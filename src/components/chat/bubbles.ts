@@ -2882,11 +2882,16 @@ export default class ChatBubbles {
   };
 
   private createResizeObserver() {
-    if(!('ResizeObserver' in window) || this.resizeObserver) {
+    const container = this.scrollable.container;
+    if(!('ResizeObserver' in window)) {
+      this.reflowWasWidth = container.offsetWidth || this.reflowWasWidth;
       return;
     }
 
-    const container = this.scrollable.container;
+    if(this.resizeObserver) {
+      return;
+    }
+
     let wasHeight = 0/* container.offsetHeight */;
     let resizing = false;
     let skip = false;
@@ -2944,6 +2949,7 @@ export default class ChatBubbles {
 
       if(!wasHeight) {
         wasHeight = height;
+        this.reflowWasWidth = Math.round(entry.contentRect.width) || this.reflowWasWidth;
         return;
       }
 
@@ -6551,9 +6557,6 @@ export default class ChatBubbles {
       });
 
       this.createResizeObserver();
-      // Baseline the container width now (the chat is laid out) so the very first window resize
-      // already detects the width change and re-pins scroll, instead of just setting the baseline.
-      this.reflowWasWidth = this.scrollable.container.offsetWidth || this.reflowWasWidth;
     };
   }
 

@@ -91,6 +91,34 @@ afterEach(() => {
 
 const peerId = 10 as PeerId;
 
+test('records the chat width from its initial resize observer entry', () => {
+  let observeResize!: ResizeObserverCallback;
+  const resizeObserverDescriptor = Object.getOwnPropertyDescriptor(window, 'ResizeObserver');
+  class ResizeObserverMock {
+    constructor(callback: ResizeObserverCallback) {
+      observeResize = callback;
+    }
+    observe() {}
+  }
+
+  Object.defineProperty(window, 'ResizeObserver', {configurable: true, value: ResizeObserverMock});
+  try {
+    const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+      scrollable: {container: document.createElement('div')},
+      resizeObserver: undefined,
+      reflowWasWidth: undefined
+    }) as any;
+
+    harness.createResizeObserver();
+    observeResize([{contentRect: {width: 640, height: 480}} as ResizeObserverEntry], {} as ResizeObserver);
+
+    expect(harness.reflowWasWidth).toBe(640);
+  } finally {
+    if(resizeObserverDescriptor) Object.defineProperty(window, 'ResizeObserver', resizeObserverDescriptor);
+    else delete (window as any).ResizeObserver;
+  }
+});
+
 test('reuses new-peer metadata and skips bot startup lookups for regular peers', async() => {
   const pendingHistory = new Promise<void>(() => {});
   const isAnyGroup = vi.fn(() => Promise.resolve(false));
