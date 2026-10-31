@@ -142,13 +142,14 @@ test('reuses new-peer metadata and skips bot startup lookups for regular peers',
 
 test('does not use previous-peer bubbles to enlarge the initial history request', async() => {
   const previousPeerId = 11 as PeerId;
+  const getRenderedHistory = vi.fn(() => [makeFullMid(previousPeerId, 100)]);
   const requestHistory = vi.fn((..._args: unknown[]) => Promise.resolve({
     cached: true,
     result: Promise.resolve({history: []})
   }));
   const harness = Object.assign(Object.create(ChatBubbles.prototype), {
     chat: {peerId, isBroadcast: false},
-    getRenderedHistory: () => [makeFullMid(previousPeerId, 100)],
+    getRenderedHistory,
     requestHistory,
     scrollable: {onScroll: vi.fn()},
     isFirstLoad: true,
@@ -158,6 +159,7 @@ test('does not use previous-peer bubbles to enlarge the initial history request'
   await harness.getHistory(undefined, true, undefined, undefined, true);
 
   expect(requestHistory.mock.calls[0][1]).toBe(Math.min(40, windowSize.height / 40 | 0));
+  expect(getRenderedHistory).not.toHaveBeenCalled();
 });
 
 function message(): Message.message {
