@@ -212,9 +212,17 @@ async function installPeerChangeTracing(page: Page) {
   return page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
     const phases: Array<{name: string, startMs: number, durationMs: number}> = [];
+    const wrappedTargets = new WeakMap<object, Set<string>>();
     const base = performance.now();
     const wrap = (target: any, method: string, name: string) => {
       if(!target || typeof target[method] !== 'function') return;
+      let wrappedMethods = wrappedTargets.get(target);
+      if(!wrappedMethods) {
+        wrappedMethods = new Set();
+        wrappedTargets.set(target, wrappedMethods);
+      }
+      if(wrappedMethods.has(method)) return;
+      wrappedMethods.add(method);
       const original = target[method];
       target[method] = function(...args: any[]) {
         const started = performance.now();
@@ -240,15 +248,25 @@ async function installPeerChangeTracing(page: Page) {
     };
     const chat = (window as any).appImManager?.chat;
     if(!chat) return [];
+    const wrapPeerChangeParts = () => {
+      wrap(chat.bubbles, 'setPeer', 'bubbles.setPeer');
+      wrap(chat.bubbles, 'getHistory1', 'bubbles.getHistory1');
+      wrap(chat.bubbles, 'performHistoryResult', 'bubbles.performHistoryResult');
+      wrap(chat.bubbles, 'finishPeerChange', 'bubbles.finishPeerChange');
+      wrap(chat.input, 'finishPeerChange', 'input.finishPeerChange');
+      wrap(chat.topbar, 'finishPeerChange', 'topbar.finishPeerChange');
+    };
     wrap(chat, 'setPeer', 'chat.setPeer');
     wrap(chat, 'onChangePeer', 'chat.onChangePeer');
     wrap(chat, 'finishPeerChange', 'chat.finishPeerChange');
-    wrap(chat.bubbles, 'setPeer', 'bubbles.setPeer');
-    wrap(chat.bubbles, 'getHistory1', 'bubbles.getHistory1');
-    wrap(chat.bubbles, 'performHistoryResult', 'bubbles.performHistoryResult');
-    wrap(chat.bubbles, 'finishPeerChange', 'bubbles.finishPeerChange');
-    wrap(chat.input, 'finishPeerChange', 'input.finishPeerChange');
-    wrap(chat.topbar, 'finishPeerChange', 'topbar.finishPeerChange');
+    wrap(chat, 'init', 'chat.init');
+    const originalInit = chat.init;
+    chat.init = function(...args: any[]) {
+      const result = originalInit.apply(this, args);
+      wrapPeerChangeParts();
+      return result;
+    };
+    wrapPeerChangeParts();
     perf.peerChangePhases = phases;
     return phases;
   });
