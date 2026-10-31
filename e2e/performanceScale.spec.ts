@@ -1,5 +1,5 @@
 import {readFileSync, writeFileSync} from 'node:fs';
-import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
+import {expect, test, type Browser, type BrowserContext, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, scenarioBundleBytes} from '../scripts/performance/policy.mjs';
 
@@ -23,6 +23,12 @@ type Metric = {
   droppedFramePercent?: number,
   droppedFrames?: number,
   frameIntervals?: number
+};
+
+type RequestCounter = {
+  value: number,
+  pendingBundleRequests: Set<Request>,
+  lastBundleRequestAt: number
 };
 
 type VariantRun = {
@@ -62,10 +68,23 @@ test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 });
 
-function installInstrumentation(page: Page, requestCounter: {value: number}, injectColdStall = false) {
+function createRequestCounter(): RequestCounter {
+  return {value: 0, pendingBundleRequests: new Set(), lastBundleRequestAt: Date.now()};
+}
+
+function installInstrumentation(page: Page, requestCounter: RequestCounter, injectColdStall = false) {
   page.on('request', (request) => {
     if(request.resourceType() !== 'websocket') ++requestCounter.value;
+    if(request.resourceType() === 'script' || request.resourceType() === 'stylesheet') {
+      requestCounter.pendingBundleRequests.add(request);
+      requestCounter.lastBundleRequestAt = Date.now();
+    }
   });
+  const bundleRequestFinished = (request: Request) => {
+    if(requestCounter.pendingBundleRequests.delete(request)) requestCounter.lastBundleRequestAt = Date.now();
+  };
+  page.on('requestfinished', bundleRequestFinished);
+  page.on('requestfailed', bundleRequestFinished);
   return page.addInitScript((injectColdStall: boolean) => {
     performance.setResourceTimingBufferSize(1_000);
     const perf: any = (window as any).__teagramPerf = {
@@ -106,7 +125,20 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
   }, injectColdStall);
 }
 
-async function begin(page: Page, requests: {value: number}) {
+async function waitForBundleRequests(page: Page, requestCounter: RequestCounter) {
+  const timeoutMs = 10_000;
+  const quietMs = 500;
+  const startedAt = Date.now();
+  while(requestCounter.pendingBundleRequests.size || Date.now() - requestCounter.lastBundleRequestAt < quietMs) {
+    if(Date.now() - startedAt >= timeoutMs) {
+      const pendingUrls = [...requestCounter.pendingBundleRequests].map((request) => request.url());
+      throw new Error(`JavaScript and CSS requests did not settle within ${timeoutMs} ms: ${pendingUrls.join(', ')}`);
+    }
+    await page.waitForTimeout(50);
+  }
+}
+
+async function begin(page: Page, requests: RequestCounter) {
   requests.value = 0;
   await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
@@ -118,7 +150,8 @@ async function begin(page: Page, requests: {value: number}) {
   });
 }
 
-async function capture(page: Page, requests: {value: number}, ms: number, scroll = false): Promise<Metric> {
+async function capture(page: Page, requests: RequestCounter, ms: number, scroll = false): Promise<Metric> {
+  await waitForBundleRequests(page, requests);
   await page.waitForTimeout(150);
   const captured = await page.evaluate(({ms, requests, scroll}) => {
     const perf = (window as any).__teagramPerf;
@@ -199,14 +232,14 @@ async function waitForChatList(page: Page) {
   await expect(page.locator('#page-chats #chatlist-container .chatlist-chat').first()).toBeVisible({timeout: 120_000});
 }
 
-async function reloadChatList(page: Page, requests: {value: number}) {
+async function reloadChatList(page: Page, requests: RequestCounter) {
   await begin(page, requests);
   await page.reload({waitUntil: 'domcontentloaded'});
   await waitForChatList(page);
   return capture(page, requests, await elapsed(page));
 }
 
-async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture) {
+async function openPartnerChat(page: Page, requests: RequestCounter, fixture: Fixture) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
   await begin(page, requests);
@@ -215,7 +248,7 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   return capture(page, requests, await elapsed(page));
 }
 
-async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean) {
+async function scrollBackTwoThousand(page: Page, requests: RequestCounter, required: boolean) {
   const hasPendingHistory = () => page.evaluate(() => {
     const bubbles = (window as any).appImManager.chat.bubbles;
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
@@ -276,7 +309,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   return capture(page, requests, await elapsed(page), true);
 }
 
-async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture, allowUnsupportedBase: boolean): Promise<Metric | undefined> {
+async function jumpToFixtureDate(page: Page, requests: RequestCounter, fixture: Fixture, allowUnsupportedBase: boolean): Promise<Metric | undefined> {
   await begin(page, requests);
   const beforeMids = await page.locator('.bubbles .bubble[data-mid]').evaluateAll((elements) => elements.map((element) => Number((element as HTMLElement).dataset.mid)));
   const searchIcon = String.fromCharCode(parseInt(Icons.search, 16));
@@ -328,8 +361,8 @@ async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture:
   return capture(page, requests, await elapsed(page));
 }
 
-async function openContacts(page: Page, requests: {value: number}) {
-  await page.waitForLoadState('load', {timeout: 10_000});
+async function openContacts(page: Page, requests: RequestCounter) {
+  await waitForBundleRequests(page, requests);
   await begin(page, requests);
   await page.locator('.sidebar-tools-button').click();
   await page.getByText('Contacts', {exact: true}).last().click();
@@ -337,7 +370,7 @@ async function openContacts(page: Page, requests: {value: number}) {
   return capture(page, requests, await elapsed(page));
 }
 
-async function searchContacts(page: Page, requests: {value: number}, scale: Scale) {
+async function searchContacts(page: Page, requests: RequestCounter, scale: Scale) {
   await begin(page, requests);
   const input = page.locator('#contacts-container .input-search-input');
   await input.fill(scale === '1x' ? 'k00099' : 'k09999');
@@ -346,7 +379,7 @@ async function searchContacts(page: Page, requests: {value: number}, scale: Scal
   return capture(page, requests, await elapsed(page));
 }
 
-async function globalSearch(page: Page, requests: {value: number}, scale: Scale) {
+async function globalSearch(page: Page, requests: RequestCounter, scale: Scale) {
   await page.locator('#contacts-container .sidebar-close-button').click();
   await begin(page, requests);
   await page.keyboard.press('Control+f');
@@ -357,7 +390,7 @@ async function globalSearch(page: Page, requests: {value: number}, scale: Scale)
   return capture(page, requests, await elapsed(page));
 }
 
-async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture) {
+async function sendMessage(page: Page, requests: RequestCounter, fixture: Fixture) {
   await page.keyboard.press('Escape');
   await page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first().click();
   await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible();
@@ -389,7 +422,7 @@ async function runColdChatList(browser: Browser, run: VariantRun): Promise<Metri
   });
   try {
     const page = await context.newPage();
-    const requests = {value: 0};
+    const requests = createRequestCounter();
     await installInstrumentation(page, requests);
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => (window as any).__teagramPerf.started)).toBe(0);
@@ -407,7 +440,7 @@ async function measureColdControlWindow(browser: Browser, run: VariantRun, injec
     storageState: run.storageState
   });
   const page = await context.newPage();
-  const requests = {value: 0};
+  const requests = createRequestCounter();
   await installInstrumentation(page, requests, injectStall);
 
   try {
@@ -472,7 +505,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     storageState: run.storageState
   });
   const page = await context.newPage();
-  const requests = {value: 0};
+  const requests = createRequestCounter();
   await installInstrumentation(page, requests);
 
   try {
@@ -540,7 +573,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
     const variants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
     for(const variant of variants) {
       const bundleSizes = report.variants[variant][scale].contactsList.map(({bundleBytes}) => bundleBytes);
-      expect(new Set(bundleSizes).size, `${scale} ${variant} contacts bundle measurements vary across repeats`).toBe(1);
+      expect(new Set(bundleSizes).size, `${scale} ${variant} contacts bundle measurements vary across repeats: ${bundleSizes.join(', ')}`).toBe(1);
     }
   }
 });
