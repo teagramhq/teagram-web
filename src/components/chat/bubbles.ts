@@ -6095,11 +6095,16 @@ export default class ChatBubbles {
       startParam,
       middleware,
       text: options.text,
-      entities: options.entities
+      entities: options.entities,
+      deferUiCallbacks: true
     };
     const preparedPeerChange = !samePeer ?
       m(this.chat.finishPeerChange(finishPeerChangeOptions)) :
       undefined;
+    let releasePeerInnerMounted!: () => void;
+    const peerInnerMounted = !samePeer ? new Promise<void>((resolve) => {
+      releasePeerInnerMounted = resolve;
+    }) : Promise.resolve();
 
     let historyRequest: Promise<Awaited<ReturnType<ChatBubbles['getHistory']>>>;
     if(!savedPosition?.mids) {
@@ -6129,28 +6134,37 @@ export default class ChatBubbles {
     log.warn('got history');// warning
 
     const {promise, cached} = result;
-    const peerReadyPromise = preparedPeerChange ?
-      Promise.all([m(promise), preparedPeerChange]).then(([historyResult]) => historyResult) :
-      m(promise);
+    const peerUiReadyPromise = preparedPeerChange ?
+      preparedPeerChange.then(async(callback) => {
+        await peerInnerMounted;
+        callback?.();
+        return {ready: true as const};
+      }).catch((error: unknown) => ({error})) :
+      Promise.resolve({ready: true as const});
+    const peerReadyPromise = Promise.all([
+      m(promise),
+      peerUiReadyPromise
+    ] as const).then(
+      ([, result]) => result,
+      (error: unknown) => ({error})
+    );
 
-    if(!cached && !samePeer) {
-      await preparedPeerChange;
+    if(!samePeer) {
       // Flip the staging-slot wallpaper that `finishPeerChange` prepared, in the same sync
-      // block as clearing the old bubbles. Otherwise the bg DOM swap (running inside the
+      // block as replacing the old bubbles. Otherwise the bg DOM swap (running inside the
       // Solid effect's `await built.readyPromise`) can paint a frame ahead of the cleared
       // bubbles, briefly showing the new wallpaper behind the old chat's messages.
       this.chat.revealPreparedBackground();
-      this.scrollable.replaceChildren(this.paddingTop, this.paddingBottom);
+      this.scrollable.replaceChildren(this.paddingTop, chatInner, this.paddingBottom);
       this.preloader.attach(this.container);
+      releasePeerInnerMounted();
     }
 
     animationIntersector.lockGroup(this.chat.animationGroup);
-    const setPeerPromise = peerReadyPromise.then(async() => {
+    const setPeerPromise = m(promise).then(async() => {
       log.warn('promise fulfilled');
 
       const mountedByLastMsgId = haveToScrollToBubble ? await m(lastMsgFullMid !== EMPTY_FULL_MID ? this.getMountedBubble(lastMsgFullMid) : {bubble: this.getLastBubble()}) : undefined;
-
-      this.preloader.detach();
 
       if(this.resolveLadderAnimation) {
         this.resolveLadderAnimation();
@@ -6162,10 +6176,16 @@ export default class ChatBubbles {
       const scrollable = this.scrollable;
       scrollable.lastScrollDirection = 0;
       scrollable.lastScrollPosition = 0;
-      // Flip the staged wallpaper sync with bubbles mount — see the matching call in the
-      // not-cached branch above.
-      this.chat.revealPreparedBackground();
-      scrollable.replaceChildren(this.paddingTop, chatInner, this.paddingBottom);
+      if(samePeer) {
+        this.chat.revealPreparedBackground();
+        scrollable.replaceChildren(this.paddingTop, chatInner, this.paddingBottom);
+      }
+
+      const peerReady = await peerReadyPromise;
+      if('error' in peerReady) {
+        throw peerReady.error;
+      }
+      this.preloader.detach();
 
       if(oldPlaceholderBubble) {
         this.cleanupPlaceholders(oldPlaceholderBubble);

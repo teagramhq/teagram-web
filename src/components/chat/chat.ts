@@ -1200,7 +1200,8 @@ export default class Chat extends EventListenerBase<{
     startParam?: string,
     middleware: () => boolean,
     text?: string,
-    entities?: MessageEntity[]
+    entities?: MessageEntity[],
+    deferUiCallbacks?: boolean
   }) {
     if(this.peerChanged) return;
 
@@ -1229,25 +1230,39 @@ export default class Chat extends EventListenerBase<{
       return;
     }
 
-    callbacks.forEach((callback) => {
-      callback?.();
-    });
+    let didApplyUiCallbacks = false;
+    const applyUiCallbacks = () => {
+      if(didApplyUiCallbacks || !middleware()) {
+        return;
+      }
+      didApplyUiCallbacks = true;
 
-    if(sharedMediaTab) {
-      appSidebarRight.replaceSharedMediaTab(sharedMediaTab);
-      this.sharedMediaTabs.filter((tab) => tab !== sharedMediaTab).forEach((tab) => this.destroySharedMediaTab(tab));
+      callbacks.forEach((callback) => {
+        callback?.();
+      });
+
+      if(sharedMediaTab) {
+        appSidebarRight.replaceSharedMediaTab(sharedMediaTab);
+        this.sharedMediaTabs.filter((tab) => tab !== sharedMediaTab).forEach((tab) => this.destroySharedMediaTab(tab));
+      }
+
+      if(this.container) {
+        this.container.dataset.type = this.type === ChatType.Search ? 'chat' : this.type;
+        this.container.classList.toggle('can-click-date', [ChatType.Chat, ChatType.Discussion, ChatType.Saved].includes(this.type));
+      }
+
+      this.log.setPrefix('CHAT-' + peerId + '-' + this.type);
+
+      if(this.isMainChat) {
+        this.appImManager.dispatchEvent('peer_changed', this);
+      }
+    };
+
+    if(options.deferUiCallbacks) {
+      return applyUiCallbacks;
     }
 
-    if(this.container) {
-      this.container.dataset.type = this.type === ChatType.Search ? 'chat' : this.type;
-      this.container.classList.toggle('can-click-date', [ChatType.Chat, ChatType.Discussion, ChatType.Saved].includes(this.type));
-    }
-
-    this.log.setPrefix('CHAT-' + peerId + '-' + this.type);
-
-    if(this.isMainChat) {
-      this.appImManager.dispatchEvent('peer_changed', this);
-    }
+    applyUiCallbacks();
   }
 
   public getMessage(mid: number | FullMid) {
