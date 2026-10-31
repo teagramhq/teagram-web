@@ -5779,9 +5779,18 @@ export default class ChatBubbles {
 
     const m = middlewarePromise(middleware, PEER_CHANGED_ERROR);
 
+    let startButtonNeededPromise: Promise<boolean>;
     if(!samePeer) {
       // await pause(2000); // * test some bugs
-      await m(this.chat.onChangePeer(options, m));
+      const onChangePeerPromise = this.chat.onChangePeer(options, m);
+      if(startParam === undefined) {
+        // This only reads the selected peer and its current history cache. Run it
+        // alongside peer metadata instead of serializing its worker lookups after.
+        startButtonNeededPromise = this.chat.isStartButtonNeeded();
+        await m(Promise.all([onChangePeerPromise, startButtonNeededPromise]));
+      } else {
+        await m(onChangePeerPromise);
+      }
     }
 
     /* if(samePeer && this.chat.setPeerPromise) {
@@ -5871,7 +5880,7 @@ export default class ChatBubbles {
       }
     }
 
-    if(startParam === undefined && await m(this.chat.isStartButtonNeeded())) {
+    if(startParam === undefined && await m(startButtonNeededPromise ?? this.chat.isStartButtonNeeded())) {
       startParam = BOT_START_PARAM;
     }
 
@@ -5942,9 +5951,10 @@ export default class ChatBubbles {
 
       this.followStack.length = 0;
 
-      this.passEntities = {
-        messageEntityBotCommand: await m(this.managers.appPeersManager.isAnyGroup(peerId)) || this.chat.isBot
-      };
+      const isAnyGroup = samePeer ?
+        await m(this.managers.appPeersManager.isAnyGroup(peerId)) :
+        this.chat.isAnyGroup;
+      this.passEntities = {messageEntityBotCommand: isAnyGroup || this.chat.isBot};
     }
 
     if(DEBUG) {
