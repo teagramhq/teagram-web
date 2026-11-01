@@ -6349,8 +6349,11 @@ export default class ChatBubbles {
       // this.chatInner.classList.remove('disable-hover', 'is-scrolling'); // warning, performance!
     }).catch((err) => {
       log.error('setPeer promise error:', err);
-      if(!middleware()) {
-        this.preloader.detach();
+      const isCurrent = middleware();
+      this.preloader.detach();
+      if(isCurrent) {
+        animationIntersector.unlockGroup(this.chat.animationGroup);
+        this.lazyLoadQueue.unlock();
       }
 
       throw err;
