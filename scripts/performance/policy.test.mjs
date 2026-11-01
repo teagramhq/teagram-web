@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceTable, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS} from './policy.mjs';
+import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS} from './policy.mjs';
 
 const SCALES = ['1x', '100x'];
 const CURRENT_FIXTURE = {
@@ -76,6 +76,25 @@ test('blocks a 100 ms main-thread task on 100x cold load from the first run', ()
 
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('coldChatList') && failure.includes('long task')));
   assert.equal(result.blockingFailures.some((failure) => failure.includes('1x coldChatList') && failure.includes('long task')), false);
+});
+
+test('reports startup phase medians across every cold and warm trace repeat', () => {
+  const diagnostics = {
+    coldChatList: Array.from({length: 6}, (_, index) => ({
+      mainPhases: [{name: 'main.bootstrapIm.import', startMs: 100 + index * 10, durationMs: 10 + index * 10}],
+      workerPhases: [{name: 'worker.managers.create', accountNumber: 2, startMs: 300 + index * 20, durationMs: 20 + index * 10}]
+    })),
+    warmChatList: Array.from({length: 3}, (_, index) => ({
+      mainPhases: [{name: 'main.bootstrapIm.import', startMs: 200 + index * 20, durationMs: 40 + index * 10}],
+      workerPhases: [{name: 'worker.managers.create', accountNumber: 2, startMs: 500 + index * 50, durationMs: 70 + index * 10}]
+    }))
+  };
+
+  const table = formatPerformanceTraceTable(diagnostics);
+
+  assert.match(table, /over 6 cold repeats and 3 warm repeats/);
+  assert.match(table, /\| main\.bootstrapIm\.import \| 125\.0 \| 35\.0 \| 220\.0 \| 50\.0 \|/);
+  assert.match(table, /\| worker\.managers\.create \(account 2\) \| 350\.0 \| 45\.0 \| 550\.0 \| 80\.0 \|/);
 });
 
 test('blocks an added 100 ms task when the 100x cold-load base already has long tasks', () => {
