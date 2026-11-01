@@ -77,7 +77,7 @@ beforeEach(() => {
   delete (window as any).requestIdleCallback;
 });
 
-test('schedules deferred UI imports immediately after the chat list paints', async() => {
+test('schedules deferred UI imports when idle after the chat list paints', async() => {
   let idle: () => void;
   let idleOptions: {timeout?: number};
   (window as any).requestIdleCallback = (callback: () => void, options: {timeout?: number}) => {
@@ -97,7 +97,8 @@ test('schedules deferred UI imports immediately after the chat list paints', asy
     'first-paint',
     'idle-scheduled'
   ]);
-  expect(idleOptions).toEqual({timeout: 0});
+  expect(idleOptions).toEqual({timeout: 2000});
+  expect(document.body.dataset.deferredUi).toBe('pending');
 
   idle();
   await vi.waitFor(() => expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1));
@@ -107,6 +108,7 @@ test('schedules deferred UI imports immediately after the chat list paints', asy
     'menu-module',
     'contacts-module'
   ]));
+  await vi.waitFor(() => expect(document.body.dataset.deferredUi).toBe('ready'));
 });
 
 test('logs a rejected chat UI initialization from the deferred loader', async() => {
@@ -123,6 +125,7 @@ test('logs a rejected chat UI initialization from the deferred loader', async() 
   idle();
   await vi.waitFor(() => expect(mocks.errors).toHaveLength(1));
   expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1);
+  await vi.waitFor(() => expect(document.body.dataset.deferredUi).toBe('ready'));
 });
 
 test('loads deferred UI through the timeout fallback when requestIdleCallback is unavailable', async() => {

@@ -24,6 +24,9 @@ let bootstrapped = false;
 export async function bootstrapIm(): Promise<void> {
   if(bootstrapped) return;
   bootstrapped = true;
+  // Pending until the deferred chat, search, menu and contacts code below has loaded, so
+  // automation can start an interaction without racing that load.
+  document.body.dataset.deferredUi = 'pending';
 
   await rootScope.managers.appStateManager.pushToState('authState', {_: 'authStateSignedIn'});
 
@@ -67,21 +70,25 @@ export async function bootstrapIm(): Promise<void> {
   await doubleRaf();
   document.body.classList.remove('has-auth-pages');
 
-  // Start these imports after the list paints. The zero timeout prevents waiting for a later idle
-  // period, so a first menu or contacts click does not trigger the chunk download.
+  // Load these once the list has painted and the main thread is idle, so they neither lengthen
+  // this bootstrap nor wait for the first click that needs them.
   const loadDeferredUi = () => {
-    void import('@lib/appImManager')
-    .then(({default: appImManager}) => appImManager.initializeChatUi())
-    .catch((error) => log.error('Failed to initialize chat UI:', error));
-    void import('@components/appSearchSuper')
-    .catch((error) => log.error('Failed to load search UI:', error));
-    void import('@components/buttonMenu')
-    .catch((error) => log.error('Failed to load button menu:', error));
-    void import('@components/sidebarLeft/tabs/contacts')
-    .catch((error) => log.error('Failed to load contacts tab:', error));
+    Promise.all([
+      import('@lib/appImManager')
+      .then(({default: appImManager}) => appImManager.initializeChatUi())
+      .catch((error) => log.error('Failed to initialize chat UI:', error)),
+      import('@components/appSearchSuper')
+      .catch((error) => log.error('Failed to load search UI:', error)),
+      import('@components/buttonMenu')
+      .catch((error) => log.error('Failed to load button menu:', error)),
+      import('@components/sidebarLeft/tabs/contacts')
+      .catch((error) => log.error('Failed to load contacts tab:', error))
+    ]).finally(() => {
+      document.body.dataset.deferredUi = 'ready';
+    });
   };
   if('requestIdleCallback' in window) {
-    requestIdleCallback(loadDeferredUi, {timeout: 0});
+    requestIdleCallback(loadDeferredUi, {timeout: 2000});
   } else {
     setTimeout(loadDeferredUi, 0);
   }

@@ -124,6 +124,9 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
 }
 
 async function begin(page: Page, requests: {value: number}, recordRpcSpans = true, traceEnabled = false) {
+  // The head client loads chat, search, menu and contacts code after first paint on an idle callback;
+  // wait for it so an interaction never measures that load. The base client never sets the marker.
+  await page.waitForFunction(() => document.body.dataset.deferredUi !== 'pending', undefined, {timeout: 60_000});
   requests.value = 0;
   await page.evaluate(async({recordSpans, traceEnabled}) => {
     if(traceEnabled) await (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace(recordSpans);
@@ -361,9 +364,6 @@ async function reloadChatList(page: Page, requests: {value: number}) {
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
-  // Chat UI is deliberately initialized after first paint; wait for its post-paint preload before
-  // measuring the chat-open interaction so the result does not depend on idle callback timing.
-  await page.waitForFunction(() => Boolean((window as any).appImManager?.chat), undefined, {timeout: 60_000});
   await begin(page, requests);
   await row.click();
   await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
