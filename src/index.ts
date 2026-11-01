@@ -33,6 +33,7 @@ import '@lib/debug/mountLogExport'; // main-thread-only: wires window.downloadLo
 import '@lib/debug/memoryReport'; // main-thread-only: wires window.memoryReport
 import apiManagerProxy from '@lib/apiManagerProxy';
 import {performancePhaseTrace} from '@lib/appManagers/performanceTrace';
+import startMainStartupTasks from '@lib/mainStartupTasks';
 import getProxiedManagers from '@lib/getProxiedManagers';
 import themeController from '@helpers/themeController';
 import overlayCounter from '@helpers/overlayCounter';
@@ -561,7 +562,6 @@ const onDocumentReady = async() => {
     const langPack = await I18n.getCacheLangPackAndApply();
     setDocumentLangPackProperties(langPack);
 
-    if(IS_BETA) import('./pages/bootstrapIm'); // cache it
     // const settings = await commonStateStorage.get('settings');
     // const timeFormat =
     // I18n.setTimeFormat(settings?.timeFormat || STATE_INIT.settings?.timeFormat);
@@ -575,11 +575,19 @@ const onDocumentReady = async() => {
   // * (4) exit if not updated
 
   // * (1)
-  const allStates = await (
-    import.meta.env.VITE_PERF_TRACE === '1' ?
+  const startupTasks = startMainStartupTasks({
+    bootstrapIm: () => import.meta.env.VITE_PERF_TRACE === '1' ?
+      performancePhaseTrace.track('main.bootstrapIm.import', () => import('./pages/bootstrapIm')) :
+      import('./pages/bootstrapIm'),
+    states: () => import.meta.env.VITE_PERF_TRACE === '1' ?
       performancePhaseTrace.track('main.states.load', () => apiManagerProxy.loadAllStates()) :
       apiManagerProxy.loadAllStates()
+  });
+  const bootstrapImImportResult = startupTasks.bootstrapIm.then(
+    (module) => ({status: 'fulfilled' as const, module}),
+    (error) => ({status: 'rejected' as const, error})
   );
+  const allStates = await startupTasks.states;
   const stateResult = allStates[getCurrentAccount()];
 
   // console.log(stateResult);
@@ -672,10 +680,6 @@ const onDocumentReady = async() => {
 
   console.log('got state, time:', performance.now() - perf);
 
-  await IMAGE_MIME_TYPES_SUPPORTED_PROMISE;
-
-  console.timeLog(TIME_LABEL, 'IMAGE_MIME_TYPES_SUPPORTED_PROMISE');
-
   appChatBackground.attach();
   appChatBackground.setBackground({transition: 'instant'});
 
@@ -765,13 +769,14 @@ const onDocumentReady = async() => {
     const fontsPromise = loadFonts();
     fadeInWhenFontsReady(document.getElementById('main-columns'), fontsPromise);
 
-    const bootstrapImImport = import.meta.env.VITE_PERF_TRACE === '1' ?
-      performancePhaseTrace.track('main.bootstrapIm.import', () => import('./pages/bootstrapIm')) :
-      import('./pages/bootstrapIm');
-    const [{bootstrapIm}, shouldAnimate] = await Promise.all([
-      bootstrapImImport,
+    const [bootstrapImResult, shouldAnimate] = await Promise.all([
+      bootstrapImImportResult,
       sessionStorage.get('should_animate_main')
     ]);
+    if(bootstrapImResult.status === 'rejected') {
+      throw bootstrapImResult.error;
+    }
+    const {bootstrapIm} = bootstrapImResult.module;
 
     const pageChatsEl = document.getElementById('page-chats') as HTMLDivElement;
 
