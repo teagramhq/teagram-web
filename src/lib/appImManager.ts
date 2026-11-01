@@ -2632,6 +2632,8 @@ export class AppImManager extends EventListenerBase<{
     const drops: ChatDragAndDrop[] = [];
     const mediaDrops: ChatDragAndDrop[] = [];
     let mounted = false, lastDialogElement: HTMLElement;
+    let activeDropsContainer: HTMLElement;
+    let activeDrops: ChatDragAndDrop[];
 
     function clearLastDialogElement() {
       if(!lastDialogElement) {
@@ -2647,21 +2649,25 @@ export class AppImManager extends EventListenerBase<{
         return;
       }
 
-      const fileEvent = loadAlongsideFilesFromEvent(e, () => Promise.all([
-        import('@components/chat/dragAndDrop'),
-        import('@components/popups/newMedia'),
-        import('@components/chat/utils')
-      ]), {onlyTypes: true});
-      const [modules, types] = await Promise.all([fileEvent.loaded, fileEvent.files]);
-      const [
-        {default: ChatDragAndDrop},
-        {default: PopupNewMedia, getCurrentNewMediaPopup},
-        {canUploadAsWhenEditing}
-      ] = modules;
-      const {isFiles} = fileEvent;
-
-      const newMediaPopup = getCurrentNewMediaPopup();
+      let _dropsContainer = activeDropsContainer;
+      let _drops = activeDrops;
       if(mount) {
+        const fileEvent = loadAlongsideFilesFromEvent(e, () => Promise.all([
+          import('@components/chat/dragAndDrop'),
+          import('@components/popups/newMedia'),
+          import('@components/chat/utils')
+        ]), {onlyTypes: true});
+        const [modules, types] = await Promise.all([fileEvent.loaded, fileEvent.files]);
+        if(!modules) return;
+
+        const [
+          {default: ChatDragAndDrop},
+          {default: PopupNewMedia, getCurrentNewMediaPopup},
+          {canUploadAsWhenEditing}
+        ] = modules;
+        const isFiles = fileEvent.isFiles || types.length > 0;
+        const newMediaPopup = getCurrentNewMediaPopup();
+
         if(!isFiles || (!(await this.canDrag()) && !newMediaPopup)) { // * skip dragging text case
           mount = false;
         }
@@ -2669,84 +2675,85 @@ export class AppImManager extends EventListenerBase<{
         if(mount === mounted) {
           return;
         }
-      }
 
-      const rights = await PopupNewMedia.canSend({...this.chat.getMessageSendingParams(), onlyVisible: true});
+        _dropsContainer = newMediaPopup ? mediaDropsContainer : dropsContainer;
+        _drops = newMediaPopup ? mediaDrops : drops;
+        activeDropsContainer = _dropsContainer;
+        activeDrops = _drops;
 
-      const _dropsContainer = newMediaPopup ? mediaDropsContainer : dropsContainer;
-      const _drops = newMediaPopup ? mediaDrops : drops;
+        if(!_drops.length) {
+          const rights = await PopupNewMedia.canSend({...this.chat.getMessageSendingParams(), onlyVisible: true});
+          const force = isFiles && !types.length; // * can't get file items not from 'drop' on Safari
 
-      if(mount && !_drops.length) {
-        const force = isFiles && !types.length; // * can't get file items not from 'drop' on Safari
+          // * a .mov counts as media — it gets converted to mp4 in the send popup
+          const [foundMedia, foundDocuments] = partition(types, (t) => MEDIA_MIME_TYPES_SUPPORTED.has(t) || t === 'video/quicktime');
+          const [foundPhotos, foundVideos] = partition(foundMedia, (t) => IMAGE_MIME_TYPES_SUPPORTED.has(t));
 
-        // * a .mov counts as media — it gets converted to mp4 in the send popup
-        const [foundMedia, foundDocuments] = partition(types, (t) => MEDIA_MIME_TYPES_SUPPORTED.has(t) || t === 'video/quicktime');
-        const [foundPhotos, foundVideos] = partition(foundMedia, (t) => IMAGE_MIME_TYPES_SUPPORTED.has(t));
-
-        if(!rights.send_docs) {
-          foundDocuments.length = 0;
-        } else {
-          foundDocuments.push(...foundMedia);
-        }
-
-        if(!rights.send_photos) {
-          foundPhotos.forEach((mimeType) => indexOfAndSplice(foundMedia, mimeType));
-          foundPhotos.length = 0;
-        }
-
-        if(!rights.send_videos) {
-          foundVideos.forEach((mimeType) => indexOfAndSplice(foundMedia, mimeType));
-          foundVideos.length = 0;
-        }
-
-        log('drag files', types, foundMedia, foundDocuments, foundPhotos, foundVideos);
-
-        if(newMediaPopup) {
-          newMediaPopup.appendDrops(_dropsContainer);
-
-          const length = (rights.send_docs ? [foundDocuments] : [foundPhotos, foundVideos]).reduce((acc, v) => acc + v.length, 0);
-          if(length || force) {
-            _drops.push(new ChatDragAndDrop(_dropsContainer, {
-              header: 'Preview.Dragging.AddItems',
-              headerArgs: [length],
-              onDrop: (e: DragEvent) => {
-                toggle(e, false);
-                log('drop', e);
-                this.onDocumentPaste(e, 'document');
-              }
-            }));
-          }
-        } else {
-          const canDragMediaWhenEditing = canUploadAsWhenEditing({message: this.chat.input?.editMessage, asWhat: 'media'});
-          const canDragDocumentWhenEditing = canUploadAsWhenEditing({message: this.chat.input?.editMessage, asWhat: 'document'});
-
-          if(canDragDocumentWhenEditing && (foundDocuments.length || force)) {
-            _drops.push(new ChatDragAndDrop(_dropsContainer, {
-              icon: 'dragfiles',
-              header: 'Chat.DropTitle',
-              subtitle: 'Chat.DropAsFilesDesc',
-              onDrop: (e: DragEvent) => {
-                toggle(e, false);
-                log('drop', e);
-                this.onDocumentPaste(e, 'document');
-              }
-            }));
+          if(!rights.send_docs) {
+            foundDocuments.length = 0;
+          } else {
+            foundDocuments.push(...foundMedia);
           }
 
-          if(canDragMediaWhenEditing && (foundMedia.length || force)) {
-            _drops.push(new ChatDragAndDrop(_dropsContainer, {
-              icon: 'dragmedia',
-              header: 'Chat.DropTitle',
-              subtitle: 'Chat.DropQuickDesc',
-              onDrop: (e: DragEvent) => {
-                toggle(e, false);
-                log('drop', e);
-                this.onDocumentPaste(e, 'media');
-              }
-            }));
+          if(!rights.send_photos) {
+            foundPhotos.forEach((mimeType) => indexOfAndSplice(foundMedia, mimeType));
+            foundPhotos.length = 0;
           }
 
-          this.chat.container.append(_dropsContainer);
+          if(!rights.send_videos) {
+            foundVideos.forEach((mimeType) => indexOfAndSplice(foundMedia, mimeType));
+            foundVideos.length = 0;
+          }
+
+          log('drag files', types, foundMedia, foundDocuments, foundPhotos, foundVideos);
+
+          if(newMediaPopup) {
+            newMediaPopup.appendDrops(_dropsContainer);
+
+            const length = (rights.send_docs ? [foundDocuments] : [foundPhotos, foundVideos]).reduce((acc, v) => acc + v.length, 0);
+            if(length || force) {
+              _drops.push(new ChatDragAndDrop(_dropsContainer, {
+                header: 'Preview.Dragging.AddItems',
+                headerArgs: [length],
+                onDrop: (e: DragEvent) => {
+                  toggle(e, false);
+                  log('drop', e);
+                  this.onDocumentPaste(e, 'document');
+                }
+              }));
+            }
+          } else {
+            const canDragMediaWhenEditing = canUploadAsWhenEditing({message: this.chat.input?.editMessage, asWhat: 'media'});
+            const canDragDocumentWhenEditing = canUploadAsWhenEditing({message: this.chat.input?.editMessage, asWhat: 'document'});
+
+            if(canDragDocumentWhenEditing && (foundDocuments.length || force)) {
+              _drops.push(new ChatDragAndDrop(_dropsContainer, {
+                icon: 'dragfiles',
+                header: 'Chat.DropTitle',
+                subtitle: 'Chat.DropAsFilesDesc',
+                onDrop: (e: DragEvent) => {
+                  toggle(e, false);
+                  log('drop', e);
+                  this.onDocumentPaste(e, 'document');
+                }
+              }));
+            }
+
+            if(canDragMediaWhenEditing && (foundMedia.length || force)) {
+              _drops.push(new ChatDragAndDrop(_dropsContainer, {
+                icon: 'dragmedia',
+                header: 'Chat.DropTitle',
+                subtitle: 'Chat.DropQuickDesc',
+                onDrop: (e: DragEvent) => {
+                  toggle(e, false);
+                  log('drop', e);
+                  this.onDocumentPaste(e, 'media');
+                }
+              }));
+            }
+
+            this.chat.container.append(_dropsContainer);
+          }
         }
       }
 
@@ -2854,6 +2861,8 @@ export class AppImManager extends EventListenerBase<{
     dropsContainer.classList.add('drops-container');
 
     const mediaDropsContainer = dropsContainer.cloneNode(true) as HTMLElement;
+    activeDropsContainer = dropsContainer;
+    activeDrops = drops;
   }
 
   private async canDrag(ephemeral = this.chat?.input?.isEphemeralComposerMode()) {
@@ -2884,6 +2893,11 @@ export class AppImManager extends EventListenerBase<{
         }
       }
     });
+    files ??= await fileEvent.files;
+    if(!files.length && !fileEvent.isFiles) {
+      return;
+    }
+
     const {default: PopupNewMedia, getCurrentNewMediaPopup} = await fileEvent.loaded;
     const newMediaPopup = getCurrentNewMediaPopup();
     const ephemeralSnapshot = this.chat?.input?.getEphemeralSendingSnapshot();
@@ -2891,7 +2905,6 @@ export class AppImManager extends EventListenerBase<{
     // console.log('document paste');
     // console.log('item', event.clipboardData.getData());
 
-    files ??= await fileEvent.files;
     if(!(await this.canDrag(!!ephemeralSnapshot)) && !newMediaPopup) {
       return;
     }

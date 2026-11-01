@@ -72,7 +72,7 @@ export function loadAlongsideFilesFromEvent<T>(
     files?: any[],
     beforeLoad?: (isFiles: boolean) => void
   } = {}
-): {isFiles: boolean, loaded: Promise<T>, files: Promise<any[]>} {
+): {isFiles: boolean, loaded: Promise<T | undefined>, files: Promise<any[]>} {
   const dataTransfer = 'dataTransfer' in e ? (e as DragEvent).dataTransfer : undefined;
   const types = dataTransfer?.types;
   // @ts-ignore
@@ -80,7 +80,9 @@ export function loadAlongsideFilesFromEvent<T>(
   const files = options.files ? Promise.resolve(options.files) : getFilesFromEvent(e, options.onlyTypes);
 
   options.beforeLoad?.(isFiles);
-  const loaded = load();
+  const loaded = files.then((capturedFiles) => {
+    return isFiles || capturedFiles.length ? load() : undefined;
+  });
 
   return {isFiles, loaded, files};
 }
