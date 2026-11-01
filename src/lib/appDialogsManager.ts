@@ -66,6 +66,7 @@ import callsController from '@lib/calls/callsController';
 import conferenceInvitesController from '@lib/calls/conferenceInvitesController';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import noop from '@helpers/noop';
+import cachePromiseWithRetry from '@helpers/cachePromiseWithRetry';
 import pause from '@helpers/schedulers/pause';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import filterAsync from '@helpers/array/filterAsync';
@@ -2047,23 +2048,25 @@ export class AppDialogsManager {
   }
 
   private loadForumUi() {
-    this.forumUiPromise ??= Promise.all([
-      import('@components/forumTab/forumTab'),
-      import('@components/forumTab/findForumTabByPeerId'),
-      import('@components/forumTab/communityOpenMode'),
-      import('@appManagers/utils/communities/isCommunity'),
-      import('@components/forumTab/fillRegister')
-    ]).then(([forumTab, findForumTabByPeerId, communityOpenMode, isCommunity, fillRegister]) => {
-      fillRegister.fillForumTabRegister();
-      return {
-        ForumTab: forumTab.ForumTab,
-        findForumTabByPeerId: findForumTabByPeerId.default,
-        shouldOpenForumAsNavigationTab: communityOpenMode.default,
-        isCommunityChat: isCommunity.default
-      };
-    });
-
-    return this.forumUiPromise;
+    return cachePromiseWithRetry(
+      () => this.forumUiPromise,
+      (promise) => this.forumUiPromise = promise,
+      () => Promise.all([
+        import('@components/forumTab/forumTab'),
+        import('@components/forumTab/findForumTabByPeerId'),
+        import('@components/forumTab/communityOpenMode'),
+        import('@appManagers/utils/communities/isCommunity'),
+        import('@components/forumTab/fillRegister')
+      ]).then(([forumTab, findForumTabByPeerId, communityOpenMode, isCommunity, fillRegister]) => {
+        fillRegister.fillForumTabRegister();
+        return {
+          ForumTab: forumTab.ForumTab,
+          findForumTabByPeerId: findForumTabByPeerId.default,
+          shouldOpenForumAsNavigationTab: communityOpenMode.default,
+          isCommunityChat: isCommunity.default
+        };
+      })
+    );
   }
 
   public openDialogInNewTab(element: HTMLElement) {

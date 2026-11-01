@@ -93,6 +93,7 @@ import wrapPeerTitle from '@components/wrappers/peerTitle';
 import getPeerTitle from '@components/wrappers/getPeerTitle';
 import NBSP from '@helpers/string/nbsp';
 import {makeMediaSize, MediaSize} from '@helpers/mediaSize';
+import cachePromiseWithRetry from '@helpers/cachePromiseWithRetry';
 import {MiddleEllipsisElement} from '@components/middleEllipsis';
 import parseUriParams from '@helpers/string/parseUriParams';
 import getMessageThreadId from '@appManagers/utils/messages/getMessageThreadId';
@@ -778,8 +779,8 @@ export class AppImManager extends EventListenerBase<{
         const threadId = getMessageThreadId(options.message, {isForum});
 
         if(
-          this.chat.peerId === options.message.peerId &&
-          this.chat.threadId === threadId &&
+          this.chat?.peerId === options.message.peerId &&
+          this.chat?.threadId === threadId &&
           !idleController.isIdle
         ) {
           return;
@@ -1707,7 +1708,7 @@ export class AppImManager extends EventListenerBase<{
       } else if(e.altKey && (key === 'ArrowUp' || key === 'ArrowDown')) {
         cancelEvent(e);
         this.managers.dialogsStorage.getNextDialog(
-          this.chat.peerId,
+          this.chat?.peerId,
           key === 'ArrowDown',
           appDialogsManager.filterId
         ).then((dialog) => {
@@ -2063,7 +2064,7 @@ export class AppImManager extends EventListenerBase<{
       return;
     }
 
-    if(isBotforum && this.chat.peerId !== peerId) {
+    if(isBotforum && this.chat?.peerId !== peerId) {
       appDialogsManager.toggleForumTabByPeerId(peerId, true);
     }
 
@@ -3168,56 +3169,60 @@ export class AppImManager extends EventListenerBase<{
   }
 
   private loadInternalLinkProcessor() {
-    this.internalLinkProcessorPromise ??= import('@lib/internalLinkProcessor').then(({default: internalLinkProcessor}) => {
-      internalLinkProcessor.construct(this.managers);
-      return internalLinkProcessor;
-    });
-
-    return this.internalLinkProcessorPromise;
+    return cachePromiseWithRetry(
+      () => this.internalLinkProcessorPromise,
+      (promise) => this.internalLinkProcessorPromise = promise,
+      () => import('@lib/internalLinkProcessor').then(({default: internalLinkProcessor}) => {
+        internalLinkProcessor.construct(this.managers);
+        return internalLinkProcessor;
+      })
+    );
   }
 
   public initializeChatUi() {
     if(this.chatUiPromise) return this.chatUiPromise;
     if(this.chat) return Promise.resolve();
 
-    this.chatUiPromise = Promise.all([
-      import('@components/chat/chat'),
-      import('@components/chat/bubbles/chatBackground'),
-      import('@components/chat/audio'),
-      import('@components/chat/markupTooltip'),
-      import('@components/chat/reactions'),
-      import('@components/popups/datePicker'),
-      import('@components/sidebarLeft/tabs/background'),
-      this.loadInternalLinkProcessor()
-    ]).then(async([{default: Chat}, {default: appChatBackground}, {default: createChatAudio}, {default: MarkupTooltip}, {savedReactionTags}, {default: showDatePickerPopup}, {AppBackgroundTab}]) => {
-      this.ChatConstructor = Chat;
-      this.appChatBackground = appChatBackground;
-      appChatBackground.attach(document.body);
-      themeController.appChatBackground = appChatBackground;
-      themeController.AppBackgroundTab = AppBackgroundTab;
-      if(IS_CALL_SUPPORTED || IS_GROUP_CALL_SUPPORTED) {
-        const {default: createTopbarCall} = await import('@components/topbarCall');
-        this.topbarCall = createTopbarCall(this.managers);
-        this.columnEl.append(this.topbarCall.container);
-      }
-      this.chatAudio = createChatAudio(this, this.managers);
-      this.columnEl.append(this.chatAudio.container);
-      this.managers.appReactionsManager.getSavedReactionTags().then((tags) => {
-        savedReactionTags.splice(0, savedReactionTags.length, ...tags);
-      });
-      MarkupTooltip.getInstance().handleSelection();
-      MarkupTooltip.showDatePickerPopup = showDatePickerPopup;
-      const applyCurrentTheme = () => this.applyCurrentTheme({noSetTheme: true});
-      if(this.legacyThemeCleanupPromise) {
-        void this.legacyThemeCleanupPromise.then(applyCurrentTheme);
-      } else {
-        void applyCurrentTheme();
-      }
-      const chat = this.createNewChat();
-      this.chatsSelectTab(chat);
-    });
-
-    return this.chatUiPromise;
+    return cachePromiseWithRetry(
+      () => this.chatUiPromise,
+      (promise) => this.chatUiPromise = promise,
+      () => Promise.all([
+        import('@components/chat/chat'),
+        import('@components/chat/bubbles/chatBackground'),
+        import('@components/chat/audio'),
+        import('@components/chat/markupTooltip'),
+        import('@components/chat/reactions'),
+        import('@components/popups/datePicker'),
+        import('@components/sidebarLeft/tabs/background'),
+        this.loadInternalLinkProcessor()
+      ]).then(async([{default: Chat}, {default: appChatBackground}, {default: createChatAudio}, {default: MarkupTooltip}, {savedReactionTags}, {default: showDatePickerPopup}, {AppBackgroundTab}]) => {
+        this.ChatConstructor = Chat;
+        this.appChatBackground = appChatBackground;
+        appChatBackground.attach(document.body);
+        themeController.appChatBackground = appChatBackground;
+        themeController.AppBackgroundTab = AppBackgroundTab;
+        if(IS_CALL_SUPPORTED || IS_GROUP_CALL_SUPPORTED) {
+          const {default: createTopbarCall} = await import('@components/topbarCall');
+          this.topbarCall = createTopbarCall(this.managers);
+          this.columnEl.append(this.topbarCall.container);
+        }
+        this.chatAudio = createChatAudio(this, this.managers);
+        this.columnEl.append(this.chatAudio.container);
+        this.managers.appReactionsManager.getSavedReactionTags().then((tags) => {
+          savedReactionTags.splice(0, savedReactionTags.length, ...tags);
+        });
+        MarkupTooltip.getInstance().handleSelection();
+        MarkupTooltip.showDatePickerPopup = showDatePickerPopup;
+        const applyCurrentTheme = () => this.applyCurrentTheme({noSetTheme: true});
+        if(this.legacyThemeCleanupPromise) {
+          void this.legacyThemeCleanupPromise.then(applyCurrentTheme);
+        } else {
+          void applyCurrentTheme();
+        }
+        const chat = this.createNewChat();
+        this.chatsSelectTab(chat);
+      })
+    );
   }
 
   private createNewChat() {

@@ -3,6 +3,7 @@ import Scrollable from '@components/scrollable2';
 import styles from '@components/stories/list.module.scss';
 import mediaSizes from '@helpers/mediaSizes';
 import rootScope from '@lib/rootScope';
+import {logger} from '@lib/logger';
 import {fastSmoothScrollToStart} from '@helpers/fastSmoothScroll';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import {AvatarNew} from '@components/avatarNew';
@@ -29,6 +30,7 @@ const ITEM_WIDTH = 74 + ITEM_MARGIN * 2;
 const ITEM_AVATAR_SIZE = 54;
 const STACKED_LENGTH = 3;
 const SMALL_SIDEBAR_WIDTH = 348;
+const log = logger('StoriesList');
 
 function _StoriesList(props: {
   foldInto: HTMLElement,
@@ -96,6 +98,8 @@ function _StoriesList(props: {
 
     import('@components/stories/viewer').then(({createStoriesViewer}) => {
       if(active) createStoriesViewer({onExit, target});
+    }).catch((error) => {
+      if(active) log.error('Failed to load stories viewer:', error);
     });
   });
 

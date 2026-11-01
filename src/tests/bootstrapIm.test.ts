@@ -1,7 +1,9 @@
-import {expect, test, vi} from 'vitest';
+import {beforeEach, expect, test, vi} from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-  events: [] as string[]
+  events: [] as string[],
+  errors: [] as unknown[][],
+  initializeChatUi: vi.fn(() => Promise.resolve())
 }));
 
 vi.mock('@lib/appDialogsManager', () => {
@@ -17,7 +19,7 @@ vi.mock('@lib/appImManager', () => {
   mocks.events.push('im-module');
   return {
     default: {
-      initializeChatUi: () => mocks.events.push('chat-ui-initialized')
+      initializeChatUi: mocks.initializeChatUi
     }
   };
 });
@@ -36,6 +38,13 @@ vi.mock('@helpers/schedulers', () => ({
   doubleRaf: async() => mocks.events.push('first-paint')
 }));
 
+vi.mock('@lib/logger', () => ({
+  logger: () => ({
+    error: (...args: unknown[]) => mocks.errors.push(args)
+  }),
+  LogTypes: {}
+}));
+
 vi.mock('@components/appSearchSuper', () => {
   mocks.events.push('search-module');
   return {default: {}};
@@ -50,22 +59,32 @@ vi.mock('@components/sidebarLeft/tabs/contacts', () => {
   mocks.events.push('contacts-module');
   return {default: {}};
 });
-
 vi.mock('@helpers/dom/loadFonts', () => ({default: () => Promise.resolve()}));
 vi.mock('@helpers/voiceRecorder/isNativeSupported', () => ({default: () => true}));
 vi.mock('@/pages/mountAuthFlow', () => ({disposeActiveAuthFlow: vi.fn()}));
 
-import {bootstrapIm} from '@/pages/bootstrapIm';
+async function loadBootstrapIm() {
+  vi.resetModules();
+  return import('@/pages/bootstrapIm');
+}
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+  mocks.events.length = 0;
+  mocks.errors.length = 0;
+  mocks.initializeChatUi.mockReset().mockResolvedValue(undefined);
+  document.body.innerHTML = '<div id="page-chats"></div>';
+  delete (window as any).requestIdleCallback;
+});
 
 test('loads chat, search, menu and contacts code only when idle after the chat list has painted', async() => {
-  mocks.events.length = 0;
-  document.body.innerHTML = '<div id="page-chats"></div>';
   let idle: () => void;
   (window as any).requestIdleCallback = (callback: () => void) => {
     idle = callback;
     return 1;
   };
 
+  const {bootstrapIm} = await loadBootstrapIm();
   await bootstrapIm();
 
   expect(mocks.events).toEqual([
@@ -76,7 +95,52 @@ test('loads chat, search, menu and contacts code only when idle after the chat l
   ]);
 
   idle();
-  await vi.waitFor(() => expect(mocks.events).toContain('chat-ui-initialized'));
-  expect(mocks.events).toEqual(expect.arrayContaining(['im-module', 'search-module', 'menu-module', 'contacts-module']));
-  delete (window as any).requestIdleCallback;
+  await vi.waitFor(() => expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1));
+  expect(mocks.events).toEqual(expect.arrayContaining([
+    'im-module',
+    'search-module',
+    'menu-module',
+    'contacts-module'
+  ]));
+});
+
+test('logs a failed chat UI initialization and retries on the next deferred initialization', async() => {
+  let idle: () => void;
+  (window as any).requestIdleCallback = (callback: () => void) => {
+    idle = callback;
+    return 1;
+  };
+  mocks.initializeChatUi
+  .mockRejectedValueOnce(new Error('chat UI chunk failed'))
+  .mockResolvedValueOnce(undefined);
+
+  const {bootstrapIm} = await loadBootstrapIm();
+  await bootstrapIm();
+
+  idle();
+  await vi.waitFor(() => expect(mocks.errors).toHaveLength(1));
+  expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1);
+
+  idle();
+  await vi.waitFor(() => expect(mocks.initializeChatUi).toHaveBeenCalledTimes(2));
+});
+
+test('loads deferred UI through the timeout fallback when requestIdleCallback is unavailable', async() => {
+  let fallback: () => void;
+  const originalSetTimeout = globalThis.setTimeout;
+  vi.spyOn(globalThis, 'setTimeout').mockImplementation(((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+    if(delay === 0) {
+      fallback = callback as () => void;
+      return 1 as any;
+    }
+
+    return originalSetTimeout(callback, delay, ...args);
+  }) as typeof setTimeout);
+
+  const {bootstrapIm} = await loadBootstrapIm();
+  await bootstrapIm();
+
+  expect(mocks.initializeChatUi).not.toHaveBeenCalled();
+  fallback();
+  await vi.waitFor(() => expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1));
 });

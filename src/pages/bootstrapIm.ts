@@ -4,9 +4,11 @@ import {doubleRaf} from '@helpers/schedulers';
 import isNativeVoiceRecorderSupported from '@helpers/voiceRecorder/isNativeSupported';
 import rootScope from '@lib/rootScope';
 import {performancePhaseTrace} from '@lib/appManagers/performanceTrace';
+import {logger} from '@lib/logger';
 
 import {disposeActiveAuthFlow} from '@/pages/mountAuthFlow';
 
+const log = logger('BootstrapIm');
 let bootstrapped = false;
 
 /**
@@ -69,10 +71,15 @@ export async function bootstrapIm(): Promise<void> {
   // thread is idle, so it neither lengthens this bootstrap nor waits for the
   // first click that needs it.
   const loadDeferredUi = () => {
-    void import('@lib/appImManager').then(({default: appImManager}) => appImManager.initializeChatUi());
-    void import('@components/appSearchSuper');
-    void import('@components/buttonMenu');
-    void import('@components/sidebarLeft/tabs/contacts');
+    void import('@lib/appImManager')
+    .then(({default: appImManager}) => appImManager.initializeChatUi())
+    .catch((error) => log.error('Failed to initialize chat UI:', error));
+    void import('@components/appSearchSuper')
+    .catch((error) => log.error('Failed to load search UI:', error));
+    void import('@components/buttonMenu')
+    .catch((error) => log.error('Failed to load button menu:', error));
+    void import('@components/sidebarLeft/tabs/contacts')
+    .catch((error) => log.error('Failed to load contacts tab:', error));
   };
   if('requestIdleCallback' in window) {
     requestIdleCallback(loadDeferredUi, {timeout: 2000});
