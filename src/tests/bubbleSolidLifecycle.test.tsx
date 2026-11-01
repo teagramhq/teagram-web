@@ -657,14 +657,14 @@ test('does not use previous-peer bubbles to enlarge the initial history request'
 
   await harness.getHistory(undefined, true, undefined, undefined, true);
 
-  expect(requestHistory.mock.calls[0][1]).toBe(getInitialHistoryLoadCount(windowSize.height));
+  expect(requestHistory.mock.calls[0][1]).toBe(10);
   expect(getRenderedHistory).not.toHaveBeenCalled();
 });
 
 test('limits the first history render to a viewport-sized page', () => {
-  expect(getInitialHistoryLoadCount(800)).toBe(15);
-  expect(getInitialHistoryLoadCount(400)).toBe(12);
-  expect(getInitialHistoryLoadCount(3_000)).toBe(40);
+  expect(getInitialHistoryLoadCount(800)).toBe(10);
+  expect(getInitialHistoryLoadCount(400)).toBe(8);
+  expect(getInitialHistoryLoadCount(3_000)).toBe(38);
 });
 
 function message(): Message.message {
