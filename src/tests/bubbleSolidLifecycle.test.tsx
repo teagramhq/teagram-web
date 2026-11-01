@@ -486,6 +486,71 @@ test('reuses initialized peer capabilities while preparing a regular user chat i
   expect(appMessagesManager.isAnonymousSending).not.toHaveBeenCalled();
 });
 
+test('updates the regular peer gift button without blocking peer setup on its profile', async() => {
+  const appPeersManager = {
+    isBroadcast: vi.fn(async() => false),
+    isBroadcastGroup: vi.fn(async() => false),
+    isBot: vi.fn(async() => false),
+    canPinMessage: vi.fn(async() => false)
+  };
+  const appMessagesManager = {isAnonymousSending: vi.fn(async() => false)};
+  const getProfileByPeerId = vi.fn(async() => ({cached: true, result: Promise.resolve({})}));
+  const getProfile = vi.fn(async() => ({pFlags: {display_gifts_button: true}}));
+  const getGlobalPrivacySettings = vi.fn(async() => ({pFlags: {display_gifts_button: false}}));
+  const getAcknowledgedGlobalPrivacySettings = vi.fn(async() => ({cached: true, result: Promise.resolve({})}));
+  const giftButtonClassList = {add: vi.fn(), toggle: vi.fn()};
+  const chat = {
+    peerId,
+    type: 'chat',
+    isBroadcast: false,
+    isBroadcastGroup: false,
+    isBot: false,
+    isChannel: false,
+    isAnonymousSending: false,
+    isPremiumRequired: false,
+    canSend: vi.fn(async() => true),
+    getAutoDeletePeriod: vi.fn(async() => ({cached: true, result: Promise.resolve(0)})),
+    canManageAutoDelete: vi.fn(async() => false)
+  } as any;
+  const input = Object.assign(Object.create(ChatInput.prototype), {
+    managers: {
+      appPeersManager,
+      appProfileManager: {getProfile},
+      appPrivacyManager: {getGlobalPrivacySettings},
+      appMessagesManager,
+      appNotificationsManager: {isPeerLocalMuted: vi.fn(async() => false)},
+      acknowledged: {
+        appProfileManager: {getProfileByPeerId},
+        appPrivacyManager: {getGlobalPrivacySettings: getAcknowledgedGlobalPrivacySettings}
+      }
+    },
+    chat,
+    createSendAs: vi.fn(() => undefined),
+    filterAttachMenuButtons: vi.fn(() => []),
+    getNeededFakeContainer: vi.fn(async() => undefined),
+    chatInput: {classList: {toggle: vi.fn()}},
+    btnAutoDeletePeriod: {classList: {toggle: vi.fn()}, replaceChildren: vi.fn()},
+    unblockBtn: {classList: {toggle: vi.fn()}},
+    btnSuggestPost: {classList: {toggle: vi.fn()}},
+    btnSendGift: {classList: giftButtonClassList},
+    botStartBtn: {classList: {toggle: vi.fn()}},
+    inputState: {set: vi.fn()},
+    _center: vi.fn(),
+    setStarsAmount: vi.fn()
+  }) as any;
+
+  const applyPeerChange = await ChatInput.prototype.finishPeerChange.call(input, {peerId, middleware: () => true});
+
+  expect(getProfile).not.toHaveBeenCalled();
+  await expect(Promise.resolve().then(applyPeerChange)).resolves.toBeUndefined();
+
+  expect(getAcknowledgedGlobalPrivacySettings).not.toHaveBeenCalled();
+  await vi.waitFor(() => expect(giftButtonClassList.toggle).toHaveBeenCalledWith('hide', false));
+  expect(getProfile).toHaveBeenCalledTimes(1);
+  expect(getProfileByPeerId).not.toHaveBeenCalled();
+  expect(getGlobalPrivacySettings).toHaveBeenCalledTimes(1);
+});
+
 test('does not use previous-peer bubbles to enlarge the initial history request', async() => {
   const previousPeerId = 11 as PeerId;
   const getRenderedHistory = vi.fn(() => [makeFullMid(previousPeerId, 100)]);
