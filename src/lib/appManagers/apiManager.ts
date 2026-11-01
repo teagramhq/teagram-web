@@ -775,11 +775,17 @@ export class ApiManager extends ApiManagerMethods {
     }
   }
 
-  public trackPerformanceRpcWait<T, P extends Promise<T>>(method: string, request: P): P {
-    // A raw getDialogs invoke may be channel reconciliation, before the first chat-list page request.
-    if(import.meta.env.VITE_PERF_TRACE === '1' && method === 'messages.getDialogs' && this.finishFirstDialogsDispatchTrace) {
+  public finishFirstDialogsTrace() {
+    if(import.meta.env.VITE_PERF_TRACE === '1' && this.finishFirstDialogsDispatchTrace) {
       this.finishFirstDialogsDispatchTrace();
       this.finishFirstDialogsDispatchTrace = undefined;
+    }
+  }
+
+  public trackPerformanceRpcWait<T, P extends Promise<T>>(method: string, request: P): P {
+    // A raw getDialogs invoke may be channel reconciliation, before the first chat-list page request.
+    if(import.meta.env.VITE_PERF_TRACE === '1' && method === 'messages.getDialogs') {
+      this.finishFirstDialogsTrace();
     }
     return import.meta.env.VITE_PERF_TRACE === '1' ?
       this.performanceRpcTrace?.trackWait(method, request) ?? request :

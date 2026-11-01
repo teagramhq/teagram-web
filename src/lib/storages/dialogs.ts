@@ -2007,6 +2007,7 @@ export default class DialogsStorage extends AppManager {
     const isEnoughDialogs = curDialogStorage.length >= (offset + limit);
     if((isServerSearchSupported ? false : query) || loadedAll || isEnoughDialogs || forceLocal) {
       if(!query && !offset && filterId === FOLDER_ID_ALL) {
+        if(import.meta.env.VITE_PERF_TRACE === '1') this.apiManager.finishFirstDialogsTrace();
         this.reconcileCachedChannelDialogs();
       }
 
