@@ -30,10 +30,16 @@ export async function startMeasurementAtClick(target: Locator) {
       perf.firstBubblePromise = new Promise((resolve) => {
         resolveFirstBubble = resolve;
       });
-      const checkForBubble = () => {
+      const observedBubbles = new WeakSet<HTMLElement>();
+      function checkForBubble() {
         const bubbles = document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]');
         for(const bubble of bubbles) {
           if(peerId && bubble.dataset.peerId !== peerId) continue;
+
+          if(!observedBubbles.has(bubble)) {
+            observedBubbles.add(bubble);
+            resizeObserver.observe(bubble);
+          }
 
           const style = getComputedStyle(bubble);
           const rect = bubble.getBoundingClientRect();
@@ -46,13 +52,15 @@ export async function startMeasurementAtClick(target: Locator) {
             preInteractionMs: perf.preInteractionMs
           };
           perf.firstBubbleBoundary = boundary;
-          observer.disconnect();
+          mutationObserver.disconnect();
+          resizeObserver.disconnect();
           resolveFirstBubble(boundary);
           return;
         }
-      };
-      const observer = new MutationObserver(checkForBubble);
-      observer.observe(document.documentElement, {
+      }
+      const mutationObserver = new MutationObserver(checkForBubble);
+      const resizeObserver = new ResizeObserver(checkForBubble);
+      mutationObserver.observe(document.documentElement, {
         attributes: true,
         attributeFilter: ['class', 'hidden', 'style'],
         childList: true,

@@ -48,3 +48,30 @@ test('records the first visible bubble when it is mounted', async({page}) => {
   expect(result.boundary.preInteractionMs).toBeGreaterThanOrEqual(0);
   expect(Math.abs(result.boundary.startedAtMs + result.boundary.ms - result.insertedAt)).toBeLessThan(50);
 });
+
+test('records a bubble that becomes visible after a stylesheet layout change', async({page}) => {
+  await page.setContent('<style>.bubble {display:block;width:10px;height:0}</style><button data-peer-id="42">Open chat</button><main class="bubbles"></main>');
+  await page.evaluate(() => {
+    (window as any).__teagramPerf = {started: performance.now()};
+  });
+  const button = page.getByRole('button', {name: 'Open chat'});
+  await startMeasurementAtClick(button);
+  await button.evaluate((element) => element.addEventListener('click', () => {
+    setTimeout(() => {
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.dataset.mid = '1';
+      bubble.dataset.peerId = '42';
+      document.querySelector('.bubbles')!.append(bubble);
+      setTimeout(() => {
+        const stylesheet = document.styleSheets[0] as CSSStyleSheet;
+        stylesheet.insertRule('.bubble {height:10px}', stylesheet.cssRules.length);
+      }, 20);
+    }, 20);
+  }));
+  await button.click();
+
+  await expect.poll(async() => page.evaluate(() => !!(window as any).__teagramPerf.firstBubbleBoundary), {timeout: 500}).toBe(true);
+  const boundary = await page.evaluate(() => (window as any).__teagramPerf.firstBubbleBoundary);
+  expect(boundary.domNodes).toBeGreaterThan(0);
+});
