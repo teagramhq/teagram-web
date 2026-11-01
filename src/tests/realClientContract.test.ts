@@ -7767,16 +7767,42 @@ describe('real client poll send diagnostics', () => {
       expect(diagnostic).toEqual({
         rowVisible: true,
         optionCount: 2,
+        activeOptionCount: 2,
         visibleOptionCount: 2,
         answerTextCounts: [1, 1],
         visibleAnswerTextCounts: [1, 1],
-        answerOptionCounts: [1, 1]
+        answerOptionCounts: [1, 1],
+        activeAnswerTextCounts: [1, 1],
+        activeAnswerOptionCounts: [1, 1]
       });
       const summary = realClientBrowser.formatPollContentDiagnostic(diagnostic);
       expect(summary).toContain('row_visible_1_options_2_visible_options_2');
       expect(summary).toContain('answer_text_counts_1_1_visible_answer_text_counts_1_1_answer_options_1_1');
       expect(summary).not.toContain('browser-ci-answer');
       expect(summary).not.toContain('fixture.invalid');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('ignores poll answer rows leaving the transition group', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="poll" class="bubble" data-mid="56">
+        <div data-poll-option-idx="0"><span>browser-ci-answer-one</span></div>
+        <div data-poll-option-idx="1"><span>browser-ci-answer-two</span></div>
+        <div data-poll-option-idx="0" class="fade-2-exit-active"><span>browser-ci-answer-one</span></div>
+      </div>`);
+
+      const diagnostic = await realClientBrowser.readPollContentDiagnostic(
+        page.locator('#poll'),
+        ['browser-ci-answer-one', 'browser-ci-answer-two']
+      );
+
+      expect(diagnostic.optionCount).toBe(3);
+      expect(diagnostic.activeOptionCount).toBe(2);
+      expect(diagnostic.activeAnswerTextCounts).toEqual([1, 1]);
+      expect(diagnostic.activeAnswerOptionCounts).toEqual([1, 1]);
     } finally {
       await page.close();
     }

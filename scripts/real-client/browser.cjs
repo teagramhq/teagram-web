@@ -18,6 +18,7 @@ const POLL_DESCRIPTION = 'Description stuff';
 const POLL_ANSWER_ONE = 'browser-ci-poll-answer-one';
 const POLL_ANSWER_TWO = 'browser-ci-poll-answer-two';
 const POLL_ANSWER_LINK = `${PRIVATE_CSP_ORIGIN}/browser-ci-poll-answer`;
+const POLL_OPTION_ACTIVE_SELECTOR = '[data-poll-option-idx]:not(.fade-2-exit):not(.fade-2-exit-active):not(.fade-2-exit-to)';
 const POLL_NEGATIVE_CONTROL = Object.freeze([
   Object.freeze({shape: 'description', stage: 'alice_poll_description_create', errorType: 'POLL_ANSWERS_INVALID'}),
   Object.freeze({shape: 'input_answer', stage: 'alice_poll_input_answer_create', errorType: 'POLL_ANSWERS_INVALID'})
@@ -2891,7 +2892,7 @@ async function ensurePollGroupActive(page, groupName, stage) {
 }
 
 function getPollOptionClickTarget(poll, answerText) {
-  return poll.locator('[data-poll-option-idx]')
+  return poll.locator(POLL_OPTION_ACTIVE_SELECTOR)
   .filter({hasText: answerText})
   .locator(':scope > div')
   .first();
@@ -3221,7 +3222,7 @@ async function waitForPollMessage(page, question, stage, timeoutMs = 30_000, mes
   if(await poll.count() !== 1) failStage(`${stage}_not_unique`);
   const questionText = poll.getByText(question, {exact: true});
   await questionText.waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_question`));
-  await page.waitForFunction(({questionText, expectedAnswers, messageId}) => {
+  await page.waitForFunction(({questionText, expectedAnswers, messageId, activeOptionSelector}) => {
     const matches = [...document.querySelectorAll('#column-center .bubble')]
     .filter((element) => element.textContent?.includes(questionText));
     const selectedMessage = messageId === undefined || messageId === null
@@ -3229,10 +3230,16 @@ async function waitForPollMessage(page, question, stage, timeoutMs = 30_000, mes
       : matches.filter((element) => element.dataset.mid === String(messageId));
     if(selectedMessage.length !== 1) return false;
     const message = selectedMessage[0];
-    if(message.querySelectorAll('[data-poll-option-idx]').length !== 2) return false;
-    return expectedAnswers.every((answerText) => [...message.querySelectorAll('*')]
-    .filter((node) => node.children.length === 0 && node.textContent?.trim() === answerText).length === 1);
-  }, {questionText: question, expectedAnswers: [POLL_ANSWER_ONE, POLL_ANSWER_TWO], messageId}, {timeout: timeoutMs}).catch(async() => {
+    const options = [...message.querySelectorAll(activeOptionSelector)];
+    if(options.length !== 2) return false;
+    return expectedAnswers.every((answerText) => options.filter((option) => [...option.querySelectorAll('*')]
+    .filter((node) => node.children.length === 0 && node.textContent?.trim() === answerText).length === 1).length === 1);
+  }, {
+    questionText: question,
+    expectedAnswers: [POLL_ANSWER_ONE, POLL_ANSWER_TWO],
+    messageId,
+    activeOptionSelector: POLL_OPTION_ACTIVE_SELECTOR
+  }, {timeout: timeoutMs}).catch(async() => {
     const diagnostic = await readPollContentDiagnostic(poll, [POLL_ANSWER_ONE, POLL_ANSWER_TWO]);
     failStage(`${stage}_answers_${formatPollContentDiagnostic(diagnostic)}`);
   });
@@ -3250,13 +3257,13 @@ async function assertPollContent(poll, {question, description, stage}) {
     failStage(`${stage}_empty_description`);
   }
 
-  const answers = poll.locator('[data-poll-option-idx]');
+  const answers = poll.locator(POLL_OPTION_ACTIVE_SELECTOR);
   if(await answers.count() !== 2) {
     const diagnostic = await readPollContentDiagnostic(poll, [POLL_ANSWER_ONE, POLL_ANSWER_TWO]);
     failStage(`${stage}_answers_${formatPollContentDiagnostic(diagnostic)}`);
   }
   for(const [index, answerText] of [POLL_ANSWER_ONE, POLL_ANSWER_TWO].entries()) {
-    if(await poll.getByText(answerText, {exact: true}).count() !== 1) {
+    if(await answers.filter({hasText: answerText}).count() !== 1) {
       const diagnostic = await readPollContentDiagnostic(poll, [POLL_ANSWER_ONE, POLL_ANSWER_TWO]);
       failStage(`${stage}_answer_${index + 1}_${formatPollContentDiagnostic(diagnostic)}`);
     }
@@ -3264,7 +3271,7 @@ async function assertPollContent(poll, {question, description, stage}) {
 }
 
 async function readPollContentDiagnostic(poll, answerTexts) {
-  return poll.evaluate((poll, {expectedAnswers}) => {
+  return poll.evaluate((poll, {expectedAnswers, activeOptionSelector}) => {
     const isVisible = (element) => {
       const style = window.getComputedStyle(element);
       const rect = element.getBoundingClientRect();
@@ -3274,21 +3281,29 @@ async function readPollContentDiagnostic(poll, answerTexts) {
     .filter((node) => node.children.length === 0 && node.textContent?.trim() === answerText &&
       (!visibleOnly || isVisible(node))).length : 0;
     const options = [...poll.querySelectorAll('[data-poll-option-idx]')];
+    const activeOptions = [...poll.querySelectorAll(activeOptionSelector)];
+    const countTextInOptions = (options, answerText) => options.reduce((count, option) => count + countText(option, answerText, false), 0);
     return {
       rowVisible: isVisible(poll),
       optionCount: options.length,
+      activeOptionCount: activeOptions.length,
       visibleOptionCount: options.filter(isVisible).length,
       answerTextCounts: expectedAnswers.map((answerText) => countText(poll, answerText, false)),
       visibleAnswerTextCounts: expectedAnswers.map((answerText) => countText(poll, answerText, true)),
-      answerOptionCounts: expectedAnswers.map((answerText) => options.filter((option) => option.textContent?.includes(answerText)).length)
+      answerOptionCounts: expectedAnswers.map((answerText) => options.filter((option) => option.textContent?.includes(answerText)).length),
+      activeAnswerTextCounts: expectedAnswers.map((answerText) => countTextInOptions(activeOptions, answerText)),
+      activeAnswerOptionCounts: expectedAnswers.map((answerText) => activeOptions.filter((option) => option.textContent?.includes(answerText)).length)
     };
-  }, {expectedAnswers: answerTexts}).catch(() => ({
+  }, {expectedAnswers: answerTexts, activeOptionSelector: POLL_OPTION_ACTIVE_SELECTOR}).catch(() => ({
     rowVisible: null,
     optionCount: null,
+    activeOptionCount: null,
     visibleOptionCount: null,
     answerTextCounts: null,
     visibleAnswerTextCounts: null,
-    answerOptionCounts: null
+    answerOptionCounts: null,
+    activeAnswerTextCounts: null,
+    activeAnswerOptionCounts: null
   }));
 }
 
@@ -3300,7 +3315,10 @@ function formatPollContentDiagnostic(diagnostic) {
     `_options_${safeCount(diagnostic.optionCount)}_visible_options_${safeCount(diagnostic.visibleOptionCount)}` +
     `_answer_text_counts_${safePair(diagnostic.answerTextCounts)}` +
     `_visible_answer_text_counts_${safePair(diagnostic.visibleAnswerTextCounts)}` +
-    `_answer_options_${safePair(diagnostic.answerOptionCounts)}`;
+    `_answer_options_${safePair(diagnostic.answerOptionCounts)}` +
+    `_active_options_${safeCount(diagnostic.activeOptionCount)}` +
+    `_active_answer_text_counts_${safePair(diagnostic.activeAnswerTextCounts)}` +
+    `_active_answer_options_${safePair(diagnostic.activeAnswerOptionCounts)}`;
 }
 
 async function attachSyntheticPollAnswerLink(page, popup, stage) {
@@ -4291,7 +4309,7 @@ async function waitForPollResults(page, question, stage, timeoutMs = 30_000, mes
     failStage(`${stage}_${formatPollResultsDiagnostic(diagnostic)}`);
   });
   if(await poll.count() !== 1 || await resultIndicator.count() !== 1) failStage(`${stage}_footer`);
-  const selectedAnswer = poll.locator('[data-poll-option-idx]').filter({hasText: POLL_ANSWER_ONE});
+  const selectedAnswer = poll.locator(POLL_OPTION_ACTIVE_SELECTOR).filter({hasText: POLL_ANSWER_ONE});
   if(await selectedAnswer.count() !== 1) failStage(`${stage}_selected_answer`);
   await selectedAnswer.getByText('1', {exact: true}).waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_count`));
   await selectedAnswer.getByText('100%', {exact: true}).waitFor({state: 'visible', timeout: timeoutMs}).catch(() => failStage(`${stage}_percentage`));

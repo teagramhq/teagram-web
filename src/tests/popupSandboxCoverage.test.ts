@@ -21,6 +21,7 @@ const ENTRY = /^export\s+(?:default\s+)?(?:async\s+)?(?:class\s+(\w*Popup\w*)|fu
  * reason is how this list turns into a place to hide gaps.
  */
 const REACHED_INDIRECTLY: {[file: string]: string} = {
+  'chatPreviewAnchor.ts': 'the chatPreview story imports chatPreview.tsx, which re-exports this shared dialog-row helper; it is not a popup',
   'aiEditorPopup/aiEditorPopup.tsx': 'the `aiEditor` story imports the folder index, which re-exports it',
   'starsPay.tsx': 'the `payment/starsPay` story goes through `PopupPayment.create`, which picks it for a Stars form',
   'index.ts': 'the popup base class, not a popup',
