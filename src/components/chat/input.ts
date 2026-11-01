@@ -2465,8 +2465,7 @@ export default class ChatInput {
       isPremiumRequired,
       autoDeletePeriod,
       canManageAutoDelete,
-      peerMuted,
-      ackedGlobalPrivacy
+      peerMuted
     ] = await Promise.all([
       this.chat.isChannel ? this.managers.appPeersManager.isBroadcastGroup(peerId) : false,
       this.chat.type === ChatType.Pinned ? this.managers.appPeersManager.canPinMessage(peerId) : false,
@@ -2480,10 +2479,7 @@ export default class ChatInput {
       this.chat.isPremiumRequired,
       modifyAckedPromise(this.chat.getAutoDeletePeriod()),
       this.chat.canManageAutoDelete(),
-      this.managers.appNotificationsManager.isPeerLocalMuted({peerId, respectType: false}),
-      this.btnSendGift ?
-        modifyAckedPromise(this.managers.acknowledged.appPrivacyManager.getGlobalPrivacySettings()) :
-        undefined
+      this.managers.appNotificationsManager.isPeerLocalMuted({peerId, respectType: false})
     ]);
 
     const placeholderParams = this.messageInput ? await this.getPlaceholderParams(canSendPlain) : undefined;
@@ -2647,19 +2643,9 @@ export default class ChatInput {
 
       if(this.btnSendGift) {
         // Default to hidden so the previous chat's state never leaks.
-        // Cached acked.result → callbackify fires synchronously inside
-        // this render closure (same tick as the hide above → no visible
-        // flicker, button settles into the correct state immediately).
-        // Cold first-load → async toggle once both fetches resolve.
         this.btnSendGift.classList.add('hide');
-        if(this.giftButtonBasePeerEligible(peerId) && !isBot) {
-          callbackify(ackedPeerFull.result, (peerFull) => {
-            if(!middleware()) return;
-            callbackify(ackedGlobalPrivacy.result, (globalPrivacy) => {
-              if(!middleware()) return;
-              this.btnSendGift.classList.toggle('hide', !this.shouldShowGiftButton(peerFull as UserFull.userFull, globalPrivacy));
-            });
-          });
+        if(!isBot) {
+          this.updateGiftButtonVisibility();
         }
       }
 
