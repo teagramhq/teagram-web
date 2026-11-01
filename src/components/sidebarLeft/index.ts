@@ -1427,12 +1427,12 @@ export class AppSidebarLeft extends SidebarSlider {
       onHelperLength();
     };
 
-    this.inputSearch.onChange = (value) => {
+    this.inputSearch.setOnChange((value) => {
       if(searchSuper.mediaTab.type !== 'chats') {
         chatTypeMenu.props.selected = 'all';
       }
       updateSearchQuery({search: value, chatType: chatTypeMenu.props.selected});
-    };
+    });
 
     this.inputSearch.onEnter = (value) => {
       const trimmed = value.trim();
