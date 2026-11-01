@@ -85,7 +85,7 @@ async function setupGuestServer(
         const response = await fetchLocalAppRoute(route, url.toString());
         if(url.pathname === '/') {
           const headers = await response.headers();
-          headers['content-security-policy'] = "script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; worker-src 'self' blob:";
+          headers['content-security-policy'] = 'script-src \'self\' \'wasm-unsafe-eval\' https://challenges.cloudflare.com; worker-src \'self\' blob:';
           await route.fulfill({response, headers});
         } else {
           await route.fulfill({response});

@@ -70,6 +70,7 @@ export class ApiManager extends ApiManagerMethods {
   private authKeyRecoveryTargets: Map<number, {networker: MTPNetworker, transport: MTTransport}>;
   private nextAuthKeyRecoveryId: number;
   private baseDcId: DcId;
+  private finishFirstDialogsDispatchTrace?: () => void;
 
   private afterMessageTempIds: {
     [tempId: string]: {
@@ -84,11 +85,15 @@ export class ApiManager extends ApiManagerMethods {
 
   private authLogRedactor?: AuthLogRedactor;
 
-  private performanceRpcTrace = new PerformanceRpcTrace(import.meta.env.VITE_PERF_TRACE === '1');
+  private performanceRpcTrace?: PerformanceRpcTrace;
 
   constructor() {
     super();
     this.name = 'API';
+
+    if(import.meta.env.VITE_PERF_TRACE === '1') {
+      this.performanceRpcTrace = new PerformanceRpcTrace(true);
+    }
 
     this.cachedNetworkers = {} as any;
     this.cachedExportPromise = {};
@@ -739,28 +744,57 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public getPerformanceRpcTrace() {
-    return this.performanceRpcTrace.getSnapshot();
+    return this.performanceRpcTrace?.getSnapshot() ?? {
+      enabled: false,
+      recording: false,
+      callCount: 0,
+      invocations: [],
+      calls: []
+    };
   }
 
   public resetPerformanceRpcTrace(recordSpans = true) {
-    this.performanceRpcTrace.reset(recordSpans);
+    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace!.reset(recordSpans);
   }
 
   public getPerformancePhaseTrace() {
-    return performancePhaseTrace.getSnapshot();
+    if(import.meta.env.VITE_PERF_TRACE === '1') return performancePhaseTrace.getSnapshot();
+    return [];
   }
 
   public resetPerformancePhaseTrace() {
-    performancePhaseTrace.reset();
+    if(import.meta.env.VITE_PERF_TRACE === '1') performancePhaseTrace.reset();
+  }
+
+  public startFirstDialogsDispatchTrace(startedAtEpochMs: number) {
+    if(import.meta.env.VITE_PERF_TRACE === '1') {
+      this.finishFirstDialogsDispatchTrace = performancePhaseTrace.start(
+        'worker.chatlist.startToFirstGetDialogs',
+        {startedAtEpochMs}
+      );
+    }
+  }
+
+  public finishFirstDialogsTrace() {
+    if(import.meta.env.VITE_PERF_TRACE === '1' && this.finishFirstDialogsDispatchTrace) {
+      this.finishFirstDialogsDispatchTrace();
+      this.finishFirstDialogsDispatchTrace = undefined;
+    }
   }
 
   public trackPerformanceRpcWait<T, P extends Promise<T>>(method: string, request: P): P {
-    return this.performanceRpcTrace.trackWait(method, request);
+    // A raw getDialogs invoke may be channel reconciliation, before the first chat-list page request.
+    if(import.meta.env.VITE_PERF_TRACE === '1' && method === 'messages.getDialogs') {
+      this.finishFirstDialogsTrace();
+    }
+    return import.meta.env.VITE_PERF_TRACE === '1' ?
+      this.performanceRpcTrace?.trackWait(method, request) ?? request :
+      request;
   }
 
   public invokeApi<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {}, options: InvokeApiOptions = {}): CancellablePromise<MethodDeclMap[T]['res']> {
     const methodName = String(method);
-    this.performanceRpcTrace.recordCall(methodName);
+    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace?.recordCall(methodName);
     if(!getAuthMethod(methodName, params)) {
       return this.invokeApiInternal(method, params, options);
     }

@@ -16,6 +16,18 @@ export const PERFORMANCE_REPEATS = 3;
 // Cold-load pairs need additional samples to outvote occasional runner long tasks.
 export const COLD_CHAT_LIST_REPEATS = 6;
 
+export function scenarioBundleBytes(resources, origin, startedAt, previouslyLoadedUrls = []) {
+  const previousUrls = new Set(previouslyLoadedUrls);
+  const bundleResources = new Map();
+  resources.filter((entry) => {
+    return entry.startTime >= startedAt &&
+      !previousUrls.has(entry.name) &&
+      new URL(entry.name).origin === origin &&
+      /\.(js|css)(?:[?#]|$)/i.test(entry.name);
+  }).forEach((entry) => bundleResources.set(entry.name, entry.decodedBodySize));
+  return [...bundleResources.values()].reduce((total, bytes) => total + bytes, 0);
+}
+
 const CALIBRATION_RUNS = 20;
 const MAX_SCALE_RATIO = 1.5;
 const MIN_BLOCKING_TIME_REGRESSION_MS = 80;
@@ -202,6 +214,14 @@ export function evaluatePerformance(report, history = []) {
       }
       if(headSamples.length < requiredRepeats) {
         addFailure(blockingFailures, scale, scenario.key, `expected at least ${requiredRepeats} repeat measurements, got ${headSamples.length}`);
+      }
+      if(scenario.key === 'contactsList') {
+        for(const [variant, samples] of [['base', baseSamples], ['head', headSamples]]) {
+          const bundleSizes = samples.map((sample) => sample?.bundleBytes).filter(Number.isFinite);
+          if(new Set(bundleSizes).size > 1) {
+            addFailure(blockingFailures, scale, scenario.key, `${variant} bundle measurements vary across repeats`);
+          }
+        }
       }
       headSamples.forEach((sample, index) => {
         const requiredMetrics = scenario.key === 'scrollBack2k' ? [

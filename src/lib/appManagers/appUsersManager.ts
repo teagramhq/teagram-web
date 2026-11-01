@@ -316,10 +316,11 @@ export class AppUsersManager extends AppManager {
     this.updatedContactsList = true;
 
     const promise = deferredPromise<Set<UserId>>();
-    this.apiManager.trackPerformanceRpcWait(
-      'contacts.getContacts',
-      this.apiManager.invokeApi('contacts.getContacts')
-    ).then((result) => {
+    const request = this.apiManager.invokeApi('contacts.getContacts');
+    const contactsRequest = import.meta.env.VITE_PERF_TRACE === '1' ?
+      this.apiManager.trackPerformanceRpcWait('contacts.getContacts', request) :
+      request;
+    contactsRequest.then((result) => {
       if(result._ === 'contacts.contacts') {
         this.contactsList.clear();
 

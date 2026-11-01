@@ -30,13 +30,14 @@ export class PerformancePhaseTrace {
     this.enabled = enabled;
   }
 
-  public start(name: string, details: {accountNumber?: number} = {}) {
+  public start(name: string, details: {accountNumber?: number, startedAtEpochMs?: number} = {}) {
     if(!this.enabled) return () => {};
 
     const started = performance.now();
+    const startedAtEpochMs = details.startedAtEpochMs ?? performance.timeOrigin + started;
     const phase: PerformancePhase = {
       name,
-      startedAtEpochMs: performance.timeOrigin + started,
+      startedAtEpochMs,
       durationMs: null,
       ...(details.accountNumber === undefined ? {} : {accountNumber: details.accountNumber})
     };
@@ -46,9 +47,9 @@ export class PerformancePhaseTrace {
     return () => {
       if(finished) return;
       finished = true;
-      const duration = Number((performance.now() - started).toFixed(2));
+      const duration = Number((performance.timeOrigin + performance.now() - startedAtEpochMs).toFixed(2));
       phase.durationMs = duration;
-      if(name.startsWith('main.')) performance.measure(name, {start: started, duration});
+      if(name.startsWith('main.')) performance.measure(name, {start: startedAtEpochMs - performance.timeOrigin, duration});
     };
   }
 

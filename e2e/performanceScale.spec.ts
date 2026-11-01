@@ -2,7 +2,7 @@ import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
-import {sumBundleBytes} from './performanceBundleBytes';
+import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
 import {summarizeCpuProfile, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
 
 type Fixture = {
@@ -74,6 +74,7 @@ const report = {
   } as Record<Variant, Record<Scale, Record<string, Partial<Metric>[]>>>
 };
 const preparedVariants: Record<Scale, Partial<Record<Variant, VariantRun>>> = {'1x': {}, '100x': {}};
+const bundleRequestTrackers = new WeakMap<Page, BundleRequestTracker>();
 
 const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
 
@@ -81,16 +82,40 @@ test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 });
 
-function installInstrumentation(page: Page, requestCounter: {value: number}, injectColdStall = false) {
+async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false) {
+  const bundleRequests = createBundleRequestTracker(new URL(origin).origin);
+  bundleRequestTrackers.set(page, bundleRequests);
   page.on('request', (request) => {
     if(request.resourceType() !== 'websocket') ++requestCounter.value;
+    bundleRequests.requestStarted(request);
   });
+  page.on('requestfinished', (request) => bundleRequests.requestFinished(request));
+  page.on('requestfailed', (request) => bundleRequests.requestFailed(request));
+  page.on('worker', (worker) => bundleRequests.workerReady(worker.url()));
+  await page.exposeBinding('__teagramBundleWorkerReady', (_source, url: string) => bundleRequests.workerReady(url));
   return page.addInitScript((injectColdStall: boolean) => {
+    // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
+    const SharedWorkerConstructor = (window as any).SharedWorker;
+    if(SharedWorkerConstructor) {
+      (window as any).SharedWorker = new Proxy(SharedWorkerConstructor, {
+        construct(target, args, newTarget) {
+          const worker = Reflect.construct(target, args, newTarget) as SharedWorker;
+          const url = new URL(String(args[0]), location.href).href;
+          worker.port.addEventListener('message', () => {
+            void (window as any).__teagramBundleWorkerReady(url);
+          }, {once: true});
+          worker.port.start();
+          return worker;
+        }
+      });
+    }
+    performance.setResourceTimingBufferSize(1_000);
     const perf: any = (window as any).__teagramPerf = {
       longTasks: [] as Array<{startTime: number, duration: number}>,
       frameIntervals: [] as number[],
       frameActive: false,
-      started: performance.now()
+      started: performance.now(),
+      resourceUrlBaseline: [] as string[]
     };
     try {
       const observer = new PerformanceObserver((list) => {
@@ -123,6 +148,12 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
   }, injectColdStall);
 }
 
+async function waitForBundleResources(page: Page) {
+  const bundleRequests = bundleRequestTrackers.get(page);
+  if(!bundleRequests) throw new Error('Bundle request tracking was not installed for this page');
+  await bundleRequests.waitForIdle(500, 10_000);
+}
+
 async function begin(page: Page, requests: {value: number}, recordRpcSpans = true, traceEnabled = false) {
   // The head client loads chat, search and menu code after first paint on an idle callback;
   // wait for it so an interaction never measures that load. Contacts load on click. The base
@@ -136,9 +167,10 @@ async function begin(page: Page, requests: {value: number}, recordRpcSpans = tru
     const perf = (window as any).__teagramPerf;
     perf.longTasks = [];
     perf.frameIntervals = [];
-    perf.started = performance.now();
+    perf.resourceUrlBaseline = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).map((entry) => entry.name);
     performance.clearResourceTimings();
     if(traceEnabled) performance.clearMeasures();
+    perf.started = performance.now();
   }, {recordSpans: recordRpcSpans, traceEnabled});
 }
 
@@ -153,10 +185,12 @@ test('fails interaction measurement when deferred UI loading failed', async({pag
 async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false): Promise<Metric> {
   const requestCount = requests.value;
   await page.waitForTimeout(150);
+  await waitForBundleResources(page);
   const captured = await page.evaluate(async({boundary, scroll, includePhases}) => {
     const {ms} = boundary;
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
+    const resourceCaptureEndedAt = performance.now();
     const intervals = scroll ? perf.frameIntervals : [];
     const droppedFrames = intervals.reduce((total: number, interval: number) => total + Math.max(0, Math.round(interval / (1000 / 60)) - 1), 0);
     const droppedFramePercent = intervals.length ? droppedFrames / (droppedFrames + intervals.length) * 100 : 0;
@@ -199,6 +233,8 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
         decodedBodySize: entry.decodedBodySize
       })),
       origin: location.origin,
+      resourceCaptureEndedAt,
+      resourceUrlBaseline: perf.resourceUrlBaseline,
       longTasks,
       rpcTraceEnabled: rpcTrace.enabled,
       rpcSpansRecorded: rpcTrace.recording,
@@ -211,13 +247,13 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
   }, {boundary, scroll, includePhases});
-  const {bundleResources, origin, longTasks, ...metrics} = captured;
+  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, ...metrics} = captured;
   if(includePhases) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
   const rpcSummary = summarizeRpcTrace(metrics.rpcCalls as PerformanceRpcCall[], boundary.ms);
   return {
     ...metrics,
-    bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, boundary.startedAtMs + boundary.ms),
+    bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
     ms: boundary.ms,
     requests: requestCount,
@@ -496,6 +532,7 @@ async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture:
 }
 
 async function openContacts(page: Page, requests: {value: number}) {
+  await waitForBundleResources(page);
   await begin(page, requests);
   await page.locator('.sidebar-tools-button').click();
   await page.getByText('Contacts', {exact: true}).last().click();
@@ -556,7 +593,7 @@ async function runColdChatList(browser: Browser, run: VariantRun): Promise<Metri
   try {
     const page = await context.newPage();
     const requests = {value: 0};
-    await installInstrumentation(page, requests);
+    await installInstrumentation(page, requests, run.origin);
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     await waitForChatList(page);
@@ -574,7 +611,7 @@ async function measureColdControlWindow(browser: Browser, run: VariantRun, injec
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests, injectStall);
+  await installInstrumentation(page, requests, run.origin, injectStall);
 
   try {
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
@@ -639,7 +676,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests);
+  await installInstrumentation(page, requests, origin);
 
   try {
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
@@ -690,7 +727,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
     });
     const page = await context.newPage();
     const requests = {value: 0};
-    await installInstrumentation(page, requests);
+    await installInstrumentation(page, requests, run.origin);
 
     try {
       const coldProfile = repeat === 0 ? await startCpuProfile(page) : undefined;

@@ -2,6 +2,7 @@ import {createEffect, createRoot, createSignal, on} from 'solid-js';
 import {render} from 'solid-js/web';
 import appImManager from '@lib/appImManager';
 import rootScope from '@lib/rootScope';
+import {logger} from '@lib/logger';
 import {createSearchGroup, SearchGroup} from '@components/searchGroup';
 import DialogsContextMenu from '@components/dialogsContextMenu';
 import Scrollable, {ScrollableX} from '@components/scrollable';
@@ -63,10 +64,12 @@ import {MyDocument} from '@appManagers/appDocsManager';
 import getAttachMenuBotIcon from '@appManagers/utils/attachMenuBots/getAttachMenuBotIcon';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 import wrapUrl from '@lib/richTextProcessor/wrapUrl';
-import flatten from '@helpers/array/flatten';
+import {updateSearchHelperResults} from '@components/sidebarLeft/searchHelperResults';
 import {AttachMenuBot, EmojiStatus, User} from '@layer';
 import {Middleware, MiddlewareHelper} from '@helpers/middleware';
 import wrapEmojiStatus from '@components/wrappers/emojiStatus';
+
+const log = logger('SidebarLeft');
 import {makeMediaSize} from '@helpers/mediaSize';
 import setBlankToAnchor from '@lib/richTextProcessor/setBlankToAnchor';
 import AccountController from '@lib/accounts/accountController';
@@ -1492,6 +1495,7 @@ export class AppSidebarLeft extends SidebarSlider {
       helperMiddlewareHelper.clean();
       onHelperLength(true);
 
+      const middleware = searchSuper.middleware.get();
       const promises: MaybePromise<HTMLElement[]>[] = [];
 
       if(!selectedMinDate && value.trim()) {
@@ -1505,12 +1509,11 @@ export class AppSidebarLeft extends SidebarSlider {
       }
 
       if(!selectedPeerId && !selectedCommunityId && value.trim()) {
-        const middleware = searchSuper.middleware.get();
         const promise = Promise.all([
           this.managers.dialogsStorage.getDialogs({query: value}).then(({dialogs}) => dialogs.map((d) => d.peerId)),
           this.managers.appUsersManager.getContactsPeerIds(value, true)
         ]).then((results) => {
-          if(!middleware()) return;
+          if(!middleware()) return [];
           const peerIds = new Set(results[0].concat(results[1]).slice(0, 20));
 
           return [...peerIds].map((peerId) => renderEntity(peerId));
@@ -1519,11 +1522,9 @@ export class AppSidebarLeft extends SidebarSlider {
         promises.push(promise);
       }
 
-      Promise.all(promises).then((arrays) => {
-        helper.replaceChildren();
-        const flattened = flatten(arrays);
-        appendToHelper(flattened);
-      });
+      Promise.all(promises)
+      .then((arrays) => updateSearchHelperResults(arrays, middleware, helper, appendToHelper))
+      .catch((error) => log.error('Failed to update search helper results', error));
     };
 
     searchSuper.tabs.inputMessagesFilterEmpty.addEventListener('mousedown', (e) => {
