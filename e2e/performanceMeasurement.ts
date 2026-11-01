@@ -13,10 +13,11 @@ export async function startMeasurementAtClick(target: Locator) {
       started: number,
       preInteractionMs?: number,
       clickAt?: number,
-      firstBubbleBoundary?: FirstBubbleBoundary,
-      firstBubblePromise?: Promise<FirstBubbleBoundary>
+      peerId?: string,
+      firstBubbleBoundary?: FirstBubbleBoundary
     };
     const armedAt = performance.now();
+    perf.peerId = (element as HTMLElement).dataset.peerId;
     const onClick = (event: MouseEvent) => {
       if(!event.composedPath().includes(element)) return;
       document.removeEventListener('click', onClick, true);
@@ -24,61 +25,34 @@ export async function startMeasurementAtClick(target: Locator) {
       perf.started = clickAt;
       perf.preInteractionMs = clickAt - armedAt;
       perf.clickAt = clickAt;
-
-      const peerId = (element as HTMLElement).dataset.peerId;
-      let resolveFirstBubble!: (boundary: FirstBubbleBoundary) => void;
-      perf.firstBubblePromise = new Promise((resolve) => {
-        resolveFirstBubble = resolve;
-      });
-      const observedBubbles = new WeakSet<HTMLElement>();
-      function checkForBubble() {
-        const bubbles = document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]');
-        for(const bubble of bubbles) {
-          if(peerId && bubble.dataset.peerId !== peerId) continue;
-
-          if(!observedBubbles.has(bubble)) {
-            observedBubbles.add(bubble);
-            resizeObserver.observe(bubble);
-          }
-
-          const style = getComputedStyle(bubble);
-          const rect = bubble.getBoundingClientRect();
-          if(style.display === 'none' || style.visibility === 'hidden' || !rect.width || !rect.height) continue;
-
-          const boundary = {
-            ms: performance.now() - clickAt,
-            startedAtMs: clickAt,
-            domNodes: document.querySelectorAll('*').length,
-            preInteractionMs: perf.preInteractionMs
-          };
-          perf.firstBubbleBoundary = boundary;
-          mutationObserver.disconnect();
-          resizeObserver.disconnect();
-          resolveFirstBubble(boundary);
-          return;
-        }
-      }
-      const mutationObserver = new MutationObserver(checkForBubble);
-      const resizeObserver = new ResizeObserver(checkForBubble);
-      mutationObserver.observe(document.documentElement, {
-        attributes: true,
-        attributeFilter: ['class', 'hidden', 'style'],
-        childList: true,
-        subtree: true
-      });
-      checkForBubble();
+      perf.firstBubbleBoundary = undefined;
     };
     document.addEventListener('click', onClick, true);
   });
 }
 
 export async function waitForFirstVisibleBubble(page: Page) {
-  await page.waitForFunction(() => !!(window as any).__teagramPerf?.firstBubbleBoundary, undefined, {timeout: 60_000});
-  return page.evaluate(async() => {
+  await page.waitForFunction(() => {
     const perf = (window as any).__teagramPerf;
-    if(!perf.firstBubblePromise) {
-      throw new Error('chat-open measurement was not armed for the first bubble');
+    if(!Number.isFinite(perf?.clickAt)) return false;
+
+    const bubbles = document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]');
+    for(const bubble of bubbles) {
+      if(perf.peerId && bubble.dataset.peerId !== perf.peerId) continue;
+
+      const style = getComputedStyle(bubble);
+      const rect = bubble.getBoundingClientRect();
+      if(style.display === 'none' || style.visibility === 'hidden' || !rect.width || !rect.height) continue;
+
+      perf.firstBubbleBoundary = {
+        ms: performance.now() - perf.clickAt,
+        startedAtMs: perf.clickAt,
+        domNodes: document.querySelectorAll('*').length,
+        preInteractionMs: perf.preInteractionMs
+      };
+      return true;
     }
-    return perf.firstBubblePromise as Promise<FirstBubbleBoundary>;
-  });
+    return false;
+  }, undefined, {timeout: 60_000});
+  return page.evaluate(() => (window as any).__teagramPerf.firstBubbleBoundary as FirstBubbleBoundary);
 }

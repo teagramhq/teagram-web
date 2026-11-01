@@ -1,5 +1,5 @@
 import {expect, test} from '@playwright/test';
-import {startMeasurementAtClick} from './performanceMeasurement';
+import {startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
 
 test('starts the measured window when the browser dispatches the click', async({page}) => {
   await page.setContent('<button>Open chat</button>');
@@ -39,7 +39,7 @@ test('records the first visible bubble when it is mounted', async({page}) => {
   }));
   await button.click();
 
-  await expect.poll(async() => page.evaluate(() => !!(window as any).__teagramPerf.firstBubbleBoundary), {timeout: 500}).toBe(true);
+  const boundary = await waitForFirstVisibleBubble(page);
   const result = await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
     return {boundary: perf.firstBubbleBoundary, insertedAt: perf.insertedAt};
@@ -71,7 +71,32 @@ test('records a bubble that becomes visible after a stylesheet layout change', a
   }));
   await button.click();
 
-  await expect.poll(async() => page.evaluate(() => !!(window as any).__teagramPerf.firstBubbleBoundary), {timeout: 500}).toBe(true);
-  const boundary = await page.evaluate(() => (window as any).__teagramPerf.firstBubbleBoundary);
+  const boundary = await waitForFirstVisibleBubble(page);
+  expect(boundary.domNodes).toBeGreaterThan(0);
+});
+
+test('records a bubble that becomes visible after a stylesheet visibility change', async({page}) => {
+  await page.setContent('<style>.bubble {display:block;width:10px;height:10px;visibility:hidden}</style><button data-peer-id="42">Open chat</button><main class="bubbles"></main>');
+  await page.evaluate(() => {
+    (window as any).__teagramPerf = {started: performance.now()};
+  });
+  const button = page.getByRole('button', {name: 'Open chat'});
+  await startMeasurementAtClick(button);
+  await button.evaluate((element) => element.addEventListener('click', () => {
+    setTimeout(() => {
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.dataset.mid = '1';
+      bubble.dataset.peerId = '42';
+      document.querySelector('.bubbles')!.append(bubble);
+      setTimeout(() => {
+        const stylesheet = document.styleSheets[0] as CSSStyleSheet;
+        stylesheet.insertRule('.bubble {visibility:visible}', stylesheet.cssRules.length);
+      }, 20);
+    }, 20);
+  }));
+  await button.click();
+
+  const boundary = await waitForFirstVisibleBubble(page);
   expect(boundary.domNodes).toBeGreaterThan(0);
 });
