@@ -2,6 +2,60 @@ import {describe, expect, test} from 'vitest';
 import {PerformancePhaseTrace, PerformanceRpcTrace} from '@lib/appManagers/performanceTrace';
 
 describe('performance trace collectors', () => {
+  test('records named phases in the page performance timeline', () => {
+    const name = 'main.chatlist.mount.test';
+    performance.clearMeasures(name);
+    const trace = new PerformancePhaseTrace(true);
+
+    const result = trace.track(name, () => 'mounted');
+    const phase = trace.getSnapshot()[0];
+    const [measure] = performance.getEntriesByName(name, 'measure');
+
+    expect(result).toBe('mounted');
+    expect(measure).toBeTruthy();
+    expect(Math.abs(phase.startedAtEpochMs - performance.timeOrigin - measure.startTime)).toBeLessThan(0.01);
+    expect(Math.abs(phase.durationMs - measure.duration)).toBeLessThan(0.01);
+    performance.clearMeasures(name);
+  });
+
+  test('tracks promise phases until the operation resolves', async() => {
+    const name = 'main.states.load.test';
+    performance.clearMeasures(name);
+    const trace = new PerformancePhaseTrace(true);
+    const promise = Promise.resolve('loaded');
+
+    await expect(trace.track(name, () => promise)).resolves.toBe('loaded');
+
+    expect(trace.getSnapshot()[0]).toMatchObject({name, durationMs: expect.any(Number)});
+    expect(performance.getEntriesByName(name, 'measure')).toHaveLength(1);
+    performance.clearMeasures(name);
+  });
+
+  test('finishes promise phases without swallowing operation errors', async() => {
+    const name = 'main.states.send.test';
+    performance.clearMeasures(name);
+    const trace = new PerformancePhaseTrace(true);
+    const error = new Error('send failed');
+    const promise = Promise.reject(error);
+
+    await expect(trace.track(name, () => promise)).rejects.toBe(error);
+
+    expect(trace.getSnapshot()[0]).toMatchObject({name, durationMs: expect.any(Number)});
+    expect(performance.getEntriesByName(name, 'measure')).toHaveLength(1);
+    performance.clearMeasures(name);
+  });
+
+  test('returns the original operation result without recording when disabled', () => {
+    const name = 'main.chatlist.mount.disabled-test';
+    performance.clearMeasures(name);
+    const trace = new PerformancePhaseTrace(false);
+    const promise = Promise.resolve('mounted');
+
+    expect(trace.track(name, () => promise)).toBe(promise);
+    expect(trace.getSnapshot()).toEqual([]);
+    expect(performance.getEntriesByName(name, 'measure')).toEqual([]);
+  });
+
   test('records worker phases without retaining arbitrary details', () => {
     const trace = new PerformancePhaseTrace(true);
     const finish = trace.start('worker.storage.load', {accountNumber: 2});

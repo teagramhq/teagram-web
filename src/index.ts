@@ -32,6 +32,7 @@ import '@lib/polyfill';
 import '@lib/debug/mountLogExport'; // main-thread-only: wires window.downloadLogs / collectLogs
 import '@lib/debug/memoryReport'; // main-thread-only: wires window.memoryReport
 import apiManagerProxy from '@lib/apiManagerProxy';
+import {performancePhaseTrace} from '@lib/appManagers/performanceTrace';
 import getProxiedManagers from '@lib/getProxiedManagers';
 import themeController from '@helpers/themeController';
 import overlayCounter from '@helpers/overlayCounter';
@@ -574,7 +575,11 @@ const onDocumentReady = async() => {
   // * (4) exit if not updated
 
   // * (1)
-  const allStates = await apiManagerProxy.loadAllStates();
+  const allStates = await (
+    import.meta.env.VITE_PERF_TRACE === '1' ?
+      performancePhaseTrace.track('main.states.load', () => apiManagerProxy.loadAllStates()) :
+      apiManagerProxy.loadAllStates()
+  );
   const stateResult = allStates[getCurrentAccount()];
 
   // console.log(stateResult);
@@ -587,7 +592,11 @@ const onDocumentReady = async() => {
   await singleInstance.start();
   console.timeLog(TIME_LABEL, 'singleInstance started');
 
-  const sendAllStatesPromise = singleInstance.deactivatedReason !== 'version' && apiManagerProxy.sendAllStates(allStates);
+  const sendAllStatesPromise = singleInstance.deactivatedReason !== 'version' && (
+    import.meta.env.VITE_PERF_TRACE === '1' ?
+      performancePhaseTrace.track('main.states.send', () => apiManagerProxy.sendAllStates(allStates)) :
+      apiManagerProxy.sendAllStates(allStates)
+  );
   if(singleInstance.deactivatedReason) {
     onInstanceDeactivated(singleInstance.deactivatedReason);
   }
@@ -606,7 +615,11 @@ const onDocumentReady = async() => {
     setUnreadMessagesText();
   };
 
-  const langPack = await I18n.getCacheLangPackAndApply();
+  const langPack = await (
+    import.meta.env.VITE_PERF_TRACE === '1' ?
+      performancePhaseTrace.track('main.lang', () => I18n.getCacheLangPackAndApply()) :
+      I18n.getCacheLangPackAndApply()
+  );
   console.timeLog(TIME_LABEL, 'await I18n.getCacheLangPack()');
   const [appSettings] = useAppSettings();
   I18n.setTimeFormat(appSettings.timeFormat);
@@ -752,8 +765,11 @@ const onDocumentReady = async() => {
     const fontsPromise = loadFonts();
     fadeInWhenFontsReady(document.getElementById('main-columns'), fontsPromise);
 
+    const bootstrapImImport = import.meta.env.VITE_PERF_TRACE === '1' ?
+      performancePhaseTrace.track('main.bootstrapIm.import', () => import('./pages/bootstrapIm')) :
+      import('./pages/bootstrapIm');
     const [{bootstrapIm}, shouldAnimate] = await Promise.all([
-      import('./pages/bootstrapIm'),
+      bootstrapImImport,
       sessionStorage.get('should_animate_main')
     ]);
 
@@ -763,7 +779,11 @@ const onDocumentReady = async() => {
       await sessionStorage.delete('should_animate_main');
       pageChatsEl.classList.add('main-screen-enter');
 
-      await bootstrapIm();
+      await (
+        import.meta.env.VITE_PERF_TRACE === '1' ?
+          performancePhaseTrace.track('main.bootstrapIm.run', () => bootstrapIm()) :
+          bootstrapIm()
+      );
       console.timeLog(TIME_LABEL, 'await bootstrapIm()');
 
       await fontsPromise;
@@ -776,7 +796,11 @@ const onDocumentReady = async() => {
 
       pageChatsEl.classList.remove('main-screen-enter', 'main-screen-entering');
     } else {
-      await bootstrapIm();
+      await (
+        import.meta.env.VITE_PERF_TRACE === '1' ?
+          performancePhaseTrace.track('main.bootstrapIm.run', () => bootstrapIm()) :
+          bootstrapIm()
+      );
     }
   }
 
