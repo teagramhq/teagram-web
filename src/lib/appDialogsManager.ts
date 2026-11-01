@@ -1953,7 +1953,7 @@ export class AppDialogsManager {
           '@components/forumTab/communityForumTab'
         ));
       } else {
-        ForumTabConstructor = ForumTab.register.getEntry(peerId);
+        ForumTabConstructor = await ForumTab.register.getEntryAsync(peerId);
       }
     }
     if(!ForumTabConstructor) return;

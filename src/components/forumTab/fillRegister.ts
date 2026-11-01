@@ -1,8 +1,5 @@
 import apiManagerProxy from '@lib/apiManagerProxy';
-import {BotforumTab} from '@components/forumTab/botforumTab';
 import {ForumTab} from '@components/forumTab/forumTab';
-import {GroupForumTab} from '@components/forumTab/groupForumTab';
-import {MonoforumTab} from '@components/forumTab/monoforumTab';
 
 
 export function fillForumTabRegister() {
@@ -11,7 +8,7 @@ export function fillForumTabRegister() {
       const peer = apiManagerProxy.getPeer(peerId);
       return !!(peer?._ === 'channel' && peer?.pFlags?.forum);
     },
-    payload: GroupForumTab
+    load: async() => (await import('@components/forumTab/groupForumTab')).GroupForumTab
   });
 
   ForumTab.register.addEntry({
@@ -19,7 +16,7 @@ export function fillForumTabRegister() {
       const peer = apiManagerProxy.getPeer(peerId);
       return !!(peer?._ === 'channel' && peer?.pFlags?.monoforum);
     },
-    payload: MonoforumTab
+    load: async() => (await import('@components/forumTab/monoforumTab')).MonoforumTab
   });
 
   ForumTab.register.addEntry({
@@ -27,6 +24,6 @@ export function fillForumTabRegister() {
       const peer = apiManagerProxy.getPeer(peerId);
       return !!(peer?._ === 'user' && peer?.pFlags?.bot_forum_view);
     },
-    payload: BotforumTab
+    load: async() => (await import('@components/forumTab/botforumTab')).BotforumTab
   });
 }

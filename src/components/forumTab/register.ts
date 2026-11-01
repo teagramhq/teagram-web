@@ -1,7 +1,9 @@
 type RegisterEntry<ToCheck, Payload> = {
   check: (value: ToCheck) => boolean;
-  payload: Payload;
-};
+} & (
+  | {payload: Payload}
+  | {load: () => Promise<Payload>}
+);
 
 export class Register<ToCheck, Payload> {
   private entries: RegisterEntry<ToCheck, Payload>[] = [];
@@ -10,15 +12,23 @@ export class Register<ToCheck, Payload> {
     this.entries.push(entry);
   }
 
+  private getEntryObject(value: ToCheck) {
+    return this.entries.find(entry => entry.check(value));
+  }
+
   hasEntryFor(value: ToCheck): boolean {
-    return this.entries.some(entry => entry.check(value));
+    return !!this.getEntryObject(value);
   }
 
   getEntry(value: ToCheck): Payload | undefined {
-    for(const entry of this.entries) {
-      if(entry.check(value)) {
-        return entry.payload;
-      }
-    }
+    const entry = this.getEntryObject(value);
+    return entry && 'payload' in entry ? entry.payload : undefined;
+  }
+
+  async getEntryAsync(value: ToCheck): Promise<Payload | undefined> {
+    const entry = this.getEntryObject(value);
+    if(!entry) return;
+
+    return 'load' in entry ? entry.load() : entry.payload;
   }
 }
