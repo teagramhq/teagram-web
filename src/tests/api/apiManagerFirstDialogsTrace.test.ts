@@ -6,7 +6,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test('finishes the chat-list startup span when the first getDialogs dispatch occurs in ApiManager', async() => {
+test('finishes the chat-list startup span when the first-page getDialogs wait is tracked', async() => {
   vi.stubEnv('VITE_PERF_TRACE', '1');
   vi.resetModules();
   const {PerformanceRpcTrace, performancePhaseTrace} = await import('@appManagers/performanceTrace');
@@ -23,6 +23,8 @@ test('finishes the chat-list startup span when the first getDialogs dispatch occ
 
   manager.startFirstDialogsDispatchTrace(startedAtEpochMs);
   expect(manager.invokeApi('messages.getDialogs')).toBe(request);
+  expect(trace.getSnapshot()).toMatchObject([{name, startedAtEpochMs, durationMs: null}]);
+  expect(manager.trackPerformanceRpcWait('messages.getDialogs', request)).toBe(request);
   expect(trace.getSnapshot()).toMatchObject([{name, startedAtEpochMs, durationMs: expect.any(Number)}]);
   expect(trace.getSnapshot()[0].durationMs).toBeGreaterThanOrEqual(50);
 });

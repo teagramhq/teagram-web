@@ -776,6 +776,11 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public trackPerformanceRpcWait<T, P extends Promise<T>>(method: string, request: P): P {
+    // A raw getDialogs invoke may be channel reconciliation, before the first chat-list page request.
+    if(import.meta.env.VITE_PERF_TRACE === '1' && method === 'messages.getDialogs' && this.finishFirstDialogsDispatchTrace) {
+      this.finishFirstDialogsDispatchTrace();
+      this.finishFirstDialogsDispatchTrace = undefined;
+    }
     return import.meta.env.VITE_PERF_TRACE === '1' ?
       this.performanceRpcTrace?.trackWait(method, request) ?? request :
       request;
@@ -783,10 +788,6 @@ export class ApiManager extends ApiManagerMethods {
 
   public invokeApi<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {}, options: InvokeApiOptions = {}): CancellablePromise<MethodDeclMap[T]['res']> {
     const methodName = String(method);
-    if(import.meta.env.VITE_PERF_TRACE === '1' && methodName === 'messages.getDialogs' && this.finishFirstDialogsDispatchTrace) {
-      this.finishFirstDialogsDispatchTrace();
-      this.finishFirstDialogsDispatchTrace = undefined;
-    }
     if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace?.recordCall(methodName);
     if(!getAuthMethod(methodName, params)) {
       return this.invokeApiInternal(method, params, options);
