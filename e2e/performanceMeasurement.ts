@@ -19,7 +19,10 @@ export async function startMeasurementAtClick(target: Locator) {
     const armedAt = performance.now();
     perf.peerId = (element as HTMLElement).dataset.peerId;
     const onClick = (event: MouseEvent) => {
-      if(!event.composedPath().includes(element)) return;
+      const peerRow = event.composedPath().find((target) =>
+        target instanceof HTMLElement && target.classList.contains('chatlist-chat')
+      ) as HTMLElement | undefined;
+      if(perf.peerId ? peerRow?.dataset.peerId !== perf.peerId : !event.composedPath().includes(element)) return;
       document.removeEventListener('click', onClick, true);
       const clickAt = performance.now();
       perf.started = clickAt;
