@@ -706,6 +706,14 @@ async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture:
 }
 
 async function openContacts(page: Page, requests: {value: number}) {
+  // appDialogsManager preloads the shared Lottie worker 200 ms after startup.
+  // The reload before this scenario can render the chat list before that timer
+  // fires, which would charge the startup worker request to opening Contacts.
+  await page.waitForTimeout(250);
+  await expect.poll(async() => page.evaluate(() => {
+    const worker = performance.getEntriesByType('resource').find((entry) => entry.name.includes('tlottie.worker')) as PerformanceResourceTiming | undefined;
+    return !worker || worker.responseEnd > 0;
+  }), {timeout: 10_000}).toBe(true);
   await waitForBundleResources(page);
   await begin(page, requests);
   await page.locator('.sidebar-tools-button').click();
