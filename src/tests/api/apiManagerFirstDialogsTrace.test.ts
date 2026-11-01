@@ -5,22 +5,25 @@ afterEach(() => {
   vi.resetModules();
 });
 
-test('finishes the chat-list startup span when the first getDialogs request is dispatched', async() => {
+test('finishes the chat-list startup span when the first getDialogs dispatch occurs in ApiManager', async() => {
   vi.stubEnv('VITE_PERF_TRACE', '1');
   vi.resetModules();
   const {PerformanceRpcTrace, performancePhaseTrace} = await import('@appManagers/performanceTrace');
   const {ApiManager} = await import('@appManagers/apiManager');
-  const name = 'main.chatlist.startToFirstGetDialogs';
+  const name = 'worker.chatlist.startToFirstGetDialogs';
   const trace = performancePhaseTrace;
   trace.reset();
-  trace.startUntil(name);
 
   const manager = Object.create(ApiManager.prototype) as any;
   manager.performanceRpcTrace = new PerformanceRpcTrace(true);
   const request = Promise.resolve({});
+  manager.invokeApiInternal = vi.fn(() => request);
+  const startedAtEpochMs = performance.timeOrigin + performance.now() - 50;
 
-  expect(manager.trackPerformanceRpcWait('messages.getDialogs', request)).toBe(request);
-  expect(trace.getSnapshot()).toMatchObject([{name, durationMs: expect.any(Number)}]);
+  manager.startFirstDialogsDispatchTrace(startedAtEpochMs);
+  expect(manager.invokeApi('messages.getDialogs')).toBe(request);
+  expect(trace.getSnapshot()).toMatchObject([{name, startedAtEpochMs, durationMs: expect.any(Number)}]);
+  expect(trace.getSnapshot()[0].durationMs).toBeGreaterThanOrEqual(50);
 });
 
 test('keeps the chat-list startup span open for unrelated requests', async() => {
@@ -28,14 +31,15 @@ test('keeps the chat-list startup span open for unrelated requests', async() => 
   vi.resetModules();
   const {PerformanceRpcTrace, performancePhaseTrace} = await import('@appManagers/performanceTrace');
   const {ApiManager} = await import('@appManagers/apiManager');
-  const name = 'main.chatlist.startToFirstGetDialogs.test';
+  const name = 'worker.chatlist.startToFirstGetDialogs';
   const trace = performancePhaseTrace;
   trace.reset();
-  trace.startUntil(name);
 
   const manager = Object.create(ApiManager.prototype) as any;
   manager.performanceRpcTrace = new PerformanceRpcTrace(true);
-  manager.trackPerformanceRpcWait('help.getAppConfig', Promise.resolve({}));
+  manager.invokeApiInternal = vi.fn(() => Promise.resolve({}));
+  manager.startFirstDialogsDispatchTrace(performance.timeOrigin + performance.now());
+  manager.invokeApi('help.getAppConfig');
 
   expect(trace.getSnapshot()).toMatchObject([{name, durationMs: null}]);
 });

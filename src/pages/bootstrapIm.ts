@@ -85,7 +85,8 @@ export async function bootstrapIm(): Promise<void> {
     (window as any).Recorder = recorder.default;
   }
   if(import.meta.env.VITE_PERF_TRACE === '1') {
-    performancePhaseTrace.startUntil('main.chatlist.startToFirstGetDialogs');
+    const startedAtEpochMs = performance.timeOrigin + performance.now();
+    void rootScope.managers.apiManager.startFirstDialogsDispatchTrace(startedAtEpochMs);
     performancePhaseTrace.track('main.chatlist.mount', () => appDialogsManager.start());
   } else {
     appDialogsManager.start();

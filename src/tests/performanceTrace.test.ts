@@ -67,17 +67,16 @@ describe('performance trace collectors', () => {
     ]);
   });
 
-  test('finishes a phase by name when the ending event occurs in another component', () => {
-    const name = 'main.chatlist.startToFirstGetDialogs.test';
-    performance.clearMeasures(name);
+  test('records a phase that starts in a different performance timeline', () => {
+    const name = 'worker.chatlist.startToFirstGetDialogs.test';
     const trace = new PerformancePhaseTrace(true);
-    trace.startUntil(name);
+    const startedAtEpochMs = performance.timeOrigin + performance.now() - 50;
+    const finish = trace.start(name, {startedAtEpochMs});
 
-    trace.finish(name);
+    finish();
 
-    expect(trace.getSnapshot()).toMatchObject([{name, durationMs: expect.any(Number)}]);
-    expect(performance.getEntriesByName(name, 'measure')).toHaveLength(1);
-    performance.clearMeasures(name);
+    expect(trace.getSnapshot()).toMatchObject([{name, startedAtEpochMs, durationMs: expect.any(Number)}]);
+    expect(trace.getSnapshot()[0].durationMs).toBeGreaterThanOrEqual(50);
   });
 
   test('counts RPC calls without recording their spans when detail tracing is disabled', () => {

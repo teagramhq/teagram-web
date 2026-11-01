@@ -1,19 +1,27 @@
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 import {PerformancePhaseTrace} from '@lib/appManagers/performanceTrace';
 
+const traceMocks = vi.hoisted(() => ({
+  startFirstDialogsDispatchTrace: vi.fn(),
+  appDialogsManagerStart: vi.fn()
+}));
+
 vi.mock('@helpers/dom/loadFonts', () => ({default: () => Promise.resolve()}));
 vi.mock('@helpers/schedulers', () => ({doubleRaf: () => Promise.resolve()}));
 vi.mock('@helpers/voiceRecorder/isNativeSupported', () => ({default: () => true}));
 vi.mock('@lib/rootScope', () => ({
   default: {
     managers: {
+      apiManager: {
+        startFirstDialogsDispatchTrace: traceMocks.startFirstDialogsDispatchTrace
+      },
       appStateManager: {
         pushToState: () => Promise.resolve()
       }
     }
   }
 }));
-vi.mock('@lib/appDialogsManager', () => ({default: {start: () => {}}}));
+vi.mock('@lib/appDialogsManager', () => ({default: {start: traceMocks.appDialogsManagerStart}}));
 vi.mock('@helpers/dom/requestVideoFrameCallbackPolyfill', () => ({}));
 vi.mock('@/pages/mountAuthFlow', () => ({disposeActiveAuthFlow: () => {}}));
 
@@ -23,6 +31,8 @@ describe('bootstrapIm performance trace', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.stubEnv('VITE_PERF_TRACE', '1');
+    traceMocks.startFirstDialogsDispatchTrace.mockReset();
+    traceMocks.appDialogsManagerStart.mockReset();
     trace = new PerformancePhaseTrace(true);
     vi.doMock('@lib/appManagers/performanceTrace', () => ({performancePhaseTrace: trace}));
     vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any);
@@ -39,7 +49,6 @@ describe('bootstrapIm performance trace', () => {
   });
 
   test('records each awaited bootstrap step as a main-thread span', async() => {
-    const startUntil = vi.spyOn(trace, 'startUntil');
     const {bootstrapIm} = await import('../pages/bootstrapIm');
 
     await bootstrapIm();
@@ -53,12 +62,15 @@ describe('bootstrapIm performance trace', () => {
       'main.bootstrapIm.fonts',
       'main.bootstrapIm.videoFrameCallbackPolyfill.import',
       'main.bootstrapIm.dependencies.wait',
-      'main.chatlist.startToFirstGetDialogs',
       'main.bootstrapIm.chatlist.mount.wait'
     ]));
-    expect(startUntil).toHaveBeenCalledWith('main.chatlist.startToFirstGetDialogs');
+    expect(traceMocks.startFirstDialogsDispatchTrace).toHaveBeenCalledOnce();
+    expect(traceMocks.startFirstDialogsDispatchTrace).toHaveBeenCalledWith(expect.any(Number));
+    expect(traceMocks.startFirstDialogsDispatchTrace.mock.invocationCallOrder[0]).toBeLessThan(
+      traceMocks.appDialogsManagerStart.mock.invocationCallOrder[0]
+    );
     expect(performance.getEntriesByType('measure').map((entry) => entry.name)).toEqual(expect.arrayContaining(
-      names.filter((name) => name !== 'main.chatlist.startToFirstGetDialogs')
+      names
     ));
   });
 });

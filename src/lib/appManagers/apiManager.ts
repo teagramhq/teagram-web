@@ -70,6 +70,7 @@ export class ApiManager extends ApiManagerMethods {
   private authKeyRecoveryTargets: Map<number, {networker: MTPNetworker, transport: MTTransport}>;
   private nextAuthKeyRecoveryId: number;
   private baseDcId: DcId;
+  private finishFirstDialogsDispatchTrace?: () => void;
 
   private afterMessageTempIds: {
     [tempId: string]: {
@@ -754,16 +755,25 @@ export class ApiManager extends ApiManagerMethods {
     performancePhaseTrace.reset();
   }
 
-  public trackPerformanceRpcWait<T, P extends Promise<T>>(method: string, request: P): P {
-    if(import.meta.env.VITE_PERF_TRACE === '1' && method === 'messages.getDialogs') {
-      performancePhaseTrace.finish('main.chatlist.startToFirstGetDialogs');
+  public startFirstDialogsDispatchTrace(startedAtEpochMs: number) {
+    if(import.meta.env.VITE_PERF_TRACE === '1') {
+      this.finishFirstDialogsDispatchTrace = performancePhaseTrace.start(
+        'worker.chatlist.startToFirstGetDialogs',
+        {startedAtEpochMs}
+      );
     }
+  }
 
+  public trackPerformanceRpcWait<T, P extends Promise<T>>(method: string, request: P): P {
     return this.performanceRpcTrace.trackWait(method, request);
   }
 
   public invokeApi<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {}, options: InvokeApiOptions = {}): CancellablePromise<MethodDeclMap[T]['res']> {
     const methodName = String(method);
+    if(import.meta.env.VITE_PERF_TRACE === '1' && methodName === 'messages.getDialogs' && this.finishFirstDialogsDispatchTrace) {
+      this.finishFirstDialogsDispatchTrace();
+      this.finishFirstDialogsDispatchTrace = undefined;
+    }
     this.performanceRpcTrace.recordCall(methodName);
     if(!getAuthMethod(methodName, params)) {
       return this.invokeApiInternal(method, params, options);
