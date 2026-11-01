@@ -1431,6 +1431,23 @@ async function captureState(page, screenshotDirectory, name, capturedScreenshots
   capturedScreenshots.count++;
 }
 
+async function openChatTopbarMenu(page) {
+  const stage = 'alice_direct_topbar_menu';
+  setPageActionStep(page, stage);
+  const toggle = page.locator('#column-center .chat.active .topbar .chat-utils .btn-menu-toggle');
+  await toggle.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_toggle`));
+  await toggle.click().catch(() => failStage(`${stage}_open`));
+
+  const menu = page.locator('.btn-menu:visible').last();
+  await menu.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_visible`));
+  const items = menu.locator('.btn-menu-item');
+  await items.first().waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_items`));
+  if(await items.count() < 1) failStage(`${stage}_items`);
+
+  await page.keyboard.press('Escape').catch(() => failStage(`${stage}_close`));
+  await menu.waitFor({state: 'hidden', timeout: 15_000}).catch(() => failStage(`${stage}_close`));
+}
+
 async function installFixtureNotificationCapture(page) {
   await page.addInitScript(() => {
     const notifications = [];
@@ -6338,6 +6355,7 @@ async function main(dependencies = {}) {
     await openComposer(alice.page, 'alice_direct_chat');
     await sendText(alice.page, MESSAGE, 'alice_direct_message');
     await captureState(alice.page, runtime.screenshotDirectory, 'alice-direct-message', capturedScreenshots);
+    await openChatTopbarMenu(alice.page);
 
     await selectUniquePeer(
       bob.page,
