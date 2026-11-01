@@ -88,4 +88,6 @@ pipeline({
   whenFinished: (result) => {
     moveFiles(result.outputDir + '/');
   }
+}).catch(() => {
+  process.exitCode = 1;
 });

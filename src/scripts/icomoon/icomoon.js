@@ -3,8 +3,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const {unzipSync} = require('fflate');
 const {chromium} = require('@playwright/test');
+const unzip = require('./icomoon-zip');
 
 const DEFAULT_TIMEOUT = 60000;
 
@@ -66,25 +66,6 @@ const getAbsolutePath = inputPath => {
     absoluteSelectionPath = path.resolve(process.env.PWD, inputPath);
   }
   return absoluteSelectionPath;
-};
-
-// fflate hands back plain files, so an entry cannot be a symlink, and one whose name leads
-// out of the output folder is refused
-const unzip = (zipPath, outputDir) => {
-  const entries = unzipSync(fs.readFileSync(zipPath));
-  for(const name in entries) {
-    if(name.endsWith('/')) {
-      continue;
-    }
-
-    const dest = path.resolve(outputDir, name);
-    if(!dest.startsWith(outputDir + path.sep)) {
-      throw new Error(`Refusing to unzip ${name} outside of ${outputDir}`);
-    }
-
-    fs.mkdirSync(path.dirname(dest), {recursive: true});
-    fs.writeFileSync(dest, entries[name]);
-  }
 };
 
 const checkDuplicateName = ({selectionPath, icons, names}, forceOverride) => {
@@ -330,6 +311,7 @@ async function pipeline(options = {}) {
     if (error?.message?.includes(PAGE.GLYPH_SET)) {
       console.log('perhaps some icon is invalid (e.g. contains a stroke)?')
     }
+    throw error;
   }
 }
 
