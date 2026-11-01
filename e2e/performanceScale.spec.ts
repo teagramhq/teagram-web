@@ -2,7 +2,7 @@ import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
-import {startMeasurementAtClick} from './performanceMeasurement';
+import {startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
 import {sumBundleBytes} from './performanceBundleBytes';
 import {summarizeCpuProfile, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
 
@@ -387,8 +387,7 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   await begin(page, requests);
   await startMeasurementAtClick(row);
   await row.click();
-  await page.locator('#page-chats .bubbles .bubble[data-mid]').first().waitFor({state: 'visible', timeout: 60_000});
-  const boundary = await snapshotMeasurementBoundary(page);
+  const boundary = await waitForFirstVisibleBubble(page);
   expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
   return capture(page, requests, boundary);
 }
@@ -730,8 +729,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         const chatProfile = await startCpuProfile(page);
         await startMeasurementAtClick(row);
         await row.click();
-        await page.locator('#page-chats .bubbles .bubble[data-mid]').first().waitFor({state: 'visible', timeout: 60_000});
-        const chatOpenBoundary = await snapshotMeasurementBoundary(page);
+        const chatOpenBoundary = await waitForFirstVisibleBubble(page);
         const chatCpu = await finishCpuProfile(chatProfile);
         const chatOpenCapture = await capture(page, requests, chatOpenBoundary, false, true);
         const peerChangePhases = await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []);

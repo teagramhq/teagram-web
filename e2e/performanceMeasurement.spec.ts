@@ -17,3 +17,34 @@ test('starts the measured window when the browser dispatches the click', async({
   expect(measurement.preInteractionMs).toBeGreaterThanOrEqual(30);
   expect(measurement.started).toBe(measurement.clickAt);
 });
+
+test('records the first visible bubble when it is mounted', async({page}) => {
+  await page.setContent('<button data-peer-id="42">Open chat</button><main class="bubbles"></main>');
+  await page.evaluate(() => {
+    (window as any).__teagramPerf = {started: performance.now()};
+  });
+  const button = page.getByRole('button', {name: 'Open chat'});
+  await startMeasurementAtClick(button);
+  await button.evaluate((element) => element.addEventListener('click', () => {
+    setTimeout(() => {
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.dataset.mid = '1';
+      bubble.dataset.peerId = '42';
+      bubble.style.cssText = 'display:block;width:10px;height:10px';
+      const insertedAt = performance.now();
+      document.querySelector('.bubbles')!.append(bubble);
+      (window as any).__teagramPerf.insertedAt = insertedAt;
+    }, 20);
+  }));
+  await button.click();
+
+  await expect.poll(async() => page.evaluate(() => !!(window as any).__teagramPerf.firstBubbleBoundary), {timeout: 500}).toBe(true);
+  const result = await page.evaluate(() => {
+    const perf = (window as any).__teagramPerf;
+    return {boundary: perf.firstBubbleBoundary, insertedAt: perf.insertedAt};
+  });
+  expect(result.boundary.domNodes).toBeGreaterThan(0);
+  expect(result.boundary.preInteractionMs).toBeGreaterThanOrEqual(0);
+  expect(Math.abs(result.boundary.startedAtMs + result.boundary.ms - result.insertedAt)).toBeLessThan(50);
+});
