@@ -6438,8 +6438,8 @@ export default class ChatBubbles {
       if(err !== PEER_CHANGED_ERROR) {
         log.error('setPeer promise error:', err);
       }
+      this.preloader.detach();
       if(isCurrent) {
-        this.preloader.detach();
         animationIntersector.unlockGroup(this.chat.animationGroup);
         this.lazyLoadQueue.unlock();
       }

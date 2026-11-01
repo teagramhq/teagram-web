@@ -3320,7 +3320,7 @@ export class AppImManager extends EventListenerBase<{
     }
 
     // * don't reset peer if returning
-    if(isSamePeer && mediaSizes.activeScreen <= ScreenSize.medium && document.body.classList.contains(LEFT_COLUMN_ACTIVE_CLASSNAME)) {
+    if(isSamePeer && !chat.peerChangeFailed && mediaSizes.activeScreen <= ScreenSize.medium && document.body.classList.contains(LEFT_COLUMN_ACTIVE_CLASSNAME)) {
       this.selectTab(APP_TABS.CHAT, animate);
       return false;
     }

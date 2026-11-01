@@ -2,6 +2,7 @@ import type {Message, PeerSettings} from '@layer';
 import '@helpers/peerIdPolyfill';
 import {getMiddleware} from '@helpers/middleware';
 import ScrollSaver from '@helpers/scrollSaver';
+import mediaSizes, {ScreenSize} from '@helpers/mediaSizes';
 import windowSize from '@helpers/windowSize';
 import {render} from 'solid-js/web';
 import {makeFullMid} from '@appManagers/utils/messages/fullMid';
@@ -14,6 +15,7 @@ const moduleMocks = vi.hoisted(() => {
   return {
     apiManagerProxy: new Proxy({}, {get: () => noop}),
     sidebarLeft: new Proxy({}, {get: () => noop}),
+    leftColumnActiveClassname: 'is-left-column-shown',
     sidebarRight: new Proxy({}, {get: () => noop}),
     rootScope: {
       myId: 0,
@@ -28,7 +30,7 @@ const moduleMocks = vi.hoisted(() => {
 });
 
 vi.mock('@lib/apiManagerProxy', () => ({default: moduleMocks.apiManagerProxy}));
-vi.mock('@components/sidebarLeft', () => ({default: moduleMocks.sidebarLeft}));
+vi.mock('@components/sidebarLeft', () => ({default: moduleMocks.sidebarLeft, LEFT_COLUMN_ACTIVE_CLASSNAME: moduleMocks.leftColumnActiveClassname}));
 vi.mock('@components/sidebarRight', () => ({default: moduleMocks.sidebarRight}));
 vi.mock('@lib/rootScope', () => ({default: moduleMocks.rootScope}));
 vi.mock('@stores/contentSettings', () => ({
@@ -639,11 +641,17 @@ test('retries peer UI setup after history fails for a newly selected peer', asyn
   chat.peerId = previousPeerId;
   chat.peerChanged = true;
   Object.setPrototypeOf(chat, Chat.prototype);
-  chat.appImManager = {
-    isSamePeer: (options1: any, options2: any) => AppImManager.prototype.isSamePeer(options1, options2),
-    dispatchEvent: vi.fn(),
-    getChatSavedPosition: vi.fn(() => undefined)
-  };
+  const appImManager = Object.assign(Object.create(AppImManager.prototype), {
+    managers: {appPeersManager: {getPeerMigratedTo: vi.fn(async() => undefined)}},
+    chats: [chat],
+    appChatBackground: {getReadyPromise: vi.fn(async() => undefined)},
+    getChatSavedPosition: vi.fn(() => undefined),
+    selectTab: vi.fn(),
+    chatsSelectTab: vi.fn(),
+    dispatchEvent: vi.fn()
+  });
+  chat.appImManager = appImManager;
+  chat.setPeer = (options: any) => Chat.prototype.setPeer.call(chat, options);
   chat.peerIdSignal = [previousPeerId, (nextPeerId: PeerId) => chat.peerId = nextPeerId];
   chat.inited = true;
   chat.middlewareHelper = getMiddleware();
@@ -670,28 +678,31 @@ test('retries peer UI setup after history fails for a newly selected peer', asyn
     promise: Promise.resolve(),
     waitPromise: Promise.resolve()
   }));
+  const previousScreen = mediaSizes.activeScreen;
+  mediaSizes.activeScreen = ScreenSize.medium;
+  document.body.classList.add(moduleMocks.leftColumnActiveClassname);
   try {
-    await expect(Chat.prototype.setPeer.call(chat, {peerId, type: ChatType.Chat})).rejects.toBe(failure);
+    await expect(AppImManager.prototype.setPeer.call(appImManager, {peerId, type: ChatType.Chat})).rejects.toBe(failure);
     await vi.waitFor(() => expect(chat.setPeerPromise).toBeNull());
 
-    const result = await Chat.prototype.setPeer.call(chat, {peerId, type: ChatType.Chat});
-    await result.promise;
+    await AppImManager.prototype.setPeer.call(appImManager, {peerId, type: ChatType.Chat});
+    await chat.setPeerPromise;
 
     expect(chat.finishPeerChange).toHaveBeenCalledTimes(2);
     expect(appliedCallbacks).toEqual(['applied']);
+    expect(getHistory1).toHaveBeenCalledTimes(2);
+    expect(appImManager.selectTab).not.toHaveBeenCalled();
   } finally {
+    mediaSizes.activeScreen = previousScreen;
+    document.body.classList.remove(moduleMocks.leftColumnActiveClassname);
     chat.middlewareHelper.clean();
   }
 });
 
-test('does not log or clean up the active peer when stale mounted history is canceled', async() => {
+test('detaches the stale preloader without unlocking the active peer when mounted history is canceled', async() => {
   let rejectFirstHistory!: (error: Error) => void;
-  let resolveSecondHistory!: () => void;
   const firstHistory = new Promise<void>((_resolve, reject) => {
     rejectFirstHistory = reject;
-  });
-  const secondHistory = new Promise<void>((resolve) => {
-    resolveSecondHistory = resolve;
   });
   const {harness, getHistory1, setPeerLogger} = makeMountableSetPeerHarness();
   let queueLocked = false;
@@ -701,34 +712,23 @@ test('does not log or clean up the active peer when stale mounted history is can
     cached: true,
     promise: firstHistory,
     waitPromise: Promise.resolve()
-  })).mockReturnValueOnce(Promise.resolve({
-    cached: true,
-    promise: secondHistory,
-    waitPromise: Promise.resolve()
   }));
+  harness.getMountedBubble = vi.fn(async() => ({bubble: document.createElement('div')}));
   const animationIntersector = (await import('@components/animationIntersector')).default;
   const unlockGroup = vi.spyOn(animationIntersector, 'unlockGroup');
 
   try {
     const first = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
-    const second = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
+    await expect(harness.setPeer({peerId, samePeer: true, sameSearch: true})).resolves.toBeNull();
 
     rejectFirstHistory(PEER_CHANGED_ERROR);
     await expect(first.promise).rejects.toBe(PEER_CHANGED_ERROR);
 
     expect(setPeerLogger.error).not.toHaveBeenCalledWith(expect.any(String), PEER_CHANGED_ERROR);
-    expect(harness.preloader.detach).not.toHaveBeenCalled();
+    expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
     expect(unlockGroup).not.toHaveBeenCalled();
     expect(harness.lazyLoadQueue.unlock).not.toHaveBeenCalled();
     expect(queueLocked).toBe(true);
-
-    resolveSecondHistory();
-    await second.promise;
-
-    expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
-    expect(unlockGroup).toHaveBeenCalledWith('chat');
-    expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
-    expect(queueLocked).toBe(false);
   } finally {
     unlockGroup.mockRestore();
     animationIntersector.unlockGroup('chat');

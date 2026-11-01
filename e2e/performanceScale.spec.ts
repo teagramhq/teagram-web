@@ -712,7 +712,7 @@ async function openContacts(page: Page, requests: {value: number}) {
   await page.waitForTimeout(250);
   await expect.poll(async() => page.evaluate(() => {
     const worker = performance.getEntriesByType('resource').find((entry) => entry.name.includes('tlottie.worker')) as PerformanceResourceTiming | undefined;
-    return !worker || worker.responseEnd > 0;
+    return !!worker && worker.responseEnd > 0;
   }), {timeout: 10_000}).toBe(true);
   await waitForBundleResources(page);
 
