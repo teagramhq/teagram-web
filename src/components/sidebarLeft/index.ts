@@ -72,6 +72,7 @@ import setBlankToAnchor from '@lib/richTextProcessor/setBlankToAnchor';
 import AccountController from '@lib/accounts/accountController';
 import {ActiveAccountNumber} from '@lib/accounts/types';
 import {MAX_ACCOUNTS, MAX_ACCOUNTS_FREE} from '@lib/accounts/constants';
+import cachePromiseWithRetry from '@helpers/cachePromiseWithRetry';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
 import {createProxiedManagersForAccount} from '@lib/getProxiedManagers';
 import limitSymbols from '@helpers/string/limitSymbols';
@@ -1159,12 +1160,11 @@ export class AppSidebarLeft extends SidebarSlider {
   public initSearch() {
     if(this.searchInitResult) return Promise.resolve(this.searchInitResult);
 
-    this.searchInitPromise ??= this.initializeSearch().catch((error) => {
-      this.searchInitPromise = undefined;
-      throw error;
-    });
-
-    return this.searchInitPromise;
+    return cachePromiseWithRetry(
+      () => this.searchInitPromise,
+      (promise) => this.searchInitPromise = promise,
+      () => this.initializeSearch()
+    );
   }
 
   private async initializeSearch() {

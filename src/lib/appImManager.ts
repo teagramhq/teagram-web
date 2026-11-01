@@ -94,7 +94,7 @@ import getPeerTitle from '@components/wrappers/getPeerTitle';
 import NBSP from '@helpers/string/nbsp';
 import {makeMediaSize, MediaSize} from '@helpers/mediaSize';
 import cachePromiseWithRetry from '@helpers/cachePromiseWithRetry';
-import canHandleChatArrowShortcut from '@lib/canHandleChatArrowShortcut';
+import createAppImManagerKeydownHandler from '@lib/appImManagerKeydown';
 import {MiddleEllipsisElement} from '@components/middleEllipsis';
 import parseUriParams from '@helpers/string/parseUriParams';
 import getMessageThreadId from '@appManagers/utils/messages/getMessageThreadId';
@@ -1664,156 +1664,15 @@ export class AppImManager extends EventListenerBase<{
   }
 
   private attachKeydownListener() {
-    const IGNORE_KEYS = new Set(['Meta', 'Control']);
-    const onKeyDown = async(e: KeyboardEvent) => {
-      const key = e.key;
-      const isSelectionCollapsed = document.getSelection().isCollapsed;
-      if(
-        overlayCounter.isOverlayActive ||
-        IGNORE_KEYS.has(key) ||
-        !e.isTrusted // * ignore synthetic events
-      ) return;
+    const onKeyDown = createAppImManagerKeydownHandler(
+      this,
+      appDialogsManager,
+      () => this.tabId === APP_TABS.CHAT
+    );
 
-      const target = e.target as HTMLElement;
-
-      const isTargetAnInput = (target.tagName === 'INPUT' && !['checkbox', 'radio'].includes((target as HTMLInputElement).type)) || target.isContentEditable;
-
-      // if(target.tagName === 'INPUT') return;
-
-      // this.log('onkeydown', e, document.activeElement);
-
-      const chat = this.chat;
-
-      // Hand keyboard focus to the bubbles scroll container so the browser scrolls it natively.
-      // (overflow:auto + outline:none → focus is invisible.)
-      const handoffScroll = () => {
-        const container = chat?.bubbles?.scrollable?.container;
-        if(container && document.activeElement !== container) {
-          container.focus({preventScroll: true});
-        }
-      };
-
-      if(this.isShiftLockShortcut && e.shiftKey) return;
-
-      if((key.startsWith('Arrow') || (e.shiftKey && key === 'Shift')) && !isSelectionCollapsed) {
-        return;
-      } else if(e.code === 'KeyC' && (e.ctrlKey || e.metaKey) && !isTargetAnInput) {
-        return;
-      } else if(
-        (key === 'PageUp' || key === 'PageDown') &&
-        !isTargetAnInput &&
-        !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey
-      ) {
-        handoffScroll();
-        return;
-      } else if(e.altKey && (key === 'ArrowUp' || key === 'ArrowDown')) {
-        cancelEvent(e);
-        this.managers.dialogsStorage.getNextDialog(
-          this.chat?.peerId,
-          key === 'ArrowDown',
-          appDialogsManager.filterId
-        ).then((dialog) => {
-          if(dialog) {
-            this.setPeer({peerId: dialog.peerId});
-          }
-        });
-        return;
-      } else if((key === 'ArrowUp' || key === 'ArrowDown') && canHandleChatArrowShortcut(chat)) {
-        // In chats/channels where the user can't post (read-only broadcasts, restricted groups,
-        // unjoined chats), there's no message to edit, so let ArrowUp/Down scroll the chat instead.
-        if(chat?.input && !chat.input.canSendPlain()) {
-          handoffScroll();
-          return;
-        }
-
-        if(
-          !appDialogsManager.contextMenu?.hasAddToFolderOpen() &&
-          !chat?.input?.editMsgId
-        ) {
-          const forReply = e.metaKey || e.ctrlKey;
-          if(!forReply && !chat?.input?.isInputEmpty()) {
-            return;
-          }
-
-          const up = key === 'ArrowUp';
-          const {replyToMsgId} = chat.input;
-          const {peerId, threadId} = chat;
-          if((!forReply && !up) || (forReply && !up && !replyToMsgId)) {
-            return;
-          }
-
-          cancelEvent(e);
-          const middleware = chat.bubbles.getMiddleware();
-          if(forReply && !(await chat.canSend())) {
-            return;
-          }
-
-          if(!middleware()) {
-            return;
-          }
-
-          this.managers.appMessagesManager.getFirstMessageToEdit({
-            peerId,
-            threadId,
-            forReply,
-            mid: forReply ? replyToMsgId : undefined,
-            up
-          }).then(async(message) => {
-            if(chat !== this.chat || !middleware()) {
-              return;
-            }
-
-            if(!message) {
-              if(forReply && chat.input.replyToMsgId === replyToMsgId) {
-                chat.input.onHelperCancel();
-              }
-
-              return;
-            }
-
-            if(forReply) {
-              const bubble = chat.bubbles.getBubble(message.peerId, message.mid);
-              await chat.input.initMessageReply(chat.input.getChatInputReplyToFromMessage(message));
-              if(bubble) {
-                chat.bubbles.scrollToBubble(bubble, 'center');
-                chat.bubbles.highlightBubble(bubble);
-              } else {
-                chat.setMessageId({
-                  lastMsgId: message.mid,
-                  lastMsgPeerId: message.peerId
-                });
-              }
-            } else {
-              chat.input.initMessageEditing(message.mid);
-            }
-          });
-        }
-
-        return;
-      } else if(key === 'ArrowDown') {
-        return;
-      }
-
-      if(
-        chat?.input?.messageInput &&
-        target !== chat.input.messageInput &&
-        !isTargetAnInput &&
-        !IS_TOUCH_SUPPORTED &&
-        (!mediaSizes.isMobile || this.tabId === APP_TABS.CHAT) &&
-        !chat.selection.isSelecting &&
-        !chat.input.recording &&
-        chat.input.messageInput.isContentEditable
-      ) {
-        chat.input.passEventToInput(e);
-      }
-    };
-
-    // Follow the active app window so the global "type anywhere → focus input" + shortcut handler
-    // keeps firing when the client is popped into a Document PiP window.
     bindActiveWindowListener((w) => w.document.body, 'keydown', onKeyDown);
   }
 
-  // * restrict copying no forwards content
   private attachCopyListener() {
     // Follow the active app window so the restricted-copy guard still fires in a Document PiP window
     // (SECURITY: if it never rebinds there, no-forwards text becomes copyable out of PiP).

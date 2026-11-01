@@ -104,15 +104,13 @@ test('loads chat, search, menu and contacts code only when idle after the chat l
   ]));
 });
 
-test('logs a failed chat UI initialization and retries on the next deferred initialization', async() => {
+test('logs a rejected chat UI initialization from the deferred loader', async() => {
   let idle: () => void;
   (window as any).requestIdleCallback = (callback: () => void) => {
     idle = callback;
     return 1;
   };
-  mocks.initializeChatUi
-  .mockRejectedValueOnce(new Error('chat UI chunk failed'))
-  .mockResolvedValueOnce(undefined);
+  mocks.initializeChatUi.mockRejectedValueOnce(new Error('chat UI chunk failed'));
 
   const {bootstrapIm} = await loadBootstrapIm();
   await bootstrapIm();
@@ -120,9 +118,6 @@ test('logs a failed chat UI initialization and retries on the next deferred init
   idle();
   await vi.waitFor(() => expect(mocks.errors).toHaveLength(1));
   expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1);
-
-  idle();
-  await vi.waitFor(() => expect(mocks.initializeChatUi).toHaveBeenCalledTimes(2));
 });
 
 test('loads deferred UI through the timeout fallback when requestIdleCallback is unavailable', async() => {

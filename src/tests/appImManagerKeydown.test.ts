@@ -1,15 +1,34 @@
-import {expect, test} from 'vitest';
-import {ChatType} from '@components/chat/chatType';
-import canHandleChatArrowShortcut from '@lib/canHandleChatArrowShortcut';
+import {expect, test, vi} from 'vitest';
+import createAppImManagerKeydownHandler from '@lib/appImManagerKeydown';
 
-test('does not handle chat arrow shortcuts before chat initialization', () => {
-  expect(canHandleChatArrowShortcut(undefined)).toBe(false);
-});
+test('ignores Ctrl+ArrowUp before chat initialization', async() => {
+  const getFirstMessageToEdit = vi.fn();
+  const manager = {
+    chat: undefined,
+    isShiftLockShortcut: false,
+    managers: {
+      appMessagesManager: {getFirstMessageToEdit}
+    },
+    setPeer: vi.fn()
+  } as unknown as Parameters<typeof createAppImManagerKeydownHandler>[0];
+  const onKeyDown = createAppImManagerKeydownHandler(
+    manager,
+    {filterId: 0, contextMenu: undefined},
+    () => false
+  );
+  vi.spyOn(document, 'getSelection').mockReturnValue({isCollapsed: true} as Selection);
 
-test('handles chat arrow shortcuts for an initialized non-scheduled chat', () => {
-  expect(canHandleChatArrowShortcut({type: ChatType.Chat})).toBe(true);
-});
+  const event = {
+    key: 'ArrowUp',
+    code: 'ArrowUp',
+    isTrusted: true,
+    ctrlKey: true,
+    metaKey: false,
+    shiftKey: false,
+    altKey: false,
+    target: document.body
+  } as unknown as KeyboardEvent;
 
-test('does not handle chat arrow shortcuts in scheduled messages', () => {
-  expect(canHandleChatArrowShortcut({type: ChatType.Scheduled})).toBe(false);
+  await expect(onKeyDown(event)).resolves.toBeUndefined();
+  expect(getFirstMessageToEdit).not.toHaveBeenCalled();
 });
