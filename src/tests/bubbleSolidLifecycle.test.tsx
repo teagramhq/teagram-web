@@ -221,6 +221,31 @@ test('prepares cached peer completion while initial history renders', async() =>
   expect(finishPeerChange).toHaveBeenCalledTimes(1);
 });
 
+test('starts unread and dialog lookups alongside peer metadata setup', async() => {
+  const pendingHistory = new Promise<void>(() => {});
+  const {harness, chat} = makeSetPeerHarness(pendingHistory);
+  let finishPeerMetadata!: () => void;
+  chat.onChangePeer = vi.fn(() => new Promise<void>((resolve) => {
+    finishPeerMetadata = resolve;
+  }));
+  chat.type = 'chat';
+  chat.getHistoryStorage().maxId = 100;
+  const getReadMaxIdIfUnread = vi.fn(async() => 0);
+  const getDialogOrTopic = vi.fn(async() => ({unread_count: 0}));
+  chat.getDialogOrTopic = getDialogOrTopic;
+  chat.getMessage = vi.fn(() => ({}));
+  harness.managers.appMessagesManager = {getReadMaxIdIfUnread};
+
+  const setPeer = harness.setPeer({peerId, samePeer: false, sameSearch: false});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(getReadMaxIdIfUnread).toHaveBeenCalledTimes(1);
+  expect(getDialogOrTopic).toHaveBeenCalledTimes(1);
+
+  finishPeerMetadata();
+  await setPeer;
+});
+
 test('defers peer UI callbacks until the caller commits the new peer', async() => {
   const callbacks: string[] = [];
   const chat = Object.assign(Object.create(Chat.prototype), {
