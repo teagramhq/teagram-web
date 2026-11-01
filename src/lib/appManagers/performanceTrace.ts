@@ -25,6 +25,7 @@ export type PerformanceRpcHandle = {
 export class PerformancePhaseTrace {
   private readonly enabled: boolean;
   private phases: PerformancePhase[] = [];
+  private openPhases = new Map<string, () => void>();
 
   constructor(enabled: boolean) {
     this.enabled = enabled;
@@ -54,6 +55,21 @@ export class PerformancePhaseTrace {
 
   public reset() {
     this.phases = [];
+    this.openPhases.clear();
+  }
+
+  public startUntil(name: string, details: {accountNumber?: number} = {}) {
+    if(!this.enabled) return;
+
+    this.openPhases.set(name, this.start(name, details));
+  }
+
+  public finish(name: string) {
+    const finish = this.openPhases.get(name);
+    if(!finish) return;
+
+    this.openPhases.delete(name);
+    finish();
   }
 
   public track<T>(name: string, operation: () => T): T {

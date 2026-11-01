@@ -67,6 +67,19 @@ describe('performance trace collectors', () => {
     ]);
   });
 
+  test('finishes a phase by name when the ending event occurs in another component', () => {
+    const name = 'main.chatlist.startToFirstGetDialogs.test';
+    performance.clearMeasures(name);
+    const trace = new PerformancePhaseTrace(true);
+    trace.startUntil(name);
+
+    trace.finish(name);
+
+    expect(trace.getSnapshot()).toMatchObject([{name, durationMs: expect.any(Number)}]);
+    expect(performance.getEntriesByName(name, 'measure')).toHaveLength(1);
+    performance.clearMeasures(name);
+  });
+
   test('counts RPC calls without recording their spans when detail tracing is disabled', () => {
     const trace = new PerformanceRpcTrace(true);
     trace.reset(false);

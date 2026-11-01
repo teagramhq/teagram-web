@@ -23,9 +23,13 @@ export async function bootstrapIm(): Promise<void> {
   if(bootstrapped) return;
   bootstrapped = true;
 
-  await performancePhaseTrace.track('main.bootstrapIm.authState', () => {
-    return rootScope.managers.appStateManager.pushToState('authState', {_: 'authStateSignedIn'});
-  });
+  await (
+    import.meta.env.VITE_PERF_TRACE === '1' ?
+      performancePhaseTrace.track('main.bootstrapIm.authState', () => {
+        return rootScope.managers.appStateManager.pushToState('authState', {_: 'authStateSignedIn'});
+      }) :
+      rootScope.managers.appStateManager.pushToState('authState', {_: 'authStateSignedIn'})
+  );
 
   const pageChatsEl = document.getElementById('page-chats');
   if(pageChatsEl) pageChatsEl.style.display = '';
@@ -35,36 +39,53 @@ export async function bootstrapIm(): Promise<void> {
   // Skip the opus-recorder fallback chunk entirely on browsers that have the
   // WebCodecs-based native path. Saves ~80 KB of WASM-shipping JS on every
   // sign-in for ~94% of users (May 2026 baseline).
-  const recorderImport: Promise<{default: unknown} | null> = performancePhaseTrace.track(
-    'main.bootstrapIm.recorder.import',
-    () => isNativeVoiceRecorderSupported() ? Promise.resolve(null) : import('@vendor/recorder.min.js' as any)
-  );
-  const appDialogsManagerImport = performancePhaseTrace.track(
-    'main.bootstrapIm.appDialogsManager.import',
-    () => import('@lib/appDialogsManager')
-  );
-  const fontsPromise = performancePhaseTrace.track('main.bootstrapIm.fonts', () => loadFonts());
-  const videoFrameCallbackPolyfillImport = performancePhaseTrace.track(
-    'main.bootstrapIm.videoFrameCallbackPolyfill.import',
-    () => 'requestVideoFrameCallback' in HTMLVideoElement.prototype ?
+  const recorderImport: Promise<{default: unknown} | null> = import.meta.env.VITE_PERF_TRACE === '1' ?
+    performancePhaseTrace.track(
+      'main.bootstrapIm.recorder.import',
+      () => isNativeVoiceRecorderSupported() ? Promise.resolve(null) : import('@vendor/recorder.min.js' as any)
+    ) :
+    isNativeVoiceRecorderSupported() ? Promise.resolve(null) : import('@vendor/recorder.min.js' as any);
+  const appDialogsManagerImport = import.meta.env.VITE_PERF_TRACE === '1' ?
+    performancePhaseTrace.track('main.bootstrapIm.appDialogsManager.import', () => import('@lib/appDialogsManager')) :
+    import('@lib/appDialogsManager');
+  const fontsPromise = import.meta.env.VITE_PERF_TRACE === '1' ?
+    performancePhaseTrace.track('main.bootstrapIm.fonts', () => loadFonts()) :
+    loadFonts();
+  const videoFrameCallbackPolyfillImport = import.meta.env.VITE_PERF_TRACE === '1' ?
+    performancePhaseTrace.track(
+      'main.bootstrapIm.videoFrameCallbackPolyfill.import',
+      () => 'requestVideoFrameCallback' in HTMLVideoElement.prototype ?
+        Promise.resolve() :
+        import('@helpers/dom/requestVideoFrameCallbackPolyfill')
+    ) :
+    'requestVideoFrameCallback' in HTMLVideoElement.prototype ?
       Promise.resolve() :
-      import('@helpers/dom/requestVideoFrameCallbackPolyfill')
-  );
+      import('@helpers/dom/requestVideoFrameCallbackPolyfill');
 
-  const [{default: appDialogsManager}, recorder] = await performancePhaseTrace.track(
-    'main.bootstrapIm.dependencies.wait',
-    () => Promise.all([
-      appDialogsManagerImport,
-      recorderImport,
-      fontsPromise,
-      videoFrameCallbackPolyfillImport
-    ])
+  const [{default: appDialogsManager}, recorder] = await (
+    import.meta.env.VITE_PERF_TRACE === '1' ?
+      performancePhaseTrace.track(
+        'main.bootstrapIm.dependencies.wait',
+        () => Promise.all([
+          appDialogsManagerImport,
+          recorderImport,
+          fontsPromise,
+          videoFrameCallbackPolyfillImport
+        ])
+      ) :
+      Promise.all([
+        appDialogsManagerImport,
+        recorderImport,
+        fontsPromise,
+        videoFrameCallbackPolyfillImport
+      ])
   );
 
   if(recorder) {
     (window as any).Recorder = recorder.default;
   }
   if(import.meta.env.VITE_PERF_TRACE === '1') {
+    performancePhaseTrace.startUntil('main.chatlist.startToFirstGetDialogs');
     performancePhaseTrace.track('main.chatlist.mount', () => appDialogsManager.start());
   } else {
     appDialogsManager.start();
@@ -77,7 +98,11 @@ export async function bootstrapIm(): Promise<void> {
   // otherwise batch into a single style commit and the gate would have no
   // effect — yield a frame so the committed state still has has-auth-pages
   // and the transform/opacity jump is instant.
-  await performancePhaseTrace.track('main.bootstrapIm.chatlist.mount.wait', () => doubleRaf());
+  await (
+    import.meta.env.VITE_PERF_TRACE === '1' ?
+      performancePhaseTrace.track('main.bootstrapIm.chatlist.mount.wait', () => doubleRaf()) :
+      doubleRaf()
+  );
   document.body.classList.remove('has-auth-pages');
 
   // Tear down the auth UI 1s after IM appears — same delay the legacy

@@ -755,6 +755,10 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public trackPerformanceRpcWait<T, P extends Promise<T>>(method: string, request: P): P {
+    if(import.meta.env.VITE_PERF_TRACE === '1' && method === 'messages.getDialogs') {
+      performancePhaseTrace.finish('main.chatlist.startToFirstGetDialogs');
+    }
+
     return this.performanceRpcTrace.trackWait(method, request);
   }
 

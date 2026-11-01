@@ -22,6 +22,7 @@ describe('bootstrapIm performance trace', () => {
 
   beforeEach(() => {
     vi.resetModules();
+    vi.stubEnv('VITE_PERF_TRACE', '1');
     trace = new PerformancePhaseTrace(true);
     vi.doMock('@lib/appManagers/performanceTrace', () => ({performancePhaseTrace: trace}));
     vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any);
@@ -31,12 +32,14 @@ describe('bootstrapIm performance trace', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     vi.doUnmock('@lib/appManagers/performanceTrace');
     document.body.innerHTML = '';
     performance.clearMeasures();
   });
 
   test('records each awaited bootstrap step as a main-thread span', async() => {
+    const startUntil = vi.spyOn(trace, 'startUntil');
     const {bootstrapIm} = await import('../pages/bootstrapIm');
 
     await bootstrapIm();
@@ -50,8 +53,12 @@ describe('bootstrapIm performance trace', () => {
       'main.bootstrapIm.fonts',
       'main.bootstrapIm.videoFrameCallbackPolyfill.import',
       'main.bootstrapIm.dependencies.wait',
+      'main.chatlist.startToFirstGetDialogs',
       'main.bootstrapIm.chatlist.mount.wait'
     ]));
-    expect(performance.getEntriesByType('measure').map((entry) => entry.name)).toEqual(expect.arrayContaining(names));
+    expect(startUntil).toHaveBeenCalledWith('main.chatlist.startToFirstGetDialogs');
+    expect(performance.getEntriesByType('measure').map((entry) => entry.name)).toEqual(expect.arrayContaining(
+      names.filter((name) => name !== 'main.chatlist.startToFirstGetDialogs')
+    ));
   });
 });
