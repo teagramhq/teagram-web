@@ -83,7 +83,7 @@ import callsController from '@lib/calls/callsController';
 import getConferenceInviteErrorLangKey from '@lib/calls/conferenceInviteError';
 import {groupCallToInput} from '@lib/calls/helpers/groupCallUpdates';
 import sameInputGroupCall from '@lib/calls/helpers/sameInputGroupCall';
-import getFilesFromEvent from '@helpers/files/getFilesFromEvent';
+import getFilesFromEvent, {loadAlongsideFilesFromEvent} from '@helpers/files/getFilesFromEvent';
 import getFileMimeType from '@helpers/files/getFileMimeType';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import paymentsWrapCurrencyAmount from '@helpers/paymentsWrapCurrencyAmount';
@@ -2785,22 +2785,20 @@ export class AppImManager extends EventListenerBase<{
         return;
       }
 
+      const fileEvent = loadAlongsideFilesFromEvent(e, () => Promise.all([
+        import('@components/chat/dragAndDrop'),
+        import('@components/popups/newMedia'),
+        import('@components/chat/utils')
+      ]), {onlyTypes: true});
+      const [modules, types] = await Promise.all([fileEvent.loaded, fileEvent.files]);
       const [
         {default: ChatDragAndDrop},
         {default: PopupNewMedia, getCurrentNewMediaPopup},
         {canUploadAsWhenEditing}
-      ] = await Promise.all([
-        import('@components/chat/dragAndDrop'),
-        import('@components/popups/newMedia'),
-        import('@components/chat/utils')
-      ]);
-
-      const _types = e.dataTransfer.types;
-      // @ts-ignore
-      const isFiles = _types.contains ? _types.contains('Files') : _types.indexOf('Files') >= 0;
+      ] = modules;
+      const {isFiles} = fileEvent;
 
       const newMediaPopup = getCurrentNewMediaPopup();
-      const types: string[] = await getFilesFromEvent(e, true);
       if(mount) {
         if(!isFiles || (!(await this.canDrag()) && !newMediaPopup)) { // * skip dragging text case
           mount = false;
@@ -3016,23 +3014,22 @@ export class AppImManager extends EventListenerBase<{
     attachType?: 'media' | 'document',
     files?: Awaited<ReturnType<typeof getFilesFromEvent>>
   ) => {
-    const {default: PopupNewMedia, getCurrentNewMediaPopup} = await import('@components/popups/newMedia');
+    const fileEvent = loadAlongsideFilesFromEvent(e, () => import('@components/popups/newMedia'), {
+      files,
+      beforeLoad: (isFiles) => {
+        if(isFiles) {
+          cancelEvent(e);
+        }
+      }
+    });
+    const {default: PopupNewMedia, getCurrentNewMediaPopup} = await fileEvent.loaded;
     const newMediaPopup = getCurrentNewMediaPopup();
     const ephemeralSnapshot = this.chat?.input?.getEphemeralSendingSnapshot();
 
     // console.log('document paste');
     // console.log('item', event.clipboardData.getData());
 
-    if('dataTransfer' in e && (e as DragEvent).dataTransfer) { // cross-realm-safe `instanceof DragEvent` (Document PiP window)
-      const _types = (e as DragEvent).dataTransfer.types;
-      // @ts-ignore
-      const isFiles = _types.contains ? _types.contains('Files') : _types.indexOf('Files') >= 0;
-      if(isFiles) {
-        cancelEvent(e);
-      }
-    }
-
-    files ??= await getFilesFromEvent(e);
+    files ??= await fileEvent.files;
     if(!(await this.canDrag(!!ephemeralSnapshot)) && !newMediaPopup) {
       return;
     }

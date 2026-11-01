@@ -63,3 +63,24 @@ export default async function getFilesFromEvent(e: ClipboardEvent | DragEvent, o
 
   return files;
 }
+
+export function loadAlongsideFilesFromEvent<T>(
+  e: ClipboardEvent | DragEvent,
+  load: () => Promise<T>,
+  options: {
+    onlyTypes?: boolean,
+    files?: any[],
+    beforeLoad?: (isFiles: boolean) => void
+  } = {}
+): {isFiles: boolean, loaded: Promise<T>, files: Promise<any[]>} {
+  const dataTransfer = 'dataTransfer' in e ? (e as DragEvent).dataTransfer : undefined;
+  const types = dataTransfer?.types;
+  // @ts-ignore
+  const isFiles = !!(types && (types.contains ? types.contains('Files') : types.indexOf('Files') >= 0));
+  const files = options.files ? Promise.resolve(options.files) : getFilesFromEvent(e, options.onlyTypes);
+
+  options.beforeLoad?.(isFiles);
+  const loaded = load();
+
+  return {isFiles, loaded, files};
+}
