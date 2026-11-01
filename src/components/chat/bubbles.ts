@@ -612,7 +612,7 @@ function getMainMidForGrouped(mids: number[]) {
 }
 
 export function getInitialHistoryLoadCount(viewportHeight: number) {
-  return Math.min(40, Math.max(12, Math.ceil(viewportHeight / 56)));
+  return Math.min(40, Math.max(8, Math.ceil(viewportHeight / 80)));
 }
 
 const getSponsoredPhoto = (sponsoredMessage: SponsoredMessage) => {
