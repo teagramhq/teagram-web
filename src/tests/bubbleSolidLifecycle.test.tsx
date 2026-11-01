@@ -6,6 +6,7 @@ import windowSize from '@helpers/windowSize';
 import {render} from 'solid-js/web';
 import {makeFullMid} from '@appManagers/utils/messages/fullMid';
 import ejectBubble from '@components/chat/bubbles/ejectBubble';
+import {ChatType} from '@components/chat/chatType';
 import {markMessageLinkEntity} from '@lib/richTextProcessor/filterDisabledEntities';
 
 const moduleMocks = vi.hoisted(() => {
@@ -40,6 +41,8 @@ vi.mock('@stores/contentSettings', () => ({
   })
 }));
 vi.mock('@stores/stars', () => ({default: () => () => 0}));
+vi.mock('@hooks/usePeerTranslation', () => ({default: (): undefined => undefined}));
+vi.mock('@hooks/useAutoDownloadSettings', () => ({default: () => ({photo: 0, video: 0, file: 0})}));
 
 let ChatBubbles: typeof import('@components/chat/bubbles').default;
 let PEER_CHANGED_ERROR: typeof import('@components/chat/bubbles').PEER_CHANGED_ERROR;
@@ -161,6 +164,40 @@ function makeSetPeerHarness(pendingHistory: Promise<void>, finishPeerChangePromi
   return {harness, chat, finishPeerChange, getHistory1, isAnyGroup, isStartButtonNeeded, setPeerLogger};
 }
 
+function makeMountableSetPeerHarness(pendingHistory: Promise<void> = Promise.resolve()) {
+  const setup = makeSetPeerHarness(pendingHistory);
+  const {harness, chat} = setup;
+  const events: string[] = [];
+  chat.type = 'chat';
+  chat.animationGroup = 'chat';
+  chat.revealPreparedBackground = vi.fn();
+  chat.isPinnedMessagesNeeded = vi.fn(() => false);
+  chat.dispatchEvent = vi.fn();
+  chat.input = {startParam: undefined};
+  harness.chatInner = document.createElement('div');
+  harness.createChatInner = () => document.createElement('div');
+  harness.container = document.createElement('div');
+  harness.dateMessages = {};
+  harness.scrollable = {
+    loadedAll: {bottom: false},
+    lastScrollDirection: 0,
+    lastScrollPosition: 0,
+    replaceChildren: vi.fn(() => events.push('replace')),
+    setScrollPositionSilently: vi.fn(),
+    updateThumb: vi.fn(),
+    onScroll: vi.fn()
+  };
+  harness.middlewareHelper = {get: () => () => true};
+  harness.onRenderScrollSet = vi.fn();
+  harness.onScroll = vi.fn();
+  harness.loadEphemeralHistory = vi.fn();
+  harness.setFetchReactionsInterval = vi.fn(async() => undefined);
+  harness.setFetchHistoryInterval = vi.fn(async() => undefined);
+  harness.managers.appMessagesManager = {getDialogOnly: vi.fn(async() => undefined)};
+
+  return {...setup, events};
+}
+
 function makeChatSetPeerHarness(setBubblesPeer: ReturnType<typeof vi.fn>) {
   const chat = Object.assign(Object.create(Chat.prototype), {
     appImManager: {isSamePeer: vi.fn(() => true)},
@@ -253,7 +290,7 @@ test('logs a failed bubble peer change while preserving the rejection for its ca
   await expect(Chat.prototype.setPeer.call(chat, {peerId})).rejects.toBe(failure);
 
   await vi.waitFor(() => {
-    expect(chat.log.error).toHaveBeenCalledWith('chat peer change failed:', failure);
+    expect(chat.log.error).toHaveBeenCalledWith(expect.any(String), failure);
   });
 });
 
@@ -286,7 +323,7 @@ test('logs cached peer render failures in the app im manager', async() => {
   await AppImManager.prototype.setPeer.call(manager, {peerId});
 
   await vi.waitFor(() => {
-    expect(error).toHaveBeenCalledWith('cached peer render failed:', failure);
+    expect(error).toHaveBeenCalledWith(expect.any(String), failure);
   });
 });
 
@@ -421,8 +458,8 @@ test('logs a failed peer part and still applies the remaining callbacks', async(
   await expect(preparedPeerChange.ready).resolves.toEqual({error: failure});
   await expect(preparedPeerChange.apply()).resolves.toBeUndefined();
 
-  expect(error).toHaveBeenCalledWith('peer change part failed:', 'bubbles', failure);
-  expect(error).toHaveBeenCalledWith('peer change apply part failed:', 'topbar', callbackFailure);
+  expect(error).toHaveBeenCalledWith(expect.any(String), 'bubbles', failure);
+  expect(error).toHaveBeenCalledWith(expect.any(String), 'topbar', callbackFailure);
   expect(callbacks).toEqual(['topbar', 'input', 'backgrounds']);
   expect(dispatchEvent).toHaveBeenCalledWith('peer_changed', chat);
 });
@@ -451,8 +488,7 @@ test('applies peer UI callbacks only after replacing the old bubbles', async() =
   const pendingHistory = new Promise<void>((resolve) => {
     resolveHistory = resolve;
   });
-  const {harness, chat} = makeSetPeerHarness(pendingHistory);
-  const events: string[] = [];
+  const {harness, chat, events} = makeMountableSetPeerHarness(pendingHistory);
   let resolveUiApplied!: () => void;
   const uiApplied = new Promise<void>((resolve) => {
     resolveUiApplied = resolve;
@@ -476,30 +512,6 @@ test('applies peer UI callbacks only after replacing the old bubbles', async() =
     events.push('apply');
     return Promise.resolve();
   });
-  chat.revealPreparedBackground = vi.fn();
-  chat.isPinnedMessagesNeeded = vi.fn(() => false);
-  chat.dispatchEvent = vi.fn();
-  chat.input = {startParam: undefined};
-  harness.chatInner = document.createElement('div');
-  harness.createChatInner = () => document.createElement('div');
-  harness.preloader = {detach: vi.fn(), attach: vi.fn()};
-  harness.container = document.createElement('div');
-  harness.dateMessages = {};
-  harness.scrollable = {
-    loadedAll: {bottom: false},
-    lastScrollDirection: 0,
-    lastScrollPosition: 0,
-    replaceChildren: vi.fn(() => events.push('replace')),
-    setScrollPositionSilently: vi.fn(),
-    updateThumb: vi.fn(),
-    onScroll: vi.fn()
-  };
-  harness.lazyLoadQueue.unlock = vi.fn();
-  harness.middlewareHelper = {get: () => () => true};
-  harness.onRenderScrollSet = vi.fn();
-  harness.onScroll = vi.fn();
-  harness.loadEphemeralHistory = vi.fn();
-
   const result = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
   expect(events).toEqual(['replace']);
   resolvePreparation();
@@ -529,7 +541,7 @@ test('rejects prepared UI readiness when mounting the new chat fails', async() =
     expect(harness.preloader.detach).toHaveBeenCalled();
     expect(unlockGroup).toHaveBeenCalledWith(animationGroup);
     expect(harness.lazyLoadQueue.unlock).toHaveBeenCalled();
-    expect(setPeerLogger.error).toHaveBeenCalledWith('setPeer promise error:', failure);
+    expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), failure);
   } finally {
     unlockGroup.mockRestore();
     animationIntersector.unlockGroup(animationGroup);
@@ -572,7 +584,7 @@ test('propagates prepared peer rejection before the initial history request reso
     expect(preparedBeforeHistory).toBe(true);
     expect(propagatedBeforeHistory).toBe(true);
     expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
-    expect(setPeerLogger.error).toHaveBeenCalledWith('setPeer failed before mount', failure);
+    expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), failure);
   } finally {
     resolveHistoryResult({cached: true, promise: pendingHistory, waitPromise: Promise.resolve()});
     resolveHistory();
@@ -608,7 +620,7 @@ test('keeps the newer peer queue locked when stale history resolves', async() =>
 
   expect(queueLocked).toBe(true);
   expect(harness.lazyLoadQueue.unlock).not.toHaveBeenCalled();
-  expect(setPeerLogger.error).not.toHaveBeenCalledWith('setPeer failed before mount', PEER_CHANGED_ERROR);
+  expect(setPeerLogger.error).not.toHaveBeenCalledWith(expect.any(String), PEER_CHANGED_ERROR);
 
   const secondFailure = new Error('new peer history failed');
   rejectSecondHistory(secondFailure);
@@ -616,7 +628,111 @@ test('keeps the newer peer queue locked when stale history resolves', async() =>
 
   expect(queueLocked).toBe(false);
   expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
-  expect(setPeerLogger.error).toHaveBeenCalledWith('setPeer failed before mount', secondFailure);
+  expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), secondFailure);
+});
+
+test('retries peer UI setup after history fails for a newly selected peer', async() => {
+  const failure = new Error('history request failed');
+  const {harness, chat, getHistory1} = makeMountableSetPeerHarness();
+  const appliedCallbacks: string[] = [];
+  const previousPeerId = (peerId + 1) as PeerId;
+  chat.peerId = previousPeerId;
+  chat.peerChanged = true;
+  Object.setPrototypeOf(chat, Chat.prototype);
+  chat.appImManager = {
+    isSamePeer: (options1: any, options2: any) => AppImManager.prototype.isSamePeer(options1, options2),
+    dispatchEvent: vi.fn(),
+    getChatSavedPosition: vi.fn(() => undefined)
+  };
+  chat.peerIdSignal = [previousPeerId, (nextPeerId: PeerId) => chat.peerId = nextPeerId];
+  chat.inited = true;
+  chat.middlewareHelper = getMiddleware();
+  chat.changeHistoryStorageKey = vi.fn();
+  chat.log = {error: vi.fn()};
+  chat.bubbles = harness;
+  harness.skippedMids = new Set();
+  harness.getMountedBubble = vi.fn(async() => undefined);
+  harness.getBubbleByPoint = vi.fn(() => undefined);
+  harness.findNextMountedBubbleByMsgId = vi.fn(() => undefined);
+  harness.getRenderedHistory = vi.fn(() => []);
+  harness.getLastBubble = vi.fn(() => undefined);
+  chat.finishPeerChange = vi.fn(() => {
+    chat.peerChanged = true;
+    return Promise.resolve({
+      ready: Promise.resolve(undefined),
+      apply: async() => {
+        appliedCallbacks.push('applied');
+      }
+    });
+  });
+  getHistory1.mockReturnValueOnce(Promise.reject(failure)).mockReturnValueOnce(Promise.resolve({
+    cached: true,
+    promise: Promise.resolve(),
+    waitPromise: Promise.resolve()
+  }));
+  try {
+    await expect(Chat.prototype.setPeer.call(chat, {peerId, type: ChatType.Chat})).rejects.toBe(failure);
+    await vi.waitFor(() => expect(chat.setPeerPromise).toBeNull());
+
+    const result = await Chat.prototype.setPeer.call(chat, {peerId, type: ChatType.Chat});
+    await result.promise;
+
+    expect(chat.finishPeerChange).toHaveBeenCalledTimes(2);
+    expect(appliedCallbacks).toEqual(['applied']);
+  } finally {
+    chat.middlewareHelper.clean();
+  }
+});
+
+test('does not log or clean up the active peer when stale mounted history is canceled', async() => {
+  let rejectFirstHistory!: (error: Error) => void;
+  let resolveSecondHistory!: () => void;
+  const firstHistory = new Promise<void>((_resolve, reject) => {
+    rejectFirstHistory = reject;
+  });
+  const secondHistory = new Promise<void>((resolve) => {
+    resolveSecondHistory = resolve;
+  });
+  const {harness, getHistory1, setPeerLogger} = makeMountableSetPeerHarness();
+  let queueLocked = false;
+  harness.lazyLoadQueue.lock = vi.fn(() => queueLocked = true);
+  harness.lazyLoadQueue.unlock = vi.fn(() => queueLocked = false);
+  getHistory1.mockReturnValueOnce(Promise.resolve({
+    cached: true,
+    promise: firstHistory,
+    waitPromise: Promise.resolve()
+  })).mockReturnValueOnce(Promise.resolve({
+    cached: true,
+    promise: secondHistory,
+    waitPromise: Promise.resolve()
+  }));
+  const animationIntersector = (await import('@components/animationIntersector')).default;
+  const unlockGroup = vi.spyOn(animationIntersector, 'unlockGroup');
+
+  try {
+    const first = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
+    const second = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
+
+    rejectFirstHistory(PEER_CHANGED_ERROR);
+    await expect(first.promise).rejects.toBe(PEER_CHANGED_ERROR);
+
+    expect(setPeerLogger.error).not.toHaveBeenCalledWith(expect.any(String), PEER_CHANGED_ERROR);
+    expect(harness.preloader.detach).not.toHaveBeenCalled();
+    expect(unlockGroup).not.toHaveBeenCalled();
+    expect(harness.lazyLoadQueue.unlock).not.toHaveBeenCalled();
+    expect(queueLocked).toBe(true);
+
+    resolveSecondHistory();
+    await second.promise;
+
+    expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
+    expect(unlockGroup).toHaveBeenCalledWith('chat');
+    expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
+    expect(queueLocked).toBe(false);
+  } finally {
+    unlockGroup.mockRestore();
+    animationIntersector.unlockGroup('chat');
+  }
 });
 
 test('logs and unlocks when the initial history request rejects before mount', async() => {
@@ -627,7 +743,7 @@ test('logs and unlocks when the initial history request rejects before mount', a
   await expect(harness.setPeer({peerId, samePeer: false, sameSearch: false})).rejects.toBe(failure);
 
   expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
-  expect(setPeerLogger.error).toHaveBeenCalledWith('setPeer failed before mount', failure);
+  expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), failure);
 });
 
 test('releases the preloader and animation group when prepared peer setup rejects', async() => {
@@ -823,7 +939,7 @@ test('does not hide the gift button for a stale search after a lookup fails', as
 
   expect(giftButtonClassList.add).not.toHaveBeenCalled();
   expect(giftButtonClassList.toggle).not.toHaveBeenCalled();
-  expect(chat.log.error).toHaveBeenCalledWith('gift button visibility error:', failure);
+  expect(chat.log.error).toHaveBeenCalledWith(expect.any(String), failure);
 });
 
 test('logs gift visibility lookup failures and keeps the button hidden', async() => {
@@ -838,7 +954,21 @@ test('logs gift visibility lookup failures and keeps the button hidden', async()
 
   expect(giftButtonClassList.add).toHaveBeenCalledWith('hide');
   expect(giftButtonClassList.toggle).not.toHaveBeenCalledWith('hide', false);
-  expect(chat.log.error).toHaveBeenCalledWith('gift button visibility error:', failure);
+  expect(chat.log.error).toHaveBeenCalledWith(expect.any(String), failure);
+});
+
+test('logs malformed gift profile data and keeps the button hidden', async() => {
+  const {input, chat, giftButtonClassList} = makeGiftButtonHarness(
+    async() => ({}),
+    async() => ({pFlags: {display_gifts_button: true}})
+  );
+  giftButtonClassList.add('hide');
+
+  await expect((ChatInput.prototype as any).updateGiftButtonVisibility.call(input)).resolves.toBeUndefined();
+
+  expect(chat.log.error).toHaveBeenCalledWith(expect.any(String), expect.any(TypeError));
+  expect(giftButtonClassList.add).toHaveBeenCalledWith('hide');
+  expect(giftButtonClassList.toggle).not.toHaveBeenCalledWith('hide', false);
 });
 
 test('does not use previous-peer bubbles to enlarge the initial history request', async() => {

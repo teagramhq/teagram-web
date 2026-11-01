@@ -6195,6 +6195,9 @@ export default class ChatBubbles {
         log.error('setPeer failed before mount', error);
       }
       if(middleware()) {
+        if(!samePeer && error !== PEER_CHANGED_ERROR) {
+          this.chat.peerChangeFailed = true;
+        }
         this.lazyLoadQueue.unlock();
       }
       throw error;
@@ -6431,10 +6434,12 @@ export default class ChatBubbles {
 
       // this.chatInner.classList.remove('disable-hover', 'is-scrolling'); // warning, performance!
     }).catch((err: unknown) => {
-      log.error('setPeer promise error:', err);
       const isCurrent = middleware();
-      this.preloader.detach();
+      if(err !== PEER_CHANGED_ERROR) {
+        log.error('setPeer promise error:', err);
+      }
       if(isCurrent) {
+        this.preloader.detach();
         animationIntersector.unlockGroup(this.chat.animationGroup);
         this.lazyLoadQueue.unlock();
       }

@@ -1,5 +1,5 @@
 import {readFileSync, writeFileSync} from 'node:fs';
-import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
+import {expect, test, type Browser, type BrowserContext, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
@@ -715,11 +715,24 @@ async function openContacts(page: Page, requests: {value: number}) {
     return !worker || worker.responseEnd > 0;
   }), {timeout: 10_000}).toBe(true);
   await waitForBundleResources(page);
-  await begin(page, requests);
-  await page.locator('.sidebar-tools-button').click();
-  await page.getByText('Contacts', {exact: true}).last().click();
-  await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+
+  const workerRequests: string[] = [];
+  const recordWorkerRequest = (request: Request) => {
+    if(request.url().includes('tlottie.worker')) workerRequests.push(request.url());
+  };
+  page.on('request', recordWorkerRequest);
+  try {
+    await begin(page, requests);
+    await page.locator('.sidebar-tools-button').click();
+    await page.getByText('Contacts', {exact: true}).last().click();
+    await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
+    const boundary = await snapshotMeasurementBoundary(page);
+    const sample = await capture(page, requests, boundary);
+    expect(workerRequests).toEqual([]);
+    return sample;
+  } finally {
+    page.off('request', recordWorkerRequest);
+  }
 }
 
 async function searchContacts(page: Page, requests: {value: number}, scale: Scale) {

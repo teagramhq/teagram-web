@@ -118,6 +118,7 @@ export default class Chat extends EventListenerBase<{
   public setPeerPromise: Promise<void>;
   private setPeerPromiseStartedAt: number;
   public peerChanged: boolean;
+  public peerChangeFailed = false;
 
   public log: ReturnType<typeof logger>;
 
@@ -1047,7 +1048,8 @@ export default class Chat extends EventListenerBase<{
       this.inited = true;
     }
 
-    const samePeer = this.appImManager.isSamePeer(this, options);
+    const samePeer = this.appImManager.isSamePeer(this, options) && !this.peerChangeFailed;
+    this.peerChangeFailed = false;
     if(!samePeer) {
       this.appImManager.dispatchEvent('peer_changing', this);
       this.peerIdSignal[1](this.peerId = peerId || NULL_PEER_ID);

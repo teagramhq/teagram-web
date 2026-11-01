@@ -2770,26 +2770,19 @@ export default class ChatInput {
         currentChat.type === ChatType.Chat;
     };
 
-    let lookups: [
-      Awaited<ReturnType<typeof this.managers.appPeersManager.isBot>>,
-      Awaited<ReturnType<typeof this.managers.appProfileManager.getProfile>>,
-      Awaited<ReturnType<typeof this.managers.appPrivacyManager.getGlobalPrivacySettings>>
-    ];
     try {
-      lookups = await Promise.all([
+      const [isBot, userFull, globalPrivacy] = await Promise.all([
         this.managers.appPeersManager.isBot(peerId),
         this.managers.appProfileManager.getProfile(peerId.toUserId()),
         this.managers.appPrivacyManager.getGlobalPrivacySettings()
       ]);
+      if(!isCurrentChat()) return;
+
+      this.btnSendGift.classList.toggle('hide', isBot || !this.shouldShowGiftButton(userFull, globalPrivacy));
     } catch(error) {
       chat.log.error('gift button visibility error:', error);
       if(isCurrentChat()) this.btnSendGift.classList.add('hide');
-      return;
     }
-
-    if(!isCurrentChat()) return;
-    const [isBot, userFull, globalPrivacy] = lookups;
-    this.btnSendGift.classList.toggle('hide', isBot || !this.shouldShowGiftButton(userFull, globalPrivacy));
   }
 
   private updateBotCommands(userFull: UserFull.userFull, skipAnimation?: boolean) {
