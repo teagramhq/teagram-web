@@ -122,7 +122,7 @@ if(args?.help) {
       harnessRevision: args.harnessRevision,
       serverRevision: args.serverRevision,
       webRevision: args.webRevision
-    }, {requireArtifact: !controlsOnly, guestSignup: args.scenarios?.includes('guest-signup') === true});
+    }, {requireArtifact: !controlsOnly});
     const {serverReady, artifactReady} = readiness;
     const credentials = readSyntheticCredentials(serverReady.credentials, args.runId, authProgress ? 1 : 2);
 
@@ -329,20 +329,13 @@ if(args?.help) {
       browserResult.gateBreakdown = parsePassedBrowserGateBreakdown(browserResult);
       const expectedScreenshots = expectedScreenshotCount(args);
       const incompleteEvidence = [];
-      if(browserResult.contextCount !== expectedBrowserContextCount(args)) incompleteEvidence.push('contexts');
+      if(browserResult.contextCount !== expectedBrowserContextCount()) incompleteEvidence.push('contexts');
       if(browserResult.screenshotsCaptured !== expectedScreenshots) {
         incompleteEvidence.push(`screenshots_${Number.isSafeInteger(browserResult.screenshotsCaptured) ? browserResult.screenshotsCaptured : 'unavailable'}_expected_${expectedScreenshots}`);
       }
       if(browserResult.network?.unexpectedAttempts !== 0) incompleteEvidence.push('unexpected_egress');
       if(browserResult.network?.observerErrors !== 0) incompleteEvidence.push('observer_errors');
-      const observedAccounts = ['alice', 'bob', ...(args.scenarios.includes('guest-signup') ? ['guest'] : [])];
-      if(args.scenarios.includes('guest-signup')) {
-        if(browserResult.guestSignupEvidence?.accountCreated !== true || browserResult.guestSignupEvidence.challengeScriptRequests !== 1) {
-          incompleteEvidence.push('guest_signup_account');
-        }
-      } else if(browserResult.guestSignupEvidence !== undefined) {
-        incompleteEvidence.push('unexpected_guest_signup_evidence');
-      }
+      const observedAccounts = ['alice', 'bob'];
       for(const account of observedAccounts) {
         const context = browserResult.network?.contexts?.[account];
         if(!hasNetworkSourceEvidence(context)) incompleteEvidence.push(`${account}_network_sources`);
@@ -368,7 +361,7 @@ if(args?.help) {
         const traceListing = docker(['exec', browserName, 'find', traceRoot, '-maxdepth', '1', '-type', 'f', '-printf', '%f\\n'], undefined, 'Playwright failure trace inspection');
         const availableTraceFiles = new Set(traceListing.split(/\r?\n/).filter((name) => /^[a-z]+\.zip$/.test(name)));
         const traceFiles = [];
-        for(const name of ['alice', 'bob', ...(args.scenarios?.includes('guest-signup') ? ['guest'] : [])]) {
+        for(const name of ['alice', 'bob']) {
           if(!availableTraceFiles.has(`${name}.zip`)) continue;
           const traceBytes = dockerBytes(['exec', browserName, 'cat', `${traceRoot}/${name}.zip`], 'Playwright failure trace export');
           writeFileSync(join(traceOutputDirectory, `${name}.zip`), traceBytes, {mode: 0o600, flag: 'wx'});

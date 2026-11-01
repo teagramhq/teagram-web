@@ -3886,9 +3886,9 @@ describe('real client scenario contract', () => {
     expect(() => parseRequiredScenarios(' , ')).toThrow('scenario selection is required');
   });
 
-  it('accepts the optional guest-signup scenario', () => {
-    expect(parseRequiredScenarios('sign-in,first-message,message,group,guest-signup'))
-    .toEqual(['sign-in', 'first-message', 'message', 'group', 'guest-signup']);
+  it('rejects guest-signup from the private-artifact scenario list', () => {
+    expect(() => parseRequiredScenarios('sign-in,first-message,message,group,guest-signup'))
+    .toThrow('unknown scenario: guest-signup');
   });
 
   it('requires every scenario exactly once', () => {
@@ -3918,11 +3918,6 @@ describe('real client scenario contract', () => {
     expect(realClientBrowser.shouldRunPollScenario({scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll']})).toBe(true);
   });
 
-  it('runs the guest-signup scenario only when selected', () => {
-    expect(realClientBrowser.shouldRunGuestSignupScenario({scenarios: ['sign-in', 'first-message', 'message', 'group']})).toBe(false);
-    expect(realClientBrowser.shouldRunGuestSignupScenario({scenarios: ['sign-in', 'first-message', 'message', 'group', 'guest-signup']})).toBe(true);
-  });
-
   it('requires the selected optional channel scenario to pass', () => {
     const scenarios = ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll'];
     expect(() => assertAllScenariosPassed([
@@ -3946,15 +3941,13 @@ describe('real client scenario contract', () => {
     expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel']})).toBe(30);
     expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll']})).toBe(34);
     expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']})).toBe(44);
-    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'guest-signup']})).toBe(46);
     expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll']})).toBe(24);
     expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']})).toBe(34);
     expect(() => realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'group']})).toThrow('negative control requires poll');
   });
 
-  it('expects a third observed context when guest signup is selected', () => {
-    expect(realClientContract.expectedBrowserContextCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']})).toBe(2);
-    expect(realClientContract.expectedBrowserContextCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'guest-signup']})).toBe(3);
+  it('keeps private-artifact observation to the two synthetic accounts', () => {
+    expect(realClientContract.expectedBrowserContextCount()).toBe(2);
   });
 
   it('pins the poll creation negative control to the pre-MAIN-2111 server and fixed evidence', () => {
@@ -4070,7 +4063,7 @@ describe('real client scenario contract', () => {
       .map((event) => JSON.stringify(event)).join('\n'), pins)).toThrow('artifact-ready audit or browser evidence is incomplete');
   });
 
-  it('accepts the open-registration test fixture only for guest-signup runs', () => {
+  it('rejects an open-registration fixture in the private-artifact runner', () => {
     const serverReady = buildServerReady();
     serverReady.security = {
       ...serverReady.security,
@@ -4080,12 +4073,7 @@ describe('real client scenario contract', () => {
     };
     const text = JSON.stringify(serverReady);
 
-    expect(parseFixtureReadiness(text, READINESS_PINS, {requireArtifact: false, guestSignup: true}).serverReady.security)
-    .toMatchObject({registrationClosed: false, guestSignUpEnabled: true, turnstileTestMode: true});
     expect(() => parseFixtureReadiness(text, READINESS_PINS, {requireArtifact: false}))
-    .toThrow('server-ready security evidence is incomplete');
-    expect(() => parseFixtureReadiness(JSON.stringify({...serverReady, security: {...serverReady.security, turnstileTestMode: false}}),
-      READINESS_PINS, {requireArtifact: false, guestSignup: true}))
     .toThrow('server-ready security evidence is incomplete');
   });
 
