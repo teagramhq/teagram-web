@@ -42,8 +42,10 @@ vi.mock('@stores/contentSettings', () => ({
 vi.mock('@stores/stars', () => ({default: () => () => 0}));
 
 let ChatBubbles: typeof import('@components/chat/bubbles').default;
+let PEER_CHANGED_ERROR: typeof import('@components/chat/bubbles').PEER_CHANGED_ERROR;
 let Chat: typeof import('@components/chat/chat').default;
 let ChatInput: typeof import('@components/chat/input').default;
+let AppImManager: typeof import('@lib/appImManager').AppImManager;
 let BubbleGroups: typeof import('@components/chat/bubbleGroups').default;
 let BubbleGroup: typeof import('@components/chat/bubbleGroups').BubbleGroup;
 let getInitialHistoryLoadCount: typeof import('@components/chat/bubbles').getInitialHistoryLoadCount;
@@ -78,6 +80,7 @@ beforeAll(async() => {
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
   ({
     default: ChatBubbles,
+    PEER_CHANGED_ERROR,
     getInitialHistoryLoadCount,
     cancelPendingHiddenLinksEvent,
     disposeChatInnerMiddlewareAfterDetach,
@@ -89,6 +92,7 @@ beforeAll(async() => {
   } = await import('@components/chat/bubbles'));
   Chat = (await import('@components/chat/chat')).default;
   ChatInput = (await import('@components/chat/input')).default;
+  AppImManager = (await import('@lib/appImManager')).AppImManager;
   ({default: BubbleGroups, BubbleGroup} = await import('@components/chat/bubbleGroups'));
   // Importing the whole bubbles graph costs far more than the default hook
   // budget once the rest of the suite is competing for the same CPU.
@@ -105,6 +109,7 @@ const peerId = 10 as PeerId;
 function makeSetPeerHarness(pendingHistory: Promise<void>, finishPeerChangePromise: Promise<unknown> = Promise.resolve()) {
   const isAnyGroup = vi.fn(() => Promise.resolve(false));
   const isStartButtonNeeded = vi.fn(() => Promise.resolve(false));
+  const setPeerLogger = Object.assign(vi.fn(), {warn: vi.fn(), error: vi.fn()});
   const getHistory1 = vi.fn(() => Promise.resolve({cached: true, promise: pendingHistory}));
   const finishPeerChange = vi.fn(() => finishPeerChangePromise);
   const historyStorage = {maxId: 0, history: {length: 0}};
@@ -132,7 +137,7 @@ function makeSetPeerHarness(pendingHistory: Promise<void>, finishPeerChangePromi
       appPeersManager: {isAnyGroup},
       apiFileManager: {setQueueId: vi.fn()}
     },
-    log: Object.assign(vi.fn(), {bindPrefix: () => Object.assign(vi.fn(), {warn: vi.fn(), error: vi.fn()})}),
+    log: Object.assign(vi.fn(), {bindPrefix: () => setPeerLogger}),
     followStack: [],
     container: document.createElement('div'),
     preloader: {attach: vi.fn(), detach: vi.fn()},
@@ -153,7 +158,22 @@ function makeSetPeerHarness(pendingHistory: Promise<void>, finishPeerChangePromi
     getHistory1
   }) as any;
 
-  return {harness, chat, finishPeerChange, getHistory1, isAnyGroup, isStartButtonNeeded};
+  return {harness, chat, finishPeerChange, getHistory1, isAnyGroup, isStartButtonNeeded, setPeerLogger};
+}
+
+function makeChatSetPeerHarness(setBubblesPeer: ReturnType<typeof vi.fn>) {
+  const chat = Object.assign(Object.create(Chat.prototype), {
+    appImManager: {isSamePeer: vi.fn(() => true)},
+    inited: true,
+    peerId,
+    setPeerPromise: null,
+    setPeerPromiseStartedAt: 0,
+    changeHistoryStorageKey: vi.fn(),
+    bubbles: {setPeer: setBubblesPeer},
+    log: {error: vi.fn()}
+  }) as any;
+
+  return chat;
 }
 
 function makeGiftButtonHarness(getProfile: () => Promise<unknown>, getGlobalPrivacySettings: () => Promise<unknown>) {
@@ -224,6 +244,50 @@ test('prepares cached peer completion while initial history renders', async() =>
   await harness.setPeer({peerId, samePeer: false, sameSearch: false});
 
   expect(finishPeerChange).toHaveBeenCalledTimes(1);
+});
+
+test('logs a failed bubble peer change while preserving the rejection for its caller', async() => {
+  const failure = new Error('peer change failed');
+  const chat = makeChatSetPeerHarness(vi.fn(() => Promise.reject(failure)));
+
+  await expect(Chat.prototype.setPeer.call(chat, {peerId})).rejects.toBe(failure);
+
+  await vi.waitFor(() => {
+    expect(chat.log.error).toHaveBeenCalledWith('chat peer change failed:', failure);
+  });
+});
+
+test('does not log canceled bubble peer changes', async() => {
+  const chat = makeChatSetPeerHarness(vi.fn(() => Promise.reject(PEER_CHANGED_ERROR)));
+  const setPeer = Chat.prototype.setPeer.call(chat, {peerId});
+  const trackedSetPeer = chat.setPeerPromise;
+
+  await expect(setPeer).rejects.toBe(PEER_CHANGED_ERROR);
+  await trackedSetPeer;
+
+  expect(chat.log.error).not.toHaveBeenCalled();
+});
+
+test('logs cached peer render failures in the app im manager', async() => {
+  const failure = new Error('cached render failed');
+  const chat = {
+    peerId,
+    setPeer: vi.fn(async() => ({cached: true, promise: Promise.reject(failure)}))
+  };
+  const error = vi.fn();
+  const manager = Object.assign(Object.create(AppImManager.prototype), {
+    managers: {appPeersManager: {getPeerMigratedTo: vi.fn(async() => undefined)}},
+    chats: [chat],
+    isSamePeer: vi.fn(() => false),
+    appChatBackground: {getReadyPromise: vi.fn(() => Promise.resolve())},
+    log: {error}
+  }) as any;
+
+  await AppImManager.prototype.setPeer.call(manager, {peerId});
+
+  await vi.waitFor(() => {
+    expect(error).toHaveBeenCalledWith('cached peer render failed:', failure);
+  });
 });
 
 test('starts unread and dialog lookups alongside peer metadata setup', async() => {
@@ -322,6 +386,47 @@ test('applies ready peer UI callbacks while slower chat parts are still preparin
   expect(callbacks).toEqual(['topbar', 'bubbles', 'input']);
 });
 
+test('logs a failed peer part and still applies the remaining callbacks', async() => {
+  const failure = new Error('bubbles preparation failed');
+  const callbackFailure = new Error('topbar apply failed');
+  const callbacks: string[] = [];
+  const dispatchEvent = vi.fn();
+  const error = vi.fn();
+  const chat = Object.assign(Object.create(Chat.prototype), {
+    peerId,
+    peerChanged: false,
+    cleanup: vi.fn(),
+    topbar: {finishPeerChange: vi.fn(async() => () => {
+      callbacks.push('topbar');
+      throw callbackFailure;
+    })},
+    bubbles: {finishPeerChange: vi.fn(() => Promise.reject(failure))},
+    input: {finishPeerChange: vi.fn(async() => () => callbacks.push('input'))},
+    handleBackgrounds: vi.fn(async() => () => callbacks.push('backgrounds')),
+    sharedMediaTab: undefined,
+    log: {warn: vi.fn(), error, setPrefix: vi.fn()},
+    type: 'chat',
+    isMainChat: true,
+    container: {dataset: {}, classList: {toggle: vi.fn()}},
+    appImManager: {dispatchEvent}
+  }) as any;
+
+  const preparedPeerChange = await Chat.prototype.finishPeerChange.call(chat, {
+    peerId,
+    middleware: () => true,
+    deferUiCallbacks: true
+  });
+  if(!preparedPeerChange) throw new Error('deferred peer change was not returned');
+
+  await expect(preparedPeerChange.ready).resolves.toEqual({error: failure});
+  await expect(preparedPeerChange.apply()).resolves.toBeUndefined();
+
+  expect(error).toHaveBeenCalledWith('peer change part failed:', 'bubbles', failure);
+  expect(error).toHaveBeenCalledWith('peer change apply part failed:', 'topbar', callbackFailure);
+  expect(callbacks).toEqual(['topbar', 'input', 'backgrounds']);
+  expect(dispatchEvent).toHaveBeenCalledWith('peer_changed', chat);
+});
+
 test('prepares peer completion while the initial history request is pending', async() => {
   const pendingHistory = new Promise<void>(() => {});
   let resolveHistoryResult!: (result: {cached: boolean, promise: Promise<void>, waitPromise: Promise<void>}) => void;
@@ -406,6 +511,31 @@ test('applies peer UI callbacks only after replacing the old bubbles', async() =
   expect(events).toEqual(['replace', 'apply']);
 });
 
+test('rejects prepared UI readiness when mounting the new chat fails', async() => {
+  const failure = new Error('chat mount failed');
+  const {harness, chat, setPeerLogger} = makeSetPeerHarness(Promise.resolve());
+  const animationGroup = 'chat' as const;
+  chat.animationGroup = animationGroup;
+  harness.scrollable.replaceChildren = vi.fn(() => {
+    throw failure;
+  });
+  const animationIntersector = (await import('@components/animationIntersector')).default;
+  const unlockGroup = vi.spyOn(animationIntersector, 'unlockGroup');
+
+  try {
+    const result = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
+    await expect(result.promise).rejects.toBe(failure);
+
+    expect(harness.preloader.detach).toHaveBeenCalled();
+    expect(unlockGroup).toHaveBeenCalledWith(animationGroup);
+    expect(harness.lazyLoadQueue.unlock).toHaveBeenCalled();
+    expect(setPeerLogger.error).toHaveBeenCalledWith('setPeer promise error:', failure);
+  } finally {
+    unlockGroup.mockRestore();
+    animationIntersector.unlockGroup(animationGroup);
+  }
+});
+
 test('propagates prepared peer rejection before the initial history request resolves', async() => {
   let resolveHistory!: () => void;
   const pendingHistory = new Promise<void>((resolve) => {
@@ -421,7 +551,7 @@ test('propagates prepared peer rejection before the initial history request reso
     resolveHistoryResult = resolve;
   });
   const failure = new Error('peer setup failed');
-  const {harness, finishPeerChange, getHistory1} = makeSetPeerHarness(pendingHistory, preparation);
+  const {harness, finishPeerChange, getHistory1, setPeerLogger} = makeSetPeerHarness(pendingHistory, preparation);
   getHistory1.mockReturnValue(historyResult);
 
   const setPeerResult: Promise<{error: unknown}> = harness.setPeer({peerId, samePeer: false, sameSearch: false}).then(
@@ -441,10 +571,23 @@ test('propagates prepared peer rejection before the initial history request reso
 
     expect(preparedBeforeHistory).toBe(true);
     expect(propagatedBeforeHistory).toBe(true);
+    expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
+    expect(setPeerLogger.error).toHaveBeenCalledWith('setPeer failed before mount', failure);
   } finally {
     resolveHistoryResult({cached: true, promise: pendingHistory, waitPromise: Promise.resolve()});
     resolveHistory();
   }
+});
+
+test('logs and unlocks when the initial history request rejects before mount', async() => {
+  const failure = new Error('history request failed');
+  const {harness, getHistory1, setPeerLogger} = makeSetPeerHarness(Promise.resolve());
+  getHistory1.mockReturnValue(Promise.reject(failure));
+
+  await expect(harness.setPeer({peerId, samePeer: false, sameSearch: false})).rejects.toBe(failure);
+
+  expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
+  expect(setPeerLogger.error).toHaveBeenCalledWith('setPeer failed before mount', failure);
 });
 
 test('releases the preloader and animation group when prepared peer setup rejects', async() => {
@@ -622,6 +765,25 @@ test('does not show the regular peer gift button after a same-peer switch to sea
 
   expect(giftButtonClassList.toggle).not.toHaveBeenCalledWith('hide', false);
   expect(giftButtonClassList.add).toHaveBeenCalledWith('hide');
+});
+
+test('does not hide the gift button for a stale search after a lookup fails', async() => {
+  const failure = new Error('profile lookup failed');
+  const {input, chat, giftButtonClassList} = makeGiftButtonHarness(
+    () => Promise.reject(failure),
+    async() => ({pFlags: {display_gifts_button: true}})
+  );
+  let isCurrent = true;
+
+  const update = (ChatInput.prototype as any).updateGiftButtonVisibility.call(input, () => isCurrent);
+  chat.type = 'search';
+  isCurrent = false;
+
+  await update;
+
+  expect(giftButtonClassList.add).not.toHaveBeenCalled();
+  expect(giftButtonClassList.toggle).not.toHaveBeenCalled();
+  expect(chat.log.error).toHaveBeenCalledWith('gift button visibility error:', failure);
 });
 
 test('logs gift visibility lookup failures and keeps the button hidden', async() => {

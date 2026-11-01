@@ -350,7 +350,7 @@ const SCROLLED_DOWN_THRESHOLD = 300;
 // * generous enough for slow media on a bad connection, short enough that a promise which will
 // * never settle cannot brick the chat
 const MEDIA_PROMISES_TIMEOUT = 10000;
-const PEER_CHANGED_ERROR = new Error('peer changed');
+export const PEER_CHANGED_ERROR = new Error('peer changed');
 const HIDDEN_LINKS_PENDING_ATTRIBUTE = 'data-hidden-links-pending';
 const HIDDEN_LINKS_FALLBACK_ATTRIBUTE = 'data-hidden-links-fallback';
 
@@ -6053,147 +6053,160 @@ export default class ChatBubbles {
 
     this.lazyLoadQueue.lock();
 
-    const canScroll = samePeer && sameSearch;
-    // const haveToScrollToBubble = (topMessage && (isJump || samePeer)) || isTarget;
-    const haveToScrollToBubble = canScroll || (topMessageFullMid !== EMPTY_FULL_MID && isJump) || isTarget;
-    const fromUp = maxBubbleFullMid !== EMPTY_FULL_MID && (lastMsgFullMid === EMPTY_FULL_MID/*  || lastMsgId < 0 */ || await (async() => {
-      const historyStorage = this.chat.getHistoryStorage();
-      const slicedArray = historyStorage.searchHistory || historyStorage.history;
-      if(slicedArray === historyStorage.searchHistory) {
-        const lastIndex = slicedArray.first.indexOf(lastMsgFullMid);
-        const maxIndex = slicedArray.first.indexOf(maxBubbleFullMid);
-        return lastIndex < maxIndex;
-      } else {
-        return splitFullMid(maxBubbleFullMid).mid < splitFullMid(lastMsgFullMid).mid;
-      }
-    })());
-    const scrollFromDown = !fromUp && canScroll;
-    const scrollFromUp = !scrollFromDown && fromUp && canScroll/*  && (samePeer || forwardingUnread) */;
-    this.willScrollOnLoad = scrollFromDown || scrollFromUp;
+    let haveToScrollToBubble: boolean;
+    let scrollFromDown: boolean;
+    let scrollFromUp: boolean;
+    let preparedPeerChange: ReturnType<Chat['finishPeerChange']> | undefined;
+    let result: Awaited<ReturnType<ChatBubbles['getHistory']>>;
+    try {
+      const canScroll = samePeer && sameSearch;
+      // const haveToScrollToBubble = (topMessage && (isJump || samePeer)) || isTarget;
+      haveToScrollToBubble = canScroll || (topMessageFullMid !== EMPTY_FULL_MID && isJump) || isTarget;
+      const fromUp = maxBubbleFullMid !== EMPTY_FULL_MID && (lastMsgFullMid === EMPTY_FULL_MID/*  || lastMsgId < 0 */ || await (async() => {
+        const historyStorage = this.chat.getHistoryStorage();
+        const slicedArray = historyStorage.searchHistory || historyStorage.history;
+        if(slicedArray === historyStorage.searchHistory) {
+          const lastIndex = slicedArray.first.indexOf(lastMsgFullMid);
+          const maxIndex = slicedArray.first.indexOf(maxBubbleFullMid);
+          return lastIndex < maxIndex;
+        } else {
+          return splitFullMid(maxBubbleFullMid).mid < splitFullMid(lastMsgFullMid).mid;
+        }
+      })());
+      scrollFromDown = !fromUp && canScroll;
+      scrollFromUp = !scrollFromDown && fromUp && canScroll/*  && (samePeer || forwardingUnread) */;
+      this.willScrollOnLoad = scrollFromDown || scrollFromUp;
 
-    this.setPeerOptions = {
-      lastMsgFullMid,
-      topMessageFullMid,
-      savedPosition
-    };
+      this.setPeerOptions = {
+        lastMsgFullMid,
+        topMessageFullMid,
+        savedPosition
+      };
 
-    if(this.chat.isBroadcast && this.chat.type === ChatType.Chat/*  && false */) {
-      this.loadSponsoredMessages();
-    }
-
-    if(!samePeer) {
-      this.ranks = undefined;
-      this.processRanks = undefined;
-      this.canShowRanks = false;
-
-      let canShowRanks = this.chat.isMegagroup, chatId = this.peerId.toChatId();
-      if(this.chat.type === ChatType.Saved && !this.chat.threadId.isUser()) {
-        const chat = apiManagerProxy.getChat(chatId = this.chat.threadId.toChatId());
-        canShowRanks = chat?._ === 'channel';
+      if(this.chat.isBroadcast && this.chat.type === ChatType.Chat/*  && false */) {
+        this.loadSponsoredMessages();
       }
 
-      if(canShowRanks) {
-        this.canShowRanks = true;
-        const processRanks = this.processRanks = new Set();
+      if(!samePeer) {
+        this.ranks = undefined;
+        this.processRanks = undefined;
+        this.canShowRanks = false;
 
-        const promise = this.managers.acknowledged.appProfileManager.getParticipants({
-          id: chatId,
-          filter: {_: 'channelParticipantsAdmins'},
-          limit: 100
-        });
-        const ackedResult = await m(promise);
-        const setRanksPromise = ackedResult.result.then((channelParticipants) => {
-          if(this.processRanks !== processRanks) {
-            return;
-          }
+        let canShowRanks = this.chat.isMegagroup, chatId = this.peerId.toChatId();
+        if(this.chat.type === ChatType.Saved && !this.chat.threadId.isUser()) {
+          const chat = apiManagerProxy.getChat(chatId = this.chat.threadId.toChatId());
+          canShowRanks = chat?._ === 'channel';
+        }
 
-          const participants = channelParticipants.participants as (ChatParticipant.chatParticipantAdmin | ChannelParticipant.channelParticipantAdmin)[];
-          this.ranks = new Map();
-          participants.forEach((participant) => {
-            const rank = getParticipantRank(participant);
-            this.ranks.set(participant.user_id.toPeerId(), rank);
+        if(canShowRanks) {
+          this.canShowRanks = true;
+          const processRanks = this.processRanks = new Set();
+
+          const promise = this.managers.acknowledged.appProfileManager.getParticipants({
+            id: chatId,
+            filter: {_: 'channelParticipantsAdmins'},
+            limit: 100
           });
-
-          getHeavyAnimationPromise().then(() => {
+          const ackedResult = await m(promise);
+          const setRanksPromise = ackedResult.result.then((channelParticipants) => {
             if(this.processRanks !== processRanks) {
               return;
             }
 
-            processRanks.forEach((callback) => callback());
-            this.processRanks = undefined;
+            const participants = channelParticipants.participants as (ChatParticipant.chatParticipantAdmin | ChannelParticipant.channelParticipantAdmin)[];
+            this.ranks = new Map();
+            participants.forEach((participant) => {
+              const rank = getParticipantRank(participant);
+              this.ranks.set(participant.user_id.toPeerId(), rank);
+            });
+
+            getHeavyAnimationPromise().then(() => {
+              if(this.processRanks !== processRanks) {
+                return;
+              }
+
+              processRanks.forEach((callback) => callback());
+              this.processRanks = undefined;
+            });
+          }, (err) => {
+            if((err as ApiError).type !== 'CHAT_ADMIN_REQUIRED') {
+              this.log.error('ranks error', err);
+            }
+
+            this.ranks = new Map();
           });
-        }, (err) => {
-          if((err as ApiError).type !== 'CHAT_ADMIN_REQUIRED') {
-            this.log.error('ranks error', err);
+
+          if(ackedResult.cached) {
+            await m(setRanksPromise);
           }
-
-          this.ranks = new Map();
-        });
-
-        if(ackedResult.cached) {
-          await m(setRanksPromise);
         }
       }
-    }
 
-    const finishPeerChangeOptions: Parameters<Chat['finishPeerChange']>[0] = {
-      peerId,
-      isTarget,
-      isJump,
-      lastMsgId,
-      startParam,
-      middleware,
-      text: options.text,
-      entities: options.entities,
-      deferUiCallbacks: true
-    };
-    const preparedPeerChange = !samePeer ?
-      m(this.chat.finishPeerChange(finishPeerChangeOptions)) :
-      undefined;
-    let releasePeerInnerMounted!: () => void;
-    const peerInnerMounted = !samePeer ? new Promise<void>((resolve) => {
-      releasePeerInnerMounted = resolve;
-    }) : Promise.resolve();
-
-    let historyRequest: Promise<Awaited<ReturnType<ChatBubbles['getHistory']>>>;
-    if(!savedPosition?.mids) {
-      historyRequest = this.getHistory1(
-        !isJump && !additionalFullMid && lastMsgFullMid === topMessageFullMid ? EMPTY_FULL_MID : lastMsgFullMid,
-        true,
+      const finishPeerChangeOptions: Parameters<Chat['finishPeerChange']>[0] = {
+        peerId,
+        isTarget,
         isJump,
-        additionalFullMid
-      );
-    } else {
-      historyRequest = Promise.resolve({
-        promise: getHeavyAnimationPromise().then(() => {
-          return this.performHistoryResult({history: savedPosition.mids}, true, true);
-        }) as any,
-        cached: true,
-        waitPromise: Promise.resolve()
-      });
-    }
-    // Observe preparation failures during the request, while keeping cached setup concurrent.
-    const historyResultPromise = preparedPeerChange ?
-      Promise.race([historyRequest, preparedPeerChange.then((prepared) => {
-        if(!prepared) {
-          return historyRequest;
-        }
+        lastMsgId,
+        startParam,
+        middleware,
+        text: options.text,
+        entities: options.entities,
+        deferUiCallbacks: true
+      };
+      preparedPeerChange = !samePeer ?
+        m(this.chat.finishPeerChange(finishPeerChangeOptions)) :
+        undefined;
 
-        return prepared.ready.then((error) => {
-          if(error) {
-            throw error.error;
-          }
-          return historyRequest;
+      let historyRequest: Promise<Awaited<ReturnType<ChatBubbles['getHistory']>>>;
+      if(!savedPosition?.mids) {
+        historyRequest = this.getHistory1(
+          !isJump && !additionalFullMid && lastMsgFullMid === topMessageFullMid ? EMPTY_FULL_MID : lastMsgFullMid,
+          true,
+          isJump,
+          additionalFullMid
+        );
+      } else {
+        historyRequest = Promise.resolve({
+          promise: getHeavyAnimationPromise().then(() => {
+            return this.performHistoryResult({history: savedPosition.mids}, true, true);
+          }) as any,
+          cached: true,
+          waitPromise: Promise.resolve()
         });
-      })]) :
-      historyRequest;
-    const result = await m(historyResultPromise);
+      }
+      // Observe preparation failures during the request, while keeping cached setup concurrent.
+      const historyResultPromise = preparedPeerChange ?
+        Promise.race([historyRequest, preparedPeerChange.then((prepared) => {
+          if(!prepared) {
+            return historyRequest;
+          }
+
+          return prepared.ready.then((error) => {
+            if(error) {
+              throw error.error;
+            }
+            return historyRequest;
+          });
+        })]) :
+        historyRequest;
+      result = await m(historyResultPromise);
+    } catch(error) {
+      log.error('setPeer failed before mount', error);
+      this.lazyLoadQueue.unlock();
+      throw error;
+    }
 
     this.setPeerCached = result.cached;
 
     log.warn('got history');// warning
 
     const {promise, cached} = result;
+    let releasePeerInnerMounted!: () => void;
+    let rejectPeerInnerMounted!: (error: unknown) => void;
+    const peerInnerMounted = !samePeer ? new Promise<void>((resolve, reject) => {
+      releasePeerInnerMounted = resolve;
+      rejectPeerInnerMounted = reject;
+    }) : Promise.resolve();
     const peerUiReadyPromise = preparedPeerChange ?
       preparedPeerChange.then(async(prepared) => {
         await peerInnerMounted;
@@ -6216,10 +6229,14 @@ export default class ChatBubbles {
       // block as replacing the old bubbles. Otherwise the bg DOM swap (running inside the
       // Solid effect's `await built.readyPromise`) can paint a frame ahead of the cleared
       // bubbles, briefly showing the new wallpaper behind the old chat's messages.
-      this.chat.revealPreparedBackground();
-      this.scrollable.replaceChildren(this.paddingTop, chatInner, this.paddingBottom);
-      this.preloader.attach(this.container);
-      releasePeerInnerMounted();
+      try {
+        this.chat.revealPreparedBackground();
+        this.scrollable.replaceChildren(this.paddingTop, chatInner, this.paddingBottom);
+        this.preloader.attach(this.container);
+        releasePeerInnerMounted();
+      } catch(error) {
+        rejectPeerInnerMounted(error);
+      }
     }
 
     animationIntersector.lockGroup(this.chat.animationGroup);

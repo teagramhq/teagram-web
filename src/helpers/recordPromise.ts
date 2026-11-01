@@ -12,15 +12,20 @@ export function recordPromise<T extends Promise<any>>(
 
   const perf = performance.now();
   log.warn(dT(), 'start', description);
-  promise.then(() => {
-    log.warn(dT(), 'end', description, performance.now() - perf);
-  });
-
   const timeout = setTimeout(() => {
     log.warn(dT(), 'timeout', description, performance.now() - perf);
   }, 1e3);
-  promise.finally(() => {
+  void promise.then(
+    () => {
+      log.warn(dT(), 'end', description, performance.now() - perf);
+    },
+    (error) => {
+      log.error(dT(), 'error', description, error);
+    }
+  ).finally(() => {
     clearTimeout(timeout);
+  }).catch((error) => {
+    log.error(dT(), 'error while recording', description, error);
   });
 
   return promise;

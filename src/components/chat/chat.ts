@@ -6,7 +6,7 @@ import EventListenerBase from '@helpers/eventListenerBase';
 import {logger, LogTypes} from '@lib/logger';
 import rootScope from '@lib/rootScope';
 import appSidebarRight from '@components/sidebarRight';
-import ChatBubbles, {FullMid, splitFullMid} from '@components/chat/bubbles';
+import ChatBubbles, {FullMid, PEER_CHANGED_ERROR, splitFullMid} from '@components/chat/bubbles';
 import ChatContextMenu from '@components/chat/contextMenu';
 import ChatInput from '@components/chat/input';
 import ChatSelection from '@components/chat/selection';
@@ -1147,8 +1147,12 @@ export default class Chat extends EventListenerBase<{
     const bubblesSetPeerPromise = this.bubbles.setPeer({...options, samePeer, sameSearch});
     this.setPeerPromiseStartedAt = Date.now();
     const setPeerPromise = this.setPeerPromise = bubblesSetPeerPromise.then((result) => {
-      return result.promise;
-    }).catch(noop).finally(() => {
+      return result?.promise;
+    }).catch((error: unknown) => {
+      if(error !== PEER_CHANGED_ERROR) {
+        this.log.error('chat peer change failed:', error);
+      }
+    }).finally(() => {
       if(this.setPeerPromise === setPeerPromise) {
         this.setPeerPromise = null;
       }
@@ -1260,20 +1264,21 @@ export default class Chat extends EventListenerBase<{
     };
 
     if(options.deferUiCallbacks) {
-      type PeerChangePart = {callback: (() => void) | undefined} | {error: unknown};
+      type PeerChangePart = {name: string, callback: (() => void) | undefined} | {name: string, error: unknown};
       const preparedParts = Object.entries(peerChangePromises).map(async([name, promise]): Promise<PeerChangePart> => {
         try {
           const result = await namedPromises({[name]: promise}, this.log);
-          return {callback: result[name] as (() => void) | undefined};
+          return {name, callback: result[name] as (() => void) | undefined};
         } catch(error) {
-          return {error};
+          this.log.error('peer change part failed:', name, error);
+          return {name, error};
         }
       });
       const allPrepared = Promise.all(preparedParts).then((): undefined => undefined);
       const firstPreparationError = new Promise<{error: unknown}>((resolve) => {
         preparedParts.forEach((part) => {
           part.then((result) => {
-            if('error' in result) resolve(result);
+            if('error' in result) resolve({error: result.error});
           });
         });
       });
@@ -1291,16 +1296,28 @@ export default class Chat extends EventListenerBase<{
           for(const part of preparedParts) {
             const result = await part;
             if('error' in result) {
-              throw result.error;
+              continue;
             }
             if(!middleware()) {
               return;
             }
-            result.callback?.();
+            try {
+              result.callback?.();
+            } catch(error) {
+              this.log.error('peer change apply part failed:', result.name, error);
+            }
           }
 
-          sharedMediaTab?.loadSidebarMedia(true);
-          applyFinalUiChanges();
+          if(middleware()) {
+            try {
+              sharedMediaTab?.loadSidebarMedia(true);
+            } catch(error) {
+              this.log.error('peer change apply part failed:', 'sharedMedia', error);
+            }
+          }
+          if(middleware()) {
+            applyFinalUiChanges();
+          }
         })();
         return applyPromise;
       };
