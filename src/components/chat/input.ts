@@ -2645,7 +2645,7 @@ export default class ChatInput {
         // Default to hidden so the previous chat's state never leaks.
         this.btnSendGift.classList.add('hide');
         if(!isBot) {
-          this.updateGiftButtonVisibility();
+          this.updateGiftButtonVisibility(middleware);
         }
       }
 
@@ -2754,20 +2754,41 @@ export default class ChatInput {
     return ownDisplay || peerDisplay;
   }
 
-  private async updateGiftButtonVisibility() {
+  private async updateGiftButtonVisibility(middleware?: () => boolean) {
     if(!this.btnSendGift || !this.chat) return;
-    const peerId = this.chat.peerId;
+    const chat = this.chat;
+    const peerId = chat.peerId;
     if(!this.giftButtonBasePeerEligible(peerId)) {
       this.btnSendGift.classList.add('hide');
       return;
     }
-    const [isBot, userFull, globalPrivacy] = await Promise.all([
-      this.managers.appPeersManager.isBot(peerId),
-      this.managers.appProfileManager.getProfile(peerId.toUserId()),
-      this.managers.appPrivacyManager.getGlobalPrivacySettings()
-    ]);
-    if(this.chat?.peerId !== peerId) return;
-    this.btnSendGift.classList.toggle('hide', isBot || !this.shouldShowGiftButton(userFull, globalPrivacy));
+
+    const isCurrentChat = () => {
+      const currentChat = this.chat;
+      return (!middleware || middleware()) &&
+        currentChat?.peerId === peerId &&
+        currentChat.type === ChatType.Chat;
+    };
+
+    try {
+      const [isBot, userFull, globalPrivacy] = await Promise.all([
+        this.managers.appPeersManager.isBot(peerId),
+        this.managers.appProfileManager.getProfile(peerId.toUserId()),
+        this.managers.appPrivacyManager.getGlobalPrivacySettings()
+      ]);
+      if(!isCurrentChat()) return;
+      this.btnSendGift.classList.toggle('hide', isBot || !this.shouldShowGiftButton(userFull, globalPrivacy));
+    } catch(error) {
+      chat.log.error('gift button visibility error:', error);
+
+      const currentChat = this.chat;
+      if(
+        currentChat?.peerId === peerId &&
+        (currentChat.type !== ChatType.Chat || !middleware || middleware())
+      ) {
+        this.btnSendGift.classList.add('hide');
+      }
+    }
   }
 
   private updateBotCommands(userFull: UserFull.userFull, skipAnimation?: boolean) {

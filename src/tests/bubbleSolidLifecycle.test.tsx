@@ -46,6 +46,7 @@ let Chat: typeof import('@components/chat/chat').default;
 let ChatInput: typeof import('@components/chat/input').default;
 let BubbleGroups: typeof import('@components/chat/bubbleGroups').default;
 let BubbleGroup: typeof import('@components/chat/bubbleGroups').BubbleGroup;
+let getInitialHistoryLoadCount: typeof import('@components/chat/bubbles').getInitialHistoryLoadCount;
 let cancelPendingHiddenLinksEvent: typeof import('@components/chat/bubbles').cancelPendingHiddenLinksEvent;
 let disposeChatInnerMiddlewareAfterDetach: typeof import('@components/chat/bubbles').disposeChatInnerMiddlewareAfterDetach;
 let isBubbleUiCurrent: typeof import('@components/chat/bubbles').isBubbleUiCurrent;
@@ -77,6 +78,7 @@ beforeAll(async() => {
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
   ({
     default: ChatBubbles,
+    getInitialHistoryLoadCount,
     cancelPendingHiddenLinksEvent,
     disposeChatInnerMiddlewareAfterDetach,
     isBubbleUiCurrent,
@@ -152,6 +154,22 @@ function makeSetPeerHarness(pendingHistory: Promise<void>, finishPeerChangePromi
   }) as any;
 
   return {harness, chat, finishPeerChange, getHistory1, isAnyGroup, isStartButtonNeeded};
+}
+
+function makeGiftButtonHarness(getProfile: () => Promise<unknown>, getGlobalPrivacySettings: () => Promise<unknown>) {
+  const chat = {peerId, type: 'chat', log: {error: vi.fn()}};
+  const giftButtonClassList = {add: vi.fn(), toggle: vi.fn()};
+  const input = Object.assign(Object.create(ChatInput.prototype), {
+    chat,
+    btnSendGift: {classList: giftButtonClassList},
+    managers: {
+      appPeersManager: {isBot: vi.fn(async() => false)},
+      appProfileManager: {getProfile},
+      appPrivacyManager: {getGlobalPrivacySettings}
+    }
+  }) as any;
+
+  return {input, chat, giftButtonClassList};
 }
 
 test('records the chat width from its initial resize observer entry', () => {
@@ -556,6 +574,46 @@ test('updates the regular peer gift button without blocking peer setup on its pr
   expect(getGlobalPrivacySettings).toHaveBeenCalledTimes(1);
 });
 
+test('does not show the regular peer gift button after a same-peer switch to search', async() => {
+  let resolveProfile!: (profile: unknown) => void;
+  let resolveGlobalPrivacy!: (privacy: unknown) => void;
+  const profile = new Promise<unknown>((resolve) => {
+    resolveProfile = resolve;
+  });
+  const globalPrivacy = new Promise<unknown>((resolve) => {
+    resolveGlobalPrivacy = resolve;
+  });
+  const {input, chat, giftButtonClassList} = makeGiftButtonHarness(() => profile, () => globalPrivacy);
+  giftButtonClassList.add('hide');
+  let isCurrent = true;
+
+  const update = (ChatInput.prototype as any).updateGiftButtonVisibility.call(input, () => isCurrent);
+  chat.type = 'search';
+  isCurrent = false;
+  resolveProfile({pFlags: {display_gifts_button: true}});
+  resolveGlobalPrivacy({pFlags: {display_gifts_button: true}});
+
+  await update;
+
+  expect(giftButtonClassList.toggle).not.toHaveBeenCalledWith('hide', false);
+  expect(giftButtonClassList.add).toHaveBeenCalledWith('hide');
+});
+
+test('logs gift visibility lookup failures and keeps the button hidden', async() => {
+  const failure = new Error('profile lookup failed');
+  const {input, chat, giftButtonClassList} = makeGiftButtonHarness(
+    () => Promise.reject(failure),
+    async() => ({pFlags: {display_gifts_button: true}})
+  );
+  giftButtonClassList.add('hide');
+
+  await expect((ChatInput.prototype as any).updateGiftButtonVisibility.call(input)).resolves.toBeUndefined();
+
+  expect(giftButtonClassList.add).toHaveBeenCalledWith('hide');
+  expect(giftButtonClassList.toggle).not.toHaveBeenCalledWith('hide', false);
+  expect(chat.log.error).toHaveBeenCalledWith('gift button visibility error:', failure);
+});
+
 test('does not use previous-peer bubbles to enlarge the initial history request', async() => {
   const previousPeerId = 11 as PeerId;
   const getRenderedHistory = vi.fn(() => [makeFullMid(previousPeerId, 100)]);
@@ -574,8 +632,14 @@ test('does not use previous-peer bubbles to enlarge the initial history request'
 
   await harness.getHistory(undefined, true, undefined, undefined, true);
 
-  expect(requestHistory.mock.calls[0][1]).toBe(Math.min(40, windowSize.height / 40 | 0));
+  expect(requestHistory.mock.calls[0][1]).toBe(getInitialHistoryLoadCount(windowSize.height));
   expect(getRenderedHistory).not.toHaveBeenCalled();
+});
+
+test('limits the first history render to a viewport-sized page', () => {
+  expect(getInitialHistoryLoadCount(800)).toBe(15);
+  expect(getInitialHistoryLoadCount(400)).toBe(12);
+  expect(getInitialHistoryLoadCount(3_000)).toBe(40);
 });
 
 function message(): Message.message {

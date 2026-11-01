@@ -611,6 +611,10 @@ function getMainMidForGrouped(mids: number[]) {
   return Math.min(...mids);
 }
 
+export function getInitialHistoryLoadCount(viewportHeight: number) {
+  return Math.min(40, Math.max(12, Math.ceil(viewportHeight / 56)));
+}
+
 const getSponsoredPhoto = (sponsoredMessage: SponsoredMessage) => {
   return sponsoredMessage.photo;
   // const peerId = getPeerId(sponsoredMessage.from_id);
@@ -12910,7 +12914,7 @@ export default class ChatBubbles {
 
     const isBroadcast = this.chat.isBroadcast;
     // console.time('appImManager call getHistory');
-    const pageCount = Math.min(40, windowSize.height / 40/*  * 1.25 */ | 0);
+    const pageCount = getInitialHistoryLoadCount(windowSize.height);
     // During a peer switch, old bubbles remain until finishPeerChange, so only use history
     // already rendered for this peer to choose the larger follow-up page size.
     const hasRenderedPeerHistory = !isBroadcast && !this.isFirstLoad &&
