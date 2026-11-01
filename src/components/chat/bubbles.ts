@@ -5801,9 +5801,43 @@ export default class ChatBubbles {
 
     const m = middlewarePromise(middleware, PEER_CHANGED_ERROR);
 
+    let readMaxId = 0;
+    let dialog: Awaited<ReturnType<Chat['getDialogOrTopic']>>;
+    let hasReadInfo = false;
+    let savedPosition: ReturnType<AppImManager['getChatSavedPosition']>;
+    let hasSavedPosition = false;
     if(!samePeer) {
-      // await pause(2000); // * test some bugs
-      await m(this.chat.onChangePeer(options, m));
+      // onChangePeer updates the peer type synchronously, then awaits its metadata lookups.
+      // Start the independent unread/dialog reads during that wait for ordinary chat opens.
+      const peerChange = this.chat.onChangePeer(options, m);
+      if(!options.lastMsgId) {
+        savedPosition = this.chat.appImManager.getChatSavedPosition(this.chat);
+        hasSavedPosition = true;
+      }
+
+      const initialHistoryStorage = this.chat.getHistoryStorage();
+      if(
+        !options.savedReaction &&
+        !options.lastMsgId &&
+        !options.query &&
+        this.chat.type === ChatType.Chat &&
+        !this.chat.threadId &&
+        initialHistoryStorage.maxId &&
+        !initialHistoryStorage.searchHistory &&
+        !savedPosition?.mids
+      ) {
+        const [_, readInfo] = await m(Promise.all([
+          peerChange,
+          Promise.all([
+            this.managers.appMessagesManager.getReadMaxIdIfUnread(peerId, this.chat.threadId),
+            this.chat.getDialogOrTopic()
+          ])
+        ]));
+        [readMaxId, dialog] = readInfo;
+        hasReadInfo = true;
+      } else {
+        await m(peerChange);
+      }
     }
 
     /* if(samePeer && this.chat.setPeerPromise) {
@@ -5842,9 +5876,9 @@ export default class ChatBubbles {
     }
 
     let followingUnread: boolean;
-    let readMaxId = 0, savedPosition: ReturnType<AppImManager['getChatSavedPosition']>, overrideAdditionMsgId: number;
+    let overrideAdditionMsgId: number;
     if(!isTarget) {
-      if(!samePeer) {
+      if(!samePeer && !hasSavedPosition) {
         savedPosition = this.chat.appImManager.getChatSavedPosition(this.chat);
       }
 
@@ -5856,8 +5890,7 @@ export default class ChatBubbles {
       } else if(this.chat.type === ChatType.Search) {
         lastMsgFullMid = topMessageFullMid;
       } else if(topMessageFullMid !== EMPTY_FULL_MID) {
-        let dialog: Awaited<ReturnType<Chat['getDialogOrTopic']>>;
-        if(!options.savedReaction) {
+        if(!options.savedReaction && !hasReadInfo) {
           [readMaxId, dialog] = await m(Promise.all([
             this.managers.appMessagesManager.getReadMaxIdIfUnread(peerId, this.chat.threadId),
             this.chat.getDialogOrTopic()
