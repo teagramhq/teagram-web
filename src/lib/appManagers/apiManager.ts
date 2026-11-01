@@ -85,11 +85,15 @@ export class ApiManager extends ApiManagerMethods {
 
   private authLogRedactor?: AuthLogRedactor;
 
-  private performanceRpcTrace = new PerformanceRpcTrace(import.meta.env.VITE_PERF_TRACE === '1');
+  private performanceRpcTrace?: PerformanceRpcTrace;
 
   constructor() {
     super();
     this.name = 'API';
+
+    if(import.meta.env.VITE_PERF_TRACE === '1') {
+      this.performanceRpcTrace = new PerformanceRpcTrace(true);
+    }
 
     this.cachedNetworkers = {} as any;
     this.cachedExportPromise = {};
@@ -740,19 +744,19 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public getPerformanceRpcTrace() {
-    return this.performanceRpcTrace.getSnapshot();
+    if(import.meta.env.VITE_PERF_TRACE === '1') return this.performanceRpcTrace!.getSnapshot();
   }
 
   public resetPerformanceRpcTrace(recordSpans = true) {
-    this.performanceRpcTrace.reset(recordSpans);
+    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace!.reset(recordSpans);
   }
 
   public getPerformancePhaseTrace() {
-    return performancePhaseTrace.getSnapshot();
+    if(import.meta.env.VITE_PERF_TRACE === '1') return performancePhaseTrace.getSnapshot();
   }
 
   public resetPerformancePhaseTrace() {
-    performancePhaseTrace.reset();
+    if(import.meta.env.VITE_PERF_TRACE === '1') performancePhaseTrace.reset();
   }
 
   public startFirstDialogsDispatchTrace(startedAtEpochMs: number) {
@@ -765,7 +769,9 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public trackPerformanceRpcWait<T, P extends Promise<T>>(method: string, request: P): P {
-    return this.performanceRpcTrace.trackWait(method, request);
+    return import.meta.env.VITE_PERF_TRACE === '1' ?
+      this.performanceRpcTrace!.trackWait(method, request) :
+      request;
   }
 
   public invokeApi<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {}, options: InvokeApiOptions = {}): CancellablePromise<MethodDeclMap[T]['res']> {
@@ -774,7 +780,7 @@ export class ApiManager extends ApiManagerMethods {
       this.finishFirstDialogsDispatchTrace();
       this.finishFirstDialogsDispatchTrace = undefined;
     }
-    this.performanceRpcTrace.recordCall(methodName);
+    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace!.recordCall(methodName);
     if(!getAuthMethod(methodName, params)) {
       return this.invokeApiInternal(method, params, options);
     }

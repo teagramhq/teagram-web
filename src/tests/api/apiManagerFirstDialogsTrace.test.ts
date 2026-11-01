@@ -43,3 +43,22 @@ test('keeps the chat-list startup span open for unrelated requests', async() => 
 
   expect(trace.getSnapshot()).toMatchObject([{name, durationMs: null}]);
 });
+
+test('does not record RPC activity when performance tracing is disabled', async() => {
+  vi.stubEnv('VITE_PERF_TRACE', '0');
+  vi.resetModules();
+  const {ApiManager} = await import('@appManagers/apiManager');
+  const manager = Object.create(ApiManager.prototype) as any;
+  const request = Promise.resolve({});
+  const performanceRpcTrace = {
+    recordCall: vi.fn(),
+    trackWait: vi.fn((_method: string, promise: Promise<unknown>) => promise)
+  };
+  manager.performanceRpcTrace = performanceRpcTrace;
+  manager.invokeApiInternal = vi.fn(() => request);
+
+  expect(manager.invokeApi('help.getAppConfig')).toBe(request);
+  expect(manager.trackPerformanceRpcWait('users.getUsers', request)).toBe(request);
+  expect(performanceRpcTrace.recordCall).not.toHaveBeenCalled();
+  expect(performanceRpcTrace.trackWait).not.toHaveBeenCalled();
+});
