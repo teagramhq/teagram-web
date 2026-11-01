@@ -361,6 +361,9 @@ async function reloadChatList(page: Page, requests: {value: number}) {
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
+  // Chat UI is deliberately initialized after first paint; wait for its post-paint preload before
+  // measuring the chat-open interaction so the result does not depend on idle callback timing.
+  await page.waitForFunction(() => Boolean((window as any).appImManager?.chat), undefined, {timeout: 60_000});
   await begin(page, requests);
   await row.click();
   await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
