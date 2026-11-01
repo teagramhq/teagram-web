@@ -8,11 +8,14 @@ export async function startMeasurementAtClick(target: Locator) {
       clickAt?: number
     };
     const armedAt = performance.now();
-    element.addEventListener('click', () => {
+    const onClick = (event: MouseEvent) => {
+      if(!event.composedPath().includes(element)) return;
+      document.removeEventListener('click', onClick, true);
       const clickAt = performance.now();
       perf.started = clickAt;
       perf.preInteractionMs = clickAt - armedAt;
       perf.clickAt = clickAt;
-    }, {capture: true, once: true});
+    };
+    document.addEventListener('click', onClick, true);
   });
 }
