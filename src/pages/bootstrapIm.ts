@@ -65,8 +65,19 @@ export async function bootstrapIm(): Promise<void> {
   await doubleRaf();
   document.body.classList.remove('has-auth-pages');
 
-  const {default: appImManager} = await import('@lib/appImManager');
-  void appImManager.initializeChatUi();
+  // Chat, search and menu code loads once the list has painted and the main
+  // thread is idle, so it neither lengthens this bootstrap nor waits for the
+  // first click that needs it.
+  const loadDeferredUi = () => {
+    void import('@lib/appImManager').then(({default: appImManager}) => appImManager.initializeChatUi());
+    void import('@components/appSearchSuper');
+    void import('@components/buttonMenu');
+  };
+  if('requestIdleCallback' in window) {
+    requestIdleCallback(loadDeferredUi, {timeout: 2000});
+  } else {
+    setTimeout(loadDeferredUi, 0);
+  }
 
   // Tear down the auth UI 1s after IM appears — same delay the legacy
   // `pageIm.onFirstMount` used so the cross-fade looks right.
