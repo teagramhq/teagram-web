@@ -7,6 +7,7 @@ test('starts the measured window when the browser dispatches the click', async({
     (window as any).__teagramPerf = {started: performance.now()};
   });
   const button = page.getByRole('button', {name: 'Open chat'});
+  await button.evaluate((element) => element.addEventListener('click', (event) => event.stopImmediatePropagation(), {capture: true}));
   await startMeasurementAtClick(button);
   await page.waitForTimeout(30);
   await button.click();
