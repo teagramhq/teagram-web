@@ -27,6 +27,9 @@ gate fails closed.
 The 100x cold chat-list measurement uses six fresh contexts for the paired
 blocking-time gate and its negative control. Its timing starts at navigation so
 the existing cold-load budget still includes the document fetch.
+Chat-open timing starts when the browser dispatches the chat-list row's click;
+the separate `preInteractionMs` field records the time before that event so
+browser-driver delay does not count against client response time.
 Because the base client has no date-jump flow, its open-chat
 bundle is the date-jump baseline; that row has no base timing sample. If the
 base client cannot load 2,000 older messages, its open-chat bundle is the scroll

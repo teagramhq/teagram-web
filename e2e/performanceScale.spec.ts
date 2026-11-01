@@ -2,6 +2,7 @@ import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
+import {startMeasurementAtClick} from './performanceMeasurement';
 import {sumBundleBytes} from './performanceBundleBytes';
 import {summarizeCpuProfile, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
 
@@ -34,7 +35,8 @@ type Metric = {
   cpu?: PerformanceCpuSummary,
   droppedFramePercent?: number,
   droppedFrames?: number,
-  frameIntervals?: number
+  frameIntervals?: number,
+  preInteractionMs?: number
 };
 
 type VariantRun = {
@@ -46,7 +48,8 @@ type VariantRun = {
 type MeasurementBoundary = {
   ms: number,
   startedAtMs: number,
-  domNodes: number
+  domNodes: number,
+  preInteractionMs?: number
 };
 
 const scales: Scale[] = ['1x', '100x'];
@@ -208,6 +211,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     ms: boundary.ms,
     requests: requestCount,
     domNodes: boundary.domNodes,
+    preInteractionMs: boundary.preInteractionMs,
     rpcWallMs: metrics.rpcSpansRecorded ? rpcSummary.rpcWallMs : null,
     nonRpcElapsedMs: metrics.rpcSpansRecorded ? rpcSummary.nonRpcElapsedMs : null,
     workerPhases: includePhases ? summarizePerformancePhases(metrics.workerPhases || []) : undefined,
@@ -316,7 +320,8 @@ async function snapshotMeasurementBoundary(page: Page): Promise<MeasurementBound
     return {
       ms: performance.now() - perf.started,
       startedAtMs: perf.started,
-      domNodes: document.querySelectorAll('*').length
+      domNodes: document.querySelectorAll('*').length,
+      preInteractionMs: perf.preInteractionMs
     };
   });
 }
@@ -380,9 +385,12 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
   await begin(page, requests);
+  await startMeasurementAtClick(row);
   await row.click();
-  await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+  await page.locator('#page-chats .bubbles .bubble[data-mid]').first().waitFor({state: 'visible', timeout: 60_000});
+  const boundary = await snapshotMeasurementBoundary(page);
+  expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
+  return capture(page, requests, boundary);
 }
 
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean) {
@@ -720,8 +728,9 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
         await installPeerChangeTracing(page);
         const chatProfile = await startCpuProfile(page);
+        await startMeasurementAtClick(row);
         await row.click();
-        await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
+        await page.locator('#page-chats .bubbles .bubble[data-mid]').first().waitFor({state: 'visible', timeout: 60_000});
         const chatOpenBoundary = await snapshotMeasurementBoundary(page);
         const chatCpu = await finishCpuProfile(chatProfile);
         const chatOpenCapture = await capture(page, requests, chatOpenBoundary, false, true);
