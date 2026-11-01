@@ -77,10 +77,13 @@ beforeEach(() => {
   delete (window as any).requestIdleCallback;
 });
 
-test('loads chat, search, menu and contacts code only when idle after the chat list has painted', async() => {
+test('schedules deferred UI imports immediately after the chat list paints', async() => {
   let idle: () => void;
-  (window as any).requestIdleCallback = (callback: () => void) => {
+  let idleOptions: {timeout?: number};
+  (window as any).requestIdleCallback = (callback: () => void, options: {timeout?: number}) => {
+    mocks.events.push('idle-scheduled');
     idle = callback;
+    idleOptions = options;
     return 1;
   };
 
@@ -91,8 +94,10 @@ test('loads chat, search, menu and contacts code only when idle after the chat l
     'state-updated',
     'dialogs-module',
     'chatlist-mounted',
-    'first-paint'
+    'first-paint',
+    'idle-scheduled'
   ]);
+  expect(idleOptions).toEqual({timeout: 0});
 
   idle();
   await vi.waitFor(() => expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1));

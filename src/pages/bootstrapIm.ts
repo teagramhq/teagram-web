@@ -67,9 +67,8 @@ export async function bootstrapIm(): Promise<void> {
   await doubleRaf();
   document.body.classList.remove('has-auth-pages');
 
-  // Chat, search, menu and contacts code loads once the list has painted and the main
-  // thread is idle, so it neither lengthens this bootstrap nor waits for the
-  // first click that needs it.
+  // Start these imports after the list paints. The zero timeout prevents waiting for a later idle
+  // period, so a first menu or contacts click does not trigger the chunk download.
   const loadDeferredUi = () => {
     void import('@lib/appImManager')
     .then(({default: appImManager}) => appImManager.initializeChatUi())
@@ -82,7 +81,7 @@ export async function bootstrapIm(): Promise<void> {
     .catch((error) => log.error('Failed to load contacts tab:', error));
   };
   if('requestIdleCallback' in window) {
-    requestIdleCallback(loadDeferredUi, {timeout: 2000});
+    requestIdleCallback(loadDeferredUi, {timeout: 0});
   } else {
     setTimeout(loadDeferredUi, 0);
   }
