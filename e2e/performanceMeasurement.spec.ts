@@ -18,8 +18,22 @@ test('starts the measured window when the browser dispatches the click', async({
   expect(measurement.started).toBe(measurement.clickAt);
 });
 
+test('starts when the peer row is replaced after arming the click', async({page}) => {
+  await page.setContent('<button class="chatlist-chat" data-peer-id="42">Open chat</button>');
+  await page.evaluate(() => {
+    (window as any).__teagramPerf = {started: performance.now()};
+  });
+  const row = page.locator('.chatlist-chat[data-peer-id="42"]');
+  await startMeasurementAtClick(row);
+  await row.evaluate((element) => element.replaceWith(element.cloneNode(true)));
+  await page.locator('.chatlist-chat[data-peer-id="42"]').click();
+
+  const clickAt = await page.evaluate(() => (window as any).__teagramPerf.clickAt);
+  expect(Number.isFinite(clickAt)).toBe(true);
+});
+
 test('records the first visible bubble when it is mounted', async({page}) => {
-  await page.setContent('<button data-peer-id="42">Open chat</button><main class="bubbles"></main>');
+  await page.setContent('<button class="chatlist-chat" data-peer-id="42">Open chat</button><main class="bubbles"></main>');
   await page.evaluate(() => {
     (window as any).__teagramPerf = {started: performance.now()};
   });
@@ -50,7 +64,7 @@ test('records the first visible bubble when it is mounted', async({page}) => {
 });
 
 test('records a bubble that becomes visible after a stylesheet layout change', async({page}) => {
-  await page.setContent('<style>.bubble {display:block;width:10px;height:0}</style><button data-peer-id="42">Open chat</button><main class="bubbles"></main>');
+  await page.setContent('<style>.bubble {display:block;width:10px;height:0}</style><button class="chatlist-chat" data-peer-id="42">Open chat</button><main class="bubbles"></main>');
   await page.evaluate(() => {
     (window as any).__teagramPerf = {started: performance.now()};
   });
@@ -76,7 +90,7 @@ test('records a bubble that becomes visible after a stylesheet layout change', a
 });
 
 test('records a bubble that becomes visible after a stylesheet visibility change', async({page}) => {
-  await page.setContent('<style>.bubble {display:block;width:10px;height:10px;visibility:hidden}</style><button data-peer-id="42">Open chat</button><main class="bubbles"></main>');
+  await page.setContent('<style>.bubble {display:block;width:10px;height:10px;visibility:hidden}</style><button class="chatlist-chat" data-peer-id="42">Open chat</button><main class="bubbles"></main>');
   await page.evaluate(() => {
     (window as any).__teagramPerf = {started: performance.now()};
   });
