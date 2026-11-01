@@ -29,7 +29,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
-const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, getClientErrorDiagnostics, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, emitReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openChatTopbarMenu, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword, waitForUnreadCount} = realClientBrowser;
+const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, getClientErrorDiagnostics, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, emitReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openChatTopbarMenu, openMainMenu, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword, waitForUnreadCount} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://teagramd.test';
@@ -5939,6 +5939,43 @@ describe('real client chat topbar menu', () => {
       </script>`);
 
       await openChatTopbarMenu(page);
+
+      expect(await page.evaluate(() => (window as any).menuOpenCount)).toBe(1);
+      expect(await page.locator('.btn-menu').isHidden()).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('real client sidebar tools menu', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  it('opens the main menu and exposes an item', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<!doctype html><body data-deferred-ui="ready"><button class="sidebar-tools-button">Tools</button>
+        <div class="btn-menu" style="display:none"><button class="btn-menu-item">Contacts</button></div>
+        <script>
+          window.menuOpenCount = 0;
+          document.querySelector('.sidebar-tools-button').addEventListener('click', () => {
+            window.menuOpenCount++;
+            document.querySelector('.btn-menu').style.display = 'block';
+          });
+          document.addEventListener('keydown', (event) => {
+            if(event.key === 'Escape') document.querySelector('.btn-menu').style.display = 'none';
+          });
+        </script></body>`);
+
+      await openMainMenu(page);
 
       expect(await page.evaluate(() => (window as any).menuOpenCount)).toBe(1);
       expect(await page.locator('.btn-menu').isHidden()).toBe(true);

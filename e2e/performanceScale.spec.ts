@@ -124,9 +124,12 @@ function installInstrumentation(page: Page, requestCounter: {value: number}, inj
 }
 
 async function begin(page: Page, requests: {value: number}, recordRpcSpans = true, traceEnabled = false) {
-  // The head client loads chat, search, menu and contacts code after first paint on an idle callback;
-  // wait for it so an interaction never measures that load. The base client never sets the marker.
+  // The head client loads chat, search and menu code after first paint on an idle callback;
+  // wait for it so an interaction never measures that load. Contacts load on click. The base
+  // client never sets the marker.
   await page.waitForFunction(() => document.body.dataset.deferredUi !== 'pending', undefined, {timeout: 60_000});
+  const deferredUiState = await page.locator('body').getAttribute('data-deferred-ui');
+  if(deferredUiState === 'failed') throw new Error('deferred UI loading failed');
   requests.value = 0;
   await page.evaluate(async({recordSpans, traceEnabled}) => {
     if(traceEnabled) await (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace(recordSpans);
@@ -138,6 +141,14 @@ async function begin(page: Page, requests: {value: number}, recordRpcSpans = tru
     if(traceEnabled) performance.clearMeasures();
   }, {recordSpans: recordRpcSpans, traceEnabled});
 }
+
+test('fails interaction measurement when deferred UI loading failed', async({page}) => {
+  await page.setContent('<body data-deferred-ui="failed"></body>');
+  const requests = {value: 7};
+
+  await expect(begin(page, requests)).rejects.toThrow('deferred UI loading failed');
+  expect(requests.value).toBe(7);
+});
 
 async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false): Promise<Metric> {
   const requestCount = requests.value;

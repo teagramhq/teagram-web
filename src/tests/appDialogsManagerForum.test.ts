@@ -29,7 +29,11 @@ const mocks = vi.hoisted(() => {
     value: () => ({matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}})
   });
 
-  return {resolveForumChunk: undefined as (() => void) | undefined};
+  return {
+    resolveForumChunk: undefined as (() => void) | undefined,
+    history: [] as Array<{peerId?: PeerId}>,
+    closeTabsUntilTab: vi.fn(async() => true)
+  };
 });
 
 vi.mock('@components/forumTab/forumTab', async() => {
@@ -39,7 +43,9 @@ vi.mock('@components/forumTab/forumTab', async() => {
   return {ForumTab: class ForumTab {}};
 });
 
-vi.mock('@components/forumTab/findForumTabByPeerId', () => ({default: (): undefined => undefined}));
+vi.mock('@components/forumTab/findForumTabByPeerId', () => ({
+  default: (history: Array<{peerId?: PeerId}>, peerId: PeerId) => history.find((tab) => tab.peerId === peerId)
+}));
 vi.mock('@components/forumTab/communityOpenMode', () => ({default: () => true}));
 vi.mock('@appManagers/utils/communities/isCommunity', () => ({default: () => false}));
 vi.mock('@components/forumTab/fillRegister', () => ({fillForumTabRegister: vi.fn()}));
@@ -50,9 +56,14 @@ vi.mock('@lib/appImManager', () => ({
 }));
 vi.mock('@components/sidebarLeft', () => ({
   default: {
-    getHistory: vi.fn(() => []),
+    getHistory: vi.fn(() => mocks.history),
     closeSearch: vi.fn(),
-    createTab: vi.fn((Constructor: new() => object) => new Constructor())
+    closeTabsUntilTab: mocks.closeTabsUntilTab,
+    createTab: vi.fn((Constructor: new() => object) => {
+      const tab = new Constructor() as {peerId?: PeerId};
+      mocks.history.push(tab);
+      return tab;
+    })
   }
 }));
 vi.mock('@components/sidebarRight', () => ({default: {}}));
@@ -66,7 +77,10 @@ import type {ForumTab} from '@components/forumTab/forumTab';
 const openedPeers: PeerId[] = [];
 
 class TestForumTab {
+  public peerId?: PeerId;
+
   public async open({peerId}: {peerId: PeerId}) {
+    this.peerId = peerId;
     const topicList = document.createElement('div');
     topicList.className = 'topics-container';
     topicList.dataset.peerId = '' + peerId;
@@ -79,6 +93,8 @@ afterEach(() => {
   vi.restoreAllMocks();
   document.body.replaceChildren();
   openedPeers.length = 0;
+  mocks.history.length = 0;
+  mocks.closeTabsUntilTab.mockClear();
 });
 
 test('opens forum topics before and after the deferred forum chunk settles', async() => {
@@ -101,6 +117,7 @@ test('opens forum topics before and after the deferred forum chunk settles', asy
   expect(document.querySelector(`.topics-container[data-peer-id="${peerId}"]`)).not.toBeNull();
 
   await manager.toggleForumTabByPeerId(peerId, true, false, forumTabConstructor);
-  expect(document.querySelectorAll(`.topics-container[data-peer-id="${peerId}"]`)).toHaveLength(2);
-  expect(openedPeers).toEqual([peerId, peerId]);
+  expect(document.querySelectorAll(`.topics-container[data-peer-id="${peerId}"]`)).toHaveLength(1);
+  expect(openedPeers).toEqual([peerId]);
+  expect(mocks.closeTabsUntilTab).toHaveBeenCalledWith(expect.objectContaining({peerId}));
 });

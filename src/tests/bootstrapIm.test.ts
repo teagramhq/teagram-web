@@ -105,13 +105,13 @@ test('schedules deferred UI imports when idle after the chat list paints', async
   expect(mocks.events).toEqual(expect.arrayContaining([
     'im-module',
     'search-module',
-    'menu-module',
-    'contacts-module'
+    'menu-module'
   ]));
+  expect(mocks.events).not.toContain('contacts-module');
   await vi.waitFor(() => expect(document.body.dataset.deferredUi).toBe('ready'));
 });
 
-test('logs a rejected chat UI initialization from the deferred loader', async() => {
+test('marks deferred UI as failed when chat UI initialization rejects', async() => {
   let idle: () => void;
   (window as any).requestIdleCallback = (callback: () => void) => {
     idle = callback;
@@ -125,7 +125,7 @@ test('logs a rejected chat UI initialization from the deferred loader', async() 
   idle();
   await vi.waitFor(() => expect(mocks.errors).toHaveLength(1));
   expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1);
-  await vi.waitFor(() => expect(document.body.dataset.deferredUi).toBe('ready'));
+  await vi.waitFor(() => expect(document.body.dataset.deferredUi).toBe('failed'));
 });
 
 test('loads deferred UI through the timeout fallback when requestIdleCallback is unavailable', async() => {

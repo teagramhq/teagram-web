@@ -74,7 +74,6 @@ import {useMediaSizes} from '@helpers/mediaSizes';
 import useHasFoldersSidebar, {useIsSidebarCollapsed} from '@stores/foldersSidebar';
 import appNavigationController from '@components/appNavigationController';
 import {preventCrossTabDynamicImportDeadlock} from '@helpers/preventDeadlock';
-import appChatBackground from '@components/chat/bubbles/chatBackground';
 import {getActiveServerHost, isAutoGuestEnabled} from '@config/serverContext';
 import {getServerSelectionAction} from '@config/serverSelection';
 import {createCurrentGuestAccountLifecycle, type GuestAccountManagers} from '@lib/guestAccountLifecycle';
@@ -519,6 +518,7 @@ const onDocumentReady = async() => {
     themeController.setThemeListener();
     setDocumentLangPackProperties(langPack);
 
+    const {default: appChatBackground} = await import('@components/chat/bubbles/chatBackground');
     appChatBackground.attach();
     await appChatBackground.setBackground({transition: 'instant'}).catch((error) => {
       console.error('Could not load the authentication wallpaper', error);
@@ -551,7 +551,10 @@ const onDocumentReady = async() => {
   await preventCrossTabDynamicImportDeadlock();
 
   await PasscodeLockScreenController.waitForUnlock(async() => {
-    const settings = await commonStateStorage.get('settings');
+    const [{default: appChatBackground}, settings] = await Promise.all([
+      import('@components/chat/bubbles/chatBackground'),
+      commonStateStorage.get('settings')
+    ]);
     settings && setAppSettingsSilent(settings);
     themeController.setThemeListener();
 
@@ -676,9 +679,6 @@ const onDocumentReady = async() => {
 
   console.timeLog(TIME_LABEL, 'IMAGE_MIME_TYPES_SUPPORTED_PROMISE');
 
-  appChatBackground.attach();
-  appChatBackground.setBackground({transition: 'instant'});
-
   setDocumentLangPackProperties(langPack);
 
   let authState = stateResult.state.authState;
@@ -731,6 +731,10 @@ const onDocumentReady = async() => {
   }
 
   if(authState._ !== 'authStateSignedIn'/*  || 1 === 1 */) {
+    const {default: appChatBackground} = await import('@components/chat/bubbles/chatBackground');
+    appChatBackground.attach();
+    appChatBackground.setBackground({transition: 'instant'});
+
     console.log('Will mount auth page:', authState._, Date.now() / 1000);
 
     (async() => {

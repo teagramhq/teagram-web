@@ -24,7 +24,7 @@ let bootstrapped = false;
 export async function bootstrapIm(): Promise<void> {
   if(bootstrapped) return;
   bootstrapped = true;
-  // Pending until the deferred chat, search, menu and contacts code below has loaded, so
+  // Pending until the deferred chat, search and menu code below has loaded, so
   // automation can start an interaction without racing that load.
   document.body.dataset.deferredUi = 'pending';
 
@@ -71,20 +71,18 @@ export async function bootstrapIm(): Promise<void> {
   document.body.classList.remove('has-auth-pages');
 
   // Load these once the list has painted and the main thread is idle, so they neither lengthen
-  // this bootstrap nor wait for the first click that needs them.
+  // this bootstrap nor wait for the first click that needs them. Contacts stay click-loaded.
   const loadDeferredUi = () => {
     Promise.all([
       import('@lib/appImManager')
-      .then(({default: appImManager}) => appImManager.initializeChatUi())
-      .catch((error) => log.error('Failed to initialize chat UI:', error)),
-      import('@components/appSearchSuper')
-      .catch((error) => log.error('Failed to load search UI:', error)),
+      .then(({default: appImManager}) => appImManager.initializeChatUi()),
+      import('@components/appSearchSuper'),
       import('@components/buttonMenu')
-      .catch((error) => log.error('Failed to load button menu:', error)),
-      import('@components/sidebarLeft/tabs/contacts')
-      .catch((error) => log.error('Failed to load contacts tab:', error))
-    ]).finally(() => {
+    ]).then(() => {
       document.body.dataset.deferredUi = 'ready';
+    }, (error) => {
+      document.body.dataset.deferredUi = 'failed';
+      log.error('Failed to load deferred UI:', error);
     });
   };
   if('requestIdleCallback' in window) {
