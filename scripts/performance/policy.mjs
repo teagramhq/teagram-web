@@ -11,7 +11,7 @@ export const SCENARIOS = [
 ];
 
 export const SCALES = ['1x', '100x'];
-export const PERFORMANCE_MEASUREMENT_VERSION = 2;
+export const PERFORMANCE_MEASUREMENT_VERSION = 3;
 export const PERFORMANCE_REPEATS = 3;
 // Cold-load pairs need additional samples to outvote occasional runner long tasks.
 export const COLD_CHAT_LIST_REPEATS = 6;

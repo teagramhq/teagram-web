@@ -4,6 +4,7 @@ import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
 import {findLongTasksWithSignificantSpanWork, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {startMeasurementAtClick} from './performanceMeasurement';
 
 type Fixture = {
   owner: number,
@@ -44,7 +45,8 @@ type Metric = {
   droppedFramePercent?: number,
   droppedFrames?: number,
   frameIntervals?: number,
-  longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>
+  longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>,
+  preInteractionMs?: number
 };
 
 type VariantRun = {
@@ -57,7 +59,8 @@ type MeasurementBoundary = {
   ms: number,
   startedAtMs: number,
   domNodes: number,
-  domNodeCounts: Metric['domNodeCounts']
+  domNodeCounts: Metric['domNodeCounts'],
+  preInteractionMs?: number
 };
 
 type ScrollBackTraceOptions = {
@@ -282,6 +285,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     requests: requestCount,
     domNodes: boundary.domNodes,
     domNodeCounts: boundary.domNodeCounts,
+    preInteractionMs: boundary.preInteractionMs,
     rpcWallMs: metrics.rpcSpansRecorded ? rpcSummary.rpcWallMs : null,
     nonRpcElapsedMs: metrics.rpcSpansRecorded ? rpcSummary.nonRpcElapsedMs : null,
     workerPhases: includePhases ? summarizePerformancePhases(metrics.workerPhases || []) : undefined,
@@ -397,7 +401,8 @@ async function snapshotMeasurementBoundary(page: Page): Promise<MeasurementBound
         dateGroups: document.querySelectorAll('.bubbles .bubbles-date-group').length,
         groupAvatars: document.querySelectorAll('.bubbles .bubbles-group-avatar-container').length,
         deletePlaceholders: document.querySelectorAll('.bubbles .bubble-delete-placeholder').length
-      }
+      },
+      preInteractionMs: perf.preInteractionMs
     };
   });
 }
@@ -543,9 +548,12 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
   await begin(page, requests);
+  await startMeasurementAtClick(row);
   await row.click();
-  await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+  await page.locator('#page-chats .bubbles .bubble[data-mid]').first().waitFor({state: 'visible', timeout: 60_000});
+  const boundary = await snapshotMeasurementBoundary(page);
+  expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
+  return capture(page, requests, boundary);
 }
 
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}) {
@@ -928,8 +936,9 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
         await installPeerChangeTracing(page);
         const chatProfile = await startCpuProfile(page);
+        await startMeasurementAtClick(row);
         await row.click();
-        await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
+        await page.locator('#page-chats .bubbles .bubble[data-mid]').first().waitFor({state: 'visible', timeout: 60_000});
         const chatOpenBoundary = await snapshotMeasurementBoundary(page);
         const chatCpu = await finishCpuProfile(chatProfile);
         const chatOpenCapture = await capture(page, requests, chatOpenBoundary, false, true);
