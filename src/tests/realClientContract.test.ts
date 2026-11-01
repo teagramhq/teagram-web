@@ -29,7 +29,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
-const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, getClientErrorDiagnostics, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, emitReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword, waitForUnreadCount} = realClientBrowser;
+const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, getClientErrorDiagnostics, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, emitReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openChatTopbarMenu, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword, waitForUnreadCount} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://teagramd.test';
@@ -5903,6 +5903,45 @@ describe('real client channel invite completion', () => {
 
       await expect(waitForChannelInviteCompletion(page, addMembers, channelName, 500)).resolves.toBe('-10012346');
       expect(await page.evaluate(() => (window as any).inviteResult)).toBe('add');
+    } finally {
+      await page.close();
+    }
+  });
+});
+
+describe('real client chat topbar menu', () => {
+  let browser: any;
+
+  beforeAll(async() => {
+    browser = await chromium.launch({headless: true});
+  }, 30_000);
+
+  afterAll(async() => {
+    await browser?.close();
+  }, 15_000);
+
+  it('opens the menu through the visible toggle when a hidden duplicate exists', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<!doctype html><div id="column-center"><div class="chat active"><div class="topbar"><div class="chat-utils">
+        <button class="btn-menu-toggle" style="display:none">Hidden</button>
+        <button class="btn-menu-toggle" id="visible-toggle">Visible</button>
+        <div class="btn-menu" style="display:none"><button class="btn-menu-item">Open chat</button></div>
+      </div></div></div></div><script>
+        window.menuOpenCount = 0;
+        document.querySelector('#visible-toggle').addEventListener('click', () => {
+          window.menuOpenCount++;
+          document.querySelector('.btn-menu').style.display = 'block';
+        });
+        document.addEventListener('keydown', (event) => {
+          if(event.key === 'Escape') document.querySelector('.btn-menu').style.display = 'none';
+        });
+      </script>`);
+
+      await openChatTopbarMenu(page);
+
+      expect(await page.evaluate(() => (window as any).menuOpenCount)).toBe(1);
+      expect(await page.locator('.btn-menu').isHidden()).toBe(true);
     } finally {
       await page.close();
     }
