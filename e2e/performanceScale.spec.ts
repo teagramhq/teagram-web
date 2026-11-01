@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {summarizeCpuProfile, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
+import {summarizeCpuProfile, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -29,7 +29,9 @@ type Metric = {
   rpcSpansRecorded: boolean,
   rpcCalls: PerformanceRpcCall[],
   workerPhases?: PerformancePhaseSummary[],
+  mainPhases?: PerformancePhaseSummary[],
   peerChangePhases?: PerformancePhaseSummary[],
+  cpu?: PerformanceCpuSummary,
   droppedFramePercent?: number,
   droppedFrames?: number,
   frameIntervals?: number
@@ -161,6 +163,7 @@ async function begin(page: Page, requests: {value: number}, recordRpcSpans = tru
     perf.frameIntervals = [];
     perf.resourceUrlBaseline = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).map((entry) => entry.name);
     performance.clearResourceTimings();
+    if(traceEnabled) performance.clearMeasures();
     perf.started = performance.now();
   }, {recordSpans: recordRpcSpans, traceEnabled});
 }
@@ -198,6 +201,11 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       ...phase,
       startMs: Math.max(0, phase.startedAtEpochMs - performance.timeOrigin)
     })) : undefined;
+    const mainPhases = includePhases ? performance.getEntriesByType('measure').filter((phase) => phase.name.startsWith('main.')).map((phase) => ({
+      name: phase.name,
+      startMs: Math.max(0, phase.startTime),
+      durationMs: phase.duration
+    })) : undefined;
     const rpcCalls = rpcTrace.calls.map((call) => ({
       method: call.method,
       startedAtMs: Math.max(0, call.startedAtEpochMs - performance.timeOrigin),
@@ -219,6 +227,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       rpcCallCount: rpcTrace.recording ? rpcInvocations.length : rpcTrace.callCount,
       rpcCalls,
       workerPhases,
+      mainPhases,
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
@@ -237,7 +246,8 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     domNodes: boundary.domNodes,
     rpcWallMs: metrics.rpcSpansRecorded ? rpcSummary.rpcWallMs : null,
     nonRpcElapsedMs: metrics.rpcSpansRecorded ? rpcSummary.nonRpcElapsedMs : null,
-    workerPhases: includePhases ? summarizePerformancePhases(metrics.workerPhases || []) : undefined
+    workerPhases: includePhases ? summarizePerformancePhases(metrics.workerPhases || []) : undefined,
+    mainPhases: includePhases ? summarizePerformancePhases(metrics.mainPhases || []) : undefined
   };
 }
 
@@ -691,54 +701,62 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
 }
 
 async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
-  const context = await browser.newContext({
-    ignoreHTTPSErrors: true,
-    viewport: {width: 1280, height: 800},
-    storageState: run.storageState
-  });
-  const page = await context.newPage();
-  const requests = {value: 0};
-  await installInstrumentation(page, requests, run.origin);
+  const coldChatList: Metric[] = [];
+  const warmChatList: Metric[] = [];
+  let chatOpen: Metric;
 
-  try {
-    const coldProfile = await startCpuProfile(page);
-    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
-    await waitForChatList(page);
-    const coldBoundary = await snapshotMeasurementBoundary(page);
-    const coldCpu = await finishCpuProfile(coldProfile);
-    const coldChatList = {...await capture(page, requests, coldBoundary, false, true), cpu: coldCpu};
+  for(let repeat = 0; repeat < COLD_CHAT_LIST_REPEATS; ++repeat) {
+    const context = await browser.newContext({
+      ignoreHTTPSErrors: true,
+      viewport: {width: 1280, height: 800},
+      storageState: run.storageState
+    });
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin);
 
-    await begin(page, requests, true, true);
-    await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
-    const warmProfile = await startCpuProfile(page);
-    await page.reload({waitUntil: 'domcontentloaded'});
-    await waitForChatList(page);
-    const warmBoundary = await snapshotMeasurementBoundary(page);
-    const warmCpu = await finishCpuProfile(warmProfile);
-    const warmChatList = {...await capture(page, requests, warmBoundary, false, true), cpu: warmCpu};
+    try {
+      const coldProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
+      await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+      await waitForChatList(page);
+      const coldBoundary = await snapshotMeasurementBoundary(page);
+      const coldCapture = await capture(page, requests, coldBoundary, false, true);
+      coldChatList.push({...coldCapture, ...(coldProfile ? {cpu: await finishCpuProfile(coldProfile)} : {})});
 
-    const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
-    await expect(row).toBeVisible({timeout: 60_000});
-    await begin(page, requests, true, true);
-    await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
-    await installPeerChangeTracing(page);
-    const chatProfile = await startCpuProfile(page);
-    await row.click();
-    await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
-    const chatOpenBoundary = await snapshotMeasurementBoundary(page);
-    const chatCpu = await finishCpuProfile(chatProfile);
-    const chatOpenCapture = await capture(page, requests, chatOpenBoundary, false, true);
-    const peerChangePhases = await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []);
-    const chatOpen = {
-      ...chatOpenCapture,
-      cpu: chatCpu,
-      peerChangePhases: summarizePerformancePhases(peerChangePhases)
-    };
+      await begin(page, requests, true, true);
+      await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
+      const warmProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
+      await page.reload({waitUntil: 'domcontentloaded'});
+      await waitForChatList(page);
+      const warmBoundary = await snapshotMeasurementBoundary(page);
+      const warmCapture = await capture(page, requests, warmBoundary, false, true);
+      warmChatList.push({...warmCapture, ...(warmProfile ? {cpu: await finishCpuProfile(warmProfile)} : {})});
 
-    return {coldChatList, warmChatList, chatOpen};
-  } finally {
-    await context.close();
+      if(repeat === 0) {
+        const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
+        await expect(row).toBeVisible({timeout: 60_000});
+        await begin(page, requests, true, true);
+        await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
+        await installPeerChangeTracing(page);
+        const chatProfile = await startCpuProfile(page);
+        await row.click();
+        await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
+        const chatOpenBoundary = await snapshotMeasurementBoundary(page);
+        const chatCpu = await finishCpuProfile(chatProfile);
+        const chatOpenCapture = await capture(page, requests, chatOpenBoundary, false, true);
+        const peerChangePhases = await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []);
+        chatOpen = {
+          ...chatOpenCapture,
+          cpu: chatCpu,
+          peerChangePhases: summarizePerformancePhases(peerChangePhases)
+        };
+      }
+    } finally {
+      await context.close();
+    }
   }
+
+  return {coldChatList, warmChatList, chatOpen: chatOpen!};
 }
 
 test('measures the scale fixture in interleaved base and head runs', async({browser}) => {

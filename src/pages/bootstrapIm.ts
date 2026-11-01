@@ -3,6 +3,7 @@ import loadFonts from '@helpers/dom/loadFonts';
 import {doubleRaf} from '@helpers/schedulers';
 import isNativeVoiceRecorderSupported from '@helpers/voiceRecorder/isNativeSupported';
 import rootScope from '@lib/rootScope';
+import {performancePhaseTrace} from '@lib/appManagers/performanceTrace';
 
 import {disposeActiveAuthFlow} from '@/pages/mountAuthFlow';
 
@@ -48,7 +49,11 @@ export async function bootstrapIm(): Promise<void> {
   if(recorder) {
     (window as any).Recorder = recorder.default;
   }
-  appDialogsManager.start();
+  if(import.meta.env.VITE_PERF_TRACE === '1') {
+    performancePhaseTrace.track('main.chatlist.mount', () => appDialogsManager.start());
+  } else {
+    appDialogsManager.start();
+  }
   // start() toggles body.is-left-column-shown synchronously
   // (appImManager.selectTab(CHATLIST)). The .main-column transform/opacity
   // transition in _chats.scss is gated by :not(.has-auth-pages) so the bar

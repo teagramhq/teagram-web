@@ -46,12 +46,29 @@ export class PerformancePhaseTrace {
     return () => {
       if(finished) return;
       finished = true;
-      phase.durationMs = Number((performance.now() - started).toFixed(2));
+      const duration = Number((performance.now() - started).toFixed(2));
+      phase.durationMs = duration;
+      if(name.startsWith('main.')) performance.measure(name, {start: started, duration});
     };
   }
 
   public reset() {
     this.phases = [];
+  }
+
+  public track<T>(name: string, operation: () => T): T {
+    if(!this.enabled) return operation();
+
+    const finish = this.start(name);
+    try {
+      const result = operation();
+      if(result instanceof Promise) return result.finally(finish) as T;
+      finish();
+      return result;
+    } catch(error) {
+      finish();
+      throw error;
+    }
   }
 
   public getSnapshot() {

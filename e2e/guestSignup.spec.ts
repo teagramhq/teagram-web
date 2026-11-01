@@ -1,14 +1,35 @@
 import {createPublicKey} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
-import {expect, test} from '@playwright/test';
-import type {Page, TestInfo} from '@playwright/test';
+import {expect, request, test} from '@playwright/test';
+import type {APIRequestContext, Page, TestInfo} from '@playwright/test';
 import {captureState, seedPriorAccountUserId} from './registrationMocks';
 
 const SERVER_HOST = 'second-server.example.test';
+let localAppRequest: APIRequestContext;
+
+test.beforeEach(async() => {
+  localAppRequest = await request.newContext();
+});
+
+test.afterEach(async({page}) => {
+  // setupGuestServer registers its catch-all on the context, not the page.
+  await page.close();
+  await page.context().unrouteAll({behavior: 'wait'});
+  await localAppRequest.dispose();
+});
 
 async function fetchLocalAppRoute(route: import('@playwright/test').Route, url: string) {
-  return route.fetch({url, maxRetries: 1});
+  // Keep transient Vite retries independent of the browser context that owns the route.
+  const headers = route.request().headers();
+  delete headers.cookie;
+  delete headers.host;
+  return localAppRequest.fetch(url, {
+    method: route.request().method(),
+    headers,
+    data: route.request().postDataBuffer() ?? undefined,
+    maxRetries: 1
+  });
 }
 
 async function setupGuestServer(
@@ -64,7 +85,7 @@ async function setupGuestServer(
         const response = await fetchLocalAppRoute(route, url.toString());
         if(url.pathname === '/') {
           const headers = await response.headers();
-          headers['content-security-policy'] = "script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; worker-src 'self' blob:";
+          headers['content-security-policy'] = 'script-src \'self\' \'wasm-unsafe-eval\' https://challenges.cloudflare.com; worker-src \'self\' blob:';
           await route.fulfill({response, headers});
         } else {
           await route.fulfill({response});
@@ -93,7 +114,8 @@ async function setupGuestServer(
         await route.abort();
       }
     } catch(error) {
-      if(error instanceof Error && /Test ended|disposed/i.test(error.message)) return;
+      if(error instanceof Error && (/Test ended|disposed/i.test(error.message) ||
+        (/Route is already handled/i.test(error.message) && route.request().failure()))) return;
       throw error;
     }
   });

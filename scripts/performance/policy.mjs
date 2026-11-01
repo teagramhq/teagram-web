@@ -394,4 +394,61 @@ export function formatPerformanceTable(evaluation) {
   return lines.join('\n');
 }
 
+function summarizeTracePhases(samples) {
+  const phases = new Map();
+  for(const sample of samples) {
+    const entries = [...(sample?.mainPhases || []), ...(sample?.workerPhases || [])];
+    for(const phase of entries) {
+      const key = `${phase.name}\0${phase.accountNumber ?? ''}`;
+      const summary = phases.get(key) || {
+        name: phase.name,
+        accountNumber: phase.accountNumber,
+        starts: [],
+        durations: []
+      };
+      if(Number.isFinite(phase.startMs)) summary.starts.push(phase.startMs);
+      if(Number.isFinite(phase.durationMs)) summary.durations.push(phase.durationMs);
+      phases.set(key, summary);
+    }
+  }
+
+  return new Map([...phases].map(([key, phase]) => [key, {
+    ...phase,
+    startMs: median(phase.starts),
+    durationMs: median(phase.durations)
+  }]));
+}
+
+export function formatPerformanceTraceTable(diagnostics) {
+  const coldSamples = Array.isArray(diagnostics?.coldChatList) ? diagnostics.coldChatList : [];
+  const warmSamples = Array.isArray(diagnostics?.warmChatList) ? diagnostics.warmChatList : [];
+  if(!coldSamples.length && !warmSamples.length) return '';
+
+  const cold = summarizeTracePhases(coldSamples);
+  const warm = summarizeTracePhases(warmSamples);
+  const keys = new Set([...cold.keys(), ...warm.keys()]);
+  const entries = [...keys].map((key) => ({key, cold: cold.get(key), warm: warm.get(key)}));
+  entries.sort((left, right) => {
+    const leftStart = Math.min(left.cold?.startMs ?? Infinity, left.warm?.startMs ?? Infinity);
+    const rightStart = Math.min(right.cold?.startMs ?? Infinity, right.warm?.startMs ?? Infinity);
+    return leftStart - rightStart;
+  });
+
+  const show = (value) => Number.isFinite(value) ? value.toFixed(1) : 'n/a';
+  const label = ({name, accountNumber}) => accountNumber === undefined ? name : `${name} (account ${accountNumber})`;
+  const lines = [
+    '### 100x startup trace spans',
+    '',
+    `Median start and duration in milliseconds from navigation over ${coldSamples.length} cold repeats and ${warmSamples.length} warm repeats.`,
+    '',
+    '| Span | Cold start | Cold duration | Warm start | Warm duration |',
+    '| --- | ---: | ---: | ---: | ---: |'
+  ];
+  for(const entry of entries) {
+    const phase = entry.cold || entry.warm;
+    lines.push(`| ${label(phase)} | ${show(entry.cold?.startMs)} | ${show(entry.cold?.durationMs)} | ${show(entry.warm?.startMs)} | ${show(entry.warm?.durationMs)} |`);
+  }
+  return lines.join('\n');
+}
+
 export const calibrationRunCount = CALIBRATION_RUNS;
