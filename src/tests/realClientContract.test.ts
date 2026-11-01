@@ -7886,6 +7886,31 @@ describe('real client poll option interaction', () => {
     }
   });
 
+  it('waits for the sender poll option transition to settle before checking row count', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-transition-question';
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="bubble" data-mid="55">
+          <div>${question}</div>
+          <div data-poll-option-idx="0"><span>browser-ci-poll-answer-one</span></div>
+          <div data-poll-option-idx="0"><span>browser-ci-poll-answer-one</span></div>
+          <div data-poll-option-idx="1"><span>browser-ci-poll-answer-two</span></div>
+        </div>
+      </div>`);
+      await page.evaluate(() => {
+        window.setTimeout(() => document.querySelector('[data-poll-option-idx="0"] + [data-poll-option-idx="0"]')?.remove(), 100);
+      });
+
+      expect(realClientBrowser.waitForPollMessage).toBeTypeOf('function');
+      const poll = await realClientBrowser.waitForPollMessage(page, question, 'poll_transition', 1000);
+
+      expect(await poll.locator('[data-poll-option-idx]').count()).toBe(2);
+    } finally {
+      await page.close();
+    }
+  });
+
   it('ignores exiting poll options when validating sender poll content', async() => {
     const page = await browser.newPage();
     const question = 'browser-ci-poll-transition-question';
