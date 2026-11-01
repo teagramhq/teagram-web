@@ -18,6 +18,8 @@ const POLL_DESCRIPTION = 'Description stuff';
 const POLL_ANSWER_ONE = 'browser-ci-poll-answer-one';
 const POLL_ANSWER_TWO = 'browser-ci-poll-answer-two';
 const POLL_ANSWER_LINK = `${PRIVATE_CSP_ORIGIN}/browser-ci-poll-answer`;
+// Keep "fade-2" aligned with the TransitionGroup name in:
+// src/components/chat/bubbleParts/pollMessageContent/PollMessageContent.tsx
 const POLL_ACTIVE_OPTION_SELECTOR = '[data-poll-option-idx]:not(.fade-2-exit-active)';
 const POLL_NEGATIVE_CONTROL = Object.freeze([
   Object.freeze({shape: 'description', stage: 'alice_poll_description_create', errorType: 'POLL_ANSWERS_INVALID'}),
@@ -3271,12 +3273,9 @@ async function assertPollContent(poll, {question, description, stage}) {
 async function readPollContentDiagnostic(poll, answerTexts) {
   return poll.evaluate((poll, {expectedAnswers, optionSelector}) => {
     const isVisible = (element) => {
-      for(let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
-        const style = window.getComputedStyle(ancestor);
-        if(style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0') return false;
-      }
+      const style = window.getComputedStyle(element);
       const rect = element.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
     };
     const options = [...poll.querySelectorAll('[data-poll-option-idx]')];
     const activeOptions = [...poll.querySelectorAll(optionSelector)];
