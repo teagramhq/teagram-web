@@ -5987,6 +5987,7 @@ export default class ChatBubbles {
           this.managers.appDraftsManager.setDraft(this.peerId, this.chat.threadId, options.text);
         }
 
+        this.preloader.detach();
         return null;
       }
     } else {
@@ -6438,8 +6439,8 @@ export default class ChatBubbles {
       if(err !== PEER_CHANGED_ERROR) {
         log.error('setPeer promise error:', err);
       }
-      this.preloader.detach();
       if(isCurrent) {
+        this.preloader.detach();
         animationIntersector.unlockGroup(this.chat.animationGroup);
         this.lazyLoadQueue.unlock();
       }

@@ -699,7 +699,7 @@ test('retries peer UI setup after history fails for a newly selected peer', asyn
   }
 });
 
-test('detaches the stale preloader without unlocking the active peer when mounted history is canceled', async() => {
+test('detaches the preloader from a same-peer no-op without unlocking its queue', async() => {
   let rejectFirstHistory!: (error: Error) => void;
   const firstHistory = new Promise<void>((_resolve, reject) => {
     rejectFirstHistory = reject;
@@ -720,6 +720,7 @@ test('detaches the stale preloader without unlocking the active peer when mounte
   try {
     const first = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
     await expect(harness.setPeer({peerId, samePeer: true, sameSearch: true})).resolves.toBeNull();
+    expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
 
     rejectFirstHistory(PEER_CHANGED_ERROR);
     await expect(first.promise).rejects.toBe(PEER_CHANGED_ERROR);
@@ -731,6 +732,51 @@ test('detaches the stale preloader without unlocking the active peer when mounte
     expect(queueLocked).toBe(true);
   } finally {
     unlockGroup.mockRestore();
+    animationIntersector.unlockGroup('chat');
+  }
+});
+
+test('keeps the new peer preloader attached when superseded history is canceled', async() => {
+  let rejectFirstHistory!: (error: Error) => void;
+  const firstHistory = new Promise<void>((_resolve, reject) => {
+    rejectFirstHistory = reject;
+  });
+  let resolveSecondHistory!: () => void;
+  const secondHistory = new Promise<void>((resolve) => {
+    resolveSecondHistory = resolve;
+  });
+  const {harness, chat, getHistory1} = makeMountableSetPeerHarness();
+  const firstPeerId = peerId;
+  const secondPeerId = (peerId + 1) as PeerId;
+  chat.onChangePeer = vi.fn(async(options: {peerId: PeerId}) => {
+    chat.peerId = options.peerId;
+  });
+  getHistory1.mockReturnValueOnce(Promise.resolve({
+    cached: true,
+    promise: firstHistory,
+    waitPromise: Promise.resolve()
+  })).mockReturnValueOnce(Promise.resolve({
+    cached: true,
+    promise: secondHistory,
+    waitPromise: Promise.resolve()
+  }));
+  const animationIntersector = (await import('@components/animationIntersector')).default;
+
+  try {
+    const first = await harness.setPeer({peerId: firstPeerId, samePeer: false, sameSearch: false});
+    const second = await harness.setPeer({peerId: secondPeerId, samePeer: false, sameSearch: false});
+
+    rejectFirstHistory(PEER_CHANGED_ERROR);
+    await expect(first.promise).rejects.toBe(PEER_CHANGED_ERROR);
+
+    expect(harness.preloader.attach).toHaveBeenCalledTimes(2);
+    expect(harness.preloader.detach).not.toHaveBeenCalled();
+
+    resolveSecondHistory();
+    await second.promise;
+
+    expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
+  } finally {
     animationIntersector.unlockGroup('chat');
   }
 });
