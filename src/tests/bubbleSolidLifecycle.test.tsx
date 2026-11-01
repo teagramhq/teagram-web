@@ -43,6 +43,7 @@ vi.mock('@stores/stars', () => ({default: () => () => 0}));
 
 let ChatBubbles: typeof import('@components/chat/bubbles').default;
 let Chat: typeof import('@components/chat/chat').default;
+let ChatInput: typeof import('@components/chat/input').default;
 let BubbleGroups: typeof import('@components/chat/bubbleGroups').default;
 let BubbleGroup: typeof import('@components/chat/bubbleGroups').BubbleGroup;
 let cancelPendingHiddenLinksEvent: typeof import('@components/chat/bubbles').cancelPendingHiddenLinksEvent;
@@ -85,6 +86,7 @@ beforeAll(async() => {
     shouldForceHideNonContactLinkTest
   } = await import('@components/chat/bubbles'));
   Chat = (await import('@components/chat/chat')).default;
+  ChatInput = (await import('@components/chat/input')).default;
   ({default: BubbleGroups, BubbleGroup} = await import('@components/chat/bubbleGroups'));
   // Importing the whole bubbles graph costs far more than the default hook
   // budget once the rest of the suite is competing for the same CPU.
@@ -352,6 +354,86 @@ test('propagates prepared peer rejection before the initial history request reso
     resolveHistoryResult({cached: true, promise: pendingHistory, waitPromise: Promise.resolve()});
     resolveHistory();
   }
+});
+
+test('releases the preloader and animation group when prepared peer setup rejects', async() => {
+  let rejectPreparation!: (error: Error) => void;
+  const preparation = new Promise<void>((_resolve, reject) => {
+    rejectPreparation = reject;
+  });
+  const failure = new Error('peer setup failed');
+  const {harness, chat} = makeSetPeerHarness(Promise.resolve(), preparation);
+  const animationGroup = 'chat-123' as const;
+  chat.animationGroup = animationGroup;
+  const preloader = harness.preloader;
+  const animationIntersector = (await import('@components/animationIntersector')).default;
+  const unlockGroup = vi.spyOn(animationIntersector, 'unlockGroup');
+
+  try {
+    const result = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
+    rejectPreparation(failure);
+
+    await expect(result.promise).rejects.toBe(failure);
+
+    expect(preloader.detach).toHaveBeenCalled();
+    expect(unlockGroup).toHaveBeenCalledWith(animationGroup);
+    expect(harness.lazyLoadQueue.unlock).toHaveBeenCalled();
+    expect((animationIntersector as any).lockedGroups[animationGroup]).toBeUndefined();
+  } finally {
+    unlockGroup.mockRestore();
+    animationIntersector.unlockGroup(animationGroup);
+  }
+});
+
+test('reuses initialized peer capabilities while preparing a regular user chat input', async() => {
+  const appPeersManager = {
+    isBroadcast: vi.fn(async() => false),
+    isBroadcastGroup: vi.fn(async() => false),
+    isBot: vi.fn(async() => false),
+    canPinMessage: vi.fn(async() => false)
+  };
+  const appMessagesManager = {isAnonymousSending: vi.fn(async() => false)};
+  const getProfileByPeerId = vi.fn(async() => ({cached: true, result: Promise.resolve({})}));
+  const chat = {
+    peerId,
+    type: 'chat',
+    isBroadcast: false,
+    isBroadcastGroup: false,
+    isBot: false,
+    isChannel: false,
+    isAnonymousSending: false,
+    isPremiumRequired: false,
+    canSend: vi.fn(async() => true),
+    isPremiumRequiredToContact: vi.fn(async() => false),
+    getAutoDeletePeriod: vi.fn(async() => ({cached: true, result: Promise.resolve(0)})),
+    canManageAutoDelete: vi.fn(async() => false)
+  } as any;
+  const input = Object.assign(Object.create(ChatInput.prototype), {
+    managers: {
+      appPeersManager,
+      appMessagesManager,
+      appNotificationsManager: {isPeerLocalMuted: vi.fn(async() => false)},
+      acknowledged: {appProfileManager: {getProfileByPeerId}}
+    },
+    chat,
+    createSendAs: vi.fn(() => undefined),
+    filterAttachMenuButtons: vi.fn(() => []),
+    getNeededFakeContainer: vi.fn(async() => undefined),
+    messageInput: document.createElement('div'),
+    placeholderParamsMiddlewareHelper: {clean: vi.fn()},
+    sendAsPeerId: undefined
+  }) as any;
+
+  await ChatInput.prototype.finishPeerChange.call(input, {peerId, middleware: () => true});
+
+  expect(appPeersManager.isBroadcast).not.toHaveBeenCalled();
+  expect(appPeersManager.isBroadcastGroup).not.toHaveBeenCalled();
+  expect(appPeersManager.isBot).not.toHaveBeenCalled();
+  expect(appPeersManager.canPinMessage).not.toHaveBeenCalled();
+  expect(chat.canSend).toHaveBeenCalledTimes(1);
+  expect(chat.isPremiumRequiredToContact).not.toHaveBeenCalled();
+  expect(getProfileByPeerId).not.toHaveBeenCalled();
+  expect(appMessagesManager.isAnonymousSending).not.toHaveBeenCalled();
 });
 
 test('does not use previous-peer bubbles to enlarge the initial history request', async() => {

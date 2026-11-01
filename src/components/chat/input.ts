@@ -2447,12 +2447,14 @@ export default class ChatInput {
     const previousSendAs = this.sendAs;
     const sendAs = this.createSendAs();
     const filteredAttachMenuButtons = this.filterAttachMenuButtons();
+    const isBroadcast = this.chat.isBroadcast;
+    const isBot = this.chat.isBot;
+    const canSendPromise = this.chat?.canSend('send_messages') || true;
+    const canSendPlainPromise = peerId.isUser() ? canSendPromise : this.chat?.canSend('send_plain') || true;
 
     const [
-      isBroadcast,
       isBroadcastGroup,
       canPinMessage,
-      isBot,
       canSend,
       canSendPlain,
       neededFakeContainer,
@@ -2461,25 +2463,21 @@ export default class ChatInput {
       setSendAsCallback,
       peerTitleShort,
       isPremiumRequired,
-      appConfig,
       autoDeletePeriod,
       canManageAutoDelete,
       peerMuted,
       ackedGlobalPrivacy
     ] = await Promise.all([
-      this.managers.appPeersManager.isBroadcast(peerId),
-      this.managers.appPeersManager.isBroadcastGroup(peerId),
-      this.managers.appPeersManager.canPinMessage(peerId),
-      this.managers.appPeersManager.isBot(peerId),
-      this.chat?.canSend('send_messages') || true,
-      this.chat?.canSend('send_plain') || true,
+      this.chat.isChannel ? this.managers.appPeersManager.isBroadcastGroup(peerId) : false,
+      this.chat.type === ChatType.Pinned ? this.managers.appPeersManager.canPinMessage(peerId) : false,
+      canSendPromise,
+      canSendPlainPromise,
       this.getNeededFakeContainer(startParam),
-      modifyAckedPromise(this.managers.acknowledged.appProfileManager.getProfileByPeerId(peerId)),
+      isBot ? modifyAckedPromise(this.managers.acknowledged.appProfileManager.getProfileByPeerId(peerId)) : undefined,
       btnScheduled && !this.chat.threadId ? modifyAckedPromise(this.managers.acknowledged.appMessagesManager.getScheduledMessages(peerId)) : undefined,
       sendAs ? (sendAs.setPeerId(peerId), sendAs.updateManual(true)) : undefined,
       wrapPeerTitle({peerId, onlyFirstName: true}),
-      this.chat.isPremiumRequiredToContact(),
-      apiManagerProxy.getAppConfig(),
+      this.chat.isPremiumRequired,
       modifyAckedPromise(this.chat.getAutoDeletePeriod()),
       this.chat.canManageAutoDelete(),
       this.managers.appNotificationsManager.isPeerLocalMuted({peerId, respectType: false}),
@@ -2550,7 +2548,7 @@ export default class ChatInput {
 
       let haveSomethingInControl = false;
       if(this.chat && this.frozenBtn) {
-        const good = !haveSomethingInControl && appConfig.freeze_since_date && !canSend;
+        const good = !haveSomethingInControl && this.chat.appConfig.freeze_since_date && !canSend;
         haveSomethingInControl ||= good;
         this.frozenBtn.classList.toggle('hide', !good);
       }
@@ -2841,10 +2839,7 @@ export default class ChatInput {
       key = 'Channel.Persmission.MessageBlock';
     } else if(threadId && !isForum && !peerId.isUser()) {
       key = 'Comment';
-    } else if(
-      await this.managers.appPeersManager.isBroadcast(peerId) ||
-      await this.managers.appPeersManager.isBroadcastGroup(peerId)
-    ) {
+    } else if(this.chat.isBroadcast || (this.chat.isChannel && await this.managers.appPeersManager.isBroadcastGroup(peerId))) {
       key = 'ChannelBroadcast';
     } else if(this.chat.isMonoforum && this.chat.canManageDirectMessages) {
       key = this.inputState.store.isSuggestingUneditablePostChange ?
@@ -2856,7 +2851,7 @@ export default class ChatInput {
       key = 'OffThreadMessage'
     } else if(
       (this.sendAsPeerId !== undefined && this.sendAsPeerId !== rootScope.myId) ||
-      await this.managers.appMessagesManager.isAnonymousSending(peerId)
+      this.chat.isAnonymousSending
     ) {
       key = 'SendAnonymously';
     } else if(type === ChatType.Stories) {
