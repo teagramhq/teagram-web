@@ -9461,11 +9461,10 @@ export class AppMessagesManager extends AppManager {
     const channelId = this.appPeersManager.isChannel(peerId) ? peerId.toChatId() : undefined;
     const mid = this.appMessagesIdsManager.generateMessageId(update.id, channelId);
     this.pendingByMessageId[mid] = randomId;
-    // const {storage} = pendingData;
-    // const message = this.getMessageFromStorage(storage, mid);
-    // if(message) { // if message somehow already exists
-    //   this.checkPendingMessage(message);
-    // }
+    const message = this.getMessageFromStorage(pendingData.storage, mid);
+    if(message) {
+      this.checkPendingMessage(message);
+    }
   };
 
   private onUpdateNewMessage = (update: Update.updateNewDiscussionMessage | Update.updateNewMessage | Update.updateNewChannelMessage) => {
