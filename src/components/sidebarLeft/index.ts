@@ -62,7 +62,7 @@ import {MyDocument} from '@appManagers/appDocsManager';
 import getAttachMenuBotIcon from '@appManagers/utils/attachMenuBots/getAttachMenuBotIcon';
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 import wrapUrl from '@lib/richTextProcessor/wrapUrl';
-import flatten from '@helpers/array/flatten';
+import {resolveSearchHelperResults} from '@components/sidebarLeft/searchHelperResults';
 import {AttachMenuBot, EmojiStatus, User} from '@layer';
 import {Middleware, MiddlewareHelper} from '@helpers/middleware';
 import wrapEmojiStatus from '@components/wrappers/emojiStatus';
@@ -1473,7 +1473,8 @@ export class AppSidebarLeft extends SidebarSlider {
       helperMiddlewareHelper.clean();
       onHelperLength(true);
 
-      const promises: MaybePromise<HTMLElement[]>[] = [];
+      const middleware = searchSuper.middleware.get();
+      const promises: MaybePromise<HTMLElement[] | undefined>[] = [];
 
       if(!selectedMinDate && value.trim()) {
         const dates: DateData[] = [];
@@ -1486,7 +1487,6 @@ export class AppSidebarLeft extends SidebarSlider {
       }
 
       if(!selectedPeerId && !selectedCommunityId && value.trim()) {
-        const middleware = searchSuper.middleware.get();
         const promise = Promise.all([
           this.managers.dialogsStorage.getDialogs({query: value}).then(({dialogs}) => dialogs.map((d) => d.peerId)),
           this.managers.appUsersManager.getContactsPeerIds(value, true)
@@ -1501,8 +1501,10 @@ export class AppSidebarLeft extends SidebarSlider {
       }
 
       Promise.all(promises).then((arrays) => {
+        const flattened = resolveSearchHelperResults(arrays, middleware);
+        if(flattened === undefined) return;
+
         helper.replaceChildren();
-        const flattened = flatten(arrays);
         appendToHelper(flattened);
       });
     };
