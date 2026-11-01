@@ -99,6 +99,67 @@ describe('Turnstile auth challenge', () => {
     });
   });
 
+  it('falls back to a fresh signup challenge when the stored QA token is rejected', async() => {
+    const response = {_: 'auth.authorization'};
+    const invokeApi = vi.fn()
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signup__signup-site-key'})
+    .mockResolvedValueOnce(response);
+    const requestChallenge = vi.fn((_siteKey, _action, submit) => submit('fresh-signup-token'));
+    const params = {phone_number: 'Alice_123', first_name: 'Teagram'} as any;
+    localStorage.setItem(QA_BYPASS_KEY, 'qa-bypass-token');
+
+    await expect(invokeTurnstileProtected(
+      invokeApi,
+      'auth.signUp',
+      params,
+      'signup',
+      requestChallenge,
+      'signup-site-key'
+    )).resolves.toEqual(response);
+
+    expect(requestChallenge).toHaveBeenCalledOnce();
+    expect(requestChallenge).toHaveBeenCalledWith('signup-site-key', 'signup', expect.any(Function));
+    expect(invokeApi).toHaveBeenNthCalledWith(1, 'invokeWithReCaptcha', {
+      token: 'qa-bypass-token',
+      query: {_: 'auth.signUp', ...params}
+    });
+    expect(invokeApi).toHaveBeenNthCalledWith(2, 'invokeWithReCaptcha', {
+      token: 'fresh-signup-token',
+      query: {_: 'auth.signUp', ...params}
+    });
+  });
+
+  it('falls back to a fresh challenge when signup rejects the QA token after its challenge error', async() => {
+    const response = {_: 'auth.authorization'};
+    const invokeApi = vi.fn()
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signup__server-site-key'})
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signup__server-site-key'})
+    .mockResolvedValueOnce(response);
+    const requestChallenge = vi.fn((_siteKey, _action, submit) => submit('fresh-signup-token'));
+    const params = {phone_number: 'Alice_123', first_name: 'Teagram'} as any;
+    localStorage.setItem(QA_BYPASS_KEY, 'qa-bypass-token');
+
+    await expect(invokeTurnstileProtected(
+      invokeApi,
+      'auth.signUp',
+      params,
+      'signup',
+      requestChallenge
+    )).resolves.toEqual(response);
+
+    expect(requestChallenge).toHaveBeenCalledOnce();
+    expect(requestChallenge).toHaveBeenCalledWith('server-site-key', 'signup', expect.any(Function));
+    expect(invokeApi).toHaveBeenNthCalledWith(1, 'auth.signUp', params);
+    expect(invokeApi).toHaveBeenNthCalledWith(2, 'invokeWithReCaptcha', {
+      token: 'qa-bypass-token',
+      query: {_: 'auth.signUp', ...params}
+    });
+    expect(invokeApi).toHaveBeenNthCalledWith(3, 'invokeWithReCaptcha', {
+      token: 'fresh-signup-token',
+      query: {_: 'auth.signUp', ...params}
+    });
+  });
+
   it('uses a test-only QA token when signup first receives a challenge error', async() => {
     const response = {_: 'auth.authorization'};
     const invokeApi = vi.fn()

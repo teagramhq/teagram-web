@@ -53,7 +53,13 @@ export async function invokeTurnstileProtected<TResponse = unknown>(
   };
 
   if(action === 'signup' && siteKey && qaBypassToken) {
-    return await submit(qaBypassToken) as TResponse;
+    try {
+      return await submit(qaBypassToken) as TResponse;
+    } catch(error) {
+      if(!requestChallenge) throw error;
+      const challengeSiteKey = getTurnstileSiteKey(error, action) || siteKey;
+      return await requestChallenge(challengeSiteKey, action, (token) => submit(token)) as TResponse;
+    }
   }
 
   if(action === 'signup' && siteKey && requestChallenge) {
@@ -65,7 +71,14 @@ export async function invokeTurnstileProtected<TResponse = unknown>(
   } catch(error) {
     const challengeSiteKey = getTurnstileSiteKey(error, action);
     if(!challengeSiteKey || !requestChallenge) throw error;
-    if(action === 'signup' && qaBypassToken) return await submit(qaBypassToken) as TResponse;
+    if(action === 'signup' && qaBypassToken) {
+      try {
+        return await submit(qaBypassToken) as TResponse;
+      } catch(bypassError) {
+        const bypassSiteKey = getTurnstileSiteKey(bypassError, action) || challengeSiteKey;
+        return await requestChallenge(bypassSiteKey, action, (token) => submit(token)) as TResponse;
+      }
+    }
 
     return await requestChallenge(challengeSiteKey, action, (token) => submit(token)) as TResponse;
   }
