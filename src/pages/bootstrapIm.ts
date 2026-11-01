@@ -4,8 +4,11 @@ import {doubleRaf} from '@helpers/schedulers';
 import isNativeVoiceRecorderSupported from '@helpers/voiceRecorder/isNativeSupported';
 import rootScope from '@lib/rootScope';
 import {performancePhaseTrace} from '@lib/appManagers/performanceTrace';
+import {logger} from '@lib/logger';
 
 import {disposeActiveAuthFlow} from '@/pages/mountAuthFlow';
+
+const log = logger('bootstrapIm');
 
 let bootstrapped = false;
 
@@ -23,12 +26,11 @@ export async function bootstrapIm(): Promise<void> {
   if(bootstrapped) return;
   bootstrapped = true;
 
+  const pushAuthState = () => rootScope.managers.appStateManager.pushToState('authState', {_: 'authStateSignedIn'});
   await (
     import.meta.env.VITE_PERF_TRACE === '1' ?
-      performancePhaseTrace.track('main.bootstrapIm.authState', () => {
-        return rootScope.managers.appStateManager.pushToState('authState', {_: 'authStateSignedIn'});
-      }) :
-      rootScope.managers.appStateManager.pushToState('authState', {_: 'authStateSignedIn'})
+      performancePhaseTrace.track('main.bootstrapIm.authState', pushAuthState) :
+      pushAuthState()
   );
 
   const pageChatsEl = document.getElementById('page-chats');
@@ -39,57 +41,53 @@ export async function bootstrapIm(): Promise<void> {
   // Skip the opus-recorder fallback chunk entirely on browsers that have the
   // WebCodecs-based native path. Saves ~80 KB of WASM-shipping JS on every
   // sign-in for ~94% of users (May 2026 baseline).
+  const loadRecorder = (): Promise<{default: unknown} | null> => {
+    return isNativeVoiceRecorderSupported() ? Promise.resolve(null) : import('@vendor/recorder.min.js' as any);
+  };
   const recorderImport: Promise<{default: unknown} | null> = import.meta.env.VITE_PERF_TRACE === '1' ?
-    performancePhaseTrace.track(
-      'main.bootstrapIm.recorder.import',
-      () => isNativeVoiceRecorderSupported() ? Promise.resolve(null) : import('@vendor/recorder.min.js' as any)
-    ) :
-    isNativeVoiceRecorderSupported() ? Promise.resolve(null) : import('@vendor/recorder.min.js' as any);
+    performancePhaseTrace.track('main.bootstrapIm.recorder.import', loadRecorder) :
+    loadRecorder();
+  const importAppDialogsManager = () => import('@lib/appDialogsManager');
   const appDialogsManagerImport = import.meta.env.VITE_PERF_TRACE === '1' ?
-    performancePhaseTrace.track('main.bootstrapIm.appDialogsManager.import', () => import('@lib/appDialogsManager')) :
-    import('@lib/appDialogsManager');
+    performancePhaseTrace.track('main.bootstrapIm.appDialogsManager.import', importAppDialogsManager) :
+    importAppDialogsManager();
+  const loadBootstrapFonts = () => loadFonts();
   const fontsPromise = import.meta.env.VITE_PERF_TRACE === '1' ?
-    performancePhaseTrace.track('main.bootstrapIm.fonts', () => loadFonts()) :
-    loadFonts();
-  const videoFrameCallbackPolyfillImport = import.meta.env.VITE_PERF_TRACE === '1' ?
-    performancePhaseTrace.track(
-      'main.bootstrapIm.videoFrameCallbackPolyfill.import',
-      () => 'requestVideoFrameCallback' in HTMLVideoElement.prototype ?
-        Promise.resolve() :
-        import('@helpers/dom/requestVideoFrameCallbackPolyfill')
-    ) :
-    'requestVideoFrameCallback' in HTMLVideoElement.prototype ?
+    performancePhaseTrace.track('main.bootstrapIm.fonts', loadBootstrapFonts) :
+    loadBootstrapFonts();
+  const loadVideoFrameCallbackPolyfill = () => {
+    return 'requestVideoFrameCallback' in HTMLVideoElement.prototype ?
       Promise.resolve() :
       import('@helpers/dom/requestVideoFrameCallbackPolyfill');
+  };
+  const videoFrameCallbackPolyfillImport = import.meta.env.VITE_PERF_TRACE === '1' ?
+    performancePhaseTrace.track('main.bootstrapIm.videoFrameCallbackPolyfill.import', loadVideoFrameCallbackPolyfill) :
+    loadVideoFrameCallbackPolyfill();
 
+  const loadBootstrapDependencies = () => Promise.all([
+    appDialogsManagerImport,
+    recorderImport,
+    fontsPromise,
+    videoFrameCallbackPolyfillImport
+  ]);
   const [{default: appDialogsManager}, recorder] = await (
     import.meta.env.VITE_PERF_TRACE === '1' ?
-      performancePhaseTrace.track(
-        'main.bootstrapIm.dependencies.wait',
-        () => Promise.all([
-          appDialogsManagerImport,
-          recorderImport,
-          fontsPromise,
-          videoFrameCallbackPolyfillImport
-        ])
-      ) :
-      Promise.all([
-        appDialogsManagerImport,
-        recorderImport,
-        fontsPromise,
-        videoFrameCallbackPolyfillImport
-      ])
+      performancePhaseTrace.track('main.bootstrapIm.dependencies.wait', loadBootstrapDependencies) :
+      loadBootstrapDependencies()
   );
 
   if(recorder) {
     (window as any).Recorder = recorder.default;
   }
+  const mountChatlist = () => appDialogsManager.start();
   if(import.meta.env.VITE_PERF_TRACE === '1') {
     const startedAtEpochMs = performance.timeOrigin + performance.now();
-    void rootScope.managers.apiManager.startFirstDialogsDispatchTrace(startedAtEpochMs);
-    performancePhaseTrace.track('main.chatlist.mount', () => appDialogsManager.start());
+    void rootScope.managers.apiManager.startFirstDialogsDispatchTrace(startedAtEpochMs).catch((error) => {
+      log.error('Failed to start first dialogs dispatch trace', error);
+    });
+    performancePhaseTrace.track('main.chatlist.mount', mountChatlist);
   } else {
-    appDialogsManager.start();
+    mountChatlist();
   }
   // start() toggles body.is-left-column-shown synchronously
   // (appImManager.selectTab(CHATLIST)). The .main-column transform/opacity
@@ -99,10 +97,11 @@ export async function bootstrapIm(): Promise<void> {
   // otherwise batch into a single style commit and the gate would have no
   // effect — yield a frame so the committed state still has has-auth-pages
   // and the transform/opacity jump is instant.
+  const waitForChatlistMount = () => doubleRaf();
   await (
     import.meta.env.VITE_PERF_TRACE === '1' ?
-      performancePhaseTrace.track('main.bootstrapIm.chatlist.mount.wait', () => doubleRaf()) :
-      doubleRaf()
+      performancePhaseTrace.track('main.bootstrapIm.chatlist.mount.wait', waitForChatlistMount) :
+      waitForChatlistMount()
   );
   document.body.classList.remove('has-auth-pages');
 

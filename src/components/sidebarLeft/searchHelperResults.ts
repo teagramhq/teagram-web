@@ -1,10 +1,13 @@
 import flatten from '@helpers/array/flatten';
 
-export function resolveSearchHelperResults<T>(
-  arrays: (T[] | undefined)[],
-  middleware: () => boolean
-): T[] | undefined {
+export function updateSearchHelperResults<T>(
+  arrays: T[][],
+  middleware: () => boolean,
+  helper: HTMLElement,
+  appendToHelper: (items: T[]) => void
+) {
   if(!middleware()) return;
 
-  return flatten(arrays.filter((array): array is T[] => array !== undefined));
+  helper.replaceChildren();
+  appendToHelper(flatten(arrays));
 }

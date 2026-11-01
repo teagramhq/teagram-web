@@ -744,7 +744,13 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public getPerformanceRpcTrace() {
-    if(import.meta.env.VITE_PERF_TRACE === '1') return this.performanceRpcTrace!.getSnapshot();
+    return this.performanceRpcTrace?.getSnapshot() ?? {
+      enabled: false,
+      recording: false,
+      callCount: 0,
+      invocations: [],
+      calls: []
+    };
   }
 
   public resetPerformanceRpcTrace(recordSpans = true) {
@@ -753,6 +759,7 @@ export class ApiManager extends ApiManagerMethods {
 
   public getPerformancePhaseTrace() {
     if(import.meta.env.VITE_PERF_TRACE === '1') return performancePhaseTrace.getSnapshot();
+    return [];
   }
 
   public resetPerformancePhaseTrace() {
@@ -770,7 +777,7 @@ export class ApiManager extends ApiManagerMethods {
 
   public trackPerformanceRpcWait<T, P extends Promise<T>>(method: string, request: P): P {
     return import.meta.env.VITE_PERF_TRACE === '1' ?
-      this.performanceRpcTrace!.trackWait(method, request) :
+      this.performanceRpcTrace?.trackWait(method, request) ?? request :
       request;
   }
 
@@ -780,7 +787,7 @@ export class ApiManager extends ApiManagerMethods {
       this.finishFirstDialogsDispatchTrace();
       this.finishFirstDialogsDispatchTrace = undefined;
     }
-    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace!.recordCall(methodName);
+    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace?.recordCall(methodName);
     if(!getAuthMethod(methodName, params)) {
       return this.invokeApiInternal(method, params, options);
     }

@@ -3,6 +3,7 @@ import {afterEach, expect, test, vi} from 'vitest';
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.resetModules();
+  vi.restoreAllMocks();
 });
 
 test('finishes the chat-list startup span when the first getDialogs dispatch occurs in ApiManager', async() => {
@@ -48,17 +49,20 @@ test('does not record RPC activity when performance tracing is disabled', async(
   vi.stubEnv('VITE_PERF_TRACE', '0');
   vi.resetModules();
   const {ApiManager} = await import('@appManagers/apiManager');
-  const manager = Object.create(ApiManager.prototype) as any;
+  vi.spyOn(globalThis, 'setInterval').mockImplementation(() => 0 as any);
+  const manager = new ApiManager();
   const request = Promise.resolve({});
-  const performanceRpcTrace = {
-    recordCall: vi.fn(),
-    trackWait: vi.fn((_method: string, promise: Promise<unknown>) => promise)
-  };
-  manager.performanceRpcTrace = performanceRpcTrace;
-  manager.invokeApiInternal = vi.fn(() => request);
+  vi.spyOn(manager as any, 'invokeApiInternal').mockReturnValue(request);
 
   expect(manager.invokeApi('help.getAppConfig')).toBe(request);
   expect(manager.trackPerformanceRpcWait('users.getUsers', request)).toBe(request);
-  expect(performanceRpcTrace.recordCall).not.toHaveBeenCalled();
-  expect(performanceRpcTrace.trackWait).not.toHaveBeenCalled();
+  expect((manager as any).performanceRpcTrace).toBeUndefined();
+  expect(manager.getPerformanceRpcTrace()).toEqual({
+    enabled: false,
+    recording: false,
+    callCount: 0,
+    invocations: [],
+    calls: []
+  });
+  expect(manager.getPerformancePhaseTrace()).toEqual([]);
 });
