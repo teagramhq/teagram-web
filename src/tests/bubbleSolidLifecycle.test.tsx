@@ -781,6 +781,43 @@ test('keeps the new peer preloader attached when superseded history is canceled'
   }
 });
 
+test('detaches the prior peer preloader when the current peer fails before mounting', async() => {
+  let rejectFirstHistory!: (error: Error) => void;
+  const firstHistory = new Promise<void>((_resolve, reject) => {
+    rejectFirstHistory = reject;
+  });
+  const failure = new Error('current peer history failed');
+  const {harness, chat, getHistory1, setPeerLogger} = makeMountableSetPeerHarness();
+  const firstPeerId = peerId;
+  const failingPeerId = (peerId + 1) as PeerId;
+  chat.onChangePeer = vi.fn(async(options: {peerId: PeerId}) => {
+    chat.peerId = options.peerId;
+  });
+  getHistory1.mockReturnValueOnce(Promise.resolve({
+    cached: true,
+    promise: firstHistory,
+    waitPromise: Promise.resolve()
+  })).mockReturnValueOnce(Promise.reject(failure));
+  const animationIntersector = (await import('@components/animationIntersector')).default;
+
+  try {
+    const first = await harness.setPeer({peerId: firstPeerId, samePeer: false, sameSearch: false});
+    expect(harness.preloader.attach).toHaveBeenCalledTimes(1);
+
+    await expect(harness.setPeer({peerId: failingPeerId, samePeer: false, sameSearch: false})).rejects.toBe(failure);
+
+    expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
+    expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
+    expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), failure);
+
+    rejectFirstHistory(PEER_CHANGED_ERROR);
+    await expect(first.promise).rejects.toBe(PEER_CHANGED_ERROR);
+    expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
+  } finally {
+    animationIntersector.unlockGroup('chat');
+  }
+});
+
 test('logs and unlocks when the initial history request rejects before mount', async() => {
   const failure = new Error('history request failed');
   const {harness, getHistory1, setPeerLogger} = makeSetPeerHarness(Promise.resolve());

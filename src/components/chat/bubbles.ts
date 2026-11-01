@@ -6196,6 +6196,7 @@ export default class ChatBubbles {
         log.error('setPeer failed before mount', error);
       }
       if(middleware()) {
+        this.preloader.detach();
         if(!samePeer && error !== PEER_CHANGED_ERROR) {
           this.chat.peerChangeFailed = true;
         }
