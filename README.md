@@ -16,6 +16,13 @@ pnpm install
 ```
 This will install all the needed dependencies.
 
+#### Regenerating icons
+
+`pnpm generate-icons` opens IcoMoon through Playwright. `pnpm install` does not install the Chromium browser binary, so install it once before regenerating icons:
+```bash
+pnpm exec playwright install chromium
+pnpm generate-icons
+```
 
 #### Running web-server
 Run `pnpm start` to start the web server and the livereload task. With no private MTProto target configured, it runs the stock Telegram client against Telegram's DCs and emits no private manifest. Only private mode targets the Teagram server.

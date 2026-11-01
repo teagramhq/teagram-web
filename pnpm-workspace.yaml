@@ -1,7 +1,7 @@
 allowBuilds:
   '@parcel/watcher@2.6.0': true
   'cpu-features@0.0.10': true
-  'esbuild@0.27.4': true
+  'esbuild@0.28.2': true
   'ssh2@1.17.0': true
 minimumReleaseAgeExclude:
   - 'baseline-browser-mapping@2.11.0'
@@ -55,3 +55,5 @@ overrides:
   seroval@<=1.6.7: ^1.6.8
   seroval@>=0.12.0 <=1.6.0: ^1.6.1
   seroval@>=1.4.1 <=1.6.7: ^1.6.8
+  'minimatch@<11.0.1': 11.0.1
+  'typed-scss-modules>esbuild': 0.28.2
