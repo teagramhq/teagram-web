@@ -94,6 +94,7 @@ import getPeerTitle from '@components/wrappers/getPeerTitle';
 import NBSP from '@helpers/string/nbsp';
 import {makeMediaSize, MediaSize} from '@helpers/mediaSize';
 import cachePromiseWithRetry from '@helpers/cachePromiseWithRetry';
+import canHandleChatArrowShortcut from '@lib/canHandleChatArrowShortcut';
 import {MiddleEllipsisElement} from '@components/middleEllipsis';
 import parseUriParams from '@helpers/string/parseUriParams';
 import getMessageThreadId from '@appManagers/utils/messages/getMessageThreadId';
@@ -1717,7 +1718,7 @@ export class AppImManager extends EventListenerBase<{
           }
         });
         return;
-      } else if((key === 'ArrowUp' || key === 'ArrowDown') && this.chat?.type !== ChatType.Scheduled) {
+      } else if((key === 'ArrowUp' || key === 'ArrowDown') && canHandleChatArrowShortcut(chat)) {
         // In chats/channels where the user can't post (read-only broadcasts, restricted groups,
         // unjoined chats), there's no message to edit, so let ArrowUp/Down scroll the chat instead.
         if(chat?.input && !chat.input.canSendPlain()) {
@@ -1735,14 +1736,14 @@ export class AppImManager extends EventListenerBase<{
           }
 
           const up = key === 'ArrowUp';
-          const {replyToMsgId} = this.chat.input;
-          const {peerId, threadId} = this.chat;
+          const {replyToMsgId} = chat.input;
+          const {peerId, threadId} = chat;
           if((!forReply && !up) || (forReply && !up && !replyToMsgId)) {
             return;
           }
 
           cancelEvent(e);
-          const middleware = this.chat.bubbles.getMiddleware();
+          const middleware = chat.bubbles.getMiddleware();
           if(forReply && !(await chat.canSend())) {
             return;
           }
