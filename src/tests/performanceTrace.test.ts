@@ -67,6 +67,18 @@ describe('performance trace collectors', () => {
     ]);
   });
 
+  test('records a phase that starts in a different performance timeline', () => {
+    const name = 'worker.chatlist.startToFirstGetDialogs.test';
+    const trace = new PerformancePhaseTrace(true);
+    const startedAtEpochMs = performance.timeOrigin + performance.now() - 50;
+    const finish = trace.start(name, {startedAtEpochMs});
+
+    finish();
+
+    expect(trace.getSnapshot()).toMatchObject([{name, startedAtEpochMs, durationMs: expect.any(Number)}]);
+    expect(trace.getSnapshot()[0].durationMs).toBeGreaterThanOrEqual(50);
+  });
+
   test('counts RPC calls without recording their spans when detail tracing is disabled', () => {
     const trace = new PerformanceRpcTrace(true);
     trace.reset(false);
