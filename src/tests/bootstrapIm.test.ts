@@ -10,7 +10,12 @@ vi.mock('@lib/appDialogsManager', () => {
   mocks.events.push('dialogs-module');
   return {
     default: {
-      start: () => mocks.events.push('chatlist-mounted')
+      start: () => {
+        const chatList = document.createElement('div');
+        chatList.id = 'chatlist-container';
+        document.body.append(chatList);
+        mocks.events.push('chatlist-mounted');
+      }
     }
   };
 });
@@ -50,11 +55,6 @@ vi.mock('@components/appSearchSuper', () => {
   return {default: {}};
 });
 
-vi.mock('@components/buttonMenu', () => {
-  mocks.events.push('menu-module');
-  return {default: {}};
-});
-
 vi.mock('@components/sidebarLeft/tabs/contacts', () => {
   mocks.events.push('contacts-module');
   return {default: {}};
@@ -77,7 +77,7 @@ beforeEach(() => {
   delete (window as any).requestIdleCallback;
 });
 
-test('schedules deferred UI imports when idle after the chat list paints', async() => {
+test('waits for a chat row to paint before scheduling deferred UI imports', async() => {
   let idle: () => void;
   let idleOptions: {timeout?: number};
   (window as any).requestIdleCallback = (callback: () => void, options: {timeout?: number}) => {
@@ -94,18 +94,23 @@ test('schedules deferred UI imports when idle after the chat list paints', async
     'state-updated',
     'dialogs-module',
     'chatlist-mounted',
-    'first-paint',
-    'idle-scheduled'
+    'first-paint'
   ]);
-  expect(idleOptions).toEqual({timeout: 2000});
+  expect(idle).toBeUndefined();
   expect(document.body.dataset.deferredUi).toBe('pending');
+
+  const row = document.createElement('div');
+  row.className = 'chatlist-chat';
+  document.getElementById('chatlist-container')!.append(row);
+  await vi.waitFor(() => expect(mocks.events).toContain('idle-scheduled'));
+  expect(idleOptions).toEqual({timeout: 2000});
+  expect(mocks.events.filter((event) => event === 'first-paint')).toHaveLength(2);
 
   idle();
   await vi.waitFor(() => expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1));
   expect(mocks.events).toEqual(expect.arrayContaining([
     'im-module',
-    'search-module',
-    'menu-module'
+    'search-module'
   ]));
   expect(mocks.events).not.toContain('contacts-module');
   await vi.waitFor(() => expect(document.body.dataset.deferredUi).toBe('ready'));
@@ -122,6 +127,10 @@ test('marks deferred UI as failed when chat UI initialization rejects', async() 
   const {bootstrapIm} = await loadBootstrapIm();
   await bootstrapIm();
 
+  const row = document.createElement('div');
+  row.className = 'chatlist-chat';
+  document.getElementById('chatlist-container')!.append(row);
+  await vi.waitFor(() => expect(idle).toBeDefined());
   idle();
   await vi.waitFor(() => expect(mocks.errors).toHaveLength(1));
   expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1);
@@ -144,6 +153,10 @@ test('loads deferred UI through the timeout fallback when requestIdleCallback is
   await bootstrapIm();
 
   expect(mocks.initializeChatUi).not.toHaveBeenCalled();
+  const row = document.createElement('div');
+  row.className = 'chatlist-chat';
+  document.getElementById('chatlist-container')!.append(row);
+  await vi.waitFor(() => expect(fallback).toBeDefined());
   fallback();
   await vi.waitFor(() => expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1));
 });

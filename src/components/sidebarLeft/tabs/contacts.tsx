@@ -65,13 +65,7 @@ const Contacts: Component = () => {
       };
 
       renderPage();
-      tab.scrollable.onScrolledBottom = () => {
-        if(renderPage) {
-          renderPage();
-        } else {
-          tab.scrollable.onScrolledBottom = null;
-        }
-      };
+      tab.scrollable.onScrolledBottom = () => renderPage?.();
 
       replaceContent(listsContainer, sortedUserList.list);
     });

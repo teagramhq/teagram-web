@@ -11,6 +11,29 @@ import {disposeActiveAuthFlow} from '@/pages/mountAuthFlow';
 const log = logger('BootstrapIm');
 let bootstrapped = false;
 
+function waitForFirstChatRow(): Promise<void> {
+  return new Promise((resolve) => {
+    const chatList = document.getElementById('chatlist-container');
+    if(!chatList || chatList.querySelector('.chatlist-chat')) {
+      resolve();
+      return;
+    }
+
+    const observer = new MutationObserver(() => {
+      if(!chatList.querySelector('.chatlist-chat')) return;
+      observer.disconnect();
+      clearTimeout(fallback);
+      resolve();
+    });
+    observer.observe(chatList, {childList: true, subtree: true});
+
+    const fallback = setTimeout(() => {
+      observer.disconnect();
+      resolve();
+    }, 2000);
+  });
+}
+
 /**
  * Procedural replacement for the legacy `pageIm` `Page` instance.
  *
@@ -76,8 +99,7 @@ export async function bootstrapIm(): Promise<void> {
     Promise.all([
       import('@lib/appImManager')
       .then(({default: appImManager}) => appImManager.initializeChatUi()),
-      import('@components/appSearchSuper'),
-      import('@components/buttonMenu')
+      import('@components/appSearchSuper')
     ]).then(() => {
       document.body.dataset.deferredUi = 'ready';
     }, (error) => {
@@ -85,11 +107,13 @@ export async function bootstrapIm(): Promise<void> {
       log.error('Failed to load deferred UI:', error);
     });
   };
-  if('requestIdleCallback' in window) {
-    requestIdleCallback(loadDeferredUi, {timeout: 2000});
-  } else {
-    setTimeout(loadDeferredUi, 0);
-  }
+  void waitForFirstChatRow().then(() => doubleRaf()).then(() => {
+    if('requestIdleCallback' in window) {
+      requestIdleCallback(loadDeferredUi, {timeout: 2000});
+    } else {
+      setTimeout(loadDeferredUi, 0);
+    }
+  });
 
   // Tear down the auth UI 1s after IM appears — same delay the legacy
   // `pageIm.onFirstMount` used so the cross-fade looks right.
