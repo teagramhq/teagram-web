@@ -258,7 +258,8 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
       limit: this.guessLoadCount(),
       filterId,
       filterType: this.getFilterType(),
-      skipMigrated: this.skipMigrated
+      skipMigrated: this.skipMigrated,
+      preload: true
     });
 
     this.checkForDialogsPlaceholder();

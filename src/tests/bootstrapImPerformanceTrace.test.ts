@@ -100,6 +100,7 @@ describe('bootstrapIm performance trace', () => {
   test('propagates an app-dialog manager import rejection without tracing', async() => {
     vi.stubEnv('VITE_PERF_TRACE', '0');
     const error = new Error('app dialogs manager import failed');
+    vi.doUnmock('@lib/appDialogsManager');
     vi.doMock('@lib/appDialogsManager', () => {
       throw error;
     });

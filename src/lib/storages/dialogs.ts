@@ -1891,6 +1891,7 @@ export default class DialogsStorage extends AppManager {
     query?: string,
     offsetIndex?: number,
     limit?: number,
+    preload?: boolean,
     filterId?: number,
     skipMigrated?: boolean,
     forceLocal?: boolean,
@@ -1902,7 +1903,7 @@ export default class DialogsStorage extends AppManager {
     isTopEnd: boolean,
     isEnd: boolean
   }> {
-    if(!options.recursion && !options.query && options.offsetIndex === undefined) {
+    if(!options.preload && !options.recursion && !options.query && options.offsetIndex === undefined) {
       const finish = performancePhaseTrace.start('worker.dialogs.firstPage');
       const result = this.getDialogsInner(options);
       if(result instanceof Promise) result.finally(finish).catch(noop);
@@ -1922,6 +1923,7 @@ export default class DialogsStorage extends AppManager {
       filterType = this.getFilterType(filterId),
       skipMigrated = filterType === FilterType.Forum,
       forceLocal,
+      preload,
       recursion
     } = options;
 
@@ -2007,7 +2009,7 @@ export default class DialogsStorage extends AppManager {
     const isEnoughDialogs = curDialogStorage.length >= (offset + limit);
     if((isServerSearchSupported ? false : query) || loadedAll || isEnoughDialogs || forceLocal) {
       if(!query && !offset && filterId === FOLDER_ID_ALL) {
-        if(import.meta.env.VITE_PERF_TRACE === '1') this.apiManager.finishFirstDialogsTrace();
+        if(import.meta.env.VITE_PERF_TRACE === '1' && !preload) this.apiManager.finishFirstDialogsTrace();
         this.reconcileCachedChannelDialogs();
       }
 
