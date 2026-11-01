@@ -7767,13 +7767,14 @@ describe('real client poll send diagnostics', () => {
       expect(diagnostic).toEqual({
         rowVisible: true,
         optionCount: 2,
+        activeOptionCount: 2,
         visibleOptionCount: 2,
         answerTextCounts: [1, 1],
         visibleAnswerTextCounts: [1, 1],
         answerOptionCounts: [1, 1]
       });
       const summary = realClientBrowser.formatPollContentDiagnostic(diagnostic);
-      expect(summary).toContain('row_visible_1_options_2_visible_options_2');
+      expect(summary).toContain('row_visible_1_options_2_active_options_2_visible_options_2');
       expect(summary).toContain('answer_text_counts_1_1_visible_answer_text_counts_1_1_answer_options_1_1');
       expect(summary).not.toContain('browser-ci-answer');
       expect(summary).not.toContain('fixture.invalid');
@@ -7905,6 +7906,34 @@ describe('real client poll option interaction', () => {
       const poll = await realClientBrowser.waitForPollMessage(page, question, 'poll_transition', 1000);
 
       expect(await poll.locator('[data-poll-option-idx]').count()).toBe(2);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('ignores exiting poll options when validating sender poll content', async() => {
+    const page = await browser.newPage();
+    const question = 'browser-ci-poll-transition-question';
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="bubble" data-mid="55">
+          <div>${question}</div>
+          <div class="fade-2-exit-active" data-poll-option-idx="0" style="opacity: 0"><span>browser-ci-poll-answer-one</span></div>
+          <div data-poll-option-idx="0"><span>browser-ci-poll-answer-one</span></div>
+          <div data-poll-option-idx="1"><span>browser-ci-poll-answer-two</span></div>
+        </div>
+      </div>`);
+
+      expect(realClientBrowser.waitForPollMessage).toBeTypeOf('function');
+      const poll = await realClientBrowser.waitForPollMessage(page, question, 'poll_transition', 1000);
+      expect(realClientBrowser.assertPollContent).toBeTypeOf('function');
+      await expect(realClientBrowser.assertPollContent(poll, {question, description: false, stage: 'poll_transition'})).resolves.toBeUndefined();
+
+      const diagnostic = await realClientBrowser.readPollContentDiagnostic(poll, [
+        'browser-ci-poll-answer-one',
+        'browser-ci-poll-answer-two'
+      ]);
+      expect(diagnostic).toMatchObject({optionCount: 3, activeOptionCount: 2, answerOptionCounts: [1, 1]});
     } finally {
       await page.close();
     }
