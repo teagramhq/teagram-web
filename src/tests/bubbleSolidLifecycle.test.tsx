@@ -579,6 +579,46 @@ test('propagates prepared peer rejection before the initial history request reso
   }
 });
 
+test('keeps the newer peer queue locked when stale history resolves', async() => {
+  let resolveFirstHistory!: (result: {cached: boolean, promise: Promise<void>, waitPromise: Promise<void>}) => void;
+  const firstHistoryResult = new Promise<{cached: boolean, promise: Promise<void>, waitPromise: Promise<void>}>((resolve) => {
+    resolveFirstHistory = resolve;
+  });
+  let rejectSecondHistory!: (error: Error) => void;
+  const secondHistoryResult = new Promise<{cached: boolean, promise: Promise<void>, waitPromise: Promise<void>}>((_resolve, reject) => {
+    rejectSecondHistory = reject;
+  });
+  const {harness, getHistory1, setPeerLogger} = makeSetPeerHarness(Promise.resolve());
+  let queueLocked = false;
+  harness.lazyLoadQueue.lock = vi.fn(() => {
+    queueLocked = true;
+  });
+  harness.lazyLoadQueue.unlock = vi.fn(() => {
+    queueLocked = false;
+  });
+  getHistory1.mockReturnValueOnce(firstHistoryResult).mockReturnValueOnce(secondHistoryResult);
+
+  const firstSetPeer = harness.setPeer({peerId, samePeer: false, sameSearch: false});
+  await vi.waitFor(() => expect(getHistory1).toHaveBeenCalledTimes(1));
+  const secondSetPeer = harness.setPeer({peerId, samePeer: false, sameSearch: false});
+  await vi.waitFor(() => expect(getHistory1).toHaveBeenCalledTimes(2));
+
+  resolveFirstHistory({cached: true, promise: Promise.resolve(), waitPromise: Promise.resolve()});
+  await expect(firstSetPeer).rejects.toBe(PEER_CHANGED_ERROR);
+
+  expect(queueLocked).toBe(true);
+  expect(harness.lazyLoadQueue.unlock).not.toHaveBeenCalled();
+  expect(setPeerLogger.error).not.toHaveBeenCalledWith('setPeer failed before mount', PEER_CHANGED_ERROR);
+
+  const secondFailure = new Error('new peer history failed');
+  rejectSecondHistory(secondFailure);
+  await expect(secondSetPeer).rejects.toBe(secondFailure);
+
+  expect(queueLocked).toBe(false);
+  expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
+  expect(setPeerLogger.error).toHaveBeenCalledWith('setPeer failed before mount', secondFailure);
+});
+
 test('logs and unlocks when the initial history request rejects before mount', async() => {
   const failure = new Error('history request failed');
   const {harness, getHistory1, setPeerLogger} = makeSetPeerHarness(Promise.resolve());

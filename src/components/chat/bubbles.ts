@@ -6191,8 +6191,12 @@ export default class ChatBubbles {
         historyRequest;
       result = await m(historyResultPromise);
     } catch(error) {
-      log.error('setPeer failed before mount', error);
-      this.lazyLoadQueue.unlock();
+      if(error !== PEER_CHANGED_ERROR) {
+        log.error('setPeer failed before mount', error);
+      }
+      if(middleware()) {
+        this.lazyLoadQueue.unlock();
+      }
       throw error;
     }
 
