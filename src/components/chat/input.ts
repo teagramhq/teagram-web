@@ -591,7 +591,7 @@ export default class ChatInput {
       this.paidMessageInterceptor.dispose();
     });
 
-    this.inputState = runWithHotReloadGuard(() => createChatInputState(this));
+    this.inputState = runWithHotReloadGuard(() => createChatInputState(this), SolidJSHotReloadGuardProvider);
 
     if(HOT_CHAT_INPUTS) {
       HOT_CHAT_INPUTS.push(this);
@@ -607,7 +607,7 @@ export default class ChatInput {
     if(!this.inputState) return;
     const carried = {...this.inputState.store};
     this.inputState.dispose();
-    this.inputState = runWithHotReloadGuard(() => create(this, carried));
+    this.inputState = runWithHotReloadGuard(() => create(this, carried), SolidJSHotReloadGuardProvider);
   }
 
   public freezeFocused(focused: boolean) {

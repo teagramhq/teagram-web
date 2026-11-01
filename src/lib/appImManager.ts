@@ -9,13 +9,12 @@ import mediaSizes, {ScreenSize} from '@helpers/mediaSizes';
 import {bindActiveWindowListener, getAppWindow, getOverlayRoot} from '@helpers/appWindow';
 import {logger, LogTypes} from '@lib/logger';
 import rootScope from '@lib/rootScope';
-import Chat, {ChatSearchKeys} from '@components/chat/chat';
+import type Chat from '@components/chat/chat';
+import type {ChatSearchKeys} from '@components/chat/chat';
 import {ChatType} from '@components/chat/chatType';
-import PopupNewMedia, {getCurrentNewMediaPopup} from '@components/popups/newMedia';
-import MarkupTooltip from '@components/chat/markupTooltip';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import SetTransition from '@components/singleTransition';
-import ChatDragAndDrop from '@components/chat/dragAndDrop';
+import type ChatDragAndDrop from '@components/chat/dragAndDrop';
 import {doubleRaf} from '@helpers/schedulers';
 import useHeavyAnimationCheck, {dispatchHeavyAnimationEvent} from '@hooks/useHeavyAnimationCheck';
 import {MOUNT_CLASS_TO} from '@config/debug';
@@ -43,7 +42,7 @@ import IMAGE_MIME_TYPES_SUPPORTED from '@environment/imageMimeTypesSupport';
 import {NULL_PEER_ID, STARS_CURRENCY} from '@appManagers/constants';
 import telegramMeWebManager from '@lib/telegramMeWebManager';
 import {formatDate, ONE_DAY} from '@helpers/date';
-import createTopbarCall, {TopbarCallController} from '@components/topbarCall';
+import type {TopbarCallController} from '@components/topbarCall';
 import confirmationPopup from '@components/confirmationPopup';
 import IS_GROUP_CALL_SUPPORTED from '@environment/groupCallSupport';
 import IS_CONFERENCE_CALL_SUPPORTED from '@environment/conferenceCallSupport';
@@ -53,10 +52,9 @@ import {Modify, SendMessageEmojiInteractionData} from '@types';
 import htmlToSpan from '@helpers/dom/htmlToSpan';
 import getVisibleRect from '@helpers/dom/getVisibleRect';
 import {simulateClickEvent} from '@helpers/dom/clickEvent';
-import PopupCall from '@components/call';
 import copy from '@helpers/object/copy';
 import numberThousandSplitter from '@helpers/number/numberThousandSplitter';
-import appChatBackground, {AppChatBackground} from '@components/chat/bubbles/chatBackground';
+import type {AppChatBackground} from '@components/chat/bubbles/chatBackground';
 import {IS_CHROMIUM, IS_FIREFOX} from '@environment/userAgent';
 import compareVersion from '@helpers/compareVersion';
 import {AppManagers} from '@lib/managers';
@@ -99,16 +97,11 @@ import {MiddleEllipsisElement} from '@components/middleEllipsis';
 import parseUriParams from '@helpers/string/parseUriParams';
 import getMessageThreadId from '@appManagers/utils/messages/getMessageThreadId';
 import findUpTag from '@helpers/dom/findUpTag';
-import showForwardPopup from '@components/popups/forward';
-import {AppBackgroundTab} from '@components/sidebarLeft/tabs/background';
 import partition from '@helpers/array/partition';
 import indexOfAndSplice from '@helpers/array/indexOfAndSplice';
 import liteMode, {LiteModeKey} from '@helpers/liteMode';
 import LottiePlayer from '@lib/lottie/lottiePlayer';
-import PopupGiftPremium from '@components/popups/giftPremium';
-import internalLinkProcessor from '@lib/internalLinkProcessor';
 import {INTERNAL_LINK_TYPE} from '@lib/internalLink';
-import {createStoriesViewerWithPeer} from '@components/stories/viewer';
 import type {CustomEmojiRendererElement} from '@lib/customEmoji/renderer';
 import type {ChatInviteJoinWebView} from '@appManagers/appChatsManager';
 import {Middleware} from '@helpers/middleware';
@@ -122,39 +115,32 @@ import {findUpAvatar} from '@components/avatarNew';
 import safePlay from '@helpers/dom/safePlay';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
 import {RequestWebViewOptions} from '@appManagers/appAttachMenuBotsManager';
-import PopupWebApp from '@components/popups/webApp';
 import {setPeerColors} from '@appManagers/utils/peers/getPeerColorById';
-import {savedReactionTags} from '@components/chat/reactions';
+import type {ChatAudioController} from '@components/chat/audio';
 import {setAppState, useAppState} from '@stores/appState';
 import rtmpCallsController, {RtmpCallInstance} from '@lib/calls/rtmpCallsController';
 import openRtmpCallViewer from '@lib/calls/openRtmpCallViewer';
 import useProfileColors from '@hooks/useProfileColors';
 import {wrapSlowModeLeftDuration} from '@components/wrappers/wrapDuration';
-import {splitFullMid} from '@components/chat/bubbles';
+import {splitFullMid} from '@appManagers/utils/messages/fullMid';
 import getSelectedNodes from '@helpers/dom/getSelectedNodes';
-import showChatToast from '@components/chat/chatToast';
 import anchorCallback from '@helpers/dom/anchorCallback';
 import PopupPremium from '@components/popups/premium';
 import safeWindowOpen from '@helpers/dom/safeWindowOpen';
-import {openWebAppInAppBrowser, openGameInAppBrowser} from '@components/browser';
 import {createProxiedManagersForAccount} from '@lib/getProxiedManagers';
 import ChatBackgroundStore from '@lib/chatBackgroundStore';
 import useLockScreenShortcut from '@appManagers/utils/useLockScreenShortcut';
 import IS_WEB_APP_BROWSER_SUPPORTED from '@environment/webAppBrowserSupport';
-import createChatAudio, {ChatAudioController} from '@components/chat/audio';
 import AudioAssetPlayer from '@helpers/audioAssetPlayer';
 import {useAppSettings} from '@stores/appSettings';
 import {MyMessage} from '@appManagers/appMessagesManager';
-import {canUploadAsWhenEditing} from '@components/chat/utils';
 import getPeerActiveUsernames from '@appManagers/utils/peers/getPeerActiveUsernames';
 import {usePeer} from '@stores/peers';
 import {untrack} from 'solid-js';
-import showStoriesStealthModePopup from '@components/popups/storiesStealthMode';
-import {ButtonMenuItemOptions, ButtonMenuSync} from '@components/buttonMenu';
+import type {ButtonMenuItemOptions} from '@components/buttonMenu';
 import contextMenuController from '@helpers/contextMenuController';
 import positionMenu from '@helpers/positionMenu';
 import {copyTextToClipboard} from '@helpers/clipboard';
-import showDatePickerPopup from '@components/popups/datePicker';
 import {getFullDate} from '@helpers/date/getFullDate';
 import noop from '@helpers/noop';
 
@@ -256,7 +242,7 @@ export class AppImManager extends EventListenerBase<{
 }> {
   public columnEl = document.getElementById('column-center') as HTMLDivElement;
   public chatsContainer: HTMLElement;
-  public appChatBackground: AppChatBackground;
+  public appChatBackground?: AppChatBackground;
 
   public offline = false;
   public updateStatusInterval = 0;
@@ -268,6 +254,10 @@ export class AppImManager extends EventListenerBase<{
   private tabId: APP_TABS;
 
   public chats: Chat[] = [];
+  private ChatConstructor: typeof import('@components/chat/chat').default;
+  private chatUiPromise: Promise<void>;
+  private internalLinkProcessorPromise: Promise<typeof import('@lib/internalLinkProcessor').default>;
+  private legacyThemeCleanupPromise: Promise<unknown>;
   private prevTab: HTMLElement;
   private chatsSelectTabDebounced: () => void;
 
@@ -321,7 +311,6 @@ export class AppImManager extends EventListenerBase<{
 
   public construct(managers: AppManagers) {
     this.managers = managers;
-    internalLinkProcessor.construct(managers);
 
     uiNotificationsManager.constructAndStartAll();
 
@@ -354,9 +343,6 @@ export class AppImManager extends EventListenerBase<{
       }
     });
 
-    this.appChatBackground = appChatBackground;
-    this.appChatBackground.attach(document.body);
-
     this.chatsContainer = document.createElement('div');
     this.chatsContainer.classList.add('chats-container', 'tabs-container');
     this.chatsContainer.dataset.animation = 'navigation';
@@ -364,9 +350,6 @@ export class AppImManager extends EventListenerBase<{
     this.appendEmojiAnimationContainer(mediaSizes.activeScreen);
 
     this.columnEl.append(this.chatsContainer);
-
-    this.createNewChat();
-    this.chatsSelectTab(this.chat);
 
     appNavigationController.onHashChange = this.onHashChange;
     // window.addEventListener('hashchange', this.onHashChange);
@@ -430,17 +413,10 @@ export class AppImManager extends EventListenerBase<{
       animationIntersector.checkAnimations2(false);
     });
 
-    themeController.AppBackgroundTab = AppBackgroundTab;
-    themeController.appChatBackground = appChatBackground;
-
     if(IS_FIREFOX && apiManagerProxy.oldVersion && compareVersion(apiManagerProxy.oldVersion, '1.4.3') === -1) {
-      this.deleteFilesIterative((response) => {
+      this.legacyThemeCleanupPromise = this.deleteFilesIterative((response) => {
         return response.headers.get('Content-Type') === 'image/svg+xml';
-      }).then(() => {
-        this.applyCurrentTheme({noSetTheme: true});
       });
-    } else {
-      this.applyCurrentTheme({noSetTheme: true});
     }
 
     // * fix simultaneous opened both sidebars, can happen when floating sidebar is opened with left sidebar
@@ -572,7 +548,8 @@ export class AppImManager extends EventListenerBase<{
       });
     });
 
-    rootScope.addEventListener('file_speed_limited', ({increaseTimes, isUpload}) => {
+    rootScope.addEventListener('file_speed_limited', async({increaseTimes, isUpload}) => {
+      const {default: showChatToast} = await import('@components/chat/chatToast');
       const {hide} = showChatToast({
         icon: 'premium_speed_filled',
         title: i18n(isUpload ? 'UploadSpeedLimited' : 'DownloadSpeedLimited'),
@@ -700,11 +677,12 @@ export class AppImManager extends EventListenerBase<{
       }, canForward && {
         icon: 'scheduled',
         text: 'Chat.Send.SetReminder',
-        onClick: () => {
+        onClick: async() => {
+          const {default: showDatePickerPopup} = await import('@components/popups/datePicker');
           showDatePickerPopup({
             initDate: date,
             withTime: true,
-            onPick: (_timestamp: number) => {
+            onPick: async(_timestamp: number) => {
               this.managers.appMessagesManager.forwardMessages({
                 peerId: rootScope.myId,
                 scheduleDate: _timestamp,
@@ -712,6 +690,7 @@ export class AppImManager extends EventListenerBase<{
                 fromPeerId: message.peerId
               });
 
+              const {default: showChatToast} = await import('@components/chat/chatToast');
               const {hide} = showChatToast({
                 icon: 'saved_filled',
                 textElement: i18n('ReminderScheduled', [
@@ -727,6 +706,7 @@ export class AppImManager extends EventListenerBase<{
         }
       }];
 
+      const {ButtonMenuSync} = await import('@components/buttonMenu');
       const menu = ButtonMenuSync({buttons: buttons.filter(Boolean)});
       menu.classList.add('contextmenu');
 
@@ -823,14 +803,6 @@ export class AppImManager extends EventListenerBase<{
     this.chatPositions = {};
     // });
 
-    if(IS_CALL_SUPPORTED || IS_GROUP_CALL_SUPPORTED) {
-      this.topbarCall = createTopbarCall(managers);
-      this.columnEl.append(this.topbarCall.container);
-    }
-
-    this.chatAudio = createChatAudio(this, managers);
-    this.columnEl.append(this.chatAudio.container);
-
     this.audioAssetPlayer = new AudioAssetPlayer({
       message_sent: 'message_sent.mp3'
     });
@@ -855,11 +827,12 @@ export class AppImManager extends EventListenerBase<{
     });
 
     if(IS_CALL_SUPPORTED) {
-      callsController.addEventListener('instance', ({instance/* , hasCurrent */}) => {
+      callsController.addEventListener('instance', async({instance/* , hasCurrent */}) => {
         // if(hasCurrent) {
         // return;
         // }
 
+        const {default: PopupCall} = await import('@components/call');
         const popup = PopupElement.createPopup(PopupCall, instance);
 
         instance.addEventListener('acceptCallOverride', (accept) => {
@@ -910,7 +883,8 @@ export class AppImManager extends EventListenerBase<{
       // (calls_instance.cpp:1204). Closing the panel is not declining: the
       // invitation keeps ringing in the registry until it is answered, revoked
       // or superseded, exactly like a 1-on-1 popup that gets closed.
-      conferenceInvitesController.addEventListener('instance', (instance) => {
+      conferenceInvitesController.addEventListener('instance', async(instance) => {
+        const {default: PopupCall} = await import('@components/call');
         const popup = PopupElement.createPopup(PopupCall, instance);
 
         // Unlike a 1-on-1 call, an invitation has nowhere else to live once its
@@ -970,10 +944,6 @@ export class AppImManager extends EventListenerBase<{
     setInterval(setAuthorized, ONE_DAY);
     setAuthorized();
 
-    this.managers.appReactionsManager.getSavedReactionTags().then((tags) => {
-      savedReactionTags.splice(0, savedReactionTags.length, ...tags);
-    });
-
     // new PasscodeLockScreenControler().lock();
 
     this.onHashChange(true);
@@ -999,7 +969,7 @@ export class AppImManager extends EventListenerBase<{
   }
 
   public adjustChatPatternBackground() {
-    this.appChatBackground.resize();
+    this.appChatBackground?.resize();
   }
 
   private checkForShare() {
@@ -1010,10 +980,13 @@ export class AppImManager extends EventListenerBase<{
 
     apiManagerProxy.share = undefined;
     if(share.files?.length) {
-      showForwardPopup(undefined, async(peerId, threadId) => {
-        await this.setPeer({peerId, threadId});
-        const foundMedia = share.files.some((file) => MEDIA_MIME_TYPES_SUPPORTED.has(getFileMimeType(file)) || isConvertibleMov(file));
-        PopupElement.createPopup(PopupNewMedia, this.chat, share.files, foundMedia ? 'media' : 'document');
+      void import('@components/popups/forward').then(({default: showForwardPopup}) => {
+        showForwardPopup(undefined, async(peerId, threadId) => {
+          await this.setPeer({peerId, threadId});
+          const foundMedia = share.files.some((file) => MEDIA_MIME_TYPES_SUPPORTED.has(getFileMimeType(file)) || isConvertibleMov(file));
+          const {default: PopupNewMedia} = await import('@components/popups/newMedia');
+          PopupElement.createPopup(PopupNewMedia, this.chat, share.files, foundMedia ? 'media' : 'document');
+        });
       });
       return;
     }
@@ -1021,10 +994,12 @@ export class AppImManager extends EventListenerBase<{
     // `/share/` is a form target any origin can POST to (Web Share Target), so
     // its text takes the `t.me/share/url` route: a draft in the chosen chat,
     // which the user sees and sends — never an immediate `sendText`.
-    internalLinkProcessor.processInternalLink({
-      _: INTERNAL_LINK_TYPE.SHARE,
-      url: share.url,
-      text: share.text || share.title
+    void this.loadInternalLinkProcessor().then((internalLinkProcessor) => {
+      return internalLinkProcessor.processInternalLink({
+        _: INTERNAL_LINK_TYPE.SHARE,
+        url: share.url,
+        text: share.text || share.title
+      });
     }).catch(noop);
   }
 
@@ -1279,7 +1254,7 @@ export class AppImManager extends EventListenerBase<{
         }
       } : onClose;
 
-      const webAppOptions: Parameters<typeof openWebAppInAppBrowser>[0] = {
+      const webAppOptions: Parameters<typeof import('@components/browser').openWebAppInAppBrowser>[0] = {
         webViewResultUrl,
         webViewOptions: options as RequestWebViewOptions,
         attachMenuBot: options.attachMenuBot,
@@ -1292,8 +1267,10 @@ export class AppImManager extends EventListenerBase<{
       }
 
       if(!IS_WEB_APP_BROWSER_SUPPORTED || options.forcePopup) {
+        const {default: PopupWebApp} = await import('@components/popups/webApp');
         PopupElement.createPopup(PopupWebApp, webAppOptions);
       } else {
+        const {openWebAppInAppBrowser} = await import('@components/browser');
         await openWebAppInAppBrowser(webAppOptions);
       }
     } catch(err) {
@@ -1389,6 +1366,7 @@ export class AppImManager extends EventListenerBase<{
       if(!callbackAnswer?.url) {
         return;
       }
+      const {openGameInAppBrowser} = await import('@components/browser');
       openGameInAppBrowser({
         game,
         message,
@@ -1599,6 +1577,7 @@ export class AppImManager extends EventListenerBase<{
 
   public async openStoriesFromAvatar(avatar: HTMLElement) {
     const storyId = +avatar.dataset.storyId;
+    const {createStoriesViewerWithPeer} = await import('@components/stories/viewer');
     createStoriesViewerWithPeer({
       target: () => avatar,
       peerId: avatar.dataset.peerId.toPeerId(),
@@ -1608,7 +1587,8 @@ export class AppImManager extends EventListenerBase<{
 
   // * opens the peer's full story ring positioned at the first unread story
   // * (like tapping their avatar), matching how Android opens a story notification
-  public openStoriesForPeer(peerId: PeerId, storyId?: number) {
+  public async openStoriesForPeer(peerId: PeerId, storyId?: number) {
+    const {createStoriesViewerWithPeer} = await import('@components/stories/viewer');
     return createStoriesViewerWithPeer({peerId, id: storyId});
   }
 
@@ -2601,6 +2581,7 @@ export class AppImManager extends EventListenerBase<{
 
   public setBackground(broadcastEvent = true, skipAnimation?: boolean): Promise<void> {
     this.log('setBackground', broadcastEvent, skipAnimation);
+    if(!this.appChatBackground) return Promise.resolve();
     return this.appChatBackground.setBackground({
       transition: skipAnimation ? 'instant' : 'fade'
     }).then(() => {
@@ -2781,8 +2762,6 @@ export class AppImManager extends EventListenerBase<{
     // Follow the active app window so paste-to-send keeps working in a Document PiP window.
     bindActiveWindowListener((w) => w.document, 'paste', this.onDocumentPaste, true);
     this.attachDragAndDropListeners();
-    MarkupTooltip.getInstance().handleSelection();
-    MarkupTooltip.showDatePickerPopup = showDatePickerPopup;
   }
 
   private attachDragAndDropListeners() {
@@ -2805,6 +2784,16 @@ export class AppImManager extends EventListenerBase<{
       if(mount === mounted/*  || !mount */) {
         return;
       }
+
+      const [
+        {default: ChatDragAndDrop},
+        {default: PopupNewMedia, getCurrentNewMediaPopup},
+        {canUploadAsWhenEditing}
+      ] = await Promise.all([
+        import('@components/chat/dragAndDrop'),
+        import('@components/popups/newMedia'),
+        import('@components/chat/utils')
+      ]);
 
       const _types = e.dataTransfer.types;
       // @ts-ignore
@@ -3027,6 +3016,7 @@ export class AppImManager extends EventListenerBase<{
     attachType?: 'media' | 'document',
     files?: Awaited<ReturnType<typeof getFilesFromEvent>>
   ) => {
+    const {default: PopupNewMedia, getCurrentNewMediaPopup} = await import('@components/popups/newMedia');
     const newMediaPopup = getCurrentNewMediaPopup();
     const ephemeralSnapshot = this.chat?.input?.getEphemeralSendingSnapshot();
 
@@ -3068,6 +3058,7 @@ export class AppImManager extends EventListenerBase<{
 
     if(chatInput.editMessage) {
       const file = files[0];
+      const {canUploadAsWhenEditing} = await import('@components/chat/utils');
       const canUploadAsMedia = (MEDIA_MIME_TYPES_SUPPORTED.has(getFileMimeType(file)) || isConvertibleMov(file)) && canUploadAsWhenEditing({message: chatInput.editMessage, asWhat: 'media'});
       const canUploadAsDocument = canUploadAsWhenEditing({message: chatInput.editMessage, asWhat: 'document'});
       chatInput.willAttachType = (canUploadAsMedia ? 'media' : canUploadAsDocument ? 'document' : undefined);
@@ -3179,8 +3170,61 @@ export class AppImManager extends EventListenerBase<{
     this.updateStatus();
   }
 
+  private loadInternalLinkProcessor() {
+    this.internalLinkProcessorPromise ??= import('@lib/internalLinkProcessor').then(({default: internalLinkProcessor}) => {
+      internalLinkProcessor.construct(this.managers);
+      return internalLinkProcessor;
+    });
+
+    return this.internalLinkProcessorPromise;
+  }
+
+  public initializeChatUi() {
+    if(this.chatUiPromise) return this.chatUiPromise;
+    if(this.chat) return Promise.resolve();
+
+    this.chatUiPromise = Promise.all([
+      import('@components/chat/chat'),
+      import('@components/chat/bubbles/chatBackground'),
+      import('@components/chat/audio'),
+      import('@components/chat/markupTooltip'),
+      import('@components/chat/reactions'),
+      import('@components/popups/datePicker'),
+      import('@components/sidebarLeft/tabs/background'),
+      this.loadInternalLinkProcessor()
+    ]).then(async([{default: Chat}, {default: appChatBackground}, {default: createChatAudio}, {default: MarkupTooltip}, {savedReactionTags}, {default: showDatePickerPopup}, {AppBackgroundTab}]) => {
+      this.ChatConstructor = Chat;
+      this.appChatBackground = appChatBackground;
+      appChatBackground.attach(document.body);
+      themeController.appChatBackground = appChatBackground;
+      themeController.AppBackgroundTab = AppBackgroundTab;
+      if(IS_CALL_SUPPORTED || IS_GROUP_CALL_SUPPORTED) {
+        const {default: createTopbarCall} = await import('@components/topbarCall');
+        this.topbarCall = createTopbarCall(this.managers);
+        this.columnEl.append(this.topbarCall.container);
+      }
+      this.chatAudio = createChatAudio(this, this.managers);
+      this.columnEl.append(this.chatAudio.container);
+      this.managers.appReactionsManager.getSavedReactionTags().then((tags) => {
+        savedReactionTags.splice(0, savedReactionTags.length, ...tags);
+      });
+      MarkupTooltip.getInstance().handleSelection();
+      MarkupTooltip.showDatePickerPopup = showDatePickerPopup;
+      const applyCurrentTheme = () => this.applyCurrentTheme({noSetTheme: true});
+      if(this.legacyThemeCleanupPromise) {
+        void this.legacyThemeCleanupPromise.then(applyCurrentTheme);
+      } else {
+        void applyCurrentTheme();
+      }
+      const chat = this.createNewChat();
+      this.chatsSelectTab(chat);
+    });
+
+    return this.chatUiPromise;
+  }
+
   private createNewChat() {
-    const chat = new Chat(
+    const chat = new this.ChatConstructor(
       this,
       this.managers,
       true
@@ -3254,6 +3298,11 @@ export class AppImManager extends EventListenerBase<{
 
   public async setPeer(options: Partial<ChatSetInnerPeerOptions> = {}, animate?: boolean): Promise<boolean> {
     options.peerId ??= NULL_PEER_ID;
+    if(options.peerId && options.peerId !== NULL_PEER_ID) {
+      await this.initializeChatUi();
+    } else if(!this.chat) {
+      return false;
+    }
     options.peerId = await this.managers.appPeersManager.getPeerMigratedTo(options.peerId) || options.peerId;
 
     const {peerId, lastMsgId, threadId} = options;
@@ -3357,6 +3406,8 @@ export class AppImManager extends EventListenerBase<{
     if(peerId === NULL_PEER_ID || !peerId) {
       return;
     }
+
+    await this.initializeChatUi();
 
     peerId = options.peerId = await this.managers.appPeersManager.getPeerMigratedTo(peerId) || peerId;
 
@@ -3780,11 +3831,13 @@ export class AppImManager extends EventListenerBase<{
 
   public giftPremium(peerId: PeerId) {
     this.managers.appPaymentsManager.getPremiumGiftCodeOptions().then((giftCodeOptions) => {
-      PopupElement.createPopup(
-        PopupGiftPremium,
-        peerId,
-        giftCodeOptions.filter((option) => option.users === 1 && option.currency !== STARS_CURRENCY)
-      );
+      void import('@components/popups/giftPremium').then(({default: PopupGiftPremium}) => {
+        PopupElement.createPopup(
+          PopupGiftPremium,
+          peerId,
+          giftCodeOptions.filter((option) => option.users === 1 && option.currency !== STARS_CURRENCY)
+        );
+      });
     });
   }
 

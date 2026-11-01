@@ -65,6 +65,9 @@ export async function bootstrapIm(): Promise<void> {
   await doubleRaf();
   document.body.classList.remove('has-auth-pages');
 
+  const {default: appImManager} = await import('@lib/appImManager');
+  void appImManager.initializeChatUi();
+
   // Tear down the auth UI 1s after IM appears — same delay the legacy
   // `pageIm.onFirstMount` used so the cross-fade looks right.
   setTimeout(() => {

@@ -12,7 +12,7 @@ import {scaffoldSolidJSTab, scaffoldSolidJSTabEventable} from '@components/solid
 import {SuperTabProvider} from '@components/solidJsTabs/superTabProvider';
 import rootScope from '@lib/rootScope';
 import type {EditProfileTabPayload} from '@components/sidebarLeft/tabs/editProfile';
-import {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
+import type {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import {ChatInvite, ChatInviteActions, getChatInviteLinksInitArgs} from '@components/sidebarRight/tabs/chatInviteLinkShared';
 import lottieLoader from '@lib/lottie/lottieLoader';
 import {deleteFolder as deleteEditFolder, getEditFolderInitArgs} from '@components/sidebarLeft/tabs/editFolderShared';

@@ -1,4 +1,4 @@
-import ButtonMenu, {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
+import type {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import filterAsync from '@helpers/array/filterAsync';
 import callbackify from '@helpers/callbackify';
 import contextMenuController from '@helpers/contextMenuController';
@@ -191,6 +191,7 @@ export default function createContextMenu<T extends ButtonMenuItemOptionsVerifia
     };
 
     try {
+      const {default: ButtonMenu} = await import('@components/buttonMenu');
       _element = await ButtonMenu({
         buttons: filteredButtons,
         listenerSetter

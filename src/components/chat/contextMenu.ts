@@ -548,7 +548,7 @@ export default class ChatContextMenu {
           noJsx: true
         });
 
-        this.selectedMessagesText = await runWithHotReloadGuard(entry.getCopyText);
+        this.selectedMessagesText = await runWithHotReloadGuard(entry.getCopyText, SolidJSHotReloadGuardProvider);
         this.messageFromLog = entry.type === 'default' ? entry.message : undefined;
       } catch{}
     };

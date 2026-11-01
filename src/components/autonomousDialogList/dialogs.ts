@@ -27,7 +27,7 @@ import {Chat, Message} from '@layer';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import {AppDialogsManager, DialogDom} from '@lib/appDialogsManager';
 import rootScope from '@lib/rootScope';
-import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
+import ChatListHotReloadGuardProvider from '@lib/solidjs/chatListHotReloadGuardProvider';
 import {runWithHotReloadGuard} from '@lib/solidjs/runWithHotReloadGuard';
 import {FilterType} from '@lib/storages/dialogs';
 import {useCommunityDialogs} from '@stores/communities';
@@ -109,7 +109,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       this.customPinnedDialog = new CustomPinnedDialog({
         render: () => {
           const element = new ArchiveDialog;
-          element.HotReloadGuard = SolidJSHotReloadGuardProvider;
+          element.HotReloadGuard = ChatListHotReloadGuardProvider;
 
           element.feedProps({
             state: this.archiveDialogState.state
@@ -123,7 +123,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
         onHasArchiveDialogChanged: (hasDialogs) => {
           this.onHasArchiveDialogChanged(hasDialogs);
         }
-      }));
+      }), ChatListHotReloadGuardProvider);
     }
 
     this.needPlaceholderAtFirstTime = true;

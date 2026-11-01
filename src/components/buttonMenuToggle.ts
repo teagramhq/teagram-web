@@ -3,7 +3,7 @@ import cancelEvent from '@helpers/dom/cancelEvent';
 import {AttachClickOptions, CLICK_EVENT_NAME, hasMouseMovedSinceDown} from '@helpers/dom/clickEvent';
 import ListenerSetter from '@helpers/listenerSetter';
 import ButtonIcon from '@components/buttonIcon';
-import ButtonMenu, {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
+import type {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import filterAsync from '@helpers/array/filterAsync';
 import {doubleRaf} from '@helpers/schedulers';
 import callbackify from '@helpers/callbackify';
@@ -151,6 +151,7 @@ export default function ButtonMenuToggle({
       previousButtons.push(...newButtons);
       canDeleteTextElementsOnClose.push(...newButtons.filter((button) => !button.textElement));
 
+      const {default: ButtonMenu} = await import('@components/buttonMenu');
       const _element = element = await ButtonMenu({
         buttons: filteredButtons,
         listenerSetter

@@ -1,6 +1,5 @@
 import {JSX, createSignal, For, createEffect, Accessor, onMount, createMemo, splitProps, on, Show, onCleanup} from 'solid-js';
 import Scrollable from '@components/scrollable2';
-import {createStoriesViewer} from '@components/stories/viewer';
 import styles from '@components/stories/list.module.scss';
 import mediaSizes from '@helpers/mediaSizes';
 import rootScope from '@lib/rootScope';
@@ -83,6 +82,9 @@ function _StoriesList(props: {
       return;
     }
 
+    let active = true;
+    onCleanup(() => active = false);
+
     const onExit = () => {
       setViewerPeer(undefined);
     };
@@ -92,7 +94,9 @@ function _StoriesList(props: {
       return item?.querySelector('.avatar');
     });
 
-    createStoriesViewer({onExit, target});
+    import('@components/stories/viewer').then(({createStoriesViewer}) => {
+      if(active) createStoriesViewer({onExit, target});
+    });
   });
 
   const onItemClick = (peer: PeerStories, e?: MouseEvent) => {

@@ -3,7 +3,7 @@ import {getMiddleware, Middleware, MiddlewareHelper} from '@helpers/middleware';
 import noop from '@helpers/noop';
 import pause from '@helpers/schedulers/pause';
 import {i18n} from '@lib/langPack';
-import {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
+import type {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import attachFloatingButtonMenu, {FloatingButtonMenuDirection} from '@components/floatingButtonMenu';
 import Icon from '@components/icon';
 
