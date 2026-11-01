@@ -65,13 +65,14 @@ export async function bootstrapIm(): Promise<void> {
   await doubleRaf();
   document.body.classList.remove('has-auth-pages');
 
-  // Chat, search and menu code loads once the list has painted and the main
+  // Chat, search, menu and contacts code loads once the list has painted and the main
   // thread is idle, so it neither lengthens this bootstrap nor waits for the
   // first click that needs it.
   const loadDeferredUi = () => {
     void import('@lib/appImManager').then(({default: appImManager}) => appImManager.initializeChatUi());
     void import('@components/appSearchSuper');
     void import('@components/buttonMenu');
+    void import('@components/sidebarLeft/tabs/contacts');
   };
   if('requestIdleCallback' in window) {
     requestIdleCallback(loadDeferredUi, {timeout: 2000});

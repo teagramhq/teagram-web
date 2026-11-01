@@ -46,13 +46,18 @@ vi.mock('@components/buttonMenu', () => {
   return {default: {}};
 });
 
+vi.mock('@components/sidebarLeft/tabs/contacts', () => {
+  mocks.events.push('contacts-module');
+  return {default: {}};
+});
+
 vi.mock('@helpers/dom/loadFonts', () => ({default: () => Promise.resolve()}));
 vi.mock('@helpers/voiceRecorder/isNativeSupported', () => ({default: () => true}));
 vi.mock('@/pages/mountAuthFlow', () => ({disposeActiveAuthFlow: vi.fn()}));
 
 import {bootstrapIm} from '@/pages/bootstrapIm';
 
-test('loads chat, search and menu code only when idle after the chat list has painted', async() => {
+test('loads chat, search, menu and contacts code only when idle after the chat list has painted', async() => {
   mocks.events.length = 0;
   document.body.innerHTML = '<div id="page-chats"></div>';
   let idle: () => void;
@@ -72,6 +77,6 @@ test('loads chat, search and menu code only when idle after the chat list has pa
 
   idle();
   await vi.waitFor(() => expect(mocks.events).toContain('chat-ui-initialized'));
-  expect(mocks.events).toEqual(expect.arrayContaining(['im-module', 'search-module', 'menu-module']));
+  expect(mocks.events).toEqual(expect.arrayContaining(['im-module', 'search-module', 'menu-module', 'contacts-module']));
   delete (window as any).requestIdleCallback;
 });
