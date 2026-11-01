@@ -100,7 +100,7 @@ afterEach(() => {
 
 const peerId = 10 as PeerId;
 
-function makeSetPeerHarness(pendingHistory: Promise<void>, finishPeerChangePromise = Promise.resolve()) {
+function makeSetPeerHarness(pendingHistory: Promise<void>, finishPeerChangePromise: Promise<unknown> = Promise.resolve()) {
   const isAnyGroup = vi.fn(() => Promise.resolve(false));
   const isStartButtonNeeded = vi.fn(() => Promise.resolve(false));
   const getHistory1 = vi.fn(() => Promise.resolve({cached: true, promise: pendingHistory}));
@@ -231,8 +231,51 @@ test('defers peer UI callbacks until the caller commits the new peer', async() =
   });
 
   expect(callbacks).toEqual([]);
-  expect(applyPeerChange).toEqual(expect.any(Function));
-  applyPeerChange();
+  if(!applyPeerChange) throw new Error('deferred peer change was not returned');
+  expect(applyPeerChange.apply).toEqual(expect.any(Function));
+  await applyPeerChange.apply();
+  expect(callbacks).toEqual(['topbar', 'bubbles', 'input']);
+});
+
+test('applies ready peer UI callbacks while slower chat parts are still preparing', async() => {
+  const callbacks: string[] = [];
+  let resolveBubbles!: (callback: () => void) => void;
+  const pendingBubbles = new Promise<() => void>((resolve) => {
+    resolveBubbles = resolve;
+  });
+  const chat = Object.assign(Object.create(Chat.prototype), {
+    peerId,
+    peerChanged: false,
+    cleanup: vi.fn(),
+    topbar: {finishPeerChange: vi.fn(async() => () => callbacks.push('topbar'))},
+    bubbles: {finishPeerChange: vi.fn(() => pendingBubbles)},
+    input: {finishPeerChange: vi.fn(async() => () => callbacks.push('input'))},
+    handleBackgrounds: vi.fn(async() => undefined),
+    sharedMediaTab: undefined,
+    log: {warn: vi.fn(), setPrefix: vi.fn()},
+    type: 'chat',
+    isMainChat: false
+  }) as any;
+
+  const preparePeerChange = Chat.prototype.finishPeerChange.call(chat, {
+    peerId,
+    middleware: () => true,
+    deferUiCallbacks: true
+  });
+  const preparedPeerChange = await Promise.race([
+    preparePeerChange,
+    new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 0))
+  ]);
+
+  if(!preparedPeerChange) throw new Error('deferred peer change was not returned');
+  expect(preparedPeerChange.apply).toEqual(expect.any(Function));
+  const applyPromise = preparedPeerChange.apply();
+  await vi.waitFor(() => expect(callbacks).toEqual(['topbar']));
+  expect(callbacks).toEqual(['topbar']);
+
+  resolveBubbles(() => callbacks.push('bubbles'));
+  await applyPromise;
+
   expect(callbacks).toEqual(['topbar', 'bubbles', 'input']);
 });
 
@@ -266,13 +309,20 @@ test('applies peer UI callbacks only after replacing the old bubbles', async() =
   const uiApplied = new Promise<void>((resolve) => {
     resolveUiApplied = resolve;
   });
-  let resolvePreparation!: (callback: () => void) => void;
-  const pendingPreparation = new Promise<() => void>((resolve) => {
+  let resolvePreparation!: () => void;
+  const pendingPreparation = new Promise<void>((resolve) => {
     resolvePreparation = resolve;
   });
   chat.finishPeerChange = vi.fn((options: {deferUiCallbacks?: boolean}) => {
     if(options.deferUiCallbacks) {
-      return pendingPreparation;
+      return Promise.resolve({
+        ready: Promise.resolve(undefined),
+        apply: async() => {
+          await pendingPreparation;
+          events.push('apply');
+          resolveUiApplied();
+        }
+      });
     }
 
     events.push('apply');
@@ -304,10 +354,7 @@ test('applies peer UI callbacks only after replacing the old bubbles', async() =
 
   const result = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
   expect(events).toEqual(['replace']);
-  resolvePreparation(() => {
-    events.push('apply');
-    resolveUiApplied();
-  });
+  resolvePreparation();
   await uiApplied;
   expect(events).toEqual(['replace', 'apply']);
   resolveHistory();
@@ -321,10 +368,11 @@ test('propagates prepared peer rejection before the initial history request reso
   const pendingHistory = new Promise<void>((resolve) => {
     resolveHistory = resolve;
   });
-  let rejectPreparation!: (error: Error) => void;
-  const preparation = new Promise<void>((_resolve, reject) => {
-    rejectPreparation = reject;
+  let resolvePreparationError!: (result: {error: unknown}) => void;
+  const ready = new Promise<{error: unknown} | undefined>((resolve) => {
+    resolvePreparationError = resolve;
   });
+  const preparation = Promise.resolve({ready, apply: vi.fn()});
   let resolveHistoryResult!: (result: {cached: boolean, promise: Promise<void>, waitPromise: Promise<void>}) => void;
   const historyResult = new Promise<{cached: boolean, promise: Promise<void>, waitPromise: Promise<void>}>((resolve) => {
     resolveHistoryResult = resolve;
@@ -341,7 +389,7 @@ test('propagates prepared peer rejection before the initial history request reso
   try {
     await new Promise((resolve) => setTimeout(resolve, 0));
     const preparedBeforeHistory = finishPeerChange.mock.calls.length === 1;
-    if(preparedBeforeHistory) rejectPreparation(failure);
+    if(preparedBeforeHistory) resolvePreparationError({error: failure});
 
     const propagatedBeforeHistory = preparedBeforeHistory && await Promise.race([
       setPeerResult.then(({error}) => error === failure),
@@ -357,11 +405,18 @@ test('propagates prepared peer rejection before the initial history request reso
 });
 
 test('releases the preloader and animation group when prepared peer setup rejects', async() => {
-  let rejectPreparation!: (error: Error) => void;
-  const preparation = new Promise<void>((_resolve, reject) => {
-    rejectPreparation = reject;
+  let resolvePreparationError!: (result: {error: unknown}) => void;
+  const ready = new Promise<{error: unknown} | undefined>((resolve) => {
+    resolvePreparationError = resolve;
   });
   const failure = new Error('peer setup failed');
+  const preparation = Promise.resolve({
+    ready,
+    apply: async() => {
+      const result = await ready;
+      if(result) throw result.error;
+    }
+  });
   const {harness, chat} = makeSetPeerHarness(Promise.resolve(), preparation);
   const animationGroup = 'chat-123' as const;
   chat.animationGroup = animationGroup;
@@ -371,7 +426,7 @@ test('releases the preloader and animation group when prepared peer setup reject
 
   try {
     const result = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
-    rejectPreparation(failure);
+    resolvePreparationError({error: failure});
 
     await expect(result.promise).rejects.toBe(failure);
 

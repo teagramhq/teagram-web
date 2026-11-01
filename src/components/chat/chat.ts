@@ -74,6 +74,11 @@ import focusSearchInput from '@components/chat/focusSearchInput';
 export type ChatSearchKeys = Pick<RequestHistoryOptions, 'query' | 'isCacheableSearch' | 'isPublicHashtag' | 'savedReaction' | 'fromPeerId' | 'inputFilter' | 'hashtagType'>;
 export const CHAT_SEARCH_KEYS: (keyof ChatSearchKeys)[] = ['query', 'isCacheableSearch', 'isPublicHashtag', 'savedReaction', 'fromPeerId', 'inputFilter', 'hashtagType'];
 
+export type DeferredPeerChange = {
+  ready: Promise<{error: unknown} | undefined>,
+  apply: () => Promise<void>
+};
+
 // * after this long an in-flight peer change is treated as abandoned rather than as a reason to
 // * ignore further attempts to open the same chat
 const STUCK_SET_PEER_TIMEOUT = 15000;
@@ -1202,7 +1207,7 @@ export default class Chat extends EventListenerBase<{
     text?: string,
     entities?: MessageEntity[],
     deferUiCallbacks?: boolean
-  }) {
+  }): Promise<DeferredPeerChange | void> {
     if(this.peerChanged) return;
 
     const peerId = this.peerId;
@@ -1215,32 +1220,16 @@ export default class Chat extends EventListenerBase<{
 
     const sharedMediaTab = this.sharedMediaTab;
 
-    const callbacksObj = await namedPromises({
+    const peerChangePromises = {
       topbar: this.topbar?.finishPeerChange(options),
       bubbles: this.bubbles?.finishPeerChange(),
       input: this.input?.finishPeerChange(options),
       sharedMedia: sharedMediaTab?.fillProfileElements(),
       backgrounds: this.handleBackgrounds()
-    }, this.log);
-
-    const callbacks = Object.values(callbacksObj);
-    sharedMediaTab?.loadSidebarMedia(true);
-
-    if(!middleware()) {
-      return;
-    }
+    };
 
     let didApplyUiCallbacks = false;
-    const applyUiCallbacks = () => {
-      if(didApplyUiCallbacks || !middleware()) {
-        return;
-      }
-      didApplyUiCallbacks = true;
-
-      callbacks.forEach((callback) => {
-        callback?.();
-      });
-
+    const applyFinalUiChanges = () => {
       if(sharedMediaTab) {
         appSidebarRight.replaceSharedMediaTab(sharedMediaTab);
         this.sharedMediaTabs.filter((tab) => tab !== sharedMediaTab).forEach((tab) => this.destroySharedMediaTab(tab));
@@ -1257,12 +1246,77 @@ export default class Chat extends EventListenerBase<{
         this.appImManager.dispatchEvent('peer_changed', this);
       }
     };
+    const applyUiCallbacks = (callbacks: Array<(() => void) | undefined>) => {
+      if(didApplyUiCallbacks || !middleware()) {
+        return;
+      }
+      didApplyUiCallbacks = true;
+
+      callbacks.forEach((callback) => {
+        callback?.();
+      });
+
+      applyFinalUiChanges();
+    };
 
     if(options.deferUiCallbacks) {
-      return applyUiCallbacks;
+      type PeerChangePart = {callback: (() => void) | undefined} | {error: unknown};
+      const preparedParts = Object.entries(peerChangePromises).map(async([name, promise]): Promise<PeerChangePart> => {
+        try {
+          const result = await namedPromises({[name]: promise}, this.log);
+          return {callback: result[name] as (() => void) | undefined};
+        } catch(error) {
+          return {error};
+        }
+      });
+      const allPrepared = Promise.all(preparedParts).then((): undefined => undefined);
+      const firstPreparationError = new Promise<{error: unknown}>((resolve) => {
+        preparedParts.forEach((part) => {
+          part.then((result) => {
+            if('error' in result) resolve(result);
+          });
+        });
+      });
+      const ready = Promise.race([allPrepared, firstPreparationError]);
+      let applyPromise: Promise<void> | undefined;
+      const apply = (): Promise<void> => {
+        if(applyPromise) {
+          return applyPromise;
+        }
+        if(didApplyUiCallbacks || !middleware()) {
+          return Promise.resolve();
+        }
+        didApplyUiCallbacks = true;
+        applyPromise = (async() => {
+          for(const part of preparedParts) {
+            const result = await part;
+            if('error' in result) {
+              throw result.error;
+            }
+            if(!middleware()) {
+              return;
+            }
+            result.callback?.();
+          }
+
+          sharedMediaTab?.loadSidebarMedia(true);
+          applyFinalUiChanges();
+        })();
+        return applyPromise;
+      };
+
+      return {ready, apply};
     }
 
-    applyUiCallbacks();
+    const callbacksObj = await namedPromises(peerChangePromises, this.log);
+    const callbacks = Object.values(callbacksObj);
+    sharedMediaTab?.loadSidebarMedia(true);
+
+    if(!middleware()) {
+      return;
+    }
+
+    applyUiCallbacks(callbacks);
   }
 
   public getMessage(mid: number | FullMid) {
