@@ -5701,7 +5701,7 @@ function buildObservationBlock(registry, appObservers, controls, egress) {
 }
 
 function buildWorkerCoverageFailureBreakdown(registry, appObservers) {
-  const contexts = Object.fromEntries(Object.keys(appObservers).map((name) => {
+  const contexts = Object.fromEntries(Object.keys(appObservers).filter((name) => APP_CONTEXTS.includes(name)).map((name) => {
     const observer = appObservers[name];
     const summary = observer.summary();
     return [name, {
@@ -6574,6 +6574,7 @@ async function main(dependencies = {}) {
           ? {
             workerCoverageBreakdown: buildWorkerCoverageFailureBreakdown(registry, appObservers),
             workerOverflowReasons: Object.fromEntries(Object.keys(appObservers)
+            .filter((name) => APP_CONTEXTS.includes(name))
             .map((name) => [name, appObservers[name].state.overflowReason || 'none']))
           }
           : {}),

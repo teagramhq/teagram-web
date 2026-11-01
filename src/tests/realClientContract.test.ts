@@ -790,6 +790,25 @@ describe('worker coverage failure diagnostics', () => {
       workerCoverageBreakdown: hostile
     })).toThrow('worker coverage evidence is invalid');
   });
+
+  it('rejects guest contexts in worker coverage evidence', () => {
+    const guestBreakdown = structuredClone(breakdown) as any;
+    guestBreakdown.contexts.guest = {...breakdown.contexts.alice};
+
+    expect(() => formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'browser_worker_observation_incomplete',
+      workerCoverageBreakdown: guestBreakdown
+    })).toThrow('worker coverage evidence is invalid');
+
+    const guestTargetBreakdown = structuredClone(breakdown);
+    guestTargetBreakdown.targets[0].owningContext = 'guest';
+    expect(() => formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'browser_worker_observation_incomplete',
+      workerCoverageBreakdown: guestTargetBreakdown
+    })).toThrow('worker coverage evidence is invalid');
+  });
 });
 
 describe('confined runner shared-worker observation contract', () => {
@@ -1866,14 +1885,15 @@ describe('confined runner shared-worker observation contract', () => {
     expect(observation.evaluateControl('c9_unknown_control', blocks.c3_no_construction)).toBe('fail');
   });
 
-  it('requires complete per-context evidence in the published report', () => {
+  it('rejects guest contexts in the published report even when callers request them', () => {
     expect(parseWorkerObservation(observationBlock())).toStrictEqual(observationBlock());
 
     const guestObservation = observationBlock();
     guestObservation.contexts.guest = replayContext(appContextEvents());
     guestObservation.attachedTargets += guestObservation.contexts.guest.attachedTargets;
     guestObservation.countedEvents += guestObservation.contexts.guest.countedEvents;
-    expect(parseWorkerObservation(guestObservation, ['alice', 'bob', 'guest'])).toStrictEqual(guestObservation);
+    expect(() => (parseWorkerObservation as any)(guestObservation, ['alice', 'bob', 'guest']))
+    .toThrow('worker observation app contexts are incomplete');
 
     const tampered = (mutate: (block: any) => void) => {
       const block = JSON.parse(JSON.stringify(observationBlock()));
@@ -4632,6 +4652,11 @@ describe('real client cleanup reports', () => {
       status: 'failed',
       stage: 'cleanup',
       workerOverflowReasons: {alice: 'none', bob: HOSTILE.phrase}
+    })).toThrow('worker overflow reason evidence is invalid');
+    expect(() => formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'cleanup',
+      workerOverflowReasons: {alice: 'none', bob: 'none', guest: 'none'}
     })).toThrow('worker overflow reason evidence is invalid');
   });
 });

@@ -412,8 +412,8 @@ function assertArtifactReadyEvidence(ready) {
 // report does not prove is a failure of the evidence, never a pass: an
 // `unclassified` block, a missing control, an unknown coverage state, a foreign
 // target, an overflow, or a context owning more than one page.
-export function parseWorkerObservation(block, expectedContexts = REQUIRED_OBSERVATION_CONTEXTS) {
-  return parseWorkerObservationForContexts(block, expectedContexts);
+export function parseWorkerObservation(block) {
+  return parseWorkerObservationForContexts(block, REQUIRED_OBSERVATION_CONTEXTS);
 }
 
 export function parseAuthProgressWorkerObservation(block) {
@@ -479,7 +479,6 @@ function parseWorkerObservationForContexts(block, expectedContexts) {
     const context = block.contexts[name];
     if(context.pageTargets !== 1) throw new Error(`${name} does not own exactly one page`);
     if(context.coverageComplete !== 1) throw new Error(`${name} shared-worker observation coverage is incomplete`);
-    if(name === 'guest') continue;
     if(context.mtprotoSourceFetch === 'not_requested') throw new Error(`${name} never fetched the MTProto worker source`);
     if(context.mtprotoSourceChunk !== 'mtproto_worker') throw new Error(`${name} MTProto worker source is not an allowlisted chunk`);
     if(context.mtprotoWorker === 'unknown') throw new Error(`${name} MTProto shared-worker state is unknown`);
@@ -760,8 +759,7 @@ function parseCleanupFailureCodes(value) {
 }
 
 function parseWorkerOverflowReasons(value) {
-  if(!(hasExactOwnKeys(value, ['alice']) || hasExactOwnKeys(value, ['alice', 'bob']) ||
-      hasExactOwnKeys(value, ['alice', 'bob', 'guest'])) ||
+  if(!hasExactOwnKeys(value, ['alice', 'bob']) ||
       Object.values(value).some((reason) => !WORKER_OVERFLOW_REASONS.includes(reason))) {
     throw new Error('worker overflow reason evidence is invalid');
   }
@@ -835,14 +833,9 @@ function parseWorkerCoverageBreakdown(value) {
   ];
   const targetTypes = ['page', 'iframe', 'service_worker', 'shared_worker', 'dedicated_worker', 'other'];
   const causes = ['multiple_pages', 'foreign', 'contextless', 'observer_overflow', 'observer_error'];
-  const workerContexts = Object.keys(value?.contexts || {}).sort();
   if(!hasExactOwnKeys(value, ['registry', 'contexts', 'targets']) ||
       !hasExactOwnKeys(value.registry, registryKeys) ||
-      !([
-        ['alice'],
-        ['alice', 'bob'],
-        ['alice', 'bob', 'guest']
-      ].some((contextNames) => JSON.stringify(workerContexts) === JSON.stringify(contextNames))) ||
+      !(hasExactOwnKeys(value.contexts, ['alice']) || hasExactOwnKeys(value.contexts, ['alice', 'bob'])) ||
       !Array.isArray(value.targets) || value.targets.length > 1024) {
     throw new Error('worker coverage evidence is invalid');
   }
@@ -871,7 +864,7 @@ function parseWorkerCoverageBreakdown(value) {
   for(const target of value.targets) {
     if(!hasExactOwnKeys(target, ['targetType', 'owningContext', 'scriptAsset', 'causes']) ||
         !targetTypes.includes(target.targetType) ||
-        !(target.owningContext === null || ['alice', 'bob', 'guest', 'control'].includes(target.owningContext)) ||
+        !(target.owningContext === null || ['alice', 'bob', 'control'].includes(target.owningContext)) ||
         typeof target.scriptAsset !== 'string' || !SCRIPT_ASSET.test(target.scriptAsset) ||
         !Array.isArray(target.causes) || target.causes.length < 1 || target.causes.length > causes.length ||
         target.causes.some((cause) => !causes.includes(cause)) || new Set(target.causes).size !== target.causes.length) {

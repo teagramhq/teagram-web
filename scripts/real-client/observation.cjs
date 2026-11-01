@@ -103,7 +103,6 @@ const WORKER_SOURCE_LABELS = Object.freeze([...new Set([...WORKER_CHUNK_PATTERNS
 const WEBSOCKET_101_CONTEXTS = Object.freeze(['alice', 'control', 'other']);
 const WEBSOCKET_101_PHASES = Object.freeze(['pre_submit', 'post_submit', 'unknown']);
 const GATE_CONTEXTS = Object.freeze(['alice', 'bob']);
-const WORKER_OBSERVATION_CONTEXTS = Object.freeze([...GATE_CONTEXTS, 'guest']);
 const COVERAGE_TARGET_TYPES = Object.freeze(['page', 'iframe', 'service_worker', 'shared_worker', 'dedicated_worker', 'other']);
 const COVERAGE_TARGET_CAUSES = Object.freeze(['multiple_pages', 'foreign', 'contextless', 'observer_overflow', 'observer_error']);
 const COVERAGE_TARGET_DETAILS_LIMIT = 1024;
@@ -266,8 +265,8 @@ function createTargetRecord(source, targetId, sequence) {
   };
 }
 
-// One observer per browser context: account and optional guest contexts, plus
-// each synthetic control context. `control` contexts are never app evidence.
+// One observer per browser context: the two app contexts and each synthetic
+// control context. `control` contexts are never counted as app evidence.
 function createContextObserver(name, options = {}) {
   const control = options.control === true;
   const observeWebSocket101 = options.observeWebSocket101 === true;
@@ -965,7 +964,7 @@ function buildWorkerCoverageBreakdown({registry, contexts, targets}) {
     const causes = COVERAGE_TARGET_CAUSES.filter((cause) => Array.isArray(target?.causes) && target.causes.includes(cause));
     return {
       targetType: coverageTargetType(target?.type),
-      owningContext: ['alice', 'bob', 'guest', 'control'].includes(target?.owningContext) ? target.owningContext : null,
+      owningContext: ['alice', 'bob', 'control'].includes(target?.owningContext) ? target.owningContext : null,
       scriptAsset: typeof target?.scriptAsset === 'string' && SCRIPT_ASSET_PATTERN.test(target.scriptAsset)
         ? target.scriptAsset
         : 'unknown',
@@ -975,7 +974,7 @@ function buildWorkerCoverageBreakdown({registry, contexts, targets}) {
   const contextBreakdown = {};
   const contextNames = Object.keys(sourceContexts).length === 0
     ? GATE_CONTEXTS
-    : WORKER_OBSERVATION_CONTEXTS.filter((name) => Object.hasOwn(sourceContexts, name));
+    : GATE_CONTEXTS.filter((name) => Object.hasOwn(sourceContexts, name));
   for(const name of contextNames) {
     const context = sourceContexts[name] || {};
     const pageTargets = Number.isSafeInteger(context.pageTargets) && context.pageTargets >= 0 && context.pageTargets <= 1_000_000

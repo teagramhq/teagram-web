@@ -349,7 +349,7 @@ if(args?.help) {
       // The page-session observer cannot see shared workers, so the shared-worker
       // evidence is the browser-level observation block: synthetic controls, per-context
       // attribution by browser context, and complete coverage.
-      parseWorkerObservation(browserResult.workerObservation, observedAccounts);
+      parseWorkerObservation(browserResult.workerObservation);
     }
   } catch(error) {
     operationError = error;
