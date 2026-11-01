@@ -14,7 +14,8 @@ test.beforeEach(async() => {
 
 test.afterEach(async({page}) => {
   // setupGuestServer registers its catch-all on the context, not the page.
-  await page.context().unrouteAll({behavior: 'ignoreErrors'});
+  await page.close();
+  await page.context().unrouteAll({behavior: 'wait'});
   await localAppRequest.dispose();
 });
 
@@ -113,7 +114,8 @@ async function setupGuestServer(
         await route.abort();
       }
     } catch(error) {
-      if(error instanceof Error && /Test ended|disposed/i.test(error.message)) return;
+      if(error instanceof Error && (/Test ended|disposed/i.test(error.message) ||
+        (/Route is already handled/i.test(error.message) && route.request().failure()))) return;
       throw error;
     }
   });
