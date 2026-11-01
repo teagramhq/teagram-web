@@ -66,6 +66,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Use the Ubuntu HTTPS mirror for Playwright dependencies
+        run: |
+          mirror_list=/etc/apt/apt-mirrors.txt
+          sudo sed -i 's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' "$mirror_list"
+          grep -Fq 'https://archive.ubuntu.com/ubuntu' "$mirror_list"
+
       - name: Install Playwright Chromium and Firefox
         run: pnpm exec playwright install --with-deps chromium firefox
 

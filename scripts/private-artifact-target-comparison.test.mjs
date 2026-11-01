@@ -397,6 +397,17 @@ describe('private artifact target comparison', () => {
     expect(bootstrap).not.toMatch(/wss:\/\/\$\{/);
   });
 
+  it('uses the reachable Ubuntu HTTPS mirror before installing Playwright dependencies', () => {
+    const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
+    const mirrorStepName = '      - name: Use the Ubuntu HTTPS mirror for Playwright dependencies';
+    const mirrorStep = workflow.split(`${mirrorStepName}\n`)[1]
+    ?.split('\n      - name: ')[0];
+
+    expect(mirrorStep).toContain('http://azure.archive.ubuntu.com/ubuntu');
+    expect(mirrorStep).toContain('https://archive.ubuntu.com/ubuntu');
+    expect(workflow.indexOf(mirrorStepName)).toBeLessThan(workflow.indexOf('      - name: Install Playwright Chromium and Firefox'));
+  });
+
   it('runs the private and standard auth browser smoke in CI', () => {
     const workflow = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
     const scripts = JSON.parse(readFileSync(join(repositoryRoot, 'package.json'), 'utf8')).scripts;
