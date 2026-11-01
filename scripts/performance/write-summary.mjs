@@ -1,6 +1,6 @@
 import {mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
-import {evaluatePerformance, formatPerformanceTable} from './policy.mjs';
+import {evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable} from './policy.mjs';
 
 const reportPath = resolve(process.env.PERF_REPORT_PATH || '.performance-report.json');
 const historyDirectory = resolve(process.env.PERF_HISTORY_DIRECTORY || '.performance-history');
@@ -34,12 +34,14 @@ if(process.env.PERF_BROWSER_OUTCOME !== 'success') {
 }
 
 const table = formatPerformanceTable(evaluation);
+const traceTable = formatPerformanceTraceTable(report.diagnostics?.['100x']);
 const summary = [
   '## Web performance at scale',
   '',
   `Fixture: \`${report.fixtureVersion || 'not recorded'}\`; server runtime commit: \`${report.serverCommit || 'not recorded'}\`; fixture seed commit: \`${report.fixtureServerCommit || 'not recorded'}\`.`,
   '',
   table,
+  ...(traceTable ? ['', traceTable] : []),
   '',
   evaluation.calibratedScenarios === 0 ? 'Timing budgets and the 100x/1x slowdown ceiling are report-only until each scale and scenario has 20 compatible successful master runs; over-budget 100x rows are marked in the table. After 20 compatible successful master runs, 100x scroll task counts and dropped-frame repeats beyond their noise bands block; scroll blocking-time deltas must also exceed the noise band by at least 80 ms. Pull requests require complete base bundle measurements; 100x non-scroll long-task count regressions and blocking-time increases of at least 80 ms, bundle growth and the 200 ms control block immediately.' : `Timing calibration is active for ${evaluation.calibratedScenarios} scale/scenario row(s); timing checks are report-only for uncalibrated rows and mark absolute budget misses until each reaches 20 compatible successful master runs. After 20 compatible successful master runs, 100x scroll task counts and dropped-frame repeats beyond their noise bands block; scroll blocking-time deltas must also exceed the noise band by at least 80 ms. Pull requests require complete base bundle measurements; 100x non-scroll long-task count regressions and blocking-time increases of at least 80 ms, bundle growth and the 200 ms control block immediately.`,
   failures.length ? `\nBlocking findings:\n${failures.map((failure) => `- ${failure}`).join('\n')}` : '\nNo blocking performance findings.'
