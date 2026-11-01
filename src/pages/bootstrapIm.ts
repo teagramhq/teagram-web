@@ -23,7 +23,9 @@ export async function bootstrapIm(): Promise<void> {
   if(bootstrapped) return;
   bootstrapped = true;
 
-  await rootScope.managers.appStateManager.pushToState('authState', {_: 'authStateSignedIn'});
+  await performancePhaseTrace.track('main.bootstrapIm.authState', () => {
+    return rootScope.managers.appStateManager.pushToState('authState', {_: 'authStateSignedIn'});
+  });
 
   const pageChatsEl = document.getElementById('page-chats');
   if(pageChatsEl) pageChatsEl.style.display = '';
@@ -33,18 +35,31 @@ export async function bootstrapIm(): Promise<void> {
   // Skip the opus-recorder fallback chunk entirely on browsers that have the
   // WebCodecs-based native path. Saves ~80 KB of WASM-shipping JS on every
   // sign-in for ~94% of users (May 2026 baseline).
-  const recorderImport: Promise<{default: unknown} | null> = isNativeVoiceRecorderSupported() ?
-    Promise.resolve(null) :
-    import('@vendor/recorder.min.js' as any);
-
-  const [{default: appDialogsManager}, recorder] = await Promise.all([
-    import('@lib/appDialogsManager'),
-    recorderImport,
-    loadFonts(),
-    'requestVideoFrameCallback' in HTMLVideoElement.prototype ?
+  const recorderImport: Promise<{default: unknown} | null> = performancePhaseTrace.track(
+    'main.bootstrapIm.recorder.import',
+    () => isNativeVoiceRecorderSupported() ? Promise.resolve(null) : import('@vendor/recorder.min.js' as any)
+  );
+  const appDialogsManagerImport = performancePhaseTrace.track(
+    'main.bootstrapIm.appDialogsManager.import',
+    () => import('@lib/appDialogsManager')
+  );
+  const fontsPromise = performancePhaseTrace.track('main.bootstrapIm.fonts', () => loadFonts());
+  const videoFrameCallbackPolyfillImport = performancePhaseTrace.track(
+    'main.bootstrapIm.videoFrameCallbackPolyfill.import',
+    () => 'requestVideoFrameCallback' in HTMLVideoElement.prototype ?
       Promise.resolve() :
       import('@helpers/dom/requestVideoFrameCallbackPolyfill')
-  ]);
+  );
+
+  const [{default: appDialogsManager}, recorder] = await performancePhaseTrace.track(
+    'main.bootstrapIm.dependencies.wait',
+    () => Promise.all([
+      appDialogsManagerImport,
+      recorderImport,
+      fontsPromise,
+      videoFrameCallbackPolyfillImport
+    ])
+  );
 
   if(recorder) {
     (window as any).Recorder = recorder.default;
@@ -62,7 +77,7 @@ export async function bootstrapIm(): Promise<void> {
   // otherwise batch into a single style commit and the gate would have no
   // effect — yield a frame so the committed state still has has-auth-pages
   // and the transform/opacity jump is instant.
-  await doubleRaf();
+  await performancePhaseTrace.track('main.bootstrapIm.chatlist.mount.wait', () => doubleRaf());
   document.body.classList.remove('has-auth-pages');
 
   // Tear down the auth UI 1s after IM appears — same delay the legacy
