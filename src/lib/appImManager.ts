@@ -12,7 +12,6 @@ import rootScope from '@lib/rootScope';
 import type Chat from '@components/chat/chat';
 import type {ChatSearchKeys} from '@components/chat/chat';
 import {ChatType} from '@components/chat/chatType';
-import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import SetTransition from '@components/singleTransition';
 import type ChatDragAndDrop from '@components/chat/dragAndDrop';
 import {doubleRaf} from '@helpers/schedulers';
@@ -1670,6 +1669,8 @@ export class AppImManager extends EventListenerBase<{
       () => this.tabId === APP_TABS.CHAT
     );
 
+    // Follow the active app window so the global "type anywhere → focus input" + shortcut handler
+    // keeps firing when the client is popped into a Document PiP window.
     bindActiveWindowListener((w) => w.document.body, 'keydown', onKeyDown);
   }
 
