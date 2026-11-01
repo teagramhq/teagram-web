@@ -44,24 +44,14 @@ test('finishes the chat-list startup span when cached dialogs serve the first pa
 
   const startedAtEpochMs = performance.timeOrigin + performance.now() - 50;
   apiManager.startFirstDialogsDispatchTrace(startedAtEpochMs);
-  const preloaded = storage.getDialogs({filterId: 0, filterType: FilterType.Folder, limit: 1, preload: true});
-
-  expect(preloaded.dialogs).toEqual([dialog]);
-  expect(performancePhaseTrace.getSnapshot().find(({name: phaseName}) => phaseName === name)).toMatchObject({
-    name,
-    durationMs: null
-  });
-  expect(performancePhaseTrace.getSnapshot().some(({name: phaseName}) => phaseName === 'worker.dialogs.firstPage')).toBe(false);
-
-  const result = storage.getDialogs({filterId: 0, filterType: FilterType.Folder, limit: 1});
+  const result = storage.getDialogs({filterId: 0, filterType: FilterType.Folder, limit: 1, preload: true});
 
   expect(result.dialogs).toEqual([dialog]);
-  expect(performancePhaseTrace.getSnapshot().some(({name: phaseName}) => phaseName === 'worker.dialogs.firstPage')).toBe(true);
-  expect(apiManager.invokeApiSingleProcess).toHaveBeenCalledOnce();
   expect(performancePhaseTrace.getSnapshot().find(({name: phaseName}) => phaseName === name)).toMatchObject({
     name,
     durationMs: expect.any(Number)
   });
+  expect(performancePhaseTrace.getSnapshot().some(({name: phaseName}) => phaseName === 'worker.dialogs.firstPage')).toBe(false);
 
   finishReconciliation({_: 'messages.dialogs', count: 0, dialogs: [], chats: [], users: []});
   await Promise.resolve();

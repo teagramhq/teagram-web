@@ -1923,7 +1923,6 @@ export default class DialogsStorage extends AppManager {
       filterType = this.getFilterType(filterId),
       skipMigrated = filterType === FilterType.Forum,
       forceLocal,
-      preload,
       recursion
     } = options;
 
@@ -2009,7 +2008,7 @@ export default class DialogsStorage extends AppManager {
     const isEnoughDialogs = curDialogStorage.length >= (offset + limit);
     if((isServerSearchSupported ? false : query) || loadedAll || isEnoughDialogs || forceLocal) {
       if(!query && !offset && filterId === FOLDER_ID_ALL) {
-        if(import.meta.env.VITE_PERF_TRACE === '1' && !preload) this.apiManager.finishFirstDialogsTrace();
+        if(import.meta.env.VITE_PERF_TRACE === '1') this.apiManager.finishFirstDialogsTrace();
         this.reconcileCachedChannelDialogs();
       }
 
