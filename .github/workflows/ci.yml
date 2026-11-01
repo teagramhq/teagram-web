@@ -593,14 +593,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          lockfile_args=()
+          while IFS= read -r -d '' lockfile; do
+            lockfile_args+=(--lockfile "/src/${lockfile#./}")
+          done < <(
+            find . \
+              -type d \( -name .git -o -name node_modules \) -prune -o \
+              -type f \( -name pnpm-lock.yaml -o -name package-lock.json \) -print0 \
+              | sort -z
+          )
+          if [ "${#lockfile_args[@]}" -eq 0 ]; then
+            echo "No supported lockfiles found for OSV Scanner" >&2
+            exit 1
+          fi
+
           scanner_status=0
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/src:ro" \
             ghcr.io/google/osv-scanner:v2.7.0@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0 \
-            scan source --format json \
-            --lockfile /src/pnpm-lock.yaml \
-            --lockfile /src/snapshot-server/pnpm-lock.yaml \
-            --lockfile /src/src/scripts/icomoon/package-lock.json \
+            scan source --format json "${lockfile_args[@]}" \
             > "$RUNNER_TEMP/osv-report.json" || scanner_status=$?
           if [ "$scanner_status" -gt 1 ]; then
             echo "OSV Scanner failed with exit status $scanner_status" >&2
