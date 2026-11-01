@@ -160,6 +160,45 @@ describe('Turnstile auth challenge', () => {
     });
   });
 
+  it('preserves non-Turnstile errors from a stored signup QA token', async() => {
+    const error = {type: 'PHONE_NUMBER_INVALID'};
+    const invokeApi = vi.fn().mockRejectedValue(error);
+    const requestChallenge = vi.fn();
+    const params = {phone_number: 'Alice_123', first_name: 'Teagram'} as any;
+    localStorage.setItem(QA_BYPASS_KEY, 'qa-bypass-token');
+
+    await expect(invokeTurnstileProtected(
+      invokeApi,
+      'auth.signUp',
+      params,
+      'signup',
+      requestChallenge,
+      'signup-site-key'
+    )).rejects.toBe(error);
+
+    expect(requestChallenge).not.toHaveBeenCalled();
+  });
+
+  it('preserves non-Turnstile errors when the QA token follows a challenge error', async() => {
+    const error = {type: 'PHONE_NUMBER_INVALID'};
+    const invokeApi = vi.fn()
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signup__server-site-key'})
+    .mockRejectedValueOnce(error);
+    const requestChallenge = vi.fn();
+    const params = {phone_number: 'Alice_123', first_name: 'Teagram'} as any;
+    localStorage.setItem(QA_BYPASS_KEY, 'qa-bypass-token');
+
+    await expect(invokeTurnstileProtected(
+      invokeApi,
+      'auth.signUp',
+      params,
+      'signup',
+      requestChallenge
+    )).rejects.toBe(error);
+
+    expect(requestChallenge).not.toHaveBeenCalled();
+  });
+
   it('uses a test-only QA token when signup first receives a challenge error', async() => {
     const response = {_: 'auth.authorization'};
     const invokeApi = vi.fn()
