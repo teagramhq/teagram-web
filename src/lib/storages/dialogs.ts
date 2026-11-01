@@ -1891,7 +1891,6 @@ export default class DialogsStorage extends AppManager {
     query?: string,
     offsetIndex?: number,
     limit?: number,
-    preload?: boolean,
     filterId?: number,
     skipMigrated?: boolean,
     forceLocal?: boolean,
@@ -1903,7 +1902,7 @@ export default class DialogsStorage extends AppManager {
     isTopEnd: boolean,
     isEnd: boolean
   }> {
-    if(!options.preload && !options.recursion && !options.query && options.offsetIndex === undefined) {
+    if(!options.recursion && !options.query && options.offsetIndex === undefined) {
       const finish = performancePhaseTrace.start('worker.dialogs.firstPage');
       const result = this.getDialogsInner(options);
       if(result instanceof Promise) result.finally(finish).catch(noop);

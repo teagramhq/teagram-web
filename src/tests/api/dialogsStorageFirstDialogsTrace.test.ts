@@ -44,7 +44,7 @@ test('finishes the chat-list startup span when cached dialogs serve the first pa
 
   const startedAtEpochMs = performance.timeOrigin + performance.now() - 50;
   apiManager.startFirstDialogsDispatchTrace(startedAtEpochMs);
-  const result = storage.getDialogs({filterId: 0, filterType: FilterType.Folder, limit: 1, preload: true});
+  const result = storage.getDialogs({filterId: 0, filterType: FilterType.Folder, limit: 1, offsetIndex: 0});
 
   expect(result.dialogs).toEqual([dialog]);
   expect(performancePhaseTrace.getSnapshot().find(({name: phaseName}) => phaseName === name)).toMatchObject({
