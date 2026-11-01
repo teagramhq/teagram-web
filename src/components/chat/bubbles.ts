@@ -6125,7 +6125,18 @@ export default class ChatBubbles {
     }
     // Observe preparation failures during the request, while keeping cached setup concurrent.
     const historyResultPromise = preparedPeerChange ?
-      Promise.race([historyRequest, preparedPeerChange.then(() => historyRequest)]) :
+      Promise.race([historyRequest, preparedPeerChange.then((prepared) => {
+        if(!prepared) {
+          return historyRequest;
+        }
+
+        return prepared.ready.then((error) => {
+          if(error) {
+            throw error.error;
+          }
+          return historyRequest;
+        });
+      })]) :
       historyRequest;
     const result = await m(historyResultPromise);
 
@@ -6135,9 +6146,11 @@ export default class ChatBubbles {
 
     const {promise, cached} = result;
     const peerUiReadyPromise = preparedPeerChange ?
-      preparedPeerChange.then(async(callback) => {
+      preparedPeerChange.then(async(prepared) => {
         await peerInnerMounted;
-        callback?.();
+        if(prepared) {
+          await prepared.apply();
+        }
         return {ready: true as const};
       }).catch((error: unknown) => ({error})) :
       Promise.resolve({ready: true as const});
@@ -6347,7 +6360,7 @@ export default class ChatBubbles {
       }
 
       // this.chatInner.classList.remove('disable-hover', 'is-scrolling'); // warning, performance!
-    }).catch((err) => {
+    }).catch((err: unknown) => {
       log.error('setPeer promise error:', err);
       const isCurrent = middleware();
       this.preloader.detach();
