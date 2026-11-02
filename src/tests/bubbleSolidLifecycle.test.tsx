@@ -482,7 +482,7 @@ test('logs a failed peer part and still applies the remaining callbacks', async(
       throw callbackFailure;
     })},
     bubbles: {finishPeerChange: vi.fn(() => Promise.reject(failure))},
-    input: {finishPeerChange: vi.fn(async() => () => callbacks.push('input'))},
+    input: {failPeerChange: vi.fn(), finishPeerChange: vi.fn(async() => () => callbacks.push('input'))},
     handleBackgrounds: vi.fn(async() => () => callbacks.push('backgrounds')),
     sharedMediaTab: undefined,
     log: {warn: vi.fn(), error, setPrefix: vi.fn()},
@@ -646,6 +646,52 @@ test('fails the peer transition when input setup rejects after history resolves'
   } finally {
     animationIntersector.unlockGroup('chat');
   }
+});
+
+test('fails closed when a non-input peer preparation rejects before history', async() => {
+  const failure = new Error('topbar peer setup failed');
+  const {harness, chat, getHistory1} = makeMountableSetPeerHarness();
+  const events: string[] = [];
+  const dispatchEvent = vi.fn();
+  const chatInput = document.createElement('div');
+  const messageInput = document.createElement('div');
+  const input = Object.assign(Object.create(ChatInput.prototype), {
+    peerChanging: false,
+    chatInput,
+    messageInput
+  }) as any;
+  input.finishPeerChange = vi.fn(() => {
+    input.peerChanging = true;
+    return Promise.resolve(() => events.push('input'));
+  });
+  Object.setPrototypeOf(chat, Chat.prototype);
+  Object.assign(chat, {
+    peerChanged: false,
+    peerChangeFailed: false,
+    cleanup: vi.fn(),
+    topbar: {finishPeerChange: vi.fn(() => Promise.reject(failure))},
+    bubbles: {finishPeerChange: vi.fn(async() => () => events.push('bubbles')), lazyLoadQueue: {queueId: 0}},
+    input,
+    sharedMediaTab: undefined,
+    sharedMediaTabs: [],
+    handleBackgrounds: vi.fn(async() => () => events.push('backgrounds')),
+    log: Object.assign(vi.fn(), {warn: vi.fn(), error: vi.fn(), setPrefix: vi.fn()}),
+    isMainChat: true,
+    container: {dataset: {}, classList: {toggle: vi.fn()}},
+    appImManager: {getChatSavedPosition: vi.fn(() => undefined), dispatchEvent}
+  });
+  chat.finishPeerChange = (options: any) => Chat.prototype.finishPeerChange.call(chat, options);
+  getHistory1.mockReturnValueOnce(new Promise(() => {}));
+
+  await expect(harness.setPeer({peerId, samePeer: false, sameSearch: false})).rejects.toBe(failure);
+
+  expect(input.peerChanging).toBe(false);
+  expect(chatInput.classList.contains('is-hidden')).toBe(true);
+  expect(messageInput.contentEditable).toBe('false');
+  expect(chat.peerChangeFailed).toBe(true);
+  expect(events).toEqual([]);
+  expect(dispatchEvent).not.toHaveBeenCalledWith('peer_changed', chat);
+  expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Error.AnError'});
 });
 
 test('finishes the peer UI and reports input callback failures', async() => {

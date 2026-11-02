@@ -1295,9 +1295,7 @@ export default class Chat extends EventListenerBase<{
           const result = await namedPromises({[name]: promise}, this.log);
           return {name, callback: result[name] as (() => void) | undefined};
         } catch(error) {
-          if(name === 'input') {
-            failPeerChange();
-          }
+          failPeerChange();
 
           this.log.error('peer change part failed:', name, error);
           return {name, error};
