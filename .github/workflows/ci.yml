@@ -239,7 +239,7 @@ jobs:
             echo "local Teagram server did not stop"
             exit 1
           fi
-          TG_REGISTRATION=closed nohup "$RUNNER_TEMP/teagramd" >>"$TEAGRAMD_LOG_FILE" 2>&1 < /dev/null &
+          env -u TG_TURNSTILE_TEST_MODE -u TG_ADVERTISE_DEMO_GUEST_SIGN_UP TG_REGISTRATION=closed nohup "$RUNNER_TEMP/teagramd" >>"$TEAGRAMD_LOG_FILE" 2>&1 < /dev/null &
           echo "$!" > "$TEAGRAMD_PID_FILE"
           ready=0
           for _ in $(seq 1 60); do
