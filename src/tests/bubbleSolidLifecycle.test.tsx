@@ -17,6 +17,7 @@ const moduleMocks = vi.hoisted(() => {
     sidebarLeft: new Proxy({}, {get: () => noop}),
     leftColumnActiveClassname: 'is-left-column-shown',
     sidebarRight: new Proxy({}, {get: () => noop}),
+    toastNew: vi.fn(),
     rootScope: {
       myId: 0,
       premium: false,
@@ -32,6 +33,10 @@ const moduleMocks = vi.hoisted(() => {
 vi.mock('@lib/apiManagerProxy', () => ({default: moduleMocks.apiManagerProxy}));
 vi.mock('@components/sidebarLeft', () => ({default: moduleMocks.sidebarLeft, LEFT_COLUMN_ACTIVE_CLASSNAME: moduleMocks.leftColumnActiveClassname}));
 vi.mock('@components/sidebarRight', () => ({default: moduleMocks.sidebarRight}));
+vi.mock('@components/toast', async(importOriginal) => ({
+  ...await importOriginal<typeof import('@components/toast')>(),
+  toastNew: moduleMocks.toastNew
+}));
 vi.mock('@lib/rootScope', () => ({default: moduleMocks.rootScope}));
 vi.mock('@stores/contentSettings', () => ({
   default: () => ({
@@ -107,6 +112,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.stubGlobal('ResizeObserver', originalResizeObserver);
   document.body.replaceChildren();
+  moduleMocks.toastNew.mockClear();
 });
 
 const peerId = 10 as PeerId;
@@ -198,6 +204,42 @@ function makeMountableSetPeerHarness(pendingHistory: Promise<void> = Promise.res
   harness.managers.appMessagesManager = {getDialogOnly: vi.fn(async() => undefined)};
 
   return {...setup, events};
+}
+
+function makePeerChangeChat() {
+  const events: string[] = [];
+  const dispatchEvent = vi.fn();
+  const chatInput = document.createElement('div');
+  const messageInput = document.createElement('div');
+  const input = Object.assign(Object.create(ChatInput.prototype), {
+    peerChanging: false,
+    chatInput,
+    messageInput
+  }) as any;
+  input.finishPeerChange = vi.fn(async() => () => events.push('input'));
+  const sharedMediaTab = {
+    fillProfileElements: vi.fn(async() => () => events.push('sharedMedia')),
+    loadSidebarMedia: vi.fn()
+  };
+  const chat = Object.assign(Object.create(Chat.prototype), {
+    peerId,
+    peerChanged: false,
+    peerChangeFailed: false,
+    cleanup: vi.fn(),
+    topbar: {finishPeerChange: vi.fn(async() => () => events.push('topbar'))},
+    bubbles: {finishPeerChange: vi.fn(async() => () => events.push('bubbles')), lazyLoadQueue: {queueId: 0}},
+    input,
+    sharedMediaTab,
+    sharedMediaTabs: [sharedMediaTab],
+    handleBackgrounds: vi.fn(async() => () => events.push('backgrounds')),
+    log: Object.assign(vi.fn(), {warn: vi.fn(), error: vi.fn(), setPrefix: vi.fn()}),
+    isMainChat: true,
+    type: 'chat',
+    container: {dataset: {}, classList: {toggle: vi.fn()}},
+    appImManager: {getChatSavedPosition: vi.fn(() => undefined), dispatchEvent}
+  });
+
+  return {chat, input, chatInput, messageInput, sharedMediaTab, events, dispatchEvent};
 }
 
 function makeChatSetPeerHarness(setBubblesPeer: ReturnType<typeof vi.fn>) {
@@ -550,6 +592,10 @@ test('fails the peer transition when input setup rejects after history resolves'
     chatInput,
     messageInput
   }) as any;
+  const sharedMediaTab = {
+    fillProfileElements: vi.fn(async() => () => events.push('sharedMedia')),
+    loadSidebarMedia: vi.fn()
+  };
   input.finishPeerChange = vi.fn(() => {
     input.peerChanging = true;
     return inputSetup;
@@ -562,8 +608,8 @@ test('fails the peer transition when input setup rejects after history resolves'
     topbar: {finishPeerChange: vi.fn(async() => () => events.push('topbar'))},
     bubbles: {finishPeerChange: vi.fn(async() => () => events.push('bubbles')), lazyLoadQueue: {queueId: 0}},
     input,
-    sharedMediaTab: undefined,
-    sharedMediaTabs: [],
+    sharedMediaTab,
+    sharedMediaTabs: [sharedMediaTab],
     handleBackgrounds: vi.fn(async() => () => events.push('backgrounds')),
     log: Object.assign(vi.fn(), {warn: vi.fn(), error: vi.fn(), setPrefix: vi.fn()}),
     isMainChat: true,
@@ -593,10 +639,100 @@ test('fails the peer transition when input setup rejects after history resolves'
     expect(messageInput.contentEditable).toBe('false');
     expect(chat.peerChanged).toBe(false);
     expect(chat.peerChangeFailed).toBe(true);
-    expect(dispatchEvent).not.toHaveBeenCalledWith('peer_changed', chat);
+    expect(events).toEqual(['topbar', 'bubbles', 'sharedMedia', 'backgrounds']);
+    expect(dispatchEvent).toHaveBeenCalledWith('peer_changed', chat);
+    expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Error.AnError'});
+    expect(moduleMocks.toastNew).toHaveBeenCalledTimes(1);
   } finally {
     animationIntersector.unlockGroup('chat');
   }
+});
+
+test('finishes the peer UI and reports input callback failures', async() => {
+  const failure = new Error('input callback failed');
+  const {chat, input, chatInput, messageInput, events, dispatchEvent} = makePeerChangeChat();
+  input.peerChanging = true;
+  input.finishPeerChange = vi.fn(async() => () => {
+    throw failure;
+  });
+
+  const prepared = await Chat.prototype.finishPeerChange.call(chat, {
+    peerId,
+    middleware: () => true,
+    deferUiCallbacks: true
+  }) as {ready: Promise<{error: unknown} | undefined>, apply: () => Promise<void>};
+  await prepared.ready;
+
+  await expect(prepared.apply()).rejects.toBe(failure);
+
+  expect(events).toEqual(['topbar', 'bubbles', 'sharedMedia', 'backgrounds']);
+  expect(dispatchEvent).toHaveBeenCalledWith('peer_changed', chat);
+  expect(input.peerChanging).toBe(false);
+  expect(chatInput.classList.contains('is-hidden')).toBe(true);
+  expect(messageInput.contentEditable).toBe('false');
+  expect(chat.peerChangeFailed).toBe(true);
+  expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Error.AnError'});
+  expect(moduleMocks.toastNew).toHaveBeenCalledTimes(1);
+});
+
+test('fails closed and reports when a synchronous peer part rejects', async() => {
+  const failure = new Error('topbar setup failed');
+  const {chat, input, chatInput, messageInput, events} = makePeerChangeChat();
+  input.peerChanging = true;
+  chat.topbar.finishPeerChange = vi.fn(() => Promise.reject(failure));
+
+  await expect(Chat.prototype.finishPeerChange.call(chat, {
+    peerId,
+    middleware: () => true
+  })).rejects.toBe(failure);
+
+  expect(events).toEqual([]);
+  expect(input.peerChanging).toBe(false);
+  expect(chatInput.classList.contains('is-hidden')).toBe(true);
+  expect(messageInput.contentEditable).toBe('false');
+  expect(chat.peerChangeFailed).toBe(true);
+  expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Error.AnError'});
+  expect(moduleMocks.toastNew).toHaveBeenCalledTimes(1);
+});
+
+test('retries the same peer after a failed input setup and restores the composer', async() => {
+  const chatInput = document.createElement('div');
+  chatInput.classList.add('is-hidden');
+  const messageInput = document.createElement('div');
+  messageInput.contentEditable = 'false';
+  const input = Object.assign(Object.create(ChatInput.prototype), {
+    peerChanging: true,
+    chatInput,
+    messageInput
+  }) as any;
+  input.failPeerChange();
+  input.finishPeerChange = vi.fn(async() => () => {
+    input.peerChanging = false;
+    chatInput.classList.remove('is-hidden');
+    messageInput.contentEditable = 'true';
+  });
+  const bubblesSetPeer = vi.fn(async(options: any) => {
+    const callback = await input.finishPeerChange(options);
+    callback?.();
+    return {cached: true, promise: Promise.resolve()};
+  });
+  const chat = makeChatSetPeerHarness(bubblesSetPeer);
+  Object.assign(chat, {
+    peerChangeFailed: true,
+    peerIdSignal: [vi.fn(), vi.fn()],
+    middlewareHelper: {clean: vi.fn(), get: () => ({onClean: vi.fn()})},
+    appSettings: {},
+    appImManager: {isSamePeer: vi.fn(() => true), dispatchEvent: vi.fn()}
+  });
+
+  await Chat.prototype.setPeer.call(chat, {peerId});
+  await chat.setPeerPromise;
+
+  expect(bubblesSetPeer).toHaveBeenCalledWith(expect.objectContaining({samePeer: false}));
+  expect(input.finishPeerChange).toHaveBeenCalledTimes(1);
+  expect(input.peerChanging).toBe(false);
+  expect(chatInput.classList.contains('is-hidden')).toBe(false);
+  expect(messageInput.contentEditable).toBe('true');
 });
 
 test('rejects prepared UI readiness when mounting the new chat fails', async() => {

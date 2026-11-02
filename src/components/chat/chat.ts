@@ -48,6 +48,7 @@ import useIsNightTheme from '@hooks/useIsNightTheme';
 import useStars, {setReservedStars} from '@stores/stars';
 import PopupElement from '@components/popups';
 import PopupStars from '@components/popups/stars';
+import {toastNew} from '@components/toast';
 import {getPendingPaidReactionKey, PENDING_PAID_REACTION_SENT_ABORT_REASON, PENDING_PAID_REACTIONS} from '@components/chat/reactions';
 import showUndoablePaidTooltip, {paidReactionLangKeys} from '@components/chat/undoablePaidTooltip';
 import namedPromises from '@helpers/namedPromises';
@@ -1225,6 +1226,7 @@ export default class Chat extends EventListenerBase<{
     this.cleanup(false);
 
     const sharedMediaTab = this.sharedMediaTab;
+    let didReportPeerChangeFailure = false;
     const failPeerChange = () => {
       if(!middleware()) {
         return;
@@ -1233,6 +1235,10 @@ export default class Chat extends EventListenerBase<{
       this.peerChanged = false;
       this.peerChangeFailed = true;
       this.input?.failPeerChange();
+      if(!didReportPeerChangeFailure) {
+        didReportPeerChangeFailure = true;
+        toastNew({langPackKey: 'Error.AnError'});
+      }
     };
 
     const peerChangePromises = {
@@ -1316,20 +1322,22 @@ export default class Chat extends EventListenerBase<{
         }
         didApplyUiCallbacks = true;
         applyPromise = (async() => {
+          let inputPeerChangeError: unknown;
+          let didInputPeerChangeFail = false;
           for(const part of preparedParts) {
             const result = await part;
-            if('error' in result) {
-              if(!middleware()) {
-                return;
-              }
-              if(result.name === 'input') {
-                failPeerChange();
-                throw result.error;
-              }
-              continue;
-            }
             if(!middleware()) {
               return;
+            }
+            if('error' in result) {
+              if(result.name === 'input') {
+                failPeerChange();
+                if(!didInputPeerChangeFail) {
+                  didInputPeerChangeFail = true;
+                  inputPeerChangeError = result.error;
+                }
+              }
+              continue;
             }
             try {
               result.callback?.();
@@ -1337,7 +1345,10 @@ export default class Chat extends EventListenerBase<{
               this.log.error('peer change apply part failed:', result.name, error);
               if(result.name === 'input') {
                 failPeerChange();
-                throw error;
+                if(!didInputPeerChangeFail) {
+                  didInputPeerChangeFail = true;
+                  inputPeerChangeError = error;
+                }
               }
             }
           }
@@ -1349,8 +1360,13 @@ export default class Chat extends EventListenerBase<{
               this.log.error('peer change apply part failed:', 'sharedMedia', error);
             }
           }
-          if(middleware()) {
-            applyFinalUiChanges();
+          if(!middleware()) {
+            return;
+          }
+
+          applyFinalUiChanges();
+          if(didInputPeerChangeFail) {
+            throw inputPeerChangeError;
           }
         })();
         return applyPromise;
@@ -1363,6 +1379,8 @@ export default class Chat extends EventListenerBase<{
     try {
       callbacksObj = await namedPromises(peerChangePromises, this.log);
     } catch(error) {
+      // namedPromises rejects the whole preparation, so none of its UI callbacks run. Fail the
+      // transition and release the input lock instead of leaving the selected peer half-open.
       failPeerChange();
       throw error;
     }
