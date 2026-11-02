@@ -981,14 +981,19 @@ export class AppImManager extends EventListenerBase<{
     }
 
     if(share.files?.length) {
-      apiManagerProxy.share = undefined;
       void import('@components/popups/forward').then(({default: showForwardPopup}) => {
-        showForwardPopup(undefined, async(peerId, threadId) => {
-          await this.setPeer({peerId, threadId});
-          const foundMedia = share.files.some((file) => MEDIA_MIME_TYPES_SUPPORTED.has(getFileMimeType(file)) || isConvertibleMov(file));
-          const {default: PopupNewMedia} = await import('@components/popups/newMedia');
-          PopupElement.createPopup(PopupNewMedia, this.chat, share.files, foundMedia ? 'media' : 'document');
+        return showForwardPopup(undefined, async(peerId, threadId) => {
+          await processShareTarget(share, async() => {
+            await this.setPeer({peerId, threadId});
+            const foundMedia = share.files.some((file) => MEDIA_MIME_TYPES_SUPPORTED.has(getFileMimeType(file)) || isConvertibleMov(file));
+            const {default: PopupNewMedia} = await import('@components/popups/newMedia');
+            PopupElement.createPopup(PopupNewMedia, this.chat, share.files, foundMedia ? 'media' : 'document');
+          }, (error) => {
+            throw error;
+          });
         });
+      }).catch((error) => {
+        console.error('Failed to process Web Share Target payload', error);
       });
       return;
     }

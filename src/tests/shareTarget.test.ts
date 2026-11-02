@@ -28,6 +28,20 @@ describe('Web Share Target payload handling', () => {
     expect(log).toHaveBeenCalledWith('Failed to process Web Share Target payload', error);
   });
 
+  it('restores the payload and rethrows deferred file processing errors', async() => {
+    const share = {files: [new File(['file'], 'image.png')]} as ShareData;
+    const error = new Error('new media chunk failed');
+    const process = vi.fn().mockRejectedValue(error);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(processShareTarget(share, process, (failure) => {
+      throw failure;
+    })).rejects.toBe(error);
+
+    expect(mocks.share).toBe(share);
+    expect(log).toHaveBeenCalledWith('Failed to process Web Share Target payload', error);
+  });
+
   it('clears the payload after successful processing', async() => {
     const share = {title: 'Draft', text: 'Send this', url: 'https://example.com'} as ShareData;
     mocks.share = share;
