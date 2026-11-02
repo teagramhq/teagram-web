@@ -85,6 +85,7 @@ import sameInputGroupCall from '@lib/calls/helpers/sameInputGroupCall';
 import getFilesFromEvent, {loadAlongsideFilesFromEvent} from '@helpers/files/getFilesFromEvent';
 import getFileMimeType from '@helpers/files/getFileMimeType';
 import apiManagerProxy from '@lib/apiManagerProxy';
+import {processShareTarget} from '@lib/shareTarget';
 import paymentsWrapCurrencyAmount from '@helpers/paymentsWrapCurrencyAmount';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import {CLICK_EVENT_NAME} from '@helpers/dom/clickEvent';
@@ -979,8 +980,8 @@ export class AppImManager extends EventListenerBase<{
       return;
     }
 
-    apiManagerProxy.share = undefined;
     if(share.files?.length) {
+      apiManagerProxy.share = undefined;
       void import('@components/popups/forward').then(({default: showForwardPopup}) => {
         showForwardPopup(undefined, async(peerId, threadId) => {
           await this.setPeer({peerId, threadId});
@@ -995,13 +996,13 @@ export class AppImManager extends EventListenerBase<{
     // `/share/` is a form target any origin can POST to (Web Share Target), so
     // its text takes the `t.me/share/url` route: a draft in the chosen chat,
     // which the user sees and sends — never an immediate `sendText`.
-    void this.loadInternalLinkProcessor().then((internalLinkProcessor) => {
+    void processShareTarget(share, () => this.loadInternalLinkProcessor().then((internalLinkProcessor) => {
       return internalLinkProcessor.processInternalLink({
         _: INTERNAL_LINK_TYPE.SHARE,
         url: share.url,
         text: share.text || share.title
       });
-    }).catch(noop);
+    }));
   }
 
   public async confirmBotWebViewInner({
