@@ -1,13 +1,15 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
-const mocks = vi.hoisted(() => ({share: undefined as unknown as ShareData}));
+const mocks = vi.hoisted(() => ({share: undefined as unknown as ShareData, toastNew: vi.fn()}));
 vi.mock('@lib/apiManagerProxy', () => ({default: mocks}));
+vi.mock('@components/toast', () => ({toastNew: mocks.toastNew}));
 
 import {processShareTarget} from '@lib/shareTarget';
 
 describe('Web Share Target payload handling', () => {
   beforeEach(() => {
     mocks.share = undefined;
+    mocks.toastNew.mockClear();
   });
 
   afterEach(() => {
@@ -26,6 +28,7 @@ describe('Web Share Target payload handling', () => {
     expect(process).toHaveBeenCalledOnce();
     expect(mocks.share).toBe(share);
     expect(log).toHaveBeenCalledWith('Failed to process Web Share Target payload', error);
+    expect(mocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Error.AnError'});
   });
 
   it('restores the payload and rethrows deferred file processing errors', async() => {

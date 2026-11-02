@@ -1,4 +1,5 @@
 import apiManagerProxy from '@lib/apiManagerProxy';
+import {toastNew} from '@components/toast';
 
 export async function processShareTarget(share: ShareData, process: () => Promise<unknown>, onFailure?: (error: unknown) => void) {
   try {
@@ -7,6 +8,7 @@ export async function processShareTarget(share: ShareData, process: () => Promis
   } catch(error) {
     if(!apiManagerProxy.share) apiManagerProxy.share = share;
     console.error('Failed to process Web Share Target payload', error);
+    toastNew({langPackKey: 'Error.AnError'});
     onFailure?.(error);
   }
 }

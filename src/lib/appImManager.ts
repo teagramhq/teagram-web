@@ -988,12 +988,11 @@ export class AppImManager extends EventListenerBase<{
             const foundMedia = share.files.some((file) => MEDIA_MIME_TYPES_SUPPORTED.has(getFileMimeType(file)) || isConvertibleMov(file));
             const {default: PopupNewMedia} = await import('@components/popups/newMedia');
             PopupElement.createPopup(PopupNewMedia, this.chat, share.files, foundMedia ? 'media' : 'document');
-          }, (error) => {
-            throw error;
           });
         });
       }).catch((error) => {
         console.error('Failed to process Web Share Target payload', error);
+        toastNew({langPackKey: 'Error.AnError'});
       });
       return;
     }

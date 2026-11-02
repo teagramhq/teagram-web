@@ -51,7 +51,7 @@ type MeasurementBoundary = {
 };
 
 const scales: Scale[] = ['1x', '100x'];
-const NEGATIVE_CONTROL_STALL_MS = 200;
+const NEGATIVE_CONTROL_STALL_MS = 100;
 const fixturePaths: Record<Scale, string | undefined> = {
   '1x': process.env.PERF_FIXTURE_FILE_1X,
   '100x': process.env.PERF_FIXTURE_FILE_100X
@@ -879,7 +879,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   report.diagnostics['100x'] = await test.step('trace 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRun!, fixtures['100x']!));
 });
 
-test('blocks repeated injected 200 ms main-thread stalls during cold chat list load', async({browser}) => {
+test(`blocks repeated injected ${NEGATIVE_CONTROL_STALL_MS} ms main-thread stalls during cold chat list load`, async({browser}) => {
   test.skip(!report.requireBase, 'negative control requires same-run base measurements');
   const preparedBase = preparedVariants['100x'].base;
   const preparedHead = preparedVariants['100x'].head;

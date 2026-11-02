@@ -519,7 +519,6 @@ const onDocumentReady = async() => {
     themeController.setThemeListener();
     setDocumentLangPackProperties(langPack);
 
-    const {default: appChatBackground} = await import('@components/chat/bubbles/chatBackground');
     appChatBackground.attach();
     await appChatBackground.setBackground({transition: 'instant'}).catch((error) => {
       console.error('Could not load the authentication wallpaper', error);
@@ -732,7 +731,6 @@ const onDocumentReady = async() => {
   }
 
   if(authState._ !== 'authStateSignedIn'/*  || 1 === 1 */) {
-    const {default: appChatBackground} = await import('@components/chat/bubbles/chatBackground');
     appChatBackground.attach();
     appChatBackground.setBackground({transition: 'instant'});
 
