@@ -140,7 +140,9 @@ jobs:
           TG_ADVERTISE_ADDR=second-server.example.test:2443
           TG_WEBSOCKET_LISTEN_ADDR=127.0.0.1:2445
           TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io
-          TG_REGISTRATION=closed
+          TG_REGISTRATION=open
+          TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
+          TG_TURNSTILE_TEST_MODE=true
           TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL=http://127.0.0.1:2445
           TEAGRAM_CUSTOM_SERVER_TEST_WS_URL=ws://127.0.0.1:2445/apiws
           TEAGRAM_CUSTOM_SERVER_TEST_USER=custom_server_user
@@ -208,13 +210,59 @@ jobs:
       - name: Run private username auth browser smoke
         run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameSignInTurnstile.spec.ts e2e/privateUsernameRegistration.spec.ts e2e/userInvites.spec.ts e2e/guestSignup.spec.ts e2e/customServerRegistration.spec.ts
 
+      - name: Run real custom-server guest signup browser smoke
+        id: custom-server-guest-smoke
+        env:
+          PLAYWRIGHT_TRACING_NO_WEBSOCKET_FRAMES: '1'
+          TWEB_PRIVATE_AUTH_OUTPUT_DIR: ${{ runner.temp }}/custom-server-playwright-results/guest-signup
+        run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/customServerLocalSignIn.spec.ts --project=chromium --workers=1 --grep 'creates a guest on the real custom server'
+
+      - name: Restart the local Teagram server with registration closed
+        id: custom-server-fixture
+        if: ${{ always() && steps.local-server.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec >>"$TEAGRAMD_STARTUP_LOG_FILE" 2>&1
+          printf 'stage=restart_server_closed_registration result=started\n'
+          server_pid="$(cat "$TEAGRAMD_PID_FILE")"
+          kill "$server_pid" 2>/dev/null || true
+          stopped=0
+          for _ in $(seq 1 30); do
+            if ! curl --max-time 1 --silent "$TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL/.well-known/teagramd/client" >/dev/null 2>&1; then
+              stopped=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$stopped" -ne 1 ]; then
+            echo "local Teagram server did not stop"
+            exit 1
+          fi
+          env -u TG_TURNSTILE_TEST_MODE -u TG_ADVERTISE_DEMO_GUEST_SIGN_UP TG_REGISTRATION=closed nohup "$RUNNER_TEMP/teagramd" >>"$TEAGRAMD_LOG_FILE" 2>&1 < /dev/null &
+          echo "$!" > "$TEAGRAMD_PID_FILE"
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl --max-time 2 --silent "$TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL/.well-known/teagramd/client" >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "local Teagram server did not restart with registration closed"
+            exit 1
+          fi
+          printf 'stage=restart_server_closed_registration result=success\n'
+
       - name: Run disposable custom-server sign-in browser smoke
         id: custom-server-smoke
-        if: ${{ always() && steps.local-server.outcome == 'success' }}
+        if: ${{ always() && steps.custom-server-fixture.outcome == 'success' }}
         env:
           PLAYWRIGHT_TRACING_NO_WEBSOCKET_FRAMES: '1'
           PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/custom-server-playwright-report.json
-        run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/customServerLocalSignIn.spec.ts --project=chromium --workers=1 --reporter=list,json
+          TWEB_PRIVATE_AUTH_OUTPUT_DIR: ${{ runner.temp }}/custom-server-playwright-results/sign-in
+        run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/customServerLocalSignIn.spec.ts --project=chromium --workers=1 --reporter=list,json --grep-invert 'creates a guest on the real custom server'
 
       - name: Run standard auth browser smoke
         if: success()
@@ -234,8 +282,8 @@ jobs:
         if: always()
         env:
           TWEB_MIGRATION_OUTCOME: ${{ steps.migrate-server.outcome || 'not-run' }}
-          TWEB_STARTUP_OUTCOME: ${{ steps.local-server.outcome || 'not-run' }}
-          TWEB_CUSTOM_SERVER_SMOKE_OUTCOME: ${{ steps.custom-server-smoke.outcome || 'not-run' }}
+          TWEB_STARTUP_OUTCOME: ${{ (steps.local-server.outcome == 'failure' || steps.custom-server-fixture.outcome == 'failure') && 'failure' || steps.local-server.outcome || steps.custom-server-fixture.outcome || 'not-run' }}
+          TWEB_CUSTOM_SERVER_SMOKE_OUTCOME: ${{ (steps.custom-server-smoke.outcome == 'failure' || steps.custom-server-guest-smoke.outcome == 'failure') && 'failure' || steps.custom-server-smoke.outcome || steps.custom-server-guest-smoke.outcome || 'not-run' }}
           TWEB_PRIVATE_AUTH_JSON_REPORT: ${{ runner.temp }}/custom-server-playwright-report.json
         run: node .github/scripts/collect-custom-server-smoke-artifacts.mjs
 
@@ -244,7 +292,7 @@ jobs:
           ${{
             always() &&
             steps.diagnostics.outputs.artifact_ready == 'true' &&
-            (steps.migrate-server.outcome == 'failure' || steps.local-server.outcome == 'failure' || steps.custom-server-smoke.outcome == 'failure')
+            (steps.migrate-server.outcome == 'failure' || steps.local-server.outcome == 'failure' || steps.custom-server-fixture.outcome == 'failure' || steps.custom-server-guest-smoke.outcome == 'failure' || steps.custom-server-smoke.outcome == 'failure')
           }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

@@ -173,51 +173,141 @@ function createTlsFixtureCredentials(directory: string, hostnames: string[]) {
   return {privateKeyPath, certificatePath};
 }
 
+async function startLocalTlsProxy(options: {
+  directoryPrefix: string,
+  hostnames: string[],
+  port: number,
+  requestHandler?: (request: IncomingMessage, response: ServerResponse) => void,
+  upgradeHandler: (request: IncomingMessage, socket: Duplex, head: Buffer, webSocketServer: WebSocketServer) => void
+}) {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), options.directoryPrefix));
+  let server: ReturnType<typeof createServer> | undefined;
+  let socketTracker: ReturnType<typeof trackTlsServerSockets> | undefined;
+  const webSocketServer = new WebSocketServer({noServer: true});
+  let closeTask: Promise<void> | undefined;
+  const close = () => {
+    if(closeTask) return closeTask;
+    closeTask = (async() => {
+      try {
+        for(const client of webSocketServer.clients) client.terminate();
+        await new Promise<void>((resolveClose, reject) => {
+          webSocketServer.close((error) => error ? reject(error) : resolveClose());
+        });
+      } finally {
+        try {
+          if(server?.listening) await closeTlsServer(server, socketTracker);
+        } finally {
+          rmSync(temporaryDirectory, {recursive: true, force: true});
+        }
+      }
+    })();
+    return closeTask;
+  };
+
+  try {
+    const credentials = createTlsFixtureCredentials(temporaryDirectory, options.hostnames);
+    server = createServer({
+      key: readFileSync(credentials.privateKeyPath),
+      cert: readFileSync(credentials.certificatePath)
+    }, options.requestHandler);
+    socketTracker = trackTlsServerSockets(server);
+    server.on('upgrade', (request, socket, head) => {
+      socketTracker!.markUpgrade(socket);
+      options.upgradeHandler(request, socket, head, webSocketServer);
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server!.listen(options.port, '127.0.0.1', resolve);
+    });
+    return {webSocketServer, close};
+  } catch(error) {
+    try {
+      await close();
+    } catch(cleanupError) {
+      throwTlsTestErrors(error, cleanupError);
+    }
+    throw error;
+  }
+}
+
+function readDeploymentCsp() {
+  const edgeConfig = readFileSync(resolve('deploy/teagram-web/nginx.conf'), 'utf8');
+  const edgeCsp = edgeConfig.match(/add_header Content-Security-Policy "([^"]+)" always;/)?.[1];
+  if(!edgeCsp) throw new Error('deployment CSP is missing from deploy/teagram-web/nginx.conf');
+  return edgeCsp;
+}
+
+async function startTeagramEdgeProxy(options: {
+  appPort: number,
+  appProxyHost: string,
+  appProxyHosts: string[],
+  cspForAppResponse: (url: URL) => boolean,
+  directoryPrefix: string,
+  hostnames: string[],
+  onDiscovery: (host: string, url: URL, response: ServerResponse) => boolean,
+  onUpgrade: (request: IncomingMessage, socket: Duplex, head: Buffer, webSocketServer: WebSocketServer) => void
+}) {
+  const edgeCsp = readDeploymentCsp();
+  const fixture = await startLocalTlsProxy({
+    directoryPrefix: options.directoryPrefix,
+    hostnames: options.hostnames,
+    port: 18443,
+    requestHandler: (request, response) => {
+      const host = (request.headers.host || '').replace(/:\d+$/, '');
+      const url = new URL(request.url || '/', `https://${host}`);
+      if(url.pathname === '/.well-known/teagramd/client' && options.onDiscovery(host, url, response)) return;
+      if(!options.appProxyHosts.includes(host)) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+
+      const upstream = httpRequest({
+        host: options.appProxyHost,
+        port: options.appPort,
+        method: request.method,
+        path: request.url,
+        headers: {...request.headers, host: `localhost:${options.appPort}`}
+      }, (upstreamResponse) => {
+        const headers = {...upstreamResponse.headers};
+        if(options.cspForAppResponse(url)) headers['content-security-policy'] = edgeCsp;
+        response.writeHead(upstreamResponse.statusCode || 502, headers);
+        upstreamResponse.pipe(response);
+      });
+      upstream.on('error', () => response.destroy());
+      request.pipe(upstream);
+    },
+    upgradeHandler: options.onUpgrade
+  });
+  return fixture;
+}
+
 async function withPrivateArtifactWebSocketFixture<T>(
   endpoint: URL,
   action: (fixture: {unrelatedRequests: string[], unrelatedUrl: string}) => Promise<T>
 ) {
-  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-private-artifact-websocket-'));
-  const credentials = createTlsFixtureCredentials(temporaryDirectory, [endpoint.hostname]);
-  const server = createServer({
-    key: readFileSync(credentials.privateKeyPath),
-    cert: readFileSync(credentials.certificatePath)
-  });
-  const socketTracker = trackTlsServerSockets(server);
-  const webSocketServer = new WebSocketServer({noServer: true});
   const unrelatedRequests: string[] = [];
-  server.on('upgrade', (request, socket, head) => {
-    socketTracker.markUpgrade(socket);
-    const pathname = new URL(request.url || '/', `https://${endpoint.host}`).pathname;
-    if(pathname === '/unrelated') unrelatedRequests.push(request.url || '');
-    if(pathname !== endpoint.pathname && pathname !== '/unrelated') {
-      socket.destroy();
-      return;
+  const fixture = await startLocalTlsProxy({
+    directoryPrefix: 'teagram-private-artifact-websocket-',
+    hostnames: [endpoint.hostname],
+    port: Number(endpoint.port),
+    upgradeHandler: (request, socket, head, webSocketServer) => {
+      const pathname = new URL(request.url || '/', `https://${endpoint.host}`).pathname;
+      if(pathname === '/unrelated') unrelatedRequests.push(request.url || '');
+      if(pathname !== endpoint.pathname && pathname !== '/unrelated') {
+        socket.destroy();
+        return;
+      }
+      webSocketServer.handleUpgrade(request, socket, head, (client) => {
+        client.on('error', () => {});
+      });
     }
-    webSocketServer.handleUpgrade(request, socket, head, (client) => {
-      client.on('error', () => {});
-    });
   });
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(Number(endpoint.port), '127.0.0.1', resolve);
-    });
     return await action({unrelatedRequests, unrelatedUrl: `${endpoint.origin}/unrelated`});
   } finally {
-    try {
-      for(const client of webSocketServer.clients) client.terminate();
-      await new Promise<void>((resolve, reject) => {
-        webSocketServer.close((error) => error ? reject(error) : resolve());
-      });
-    } finally {
-      try {
-        if(server.listening) await closeTlsServer(server, socketTracker);
-      } finally {
-        rmSync(temporaryDirectory, {recursive: true, force: true});
-      }
-    }
+    await fixture.close();
   }
 }
 
@@ -472,9 +562,6 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
   const appBaseUrl = new URL(testInfo.project.use.baseURL as string);
   const appPort = Number(appBaseUrl.port);
   const appOrigin = `https://${APP_HOST}`;
-  const edgeConfig = readFileSync(resolve('deploy/teagram-web/nginx.conf'), 'utf8');
-  const edgeCsp = edgeConfig.match(/add_header Content-Security-Policy "([^"]+)" always;/)?.[1];
-  if(!edgeCsp) throw new Error('deployment CSP is missing from deploy/teagram-web/nginx.conf');
 
   const rsaPublicKey = createPublicKey(readFileSync(resolve('scripts/fixtures/private-mtproto-public.pem')));
   const discovery = {
@@ -492,65 +579,37 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
   let resolveWebSocketProbeStarted: (() => void) | undefined;
   let resolveWebSocketProbeClosed: (() => void) | undefined;
   let releaseWebSocketProbe: (() => void) | undefined;
-  let tlsServer: ReturnType<typeof createServer> | undefined;
-  let tlsSocketTracker: ReturnType<typeof trackTlsServerSockets> | undefined;
-  let webSocketServer: WebSocketServer | undefined;
-  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-private-artifact-discovery-'));
-
-  try {
-    const credentials = createTlsFixtureCredentials(temporaryDirectory, [APP_HOST, serverHost, CANCEL_SERVER_HOST]);
-    tlsServer = createServer({
-      key: readFileSync(credentials.privateKeyPath),
-      cert: readFileSync(credentials.certificatePath)
-    }, (request, response) => {
-      const host = (request.headers.host || '').replace(/:\d+$/, '');
-      const url = new URL(request.url || '/', `https://${host}`);
-      if((host === serverHost || host === CANCEL_SERVER_HOST) && url.pathname === '/.well-known/teagramd/client') {
-        discoveryRequests.push(url.pathname);
-        const cancelDiscovery = {
-          ...discovery,
-          mtproto: {...discovery.mtproto, endpoint: `${host}:2443`},
-          websocket: {endpoint: new URL(privateEndpoint.href.replace(serverHost, host)).href}
-        };
-        const sendDiscovery = () => {
-          response.writeHead(200, {
-            'access-control-allow-origin': '*',
-            'content-type': 'application/json'
-          });
-          response.end(JSON.stringify(cancelDiscovery));
-        };
-        if(delayNextDiscovery) {
-          delayNextDiscovery = false;
-          setTimeout(sendDiscovery, 1800);
-        } else {
-          sendDiscovery();
-        }
-        return;
+  const edgeProxy = await startTeagramEdgeProxy({
+    appPort,
+    appProxyHost: 'localhost',
+    appProxyHosts: [APP_HOST, serverHost, CANCEL_SERVER_HOST],
+    cspForAppResponse: () => true,
+    directoryPrefix: 'teagram-private-artifact-discovery-',
+    hostnames: [APP_HOST, serverHost, CANCEL_SERVER_HOST],
+    onDiscovery: (host, url, response) => {
+      if(host !== serverHost && host !== CANCEL_SERVER_HOST) return false;
+      discoveryRequests.push(url.pathname);
+      const cancelDiscovery = {
+        ...discovery,
+        mtproto: {...discovery.mtproto, endpoint: `${host}:2443`},
+        websocket: {endpoint: new URL(privateEndpoint.href.replace(serverHost, host)).href}
+      };
+      const sendDiscovery = () => {
+        response.writeHead(200, {
+          'access-control-allow-origin': '*',
+          'content-type': 'application/json'
+        });
+        response.end(JSON.stringify(cancelDiscovery));
+      };
+      if(delayNextDiscovery) {
+        delayNextDiscovery = false;
+        setTimeout(sendDiscovery, 1800);
+      } else {
+        sendDiscovery();
       }
-      if(host !== APP_HOST && host !== serverHost && host !== CANCEL_SERVER_HOST) {
-        response.writeHead(404);
-        response.end();
-        return;
-      }
-
-      const upstream = httpRequest({
-        host: 'localhost',
-        port: appPort,
-        method: request.method,
-        path: request.url,
-        headers: {...request.headers, host: `localhost:${appPort}`}
-      }, (upstreamResponse) => {
-        const headers = {...upstreamResponse.headers, 'content-security-policy': edgeCsp};
-        response.writeHead(upstreamResponse.statusCode || 502, headers);
-        upstreamResponse.pipe(response);
-      });
-      upstream.on('error', () => response.destroy());
-      request.pipe(upstream);
-    });
-    tlsSocketTracker = trackTlsServerSockets(tlsServer);
-    webSocketServer = new WebSocketServer({noServer: true});
-    tlsServer.on('upgrade', (request, socket, head) => {
-      tlsSocketTracker!.markUpgrade(socket);
+      return true;
+    },
+    onUpgrade: (request, socket, head, webSocketServer) => {
       if(request.url !== privateEndpoint.pathname) {
         socket.destroy();
         return;
@@ -561,22 +620,19 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
         resolveWebSocketProbeStarted?.();
         releaseWebSocketProbe = () => {
           if(socket.destroyed) return;
-          webSocketServer!.handleUpgrade(request, socket, head, (client) => {
+          webSocketServer.handleUpgrade(request, socket, head, (client) => {
             client.on('error', () => {});
           });
         };
         return;
       }
-      webSocketServer!.handleUpgrade(request, socket, head, (client) => {
+      webSocketServer.handleUpgrade(request, socket, head, (client) => {
         client.on('error', () => {});
       });
-    });
+    }
+  });
 
-    await new Promise<void>((resolveListen, reject) => {
-      tlsServer!.once('error', reject);
-      tlsServer!.listen(18443, '127.0.0.1', resolveListen);
-    });
-
+  try {
     const referenceContext = await browser.newContext({
       viewport: {width: 689, height: 750},
       deviceScaleFactor: 2,
@@ -1000,20 +1056,7 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     expect(pinnedCspViolations).toEqual([]);
     await pinnedPage.close();
   } finally {
-    try {
-      if(webSocketServer) {
-        for(const client of webSocketServer.clients) client.terminate();
-        await new Promise<void>((resolveClose, reject) => {
-          webSocketServer!.close((error) => error ? reject(error) : resolveClose());
-        });
-      }
-    } finally {
-      try {
-        if(tlsServer?.listening) await closeTlsServer(tlsServer, tlsSocketTracker);
-      } finally {
-        rmSync(temporaryDirectory, {recursive: true, force: true});
-      }
-    }
+    await edgeProxy.close();
   }
 });
 
@@ -1083,9 +1126,7 @@ async function runPrivateArtifactFirefoxEgress(
   const serverHost = privateEndpoint.hostname;
   const appBaseUrl = new URL(testInfo.project.use.baseURL as string);
   const appOrigin = appBaseUrl.origin;
-  const edgeConfig = readFileSync(resolve('deploy/teagram-web/nginx.conf'), 'utf8');
-  const edgeCsp = edgeConfig.match(/add_header Content-Security-Policy "([^"]+)" always;/)?.[1];
-  if(!edgeCsp) throw new Error('deployment CSP is missing from deploy/teagram-web/nginx.conf');
+  const edgeCsp = readDeploymentCsp();
 
   const rsaPublicKey = createPublicKey(readFileSync(resolve('scripts/fixtures/private-mtproto-public.pem')));
   const discovery = {
@@ -1755,4 +1796,147 @@ test('unlocks server selection when the pinned-key popup import fails', async({p
   await expect(page.getByRole('button', {name: 'Next', exact: true})).toBeDisabled();
   await usernameInput.fill('Alice_123');
   await expect(page.getByRole('button', {name: 'Next', exact: true})).toBeEnabled();
+});
+
+test('creates a guest on the real custom server without Turnstile and restores it after reload', async({page}, testInfo) => {
+  const serverHttpUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL;
+  const serverWebSocketUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_WS_URL;
+  const hasServerFixture = !!serverHttpUrl && !!serverWebSocketUrl;
+  test.skip(!process.env.CI && !hasServerFixture, 'CI must provide the local Teagram server');
+  if(!hasServerFixture) throw new Error('CI must provide the local Teagram server');
+
+  const discoveryResponse = await fetch(`${serverHttpUrl}/.well-known/teagramd/client`);
+  expect(discoveryResponse.ok).toBe(true);
+  const discovery = await discoveryResponse.json() as {
+    demo?: {guest_sign_up?: boolean},
+    websocket?: {endpoint?: string}
+  };
+  expect(discovery.demo?.guest_sign_up).toBe(true);
+  expect(discovery.websocket?.endpoint).toBe(`wss://${SERVER_HOST}/apiws`);
+
+  const appBaseUrl = new URL(testInfo.project.use.baseURL as string);
+  const appPort = Number(appBaseUrl.port);
+  const appOrigin = new URL(appBaseUrl);
+  appOrigin.protocol = 'https:';
+  appOrigin.hostname = APP_HOST;
+  appOrigin.port = '';
+  await page.context().grantPermissions(['local-network-access'], {origin: appOrigin.origin});
+  const turnstileRequests: string[] = [];
+  page.on('request', (browserRequest) => {
+    if(browserRequest.url().includes('challenges.cloudflare.com')) turnstileRequests.push(browserRequest.url());
+  });
+  const edgeProxy = await startTeagramEdgeProxy({
+    appPort,
+    appProxyHost: '::1',
+    appProxyHosts: [APP_HOST],
+    cspForAppResponse: (url) => url.pathname === '/',
+    directoryPrefix: 'teagram-custom-guest-signup-',
+    hostnames: [APP_HOST, SERVER_HOST],
+    onDiscovery: (host, url, response) => {
+      if(host !== SERVER_HOST) return false;
+      void fetch(`${serverHttpUrl}${url.pathname}${url.search}`).then(async(upstreamResponse) => {
+        const body = await upstreamResponse.text();
+        response.writeHead(upstreamResponse.status, Object.fromEntries(upstreamResponse.headers.entries()));
+        response.end(body);
+      }).catch(() => {
+        response.writeHead(502);
+        response.end();
+      });
+      return true;
+    },
+    onUpgrade: (request, socket, head, webSocketServer) => {
+      if(request.url !== '/apiws') {
+        socket.destroy();
+        return;
+      }
+      webSocketServer.handleUpgrade(request, socket, head, (client) => {
+        const upstream = new WebSocket(serverWebSocketUrl, {
+          headers: {origin: request.headers.origin || ''}
+        });
+        const pending: Array<{data: Buffer | ArrayBuffer | Buffer[], binary: boolean}> = [];
+        client.on('message', (data, binary) => {
+          if(upstream.readyState === WebSocket.OPEN) upstream.send(data, {binary});
+          else pending.push({data, binary});
+        });
+        upstream.on('open', () => {
+          for(const message of pending) upstream.send(message.data, {binary: message.binary});
+          pending.length = 0;
+        });
+        upstream.on('message', (data, binary) => {
+          if(client.readyState === WebSocket.OPEN) client.send(data, {binary});
+        });
+        client.on('close', () => upstream.close());
+        upstream.on('close', () => client.close());
+        client.on('error', () => upstream.close());
+        upstream.on('error', () => client.close(1011, 'local Teagram server unavailable'));
+      });
+    }
+  });
+
+  try {
+    await page.context().route('**/*', async(route) => {
+      const url = new URL(route.request().url());
+      if((url.hostname === APP_HOST && url.protocol === 'https:' && !url.port) || url.hostname === SERVER_HOST) await route.continue();
+      else await route.abort();
+    });
+    await page.goto(`${appOrigin.origin}/?noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
+    await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+    const hostInput = page.getByRole('textbox', {name: 'Server address'});
+    await expect(hostInput).toHaveValue('');
+    await hostInput.fill(SERVER_HOST);
+    await page.getByRole('textbox', {name: 'Username'}).fill('Guest_Test_123');
+    await page.getByRole('button', {name: 'Next', exact: true}).click();
+    const confirmation = page.getByRole('dialog', {name: 'Confirm this server'});
+    await expect(confirmation.getByText(SERVER_HOST, {exact: true})).toBeVisible();
+    await confirmation.getByRole('button', {name: 'Confirm', exact: true}).click();
+
+    const auth = page.locator('#auth-pages');
+    const guestButton = auth.getByRole('button', {name: 'Try it as a guest'});
+    await expect(guestButton).toBeVisible({timeout: 30_000});
+    await expect(auth.getByTestId('turnstile-challenge')).toHaveCount(0);
+    await guestButton.click();
+    const terms = page.getByRole('dialog', {name: 'Terms of service'});
+    await expect(terms).toBeVisible();
+    await expect(auth.getByTestId('turnstile-challenge')).toHaveCount(0);
+    await terms.getByRole('button', {name: 'Accept'}).click();
+    await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
+    expect(turnstileRequests).toEqual([]);
+    const guestUserId = await page.evaluate(() => String((window as any).rootScope.myId));
+    expect(Number(guestUserId)).toBeGreaterThan(0);
+    const readStoredGuestUserId = () => page.evaluate(() => {
+      const accountKey = Object.keys(localStorage).find((key) => key.endsWith(':account1'));
+      if(!accountKey) return '0';
+      try {
+        return String(JSON.parse(localStorage.getItem(accountKey) || '{}').userId || '0');
+      } catch{
+        return '0';
+      }
+    });
+    await expect.poll(readStoredGuestUserId).toBe(guestUserId);
+    await page.reload({waitUntil: 'domcontentloaded'});
+    await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
+    await expect(page.locator('#auth-pages')).toHaveCount(0);
+    await expect.poll(readStoredGuestUserId).toBe(guestUserId);
+    const authorizationState = await page.evaluate(async() => {
+      try {
+        const result = await (window as any).rootScope.managers.appAccountManager.getAuthorizations();
+        return {type: result._, count: result.authorizations.length};
+      } catch(error) {
+        return {
+          errorType: String((error as any)?.type || ''),
+          errorMessage: String((error as any)?.message || error)
+        };
+      }
+    });
+    expect(authorizationState).toMatchObject({type: 'account.authorizations'});
+    expect((authorizationState as {count?: number}).count).toBeGreaterThan(0);
+    expect(turnstileRequests).toEqual([]);
+  } finally {
+    try {
+      await page.close();
+      await page.context().unrouteAll({behavior: 'wait'});
+    } finally {
+      await edgeProxy.close();
+    }
+  }
 });
