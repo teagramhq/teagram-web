@@ -525,6 +525,80 @@ test('applies peer UI callbacks only after replacing the old bubbles', async() =
   expect(events).toEqual(['replace', 'apply']);
 });
 
+test('fails the peer transition when input setup rejects after history resolves', async() => {
+  let resolveHistory!: () => void;
+  const history = new Promise<void>((resolve) => {
+    resolveHistory = resolve;
+  });
+  let resolveHistorySettled!: () => void;
+  const historySettled = new Promise<void>((resolve) => {
+    resolveHistorySettled = resolve;
+  });
+  history.then(() => resolveHistorySettled());
+  let rejectInputSetup!: (error: Error) => void;
+  const inputSetup = new Promise<() => void>((_resolve, reject) => {
+    rejectInputSetup = reject;
+  });
+  const failure = new Error('input peer setup failed');
+  const {harness, chat, getHistory1} = makeMountableSetPeerHarness();
+  const events: string[] = [];
+  const dispatchEvent = vi.fn();
+  const chatInput = document.createElement('div');
+  const messageInput = document.createElement('div');
+  const input = Object.assign(Object.create(ChatInput.prototype), {
+    peerChanging: false,
+    chatInput,
+    messageInput
+  }) as any;
+  input.finishPeerChange = vi.fn(() => {
+    input.peerChanging = true;
+    return inputSetup;
+  });
+  Object.setPrototypeOf(chat, Chat.prototype);
+  Object.assign(chat, {
+    peerChanged: false,
+    peerChangeFailed: false,
+    cleanup: vi.fn(),
+    topbar: {finishPeerChange: vi.fn(async() => () => events.push('topbar'))},
+    bubbles: {finishPeerChange: vi.fn(async() => () => events.push('bubbles')), lazyLoadQueue: {queueId: 0}},
+    input,
+    sharedMediaTab: undefined,
+    sharedMediaTabs: [],
+    handleBackgrounds: vi.fn(async() => () => events.push('backgrounds')),
+    log: Object.assign(vi.fn(), {warn: vi.fn(), error: vi.fn(), setPrefix: vi.fn()}),
+    isMainChat: true,
+    container: {dataset: {}, classList: {toggle: vi.fn()}},
+    appImManager: {getChatSavedPosition: vi.fn(() => undefined), dispatchEvent}
+  });
+  chat.finishPeerChange = (options: any) => Chat.prototype.finishPeerChange.call(chat, options);
+  getHistory1.mockReturnValueOnce(Promise.resolve({
+    cached: true,
+    promise: history,
+    waitPromise: Promise.resolve()
+  }));
+  const animationIntersector = (await import('@components/animationIntersector')).default;
+
+  try {
+    const result = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
+    await vi.waitFor(() => expect(events).toEqual(['topbar', 'bubbles']));
+
+    resolveHistory();
+    await historySettled;
+    rejectInputSetup(failure);
+
+    await expect(result.promise).rejects.toBe(failure);
+
+    expect(input.peerChanging).toBe(false);
+    expect(chatInput.classList.contains('is-hidden')).toBe(true);
+    expect(messageInput.contentEditable).toBe('false');
+    expect(chat.peerChanged).toBe(false);
+    expect(chat.peerChangeFailed).toBe(true);
+    expect(dispatchEvent).not.toHaveBeenCalledWith('peer_changed', chat);
+  } finally {
+    animationIntersector.unlockGroup('chat');
+  }
+});
+
 test('rejects prepared UI readiness when mounting the new chat fails', async() => {
   const failure = new Error('chat mount failed');
   const {harness, chat, setPeerLogger} = makeSetPeerHarness(Promise.resolve());

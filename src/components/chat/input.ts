@@ -2696,6 +2696,13 @@ export default class ChatInput {
     };
   }
 
+  public failPeerChange() {
+    this.peerChanging = false;
+    this.restoreInputLock = undefined;
+    this.chatInput.classList.add('is-hidden');
+    this.messageInput.contentEditable = 'false';
+  }
+
   private updateOffset(
     type: ChatInput['hasOffset']['type'],
     forwards: boolean,

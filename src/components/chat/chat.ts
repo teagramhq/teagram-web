@@ -1225,6 +1225,15 @@ export default class Chat extends EventListenerBase<{
     this.cleanup(false);
 
     const sharedMediaTab = this.sharedMediaTab;
+    const failPeerChange = () => {
+      if(!middleware()) {
+        return;
+      }
+
+      this.peerChanged = false;
+      this.peerChangeFailed = true;
+      this.input?.failPeerChange();
+    };
 
     const peerChangePromises = {
       topbar: this.topbar?.finishPeerChange(options),
@@ -1252,14 +1261,22 @@ export default class Chat extends EventListenerBase<{
         this.appImManager.dispatchEvent('peer_changed', this);
       }
     };
-    const applyUiCallbacks = (callbacks: Array<(() => void) | undefined>) => {
+    const applyUiCallbacks = (callbacks: Array<[string, (() => void) | undefined]>) => {
       if(didApplyUiCallbacks || !middleware()) {
         return;
       }
       didApplyUiCallbacks = true;
 
-      callbacks.forEach((callback) => {
-        callback?.();
+      callbacks.forEach(([name, callback]) => {
+        try {
+          callback?.();
+        } catch(error) {
+          if(name === 'input') {
+            failPeerChange();
+          }
+
+          throw error;
+        }
       });
 
       applyFinalUiChanges();
@@ -1272,6 +1289,10 @@ export default class Chat extends EventListenerBase<{
           const result = await namedPromises({[name]: promise}, this.log);
           return {name, callback: result[name] as (() => void) | undefined};
         } catch(error) {
+          if(name === 'input') {
+            failPeerChange();
+          }
+
           this.log.error('peer change part failed:', name, error);
           return {name, error};
         }
@@ -1298,6 +1319,13 @@ export default class Chat extends EventListenerBase<{
           for(const part of preparedParts) {
             const result = await part;
             if('error' in result) {
+              if(!middleware()) {
+                return;
+              }
+              if(result.name === 'input') {
+                failPeerChange();
+                throw result.error;
+              }
               continue;
             }
             if(!middleware()) {
@@ -1307,6 +1335,10 @@ export default class Chat extends EventListenerBase<{
               result.callback?.();
             } catch(error) {
               this.log.error('peer change apply part failed:', result.name, error);
+              if(result.name === 'input') {
+                failPeerChange();
+                throw error;
+              }
             }
           }
 
@@ -1327,8 +1359,14 @@ export default class Chat extends EventListenerBase<{
       return {ready, apply};
     }
 
-    const callbacksObj = await namedPromises(peerChangePromises, this.log);
-    const callbacks = Object.values(callbacksObj);
+    let callbacksObj: Awaited<ReturnType<typeof namedPromises<typeof peerChangePromises>>>;
+    try {
+      callbacksObj = await namedPromises(peerChangePromises, this.log);
+    } catch(error) {
+      failPeerChange();
+      throw error;
+    }
+    const callbacks = Object.entries(callbacksObj) as Array<[string, (() => void) | undefined]>;
     sharedMediaTab?.loadSidebarMedia(true);
 
     if(!middleware()) {
