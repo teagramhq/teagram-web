@@ -137,6 +137,10 @@ export function expectedScreenshotCount({pollCreationNegativeControl = false, sc
   return 20 + channelScreenshots + pollScreenshots;
 }
 
+export function expectedBrowserContextCount() {
+  return REQUIRED_OBSERVATION_CONTEXTS.length;
+}
+
 export function parseRealClientArgs(argv) {
   const argumentsList = argv[0] === '--' ? argv.slice(1) : argv;
   if(argumentsList.includes('--help') || argumentsList.includes('-h')) {
@@ -344,7 +348,9 @@ function assertServerReadyEvidence(ready) {
   const observer = evidence?.observerControlledAttempts;
   const workerTypes = ['page', 'shared_worker', 'service_worker'];
 
-  if(security?.registrationClosed !== true || security.loginCodeLogging !== false ||
+  if(security?.registrationClosed !== true ||
+      security.guestSignUpEnabled === true || security.turnstileTestMode === true ||
+      security.loginCodeLogging !== false ||
       security.electionClosed !== true || security.administratorIsNull !== true ||
       security.ordinaryUsers !== 2 || security.usernameAccounts !== 2 ||
       security.passwordVerifiers !== 2 || security.initialAuthKeys !== 0 || security.initialMessages !== 0 || security.finalAuthKeys !== 2 ||

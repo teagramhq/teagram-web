@@ -6,6 +6,7 @@ import {isIPv4} from 'node:net';
 
 import {
   assertAllScenariosPassed,
+  expectedBrowserContextCount,
   expectedScreenshotCount,
   formatBrowserFailureMessage,
   parsePassedBrowserGateBreakdown,
@@ -328,13 +329,14 @@ if(args?.help) {
       browserResult.gateBreakdown = parsePassedBrowserGateBreakdown(browserResult);
       const expectedScreenshots = expectedScreenshotCount(args);
       const incompleteEvidence = [];
-      if(browserResult.contextCount !== 2) incompleteEvidence.push('contexts');
+      if(browserResult.contextCount !== expectedBrowserContextCount()) incompleteEvidence.push('contexts');
       if(browserResult.screenshotsCaptured !== expectedScreenshots) {
         incompleteEvidence.push(`screenshots_${Number.isSafeInteger(browserResult.screenshotsCaptured) ? browserResult.screenshotsCaptured : 'unavailable'}_expected_${expectedScreenshots}`);
       }
       if(browserResult.network?.unexpectedAttempts !== 0) incompleteEvidence.push('unexpected_egress');
       if(browserResult.network?.observerErrors !== 0) incompleteEvidence.push('observer_errors');
-      for(const account of ['alice', 'bob']) {
+      const observedAccounts = ['alice', 'bob'];
+      for(const account of observedAccounts) {
         const context = browserResult.network?.contexts?.[account];
         if(!hasNetworkSourceEvidence(context)) incompleteEvidence.push(`${account}_network_sources`);
         if(!Number.isSafeInteger(context?.workerTargets?.service_worker) || context.workerTargets.service_worker < 1) {

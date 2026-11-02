@@ -790,6 +790,25 @@ describe('worker coverage failure diagnostics', () => {
       workerCoverageBreakdown: hostile
     })).toThrow('worker coverage evidence is invalid');
   });
+
+  it('rejects guest contexts in worker coverage evidence', () => {
+    const guestBreakdown = structuredClone(breakdown) as any;
+    guestBreakdown.contexts.guest = {...breakdown.contexts.alice};
+
+    expect(() => formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'browser_worker_observation_incomplete',
+      workerCoverageBreakdown: guestBreakdown
+    })).toThrow('worker coverage evidence is invalid');
+
+    const guestTargetBreakdown = structuredClone(breakdown);
+    guestTargetBreakdown.targets[0].owningContext = 'guest';
+    expect(() => formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'browser_worker_observation_incomplete',
+      workerCoverageBreakdown: guestTargetBreakdown
+    })).toThrow('worker coverage evidence is invalid');
+  });
 });
 
 describe('confined runner shared-worker observation contract', () => {
@@ -1442,6 +1461,32 @@ describe('confined runner shared-worker observation contract', () => {
     await expect(networkObserver.stop()).rejects.toBe(detachFailure);
   });
 
+  it('does not detach a page session already closed with its target', async() => {
+    const contextObserver = observation.createContextObserver('closed-session');
+    const detach = vi.fn(async() => {});
+    const {cdp, networkObserver} = createNetworkObserverHarness(contextObserver, {detach});
+    await networkObserver.start();
+
+    cdp.emit('close');
+    await networkObserver.stop();
+
+    expect(detach).not.toHaveBeenCalled();
+  });
+
+  it('accepts a page target that closes during observer detach', async() => {
+    const contextObserver = observation.createContextObserver('closing-session');
+    const detachFailure = new Error('target closed during detach');
+    const harness = createNetworkObserverHarness(contextObserver, {
+      detach: async() => {
+        harness.cdp.emit('close');
+        throw detachFailure;
+      }
+    });
+    await harness.networkObserver.start();
+
+    await expect(harness.networkObserver.stop()).resolves.toBeUndefined();
+  });
+
   it('times out a stalled page observer cleanup command', async() => {
     const contextObserver = observation.createContextObserver('stalled-detach');
     const {networkObserver} = createNetworkObserverHarness(contextObserver, {detach: () => new Promise(() => {})});
@@ -1840,8 +1885,15 @@ describe('confined runner shared-worker observation contract', () => {
     expect(observation.evaluateControl('c9_unknown_control', blocks.c3_no_construction)).toBe('fail');
   });
 
-  it('requires complete per-context evidence in the published report', () => {
+  it('rejects guest contexts in the published report even when callers request them', () => {
     expect(parseWorkerObservation(observationBlock())).toStrictEqual(observationBlock());
+
+    const guestObservation = observationBlock();
+    guestObservation.contexts.guest = replayContext(appContextEvents());
+    guestObservation.attachedTargets += guestObservation.contexts.guest.attachedTargets;
+    guestObservation.countedEvents += guestObservation.contexts.guest.countedEvents;
+    expect(() => (parseWorkerObservation as any)(guestObservation, ['alice', 'bob', 'guest']))
+    .toThrow('worker observation app contexts are incomplete');
 
     const tampered = (mutate: (block: any) => void) => {
       const block = JSON.parse(JSON.stringify(observationBlock()));
@@ -3854,6 +3906,11 @@ describe('real client scenario contract', () => {
     expect(() => parseRequiredScenarios(' , ')).toThrow('scenario selection is required');
   });
 
+  it('rejects guest-signup from the private-artifact scenario list', () => {
+    expect(() => parseRequiredScenarios('sign-in,first-message,message,group,guest-signup'))
+    .toThrow('unknown scenario: guest-signup');
+  });
+
   it('requires every scenario exactly once', () => {
     expect(() => parseRequiredScenarios('sign-in,message')).toThrow('required scenarios are missing');
     expect(() => parseRequiredScenarios('sign-in,first-message,message,group,group')).toThrow('duplicate scenario');
@@ -3907,6 +3964,10 @@ describe('real client scenario contract', () => {
     expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll']})).toBe(24);
     expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']})).toBe(34);
     expect(() => realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'group']})).toThrow('negative control requires poll');
+  });
+
+  it('keeps private-artifact observation to the two synthetic accounts', () => {
+    expect(realClientContract.expectedBrowserContextCount()).toBe(2);
   });
 
   it('pins the poll creation negative control to the pre-MAIN-2111 server and fixed evidence', () => {
@@ -4020,6 +4081,20 @@ describe('real client scenario contract', () => {
       .map((event) => JSON.stringify(event)).join('\n'), pins)).toThrow('server-ready security evidence is incomplete');
     expect(() => parseFixtureReadiness([expected, {...artifactReady, auditChecks: {manifestMode: true}}]
       .map((event) => JSON.stringify(event)).join('\n'), pins)).toThrow('artifact-ready audit or browser evidence is incomplete');
+  });
+
+  it('rejects an open-registration fixture in the private-artifact runner', () => {
+    const serverReady = buildServerReady();
+    serverReady.security = {
+      ...serverReady.security,
+      registrationClosed: false,
+      guestSignUpEnabled: true,
+      turnstileTestMode: true
+    };
+    const text = JSON.stringify(serverReady);
+
+    expect(() => parseFixtureReadiness(text, READINESS_PINS, {requireArtifact: false}))
+    .toThrow('server-ready security evidence is incomplete');
   });
 
   it('requires the manifest payload digest beside the staged artifact digest', () => {
@@ -4577,6 +4652,11 @@ describe('real client cleanup reports', () => {
       status: 'failed',
       stage: 'cleanup',
       workerOverflowReasons: {alice: 'none', bob: HOSTILE.phrase}
+    })).toThrow('worker overflow reason evidence is invalid');
+    expect(() => formatBrowserFailureMessage({
+      status: 'failed',
+      stage: 'cleanup',
+      workerOverflowReasons: {alice: 'none', bob: 'none', guest: 'none'}
     })).toThrow('worker overflow reason evidence is invalid');
   });
 });
