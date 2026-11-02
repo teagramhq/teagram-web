@@ -210,6 +210,13 @@ jobs:
       - name: Run private username auth browser smoke
         run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/privateUsernameSignIn.spec.ts e2e/privateUsernameSignInTurnstile.spec.ts e2e/privateUsernameRegistration.spec.ts e2e/userInvites.spec.ts e2e/guestSignup.spec.ts e2e/customServerRegistration.spec.ts
 
+      - name: Run real custom-server guest signup browser smoke
+        id: custom-server-guest-smoke
+        env:
+          PLAYWRIGHT_TRACING_NO_WEBSOCKET_FRAMES: '1'
+          TWEB_PRIVATE_AUTH_OUTPUT_DIR: ${{ runner.temp }}/custom-server-playwright-results/guest-signup
+        run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/customServerLocalSignIn.spec.ts --project=chromium --workers=1 --grep 'creates a guest on the real custom server'
+
       - name: Restart the local Teagram server with registration closed
         id: custom-server-fixture
         if: ${{ always() && steps.local-server.outcome == 'success' }}
@@ -254,7 +261,8 @@ jobs:
         env:
           PLAYWRIGHT_TRACING_NO_WEBSOCKET_FRAMES: '1'
           PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/custom-server-playwright-report.json
-        run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/customServerLocalSignIn.spec.ts --project=chromium --workers=1 --reporter=list,json
+          TWEB_PRIVATE_AUTH_OUTPUT_DIR: ${{ runner.temp }}/custom-server-playwright-results/sign-in
+        run: pnpm exec playwright test -c playwright.private-auth.config.ts e2e/customServerLocalSignIn.spec.ts --project=chromium --workers=1 --reporter=list,json --grep-invert 'creates a guest on the real custom server'
 
       - name: Run standard auth browser smoke
         if: success()
@@ -275,7 +283,7 @@ jobs:
         env:
           TWEB_MIGRATION_OUTCOME: ${{ steps.migrate-server.outcome || 'not-run' }}
           TWEB_STARTUP_OUTCOME: ${{ (steps.local-server.outcome == 'failure' || steps.custom-server-fixture.outcome == 'failure') && 'failure' || steps.local-server.outcome || steps.custom-server-fixture.outcome || 'not-run' }}
-          TWEB_CUSTOM_SERVER_SMOKE_OUTCOME: ${{ steps.custom-server-smoke.outcome || 'not-run' }}
+          TWEB_CUSTOM_SERVER_SMOKE_OUTCOME: ${{ (steps.custom-server-smoke.outcome == 'failure' || steps.custom-server-guest-smoke.outcome == 'failure') && 'failure' || steps.custom-server-smoke.outcome || steps.custom-server-guest-smoke.outcome || 'not-run' }}
           TWEB_PRIVATE_AUTH_JSON_REPORT: ${{ runner.temp }}/custom-server-playwright-report.json
         run: node .github/scripts/collect-custom-server-smoke-artifacts.mjs
 
@@ -284,7 +292,7 @@ jobs:
           ${{
             always() &&
             steps.diagnostics.outputs.artifact_ready == 'true' &&
-            (steps.migrate-server.outcome == 'failure' || steps.local-server.outcome == 'failure' || steps.custom-server-fixture.outcome == 'failure' || steps.custom-server-smoke.outcome == 'failure')
+            (steps.migrate-server.outcome == 'failure' || steps.local-server.outcome == 'failure' || steps.custom-server-fixture.outcome == 'failure' || steps.custom-server-guest-smoke.outcome == 'failure' || steps.custom-server-smoke.outcome == 'failure')
           }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
