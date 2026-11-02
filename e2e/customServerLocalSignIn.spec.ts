@@ -1756,3 +1756,211 @@ test('unlocks server selection when the pinned-key popup import fails', async({p
   await usernameInput.fill('Alice_123');
   await expect(page.getByRole('button', {name: 'Next', exact: true})).toBeEnabled();
 });
+
+test('creates a guest on the real custom server without Turnstile and restores it after reload', async({page}, testInfo) => {
+  const serverHttpUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL;
+  const serverWebSocketUrl = process.env.TEAGRAM_CUSTOM_SERVER_TEST_WS_URL;
+  const hasServerFixture = !!serverHttpUrl && !!serverWebSocketUrl;
+  test.skip(!process.env.CI && !hasServerFixture, 'CI must provide the local Teagram server');
+  if(!hasServerFixture) throw new Error('CI must provide the local Teagram server');
+
+  const discoveryResponse = await fetch(`${serverHttpUrl}/.well-known/teagramd/client`);
+  expect(discoveryResponse.ok).toBe(true);
+  const discovery = await discoveryResponse.json() as {
+    demo?: {guest_sign_up?: boolean},
+    websocket?: {endpoint?: string}
+  };
+  expect(discovery.demo?.guest_sign_up).toBe(true);
+  expect(discovery.websocket?.endpoint).toBe(`wss://${SERVER_HOST}/apiws`);
+
+  const appBaseUrl = new URL(testInfo.project.use.baseURL as string);
+  const appPort = Number(appBaseUrl.port);
+  const appOrigin = new URL(appBaseUrl);
+  appOrigin.protocol = 'https:';
+  appOrigin.hostname = APP_HOST;
+  appOrigin.port = '';
+  await page.context().grantPermissions(['local-network-access'], {origin: appOrigin.origin});
+  const edgeConfig = readFileSync(resolve('deploy/teagram-web/nginx.conf'), 'utf8');
+  const edgeCsp = edgeConfig.match(/add_header Content-Security-Policy "([^"]+)" always;/)?.[1];
+  if(!edgeCsp) throw new Error('deployment CSP is missing from deploy/teagram-web/nginx.conf');
+
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), 'teagram-custom-guest-signup-'));
+  let tlsServer: ReturnType<typeof createServer> | undefined;
+  let tlsSocketTracker: ReturnType<typeof trackTlsServerSockets> | undefined;
+  let webSocketServer: WebSocketServer | undefined;
+  const turnstileRequests: string[] = [];
+  page.on('request', (browserRequest) => {
+    if(browserRequest.url().includes('challenges.cloudflare.com')) turnstileRequests.push(browserRequest.url());
+  });
+
+  try {
+    const credentials = createTlsFixtureCredentials(temporaryDirectory, [APP_HOST, SERVER_HOST]);
+    webSocketServer = new WebSocketServer({noServer: true});
+    tlsServer = createServer({
+      key: readFileSync(credentials.privateKeyPath),
+      cert: readFileSync(credentials.certificatePath)
+    }, (request, response) => {
+      const host = (request.headers.host || '').replace(/:\d+$/, '');
+      const url = new URL(request.url || '/', `https://${host}`);
+      if(host === SERVER_HOST && url.pathname === '/.well-known/teagramd/client') {
+        void fetch(`${serverHttpUrl}${url.pathname}${url.search}`).then(async(upstreamResponse) => {
+          const body = await upstreamResponse.text();
+          response.writeHead(upstreamResponse.status, Object.fromEntries(upstreamResponse.headers.entries()));
+          response.end(body);
+        }).catch(() => {
+          response.writeHead(502);
+          response.end();
+        });
+        return;
+      }
+      if(host !== APP_HOST) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+
+      const upstream = httpRequest({
+        host: '::1',
+        port: appPort,
+        method: request.method,
+        path: request.url,
+        headers: {...request.headers, host: `localhost:${appPort}`}
+      }, (upstreamResponse) => {
+        const headers = {...upstreamResponse.headers};
+        if(url.pathname === '/') headers['content-security-policy'] = edgeCsp;
+        response.writeHead(upstreamResponse.statusCode || 502, headers);
+        upstreamResponse.pipe(response);
+      });
+      upstream.on('error', () => response.destroy());
+      request.pipe(upstream);
+    });
+    tlsSocketTracker = trackTlsServerSockets(tlsServer);
+    tlsServer.on('upgrade', (request, socket, head) => {
+      tlsSocketTracker!.markUpgrade(socket);
+      if(request.url !== '/apiws') {
+        socket.destroy();
+        return;
+      }
+      webSocketServer!.handleUpgrade(request, socket, head, (client) => {
+        const upstream = new WebSocket(serverWebSocketUrl, {
+          headers: {origin: request.headers.origin || ''}
+        });
+        const pending: Array<{data: Buffer | ArrayBuffer | Buffer[], binary: boolean}> = [];
+        client.on('message', (data, binary) => {
+          if(upstream.readyState === WebSocket.OPEN) upstream.send(data, {binary});
+          else pending.push({data, binary});
+        });
+        upstream.on('open', () => {
+          for(const message of pending) upstream.send(message.data, {binary: message.binary});
+          pending.length = 0;
+        });
+        upstream.on('message', (data, binary) => {
+          if(client.readyState === WebSocket.OPEN) client.send(data, {binary});
+        });
+        client.on('close', () => upstream.close());
+        upstream.on('close', () => client.close());
+        client.on('error', () => upstream.close());
+        upstream.on('error', () => client.close(1011, 'local Teagram server unavailable'));
+      });
+    });
+    await new Promise<void>((resolveListen, reject) => {
+      tlsServer!.once('error', reject);
+      tlsServer!.listen(18443, '127.0.0.1', resolveListen);
+    });
+    await page.context().route('**/*', async(route) => {
+      const url = new URL(route.request().url());
+      if(url.hostname === APP_HOST && url.protocol === 'https:' && !url.port) {
+        url.protocol = 'http:';
+        url.hostname = 'localhost';
+        url.port = String(appPort);
+        const upstreamResponse = await route.fetch({url: url.toString(), maxRetries: 1});
+        if(url.pathname === '/') {
+          const headers = await upstreamResponse.headers();
+          headers['content-security-policy'] = edgeCsp;
+          await route.fulfill({response: upstreamResponse, headers});
+        } else {
+          await route.fulfill({response: upstreamResponse});
+        }
+      } else if(url.hostname === SERVER_HOST && url.pathname === '/.well-known/teagramd/client') {
+        const upstreamResponse = await route.fetch({
+          url: `${serverHttpUrl}${url.pathname}${url.search}`,
+          maxRetries: 1
+        });
+        await route.fulfill({response: upstreamResponse});
+      } else if(url.hostname === SERVER_HOST) {
+        await route.continue();
+      } else {
+        await route.abort();
+      }
+    });
+    await page.goto(`${appOrigin.origin}/?noServiceWorker=1`, {waitUntil: 'domcontentloaded'});
+    await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
+    const hostInput = page.getByRole('textbox', {name: 'Server address'});
+    await expect(hostInput).toHaveValue('');
+    await hostInput.fill(SERVER_HOST);
+    await page.getByRole('textbox', {name: 'Username'}).fill('Guest_Test_123');
+    await page.getByRole('button', {name: 'Next', exact: true}).click();
+    const confirmation = page.getByRole('dialog', {name: 'Confirm this server'});
+    await expect(confirmation.getByText(SERVER_HOST, {exact: true})).toBeVisible();
+    await confirmation.getByRole('button', {name: 'Confirm', exact: true}).click();
+
+    const auth = page.locator('#auth-pages');
+    const guestButton = auth.getByRole('button', {name: 'Try it as a guest'});
+    await expect(guestButton).toBeVisible({timeout: 30_000});
+    await expect(auth.getByTestId('turnstile-challenge')).toHaveCount(0);
+    await guestButton.click();
+    const terms = page.getByRole('dialog', {name: 'Terms of service'});
+    await expect(terms).toBeVisible();
+    await expect(auth.getByTestId('turnstile-challenge')).toHaveCount(0);
+    await terms.getByRole('button', {name: 'Accept'}).click();
+    await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
+    expect(turnstileRequests).toEqual([]);
+    const guestUserId = await page.evaluate(() => String((window as any).rootScope.myId));
+    expect(Number(guestUserId)).toBeGreaterThan(0);
+    const readStoredGuestUserId = () => page.evaluate(() => {
+      const accountKey = Object.keys(localStorage).find((key) => key.endsWith(':account1'));
+      if(!accountKey) return '0';
+      try {
+        return String(JSON.parse(localStorage.getItem(accountKey) || '{}').userId || '0');
+      } catch{
+        return '0';
+      }
+    });
+    await expect.poll(readStoredGuestUserId).toBe(guestUserId);
+    await page.reload({waitUntil: 'domcontentloaded'});
+    await expect(page.locator('#page-chats')).toBeVisible({timeout: 60_000});
+    await expect(page.locator('#auth-pages')).toHaveCount(0);
+    await expect.poll(readStoredGuestUserId).toBe(guestUserId);
+    const authorizationState = await page.evaluate(async() => {
+      try {
+        const result = await (window as any).rootScope.managers.appAccountManager.getAuthorizations();
+        return {type: result._, count: result.authorizations.length};
+      } catch(error) {
+        return {
+          errorType: String((error as any)?.type || ''),
+          errorMessage: String((error as any)?.message || error)
+        };
+      }
+    });
+    expect(authorizationState).toMatchObject({type: 'account.authorizations'});
+    expect((authorizationState as {count?: number}).count).toBeGreaterThan(0);
+    expect(turnstileRequests).toEqual([]);
+  } finally {
+    try {
+      await page.close();
+      await page.context().unrouteAll({behavior: 'wait'});
+      if(webSocketServer) {
+        for(const client of webSocketServer.clients) client.terminate();
+        await new Promise<void>((resolveClose, reject) => {
+          webSocketServer!.close((error) => error ? reject(error) : resolveClose());
+        });
+      }
+    } finally {
+      try {
+        if(tlsServer?.listening) await closeTlsServer(tlsServer, tlsSocketTracker);
+      } finally {
+        rmSync(temporaryDirectory, {recursive: true, force: true});
+      }
+    }
+  }
+});

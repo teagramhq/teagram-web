@@ -140,7 +140,9 @@ jobs:
           TG_ADVERTISE_ADDR=second-server.example.test:2443
           TG_WEBSOCKET_LISTEN_ADDR=127.0.0.1:2445
           TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io
-          TG_REGISTRATION=closed
+          TG_REGISTRATION=open
+          TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
+          TG_TURNSTILE_TEST_MODE=true
           TEAGRAM_CUSTOM_SERVER_TEST_HTTP_URL=http://127.0.0.1:2445
           TEAGRAM_CUSTOM_SERVER_TEST_WS_URL=ws://127.0.0.1:2445/apiws
           TEAGRAM_CUSTOM_SERVER_TEST_USER=custom_server_user
