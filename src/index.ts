@@ -74,6 +74,7 @@ import {useMediaSizes} from '@helpers/mediaSizes';
 import useHasFoldersSidebar, {useIsSidebarCollapsed} from '@stores/foldersSidebar';
 import appNavigationController from '@components/appNavigationController';
 import {preventCrossTabDynamicImportDeadlock} from '@helpers/preventDeadlock';
+import appChatBackground from '@components/chat/bubbles/chatBackground';
 import {getActiveServerHost, isAutoGuestEnabled} from '@config/serverContext';
 import {getServerSelectionAction} from '@config/serverSelection';
 import {createCurrentGuestAccountLifecycle, type GuestAccountManagers} from '@lib/guestAccountLifecycle';
@@ -551,10 +552,7 @@ const onDocumentReady = async() => {
   await preventCrossTabDynamicImportDeadlock();
 
   await PasscodeLockScreenController.waitForUnlock(async() => {
-    const [{default: appChatBackground}, settings] = await Promise.all([
-      import('@components/chat/bubbles/chatBackground'),
-      commonStateStorage.get('settings')
-    ]);
+    const settings = await commonStateStorage.get('settings');
     settings && setAppSettingsSilent(settings);
     themeController.setThemeListener();
 
@@ -678,6 +676,9 @@ const onDocumentReady = async() => {
   await IMAGE_MIME_TYPES_SUPPORTED_PROMISE;
 
   console.timeLog(TIME_LABEL, 'IMAGE_MIME_TYPES_SUPPORTED_PROMISE');
+
+  appChatBackground.attach();
+  appChatBackground.setBackground({transition: 'instant'});
 
   setDocumentLangPackProperties(langPack);
 

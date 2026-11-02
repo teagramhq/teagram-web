@@ -664,6 +664,52 @@ test.beforeAll(async({browser}) => {
   }
 });
 
+test('attaches the chat wallpaper before deferred UI idles', async({browser}) => {
+  test.skip(!report.requireBase, 'unlocked deferred startup check runs on pull requests');
+  const run = preparedVariants['100x'].head;
+  expect(run, '100x head sign-in snapshot was not prepared').toBeTruthy();
+
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run!.storageState
+  });
+
+  try {
+    const page = await context.newPage();
+    await page.addInitScript(() => {
+      const nativeRequestIdleCallback = (window as any).requestIdleCallback;
+      (window as any).requestIdleCallback = (callback: IdleRequestCallback, options: IdleRequestOptions) => {
+        if(document.body?.dataset.deferredUi === 'pending') {
+          const callbacks = ((window as any).__deferredUiIdleCallbacks ??= []) as IdleRequestCallback[];
+          callbacks.push(callback);
+          return callbacks.length;
+        }
+
+        return nativeRequestIdleCallback.call(window, callback, options);
+      };
+    });
+    await page.goto(run!.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    await expect.poll(() => page.evaluate(() => ((window as any).__deferredUiIdleCallbacks?.length ?? 0) > 0)).toBe(true);
+
+    const hasWallpaperLayer = await page.evaluate(() => {
+      const wrapper = document.body.firstElementChild;
+      const layer = wrapper?.firstElementChild;
+      return wrapper?.tagName === 'DIV' && layer?.tagName === 'DIV' &&
+        getComputedStyle(layer).position === 'absolute' && getComputedStyle(layer).pointerEvents === 'none';
+    });
+    expect(hasWallpaperLayer, 'chat wallpaper layer was not attached before deferred UI loaded').toBe(true);
+
+    await page.evaluate(() => (window as any).__deferredUiIdleCallbacks.forEach((callback: IdleRequestCallback) => {
+      callback({didTimeout: true, timeRemaining: () => 0});
+    }));
+    await page.waitForFunction(() => document.body.dataset.deferredUi === 'ready');
+  } finally {
+    await context.close();
+  }
+});
+
 async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixture: Fixture) {
   const {variant, origin} = run;
   const measured = report.variants[variant][scale];
