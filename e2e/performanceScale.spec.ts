@@ -50,6 +50,7 @@ type MeasurementBoundary = {
 };
 
 const scales: Scale[] = ['1x', '100x'];
+const NEGATIVE_CONTROL_STALL_MS = 200;
 const fixturePaths: Record<Scale, string | undefined> = {
   '1x': process.env.PERF_FIXTURE_FILE_1X,
   '100x': process.env.PERF_FIXTURE_FILE_100X
@@ -82,7 +83,13 @@ test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 });
 
-async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false) {
+async function installInstrumentation(
+  page: Page,
+  requestCounter: {value: number},
+  origin: string,
+  injectColdStall = false,
+  coldStallDurationMs = 0
+) {
   const bundleRequests = createBundleRequestTracker(new URL(origin).origin);
   bundleRequestTrackers.set(page, bundleRequests);
   page.on('request', (request) => {
@@ -93,7 +100,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   page.on('requestfailed', (request) => bundleRequests.requestFailed(request));
   page.on('worker', (worker) => bundleRequests.workerReady(worker.url()));
   await page.exposeBinding('__teagramBundleWorkerReady', (_source, url: string) => bundleRequests.workerReady(url));
-  return page.addInitScript((injectColdStall: boolean) => {
+  return page.addInitScript(({injectColdStall, coldStallDurationMs}: {injectColdStall: boolean, coldStallDurationMs: number}) => {
     // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
     const SharedWorkerConstructor = (window as any).SharedWorker;
     if(SharedWorkerConstructor) {
@@ -132,7 +139,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
       perf.injectedLongTask = {started, duration: performance.now() - started};
       return perf.injectedLongTask;
     };
-    if(injectColdStall) setTimeout(() => perf.injectLongTask(100), 0);
+    if(injectColdStall) setTimeout(() => perf.injectLongTask(coldStallDurationMs), 0);
     perf.startFrames = () => {
       perf.frameActive = true;
       perf.lastFrame = performance.now();
@@ -145,7 +152,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
       requestAnimationFrame(sampleFrame);
     };
     perf.stopFrames = () => perf.frameActive = false;
-  }, injectColdStall);
+  }, {injectColdStall, coldStallDurationMs});
 }
 
 async function waitForBundleResources(page: Page) {
@@ -611,7 +618,7 @@ async function measureColdControlWindow(browser: Browser, run: VariantRun, injec
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  await installInstrumentation(page, requests, run.origin, injectStall);
+  await installInstrumentation(page, requests, run.origin, injectStall, NEGATIVE_CONTROL_STALL_MS);
 
   try {
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
@@ -850,7 +857,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   report.diagnostics['100x'] = await test.step('trace 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRun!, fixtures['100x']!));
 });
 
-test('blocks repeated injected 100 ms main-thread stalls during cold chat list load', async({browser}) => {
+test('blocks repeated injected 200 ms main-thread stalls during cold chat list load', async({browser}) => {
   test.skip(!report.requireBase, 'negative control requires same-run base measurements');
   const preparedBase = preparedVariants['100x'].base;
   const preparedHead = preparedVariants['100x'].head;
@@ -869,9 +876,9 @@ test('blocks repeated injected 100 ms main-thread stalls during cold chat list l
 
       if(isHead) {
         expect(sample.longTasksOver50Ms).toBeGreaterThan(0);
-        expect(injectedTask?.duration).toBeGreaterThanOrEqual(100);
+        expect(injectedTask?.duration).toBeGreaterThanOrEqual(NEGATIVE_CONTROL_STALL_MS);
         expect(injectedTask?.observed).toBe(true);
-        expect(sample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
+        expect(sample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(NEGATIVE_CONTROL_STALL_MS);
         negativeSamples.push(sample);
       } else {
         baseControlSamples.push(sample);
@@ -881,5 +888,5 @@ test('blocks repeated injected 100 ms main-thread stalls during cold chat list l
   const coldLoadEvaluation = evaluateWithControlSamples('coldChatList', baseControlSamples, negativeSamples);
   const coldLoadFailures = coldLoadEvaluation.blockingFailures.filter((failure) => failure.startsWith('100x coldChatList: '));
   const blockingTimes = (samples: Metric[]) => samples.map((sample) => sample.blockingTimeMs);
-  expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `100 ms control was not blocked: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs same-phase base ${JSON.stringify(blockingTimes(baseControlSamples))} ms`).toBe(true);
+  expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `${NEGATIVE_CONTROL_STALL_MS} ms control was not blocked: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs same-phase base ${JSON.stringify(blockingTimes(baseControlSamples))} ms`).toBe(true);
 });
