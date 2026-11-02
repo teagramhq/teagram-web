@@ -1406,7 +1406,7 @@ test('isolates two server tabs when a custom server worker takes control', async
       const hostInput = customPage.getByRole('textbox', {name: 'Server address'});
       await expect(hostInput).toHaveValue('');
       await hostInput.fill(SERVER_HOST);
-      await customPage.getByRole('button', {name: 'Next', exact: true}).click();
+      await customPage.getByRole('button', {name: 'Create account', exact: true}).click();
 
       const confirm = customPage.getByRole('dialog', {name: 'Confirm this server'});
       await expect(confirm.getByText(SERVER_HOST, {exact: true})).toBeVisible();
