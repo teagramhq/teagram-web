@@ -721,6 +721,42 @@ test('finishes the peer UI and reports input callback failures', async() => {
   expect(moduleMocks.toastNew).toHaveBeenCalledTimes(1);
 });
 
+test('does not fail the active peer when stale input preparation rejects', async() => {
+  let rejectInputSetup!: (error: Error) => void;
+  const inputSetup = new Promise<() => void>((_resolve, reject) => {
+    rejectInputSetup = reject;
+  });
+  const failure = new Error('stale input peer setup failed');
+  const {chat, input, chatInput, messageInput} = makePeerChangeChat();
+  let isCurrent = true;
+  const failPeerChange = vi.spyOn(input, 'failPeerChange');
+  input.finishPeerChange = vi.fn(() => {
+    input.peerChanging = true;
+    return inputSetup;
+  });
+  chatInput.classList.remove('is-hidden');
+  messageInput.contentEditable = 'true';
+
+  const prepared = await Chat.prototype.finishPeerChange.call(chat, {
+    peerId,
+    middleware: () => isCurrent,
+    deferUiCallbacks: true
+  }) as {ready: Promise<{error: unknown} | undefined>, apply: () => Promise<void>};
+
+  isCurrent = false;
+  input.peerChanging = true;
+  rejectInputSetup(failure);
+  await expect(prepared.ready).resolves.toEqual({error: failure});
+  await prepared.apply();
+
+  expect(failPeerChange).not.toHaveBeenCalled();
+  expect(input.peerChanging).toBe(true);
+  expect(chatInput.classList.contains('is-hidden')).toBe(false);
+  expect(messageInput.contentEditable).toBe('true');
+  expect(chat.peerChangeFailed).toBe(false);
+  expect(moduleMocks.toastNew).not.toHaveBeenCalled();
+});
+
 test('fails closed and reports when a synchronous peer part rejects', async() => {
   const failure = new Error('topbar setup failed');
   const {chat, input, chatInput, messageInput, events} = makePeerChangeChat();
@@ -742,40 +778,45 @@ test('fails closed and reports when a synchronous peer part rejects', async() =>
 });
 
 test('retries the same peer after a failed input setup and restores the composer', async() => {
+  const {harness, chat} = makeMountableSetPeerHarness();
   const chatInput = document.createElement('div');
   chatInput.classList.add('is-hidden');
   const messageInput = document.createElement('div');
+  messageInput.textContent = 'draft';
   messageInput.contentEditable = 'false';
   const input = Object.assign(Object.create(ChatInput.prototype), {
     peerChanging: true,
     chatInput,
-    messageInput
+    messageInput,
+    updateMessageInputPlaceholder: vi.fn(),
+    updateSendBtn: vi.fn(),
+    setDraft: vi.fn()
   }) as any;
   input.failPeerChange();
-  input.finishPeerChange = vi.fn(async() => () => {
-    input.peerChanging = false;
-    chatInput.classList.remove('is-hidden');
-    messageInput.contentEditable = 'true';
-  });
-  const bubblesSetPeer = vi.fn(async(options: any) => {
-    const callback = await input.finishPeerChange(options);
-    callback?.();
-    return {cached: true, promise: Promise.resolve()};
-  });
-  const chat = makeChatSetPeerHarness(bubblesSetPeer);
+  Object.setPrototypeOf(chat, Chat.prototype);
   Object.assign(chat, {
+    inited: true,
     peerChangeFailed: true,
     peerIdSignal: [vi.fn(), vi.fn()],
     middlewareHelper: {clean: vi.fn(), get: () => ({onClean: vi.fn()})},
     appSettings: {},
-    appImManager: {isSamePeer: vi.fn(() => true), dispatchEvent: vi.fn()}
+    appImManager: {isSamePeer: vi.fn(() => true), dispatchEvent: vi.fn(), getChatSavedPosition: vi.fn(() => undefined)},
+    changeHistoryStorageKey: vi.fn(),
+    finishPeerChange: vi.fn(async() => ({
+      ready: Promise.resolve(undefined),
+      apply: async() => input.updateMessageInput(true, true, undefined)
+    }))
   });
+  chat.peerIdSignal[1] = (nextPeerId: PeerId) => chat.peerId = nextPeerId;
+  chat.bubbles = harness;
+  harness.chat = chat;
 
   await Chat.prototype.setPeer.call(chat, {peerId});
   await chat.setPeerPromise;
 
-  expect(bubblesSetPeer).toHaveBeenCalledWith(expect.objectContaining({samePeer: false}));
-  expect(input.finishPeerChange).toHaveBeenCalledTimes(1);
+  expect(harness.getHistory1).toHaveBeenCalledTimes(1);
+  expect(chat.finishPeerChange).toHaveBeenCalledTimes(1);
+  expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
   expect(input.peerChanging).toBe(false);
   expect(chatInput.classList.contains('is-hidden')).toBe(false);
   expect(messageInput.contentEditable).toBe('true');
