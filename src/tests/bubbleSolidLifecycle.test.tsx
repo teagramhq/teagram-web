@@ -339,6 +339,57 @@ test('logs a failed bubble peer change while preserving the rejection for its ca
   });
 });
 
+test('logs the originating peer when a superseded peer change rejects', async() => {
+  let rejectFirstBubbleSetPeer!: (error: Error) => void;
+  const firstBubbleSetPeerPromise = new Promise<never>((_resolve, reject) => {
+    rejectFirstBubbleSetPeer = reject;
+  });
+  let resolveSecondBubbleSetPeer!: () => void;
+  const secondBubbleSetPeerPromise = new Promise<undefined>((resolve) => {
+    resolveSecondBubbleSetPeer = () => resolve(undefined);
+  });
+  const bubbleSetPeer = vi.fn()
+    .mockReturnValueOnce(firstBubbleSetPeerPromise)
+    .mockReturnValueOnce(secondBubbleSetPeerPromise);
+  const failure = new Error('superseded peer change failed');
+  const {chat} = makeMountableSetPeerHarness();
+  const previousPeerId = (peerId + 2) as PeerId;
+  const failingPeerId = peerId;
+  const currentPeerId = (peerId + 1) as PeerId;
+  chat.peerId = previousPeerId;
+  Object.setPrototypeOf(chat, Chat.prototype);
+  chat.appImManager = {
+    isSamePeer: vi.fn((currentChat: typeof chat, options: {peerId: PeerId}) => currentChat.peerId === options.peerId),
+    dispatchEvent: vi.fn()
+  };
+  chat.peerIdSignal = [previousPeerId, (nextPeerId: PeerId) => chat.peerId = nextPeerId];
+  chat.inited = true;
+  chat.peerChangeFailed = false;
+  chat.setPeerPromise = null;
+  chat.setPeerPromiseStartedAt = 0;
+  chat.middlewareHelper = getMiddleware();
+  chat.changeHistoryStorageKey = vi.fn();
+  chat.log = {error: vi.fn()};
+  chat.bubbles = {setPeer: bubbleSetPeer};
+
+  const firstSetPeer = Chat.prototype.setPeer.call(chat, {peerId: failingPeerId});
+  const secondSetPeer = Chat.prototype.setPeer.call(chat, {peerId: currentPeerId});
+  expect(chat.peerId).toBe(currentPeerId);
+  rejectFirstBubbleSetPeer(failure);
+
+  try {
+    await expect(firstSetPeer).rejects.toBe(failure);
+    await vi.waitFor(() => {
+      expect(chat.log.error).toHaveBeenCalledWith('chat peer change failed:', failingPeerId, failure);
+    });
+  } finally {
+    resolveSecondBubbleSetPeer();
+    await secondSetPeer;
+    await chat.setPeerPromise;
+    chat.middlewareHelper.clean();
+  }
+});
+
 test('does not log canceled bubble peer changes', async() => {
   const chat = makeChatSetPeerHarness(vi.fn(() => Promise.reject(PEER_CHANGED_ERROR)));
   const setPeer = Chat.prototype.setPeer.call(chat, {peerId});
