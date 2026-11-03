@@ -335,7 +335,7 @@ test('logs a failed bubble peer change while preserving the rejection for its ca
   await expect(Chat.prototype.setPeer.call(chat, {peerId})).rejects.toBe(failure);
 
   await vi.waitFor(() => {
-    expect(chat.log.error).toHaveBeenCalledWith(expect.any(String), failure);
+    expect(chat.log.error).toHaveBeenCalledWith(expect.any(String), peerId, failure);
   });
 });
 
@@ -368,7 +368,7 @@ test('logs cached peer render failures in the app im manager', async() => {
   await AppImManager.prototype.setPeer.call(manager, {peerId});
 
   await vi.waitFor(() => {
-    expect(error).toHaveBeenCalledWith(expect.any(String), failure);
+    expect(error).toHaveBeenCalledWith(expect.any(String), peerId, failure);
   });
 });
 

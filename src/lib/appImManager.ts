@@ -3343,7 +3343,7 @@ export class AppImManager extends EventListenerBase<{
             this.selectTab(APP_TABS.CHAT, animate);
           }, 0);
         }).catch((error: unknown) => {
-          this.log.error('cached peer render failed:', error);
+          this.log.error('cached peer render failed:', peerId, error);
         });
       }
     }

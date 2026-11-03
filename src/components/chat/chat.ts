@@ -1153,7 +1153,7 @@ export default class Chat extends EventListenerBase<{
       return result?.promise;
     }).catch((error: unknown) => {
       if(error !== PEER_CHANGED_ERROR) {
-        this.log.error('chat peer change failed:', error);
+        this.log.error('chat peer change failed:', this.peerId, error);
       }
     }).finally(() => {
       if(this.setPeerPromise === setPeerPromise) {
