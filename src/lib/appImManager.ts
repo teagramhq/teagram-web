@@ -974,6 +974,18 @@ export class AppImManager extends EventListenerBase<{
     this.appChatBackground?.resize();
   }
 
+  private showShareTargetRetry(share: ShareData) {
+    const retry = anchorCallback(() => {
+      hideToast();
+      if(apiManagerProxy.share === share) this.checkForShare();
+    });
+    retry.append(i18n('Ephemeral.Retry'));
+
+    const content = document.createDocumentFragment();
+    content.append(i18n('Error.AnError'), ' ', retry);
+    toast(content, undefined, 6000);
+  }
+
   private checkForShare() {
     const share = apiManagerProxy.share;
     if(!share) {
@@ -992,7 +1004,7 @@ export class AppImManager extends EventListenerBase<{
         });
       }).catch((error) => {
         console.error('Failed to process Web Share Target payload', error);
-        toastNew({langPackKey: 'Error.AnError'});
+        this.showShareTargetRetry(share);
       });
       return;
     }
@@ -1006,7 +1018,7 @@ export class AppImManager extends EventListenerBase<{
         url: share.url,
         text: share.text || share.title
       });
-    }));
+    }), () => this.showShareTargetRetry(share));
   }
 
   public async confirmBotWebViewInner({

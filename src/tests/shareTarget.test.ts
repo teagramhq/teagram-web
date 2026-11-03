@@ -16,19 +16,24 @@ describe('Web Share Target payload handling', () => {
     vi.restoreAllMocks();
   });
 
-  it('preserves and logs the payload when lazy processing rejects', async() => {
+  it('keeps failed text payloads available to the retry action', async() => {
     const share = {title: 'Draft', text: 'Keep this draft', url: 'https://example.com'} as ShareData;
     const error = new Error('chunk load failed');
     mocks.share = share;
     const process = vi.fn().mockRejectedValue(error);
+    const retryAction = vi.fn();
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await processShareTarget(share, process);
+    await processShareTarget(share, process, retryAction);
 
     expect(process).toHaveBeenCalledOnce();
     expect(mocks.share).toBe(share);
     expect(log).toHaveBeenCalledWith('Failed to process Web Share Target payload', error);
     expect(mocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Error.AnError'});
+    expect(retryAction).toHaveBeenCalledWith(error);
+
+    await processShareTarget(share, async() => {});
+    expect(mocks.share).toBeUndefined();
   });
 
   it('keeps the picker submission open when deferred file processing fails', async() => {
@@ -42,6 +47,12 @@ describe('Web Share Target payload handling', () => {
     expect(mocks.share).toBe(share);
     expect(log).toHaveBeenCalledWith('Failed to process Web Share Target payload', error);
     expect(mocks.toastNew).toHaveBeenCalledOnce();
+
+    const retry = vi.fn().mockResolvedValue(undefined);
+    await processShareTargetForPicker(share, retry);
+
+    expect(retry).toHaveBeenCalledOnce();
+    expect(mocks.share).toBeUndefined();
   });
 
   it('clears the payload after successful processing', async() => {
