@@ -54,7 +54,7 @@ test('defers scroll anchor geometry reads until the next frame', async() => {
   };
 
   const scrollable = new Scrollable(undefined, 'test', 300, undefined, container);
-  const scrollSaver = new ScrollSaver(scrollable, '.bubble', true);
+  const scrollSaver = new ScrollSaver(scrollable, '.bubble', false);
   scrollSaver.save();
 
   try {
@@ -73,6 +73,61 @@ test('defers scroll anchor geometry reads until the next frame', async() => {
 
     expect(readsAfterMutation).toContain('bubble rect');
     expect(scrollable.scrollPosition).toBe(150);
+  } finally {
+    scrollable.destroy();
+    vi.useRealTimers();
+  }
+});
+
+test('restores prepended history from scroll-size delta without measuring bubble geometry', async() => {
+  vi.useFakeTimers();
+
+  const container = document.createElement('div');
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  container.append(bubble);
+
+  let mutated = false;
+  let scrollTop = 200;
+  const rectReads: string[] = [];
+  Object.defineProperties(container, {
+    scrollTop: {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value) => scrollTop = value
+    },
+    scrollHeight: {
+      configurable: true,
+      get: () => mutated ? 1_100 : 1_000
+    },
+    clientHeight: {configurable: true, value: 500}
+  });
+  container.getBoundingClientRect = () => {
+    rectReads.push('container');
+    return {top: 0, bottom: 500, left: 0, right: 400, width: 400, height: 500} as DOMRect;
+  };
+  bubble.getBoundingClientRect = () => {
+    rectReads.push('bubble');
+    return {top: 50, bottom: 100, left: 0, right: 400, width: 400, height: 50} as DOMRect;
+  };
+
+  const scrollable = new Scrollable(undefined, 'test', 300, undefined, container);
+  const scrollSaver = new ScrollSaver(scrollable, '.bubble', true);
+
+  try {
+    const savePosition = (scrollSaver as ScrollSaver & {savePosition?: () => void}).savePosition;
+    expect(savePosition).toBeTypeOf('function');
+    if(!savePosition) return;
+
+    savePosition.call(scrollSaver);
+    mutated = true;
+    const restoration = scrollSaver.restoreAfterLayout();
+
+    await vi.advanceTimersToNextFrame();
+    await restoration;
+
+    expect(scrollTop).toBe(300);
+    expect(rectReads).toEqual([]);
   } finally {
     scrollable.destroy();
     vi.useRealTimers();

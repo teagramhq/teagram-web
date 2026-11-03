@@ -11378,7 +11378,11 @@ export default class ChatBubbles {
     const log = this.log.bindPrefix('prepareToSaveScroll');
     log('save');
     const scrollSaver = this.createScrollSaver(reverse);
-    scrollSaver.save(); // * let's save scroll position by point before the slicing, not after
+    if(reverse) {
+      scrollSaver.savePosition();
+    } else {
+      scrollSaver.save(); // * let's save scroll position by point before the slicing, not after
+    }
 
     if((sliceTop || sliceBottom) && this.getRenderedLength() && !this.chat.setPeerPromise) {
       const viewportSlice = this.getViewportSlice(true);

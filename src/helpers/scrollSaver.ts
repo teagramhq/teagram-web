@@ -98,6 +98,12 @@ export default class ScrollSaver {
     this._save();
   }
 
+  public savePosition() {
+    // Prepend batches can restore from the scroll-size delta without measuring visible bubbles.
+    this.elements = [];
+    this._save();
+  }
+
   public _save() {
     const {scrollTop, scrollHeight, clientHeight} = this.container;
 
@@ -220,7 +226,13 @@ export default class ScrollSaver {
 
   public async restoreAfterLayout(useReflow?: boolean) {
     await fastRafPromise();
-    this.restore(useReflow);
+    if(this.reverse) {
+      // Read the updated size after layout, then preserve the previous distance from the bottom.
+      this.scrollHeight = this.scrollable.scrollSize;
+      this._restore(useReflow);
+    } else {
+      this.restore(useReflow);
+    }
   }
 
   public _restore(useReflow?: boolean) {
