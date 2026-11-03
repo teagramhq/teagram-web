@@ -539,6 +539,43 @@ test('auto-creates one guest from runtime config without a picker and restores i
     }
   }
   await applyScreenshotTheme(page, 'day');
+  await page.evaluate(() => {
+    // The auth fixture does not finish loading dialogs. Render the empty state with the app's
+    // production classes so the revised copy can be captured at the requested sizes and themes.
+    const sidebar = document.querySelector('#column-left');
+    if(!sidebar) throw new Error('Expected the sidebar to be available for the empty-state preview');
+    const preview = document.createElement('div');
+    preview.className = 'empty-placeholder-preview';
+    Object.assign(preview.style, {
+      position: 'absolute',
+      inset: '0',
+      zIndex: '10',
+      background: 'var(--surface-color)'
+    });
+    const placeholder = document.createElement('div');
+    placeholder.className = 'empty-placeholder empty-placeholder-dialogs visible';
+    const icon = document.createElement('img');
+    icon.className = 'empty-placeholder-dialogs-icon';
+    icon.src = '/assets/img/EmptyChats.svg';
+    const title = document.createElement('div');
+    title.className = 'empty-placeholder-header';
+    title.textContent = 'Your chats will be here';
+    placeholder.append(icon, title);
+    preview.append(placeholder);
+    sidebar.append(preview);
+  });
+  await expect(page.locator('.empty-placeholder-dialogs-icon')).toHaveJSProperty('complete', true);
+  for(const theme of ['day', 'night'] as const) {
+    await applyScreenshotTheme(page, theme);
+    for(const width of [375, 1280]) {
+      await page.setViewportSize({width, height: 900});
+      const screenshot = testInfo.outputPath(`guest-chat-empty-${theme}-${width}.png`);
+      await page.locator('#column-left').screenshot({path: screenshot, animations: 'disabled'});
+      await testInfo.attach(`guest-chat-empty-${theme}-${width}`, {path: screenshot, contentType: 'image/png'});
+    }
+  }
+  await page.locator('.empty-placeholder-preview').evaluate((element) => element.remove());
+  await applyScreenshotTheme(page, 'day');
   await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(8282)?.username))
     .toBe(guestUsername);
 
