@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {expect, request, test} from '@playwright/test';
 import type {APIRequestContext, Page, TestInfo} from '@playwright/test';
+import type {MyDialogFilter} from '@lib/storages/filters';
 import {captureState, seedPriorAccountUserId} from './registrationMocks';
 
 const SERVER_HOST = 'second-server.example.test';
@@ -423,71 +424,50 @@ test('auto-creates one guest from runtime config without a picker and restores i
   await expect(demoGuestBanner.getByText('Demo server: you\'re a guest.', {exact: true}))
     .toBeVisible({timeout: 30_000});
   await expect(demoGuestBanner.getByText(/Everything is wiped every week\. Use your own server at/)).toBeVisible();
-  let notificationBanner = chatlistOverlay.locator('.row').filter({hasText: 'Never miss a message'});
-  if(!await notificationBanner.count()) {
-    // The registration fixture stops before account suggestions load. Reuse the app's row classes
-    // to exercise the overlay layout with both banners present.
-    await chatlistOverlay.evaluate((overlay) => {
-      const guestBanner = overlay.querySelector('[role="status"]') as HTMLElement;
-      const guestContainer = guestBanner.parentElement as HTMLElement;
-      const notificationContainer = document.createElement('div');
-      notificationContainer.className = guestContainer.className;
-      const notificationBanner = guestBanner.cloneNode(true) as HTMLElement;
-      notificationBanner.removeAttribute('role');
-      notificationBanner.querySelector('.row-title')!.textContent = 'Never miss a message!';
-      notificationBanner.querySelector('.row-subtitle')!.textContent = 'Enable notifications to stay updated.';
-      const closeButton = document.createElement('button');
-      closeButton.type = 'button';
-      closeButton.setAttribute('aria-label', 'Close');
-      closeButton.textContent = '×';
-      Object.assign(closeButton.style, {
-        position: 'absolute',
-        insetInlineEnd: '.25rem',
-        top: '.25rem',
-        zIndex: '1',
-        padding: '.375rem',
-        fontSize: '1.0625rem',
-        background: 'transparent',
-        border: '0',
-        color: 'inherit'
-      });
-      closeButton.addEventListener('click', () => notificationContainer.remove());
-      notificationBanner.firstElementChild!.append(closeButton);
-      notificationContainer.append(notificationBanner.firstElementChild!);
-      overlay.insertBefore(notificationContainer, guestContainer.nextSibling);
-    });
-    notificationBanner = chatlistOverlay.locator('.row').filter({hasText: 'Never miss a message'});
-  }
+  await page.evaluate(async() => {
+    const manager = (window as any).appDialogsManager;
+    const settingsModulePath = '/src/stores/appSettings.ts';
+    const {setAppSettingsSilent} = await import(settingsModulePath);
+    setAppSettingsSilent('notifications', 'suggested', false);
+
+    if(!manager.suggestionContainer) {
+      const container = document.createElement('div');
+      manager.suggestionContainer = container;
+      manager.foldersOverlay.prepend(container);
+      const pendingSuggestionModulePath = '/src/components/sidebarLeft/pendingSuggestion.tsx';
+      const {renderPendingSuggestion} = await import(pendingSuggestionModulePath);
+      renderPendingSuggestion(container);
+    }
+
+    const foldersModulePath = '/src/stores/folders.ts';
+    const useFolders = (await import(foldersModulePath)).default;
+    const folders = useFolders();
+    const existingFilters = (folders.folderItems as Array<{filter: MyDialogFilter}>).map(({filter}) => filter);
+    const allFilter = (existingFilters.find(({id}) => id === 0) || manager.managers.filtersStorage.getFilter(0)) as MyDialogFilter | undefined;
+    if(!allFilter) throw new Error('Expected the real All chats folder to be available');
+
+    const filterId = 991234;
+    const localId = Math.max(...existingFilters.map(({localId}) => localId || 0), allFilter.localId || 0) + 1;
+    const customFilter = {
+      ...allFilter,
+      id: filterId,
+      localId,
+      title: {...allFilter.title, text: 'Personal'}
+    };
+    if(!manager.filtersRendered[0]) manager.addFilter(allFilter);
+    manager.addFilter(customFilter);
+    await folders.hydrateFilters([allFilter, ...existingFilters.filter(({id}) => id !== 0), customFilter]);
+    await manager.onFiltersLengthChange();
+  });
+
+  const notificationBanner = chatlistOverlay.locator('.row').filter({hasText: 'Never miss a message'});
   await expect(notificationBanner).toBeVisible();
+  const notificationSuggestion = notificationBanner.locator('xpath=ancestor::div[contains(@class, "suggestionContainer")][1]');
+  await expect(notificationSuggestion).toHaveCount(1);
   const filterTabs = chatlistOverlay.locator('#folders-tabs');
-  if(!await filterTabs.isVisible()) {
-    await filterTabs.evaluate((element) => {
-      element.replaceChildren(...['All', 'Personal', 'Channels', 'Groups'].map((label, index) => {
-        const tab = document.createElement('div');
-        tab.className = 'menu-horizontal-div-item' + (index === 0 ? ' active' : '');
-        const background = document.createElement('i');
-        background.className = 'menu-horizontal-div-item-background';
-        const title = document.createElement('div');
-        title.className = 'menu-horizontal-div-item-span';
-        title.textContent = label;
-        tab.append(background, title);
-        return tab;
-      }));
-      const scrollable = element.closest('.folders-tabs-scrollable') as HTMLElement;
-      if(scrollable) {
-        scrollable.classList.remove('hide');
-        scrollable.style.display = 'block';
-        scrollable.style.visibility = 'visible';
-        scrollable.style.opacity = '1';
-        scrollable.style.height = '3rem';
-      }
-      element.style.display = 'flex';
-      element.style.visibility = 'visible';
-      element.style.height = '3rem';
-      element.style.width = '100%';
-    });
-  }
+  await expect(filterTabs.getByText('Personal')).toBeVisible();
   await expect(filterTabs).toBeVisible();
+  await expect(chatlistOverlay.locator('.folders-tabs-scrollable')).toBeVisible();
 
   const overlaps = (first: {x: number, y: number, width: number, height: number}, second: {x: number, y: number, width: number, height: number}) =>
     first.x < second.x + second.width && first.x + first.width > second.x &&
@@ -498,7 +478,7 @@ test('auto-creates one guest from runtime config without a picker and restores i
       await page.setViewportSize({width, height: 900});
       const [guestBox, notificationBox, tabsBox] = await Promise.all([
         demoGuestBanner.boundingBox(),
-        notificationBanner.boundingBox(),
+        notificationSuggestion.boundingBox(),
         filterTabs.boundingBox()
       ]);
       if(!guestBox || !notificationBox || !tabsBox) {
@@ -514,11 +494,8 @@ test('auto-creates one guest from runtime config without a picker and restores i
   }
 
   const closeNotification = notificationBanner.locator('button');
-  if(await closeNotification.count()) {
-    await closeNotification.first().click();
-  } else {
-    await notificationBanner.evaluate((element) => element.parentElement?.remove());
-  }
+  await expect(closeNotification.first()).toBeVisible();
+  await closeNotification.first().click();
   await expect(notificationBanner).toHaveCount(0);
   await applyScreenshotTheme(page, 'day');
   for(const theme of ['day', 'night'] as const) {
@@ -540,41 +517,26 @@ test('auto-creates one guest from runtime config without a picker and restores i
   }
   await applyScreenshotTheme(page, 'day');
   await page.evaluate(() => {
-    // The auth fixture does not finish loading dialogs. Render the empty state with the app's
-    // production classes so the revised copy can be captured at the requested sizes and themes.
-    const sidebar = document.querySelector('#column-left');
-    if(!sidebar) throw new Error('Expected the sidebar to be available for the empty-state preview');
-    const preview = document.createElement('div');
-    preview.className = 'empty-placeholder-preview';
-    Object.assign(preview.style, {
-      position: 'absolute',
-      inset: '0',
-      zIndex: '10',
-      background: 'var(--surface-color)'
-    });
-    const placeholder = document.createElement('div');
-    placeholder.className = 'empty-placeholder empty-placeholder-dialogs visible';
-    const icon = document.createElement('img');
-    icon.className = 'empty-placeholder-dialogs-icon';
-    icon.src = '/assets/img/EmptyChats.svg';
-    const title = document.createElement('div');
-    title.className = 'empty-placeholder-header';
-    title.textContent = 'Your chats will be here';
-    placeholder.append(icon, title);
-    preview.append(placeholder);
-    sidebar.append(preview);
+    const manager = (window as any).appDialogsManager;
+    manager.__guestTestOriginalUpdateContactsLength = manager.updateContactsLength;
+    manager.updateContactsLength = () => Promise.resolve(0);
+    manager.updateContactsLengthPromise = undefined;
+    // The guest fixture leaves its initial empty placeholder waiting on contacts; regenerate it with an empty result.
+    manager.chatList.parentElement.querySelector('.empty-placeholder-dialogs')?.remove();
+    manager.chatList.parentElement.classList.remove('with-placeholder');
+    manager.checkIfPlaceholderNeeded();
   });
-  await expect(page.locator('.empty-placeholder-dialogs-icon')).toHaveJSProperty('complete', true);
-  for(const theme of ['day', 'night'] as const) {
-    await applyScreenshotTheme(page, theme);
-    for(const width of [375, 1280]) {
-      await page.setViewportSize({width, height: 900});
-      const screenshot = testInfo.outputPath(`guest-chat-empty-${theme}-${width}.png`);
-      await page.locator('#column-left').screenshot({path: screenshot, animations: 'disabled'});
-      await testInfo.attach(`guest-chat-empty-${theme}-${width}`, {path: screenshot, contentType: 'image/png'});
-    }
-  }
-  await page.locator('.empty-placeholder-preview').evaluate((element) => element.remove());
+  const emptyPlaceholder = page.locator('.empty-placeholder-dialogs');
+  await expect(emptyPlaceholder).toHaveCount(1);
+  await expect(emptyPlaceholder.locator('.empty-placeholder-header')).toHaveText('Your chats will be here');
+  await expect(emptyPlaceholder.locator('.empty-placeholder-subtitle')).toHaveCount(0);
+  await expect(emptyPlaceholder.locator('a[href*="telegram."]')).toHaveCount(0);
+  await expect(emptyPlaceholder.locator('.empty-placeholder-dialogs-icon')).toHaveJSProperty('complete', true);
+  await page.evaluate(() => {
+    const manager = (window as any).appDialogsManager;
+    manager.updateContactsLength = manager.__guestTestOriginalUpdateContactsLength;
+    delete manager.__guestTestOriginalUpdateContactsLength;
+  });
   await applyScreenshotTheme(page, 'day');
   await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(8282)?.username))
     .toBe(guestUsername);
@@ -633,6 +595,30 @@ test('explains when the guest account context changes', async({page}, testInfo) 
   await expect(error).toHaveText('Your account or server changed. Start the guest sign-in again.', {timeout: 30_000});
   await expect(error).not.toContainText('Check your connection');
   await captureState(page, testInfo, 'guest-auth-context-changed');
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
+test('keeps non-terms focus traps on their description', async({page}, testInfo) => {
+  await setupGuestServer(page, testInfo, true);
+  await openSelectedServer(page, testInfo);
+
+  await page.evaluate(async() => {
+    const popupModulePath = '/src/components/popups/simpleConfirmation.ts';
+    const {SimpleConfirmationPopup} = await import(popupModulePath);
+    const popup = new SimpleConfirmationPopup({
+      titleLangKey: 'Confirm',
+      descriptionText: 'Confirm the server identity.',
+      buttons: [{langKey: 'OK'}],
+      focusTrap: true
+    });
+    (window as any).__guestFocusPopup = popup;
+    popup.show(false);
+  });
+
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('.popup-description')).toBeFocused();
+  await page.evaluate(() => (window as any).__guestFocusPopup.forceHide());
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
 
