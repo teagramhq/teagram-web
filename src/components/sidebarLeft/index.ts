@@ -9,8 +9,7 @@ import Scrollable, {ScrollableX} from '@components/scrollable';
 import InputSearch from '@components/inputSearch';
 import SidebarSlider, {SliderSuperTab} from '@components/slider';
 import TransitionSlider from '@components/transition';
-import type AppSearchSuper from '@components/appSearchSuper';
-import type {SearchSuperMediaType} from '@components/appSearchSuper';
+import AppSearchSuper, {SearchSuperMediaType} from '@components/appSearchSuper';
 import {DateData, fillTipDates} from '@helpers/date';
 import {MOUNT_CLASS_TO} from '@config/debug';
 import {AppSettingsTab} from '@components/solidJsTabs';
@@ -57,7 +56,7 @@ import liteMode from '@helpers/liteMode';
 import {AppPowerSavingTab} from '@components/solidJsTabs/tabs';
 import {AppMyStoriesTab} from '@components/solidJsTabs/tabs';
 import Icon from '@components/icon';
-import SelectorSearch from '@components/selectorSearch';
+import AppSelectPeers from '@components/appSelectPeers';
 import setBadgeContent from '@helpers/setBadgeContent';
 import createBadge from '@helpers/createBadge';
 import {MyDocument} from '@appManagers/appDocsManager';
@@ -71,11 +70,11 @@ import wrapEmojiStatus from '@components/wrappers/emojiStatus';
 
 const log = logger('SidebarLeft');
 import {makeMediaSize} from '@helpers/mediaSize';
+import ReactionElement from '@components/chat/reaction';
 import setBlankToAnchor from '@lib/richTextProcessor/setBlankToAnchor';
 import AccountController from '@lib/accounts/accountController';
 import {ActiveAccountNumber} from '@lib/accounts/types';
 import {MAX_ACCOUNTS, MAX_ACCOUNTS_FREE} from '@lib/accounts/constants';
-import cachePromiseWithRetry from '@helpers/cachePromiseWithRetry';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
 import {createProxiedManagersForAccount} from '@lib/getProxiedManagers';
 import limitSymbols from '@helpers/string/limitSymbols';
@@ -85,7 +84,7 @@ import AccountsLimitPopup from '@components/sidebarLeft/accountsLimitPopup';
 import {changeAccount} from '@lib/accounts/changeAccount';
 import uiNotificationsManager from '@lib/uiNotificationsManager';
 import {renderFoldersSidebarContent} from '@components/sidebarLeft/foldersSidebarContent';
-import ChatListHotReloadGuardProvider from '@lib/solidjs/chatListHotReloadGuardProvider';
+import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
 import {AppChatFoldersTab} from '@components/solidJsTabs/tabs';
 import {SliderSuperTabConstructable} from '@components/sliderTab';
 import SettingsSliderPopup from '@components/sidebarLeft/settingsSliderPopup';
@@ -109,6 +108,7 @@ import useHasFoldersSidebar, {
 import isObject from '@helpers/object/isObject';
 import {useAppSettings} from '@stores/appSettings';
 import {useCollapsedCommunityDialogsKey} from '@stores/communities';
+import {openEmojiStatusPicker} from '@components/sidebarLeft/emojiStatusPicker';
 import IS_CONFERENCE_CALL_SUPPORTED from '@environment/conferenceCallSupport';
 import IS_CALL_SUPPORTED from '@environment/callSupport';
 import DemoGuestBanner from '@components/sidebarLeft/demoGuestBanner';
@@ -137,7 +137,6 @@ export class AppSidebarLeft extends SidebarSlider {
   private searchGroups: {[k in 'contacts' | 'globalContacts' | 'messages' | 'people' | 'recent']: SearchGroup} = {} as any;
   public searchSuper: AppSearchSuper;
   private searchInitResult: SearchInitResult;
-  private searchInitPromise: Promise<SearchInitResult>;
   private get isSearchActive() {
     return useIsLeftSearchActive()[0]();
   }
@@ -187,7 +186,7 @@ export class AppSidebarLeft extends SidebarSlider {
     renderFoldersSidebarContent(
       document.getElementById('main-columns'),
       allNotificationsCount,
-      ChatListHotReloadGuardProvider,
+      SolidJSHotReloadGuardProvider,
       mainMiddleware
     );
 
@@ -234,9 +233,7 @@ export class AppSidebarLeft extends SidebarSlider {
 
     sidebarHeader.nextElementSibling.append(this.updateBtn);
 
-    this.inputSearch.input.addEventListener('focus', () => {
-      void this.initSearch();
-    }, {once: true});
+    this.inputSearch.input.addEventListener('focus', () => this.initSearch(), {once: true});
 
     this.archivedCount = createBadge('span', 24, 'gray');
     this.archivedCount.classList.add('archived-count');
@@ -273,8 +270,7 @@ export class AppSidebarLeft extends SidebarSlider {
 
     const lockButton = createLockButton();
 
-    attachClickEvent(statusBtnIcon, async() => {
-      const {openEmojiStatusPicker} = await import('@components/sidebarLeft/emojiStatusPicker');
+    attachClickEvent(statusBtnIcon, () => {
       openEmojiStatusPicker({
         managers: this.managers,
         anchorElement: statusBtnIcon,
@@ -293,25 +289,22 @@ export class AppSidebarLeft extends SidebarSlider {
         return;
       }
 
-      if(fireOnNew) {
-        const {default: ReactionElement} = await import('@components/chat/reaction');
-        ReactionElement.fireAroundAnimation({
-          middleware: statusMiddlewareHelper?.get() || this.getMiddleware(),
-          reaction: {
-            _: 'reactionCustomEmoji',
-            document_id: emojiStatus.document_id
-          },
-          sizes: {
-            genericEffect: 26,
-            genericEffectSize: 100,
-            size: 22 + 18,
-            effectSize: 80
-          },
-          stickerContainer: statusBtnIcon,
-          cache: statusBtnIcon as any,
-          textColor: 'primary-color'
-        });
-      }
+      fireOnNew && ReactionElement.fireAroundAnimation({
+        middleware: statusMiddlewareHelper?.get() || this.getMiddleware(),
+        reaction: {
+          _: 'reactionCustomEmoji',
+          document_id: emojiStatus.document_id
+        },
+        sizes: {
+          genericEffect: 26,
+          genericEffectSize: 100,
+          size: 22 + 18,
+          effectSize: 80
+        },
+        stickerContainer: statusBtnIcon,
+        cache: statusBtnIcon as any,
+        textColor: 'primary-color'
+      });
 
       fireOnNew = false;
 
@@ -408,7 +401,7 @@ export class AppSidebarLeft extends SidebarSlider {
     this.searchTriggerWhenCollapsed.className = 'sidebar-header-search-trigger';
     this.searchTriggerWhenCollapsed.append(ButtonIcon('search'));
     this.searchTriggerWhenCollapsed.addEventListener('click', () => {
-      void this.initSearch().then(({open}) => open());
+      this.initSearch().open();
     });
 
     this.buttonsContainer.parentElement.prepend(this.searchTriggerWhenCollapsed);
@@ -469,12 +462,12 @@ export class AppSidebarLeft extends SidebarSlider {
 
     addShortcutListener(['ctrl+f', 'alt+f', 'meta+f'], () => {
       if(appNavigationController.findItemByType('popup')) return;
-      void this.initSearch().then(({open}) => open());
+      this.initSearch().open();
     });
 
     addShortcutListener(['ctrl+0', 'meta+0'], () => {
       if(appNavigationController.findItemByType('popup') ||
-        appImManager.chat?.peerId === appImManager.myId) return;
+        appImManager.chat.peerId === appImManager.myId) return;
       appImManager.setPeer({
         peerId: appImManager.myId
       });
@@ -490,7 +483,7 @@ export class AppSidebarLeft extends SidebarSlider {
       onPop: () => {
         setTimeout(() => {
           if(this.isAnimatingCollapse) return;
-          void this.initSearch().then(({open}) => open());
+          this.initSearch().open();
         }, 0);
 
         return false;
@@ -1161,17 +1154,7 @@ export class AppSidebarLeft extends SidebarSlider {
   }
 
   public initSearch() {
-    if(this.searchInitResult) return Promise.resolve(this.searchInitResult);
-
-    return cachePromiseWithRetry(
-      () => this.searchInitPromise,
-      (promise) => this.searchInitPromise = promise,
-      () => this.initializeSearch()
-    );
-  }
-
-  private async initializeSearch() {
-    const {default: AppSearchSuper} = await import('@components/appSearchSuper');
+    if(this.searchInitResult) return this.searchInitResult;
 
     const searchContainer = this.sidebarEl.querySelector('#search-container') as HTMLDivElement;
 
@@ -1374,7 +1357,7 @@ export class AppSidebarLeft extends SidebarSlider {
     const renderEntity = (key: PeerId | string, title?: string | HTMLElement) => {
       const peerId = key.isPeerId() ? key.toPeerId() : undefined;
       const community = peerId && getCommunityByPeerId(peerId);
-      const rendered = SelectorSearch.renderEntity({
+      const rendered = AppSelectPeers.renderEntity({
         key,
         title: title ?? community?.title,
         middleware: helperMiddlewareHelper.get(),
@@ -1430,12 +1413,12 @@ export class AppSidebarLeft extends SidebarSlider {
       onHelperLength();
     };
 
-    this.inputSearch.setOnChange((value) => {
+    this.inputSearch.onChange = (value) => {
       if(searchSuper.mediaTab.type !== 'chats') {
         chatTypeMenu.props.selected = 'all';
       }
       updateSearchQuery({search: value, chatType: chatTypeMenu.props.selected});
-    });
+    };
 
     this.inputSearch.onEnter = (value) => {
       const trimmed = value.trim();
@@ -1567,12 +1550,9 @@ export class AppSidebarLeft extends SidebarSlider {
       searchListenerSetter.removeAll();
 
       this.searchInitResult = undefined;
-      this.searchInitPromise = undefined;
       this.searchSuper = undefined;
 
-      this.inputSearch.input.addEventListener('focus', () => {
-        void this.initSearch();
-      }, {once: true});
+      this.inputSearch.input.addEventListener('focus', () => this.initSearch(), {once: true});
     };
 
     const transition = TransitionSlider({

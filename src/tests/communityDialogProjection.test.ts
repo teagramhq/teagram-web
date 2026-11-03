@@ -39,10 +39,6 @@ vi.mock('@environment/groupCallSupport', () => ({
   default: false
 }));
 
-vi.mock('@environment/webpSupport', () => ({
-  default: true
-}));
-
 vi.mock('@lib/apiManagerProxy', () => ({
   default: {}
 }));
@@ -56,10 +52,6 @@ vi.mock('@lib/rootScope', () => ({
 }));
 
 vi.mock('@lib/solidjs/hotReloadGuardProvider', () => ({
-  default: class {}
-}));
-
-vi.mock('@lib/solidjs/chatListHotReloadGuardProvider', () => ({
   default: class {}
 }));
 

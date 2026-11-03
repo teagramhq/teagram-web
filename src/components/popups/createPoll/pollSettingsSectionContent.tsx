@@ -23,6 +23,7 @@ import classNames from '@helpers/string/classNames';
 import {useIsCleaned} from '@hooks/useIsCleaned';
 import {oneDayInSeconds, oneHourInSeconds, oneWeekInSeconds} from '@lib/constants';
 import {LangPackKey, i18n} from '@lib/langPack';
+import {logger} from '@lib/logger';
 import {useHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
 import {FilterBooleanKeys} from '@types';
 import {Accessor, createEffect, createSignal, JSX, on, onCleanup, Show} from 'solid-js';
@@ -37,6 +38,7 @@ import {createFormFieldClickHandler, interactableClass, useSupportsMedia} from '
 type BooleanSettingKey = FilterBooleanKeys<CreatePollStore>;
 
 const minEndTimeFromNowMinutes = 5;
+const log = logger('PollSettingsSectionContent');
 
 export const PollSettingsSectionContent = (props: {
   countriesElementRef?: (element: HTMLElement) => void
@@ -391,8 +393,6 @@ type PollDurationMenuArgs = {
 };
 
 const usePollDurationMenu = (args: PollDurationMenuArgs) => {
-  const {ButtonMenuSync} = useHotReloadGuard();
-
   const {closePeriodMax} = useCreatePollLimits();
 
   const format = (duration: number) => wrapFormattedDuration(formatDuration(duration, 1));
@@ -402,62 +402,65 @@ const usePollDurationMenu = (args: PollDurationMenuArgs) => {
   createEffect(on(args.open, (open) => {
     if(!open) return;
 
-    const buttonMenu = ButtonMenuSync({
-      buttons: [
-        ...durationOptions.map((duration) => ({
-          iconElement: createAutoDeleteIcon(duration),
-          regularText: format(duration),
-          onClick: () => {
-            args.onOptionClick(duration);
+    let buttonMenu: HTMLElement;
+    onCleanup(() => buttonMenu?.remove());
+
+    void import('@components/buttonMenu').then(({ButtonMenuSync}) => {
+      if(isCleaned() || !args.open()) return;
+
+      buttonMenu = ButtonMenuSync({
+        buttons: [
+          ...durationOptions.map((duration) => ({
+            iconElement: createAutoDeleteIcon(duration),
+            regularText: format(duration),
+            onClick: () => {
+              args.onOptionClick(duration);
+            }
+          })),
+          {
+            icon: 'tools',
+            text: 'Other',
+            onClick: () => {
+              const minTimeDate = new Date();
+              minTimeDate.setMinutes(minTimeDate.getMinutes() + minEndTimeFromNowMinutes);
+
+              const minDate = new Date(minTimeDate);
+              minDate.setHours(0, 0, 0, 0);
+
+              const maxDate = new Date(minDate);
+              maxDate.setDate(maxDate.getDate() + Math.floor(closePeriodMax() / oneDayInSeconds));
+
+              showDatePickerPopup({
+                initDate: new Date(minTimeDate),
+                minSendDateLangKey: 'NewPoll.MinEndTime',
+                minDate,
+                minTimeDate,
+                maxDate,
+                withTime: true,
+                onPick: (timestamp) => {
+                  args.onCustomTimestamp(timestamp);
+                },
+                sendTodayLangKey: 'NewPoll.EndToday',
+                sendDateLangKey: 'NewPoll.EndDate'
+              });
+            }
           }
-        })),
-        {
-          icon: 'tools',
-          text: 'Other',
-          onClick: () => {
-            const minTimeDate = new Date();
-            minTimeDate.setMinutes(minTimeDate.getMinutes() + minEndTimeFromNowMinutes);
-
-            const minDate = new Date(minTimeDate);
-            minDate.setHours(0, 0, 0, 0);
-
-            const maxDate = new Date(minDate);
-            maxDate.setDate(maxDate.getDate() + Math.floor(closePeriodMax() / oneDayInSeconds));
-
-            showDatePickerPopup({
-              initDate: new Date(minTimeDate),
-              minSendDateLangKey: 'NewPoll.MinEndTime',
-              minDate,
-              minTimeDate,
-              maxDate,
-              withTime: true,
-              onPick: (timestamp) => {
-                args.onCustomTimestamp(timestamp);
-              },
-              sendTodayLangKey: 'NewPoll.EndToday',
-              sendDateLangKey: 'NewPoll.EndDate'
-            });
-          }
-        }
-      ]
-    });
-
-    buttonMenu.classList.add(styles.pollDurationMenu);
-
-    getOverlayRoot().appendChild(buttonMenu);
-
-    requestRAF(() => {
-      if(isCleaned()) return;
-
-      positionFloatingMenu(args.container().getBoundingClientRect(), buttonMenu, 'top-end');
-      contextMenuController.openBtnMenu(buttonMenu, async() => {
-        await pause(400);
-        args.onClose?.();
+        ]
       });
-    });
 
-    onCleanup(() => {
-      buttonMenu.remove();
-    });
+      buttonMenu.classList.add(styles.pollDurationMenu);
+
+      getOverlayRoot().appendChild(buttonMenu);
+
+      requestRAF(() => {
+        if(isCleaned()) return;
+
+        positionFloatingMenu(args.container().getBoundingClientRect(), buttonMenu, 'top-end');
+        contextMenuController.openBtnMenu(buttonMenu, async() => {
+          await pause(400);
+          args.onClose?.();
+        });
+      });
+    }).catch((error) => log.error('Failed to load poll duration menu', error));
   }));
 };

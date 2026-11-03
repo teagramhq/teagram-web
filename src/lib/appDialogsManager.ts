@@ -66,7 +66,6 @@ import callsController from '@lib/calls/callsController';
 import conferenceInvitesController from '@lib/calls/conferenceInvitesController';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import noop from '@helpers/noop';
-import cachePromiseWithRetry from '@helpers/cachePromiseWithRetry';
 import pause from '@helpers/schedulers/pause';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import filterAsync from '@helpers/array/filterAsync';
@@ -84,7 +83,7 @@ import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId'
 import {AppChatFoldersTab} from '@components/solidJsTabs/tabs';
 import eachTimeout from '@helpers/eachTimeout';
 import PopupSharedFolderInvite from '@components/popups/sharedFolderInvite';
-import {openChatPreviewFromDialogRow} from '@components/popups/chatPreviewAnchor';
+import showChatPreviewPopup, {chatPreviewAnchorFromDialogRow} from '@components/popups/chatPreview';
 import showLimitPopup from '@components/popups/limit';
 import StoriesList from '@components/stories/list';
 import {render} from 'solid-js/web';
@@ -106,8 +105,12 @@ import {useAppState} from '@stores/appState';
 import {BADGE_TRANSITION_TIME} from '@components/autonomousDialogList/constants';
 import {AutonomousDialogList} from '@components/autonomousDialogList/dialogs';
 import {PossibleDialog, setDialogTyping} from '@components/autonomousDialogList/base';
-import type {ForumTab} from '@components/forumTab/forumTab';
+import {ForumTab} from '@components/forumTab/forumTab';
+import findForumTabByPeerId from '@components/forumTab/findForumTabByPeerId';
+import shouldOpenForumAsNavigationTab from '@components/forumTab/communityOpenMode';
+import isCommunityChat from '@appManagers/utils/communities/isCommunity';
 import {getCommunityPeerSubtitle} from '@components/communities/communityPeerStatus';
+import {fillForumTabRegister} from '@components/forumTab/fillRegister';
 import LazyLoadQueue from '@components/lazyLoadQueue';
 import {fastSmoothScrollToStart} from '@helpers/fastSmoothScroll';
 import ArchiveDialog, {archiveDialogTagName} from '@components/archiveDialog';
@@ -775,12 +778,6 @@ export class AppDialogsManager {
   private forumsTabs: Map<PeerId, ForumTab>;
   private forumsSlider: HTMLElement;
   private forumTabByPeerIdPromises = new Map<PeerId, Promise<void>>();
-  private forumUiPromise: Promise<{
-    ForumTab: typeof import('@components/forumTab/forumTab').ForumTab,
-    findForumTabByPeerId: typeof import('@components/forumTab/findForumTabByPeerId').default,
-    shouldOpenForumAsNavigationTab: typeof import('@components/forumTab/communityOpenMode').default,
-    isCommunityChat: typeof import('@appManagers/utils/communities/isCommunity').default
-  }>;
   public forumTab: ForumTab;
   private forumNavigationItem: NavigationItem;
 
@@ -834,6 +831,8 @@ export class AppDialogsManager {
 
     const storiesListContainer = this.storiesListContainer = document.createElement('div');
     storiesListContainer.classList.add('stories-list');
+
+    fillForumTabRegister();
 
     this.forumsTabs = new Map();
     this.forumsSlider = document.createElement('div');
@@ -1892,7 +1891,7 @@ export class AppDialogsManager {
     peerId: PeerId,
     show?: boolean,
     asInnerIfAsMessages?: boolean,
-    ForumTabConstructorOverride?: typeof import('@components/forumTab/forumTab').ForumTab
+    ForumTabConstructorOverride?: typeof ForumTab
   ) {
     const previousPromise = this.forumTabByPeerIdPromises.get(peerId);
     const run = () => this.toggleForumTabByPeerIdInternal(
@@ -1919,7 +1918,7 @@ export class AppDialogsManager {
     peerId: PeerId,
     show?: boolean,
     asInnerIfAsMessages?: boolean,
-    ForumTabConstructorOverride?: typeof import('@components/forumTab/forumTab').ForumTab
+    ForumTabConstructorOverride?: typeof ForumTab
   ) {
     if(peerId === rootScope.myId) {
       const tab = appSidebarLeft.getTab(AppSharedMediaTab);
@@ -1936,14 +1935,11 @@ export class AppDialogsManager {
       return;
     }
 
-    const forumUi = await this.loadForumUi();
-    const {ForumTab: ForumTabClass} = forumUi;
-
     const {managers} = this;
     const chat = !peerId.isUser() ?
       apiManagerProxy.getChat(peerId.toChatId()) :
       undefined;
-    const community = forumUi.isCommunityChat(chat) ? chat : undefined;
+    const community = isCommunityChat(chat) ? chat : undefined;
     const isCommunity = !!community;
     const canOpenCommunity = community?._ === 'communityForbidden' ||
       (
@@ -1957,7 +1953,7 @@ export class AppDialogsManager {
           '@components/forumTab/communityForumTab'
         ));
       } else {
-        ForumTabConstructor = ForumTabClass.register.getEntry(peerId);
+        ForumTabConstructor = ForumTab.register.getEntry(peerId);
       }
     }
     if(!ForumTabConstructor) return;
@@ -1976,15 +1972,15 @@ export class AppDialogsManager {
     const history = appSidebarLeft.getHistory();
     const lastTab = history[history.length - 1];
     let forumTab: ForumTab;
-    const asNavigationTab = forumUi.shouldOpenForumAsNavigationTab({
+    const asNavigationTab = shouldOpenForumAsNavigationTab({
       hasNavigationHistory: !!lastTab,
       isCommunity,
       isNarrowScreen: mediaSizes.isLessThanFloatingLeftSidebar
     });
     if(asNavigationTab) {
-      const isSameTab = lastTab instanceof ForumTabClass &&
+      const isSameTab = lastTab instanceof ForumTab &&
         lastTab.peerId === peerId;
-      const existingTab = forumUi.findForumTabByPeerId(history, peerId);
+      const existingTab = findForumTabByPeerId(history, peerId);
       if(show === false) {
         if(isSameTab) {
           lastTab.close();
@@ -2045,28 +2041,6 @@ export class AppDialogsManager {
     }
 
     return this.toggleForumTab(forumTab);
-  }
-
-  private loadForumUi() {
-    return cachePromiseWithRetry(
-      () => this.forumUiPromise,
-      (promise) => this.forumUiPromise = promise,
-      () => Promise.all([
-        import('@components/forumTab/forumTab'),
-        import('@components/forumTab/findForumTabByPeerId'),
-        import('@components/forumTab/communityOpenMode'),
-        import('@appManagers/utils/communities/isCommunity'),
-        import('@components/forumTab/fillRegister')
-      ]).then(([forumTab, findForumTabByPeerId, communityOpenMode, isCommunity, fillRegister]) => {
-        fillRegister.fillForumTabRegister();
-        return {
-          ForumTab: forumTab.ForumTab,
-          findForumTabByPeerId: findForumTabByPeerId.default,
-          shouldOpenForumAsNavigationTab: communityOpenMode.default,
-          isCommunityChat: isCommunity.default
-        };
-      })
-    );
   }
 
   public openDialogInNewTab(element: HTMLElement) {
@@ -2217,12 +2191,14 @@ export class AppDialogsManager {
       // Snapshot the anchor *now* — virtual scroll reuses DOM nodes and may yank this
       // element offscreen by the time the popup constructor runs.
       if(e.shiftKey && !e.ctrlKey && !e.metaKey && !autonomous) {
-        void openChatPreviewFromDialogRow(e, elem, {
+        showChatPreviewPopup({
           peerId: monoforumParentPeerId || peerId,
           monoforumThreadId: monoforumParentPeerId ? peerId : undefined,
           threadId,
-          lastMsgId
+          lastMsgId,
+          anchor: chatPreviewAnchorFromDialogRow(elem)
         });
+        cancelEvent(e);
         return;
       }
 

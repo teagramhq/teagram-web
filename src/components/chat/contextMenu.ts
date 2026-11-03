@@ -1,7 +1,7 @@
 import type {MyDocument} from '@appManagers/appDocsManager';
 import type Chat from '@components/chat/chat';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
-import ButtonMenu, {ButtonMenuItemOptions, ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
+import type {ButtonMenuItemOptions, ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import PopupDeleteMessages from '@components/popups/deleteMessages';
 import showForwardPopup from '@components/popups/forward';
 import PopupPinMessage from '@components/popups/unpinMessage';
@@ -548,7 +548,7 @@ export default class ChatContextMenu {
           noJsx: true
         });
 
-        this.selectedMessagesText = await runWithHotReloadGuard(entry.getCopyText, SolidJSHotReloadGuardProvider);
+        this.selectedMessagesText = await runWithHotReloadGuard(entry.getCopyText);
         this.messageFromLog = entry.type === 'default' ? entry.message : undefined;
       } catch{}
     };
@@ -1472,6 +1472,7 @@ export default class ChatContextMenu {
 
     if(!middleware()) return;
 
+    const {default: ButtonMenu} = await import('@components/buttonMenu');
     return ButtonMenu({
       buttons: filteredButtons
     })
@@ -1518,6 +1519,7 @@ export default class ChatContextMenu {
 
     if(!middleware()) return;
 
+    const {default: ButtonMenu} = await import('@components/buttonMenu');
     return ButtonMenu({
       buttons: filteredButtons
     })
@@ -1616,6 +1618,7 @@ export default class ChatContextMenu {
       return;
     }
 
+    const {default: ButtonMenu} = await import('@components/buttonMenu');
     const element = this.element = await ButtonMenu({
       buttons: filteredButtons,
       listenerSetter: this.listenerSetter

@@ -23,11 +23,9 @@ vi.mock('@components/scrollable', () => ({default: class {}}));
 vi.mock('@components/singleTransition', () => ({default: vi.fn()}));
 vi.mock('@components/sortedDialogList', () => ({default: class {}, CustomPinnedDialog: class {}, CustomSortedDialog: class {}}));
 vi.mock('@environment/groupCallSupport', () => ({default: false}));
-vi.mock('@environment/webpSupport', () => ({default: true}));
 vi.mock('@lib/apiManagerProxy', () => ({default: {getPeer: vi.fn()}}));
 vi.mock('@lib/rootScope', () => ({default: {managers: {}, addEventListener: vi.fn(), dispatchEvent: vi.fn()}}));
 vi.mock('@lib/solidjs/hotReloadGuardProvider', () => ({default: class {}}));
-vi.mock('@lib/solidjs/chatListHotReloadGuardProvider', () => ({default: class {}}));
 vi.mock('@lib/solidjs/runWithHotReloadGuard', () => ({runWithHotReloadGuard: (callback: () => unknown) => callback()}));
 vi.mock('@stores/communities', () => ({useCommunities: () => ({}), useCommunityDialogs: () => ({})}));
 

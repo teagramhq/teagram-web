@@ -5,7 +5,6 @@ import createFolderContextMenu from '@helpers/dom/createFolderContextMenu';
 import {keepMe} from '@helpers/keepMe';
 import {Middleware} from '@helpers/middleware';
 import pause from '@helpers/schedulers/pause';
-import {doubleRaf} from '@helpers/schedulers';
 import Animated from '@helpers/solid/animations';
 import classNames from '@helpers/string/classNames';
 import {logger, LogTypes} from '@lib/logger';
@@ -14,6 +13,7 @@ import {useHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
 import type SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
 import useHasFoldersSidebar from '@stores/foldersSidebar';
 import useFolders from '@stores/folders';
+import appChatBackground from '@components/chat/bubbles/chatBackground';
 import {IconTsx} from '@components/iconTsx';
 import ripple from '@components/ripple';
 import Scrollable from '@components/scrollable2';
@@ -58,9 +58,6 @@ export function FoldersSidebarContent(props: {
   // the (bright) raw gradient — so the bar needs an extra-dark tint to match. Tinted/light don't.
   const [isDarkPattern, setIsDarkPattern] = createSignal(false);
   let backgroundCanvas: HTMLCanvasElement;
-  let unsubscribeRenderer: (() => void) | undefined;
-  let detachMirror: (() => void) | undefined;
-  let isDestroyed = false;
 
   let folderItemsContainer: HTMLDivElement;
 
@@ -94,30 +91,27 @@ export function FoldersSidebarContent(props: {
       listenTo: folderItemsContainer
     });
 
-    // The chat background is not needed to paint the chat list. Load its renderer
-    // after the initial frame, then use it as the cheap blur approximation here.
-    void doubleRaf().then(() => import('@components/chat/bubbles/chatBackground')).then(({default: appChatBackground}) => {
-      if(isDestroyed) return;
-
-      unsubscribeRenderer = appChatBackground.onActiveGradientRendererChange((renderer, meta) => {
-        detachMirror?.();
-        detachMirror = undefined;
-        if(renderer && backgroundCanvas) {
-          detachMirror = renderer.attachMirror(backgroundCanvas);
-          setHasGradient(true);
-        } else {
-          setHasGradient(false);
-        }
-        setIsDarkPattern(!!meta?.isDarkMaskPattern);
-      });
-    }).catch((error) => {
-      log.error('Failed to initialize folder sidebar background:', error);
+    // Mirror the chat-background gradient into our own canvas — cheap stand-in for
+    // backdrop-filter: blur(40px). The bar always sits over the chat background, so the visible
+    // result of a heavy blur over that area is mathematically close to the gradient itself
+    // (the high-frequency pattern blurs to a near-constant tint that we approximate via the
+    // dark overlay). Falls back to backdrop-filter when no gradient is active.
+    let detachMirror: (() => void) | undefined;
+    const unsubscribeRenderer = appChatBackground.onActiveGradientRendererChange((renderer, meta) => {
+      detachMirror?.();
+      detachMirror = undefined;
+      if(renderer && backgroundCanvas) {
+        detachMirror = renderer.attachMirror(backgroundCanvas);
+        setHasGradient(true);
+      } else {
+        setHasGradient(false);
+      }
+      setIsDarkPattern(!!meta?.isDarkMaskPattern);
     });
 
     onCleanup(() => {
-      isDestroyed = true;
       contextMenu.destroy();
-      unsubscribeRenderer?.();
+      unsubscribeRenderer();
       detachMirror?.();
     });
   });

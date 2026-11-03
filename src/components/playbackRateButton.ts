@@ -1,6 +1,6 @@
 
 import appMediaPlaybackController from '@components/appMediaPlaybackController';
-import {ButtonMenuSync} from '@components/buttonMenu';
+import type {ButtonMenuSync} from '@components/buttonMenu';
 import {ButtonMenuToggleHandler} from '@components/buttonMenuToggle';
 import ButtonIcon from '@components/buttonIcon';
 import Icon from '@components/icon';
@@ -27,31 +27,42 @@ export const PlaybackRateButton = (options: {
     }
   };
 
-  const setBtnMenuToggle = () => {
-    const buttons = PLAYBACK_RATES.map((rate, idx) => {
-      const buttonOptions: Parameters<typeof ButtonMenuSync>[0]['buttons'][0] = {
-        // icon: PLAYBACK_RATES_ICONS[idx],
-        regularText: rate + 'x',
-        onClick: () => {
-          appMediaPlaybackController.playbackRate = rate;
-        }
-      };
+  let menuPromise: Promise<HTMLElement>;
+  const getMenu = () => {
+    if(!menuPromise) {
+      menuPromise = import('@components/buttonMenu').then(({ButtonMenuSync}) => {
+        const buttons = PLAYBACK_RATES.map((rate) => ({
+          regularText: rate + 'x',
+          onClick: () => {
+            appMediaPlaybackController.playbackRate = rate;
+          }
+        }));
+        const menu = ButtonMenuSync({buttons});
+        menu.classList.add(options.direction, 'playback-rate-menu');
+        button.append(menu);
+        return menu;
+      }).catch((error) => {
+        menuPromise = undefined;
+        throw error;
+      });
+    }
 
-      return buttonOptions;
-    });
-    const btnMenu = ButtonMenuSync({buttons});
-    btnMenu.classList.add(options.direction, 'playback-rate-menu');
+    return menuPromise;
+  };
+
+  const setBtnMenuToggle = () => {
     ButtonMenuToggleHandler({
       el: button,
-      onOpen: options.onPlaybackRateMenuToggle ? () => {
-        options.onPlaybackRateMenuToggle(true);
-      } : undefined,
+      onOpen: async() => {
+        const menu = await getMenu();
+        options.onPlaybackRateMenuToggle?.(true);
+        return menu;
+      },
       onClose: options.onPlaybackRateMenuToggle ? () => {
         options.onPlaybackRateMenuToggle(false);
       } : undefined
     });
     setIcon();
-    button.append(btnMenu);
   };
 
   const addRate = (add: number) => {

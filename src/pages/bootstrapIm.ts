@@ -47,7 +47,7 @@ function waitForFirstChatRow(): Promise<void> {
 export async function bootstrapIm(): Promise<void> {
   if(bootstrapped) return;
   bootstrapped = true;
-  // Pending until the deferred chat, search and menu code below has loaded, so
+  // Pending until the deferred topbar and menu chunks below have loaded, so
   // automation can start an interaction without racing that load.
   document.body.dataset.deferredUi = 'pending';
 
@@ -131,12 +131,11 @@ export async function bootstrapIm(): Promise<void> {
   document.body.classList.remove('has-auth-pages');
 
   // Load these once the list has painted and the main thread is idle, so they neither lengthen
-  // this bootstrap nor wait for the first click that needs them. Contacts stay click-loaded.
+  // this bootstrap nor wait for the first click that needs them.
   const loadDeferredUi = () => {
     Promise.all([
-      import('@lib/appImManager')
-      .then(({default: appImManager}) => appImManager.initializeChatUi()),
-      import('@components/appSearchSuper')
+      import('@components/chat/topbar'),
+      import('@components/buttonMenu')
     ]).then(() => {
       document.body.dataset.deferredUi = 'ready';
     }, (error) => {

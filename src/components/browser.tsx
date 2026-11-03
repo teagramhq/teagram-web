@@ -10,7 +10,7 @@ import classNames from '@helpers/string/classNames';
 import Scrollable from '@components/scrollable2';
 import fastSmoothScroll from '@helpers/fastSmoothScroll';
 import {IconTsx} from '@components/iconTsx';
-import {ButtonMenuItemOptionsVerifiable, ButtonMenuSync} from '@components/buttonMenu';
+import type {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import {attachContextMenuListener} from '@helpers/dom/attachContextMenuListener';
 import ListenerSetter from '@helpers/listenerSetter';
 import findUpClassName from '@helpers/dom/findUpClassName';
@@ -199,6 +199,7 @@ function BrowserHeader(props: {
       button.options = {listenerSetter};
       return button;
     });
+    const {ButtonMenuSync} = await import('@components/buttonMenu');
     const element = ButtonMenuSync({
       buttons,
       listenerSetter

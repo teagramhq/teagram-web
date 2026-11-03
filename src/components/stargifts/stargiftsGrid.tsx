@@ -28,7 +28,7 @@ import CheckboxFieldTsx from '@components/checkboxFieldTsx';
 import tsNow from '@helpers/tsNow';
 import PopupStarGiftWear from '@components/popups/starGiftWear';
 import createSubmenuTrigger from '@components/createSubmenuTrigger';
-import {ButtonMenuItemOptions, ButtonMenuItemOptionsVerifiable, ButtonMenuSync} from '@components/buttonMenu';
+import type {ButtonMenuItemOptions, ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import CheckboxField from '@components/checkboxField';
 
 function StarGiftGridItem(props: {
@@ -98,8 +98,9 @@ function StarGiftGridItem(props: {
             text: 'StarGiftCollectionsAddToCollection',
             verify: () => isEditableUniqueGift && profileCollections().length > 0
           },
-          createSubmenu: () => {
+          createSubmenu: async() => {
             if(!saved || !input || !props.profilePeerId || !profileCollections().length) {
+              const {ButtonMenuSync} = await import('@components/buttonMenu');
               return ButtonMenuSync({buttons: []});
             }
 
@@ -128,6 +129,7 @@ function StarGiftGridItem(props: {
               };
             });
 
+            const {ButtonMenuSync} = await import('@components/buttonMenu');
             return ButtonMenuSync({buttons});
           }
         }),

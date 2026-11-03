@@ -6003,7 +6003,7 @@ describe('real client chat topbar menu', () => {
   it('opens the menu through the visible toggle when a hidden duplicate exists', async() => {
     const page = await browser.newPage();
     try {
-      await page.setContent(`<!doctype html><div id="column-center"><div class="chat active"><div class="topbar"><div class="chat-utils">
+      await page.setContent(`<!doctype html><body data-deferred-ui="ready"><div id="column-center"><div class="chat active"><div class="topbar"><div class="chat-utils">
         <button class="btn-menu-toggle" style="display:none">Hidden</button>
         <button class="btn-menu-toggle" id="visible-toggle">Visible</button>
         <div class="btn-menu" style="display:none"><button class="btn-menu-item">Open chat</button></div>

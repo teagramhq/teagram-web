@@ -17,7 +17,6 @@ import {Middleware} from '@helpers/middleware';
 import rootScope from '@lib/rootScope';
 import Icon from '@components/icon';
 import reactionsEqual from '@appManagers/utils/reactions/reactionsEqual';
-import {ButtonMenuSync} from '@components/buttonMenu';
 import ListenerSetter from '@helpers/listenerSetter';
 import {attachContextMenuListener} from '@helpers/dom/attachContextMenuListener';
 import cancelEvent from '@helpers/dom/cancelEvent';
@@ -294,7 +293,7 @@ export default class PopupReactedList extends PopupElement {
     this.show();
   }
 
-  private openDeleteReactionMenu({
+  private async openDeleteReactionMenu({
     e,
     element,
     message,
@@ -312,6 +311,7 @@ export default class PopupReactedList extends PopupElement {
     cancelEvent(e);
 
     const listenerSetter = new ListenerSetter();
+    const {ButtonMenuSync} = await import('@components/buttonMenu');
     const menu = ButtonMenuSync({
       buttons: [{
         icon: 'delete',

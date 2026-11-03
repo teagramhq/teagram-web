@@ -5,7 +5,6 @@ import AppMediaViewerStatic from '@components/mediaViewer/static';
 import {AutonomousMonoforumThreadList} from '@components/autonomousDialogList/monoforumThreads';
 import {avatarNew, AvatarNewTsx, StoriesSegments} from '@components/avatarNew';
 import BusinessHours from '@components/businessHours';
-import ButtonMenu, {ButtonMenuSync} from '@components/buttonMenu';
 import {ChatType} from '@components/chat/chatType';
 import PaidMessagesInterceptor from '@components/chat/paidMessagesInterceptor';
 import {pickLanguage} from '@components/chat/translation';
@@ -136,8 +135,6 @@ export type SolidJSHotReloadGuardContextValue = {
   onMediaCaptionClick: typeof onMediaCaptionClick;
   formatDate: typeof formatDate;
   wrapFolderTitle: typeof wrapFolderTitle;
-  ButtonMenu: typeof ButtonMenu;
-  ButtonMenuSync: typeof ButtonMenuSync;
   StoriesProvider: typeof StoriesProvider;
   useStories: typeof useStories;
   StoriesSegments: typeof StoriesSegments;

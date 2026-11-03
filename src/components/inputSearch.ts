@@ -219,11 +219,6 @@ export default class InputSearch {
     }, this.debounceTime);
   };
 
-  public setOnChange = (onChange: InputSearch['onChange']) => {
-    this.onChange = onChange;
-    this.onInput();
-  };
-
   onKeyDown = (e: KeyboardEvent) => {
     if(e.key !== 'Enter' || !this.onEnter) return;
     const value = this.value;

@@ -5,7 +5,6 @@ import AppMediaViewerStatic from '@components/mediaViewer/static';
 import {AutonomousMonoforumThreadList} from '@components/autonomousDialogList/monoforumThreads';
 import {avatarNew, AvatarNewTsx, StoriesSegments} from '@components/avatarNew';
 import BusinessHours from '@components/businessHours';
-import ButtonMenu, {ButtonMenuSync} from '@components/buttonMenu';
 import {ChatType} from '@components/chat/chatType';
 import PaidMessagesInterceptor from '@components/chat/paidMessagesInterceptor';
 import {pickLanguage} from '@components/chat/translation';
@@ -138,8 +137,6 @@ export default function SolidJSHotReloadGuardProvider(props: ParentProps) {
       formatDate,
       hideToast,
       wrapFolderTitle,
-      ButtonMenu,
-      ButtonMenuSync,
       StoriesProvider,
       useStories,
       StoriesSegments,

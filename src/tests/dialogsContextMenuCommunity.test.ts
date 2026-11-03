@@ -258,7 +258,7 @@ describe('DialogsContextMenu on a Community chat row', () => {
     row.dataset.mid = '123';
     const buttons = await openMenu(row, {useDialogFolder: true});
 
-    await buttons.find((button) => button.text === 'ChatList.Context.Preview').onClick();
+    buttons.find((button) => button.text === 'ChatList.Context.Preview').onClick();
     expect(showChatPreviewPopup).toHaveBeenCalledWith(expect.objectContaining({
       peerId,
       lastMsgId: 123

@@ -2,7 +2,7 @@ import {Accessor, createEffect, createSignal, on, Show} from 'solid-js';
 import {AppManagers} from '@lib/managers';
 import {NULL_PEER_ID} from '@appManagers/constants';
 import Chat from '@components/chat/chat';
-import ChatTopbar from '@components/chat/topbar';
+import type ChatTopbar from '@components/chat/topbar';
 import {SponsoredMessage} from '@layer';
 import classNames from '@helpers/string/classNames';
 

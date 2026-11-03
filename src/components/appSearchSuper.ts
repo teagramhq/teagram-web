@@ -23,7 +23,7 @@ import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import handleTabSwipe from '@helpers/dom/handleTabSwipe';
 import windowSize from '@helpers/windowSize';
 import {formatPhoneNumber} from '@helpers/formatPhoneNumber';
-import {ButtonMenuItemOptions, ButtonMenuSync} from '@components/buttonMenu';
+import type {ButtonMenuItemOptions} from '@components/buttonMenu';
 import showForwardPopup from '@components/popups/forward';
 import PopupDeleteMessages from '@components/popups/deleteMessages';
 import {renderSearchWebPageRow} from '@components/searchWebPageRow';
@@ -202,9 +202,9 @@ class SearchContextMenu {
   ) {
     this.managers = searchSuper.managers;
 
-    const onContextMenu: Parameters<typeof attachContextMenuListener>[0]['callback'] = (e) => {
+    const onContextMenu: Parameters<typeof attachContextMenuListener>[0]['callback'] = async(e) => {
       if(this.init) {
-        this.init();
+        await this.init();
         this.init = null;
       }
 
@@ -273,7 +273,7 @@ class SearchContextMenu {
     });
   }
 
-  private init() {
+  private async init() {
     this.buttons = [{
       icon: 'forward',
       text: 'Forward',
@@ -335,6 +335,7 @@ class SearchContextMenu {
       withSelection: true
     }];
 
+    const {ButtonMenuSync} = await import('@components/buttonMenu');
     this.element = ButtonMenuSync({buttons: this.buttons, listenerSetter: this.listenerSetter});
     this.element.classList.add('search-contextmenu', 'contextmenu');
     getOverlayRoot().append(this.element);

@@ -2,8 +2,7 @@ import {beforeEach, expect, test, vi} from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   events: [] as string[],
-  errors: [] as unknown[][],
-  initializeChatUi: vi.fn(() => Promise.resolve())
+  errors: [] as unknown[][]
 }));
 
 vi.mock('@lib/appDialogsManager', () => {
@@ -22,11 +21,7 @@ vi.mock('@lib/appDialogsManager', () => {
 
 vi.mock('@lib/appImManager', () => {
   mocks.events.push('im-module');
-  return {
-    default: {
-      initializeChatUi: mocks.initializeChatUi
-    }
-  };
+  return {default: {}};
 });
 
 vi.mock('@lib/rootScope', () => ({
@@ -50,6 +45,16 @@ vi.mock('@lib/logger', () => ({
   LogTypes: {}
 }));
 
+vi.mock('@components/chat/topbar', () => {
+  mocks.events.push('topbar-module');
+  return {default: class ChatTopbar {}};
+});
+
+vi.mock('@components/buttonMenu', () => {
+  mocks.events.push('menu-module');
+  return {default: async() => document.createElement('div')};
+});
+
 vi.mock('@components/appSearchSuper', () => {
   mocks.events.push('search-module');
   return {default: {}};
@@ -72,7 +77,6 @@ beforeEach(() => {
   vi.restoreAllMocks();
   mocks.events.length = 0;
   mocks.errors.length = 0;
-  mocks.initializeChatUi.mockReset().mockResolvedValue(undefined);
   document.body.innerHTML = '<div id="page-chats"></div>';
   delete (window as any).requestIdleCallback;
 });
@@ -107,34 +111,10 @@ test('waits for a chat row to paint before scheduling deferred UI imports', asyn
   expect(mocks.events.filter((event) => event === 'first-paint')).toHaveLength(2);
 
   idle();
-  await vi.waitFor(() => expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1));
-  expect(mocks.events).toEqual(expect.arrayContaining([
-    'im-module',
-    'search-module'
-  ]));
-  expect(mocks.events).not.toContain('contacts-module');
   await vi.waitFor(() => expect(document.body.dataset.deferredUi).toBe('ready'));
-});
-
-test('marks deferred UI as failed when chat UI initialization rejects', async() => {
-  let idle: () => void;
-  (window as any).requestIdleCallback = (callback: () => void) => {
-    idle = callback;
-    return 1;
-  };
-  mocks.initializeChatUi.mockRejectedValueOnce(new Error('chat UI chunk failed'));
-
-  const {bootstrapIm} = await loadBootstrapIm();
-  await bootstrapIm();
-
-  const row = document.createElement('div');
-  row.className = 'chatlist-chat';
-  document.getElementById('chatlist-container')!.append(row);
-  await vi.waitFor(() => expect(idle).toBeDefined());
-  idle();
-  await vi.waitFor(() => expect(mocks.errors).toHaveLength(1));
-  expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1);
-  await vi.waitFor(() => expect(document.body.dataset.deferredUi).toBe('failed'));
+  expect(mocks.events).toEqual(expect.arrayContaining(['topbar-module', 'menu-module']));
+  expect(mocks.events).not.toContain('im-module');
+  expect(mocks.events).not.toContain('contacts-module');
 });
 
 test('loads deferred UI through the timeout fallback when requestIdleCallback is unavailable', async() => {
@@ -152,11 +132,11 @@ test('loads deferred UI through the timeout fallback when requestIdleCallback is
   const {bootstrapIm} = await loadBootstrapIm();
   await bootstrapIm();
 
-  expect(mocks.initializeChatUi).not.toHaveBeenCalled();
+  expect(mocks.events).not.toContain('topbar-module');
   const row = document.createElement('div');
   row.className = 'chatlist-chat';
   document.getElementById('chatlist-container')!.append(row);
   await vi.waitFor(() => expect(fallback).toBeDefined());
   fallback();
-  await vi.waitFor(() => expect(mocks.initializeChatUi).toHaveBeenCalledTimes(1));
+  await vi.waitFor(() => expect(document.body.dataset.deferredUi).toBe('ready'));
 });

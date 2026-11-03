@@ -14,7 +14,7 @@ import apiManagerProxy from '@lib/apiManagerProxy';
 import {AckedResult} from '@lib/superMessagePort';
 import rootScope from '@lib/rootScope';
 import {avatarNew} from '@components/avatarNew';
-import {ButtonMenuItemOptions, ButtonMenuSync} from '@components/buttonMenu';
+import type {ButtonMenuItemOptions} from '@components/buttonMenu';
 import ButtonMenuToggle from '@components/buttonMenuToggle';
 import Icon from '@components/icon';
 import PeerTitle from '@components/peerTitle';
@@ -195,6 +195,7 @@ export default class ChatSendAs {
     });
 
     const buttons = await Promise.all(promises);
+    const {ButtonMenuSync} = await import('@components/buttonMenu');
     const btnMenu = ButtonMenuSync({buttons}/* , this.listenerSetter */);
     buttons.forEach((button, idx) => {
       const {peerId} = peers[idx];

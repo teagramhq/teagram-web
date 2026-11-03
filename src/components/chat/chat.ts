@@ -10,7 +10,7 @@ import ChatBubbles, {FullMid, splitFullMid} from '@components/chat/bubbles';
 import ChatContextMenu from '@components/chat/contextMenu';
 import ChatInput from '@components/chat/input';
 import ChatSelection from '@components/chat/selection';
-import ChatTopbar from '@components/chat/topbar';
+import type ChatTopbar from '@components/chat/topbar';
 import {HIDDEN_PEER_ID, NULL_PEER_ID, REPLIES_HIDDEN_CHANNEL_ID, REPLIES_PEER_ID, SEND_PAID_WITH_STARS_DELAY, SERVICE_PEER_ID, VERIFICATION_CODES_BOT_ID} from '@appManagers/constants';
 import {AppPrivateSearchTab} from '@components/solidJsTabs/tabs';
 import mediaSizes, {ScreenSize} from '@helpers/mediaSizes';
@@ -85,6 +85,9 @@ export default class Chat extends EventListenerBase<{
   public bubblesViewport: HTMLElement;
 
   public topbar: ChatTopbar;
+  private inputPeerHelpersPromise: Promise<void>;
+  private topbarPromise: Promise<void>;
+  private topbarInitGeneration = 0;
   public bubbles: ChatBubbles;
   public input: ChatInput;
   public selection: ChatSelection;
@@ -611,10 +614,29 @@ export default class Chat extends EventListenerBase<{
     this.type = type;
   }
 
+  public initializeTopbar() {
+    if(this.topbar) return Promise.resolve();
+    if(this.topbarPromise) return this.topbarPromise;
+
+    const generation = this.topbarInitGeneration;
+    this.topbarPromise = import('@components/chat/topbar').then(({default: ChatTopbar}) => {
+      if(generation !== this.topbarInitGeneration) return;
+
+      const topbar = this.topbar = new ChatTopbar(this, appSidebarRight, this.managers);
+      topbar.constructUtils();
+      topbar.constructPeerHelpers();
+      topbar.construct();
+      this.container.prepend(topbar.container);
+    }).catch((error) => {
+      if(generation === this.topbarInitGeneration) this.topbarPromise = undefined;
+      throw error;
+    });
+    return this.topbarPromise;
+  }
+
   public init(/* peerId: PeerId */) {
     // this.initPeerId = peerId;
 
-    this.topbar = new ChatTopbar(this, appSidebarRight, this.managers);
     this.bubbles = new ChatBubbles(this, this.managers);
     this.input = new ChatInput(this, this.appImManager, this.managers, 'chat-input-main');
     this.contextMenu = new ChatContextMenu(this, this.managers);
@@ -626,14 +648,10 @@ export default class Chat extends EventListenerBase<{
       managers: this.managers
     });
 
-    this.topbar.constructUtils();
-    this.topbar.constructPeerHelpers();
-
-    this.topbar.construct();
     this.input.construct();
 
     this.bubbles.constructPeerHelpers();
-    this.input.constructPeerHelpers();
+    this.inputPeerHelpersPromise = this.input.constructPeerHelpers();
 
     this.priceChangedInterceptor.init();
 
@@ -646,7 +664,7 @@ export default class Chat extends EventListenerBase<{
     this.bubblesViewport = document.createElement('div');
     this.bubblesViewport.classList.add('bubbles-viewport', 'disable-hover');
 
-    this.container.append(this.topbar.container, this.bubbles.container, this.bubblesViewport, this.input.chatInput);
+    this.container.append(this.bubbles.container, this.bubblesViewport, this.input.chatInput);
 
     this.bubbles.listenerSetter.add(rootScope)('dialog_migrate', ({migrateFrom, migrateTo}) => {
       if(this.peerId === migrateFrom) {
@@ -845,6 +863,8 @@ export default class Chat extends EventListenerBase<{
   public destroy() {
     // const perf = performance.now();
 
+    this.topbarInitGeneration++;
+    this.topbarPromise = undefined;
     this.destroyPromise?.resolve();
     this.destroySharedMediaTab();
     this.topbar?.destroy();
@@ -895,6 +915,10 @@ export default class Chat extends EventListenerBase<{
   public async onChangePeer(options: ChatSetPeerOptions, m: ReturnType<typeof middlewarePromise>) {
     // spot
     const {peerId, threadId} = options;
+
+    if(peerId) {
+      await Promise.all([this.initializeTopbar(), this.inputPeerHelpersPromise]);
+    }
 
     if(!this.excludeParts.elements) {
       const searchTab = appSidebarRight.getTab(AppPrivateSearchTab);

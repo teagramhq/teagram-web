@@ -1445,6 +1445,8 @@ async function captureState(page, screenshotDirectory, name, capturedScreenshots
 async function openChatTopbarMenu(page) {
   const stage = 'alice_direct_topbar_menu';
   setPageActionStep(page, stage);
+  await page.waitForFunction(() => document.body.dataset.deferredUi === 'ready', null, {timeout: 15_000})
+  .catch(() => failStage(`${stage}_deferred_ui`));
   const toggle = page.locator('#column-center .chat.active .topbar .chat-utils .btn-menu-toggle:visible');
   await toggle.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_toggle`));
   await toggle.click().catch(() => failStage(`${stage}_open`));

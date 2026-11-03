@@ -675,8 +675,6 @@ export class ThemeController {
       settings: newSettings
     };
 
-    const {default: appImManager} = await import('@lib/appImManager');
-    await appImManager.initializeChatUi();
     await this.AppBackgroundTab.setBackgroundDocument(effectiveWallpaper, targetSettings);
     let idx = themes.indexOf(currentTheme);
     if(idx < 0) idx = themes.findIndex((t) => t.name === themeName);

@@ -6,7 +6,7 @@ import appDialogsManager, {
 } from '@lib/appDialogsManager';
 import rootScope from '@lib/rootScope';
 import {useAppSettings} from '@stores/appSettings';
-import type {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
+import {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import PopupDeleteDialog from '@components/popups/deleteDialog';
 import {i18n, LangPackKey, _i18n} from '@lib/langPack';
 import {toastNew} from '@components/toast';
@@ -16,7 +16,7 @@ import {CAN_HIDE_TOPIC, FOLDER_ID_ARCHIVE, GENERAL_TOPIC_ID, REAL_FOLDER_ID, REA
 import showLimitPopup from '@components/popups/limit';
 import createContextMenu from '@helpers/dom/createContextMenu';
 import PopupElement from '@components/popups';
-import {chatPreviewAnchorFromDialogRow} from '@components/popups/chatPreviewAnchor';
+import showChatPreviewPopup, {chatPreviewAnchorFromDialogRow} from '@components/popups/chatPreview';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import IS_SHARED_WORKER_SUPPORTED from '@environment/sharedWorkerSupport';
 import appImManager from '@lib/appImManager';
@@ -607,15 +607,13 @@ export default class DialogsContextMenu {
     PopupElement.createPopup(PopupMute, this.peerId, this.threadId);
   };
 
-  private onPreviewClick = async() => {
-    const anchor = chatPreviewAnchorFromDialogRow(this.li);
-    const {default: showChatPreviewPopup} = await import('@components/popups/chatPreview');
+  private onPreviewClick = () => {
     showChatPreviewPopup({
       peerId: this.monoforumParentPeerId || this.peerId,
       monoforumThreadId: this.monoforumParentPeerId ? this.peerId : undefined,
       threadId: this.threadId,
       lastMsgId: +this.li.dataset.mid || undefined,
-      anchor
+      anchor: chatPreviewAnchorFromDialogRow(this.li)
     });
   };
 

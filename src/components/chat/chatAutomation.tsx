@@ -1,7 +1,7 @@
 import {AvatarNewTsx} from '@components/avatarNew';
 import {ButtonMenuToggleTsx} from '@components/buttonMenuToggleTsx';
 import Chat from '@components/chat/chat';
-import ChatTopbar from '@components/chat/topbar';
+import type ChatTopbar from '@components/chat/topbar';
 import TopbarPlate, {createTopbarPlate, TopbarPlateController} from '@components/chat/topbarPlate';
 import {PeerTitleTsx} from '@components/peerTitleTsx';
 import {PeerSettings} from '@layer';

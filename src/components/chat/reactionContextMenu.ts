@@ -4,7 +4,7 @@ import {InputStickerSet, Message, MessagePeerReaction, MessagesMessageReactionsL
 import {AppManagers} from '@lib/managers';
 import {Middleware} from '@helpers/middleware';
 import ListenerSetter from '@helpers/listenerSetter';
-import ButtonMenu, {ButtonMenuItemOptions} from '@components/buttonMenu';
+import type {ButtonMenuItemOptions} from '@components/buttonMenu';
 import ButtonIcon from '@components/buttonIcon';
 import PeerTitle from '@components/peerTitle';
 import PopupElement from '@components/popups';
@@ -211,6 +211,7 @@ export default async function createReactionContextMenu({
     return;
   }
 
+  const {default: ButtonMenu} = await import('@components/buttonMenu');
   const element = await ButtonMenu({buttons, listenerSetter});
   element.classList.add('contextmenu', 'reaction-context-menu');
 

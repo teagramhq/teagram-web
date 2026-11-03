@@ -18,17 +18,18 @@ import {doubleRaf} from '@helpers/schedulers';
 import {I18nTsx} from '@helpers/solid/i18n';
 import ButtonTsx from '@components/buttonTsx';
 import {StoriesSelection, toastStoryPinnedToProfile} from './selection';
-import {ButtonMenuItemOptions, ButtonMenuSync} from '@components/buttonMenu';
+import type {ButtonMenuItemOptions} from '@components/buttonMenu';
 import CheckboxField from '@components/checkboxField';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import {attachContextMenuListener} from '@helpers/dom/attachContextMenuListener';
 import contextMenuController from '@helpers/contextMenuController';
 import positionMenu from '@helpers/positionMenu';
 import rootScope from '@lib/rootScope';
+import {logger} from '@lib/logger';
 import ListenerSetter from '@helpers/listenerSetter';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import cancelClickOrNextIfNotClick from '@helpers/dom/cancelClickOrNextIfNotClick';
-import {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
+import type {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import {AppMyStoriesTab} from '@components/solidJsTabs/tabs';
 import SidebarSlider from '../slider';
 import InputField from '@components/inputField';
@@ -50,6 +51,7 @@ const ADD_ALBUM_ID = -2;
 
 const TEST_ONE = false;
 const TEST_TWO = false;
+const log = logger('StoriesContextMenu');
 
 class StoriesContextMenu {
   private buttons: ButtonMenuItemOptionsVerifiable[];
@@ -59,6 +61,7 @@ class StoriesContextMenu {
   private mid: number;
   private isSelected: boolean;
   private storyItem: StoryItem.storyItem;
+  private initPromise: Promise<void>;
 
   constructor(
     private attachTo: HTMLElement,
@@ -68,18 +71,20 @@ class StoriesContextMenu {
   ) {
     attachContextMenuListener({
       element: attachTo,
-      callback: (e) => {
-        if(this.init) {
-          this.init();
-          this.init = null;
-        }
-
+      callback: async(e) => {
         let item: HTMLElement;
         try {
           item = findUpClassName(e.target, 'search-super-item');
         } catch(e) {}
 
         if(!item) return;
+
+        try {
+          await this.init();
+        } catch(error) {
+          log.error('Failed to load stories context menu', error);
+          return;
+        }
 
         if(!('touches' in e)) e.preventDefault(); // cross-realm-safe mouse check (Document PiP window)
         if(this.element.classList.contains('active')) {
@@ -119,6 +124,17 @@ class StoriesContextMenu {
   }
 
   private init() {
+    if(!this.initPromise) {
+      this.initPromise = this.initialize().catch((error) => {
+        this.initPromise = undefined;
+        throw error;
+      });
+    }
+
+    return this.initPromise;
+  }
+
+  private async initialize() {
     const managers = rootScope.managers;
     const getSelectedIds = () => {
       if(this.selection && this.selection.isSelecting) {
@@ -194,6 +210,7 @@ class StoriesContextMenu {
           };
         });
 
+        const {ButtonMenuSync} = await import('@components/buttonMenu');
         return ButtonMenuSync({buttons, listenerSetter: this.listenerSetter});
       }
     }), {
@@ -275,6 +292,7 @@ class StoriesContextMenu {
       verify: () => managers.appStoriesManager.hasRights(this.peerId, this.storyItem.id, 'delete')
     }];
 
+    const {ButtonMenuSync} = await import('@components/buttonMenu');
     this.element = ButtonMenuSync({buttons: this.buttons, listenerSetter: this.listenerSetter});
     this.element.classList.add('search-contextmenu', 'contextmenu');
     getOverlayRoot().append(this.element);

@@ -1,17 +1,17 @@
 import {createRoot} from 'solid-js';
-import type {Component, ParentProps} from 'solid-js';
+import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
 
 /**
  * If your function creates and returns computations (e.g. signals, effects, etc.), make sure it is wrapped in a `createRoot` call.
  */
-export function runWithHotReloadGuard<T>(fn: () => T, HotReloadGuardProvider: Component<ParentProps>): T {
+export function runWithHotReloadGuard<T>(fn: () => T): T {
   let result: T;
 
   const dispose = createRoot((dispose) => {
     (
-      <HotReloadGuardProvider>
+      <SolidJSHotReloadGuardProvider>
         {void (result = fn())}
-      </HotReloadGuardProvider>
+      </SolidJSHotReloadGuardProvider>
     );
 
     return dispose;

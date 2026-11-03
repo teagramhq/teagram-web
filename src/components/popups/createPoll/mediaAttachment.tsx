@@ -27,6 +27,7 @@ import classNames from '@helpers/string/classNames';
 import {wrapAsyncClickHandler} from '@helpers/wrapAsyncClickHandler';
 import {useIsCleaned} from '@hooks/useIsCleaned';
 import I18n from '@lib/langPack';
+import {logger} from '@lib/logger';
 import {useHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
 import {createEffect, createMemo, createResource, createSignal, Match, on, onCleanup, Switch} from 'solid-js';
 import {unwrap} from 'solid-js/store';
@@ -948,39 +949,41 @@ export const MediaAttachment = (props: {
 };
 
 type MenuButtons = Parameters<typeof ButtonMenuSync>[0]['buttons'];
+const log = logger('PollMediaAttachment');
 
 function useMenu(args: {
   buttons: () => MenuButtons;
   pivot: () => HTMLElement;
 }) {
-  const {ButtonMenuSync} = useHotReloadGuard();
   const [isMenuOpen, setIsMenuOpen] = createSignal(false);
 
   createEffect(on(isMenuOpen, (open) => {
     if(!open) return;
 
     const isCleaned = useIsCleaned();
+    let buttonMenu: HTMLElement;
+    onCleanup(() => buttonMenu?.remove());
 
-    const buttonMenu = ButtonMenuSync({buttons: args.buttons()});
+    void import('@components/buttonMenu').then(({ButtonMenuSync}) => {
+      if(!isMenuOpen() || isCleaned()) return;
 
-    buttonMenu.style.position = 'fixed';
-    buttonMenu.style.top = 'unset';
+      buttonMenu = ButtonMenuSync({buttons: args.buttons()});
 
-    getOverlayRoot().appendChild(buttonMenu);
+      buttonMenu.style.position = 'fixed';
+      buttonMenu.style.top = 'unset';
 
-    requestRAF(() => {
-      if(isCleaned()) return;
+      getOverlayRoot().appendChild(buttonMenu);
 
-      positionFloatingMenu(args.pivot().getBoundingClientRect(), buttonMenu, 'right-center', [12, 0]);
-      contextMenuController.openBtnMenu(buttonMenu, async() => {
-        await pause(400);
-        setIsMenuOpen(false);
+      requestRAF(() => {
+        if(isCleaned()) return;
+
+        positionFloatingMenu(args.pivot().getBoundingClientRect(), buttonMenu, 'right-center', [12, 0]);
+        contextMenuController.openBtnMenu(buttonMenu, async() => {
+          await pause(400);
+          setIsMenuOpen(false);
+        });
       });
-    });
-
-    onCleanup(() => {
-      buttonMenu.remove();
-    });
+    }).catch((error) => log.error('Failed to load poll media menu', error));
   }));
 
   return setIsMenuOpen;

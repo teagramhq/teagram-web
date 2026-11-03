@@ -42,6 +42,7 @@ import appSidebarRight from '@components/sidebarRight';
 import pause from '@helpers/schedulers/pause';
 import namedPromises from '@helpers/namedPromises';
 import {openInstantViewInAppBrowser} from '@components/browser';
+import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import appSidebarLeft from '@components/sidebarLeft';
 import {AppContactsTab} from '@components/solidJsTabs/tabs';
@@ -1032,8 +1033,7 @@ export class InternalLinkProcessor {
       return;
     }
 
-    const search = await appSidebarLeft.initSearch();
-    search.open();
+    appSidebarLeft.initSearch().open();
   }
 
   /** Points at a control that lives in the menu behind `toggle`. */
@@ -1251,7 +1251,6 @@ export class InternalLinkProcessor {
 
       const savedTones = tones.filter((t) => t._ === 'aiComposeTone').length;
       const isSaved = !tone.pFlags.creator && tones.some((t) => t._ === 'aiComposeTone' && t.id.toString() === tone.id.toString());
-      const {default: SolidJSHotReloadGuardProvider} = await import('@lib/solidjs/hotReloadGuardProvider');
 
       showViewTonePopup({
         tone,
@@ -1609,8 +1608,7 @@ export class InternalLinkProcessor {
     }
   };
 
-  public processInstantViewLink = async(link: InternalLink.InternalLinkInstantView) => {
-    const {default: SolidJSHotReloadGuardProvider} = await import('@lib/solidjs/hotReloadGuardProvider');
+  public processInstantViewLink = (link: InternalLink.InternalLinkInstantView) => {
     openInstantViewInAppBrowser({
       cachedPage: link.url,
       HotReloadGuardProvider: SolidJSHotReloadGuardProvider

@@ -6,7 +6,7 @@ import type Chat from '@components/chat/chat';
 import {AppImManager, APP_TABS} from '@lib/appImManager';
 import IS_TOUCH_SUPPORTED from '@environment/touchSupport';
 import ChatRecording from '@components/chat/recording/chatRecording';
-import {ButtonMenuItemOptions, ButtonMenuItemOptionsVerifiable, ButtonMenuSync} from '@components/buttonMenu';
+import type {ButtonMenuItemOptions, ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import emoticonsDropdown, {EmoticonsDropdown} from '@components/emoticonsDropdown';
 import showForwardPopup from '@components/popups/forward';
 import PopupNewMedia, {getCurrentNewMediaPopup} from '@components/popups/newMedia';
@@ -591,7 +591,7 @@ export default class ChatInput {
       this.paidMessageInterceptor.dispose();
     });
 
-    this.inputState = runWithHotReloadGuard(() => createChatInputState(this), SolidJSHotReloadGuardProvider);
+    this.inputState = runWithHotReloadGuard(() => createChatInputState(this));
 
     if(HOT_CHAT_INPUTS) {
       HOT_CHAT_INPUTS.push(this);
@@ -607,7 +607,7 @@ export default class ChatInput {
     if(!this.inputState) return;
     const carried = {...this.inputState.store};
     this.inputState.dispose();
-    this.inputState = runWithHotReloadGuard(() => create(this, carried), SolidJSHotReloadGuardProvider);
+    this.inputState = runWithHotReloadGuard(() => create(this, carried));
   }
 
   public freezeFocused(focused: boolean) {
@@ -640,7 +640,7 @@ export default class ChatInput {
     }, {listenerSetter: this.listenerSetter});
   }
 
-  private constructReplyElements() {
+  private async constructReplyElements() {
     this.replyElements.container = document.createElement('div');
     this.replyElements.container.classList.add('reply-wrapper', 'rows-wrapper-row');
 
@@ -679,6 +679,7 @@ export default class ChatInput {
       onClick: this.onHelperCancel,
       danger: true
     }];
+    const {ButtonMenuSync} = await import('@components/buttonMenu');
     const btnMenu = this.replyElements.menuContainer = ButtonMenuSync({
       buttons,
       listenerSetter: this.listenerSetter
@@ -690,7 +691,7 @@ export default class ChatInput {
     }
   }
 
-  private constructForwardElements() {
+  private async constructForwardElements() {
     const onHideAuthorClick = () => {
       isChangingAuthor = true;
     };
@@ -738,6 +739,7 @@ export default class ChatInput {
         danger: true
       }
     ];
+    const {ButtonMenuSync} = await import('@components/buttonMenu');
     const forwardBtnMenu = forwardElements.container = ButtonMenuSync({
       buttons: forwardButtons,
       radioGroups: [{
@@ -785,7 +787,7 @@ export default class ChatInput {
     forwardElements.modifyArgs = forwardButtons.slice(0, -2);
   }
 
-  private constructWebPageElements() {
+  private async constructWebPageElements() {
     this.webPageElements = {} as any;
     const buttons: ButtonMenuItemOptions[] = [this.webPageElements.above = {
       text: 'AboveMessage',
@@ -811,6 +813,7 @@ export default class ChatInput {
       icon: 'delete',
       danger: true
     }];
+    const {ButtonMenuSync} = await import('@components/buttonMenu');
     const btnMenu = this.webPageElements.container = ButtonMenuSync({
       buttons,
       radioGroups: [{
@@ -1022,13 +1025,13 @@ export default class ChatInput {
     this.recordingController = new ChatRecording(this);
   }
 
-  public constructPeerHelpers() {
+  public async constructPeerHelpers() {
     if(!this.excludeParts.reply) {
-      this.constructReplyElements();
+      await this.constructReplyElements();
 
       if(!this.excludeParts.forwardOptions) {
-        this.constructForwardElements();
-        this.constructWebPageElements();
+        await this.constructForwardElements();
+        await this.constructWebPageElements();
       }
     }
 
@@ -1543,7 +1546,7 @@ export default class ChatInput {
 
     this.botStartBtn = makeControlButton('BotStart');
     this.unblockBtn = makeControlButton('Unblock');
-    this.joinBtn = this.chat.topbar && makeControlButton('ChannelJoin', true);
+    this.joinBtn = makeControlButton('ChannelJoin', true);
     this.channelMuteBtn = makeControlButton('ChatList.Context.Mute');
     this.channelMuteBtn.classList.add('hide');
     this.onlyPremiumBtnText = new I18n.IntlElement({key: 'Chat.Input.PremiumRequiredButton', args: [0, document.createElement('a')]});
@@ -1565,7 +1568,7 @@ export default class ChatInput {
     attachClickEvent(this.frozenBtn, () => {
       showFrozenPopup();
     }, {listenerSetter: this.listenerSetter});
-    this.joinBtn && attachClickEvent(this.joinBtn, this.chat.topbar.onJoinClick.bind(this.chat.topbar, this.joinBtn), {listenerSetter: this.listenerSetter});
+    attachClickEvent(this.joinBtn, () => this.chat.topbar?.onJoinClick(this.joinBtn), {listenerSetter: this.listenerSetter});
     attachClickEvent(this.channelMuteBtn, () => {
       this.managers.appMessagesManager.togglePeerMute({peerId: this.chat.peerId});
     }, {listenerSetter: this.listenerSetter});
@@ -1633,6 +1636,8 @@ export default class ChatInput {
       controlPlate,
       this.replyInTopicOverlay
     ].filter(Boolean));
+
+    await this.sendMenu?.ready;
   }
 
   private setChatListeners() {

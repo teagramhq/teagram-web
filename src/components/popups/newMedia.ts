@@ -76,7 +76,6 @@ import {animateValue} from '@helpers/animateValue';
 import {lerp} from '@helpers/lerp';
 import {attachContextMenuListener} from '@helpers/dom/attachContextMenuListener';
 import cancelEvent from '@helpers/dom/cancelEvent';
-import ButtonMenu from '@components/buttonMenu';
 import contextMenuController from '@helpers/contextMenuController';
 import {makeDateFromTimestamp} from '@helpers/date/makeDateFromTimestamp';
 import Section from '@components/section';
@@ -431,6 +430,7 @@ export default class PopupNewMedia extends PopupElement {
         callback: async(e) => {
           cancelEvent(e);
 
+          const {default: ButtonMenu} = await import('@components/buttonMenu');
           const element = await ButtonMenu({
             buttons: [{
               text: 'MessageScheduleEditTime',

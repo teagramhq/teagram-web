@@ -5,7 +5,7 @@ import ListenerSetter from '@helpers/listenerSetter';
 import {getMiddleware, Middleware, MiddlewareHelper} from '@helpers/middleware';
 import {Reaction} from '@layer';
 import rootScope from '@lib/rootScope';
-import {ButtonMenuItemOptionsVerifiable, ButtonMenuSync} from '@components/buttonMenu';
+import type {ButtonMenuItemOptionsVerifiable} from '@components/buttonMenu';
 import PopupPremium from '@components/popups/premium';
 import ChatContextMenu from '@components/chat/contextMenu';
 import {ChatReactionsMenu} from '@components/chat/reactionsMenu';
@@ -31,8 +31,10 @@ export default class SendMenu {
     onEffect?: (effect: DocId) => void
   }) {
     this.middlewareHelper = options.middleware.create();
-    this.createMenu();
+    this.ready = this.createMenu();
   }
+
+  public ready: Promise<void>;
 
   public setPeerParams(params: {peerId: PeerId, isPaid: boolean}) {
     this.type = params.peerId === rootScope.myId ? 'reminder' : 'schedule';
@@ -69,7 +71,7 @@ export default class SendMenu {
     }];
   }
 
-  private createMenu() {
+  private async createMenu() {
     this.middlewareHelper.clean();
     const middleware = this.middlewareHelper.get();
 
@@ -80,6 +82,7 @@ export default class SendMenu {
 
     this.createButtons();
     const buttons = this.createButtons();
+    const {ButtonMenuSync} = await import('@components/buttonMenu');
     const element = ButtonMenuSync({buttons, listenerSetter});
     element.classList.add('menu-send', this.options.openSide);
     this.options.onRef(element);

@@ -1,6 +1,7 @@
 import {Component} from 'solid-js';
 import {render} from 'solid-js/web';
 import {LangPackKey} from '@lib/langPack';
+import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
 import {InstanceOf} from '@types';
 import {SliderSuperTab} from '@components/slider';
 import {SliderSuperTabEventable} from '@components/sliderTab';
@@ -41,7 +42,6 @@ export function scaffoldSolidJSTab<Payload = void>({
       const div = document.createElement('div');
 
       const {default: Component} = await getComponentModule();
-      const {default: SolidJSHotReloadGuardProvider} = await import('@lib/solidjs/hotReloadGuardProvider');
 
       const promiseCollectorHelper = PromiseCollector.createHelper();
 
@@ -112,7 +112,6 @@ export function scaffoldSolidJSTabEventable<Payload = void, Events extends Event
       const div = document.createElement('div');
 
       const {default: Component} = await getComponentModule();
-      const {default: SolidJSHotReloadGuardProvider} = await import('@lib/solidjs/hotReloadGuardProvider');
 
       const promiseCollectorHelper = PromiseCollector.createHelper();
 

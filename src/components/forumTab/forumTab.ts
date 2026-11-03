@@ -74,8 +74,7 @@ export class ForumTab extends SliderSuperTabEventable {
   protected async onSearchClick() {
     appSidebarLeft.closeEverythingInside();
     if(liteMode.isAvailable('animations')) await pause(400);
-    const search = await appSidebarLeft.initSearch();
-    search.openWithPeerId(this.peerId);
+    appSidebarLeft.initSearch().openWithPeerId(this.peerId);
   }
 
   public init(options: {

@@ -1,9 +1,9 @@
 import {JSX, createSignal, For, createEffect, Accessor, onMount, createMemo, splitProps, on, Show, onCleanup} from 'solid-js';
 import Scrollable from '@components/scrollable2';
+import {createStoriesViewer} from '@components/stories/viewer';
 import styles from '@components/stories/list.module.scss';
 import mediaSizes from '@helpers/mediaSizes';
 import rootScope from '@lib/rootScope';
-import {logger} from '@lib/logger';
 import {fastSmoothScrollToStart} from '@helpers/fastSmoothScroll';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import {AvatarNew} from '@components/avatarNew';
@@ -30,7 +30,6 @@ const ITEM_WIDTH = 74 + ITEM_MARGIN * 2;
 const ITEM_AVATAR_SIZE = 54;
 const STACKED_LENGTH = 3;
 const SMALL_SIDEBAR_WIDTH = 348;
-const log = logger('StoriesList');
 
 function _StoriesList(props: {
   foldInto: HTMLElement,
@@ -84,9 +83,6 @@ function _StoriesList(props: {
       return;
     }
 
-    let active = true;
-    onCleanup(() => active = false);
-
     const onExit = () => {
       setViewerPeer(undefined);
     };
@@ -96,11 +92,7 @@ function _StoriesList(props: {
       return item?.querySelector('.avatar');
     });
 
-    import('@components/stories/viewer').then(({createStoriesViewer}) => {
-      if(active) createStoriesViewer({onExit, target});
-    }).catch((error) => {
-      if(active) log.error('Failed to load stories viewer:', error);
-    });
+    createStoriesViewer({onExit, target});
   });
 
   const onItemClick = (peer: PeerStories, e?: MouseEvent) => {
