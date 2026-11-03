@@ -81,8 +81,9 @@ export class ScrollableBase {
 
   public isHeavyAnimationInProgress = false;
   protected needCheckAfterAnimation = false;
+  protected scrollDistanceToEndOnScroll?: number;
 
-  public checkForTriggers?: (scrollPosition?: number) => void;
+  public checkForTriggers?: (scrollPosition?: number, scrollSize?: number, clientSize?: number) => void;
 
   public scrollPositionProperty: 'scrollTop' | 'scrollLeft';
   public scrollSizeProperty: 'scrollHeight' | 'scrollWidth';
@@ -229,21 +230,30 @@ export class ScrollableBase {
       const scrollPosition = this.scrollPosition;
       // Keep geometry reads ahead of the chat callback's class changes.
       const updateCustomThumb = !IS_OVERLAY_SCROLL_SUPPORTED() && this.thumb;
-      const scrollSize = updateCustomThumb ? this.scrollSize : undefined;
-      const clientSize = updateCustomThumb ? this.clientSize : undefined;
-      this.lastScrollDirection = this.lastScrollPosition === scrollPosition ? 0 : (this.lastScrollPosition < scrollPosition ? 1 : -1); // * 1 - bottom, -1 - top
-      this.lastScrollPosition = scrollPosition;
+      const checkScrollTriggers = this.onScrolledTop || this.onScrolledBottom;
+      const needsScrollSize = updateCustomThumb || checkScrollTriggers;
+      const scrollSize = needsScrollSize ? this.scrollSize : undefined;
+      const clientSize = needsScrollSize ? this.clientSize : undefined;
+      const offsetSize = this.onAdditionalScroll && checkScrollTriggers ? this.offsetSize : undefined;
+      this.scrollDistanceToEndOnScroll = offsetSize === undefined ? undefined : scrollSize - Math.round(scrollPosition + offsetSize);
 
-      if(this.checkForTriggers) {
-        this.checkForTriggers(scrollPosition);
+      try {
+        this.lastScrollDirection = this.lastScrollPosition === scrollPosition ? 0 : (this.lastScrollPosition < scrollPosition ? 1 : -1); // * 1 - bottom, -1 - top
+        this.lastScrollPosition = scrollPosition;
+
+        if(this.checkForTriggers) {
+          this.checkForTriggers(scrollPosition, scrollSize, clientSize);
+        }
+
+        // lastScrollDirection check is useless here, every callback should decide on its own
+        if(this.onAdditionalScroll/*  && this.lastScrollDirection !== 0 */) {
+          this.onAdditionalScroll();
+        }
+
+        this.updateThumb(scrollPosition, scrollSize, clientSize);
+      } finally {
+        this.scrollDistanceToEndOnScroll = undefined;
       }
-
-      // lastScrollDirection check is useless here, every callback should decide on its own
-      if(this.onAdditionalScroll/*  && this.lastScrollDirection !== 0 */) {
-        this.onAdditionalScroll();
-      }
-
-      this.updateThumb(scrollPosition, scrollSize, clientSize);
     });
   };
 
@@ -317,6 +327,10 @@ export class ScrollableBase {
   }
 
   public getDistanceToEnd() {
+    if(this.scrollDistanceToEndOnScroll !== undefined) {
+      return this.scrollDistanceToEndOnScroll;
+    }
+
     return this.scrollSize - Math.round(this.scrollPosition + this.offsetSize);
   }
 
@@ -434,7 +448,7 @@ export default class Scrollable extends ScrollableBase {
     this.log('setVirtualContainer:', el, this);
   }
 
-  public checkForTriggers = (scrollPosition?: number) => {
+  public checkForTriggers = (scrollPosition?: number, scrollSize?: number, clientSize?: number) => {
     if((!this.onScrolledTop && !this.onScrolledBottom)) return;
 
     if(this.isHeavyAnimationInProgress) {
@@ -443,7 +457,8 @@ export default class Scrollable extends ScrollableBase {
     }
 
     scrollPosition ??= this.scrollPosition;
-    const {scrollSize, clientSize} = this;
+    scrollSize ??= this.scrollSize;
+    clientSize ??= this.clientSize;
     if(!scrollSize) { // незачем вызывать триггеры если блок пустой или не виден
       return;
     }

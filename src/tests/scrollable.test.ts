@@ -91,3 +91,48 @@ test('reuses the scroll position read by the scroll handler for history triggers
     vi.useRealTimers();
   }
 });
+
+test('reads the distance to end before history callbacks change layout', () => {
+  vi.useFakeTimers();
+
+  const container = document.createElement('div');
+  let historyTriggerRan = false;
+  const readsAfterHistoryTrigger: string[] = [];
+  const geometry = {
+    scrollTop: 100,
+    scrollHeight: 1_000,
+    clientHeight: 500,
+    offsetHeight: 500
+  };
+  for(const [property, value] of Object.entries(geometry)) {
+    Object.defineProperty(container, property, {
+      configurable: true,
+      get: () => {
+        if(historyTriggerRan) readsAfterHistoryTrigger.push(property);
+        return value;
+      }
+    });
+  }
+
+  const scrollable = new Scrollable(undefined, 'test', 300, undefined, container);
+  scrollable.lastScrollPosition = 200;
+  scrollable.onScrolledTop = () => {
+    historyTriggerRan = true;
+    container.classList.add('history-trigger-ran');
+  };
+  let distanceToEnd: number;
+  scrollable.onAdditionalScroll = () => {
+    distanceToEnd = scrollable.getDistanceToEnd();
+  };
+
+  try {
+    scrollable.onScroll();
+    vi.advanceTimersToNextFrame();
+
+    expect(distanceToEnd).toBe(400);
+    expect(readsAfterHistoryTrigger).toEqual([]);
+  } finally {
+    scrollable.destroy();
+    vi.useRealTimers();
+  }
+});
