@@ -6698,7 +6698,7 @@ export default class ChatBubbles {
 
     this.updatePlaceholderPosition?.();
 
-    restoreScroll?.();
+    await restoreScroll?.();
 
     m(pause(!this.chat.setPeerPromise ? 0 : 1000))
     .then(() => m(getHeavyAnimationPromise()))
@@ -11392,10 +11392,14 @@ export default class ChatBubbles {
     // const hadScroll = saved.scrollHeight !== saved.clientHeight;
 
     return {
-      restoreScroll: () => {
+      restoreScroll: async() => {
         log('restore');
         // scrollSaver.restore(_history.length === 1 && !reverse ? false : true);
-        scrollSaver.restore(reverse);
+        if(reverse) {
+          await scrollSaver.restoreAfterLayout(reverse);
+        } else {
+          scrollSaver.restore(reverse);
+        }
         this.onRenderScrollSet(scrollSaver.getSaved());
       },
       scrollSaver
