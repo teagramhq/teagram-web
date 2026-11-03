@@ -1297,7 +1297,7 @@ export default class Chat extends EventListenerBase<{
         } catch(error) {
           failPeerChange();
 
-          this.log.error('peer change part failed:', name, error);
+          this.log.error('peer change part failed:', peerId, name, error);
           return {name, error};
         }
       });
@@ -1340,7 +1340,7 @@ export default class Chat extends EventListenerBase<{
             try {
               result.callback?.();
             } catch(error) {
-              this.log.error('peer change apply part failed:', result.name, error);
+              this.log.error('peer change apply part failed:', peerId, result.name, error);
               if(result.name === 'input') {
                 failPeerChange();
                 if(!didInputPeerChangeFail) {
@@ -1355,7 +1355,7 @@ export default class Chat extends EventListenerBase<{
             try {
               sharedMediaTab?.loadSidebarMedia(true);
             } catch(error) {
-              this.log.error('peer change apply part failed:', 'sharedMedia', error);
+              this.log.error('peer change apply part failed:', peerId, 'sharedMedia', error);
             }
           }
           if(!middleware()) {

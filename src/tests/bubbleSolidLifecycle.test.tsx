@@ -2,6 +2,7 @@ import type {Message, PeerSettings} from '@layer';
 import '@helpers/peerIdPolyfill';
 import {getMiddleware} from '@helpers/middleware';
 import ScrollSaver from '@helpers/scrollSaver';
+import lang from '@/lang';
 import mediaSizes, {ScreenSize} from '@helpers/mediaSizes';
 import windowSize from '@helpers/windowSize';
 import {render} from 'solid-js/web';
@@ -502,8 +503,8 @@ test('logs a failed peer part and still applies the remaining callbacks', async(
   await expect(preparedPeerChange.ready).resolves.toEqual({error: failure});
   await expect(preparedPeerChange.apply()).resolves.toBeUndefined();
 
-  expect(error).toHaveBeenCalledWith(expect.any(String), 'bubbles', failure);
-  expect(error).toHaveBeenCalledWith(expect.any(String), 'topbar', callbackFailure);
+  expect(error).toHaveBeenCalledWith('peer change part failed:', peerId, 'bubbles', failure);
+  expect(error).toHaveBeenCalledWith('peer change apply part failed:', peerId, 'topbar', callbackFailure);
   expect(callbacks).toEqual(['topbar', 'input', 'backgrounds']);
   expect(dispatchEvent).toHaveBeenCalledWith('peer_changed', chat);
 });
@@ -691,6 +692,7 @@ test('fails closed when a non-input peer preparation rejects before history', as
   expect(chat.peerChangeFailed).toBe(true);
   expect(events).toEqual([]);
   expect(dispatchEvent).not.toHaveBeenCalledWith('peer_changed', chat);
+  expect(chat.log.error).toHaveBeenCalledWith('peer change part failed:', peerId, 'topbar', failure);
   expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Chat.PeerChangeFailed'});
 });
 
@@ -717,8 +719,29 @@ test('finishes the peer UI and reports input callback failures', async() => {
   expect(chatInput.classList.contains('is-hidden')).toBe(true);
   expect(messageInput.contentEditable).toBe('false');
   expect(chat.peerChangeFailed).toBe(true);
+  expect(chat.log.error).toHaveBeenCalledWith('peer change apply part failed:', peerId, 'input', failure);
   expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Chat.PeerChangeFailed'});
   expect(moduleMocks.toastNew).toHaveBeenCalledTimes(1);
+});
+
+test('logs the peer id when shared media loading fails during deferred apply', async() => {
+  const failure = new Error('shared media loading failed');
+  const {chat, sharedMediaTab, events, dispatchEvent} = makePeerChangeChat();
+  sharedMediaTab.loadSidebarMedia = vi.fn(() => {
+    throw failure;
+  });
+
+  const prepared = await Chat.prototype.finishPeerChange.call(chat, {
+    peerId,
+    middleware: () => true,
+    deferUiCallbacks: true
+  }) as {ready: Promise<{error: unknown} | undefined>, apply: () => Promise<void>};
+  await prepared.ready;
+  await prepared.apply();
+
+  expect(events).toEqual(['topbar', 'bubbles', 'input', 'sharedMedia', 'backgrounds']);
+  expect(chat.log.error).toHaveBeenCalledWith('peer change apply part failed:', peerId, 'sharedMedia', failure);
+  expect(dispatchEvent).toHaveBeenCalledWith('peer_changed', chat);
 });
 
 test('does not fail the active peer when stale input preparation rejects', async() => {
@@ -801,6 +824,7 @@ test('fails closed and reports when a synchronous peer part rejects', async() =>
   expect(chat.peerChangeFailed).toBe(true);
   expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Chat.PeerChangeFailed'});
   expect(moduleMocks.toastNew).toHaveBeenCalledTimes(1);
+  expect(lang['Teagram.Chat.PeerChangeFailed']).toBe('This chat couldn\'t be opened. Reopen it to try again.');
 });
 
 test('retries the same peer after a failed input setup and restores the composer', async() => {
