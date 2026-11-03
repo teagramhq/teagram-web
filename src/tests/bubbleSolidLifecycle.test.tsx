@@ -423,6 +423,39 @@ test('logs cached peer render failures in the app im manager', async() => {
   });
 });
 
+test('logs the originating peer when a cached render is superseded', async() => {
+  let rejectCachedRender!: (error: Error) => void;
+  const cachedRender = new Promise<void>((_resolve, reject) => {
+    rejectCachedRender = reject;
+  });
+  const failure = new Error('cached render failed');
+  const firstPeerId = peerId;
+  const secondPeerId = (peerId + 1) as PeerId;
+  const firstChat = {
+    peerId: firstPeerId,
+    setPeer: vi.fn(async() => ({cached: true, promise: cachedRender}))
+  };
+  const secondChat = {peerId: secondPeerId};
+  const error = vi.fn();
+  const manager = Object.assign(Object.create(AppImManager.prototype), {
+    managers: {appPeersManager: {getPeerMigratedTo: vi.fn(async() => undefined)}},
+    chats: [firstChat],
+    isSamePeer: vi.fn(() => false),
+    appChatBackground: {getReadyPromise: vi.fn(() => Promise.resolve())},
+    log: {error}
+  }) as any;
+
+  await AppImManager.prototype.setPeer.call(manager, {peerId: firstPeerId});
+
+  firstChat.peerId = secondPeerId;
+  manager.chats = [secondChat];
+  rejectCachedRender(failure);
+
+  await vi.waitFor(() => {
+    expect(error).toHaveBeenCalledWith(expect.any(String), firstPeerId, failure);
+  });
+});
+
 test('starts unread and dialog lookups alongside peer metadata setup', async() => {
   const pendingHistory = new Promise<void>(() => {});
   const {harness, chat} = makeSetPeerHarness(pendingHistory);
