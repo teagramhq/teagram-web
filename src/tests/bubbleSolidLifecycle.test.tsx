@@ -584,7 +584,7 @@ test('logs a failed peer part and still applies the remaining callbacks', async(
   });
   if(!preparedPeerChange) throw new Error('deferred peer change was not returned');
 
-  await expect(preparedPeerChange.ready).resolves.toEqual({error: failure});
+  await expect(preparedPeerChange.ready).resolves.toEqual({error: failure, name: 'bubbles'});
   await expect(preparedPeerChange.apply()).resolves.toBeUndefined();
 
   expect(error).toHaveBeenCalledWith('peer change part failed:', peerId, 'bubbles', failure);
@@ -711,7 +711,7 @@ test('fails the peer transition when input setup rejects after history resolves'
 
   try {
     const result = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
-    await vi.waitFor(() => expect(events).toEqual(['topbar', 'bubbles']));
+    expect(harness.preloader.attach).toHaveBeenCalled();
 
     resolveHistory();
     await historySettled;
@@ -726,6 +726,87 @@ test('fails the peer transition when input setup rejects after history resolves'
     expect(chat.peerChangeFailed).toBe(true);
     expect(events).toEqual(['topbar', 'bubbles', 'sharedMedia', 'backgrounds']);
     expect(dispatchEvent).toHaveBeenCalledWith('peer_changed', chat);
+    expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Chat.PeerChangeFailed'});
+    expect(moduleMocks.toastNew).toHaveBeenCalledTimes(1);
+  } finally {
+    animationIntersector.unlockGroup('chat');
+  }
+});
+
+test('fails the peer transition when topbar setup rejects after history resolves', async() => {
+  let resolveHistory!: () => void;
+  const history = new Promise<void>((resolve) => {
+    resolveHistory = resolve;
+  });
+  let resolveHistorySettled!: () => void;
+  const historySettled = new Promise<void>((resolve) => {
+    resolveHistorySettled = resolve;
+  });
+  history.then(() => resolveHistorySettled());
+  let rejectTopbarSetup!: (error: Error) => void;
+  const topbarSetup = new Promise<() => void>((_resolve, reject) => {
+    rejectTopbarSetup = reject;
+  });
+  const failure = new Error('topbar peer setup failed');
+  const {harness, chat, getHistory1} = makeMountableSetPeerHarness();
+  const events: string[] = [];
+  const dispatchEvent = vi.fn();
+  const chatInput = document.createElement('div');
+  const messageInput = document.createElement('div');
+  const input = Object.assign(Object.create(ChatInput.prototype), {
+    peerChanging: false,
+    chatInput,
+    messageInput
+  }) as any;
+  input.finishPeerChange = vi.fn(() => {
+    input.peerChanging = true;
+    return Promise.resolve(() => events.push('input'));
+  });
+  const sharedMediaTab = {
+    fillProfileElements: vi.fn(async() => () => events.push('sharedMedia')),
+    loadSidebarMedia: vi.fn()
+  };
+  Object.setPrototypeOf(chat, Chat.prototype);
+  Object.assign(chat, {
+    peerChanged: false,
+    peerChangeFailed: false,
+    cleanup: vi.fn(),
+    topbar: {finishPeerChange: vi.fn(() => topbarSetup)},
+    bubbles: {finishPeerChange: vi.fn(async() => () => events.push('bubbles')), lazyLoadQueue: {queueId: 0}},
+    input,
+    sharedMediaTab,
+    sharedMediaTabs: [sharedMediaTab],
+    handleBackgrounds: vi.fn(async() => () => events.push('backgrounds')),
+    log: Object.assign(vi.fn(), {warn: vi.fn(), error: vi.fn(), setPrefix: vi.fn()}),
+    isMainChat: true,
+    container: {dataset: {}, classList: {toggle: vi.fn()}},
+    appImManager: {getChatSavedPosition: vi.fn(() => undefined), dispatchEvent}
+  });
+  chat.finishPeerChange = (options: any) => Chat.prototype.finishPeerChange.call(chat, options);
+  getHistory1.mockReturnValueOnce(Promise.resolve({
+    cached: true,
+    promise: history,
+    waitPromise: Promise.resolve()
+  }));
+  const animationIntersector = (await import('@components/animationIntersector')).default;
+
+  try {
+    const result = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
+    expect(harness.preloader.attach).toHaveBeenCalled();
+
+    resolveHistory();
+    await historySettled;
+    rejectTopbarSetup(failure);
+
+    await expect(result.promise).rejects.toBe(failure);
+
+    expect(input.peerChanging).toBe(false);
+    expect(chatInput.classList.contains('is-hidden')).toBe(true);
+    expect(messageInput.contentEditable).toBe('false');
+    expect(chat.peerChanged).toBe(false);
+    expect(chat.peerChangeFailed).toBe(true);
+    expect(events).toEqual([]);
+    expect(dispatchEvent).not.toHaveBeenCalledWith('peer_changed', chat);
     expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Chat.PeerChangeFailed'});
     expect(moduleMocks.toastNew).toHaveBeenCalledTimes(1);
   } finally {
@@ -792,7 +873,7 @@ test('finishes the peer UI and reports input callback failures', async() => {
     peerId,
     middleware: () => true,
     deferUiCallbacks: true
-  }) as {ready: Promise<{error: unknown} | undefined>, apply: () => Promise<void>};
+  }) as {ready: Promise<{error: unknown, name: string} | undefined>, apply: () => Promise<void>};
   await prepared.ready;
 
   await expect(prepared.apply()).rejects.toBe(failure);
@@ -819,7 +900,7 @@ test('logs the peer id when shared media loading fails during deferred apply', a
     peerId,
     middleware: () => true,
     deferUiCallbacks: true
-  }) as {ready: Promise<{error: unknown} | undefined>, apply: () => Promise<void>};
+  }) as {ready: Promise<{error: unknown, name: string} | undefined>, apply: () => Promise<void>};
   await prepared.ready;
   await prepared.apply();
 
@@ -848,12 +929,12 @@ test('does not fail the active peer when stale input preparation rejects', async
     peerId,
     middleware: () => isCurrent,
     deferUiCallbacks: true
-  }) as {ready: Promise<{error: unknown} | undefined>, apply: () => Promise<void>};
+  }) as {ready: Promise<{error: unknown, name: string} | undefined>, apply: () => Promise<void>};
 
   isCurrent = false;
   input.peerChanging = true;
   rejectInputSetup(failure);
-  await expect(prepared.ready).resolves.toEqual({error: failure});
+  await expect(prepared.ready).resolves.toEqual({error: failure, name: 'input'});
   await prepared.apply();
 
   expect(failPeerChange).not.toHaveBeenCalled();
@@ -877,7 +958,7 @@ test('does not apply peer UI callbacks when the generation goes stale during app
     peerId,
     middleware: () => isCurrent,
     deferUiCallbacks: true
-  }) as {ready: Promise<{error: unknown} | undefined>, apply: () => Promise<void>};
+  }) as {ready: Promise<{error: unknown, name: string} | undefined>, apply: () => Promise<void>};
   const applyPromise = prepared.apply();
   await vi.waitFor(() => expect(events).toEqual(['topbar', 'bubbles']));
 

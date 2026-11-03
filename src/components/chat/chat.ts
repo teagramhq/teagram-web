@@ -76,7 +76,7 @@ export type ChatSearchKeys = Pick<RequestHistoryOptions, 'query' | 'isCacheableS
 export const CHAT_SEARCH_KEYS: (keyof ChatSearchKeys)[] = ['query', 'isCacheableSearch', 'isPublicHashtag', 'savedReaction', 'fromPeerId', 'inputFilter', 'hashtagType'];
 
 export type DeferredPeerChange = {
-  ready: Promise<{error: unknown} | undefined>,
+  ready: Promise<{error: unknown, name: string} | undefined>,
   apply: () => Promise<void>
 };
 
@@ -1302,10 +1302,10 @@ export default class Chat extends EventListenerBase<{
         }
       });
       const allPrepared = Promise.all(preparedParts).then((): undefined => undefined);
-      const firstPreparationError = new Promise<{error: unknown}>((resolve) => {
+      const firstPreparationError = new Promise<{error: unknown, name: string}>((resolve) => {
         preparedParts.forEach((part) => {
           part.then((result) => {
-            if('error' in result) resolve({error: result.error});
+            if('error' in result) resolve({error: result.error, name: result.name});
           });
         });
       });

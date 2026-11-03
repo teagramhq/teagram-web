@@ -6220,6 +6220,13 @@ export default class ChatBubbles {
       preparedPeerChange.then(async(prepared) => {
         await peerInnerMounted;
         if(prepared) {
+          const ready = await prepared.ready;
+          if(ready && 'error' in ready) {
+            if(ready.name === 'input') {
+              await prepared.apply();
+            }
+            throw ready.error;
+          }
           await prepared.apply();
         }
         return {ready: true as const};
