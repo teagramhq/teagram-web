@@ -1237,7 +1237,7 @@ export default class Chat extends EventListenerBase<{
       this.input?.failPeerChange();
       if(!didReportPeerChangeFailure) {
         didReportPeerChangeFailure = true;
-        toastNew({langPackKey: 'Error.AnError'});
+        toastNew({langPackKey: 'Teagram.Chat.PeerChangeFailed'});
       }
     };
 
