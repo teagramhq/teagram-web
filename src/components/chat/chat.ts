@@ -651,7 +651,10 @@ export default class Chat extends EventListenerBase<{
     this.input.construct();
 
     this.bubbles.constructPeerHelpers();
-    this.inputPeerHelpersPromise = this.input.constructPeerHelpers();
+    const inputPeerHelpersPromise = this.inputPeerHelpersPromise = this.input.constructPeerHelpers();
+    inputPeerHelpersPromise.finally(() => {
+      if(this.inputPeerHelpersPromise === inputPeerHelpersPromise) this.inputPeerHelpersPromise = undefined;
+    }).catch(noop);
 
     this.priceChangedInterceptor.init();
 
@@ -916,7 +919,9 @@ export default class Chat extends EventListenerBase<{
     // spot
     const {peerId, threadId} = options;
 
-    if(peerId) {
+    // Only wait while the lazy topbar or input menus are still loading; once they are attached the
+    // method must reach its first `m(...)` synchronously, as it did before they were deferred.
+    if(peerId && (!this.topbar || this.inputPeerHelpersPromise)) {
       await Promise.all([this.initializeTopbar(), this.inputPeerHelpersPromise]);
     }
 
