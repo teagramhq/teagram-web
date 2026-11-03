@@ -122,7 +122,7 @@ async function installInstrumentation(
   page.on('requestfailed', (request) => bundleRequests.requestFailed(request));
   page.on('worker', (worker) => bundleRequests.workerReady(worker.url()));
   await page.exposeBinding('__teagramBundleWorkerReady', (_source, url: string) => bundleRequests.workerReady(url));
-  return page.addInitScript(({injectColdStall, coldStallDurationMs}: {injectColdStall: boolean, coldStallDurationMs: number}) => {
+  await page.addInitScript(({injectColdStall, coldStallDurationMs}: {injectColdStall: boolean, coldStallDurationMs: number}) => {
     // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
     const SharedWorkerConstructor = (window as any).SharedWorker;
     if(SharedWorkerConstructor) {
@@ -146,25 +146,6 @@ async function installInstrumentation(
       started: performance.now(),
       resourceUrlBaseline: [] as string[]
     };
-    let chatListPaintScheduled = false;
-    let chatListObserver: MutationObserver;
-    const recordChatListPaint = () => {
-      if(perf.chatListPaint || chatListPaintScheduled || !document.querySelector('#page-chats #chatlist-container .chatlist-chat')) return;
-      chatListPaintScheduled = true;
-      requestAnimationFrame(() => {
-        if(!perf.chatListPaint && document.querySelector('#page-chats #chatlist-container .chatlist-chat')) {
-          perf.chatListPaint = {
-            ms: performance.now() - perf.started,
-            startedAtMs: perf.started,
-            domNodes: document.querySelectorAll('*').length
-          };
-        }
-        chatListObserver.disconnect();
-      });
-    };
-    chatListObserver = new MutationObserver(recordChatListPaint);
-    chatListObserver.observe(document.documentElement, {childList: true, subtree: true});
-    recordChatListPaint();
     try {
       const observer = new PerformanceObserver((list) => {
         perf.longTasks.push(...list.getEntries().filter((entry) => entry.duration > 50).map((entry) => ({
@@ -194,6 +175,48 @@ async function installInstrumentation(
     };
     perf.stopFrames = () => perf.frameActive = false;
   }, {injectColdStall, coldStallDurationMs});
+  return page.addInitScript(observeChatListPaint);
+}
+
+function observeChatListPaint() {
+  const perf = (window as any).__teagramPerf;
+  if(!perf) return;
+
+  const selector = '#page-chats #chatlist-container .chatlist-chat';
+  let scheduled = false;
+  let observer: MutationObserver;
+  const recordChatListPaint = () => {
+    if(perf.chatListPaint) {
+      observer.disconnect();
+      return;
+    }
+    if(scheduled || !document.querySelector(selector)) return;
+
+    scheduled = true;
+    requestAnimationFrame(() => {
+      if(!perf.chatListPaint && document.querySelector(selector)) {
+        perf.chatListPaint = {
+          ms: performance.now() - perf.started,
+          startedAtMs: perf.started,
+          domNodes: document.querySelectorAll('*').length
+        };
+        observer.disconnect();
+      } else {
+        // The matching row can be mounted before its final class or detached before paint.
+        // Keep observing so the next stable row still marks the real first-paint boundary.
+        scheduled = false;
+      }
+    });
+  };
+
+  observer = new MutationObserver(recordChatListPaint);
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['class']
+  });
+  recordChatListPaint();
 }
 
 async function waitForBundleResources(page: Page) {
@@ -228,6 +251,44 @@ test('fails interaction measurement when deferred UI loading failed', async({pag
 
   await expect(begin(page, requests)).rejects.toThrow('deferred UI loading failed');
   expect(requests.value).toBe(7);
+});
+
+test('keeps watching for chat-list paint when a matching row is detached before its next frame', async({page}) => {
+  await page.setContent('<body></body>');
+  await page.evaluate(() => {
+    (window as any).__teagramPerf = {started: performance.now()};
+    const frames: FrameRequestCallback[] = [];
+    window.requestAnimationFrame = (callback) => {
+      frames.push(callback);
+      return frames.length;
+    };
+    (window as any).__flushFrame = () => {
+      frames.splice(0).forEach((callback) => callback(performance.now()));
+    };
+  });
+  await page.evaluate(observeChatListPaint);
+
+  const result = await page.evaluate(async() => {
+    const addChatRow = () => {
+      const pageChats = document.createElement('div');
+      pageChats.id = 'page-chats';
+      pageChats.innerHTML = '<div id="chatlist-container"><div class="chatlist-chat"></div></div>';
+      document.body.append(pageChats);
+    };
+    const nextMicrotask = () => new Promise<void>((resolve) => queueMicrotask(resolve));
+    addChatRow();
+    await nextMicrotask();
+    document.querySelector('.chatlist-chat')?.closest('#page-chats')?.remove();
+    (window as any).__flushFrame();
+    const recordedAfterDetachedRow = !!(window as any).__teagramPerf.chatListPaint;
+
+    addChatRow();
+    await nextMicrotask();
+    (window as any).__flushFrame();
+    return {recordedAfterDetachedRow, recordedAfterPaint: !!(window as any).__teagramPerf.chatListPaint};
+  });
+
+  expect(result).toEqual({recordedAfterDetachedRow: false, recordedAfterPaint: true});
 });
 
 async function capture(page: Page, requests: RequestCounter, boundary: MeasurementBoundary, scroll = false, includePhases = false): Promise<Metric> {
@@ -729,6 +790,8 @@ function withOrigin(run: VariantRun, variant: Variant, origin: string): VariantR
 }
 
 test.beforeAll(async({browser}) => {
+  if(!reportPath && !username && !password && scales.every((scale) => !fixturePaths[scale])) return;
+
   expect(username).toBeTruthy();
   expect(password).toBeTruthy();
 
