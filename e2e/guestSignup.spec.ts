@@ -476,6 +476,17 @@ test('auto-creates one guest from runtime config without a picker and restores i
     await applyScreenshotTheme(page, theme);
     for(const width of [375, 1280]) {
       await page.setViewportSize({width, height: 900});
+      await expect.poll(async() => {
+        const [guestBox, notificationBox, tabsBox] = await Promise.all([
+          demoGuestBanner.boundingBox(),
+          notificationSuggestion.boundingBox(),
+          filterTabs.boundingBox()
+        ]);
+        return !!guestBox && !!notificationBox && !!tabsBox &&
+          !overlaps(guestBox, notificationBox) &&
+          guestBox.y + guestBox.height <= tabsBox.y &&
+          notificationBox.y + notificationBox.height <= tabsBox.y;
+      }).toBe(true);
       const [guestBox, notificationBox, tabsBox] = await Promise.all([
         demoGuestBanner.boundingBox(),
         notificationSuggestion.boundingBox(),
