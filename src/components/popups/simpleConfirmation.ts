@@ -38,6 +38,7 @@ export class SimpleConfirmationPopup extends PopupElement {
   private acceptButton: PopupButton;
   private declineButton: PopupButton;
   private focusTrap: boolean;
+  private termsDialog: boolean;
   private disableTextEnterConfirm: boolean;
 
   constructor(options: SimpleConfirmationPopupOptions) {
@@ -51,6 +52,7 @@ export class SimpleConfirmationPopup extends PopupElement {
     });
     this.disableTextEnterConfirm = options.disableTextEnterConfirm || false;
     this.focusTrap = focusTrap;
+    this.termsDialog = termsDialog;
 
     const description = document.createElement('p');
     description.classList.add('popup-description');
@@ -89,6 +91,7 @@ export class SimpleConfirmationPopup extends PopupElement {
       this.element.setAttribute('role', 'dialog');
       this.element.setAttribute('aria-modal', 'true');
       this.element.setAttribute('aria-labelledby', this.title.id);
+      this.element.tabIndex = -1;
       this.acceptButton = options.buttons.find((button) => !button.isCancel);
       this.declineButton = options.buttons.find((button) => button.isCancel);
       this.btnConfirmOnEnter = undefined;
@@ -116,7 +119,7 @@ export class SimpleConfirmationPopup extends PopupElement {
         this.declineButton?.element?.click();
         return false;
       };
-      this.description.focus();
+      (this.termsDialog ? this.element : this.description).focus();
     }
   }
 
