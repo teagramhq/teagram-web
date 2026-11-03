@@ -760,7 +760,12 @@ test('fails the peer transition when topbar setup rejects after history resolves
   }) as any;
   input.finishPeerChange = vi.fn(() => {
     input.peerChanging = true;
-    return Promise.resolve(() => events.push('input'));
+    return Promise.resolve(() => {
+      events.push('input');
+      input.peerChanging = false;
+      chatInput.classList.remove('is-hidden');
+      messageInput.contentEditable = 'true';
+    });
   });
   const sharedMediaTab = {
     fillProfileElements: vi.fn(async() => () => events.push('sharedMedia')),
@@ -805,8 +810,8 @@ test('fails the peer transition when topbar setup rejects after history resolves
     expect(messageInput.contentEditable).toBe('false');
     expect(chat.peerChanged).toBe(false);
     expect(chat.peerChangeFailed).toBe(true);
-    expect(events).toEqual([]);
-    expect(dispatchEvent).not.toHaveBeenCalledWith('peer_changed', chat);
+    expect(events).toEqual(['bubbles', 'input', 'sharedMedia', 'backgrounds']);
+    expect(dispatchEvent).toHaveBeenCalledWith('peer_changed', chat);
     expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Chat.PeerChangeFailed'});
     expect(moduleMocks.toastNew).toHaveBeenCalledTimes(1);
   } finally {

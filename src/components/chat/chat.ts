@@ -77,7 +77,8 @@ export const CHAT_SEARCH_KEYS: (keyof ChatSearchKeys)[] = ['query', 'isCacheable
 
 export type DeferredPeerChange = {
   ready: Promise<{error: unknown, name: string} | undefined>,
-  apply: () => Promise<void>
+  apply: () => Promise<void>,
+  failPeerChange: () => void
 };
 
 // * after this long an in-flight peer change is treated as abandoned rather than as a reason to
@@ -1370,7 +1371,7 @@ export default class Chat extends EventListenerBase<{
         return applyPromise;
       };
 
-      return {ready, apply};
+      return {ready, apply, failPeerChange};
     }
 
     let callbacksObj: Awaited<ReturnType<typeof namedPromises<typeof peerChangePromises>>>;
