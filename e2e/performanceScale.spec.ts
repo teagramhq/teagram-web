@@ -18,6 +18,11 @@ type Variant = 'base' | 'head';
 type Metric = {
   ms: number,
   requests: number,
+  requestBreakdown: {
+    scriptStylePaths: string[],
+    otherRequests: number,
+    deferredChunkPaths: string[]
+  },
   domNodes: number,
   bundleBytes: number,
   longTasksOver50Ms: number,
@@ -48,6 +53,12 @@ type MeasurementBoundary = {
   ms: number,
   startedAtMs: number,
   domNodes: number
+};
+
+type RequestCounter = {
+  value: number,
+  scriptStylePaths?: string[],
+  otherRequests?: number
 };
 
 const scales: Scale[] = ['1x', '100x'];
@@ -86,15 +97,25 @@ test.afterAll(() => {
 
 async function installInstrumentation(
   page: Page,
-  requestCounter: {value: number},
+  requestCounter: RequestCounter,
   origin: string,
   injectColdStall = false,
   coldStallDurationMs = 0
 ) {
+  requestCounter.scriptStylePaths ||= [];
+  requestCounter.otherRequests ||= 0;
   const bundleRequests = createBundleRequestTracker(new URL(origin).origin);
   bundleRequestTrackers.set(page, bundleRequests);
   page.on('request', (request) => {
-    if(request.resourceType() !== 'websocket') ++requestCounter.value;
+    const resourceType = request.resourceType();
+    if(resourceType !== 'websocket') {
+      ++requestCounter.value;
+      if(resourceType === 'script' || resourceType === 'stylesheet') {
+        requestCounter.scriptStylePaths!.push(new URL(request.url()).pathname);
+      } else {
+        ++requestCounter.otherRequests!;
+      }
+    }
     bundleRequests.requestStarted(request);
   });
   page.on('requestfinished', (request) => bundleRequests.requestFinished(request));
@@ -125,6 +146,25 @@ async function installInstrumentation(
       started: performance.now(),
       resourceUrlBaseline: [] as string[]
     };
+    let chatListPaintScheduled = false;
+    let chatListObserver: MutationObserver;
+    const recordChatListPaint = () => {
+      if(perf.chatListPaint || chatListPaintScheduled || !document.querySelector('#page-chats #chatlist-container .chatlist-chat')) return;
+      chatListPaintScheduled = true;
+      requestAnimationFrame(() => {
+        if(!perf.chatListPaint && document.querySelector('#page-chats #chatlist-container .chatlist-chat')) {
+          perf.chatListPaint = {
+            ms: performance.now() - perf.started,
+            startedAtMs: perf.started,
+            domNodes: document.querySelectorAll('*').length
+          };
+        }
+        chatListObserver.disconnect();
+      });
+    };
+    chatListObserver = new MutationObserver(recordChatListPaint);
+    chatListObserver.observe(document.documentElement, {childList: true, subtree: true});
+    recordChatListPaint();
     try {
       const observer = new PerformanceObserver((list) => {
         perf.longTasks.push(...list.getEntries().filter((entry) => entry.duration > 50).map((entry) => ({
@@ -168,6 +208,8 @@ async function begin(page: Page, requests: {value: number}, recordRpcSpans = tru
   // client never sets the marker.
   await waitForDeferredUi(page);
   requests.value = 0;
+  (requests as RequestCounter).scriptStylePaths?.splice(0);
+  (requests as RequestCounter).otherRequests = 0;
   await page.evaluate(async({recordSpans, traceEnabled}) => {
     if(traceEnabled) await (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace(recordSpans);
     const perf = (window as any).__teagramPerf;
@@ -188,8 +230,10 @@ test('fails interaction measurement when deferred UI loading failed', async({pag
   expect(requests.value).toBe(7);
 });
 
-async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false): Promise<Metric> {
+async function capture(page: Page, requests: RequestCounter, boundary: MeasurementBoundary, scroll = false, includePhases = false): Promise<Metric> {
   const requestCount = await waitForDeferredUiAndSnapshotRequests(page, requests);
+  const scriptStylePaths = [...(requests.scriptStylePaths || [])];
+  const otherRequests = requests.otherRequests || 0;
   await page.waitForTimeout(150);
   await waitForBundleResources(page);
   const captured = await page.evaluate(async({boundary, scroll, includePhases}) => {
@@ -254,11 +298,25 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     };
   }, {boundary, scroll, includePhases});
   const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, ...metrics} = captured;
+  const deferredChunkPaths = bundleResources.filter((entry) => {
+    try {
+      const url = new URL(entry.name);
+      return url.origin === origin && entry.startTime >= boundary.startedAtMs + boundary.ms &&
+        !resourceUrlBaseline.includes(entry.name) && /\.(js|css)(?:[?#]|$)/i.test(url.pathname);
+    } catch {
+      return false;
+    }
+  }).map((entry) => new URL(entry.name).pathname);
   if(includePhases) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
   const rpcSummary = summarizeRpcTrace(metrics.rpcCalls as PerformanceRpcCall[], boundary.ms);
   return {
     ...metrics,
+    requestBreakdown: {
+      scriptStylePaths,
+      otherRequests,
+      deferredChunkPaths: [...new Set(deferredChunkPaths)].sort()
+    },
     bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
     ms: boundary.ms,
@@ -382,6 +440,11 @@ async function snapshotMeasurementBoundary(page: Page): Promise<MeasurementBound
   });
 }
 
+async function snapshotChatListPaintBoundary(page: Page): Promise<MeasurementBoundary> {
+  await page.waitForFunction(() => !!(window as any).__teagramPerf?.chatListPaint, undefined, {timeout: 120_000});
+  return page.evaluate(() => (window as any).__teagramPerf.chatListPaint as MeasurementBoundary);
+}
+
 async function startCpuProfile(page: Page) {
   const session = await page.context().newCDPSession(page);
   await session.send('Profiler.enable');
@@ -434,7 +497,7 @@ async function reloadChatList(page: Page, requests: {value: number}) {
   await begin(page, requests);
   await page.reload({waitUntil: 'domcontentloaded'});
   await waitForChatList(page);
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+  return capture(page, requests, await snapshotChatListPaintBoundary(page));
 }
 
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture) {
@@ -626,7 +689,7 @@ async function runColdChatList(browser: Browser, run: VariantRun): Promise<Metri
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     await waitForChatList(page);
-    return await capture(page, requests, await snapshotMeasurementBoundary(page));
+    return await capture(page, requests, await snapshotChatListPaintBoundary(page));
   } finally {
     await context.close();
   }
@@ -646,7 +709,7 @@ async function measureColdControlWindow(browser: Browser, run: VariantRun, injec
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     await waitForChatList(page);
-    const sample = await capture(page, requests, await snapshotMeasurementBoundary(page));
+    const sample = await capture(page, requests, await snapshotChatListPaintBoundary(page));
     return {sample, injectedTask: injectStall ? await injectedLongTask(page) : undefined};
   } finally {
     await context.close();
@@ -757,7 +820,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     await waitForChatList(page);
-    measured.coldChatList.push(await test.step('cold chat list', async() => capture(page, requests, await snapshotMeasurementBoundary(page))));
+    measured.coldChatList.push(await test.step('cold chat list', async() => capture(page, requests, await snapshotChatListPaintBoundary(page))));
     measured.warmChatList.push(await test.step('warm chat list', () => reloadChatList(page, requests)));
 
     const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture));
@@ -808,7 +871,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
       const coldProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
       await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
       await waitForChatList(page);
-      const coldBoundary = await snapshotMeasurementBoundary(page);
+      const coldBoundary = await snapshotChatListPaintBoundary(page);
       const coldCapture = await capture(page, requests, coldBoundary, false, true);
       coldChatList.push({...coldCapture, ...(coldProfile ? {cpu: await finishCpuProfile(coldProfile)} : {})});
 
@@ -817,7 +880,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
       const warmProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
       await page.reload({waitUntil: 'domcontentloaded'});
       await waitForChatList(page);
-      const warmBoundary = await snapshotMeasurementBoundary(page);
+      const warmBoundary = await snapshotChatListPaintBoundary(page);
       const warmCapture = await capture(page, requests, warmBoundary, false, true);
       warmChatList.push({...warmCapture, ...(warmProfile ? {cpu: await finishCpuProfile(warmProfile)} : {})});
 
