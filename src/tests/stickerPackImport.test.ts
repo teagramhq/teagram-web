@@ -86,3 +86,24 @@ describe('sticker set share links', () => {
     expect(parseStickerSetShareLink('https://teagram.test/addstickers/cats_a?start=1', 'https://teagram.test/')).toBeUndefined();
   });
 });
+
+describe('sticker pack zip streaming', () => {
+  it('returns files in archive order when entries inflate asynchronously', async() => {
+    const entries = Object.fromEntries(
+      Array.from({length: 6}, (_, index) => [`${index}.webp`, new Uint8Array(200 * 1024).fill(index)])
+    );
+    const archive = zipSync(entries, {level: 6});
+    const result = await readStickerPackZip(new File([archive], 'ordered.zip'));
+
+    expect(result.error).toBeUndefined();
+    expect(result.files.map((file) => file.name)).toEqual(['0.webp', '1.webp', '2.webp', '3.webp', '4.webp', '5.webp']);
+  });
+
+  it('reports a truncated archive instead of returning its partial entries', async() => {
+    const archive = zipSync({'a.webp': new Uint8Array(100 * 1024).fill(7), 'b.webp': new Uint8Array(100 * 1024).fill(9)}, {level: 6});
+    const result = await readStickerPackZip(new File([archive.slice(0, archive.length - 1000)], 'truncated.zip'));
+
+    expect(result.error).toBe('invalid_zip');
+    expect(result.files).toHaveLength(0);
+  });
+});

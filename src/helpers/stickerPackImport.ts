@@ -1,4 +1,4 @@
-import {Unzip, UnzipInflate} from 'fflate';
+import {AsyncFlateStreamHandler, AsyncInflate, Unzip, UnzipDecoder} from 'fflate';
 
 export type StickerPackType = 'stickers' | 'emoji';
 export type StickerPackRejectionReason = 'too_large' | 'too_many' | 'unsupported_format';
@@ -10,6 +10,8 @@ const MAX_ZIP_ENTRIES = 201;
 const MAX_ZIP_ENTRY_SIZE = 512 * 1024;
 const MAX_ZIP_TOTAL_SIZE = 110 * 1024 * 1024;
 const ZIP_CHUNK_SIZE = 64 * 1024;
+// Hands the event loop a turn every 1 MiB of archive so progress and cancel can paint while a big zip is read.
+const ZIP_CHUNKS_PER_TURN = 16;
 
 const STICKER_FILE_LIMITS = {
   webp: {size: 512 * 1024, mimeType: 'image/webp'},
@@ -31,6 +33,10 @@ function getBasename(name: string) {
 
 function getMaxCount(type: StickerPackType) {
   return type === 'emoji' ? 200 : 120;
+}
+
+function yieldToEventLoop() {
+  return new Promise<void>((resolve) => setTimeout(resolve));
 }
 
 export function validateStickerPackFiles(files: File[], type: StickerPackType): StickerPackFilesResult {
@@ -68,19 +74,51 @@ export async function readStickerPackZip(archive: File): Promise<StickerPackZipR
   }
 
   const bytes = new Uint8Array(await archive.arrayBuffer());
-  const files: File[] = [];
+  const files: {order: number, file: File}[] = [];
   const rejected: StickerPackRejectedFile[] = [];
   const activeEntries = new Set<{terminate: () => void}>();
+  // Every decoder Unzip started; one that never got its final chunk belongs to a truncated archive.
+  const decoders: {inputDone: boolean}[] = [];
   let entryCount = 0;
   let inflatedSize = 0;
   let error: StickerPackZipResult['error'];
+  let onIdle: (() => void) | undefined;
+
+  const release = (entry: {terminate: () => void}) => {
+    activeEntries.delete(entry);
+    if(!activeEntries.size) onIdle?.();
+  };
 
   const fail = (reason: NonNullable<StickerPackZipResult['error']>) => {
     if(error) return;
     error = reason;
     activeEntries.forEach((entry) => entry.terminate());
     activeEntries.clear();
+    onIdle?.();
   };
+
+  // Inflation runs in fflate's worker-backed AsyncInflate. UnzipInflate would inflate on this thread,
+  // so a near-limit archive would hold the page for the whole ~110 MB, progress and cancel included.
+  class ZipInflate implements UnzipDecoder {
+    static compression = 8;
+    ondata!: AsyncFlateStreamHandler;
+    inputDone = false;
+    private readonly inflate = new AsyncInflate((err, data, final) => this.ondata(err, data, final));
+
+    constructor() {
+      decoders.push(this);
+    }
+
+    terminate() {
+      this.inflate.terminate();
+    }
+
+    push(chunk: Uint8Array, final: boolean) {
+      if(final) this.inputDone = true;
+      // The chunk is a view into `bytes`; copy it so the worker's transfer cannot detach the archive.
+      this.inflate.push(chunk.slice(), final);
+    }
+  }
 
   const unzip = new Unzip((entry) => {
     if(error) return;
@@ -91,6 +129,7 @@ export async function readStickerPackZip(archive: File): Promise<StickerPackZipR
       return;
     }
 
+    const order = entryCount;
     const normalizedName = entry.name.replace(/\\/g, '/');
     const isDirectory = normalizedName.endsWith('/');
     const name = getBasename(normalizedName);
@@ -124,7 +163,7 @@ export async function readStickerPackZip(archive: File): Promise<StickerPackZipR
       if(err) {
         fail('invalid_zip');
         finished = true;
-        activeEntries.delete(entry);
+        release(entry);
         return;
       }
 
@@ -133,13 +172,13 @@ export async function readStickerPackZip(archive: File): Promise<StickerPackZipR
       if(inflatedSize > MAX_ZIP_TOTAL_SIZE) {
         fail('archive_too_large');
         finished = true;
-        activeEntries.delete(entry);
+        release(entry);
         return;
       }
       if(fileSize > MAX_ZIP_ENTRY_SIZE) {
         fail('entry_too_large');
         finished = true;
-        activeEntries.delete(entry);
+        release(entry);
         return;
       }
 
@@ -159,30 +198,39 @@ export async function readStickerPackZip(archive: File): Promise<StickerPackZipR
             content.set(chunk, offset);
             offset += chunk.byteLength;
           }
-          files.push(new File([content.buffer], name, {type: STICKER_FILE_LIMITS[extension].mimeType}));
+          files.push({order, file: new File([content.buffer], name, {type: STICKER_FILE_LIMITS[extension].mimeType})});
         }
         finished = true;
-        activeEntries.delete(entry);
+        release(entry);
       }
     };
 
     entry.start();
   });
 
-  unzip.register(UnzipInflate);
+  unzip.register(ZipInflate);
 
   try {
     if(!bytes.length) return {files: [], rejected: [], error: 'invalid_zip'};
 
+    let chunkCount = 0;
     for(let offset = 0; offset < bytes.length && !error; offset += ZIP_CHUNK_SIZE) {
       const end = Math.min(offset + ZIP_CHUNK_SIZE, bytes.length);
       unzip.push(bytes.subarray(offset, end), end === bytes.length);
+      if(++chunkCount % ZIP_CHUNKS_PER_TURN === 0) await yieldToEventLoop();
     }
   } catch(err) {
     fail('invalid_zip');
   }
 
-  if(activeEntries.size && !error) fail('invalid_zip');
+  if(!error && decoders.some((decoder) => !decoder.inputDone)) fail('invalid_zip');
+
+  // Inflation finishes after the loop above, so wait for every entry to settle or the stream to fail.
+  await new Promise<void>((resolve) => {
+    onIdle = resolve;
+    if(error || !activeEntries.size) resolve();
+  });
+
   if(error) return {files: [], rejected: [], error};
-  return {files, rejected};
+  return {files: files.sort((a, b) => a.order - b.order).map(({file}) => file), rejected};
 }

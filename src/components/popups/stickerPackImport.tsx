@@ -1,8 +1,9 @@
-import {createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack} from 'solid-js';
+import {createEffect, createMemo, createSignal, For, onCleanup, onMount, Show} from 'solid-js';
 import {InputFieldTsx} from '@components/inputFieldTsx';
 import type InputField from '@components/inputField';
-import PopupElement, {createPopup, usePopupContext} from '@components/popups/indexTsx';
+import PopupElement, {createPopup, useSnitchedPopupContext} from '@components/popups/indexTsx';
 import {i18n} from '@lib/langPack';
+import type {AppManagers} from '@lib/managers';
 import showStickersPopup from '@components/popups/stickers';
 import {getStickerSetInputByShortName} from '@lib/appManagers/utils/stickers/getStickerSetInput';
 import {createStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
@@ -25,8 +26,9 @@ const rejectionText = (reason: StickerPackRejectedFile['reason']) => {
 };
 
 const StickerPackImportPopup = () => {
-  const context = usePopupContext();
-  const managers = untrack(() => context.managers);
+  // The popup context is provided by PopupElement below this component, so it is read through the snitch.
+  const {SnitchPopupContext, popupContext} = useSnitchedPopupContext();
+  const managers: AppManagers = PopupElement.MANAGERS;
   const [type, setType] = createSignal<StickerPackType>('stickers');
   const [title, setTitle] = createSignal('');
   const [shortName, setShortName] = createSignal('');
@@ -187,7 +189,7 @@ const StickerPackImportPopup = () => {
         software
       });
 
-      context.hide();
+      popupContext()?.hide();
       showStickersPopup(getStickerSetInputByShortName(finalName), type() === 'emoji');
     } catch(err) {
       setUploadError(`${i18n('Teagram.Import.Failed')}: ${getServerErrorText(err)}`);
@@ -200,7 +202,7 @@ const StickerPackImportPopup = () => {
     switch(shortNameStatus()) {
       case 'invalid': return i18n('Teagram.Import.ShortNameInvalid');
       case 'checking': return i18n('Teagram.Import.CheckingName');
-      case 'available': return i18n('EditProfile.Username.Available');
+      case 'available': return i18n('Link.Available');
       case 'taken': return i18n('EditProfile.Username.Taken');
       case 'error': return i18n('Teagram.Import.NameCheckFailed');
       default: return '';
@@ -224,6 +226,7 @@ const StickerPackImportPopup = () => {
       class={styles.popup}
       containerClass={styles.container}
     >
+      <SnitchPopupContext />
       <PopupElement.Header>
         <PopupElement.CloseButton />
         <PopupElement.Title>{i18n('Teagram.Import.Title')}</PopupElement.Title>
