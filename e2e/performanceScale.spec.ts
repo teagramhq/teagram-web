@@ -487,7 +487,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   }
   const boundary = await snapshotMeasurementBoundary(page);
   const cpu = cpuProfile ? await finishCpuProfile(cpuProfile) : undefined;
-  const metric = await capture(page, requests, boundary, true);
+  const metric = await capture(page, requests, boundary, true, profileTrace);
   return cpu ? {...metric, cpu} : metric;
 }
 
