@@ -6193,7 +6193,7 @@ export default class ChatBubbles {
       result = await m(historyResultPromise);
     } catch(error) {
       if(error !== PEER_CHANGED_ERROR) {
-        log.error('setPeer failed before mount', error);
+        log.error('setPeer failed before mount', peerId, error);
       }
       if(middleware()) {
         this.preloader.detach();
@@ -6438,7 +6438,7 @@ export default class ChatBubbles {
     }).catch((err: unknown) => {
       const isCurrent = middleware();
       if(err !== PEER_CHANGED_ERROR) {
-        log.error('setPeer promise error:', err);
+        log.error('setPeer promise error:', peerId, err);
       }
       if(isCurrent) {
         this.preloader.detach();

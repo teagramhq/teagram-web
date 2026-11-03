@@ -890,7 +890,7 @@ test('rejects prepared UI readiness when mounting the new chat fails', async() =
     expect(harness.preloader.detach).toHaveBeenCalled();
     expect(unlockGroup).toHaveBeenCalledWith(animationGroup);
     expect(harness.lazyLoadQueue.unlock).toHaveBeenCalled();
-    expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), failure);
+    expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), peerId, failure);
   } finally {
     unlockGroup.mockRestore();
     animationIntersector.unlockGroup(animationGroup);
@@ -933,7 +933,7 @@ test('propagates prepared peer rejection before the initial history request reso
     expect(preparedBeforeHistory).toBe(true);
     expect(propagatedBeforeHistory).toBe(true);
     expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
-    expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), failure);
+    expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), peerId, failure);
   } finally {
     resolveHistoryResult({cached: true, promise: pendingHistory, waitPromise: Promise.resolve()});
     resolveHistory();
@@ -969,7 +969,7 @@ test('keeps the newer peer queue locked when stale history resolves', async() =>
 
   expect(queueLocked).toBe(true);
   expect(harness.lazyLoadQueue.unlock).not.toHaveBeenCalled();
-  expect(setPeerLogger.error).not.toHaveBeenCalledWith(expect.any(String), PEER_CHANGED_ERROR);
+  expect(setPeerLogger.error).not.toHaveBeenCalledWith(expect.any(String), peerId, PEER_CHANGED_ERROR);
 
   const secondFailure = new Error('new peer history failed');
   rejectSecondHistory(secondFailure);
@@ -977,7 +977,7 @@ test('keeps the newer peer queue locked when stale history resolves', async() =>
 
   expect(queueLocked).toBe(false);
   expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
-  expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), secondFailure);
+  expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), peerId, secondFailure);
 });
 
 test('retries peer UI setup after history fails for a newly selected peer', async() => {
@@ -1072,7 +1072,7 @@ test('detaches the preloader from a same-peer no-op without unlocking its queue'
     rejectFirstHistory(PEER_CHANGED_ERROR);
     await expect(first.promise).rejects.toBe(PEER_CHANGED_ERROR);
 
-    expect(setPeerLogger.error).not.toHaveBeenCalledWith(expect.any(String), PEER_CHANGED_ERROR);
+    expect(setPeerLogger.error).not.toHaveBeenCalledWith(expect.any(String), peerId, PEER_CHANGED_ERROR);
     expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
     expect(unlockGroup).not.toHaveBeenCalled();
     expect(harness.lazyLoadQueue.unlock).not.toHaveBeenCalled();
@@ -1155,7 +1155,7 @@ test('detaches the prior peer preloader when the current peer fails before mount
 
     expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
     expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
-    expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), failure);
+    expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), failingPeerId, failure);
 
     rejectFirstHistory(PEER_CHANGED_ERROR);
     await expect(first.promise).rejects.toBe(PEER_CHANGED_ERROR);
@@ -1173,7 +1173,7 @@ test('logs and unlocks when the initial history request rejects before mount', a
   await expect(harness.setPeer({peerId, samePeer: false, sameSearch: false})).rejects.toBe(failure);
 
   expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
-  expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), failure);
+  expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), peerId, failure);
 });
 
 test('releases the preloader and animation group when prepared peer setup rejects', async() => {
