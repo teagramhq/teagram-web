@@ -82,7 +82,7 @@ export class ScrollableBase {
   public isHeavyAnimationInProgress = false;
   protected needCheckAfterAnimation = false;
 
-  public checkForTriggers?: () => void;
+  public checkForTriggers?: (scrollPosition?: number) => void;
 
   public scrollPositionProperty: 'scrollTop' | 'scrollLeft';
   public scrollSizeProperty: 'scrollHeight' | 'scrollWidth';
@@ -235,7 +235,7 @@ export class ScrollableBase {
       this.lastScrollPosition = scrollPosition;
 
       if(this.checkForTriggers) {
-        this.checkForTriggers();
+        this.checkForTriggers(scrollPosition);
       }
 
       // lastScrollDirection check is useless here, every callback should decide on its own
@@ -434,7 +434,7 @@ export default class Scrollable extends ScrollableBase {
     this.log('setVirtualContainer:', el, this);
   }
 
-  public checkForTriggers = () => {
+  public checkForTriggers = (scrollPosition?: number) => {
     if((!this.onScrolledTop && !this.onScrolledBottom)) return;
 
     if(this.isHeavyAnimationInProgress) {
@@ -442,7 +442,8 @@ export default class Scrollable extends ScrollableBase {
       return;
     }
 
-    const {scrollSize, scrollPosition, clientSize} = this;
+    scrollPosition ??= this.scrollPosition;
+    const {scrollSize, clientSize} = this;
     if(!scrollSize) { // незачем вызывать триггеры если блок пустой или не виден
       return;
     }

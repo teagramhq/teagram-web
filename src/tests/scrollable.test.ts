@@ -57,3 +57,37 @@ test('checks history triggers from geometry read before scroll callbacks', () =>
     vi.useRealTimers();
   }
 });
+
+test('reuses the scroll position read by the scroll handler for history triggers', () => {
+  vi.useFakeTimers();
+
+  const container = document.createElement('div');
+  let scrollPositionReads = 0;
+  Object.defineProperties(container, {
+    scrollTop: {
+      configurable: true,
+      get: () => {
+        ++scrollPositionReads;
+        return 100;
+      }
+    },
+    scrollHeight: {configurable: true, value: 1_000},
+    clientHeight: {configurable: true, value: 500},
+    offsetHeight: {configurable: true, value: 500}
+  });
+
+  const scrollable = new Scrollable(undefined, 'test', 300, undefined, container);
+  scrollable.lastScrollPosition = 200;
+  scrollable.onScrolledTop = vi.fn();
+
+  try {
+    scrollable.onScroll();
+    vi.advanceTimersToNextFrame();
+
+    expect(scrollable.onScrolledTop).toHaveBeenCalledOnce();
+    expect(scrollPositionReads).toBe(1);
+  } finally {
+    scrollable.destroy();
+    vi.useRealTimers();
+  }
+});
