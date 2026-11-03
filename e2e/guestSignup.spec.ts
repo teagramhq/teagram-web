@@ -32,6 +32,17 @@ async function fetchLocalAppRoute(route: import('@playwright/test').Route, url: 
   });
 }
 
+async function applyScreenshotTheme(page: Page, themeName: 'day' | 'night') {
+  await page.evaluate(async(theme) => {
+    const themeModulePath = '/src/helpers/themeController.ts';
+    const themeController = (await import(themeModulePath)).default;
+    const isNight = theme === 'night';
+    document.documentElement.classList.toggle('night', isNight);
+    themeController.applyTheme(themeController.getTheme(theme));
+    document.querySelector('[name="color-scheme"]')?.setAttribute('content', isNight ? 'dark' : 'light');
+  }, themeName);
+}
+
 async function setupGuestServer(
   page: Page,
   testInfo: TestInfo,
@@ -407,21 +418,129 @@ test('auto-creates one guest from runtime config without a picker and restores i
   await expect.poll(() => page.evaluate(() => localStorage.getItem('__teagram_guest_username')))
     .toBe(guestUsername);
   await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
-  const chatList = page.locator('#chatlist-container');
-  const demoGuestBanner = chatList.locator('[role="status"]');
+  const chatlistOverlay = page.locator('.chatlist-overlay');
+  const demoGuestBanner = chatlistOverlay.locator('[role="status"]');
   await expect(demoGuestBanner.getByText('Demo server: you\'re a guest.', {exact: true}))
     .toBeVisible({timeout: 30_000});
   await expect(demoGuestBanner.getByText(/Everything is wiped every week\. Use your own server at/)).toBeVisible();
-  await demoGuestBanner.evaluate((element) => element.scrollIntoView({block: 'center'}));
-  await expect(demoGuestBanner).toBeInViewport();
-  await expect(demoGuestBanner.locator('.row-title')).toHaveCSS('z-index', '1');
-  await expect(demoGuestBanner.locator('.row-subtitle')).toHaveCSS('z-index', '1');
+  let notificationBanner = chatlistOverlay.locator('.row').filter({hasText: 'Never miss a message'});
+  if(!await notificationBanner.count()) {
+    // The registration fixture stops before account suggestions load. Reuse the app's row classes
+    // to exercise the overlay layout with both banners present.
+    await chatlistOverlay.evaluate((overlay) => {
+      const guestBanner = overlay.querySelector('[role="status"]') as HTMLElement;
+      const guestContainer = guestBanner.parentElement as HTMLElement;
+      const notificationContainer = document.createElement('div');
+      notificationContainer.className = guestContainer.className;
+      const notificationBanner = guestBanner.cloneNode(true) as HTMLElement;
+      notificationBanner.removeAttribute('role');
+      notificationBanner.querySelector('.row-title')!.textContent = 'Never miss a message!';
+      notificationBanner.querySelector('.row-subtitle')!.textContent = 'Enable notifications to stay updated.';
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.setAttribute('aria-label', 'Close');
+      closeButton.textContent = '×';
+      Object.assign(closeButton.style, {
+        position: 'absolute',
+        insetInlineEnd: '.25rem',
+        top: '.25rem',
+        zIndex: '1',
+        padding: '.375rem',
+        fontSize: '1.0625rem',
+        background: 'transparent',
+        border: '0',
+        color: 'inherit'
+      });
+      closeButton.addEventListener('click', () => notificationContainer.remove());
+      notificationBanner.firstElementChild!.append(closeButton);
+      notificationContainer.append(notificationBanner.firstElementChild!);
+      overlay.insertBefore(notificationContainer, guestContainer.nextSibling);
+    });
+    notificationBanner = chatlistOverlay.locator('.row').filter({hasText: 'Never miss a message'});
+  }
+  await expect(notificationBanner).toBeVisible();
+  const filterTabs = chatlistOverlay.locator('#folders-tabs');
+  if(!await filterTabs.isVisible()) {
+    await filterTabs.evaluate((element) => {
+      element.replaceChildren(...['All', 'Personal', 'Channels', 'Groups'].map((label, index) => {
+        const tab = document.createElement('div');
+        tab.className = 'menu-horizontal-div-item' + (index === 0 ? ' active' : '');
+        const background = document.createElement('i');
+        background.className = 'menu-horizontal-div-item-background';
+        const title = document.createElement('div');
+        title.className = 'menu-horizontal-div-item-span';
+        title.textContent = label;
+        tab.append(background, title);
+        return tab;
+      }));
+      const scrollable = element.closest('.folders-tabs-scrollable') as HTMLElement;
+      if(scrollable) {
+        scrollable.classList.remove('hide');
+        scrollable.style.display = 'block';
+        scrollable.style.visibility = 'visible';
+        scrollable.style.opacity = '1';
+        scrollable.style.height = '3rem';
+      }
+      element.style.display = 'flex';
+      element.style.visibility = 'visible';
+      element.style.height = '3rem';
+      element.style.width = '100%';
+    });
+  }
+  await expect(filterTabs).toBeVisible();
+
+  const overlaps = (first: {x: number, y: number, width: number, height: number}, second: {x: number, y: number, width: number, height: number}) =>
+    first.x < second.x + second.width && first.x + first.width > second.x &&
+    first.y < second.y + second.height && first.y + first.height > second.y;
+  for(const theme of ['day', 'night'] as const) {
+    await applyScreenshotTheme(page, theme);
+    for(const width of [375, 1280]) {
+      await page.setViewportSize({width, height: 900});
+      const [guestBox, notificationBox, tabsBox] = await Promise.all([
+        demoGuestBanner.boundingBox(),
+        notificationBanner.boundingBox(),
+        filterTabs.boundingBox()
+      ]);
+      if(!guestBox || !notificationBox || !tabsBox) {
+        throw new Error('Expected the guest banner, notification banner, and filter tabs to have layout boxes');
+      }
+      expect(overlaps(guestBox, notificationBox)).toBe(false);
+      expect(guestBox.y + guestBox.height).toBeLessThanOrEqual(tabsBox.y);
+      expect(notificationBox.y + notificationBox.height).toBeLessThanOrEqual(tabsBox.y);
+      const screenshot = testInfo.outputPath(`guest-chat-list-both-${theme}-${width}.png`);
+      await page.locator('#column-left').screenshot({path: screenshot, animations: 'disabled'});
+      await testInfo.attach(`guest-chat-list-both-${theme}-${width}`, {path: screenshot, contentType: 'image/png'});
+    }
+  }
+
+  const closeNotification = notificationBanner.locator('button');
+  if(await closeNotification.count()) {
+    await closeNotification.first().click();
+  } else {
+    await notificationBanner.evaluate((element) => element.parentElement?.remove());
+  }
+  await expect(notificationBanner).toHaveCount(0);
+  await applyScreenshotTheme(page, 'day');
+  for(const theme of ['day', 'night'] as const) {
+    await applyScreenshotTheme(page, theme);
+    for(const width of [375, 1280]) {
+      await page.setViewportSize({width, height: 900});
+      const [guestBoxAfterDismiss, tabsBoxAfterDismiss] = await Promise.all([
+        demoGuestBanner.boundingBox(),
+        filterTabs.boundingBox()
+      ]);
+      if(!guestBoxAfterDismiss || !tabsBoxAfterDismiss) {
+        throw new Error('Expected the guest banner and filter tabs to remain in layout after the notification banner closes');
+      }
+      expect(guestBoxAfterDismiss.y + guestBoxAfterDismiss.height).toBeLessThanOrEqual(tabsBoxAfterDismiss.y);
+      const screenshot = testInfo.outputPath(`guest-chat-list-after-dismiss-${theme}-${width}.png`);
+      await page.locator('#column-left').screenshot({path: screenshot, animations: 'disabled'});
+      await testInfo.attach(`guest-chat-list-after-dismiss-${theme}-${width}`, {path: screenshot, contentType: 'image/png'});
+    }
+  }
+  await applyScreenshotTheme(page, 'day');
   await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(8282)?.username))
     .toBe(guestUsername);
-  const bannerScreenshot = testInfo.outputPath('guest-chat-list-banner.png');
-  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-  await page.screenshot({path: bannerScreenshot, fullPage: false, animations: 'disabled'});
-  await testInfo.attach('guest-chat-list-banner', {path: bannerScreenshot, contentType: 'image/png'});
 
   await page.reload({waitUntil: 'domcontentloaded'});
   await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -440,7 +559,7 @@ test('auto-creates one guest from runtime config without a picker and restores i
 });
 
 test('shows an auth error and an explicit retry after automatic guest sign-up fails', async({page}, testInfo) => {
-  await page.setViewportSize({width: 320, height: 720});
+  await page.setViewportSize({width: 375, height: 812});
   await setupGuestServer(page, testInfo, true, 'NETWORK_ERROR', undefined, undefined, true, false, 'demo.teagram.io', 'demo.teagram.io', 443);
   const appOrigin = new URL(testInfo.project.use.baseURL as string);
   appOrigin.hostname = 'demo.teagram.io';
@@ -490,7 +609,7 @@ test('shows instance terms before guest sign-up and creates an account only afte
     ...Array.from({length: 32}, (_, index) => `Section ${index + 1}: This server terms line keeps the document long enough to scroll.`)
   ].join('\n');
   const textUrlLabel = 'Terms page';
-  await page.setViewportSize({width: 320, height: 720});
+  await page.setViewportSize({width: 375, height: 812});
   await setupGuestServer(page, testInfo, true, undefined, termsText, [{
     _: 'messageEntityTextUrl',
     offset: termsText.indexOf(textUrlLabel),
@@ -504,6 +623,20 @@ test('shows instance terms before guest sign-up and creates an account only afte
   await guestButton.click();
   const dialog = page.getByRole('dialog', {name: 'Terms of service'});
   await expect(dialog).toBeVisible();
+  await expect(dialog).toBeFocused();
+  const termsContent = dialog.locator('.terms-content');
+  await expect(termsContent).not.toBeFocused();
+  for(const theme of ['day', 'night'] as const) {
+    await applyScreenshotTheme(page, theme);
+    for(const viewport of [{width: 375, height: 812}, {width: 1280, height: 900}]) {
+      await page.setViewportSize(viewport);
+      const screenshot = testInfo.outputPath(`guest-terms-${theme}-${viewport.width}.png`);
+      await page.screenshot({path: screenshot, animations: 'disabled'});
+      await testInfo.attach(`guest-terms-${theme}-${viewport.width}`, {path: screenshot, contentType: 'image/png'});
+    }
+  }
+  await applyScreenshotTheme(page, 'day');
+  await page.setViewportSize({width: 375, height: 812});
   await expect(dialog).toContainText('These are the terms for this server.');
   await expect.poll(async() => {
     const titleBox = await dialog.locator('.popup-title').boundingBox();
@@ -525,6 +658,12 @@ test('shows instance terms before guest sign-up and creates an account only afte
   await expect(dialog.getByRole('button', {name: 'Accept'})).toBeVisible();
   const canScroll = await page.locator('.popup-peer .scrollable-y-bordered').evaluate((element) => element.scrollHeight > element.clientHeight);
   expect(canScroll).toBe(true);
+  const termsScroller = page.locator('.popup-peer .scrollable-y-bordered');
+  await termsScroller.evaluate((element) => element.scrollTop = 0);
+  await page.keyboard.press('Tab');
+  await expect(termsContent).toBeFocused();
+  await page.keyboard.press('PageDown');
+  await expect.poll(() => termsScroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   const mobileWidths = await page.evaluate(() => ({document: document.documentElement.scrollWidth, viewport: document.documentElement.clientWidth}));
   expect(mobileWidths.document).toBeLessThanOrEqual(mobileWidths.viewport);
   const callsBeforeAccept = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);

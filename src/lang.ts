@@ -186,9 +186,7 @@ const lang = {
     'one_value': '%d new chat',
     'other_value': '%d new chats'
   },
-  'ChatList.Main.EmptyPlaceholder.Title': 'Your chats will appear here',
-  'ChatList.Main.EmptyPlaceholder.Subtitle': 'You have %s on Telegram',
-  'ChatList.Main.EmptyPlaceholder.SubtitleNoContacts': 'Use Telegram app on your [Android](https://telegram.org/android) or [iOS](https://telegram.org/dl/ios) device to sync your contacts',
+  'ChatList.Main.EmptyPlaceholder.Title': 'Your chats will be here',
   // "ChatList.Menu.Archived": "Archived",
   'ChatList.Menu.SwitchTo.Webogram': 'Switch to Old Version',
   'ChatList.Menu.SwitchTo.A': 'Switch to A version',

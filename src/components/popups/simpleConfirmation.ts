@@ -89,6 +89,7 @@ export class SimpleConfirmationPopup extends PopupElement {
       this.element.setAttribute('role', 'dialog');
       this.element.setAttribute('aria-modal', 'true');
       this.element.setAttribute('aria-labelledby', this.title.id);
+      this.element.tabIndex = -1;
       this.acceptButton = options.buttons.find((button) => !button.isCancel);
       this.declineButton = options.buttons.find((button) => button.isCancel);
       this.btnConfirmOnEnter = undefined;
@@ -116,7 +117,7 @@ export class SimpleConfirmationPopup extends PopupElement {
         this.declineButton?.element?.click();
         return false;
       };
-      this.description.focus();
+      this.element.focus();
     }
   }
 
