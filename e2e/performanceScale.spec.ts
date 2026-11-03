@@ -210,7 +210,8 @@ function observeChatListPaint() {
   };
 
   observer = new MutationObserver(recordChatListPaint);
-  observer.observe(document.documentElement, {
+  // Init scripts run before the document element exists, so observe the document itself.
+  observer.observe(document, {
     childList: true,
     subtree: true,
     attributes: true,
