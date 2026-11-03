@@ -640,7 +640,7 @@ export default class ChatInput {
     }, {listenerSetter: this.listenerSetter});
   }
 
-  private async constructReplyElements() {
+  private constructReplyElements() {
     this.replyElements.container = document.createElement('div');
     this.replyElements.container.classList.add('reply-wrapper', 'rows-wrapper-row');
 
@@ -679,19 +679,20 @@ export default class ChatInput {
       onClick: this.onHelperCancel,
       danger: true
     }];
-    const {ButtonMenuSync} = await import('@components/buttonMenu');
-    const btnMenu = this.replyElements.menuContainer = ButtonMenuSync({
-      buttons,
-      listenerSetter: this.listenerSetter
-    });
-    btnMenu.classList.add('reply-line-menu', 'top-right');
+    return import('@components/buttonMenu').then(({ButtonMenuSync}) => {
+      const btnMenu = this.replyElements.menuContainer = ButtonMenuSync({
+        buttons,
+        listenerSetter: this.listenerSetter
+      });
+      btnMenu.classList.add('reply-line-menu', 'top-right');
 
-    if(!IS_TOUCH_SUPPORTED) {
-      this.replyHover = this.createReplyLineHover(btnMenu);
-    }
+      if(!IS_TOUCH_SUPPORTED) {
+        this.replyHover = this.createReplyLineHover(btnMenu);
+      }
+    });
   }
 
-  private async constructForwardElements() {
+  private constructForwardElements() {
     const onHideAuthorClick = () => {
       isChangingAuthor = true;
     };
@@ -739,55 +740,55 @@ export default class ChatInput {
         danger: true
       }
     ];
-    const {ButtonMenuSync} = await import('@components/buttonMenu');
-    const forwardBtnMenu = forwardElements.container = ButtonMenuSync({
-      buttons: forwardButtons,
-      radioGroups: [{
-        name: 'author',
-        onChange: (value) => {
-          const checked = !!+value;
-          if(isChangingAuthor) {
-            this.forwardWasDroppingAuthor = !checked;
-          }
-
-          const replyTitle = this.replyElements.content.querySelector('.reply-title');
-          if(replyTitle) {
-            const el = replyTitle.firstElementChild as HTMLElement;
-            const i = I18n.weakMap.get(el) as I18n.IntlElement;
-            const langPackKey: LangPackKey = forwardElements.showSender.checkboxField.checked ? 'Chat.Accessory.Forward' : 'Chat.Accessory.Hidden';
-            i.key = langPackKey;
-            i.update();
-          }
-        },
-        checked: 0
-      }, {
-        name: 'caption',
-        onChange: (value) => {
-          const checked = !!+value;
-          let b: ButtonMenuItemOptions;
-          if(checked && this.forwardWasDroppingAuthor !== undefined) {
-            b = this.forwardWasDroppingAuthor ? forwardElements.hideSender : forwardElements.showSender;
-          } else {
-            b = checked ? forwardElements.showSender : forwardElements.hideSender;
-          }
-
-          b.checkboxField.checked = true;
-        },
-        checked: 0
-      }],
-      listenerSetter: this.listenerSetter
-    });
-
-    forwardBtnMenu.classList.add('reply-line-menu', 'top-right');
-
-    if(!IS_TOUCH_SUPPORTED) {
-      this.forwardHover = this.createReplyLineHover(forwardBtnMenu);
-    }
-
     forwardElements.modifyArgs = forwardButtons.slice(0, -2);
+    return import('@components/buttonMenu').then(({ButtonMenuSync}) => {
+      const forwardBtnMenu = forwardElements.container = ButtonMenuSync({
+        buttons: forwardButtons,
+        radioGroups: [{
+          name: 'author',
+          onChange: (value) => {
+            const checked = !!+value;
+            if(isChangingAuthor) {
+              this.forwardWasDroppingAuthor = !checked;
+            }
+
+            const replyTitle = this.replyElements.content.querySelector('.reply-title');
+            if(replyTitle) {
+              const el = replyTitle.firstElementChild as HTMLElement;
+              const i = I18n.weakMap.get(el) as I18n.IntlElement;
+              const langPackKey: LangPackKey = forwardElements.showSender.checkboxField.checked ? 'Chat.Accessory.Forward' : 'Chat.Accessory.Hidden';
+              i.key = langPackKey;
+              i.update();
+            }
+          },
+          checked: 0
+        }, {
+          name: 'caption',
+          onChange: (value) => {
+            const checked = !!+value;
+            let b: ButtonMenuItemOptions;
+            if(checked && this.forwardWasDroppingAuthor !== undefined) {
+              b = this.forwardWasDroppingAuthor ? forwardElements.hideSender : forwardElements.showSender;
+            } else {
+              b = checked ? forwardElements.showSender : forwardElements.hideSender;
+            }
+
+            b.checkboxField.checked = true;
+          },
+          checked: 0
+        }],
+        listenerSetter: this.listenerSetter
+      });
+
+      forwardBtnMenu.classList.add('reply-line-menu', 'top-right');
+
+      if(!IS_TOUCH_SUPPORTED) {
+        this.forwardHover = this.createReplyLineHover(forwardBtnMenu);
+      }
+    });
   }
 
-  private async constructWebPageElements() {
+  private constructWebPageElements() {
     this.webPageElements = {} as any;
     const buttons: ButtonMenuItemOptions[] = [this.webPageElements.above = {
       text: 'AboveMessage',
@@ -813,33 +814,34 @@ export default class ChatInput {
       icon: 'delete',
       danger: true
     }];
-    const {ButtonMenuSync} = await import('@components/buttonMenu');
-    const btnMenu = this.webPageElements.container = ButtonMenuSync({
-      buttons,
-      radioGroups: [{
-        name: 'position',
-        onChange: (value) => {
-          this.invertMedia = !!+value;
-          this.saveDraftDebounced?.();
-        },
-        checked: 0
-      }, {
-        name: 'size',
-        onChange: (value) => {
-          this.webPageOptions.largeMedia = !!+value;
-          this.webPageOptions.smallMedia = !+value;
-          this.saveDraftDebounced?.();
-        },
-        checked: 0
-      }],
-      listenerSetter: this.listenerSetter
+    return import('@components/buttonMenu').then(({ButtonMenuSync}) => {
+      const btnMenu = this.webPageElements.container = ButtonMenuSync({
+        buttons,
+        radioGroups: [{
+          name: 'position',
+          onChange: (value) => {
+            this.invertMedia = !!+value;
+            this.saveDraftDebounced?.();
+          },
+          checked: 0
+        }, {
+          name: 'size',
+          onChange: (value) => {
+            this.webPageOptions.largeMedia = !!+value;
+            this.webPageOptions.smallMedia = !+value;
+            this.saveDraftDebounced?.();
+          },
+          checked: 0
+        }],
+        listenerSetter: this.listenerSetter
+      });
+
+      btnMenu.classList.add('reply-line-menu', 'top-right');
+
+      if(!IS_TOUCH_SUPPORTED) {
+        this.webPageHover = this.createReplyLineHover(btnMenu);
+      }
     });
-
-    btnMenu.classList.add('reply-line-menu', 'top-right');
-
-    if(!IS_TOUCH_SUPPORTED) {
-      this.webPageHover = this.createReplyLineHover(btnMenu);
-    }
   }
 
   private constructMentionButton(kind: 'mention' | 'reaction' | 'pollVote' = 'mention') {
@@ -1025,13 +1027,14 @@ export default class ChatInput {
     this.recordingController = new ChatRecording(this);
   }
 
-  public async constructPeerHelpers() {
+  // Everything is built synchronously; the returned promise settles once the lazily loaded menus are attached.
+  public constructPeerHelpers() {
+    const menusReady: Promise<unknown>[] = [];
     if(!this.excludeParts.reply) {
-      await this.constructReplyElements();
+      menusReady.push(this.constructReplyElements());
 
       if(!this.excludeParts.forwardOptions) {
-        await this.constructForwardElements();
-        await this.constructWebPageElements();
+        menusReady.push(this.constructForwardElements(), this.constructWebPageElements());
       }
     }
 
@@ -1637,7 +1640,8 @@ export default class ChatInput {
       this.replyInTopicOverlay
     ].filter(Boolean));
 
-    await this.sendMenu?.ready;
+    menusReady.push(this.sendMenu?.ready);
+    return Promise.all(menusReady).then(() => {});
   }
 
   private setChatListeners() {
