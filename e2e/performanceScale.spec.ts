@@ -432,7 +432,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   });
 
   await waitForHistorySettled(page);
-  await begin(page, requests, profileTrace);
+  await begin(page, requests, profileTrace, profileTrace);
   const cpuProfile = profileTrace ? await startCpuProfile(page) : undefined;
   await page.evaluate(() => (window as any).__teagramPerf.startFrames());
   const initial = await page.evaluate(() => {
