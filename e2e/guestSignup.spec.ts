@@ -502,6 +502,13 @@ test('auto-creates one guest from runtime config without a picker and restores i
     await applyScreenshotTheme(page, theme);
     for(const width of [375, 1280]) {
       await page.setViewportSize({width, height: 900});
+      await expect.poll(async() => {
+        const [guestBox, tabsBox] = await Promise.all([
+          demoGuestBanner.boundingBox(),
+          filterTabs.boundingBox()
+        ]);
+        return !!guestBox && !!tabsBox && guestBox.y + guestBox.height <= tabsBox.y;
+      }).toBe(true);
       const [guestBoxAfterDismiss, tabsBoxAfterDismiss] = await Promise.all([
         demoGuestBanner.boundingBox(),
         filterTabs.boundingBox()
@@ -528,10 +535,38 @@ test('auto-creates one guest from runtime config without a picker and restores i
   });
   const emptyPlaceholder = page.locator('.empty-placeholder-dialogs');
   await expect(emptyPlaceholder).toHaveCount(1);
-  await expect(emptyPlaceholder.locator('.empty-placeholder-header')).toHaveText('Your chats will be here');
+  const emptyPlaceholderHeader = emptyPlaceholder.locator('.empty-placeholder-header');
+  await expect(emptyPlaceholderHeader).toHaveText('Your chats will be here');
   await expect(emptyPlaceholder.locator('.empty-placeholder-subtitle')).toHaveCount(0);
   await expect(emptyPlaceholder.locator('a[href*="telegram."]')).toHaveCount(0);
   await expect(emptyPlaceholder.locator('.empty-placeholder-dialogs-icon')).toHaveJSProperty('complete', true);
+  // The guest test leaves the production list tab inactive; reveal that rendered list and its real placeholder for the evidence crop.
+  const emptyPlaceholderCaptureStyle = await page.addStyleTag({content: `
+    #column-left .folders-scrollable { display: block !important; }
+    #column-left .empty-placeholder-dialogs { display: block !important; }
+    #column-left .loading-dialog-skeleton { display: none !important; }
+    #column-left .virtual-chatlist,
+    #column-left .dialogs-placeholder-canvas { display: none !important; }
+    #column-left .chatlist-overlay,
+    #column-left #new-menu,
+    .toasts-container { display: none !important; }
+  `});
+  await expect(emptyPlaceholder).toBeVisible();
+  await expect(emptyPlaceholderHeader).toHaveText('Your chats will be here');
+  for(const theme of ['day', 'night'] as const) {
+    await applyScreenshotTheme(page, theme);
+    for(const width of [375, 1280]) {
+      await page.setViewportSize({width, height: 900});
+      await emptyPlaceholder.scrollIntoViewIfNeeded();
+      await expect(emptyPlaceholderHeader).toBeInViewport({ratio: 1});
+      await expect(emptyPlaceholder).toBeVisible();
+      const screenshot = testInfo.outputPath(`guest-chat-empty-${theme}-${width}.png`);
+      await emptyPlaceholder.screenshot({path: screenshot, animations: 'disabled'});
+      await testInfo.attach(`guest-chat-empty-${theme}-${width}`, {path: screenshot, contentType: 'image/png'});
+    }
+  }
+  await emptyPlaceholderCaptureStyle.evaluate((style) => style.parentNode?.removeChild(style));
+  await applyScreenshotTheme(page, 'day');
   await page.evaluate(() => {
     const manager = (window as any).appDialogsManager;
     manager.updateContactsLength = manager.__guestTestOriginalUpdateContactsLength;
