@@ -81,6 +81,40 @@ defineStories('Composer & bots', [
     }
   },
   {
+    id: 'stickerPackImport',
+    fixtureOnly: true,
+    title: 'Import a sticker pack',
+    managers: {
+      apiManager: {
+        getAppConfig: () => ({sticker_import_mode: 'on'}),
+        getConfig: () => ({me_url_prefix: 'https://teagram.test/'})
+      },
+      appStickersManager: {
+        checkStickerSetShortName: () => true,
+        suggestStickerSetShortName: () => 'sandbox_imported',
+        createStickerSet: () => true,
+        getStickerSet: () => ({
+          set: {
+            _: 'stickerSet',
+            pFlags: {},
+            id: '8002',
+            access_hash: '8002',
+            title: 'Imported Pack',
+            short_name: 'sandbox_imported',
+            count: 1,
+            hash: 0
+          },
+          documents: [stickerDocument],
+          packs: []
+        })
+      }
+    },
+    open: async() => {
+      const {default: showStickerPackImportPopup} = await import('@components/popups/stickerPackImport');
+      showStickerPackImportPopup();
+    }
+  },
+  {
     id: 'translate',
     title: 'Translate a message',
     managers: {

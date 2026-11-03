@@ -3,6 +3,7 @@ import {PHONE_NUMBER_REG_EXP} from '.';
 import {MOUNT_CLASS_TO} from '@config/debug';
 import {normalizeUrlProtocol} from '@lib/richTextProcessor/matchUrlProtocol';
 import matchTelegramUrlHost, {matchUrlHost, TELESCOPE_LINK_HOST} from '@lib/richTextProcessor/matchTelegramUrlHost';
+import {getStickerSetLinkPrefix, parseStickerSetShareLink} from '@helpers/stickerSetLink';
 
 export default function wrapUrl(url: string, safe?: boolean) {
   url = normalizeUrlProtocol(url);
@@ -17,10 +18,13 @@ export default function wrapUrl(url: string, safe?: boolean) {
   } catch(err) {}
 
   const telegramUrlMatch = parsedUrl && matchTelegramUrlHost(parsedUrl);
+  const stickerSetLink = parsedUrl && parseStickerSetShareLink(parsedUrl.toString(), getStickerSetLinkPrefix());
 
   let tgMatch;
   let onclick: typeof out['onclick'];
-  /* if(unsafe === 2) {
+  if(stickerSetLink && (window as any).stickerSet) {
+    onclick = 'stickerSet';
+  } else /* if(unsafe === 2) {
     url = 'tg://unsafe_url?url=' + encodeURIComponent(url);
   } else  */if(telegramUrlMatch) {
     const {prefix} = telegramUrlMatch;

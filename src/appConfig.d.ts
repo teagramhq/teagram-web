@@ -186,6 +186,7 @@ export interface MTAppConfig {
   username_max_length?:                       number;
   username_pattern?:                          string;
   registration_mode?:                         'closed' | 'invite' | 'open';
+  sticker_import_mode?:                        'on' | 'off';
   user_invites_enabled?:                       boolean;
   user_invite_quota?:                          number;
   turnstile?:                                 {site_key?: string};

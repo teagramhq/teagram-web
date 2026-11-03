@@ -1,4 +1,4 @@
-import {Component, createResource, onMount} from 'solid-js';
+import {Component, createResource, onMount, Show} from 'solid-js';
 import assumeType from '@helpers/assumeType';
 import createContextMenu from '@helpers/dom/createContextMenu';
 import positionElementByIndex from '@helpers/dom/positionElementByIndex';
@@ -23,6 +23,8 @@ import {usePromiseCollector} from '@components/solidJsTabs/promiseCollector';
 import {renderComponent} from '@helpers/solid/renderComponent';
 import {IconTsx} from '@components/iconTsx';
 import {mountSolidComponent} from '@helpers/solid/wrapSolidComponent';
+import showStickerPackImportPopup from '@components/popups/stickerPackImport';
+import {useAppConfig} from '@stores/appState';
 
 const StickersAndEmoji: Component = () => {
   const [tab] = useSuperTab();
@@ -176,6 +178,19 @@ const StickersAndEmoji: Component = () => {
 
     {
       const section = new SettingSection({name: 'Telegram.InstalledStickerPacksController', caption: 'StickersBotInfo'});
+
+      renderComponent({
+        element: section.content,
+        Component: () => (
+          <Show when={useAppConfig()?.sticker_import_mode !== 'off'}>
+            <Row clickable={showStickerPackImportPopup}>
+              <Row.Icon icon="stickers_face" />
+              <Row.Title>{i18n('Teagram.Import.Pack')}</Row.Title>
+            </Row>
+          </Show>
+        ),
+        middleware: tab.middlewareHelper.get()
+      });
 
       const stickerSets: {[id: string]: {container: HTMLElement, dispose: VoidFunction}} = {};
 

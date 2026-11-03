@@ -59,6 +59,7 @@ import parseBotAdminRights from '@appManagers/utils/bots/parseBotAdminRights';
 import isEphemeralMessage from '@appManagers/utils/messages/isEphemeralMessage';
 import parseChatSpecificTag from '@lib/richTextProcessor/parseChatSpecificTag';
 import searchByTag from '@lib/richTextProcessor/searchByTag';
+import {getStickerSetLinkPrefix, parseStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
 
 /**
  * A link whose section we know but whose path we do not — the one thing worse
@@ -84,6 +85,25 @@ export class InternalLinkProcessor {
 
   public construct(managers: AppManagers) {
     this.managers = managers;
+
+    const updateStickerSetLinkPrefix = (config: Awaited<ReturnType<AppManagers['apiManager']['getConfig']>>) => {
+      setStickerSetLinkPrefix(config.me_url_prefix);
+    };
+    rootScope.addEventListener('config', updateStickerSetLinkPrefix);
+    Promise.resolve(managers.apiManager.getConfig()).then(updateStickerSetLinkPrefix);
+
+    addAnchorListener<{}>({
+      name: 'stickerSet',
+      callback: ({element}) => {
+        const stickerSet = element && parseStickerSetShareLink(element.href, getStickerSetLinkPrefix());
+        if(!stickerSet) return;
+
+        return this.processInternalLink({
+          _: stickerSet.isEmoji ? INTERNAL_LINK_TYPE.EMOJI_SET : INTERNAL_LINK_TYPE.STICKER_SET,
+          set: stickerSet.shortName
+        });
+      }
+    });
 
     addAnchorListener<{}>({
       name: 'showMaskedAlert',

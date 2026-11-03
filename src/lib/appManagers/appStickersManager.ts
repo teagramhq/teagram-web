@@ -1,6 +1,6 @@
 import type {MyDocument} from '@appManagers/appDocsManager';
 import type {DownloadOptions} from '@appManagers/apiFileManager';
-import {Document, InputFileLocation, InputStickerSet, MessageEntity, MessagesAllStickers, MessagesFavedStickers, MessagesFeaturedStickers, MessagesFoundStickerSets, MessagesRecentStickers, MessagesStickers, MessagesStickerSet, PhotoSize, StickerPack, StickerSet, StickerSetCovered, Update, VideoSize} from '@layer';
+import {Document, InputFileLocation, InputMedia, InputStickerSet, InputStickerSetItem, MessageEntity, MessagesAllStickers, MessagesFavedStickers, MessagesFeaturedStickers, MessagesFoundStickerSets, MessagesRecentStickers, MessagesStickers, MessagesStickerSet, PhotoSize, StickerPack, StickerSet, StickerSetCovered, Update, VideoSize} from '@layer';
 import {Modify} from '@types';
 import AppStorage from '@lib/storage';
 import {AccountDatabase, getDatabaseState} from '@config/databases/state';
@@ -667,6 +667,60 @@ export class AppStickersManager extends AppManager {
 
   public toggleStickerSets(sets: StickerSet.stickerSet[]) {
     return Promise.all(sets.map((set) => this.toggleStickerSet(set)));
+  }
+
+  public checkStickerSetShortName(shortName: string) {
+    return this.apiManager.invokeApi('stickers.checkShortName', {short_name: shortName});
+  }
+
+  public async suggestStickerSetShortName(title: string) {
+    const result = await this.apiManager.invokeApi('stickers.suggestShortName', {title});
+    return result.short_name;
+  }
+
+  public async createStickerSet(options: {
+    files: File[],
+    title: string,
+    shortName: string,
+    isEmoji: boolean,
+    software: 'folder' | 'zip'
+  }) {
+    const stickers: InputStickerSetItem[] = [];
+    const peer = this.appPeersManager.getInputPeerSelf();
+
+    for(const file of options.files) {
+      const extension = file.name.split('.').pop()?.toLowerCase();
+      const mimeType = extension === 'webp' ? 'image/webp' : extension === 'tgs' ? 'application/x-tgsticker' : 'video/webm';
+      const uploadedFile = await this.apiFileManager.upload({file, fileName: file.name});
+      const media: InputMedia.inputMediaUploadedDocument = {
+        _: 'inputMediaUploadedDocument',
+        file: uploadedFile,
+        mime_type: mimeType,
+        pFlags: {},
+        attributes: [{_: 'documentAttributeFilename', file_name: file.name}]
+      };
+      const uploaded = await this.apiManager.invokeApi('messages.uploadMedia', {peer, media});
+
+      if(uploaded._ !== 'messageMediaDocument' || uploaded.document._ !== 'document') {
+        throw new Error('Unexpected uploaded sticker document');
+      }
+
+      const document = this.appDocsManager.saveDoc(uploaded.document);
+      stickers.push({
+        _: 'inputStickerSetItem',
+        document: getDocumentInput(document),
+        emoji: '🙂'
+      });
+    }
+
+    return this.apiManager.invokeApi('stickers.createStickerSet', {
+      user_id: this.appUsersManager.getUserInput(this.appUsersManager.getSelf().id),
+      title: options.title,
+      short_name: options.shortName,
+      stickers,
+      emojis: options.isEmoji,
+      software: options.software
+    });
   }
 
   public async searchStickerSets(query: string, excludeFeatured = true) {

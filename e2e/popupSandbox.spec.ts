@@ -126,3 +126,31 @@ test('every popup story opens and becomes visible', async({page}) => {
 
   expect(failed, `\n${failed.join('\n')}\n`).toEqual([]);
 });
+
+test('imports a folder pack and opens its shareable sticker set', async({page}) => {
+  await page.goto('/?popups=1');
+  await page.waitForFunction(() => !!window.popupSandbox, null, {timeout: 30_000});
+  await page.evaluate(() => window.popupSandbox.ready());
+  expect(await openStory(page, 'stickerPackImport')).toBeNull();
+
+  const importPopup = page.locator('.popup.active').last();
+  await expect(importPopup.getByText('Import a sticker pack', {exact: true})).toBeVisible();
+  await importPopup.locator('input[name="sticker-pack-title"]').fill('Imported Pack');
+  await importPopup.locator('input[name="sticker-pack-short-name"]').fill('sandbox_imported');
+  await expect(importPopup.getByText('Link is available', {exact: true})).toBeVisible();
+  await importPopup.locator('input[webkitdirectory]').setInputFiles({
+    name: 'cat.webp',
+    mimeType: 'image/webp',
+    buffer: Buffer.from([1, 2, 3])
+  });
+  await importPopup.getByLabel('I have the right to share this pack.').check();
+  await importPopup.getByRole('button', {name: 'Import pack'}).click();
+
+  const stickerPopup = page.locator('.popup-stickers.popup.active');
+  await expect(stickerPopup.getByText('Imported Pack', {exact: true})).toBeVisible();
+  await expect(stickerPopup.locator('input[aria-label="Sticker pack link"]')).toHaveValue(
+    'https://teagram.test/addstickers/sandbox_imported'
+  );
+  await expect(stickerPopup.getByRole('button', {name: 'Copy Link'})).toBeVisible();
+  await page.evaluate(() => window.popupSandbox.closePopups());
+});

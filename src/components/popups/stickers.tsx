@@ -20,6 +20,7 @@ import wrapCustomEmoji from '@components/wrappers/customEmoji';
 import emoticonsDropdown from '@components/emoticonsDropdown';
 import ButtonMenuToggle from '@components/buttonMenuToggle';
 import {copyTextToClipboard} from '@helpers/clipboard';
+import {createStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
 import {onMediaCaptionClick} from '@components/mediaViewer';
 import DEBUG from '@config/debug';
@@ -28,7 +29,7 @@ import appDownloadManager from '@lib/appDownloadManager';
 import pause from '@helpers/schedulers/pause';
 import toArray from '@helpers/array/toArray';
 import ListenerSetter from '@helpers/listenerSetter';
-import {createSignal, JSX, onCleanup, onMount, Show, untrack, useContext} from 'solid-js';
+import {createSignal, For, JSX, onCleanup, onMount, Show, untrack, useContext} from 'solid-js';
 import {subscribeOn} from '@helpers/solid/subscribeOn';
 import MyShow from '@helpers/solid/myShow';
 import Button from '@components/button';
@@ -70,6 +71,7 @@ export default function showStickersPopup(
     const [isAdd, setIsAdd] = createSignal(false);
     const [buttonText, setButtonText] = createSignal<JSX.Element>();
     const [containers, setContainers] = createSignal<JSX.Element>();
+    const [shareLinks, setShareLinks] = createSignal<string[]>([]);
 
     let rawSetsRef: Awaited<ReturnType<AppStickersManager['getStickerSet']>>[];
 
@@ -189,6 +191,14 @@ export default function showStickersPopup(
 
       isEmojis ??= !!firstSet.set.pFlags.emojis;
 
+      try {
+        const config = await managers.apiManager.getConfig();
+        setStickerSetLinkPrefix(config.me_url_prefix);
+        setShareLinks(rawSets.map((set) => createStickerSetShareLink(config.me_url_prefix, set.set.short_name, !!isEmojis)));
+      } catch(err) {
+        setShareLinks([]);
+      }
+
       attachClickEvent(scrollableEl, onStickersClick, {listenerSetter});
 
       const {destroy} = createStickersContextMenu({
@@ -278,9 +288,7 @@ export default function showStickersPopup(
         icon: 'copy',
         text: 'CopyLink',
         onClick: () => {
-          const prefix = `https://t.me/${isEmojis ? 'addemoji' : 'addstickers'}/`;
-          const text = rawSets.map((set) => prefix + set.set.short_name).join('\n');
-          copyTextToClipboard(text);
+          copyTextToClipboard(shareLinks().join('\n'));
         }
       }];
 
@@ -349,7 +357,21 @@ export default function showStickersPopup(
             withBorders="top"
           >
             <Show when={isLoaded()} fallback={putPreloader(undefined, true)}>
-              {containers()}
+              <>
+                {containers()}
+                <Show when={shareLinks().length > 0}>
+                  <div class="sticker-set-share-links">
+                    <For each={shareLinks()}>{(link) => (
+                      <div class="sticker-set-share-link">
+                        <input aria-label={i18n('Teagram.Import.ShareLink').textContent} readOnly value={link} />
+                        <button class="btn btn-transparent primary" type="button" onClick={() => copyTextToClipboard(link)}>
+                          {i18n('CopyLink')}
+                        </button>
+                      </div>
+                    )}</For>
+                  </div>
+                </Show>
+              </>
             </Show>
           </PopupElement.Scrollable>
         </PopupElement.Body>
