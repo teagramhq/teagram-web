@@ -12,3 +12,9 @@ export async function processShareTarget(share: ShareData, process: () => Promis
     onFailure?.(error);
   }
 }
+
+export function processShareTargetForPicker(share: ShareData, process: () => Promise<unknown>) {
+  return processShareTarget(share, process, (error) => {
+    throw error;
+  });
+}

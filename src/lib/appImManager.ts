@@ -85,7 +85,7 @@ import sameInputGroupCall from '@lib/calls/helpers/sameInputGroupCall';
 import getFilesFromEvent, {loadAlongsideFilesFromEvent} from '@helpers/files/getFilesFromEvent';
 import getFileMimeType from '@helpers/files/getFileMimeType';
 import apiManagerProxy from '@lib/apiManagerProxy';
-import {processShareTarget} from '@lib/shareTarget';
+import {processShareTarget, processShareTargetForPicker} from '@lib/shareTarget';
 import paymentsWrapCurrencyAmount from '@helpers/paymentsWrapCurrencyAmount';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import {CLICK_EVENT_NAME} from '@helpers/dom/clickEvent';
@@ -983,7 +983,7 @@ export class AppImManager extends EventListenerBase<{
     if(share.files?.length) {
       void import('@components/popups/forward').then(({default: showForwardPopup}) => {
         return showForwardPopup(undefined, async(peerId, threadId) => {
-          await processShareTarget(share, async() => {
+          await processShareTargetForPicker(share, async() => {
             await this.setPeer({peerId, threadId});
             const foundMedia = share.files.some((file) => MEDIA_MIME_TYPES_SUPPORTED.has(getFileMimeType(file)) || isConvertibleMov(file));
             const {default: PopupNewMedia} = await import('@components/popups/newMedia');

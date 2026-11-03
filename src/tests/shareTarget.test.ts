@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({share: undefined as unknown as ShareData, toast
 vi.mock('@lib/apiManagerProxy', () => ({default: mocks}));
 vi.mock('@components/toast', () => ({toastNew: mocks.toastNew}));
 
-import {processShareTarget} from '@lib/shareTarget';
+import {processShareTarget, processShareTargetForPicker} from '@lib/shareTarget';
 
 describe('Web Share Target payload handling', () => {
   beforeEach(() => {
@@ -31,18 +31,17 @@ describe('Web Share Target payload handling', () => {
     expect(mocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Error.AnError'});
   });
 
-  it('restores the payload and rethrows deferred file processing errors', async() => {
+  it('keeps the picker submission open when deferred file processing fails', async() => {
     const share = {files: [new File(['file'], 'image.png')]} as ShareData;
     const error = new Error('new media chunk failed');
     const process = vi.fn().mockRejectedValue(error);
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await expect(processShareTarget(share, process, (failure) => {
-      throw failure;
-    })).rejects.toBe(error);
+    await expect(processShareTargetForPicker(share, process)).rejects.toBe(error);
 
     expect(mocks.share).toBe(share);
     expect(log).toHaveBeenCalledWith('Failed to process Web Share Target payload', error);
+    expect(mocks.toastNew).toHaveBeenCalledOnce();
   });
 
   it('clears the payload after successful processing', async() => {
