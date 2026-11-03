@@ -608,7 +608,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ inputs.checkout_ref || github.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Set up Python
@@ -673,10 +673,18 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_COMMITS: ${{ github.event.pull_request.commits }}
         run: |
           case "$BASE_SHA$HEAD_SHA" in
             *[!0-9a-f]*) echo "pull request commit is not a hexadecimal SHA" >&2; exit 1 ;;
           esac
+          case "$PR_COMMITS" in
+            ''|*[!0-9]*) echo "pull request commit count is not a number" >&2; exit 1 ;;
+          esac
+          # Fetch only the history Gitleaks scans: BASE..HEAD is at most PR_COMMITS
+          # commits deep from HEAD, so one extra level reaches the base commit.
+          git fetch --no-tags --no-recurse-submodules --depth="$((PR_COMMITS + 1))" \
+            origin "$HEAD_SHA" "$BASE_SHA"
           gitleaks git --log-opts="$BASE_SHA..$HEAD_SHA" \
             --redact=100 --no-banner --report-format=json \
             --report-path="$RUNNER_TEMP/gitleaks-report.json"

@@ -86,6 +86,8 @@ check_publication_call_graph() {
     [[ "$cancel_in_progress" == *"github.event_name == 'pull_request'"* ]] ||
       fail "$workflow_path must cancel superseded pull request runs only"
   done
+  [[ "$(publication_query "$repository_ci_workflow" '.jobs.check-security.steps[] | select(.name == "Check out code") | .with."fetch-depth"')" == 1 ]] ||
+    fail 'check: security must check out shallowly; its Gitleaks step fetches the pull request range itself'
 }
 
 check_target_selection() (
