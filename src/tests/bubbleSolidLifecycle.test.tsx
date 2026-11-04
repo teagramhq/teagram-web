@@ -2,7 +2,7 @@ import type {Message, PeerSettings} from '@layer';
 import '@helpers/peerIdPolyfill';
 import {getMiddleware} from '@helpers/middleware';
 import {render} from 'solid-js/web';
-import {makeFullMid} from '@appManagers/utils/messages/fullMid';
+import {makeFullMid, type FullMid} from '@appManagers/utils/messages/fullMid';
 import ejectBubble from '@components/chat/bubbles/ejectBubble';
 import {markMessageLinkEntity} from '@lib/richTextProcessor/filterDisabledEntities';
 import Scrollable from '@components/scrollable';
@@ -1184,6 +1184,36 @@ test('defers every affected BubbleGroup mount during an atomic replacement regro
   expect(group.unmountItem).toHaveBeenCalledOnce();
   expect(mountUnmountGroups).not.toHaveBeenCalled();
   expect(deferredGroups).toEqual(new Set([group]));
+});
+
+test('mounts affected groups once after deleting a viewport slice', () => {
+  const fullMids = ['10_1', '10_2'] as FullMid[];
+  const bubbles = new Map(fullMids.map((fullMid) => [fullMid, document.createElement('div')]));
+  const group = {};
+  const bubbleGroups = {mountUnmountGroups: vi.fn()};
+  const harness = {
+    getBubble: (fullMid: FullMid) => bubbles.get(fullMid),
+    getRenderedHistory: () => fullMids,
+    destroyBubble: vi.fn((
+      _bubble: HTMLElement,
+      _animate: boolean | undefined,
+      _fullMid: FullMid,
+      deferredGroups?: Set<typeof group>
+    ) => deferredGroups?.add(group)),
+    scrollable: {ignoreNextScrollEvent: vi.fn(), onScroll: vi.fn()},
+    chat: {selection: {isSelecting: false}, animationGroup: {}},
+    bubbleGroups,
+    deleteEmptyDateGroups: vi.fn()
+  };
+
+  ChatBubbles.prototype.deleteMessagesByIds.call(harness as any, fullMids, false, true);
+
+  expect(harness.destroyBubble).toHaveBeenCalledTimes(fullMids.length);
+  const deferredGroups = harness.destroyBubble.mock.calls[0][3];
+  expect(deferredGroups).toBeInstanceOf(Set);
+  expect(harness.destroyBubble.mock.calls.every((call) => call[3] === deferredGroups)).toBe(true);
+  expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledOnce();
+  expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledWith([group]);
 });
 
 test('reconciles only the latest streamed revision queued during the initial async render', async() => {

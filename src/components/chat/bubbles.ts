@@ -4827,7 +4827,8 @@ export default class ChatBubbles {
   public destroyBubble(
     bubble: HTMLElement,
     animate?: boolean,
-    fullMid = getBubbleFullMid(bubble)
+    fullMid = getBubbleFullMid(bubble),
+    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
   ) {
     const replacement = this.findPendingBubbleReplacement(bubble);
     if(replacement) {
@@ -4896,7 +4897,7 @@ export default class ChatBubbles {
     const scrollSaver = canBeDeleted && this.createScrollSaver(false);
     scrollSaver?.save();
 
-    this.bubbleGroups.removeAndUnmountBubble(bubble);
+    this.bubbleGroups.removeAndUnmountBubble(bubble, deferredGroups);
     if(this.observer) {
       this.observer.unobserve(bubble, this.unreadedObserverCallback);
       this.unreaded.delete(bubble);
@@ -5026,14 +5027,21 @@ export default class ChatBubbles {
     const rendered = this.getRenderedHistory('desc');
     const indexes: Record<FullMid, number> = {};
     rendered.forEach((mid, idx) => indexes[mid] = idx);
+    const deferredGroups = !permanent && ignoreOnScroll ?
+      new Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>() :
+      undefined;
 
     fullMids
     .slice()
     .sort((a, b) => (indexes[a] ?? 0) - (indexes[b] ?? 0))
     .forEach((fullMid) => {
       const bubble = this.getBubble(fullMid);
-      this.destroyBubble(bubble, permanent && liteMode.isAvailable('animations'));
+      this.destroyBubble(bubble, permanent && liteMode.isAvailable('animations'), fullMid, deferredGroups);
     });
+
+    if(deferredGroups?.size) {
+      this.bubbleGroups.mountUnmountGroups(Array.from(deferredGroups));
+    }
 
     this.scrollable.ignoreNextScrollEvent();
     if(permanent && this.chat.selection.isSelecting) {
