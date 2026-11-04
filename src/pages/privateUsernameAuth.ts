@@ -3,7 +3,7 @@ import App from '@config/app';
 import type {MTAppConfig} from '@/appConfig';
 import {isPrivateUsernameCredentialError} from '@/pages/privateUsernameLoginState';
 import {invokeSignUpWithTurnstile, invokeTurnstileProtected} from '@/pages/turnstileSignup';
-import type {RequestTurnstileChallenge} from '@/pages/turnstileSignup';
+import type {RequestTurnstileChallenge, TurnstileAction} from '@/pages/turnstileSignup';
 import {isUsernameValid} from '@lib/richTextProcessor/validators';
 import {parsePrivateUsernameInviteSecret} from '@/pages/privateUsernameInvite';
 
@@ -150,6 +150,8 @@ export async function authenticatePrivateUsername(
   };
 
   let sentCode: unknown;
+  const sendCodeAction: TurnstileAction = registration && registration.mode !== 'closed' ? 'signup' : 'signin';
+  const signupChallengeBoundToCode = sendCodeAction === 'signup' && !!requestTurnstile && !!turnstileSiteKey;
   try {
     sentCode = await invokeTurnstileProtected(invokeAuthApi, 'auth.sendCode', {
       phone_number: username,
@@ -159,7 +161,7 @@ export async function authenticatePrivateUsername(
         _: 'codeSettings',
         pFlags: {}
       }
-    }, 'signin', requestTurnstile);
+    }, sendCodeAction, requestTurnstile, turnstileSiteKey);
   } catch(error) {
     if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
     if(authKeyRecoveryFailed) return getAuthErrorResult(error, !!registration, true);
@@ -239,7 +241,7 @@ export async function authenticatePrivateUsername(
         (method, request) => invokeAuthApi(method, request),
         params,
         requestTurnstile,
-        turnstileSiteKey
+        signupChallengeBoundToCode ? undefined : turnstileSiteKey
       );
     } catch(error) {
       if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};

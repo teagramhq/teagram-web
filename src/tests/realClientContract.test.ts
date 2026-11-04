@@ -4209,6 +4209,28 @@ describe('real client scenario contract', () => {
     expect(() => parseRealClientArgs([...args, '--source-sha', 'a'.repeat(40)])).toThrow('unknown option');
   });
 
+  it('keeps fresh guest signup as an explicit standalone browser mode', () => {
+    const args = [
+      '--readiness-file', './fixture.jsonl',
+      '--harness-revision', READINESS_PINS.harnessRevision,
+      '--server-revision', READINESS_PINS.serverRevision,
+      '--web-revision', READINESS_PINS.webRevision,
+      '--run-id', READINESS_PINS.runId,
+      '--guest-signup'
+    ];
+
+    expect(parseRealClientArgs(args)).toEqual({
+      readinessFile: './fixture.jsonl',
+      harnessRevision: READINESS_PINS.harnessRevision,
+      serverRevision: READINESS_PINS.serverRevision,
+      webRevision: READINESS_PINS.webRevision,
+      runId: READINESS_PINS.runId,
+      guestSignupOnly: true
+    });
+    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in'])).toThrow('cannot be combined');
+    expect(() => parseRealClientArgs([...args, '--guest-signup'])).toThrow('option was provided more than once');
+  });
+
   it('accepts the previously supported scenario selections without poll', () => {
     const args = [
       '--readiness-file', './fixture.jsonl',
@@ -4240,6 +4262,28 @@ describe('real client scenario contract', () => {
     expect(() => parseFixtureReadiness([serverReady, buildArtifactReady(serverReady)].map((event) => JSON.stringify(event)).join('\n'), READINESS_PINS, {requireArtifact: false}))
     .toThrow('one fixture readiness event is required');
     expect(() => parseFixtureReadiness(JSON.stringify({...serverReady, security: {...serverReady.security, registrationClosed: false}}), READINESS_PINS, {requireArtifact: false}))
+    .toThrow('server-ready security evidence is incomplete');
+  });
+
+  it('requires open registration and the enabled sign-in gate for fresh guest signup readiness', () => {
+    const serverReady = buildServerReady();
+    serverReady.security = {
+      ...serverReady.security,
+      registrationClosed: false,
+      guestSignUpEnabled: true,
+      turnstileSignInEnabled: true,
+      finalAuthKeys: 0
+    };
+    const text = JSON.stringify(serverReady);
+
+    expect(parseFixtureReadiness(text, READINESS_PINS, {requireArtifact: false, guestSignupOnly: true}))
+    .toEqual({serverReady, artifactReady: undefined});
+    expect(() => parseFixtureReadiness(text, READINESS_PINS, {requireArtifact: false}))
+    .toThrow('server-ready security evidence is incomplete');
+    expect(() => parseFixtureReadiness(JSON.stringify({
+      ...serverReady,
+      security: {...serverReady.security, finalAuthKeys: 2}
+    }), READINESS_PINS, {requireArtifact: false, guestSignupOnly: true}))
     .toThrow('server-ready security evidence is incomplete');
   });
 

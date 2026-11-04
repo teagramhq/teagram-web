@@ -116,13 +116,14 @@ if(args?.help) {
 
     const controlsOnly = args.observerControlsOnly === true;
     const authProgress = args.authProgressOneSubmission === true;
+    const guestSignupOnly = args.guestSignupOnly === true;
     const readinessText = readFileSync(resolve(args.readinessFile), 'utf8');
     readiness = parseFixtureReadiness(readinessText, {
       runId: args.runId,
       harnessRevision: args.harnessRevision,
       serverRevision: args.serverRevision,
       webRevision: args.webRevision
-    }, {requireArtifact: !controlsOnly});
+    }, {requireArtifact: !controlsOnly, guestSignupOnly});
     const {serverReady, artifactReady} = readiness;
     const credentials = readSyntheticCredentials(serverReady.credentials, args.runId, authProgress ? 1 : 2);
 
@@ -211,6 +212,7 @@ if(args?.help) {
     const browserInput = JSON.stringify({
       ...(controlsOnly ? {observationOnly: true} : {}),
       ...(authProgress ? {authProgressOneSubmission: true} : {}),
+      ...(guestSignupOnly ? {guestSignupOnly: true} : {}),
       ...(args.pageErrorDiagnostics === true ? {pageErrorDiagnostics: true} : {}),
       ...(args.pollCreationNegativeControl === true ? {pollCreationNegativeControl: true} : {}),
       ...(Array.isArray(args.scenarios) ? {scenarios: args.scenarios} : {}),
@@ -301,6 +303,16 @@ if(args?.help) {
         controlContextCount: browserResult.controlContextCount,
         workerObservation: browserResult.workerObservation
       })}\n`);
+    } else if(guestSignupOnly) {
+      if(browserResult.mode !== 'guest_signup' || browserResult.contextCount !== 1 ||
+          browserResult.guestSignup?.availabilityVisible !== true || browserResult.guestSignup?.appConfigLoaded !== true ||
+          JSON.stringify(browserResult.guestSignup?.turnstileActions) !== JSON.stringify(['signup']) ||
+          browserResult.guestSignup?.authorized !== true || browserResult.screenshotsCaptured !== 2 ||
+          browserResult.controlContextCount !== REQUIRED_CONTROLS.length ||
+          browserResult.network?.unexpectedAttempts !== 0 || browserResult.network?.observerErrors !== 0) {
+        throw new Error('guest signup browser evidence is incomplete');
+      }
+      controlsOnlyDone = true;
     }
     if(!controlsOnlyDone && !authProgress) {
       passwordEvidence = parsePasswordEvidence(browserResult.passwordEvidence);
@@ -438,6 +450,26 @@ if(args?.help) {
     const errors = [operationError?.message, cleanupError?.message].filter((message) => typeof message === 'string');
     process.stderr.write(`${errors.join('; ') || 'real client runner failed'}\n`);
     process.exitCode = 1;
+  } else if(guestSignupOnly) {
+    process.stdout.write(`${JSON.stringify({
+      status: 'passed',
+      mode: 'guest_signup',
+      runId: args.runId,
+      harnessRevision: args.harnessRevision,
+      serverRevision: args.serverRevision,
+      webRevision: args.webRevision,
+      artifactDigest: readiness?.artifactReady?.artifactDigest ?? null,
+      artifactAuditChecks: readiness.artifactReady.auditChecks,
+      controlledProbeEvidence: {
+        workers: readiness.serverReady.evidence.workerProbes,
+        observerControlledAttempts: readiness.serverReady.evidence.observerControlledAttempts,
+        directTCP: readiness.serverReady.evidence.directTCP
+      },
+      guestSignup: browserResult.guestSignup,
+      contextCount: browserResult.contextCount,
+      screenshotsCaptured: browserResult.screenshotsCaptured,
+      network: browserResult.network
+    })}\n`);
   } else if(!controlsOnlyDone) {
 
     process.stdout.write(`${JSON.stringify({
