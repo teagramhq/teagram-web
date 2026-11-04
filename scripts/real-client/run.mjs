@@ -61,6 +61,7 @@ try {
 if(args?.help) {
   process.stdout.write(`${HELP}\n`);
 } else if(args) {
+  const guestSignupOnly = args.guestSignupOnly === true;
   let cleanupError;
   let operationError;
   let browserScriptInstalled = false;
@@ -116,7 +117,6 @@ if(args?.help) {
 
     const controlsOnly = args.observerControlsOnly === true;
     const authProgress = args.authProgressOneSubmission === true;
-    const guestSignupOnly = args.guestSignupOnly === true;
     const readinessText = readFileSync(resolve(args.readinessFile), 'utf8');
     readiness = parseFixtureReadiness(readinessText, {
       runId: args.runId,

@@ -6204,14 +6204,6 @@ async function main(dependencies = {}) {
       ));
       await countClientErrors(guestPage, () => readClientErrorScenarioStep(guestPage));
       await guestPage.addInitScript(() => {
-        const discoveryValue = (name, value) => Object.defineProperty(window, name, {
-          configurable: true,
-          get: () => value,
-          set: () => {}
-        });
-        discoveryValue('__TEAGRAM_ACTIVE_GUEST_SIGN_UP__', true);
-        discoveryValue('__TEAGRAM_ACTIVE_SERVER_HOST__', 'demo.teagram.io');
-        discoveryValue('__TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__', 'fixture-turnstile-site-key');
         window.__fixtureTurnstileActions = [];
         window.turnstile = {
           render(container, callbacks) {
@@ -6232,6 +6224,13 @@ async function main(dependencies = {}) {
       const response = await guestPage.goto(PRIVATE_CSP_ORIGIN, {waitUntil: 'domcontentloaded', timeout: 30_000});
       if(response?.status() !== 200) failStage('guest_artifact_load');
       await guestPage.locator('#auth-pages').waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_auth_card'));
+      const discovery = await guestPage.evaluate(() => ({
+        guestSignUpEnabled: window.__TEAGRAM_ACTIVE_GUEST_SIGN_UP__,
+        turnstileSiteKey: window.__TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__
+      }));
+      if(discovery.guestSignUpEnabled !== true || discovery.turnstileSiteKey !== 'fixture-turnstile-site-key') {
+        failStage('guest_discovery_capabilities');
+      }
       const guestButton = guestPage.getByRole('button', {name: 'Try it as a guest'});
       await guestButton.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_availability_button'));
       const registrationButton = guestPage.getByRole('button', {name: 'Create account'});
@@ -6245,15 +6244,13 @@ async function main(dependencies = {}) {
         return button && !button.disabled;
       }, null, {timeout: 30_000}).catch(() => failStage('guest_restore_ready'));
       await guestButton.click().catch(() => failStage('guest_create_click'));
-      const termsDialog = guestPage.getByRole('dialog');
-      if(await termsDialog.count() > 0) {
-        const acceptTerms = termsDialog.getByRole('button', {name: 'Accept'});
-        if(await acceptTerms.count() > 0) await acceptTerms.click().catch(() => failStage('guest_terms_accept'));
-      }
       const challenge = guestPage.getByTestId('turnstile-challenge');
       await challenge.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_turnstile_challenge'));
       if(await challenge.getAttribute('data-sitekey') !== 'fixture-turnstile-site-key') failStage('guest_turnstile_site_key');
       await guestPage.getByTestId('fixture-turnstile-complete').click().catch(() => failStage('guest_turnstile_complete'));
+      const termsDialog = guestPage.getByRole('dialog');
+      await termsDialog.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_terms_dialog'));
+      await termsDialog.getByRole('button', {name: 'Accept'}).click().catch(() => failStage('guest_terms_accept'));
       await guestPage.waitForFunction(() => {
         const chats = document.querySelector('#page-chats');
         return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
