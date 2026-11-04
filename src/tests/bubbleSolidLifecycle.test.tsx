@@ -1095,7 +1095,7 @@ test('commits final group identity before a structural replacement is mounted', 
   middlewareHelper.destroy();
 });
 
-test('keeps a sender description poll in processBatch when message_sent rekeys it during async work', async() => {
+test('keeps a sender description poll in processBatch while coalescing viewport slice group mounts', async() => {
   const tempMessage = descriptionPollMessage(3.0001);
   const sentMessage = {...tempMessage, id: 101, mid: 101};
   const tempFullMid = makeFullMid(tempMessage);
@@ -1108,6 +1108,7 @@ test('keeps a sender description poll in processBatch when message_sent rekeys i
     lastGroup: undefined as {lastMid?: string} | undefined,
     mountUnmountGroups: vi.fn()
   };
+  const viewportSliceGroup = {items: [] as any[]};
   let committedBubbles: ReadonlySet<HTMLElement> = new Set();
   const harness = Object.assign(Object.create(ChatBubbles.prototype), {
     bubbles,
@@ -1117,9 +1118,17 @@ test('keeps a sender description poll in processBatch when message_sent rekeys i
     lazyLoadQueue: {setAllSeen: vi.fn()},
     getBubble: (fullMid: string) => bubbles[fullMid],
     makeFullMid: (currentMessage: Message.message) => makeFullMid(currentMessage),
-    groupBubbles: vi.fn(() => ({groups: [], avatarPromises: []})),
+    groupBubbles: vi.fn(() => ({groups: [viewportSliceGroup], avatarPromises: []})),
     setUnreadDelimiter: vi.fn(() => Promise.resolve()),
-    prepareToSaveScroll: vi.fn(() => ({restoreScroll: vi.fn(), scrollSaver: {}})),
+    prepareToSaveScroll: vi.fn((
+      _reverse: boolean | undefined,
+      _sliceTop: boolean | undefined,
+      _sliceBottom: boolean | undefined,
+      deferredGroups?: Set<typeof viewportSliceGroup>
+    ) => {
+      deferredGroups?.add(viewportSliceGroup);
+      return {restoreScroll: vi.fn(), scrollSaver: {}};
+    }),
     commitBubbleReplacements: vi.fn((renderedBubbles: ReadonlySet<HTMLElement>) => {
       committedBubbles = renderedBubbles;
     })
@@ -1161,7 +1170,9 @@ test('keeps a sender description poll in processBatch when message_sent rekeys i
   expect(bubbles[tempFullMid]).toBeUndefined();
   expect(bubbles[sentFullMid]).toBe(bubble);
   expect(Array.from(committedBubbles)).toEqual([bubble]);
+  expect(harness.prepareToSaveScroll).toHaveBeenCalledWith(undefined, true, true, expect.any(Set));
   expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledOnce();
+  expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledWith([viewportSliceGroup]);
 });
 
 test('defers every affected BubbleGroup mount during an atomic replacement regroup', () => {
@@ -1229,6 +1240,77 @@ test('mounts affected groups once after deleting a viewport slice', () => {
   expect(harness.destroyBubble.mock.calls.every((call) => call[5] === groupsFullyDeleted)).toBe(true);
   expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledOnce();
   expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledWith([group]);
+});
+
+test('leaves viewport slice group mounting to the caller batch when given a deferred set', () => {
+  const fullMid = '10_1' as FullMid;
+  const bubble = document.createElement('div');
+  const group = {items: [] as any[]} as unknown as InstanceType<typeof BubbleGroup>;
+  const deferredGroups = new Set<InstanceType<typeof BubbleGroup>>();
+  const bubbleGroups = {itemsArr: [] as any[], groups: [] as any[], mountUnmountGroups: vi.fn()};
+  const harness = {
+    getBubble: (mid: FullMid) => mid === fullMid ? bubble : undefined,
+    getRenderedHistory: () => [fullMid],
+    destroyBubble: vi.fn((
+      _bubble: HTMLElement,
+      _animate: boolean | undefined,
+      _mid: FullMid,
+      groups?: Set<InstanceType<typeof BubbleGroup>>
+    ) => groups?.add(group)),
+    scrollable: {ignoreNextScrollEvent: vi.fn(), onScroll: vi.fn()},
+    chat: {selection: {isSelecting: false}, animationGroup: {}},
+    bubbleGroups,
+    deleteEmptyDateGroups: vi.fn()
+  };
+
+  ChatBubbles.prototype.deleteMessagesByIds.call(harness as any, [fullMid], false, true, deferredGroups);
+
+  expect(harness.destroyBubble).toHaveBeenCalledWith(bubble, false, fullMid, deferredGroups, undefined, expect.any(Set));
+  expect(deferredGroups).toEqual(new Set([group]));
+  expect(bubbleGroups.mountUnmountGroups).not.toHaveBeenCalled();
+});
+
+test('passes deferred viewport groups through prepareToSaveScroll', () => {
+  const slice = {invisibleTop: [], visible: [], invisibleBottom: []} as any;
+  const deferredGroups = new Set<InstanceType<typeof BubbleGroup>>();
+  const deleteViewportSlice = vi.fn();
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chatInner: {parentElement: document.body},
+    log: {bindPrefix: () => vi.fn()},
+    createScrollSaver: () => ({save: vi.fn()}),
+    chat: {setPeerPromise: undefined},
+    getRenderedLength: () => 1,
+    getViewportSlice: () => slice,
+    deleteViewportSlice
+  }) as any;
+
+  (ChatBubbles.prototype as any).prepareToSaveScroll.call(harness, false, false, true, deferredGroups);
+
+  expect(deleteViewportSlice).toHaveBeenCalledWith(slice, true, deferredGroups);
+});
+
+test('passes deferred viewport groups through deleteViewportSlice', () => {
+  const bubble = document.createElement('div');
+  bubble.dataset.peerId = '' + peerId;
+  bubble.dataset.mid = '1';
+  const slice = {
+    invisibleTop: [],
+    visible: [],
+    invisibleBottom: [{element: bubble, rect: new DOMRect()}]
+  } as any;
+  const deferredGroups = new Set<InstanceType<typeof BubbleGroup>>();
+  const deleteMessagesByIds = vi.fn();
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    log: {bindPrefix: () => vi.fn()},
+    chat: {getMessageByPeer: vi.fn()},
+    setLoaded: vi.fn(),
+    deleteMessagesByIds,
+    scrollable: {}
+  }) as any;
+
+  (ChatBubbles.prototype as any).deleteViewportSlice.call(harness, slice, true, deferredGroups);
+
+  expect(deleteMessagesByIds).toHaveBeenCalledWith([makeFullMid(peerId, 1)], false, true, deferredGroups);
 });
 
 test('defers group updates and removes a fully sliced group as one container', () => {
