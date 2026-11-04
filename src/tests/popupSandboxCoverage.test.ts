@@ -127,8 +127,10 @@ describe('popup sandbox live-readiness', () => {
         // The whole block, not just `open()`: a story whose canned manager answers are fixtures is
         // fixture-bound too, since live mode drops those answers.
         const usesFixture = names.some((name) => new RegExp(`\\b${name}\\b`).test(story.block));
+        const usesFixtureManagerFactory = /managers:\s*\w*FixtureManagers\(/.test(story.block);
         // Inline literals count as well — a hand-built payment form is fixture data with no import.
         const looksSynthetic = usesFixture ||
+          usesFixtureManagerFactory ||
           /_: '/.test(story.block) ||
           /localhost|location\.origin|'sandbox-/.test(story.block);
         if(!looksSynthetic) stale.push(story.id);

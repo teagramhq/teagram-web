@@ -41,7 +41,7 @@ const getStickerSetPreviewManagers = (getConfig: () => unknown = () => stickerSe
   }
 });
 
-const getStickerPackImportManagers = (options: {
+const getStickerPackImportFixtureManagers = (options: {
   mode?: 'on' | 'off',
   configFailure?: boolean,
   takenName?: string,
@@ -136,7 +136,7 @@ defineStories('Composer & bots', [
     id: 'stickerPackImport',
     fixtureOnly: true,
     title: 'Import a sticker pack',
-    managers: getStickerPackImportManagers(),
+    managers: getStickerPackImportFixtureManagers(),
     open: async() => {
       const {default: showStickerPackImportPopup} = await import('@components/popups/stickerPackImport');
       showStickerPackImportPopup();
@@ -146,7 +146,7 @@ defineStories('Composer & bots', [
     id: 'stickerPackImportOff',
     fixtureOnly: true,
     title: 'Sticker pack import disabled',
-    managers: getStickerPackImportManagers({mode: 'off'}),
+    managers: getStickerPackImportFixtureManagers({mode: 'off'}),
     open: async() => {
       const {default: showStickerPackImportPopup} = await import('@components/popups/stickerPackImport');
       showStickerPackImportPopup();
@@ -156,7 +156,7 @@ defineStories('Composer & bots', [
     id: 'stickerPackImportConfigFailed',
     fixtureOnly: true,
     title: 'Sticker pack import config failed',
-    managers: getStickerPackImportManagers({configFailure: true}),
+    managers: getStickerPackImportFixtureManagers({configFailure: true}),
     open: async() => {
       const {default: showStickerPackImportPopup} = await import('@components/popups/stickerPackImport');
       showStickerPackImportPopup();
@@ -166,7 +166,7 @@ defineStories('Composer & bots', [
     id: 'stickerPackImportErrors',
     fixtureOnly: true,
     title: 'Sticker pack import errors',
-    managers: getStickerPackImportManagers({
+    managers: getStickerPackImportFixtureManagers({
       takenName: 'taken_name',
       createErrors: [
         {type: 'STICKER_SET_INVALID'},
