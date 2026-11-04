@@ -3,7 +3,7 @@ import type {ScrollableContextValue} from '@components/scrollable2';
 import {MOUNT_CLASS_TO} from '@config/debug';
 import {IS_SAFARI} from '@environment/userAgent';
 import getVisibleRect from '@helpers/dom/getVisibleRect';
-import {doubleRaf, fastRaf, fastRafPromise} from '@helpers/schedulers';
+import {fastRaf, fastRafPromise} from '@helpers/schedulers';
 
 // let USE_REFLOW = false;
 // if(IS_SAFARI) {
@@ -98,10 +98,11 @@ export default class ScrollSaver {
     this._save();
   }
 
-  public savePosition(anchor?: {element: HTMLElement, rect: DOMRect}) {
-    // Reuse an existing viewport measurement when a bottom slice changes the scroll-size delta.
-    this.elements = anchor ? [anchor] : [];
+  public savePosition(bottomSliceHeight = 0) {
+    // Keep bottom trimming from canceling the scroll-height increase caused by prepending.
+    this.elements = [];
     this._save();
+    this.scrollHeightMinusTop -= bottomSliceHeight;
   }
 
   public _save() {
@@ -225,20 +226,10 @@ export default class ScrollSaver {
   }
 
   public async restoreAfterLayout(useReflow?: boolean) {
+    await fastRafPromise();
     if(this.reverse) {
-      // Let the browser lay out the inserted messages before reading their geometry.
-      await doubleRaf();
-    } else {
-      await fastRafPromise();
-    }
-    if(this.reverse) {
-      if(this.elements.length) {
-        this.restore(useReflow);
-      } else {
-        // With no visible anchor, preserve the previous distance from the bottom.
-        this.scrollHeight = this.scrollable.scrollSize;
-        this._restore(useReflow);
-      }
+      this.scrollHeight = this.scrollable.scrollSize;
+      this._restore(useReflow);
     } else {
       this.restore(useReflow);
     }

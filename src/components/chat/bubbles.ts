@@ -11386,7 +11386,11 @@ export default class ChatBubbles {
     }
 
     if(reverse) {
-      scrollSaver.savePosition(viewportSlice?.invisibleBottom.length ? viewportSlice.visible[0] : undefined);
+      const bottomSlice = viewportSlice?.invisibleBottom;
+      const bottomSliceHeight = bottomSlice?.length ?
+        bottomSlice[bottomSlice.length - 1].rect.bottom - bottomSlice[0].rect.top :
+        0;
+      scrollSaver.savePosition(bottomSliceHeight);
     } else {
       scrollSaver.save(); // * let's save scroll position by point before the slicing, not after
     }

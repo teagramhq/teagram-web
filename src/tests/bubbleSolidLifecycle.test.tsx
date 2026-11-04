@@ -2071,7 +2071,10 @@ test('preserves the visible bubble when prepending history slices messages below
   const slice: ReturnType<InstanceType<typeof ChatBubbles>['getViewportSlice']> = {
     invisibleTop: [],
     visible: [{element: bubble, rect: makeRect(100, 50), visibleRect: {rect: makeRect(100, 50), overflow: {top: false, right: false, bottom: false, left: false, vertical: 0, horizontal: 0}}}],
-    invisibleBottom: [{element: document.createElement('div'), rect: makeRect(900, 50), visibleRect: null}]
+    invisibleBottom: [
+      {element: document.createElement('div'), rect: makeRect(800, 50), visibleRect: null},
+      {element: document.createElement('div'), rect: makeRect(900, 50), visibleRect: null}
+    ]
   };
   const harness = Object.assign(Object.create(ChatBubbles.prototype), {
     chatInner: {parentElement: document.body},
@@ -2089,7 +2092,6 @@ test('preserves the visible bubble when prepending history slices messages below
     const {restoreScroll} = prepareToSaveScroll.call(harness, true, false, true);
     const restoration = restoreScroll();
 
-    await vi.advanceTimersToNextFrame();
     await vi.advanceTimersToNextFrame();
     await restoration;
 

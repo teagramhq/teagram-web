@@ -124,11 +124,53 @@ test('restores prepended history from scroll-size delta without measuring bubble
     const restoration = scrollSaver.restoreAfterLayout();
 
     await vi.advanceTimersToNextFrame();
-    await vi.advanceTimersToNextFrame();
+    expect(scrollTop).toBe(300);
     await restoration;
 
     expect(scrollTop).toBe(300);
     expect(rectReads).toEqual([]);
+  } finally {
+    scrollable.destroy();
+    vi.useRealTimers();
+  }
+});
+
+test('accounts for a bottom slice when restoring prepended history without measuring bubble geometry', async() => {
+  vi.useFakeTimers();
+
+  const container = document.createElement('div');
+  let scrollTop = 400;
+  let mutated = false;
+  Object.defineProperties(container, {
+    scrollTop: {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value) => scrollTop = value
+    },
+    scrollHeight: {
+      configurable: true,
+      get: () => mutated ? 1_050 : 1_000
+    },
+    clientHeight: {configurable: true, value: 500}
+  });
+  const scrollable = new Scrollable(undefined, 'test', 300, undefined, container);
+  const scrollSaver = new ScrollSaver(scrollable, '.bubble', true);
+
+  try {
+    const savePosition = (scrollSaver as ScrollSaver & {savePosition?: (bottomSliceHeight?: number) => void}).savePosition;
+    expect(savePosition).toBeTypeOf('function');
+    if(!savePosition) return;
+
+    savePosition.call(scrollSaver, 150);
+    mutated = true;
+    const restoration = scrollSaver.restoreAfterLayout();
+
+    await vi.advanceTimersToNextFrame();
+    expect(scrollTop).toBe(600);
+    await restoration;
+
+    // The net scroll-height increase is 50px (200px prepended minus 150px sliced).
+    expect(scrollTop).toBe(600);
   } finally {
     scrollable.destroy();
     vi.useRealTimers();
@@ -172,12 +214,10 @@ test('waits for layout before reading the scroll size after a prepend', async() 
     mutated = true;
     const restoration = scrollSaver.restoreAfterLayout();
 
-    await vi.advanceTimersToNextFrame();
     expect(scrollHeightReads).toBe(0);
-
     await vi.advanceTimersToNextFrame();
-    await restoration;
     expect(scrollHeightReads).toBe(1);
+    await restoration;
   } finally {
     scrollable.destroy();
     vi.useRealTimers();
