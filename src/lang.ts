@@ -4238,6 +4238,7 @@ const lang = {
     'other_value': 'last seen %d hours ago'
   },
   'Teagram.Chat.PeerChangeFailed': '%@ couldn\'t be opened. Reopen it to try again.',
+  'Teagram.Chat.PeerChangeFailedUnnamed': 'This chat couldn\'t be opened. Reopen it to try again.',
   'Teagram.Invite.Title': 'Invite friends',
   'Teagram.Invite.Title.SearchKeywords': 'invite, link, friends, sign up',
   'Teagram.Invite.About': 'Invite people you know to create an account on %s. Each invite link works once.',

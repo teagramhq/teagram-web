@@ -350,6 +350,8 @@ const SCROLLED_DOWN_THRESHOLD = 300;
 // * generous enough for slow media on a bad connection, short enough that a promise which will
 // * never settle cannot brick the chat
 const MEDIA_PROMISES_TIMEOUT = 10000;
+// * Peer setup includes network-bound UI parts, so allow them longer than individual media waits.
+const PEER_CHANGE_PREPARATION_TIMEOUT = 30000;
 export const PEER_CHANGED_ERROR = new Error('peer changed');
 const HIDDEN_LINKS_PENDING_ATTRIBUTE = 'data-hidden-links-pending';
 const HIDDEN_LINKS_FALLBACK_ATTRIBUTE = 'data-hidden-links-fallback';
@@ -6167,12 +6169,16 @@ export default class ChatBubbles {
           return;
         }
 
-        const timeoutError = new Error(`peer change preparation timed out after ${MEDIA_PROMISES_TIMEOUT}ms`);
-        const ready = await withTimeout(prepared.ready, MEDIA_PROMISES_TIMEOUT, timeoutError);
-        if(ready instanceof Error) {
-          log.error('peer change preparation timed out:', peerId, ready);
+        const timeoutMarker = Symbol('peer change preparation timeout');
+        const ready = await withTimeout(prepared.ready, PEER_CHANGE_PREPARATION_TIMEOUT, timeoutMarker);
+        if(ready === timeoutMarker) {
+          const pendingParts = prepared.getPendingParts();
+          const timeoutError = new Error(
+            `peer change preparation timed out after ${PEER_CHANGE_PREPARATION_TIMEOUT}ms: ${pendingParts.join(', ') || 'unknown part'}`
+          );
+          log.error('peer change preparation timed out:', peerId, pendingParts, timeoutError);
           prepared.failPeerChange();
-          throw ready;
+          throw timeoutError;
         }
 
         return {prepared, ready};

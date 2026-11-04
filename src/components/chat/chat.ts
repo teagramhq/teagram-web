@@ -79,7 +79,8 @@ export const CHAT_SEARCH_KEYS: (keyof ChatSearchKeys)[] = ['query', 'isCacheable
 export type DeferredPeerChange = {
   ready: Promise<{error: unknown, name: string} | undefined>,
   apply: () => Promise<void>,
-  failPeerChange: () => void
+  failPeerChange: () => void,
+  getPendingParts: () => string[]
 };
 
 // * after this long an in-flight peer change is treated as abandoned rather than as a reason to
@@ -1242,15 +1243,15 @@ export default class Chat extends EventListenerBase<{
       this.input?.failPeerChange();
       if(!didReportPeerChangeFailure) {
         didReportPeerChangeFailure = true;
-        const peerTitlePromise = getPeerTitle({peerId, plainText: true}).catch((error: unknown) => {
+        const peerTitlePromise = getPeerTitle({peerId, plainText: true}).catch((error: unknown): string | undefined => {
           this.log.error('failed to get peer title for peer change failure:', peerId, error);
-          return String(peerId);
+          return undefined;
         });
         void peerTitlePromise.then((title) => {
           if(middleware()) {
             toastNew({
-              langPackKey: 'Teagram.Chat.PeerChangeFailed',
-              langPackArguments: [title]
+              langPackKey: title ? 'Teagram.Chat.PeerChangeFailed' : 'Teagram.Chat.PeerChangeFailedUnnamed',
+              ...(title ? {langPackArguments: [title]} : {})
             });
           }
         }).catch((error: unknown) => {
@@ -1266,6 +1267,7 @@ export default class Chat extends EventListenerBase<{
       sharedMedia: sharedMediaTab?.fillProfileElements(),
       backgrounds: this.handleBackgrounds()
     };
+    const pendingPeerChangeParts = new Set(Object.keys(peerChangePromises));
 
     let didApplyUiCallbacks = false;
     const applyFinalUiChanges = () => {
@@ -1314,8 +1316,10 @@ export default class Chat extends EventListenerBase<{
       const preparedParts = Object.entries(peerChangePromises).map(async([name, promise]): Promise<PeerChangePart> => {
         try {
           const result = await namedPromises({[name]: promise}, this.log);
+          pendingPeerChangeParts.delete(name);
           return {name, callback: result[name] as (() => void) | undefined};
         } catch(error) {
+          pendingPeerChangeParts.delete(name);
           failPeerChange();
 
           this.log.error('peer change part failed:', peerId, name, error);
@@ -1391,7 +1395,7 @@ export default class Chat extends EventListenerBase<{
         return applyPromise;
       };
 
-      return {ready, apply, failPeerChange};
+      return {ready, apply, failPeerChange, getPendingParts: () => Array.from(pendingPeerChangeParts)};
     }
 
     let callbacksObj: Awaited<ReturnType<typeof namedPromises<typeof peerChangePromises>>>;
