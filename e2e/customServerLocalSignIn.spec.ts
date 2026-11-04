@@ -551,6 +551,37 @@ test('does not wait on a pending TLS upgrade after stopping the listener', async
   expect(socketTracker?.snapshot()).toEqual({https: 0, websocket: 0});
 });
 
+test('private artifact boots from a direct sticker set URL', async({page}, testInfo) => {
+  test.skip(testInfo.project.name !== 'private-artifact-chromium', 'requires the production artifact preview');
+
+  const brokenScripts: string[] = [];
+  const assetsUnderSharePath: string[] = [];
+  const pageErrors: string[] = [];
+  const appOrigin = new URL(testInfo.project.use.baseURL as string).origin;
+  const assetResourceTypes = new Set(['script', 'stylesheet', 'image', 'font', 'manifest']);
+  page.on('request', (request) => {
+    if(!assetResourceTypes.has(request.resourceType())) return;
+    const url = new URL(request.url());
+    if(url.origin === appOrigin && url.pathname.startsWith('/addstickers/')) assetsUnderSharePath.push(url.href);
+  });
+  page.on('response', (response) => {
+    if(response.request().resourceType() !== 'script') return;
+    const contentType = response.headers()['content-type'] || '';
+    if(response.status() !== 200 || !/javascript/i.test(contentType)) {
+      brokenScripts.push(`${response.status()} ${contentType} ${response.url()}`);
+    }
+  });
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+
+  const response = await page.goto('/addstickers/cats_a');
+  expect(response?.status()).toBe(200);
+  expect(brokenScripts).toEqual([]);
+  await expect(page.locator('#auth-flow-root')).toBeAttached({timeout: 30_000});
+  expect(new URL(page.url()).pathname).toBe('/addstickers/cats_a');
+  expect(assetsUnderSharePath).toEqual([]);
+  expect(pageErrors).toEqual([]);
+});
+
 test('private artifact discovers a server from web.teagram.io without CSP violations', async({browser, page}, testInfo) => {
   test.skip(testInfo.project.name !== 'private-artifact-chromium', 'requires the production artifact preview');
   const manifest = JSON.parse(readFileSync(resolve('dist/mtproto-target.json'), 'utf8')) as {mode: string, endpoint: string};
