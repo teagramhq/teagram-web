@@ -15,7 +15,8 @@ export type PerformanceRpcSummary = {
 export type PerformanceCpuProfile = {
   nodes: Array<{
     id: number,
-    callFrame: {functionName?: string, url?: string}
+    callFrame: {functionName?: string, url?: string},
+    children?: number[]
   }>,
   samples?: number[],
   timeDeltas?: number[]
@@ -39,7 +40,8 @@ type LongAnimationFrame = {
 
 export type PerformanceCpuSummary = {
   sampledCpuMs: number,
-  topFrames: Array<{functionName: string, script: string, selfMs: number}>
+  topFrames: Array<{functionName: string, script: string, selfMs: number}>,
+  topStacks: Array<{frames: Array<{functionName: string, script: string}>, selfMs: number}>
 };
 
 export type PerformancePhaseSummary = {
@@ -131,7 +133,12 @@ export function summarizeRpcTrace(rpcCalls: PerformanceRpcCall[], elapsedMs: num
 
 export function summarizeCpuProfile(profile: PerformanceCpuProfile): PerformanceCpuSummary {
   const callFrames = new Map(profile.nodes.map(({id, callFrame}) => [id, callFrame]));
+  const parentIds = new Map<number, number>();
+  profile.nodes.forEach(({id, children = []}) => {
+    children.forEach((childId) => parentIds.set(childId, id));
+  });
   const selfTimeByFrame = new Map<string, {functionName: string, script: string, selfMs: number}>();
+  const selfTimeByStack = new Map<string, {frames: Array<{functionName: string, script: string}>, selfMs: number}>();
   let sampledCpuMs = 0;
 
   (profile.samples || []).forEach((nodeId, index) => {
@@ -146,6 +153,30 @@ export function summarizeCpuProfile(profile: PerformanceCpuProfile): Performance
     const entry = selfTimeByFrame.get(key) || {functionName, script: script.startsWith('/') ? script : `/${script}`, selfMs: 0};
     entry.selfMs += selfMs;
     selfTimeByFrame.set(key, entry);
+
+    const frames: Array<{functionName: string, script: string}> = [];
+    let currentNodeId: number | undefined = nodeId;
+    while(currentNodeId !== undefined && frames.length < 20) {
+      const currentCallFrame = callFrames.get(currentNodeId);
+      if(!currentCallFrame) break;
+      const currentFunctionName = currentCallFrame.functionName || '(anonymous)';
+      if(currentFunctionName !== '(root)') {
+        const currentPath = currentCallFrame.url ? new URL(currentCallFrame.url, 'https://trace.invalid').pathname : '';
+        const currentScript = currentPath ? currentPath.split('/').slice(-2).join('/') : 'native';
+        frames.push({
+          functionName: currentFunctionName,
+          script: currentScript.startsWith('/') ? currentScript : `/${currentScript}`
+        });
+      }
+      currentNodeId = parentIds.get(currentNodeId);
+    }
+
+    frames.reverse();
+    const stackFrames = frames.slice(-10);
+    const stackKey = JSON.stringify(stackFrames);
+    const stack = selfTimeByStack.get(stackKey) || {frames: stackFrames, selfMs: 0};
+    stack.selfMs += selfMs;
+    selfTimeByStack.set(stackKey, stack);
     sampledCpuMs += selfMs;
   });
 
@@ -154,6 +185,10 @@ export function summarizeCpuProfile(profile: PerformanceCpuProfile): Performance
     topFrames: [...selfTimeByFrame.values()]
       .sort((left, right) => right.selfMs - left.selfMs)
       .slice(0, 20)
-      .map((frame) => ({...frame, selfMs: Number(frame.selfMs.toFixed(2))}))
+      .map((frame) => ({...frame, selfMs: Number(frame.selfMs.toFixed(2))})),
+    topStacks: [...selfTimeByStack.values()]
+      .sort((left, right) => right.selfMs - left.selfMs)
+      .slice(0, 20)
+      .map((stack) => ({...stack, selfMs: Number(stack.selfMs.toFixed(2))}))
   };
 }

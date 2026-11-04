@@ -114,18 +114,33 @@ describe('performance RPC trace summary', () => {
   test('summarizes sampled client CPU by function without retaining trace arguments', () => {
     const summary = summarizeCpuProfile({
       nodes: [
-        {id: 1, callFrame: {functionName: '(root)', url: ''}},
-        {id: 2, callFrame: {functionName: 'hydrateDialogs', url: 'http://localhost:4176/assets/app.js?token=private'}},
-        {id: 3, callFrame: {functionName: 'renderBubble', url: 'http://localhost:4176/assets/app.js'}}
+        {id: 1, callFrame: {functionName: '(root)', url: ''}, children: [2]},
+        {id: 2, callFrame: {functionName: 'performHistoryResult', url: 'http://localhost:4176/assets/app.js?token=private'}, children: [3]},
+        {id: 3, callFrame: {functionName: 'deleteViewportSlice', url: 'http://localhost:4176/assets/app.js'}, children: [4]},
+        {id: 4, callFrame: {functionName: 'remove', url: ''}}
       ],
-      samples: [2, 3, 2],
+      samples: [2, 4, 4],
       timeDeltas: [1_000, 2_000, 3_000]
     });
 
     expect(summary.sampledCpuMs).toBe(6);
     expect(summary.topFrames).toEqual([
-      {functionName: 'hydrateDialogs', script: '/assets/app.js', selfMs: 4},
-      {functionName: 'renderBubble', script: '/assets/app.js', selfMs: 2}
+      {functionName: 'remove', script: '/native', selfMs: 5},
+      {functionName: 'performHistoryResult', script: '/assets/app.js', selfMs: 1}
+    ]);
+    expect(summary.topStacks).toEqual([
+      {
+        frames: [
+          {functionName: 'performHistoryResult', script: '/assets/app.js'},
+          {functionName: 'deleteViewportSlice', script: '/assets/app.js'},
+          {functionName: 'remove', script: '/native'}
+        ],
+        selfMs: 5
+      },
+      {
+        frames: [{functionName: 'performHistoryResult', script: '/assets/app.js'}],
+        selfMs: 1
+      }
     ]);
     expect(JSON.stringify(summary)).not.toContain('private');
   });
