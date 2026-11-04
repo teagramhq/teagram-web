@@ -1,7 +1,7 @@
 import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
-import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
+import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, PERFORMANCE_TIMING_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
 import {findLongTasksWithSignificantSpanWork, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
 import {startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
@@ -87,6 +87,7 @@ const report = {
   serverCommit: process.env.PERF_SERVER_COMMIT || '',
   fixtureServerCommit: process.env.PERF_FIXTURE_SERVER_COMMIT || '',
   requireBase: process.env.PERF_REQUIRE_BASE === 'true',
+  requireTimingRepeats: process.env.PERF_REQUIRE_BASE === 'true',
   diagnostics: {} as Record<string, Record<string, unknown>>,
   variants: {
     base: {'1x': {}, '100x': {}},
@@ -915,6 +916,28 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   }
 }
 
+async function runTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixture) {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+  const page = await context.newPage();
+  const requests = {value: 0};
+  await installInstrumentation(page, requests, run.origin);
+
+  try {
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    const chatOpen = await openPartnerChat(page, requests, fixture);
+    const scrollBack2k = await scrollBackTwoThousand(page, requests, run.variant === 'head');
+    const send = await sendMessage(page, requests, fixture);
+    return {chatOpen, scrollBack2k: scrollBack2k || {bundleBytes: chatOpen.bundleBytes}, send};
+  } finally {
+    await context.close();
+  }
+}
+
 async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
   const coldChatList: Metric[] = [];
   const warmChatList: Metric[] = [];
@@ -1000,6 +1023,20 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       const order = round % 2 === 0 ? variants : [...variants].reverse();
       for(const variant of order) {
         await test.step(`${scale} ${variant} round ${round + 1}`, () => runVariant(browser, preparedVariants[scale][variant]!, scale, fixture!));
+      }
+    }
+  }
+
+  if(report.requireTimingRepeats) {
+    const timingVariants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
+    for(let repeat = PERFORMANCE_REPEATS; repeat < PERFORMANCE_TIMING_REPEATS; ++repeat) {
+      const order = repeat % 2 === 0 ? timingVariants : [...timingVariants].reverse();
+      for(const variant of order) {
+        const run = preparedVariants['100x'][variant]!;
+        const measured = await test.step(`100x ${variant} targeted timing repeat ${repeat + 1}`, () => runTimingRepeat(browser, run, fixtures['100x']!));
+        report.variants[variant]['100x'].chatOpen.push(measured.chatOpen);
+        report.variants[variant]['100x'].scrollBack2k.push(measured.scrollBack2k);
+        report.variants[variant]['100x'].sendMessage.push(measured.send);
       }
     }
   }

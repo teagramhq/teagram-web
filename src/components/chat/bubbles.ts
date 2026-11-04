@@ -6172,11 +6172,16 @@ export default class ChatBubbles {
         const timeoutMarker = Symbol('peer change preparation timeout');
         const ready = await withTimeout(prepared.ready, PEER_CHANGE_PREPARATION_TIMEOUT, timeoutMarker);
         if(ready === timeoutMarker) {
+          if(!middleware()) {
+            throw PEER_CHANGED_ERROR;
+          }
           const pendingParts = prepared.getPendingParts();
           const timeoutError = new Error(
             `peer change preparation timed out after ${PEER_CHANGE_PREPARATION_TIMEOUT}ms: ${pendingParts.join(', ') || 'unknown part'}`
           );
-          log.error('peer change preparation timed out:', peerId, pendingParts, timeoutError);
+          if(middleware()) {
+            log.error('peer change preparation timed out:', peerId, pendingParts, timeoutError);
+          }
           prepared.failPeerChange();
           throw timeoutError;
         }
@@ -6219,8 +6224,11 @@ export default class ChatBubbles {
         })]) :
         historyRequest;
       result = await m(historyResultPromise);
+      if(!samePeer) {
+        this.preloader.attach(this.container);
+      }
     } catch(error) {
-      if(error !== PEER_CHANGED_ERROR) {
+      if(middleware() && error !== PEER_CHANGED_ERROR) {
         log.error('setPeer failed before mount', peerId, error);
       }
       if(middleware()) {
@@ -6244,9 +6252,44 @@ export default class ChatBubbles {
       releasePeerInnerMounted = resolve;
       rejectPeerInnerMounted = reject;
     }) : Promise.resolve();
+    void peerInnerMounted.catch((): undefined => undefined);
+    let historyRenderFailed = false;
+    let historyRenderError: unknown;
+    const historyRenderPromise = m(promise).catch((error: unknown) => {
+      historyRenderFailed = true;
+      historyRenderError = error;
+      throw error;
+    });
+    if(!samePeer) {
+      void (async() => {
+        try {
+          if(preparedPeerChangeReady) {
+            const preparedChange = await m(preparedPeerChangeReady);
+            if(preparedChange) {
+              if('error' in preparedChange) {
+                throw preparedChange.error;
+              }
+              const {prepared, ready} = preparedChange;
+              if(ready && 'error' in ready) {
+                throw ready.error;
+              }
+            }
+          }
+          if(historyRenderFailed) {
+            throw historyRenderError;
+          }
+
+          // Keep the previous chat paired with its header until all new-peer UI setup is ready.
+          this.chat.revealPreparedBackground();
+          this.scrollable.replaceChildren(this.paddingTop, chatInner, this.paddingBottom);
+          releasePeerInnerMounted();
+        } catch(error) {
+          rejectPeerInnerMounted(error);
+        }
+      })();
+    }
     const peerUiReadyPromise = preparedPeerChangeReady ?
       preparedPeerChangeReady.then(async(preparedChange) => {
-        await peerInnerMounted;
         if(preparedChange) {
           if('error' in preparedChange) {
             throw preparedChange.error;
@@ -6256,36 +6299,19 @@ export default class ChatBubbles {
             prepared.failPeerChange();
             throw ready.error;
           }
+        }
+        await peerInnerMounted;
+        if(preparedChange && !('error' in preparedChange)) {
+          const {prepared} = preparedChange;
           await prepared.apply();
         }
         return {ready: true as const};
-      }).catch((error: unknown) => ({error})) :
-      Promise.resolve({ready: true as const});
-    const peerReadyPromise = Promise.all([
-      m(promise),
-      peerUiReadyPromise
-    ] as const).then(
-      ([, result]) => result,
-      (error: unknown) => ({error})
-    );
-
-    if(!samePeer) {
-      // Flip the staging-slot wallpaper that `finishPeerChange` prepared, in the same sync
-      // block as replacing the old bubbles. Otherwise the bg DOM swap (running inside the
-      // Solid effect's `await built.readyPromise`) can paint a frame ahead of the cleared
-      // bubbles, briefly showing the new wallpaper behind the old chat's messages.
-      try {
-        this.chat.revealPreparedBackground();
-        this.scrollable.replaceChildren(this.paddingTop, chatInner, this.paddingBottom);
-        this.preloader.attach(this.container);
-        releasePeerInnerMounted();
-      } catch(error) {
-        rejectPeerInnerMounted(error);
-      }
-    }
+      }) :
+      peerInnerMounted.then(() => ({ready: true as const}));
+    const peerReadyPromise = Promise.all([historyRenderPromise, peerUiReadyPromise]);
 
     animationIntersector.lockGroup(this.chat.animationGroup);
-    const setPeerPromise = m(promise).then(async() => {
+    const setPeerPromise = peerReadyPromise.then(async() => {
       log.warn('promise fulfilled');
 
       const mountedByLastMsgId = haveToScrollToBubble ? await m(lastMsgFullMid !== EMPTY_FULL_MID ? this.getMountedBubble(lastMsgFullMid) : {bubble: this.getLastBubble()}) : undefined;
@@ -6305,10 +6331,6 @@ export default class ChatBubbles {
         scrollable.replaceChildren(this.paddingTop, chatInner, this.paddingBottom);
       }
 
-      const peerReady = await peerReadyPromise;
-      if('error' in peerReady) {
-        throw peerReady.error;
-      }
       this.preloader.detach();
 
       if(oldPlaceholderBubble) {
@@ -6473,7 +6495,7 @@ export default class ChatBubbles {
       // this.chatInner.classList.remove('disable-hover', 'is-scrolling'); // warning, performance!
     }).catch((err: unknown) => {
       const isCurrent = middleware();
-      if(err !== PEER_CHANGED_ERROR) {
+      if(isCurrent && err !== PEER_CHANGED_ERROR) {
         log.error('setPeer promise error:', peerId, err);
       }
       if(isCurrent) {

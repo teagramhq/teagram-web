@@ -338,6 +338,35 @@ test('prepares cached peer completion while initial history renders', async() =>
   expect(finishPeerChange).toHaveBeenCalledTimes(1);
 });
 
+test('keeps cached bubbles from mounting until peer preparation is ready', async() => {
+  let resolvePreparation!: () => void;
+  const preparationReady = new Promise<void>((resolve) => {
+    resolvePreparation = resolve;
+  });
+  const {harness, chat, events} = makeMountableSetPeerHarness();
+  chat.finishPeerChange = vi.fn(async() => ({
+    ready: preparationReady,
+    apply: async() => events.push('apply')
+  }));
+
+  let resolvePreloaderAttached!: () => void;
+  const preloaderAttached = new Promise<void>((resolve) => {
+    resolvePreloaderAttached = resolve;
+  });
+  harness.preloader.attach = vi.fn(() => resolvePreloaderAttached());
+  const setPeer = harness.setPeer({peerId, samePeer: false, sameSearch: false});
+  await preloaderAttached;
+  const result = await setPeer;
+
+  expect(events).toEqual([]);
+  expect(harness.scrollable.replaceChildren).not.toHaveBeenCalled();
+
+  resolvePreparation();
+  await result.promise;
+
+  expect(events).toEqual(['replace', 'apply']);
+});
+
 test('logs a failed bubble peer change while preserving the rejection for its caller', async() => {
   const failure = new Error('peer change failed');
   const chat = makeChatSetPeerHarness(vi.fn(() => Promise.reject(failure)));
@@ -667,6 +696,7 @@ test('applies peer UI callbacks only after replacing the old bubbles', async() =
     return Promise.resolve();
   });
   const result = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
+  await vi.waitFor(() => expect(events).toEqual(['replace']));
   expect(events).toEqual(['replace']);
   resolvePreparation();
   await uiApplied;
@@ -1445,10 +1475,12 @@ test('releases the preloader and animation group when prepared peer setup reject
   }
 });
 
-test('times out prepared peer setup that never settles after cached history mounts', async() => {
+test('keeps cached bubbles unmounted and fails closed when peer preparation times out', async() => {
   const ready = new Promise<undefined>(() => {});
-  const failPeerChange = vi.fn();
-  const {harness, chat, setPeerLogger} = makeMountableSetPeerHarness();
+  const {harness, chat, events, setPeerLogger} = makeMountableSetPeerHarness();
+  const failPeerChange = vi.fn(() => {
+    chat.peerChangeFailed = true;
+  });
   chat.finishPeerChange = vi.fn(async() => ({
     ready,
     failPeerChange,
@@ -1456,12 +1488,19 @@ test('times out prepared peer setup that never settles after cached history moun
     apply: vi.fn(async() => undefined)
   }));
   const animationIntersector = (await import('@components/animationIntersector')).default;
-  const unlockGroup = vi.spyOn(animationIntersector, 'unlockGroup');
 
   vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']});
   try {
+    let resolvePreloaderAttached!: () => void;
+    const preloaderAttached = new Promise<void>((resolve) => {
+      resolvePreloaderAttached = resolve;
+    });
+    harness.preloader.attach = vi.fn(() => resolvePreloaderAttached());
     const result = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
-    expect(harness.preloader.attach).toHaveBeenCalled();
+    await preloaderAttached;
+
+    expect(events).toEqual([]);
+    expect(harness.scrollable.replaceChildren).not.toHaveBeenCalled();
 
     const failure = expect(result.promise).rejects.toThrow('peer change preparation timed out');
     await vi.advanceTimersByTimeAsync(30_000);
@@ -1469,14 +1508,115 @@ test('times out prepared peer setup that never settles after cached history moun
 
     expect(failPeerChange).toHaveBeenCalledTimes(1);
     expect(harness.preloader.detach).toHaveBeenCalled();
-    expect(unlockGroup).toHaveBeenCalledWith(chat.animationGroup);
     expect(harness.lazyLoadQueue.unlock).toHaveBeenCalled();
+    expect(chat.peerChangeFailed).toBe(true);
     expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), peerId, ['input'], expect.any(Error));
-    expect(setPeerLogger.error).toHaveBeenCalledWith('setPeer promise error:', peerId, expect.any(Error));
+    expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), peerId, expect.any(Error));
   } finally {
     vi.useRealTimers();
-    unlockGroup.mockRestore();
     animationIntersector.unlockGroup(chat.animationGroup);
+  }
+});
+
+test('does not log a preparation timeout after the peer transition is superseded', async() => {
+  const firstReady = new Promise<undefined>(() => {});
+  const {harness, chat, setPeerLogger} = makeMountableSetPeerHarness();
+  chat.finishPeerChange = vi.fn()
+    .mockImplementationOnce(async() => ({
+      ready: firstReady,
+      failPeerChange: vi.fn(),
+      getPendingParts: () => ['topbar'],
+      apply: vi.fn(async() => undefined)
+    }))
+    .mockImplementationOnce(async() => ({
+      ready: Promise.resolve(undefined),
+      failPeerChange: vi.fn(),
+      getPendingParts: (): string[] => [],
+      apply: vi.fn(async() => undefined)
+    }));
+  harness.middlewareHelper.get = () => {
+    const generation = harness.setPeerTempId;
+    return () => harness.setPeerTempId === generation;
+  };
+
+  vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']});
+  try {
+    const first = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
+    const second = await harness.setPeer({peerId: (peerId + 1) as PeerId, samePeer: false, sameSearch: false});
+    await second.promise;
+
+    const firstFailure = expect(first.promise).rejects.toBe(PEER_CHANGED_ERROR);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await firstFailure;
+
+    expect(setPeerLogger.error).not.toHaveBeenCalledWith('peer change preparation timed out:', expect.anything(), expect.anything(), expect.anything());
+    expect(setPeerLogger.error).not.toHaveBeenCalledWith('setPeer promise error:', expect.anything(), expect.anything());
+  } finally {
+    vi.useRealTimers();
+    const animationIntersector = (await import('@components/animationIntersector')).default;
+    animationIntersector.unlockGroup(chat.animationGroup);
+  }
+});
+
+test('names only the unsettled real peer preparation part when cached mounting times out', async() => {
+  const {harness, chat, setPeerLogger} = makeMountableSetPeerHarness();
+  const events: string[] = [];
+  const failInputPeerChange = vi.fn();
+  const topbarSetup = new Promise<() => void>(() => {});
+  const dispatchEvent = vi.fn();
+  Object.setPrototypeOf(chat, Chat.prototype);
+  Object.assign(chat, {
+    peerChanged: false,
+    peerChangeFailed: false,
+    cleanup: vi.fn(),
+    topbar: {finishPeerChange: vi.fn(() => topbarSetup)},
+    bubbles: {finishPeerChange: vi.fn(async() => () => events.push('bubbles')), lazyLoadQueue: {queueId: 0}},
+    input: {
+      finishPeerChange: vi.fn(async() => () => events.push('input')),
+      failPeerChange: failInputPeerChange
+    },
+    sharedMediaTab: {
+      fillProfileElements: vi.fn(async() => () => events.push('sharedMedia')),
+      loadSidebarMedia: vi.fn()
+    },
+    sharedMediaTabs: [],
+    handleBackgrounds: vi.fn(async() => () => events.push('backgrounds')),
+    log: Object.assign(vi.fn(), {warn: vi.fn(), error: vi.fn(), setPrefix: vi.fn()}),
+    isMainChat: true,
+    type: 'chat',
+    container: harness.container,
+    appImManager: {getChatSavedPosition: vi.fn(() => undefined), dispatchEvent}
+  });
+  chat.finishPeerChange = (options: any) => Chat.prototype.finishPeerChange.call(chat, options);
+
+  vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']});
+  try {
+    let resolvePreloaderAttached!: () => void;
+    const preloaderAttached = new Promise<void>((resolve) => {
+      resolvePreloaderAttached = resolve;
+    });
+    harness.preloader.attach = vi.fn(() => resolvePreloaderAttached());
+    const result = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
+    await preloaderAttached;
+
+    expect(harness.scrollable.replaceChildren).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    expect(harness.preloader.detach).not.toHaveBeenCalled();
+
+    const failure = expect(result.promise).rejects.toThrow(/timed out.*topbar/);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await failure;
+
+    const timeoutCall = setPeerLogger.error.mock.calls.find(([message]) => message === 'peer change preparation timed out:');
+    expect(timeoutCall).toEqual(['peer change preparation timed out:', peerId, ['topbar'], expect.any(Error)]);
+    expect((timeoutCall?.[3] as Error).message).toContain('topbar');
+    expect(failInputPeerChange).toHaveBeenCalledTimes(1);
+    expect(harness.preloader.detach).toHaveBeenCalled();
+    expect(harness.lazyLoadQueue.unlock).toHaveBeenCalled();
+    expect(chat.peerChangeFailed).toBe(true);
+    expect(dispatchEvent).not.toHaveBeenCalledWith('peer_changed', chat);
+  } finally {
+    vi.useRealTimers();
   }
 });
 

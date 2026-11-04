@@ -21,7 +21,11 @@ Cold chat-list history also requires a matching cold-load measurement version;
 other scenarios continue using the shared measurement version.
 On pull requests, scrolling fails if any 100x repeat records a task over 50 ms
 or the pooled dropped-frame percentage reaches 1%; dropped-frame percentage is
-pooled across all frame intervals from the three scroll repeats.
+pooled across all frame intervals from the scroll repeats. Chat open, scroll
+back, and send measurements use five same-run paired repeats. Send and scroll
+timing fail immediately when every head repeat is slower than every base repeat
+and the head median is at least 10% slower than the base median; overlapping
+repeat ranges remain visible in the sample table as runner noise.
 Every scenario and size needs three base bundle measurements or the performance
 gate fails closed.
 The 100x cold chat-list measurement uses six fresh contexts for the paired

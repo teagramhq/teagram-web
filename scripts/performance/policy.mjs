@@ -13,6 +13,7 @@ export const SCENARIOS = [
 export const SCALES = ['1x', '100x'];
 export const PERFORMANCE_MEASUREMENT_VERSION = 3;
 export const PERFORMANCE_REPEATS = 3;
+export const PERFORMANCE_TIMING_REPEATS = 5;
 // Cold-load pairs need additional samples to outvote occasional runner long tasks.
 export const COLD_CHAT_LIST_REPEATS = 6;
 
@@ -196,7 +197,9 @@ export function evaluatePerformance(report, history = []) {
       const headSamples = Array.isArray(rawHeadSamples) ? rawHeadSamples : [];
       const base = summarizeSamples(baseSamples);
       const head = summarizeSamples(headSamples);
-      const requiredRepeats = scale === '100x' && scenario.key === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
+      const isTimingRepeatScenario = scale === '100x' && ['chatOpen', 'scrollBack2k', 'sendMessage'].includes(scenario.key);
+      const requiredRepeats = report.requireTimingRepeats && isTimingRepeatScenario ? PERFORMANCE_TIMING_REPEATS :
+        scale === '100x' && scenario.key === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
       const mainValues = historyFor(history, scale, scenario.key, report);
       const calibrated = mainValues.length >= CALIBRATION_RUNS;
       const scrollHistory = scale === '100x' && scenario.key === 'scrollBack2k' ? historyScrollMetrics(history, report) : [];
@@ -244,8 +247,9 @@ export function evaluatePerformance(report, history = []) {
       });
 
       if(report.requireBase) {
-        if(baseSamples.length < PERFORMANCE_REPEATS) {
-          addFailure(blockingFailures, scale, scenario.key, `base bundle baseline requires ${PERFORMANCE_REPEATS} repeats, got ${baseSamples.length}`);
+        const requiredBaseRepeats = report.requireTimingRepeats && isTimingRepeatScenario ? PERFORMANCE_TIMING_REPEATS : PERFORMANCE_REPEATS;
+        if(baseSamples.length < requiredBaseRepeats) {
+          addFailure(blockingFailures, scale, scenario.key, `base bundle baseline requires ${requiredBaseRepeats} repeats, got ${baseSamples.length}`);
         }
         if(scale === '100x' && scenario.key === 'coldChatList' && baseSamples.length < COLD_CHAT_LIST_REPEATS) {
           addFailure(blockingFailures, scale, scenario.key, `base cold-load baseline requires ${COLD_CHAT_LIST_REPEATS} repeats, got ${baseSamples.length}`);
@@ -253,6 +257,9 @@ export function evaluatePerformance(report, history = []) {
         baseSamples.forEach((sample, index) => {
           if(!Number.isFinite(sample?.bundleBytes)) {
             addFailure(blockingFailures, scale, scenario.key, `base bundle measurement is missing or invalid in sample ${index + 1}`);
+          }
+          if(report.requireTimingRepeats && isTimingRepeatScenario && scenario.key !== 'scrollBack2k' && !Number.isFinite(sample?.ms)) {
+            addFailure(blockingFailures, scale, scenario.key, `base timing measurement is missing or invalid in sample ${index + 1}`);
           }
           if(scale === '100x' && scenario.key !== 'scrollBack2k' && scenario.key !== 'dateJump') {
             if(!Number.isFinite(sample?.longTasksOver50Ms)) {
@@ -263,6 +270,12 @@ export function evaluatePerformance(report, history = []) {
             }
           }
         });
+        if(report.requireTimingRepeats && scale === '100x' && scenario.key === 'scrollBack2k') {
+          const measuredBaseTimings = baseSamples.filter((sample) => Number.isFinite(sample?.ms)).length;
+          if(measuredBaseTimings > 0 && measuredBaseTimings < baseSamples.length) {
+            addFailure(blockingFailures, scale, scenario.key, 'base timing measurements are incomplete across scroll repeats');
+          }
+        }
       }
 
       if(scale === '100x') {
@@ -320,6 +333,15 @@ export function evaluatePerformance(report, history = []) {
             if(Number.isFinite(baselineBlockingTime) && Number.isFinite(headBlockingTime) && headBlockingTime - baselineBlockingTime >= MIN_BLOCKING_TIME_REGRESSION_MS) {
               addFailure(blockingFailures, scale, scenario.key, `median long-task blocking time ${headBlockingTime.toFixed(1)} ms exceeded base median ${baselineBlockingTime.toFixed(1)} ms by at least ${MIN_BLOCKING_TIME_REGRESSION_MS} ms`);
             }
+          }
+        }
+
+        if(report.requireTimingRepeats && report.requireBase && ['scrollBack2k', 'sendMessage'].includes(scenario.key)) {
+          const baseMedian = median(baseSamples.map((sample) => sample?.ms).filter(Number.isFinite));
+          const minimumIncrease = Number.isFinite(baseMedian) ? Math.max(10, baseMedian * 0.1) : Infinity;
+          if(separatedRegression(headSamples, baseSamples, 'ms', minimumIncrease)) {
+            const headMedian = median(headSamples.map((sample) => sample.ms));
+            addFailure(blockingFailures, scale, scenario.key, `timing increased by at least 10% in fully separated repeats (${headMedian.toFixed(1)} ms vs ${baseMedian.toFixed(1)} ms same-run base median)`);
           }
         }
       }
@@ -390,6 +412,35 @@ export function formatPerformanceTable(evaluation) {
     const scenarioFailure = evaluation.blockingFailures.some((failure) => failure.startsWith(`${row.scale} ${row.key}:`));
     const gate = row.budgetStatus === 'failed' || scenarioFailure ? 'failed' : row.scrollGateStatus || (row.budgetStatus === 'warming' ? overBudget ? 'over budget (report only)' : 'report only' : 'calibrated');
     lines.push(`| ${row.label} (${row.scale}) | ${show(row.head.ms, 1)} | ${budget} | ${noise} | ${ratio} | ${scrollNoise} | ${show(row.base.ms, 1)} | ${show(row.head.requests)} | ${show(row.head.domNodes)} | ${show(row.head.longTasksOver50Ms)} | ${show(row.head.blockingTimeMs, 1)} | ${show(row.head.droppedFramePercent, 2)}% | ${show(row.head.bundleBytes)} | ${gate} |`);
+  }
+  return lines.join('\n');
+}
+
+export function formatPerformanceSamplesTable(report, scale = '100x') {
+  const scenarios = [
+    ['chatOpen', 'Open long-history chat'],
+    ['scrollBack2k', 'Scroll back 2,000 messages'],
+    ['sendMessage', 'Send a message']
+  ];
+  const rows = [];
+  for(const [key, label] of scenarios) {
+    for(const variant of ['base', 'head']) {
+      const samples = report.variants?.[variant]?.[scale]?.[key];
+      if(!Array.isArray(samples)) continue;
+      samples.forEach((sample, index) => rows.push({label, variant, index, sample}));
+    }
+  }
+  if(!rows.length) return '';
+
+  const show = (value, digits = 1) => Number.isFinite(value) ? value.toFixed(digits) : '—';
+  const lines = [
+    `### ${scale} repeated scenario samples`,
+    '',
+    '| Scenario | Variant | Repeat | Time (ms) | preInteractionMs | Requests | DOM nodes | Long tasks >50 ms | Blocking (ms) | Dropped frames |',
+    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'
+  ];
+  for(const {label, variant, index, sample} of rows) {
+    lines.push(`| ${label} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.preInteractionMs)} | ${show(sample.requests, 0)} | ${show(sample.domNodes, 0)} | ${show(sample.longTasksOver50Ms, 0)} | ${show(sample.blockingTimeMs)} | ${show(sample.droppedFramePercent)}% |`);
   }
   return lines.join('\n');
 }

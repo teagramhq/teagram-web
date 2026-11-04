@@ -1322,7 +1322,9 @@ export default class Chat extends EventListenerBase<{
           pendingPeerChangeParts.delete(name);
           failPeerChange();
 
-          this.log.error('peer change part failed:', peerId, name, error);
+          if(middleware()) {
+            this.log.error('peer change part failed:', peerId, name, error);
+          }
           return {name, error};
         }
       });

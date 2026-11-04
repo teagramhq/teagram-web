@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS, scenarioBundleBytes} from './policy.mjs';
+import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceSamplesTable, formatPerformanceTable, formatPerformanceTraceTable, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, PERFORMANCE_TIMING_REPEATS, SCENARIOS, scenarioBundleBytes} from './policy.mjs';
 
 const SCALES = ['1x', '100x'];
 const CURRENT_FIXTURE = {
@@ -245,6 +245,63 @@ test('allows send-message task noise when the corresponding base repeat is worse
   const result = evaluatePerformance(report({base, head}));
 
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x sendMessage') && /long task|blocking time/.test(failure)), false);
+});
+
+test('allows send and scroll timing repeats when their ranges overlap the same-run base', () => {
+  const timingRuns = [
+    {chatOpen: Array.from({length: PERFORMANCE_TIMING_REPEATS}, () => ({})),
+      scrollBack2k: [11_479, 14_798, 15_093, 13_000, 12_500].map((ms) => ({ms})),
+      sendMessage: [165, 180, 216, 130, 140].map((ms) => ({ms}))},
+    {chatOpen: Array.from({length: PERFORMANCE_TIMING_REPEATS}, () => ({})),
+      scrollBack2k: [12_191, 12_593, 13_618, 12_000, 14_000].map((ms) => ({ms})),
+      sendMessage: [110, 168, 116, 120, 130].map((ms) => ({ms}))}
+  ];
+  const [headTiming, baseTiming] = timingRuns;
+  const head = scaleVariants({'100x': headTiming});
+  const base = scaleVariants({'100x': baseTiming});
+  const result = evaluatePerformance(report({base, head, requireTimingRepeats: true}));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x sendMessage') && failure.includes('timing increased')), false);
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('timing increased')), false);
+});
+
+test('blocks repeated send and scroll timing regressions when all head repeats are slower', () => {
+  const head = scaleVariants({'100x': {
+    chatOpen: Array.from({length: PERFORMANCE_TIMING_REPEATS}, () => ({})),
+    scrollBack2k: [13_500, 14_000, 14_500, 15_000, 15_500].map((ms) => ({ms})),
+    sendMessage: [160, 170, 180, 190, 200].map((ms) => ({ms}))
+  }});
+  const base = scaleVariants({'100x': {
+    chatOpen: Array.from({length: PERFORMANCE_TIMING_REPEATS}, () => ({})),
+    scrollBack2k: [10_000, 10_500, 11_000, 11_500, 12_000].map((ms) => ({ms})),
+    sendMessage: [100, 110, 120, 130, 140].map((ms) => ({ms}))
+  }});
+  const result = evaluatePerformance(report({base, head, requireTimingRepeats: true}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x sendMessage') && failure.includes('timing increased by at least 10%')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('timing increased by at least 10%')));
+});
+
+test('requires five paired samples for 100x chat open, scroll and send in PR runs', () => {
+  const result = evaluatePerformance(report({requireTimingRepeats: true}));
+
+  for(const key of ['chatOpen', 'scrollBack2k', 'sendMessage']) {
+    assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes(`expected at least ${PERFORMANCE_TIMING_REPEATS} repeat measurements`)));
+    assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes(`base bundle baseline requires ${PERFORMANCE_TIMING_REPEATS} repeats`)));
+  }
+});
+
+test('formats raw repeated timing samples with chat-open input delay and page metrics', () => {
+  const head = scaleVariants({'100x': {
+    chatOpen: [{ms: 165, preInteractionMs: 36, requests: 4, domNodes: 1_183, longTasksOver50Ms: 0, blockingTimeMs: 0}],
+    scrollBack2k: [{ms: 14_798, preInteractionMs: 30, requests: 0, domNodes: 2_760, longTasksOver50Ms: 3, blockingTimeMs: 89, droppedFramePercent: 10.5}],
+    sendMessage: [{ms: 180, requests: 0, domNodes: 1_808, longTasksOver50Ms: 0, blockingTimeMs: 0}]
+  }});
+  const table = formatPerformanceSamplesTable({variants: {head, base: scaleVariants()}});
+
+  assert.match(table, /Open long-history chat \| head \| 1 \| 165\.0 \| 36\.0 \| 4/);
+  assert.match(table, /Scroll back 2,000 messages \| head \| 1 \| 14798\.0/);
+  assert.match(table, /Send a message \| head \| 1 \| 180\.0/);
 });
 
 test('allows existing 100x base long tasks when the head count does not grow', () => {
