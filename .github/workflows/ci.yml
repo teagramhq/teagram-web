@@ -347,6 +347,9 @@ jobs:
       - name: Check the deploy workflow contract
         run: PATH="$(go env GOPATH)/bin:$PATH" bash .github/scripts/test-deploy-workflow-contract.sh
 
+      - name: Check Gitleaks range with an advanced base
+        run: PATH="$(go env GOPATH)/bin:$PATH" bash .github/scripts/test-gitleaks-pr-range.sh
+
       - name: Check deployment script syntax
         run: bash -n deploy/teagram-web/deploy-main.sh && bash -n deploy/telegram-web/deploy-main.sh
 
@@ -681,10 +684,19 @@ jobs:
           case "$PR_COMMITS" in
             ''|*[!0-9]*) echo "pull request commit count is not a number" >&2; exit 1 ;;
           esac
-          # Fetch only the history Gitleaks scans: BASE..HEAD is at most PR_COMMITS
-          # commits deep from HEAD, so one extra level reaches the base commit.
+          # Fetch the PR history and enough base history to establish its shared ancestry.
           git fetch --no-tags --no-recurse-submodules --depth="$((PR_COMMITS + 1))" \
             origin "$HEAD_SHA" "$BASE_SHA"
+          while ! git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null; do
+            previous_commit_count="$(git rev-list --count "$BASE_SHA" "$HEAD_SHA")"
+            git fetch --no-tags --no-recurse-submodules --deepen=128 \
+              origin "$BASE_SHA"
+            current_commit_count="$(git rev-list --count "$BASE_SHA" "$HEAD_SHA")"
+            if [ "$previous_commit_count" = "$current_commit_count" ]; then
+              echo 'could not find a shared ancestor for the pull request base and head' >&2
+              exit 1
+            fi
+          done
           gitleaks git --log-opts="$BASE_SHA..$HEAD_SHA" \
             --redact=100 --no-banner --report-format=json \
             --report-path="$RUNNER_TEMP/gitleaks-report.json"
