@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {expect, request, test} from '@playwright/test';
 import type {APIRequestContext, Page, TestInfo} from '@playwright/test';
+import type {MyDialogFilter} from '@lib/storages/filters';
 import {captureState, seedPriorAccountUserId} from './registrationMocks';
 
 const SERVER_HOST = 'second-server.example.test';
@@ -30,6 +31,17 @@ async function fetchLocalAppRoute(route: import('@playwright/test').Route, url: 
     data: route.request().postDataBuffer() ?? undefined,
     maxRetries: 1
   });
+}
+
+async function applyScreenshotTheme(page: Page, themeName: 'day' | 'night') {
+  await page.evaluate(async(theme) => {
+    const themeModulePath = '/src/helpers/themeController.ts';
+    const themeController = (await import(themeModulePath)).default;
+    const isNight = theme === 'night';
+    document.documentElement.classList.toggle('night', isNight);
+    themeController.applyTheme(themeController.getTheme(theme));
+    document.querySelector('[name="color-scheme"]')?.setAttribute('content', isNight ? 'dark' : 'light');
+  }, themeName);
 }
 
 async function setupGuestServer(
@@ -407,21 +419,173 @@ test('auto-creates one guest from runtime config without a picker and restores i
   await expect.poll(() => page.evaluate(() => localStorage.getItem('__teagram_guest_username')))
     .toBe(guestUsername);
   await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
-  const chatList = page.locator('#chatlist-container');
-  const demoGuestBanner = chatList.locator('[role="status"]');
+  const chatlistOverlay = page.locator('.chatlist-overlay');
+  const demoGuestBanner = chatlistOverlay.locator('[role="status"]');
   await expect(demoGuestBanner.getByText('Demo server: you\'re a guest.', {exact: true}))
     .toBeVisible({timeout: 30_000});
   await expect(demoGuestBanner.getByText(/Everything is wiped every week\. Use your own server at/)).toBeVisible();
-  await demoGuestBanner.evaluate((element) => element.scrollIntoView({block: 'center'}));
-  await expect(demoGuestBanner).toBeInViewport();
-  await expect(demoGuestBanner.locator('.row-title')).toHaveCSS('z-index', '1');
-  await expect(demoGuestBanner.locator('.row-subtitle')).toHaveCSS('z-index', '1');
+  await page.evaluate(async() => {
+    const manager = (window as any).appDialogsManager;
+    const settingsModulePath = '/src/stores/appSettings.ts';
+    const {setAppSettingsSilent} = await import(settingsModulePath);
+    setAppSettingsSilent('notifications', 'suggested', false);
+
+    if(!manager.suggestionContainer) {
+      const container = document.createElement('div');
+      manager.suggestionContainer = container;
+      manager.foldersOverlay.prepend(container);
+      const pendingSuggestionModulePath = '/src/components/sidebarLeft/pendingSuggestion.tsx';
+      const {renderPendingSuggestion} = await import(pendingSuggestionModulePath);
+      renderPendingSuggestion(container);
+    }
+
+    const foldersModulePath = '/src/stores/folders.ts';
+    const useFolders = (await import(foldersModulePath)).default;
+    const folders = useFolders();
+    const existingFilters = (folders.folderItems as Array<{filter: MyDialogFilter}>).map(({filter}) => filter);
+    const allFilter = (existingFilters.find(({id}) => id === 0) || manager.managers.filtersStorage.getFilter(0)) as MyDialogFilter | undefined;
+    if(!allFilter) throw new Error('Expected the real All chats folder to be available');
+
+    const filterId = 991234;
+    const localId = Math.max(...existingFilters.map(({localId}) => localId || 0), allFilter.localId || 0) + 1;
+    const customFilter = {
+      ...allFilter,
+      id: filterId,
+      localId,
+      title: {...allFilter.title, text: 'Personal'}
+    };
+    if(!manager.filtersRendered[0]) manager.addFilter(allFilter);
+    manager.addFilter(customFilter);
+    await folders.hydrateFilters([allFilter, ...existingFilters.filter(({id}) => id !== 0), customFilter]);
+    await manager.onFiltersLengthChange();
+  });
+
+  const notificationBanner = chatlistOverlay.locator('.row').filter({hasText: 'Never miss a message'});
+  await expect(notificationBanner).toBeVisible();
+  const notificationSuggestion = notificationBanner.locator('xpath=ancestor::div[contains(@class, "suggestionContainer")][1]');
+  await expect(notificationSuggestion).toHaveCount(1);
+  const filterTabs = chatlistOverlay.locator('#folders-tabs');
+  await expect(filterTabs.getByText('Personal')).toBeVisible();
+  await expect(filterTabs).toBeVisible();
+  await expect(chatlistOverlay.locator('.folders-tabs-scrollable')).toBeVisible();
+
+  const overlaps = (first: {x: number, y: number, width: number, height: number}, second: {x: number, y: number, width: number, height: number}) =>
+    first.x < second.x + second.width && first.x + first.width > second.x &&
+    first.y < second.y + second.height && first.y + first.height > second.y;
+  for(const theme of ['day', 'night'] as const) {
+    await applyScreenshotTheme(page, theme);
+    for(const width of [375, 1280]) {
+      await page.setViewportSize({width, height: 900});
+      await expect.poll(async() => {
+        const [guestBox, notificationBox, tabsBox] = await Promise.all([
+          demoGuestBanner.boundingBox(),
+          notificationSuggestion.boundingBox(),
+          filterTabs.boundingBox()
+        ]);
+        return !!guestBox && !!notificationBox && !!tabsBox &&
+          !overlaps(guestBox, notificationBox) &&
+          guestBox.y + guestBox.height <= tabsBox.y &&
+          notificationBox.y + notificationBox.height <= tabsBox.y;
+      }).toBe(true);
+      const [guestBox, notificationBox, tabsBox] = await Promise.all([
+        demoGuestBanner.boundingBox(),
+        notificationSuggestion.boundingBox(),
+        filterTabs.boundingBox()
+      ]);
+      if(!guestBox || !notificationBox || !tabsBox) {
+        throw new Error('Expected the guest banner, notification banner, and filter tabs to have layout boxes');
+      }
+      expect(overlaps(guestBox, notificationBox)).toBe(false);
+      expect(guestBox.y + guestBox.height).toBeLessThanOrEqual(tabsBox.y);
+      expect(notificationBox.y + notificationBox.height).toBeLessThanOrEqual(tabsBox.y);
+      const screenshot = testInfo.outputPath(`guest-chat-list-both-${theme}-${width}.png`);
+      await page.locator('#column-left').screenshot({path: screenshot, animations: 'disabled'});
+      await testInfo.attach(`guest-chat-list-both-${theme}-${width}`, {path: screenshot, contentType: 'image/png'});
+    }
+  }
+
+  const closeNotification = notificationBanner.locator('button');
+  await expect(closeNotification.first()).toBeVisible();
+  await closeNotification.first().click();
+  await expect(notificationBanner).toHaveCount(0);
+  await applyScreenshotTheme(page, 'day');
+  for(const theme of ['day', 'night'] as const) {
+    await applyScreenshotTheme(page, theme);
+    for(const width of [375, 1280]) {
+      await page.setViewportSize({width, height: 900});
+      await expect.poll(async() => {
+        const [guestBox, tabsBox] = await Promise.all([
+          demoGuestBanner.boundingBox(),
+          filterTabs.boundingBox()
+        ]);
+        return !!guestBox && !!tabsBox && guestBox.y + guestBox.height <= tabsBox.y;
+      }).toBe(true);
+      const [guestBoxAfterDismiss, tabsBoxAfterDismiss] = await Promise.all([
+        demoGuestBanner.boundingBox(),
+        filterTabs.boundingBox()
+      ]);
+      if(!guestBoxAfterDismiss || !tabsBoxAfterDismiss) {
+        throw new Error('Expected the guest banner and filter tabs to remain in layout after the notification banner closes');
+      }
+      expect(guestBoxAfterDismiss.y + guestBoxAfterDismiss.height).toBeLessThanOrEqual(tabsBoxAfterDismiss.y);
+      const screenshot = testInfo.outputPath(`guest-chat-list-after-dismiss-${theme}-${width}.png`);
+      await page.locator('#column-left').screenshot({path: screenshot, animations: 'disabled'});
+      await testInfo.attach(`guest-chat-list-after-dismiss-${theme}-${width}`, {path: screenshot, contentType: 'image/png'});
+    }
+  }
+  await applyScreenshotTheme(page, 'day');
+  await page.evaluate(() => {
+    const manager = (window as any).appDialogsManager;
+    manager.__guestTestOriginalUpdateContactsLength = manager.updateContactsLength;
+    manager.updateContactsLength = () => Promise.resolve(0);
+    manager.updateContactsLengthPromise = undefined;
+    // The guest fixture leaves its initial empty placeholder waiting on contacts; regenerate it with an empty result.
+    manager.chatList.parentElement.querySelector('.empty-placeholder-dialogs')?.remove();
+    manager.chatList.parentElement.classList.remove('with-placeholder');
+    manager.checkIfPlaceholderNeeded();
+  });
+  const emptyPlaceholder = page.locator('.empty-placeholder-dialogs');
+  await expect(emptyPlaceholder).toHaveCount(1);
+  const emptyPlaceholderHeader = emptyPlaceholder.locator('.empty-placeholder-header');
+  await expect(emptyPlaceholderHeader).toHaveText('Your chats will be here');
+  await expect(emptyPlaceholder.locator('.empty-placeholder-subtitle')).toHaveCount(0);
+  await expect(emptyPlaceholder.locator('a[href*="telegram."]')).toHaveCount(0);
+  await expect(emptyPlaceholder.locator('.empty-placeholder-dialogs-icon')).toHaveJSProperty('complete', true);
+  // The guest test leaves the production list tab inactive; reveal that rendered list and its real placeholder for the evidence crop.
+  const emptyPlaceholderCaptureStyle = await page.addStyleTag({content: `
+    #column-left .folders-scrollable { display: block !important; }
+    #column-left .empty-placeholder-dialogs { display: block !important; }
+    #column-left .loading-dialog-skeleton { display: none !important; }
+    #column-left .virtual-chatlist,
+    #column-left .dialogs-placeholder-canvas { display: none !important; }
+    #column-left .chatlist-overlay,
+    #column-left #new-menu,
+    .toasts-container { display: none !important; }
+  `});
+  await expect(emptyPlaceholder).toBeVisible();
+  await expect(emptyPlaceholderHeader).toHaveText('Your chats will be here');
+  for(const theme of ['day', 'night'] as const) {
+    await applyScreenshotTheme(page, theme);
+    for(const width of [375, 1280]) {
+      await page.setViewportSize({width, height: 900});
+      await emptyPlaceholder.scrollIntoViewIfNeeded();
+      await expect(emptyPlaceholderHeader).toBeInViewport({ratio: 1});
+      await expect(emptyPlaceholder).toBeVisible();
+      const screenshot = testInfo.outputPath(`guest-chat-empty-${theme}-${width}.png`);
+      await emptyPlaceholder.screenshot({path: screenshot, animations: 'disabled'});
+      await testInfo.attach(`guest-chat-empty-${theme}-${width}`, {path: screenshot, contentType: 'image/png'});
+    }
+  }
+  await emptyPlaceholderCaptureStyle.evaluate((style) => style.parentNode?.removeChild(style));
+  await applyScreenshotTheme(page, 'day');
+  await page.evaluate(() => {
+    const manager = (window as any).appDialogsManager;
+    manager.updateContactsLength = manager.__guestTestOriginalUpdateContactsLength;
+    delete manager.__guestTestOriginalUpdateContactsLength;
+  });
+  await applyScreenshotTheme(page, 'day');
   await expect.poll(() => page.evaluate(() => (window as any).apiManagerProxy.getUser(8282)?.username))
     .toBe(guestUsername);
-  const bannerScreenshot = testInfo.outputPath('guest-chat-list-banner.png');
-  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-  await page.screenshot({path: bannerScreenshot, fullPage: false, animations: 'disabled'});
-  await testInfo.attach('guest-chat-list-banner', {path: bannerScreenshot, contentType: 'image/png'});
 
   await page.reload({waitUntil: 'domcontentloaded'});
   await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -440,7 +604,7 @@ test('auto-creates one guest from runtime config without a picker and restores i
 });
 
 test('shows an auth error and an explicit retry after automatic guest sign-up fails', async({page}, testInfo) => {
-  await page.setViewportSize({width: 320, height: 720});
+  await page.setViewportSize({width: 375, height: 812});
   await setupGuestServer(page, testInfo, true, 'NETWORK_ERROR', undefined, undefined, true, false, 'demo.teagram.io', 'demo.teagram.io', 443);
   const appOrigin = new URL(testInfo.project.use.baseURL as string);
   appOrigin.hostname = 'demo.teagram.io';
@@ -480,6 +644,30 @@ test('explains when the guest account context changes', async({page}, testInfo) 
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
 
+test('keeps non-terms focus traps on their description', async({page}, testInfo) => {
+  await setupGuestServer(page, testInfo, true);
+  await openSelectedServer(page, testInfo);
+
+  await page.evaluate(async() => {
+    const popupModulePath = '/src/components/popups/simpleConfirmation.ts';
+    const {SimpleConfirmationPopup} = await import(popupModulePath);
+    const popup = new SimpleConfirmationPopup({
+      titleLangKey: 'Confirm',
+      descriptionText: 'Confirm the server identity.',
+      buttons: [{langKey: 'OK'}],
+      focusTrap: true
+    });
+    (window as any).__guestFocusPopup = popup;
+    popup.show(false);
+  });
+
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator('.popup-description')).toBeFocused();
+  await page.evaluate(() => (window as any).__guestFocusPopup.forceHide());
+  await page.unrouteAll({behavior: 'ignoreErrors'});
+});
+
 test('shows instance terms before guest sign-up and creates an account only after acceptance', async({page}, testInfo) => {
   const termsText = [
     'These are the terms for this server.',
@@ -490,7 +678,7 @@ test('shows instance terms before guest sign-up and creates an account only afte
     ...Array.from({length: 32}, (_, index) => `Section ${index + 1}: This server terms line keeps the document long enough to scroll.`)
   ].join('\n');
   const textUrlLabel = 'Terms page';
-  await page.setViewportSize({width: 320, height: 720});
+  await page.setViewportSize({width: 375, height: 812});
   await setupGuestServer(page, testInfo, true, undefined, termsText, [{
     _: 'messageEntityTextUrl',
     offset: termsText.indexOf(textUrlLabel),
@@ -504,6 +692,20 @@ test('shows instance terms before guest sign-up and creates an account only afte
   await guestButton.click();
   const dialog = page.getByRole('dialog', {name: 'Terms of service'});
   await expect(dialog).toBeVisible();
+  await expect(dialog).toBeFocused();
+  const termsContent = dialog.locator('.terms-content');
+  await expect(termsContent).not.toBeFocused();
+  for(const theme of ['day', 'night'] as const) {
+    await applyScreenshotTheme(page, theme);
+    for(const viewport of [{width: 375, height: 812}, {width: 1280, height: 900}]) {
+      await page.setViewportSize(viewport);
+      const screenshot = testInfo.outputPath(`guest-terms-${theme}-${viewport.width}.png`);
+      await page.screenshot({path: screenshot, animations: 'disabled'});
+      await testInfo.attach(`guest-terms-${theme}-${viewport.width}`, {path: screenshot, contentType: 'image/png'});
+    }
+  }
+  await applyScreenshotTheme(page, 'day');
+  await page.setViewportSize({width: 375, height: 812});
   await expect(dialog).toContainText('These are the terms for this server.');
   await expect.poll(async() => {
     const titleBox = await dialog.locator('.popup-title').boundingBox();
@@ -525,6 +727,12 @@ test('shows instance terms before guest sign-up and creates an account only afte
   await expect(dialog.getByRole('button', {name: 'Accept'})).toBeVisible();
   const canScroll = await page.locator('.popup-peer .scrollable-y-bordered').evaluate((element) => element.scrollHeight > element.clientHeight);
   expect(canScroll).toBe(true);
+  const termsScroller = page.locator('.popup-peer .scrollable-y-bordered');
+  await termsScroller.evaluate((element) => element.scrollTop = 0);
+  await page.keyboard.press('Tab');
+  await expect(termsContent).toBeFocused();
+  await page.keyboard.press('PageDown');
+  await expect.poll(() => termsScroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   const mobileWidths = await page.evaluate(() => ({document: document.documentElement.scrollWidth, viewport: document.documentElement.clientWidth}));
   expect(mobileWidths.document).toBeLessThanOrEqual(mobileWidths.viewport);
   const callsBeforeAccept = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
