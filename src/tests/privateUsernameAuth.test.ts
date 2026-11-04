@@ -226,6 +226,42 @@ describe('private username sign-in', () => {
     expect(updatePasswordSettings).toHaveBeenCalledWith('StrongPassword123');
   });
 
+  it('uses one signup challenge for sendCode and signUp when registration has a site key', async() => {
+    const user = {_: 'user', id: 42};
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockResolvedValueOnce({_: 'auth.authorization', user});
+    const requestTurnstile = vi.fn((_siteKey, action, submit) => {
+      expect(action).toBe('signup');
+      return submit('signup-token');
+    });
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings: vi.fn().mockResolvedValue(true)
+    }, requestTurnstile, 'signup-site-key')).resolves.toEqual({kind: 'authorized', user});
+
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual([
+      'invokeWithReCaptcha',
+      'auth.signIn',
+      'auth.signUp'
+    ]);
+    expect(invokeApi).toHaveBeenNthCalledWith(1, 'invokeWithReCaptcha', {
+      token: 'signup-token',
+      query: expect.objectContaining({_: 'auth.sendCode', phone_number: USERNAME})
+    });
+    expect(invokeApi).toHaveBeenNthCalledWith(3, 'auth.signUp', {
+      phone_number: USERNAME,
+      phone_code_hash: 'mock-code-hash',
+      first_name: 'Alice Example',
+      last_name: ''
+    });
+    expect(requestTurnstile).toHaveBeenCalledOnce();
+  });
+
   it('waits for server terms acceptance before creating an account', async() => {
     const user = {_: 'user', id: 42};
     const termsOfService: HelpTermsOfService = {
@@ -385,7 +421,7 @@ describe('private username sign-in', () => {
     expect(updatePasswordSettings).toHaveBeenCalledWith('StrongPassword123');
   });
 
-  it('surfaces Turnstile cancellation without retrying registration', async() => {
+  it('surfaces Turnstile cancellation before sending signup auth.sendCode', async() => {
     const invokeApi = vi.fn()
     .mockResolvedValueOnce(SENT_CODE)
     .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}});
@@ -398,7 +434,7 @@ describe('private username sign-in', () => {
       updatePasswordSettings: vi.fn()
     }, requestTurnstile, 'site-key')).resolves.toEqual({kind: 'cancelled'});
 
-    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
+    expect(invokeApi).not.toHaveBeenCalled();
     expect(requestTurnstile).toHaveBeenCalledOnce();
   });
 
