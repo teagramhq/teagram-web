@@ -1235,6 +1235,9 @@ export default class Chat extends EventListenerBase<{
 
       this.peerChanged = false;
       this.peerChangeFailed = true;
+      if(this.container) {
+        this.container.hidden = true;
+      }
       this.input?.failPeerChange();
       if(!didReportPeerChangeFailure) {
         didReportPeerChangeFailure = true;
@@ -1258,6 +1261,9 @@ export default class Chat extends EventListenerBase<{
       }
 
       if(this.container) {
+        if(!this.peerChangeFailed) {
+          this.container.hidden = false;
+        }
         this.container.dataset.type = this.type === ChatType.Search ? 'chat' : this.type;
         this.container.classList.toggle('can-click-date', [ChatType.Chat, ChatType.Discussion, ChatType.Saved].includes(this.type));
       }

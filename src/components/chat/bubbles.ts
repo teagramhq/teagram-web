@@ -6221,11 +6221,11 @@ export default class ChatBubbles {
         await peerInnerMounted;
         if(prepared) {
           const ready = await prepared.ready;
-          await prepared.apply();
           if(ready && 'error' in ready) {
             prepared.failPeerChange();
             throw ready.error;
           }
+          await prepared.apply();
         }
         return {ready: true as const};
       }).catch((error: unknown) => ({error})) :
