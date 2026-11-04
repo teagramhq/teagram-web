@@ -60,7 +60,7 @@ import parseBotAdminRights from '@appManagers/utils/bots/parseBotAdminRights';
 import isEphemeralMessage from '@appManagers/utils/messages/isEphemeralMessage';
 import parseChatSpecificTag from '@lib/richTextProcessor/parseChatSpecificTag';
 import searchByTag from '@lib/richTextProcessor/searchByTag';
-import {processInitialStickerSetShareLink, resolveStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
+import {handleStickerSetShareLinkClick, processInitialStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
 
 /**
  * A link whose section we know but whose path we do not — the one thing worse
@@ -108,14 +108,18 @@ export class InternalLinkProcessor {
     addAnchorListener<{}>({
       name: 'stickerSet',
       noCancelEvent: true,
-      callback: ({element, event}) => {
-        const stickerSet = element && resolveStickerSetShareLink(element.href);
-        if(!stickerSet) return;
+      callback: ({element, event, masked}) => {
+        if(!element) return;
 
-        cancelEvent(event);
-        return this.processInternalLink({
-          _: stickerSet.isEmoji ? INTERNAL_LINK_TYPE.EMOJI_SET : INTERNAL_LINK_TYPE.STICKER_SET,
-          set: stickerSet.shortName
+        return handleStickerSetShareLinkClick(element.href, !!masked, (stickerSet) => {
+          cancelEvent(event);
+          return this.processInternalLink({
+            _: stickerSet.isEmoji ? INTERNAL_LINK_TYPE.EMOJI_SET : INTERNAL_LINK_TYPE.STICKER_SET,
+            set: stickerSet.shortName
+          });
+        }, () => {
+          cancelEvent(event);
+          (window as any).showMaskedAlert(element, event);
         });
       }
     });

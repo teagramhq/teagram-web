@@ -40,6 +40,20 @@ export function resolveStickerSetShareLink(value: string) {
   return parseStickerSetShareLink(value, stickerSetLinkPrefix);
 }
 
+export function handleStickerSetShareLinkClick(
+  value: string,
+  masked: boolean,
+  onStickerSet: (stickerSet: {shortName: string, isEmoji: boolean}) => void,
+  onMasked: () => void
+) {
+  const stickerSet = resolveStickerSetShareLink(value);
+  if(stickerSet) {
+    onStickerSet(stickerSet);
+  } else if(masked) {
+    onMasked();
+  }
+}
+
 export function createStickerSetShareLink(prefix: string, shortName: string, isEmoji: boolean) {
   if(!SHORT_NAME_PATTERN.test(shortName)) throw new Error('Invalid sticker set short name');
 

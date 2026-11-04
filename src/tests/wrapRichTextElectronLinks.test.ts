@@ -1,7 +1,7 @@
 import {afterEach, describe, expect, test, vi} from 'vitest';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
 import {MessageEntity} from '@layer';
-import {resolveStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
+import {handleStickerSetShareLinkClick, resolveStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
 
 // wrapRichText reaches the worker proxy through langPack; none of that is needed to build a link
 vi.mock('@lib/apiManagerProxy', () => ({default: {addEventListener: () => {}, getState: () => Promise.resolve({})}}));
@@ -111,21 +111,38 @@ describe('wrapRichText external links', () => {
     expect(anchor.getAttribute('target')).toBeNull();
   });
 
-  test('a chat sticker link rendered before config resolves uses the prefix at click time', () => {
+  test('masked and unmasked sticker links rendered before config resolves use the prefix at click time', () => {
     vi.stubGlobal('stickerSet', vi.fn());
+    vi.stubGlobal('showMaskedAlert', vi.fn());
 
-    const anchor = wrapUrlEntity('https://links.teagram.test/addstickers/cats_a') as HTMLAnchorElement;
-    document.body.append(anchor);
+    const chatAnchor = wrapUrlEntity('https://links.teagram.test/addstickers/cats_a') as HTMLAnchorElement;
+    const maskedAnchor = wrapTextUrlEntity('sticker pack', 'https://links.teagram.test/addstickers/dogs_b') as HTMLAnchorElement;
+    document.body.append(chatAnchor, maskedAnchor);
 
-    expect(anchor.getAttribute('onclick')).toBe('stickerSet(this,event)');
-    expect(anchor.getAttribute('target')).toBe('_blank');
+    expect(chatAnchor.getAttribute('onclick')).toBe('stickerSet(this,event)');
+    expect(chatAnchor.getAttribute('target')).toBe('_blank');
+    expect(maskedAnchor.getAttribute('onclick')).toBe('stickerSet(this,event)');
+    expect(maskedAnchor.getAttribute('target')).toBe('_blank');
 
     const querySelectorAll = vi.spyOn(document, 'querySelectorAll');
     setStickerSetLinkPrefix('https://links.teagram.test/');
 
-    expect(anchor.getAttribute('onclick')).toBe('stickerSet(this,event)');
-    expect(anchor.getAttribute('target')).toBe('_blank');
-    expect(resolveStickerSetShareLink(anchor.href)).toEqual({shortName: 'cats_a', isEmoji: false});
+    expect(chatAnchor.getAttribute('onclick')).toBe('stickerSet(this,event)');
+    expect(chatAnchor.getAttribute('target')).toBe('_blank');
+    expect(maskedAnchor.getAttribute('onclick')).toBe('stickerSet(this,event)');
+    expect(maskedAnchor.getAttribute('target')).toBe('_blank');
+    expect(resolveStickerSetShareLink(chatAnchor.href)).toEqual({shortName: 'cats_a', isEmoji: false});
+    expect(resolveStickerSetShareLink(maskedAnchor.href)).toEqual({shortName: 'dogs_b', isEmoji: false});
+
+    const openStickerSet = vi.fn();
+    const showMaskedAlert = vi.fn();
+    handleStickerSetShareLinkClick(maskedAnchor.href, true, openStickerSet, showMaskedAlert);
+    expect(openStickerSet).toHaveBeenCalledWith({shortName: 'dogs_b', isEmoji: false});
+    expect(showMaskedAlert).not.toHaveBeenCalled();
+
+    setStickerSetLinkPrefix('https://other-links.teagram.test/');
+    handleStickerSetShareLinkClick(maskedAnchor.href, true, openStickerSet, showMaskedAlert);
+    expect(showMaskedAlert).toHaveBeenCalledTimes(1);
     expect(querySelectorAll).not.toHaveBeenCalled();
     querySelectorAll.mockRestore();
   });

@@ -599,9 +599,11 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           }
 
           const currentContext = !!onclick && !pendingStickerSetLink;
+          const pendingStickerSetClick = pendingStickerSetLink && onclick === 'stickerSet';
           if(
             masked &&
             !currentContext &&
+            !pendingStickerSetClick &&
             !options.passMaskedLinks
           ) {
             onclick = 'showMaskedAlert';
