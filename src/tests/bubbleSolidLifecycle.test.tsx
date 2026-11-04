@@ -5,6 +5,8 @@ import {render} from 'solid-js/web';
 import {makeFullMid} from '@appManagers/utils/messages/fullMid';
 import ejectBubble from '@components/chat/bubbles/ejectBubble';
 import {markMessageLinkEntity} from '@lib/richTextProcessor/filterDisabledEntities';
+import Scrollable from '@components/scrollable';
+import ScrollSaver from '@helpers/scrollSaver';
 
 const moduleMocks = vi.hoisted(() => {
   const noop = vi.fn();
@@ -2025,4 +2027,75 @@ test.each([
 
   expect(chatUpdate).toBeTypeOf('function');
   await expect(chatUpdate(chatId)).resolves.toBeUndefined();
+});
+
+test('preserves the visible bubble when prepending history slices messages below the viewport', async() => {
+  vi.useFakeTimers();
+
+  const container = document.createElement('div');
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  container.append(bubble);
+  document.body.append(container);
+
+  let mutated = false;
+  let scrollTop = 400;
+  Object.defineProperties(container, {
+    scrollTop: {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => scrollTop = value
+    },
+    scrollHeight: {
+      configurable: true,
+      get: () => mutated ? 1_050 : 1_000
+    },
+    clientHeight: {configurable: true, value: 500}
+  });
+  const makeRect = (top: number, height: number): DOMRect => ({
+    x: 0,
+    y: top,
+    top,
+    bottom: top + height,
+    left: 0,
+    right: 400,
+    width: 400,
+    height,
+    toJSON: () => ({})
+  });
+  container.getBoundingClientRect = () => makeRect(0, 500);
+  bubble.getBoundingClientRect = () => makeRect(mutated ? 300 : 100, 50);
+
+  const scrollable = new Scrollable(undefined, 'test', 300, undefined, container);
+  const scrollSaver = new ScrollSaver(scrollable, '.bubble', true);
+  const slice: ReturnType<InstanceType<typeof ChatBubbles>['getViewportSlice']> = {
+    invisibleTop: [],
+    visible: [{element: bubble, rect: makeRect(100, 50), visibleRect: {rect: makeRect(100, 50), overflow: {top: false, right: false, bottom: false, left: false, vertical: 0, horizontal: 0}}}],
+    invisibleBottom: [{element: document.createElement('div'), rect: makeRect(900, 50), visibleRect: null}]
+  };
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chatInner: {parentElement: document.body},
+    log: {bindPrefix: () => vi.fn()},
+    chat: {setPeerPromise: undefined},
+    createScrollSaver: () => scrollSaver,
+    getRenderedLength: () => 1,
+    getViewportSlice: () => slice,
+    deleteViewportSlice: () => mutated = true,
+    onRenderScrollSet: vi.fn()
+  }) as any;
+
+  try {
+    const prepareToSaveScroll = (ChatBubbles.prototype as any).prepareToSaveScroll;
+    const {restoreScroll} = prepareToSaveScroll.call(harness, true, false, true);
+    const restoration = restoreScroll();
+
+    await vi.advanceTimersToNextFrame();
+    await vi.advanceTimersToNextFrame();
+    await restoration;
+
+    expect(scrollTop).toBe(600);
+  } finally {
+    scrollable.destroy();
+    vi.useRealTimers();
+  }
 });

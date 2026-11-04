@@ -11378,18 +11378,20 @@ export default class ChatBubbles {
     const log = this.log.bindPrefix('prepareToSaveScroll');
     log('save');
     const scrollSaver = this.createScrollSaver(reverse);
+    let viewportSlice: ReturnType<typeof getViewportSlice>;
+    if((sliceTop || sliceBottom) && this.getRenderedLength() && !this.chat.setPeerPromise) {
+      viewportSlice = this.getViewportSlice(true);
+      if(!sliceTop) viewportSlice.invisibleTop.length = 0;
+      if(!sliceBottom) viewportSlice.invisibleBottom.length = 0;
+    }
+
     if(reverse) {
-      scrollSaver.savePosition();
+      scrollSaver.savePosition(viewportSlice?.invisibleBottom.length ? viewportSlice.visible[0] : undefined);
     } else {
       scrollSaver.save(); // * let's save scroll position by point before the slicing, not after
     }
 
-    if((sliceTop || sliceBottom) && this.getRenderedLength() && !this.chat.setPeerPromise) {
-      const viewportSlice = this.getViewportSlice(true);
-      if(!sliceTop) viewportSlice.invisibleTop.length = 0;
-      if(!sliceBottom) viewportSlice.invisibleBottom.length = 0;
-      this.deleteViewportSlice(viewportSlice, true);
-    }
+    if(viewportSlice) this.deleteViewportSlice(viewportSlice, true);
 
     // scrollSaver.save(); // ! slicing will corrupt scroll position
     // const saved = scrollSaver.getSaved();

@@ -124,10 +124,60 @@ test('restores prepended history from scroll-size delta without measuring bubble
     const restoration = scrollSaver.restoreAfterLayout();
 
     await vi.advanceTimersToNextFrame();
+    await vi.advanceTimersToNextFrame();
     await restoration;
 
     expect(scrollTop).toBe(300);
     expect(rectReads).toEqual([]);
+  } finally {
+    scrollable.destroy();
+    vi.useRealTimers();
+  }
+});
+
+test('waits for layout before reading the scroll size after a prepend', async() => {
+  vi.useFakeTimers();
+
+  const container = document.createElement('div');
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  container.append(bubble);
+
+  let mutated = false;
+  let scrollTop = 200;
+  let scrollHeightReads = 0;
+  Object.defineProperties(container, {
+    scrollTop: {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => scrollTop = value
+    },
+    scrollHeight: {
+      configurable: true,
+      get: () => {
+        if(mutated) ++scrollHeightReads;
+        return mutated ? 1_100 : 1_000;
+      }
+    },
+    clientHeight: {configurable: true, value: 500}
+  });
+  container.getBoundingClientRect = () => ({top: 0, bottom: 500, left: 0, right: 400, width: 400, height: 500} as DOMRect);
+  bubble.getBoundingClientRect = () => ({top: 50, bottom: 100, left: 0, right: 400, width: 400, height: 50} as DOMRect);
+
+  const scrollable = new Scrollable(undefined, 'test', 300, undefined, container);
+  const scrollSaver = new ScrollSaver(scrollable, '.bubble', true);
+
+  try {
+    scrollSaver.savePosition();
+    mutated = true;
+    const restoration = scrollSaver.restoreAfterLayout();
+
+    await vi.advanceTimersToNextFrame();
+    expect(scrollHeightReads).toBe(0);
+
+    await vi.advanceTimersToNextFrame();
+    await restoration;
+    expect(scrollHeightReads).toBe(1);
   } finally {
     scrollable.destroy();
     vi.useRealTimers();
