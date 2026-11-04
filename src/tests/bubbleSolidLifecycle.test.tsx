@@ -2068,6 +2068,7 @@ test('preserves the visible bubble when prepending history slices messages below
 
   const scrollable = new Scrollable(undefined, 'test', 300, undefined, container);
   const scrollSaver = new ScrollSaver(scrollable, '.bubble', true);
+  const savePosition = vi.spyOn(scrollSaver, 'savePosition');
   const slice: ReturnType<InstanceType<typeof ChatBubbles>['getViewportSlice']> = {
     invisibleTop: [],
     visible: [{element: bubble, rect: makeRect(100, 50), visibleRect: {rect: makeRect(100, 50), overflow: {top: false, right: false, bottom: false, left: false, vertical: 0, horizontal: 0}}}],
@@ -2090,6 +2091,7 @@ test('preserves the visible bubble when prepending history slices messages below
   try {
     const prepareToSaveScroll = (ChatBubbles.prototype as any).prepareToSaveScroll;
     const {restoreScroll} = prepareToSaveScroll.call(harness, true, false, true);
+    expect(savePosition).toHaveBeenCalledWith(150);
     const restoration = restoreScroll();
 
     await vi.advanceTimersToNextFrame();
