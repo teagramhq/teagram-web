@@ -43,6 +43,7 @@ vi.mock('@stores/stars', () => ({default: () => () => 0}));
 
 let ChatBubbles: typeof import('@components/chat/bubbles').default;
 let BubbleGroups: typeof import('@components/chat/bubbleGroups').default;
+let BubbleGroup: typeof import('@components/chat/bubbleGroups').BubbleGroup;
 let cancelPendingHiddenLinksEvent: typeof import('@components/chat/bubbles').cancelPendingHiddenLinksEvent;
 let disposeChatInnerMiddlewareAfterDetach: typeof import('@components/chat/bubbles').disposeChatInnerMiddlewareAfterDetach;
 let isBubbleUiCurrent: typeof import('@components/chat/bubbles').isBubbleUiCurrent;
@@ -81,7 +82,9 @@ beforeAll(async() => {
     setBubbleHiddenLinksPending,
     shouldForceHideNonContactLinkTest
   } = await import('@components/chat/bubbles'));
-  BubbleGroups = (await import('@components/chat/bubbleGroups')).default;
+  const bubbleGroupsModule = await import('@components/chat/bubbleGroups');
+  BubbleGroups = bubbleGroupsModule.default;
+  BubbleGroup = bubbleGroupsModule.BubbleGroup;
   // Importing the whole bubbles graph costs far more than the default hook
   // budget once the rest of the suite is competing for the same CPU.
 }, 60_000);
@@ -1189,8 +1192,10 @@ test('defers every affected BubbleGroup mount during an atomic replacement regro
 test('mounts affected groups once after deleting a viewport slice', () => {
   const fullMids = ['10_1', '10_2'] as FullMid[];
   const bubbles = new Map(fullMids.map((fullMid) => [fullMid, document.createElement('div')]));
-  const group = {};
-  const bubbleGroups = {mountUnmountGroups: vi.fn()};
+  const group: {items: Array<{bubble: HTMLElement}>} = {items: []};
+  const items = fullMids.map((fullMid) => ({bubble: bubbles.get(fullMid), group, mounted: true}));
+  group.items = items;
+  const bubbleGroups = {itemsArr: items, groups: [group], mountUnmountGroups: vi.fn()};
   const harness = {
     getBubble: (fullMid: FullMid) => bubbles.get(fullMid),
     getRenderedHistory: () => fullMids,
@@ -1198,8 +1203,13 @@ test('mounts affected groups once after deleting a viewport slice', () => {
       _bubble: HTMLElement,
       _animate: boolean | undefined,
       _fullMid: FullMid,
-      deferredGroups?: Set<typeof group>
-    ) => deferredGroups?.add(group)),
+      deferredGroups?: Set<typeof group>,
+      groupItemIndex?: number,
+      groupsFullyDeleted?: Set<typeof group>
+    ) => {
+      deferredGroups?.add(group);
+      return {groupItemIndex, groupsFullyDeleted};
+    }),
     scrollable: {ignoreNextScrollEvent: vi.fn(), onScroll: vi.fn()},
     chat: {selection: {isSelecting: false}, animationGroup: {}},
     bubbleGroups,
@@ -1210,10 +1220,80 @@ test('mounts affected groups once after deleting a viewport slice', () => {
 
   expect(harness.destroyBubble).toHaveBeenCalledTimes(fullMids.length);
   const deferredGroups = harness.destroyBubble.mock.calls[0][3];
+  const groupsFullyDeleted = harness.destroyBubble.mock.calls[0][5];
   expect(deferredGroups).toBeInstanceOf(Set);
   expect(harness.destroyBubble.mock.calls.every((call) => call[3] === deferredGroups)).toBe(true);
+  expect(harness.destroyBubble.mock.calls.map((call) => call[2])).toEqual(['10_2', '10_1']);
+  expect(harness.destroyBubble.mock.calls.map((call) => call[4])).toEqual([1, 0]);
+  expect(groupsFullyDeleted).toEqual(new Set([group]));
+  expect(harness.destroyBubble.mock.calls.every((call) => call[5] === groupsFullyDeleted)).toBe(true);
   expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledOnce();
   expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledWith([group]);
+});
+
+test('defers group updates and removes a fully sliced group as one container', () => {
+  const container = document.createElement('div');
+  const bubble = document.createElement('div');
+  container.append(bubble);
+  document.body.append(container);
+  const dateContainer = {groupsLength: 1};
+  const deleteEmptyDateGroups = vi.fn();
+  const group: any = {
+    items: [],
+    mounted: true,
+    container,
+    dateContainer,
+    chat: {bubbles: {deleteEmptyDateGroups}},
+    middlewareHelper: {clean: vi.fn()},
+    groups: {updateGroupsClassNames: vi.fn()}
+  };
+  const onItemUnmount = vi.fn(() => BubbleGroup.prototype.onItemUnmount.call(group));
+  group.onItemUnmount = onItemUnmount;
+  const item = {bubble, mounted: true};
+
+  (BubbleGroup.prototype.unmountItem as any).call(group, item, false, true);
+
+  expect(item.mounted).toBe(false);
+  expect(bubble.isConnected).toBe(true);
+  expect(onItemUnmount).not.toHaveBeenCalled();
+
+  group.onItemUnmount();
+
+  expect(container.isConnected).toBe(false);
+  expect(bubble.isConnected).toBe(false);
+  expect(dateContainer.groupsLength).toBe(0);
+  expect(deleteEmptyDateGroups).toHaveBeenCalledOnce();
+});
+
+test('passes deferred removal details through BubbleGroups for a fully sliced group', () => {
+  const bubble = document.createElement('div');
+  const group = {items: [] as any[], unmountItem: vi.fn()};
+  const item: {bubble: HTMLElement, mounted: boolean, group?: typeof group} = {bubble, mounted: true, group};
+  group.items.push(item);
+  const itemsArr = [item] as any;
+  const deferredGroups = new Set<typeof group>();
+  const groupsFullyDeleted = new Set([group]);
+  const getSiblingsAtIndex = vi.fn(() => [undefined, undefined] as const);
+  const groupsHarness = {
+    itemsArr,
+    getItemByBubble: () => item,
+    getSiblingsAtIndex,
+    removeItem: vi.fn(),
+    mountUnmountGroups: vi.fn()
+  };
+
+  (BubbleGroups.prototype.removeAndUnmountBubble as any).call(
+    groupsHarness,
+    bubble,
+    deferredGroups,
+    0,
+    groupsFullyDeleted
+  );
+
+  expect(getSiblingsAtIndex).toHaveBeenCalledWith(0, itemsArr);
+  expect(group.unmountItem).toHaveBeenCalledWith(item, false, true);
+  expect(deferredGroups).toEqual(new Set([group]));
+  expect(groupsHarness.mountUnmountGroups).not.toHaveBeenCalled();
 });
 
 test('reconciles only the latest streamed revision queued during the initial async render', async() => {

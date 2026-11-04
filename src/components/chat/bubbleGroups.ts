@@ -331,14 +331,18 @@ export class BubbleGroup {
     item.mounted = true;
   }
 
-  unmountItem(item: GroupItem) {
+  unmountItem(item: GroupItem, removeBubble = true, deferGroupUpdate = false) {
     if(!item.mounted) {
       return;
     }
 
-    item.bubble.remove();
+    if(removeBubble) {
+      item.bubble.remove();
+    }
     item.mounted = false;
-    this.onItemUnmount();
+    if(!deferGroupUpdate) {
+      this.onItemUnmount();
+    }
   }
 
   onItemMount() {
@@ -423,7 +427,12 @@ export default class BubbleGroups {
     this.removeItemFromCache(item);
   }
 
-  removeAndUnmountBubble(bubble: HTMLElement, deferredGroups?: Set<BubbleGroup>) {
+  removeAndUnmountBubble(
+    bubble: HTMLElement,
+    deferredGroups?: Set<BubbleGroup>,
+    itemIndex?: number,
+    groupsFullyDeleted?: Set<BubbleGroup>
+  ) {
     const item = this.getItemByBubble(bubble);
     if(!item) { // * can be a placeholder
       const parentElement = bubble.parentElement;
@@ -439,7 +448,7 @@ export default class BubbleGroups {
     }
 
     const items = this.itemsArr;
-    const index = items.indexOf(item);
+    const index = itemIndex ?? items.indexOf(item);
     const siblings = this.getSiblingsAtIndex(index, items);
 
     const group = item.group;
@@ -447,7 +456,7 @@ export default class BubbleGroups {
 
     const modifiedGroups: Set<BubbleGroup> = new Set();
     if(group) {
-      group.unmountItem(item);
+      group.unmountItem(item, !groupsFullyDeleted?.has(group), !!deferredGroups);
       modifiedGroups.add(group);
     }
 
@@ -460,7 +469,11 @@ export default class BubbleGroups {
     ) {
       const group = nextSibling.group;
       this.f(nextSibling.group.items);
-      group.onItemUnmount();
+      if(deferredGroups) {
+        deferredGroups.add(group);
+      } else {
+        group.onItemUnmount();
+      }
       modifiedGroups.add(previousSibling.group);
       const regrouped = this.groupUngrouped();
       if(deferredGroups) {

@@ -4828,7 +4828,9 @@ export default class ChatBubbles {
     bubble: HTMLElement,
     animate?: boolean,
     fullMid = getBubbleFullMid(bubble),
-    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
+    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>,
+    groupItemIndex?: number,
+    groupsFullyDeleted?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
   ) {
     const replacement = this.findPendingBubbleReplacement(bubble);
     if(replacement) {
@@ -4897,7 +4899,7 @@ export default class ChatBubbles {
     const scrollSaver = canBeDeleted && this.createScrollSaver(false);
     scrollSaver?.save();
 
-    this.bubbleGroups.removeAndUnmountBubble(bubble, deferredGroups);
+    this.bubbleGroups.removeAndUnmountBubble(bubble, deferredGroups, groupItemIndex, groupsFullyDeleted);
     if(this.observer) {
       this.observer.unobserve(bubble, this.unreadedObserverCallback);
       this.unreaded.delete(bubble);
@@ -5024,19 +5026,47 @@ export default class ChatBubbles {
       return;
     }
 
-    const rendered = this.getRenderedHistory('desc');
-    const indexes: Record<FullMid, number> = {};
-    rendered.forEach((mid, idx) => indexes[mid] = idx);
     const deferredGroups = !permanent && ignoreOnScroll ?
       new Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>() :
       undefined;
+    const bubblesToDelete = deferredGroups ?
+      new Set(fullMids.map((fullMid) => this.getBubble(fullMid))) :
+      undefined;
+    const groupIndexes = deferredGroups ?
+      new Map(this.bubbleGroups.itemsArr.map((item, idx) => [item.bubble, idx] as const)) :
+      undefined;
+    const groupsFullyDeleted = deferredGroups ?
+      new Set(this.bubbleGroups.groups.filter((group) => (
+        group.items.length && group.items.every((item) => bubblesToDelete.has(item.bubble))
+      ))) :
+      undefined;
+
+    const indexes: Record<FullMid, number> = {};
+    if(!groupIndexes) {
+      this.getRenderedHistory('desc').forEach((mid, idx) => indexes[mid] = idx);
+    }
 
     fullMids
     .slice()
-    .sort((a, b) => (indexes[a] ?? 0) - (indexes[b] ?? 0))
+    .sort((a, b) => {
+      if(groupIndexes) {
+        const aIndex = groupIndexes.get(this.getBubble(a)) ?? -1;
+        const bIndex = groupIndexes.get(this.getBubble(b)) ?? -1;
+        return bIndex - aIndex;
+      }
+
+      return (indexes[a] ?? 0) - (indexes[b] ?? 0);
+    })
     .forEach((fullMid) => {
       const bubble = this.getBubble(fullMid);
-      this.destroyBubble(bubble, permanent && liteMode.isAvailable('animations'), fullMid, deferredGroups);
+      this.destroyBubble(
+        bubble,
+        permanent && liteMode.isAvailable('animations'),
+        fullMid,
+        deferredGroups,
+        groupIndexes?.get(bubble),
+        groupsFullyDeleted
+      );
     });
 
     if(deferredGroups?.size) {
