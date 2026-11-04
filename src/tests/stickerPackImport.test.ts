@@ -207,6 +207,15 @@ describe('sticker set share links', () => {
     )).rejects.toBe(configError);
   });
 
+  it('does not load sticker link config for unrelated initial routes', async() => {
+    const configError = new Error('config unavailable');
+    const config = Promise.reject<{me_url_prefix: string}>(configError);
+    void config.catch((_error): undefined => undefined);
+
+    await expect(processInitialStickerSetShareLink('https://teagram.test/invite?token=abc', config, vi.fn()))
+      .resolves.toBeUndefined();
+  });
+
   it('logs and rejects an invalid server link prefix', () => {
     const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 

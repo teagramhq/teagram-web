@@ -86,6 +86,15 @@ export async function processInitialStickerSetShareLink(
   configPromise: Promise<{me_url_prefix: string}>,
   onStickerSet: (stickerSet: {shortName: string, isEmoji: boolean}) => void
 ) {
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch(err) {
+    return;
+  }
+
+  if(url.search || url.hash || !/\/(?:addstickers|addemoji)\/[A-Za-z0-9_]{1,64}$/.test(url.pathname)) return;
+
   let config: {me_url_prefix: string};
   try {
     config = await configPromise;
