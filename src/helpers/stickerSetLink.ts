@@ -20,6 +20,18 @@ function parseStickerSetLinkPrefix(prefix: string) {
   }
 }
 
+function refreshStickerSetShareLinkAnchors() {
+  if(typeof document === 'undefined' || typeof (window as any).stickerSet !== 'function' || !stickerSetLinkPrefix) return;
+
+  document.querySelectorAll<HTMLAnchorElement>('a.anchor-url[href]').forEach((anchor) => {
+    if(!parseStickerSetShareLink(anchor.href, stickerSetLinkPrefix)) return;
+
+    anchor.setAttribute('onclick', 'stickerSet(this)');
+    anchor.removeAttribute('target');
+    anchor.removeAttribute('rel');
+  });
+}
+
 export function setStickerSetLinkPrefix(prefix: string) {
   const url = parseStickerSetLinkPrefix(prefix);
   if(!url) {
@@ -29,6 +41,7 @@ export function setStickerSetLinkPrefix(prefix: string) {
   }
 
   stickerSetLinkPrefix = url.toString();
+  refreshStickerSetShareLinkAnchors();
   return true;
 }
 

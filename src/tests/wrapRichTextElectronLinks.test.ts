@@ -1,6 +1,7 @@
 import {afterEach, describe, expect, test, vi} from 'vitest';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
 import {MessageEntity} from '@layer';
+import {setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
 
 // wrapRichText reaches the worker proxy through langPack; none of that is needed to build a link
 vi.mock('@lib/apiManagerProxy', () => ({default: {addEventListener: () => {}, getState: () => Promise.resolve({})}}));
@@ -108,6 +109,22 @@ describe('wrapRichText external links', () => {
     const anchor = wrapUrlEntity('https://t.me/durov');
     expect(anchor.getAttribute('onclick')).toEqual('im(this)');
     expect(anchor.getAttribute('target')).toBeNull();
+  });
+
+  test('a chat sticker link rendered before config resolves gets its internal handler when config arrives', () => {
+    vi.stubGlobal('stickerSet', vi.fn());
+
+    const anchor = wrapUrlEntity('https://links.teagram.test/addstickers/cats_a');
+    document.body.append(anchor);
+
+    expect(anchor.getAttribute('onclick')).toBeNull();
+    expect(anchor.getAttribute('target')).toBe('_blank');
+
+    setStickerSetLinkPrefix('https://links.teagram.test/');
+
+    expect(anchor.getAttribute('onclick')).toBe('stickerSet(this)');
+    expect(anchor.getAttribute('target')).toBeNull();
+    expect(anchor.getAttribute('rel')).toBeNull();
   });
 
   test('a link the URL parser rejects still renders as an external link', () => {
