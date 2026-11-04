@@ -521,6 +521,11 @@ async function waitForChatList(page: Page) {
   await expect(page.locator('#page-chats #chatlist-container .chatlist-chat').first()).toBeVisible({timeout: 120_000});
 }
 
+async function resetToChatList(page: Page, origin: string) {
+  await page.goto(origin, {waitUntil: 'domcontentloaded'});
+  await waitForChatList(page);
+}
+
 async function waitForHistorySettled(page: Page) {
   let previousDomNodes = -1;
   let stableSamples = 0;
@@ -905,8 +910,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     }
 
     // Reset both variants to the same signed-in chat-list state before contacts measurements.
-    await page.goto(origin, {waitUntil: 'domcontentloaded'});
-    await waitForChatList(page);
+    await resetToChatList(page, origin);
     measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
     measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
     measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
@@ -931,6 +935,8 @@ async function runTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixtu
     await waitForChatList(page);
     const chatOpen = await openPartnerChat(page, requests, fixture);
     const scrollBack2k = await scrollBackTwoThousand(page, requests, run.variant === 'head');
+    // The history scenario leaves the same chat scrolled up; start send timing from a clean list state.
+    await resetToChatList(page, run.origin);
     const send = await sendMessage(page, requests, fixture);
     return {chatOpen, scrollBack2k: scrollBack2k || {bundleBytes: chatOpen.bundleBytes}, send};
   } finally {
