@@ -60,7 +60,7 @@ import parseBotAdminRights from '@appManagers/utils/bots/parseBotAdminRights';
 import isEphemeralMessage from '@appManagers/utils/messages/isEphemeralMessage';
 import parseChatSpecificTag from '@lib/richTextProcessor/parseChatSpecificTag';
 import searchByTag from '@lib/richTextProcessor/searchByTag';
-import {getStickerSetLinkPrefix, parseStickerSetShareLink, processInitialStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
+import {processInitialStickerSetShareLink, resolveStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
 
 /**
  * A link whose section we know but whose path we do not — the one thing worse
@@ -107,10 +107,12 @@ export class InternalLinkProcessor {
 
     addAnchorListener<{}>({
       name: 'stickerSet',
-      callback: ({element}) => {
-        const stickerSet = element && parseStickerSetShareLink(element.href, getStickerSetLinkPrefix());
+      noCancelEvent: true,
+      callback: ({element, event}) => {
+        const stickerSet = element && resolveStickerSetShareLink(element.href);
         if(!stickerSet) return;
 
+        cancelEvent(event);
         return this.processInternalLink({
           _: stickerSet.isEmoji ? INTERNAL_LINK_TYPE.EMOJI_SET : INTERNAL_LINK_TYPE.STICKER_SET,
           set: stickerSet.shortName

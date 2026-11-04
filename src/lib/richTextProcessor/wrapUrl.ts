@@ -3,12 +3,12 @@ import {PHONE_NUMBER_REG_EXP} from '.';
 import {MOUNT_CLASS_TO} from '@config/debug';
 import {normalizeUrlProtocol} from '@lib/richTextProcessor/matchUrlProtocol';
 import matchTelegramUrlHost, {matchUrlHost, TELESCOPE_LINK_HOST} from '@lib/richTextProcessor/matchTelegramUrlHost';
-import {getStickerSetLinkPrefix, parseStickerSetShareLink} from '@helpers/stickerSetLink';
+import {getStickerSetLinkPrefix, isPotentialStickerSetShareLink, resolveStickerSetShareLink} from '@helpers/stickerSetLink';
 
 export default function wrapUrl(url: string, safe?: boolean) {
   url = normalizeUrlProtocol(url);
 
-  const out: {url: string, onclick?: Parameters<typeof addAnchorListener>[0]['name']} = {url};
+  const out: {url: string, onclick?: Parameters<typeof addAnchorListener>[0]['name'], pendingStickerSetLink?: boolean} = {url};
   // parsed once for every branch below. a url the parser rejects (a port out of range, say) has to
   // leave here as a plain external link: `wrapRichText` does not catch, so a throw would take the
   // whole message render down with it
@@ -18,11 +18,13 @@ export default function wrapUrl(url: string, safe?: boolean) {
   } catch(err) {}
 
   const telegramUrlMatch = parsedUrl && matchTelegramUrlHost(parsedUrl);
-  const stickerSetLink = parsedUrl && parseStickerSetShareLink(parsedUrl.toString(), getStickerSetLinkPrefix());
+  const stickerSetLinkPrefix = getStickerSetLinkPrefix();
+  const stickerSetLink = parsedUrl && resolveStickerSetShareLink(parsedUrl.toString());
+  const pendingStickerSetLink = !!parsedUrl && !stickerSetLinkPrefix && isPotentialStickerSetShareLink(parsedUrl.toString());
 
   let tgMatch;
   let onclick: typeof out['onclick'];
-  if(stickerSetLink && (window as any).stickerSet) {
+  if((stickerSetLink || pendingStickerSetLink) && (window as any).stickerSet) {
     onclick = 'stickerSet';
   } else /* if(unsafe === 2) {
     url = 'tg://unsafe_url?url=' + encodeURIComponent(url);
@@ -101,6 +103,7 @@ export default function wrapUrl(url: string, safe?: boolean) {
   }
 
   out.onclick = onclick;
+  if(pendingStickerSetLink) out.pendingStickerSetLink = true;
   return out;
 }
 

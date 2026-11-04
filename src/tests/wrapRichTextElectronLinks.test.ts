@@ -1,7 +1,7 @@
 import {afterEach, describe, expect, test, vi} from 'vitest';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
 import {MessageEntity} from '@layer';
-import {setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
+import {resolveStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
 
 // wrapRichText reaches the worker proxy through langPack; none of that is needed to build a link
 vi.mock('@lib/apiManagerProxy', () => ({default: {addEventListener: () => {}, getState: () => Promise.resolve({})}}));
@@ -111,20 +111,34 @@ describe('wrapRichText external links', () => {
     expect(anchor.getAttribute('target')).toBeNull();
   });
 
-  test('a chat sticker link rendered before config resolves gets its internal handler when config arrives', () => {
+  test('a chat sticker link rendered before config resolves uses the prefix at click time', () => {
     vi.stubGlobal('stickerSet', vi.fn());
 
-    const anchor = wrapUrlEntity('https://links.teagram.test/addstickers/cats_a');
+    const anchor = wrapUrlEntity('https://links.teagram.test/addstickers/cats_a') as HTMLAnchorElement;
     document.body.append(anchor);
 
-    expect(anchor.getAttribute('onclick')).toBeNull();
+    expect(anchor.getAttribute('onclick')).toBe('stickerSet(this,event)');
     expect(anchor.getAttribute('target')).toBe('_blank');
+
+    const querySelectorAll = vi.spyOn(document, 'querySelectorAll');
+    setStickerSetLinkPrefix('https://links.teagram.test/');
+
+    expect(anchor.getAttribute('onclick')).toBe('stickerSet(this,event)');
+    expect(anchor.getAttribute('target')).toBe('_blank');
+    expect(resolveStickerSetShareLink(anchor.href)).toEqual({shortName: 'cats_a', isEmoji: false});
+    expect(querySelectorAll).not.toHaveBeenCalled();
+    querySelectorAll.mockRestore();
+  });
+
+  test('setting the sticker link prefix does not scan rendered message anchors', () => {
+    vi.stubGlobal('stickerSet', vi.fn());
+    document.body.append(document.createElement('a'));
+    const querySelectorAll = vi.spyOn(document, 'querySelectorAll');
 
     setStickerSetLinkPrefix('https://links.teagram.test/');
 
-    expect(anchor.getAttribute('onclick')).toBe('stickerSet(this)');
-    expect(anchor.getAttribute('target')).toBeNull();
-    expect(anchor.getAttribute('rel')).toBeNull();
+    expect(querySelectorAll).not.toHaveBeenCalled();
+    querySelectorAll.mockRestore();
   });
 
   test('a link the URL parser rejects still renders as an external link', () => {

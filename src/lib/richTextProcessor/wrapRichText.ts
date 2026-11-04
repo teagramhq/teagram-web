@@ -569,6 +569,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           const wrapped = wrapUrl(url, (entity as MessageEntity.messageEntityTextUrl).safe);
           url = wrapped.url;
           onclick = wrapped.onclick;
+          const pendingStickerSetLink = !!wrapped.pendingStickerSetLink;
 
           if(options.whitelistedDomains) {
             try {
@@ -597,9 +598,8 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
             // inner = encodeEntities(replaceUrlEncodings(entityText));
           }
 
-          const currentContext = !!onclick;
+          const currentContext = !!onclick && !pendingStickerSetLink;
           if(
-            !onclick &&
             masked &&
             !currentContext &&
             !options.passMaskedLinks
@@ -621,7 +621,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           }
 
           if(onclick) {
-            element.setAttribute('onclick', onclick + '(this)');
+            element.setAttribute('onclick', onclick === 'stickerSet' ? 'stickerSet(this,event)' : onclick + '(this)');
           }
         }
 

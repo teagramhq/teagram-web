@@ -20,18 +20,6 @@ function parseStickerSetLinkPrefix(prefix: string) {
   }
 }
 
-function refreshStickerSetShareLinkAnchors() {
-  if(typeof document === 'undefined' || typeof (window as any).stickerSet !== 'function' || !stickerSetLinkPrefix) return;
-
-  document.querySelectorAll<HTMLAnchorElement>('a.anchor-url[href]').forEach((anchor) => {
-    if(!parseStickerSetShareLink(anchor.href, stickerSetLinkPrefix)) return;
-
-    anchor.setAttribute('onclick', 'stickerSet(this)');
-    anchor.removeAttribute('target');
-    anchor.removeAttribute('rel');
-  });
-}
-
 export function setStickerSetLinkPrefix(prefix: string) {
   const url = parseStickerSetLinkPrefix(prefix);
   if(!url) {
@@ -41,12 +29,15 @@ export function setStickerSetLinkPrefix(prefix: string) {
   }
 
   stickerSetLinkPrefix = url.toString();
-  refreshStickerSetShareLinkAnchors();
   return true;
 }
 
 export function getStickerSetLinkPrefix() {
   return stickerSetLinkPrefix;
+}
+
+export function resolveStickerSetShareLink(value: string) {
+  return parseStickerSetShareLink(value, stickerSetLinkPrefix);
 }
 
 export function createStickerSetShareLink(prefix: string, shortName: string, isEmoji: boolean) {
@@ -94,19 +85,32 @@ export function parseStickerSetShareLink(value: string, prefix?: string): {short
   return {shortName: match[2], isEmoji: match[1] === 'addemoji'};
 }
 
+export function isPotentialStickerSetShareLink(value: string) {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch(err) {
+    return false;
+  }
+
+  if(
+    !['http:', 'https:'].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) return false;
+
+  const match = /\/(addstickers|addemoji)\/([^/]+)$/.exec(url.pathname);
+  return !!match && SHORT_NAME_PATTERN.test(match[2]);
+}
+
 export async function processInitialStickerSetShareLink(
   href: string,
   configPromise: Promise<{me_url_prefix: string}>,
   onStickerSet: (stickerSet: {shortName: string, isEmoji: boolean}) => void
 ) {
-  let url: URL;
-  try {
-    url = new URL(href);
-  } catch(err) {
-    return;
-  }
-
-  if(url.search || url.hash || !/\/(?:addstickers|addemoji)\/[A-Za-z0-9_]{1,64}$/.test(url.pathname)) return;
+  if(!isPotentialStickerSetShareLink(href)) return;
 
   let config: {me_url_prefix: string};
   try {
