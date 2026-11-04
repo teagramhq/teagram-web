@@ -684,18 +684,21 @@ jobs:
           case "$PR_COMMITS" in
             ''|*[!0-9]*) echo "pull request commit count is not a number" >&2; exit 1 ;;
           esac
-          # Fetch the PR history and enough base history to establish its shared ancestry.
+          # Fetch enough base history to resolve ancestry in the scanned PR range.
           git fetch --no-tags --no-recurse-submodules --depth="$((PR_COMMITS + 1))" \
             origin "$HEAD_SHA" "$BASE_SHA"
-          while ! git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null; do
-            previous_commit_count="$(git rev-list --count "$BASE_SHA" "$HEAD_SHA")"
+          range_parents="$(git rev-list --parents "$BASE_SHA..$HEAD_SHA")"
+          while ! git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null || \
+            awk 'NF == 1 { found = 1 } END { exit !found }' <<<"$range_parents"; do
+            previous_base_commit_count="$(git rev-list --count "$BASE_SHA")"
             git fetch --no-tags --no-recurse-submodules --deepen=128 \
               origin "$BASE_SHA"
-            current_commit_count="$(git rev-list --count "$BASE_SHA" "$HEAD_SHA")"
-            if [ "$previous_commit_count" = "$current_commit_count" ]; then
-              echo 'could not find a shared ancestor for the pull request base and head' >&2
+            current_base_commit_count="$(git rev-list --count "$BASE_SHA")"
+            if [ "$previous_base_commit_count" = "$current_base_commit_count" ]; then
+              echo 'could not resolve the full pull request range from the base history' >&2
               exit 1
             fi
+            range_parents="$(git rev-list --parents "$BASE_SHA..$HEAD_SHA")"
           done
           gitleaks git --log-opts="$BASE_SHA..$HEAD_SHA" \
             --redact=100 --no-banner --report-format=json \
