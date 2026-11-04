@@ -6211,6 +6211,7 @@ async function main(dependencies = {}) {
         });
         discoveryValue('__TEAGRAM_ACTIVE_GUEST_SIGN_UP__', true);
         discoveryValue('__TEAGRAM_ACTIVE_SERVER_HOST__', 'demo.teagram.io');
+        discoveryValue('__TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__', 'fixture-turnstile-site-key');
         window.__fixtureTurnstileActions = [];
         window.turnstile = {
           render(container, callbacks) {
