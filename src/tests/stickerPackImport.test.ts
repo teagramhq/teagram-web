@@ -1,7 +1,8 @@
-import {zipSync} from 'fflate';
-import {describe, expect, it} from 'vitest';
-import {readStickerPackZip, validateStickerPackFiles} from '@helpers/stickerPackImport';
-import {createStickerSetShareLink, parseStickerSetShareLink} from '@helpers/stickerSetLink';
+import {deflateSync, zipSync} from 'fflate';
+import {describe, expect, it, vi} from 'vitest';
+import {validateStickerPackFiles} from '@helpers/stickerPackImport';
+import {BoundedZipInflate, readStickerPackZipBytes} from '@helpers/stickerPackImportZip';
+import {createStickerSetShareLink, parseStickerSetShareLink, processInitialStickerSetShareLink} from '@helpers/stickerSetLink';
 
 const makeFile = (name: string, size: number) => new File([new Uint8Array(size)], name);
 
@@ -41,7 +42,7 @@ describe('sticker pack import files', () => {
 
   it('uses only an archive entry basename when creating an upload file', async() => {
     const archive = zipSync({'../animals/cat.webp': Uint8Array.from([1, 2, 3])});
-    const result = await readStickerPackZip(new File([archive], 'pack.zip'));
+    const result = readStickerPackZipBytes(archive);
 
     expect(result.error).toBeUndefined();
     expect(result.files.map((file) => file.name)).toEqual(['cat.webp']);
@@ -53,7 +54,7 @@ describe('sticker pack import files', () => {
       Array.from({length: 202}, (_, index) => [`${index}.webp`, Uint8Array.from([1])])
     );
     const archive = zipSync(entries, {level: 0});
-    const result = await readStickerPackZip(new File([archive], 'too-many.zip'));
+    const result = readStickerPackZipBytes(archive);
 
     expect(result.error).toBe('too_many_entries');
     expect(result.files).toHaveLength(0);
@@ -61,7 +62,40 @@ describe('sticker pack import files', () => {
 
   it('blocks an archive with an entry larger than the server limit', async() => {
     const archive = zipSync({'too-large.txt': new Uint8Array(512 * 1024 + 1)}, {level: 0});
-    const result = await readStickerPackZip(new File([archive], 'too-large.zip'));
+    const result = readStickerPackZipBytes(archive);
+
+    expect(result.error).toBe('entry_too_large');
+    expect(result.files).toHaveLength(0);
+  });
+
+  it('bounds each inflate output chunk and stops a compressed entry at the server limit', () => {
+    const compressed = deflateSync(new Uint8Array(4 * 1024 * 1024).fill(65), {level: 9});
+    let receivedBytes = 0;
+    let largestOutputChunk = 0;
+    const onLimitExceeded = vi.fn();
+    const inflater = new BoundedZipInflate(onLimitExceeded);
+    inflater.ondata = (error, data) => {
+      expect(error).toBeNull();
+      if(!data) return;
+      receivedBytes += data.byteLength;
+      largestOutputChunk = Math.max(largestOutputChunk, data.byteLength);
+    };
+
+    inflater.push(compressed, true);
+
+    expect(onLimitExceeded).toHaveBeenCalledTimes(1);
+    expect(receivedBytes).toBeLessThanOrEqual(512 * 1024);
+    expect(largestOutputChunk).toBeLessThan(256 * 1024);
+    expect(onLimitExceeded.mock.calls[0][0]).toBeLessThan(256 * 1024);
+  });
+
+  it('rejects a compressed oversized entry even when its ZIP size field is falsified', () => {
+    const archive = zipSync({'bomb.webp': new Uint8Array(4 * 1024 * 1024).fill(65)}, {level: 9});
+    const forgedArchive = archive.slice();
+    // ZIP local header: the uncompressed size is at byte 22. The compressed data and its length stay intact.
+    new DataView(forgedArchive.buffer, forgedArchive.byteOffset, forgedArchive.byteLength).setUint32(22, 0, true);
+
+    const result = readStickerPackZipBytes(forgedArchive);
 
     expect(result.error).toBe('entry_too_large');
     expect(result.files).toHaveLength(0);
@@ -85,23 +119,36 @@ describe('sticker set share links', () => {
     expect(parseStickerSetShareLink('https://teagram.test/addstickers/cats_a/extra', 'https://teagram.test/')).toBeUndefined();
     expect(parseStickerSetShareLink('https://teagram.test/addstickers/cats_a?start=1', 'https://teagram.test/')).toBeUndefined();
   });
+
+  it('opens a direct navigation only after the server config supplies its link prefix', async() => {
+    let resolveConfig: (config: {me_url_prefix: string}) => void;
+    const config = new Promise<{me_url_prefix: string}>((resolve) => resolveConfig = resolve);
+    const openSet = vi.fn();
+    const opening = processInitialStickerSetShareLink('https://teagram.test/addemoji/faces_2', config, openSet);
+
+    expect(openSet).not.toHaveBeenCalled();
+    resolveConfig({me_url_prefix: 'https://teagram.test/'});
+    await opening;
+
+    expect(openSet).toHaveBeenCalledExactlyOnceWith({shortName: 'faces_2', isEmoji: true});
+  });
 });
 
 describe('sticker pack zip streaming', () => {
-  it('returns files in archive order when entries inflate asynchronously', async() => {
+  it('returns files in archive order after bounded streaming inflation', () => {
     const entries = Object.fromEntries(
       Array.from({length: 6}, (_, index) => [`${index}.webp`, new Uint8Array(200 * 1024).fill(index)])
     );
     const archive = zipSync(entries, {level: 6});
-    const result = await readStickerPackZip(new File([archive], 'ordered.zip'));
+    const result = readStickerPackZipBytes(archive);
 
     expect(result.error).toBeUndefined();
     expect(result.files.map((file) => file.name)).toEqual(['0.webp', '1.webp', '2.webp', '3.webp', '4.webp', '5.webp']);
   });
 
-  it('reports a truncated archive instead of returning its partial entries', async() => {
+  it('reports a truncated archive instead of returning its partial entries', () => {
     const archive = zipSync({'a.webp': new Uint8Array(100 * 1024).fill(7), 'b.webp': new Uint8Array(100 * 1024).fill(9)}, {level: 6});
-    const result = await readStickerPackZip(new File([archive.slice(0, archive.length - 1000)], 'truncated.zip'));
+    const result = readStickerPackZipBytes(archive.slice(0, archive.length - 1000));
 
     expect(result.error).toBe('invalid_zip');
     expect(result.files).toHaveLength(0);

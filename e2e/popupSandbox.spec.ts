@@ -1,6 +1,7 @@
 import {mkdirSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {expect, Page, test} from '@playwright/test';
+import {zipSync} from 'fflate';
 
 /*
  * Opens every popup the sandbox knows about and asserts it actually renders.
@@ -168,4 +169,24 @@ test('imports a folder pack and opens its shareable sticker set', async({page}, 
   );
   await expect(stickerPopup.getByRole('button', {name: 'Copy Link'})).toBeVisible();
   await page.evaluate(() => window.popupSandbox.closePopups());
+});
+
+test('rejects a compressed oversized zip entry while reading it in the worker', async({page}, testInfo) => {
+  const archive = zipSync({'bomb.webp': new Uint8Array(4 * 1024 * 1024).fill(65)}, {level: 9});
+  const forgedArchive = archive.slice();
+  new DataView(forgedArchive.buffer, forgedArchive.byteOffset, forgedArchive.byteLength).setUint32(22, 0, true);
+  const zipPath = testInfo.outputPath('compressed-bomb.zip');
+  writeFileSync(zipPath, forgedArchive);
+
+  await page.goto('/?popups=1');
+  await page.waitForFunction(() => !!window.popupSandbox, null, {timeout: 30_000});
+  await page.evaluate(() => window.popupSandbox.ready());
+  expect(await openStory(page, 'stickerPackImport')).toBeNull();
+
+  const importPopup = page.locator('.popup.active').last();
+  await importPopup.locator('input[accept=".zip,application/zip"]').setInputFiles(zipPath);
+  await expect(importPopup.getByText('A file inside this ZIP is larger than 512 KB.', {exact: true})).toBeVisible();
+  await expect(importPopup.getByRole('button', {name: 'Import pack'})).toBeDisabled();
+  expect(await page.evaluate(() => window.popupSandbox.calls()
+    .filter((call) => call.manager === 'appStickersManager' && call.method === 'createStickerSet'))).toEqual([]);
 });

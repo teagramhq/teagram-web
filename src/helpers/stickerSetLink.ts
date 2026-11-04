@@ -67,3 +67,20 @@ export function parseStickerSetShareLink(value: string, prefix?: string): {short
 
   return {shortName: match[2], isEmoji: match[1] === 'addemoji'};
 }
+
+export async function processInitialStickerSetShareLink(
+  href: string,
+  configPromise: Promise<{me_url_prefix: string}>,
+  onStickerSet: (stickerSet: {shortName: string, isEmoji: boolean}) => void
+) {
+  let config: {me_url_prefix: string};
+  try {
+    config = await configPromise;
+  } catch(err) {
+    return;
+  }
+
+  setStickerSetLinkPrefix(config.me_url_prefix);
+  const stickerSet = parseStickerSetShareLink(href, config.me_url_prefix);
+  if(stickerSet) onStickerSet(stickerSet);
+}
