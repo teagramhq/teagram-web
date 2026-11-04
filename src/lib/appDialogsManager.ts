@@ -99,6 +99,7 @@ import {unwrap} from 'solid-js/store';
 import wrapMediaSpoiler from '@components/wrappers/mediaSpoiler';
 import type {MonoforumDialog} from '@lib/storages/monoforumDialogs';
 import {renderPendingSuggestion} from '@components/sidebarLeft/pendingSuggestion';
+import DemoGuestBanner from '@components/sidebarLeft/demoGuestBanner';
 import {renderNewAuthorization} from '@components/sidebarLeft/newAuthorization';
 import {useHasFolders} from '@stores/foldersSidebar';
 import {useAppState} from '@stores/appState';
@@ -763,7 +764,6 @@ export class AppDialogsManager {
   public onListLengthChange: () => Promise<void>;
   private allChatsIntlElement: I18n.IntlElement;
 
-  private emptyDialogsPlaceholderSubtitle: I18n.IntlElement;
   private updateContactsLengthPromise: Promise<number>;
 
   private filtersNavigationItem: NavigationItem;
@@ -821,6 +821,10 @@ export class AppDialogsManager {
     this.foldersOverlay = document.createElement('div');
     this.foldersOverlay.classList.add('chatlist-overlay');
     bottomPart.prepend(this.foldersOverlay);
+
+    const demoGuestContainer = document.createElement('div');
+    this.foldersOverlay.append(demoGuestContainer);
+    render(() => DemoGuestBanner(), demoGuestContainer);
 
     // Surface the overlay's live height to the parent so the chatlist below can leave matching
     // top padding — .folders-scrollable reads var(--chatlist-overlay-height) for its padding-top.
@@ -1563,13 +1567,14 @@ export class AppDialogsManager {
     header.classList.add(BASE_CLASS + '-header');
     _i18n(header, options.title);
 
-    const subtitle = document.createElement('div');
-    subtitle.classList.add(BASE_CLASS + '-subtitle');
-    if(options.subtitle) {
+    const subtitle = options.subtitle ? document.createElement('div') : undefined;
+    if(subtitle) {
+      subtitle.classList.add(BASE_CLASS + '-subtitle');
       _i18n(subtitle, options.subtitle, options.subtitleArgs);
     }
 
-    container.append(header, subtitle);
+    container.append(header);
+    if(subtitle) container.append(subtitle);
 
     return {container, header, subtitle};
   }
@@ -1608,10 +1613,6 @@ export class AppDialogsManager {
 
       const img = document.createElement('img');
       img.classList.add('empty-placeholder-dialogs-icon');
-
-      this.emptyDialogsPlaceholderSubtitle = new I18n.IntlElement({
-        element: placeholder.subtitle
-      });
 
       Promise.all([
         this.updateContactsLength(false),
@@ -1664,24 +1665,6 @@ export class AppDialogsManager {
 
   private updateContactsLength(updatePartClassName: boolean) {
     return this.updateContactsLengthPromise ??= this.managers.appUsersManager.getContacts().then((users) => {
-      const subtitle = this.emptyDialogsPlaceholderSubtitle;
-      if(subtitle) {
-        let key: LangPackKey, args: FormatterArguments;
-
-        if(users.length/*  && false */) {
-          key = 'ChatList.Main.EmptyPlaceholder.Subtitle';
-          args = [i18n('Contacts.Count', [users.length])];
-        } else {
-          key = 'ChatList.Main.EmptyPlaceholder.SubtitleNoContacts';
-          args = [];
-        }
-
-        subtitle.compareAndUpdate({
-          key,
-          args
-        });
-      }
-
       if(updatePartClassName) {
         const chatList = this.chatList;
         const part = chatList.parentElement as HTMLElement;
