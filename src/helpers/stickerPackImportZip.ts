@@ -1,42 +1,81 @@
-import {Inflate, Unzip} from 'fflate';
+import {FlateErrorCode, Inflate, Unzip} from 'fflate';
 import type {AsyncFlateStreamHandler, FlateError, UnzipDecoder} from 'fflate';
-import type {StickerPackRejectedFile} from '@helpers/stickerPackImport';
+import {getBasename, getStickerFileExtension, STICKER_FILE_LIMITS} from '@helpers/stickerPackCommon';
+import type {StickerPackRejectedFile} from '@helpers/stickerPackCommon';
+import {logger} from '@lib/logger';
 
 const MAX_ZIP_ENTRIES = 201;
-export const MAX_ZIP_ENTRY_SIZE = 512 * 1024;
+export const MAX_ZIP_ENTRY_SIZE = STICKER_FILE_LIMITS.webp.size;
 export const MAX_ZIP_TOTAL_SIZE = 110 * 1024 * 1024;
 const ZIP_ARCHIVE_CHUNK_SIZE = 64 * 1024;
 const ZIP_INFLATE_INPUT_SIZE = 128;
+const ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50;
+const FLATE_ERROR_CODES = new Set<number>(Object.values(FlateErrorCode));
 
-const STICKER_FILE_LIMITS = {
-  webp: {size: 512 * 1024, mimeType: 'image/webp'},
-  tgs: {size: 64 * 1024, mimeType: 'application/x-tgsticker'},
-  webm: {size: 256 * 1024, mimeType: 'video/webm'}
-} as const;
-
-type StickerFileExtension = keyof typeof STICKER_FILE_LIMITS;
-type StickerPackZipError = 'invalid_zip' | 'too_many_entries' | 'archive_too_large' | 'entry_too_large';
+type StickerPackZipFailureCode =
+  | 'invalid_zip'
+  | 'too_many_entries'
+  | 'archive_too_large'
+  | 'entry_too_large'
+  | 'worker_failed'
+  | 'internal_error';
+export type StickerPackZipError = StickerPackZipFailureCode;
 type StickerPackZipBytesFile = {name: string, type: string, chunks: Uint8Array[]};
-export type StickerPackZipBytesResult = {
-  files: StickerPackZipBytesFile[],
-  rejected: StickerPackRejectedFile[],
-  error?: StickerPackZipError
-};
+export type StickerPackZipBytesResult =
+  | {ok: true, files: StickerPackZipBytesFile[], rejected: StickerPackRejectedFile[], error?: undefined}
+  | {ok: false, files: [], rejected: [], error: StickerPackZipError};
+export type StickerPackZipWorkerFile = {name: string, type: string, chunks: ArrayBuffer[]};
+export type StickerPackZipWorkerResult =
+  | {ok: true, files: StickerPackZipWorkerFile[], rejected: StickerPackRejectedFile[], error?: undefined}
+  | {ok: false, files: [], rejected: [], error: StickerPackZipError};
 
-function getFileExtension(name: string): StickerFileExtension | undefined {
-  const match = /\.([^.]+)$/.exec(name);
-  const extension = match?.[1].toLowerCase();
-  return extension && extension in STICKER_FILE_LIMITS ? extension as StickerFileExtension : undefined;
+const zipLogger = logger('StickerPackZip');
+
+function isFlateError(error: unknown): error is FlateError {
+  if(!(error instanceof Error)) return false;
+  const code = (error as FlateError).code;
+  return typeof code === 'number' && FLATE_ERROR_CODES.has(code);
 }
 
-function getBasename(name: string) {
-  return name.replace(/\\/g, '/').split('/').pop() || '';
+function getZipEntryCount(bytes: Uint8Array) {
+  const searchStart = Math.max(0, bytes.byteLength - 22 - 0xffff);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+  for(let offset = bytes.byteLength - 22; offset >= searchStart; offset--) {
+    if(view.getUint32(offset, true) !== ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE) continue;
+
+    const commentLength = view.getUint16(offset + 20, true);
+    if(offset + 22 + commentLength !== bytes.byteLength) continue;
+
+    const diskNumber = view.getUint16(offset + 4, true);
+    const centralDirectoryDisk = view.getUint16(offset + 6, true);
+    const entriesOnDisk = view.getUint16(offset + 8, true);
+    const totalEntries = view.getUint16(offset + 10, true);
+    const centralDirectorySize = view.getUint32(offset + 12, true);
+    const centralDirectoryOffset = view.getUint32(offset + 16, true);
+
+    if(
+      diskNumber !== 0 ||
+      centralDirectoryDisk !== 0 ||
+      entriesOnDisk !== totalEntries ||
+      totalEntries === 0xffff ||
+      centralDirectoryOffset + centralDirectorySize > offset
+    ) {
+      return undefined;
+    }
+
+    return totalEntries;
+  }
+
+  return undefined;
 }
+
+const zipErrorResult = (error: StickerPackZipError): StickerPackZipBytesResult => ({ok: false, files: [], rejected: [], error});
 
 export class BoundedZipInflate implements UnzipDecoder {
   static compression = 8;
   ondata!: AsyncFlateStreamHandler;
-  inputDone = false;
+  #inputDone = false;
   private outputSize = 0;
   private stopped = false;
   private readonly inflater: Inflate;
@@ -55,9 +94,13 @@ export class BoundedZipInflate implements UnzipDecoder {
     });
   }
 
+  get inputDone() {
+    return this.#inputDone;
+  }
+
   push(chunk: Uint8Array, final: boolean) {
     if(this.stopped) return;
-    if(final) this.inputDone = true;
+    if(final) this.#inputDone = true;
 
     if(!chunk.length) {
       if(final) this.pushInflater(chunk, true);
@@ -78,15 +121,20 @@ export class BoundedZipInflate implements UnzipDecoder {
     try {
       this.inflater.push(chunk, final);
     } catch(err) {
+      if(!isFlateError(err)) throw err;
+      zipLogger.error('Invalid sticker ZIP compressed entry', err);
       this.stopped = true;
-      const flateError = err instanceof Error && 'code' in err ? err as FlateError : Object.assign(new Error('Invalid ZIP data'), {code: 13});
-      this.ondata(flateError, new Uint8Array(), final);
+      this.ondata(err, new Uint8Array(), final);
     }
   }
 }
 
 export function readStickerPackZipBytes(bytes: Uint8Array): StickerPackZipBytesResult {
-  if(bytes.byteLength > MAX_ZIP_TOTAL_SIZE) return {files: [], rejected: [], error: 'archive_too_large'};
+  if(bytes.byteLength > MAX_ZIP_TOTAL_SIZE) return zipErrorResult('archive_too_large');
+  if(!bytes.length) return zipErrorResult('invalid_zip');
+
+  const expectedEntryCount = getZipEntryCount(bytes);
+  if(expectedEntryCount === undefined) return zipErrorResult('invalid_zip');
 
   const files: {order: number, file: StickerPackZipBytesFile}[] = [];
   const rejected: StickerPackRejectedFile[] = [];
@@ -123,7 +171,7 @@ export function readStickerPackZipBytes(bytes: Uint8Array): StickerPackZipBytesR
     const normalizedName = entry.name.replace(/\\/g, '/');
     const isDirectory = normalizedName.endsWith('/');
     const name = getBasename(normalizedName);
-    const extension = getFileExtension(name);
+    const extension = getStickerFileExtension(name);
     const originalSize = entry.originalSize;
 
     if(originalSize !== undefined) {
@@ -149,6 +197,7 @@ export function readStickerPackZipBytes(bytes: Uint8Array): StickerPackZipBytesR
     entry.ondata = (err, data, final) => {
       if(finished || error) return;
       if(err) {
+        zipLogger.error('Could not inflate a sticker ZIP entry', err);
         fail('invalid_zip');
         finished = true;
         release();
@@ -196,16 +245,21 @@ export function readStickerPackZipBytes(bytes: Uint8Array): StickerPackZipBytesR
   unzip.register(ZipInflate);
 
   try {
-    if(!bytes.length) return {files: [], rejected: [], error: 'invalid_zip'};
     for(let offset = 0; offset < bytes.length && !error; offset += ZIP_ARCHIVE_CHUNK_SIZE) {
       const end = Math.min(offset + ZIP_ARCHIVE_CHUNK_SIZE, bytes.length);
       unzip.push(bytes.subarray(offset, end), end === bytes.length);
     }
   } catch(err) {
+    if(!isFlateError(err)) {
+      zipLogger.error('Unexpected sticker ZIP parser failure', err);
+      throw err;
+    }
+    zipLogger.error('Invalid sticker ZIP archive', err);
     fail('invalid_zip');
   }
 
   if(!error && decoders.some((decoder) => !decoder.inputDone)) fail('invalid_zip');
-  if(error) return {files: [], rejected: [], error};
-  return {files: files.sort((a, b) => a.order - b.order).map(({file}) => file), rejected};
+  if(!error && entryCount !== expectedEntryCount) fail('invalid_zip');
+  if(error) return zipErrorResult(error);
+  return {ok: true, files: files.sort((a, b) => a.order - b.order).map(({file}) => file), rejected};
 }

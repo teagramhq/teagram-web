@@ -578,6 +578,11 @@ test('private artifact boots from a direct sticker set URL', async({page}, testI
   expect(brokenScripts).toEqual([]);
   await expect(page.locator('#auth-flow-root')).toBeAttached({timeout: 30_000});
   expect(new URL(page.url()).pathname).toBe('/addstickers/cats_a');
+  const fragmentTargetPaths = await page.evaluate(() => [
+    new URL('#message-tail', document.baseURI).pathname,
+    new URL('#star-sparkle', document.baseURI).pathname
+  ]);
+  expect(fragmentTargetPaths).toEqual(['/addstickers/cats_a', '/addstickers/cats_a']);
   expect(assetsUnderSharePath).toEqual([]);
   expect(pageErrors).toEqual([]);
 });

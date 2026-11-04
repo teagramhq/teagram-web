@@ -21,6 +21,7 @@ import emoticonsDropdown from '@components/emoticonsDropdown';
 import ButtonMenuToggle from '@components/buttonMenuToggle';
 import {copyTextToClipboard} from '@helpers/clipboard';
 import {createStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
+import {logger} from '@lib/logger';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
 import {onMediaCaptionClick} from '@components/mediaViewer';
 import DEBUG from '@config/debug';
@@ -37,6 +38,7 @@ import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 
 const ANIMATION_GROUP: AnimationItemGroup = 'STICKERS-POPUP';
 export const STICKERS_POPUP_KIND = Symbol('stickers-popup');
+const stickersPopupLogger = logger('StickersPopup');
 
 const TEST_LOADING_DELAY = 0;
 
@@ -193,10 +195,12 @@ export default function showStickersPopup(
 
       try {
         const config = await managers.apiManager.getConfig();
-        setStickerSetLinkPrefix(config.me_url_prefix);
+        if(!setStickerSetLinkPrefix(config.me_url_prefix)) throw new Error('Invalid sticker set link prefix');
         setShareLinks(rawSets.map((set) => createStickerSetShareLink(config.me_url_prefix, set.set.short_name, !!isEmojis)));
       } catch(err) {
+        stickersPopupLogger.error('Could not create sticker set share links', err);
         setShareLinks([]);
+        toastNew({langPackKey: 'Teagram.Import.ShareLinkFailed'});
       }
 
       attachClickEvent(scrollableEl, onStickersClick, {listenerSetter});
@@ -287,8 +291,10 @@ export default function showStickersPopup(
       const buttons: ButtonMenuItemOptionsVerifiable[] = [{
         icon: 'copy',
         text: 'CopyLink',
+        verify: () => shareLinks().length > 0,
         onClick: () => {
-          copyTextToClipboard(shareLinks().join('\n'));
+          const links = shareLinks();
+          if(links.length) copyTextToClipboard(links.join('\n'));
         }
       }];
 

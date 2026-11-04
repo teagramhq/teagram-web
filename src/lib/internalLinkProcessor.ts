@@ -38,6 +38,7 @@ import {getMiddleware} from '@helpers/middleware';
 import anchorCallback from '@helpers/dom/anchorCallback';
 import PopupStarGiftInfo from '@components/popups/starGiftInfo';
 import noop from '@helpers/noop';
+import {logger} from '@lib/logger';
 import appSidebarRight from '@components/sidebarRight';
 import pause from '@helpers/schedulers/pause';
 import namedPromises from '@helpers/namedPromises';
@@ -70,6 +71,8 @@ const showUnsupportedLinkToast = () => {
   toastNew({langPackKey: 'Link.NotSupported'});
 };
 
+const stickerSetLinkLogger = logger('StickerSetLink');
+
 export class InternalLinkProcessor {
   protected managers: AppManagers;
   private processingAddAiStyleSlugs: Set<string> = new Set();
@@ -97,6 +100,9 @@ export class InternalLinkProcessor {
         _: stickerSet.isEmoji ? INTERNAL_LINK_TYPE.EMOJI_SET : INTERNAL_LINK_TYPE.STICKER_SET,
         set: stickerSet.shortName
       });
+    }).catch((err) => {
+      stickerSetLinkLogger.error('Could not process the initial sticker set link', err);
+      toastNew({langPackKey: 'Teagram.Import.ShareLinkFailed'});
     });
 
     addAnchorListener<{}>({

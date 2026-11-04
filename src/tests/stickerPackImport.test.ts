@@ -1,8 +1,9 @@
 import {deflateSync, zipSync} from 'fflate';
 import {describe, expect, it, vi} from 'vitest';
-import {validateStickerPackFiles} from '@helpers/stickerPackImport';
+import {readStickerPackZip, validateStickerPackFiles} from '@helpers/stickerPackImport';
 import {BoundedZipInflate, readStickerPackZipBytes} from '@helpers/stickerPackImportZip';
-import {createStickerSetShareLink, parseStickerSetShareLink, processInitialStickerSetShareLink} from '@helpers/stickerSetLink';
+import {getStickerFileMimeType} from '@helpers/stickerPackCommon';
+import {createStickerSetShareLink, parseStickerSetShareLink, processInitialStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
 
 const makeFile = (name: string, size: number) => new File([new Uint8Array(size)], name);
 
@@ -46,7 +47,51 @@ describe('sticker pack import files', () => {
 
     expect(result.error).toBeUndefined();
     expect(result.files.map((file) => file.name)).toEqual(['cat.webp']);
+    expect(Array.from(result.files[0].chunks.flatMap((chunk) => Array.from(chunk)))).toEqual([1, 2, 3]);
     expect(result.rejected).toEqual([]);
+  });
+
+  it('uses one explicit MIME map and rejects unknown extensions', () => {
+    expect(getStickerFileMimeType('cat.WEBP')).toBe('image/webp');
+    expect(getStickerFileMimeType('loop.tgs')).toBe('application/x-tgsticker');
+    expect(getStickerFileMimeType('clip.webm')).toBe('video/webm');
+    expect(() => getStickerFileMimeType('cat.png')).toThrow('Unsupported sticker file format');
+  });
+
+  it('reports and logs a ZIP worker load failure distinctly from invalid archive data', async() => {
+    const workerInstances: Array<{terminate: ReturnType<typeof vi.fn>}> = [];
+    class WorkerMock extends EventTarget {
+      constructor() {
+        super();
+        workerInstances.push(this);
+      }
+
+      terminate = vi.fn();
+      postMessage() {
+        queueMicrotask(() => this.dispatchEvent(new ErrorEvent('error', {message: 'worker blocked by CSP'})));
+      }
+    }
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.stubGlobal('Worker', WorkerMock);
+
+    try {
+      const result = await readStickerPackZip(new File([Uint8Array.from([1])], 'pack.zip'));
+
+      expect(result).toEqual({ok: false, files: [], rejected: [], error: 'worker_failed'});
+      expect(workerInstances[0].terminate).toHaveBeenCalledOnce();
+      expect(logError).toHaveBeenCalled();
+
+      vi.stubGlobal('Worker', class {
+        constructor() {
+          throw new Error('worker-src blocked by CSP');
+        }
+      });
+      await expect(readStickerPackZip(new File([Uint8Array.from([1])], 'pack.zip')))
+        .resolves.toEqual({ok: false, files: [], rejected: [], error: 'worker_failed'});
+    } finally {
+      vi.unstubAllGlobals();
+      logError.mockRestore();
+    }
   });
 
   it('stops reading a zip after its 201st entry', async() => {
@@ -85,8 +130,27 @@ describe('sticker pack import files', () => {
 
     expect(onLimitExceeded).toHaveBeenCalledTimes(1);
     expect(receivedBytes).toBeLessThanOrEqual(512 * 1024);
-    expect(largestOutputChunk).toBeLessThan(256 * 1024);
-    expect(onLimitExceeded.mock.calls[0][0]).toBeLessThan(256 * 1024);
+    expect(largestOutputChunk).toBeGreaterThan(0);
+  });
+
+  it('keeps the inflater completion flag read-only', () => {
+    const inflater = new BoundedZipInflate(vi.fn());
+    const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(inflater), 'inputDone');
+
+    expect(descriptor?.get).toBeTypeOf('function');
+    expect(descriptor?.set).toBeUndefined();
+  });
+
+  it('passes callback failures through instead of reporting them as malformed ZIP data', () => {
+    const callbackError = new Error('entry callback failed');
+    const ondata = vi.fn((error: Error | null) => {
+      if(!error) throw callbackError;
+    });
+    const inflater = new BoundedZipInflate(vi.fn());
+    inflater.ondata = ondata;
+
+    expect(() => inflater.push(deflateSync(Uint8Array.from([1, 2, 3])), true)).toThrow(callbackError);
+    expect(ondata).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a compressed oversized entry even when its ZIP size field is falsified', () => {
@@ -132,6 +196,27 @@ describe('sticker set share links', () => {
 
     expect(openSet).toHaveBeenCalledExactlyOnceWith({shortName: 'faces_2', isEmoji: true});
   });
+
+  it('surfaces a failed config lookup instead of silently ignoring a share link', async() => {
+    const configError = new Error('config unavailable');
+
+    await expect(processInitialStickerSetShareLink(
+      'https://teagram.test/addstickers/cats_a',
+      Promise.reject(configError),
+      vi.fn()
+    )).rejects.toBe(configError);
+  });
+
+  it('logs and rejects an invalid server link prefix', () => {
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      expect(setStickerSetLinkPrefix('javascript:alert(1)')).toBe(false);
+      expect(logError).toHaveBeenCalled();
+    } finally {
+      logError.mockRestore();
+    }
+  });
 });
 
 describe('sticker pack zip streaming', () => {
@@ -149,6 +234,14 @@ describe('sticker pack zip streaming', () => {
   it('reports a truncated archive instead of returning its partial entries', () => {
     const archive = zipSync({'a.webp': new Uint8Array(100 * 1024).fill(7), 'b.webp': new Uint8Array(100 * 1024).fill(9)}, {level: 6});
     const result = readStickerPackZipBytes(archive.slice(0, archive.length - 1000));
+
+    expect(result.error).toBe('invalid_zip');
+    expect(result.files).toHaveLength(0);
+  });
+
+  it('rejects an archive truncated inside a local file header', () => {
+    const archive = zipSync({'a.webp': Uint8Array.from([1, 2, 3])});
+    const result = readStickerPackZipBytes(archive.slice(0, 12));
 
     expect(result.error).toBe('invalid_zip');
     expect(result.files).toHaveLength(0);

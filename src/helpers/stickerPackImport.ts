@@ -1,41 +1,25 @@
-import {MAX_ZIP_TOTAL_SIZE, StickerPackZipBytesResult} from '@helpers/stickerPackImportZip';
+import {MAX_ZIP_TOTAL_SIZE} from '@helpers/stickerPackImportZip';
+import type {StickerPackZipError, StickerPackZipWorkerResult} from '@helpers/stickerPackImportZip';
+import {getBasename, getStickerFileExtension, getStickerPackMaxCount, STICKER_FILE_LIMITS} from '@helpers/stickerPackCommon';
+import type {StickerPackRejectedFile, StickerPackType, ValidatedStickerPackFiles} from '@helpers/stickerPackCommon';
+import {logger} from '@lib/logger';
 
-export type StickerPackType = 'stickers' | 'emoji';
-export type StickerPackRejectionReason = 'too_large' | 'too_many' | 'unsupported_format';
-export type StickerPackRejectedFile = {name: string, reason: StickerPackRejectionReason};
-export type StickerPackFilesResult = {files: File[], rejected: StickerPackRejectedFile[]};
-export type StickerPackZipResult = Omit<StickerPackZipBytesResult, 'files'> & {files: File[]};
+export type {StickerPackRejectedFile, StickerPackRejectionReason, StickerPackType, ValidatedStickerPackFiles} from '@helpers/stickerPackCommon';
+export type StickerPackFilesResult = {files: ValidatedStickerPackFiles, rejected: StickerPackRejectedFile[]};
+export type StickerPackZipResult =
+  | {ok: true, files: File[], rejected: StickerPackRejectedFile[], error?: undefined}
+  | {ok: false, files: [], rejected: [], error: StickerPackZipError};
 
-const STICKER_FILE_LIMITS = {
-  webp: {size: 512 * 1024, mimeType: 'image/webp'},
-  tgs: {size: 64 * 1024, mimeType: 'application/x-tgsticker'},
-  webm: {size: 256 * 1024, mimeType: 'video/webm'}
-} as const;
-
-type StickerFileExtension = keyof typeof STICKER_FILE_LIMITS;
-
-function getFileExtension(name: string): StickerFileExtension | undefined {
-  const match = /\.([^.]+)$/.exec(name);
-  const extension = match?.[1].toLowerCase();
-  return extension && extension in STICKER_FILE_LIMITS ? extension as StickerFileExtension : undefined;
-}
-
-function getBasename(name: string) {
-  return name.replace(/\\/g, '/').split('/').pop() || '';
-}
-
-function getMaxCount(type: StickerPackType) {
-  return type === 'emoji' ? 200 : 120;
-}
+const importLogger = logger('StickerPackImport');
 
 export function validateStickerPackFiles(files: File[], type: StickerPackType): StickerPackFilesResult {
   const accepted: File[] = [];
   const rejected: StickerPackRejectedFile[] = [];
-  const maxCount = getMaxCount(type);
+  const maxCount = getStickerPackMaxCount(type);
 
   for(const file of files) {
     const name = getBasename(file.name);
-    const extension = getFileExtension(name);
+    const extension = getStickerFileExtension(name);
     if(!extension) {
       rejected.push({name, reason: 'unsupported_format'});
       continue;
@@ -54,38 +38,68 @@ export function validateStickerPackFiles(files: File[], type: StickerPackType): 
     accepted.push(file);
   }
 
-  return {files: accepted, rejected};
+  return {files: accepted as ValidatedStickerPackFiles, rejected};
 }
 
-type StickerPackZipWorkerFile = {name: string, type: string, chunks: ArrayBuffer[]};
-type StickerPackZipWorkerResult = Omit<StickerPackZipBytesResult, 'files'> & {files: StickerPackZipWorkerFile[]};
+const zipErrorResult = (error: StickerPackZipError): StickerPackZipResult => ({ok: false, files: [], rejected: [], error});
 
 export async function readStickerPackZip(archive: File): Promise<StickerPackZipResult> {
-  if(archive.size > MAX_ZIP_TOTAL_SIZE) {
-    return {files: [], rejected: [], error: 'archive_too_large'};
-  }
+  if(archive.size > MAX_ZIP_TOTAL_SIZE) return zipErrorResult('archive_too_large');
 
   const bytes = await archive.arrayBuffer();
   return new Promise((resolve) => {
-    const worker = new Worker(new URL('./stickerPackImportZip.worker.ts', import.meta.url), {type: 'module'});
+    let worker: Worker;
+    try {
+      worker = new Worker(new URL('./stickerPackImportZip.worker.ts', import.meta.url), {type: 'module'});
+    } catch(err) {
+      importLogger.error('Could not start the sticker pack ZIP worker', err);
+      resolve(zipErrorResult('worker_failed'));
+      return;
+    }
+
     let settled = false;
+    const settleError = (error: StickerPackZipError) => {
+      if(settled) return;
+      settled = true;
+      worker.terminate();
+      resolve(zipErrorResult(error));
+    };
     const settle = (result: StickerPackZipWorkerResult) => {
       if(settled) return;
       settled = true;
       worker.terminate();
+      if(result.ok === false) {
+        resolve(zipErrorResult(result.error));
+        return;
+      }
+
       try {
         resolve({
           ...result,
           files: result.files.map(({name, type, chunks}) => new File(chunks, name, {type}))
         });
       } catch(err) {
-        resolve({files: [], rejected: [], error: 'invalid_zip'});
+        importLogger.error('Could not restore sticker files from ZIP worker output', err);
+        resolve(zipErrorResult('internal_error'));
       }
     };
 
     worker.addEventListener('message', (event: MessageEvent<StickerPackZipWorkerResult>) => settle(event.data), {once: true});
-    worker.addEventListener('error', () => settle({files: [], rejected: [], error: 'invalid_zip'}), {once: true});
-    worker.addEventListener('messageerror', () => settle({files: [], rejected: [], error: 'invalid_zip'}), {once: true});
-    worker.postMessage(bytes, [bytes]);
+    worker.addEventListener('error', (event) => {
+      const errorEvent = event as ErrorEvent;
+      importLogger.error('Sticker pack ZIP worker failed to load or run', errorEvent.message, errorEvent.error);
+      settleError('worker_failed');
+    }, {once: true});
+    worker.addEventListener('messageerror', (event) => {
+      importLogger.error('Could not read the sticker pack ZIP worker response', event);
+      settleError('internal_error');
+    }, {once: true});
+
+    try {
+      worker.postMessage(bytes, [bytes]);
+    } catch(err) {
+      importLogger.error('Could not send the sticker pack ZIP to its worker', err);
+      settleError('worker_failed');
+    }
   });
 }

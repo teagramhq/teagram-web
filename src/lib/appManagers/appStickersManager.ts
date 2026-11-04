@@ -23,6 +23,8 @@ import StickerType from '@config/stickerType';
 import {ReferenceContext} from '@lib/storages/references';
 import {STICKERS_LOCAL_IDS, STICKERS_LOCAL_IDS_SET, STICKER_LOCAL_SET_ID, MyMessagesStickerSet, MyStickerSetInput} from '@lib/appManagers/utils/stickers/constants';
 import {getStickerSetInputByDice, getStickerSetInputById, getStickerSetInputByLocalId, getStickerSetInputByShortName, getStickerSetInputByStickerSet} from '@lib/appManagers/utils/stickers/getStickerSetInput';
+import {getStickerFileMimeType} from '@helpers/stickerPackCommon';
+import type {ValidatedStickerPackFiles} from '@helpers/stickerPackCommon';
 
 const CACHE_TIME = 3600e3;
 
@@ -679,7 +681,7 @@ export class AppStickersManager extends AppManager {
   }
 
   public async createStickerSet(options: {
-    files: File[],
+    files: ValidatedStickerPackFiles,
     title: string,
     shortName: string,
     isEmoji: boolean,
@@ -689,8 +691,7 @@ export class AppStickersManager extends AppManager {
     const peer = this.appPeersManager.getInputPeerSelf();
 
     for(const file of options.files) {
-      const extension = file.name.split('.').pop()?.toLowerCase();
-      const mimeType = extension === 'webp' ? 'image/webp' : extension === 'tgs' ? 'application/x-tgsticker' : 'video/webm';
+      const mimeType = getStickerFileMimeType(file.name);
       const uploadedFile = await this.apiFileManager.upload({file, fileName: file.name});
       const media: InputMedia.inputMediaUploadedDocument = {
         _: 'inputMediaUploadedDocument',

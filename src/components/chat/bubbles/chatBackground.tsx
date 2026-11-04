@@ -189,7 +189,7 @@ function getWallPaperUrl(
 
   // Built-in default pattern is bundled — used on auth screens before managers exist.
   if(slug === DEFAULT_BACKGROUND_SLUG) {
-    return {urlOrPromise: 'assets/img/pattern.svg', isColorOnly};
+    return {urlOrPromise: '/assets/img/pattern.svg', isColorOnly};
   }
 
   const settings = wallPaper.settings;

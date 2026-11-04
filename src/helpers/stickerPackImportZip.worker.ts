@@ -1,8 +1,16 @@
 import {readStickerPackZipBytes} from '@helpers/stickerPackImportZip';
+import {logger} from '@lib/logger';
+
+const zipWorkerLogger = logger('StickerPackImportZipWorker');
 
 self.addEventListener('message', (event: MessageEvent<ArrayBuffer>) => {
   try {
     const result = readStickerPackZipBytes(new Uint8Array(event.data));
+    if(!result.ok) {
+      self.postMessage(result);
+      return;
+    }
+
     const files = result.files.map(({name, type, chunks}) => ({
       name,
       type,
@@ -13,6 +21,7 @@ self.addEventListener('message', (event: MessageEvent<ArrayBuffer>) => {
     const transferables = files.flatMap(({chunks}) => chunks);
     self.postMessage({...result, files}, transferables);
   } catch(err) {
-    self.postMessage({files: [], rejected: [], error: 'invalid_zip'});
+    zipWorkerLogger.error('Unexpected sticker pack ZIP worker failure', err);
+    self.postMessage({ok: false, files: [], rejected: [], error: 'internal_error'});
   }
 });

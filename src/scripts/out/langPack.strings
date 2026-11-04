@@ -3768,8 +3768,12 @@
 "Teagram.Import.TryAgain" = "Try again";
 "Teagram.Import.SuggestFailed" = "Couldn’t suggest a short name. Try again.";
 "Teagram.Import.ShortNameInvalid" = "Use 1–64 letters, numbers, or underscores.";
+"Teagram.Import.ShortNameTaken" = "This short name is already taken.";
 "Teagram.Import.CheckingName" = "Checking short name…";
 "Teagram.Import.NameCheckFailed" = "Couldn’t check this short name.";
+"Teagram.Import.ShareLinkFailed" = "Couldn’t load the sticker set link. Check your connection and try again.";
+"Teagram.Import.ZipWorkerFailed" = "Couldn’t start the ZIP reader. Try again.";
+"Teagram.Import.ZipReadFailed" = "Couldn’t read this ZIP archive. Try again.";
 "Teagram.Import.Failed" = "Import failed";
 "Teagram.Import.Import" = "Import pack";
 "Teagram.Import.Importing" = "Importing…";

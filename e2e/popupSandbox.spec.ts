@@ -1,6 +1,6 @@
 import {mkdirSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {expect, Page, test} from '@playwright/test';
+import {expect, Page, test, type TestInfo} from '@playwright/test';
 import {zipSync} from 'fflate';
 
 /*
@@ -72,6 +72,20 @@ async function openStory(page: Page, id: string): Promise<string> {
   }
 }
 
+async function openSandboxStory(page: Page, id: string) {
+  await page.goto('/?popups=1');
+  await page.waitForFunction(() => !!window.popupSandbox, null, {timeout: 30_000});
+  await page.evaluate(() => window.popupSandbox.ready());
+  expect(await openStory(page, id)).toBeNull();
+  return page.locator('.popup.active').last();
+}
+
+async function capturePopupScreenshot(page: Page, testInfo: TestInfo, name: string) {
+  const path = testInfo.outputPath(`${name}.png`);
+  await page.screenshot({path});
+  await testInfo.attach(name, {path, contentType: 'image/png'});
+}
+
 test('every popup story opens and becomes visible', async({page}) => {
   // One test walks the whole registry, so it needs far more than the config's per-test default.
   test.setTimeout(5 * 60_000);
@@ -137,12 +151,7 @@ test('imports a folder pack and opens its shareable sticker set', async({page}, 
   mkdirSync(folder, {recursive: true});
   writeFileSync(join(folder, 'cat.webp'), Buffer.from([1, 2, 3]));
 
-  await page.goto('/?popups=1');
-  await page.waitForFunction(() => !!window.popupSandbox, null, {timeout: 30_000});
-  await page.evaluate(() => window.popupSandbox.ready());
-  expect(await openStory(page, 'stickerPackImport')).toBeNull();
-
-  const importPopup = page.locator('.popup.active').last();
+  const importPopup = await openSandboxStory(page, 'stickerPackImport');
   await expect(importPopup.getByText('Import a sticker pack', {exact: true})).toBeVisible();
   await importPopup.locator('input[name="sticker-pack-title"]').fill('Imported Pack');
   await importPopup.locator('input[name="sticker-pack-short-name"]').fill('sandbox_imported');
@@ -154,6 +163,7 @@ test('imports a folder pack and opens its shareable sticker set', async({page}, 
 
   await expect(importButton).toBeDisabled();
   expect(await createStickerSetCalls()).toEqual([]);
+  await capturePopupScreenshot(page, testInfo, 'sticker-import-consent-disabled');
 
   // Click the row's text as a user would; the checkbox itself is covered by its styled box.
   await importPopup.getByText('I have the right to share this pack.', {exact: true}).click();
@@ -169,6 +179,96 @@ test('imports a folder pack and opens its shareable sticker set', async({page}, 
   );
   await expect(stickerPopup.getByRole('button', {name: 'Copy Link'})).toBeVisible();
   await page.evaluate(() => window.popupSandbox.closePopups());
+});
+
+test('imports a valid ZIP through the worker and sends its bytes as a ZIP source', async({page}, testInfo) => {
+  const zipPath = testInfo.outputPath('pack.zip');
+  writeFileSync(zipPath, zipSync({'cat.webp': Uint8Array.from([5, 6, 7])}));
+
+  const importPopup = await openSandboxStory(page, 'stickerPackImport');
+  await importPopup.locator('input[name="sticker-pack-title"]').fill('Imported Pack');
+  await importPopup.locator('input[name="sticker-pack-short-name"]').fill('sandbox_imported');
+  await expect(importPopup.getByText('Link is available', {exact: true})).toBeVisible();
+  await importPopup.locator('input[accept=".zip,application/zip"]').setInputFiles(zipPath);
+  await expect(importPopup.getByText('1 files selected from ZIP archive', {exact: true})).toBeVisible();
+  await capturePopupScreenshot(page, testInfo, 'sticker-import-zip-selected');
+  await importPopup.getByText('I have the right to share this pack.', {exact: true}).click();
+  await importPopup.getByRole('button', {name: 'Import pack'}).click();
+
+  const importCall = () => page.evaluate(async() => {
+    const call = window.popupSandbox.calls().find((entry) => entry.manager === 'appStickersManager' && entry.method === 'createStickerSet');
+    if(!call) return undefined;
+    const options = call.args[0] as {files: File[], software: string};
+    return {
+      software: options.software,
+      names: options.files.map((file) => file.name),
+      bytes: await Promise.all(options.files.map(async(file) => Array.from(new Uint8Array(await file.arrayBuffer()))))
+    };
+  });
+  await expect.poll(importCall).toEqual({software: 'zip', names: ['cat.webp'], bytes: [[5, 6, 7]]});
+});
+
+test('does not show the import controls when sticker import is disabled', async({page}, testInfo) => {
+  const importPopup = await openSandboxStory(page, 'stickerPackImportOff');
+
+  await expect(importPopup.getByText('Sticker pack import is turned off on this server.', {exact: true})).toBeVisible();
+  await expect(importPopup.getByRole('button', {name: 'Import pack'})).toBeDisabled();
+  expect(await page.evaluate(() => window.popupSandbox.calls()
+    .filter((call) => call.manager === 'appStickersManager' && call.method === 'createStickerSet'))).toEqual([]);
+  await capturePopupScreenshot(page, testInfo, 'sticker-import-disabled-mode');
+});
+
+test('shows the import configuration failure instead of enabling the flow', async({page}, testInfo) => {
+  const importPopup = await openSandboxStory(page, 'stickerPackImportConfigFailed');
+
+  await expect(importPopup.getByText('Couldn’t check whether sticker pack import is available.', {exact: true})).toBeVisible();
+  await expect(importPopup.getByRole('button', {name: 'Try again'})).toBeVisible();
+  await expect(importPopup.getByRole('button', {name: 'Import pack'})).toBeDisabled();
+  await capturePopupScreenshot(page, testInfo, 'sticker-import-config-error');
+});
+
+test('uses a sticker set short name error and only displays API error codes', async({page}, testInfo) => {
+  const importPopup = await openSandboxStory(page, 'stickerPackImportErrors');
+  const folder = testInfo.outputPath('api-error-pack');
+  mkdirSync(folder, {recursive: true});
+  writeFileSync(join(folder, 'cat.webp'), Buffer.from([1, 2, 3]));
+
+  await importPopup.locator('input[name="sticker-pack-title"]').fill('Imported Pack');
+  await importPopup.locator('input[name="sticker-pack-short-name"]').fill('taken_name');
+  await expect(importPopup.getByText('This short name is already taken.', {exact: true})).toBeVisible();
+  await importPopup.locator('input[name="sticker-pack-short-name"]').fill('sandbox_imported');
+  await expect(importPopup.getByText('Link is available', {exact: true})).toBeVisible();
+  await importPopup.locator('input[webkitdirectory]').setInputFiles(folder);
+  await importPopup.getByText('I have the right to share this pack.', {exact: true}).click();
+  await importPopup.getByRole('button', {name: 'Import pack'}).click();
+
+  await expect(importPopup.getByText('Import failed: sticker set invalid', {exact: true})).toBeVisible();
+  await capturePopupScreenshot(page, testInfo, 'sticker-import-api-error');
+  await importPopup.getByRole('button', {name: 'Import pack'}).click();
+  await expect(importPopup.getByText('Import failed: An error occurred. Please try again later.', {exact: true})).toBeVisible();
+  await expect(importPopup.getByText('internal server detail', {exact: true})).toHaveCount(0);
+  await capturePopupScreenshot(page, testInfo, 'sticker-import-generic-error');
+});
+
+test('copies an existing sticker set link using the configured server prefix', async({page, context}) => {
+  const stickerPopup = await openSandboxStory(page, 'stickers');
+  await expect(stickerPopup.locator('input[aria-label="Sticker pack link"]')).toHaveValue(
+    'https://teagram.test/addstickers/sandbox_stickers'
+  );
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], {origin: new URL(page.url()).origin});
+  await stickerPopup.getByRole('button', {name: 'Copy Link'}).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(
+    'https://teagram.test/addstickers/sandbox_stickers'
+  );
+});
+
+test('reports a share link lookup failure and hides its copy action', async({page}, testInfo) => {
+  const stickerPopup = await openSandboxStory(page, 'stickersWithoutShareLinks');
+
+  await expect(page.getByText('Couldn’t load the sticker set link. Check your connection and try again.')).toBeVisible();
+  await expect(stickerPopup.locator('.sticker-set-share-links')).toHaveCount(0);
+  await expect(stickerPopup.getByRole('button', {name: 'Copy Link'})).toHaveCount(0);
+  await capturePopupScreenshot(page, testInfo, 'sticker-share-link-error');
 });
 
 test('rejects a compressed oversized zip entry while reading it in the worker', async({page}, testInfo) => {
@@ -187,6 +287,7 @@ test('rejects a compressed oversized zip entry while reading it in the worker', 
   await importPopup.locator('input[accept=".zip,application/zip"]').setInputFiles(zipPath);
   await expect(importPopup.getByText('A file inside this ZIP is larger than 512 KB.', {exact: true})).toBeVisible();
   await expect(importPopup.getByRole('button', {name: 'Import pack'})).toBeDisabled();
+  await capturePopupScreenshot(page, testInfo, 'sticker-import-oversized-zip');
   expect(await page.evaluate(() => window.popupSandbox.calls()
     .filter((call) => call.manager === 'appStickersManager' && call.method === 'createStickerSet'))).toEqual([]);
 });

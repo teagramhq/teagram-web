@@ -182,7 +182,7 @@ const StickersAndEmoji: Component = () => {
       renderComponent({
         element: section.content,
         Component: () => (
-          <Show when={useAppConfig()?.sticker_import_mode !== 'off'}>
+          <Show when={useAppConfig()?.sticker_import_mode === 'on'}>
             <Row clickable={showStickerPackImportPopup}>
               <Row.Icon icon="stickers_face" />
               <Row.Title>{i18n('Teagram.Import.Pack')}</Row.Title>

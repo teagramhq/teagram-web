@@ -1,13 +1,35 @@
-const SHORT_NAME_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
-let stickerSetLinkPrefix: string | undefined;
+import {SHORT_NAME_PATTERN} from '@helpers/stickerPackCommon';
+import {logger} from '@lib/logger';
 
-export function setStickerSetLinkPrefix(prefix: string) {
+let stickerSetLinkPrefix: string | undefined;
+const stickerSetLinkLogger = logger('StickerSetLink');
+
+function parseStickerSetLinkPrefix(prefix: string) {
   try {
     const url = new URL(prefix);
-    stickerSetLinkPrefix = ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? url.toString() : undefined;
+    if(
+      !['http:', 'https:'].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) return;
+    return url;
   } catch(err) {
-    stickerSetLinkPrefix = undefined;
+    return;
   }
+}
+
+export function setStickerSetLinkPrefix(prefix: string) {
+  const url = parseStickerSetLinkPrefix(prefix);
+  if(!url) {
+    stickerSetLinkPrefix = undefined;
+    stickerSetLinkLogger.error('Rejected invalid sticker set link prefix', prefix);
+    return false;
+  }
+
+  stickerSetLinkPrefix = url.toString();
+  return true;
 }
 
 export function getStickerSetLinkPrefix() {
@@ -17,14 +39,9 @@ export function getStickerSetLinkPrefix() {
 export function createStickerSetShareLink(prefix: string, shortName: string, isEmoji: boolean) {
   if(!SHORT_NAME_PATTERN.test(shortName)) throw new Error('Invalid sticker set short name');
 
-  const base = new URL(prefix);
-  if(
-    !['http:', 'https:'].includes(base.protocol) ||
-    base.username ||
-    base.password ||
-    base.search ||
-    base.hash
-  ) {
+  const base = parseStickerSetLinkPrefix(prefix);
+  if(!base) {
+    stickerSetLinkLogger.error('Rejected invalid sticker set link prefix', prefix);
     throw new Error('Invalid sticker set link prefix');
   }
 
@@ -34,27 +51,23 @@ export function createStickerSetShareLink(prefix: string, shortName: string, isE
 }
 
 export function parseStickerSetShareLink(value: string, prefix?: string): {shortName: string, isEmoji: boolean} | undefined {
-  let link: URL,
-    base: URL;
+  if(!prefix) return;
+
+  let link: URL;
   try {
-    if(!prefix) return;
     link = new URL(value);
-    base = new URL(prefix);
   } catch(err) {
     return;
   }
 
+  const base = parseStickerSetLinkPrefix(prefix);
   if(
-    !['http:', 'https:'].includes(base.protocol) ||
-    base.username ||
-    base.password ||
+    !base ||
     link.origin !== base.origin ||
     link.username ||
     link.password ||
     link.search ||
-    link.hash ||
-    base.search ||
-    base.hash
+    link.hash
   ) {
     return;
   }
@@ -77,10 +90,11 @@ export async function processInitialStickerSetShareLink(
   try {
     config = await configPromise;
   } catch(err) {
-    return;
+    stickerSetLinkLogger.error('Could not load config for initial sticker set link', err);
+    throw err;
   }
 
-  setStickerSetLinkPrefix(config.me_url_prefix);
+  if(!setStickerSetLinkPrefix(config.me_url_prefix)) throw new Error('Invalid sticker set link prefix');
   const stickerSet = parseStickerSetShareLink(href, config.me_url_prefix);
   if(stickerSet) onStickerSet(stickerSet);
 }

@@ -8,13 +8,17 @@ import showStickersPopup from '@components/popups/stickers';
 import {getStickerSetInputByShortName} from '@lib/appManagers/utils/stickers/getStickerSetInput';
 import {createStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
 import {readStickerPackZip, StickerPackType, validateStickerPackFiles, StickerPackRejectedFile} from '@helpers/stickerPackImport';
+import {SHORT_NAME_PATTERN} from '@helpers/stickerPackCommon';
+import type {StickerPackZipError} from '@helpers/stickerPackImportZip';
+import {logger} from '@lib/logger';
 import styles from './stickerPackImport.module.scss';
 
-const SHORT_NAME_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
+const importLogger = logger('StickerPackImportPopup');
 
 const getServerErrorText = (error: unknown) => {
-  const type = (error as ApiError)?.type || (error as Error)?.message || 'UNKNOWN_ERROR';
-  return type.toLowerCase().replace(/_/g, ' ');
+  if(!error || typeof error !== 'object' || error instanceof Error) return i18n('Error.AnError').textContent;
+  const type = (error as Partial<ApiError>)?.type;
+  return typeof type === 'string' ? type.toLowerCase().replace(/_/g, ' ') : i18n('Error.AnError').textContent;
 };
 
 const rejectionText = (reason: StickerPackRejectedFile['reason']) => {
@@ -37,7 +41,7 @@ const StickerPackImportPopup = () => {
   const [source, setSource] = createSignal<'folder' | 'zip'>();
   const [sourceFiles, setSourceFiles] = createSignal<File[]>([]);
   const [sourceRejected, setSourceRejected] = createSignal<StickerPackRejectedFile[]>([]);
-  const [archiveError, setArchiveError] = createSignal<'invalid_zip' | 'too_many_entries' | 'archive_too_large' | 'entry_too_large'>();
+  const [archiveError, setArchiveError] = createSignal<StickerPackZipError>();
   const [readingArchive, setReadingArchive] = createSignal(false);
   const [configLoading, setConfigLoading] = createSignal(true);
   const [importModeOff, setImportModeOff] = createSignal(false);
@@ -58,6 +62,7 @@ const StickerPackImportPopup = () => {
       const config = await managers.apiManager.getAppConfig(force);
       setImportModeOff(config.sticker_import_mode === 'off');
     } catch(err) {
+      importLogger.error('Could not load sticker import settings', err);
       setConfigError(true);
     } finally {
       setConfigLoading(false);
@@ -85,7 +90,8 @@ const StickerPackImportPopup = () => {
     const timeout = window.setTimeout(() => {
       managers.appStickersManager.checkStickerSetShortName(name).then((available) => {
         if(version === nameCheckVersion) setShortNameStatus(available ? 'available' : 'taken');
-      }).catch(() => {
+      }).catch((err) => {
+        importLogger.error('Could not check sticker set short name', err);
         if(version === nameCheckVersion) setShortNameStatus('error');
       });
     }, 350);
@@ -122,11 +128,12 @@ const StickerPackImportPopup = () => {
     setUploadError(undefined);
     try {
       const result = await readStickerPackZip(archive);
-      setArchiveError(result.error);
+      setArchiveError(result.ok ? undefined : result.error);
       setSourceFiles(result.files);
       setSourceRejected(result.rejected);
     } catch(err) {
-      setArchiveError('invalid_zip');
+      importLogger.error('Could not read sticker pack ZIP', err);
+      setArchiveError('internal_error');
     } finally {
       setReadingArchive(false);
     }
@@ -140,6 +147,7 @@ const StickerPackImportPopup = () => {
       const suggestion = await managers.appStickersManager.suggestStickerSetShortName(value);
       if(title().trim() === value) setShortName(suggestion);
     } catch(err) {
+      importLogger.error('Could not suggest a sticker set short name', err);
       setUploadError(i18n('Teagram.Import.SuggestFailed').textContent);
     } finally {
       setSuggesting(false);
@@ -158,27 +166,27 @@ const StickerPackImportPopup = () => {
     rightsConfirmed();
 
   const importPack = async() => {
-    if(!canImport()) return;
+    if(!canImport()) return false;
     setUploading(true);
     setUploadError(undefined);
     try {
       const appConfig = await managers.apiManager.getAppConfig(true);
       if(appConfig.sticker_import_mode === 'off') {
         setImportModeOff(true);
-        return;
+        return false;
       }
 
       const {me_url_prefix: prefix} = await managers.apiManager.getConfig();
+      if(!setStickerSetLinkPrefix(prefix)) throw new Error('Invalid sticker set link prefix');
       createStickerSetShareLink(prefix, shortName().trim(), type() === 'emoji');
-      setStickerSetLinkPrefix(prefix);
 
       const files = validation().files;
       const finalName = shortName().trim();
       const software = source();
-      if(!software) return;
+      if(!software) return false;
       if(!(await managers.appStickersManager.checkStickerSetShortName(finalName))) {
         setShortNameStatus('taken');
-        return;
+        return false;
       }
 
       await managers.appStickersManager.createStickerSet({
@@ -192,7 +200,9 @@ const StickerPackImportPopup = () => {
       popupContext()?.hide();
       showStickersPopup(getStickerSetInputByShortName(finalName), type() === 'emoji');
     } catch(err) {
-      setUploadError(`${i18n('Teagram.Import.Failed')}: ${getServerErrorText(err)}`);
+      importLogger.error('Sticker pack import failed', err);
+      setUploadError(`${i18n('Teagram.Import.Failed').textContent}: ${getServerErrorText(err)}`);
+      return false;
     } finally {
       setUploading(false);
     }
@@ -203,7 +213,7 @@ const StickerPackImportPopup = () => {
       case 'invalid': return i18n('Teagram.Import.ShortNameInvalid');
       case 'checking': return i18n('Teagram.Import.CheckingName');
       case 'available': return i18n('Link.Available');
-      case 'taken': return i18n('EditProfile.Username.Taken');
+      case 'taken': return i18n('Teagram.Import.ShortNameTaken');
       case 'error': return i18n('Teagram.Import.NameCheckFailed');
       default: return '';
     }
@@ -215,6 +225,8 @@ const StickerPackImportPopup = () => {
       case 'too_many_entries': return i18n('Teagram.Import.ZipEntryLimit');
       case 'archive_too_large': return i18n('Teagram.Import.ZipTooLarge');
       case 'entry_too_large': return i18n('Teagram.Import.ZipEntryTooLarge');
+      case 'worker_failed': return i18n('Teagram.Import.ZipWorkerFailed');
+      case 'internal_error': return i18n('Teagram.Import.ZipReadFailed');
       default: return '';
     }
   };
