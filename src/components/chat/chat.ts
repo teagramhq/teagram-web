@@ -11,6 +11,7 @@ import ChatContextMenu from '@components/chat/contextMenu';
 import ChatInput from '@components/chat/input';
 import ChatSelection from '@components/chat/selection';
 import ChatTopbar from '@components/chat/topbar';
+import getPeerTitle from '@components/wrappers/getPeerTitle';
 import {HIDDEN_PEER_ID, NULL_PEER_ID, REPLIES_HIDDEN_CHANNEL_ID, REPLIES_PEER_ID, SEND_PAID_WITH_STARS_DELAY, SERVICE_PEER_ID, VERIFICATION_CODES_BOT_ID} from '@appManagers/constants';
 import {AppPrivateSearchTab} from '@components/solidJsTabs/tabs';
 import mediaSizes, {ScreenSize} from '@helpers/mediaSizes';
@@ -1241,7 +1242,20 @@ export default class Chat extends EventListenerBase<{
       this.input?.failPeerChange();
       if(!didReportPeerChangeFailure) {
         didReportPeerChangeFailure = true;
-        toastNew({langPackKey: 'Teagram.Chat.PeerChangeFailed'});
+        const peerTitlePromise = getPeerTitle({peerId, plainText: true}).catch((error: unknown) => {
+          this.log.error('failed to get peer title for peer change failure:', peerId, error);
+          return String(peerId);
+        });
+        void peerTitlePromise.then((title) => {
+          if(middleware()) {
+            toastNew({
+              langPackKey: 'Teagram.Chat.PeerChangeFailed',
+              langPackArguments: [title]
+            });
+          }
+        }).catch((error: unknown) => {
+          this.log.error('failed to show peer change failure toast:', peerId, error);
+        });
       }
     };
 

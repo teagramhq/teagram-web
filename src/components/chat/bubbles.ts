@@ -6058,6 +6058,11 @@ export default class ChatBubbles {
     let scrollFromDown: boolean;
     let scrollFromUp: boolean;
     let preparedPeerChange: ReturnType<Chat['finishPeerChange']> | undefined;
+    type PreparedPeerChange = Exclude<Awaited<ReturnType<Chat['finishPeerChange']>>, void>;
+    let preparedPeerChangeReady: Promise<{
+      prepared: PreparedPeerChange,
+      ready: Awaited<PreparedPeerChange['ready']>
+    } | {error: unknown} | undefined> | undefined;
     let result: Awaited<ReturnType<ChatBubbles['getHistory']>>;
     try {
       const canScroll = samePeer && sameSearch;
@@ -6157,6 +6162,21 @@ export default class ChatBubbles {
       preparedPeerChange = !samePeer ?
         m(this.chat.finishPeerChange(finishPeerChangeOptions)) :
         undefined;
+      preparedPeerChangeReady = preparedPeerChange?.then(async(prepared) => {
+        if(!prepared) {
+          return;
+        }
+
+        const timeoutError = new Error(`peer change preparation timed out after ${MEDIA_PROMISES_TIMEOUT}ms`);
+        const ready = await withTimeout(prepared.ready, MEDIA_PROMISES_TIMEOUT, timeoutError);
+        if(ready instanceof Error) {
+          log.error('peer change preparation timed out:', peerId, ready);
+          prepared.failPeerChange();
+          throw ready;
+        }
+
+        return {prepared, ready};
+      }).catch((error: unknown) => ({error}));
 
       let historyRequest: Promise<Awaited<ReturnType<ChatBubbles['getHistory']>>>;
       if(!savedPosition?.mids) {
@@ -6176,18 +6196,20 @@ export default class ChatBubbles {
         });
       }
       // Observe preparation failures during the request, while keeping cached setup concurrent.
-      const historyResultPromise = preparedPeerChange ?
-        Promise.race([historyRequest, preparedPeerChange.then((prepared) => {
-          if(!prepared) {
+      const historyResultPromise = preparedPeerChangeReady ?
+        Promise.race([historyRequest, preparedPeerChangeReady.then((preparedChange) => {
+          if(!preparedChange) {
             return historyRequest;
           }
+          if('error' in preparedChange) {
+            throw preparedChange.error;
+          }
 
-          return prepared.ready.then((error) => {
-            if(error) {
-              throw error.error;
-            }
-            return historyRequest;
-          });
+          const {ready} = preparedChange;
+          if(ready && 'error' in ready) {
+            throw ready.error;
+          }
+          return historyRequest;
         })]) :
         historyRequest;
       result = await m(historyResultPromise);
@@ -6216,11 +6238,14 @@ export default class ChatBubbles {
       releasePeerInnerMounted = resolve;
       rejectPeerInnerMounted = reject;
     }) : Promise.resolve();
-    const peerUiReadyPromise = preparedPeerChange ?
-      preparedPeerChange.then(async(prepared) => {
+    const peerUiReadyPromise = preparedPeerChangeReady ?
+      preparedPeerChangeReady.then(async(preparedChange) => {
         await peerInnerMounted;
-        if(prepared) {
-          const ready = await prepared.ready;
+        if(preparedChange) {
+          if('error' in preparedChange) {
+            throw preparedChange.error;
+          }
+          const {prepared, ready} = preparedChange;
           if(ready && 'error' in ready) {
             prepared.failPeerChange();
             throw ready.error;

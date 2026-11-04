@@ -19,6 +19,7 @@ const moduleMocks = vi.hoisted(() => {
     leftColumnActiveClassname: 'is-left-column-shown',
     sidebarRight: new Proxy({}, {get: () => noop}),
     toastNew: vi.fn(),
+    getPeerTitle: vi.fn(async() => 'Alice'),
     rootScope: {
       myId: 0,
       premium: false,
@@ -34,6 +35,7 @@ const moduleMocks = vi.hoisted(() => {
 vi.mock('@lib/apiManagerProxy', () => ({default: moduleMocks.apiManagerProxy}));
 vi.mock('@components/sidebarLeft', () => ({default: moduleMocks.sidebarLeft, LEFT_COLUMN_ACTIVE_CLASSNAME: moduleMocks.leftColumnActiveClassname}));
 vi.mock('@components/sidebarRight', () => ({default: moduleMocks.sidebarRight}));
+vi.mock('@components/wrappers/getPeerTitle', () => ({default: moduleMocks.getPeerTitle}));
 vi.mock('@components/toast', async(importOriginal) => ({
   ...await importOriginal<typeof import('@components/toast')>(),
   toastNew: moduleMocks.toastNew
@@ -114,7 +116,15 @@ afterEach(() => {
   vi.stubGlobal('ResizeObserver', originalResizeObserver);
   document.body.replaceChildren();
   moduleMocks.toastNew.mockClear();
+  moduleMocks.getPeerTitle.mockClear();
 });
+
+async function expectPeerChangeFailedToast() {
+  await vi.waitFor(() => expect(moduleMocks.toastNew).toHaveBeenCalledWith({
+    langPackKey: 'Teagram.Chat.PeerChangeFailed',
+    langPackArguments: ['Alice']
+  }));
+}
 
 const peerId = 10 as PeerId;
 
@@ -743,7 +753,7 @@ test('fails the peer transition when input setup rejects after history resolves'
     expect(dispatchEvent).not.toHaveBeenCalledWith('peer_changed', chat);
     expect(chat.container.hidden).toBe(true);
     expect(harness.preloader.detach).toHaveBeenCalled();
-    expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Chat.PeerChangeFailed'});
+    await expectPeerChangeFailedToast();
     expect(moduleMocks.toastNew).toHaveBeenCalledTimes(1);
   } finally {
     animationIntersector.unlockGroup('chat');
@@ -841,7 +851,7 @@ test('fails the peer transition when topbar setup rejects after history resolves
     expect(dispatchEvent).not.toHaveBeenCalledWith('peer_changed', chat);
     expect(chat.container.hidden).toBe(true);
     expect(harness.preloader.detach).toHaveBeenCalled();
-    expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Chat.PeerChangeFailed'});
+    await expectPeerChangeFailedToast();
     expect(moduleMocks.toastNew).toHaveBeenCalledTimes(1);
   } finally {
     animationIntersector.unlockGroup('chat');
@@ -892,7 +902,7 @@ test('fails closed when a non-input peer preparation rejects before history', as
   expect(events).toEqual([]);
   expect(dispatchEvent).not.toHaveBeenCalledWith('peer_changed', chat);
   expect(chat.log.error).toHaveBeenCalledWith('peer change part failed:', peerId, 'topbar', failure);
-  expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Chat.PeerChangeFailed'});
+  await expectPeerChangeFailedToast();
 });
 
 test('finishes the peer UI and reports input callback failures', async() => {
@@ -919,7 +929,7 @@ test('finishes the peer UI and reports input callback failures', async() => {
   expect(messageInput.contentEditable).toBe('false');
   expect(chat.peerChangeFailed).toBe(true);
   expect(chat.log.error).toHaveBeenCalledWith('peer change apply part failed:', peerId, 'input', failure);
-  expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Chat.PeerChangeFailed'});
+  await expectPeerChangeFailedToast();
   expect(moduleMocks.toastNew).toHaveBeenCalledTimes(1);
 });
 
@@ -1021,9 +1031,9 @@ test('fails closed and reports when a synchronous peer part rejects', async() =>
   expect(chatInput.classList.contains('is-hidden')).toBe(true);
   expect(messageInput.contentEditable).toBe('false');
   expect(chat.peerChangeFailed).toBe(true);
-  expect(moduleMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Teagram.Chat.PeerChangeFailed'});
+  await expectPeerChangeFailedToast();
   expect(moduleMocks.toastNew).toHaveBeenCalledTimes(1);
-  expect(lang['Teagram.Chat.PeerChangeFailed']).toBe('This chat couldn\'t be opened. Reopen it to try again.');
+  expect(lang['Teagram.Chat.PeerChangeFailed']).toBe('%@ couldn\'t be opened. Reopen it to try again.');
 });
 
 test('retries the same peer after a failed input setup and restores the composer', async() => {
@@ -1411,6 +1421,36 @@ test('releases the preloader and animation group when prepared peer setup reject
   } finally {
     unlockGroup.mockRestore();
     animationIntersector.unlockGroup(animationGroup);
+  }
+});
+
+test('times out prepared peer setup that never settles after cached history mounts', async() => {
+  const ready = new Promise<undefined>(() => {});
+  const failPeerChange = vi.fn();
+  const {harness, chat, setPeerLogger} = makeMountableSetPeerHarness();
+  chat.finishPeerChange = vi.fn(async() => ({ready, failPeerChange, apply: vi.fn(async() => undefined)}));
+  const animationIntersector = (await import('@components/animationIntersector')).default;
+  const unlockGroup = vi.spyOn(animationIntersector, 'unlockGroup');
+
+  vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']});
+  try {
+    const result = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
+    expect(harness.preloader.attach).toHaveBeenCalled();
+
+    const failure = expect(result.promise).rejects.toThrow('peer change preparation timed out');
+    await vi.advanceTimersByTimeAsync(10_000);
+    await failure;
+
+    expect(failPeerChange).toHaveBeenCalledTimes(1);
+    expect(harness.preloader.detach).toHaveBeenCalled();
+    expect(unlockGroup).toHaveBeenCalledWith(chat.animationGroup);
+    expect(harness.lazyLoadQueue.unlock).toHaveBeenCalled();
+    expect(setPeerLogger.error).toHaveBeenCalledWith('peer change preparation timed out:', peerId, expect.any(Error));
+    expect(setPeerLogger.error).toHaveBeenCalledWith('setPeer promise error:', peerId, expect.any(Error));
+  } finally {
+    vi.useRealTimers();
+    unlockGroup.mockRestore();
+    animationIntersector.unlockGroup(chat.animationGroup);
   }
 });
 
