@@ -185,7 +185,9 @@ export class AppChatsManager extends AppManager {
         this.chats[id] = communityToSave;
       }
 
-      this.mirrorChat(communityToSave, trace, mirrorBatch);
+      if(mirrorBatch) this.mirrorChat(communityToSave, trace, mirrorBatch);
+      else if(trace) this.mirrorChat(communityToSave, trace);
+      else this.mirrorChat(communityToSave);
       this.appCommunitiesManager.handleCommunityUpdate(id);
       const newPhotoId = communityToSave._ === 'community' &&
         communityToSave.photo?._ === 'chatPhoto' ?
@@ -263,7 +265,9 @@ export class AppChatsManager extends AppManager {
     const peerId = chat.id.toPeerId(true);
     if(oldChat === undefined) {
       this.chats[chat.id] = chat;
-      this.mirrorChat(chat, trace, mirrorBatch);
+      if(mirrorBatch) this.mirrorChat(chat, trace, mirrorBatch);
+      else if(trace) this.mirrorChat(chat, trace);
+      else this.mirrorChat(chat);
     } else {
       const oldPhotoId = ((oldChat as Chat.chat).photo as ChatPhoto.chatPhoto)?.photo_id;
       const newPhotoId = ((chat as Chat.chat).photo as ChatPhoto.chatPhoto)?.photo_id;
@@ -286,7 +290,9 @@ export class AppChatsManager extends AppManager {
       const storiesCallback = this.appStoriesManager.saveApiPeerStories(chat as Chat.channel, oldChat as Chat.channel);
 
       safeReplaceObject(oldChat, chat);
-      this.mirrorChat(oldChat, trace, mirrorBatch);
+      if(mirrorBatch) this.mirrorChat(oldChat, trace, mirrorBatch);
+      else if(trace) this.mirrorChat(oldChat, trace);
+      else this.mirrorChat(oldChat);
       this.rootScope.dispatchEvent('chat_update', chat.id);
 
       storiesCallback?.();

@@ -688,7 +688,9 @@ export class AppUsersManager extends AppManager {
     const peerId = userId.toPeerId(false);
     if(oldUser === undefined) {
       this.users[userId] = user;
-      this.mirrorUser(user, trace, mirrorBatch);
+      if(mirrorBatch) this.mirrorUser(user, trace, mirrorBatch);
+      else if(trace) this.mirrorUser(user, trace);
+      else this.mirrorUser(user);
     } else {
       const changedTitle = user.first_name !== oldUser.first_name ||
         user.last_name !== oldUser.last_name ||
@@ -717,7 +719,9 @@ export class AppUsersManager extends AppManager {
       const storiesCallback = this.appStoriesManager.saveApiPeerStories(user, oldUser);
 
       safeReplaceObject(oldUser, user);
-      this.mirrorUser(oldUser, trace, mirrorBatch);
+      if(mirrorBatch) this.mirrorUser(oldUser, trace, mirrorBatch);
+      else if(trace) this.mirrorUser(oldUser, trace);
+      else this.mirrorUser(oldUser);
 
       this.rootScope.dispatchEvent('user_update', userId);
 
