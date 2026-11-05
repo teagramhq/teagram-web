@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, reuseCachedPrivateWorkerUrl, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries} from '../../e2e/performanceRpcTrace';
+import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries} from '../../e2e/performanceRpcTrace';
 import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
 
 test('summarizes cached dialog reconciliation relative to a scenario', () => {
@@ -73,21 +73,41 @@ test('keeps a completed async reconciliation phase over a stale pending snapshot
   ])).toEqual([completed]);
 });
 
-test('reuses the private worker URL across measured page reloads', () => {
-  expect(reuseCachedPrivateWorkerUrl('blob:https://example.test/worker-1', 'blob:https://example.test/worker-2', true))
-    .toBe('blob:https://example.test/worker-1');
-  expect(reuseCachedPrivateWorkerUrl(null, 'blob:https://example.test/worker-2', true))
-    .toBe('blob:https://example.test/worker-2');
-  expect(reuseCachedPrivateWorkerUrl('blob:https://example.test/worker-1', 'https://example.test/worker.js', true))
-    .toBe('https://example.test/worker.js');
+test('keeps the furthest pending snapshot of a walk', () => {
+  const pending = {traceId: 'long-walk', startedAtEpochMs: 1_000, durationMs: null as number | null};
+  expect(mergeCachedDialogReconcilePhaseSnapshots([
+    [{...pending, pageCount: 3}],
+    [{...pending, pageCount: 17}],
+    [{...pending, pageCount: 9}]
+  ])).toEqual([{...pending, pageCount: 17}]);
 });
 
-test('leaves private worker URLs untouched outside reconciliation measurements', () => {
-  expect(reuseCachedPrivateWorkerUrl(
-    'blob:https://example.test/worker-1',
-    'blob:https://example.test/worker-2',
-    false
-  )).toBe('blob:https://example.test/worker-2');
+test('ends a walk its worker no longer reports at the next page start', () => {
+  const dead = {traceId: 'dead-walk', pageCount: 17, startedAtEpochMs: 1_000, durationMs: null as number | null};
+  const live = {traceId: 'live-walk', startedAtEpochMs: 4_000, durationMs: null as number | null};
+  const finished = {traceId: 'done-walk', pageCount: 50, startedAtEpochMs: 500, durationMs: 700};
+
+  expect(settleInterruptedCachedDialogReconciles([dead, live, finished], ['live-walk'], [0, 3_000, 9_000])).toEqual([
+    {...dead, durationMs: 2_000, interrupted: true},
+    live,
+    finished
+  ]);
+  expect(settleInterruptedCachedDialogReconciles([dead], [], [0])).toEqual([dead]);
+});
+
+test('summarizes an interrupted walk without a main-thread flush', () => {
+  const interrupted = {traceId: 'dead-walk', pageCount: 17, startedAtEpochMs: 1_000, durationMs: 2_000, interrupted: true};
+  expect(collectCachedDialogReconciles([interrupted], 0, 5_000, {})).toEqual({
+    walks: [{
+      traceId: 'dead-walk',
+      pageCount: 17,
+      startRelativeToScenarioMs: 1_000,
+      endRelativeToScenarioMs: 3_000,
+      mainThreadTimeMs: 0,
+      interrupted: true
+    }]
+  });
+  expect(() => collectCachedDialogReconciles([{...interrupted, interrupted: undefined}], 0, 5_000, {})).toThrow('main-thread time');
 });
 
 test('requires a complete reconciliation summary on every measured scenario repeat', () => {

@@ -2136,7 +2136,7 @@ export default class DialogsStorage extends AppManager {
             return result;
           }
         });
-        if(finishTrace) ++pageCount;
+        if(finishTrace) performancePhaseTrace.setPageCount(traceId!, ++pageCount);
 
         if(result._ === 'messages.dialogsNotModified') {
           return missingPeerIds;

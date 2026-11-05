@@ -74,14 +74,17 @@ export type CachedDialogReconcileRunSummary = {
   pageCount: number | null,
   startRelativeToScenarioMs: number,
   endRelativeToScenarioMs: number,
-  mainThreadTimeMs: number
+  mainThreadTimeMs: number,
+  // The page navigated away and took the worker with it before the walk finished; the end is that navigation.
+  interrupted?: boolean
 };
 
 export type CachedDialogReconcilePhase = {
   traceId: string,
   pageCount?: number,
   startedAtEpochMs: number,
-  durationMs: number | null
+  durationMs: number | null,
+  interrupted?: boolean
 };
 
 export type CachedDialogReconcileWindow = {
@@ -89,19 +92,38 @@ export type CachedDialogReconcileWindow = {
   scenarioEndedAtEpochMs: number
 };
 
-export function reuseCachedPrivateWorkerUrl(cachedUrl: string | null, currentUrl: string, enabled = false) {
-  return enabled && cachedUrl?.startsWith('blob:') && currentUrl.startsWith('blob:') ? cachedUrl : currentUrl;
-}
-
 export function mergeCachedDialogReconcilePhaseSnapshots(snapshots: CachedDialogReconcilePhase[][]): CachedDialogReconcilePhase[] {
   const phasesByTraceId = new Map<string, CachedDialogReconcilePhase>();
   snapshots.flat().forEach((phase) => {
     const previous = phasesByTraceId.get(phase.traceId);
-    if(!previous || previous.durationMs === null || phase.durationMs !== null) {
+    // Of two pending snapshots, the later one has seen more pages.
+    const laterPending = previous?.durationMs === null && phase.durationMs === null && (phase.pageCount ?? 0) >= (previous.pageCount ?? 0);
+    if(!previous || laterPending || (previous.durationMs === null && phase.durationMs !== null)) {
       phasesByTraceId.set(phase.traceId, phase);
     }
   });
   return [...phasesByTraceId.values()];
+}
+
+// A walk runs in the page's worker, so a navigation ends it without a completion record. A pending walk that
+// the live worker no longer reports ended when the next page started; a walk the live worker still reports
+// stays pending.
+export function settleInterruptedCachedDialogReconciles(
+  phases: CachedDialogReconcilePhase[],
+  livePendingTraceIds: Iterable<string>,
+  pageStartedAtEpochMs: number[]
+): CachedDialogReconcilePhase[] {
+  const live = new Set(livePendingTraceIds);
+  return phases.map((phase) => {
+    if(phase.durationMs !== null || live.has(phase.traceId)) return phase;
+    const interruptedAtEpochMs = Math.min(...pageStartedAtEpochMs.filter((startedAt) => startedAt > phase.startedAtEpochMs));
+    if(!Number.isFinite(interruptedAtEpochMs)) return phase;
+    return {
+      ...phase,
+      durationMs: Number((interruptedAtEpochMs - phase.startedAtEpochMs).toFixed(2)),
+      interrupted: true
+    };
+  });
 }
 
 export const CACHED_DIALOG_RECONCILE_PHASE_NAME = 'worker.dialogs.cachedChannelReconcile';
@@ -172,6 +194,7 @@ export function summarizeCachedDialogReconcile(
   }
   const startRelativeToScenarioMs = phase.startedAtEpochMs - scenarioStartedAtEpochMs;
   return {
+    ...(phase.interrupted ? {interrupted: true} : {}),
     traceId: phase.traceId,
     pageCount: phase.pageCount ?? null,
     startRelativeToScenarioMs: Number(startRelativeToScenarioMs.toFixed(2)),
@@ -193,7 +216,8 @@ export function collectCachedDialogReconciles(
     }
     return phase.startedAtEpochMs + phase.durationMs > scenarioStartedAtEpochMs;
   }).map((phase) => {
-    const mainThreadTimeMs = mainThreadTimeByTraceId[phase.traceId];
+    // An interrupted walk never flushed its deferred peer mirrors, so it cost the main thread nothing.
+    const mainThreadTimeMs = mainThreadTimeByTraceId[phase.traceId] ?? (phase.interrupted ? 0 : undefined);
     if(!Number.isFinite(mainThreadTimeMs) || mainThreadTimeMs < 0) {
       throw new Error(`cached dialog reconciliation ${phase.traceId} has no main-thread time`);
     }
@@ -218,8 +242,7 @@ export function collectCachedDialogReconcileSummaries(
 function hasCompleteCachedDialogReconcileSummary(summary: CachedDialogReconcileSummary | undefined) {
   return !!summary && Array.isArray(summary.walks) && summary.walks.every((walk) => (
     typeof walk.traceId === 'string' &&
-    Number.isFinite(walk.pageCount) &&
-    walk.pageCount! >= 0 &&
+    (walk.interrupted || (Number.isFinite(walk.pageCount) && walk.pageCount! >= 0)) &&
     Number.isFinite(walk.startRelativeToScenarioMs) &&
     Number.isFinite(walk.endRelativeToScenarioMs) &&
     Number.isFinite(walk.mainThreadTimeMs) &&

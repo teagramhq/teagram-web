@@ -2,6 +2,18 @@ import {describe, expect, test} from 'vitest';
 import {PerformancePhaseTrace, PerformanceRpcTrace} from '@lib/appManagers/performanceTrace';
 
 describe('performance trace collectors', () => {
+  test('reports the pages seen so far on a running phase only', () => {
+    const trace = new PerformancePhaseTrace(true);
+    const finish = trace.start('worker.walk', {traceId: 'walk-1'});
+
+    trace.setPageCount('walk-1', 4);
+    expect(trace.getSnapshot()[0]).toMatchObject({traceId: 'walk-1', durationMs: null, pageCount: 4});
+
+    finish({pageCount: 5});
+    trace.setPageCount('walk-1', 9);
+    expect(trace.getSnapshot()[0].pageCount).toBe(5);
+  });
+
   test('records named phases in the page performance timeline', () => {
     const name = 'main.chatlist.mount.test';
     performance.clearMeasures(name);

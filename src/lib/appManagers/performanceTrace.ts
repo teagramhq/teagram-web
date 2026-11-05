@@ -62,6 +62,12 @@ export class PerformancePhaseTrace {
     };
   }
 
+  // A phase that is still running reports the pages seen so far, for a reader that never sees it finish.
+  public setPageCount(traceId: string, pageCount: number) {
+    const phase = this.phases.find((candidate) => candidate.traceId === traceId && candidate.durationMs === null);
+    if(phase) phase.pageCount = pageCount;
+  }
+
   public reset(preserveNames: string[] = []) {
     this.phases = this.phases.filter(({name}) => preserveNames.includes(name));
   }
