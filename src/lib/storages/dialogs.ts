@@ -22,6 +22,7 @@ import insertInDescendSortedArray from '@helpers/array/insertInDescendSortedArra
 import safeReplaceObject from '@helpers/object/safeReplaceObject';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
 import {AppManager} from '@appManagers/manager';
+import type {PeerMirrorBatch, PeerMirrorValue} from '@appManagers/peerMirrorBatch';
 import getDialogIndexKey from '@appManagers/utils/dialogs/getDialogIndexKey';
 import isObject from '@helpers/object/isObject';
 import getDialogIndex from '@appManagers/utils/dialogs/getDialogIndex';
@@ -2095,13 +2096,18 @@ export default class DialogsStorage extends AppManager {
   }
 
   private async getServerChannelsMissingLocally() {
-    const finishTrace = import.meta.env.VITE_PERF_TRACE === '1' ?
+    const trace = import.meta.env.VITE_PERF_TRACE === '1' ? 'cachedChannelDialogsReconcile' : undefined;
+    const finishTrace = trace ?
       performancePhaseTrace.start('worker.dialogs.cachedChannelReconcile') :
       undefined;
     let pageCount = 0;
     const limit = 100;
     const missingPeerIds: PeerId[] = [];
     const seenPeerIds: Set<PeerId> = new Set();
+    const peers: Record<string, PeerMirrorValue> = {};
+    const mirrorBatch: PeerMirrorBatch = (peerKey, peer) => {
+      peers[peerKey] = peer;
+    };
     let offsetDate = 0, offsetId = 0, offsetPeerId: PeerId;
     try {
       for(;;) {
@@ -2119,8 +2125,8 @@ export default class DialogsStorage extends AppManager {
             if(result._ !== 'messages.dialogsNotModified') {
               this.appPeersManager.saveApiPeers(
                 result,
-                import.meta.env.VITE_PERF_TRACE === '1' ? 'cachedChannelDialogsReconcile' : undefined,
-                true
+                trace,
+                mirrorBatch
               );
             }
 
@@ -2170,6 +2176,7 @@ export default class DialogsStorage extends AppManager {
         offsetDate = (lastMessage as Message.message)?.date ?? 0;
       }
     } finally {
+      this.appPeersManager.mirrorApiPeers(peers, trace);
       finishTrace?.({pageCount});
     }
   }

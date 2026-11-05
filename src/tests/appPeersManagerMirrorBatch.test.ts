@@ -26,7 +26,7 @@ test('chat and user managers collect their mirror values without sending individ
   expect(invokeVoid).not.toHaveBeenCalled();
 });
 
-test('batches reconciled chat and user mirrors into one merge payload', () => {
+test('flushes reconciled chat and user mirrors once after collecting multiple pages', () => {
   vi.stubEnv('VITE_PERF_TRACE', '1');
   const invokeVoid = vi.fn();
   vi.spyOn(MTProtoMessagePort, 'getInstance').mockReturnValue({invokeVoid} as any);
@@ -44,20 +44,28 @@ test('batches reconciled chat and user mirrors into one merge payload', () => {
     getAccountNumber: () => 1
   });
 
-  manager.saveApiPeers({chats: [chat], users: [user]}, 'cachedChannelDialogsReconcile', true);
+  const peers: Record<string, any> = {};
+  const mirrorBatch = (peerKey: string, peer: any) => peers[peerKey] = peer;
+  manager.saveApiPeers({chats: [chat]}, 'cachedChannelDialogsReconcile', mirrorBatch);
+  manager.saveApiPeers({users: [user]}, 'cachedChannelDialogsReconcile', mirrorBatch);
 
   expect(manager.appChatsManager.saveApiChats).toHaveBeenCalledWith(
     [chat],
     undefined,
     'cachedChannelDialogsReconcile',
-    expect.any(Function)
+    mirrorBatch
   );
   expect(manager.appUsersManager.saveApiUsers).toHaveBeenCalledWith(
     [user],
     undefined,
     'cachedChannelDialogsReconcile',
-    expect.any(Function)
+    mirrorBatch
   );
+  expect(peers).toEqual({'chat-key': chat, 'user-key': user});
+  expect(invokeVoid).not.toHaveBeenCalled();
+
+  manager.mirrorApiPeers(peers, 'cachedChannelDialogsReconcile');
+
   expect(invokeVoid).toHaveBeenCalledTimes(1);
   expect(invokeVoid).toHaveBeenCalledWith('mirror', {
     name: 'peers',
