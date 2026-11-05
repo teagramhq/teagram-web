@@ -76,12 +76,12 @@ jobs:
       - name: Test, typecheck and prepare bundle
         run: pnpm test --run && pnpm run typecheck && pnpm run generate-changelog
 
-      - name: Test direct sticker share install in the popup sandbox
+      - name: Test sticker install and import flows in the popup sandbox
         run: >-
           pnpm exec playwright test
           e2e/popupSandbox.spec.ts
           --project=chromium
-          --grep "opens and installs a sticker set from a direct share URL"
+          --grep "opens and installs a sticker set from a direct share URL|imports a folder pack and opens its shareable sticker set|imports a valid ZIP through the worker and sends its bytes as a ZIP source|does not show the import controls when sticker import is disabled"
 
       - name: Build and audit production bundle
         env:

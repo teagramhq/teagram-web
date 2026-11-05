@@ -22,6 +22,7 @@
 .typeField {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 1rem;
   min-width: 0;
   margin: 0;
@@ -37,20 +38,8 @@
 }
 
 .radioOption {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
   min-height: 2.5rem;
-  color: var(--primary-text-color);
-  cursor: pointer;
-}
-
-.radioOption input,
-.rightsRow input {
-  width: 1.125rem;
-  height: 1.125rem;
-  flex: 0 0 auto;
-  accent-color: var(--primary-color);
+  padding-block: 0;
 }
 
 .field,
@@ -151,16 +140,7 @@
 }
 
 .rightsRow {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.75rem;
-  color: var(--primary-text-color);
-  line-height: 1.4;
-  cursor: pointer;
-}
-
-.rightsRow input {
-  margin: 0.1rem 0 0;
+  padding-block: 0;
 }
 
 @media (max-width: 480px) {

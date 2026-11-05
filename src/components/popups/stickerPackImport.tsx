@@ -1,7 +1,10 @@
 import {createEffect, createMemo, createSignal, For, onCleanup, onMount, Show} from 'solid-js';
+import CheckboxFieldTsx from '@components/checkboxFieldTsx';
 import {InputFieldTsx} from '@components/inputFieldTsx';
 import type InputField from '@components/inputField';
 import PopupElement, {createPopup, useSnitchedPopupContext} from '@components/popups/indexTsx';
+import RadioFieldTsx from '@components/radioFieldTsx';
+import Row from '@components/rowTsx';
 import {i18n} from '@lib/langPack';
 import type {AppManagers} from '@lib/managers';
 import showStickersPopup from '@components/popups/stickers';
@@ -258,14 +261,30 @@ const StickerPackImportPopup = () => {
                 <div class={styles.content}>
                   <fieldset class={styles.typeField} disabled={disabled()}>
                     <legend>{i18n('Teagram.Import.Type')}</legend>
-                    <label class={styles.radioOption}>
-                      <input type="radio" name="sticker-pack-type" checked={type() === 'stickers'} onChange={() => setType('stickers')} />
-                      <span>{i18n('Teagram.Import.Stickers')}</span>
-                    </label>
-                    <label class={styles.radioOption}>
-                      <input type="radio" name="sticker-pack-type" checked={type() === 'emoji'} onChange={() => setType('emoji')} />
-                      <span>{i18n('Teagram.Import.Emoji')}</span>
-                    </label>
+                    <Row class={styles.radioOption} disabled={disabled()}>
+                      <Row.RadioField>
+                        <RadioFieldTsx
+                          name="sticker-pack-type"
+                          value="stickers"
+                          ariaLabel={i18n('Teagram.Import.Stickers').textContent}
+                          checked={type() === 'stickers'}
+                          onChange={(checked) => checked && setType('stickers')}
+                        />
+                      </Row.RadioField>
+                      <Row.Title>{i18n('Teagram.Import.Stickers')}</Row.Title>
+                    </Row>
+                    <Row class={styles.radioOption} disabled={disabled()}>
+                      <Row.RadioField>
+                        <RadioFieldTsx
+                          name="sticker-pack-type"
+                          value="emoji"
+                          ariaLabel={i18n('Teagram.Import.Emoji').textContent}
+                          checked={type() === 'emoji'}
+                          onChange={(checked) => checked && setType('emoji')}
+                        />
+                      </Row.RadioField>
+                      <Row.Title>{i18n('Teagram.Import.Emoji')}</Row.Title>
+                    </Row>
                   </fieldset>
 
                   <div class={styles.field}>
@@ -357,10 +376,12 @@ const StickerPackImportPopup = () => {
                     </Show>
                   </div>
 
-                  <label class={styles.rightsRow}>
-                    <input type="checkbox" checked={rightsConfirmed()} onChange={(event) => setRightsConfirmed(event.currentTarget.checked)} disabled={uploading()} />
-                    <span>{i18n('Teagram.Import.Rights')}</span>
-                  </label>
+                  <Row class={styles.rightsRow} disabled={uploading()}>
+                    <Row.CheckboxField>
+                      <CheckboxFieldTsx checked={rightsConfirmed()} disabled={uploading()} onChange={setRightsConfirmed} />
+                    </Row.CheckboxField>
+                    <Row.Title>{i18n('Teagram.Import.Rights')}</Row.Title>
+                  </Row>
 
                   <Show when={uploadError()}>
                     <div class={styles.error} role="alert">{uploadError()}</div>

@@ -72,10 +72,14 @@ async function openStory(page: Page, id: string): Promise<string> {
   }
 }
 
-async function openSandboxStory(page: Page, id: string) {
+async function openSandboxStory(page: Page, id: string, hideSidebar = false) {
   await page.goto('/?popups=1');
   await page.waitForFunction(() => !!window.popupSandbox, null, {timeout: 30_000});
   await page.evaluate(() => window.popupSandbox.ready());
+  if(hideSidebar) {
+    await page.getByRole('button', {name: '◂ Hide'}).click();
+    await expect(page.locator('[role="complementary"][aria-label="Popup sandbox"]')).toHaveAttribute('aria-hidden', 'true');
+  }
   expect(await openStory(page, id)).toBeNull();
   return page.locator('.popup.active').last();
 }
@@ -172,13 +176,18 @@ test('opens and installs a sticker set from a direct share URL', async({page}) =
 });
 
 test('imports a folder pack and opens its shareable sticker set', async({page}, testInfo) => {
+  await page.setViewportSize({width: 375, height: 812});
+
   // A webkitdirectory input only accepts a real directory path, so the folder is written to this test's output dir.
   const folder = testInfo.outputPath('pack');
   mkdirSync(folder, {recursive: true});
   writeFileSync(join(folder, 'cat.webp'), Buffer.from([1, 2, 3]));
 
-  const importPopup = await openSandboxStory(page, 'stickerPackImport');
+  const importPopup = await openSandboxStory(page, 'stickerPackImport', true);
   await expect(importPopup.getByText('Import a sticker pack', {exact: true})).toBeVisible();
+  const popupBounds = await importPopup.boundingBox();
+  if(!popupBounds) throw new Error('Sticker import popup is not visible at mobile width');
+  expect(popupBounds.x + popupBounds.width).toBeLessThanOrEqual(375);
   await importPopup.locator('input[name="sticker-pack-title"]').fill('Imported Pack');
   await importPopup.locator('input[name="sticker-pack-short-name"]').fill('sandbox_imported');
   await expect(importPopup.getByText('Link is available', {exact: true})).toBeVisible();
@@ -187,13 +196,31 @@ test('imports a folder pack and opens its shareable sticker set', async({page}, 
   const createStickerSetCalls = () => page.evaluate(() => window.popupSandbox.calls()
     .filter((call) => call.manager === 'appStickersManager' && call.method === 'createStickerSet'));
 
+  const stickersRadio = importPopup.getByRole('radio', {name: 'Stickers'});
+  const emojiRadio = importPopup.getByRole('radio', {name: 'Custom emoji'});
+  await expect(stickersRadio).toBeChecked();
+  await expect(importPopup.locator('.radio-field-main')).toHaveCount(2);
+  const selectedRadioMarker = await importPopup.locator('.radio-field-main').first().evaluate((element) => ({
+    width: parseFloat(getComputedStyle(element, '::before').width),
+    selection: getComputedStyle(element, '::after').transform
+  }));
+  expect(selectedRadioMarker.width).toBeGreaterThan(0);
+  expect(selectedRadioMarker.selection).not.toBe('matrix(0, 0, 0, 0, 0, 0)');
+  await emojiRadio.focus();
+  await emojiRadio.press('Space');
+  await expect(emojiRadio).toBeChecked();
+  await stickersRadio.focus();
+  await stickersRadio.press('Space');
+  await expect(stickersRadio).toBeChecked();
+  await expect(importPopup.locator('.checkbox-box')).toBeVisible();
+  await expect(importPopup.getByLabel('I have the right to share this pack.')).not.toBeChecked();
   await expect(importButton).toBeDisabled();
   expect(await createStickerSetCalls()).toEqual([]);
   await capturePopupScreenshot(page, testInfo, 'sticker-import-consent-disabled');
 
-  // Click the row's text as a user would; the checkbox itself is covered by its styled box.
-  await importPopup.getByText('I have the right to share this pack.', {exact: true}).click();
+  await importPopup.getByLabel('I have the right to share this pack.').check();
   await expect(importPopup.getByLabel('I have the right to share this pack.')).toBeChecked();
+  await expect.poll(() => importPopup.locator('.checkbox-box-check use').evaluate((element) => getComputedStyle(element).visibility)).toBe('visible');
   await expect(importButton).toBeEnabled();
   await importButton.click();
   await expect.poll(createStickerSetCalls).toHaveLength(1);
@@ -218,7 +245,7 @@ test('imports a valid ZIP through the worker and sends its bytes as a ZIP source
   await importPopup.locator('input[accept=".zip,application/zip"]').setInputFiles(zipPath);
   await expect(importPopup.getByText('1 files selected from ZIP archive', {exact: true})).toBeVisible();
   await capturePopupScreenshot(page, testInfo, 'sticker-import-zip-selected');
-  await importPopup.getByText('I have the right to share this pack.', {exact: true}).click();
+  await importPopup.getByLabel('I have the right to share this pack.').check();
   await importPopup.getByRole('button', {name: 'Import pack'}).click();
 
   const importCall = () => page.evaluate(async() => {
@@ -265,7 +292,7 @@ test('uses a sticker set short name error and only displays API error codes', as
   await importPopup.locator('input[name="sticker-pack-short-name"]').fill('sandbox_imported');
   await expect(importPopup.getByText('Link is available', {exact: true})).toBeVisible();
   await importPopup.locator('input[webkitdirectory]').setInputFiles(folder);
-  await importPopup.getByText('I have the right to share this pack.', {exact: true}).click();
+  await importPopup.getByLabel('I have the right to share this pack.').check();
   await importPopup.getByRole('button', {name: 'Import pack'}).click();
 
   await expect(importPopup.getByText('Import failed: sticker set invalid', {exact: true})).toBeVisible();
