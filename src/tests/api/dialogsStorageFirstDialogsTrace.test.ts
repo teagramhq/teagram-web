@@ -49,7 +49,7 @@ test('flushes current peers once after the cached-dialog walk completes', async(
           mirrorBatch(peerKey, user);
         }
       }),
-      mirrorApiPeers: vi.fn((peerKeys: Iterable<string>, _trace?: 'cachedChannelDialogsReconcile', _traceId?: string) => {
+      mirrorApiPeers: vi.fn((peerKeys: Iterable<string>, _trace?: 'cachedChannelDialogsReconcile', _traceId?: string, _reconcilePhase?: unknown) => {
         for(const peerKey of peerKeys) {
           if(currentPeers[peerKey]) mirroredPeers[peerKey] = currentPeers[peerKey];
         }
@@ -130,7 +130,12 @@ test('flushes current peers once after the cached-dialog walk completes', async(
   expect(storage.appPeersManager.mirrorApiPeers).toHaveBeenCalledWith(
     new Set(['-42', '1', '2']),
     'cachedChannelDialogsReconcile',
-    expect.stringMatching(/^\d+-\d+$/)
+    expect.stringMatching(/^\d+-\d+$/),
+    expect.objectContaining({
+      name: 'worker.dialogs.cachedChannelReconcile',
+      pageCount: 2,
+      durationMs: expect.any(Number)
+    })
   );
   expect(mirroredPeers).toEqual({'1': currentFirstUser, '2': secondUser});
   expect(result.dialogs).toEqual([dialog]);

@@ -2179,8 +2179,9 @@ export default class DialogsStorage extends AppManager {
         offsetDate = (lastMessage as Message.message)?.date ?? 0;
       }
     } finally {
-      this.appPeersManager.mirrorApiPeers(peerKeys, trace, traceId);
       finishTrace?.({pageCount});
+      const reconcilePhase = traceId ? performancePhaseTrace.getSnapshot().find((phase) => phase.traceId === traceId) : undefined;
+      this.appPeersManager.mirrorApiPeers(peerKeys, trace, traceId, reconcilePhase);
     }
   }
 

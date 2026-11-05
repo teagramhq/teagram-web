@@ -77,6 +77,7 @@ import Modes from '@config/modes';
 import {getMtprotoTarget, isPrivateMtprotoTarget} from '@config/mtprotoTarget';
 import {getActiveServerId, getActiveServerQuery} from '@config/serverContext';
 import {waitForMtprotoWorkerReady} from '@helpers/mtprotoWorkerReady';
+import type {PerformancePhase} from '@appManagers/performanceTrace';
 import {toast} from '@components/toast';
 import appNavigationController from '@components/appNavigationController';
 import {BroadcastChannelWrapper, createBroadcastChannelWrapper} from './broadcastChannelWrapper';
@@ -154,6 +155,7 @@ export type MirrorTaskPayload<
   accountNumber: ActiveAccountNumber,
   trace?: 'cachedChannelDialogsReconcile',
   traceId?: string,
+  reconcilePhase?: PerformancePhase,
   traceOnly?: boolean
 };
 
@@ -1669,6 +1671,23 @@ class ApiManagerProxy extends MTProtoMessagePort {
         try {
           window.sessionStorage.setItem('teagram-perf-cached-dialog-reconcile-main-thread-ms', JSON.stringify(storedTimes));
         } catch{}
+        const phase = payload.reconcilePhase;
+        if(phase?.traceId && phase.durationMs !== null && Number.isFinite(phase.durationMs)) {
+          const phaseStorageKey = 'teagram-perf-cached-dialog-reconcile-phases';
+          let storedPhases: Record<string, PerformancePhase> = {};
+          try {
+            const parsed = JSON.parse(window.sessionStorage.getItem(phaseStorageKey) || '{}');
+            if(parsed && typeof parsed === 'object' && !Array.isArray(parsed)) storedPhases = parsed;
+          } catch{}
+          storedPhases[phase.traceId] = phase;
+          const traceIds = Object.keys(storedPhases);
+          if(traceIds.length > 100) {
+            traceIds.slice(0, traceIds.length - 100).forEach((oldTraceId) => delete storedPhases[oldTraceId]);
+          }
+          try {
+            window.sessionStorage.setItem(phaseStorageKey, JSON.stringify(storedPhases));
+          } catch{}
+        }
       }
     }
   };

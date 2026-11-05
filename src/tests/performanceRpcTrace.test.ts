@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {collectCachedDialogReconciles, observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries} from '../../e2e/performanceRpcTrace';
+import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries} from '../../e2e/performanceRpcTrace';
 import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
 
 test('summarizes cached dialog reconciliation relative to a scenario', () => {
@@ -37,6 +37,40 @@ test('associates only walks that overlap each measured scenario and records no-w
     }]
   });
   expect(() => collectCachedDialogReconciles([laterWalk], 17_500, 18_000, {})).toThrow('main-thread time');
+});
+
+test('attributes a long warm-list walk to every overlapping scroll repeat', () => {
+  expect(collectCachedDialogReconcileSummaries([
+    {scenarioStartedAtEpochMs: 0, scenarioEndedAtEpochMs: 1_000},
+    {scenarioStartedAtEpochMs: 10_000, scenarioEndedAtEpochMs: 20_000},
+    {scenarioStartedAtEpochMs: 30_000, scenarioEndedAtEpochMs: 40_000},
+    {scenarioStartedAtEpochMs: 50_000, scenarioEndedAtEpochMs: 62_000},
+    {scenarioStartedAtEpochMs: 70_000, scenarioEndedAtEpochMs: 80_000}
+  ], [{
+    traceId: 'warm-list-walk',
+    pageCount: 50,
+    startedAtEpochMs: 500,
+    durationMs: 60_000
+  }], {'warm-list-walk': 18.6})).toEqual([
+    {walks: [{traceId: 'warm-list-walk', pageCount: 50, startRelativeToScenarioMs: 500, endRelativeToScenarioMs: 60_500, mainThreadTimeMs: 18.6}]},
+    {walks: [{traceId: 'warm-list-walk', pageCount: 50, startRelativeToScenarioMs: -9_500, endRelativeToScenarioMs: 50_500, mainThreadTimeMs: 18.6}]},
+    {walks: [{traceId: 'warm-list-walk', pageCount: 50, startRelativeToScenarioMs: -29_500, endRelativeToScenarioMs: 30_500, mainThreadTimeMs: 18.6}]},
+    {walks: [{traceId: 'warm-list-walk', pageCount: 50, startRelativeToScenarioMs: -49_500, endRelativeToScenarioMs: 10_500, mainThreadTimeMs: 18.6}]},
+    {walks: []}
+  ]);
+});
+
+test('keeps a completed async reconciliation phase over a stale pending snapshot', () => {
+  const completed = {
+    traceId: 'long-walk',
+    pageCount: 50,
+    startedAtEpochMs: 1_000,
+    durationMs: 60_000
+  };
+  expect(mergeCachedDialogReconcilePhaseSnapshots([
+    [{...completed, durationMs: null, pageCount: undefined}],
+    [completed]
+  ])).toEqual([completed]);
 });
 
 test('requires a complete reconciliation summary on every measured scenario repeat', () => {

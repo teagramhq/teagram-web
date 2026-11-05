@@ -84,6 +84,22 @@ export type CachedDialogReconcilePhase = {
   durationMs: number | null
 };
 
+export type CachedDialogReconcileWindow = {
+  scenarioStartedAtEpochMs: number,
+  scenarioEndedAtEpochMs: number
+};
+
+export function mergeCachedDialogReconcilePhaseSnapshots(snapshots: CachedDialogReconcilePhase[][]): CachedDialogReconcilePhase[] {
+  const phasesByTraceId = new Map<string, CachedDialogReconcilePhase>();
+  snapshots.flat().forEach((phase) => {
+    const previous = phasesByTraceId.get(phase.traceId);
+    if(!previous || previous.durationMs === null || phase.durationMs !== null) {
+      phasesByTraceId.set(phase.traceId, phase);
+    }
+  });
+  return [...phasesByTraceId.values()];
+}
+
 export const CACHED_DIALOG_RECONCILE_PHASE_NAME = 'worker.dialogs.cachedChannelReconcile';
 
 export function getScenarioPreservedPerformancePhases() {
@@ -180,6 +196,19 @@ export function collectCachedDialogReconciles(
     return summarizeCachedDialogReconcile(phase, scenarioStartedAtEpochMs, mainThreadTimeMs);
   });
   return {walks};
+}
+
+export function collectCachedDialogReconcileSummaries(
+  windows: CachedDialogReconcileWindow[],
+  phases: CachedDialogReconcilePhase[],
+  mainThreadTimeByTraceId: Record<string, number>
+): CachedDialogReconcileSummary[] {
+  return windows.map(({scenarioStartedAtEpochMs, scenarioEndedAtEpochMs}) => collectCachedDialogReconciles(
+    phases,
+    scenarioStartedAtEpochMs,
+    scenarioEndedAtEpochMs,
+    mainThreadTimeByTraceId
+  ));
 }
 
 function hasCompleteCachedDialogReconcileSummary(summary: CachedDialogReconcileSummary | undefined) {

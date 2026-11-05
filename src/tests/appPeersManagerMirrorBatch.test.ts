@@ -83,7 +83,14 @@ test('mirrors the current peers and drops chats cleared before flush', () => {
   expect(chatsManager.getChat(42)).toBeUndefined();
   expect(invokeVoid).not.toHaveBeenCalled();
 
-  manager.mirrorApiPeers(peerKeys, 'cachedChannelDialogsReconcile');
+  const reconcilePhase = {
+    name: 'worker.dialogs.cachedChannelReconcile',
+    traceId: 'walk-1',
+    startedAtEpochMs: 1_000,
+    durationMs: 60_000,
+    pageCount: 50
+  };
+  manager.mirrorApiPeers(peerKeys, 'cachedChannelDialogsReconcile', 'walk-1', reconcilePhase);
 
   expect(invokeVoid).toHaveBeenCalledTimes(1);
   expect(invokeVoid).toHaveBeenCalledWith('mirror', {
@@ -91,6 +98,8 @@ test('mirrors the current peers and drops chats cleared before flush', () => {
     value: {'7': currentUser},
     merge: true,
     accountNumber: 1,
-    trace: 'cachedChannelDialogsReconcile'
+    trace: 'cachedChannelDialogsReconcile',
+    traceId: 'walk-1',
+    reconcilePhase
   });
 });

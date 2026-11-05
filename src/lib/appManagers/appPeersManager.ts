@@ -20,6 +20,7 @@ import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId'
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import callbackify from '@helpers/callbackify';
 import type {PeerMirrorBatch, PeerMirrorValue} from '@appManagers/peerMirrorBatch';
+import type {PerformancePhase} from '@appManagers/performanceTrace';
 
 export type PeerType = 'channel' | 'community' | 'chat' | 'megagroup' | 'group' | 'saved' | 'savedDialog' | 'monoforum' | 'monoforum_thread' | 'botforum_thread';
 export class AppPeersManager extends AppManager {
@@ -36,7 +37,7 @@ export class AppPeersManager extends AppManager {
     this.appUsersManager.saveApiUsers(object.users, undefined, trace, mirrorBatch);
   }
 
-  public mirrorApiPeers(peerKeys: Iterable<string>, trace?: 'cachedChannelDialogsReconcile', traceId?: string) {
+  public mirrorApiPeers(peerKeys: Iterable<string>, trace?: 'cachedChannelDialogsReconcile', traceId?: string, reconcilePhase?: PerformancePhase) {
     // The paginated walk can outlive a clear or a newer peer update.
     const peers: Record<string, PeerMirrorValue> = {};
     for(const peerKey of peerKeys) {
@@ -55,6 +56,7 @@ export class AppPeersManager extends AppManager {
       accountNumber: this.getAccountNumber(),
       ...(trace ? {trace} : {}),
       ...(traceId ? {traceId} : {}),
+      ...(reconcilePhase ? {reconcilePhase} : {}),
       ...(traceOnly ? {traceOnly: true} : {})
     });
   }
