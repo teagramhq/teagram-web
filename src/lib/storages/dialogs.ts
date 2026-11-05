@@ -46,7 +46,7 @@ import {isTempId} from '@appManagers/utils/messages/isTempId';
 
 let cachedDialogReconcileTraceSequence = 0;
 const CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE = 25;
-const CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE = 10;
+const CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE = 4;
 
 export enum FilterType {
   Folder,
@@ -2130,11 +2130,18 @@ export default class DialogsStorage extends AppManager {
         return {...event, args: [event.args[0], {...event.args[1], statusFromWorker: true}]};
       });
       peerKeys.clear();
-      const chatUpdates = pageEvents.filter((event) => event.name === 'chat_update').map((event) => event.args[0] as ChatId);
+      const chatUpdates = new Map<string, ChatId>();
+      pageEvents.forEach((event) => {
+        if(event.name !== 'chat_update') return;
+        const chatId = event.args[0] as ChatId;
+        chatUpdates.set(String(chatId.toPeerId(true)), chatId);
+      });
       for(let offset = 0; offset < keys.length; offset += CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE) {
+        const batchKeys = keys.slice(offset, offset + CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE);
+        const suppressed = batchKeys.flatMap((key) => chatUpdates.has(key) ? [chatUpdates.get(key)!] : []);
         this.appPeersManager.mirrorApiPeers(
-          keys.slice(offset, offset + CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE),
-          trace, traceId, undefined, undefined, undefined, chatUpdates
+          batchKeys,
+          trace, traceId, undefined, undefined, undefined, suppressed
         );
         await pause(0);
       }
