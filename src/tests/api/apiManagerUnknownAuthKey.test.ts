@@ -1,9 +1,63 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
+import '@lib/crypto/crypto.worker';
 import {ApiManager} from '@appManagers/apiManager';
 import {PerformanceRpcTrace} from '@appManagers/performanceTrace';
+import AccountController from '@lib/accounts/accountController';
+import CryptoWorker from '@lib/crypto/cryptoMessagePort';
+import bytesFromHex from '@helpers/bytes/bytesFromHex';
+import {Authorizer} from '@lib/mtproto/authorizer';
+import {MTAuthKey} from '@lib/mtproto/authKey';
 import MTPNetworker from '@lib/mtproto/networker';
+import rsaKeysManager from '@lib/mtproto/rsaKeysManager';
+import Schema from '@lib/mtproto/schema';
+import {TLDeserialization, TLSerialization} from '@lib/mtproto/tl_utils';
+import {TimeManager} from '@lib/mtproto/timeManager';
 import MTTransport from '@lib/mtproto/transports/transport';
+import sessionStorage from '@lib/sessionStorage';
+
+class SimulatedTransport {
+  public networker?: MTPNetworker;
+  public connected = true;
+  public noScheduler?: boolean;
+  public sentMethodIds: number[] = [];
+  public destroy = vi.fn();
+
+  public send(data: Uint8Array) {
+    const requestBody = data.subarray(20);
+    const deserializer = new TLDeserialization(requestBody, {mtproto: true});
+    this.sentMethodIds.push(deserializer.fetchInt());
+    const nonce = requestBody.subarray(4, 20).slice();
+
+    const responseBody = new TLSerialization({mtproto: true});
+    responseBody.storeObject({
+      _: 'resPQ',
+      nonce,
+      server_nonce: new Uint8Array(16).fill(this.sentMethodIds.length),
+      pq: new Uint8Array([0x17, 0x11]),
+      server_public_key_fingerprints: ['123456789']
+    }, 'ResPQ');
+
+    const response = new TLSerialization({mtproto: true});
+    response.storeLongP(0, 0, 'auth_key_id');
+    response.storeLongP(0, 4, 'msg_id');
+    response.storeInt(responseBody.getOffset(), 'msg_len');
+    response.storeRawBytes(responseBody.getBytes(true));
+    return Promise.resolve(response.getBytes(true));
+  }
+
+  public receiveResponse(packet: Uint8Array) {
+    if(packet.byteLength !== 4 || !this.networker) return;
+    const code = new DataView(packet.buffer, packet.byteOffset, packet.byteLength).getInt32(0, true);
+    if(code < 0) this.networker.onTransportError(code, this as unknown as MTTransport);
+  }
+}
+
+function makeTransportErrorPacket(code: number) {
+  const packet = new Uint8Array(4);
+  new DataView(packet.buffer).setInt32(0, code, true);
+  return packet;
+}
 
 function createManager(error: {code: number, type: string}, userId: number, isCurrent = true) {
   const transport = {} as MTTransport;
@@ -37,6 +91,7 @@ function createManager(error: {code: number, type: string}, userId: number, isCu
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  (ApiManager as any).fillTimeManagerOffsetPromise = undefined;
 });
 
 describe('unknown auth keys', () => {
@@ -160,6 +215,140 @@ describe('unknown auth keys', () => {
     expect(recoverUnknownAuthKey).toHaveBeenCalledOnce();
     expect(recoverUnknownAuthKey).toHaveBeenCalledWith(1);
     expect(targets.get(1)).toEqual({networker, transport});
+  });
+
+  it('uses the production networker wiring to send req_pq after repeated idle WebSocket rejections', async() => {
+    vi.stubGlobal('navigator', {...navigator, locks: {request: (_name: string, callback: () => Promise<unknown>) => callback()}});
+    const rejectedKey = 'aa'.repeat(256);
+    const firstReplacementKey = 'bb'.repeat(256);
+    const secondReplacementKey = 'cc'.repeat(256);
+    let accountData: Record<string, any> = {
+      dc2_auth_key: rejectedKey,
+      dc2_server_salt: '11'.repeat(8)
+    };
+    const getAccount = vi.spyOn(AccountController, 'get').mockImplementation(async() => structuredClone(accountData));
+    vi.spyOn(sessionStorage, 'getFresh').mockImplementation(async(key: string) => {
+      return key === 'account1' ? structuredClone(accountData) : undefined;
+    });
+    vi.spyOn(sessionStorage, 'set').mockImplementation(async(data: any) => {
+      if(data.account1) accountData = structuredClone(data.account1);
+    });
+    vi.spyOn(sessionStorage, 'flush').mockResolvedValue(undefined);
+    vi.spyOn(AccountController, 'updateStorageForLegacy').mockResolvedValue(undefined);
+    (ApiManager as any).fillTimeManagerOffsetPromise = Promise.resolve();
+
+    const timeManager = new TimeManager();
+    const transports: SimulatedTransport[] = [];
+    const dcConfigurator = {
+      chosenServers: {
+        http: {client: {}, download: {}, upload: {}},
+        https: {client: {}, download: {}, upload: {}},
+        websocket: {client: {}, download: {}, upload: {}}
+      },
+      chooseServer: vi.fn(() => {
+        const transport = new SimulatedTransport();
+        transports.push(transport);
+        return transport as unknown as MTTransport;
+      })
+    };
+    const authorizer = new Authorizer({timeManager, dcConfigurator: dcConfigurator as any});
+    (authorizer as any).transportType = 'websocket';
+    (authorizer as any).getTransportTypePromise = Promise.resolve();
+
+    const temporaryAuth = {
+      authKey: new MTAuthKey(new Uint8Array(256).fill(0xdd), new Uint8Array(8).fill(1)),
+      serverSalt: new Uint8Array(8).fill(0x44),
+      expiresAt: Date.now() + 60_000
+    };
+    const originalAuth = authorizer.auth.bind(authorizer);
+    const auth = vi.spyOn(authorizer, 'auth').mockImplementation((dcId, temp, force) => {
+      if(temp) return Promise.resolve(temporaryAuth as any);
+      return originalAuth(dcId, temp, force);
+    });
+    const exchangeKeys = [
+      {key: firstReplacementKey, byte: 0xbb, salt: 0x22},
+      {key: secondReplacementKey, byte: 0xcc, salt: 0x33}
+    ];
+    let exchangeCount = 0;
+    vi.spyOn(authorizer as any, 'sendReqDhParams').mockImplementation(async(authOptions: any) => {
+      const exchange = exchangeKeys[exchangeCount++];
+      return {
+        ...authOptions,
+        authKey: new MTAuthKey(new Uint8Array(256).fill(exchange.byte), new Uint8Array(8).fill(exchange.byte)),
+        serverSalt: new Uint8Array(8).fill(exchange.salt)
+      };
+    });
+    vi.spyOn(rsaKeysManager, 'prepare').mockResolvedValue(undefined);
+    vi.spyOn(rsaKeysManager, 'select').mockResolvedValue({
+      modulus: 'f'.repeat(512),
+      exponent: '010001',
+      fingerprint: '123456789'
+    });
+    vi.spyOn(CryptoWorker, 'invokeCrypto').mockResolvedValue([new Uint8Array([3]), new Uint8Array([5])] as any);
+
+    const networkers: MTPNetworker[] = [];
+    const networkerFactory = {
+      getNetworker: vi.fn((options: any) => {
+        const networker = new MTPNetworker({
+          ...options,
+          timeManager,
+          getInitConnectionParams: () => ({id: 1}),
+          getBaseDcId: async() => 2
+        } as any);
+        networkers.push(networker);
+        return networker;
+      }),
+      removeNetworker: vi.fn()
+    };
+    const cachedNetworkers: any = Object.fromEntries(['http', 'https', 'websocket'].map((transportType) => [transportType, {
+      client: {},
+      download: {},
+      upload: {}
+    }]));
+    const log = Object.assign(vi.fn(), {error: vi.fn()});
+    const manager = Object.create(ApiManager.prototype) as ApiManager;
+    Object.assign(manager, {
+      accountNumber: 1,
+      authKeyRecoveryTargets: new Map(),
+      nextAuthKeyRecoveryId: 0,
+      baseDcId: 2,
+      cachedNetworkers,
+      gettingNetworkers: {},
+      transportType: 'websocket',
+      timeManager,
+      rootScope: {myId: 0, premium: false},
+      dcConfigurator,
+      networkerFactory,
+      authorizer,
+      performanceRpcTrace: new PerformanceRpcTrace(false),
+      log
+    });
+    vi.spyOn(manager, 'getAuthKeyFromHex').mockImplementation(async(authKeyHex) => {
+      return new MTAuthKey(bytesFromHex(authKeyHex), new Uint8Array(8));
+    });
+    vi.spyOn(manager, 'setOnDrainIfNeeded').mockImplementation(() => {});
+    const recover = vi.spyOn(manager, 'recoverUnknownAuthKey');
+
+    const firstNetworker = await manager.getNetworker(2);
+    expect(firstNetworker.usesPermanentAuthKeyHex(rejectedKey)).toBe(true);
+    (firstNetworker.transport as unknown as SimulatedTransport).receiveResponse(makeTransportErrorPacket(-404));
+    await expect(recover.mock.results[0].value).resolves.toBe(true);
+
+    const secondNetworker = await manager.getNetworker(2);
+    expect(accountData.dc2_auth_key).toBe(firstReplacementKey);
+    expect(secondNetworker.usesPermanentAuthKeyHex(firstReplacementKey)).toBe(true);
+    expect(secondNetworker.usesPermanentAuthKeyHex(rejectedKey)).toBe(false);
+    (secondNetworker.transport as unknown as SimulatedTransport).receiveResponse(makeTransportErrorPacket(-404));
+    await expect(recover.mock.results[1].value).resolves.toBe(true);
+
+    const reqPqMethodId = Schema.MTProto.methods.find(({method}) => method === 'req_pq_multi')!.id;
+    expect(transports.filter(({sentMethodIds}) => sentMethodIds.length).map(({sentMethodIds}) => sentMethodIds))
+    .toEqual([[reqPqMethodId], [reqPqMethodId]]);
+    expect(accountData.dc2_auth_key).toBe(secondReplacementKey);
+    expect(auth).toHaveBeenCalledWith(2, false, true);
+    expect(auth.mock.calls.filter(([, temp]) => !temp)).toHaveLength(2);
+    expect(networkers).toHaveLength(2);
+    expect(getAccount).toHaveBeenCalledTimes(2);
   });
 
   it('ignores an unknown-key error from a stale networker', async() => {
