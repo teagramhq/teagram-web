@@ -38,6 +38,37 @@ test('keeps completed reconciliation measurements when the scenario trace resets
   });
 });
 
+test('attaches reconciliation summaries to every measured scenario repeat', async() => {
+  const attachSummaries = (await import('../../e2e/performanceRpcTrace') as any).attachCachedDialogReconcileSummaries;
+  expect(attachSummaries).toBeTypeOf('function');
+
+  const firstSummary = {
+    pageCount: 30,
+    startRelativeToScenarioMs: -100,
+    endRelativeToScenarioMs: 2_500,
+    mainThreadTimeMs: 640
+  };
+  const secondSummary = {...firstSummary, startRelativeToScenarioMs: -80, endRelativeToScenarioMs: 2_520};
+  expect(attachSummaries(
+    [{ms: 100}, {ms: 120}],
+    [{cachedDialogReconcile: firstSummary}, {cachedDialogReconcile: secondSummary}],
+    'contactSearch'
+  )).toEqual([
+    {ms: 100, cachedDialogReconcile: firstSummary},
+    {ms: 120, cachedDialogReconcile: secondSummary}
+  ]);
+});
+
+test('fails when a measured scenario repeat has no reconciliation summary', async() => {
+  const attachSummaries = (await import('../../e2e/performanceRpcTrace') as any).attachCachedDialogReconcileSummaries;
+  expect(attachSummaries).toBeTypeOf('function');
+  expect(() => attachSummaries(
+    [{ms: 100}, {ms: 120}],
+    [{cachedDialogReconcile: {pageCount: 30, startRelativeToScenarioMs: -100, endRelativeToScenarioMs: 2_500, mainThreadTimeMs: 640}}],
+    'contactSearch'
+  )).toThrow('100x contactSearch repeat 2 is missing its cached dialog reconciliation summary');
+});
+
 describe('performance RPC trace summary', () => {
   test('excludes long tasks that start outside the scenario measurement window', async() => {
     const trace = await import('../../e2e/performanceRpcTrace') as any;

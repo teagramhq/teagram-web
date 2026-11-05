@@ -449,7 +449,7 @@ export function formatPerformanceTraceTable(diagnostics) {
     lines.push(`| ${label(phase)} | ${show(entry.cold?.startMs)} | ${show(entry.cold?.durationMs)} | ${show(entry.warm?.startMs)} | ${show(entry.warm?.durationMs)} |`);
   }
 
-  const reconcileRows = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k'].flatMap((scenario) => {
+  const reconcileRows = SCENARIOS.map(({key}) => key).flatMap((scenario) => {
     const samples = Array.isArray(diagnostics?.[scenario]) ? diagnostics[scenario] : [];
     const traces = samples.map((sample) => sample.cachedDialogReconcile).filter(Boolean);
     if(!traces.length) return [];

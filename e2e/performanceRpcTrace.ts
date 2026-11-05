@@ -144,6 +144,18 @@ export function summarizeCachedDialogReconcile(
   };
 }
 
+export function attachCachedDialogReconcileSummaries<T extends {cachedDialogReconcile?: CachedDialogReconcileSummary}>(
+  measuredSamples: T[],
+  diagnosticSamples: Array<{cachedDialogReconcile?: CachedDialogReconcileSummary}>,
+  scenario: string
+): T[] {
+  return measuredSamples.map((sample, index) => {
+    const summary = diagnosticSamples[index]?.cachedDialogReconcile;
+    if(!summary) throw new Error(`100x ${scenario} repeat ${index + 1} is missing its cached dialog reconciliation summary`);
+    return {...sample, cachedDialogReconcile: summary};
+  });
+}
+
 export function summarizeRpcTrace(rpcCalls: PerformanceRpcCall[], elapsedMs: number): PerformanceRpcSummary {
   const intervals = rpcCalls.map(({startedAtMs, durationMs}) => {
     const start = Math.max(0, Math.min(elapsedMs, startedAtMs));

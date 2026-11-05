@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {CACHED_DIALOG_RECONCILE_PHASE_NAME, getScenarioPreservedPerformancePhases, observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {attachCachedDialogReconcileSummaries, CACHED_DIALOG_RECONCILE_PHASE_NAME, getScenarioPreservedPerformancePhases, observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -219,6 +219,16 @@ async function begin(page: Page, requests: {value: number}, recordRpcSpans = tru
   }, {recordSpans: recordRpcSpans, traceEnabled});
 }
 
+async function beginScenario(page: Page, requests: {value: number}, traceEnabled = false) {
+  if(!traceEnabled) {
+    await begin(page, requests);
+    return;
+  }
+
+  await begin(page, requests, true, true);
+  await page.evaluate((preserveNames) => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace(preserveNames), scenarioPreservedPerformancePhases);
+}
+
 async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false): Promise<Metric> {
   const requestCount = requests.value;
   await page.waitForTimeout(150);
@@ -349,7 +359,8 @@ async function finalizeCachedDialogReconcileSummaries(page: Page, targets: Cache
   for(const target of targets) {
     const summary = summarizeCachedDialogReconcile(phase!, target.scenarioStartedAtEpochMs, mainThreadTimeMs);
     expect(summary.pageCount, `${target.scenario} reconciliation page count is missing`).toBeGreaterThan(0);
-    expect(summary.endRelativeToScenarioMs, `${target.scenario} reconciliation end offset is missing`).not.toBeNull();
+    expect(Number.isFinite(summary.startRelativeToScenarioMs), `${target.scenario} reconciliation start offset is missing`).toBe(true);
+    expect(Number.isFinite(summary.endRelativeToScenarioMs), `${target.scenario} reconciliation end offset is missing`).toBe(true);
     expect(summary.mainThreadTimeMs, `${target.scenario} reconciliation main-thread time is missing`).toBeGreaterThan(0);
     target.metric.cachedDialogReconcile = summary;
   }
@@ -450,6 +461,17 @@ async function snapshotMeasurementBoundary(page: Page): Promise<MeasurementBound
       }
     };
   });
+}
+
+async function captureScenario(
+  page: Page,
+  requests: {value: number},
+  traceEnabled = false,
+  onMeasurementBoundary?: (boundary: MeasurementBoundary) => void
+) {
+  const boundary = await snapshotMeasurementBoundary(page);
+  onMeasurementBoundary?.(boundary);
+  return capture(page, requests, boundary, false, traceEnabled);
 }
 
 async function startCpuProfile(page: Page) {
@@ -586,7 +608,7 @@ async function scrollBackTwoThousand(
 
   // Only the diagnostic pass waits: the gated window must keep the chat-open history tail it always had.
   if(profileTrace) await waitForHistorySettled(page);
-  await begin(page, requests, profileTrace, profileTrace);
+  await beginScenario(page, requests, profileTrace);
   if(profileTrace) await installScrollSpanTracing(page);
   const cpuProfile = profileTrace ? await startCpuProfile(page) : undefined;
   await page.evaluate(() => (window as any).__teagramPerf.startFrames());
@@ -667,8 +689,15 @@ async function scrollBackTwoThousand(
   };
 }
 
-async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture, allowUnsupportedBase: boolean): Promise<Metric | undefined> {
-  await begin(page, requests);
+async function jumpToFixtureDate(
+  page: Page,
+  requests: {value: number},
+  fixture: Fixture,
+  allowUnsupportedBase: boolean,
+  traceEnabled = false,
+  onMeasurementBoundary?: (boundary: MeasurementBoundary) => void
+): Promise<Metric | undefined> {
+  await beginScenario(page, requests, traceEnabled);
   const beforeMids = await page.locator('.bubbles .bubble[data-mid]').evaluateAll((elements) => elements.map((element) => Number((element as HTMLElement).dataset.mid)));
   const searchIcon = String.fromCharCode(parseInt(Icons.search, 16));
   await page.locator('#page-chats .chat-utils > .btn-icon').filter({hasText: searchIcon}).click();
@@ -717,49 +746,49 @@ async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture:
     return [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].some((bubble) => !old.has(Number(bubble.dataset.mid)));
   }, beforeMids, {timeout: 60_000});
   await waitForHistorySettled(page);
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+  return captureScenario(page, requests, traceEnabled, onMeasurementBoundary);
 }
 
-async function openContacts(page: Page, requests: {value: number}) {
+async function openContacts(page: Page, requests: {value: number}, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void) {
   await waitForBundleResources(page);
-  await begin(page, requests);
+  await beginScenario(page, requests, traceEnabled);
   await page.locator('.sidebar-tools-button').click();
   await page.getByText('Contacts', {exact: true}).last().click();
   await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+  return captureScenario(page, requests, traceEnabled, onMeasurementBoundary);
 }
 
-async function searchContacts(page: Page, requests: {value: number}, scale: Scale) {
-  await begin(page, requests);
+async function searchContacts(page: Page, requests: {value: number}, scale: Scale, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void) {
+  await beginScenario(page, requests, traceEnabled);
   const input = page.locator('#contacts-container .input-search-input');
   await input.fill(scale === '1x' ? 'k00099' : 'k09999');
   await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
   await expect(page.locator('#contacts-container .chatlist-chat')).toHaveCount(1, {timeout: 60_000});
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+  return captureScenario(page, requests, traceEnabled, onMeasurementBoundary);
 }
 
-async function globalSearch(page: Page, requests: {value: number}, scale: Scale) {
+async function globalSearch(page: Page, requests: {value: number}, scale: Scale, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void) {
   await page.locator('#contacts-container .sidebar-close-button').click();
-  await begin(page, requests);
+  await beginScenario(page, requests, traceEnabled);
   await page.keyboard.press('Control+f');
   const input = page.locator('#column-left .item-main .sidebar-header .input-search-input');
   await expect(input).toBeVisible();
   await input.fill(`needle ${scale === '1x' ? '5000' : '500000'}`);
   await expect(page.locator('#search-container .chatlist-chat').first()).toBeVisible({timeout: 90_000});
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+  return captureScenario(page, requests, traceEnabled, onMeasurementBoundary);
 }
 
-async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture) {
+async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void) {
   await page.keyboard.press('Escape');
   await page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first().click();
   await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible();
-  await begin(page, requests);
+  await beginScenario(page, requests, traceEnabled);
   const text = `web-perf-${process.env.GITHUB_RUN_ID || 'local'}-${Date.now()}`;
   const composer = page.locator('.input-message-input:not(.input-field-input-fake)[contenteditable="true"]');
   await composer.fill(text);
   await composer.press('Enter');
   await expect(page.locator('#page-chats .bubbles .bubble.is-out').filter({hasText: text})).toBeVisible({timeout: 60_000});
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+  return captureScenario(page, requests, traceEnabled, onMeasurementBoundary);
 }
 
 async function prepareVariant(browser: Browser, variant: Variant, origin: string): Promise<VariantRun> {
@@ -904,11 +933,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
 }
 
 async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
-  const coldChatList: Metric[] = [];
-  const warmChatList: Metric[] = [];
-  let chatOpen: Metric;
-  let scrollBack2k: Metric;
-  const scrollBack2kRepeats: Metric[] = [];
+  const traceSamples = Object.fromEntries(scenarios.map((scenario) => [scenario, [] as Metric[]])) as Record<string, Metric[]>;
 
   for(let repeat = 0; repeat < COLD_CHAT_LIST_REPEATS; ++repeat) {
     const context = await browser.newContext({
@@ -928,25 +953,23 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
       const coldBoundary = await snapshotMeasurementBoundary(page);
       const coldCapture = await capture(page, requests, coldBoundary, false, true);
       const coldSample = {...coldCapture, ...(coldProfile ? {cpu: await finishCpuProfile(coldProfile)} : {})};
-      coldChatList.push(coldSample);
+      traceSamples.coldChatList.push(coldSample);
       reconcileTargets.push({metric: coldSample, scenario: 'coldChatList', scenarioStartedAtEpochMs: coldBoundary.startedAtEpochMs});
 
-      await begin(page, requests, true, true);
-      await page.evaluate((preserveNames) => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace(preserveNames), scenarioPreservedPerformancePhases);
-      const warmProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
-      await page.reload({waitUntil: 'domcontentloaded'});
-      await waitForChatList(page);
-      const warmBoundary = await snapshotMeasurementBoundary(page);
-      const warmCapture = await capture(page, requests, warmBoundary, false, true);
-      const warmSample = {...warmCapture, ...(warmProfile ? {cpu: await finishCpuProfile(warmProfile)} : {})};
-      warmChatList.push(warmSample);
-      reconcileTargets.push({metric: warmSample, scenario: 'warmChatList', scenarioStartedAtEpochMs: warmBoundary.startedAtEpochMs});
-
       if(repeat < PERFORMANCE_REPEATS) {
+        await beginScenario(page, requests, true);
+        const warmProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
+        await page.reload({waitUntil: 'domcontentloaded'});
+        await waitForChatList(page);
+        const warmBoundary = await snapshotMeasurementBoundary(page);
+        const warmCapture = await capture(page, requests, warmBoundary, false, true);
+        const warmSample = {...warmCapture, ...(warmProfile ? {cpu: await finishCpuProfile(warmProfile)} : {})};
+        traceSamples.warmChatList.push(warmSample);
+        reconcileTargets.push({metric: warmSample, scenario: 'warmChatList', scenarioStartedAtEpochMs: warmBoundary.startedAtEpochMs});
+
         const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
         await expect(row).toBeVisible({timeout: 60_000});
-        await begin(page, requests, true, true);
-        await page.evaluate((preserveNames) => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace(preserveNames), scenarioPreservedPerformancePhases);
+        await beginScenario(page, requests, true);
         await installPeerChangeTracing(page);
         const chatProfile = await startCpuProfile(page);
         await row.click();
@@ -959,10 +982,8 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
           cpu: chatCpu,
           peerChangePhases: summarizePerformancePhases(await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []))
         };
+        traceSamples.chatOpen.push(chatOpenSample);
         reconcileTargets.push({metric: chatOpenSample, scenario: 'chatOpen', scenarioStartedAtEpochMs: chatOpenBoundary.startedAtEpochMs});
-        if(repeat === 0) {
-          chatOpen = chatOpenSample;
-        }
         // Every diagnostic repeat scrolls back, so each one's long tasks carry their own CPU stacks and spans.
         let scrollBoundary: MeasurementBoundary | undefined;
         const scrolled = await test.step(`profile 100x scroll back 2,000 messages (repeat ${repeat + 1})`, () => scrollBackTwoThousand(
@@ -976,9 +997,71 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         expect(scrolled.rpcSpansRecorded, 'scroll-back RPC spans were not recorded').toBe(true);
         expect(scrolled.cpu.sampledCpuMs, 'scroll-back CPU profile was empty').toBeGreaterThan(0);
         if(!scrollBoundary) throw new Error('scroll-back measurement boundary was not recorded');
-        scrollBack2kRepeats.push(scrolled);
+        traceSamples.scrollBack2k.push(scrolled);
         reconcileTargets.push({metric: scrolled, scenario: 'scrollBack2k', scenarioStartedAtEpochMs: scrollBoundary.startedAtEpochMs});
-        if(repeat === 0) scrollBack2k = scrolled;
+
+        let dateJumpBoundary: MeasurementBoundary | undefined;
+        const jumped = await test.step(`profile 100x date jump (repeat ${repeat + 1})`, () => jumpToFixtureDate(
+          page,
+          requests,
+          fixture,
+          false,
+          true,
+          (boundary) => dateJumpBoundary = boundary
+        ));
+        if(!jumped || !dateJumpBoundary) throw new Error('date-jump profile did not record its measurement boundary');
+        traceSamples.dateJump.push(jumped);
+        reconcileTargets.push({metric: jumped, scenario: 'dateJump', scenarioStartedAtEpochMs: dateJumpBoundary.startedAtEpochMs});
+
+        await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+        await waitForChatList(page);
+
+        let contactsBoundary: MeasurementBoundary | undefined;
+        const contacts = await test.step(`profile 100x contacts list (repeat ${repeat + 1})`, () => openContacts(
+          page,
+          requests,
+          true,
+          (boundary) => contactsBoundary = boundary
+        ));
+        if(!contactsBoundary) throw new Error('contacts profile did not record its measurement boundary');
+        traceSamples.contactsList.push(contacts);
+        reconcileTargets.push({metric: contacts, scenario: 'contactsList', scenarioStartedAtEpochMs: contactsBoundary.startedAtEpochMs});
+
+        let contactSearchBoundary: MeasurementBoundary | undefined;
+        const contactSearch = await test.step(`profile 100x contact search (repeat ${repeat + 1})`, () => searchContacts(
+          page,
+          requests,
+          '100x',
+          true,
+          (boundary) => contactSearchBoundary = boundary
+        ));
+        if(!contactSearchBoundary) throw new Error('contact-search profile did not record its measurement boundary');
+        traceSamples.contactSearch.push(contactSearch);
+        reconcileTargets.push({metric: contactSearch, scenario: 'contactSearch', scenarioStartedAtEpochMs: contactSearchBoundary.startedAtEpochMs});
+
+        let globalSearchBoundary: MeasurementBoundary | undefined;
+        const globalSearchSample = await test.step(`profile 100x global search (repeat ${repeat + 1})`, () => globalSearch(
+          page,
+          requests,
+          '100x',
+          true,
+          (boundary) => globalSearchBoundary = boundary
+        ));
+        if(!globalSearchBoundary) throw new Error('global-search profile did not record its measurement boundary');
+        traceSamples.globalSearch.push(globalSearchSample);
+        reconcileTargets.push({metric: globalSearchSample, scenario: 'globalSearch', scenarioStartedAtEpochMs: globalSearchBoundary.startedAtEpochMs});
+
+        let sendMessageBoundary: MeasurementBoundary | undefined;
+        const sent = await test.step(`profile 100x send message (repeat ${repeat + 1})`, () => sendMessage(
+          page,
+          requests,
+          fixture,
+          true,
+          (boundary) => sendMessageBoundary = boundary
+        ));
+        if(!sendMessageBoundary) throw new Error('send-message profile did not record its measurement boundary');
+        traceSamples.sendMessage.push(sent);
+        reconcileTargets.push({metric: sent, scenario: 'sendMessage', scenarioStartedAtEpochMs: sendMessageBoundary.startedAtEpochMs});
       }
 
       // Finish the measured windows first, then wait for the diagnostic phase so each window gets its final page and time totals.
@@ -988,7 +1071,21 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
     }
   }
 
-  return {coldChatList, warmChatList, chatOpen: chatOpen!, scrollBack2k: scrollBack2k!, scrollBack2kRepeats};
+  const measured = report.variants.head['100x'];
+  for(const scenario of scenarios) {
+    const measuredSamples = measured[scenario];
+    expect(measuredSamples?.length, `100x ${scenario} has no measured repeats`).toBeGreaterThan(0);
+    measured[scenario] = attachCachedDialogReconcileSummaries(measuredSamples, traceSamples[scenario], scenario);
+    for(const [index, sample] of measured[scenario].entries()) {
+      const summary = sample.cachedDialogReconcile;
+      expect(summary?.pageCount, `100x ${scenario} measured repeat ${index + 1} has no reconciliation page count`).toBeGreaterThan(0);
+      expect(Number.isFinite(summary?.startRelativeToScenarioMs), `100x ${scenario} measured repeat ${index + 1} has no reconciliation start offset`).toBe(true);
+      expect(Number.isFinite(summary?.endRelativeToScenarioMs), `100x ${scenario} measured repeat ${index + 1} has no reconciliation end offset`).toBe(true);
+      expect(summary?.mainThreadTimeMs, `100x ${scenario} measured repeat ${index + 1} has no reconciliation main-thread time`).toBeGreaterThan(0);
+    }
+  }
+
+  return traceSamples;
 }
 
 test('measures the scale fixture in interleaved base and head runs', async({browser}) => {

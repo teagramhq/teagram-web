@@ -134,6 +134,21 @@ test('reports cached dialog reconciliation timing and main-thread time by scenar
   assert.match(table, /\| scrollBack2k \| 30\.0 \| -2000\.0 \| -50\.0 \| 12\.0 \|/);
 });
 
+test('reports reconciliation summaries for every measured scenario', () => {
+  const summary = {
+    pageCount: 30,
+    startRelativeToScenarioMs: -100,
+    endRelativeToScenarioMs: 2_500,
+    mainThreadTimeMs: 640
+  };
+  const diagnostics = Object.fromEntries(SCENARIOS.map(({key}) => [key, [{cachedDialogReconcile: summary}]]));
+  const table = formatPerformanceTraceTable(diagnostics);
+
+  for(const {key} of SCENARIOS) {
+    assert.ok(table.includes(`| ${key} | 30.0 | -100.0 | 2500.0 | 640.0 |`), `${key} reconciliation summary is missing from the trace table`);
+  }
+});
+
 test('blocks an added 100 ms task when the 100x cold-load base already has long tasks', () => {
   const base = scaleVariants({'100x': {coldChatList: [
     {longTasksOver50Ms: 3, blockingTimeMs: 140, maxLongTaskDurationMs: 118},
