@@ -909,7 +909,8 @@ export class ApiManager extends ApiManagerMethods {
         };
       }
 
-      return promise.catch(async(error: ApiError) => {
+      return promise.catch((error: ApiError) => {
+        let authKeyRecoveryPromise: Promise<unknown> | undefined;
         if(error?.code === -404 && error.type === 'AUTH_KEY_UNKNOWN' && cachedNetworker &&
           cachedNetworker.transport === requestTransport && this.isNetworkerCurrentForDc(cachedNetworker.dcId, cachedNetworker)) {
           if(authKeyRecovery || !this.rootScope.myId) {
@@ -919,11 +920,9 @@ export class ApiManager extends ApiManagerMethods {
             if(authKeyRecovery) {
               error = {...error, authKeyRecoveryId: recoveryId};
             } else {
-              try {
-                await this.recoverUnknownAuthKey(recoveryId);
-              } catch(recoveryError) {
+              authKeyRecoveryPromise = this.recoverUnknownAuthKey(recoveryId).catch((recoveryError) => {
                 this.log.error('Failed to recover unknown auth key', recoveryError);
-              }
+              });
             }
           }
 
@@ -1043,6 +1042,12 @@ export class ApiManager extends ApiManagerMethods {
         } else {
           if(RepayRequestHandler.canHandleError(error))
             error = RepayRequestHandler.attachInvokeArgsToError(error, [method, params, options]);
+
+          if(authKeyRecoveryPromise) {
+            return authKeyRecoveryPromise.then(() => {
+              throw error;
+            });
+          }
 
           throw error;
         }
