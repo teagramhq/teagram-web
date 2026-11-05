@@ -264,4 +264,79 @@ describe('media uploads across the manager worker port', () => {
       expect(manager.onMessagesSendError).not.toHaveBeenCalled();
     }
   });
+
+  it.each(['success first', 'failure first'])('marks every pending album message failed when one upload fails (%s)', async(order) => {
+    const {client, worker} = createPair();
+    const uploads = [deferredPromise<any>(), deferredPromise<any>()];
+    const sends = uploads.map((upload) => vi.fn(() => upload));
+    const messages: any[] = [1, 2].map((id) => ({
+      _: 'message', id, mid: id, peerId: 1 as PeerId, storageKey: '1_history',
+      random_id: String(id), pFlags: {}, pending: true
+    }));
+    const storage = new Map(messages.map((message) => [message.mid, message]));
+    const dispatchEvent = vi.fn();
+    const photo = {_: 'photo', id: '1', access_hash: '2', file_reference: new Uint8Array(), date: 0, sizes: [] as any[], dc_id: 1, pFlags: {}};
+    const invokeApi = vi.fn(async(method: string): Promise<any> => {
+      if(method === 'messages.uploadMedia') return {_: 'messageMediaPhoto', pFlags: {}, photo};
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    const sendFile = vi.fn(async(options: any): Promise<any> => {
+      const index = options.file.name === 'first.jpg' ? 0 : 1;
+      return {message: messages[index], send: sends[index], uploadingFileName: `file-${index}`};
+    });
+    const log: any = vi.fn();
+    log.error = vi.fn();
+    log.bindPrefix = () => log;
+    const manager = new AppMessagesManager() as any;
+    Object.assign(manager, {
+      appPeersManager: {
+        getPeerMigratedTo: (): PeerId => undefined,
+        getInputPeerById: () => ({_: 'inputPeerSelf'})
+      },
+      getEphemeralSendContext: (): undefined => undefined,
+      checkSendOptions: async(): Promise<void> => undefined,
+      getInputEntities: (): any[] => [],
+      groupedTempId: 0,
+      sendFile,
+      apiManager: {invokeApi},
+      appPhotosManager: {savePhoto: (value: any): any => value},
+      apiFileManager: {cancelDownload: vi.fn()},
+      onMessageModification: (message: any): void => { storage.set(message.mid, message); },
+      updateMessageContext: vi.fn(),
+      getDialogOnly: (): undefined => undefined,
+      rootScope: {dispatchEvent},
+      setTyping: vi.fn(),
+      log
+    });
+    worker.addEventListener('call', () => manager.sendGrouped({
+      peerId: 1 as PeerId,
+      isMedia: true,
+      sendFileDetails: [
+        {file: new File(['one'], 'first.jpg', {type: 'image/jpeg'})},
+        {file: new File(['two'], 'second.jpg', {type: 'image/jpeg'})}
+      ]
+    }));
+    const handled = handleMediaSendFailure(client.invoke('call', {kind: 'value'}));
+    await vi.waitFor(() => {
+      expect(sends[0]).toHaveBeenCalledOnce();
+      expect(sends[1]).toHaveBeenCalledOnce();
+    });
+
+    const input = {_: 'inputMediaUploadedPhoto', file: {_: 'inputFile', id: '1', parts: 1, name: 'first.jpg', md5_checksum: ''}, pFlags: {}};
+    if(order === 'success first') {
+      uploads[0].resolve(input);
+      await vi.waitFor(() => expect(invokeApi).toHaveBeenCalledWith('messages.uploadMedia', expect.any(Object)));
+    }
+    uploads[1].reject({type: 'UPLOAD_DISABLED', code: 403});
+    await handled;
+    if(order === 'failure first') {
+      uploads[0].resolve(input);
+      await vi.waitFor(() => expect(invokeApi).toHaveBeenCalledWith('messages.uploadMedia', expect.any(Object)));
+    }
+
+    expect([...storage.values()].map((message) => message.error?.type)).toEqual(['UPLOAD_DISABLED', 'UPLOAD_DISABLED']);
+    expect(dispatchEvent.mock.calls.filter(([event]) => event === 'message_error')).toHaveLength(2);
+    expect(invokeApi.mock.calls.some(([method]) => method === 'messages.sendMultiMedia')).toBe(false);
+    expect(mediaMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Error.AnError'});
+  });
 });

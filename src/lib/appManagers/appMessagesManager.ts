@@ -3465,6 +3465,10 @@ export class AppMessagesManager extends AppManager {
         return;
       }
       return invoke(inputs);
+    }, (error: ApiError) => {
+      // One failed upload prevents the whole album from being sent.
+      results.forEach(({message}) => toggleError(message, error));
+      throw error;
     });
   }
 
