@@ -704,6 +704,7 @@ export default class ChatBubbles {
 
   private getHistoryTopPromise: Promise<boolean>;
   private getHistoryBottomPromise: Promise<boolean>;
+  private deferredHistoryRetry?: () => Promise<void>;
 
   // public messagesCount: number = -1;
 
@@ -4596,11 +4597,29 @@ export default class ChatBubbles {
       /* TEST_SCROLL || */
       this.chat.setPeerPromise ||
       this.isHeavyAnimationInProgress ||
-      (top && (this.getHistoryTopPromise || this.scrollable.loadedAll.top)) ||
-      (!top && (this.getHistoryBottomPromise || this.scrollable.loadedAll.bottom))
+      (top && this.getHistoryTopPromise) ||
+      (!top && this.getHistoryBottomPromise)
     ) {
       return;
     }
+
+    const retry = top && this.deferredHistoryRetry;
+    if(retry) {
+      const retryPromise = Promise.resolve().then(retry).then(() => true);
+      this.getHistoryTopPromise = retryPromise;
+      retryPromise.then(() => {
+        if(this.getHistoryTopPromise !== retryPromise) return;
+        this.getHistoryTopPromise = undefined;
+        this.scrollable.onScroll();
+      }, (error: unknown) => {
+        if(this.getHistoryTopPromise !== retryPromise) return;
+        this.getHistoryTopPromise = undefined;
+        if(error !== PEER_CHANGED_ERROR) this.log.error('deferred history retry failed:', error);
+      });
+      return;
+    }
+
+    if((top && this.scrollable.loadedAll.top) || (!top && this.scrollable.loadedAll.bottom)) return;
 
     const history = this.getRenderedHistory('asc', true);
 
@@ -5683,6 +5702,7 @@ export default class ChatBubbles {
     this.batchProcessor.clear();
 
     this.getHistoryTopPromise = this.getHistoryBottomPromise = undefined;
+    this.deferredHistoryRetry = undefined;
     this.fetchNewPromise = undefined;
     this.updateGradient = undefined;
     this.ephemeralHistoryPromise = undefined;
@@ -7321,14 +7341,16 @@ export default class ChatBubbles {
     bubble,
     updatePosition = true,
     processResult,
-    canAnimateLadder
+    canAnimateLadder,
+    propagateFailure = false
   }: {
     message: Message.message | Message.messageService | AdminLog,
     reverse?: boolean,
     bubble?: HTMLElement,
     updatePosition?: boolean,
     processResult?: (result: ReturnType<ChatBubbles['renderMessage']>, bubble: HTMLElement) => typeof result,
-    canAnimateLadder?: boolean
+    canAnimateLadder?: boolean,
+    propagateFailure?: boolean
   }) {
     const fullMid = this.makeFullMid(message);
     if(!message || this.renderingMessages.has(fullMid) || (this.getBubble(fullMid) && !bubble)) {
@@ -7412,6 +7434,7 @@ export default class ChatBubbles {
       updatePosition: typeof updatePosition,
       canAnimateLadder?: boolean
     };
+    let renderFailure: {error: unknown} | undefined;
     try {
       this.renderingMessages.add(fullMid);
 
@@ -7516,6 +7539,7 @@ export default class ChatBubbles {
     } catch(err) {
       discardUncommittedBubble();
       this.log.error('renderMessage error:', err);
+      if(propagateFailure) renderFailure = {error: err};
     }
 
     if(!realMiddleware()) {
@@ -7524,6 +7548,7 @@ export default class ChatBubbles {
 
     this.renderingMessages.delete(fullMid);
     this.reconcilePendingStreamedMessageUpdate(fullMid);
+    if(renderFailure) throw renderFailure.error;
     return result;
   }
 
@@ -11655,16 +11680,17 @@ export default class ChatBubbles {
       this.needReflowScroll = false;
     }
 
-    const cb = (message: Message.message | Message.messageService | AdminLog) => {
+    const cb = (message: Message.message | Message.messageService | AdminLog, propagateFailure = false) => {
       if(!message) {
         return;
       } else if(isMessage(message) && message.pFlags.local) {
-        return this.processLocalMessageRender(message);
+        return this.processLocalMessageRender(message, undefined, propagateFailure);
       } else {
         return this.safeRenderMessage({
           message,
           reverse,
-          canAnimateLadder: true
+          canAnimateLadder: true,
+          propagateFailure
         });
       }
     };
@@ -11761,18 +11787,56 @@ export default class ChatBubbles {
       }
     }
 
-    const renderMessages = async(batch: typeof messages) => {
-      let promises: Promise<any>[] = [];
-      if(this.chat.type === ChatType.Search && false) {
-        const length = batch.length;
-        if(reverse) for(let i = 0; i < length; ++i) promises.push(cb(batch[i]));
-        else for(let i = length - 1; i >= 0; --i) promises.push(cb(batch[i]));
-      } else {
-        promises = batch.map(cb);
-      }
+    let pendingTailRollback: Map<FullMid, HTMLElement> | undefined;
+    const rollbackTailBubbles = () => {
+      if(!pendingTailRollback?.size) return;
+      const mids = [...pendingTailRollback].filter(([fullMid, bubble]) => this.getBubble(fullMid) === bubble).map(([fullMid]) => fullMid);
+      if(mids.length) this.deleteMessagesByIds(mids, false, true);
+      pendingTailRollback.clear();
+    };
+    const renderMessages = async(batch: typeof messages, rollbackOnFailure = false) => {
+      const renderedPeerId = this.peerId;
+      const renderedChatInner = this.chatInner;
+      const renderedBubbleGroups = this.bubbleGroups;
+      const createdBubbles = rollbackOnFailure ? new Map<FullMid, HTMLElement>() : undefined;
+      const render = (message: typeof batch[number]) => {
+        if(!createdBubbles || !message) return cb(message);
+        const fullMid = this.makeFullMid(message);
+        const previousBubble = this.getBubble(fullMid);
+        const promise = cb(message, true);
+        const bubble = this.getBubble(fullMid);
+        if(!previousBubble && bubble) createdBubbles.set(fullMid, bubble);
+        return promise;
+      };
+      const promises: Promise<any>[] = [];
+      try {
+        if(this.chat.type === ChatType.Search && false) {
+          const length = batch.length;
+          if(reverse) for(let i = 0; i < length; ++i) promises.push(render(batch[i]));
+          else for(let i = length - 1; i >= 0; --i) promises.push(render(batch[i]));
+        } else {
+          for(const message of batch) promises.push(render(message));
+        }
 
-      promises.length && await Promise.all(promises);
-      await this.messagesQueuePromise;
+        if(rollbackOnFailure) void this.messagesQueuePromise?.catch(noop);
+        promises.length && await Promise.all(promises);
+        await this.messagesQueuePromise;
+      } catch(error) {
+        if(createdBubbles) {
+          await Promise.allSettled(promises);
+          await this.messagesQueuePromise?.catch(noop);
+          if(this.peerId === renderedPeerId && this.chatInner === renderedChatInner && this.bubbleGroups === renderedBubbleGroups) {
+            const pendingRollback = pendingTailRollback ??= new Map();
+            createdBubbles.forEach((bubble, fullMid) => pendingRollback.set(fullMid, bubble));
+            try {
+              rollbackTailBubbles();
+            } catch(rollbackError) {
+              this.log.error('could not roll back deferred history:', rollbackError);
+            }
+          }
+        }
+        throw error;
+      }
     };
 
     try {
@@ -11792,24 +11856,48 @@ export default class ChatBubbles {
         const renderedPeerId = this.peerId;
         const renderedChatInner = this.chatInner;
         const renderedBubbleGroups = this.bubbleGroups;
-        const renderRemainder = new Promise<void>((resolve) => {
+        const loadedTop = this.scrollable.loadedAll.top;
+        const isCurrent = () => this.peerId === renderedPeerId && this.chatInner === renderedChatInner && this.bubbleGroups === renderedBubbleGroups;
+        const retryTail = async() => {
+          if(!isCurrent()) {
+            if(this.deferredHistoryRetry === retryTail) this.deferredHistoryRetry = undefined;
+            return;
+          }
+          try {
+            rollbackTailBubbles();
+            await renderMessages(messages.slice(firstBatchEnd), true);
+            if(this.deferredHistoryRetry === retryTail) {
+              if(loadedTop) await this.setLoaded('top', true);
+              this.deferredHistoryRetry = undefined;
+            }
+          } catch(error) {
+            if(isCurrent()) {
+              this.deferredHistoryRetry = retryTail;
+              try {
+                await this.setLoaded('top', false, false);
+              } catch(setLoadedError) {
+                this.log.error('could not reset history end:', setLoadedError);
+              }
+            } else if(this.deferredHistoryRetry === retryTail) {
+              this.deferredHistoryRetry = undefined;
+            }
+            throw error;
+          }
+        };
+        const renderRemainder = new Promise<void>((resolve, reject) => {
           // Let the newly mounted chat paint its newest bubbles before building the rest of the page.
           fastRaf(() => {
             window.setTimeout(() => {
-              if(this.peerId !== renderedPeerId || this.chatInner !== renderedChatInner || this.bubbleGroups !== renderedBubbleGroups) {
+              if(!isCurrent()) {
                 resolve();
                 return;
               }
 
-              void renderMessages(messages.slice(firstBatchEnd)).then(resolve, (error: unknown) => {
-                if(error !== PEER_CHANGED_ERROR) {
-                  this.log.error('deferred history render failed:', error);
-                }
-                resolve();
-              });
+              void retryTail().then(resolve, reject);
             }, 0);
           });
         });
+        void renderRemainder.catch(noop);
         onDeferredHistory?.(renderRemainder);
       } else {
         await renderMessages(messages);
@@ -12421,7 +12509,8 @@ export default class ChatBubbles {
 
   private async processLocalMessageRender(
     message: Message.message | Message.messageService,
-    animate?: boolean
+    animate?: boolean,
+    propagateFailure = false
   ) {
     const isSponsored = !!(message as Message.message).pFlags.sponsored;
 
@@ -12605,7 +12694,8 @@ export default class ChatBubbles {
       reverse: !isSponsored,
       updatePosition: false,
       processResult: p,
-      canAnimateLadder: true
+      canAnimateLadder: true,
+      propagateFailure
     });
   }
 
@@ -13032,7 +13122,7 @@ export default class ChatBubbles {
 
     (reverse ? this.getHistoryTopPromise = waitPromise : this.getHistoryBottomPromise = waitPromise);
     waitPromise.then(() => {
-      if(!middleware()) {
+      if(!middleware() || (reverse ? this.getHistoryTopPromise : this.getHistoryBottomPromise) !== waitPromise) {
         return;
       }
 
@@ -13058,6 +13148,10 @@ export default class ChatBubbles {
 
         // this.scrollable.onScroll();
       }
+    }, (error: unknown) => {
+      if(!middleware() || (reverse ? this.getHistoryTopPromise : this.getHistoryBottomPromise) !== waitPromise) return;
+      (reverse ? this.getHistoryTopPromise = undefined : this.getHistoryBottomPromise = undefined);
+      if(error !== PEER_CHANGED_ERROR) this.log.error('history load failed:', error);
     });
 
     return result;
