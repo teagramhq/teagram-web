@@ -220,42 +220,51 @@ export default class ScrollSaver {
   }
 
   // ResizeObserver runs after layout, so restoring a mounted batch can inspect its anchor without forcing layout.
-  public restoreAfterLayout(useReflow?: boolean, middleware?: Middleware) {
-    return new Promise<void>((resolve, reject) => {
+  public restoreAfterLayout(useReflow?: boolean, middleware?: Middleware, timeoutMs = 10_000) {
+    return new Promise<boolean>((resolve, reject) => {
       if(middleware && !middleware()) {
-        resolve();
+        resolve(false);
         return;
       }
 
       let observer: ResizeObserver | undefined;
       let settled = false;
       const lifecycleHelper = middleware?.create();
+      const settle = (restore: boolean) => {
+        if(settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        observer?.disconnect();
+        try {
+          if(!restore || (middleware && !middleware())) {
+            resolve(false);
+            return;
+          }
+          this.restore(useReflow);
+          resolve(true);
+        } catch(err) {
+          reject(err);
+        } finally {
+          lifecycleHelper?.destroy();
+        }
+      };
+      const timeout = setTimeout(() => settle(false), timeoutMs);
       const cancel = () => {
         if(settled) return;
         settled = true;
+        clearTimeout(timeout);
         observer?.disconnect();
-        resolve();
+        resolve(false);
       };
       lifecycleHelper?.onDestroy(cancel);
 
       try {
-        observer = new ResizeObserver(() => {
-          if(settled) return;
-          settled = true;
-          observer?.disconnect();
-          try {
-            if(!middleware || middleware()) this.restore(useReflow);
-            resolve();
-          } catch(err) {
-            reject(err);
-          } finally {
-            lifecycleHelper?.destroy();
-          }
-        });
+        observer = new ResizeObserver(() => settle(true));
         observer.observe(this.container);
       } catch(err) {
         if(settled) return;
         settled = true;
+        clearTimeout(timeout);
         observer?.disconnect();
         lifecycleHelper?.destroy();
         reject(err);

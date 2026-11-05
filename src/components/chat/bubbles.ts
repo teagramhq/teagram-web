@@ -11397,8 +11397,8 @@ export default class ChatBubbles {
         log('restore');
         if(!middleware?.()) return;
         // scrollSaver.restore(_history.length === 1 && !reverse ? false : true);
-        await scrollSaver.restoreAfterLayout(reverse, middleware);
-        if(!middleware?.()) return;
+        const restored = await scrollSaver.restoreAfterLayout(reverse, middleware, MEDIA_PROMISES_TIMEOUT);
+        if(!restored || !middleware?.()) return;
         this.onRenderScrollSet(scrollSaver.getSaved());
       },
       scrollSaver

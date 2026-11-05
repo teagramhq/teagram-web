@@ -136,6 +136,7 @@ function captureResizeObserver() {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.stubGlobal('ResizeObserver', originalResizeObserver);
   document.body.replaceChildren();
 });
@@ -151,7 +152,7 @@ test('restores the top anchor after prepending history above it', async() => {
   setScrollHeight(1050);
   setLayoutDirty(true);
 
-  let restoring: Promise<void>;
+  let restoring: Promise<boolean>;
   expect(() => restoring = saver.restoreAfterLayout()).not.toThrow();
 
   setLayoutDirty(false);
@@ -173,7 +174,7 @@ test('keeps the bottom anchor still when history is appended below it', async() 
   setScrollHeight(1020);
   setLayoutDirty(true);
 
-  let restoring: Promise<void>;
+  let restoring: Promise<boolean>;
   expect(() => restoring = saver.restoreAfterLayout()).not.toThrow();
 
   setLayoutDirty(false);
@@ -209,5 +210,22 @@ test('disconnects and settles a pending restore when its chat generation is disp
   setLayoutDirty(false);
   resizeObserver.flush(bubbles[0].parentElement!);
   await restoring;
+  expect(getScrollTop()).toBe(100);
+});
+
+test('disconnects and settles a pending restore when ResizeObserver never delivers', async() => {
+  vi.useFakeTimers();
+  const resizeObserver = captureResizeObserver();
+  const {saver, getScrollTop} = makeScrollSaver(true);
+
+  const restoring = saver.restoreAfterLayout(undefined, undefined, 25);
+  let settled = false;
+  void restoring.then(() => settled = true);
+
+  await vi.advanceTimersByTimeAsync(25);
+
+  expect(settled).toBe(true);
+  expect(resizeObserver.disconnect).toHaveBeenCalledOnce();
+  await expect(restoring).resolves.toBe(false);
   expect(getScrollTop()).toBe(100);
 });

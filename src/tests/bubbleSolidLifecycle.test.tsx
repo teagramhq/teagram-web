@@ -1,6 +1,7 @@
 import type {Message, PeerSettings} from '@layer';
 import '@helpers/peerIdPolyfill';
 import {getMiddleware} from '@helpers/middleware';
+import ScrollSaver from '@helpers/scrollSaver';
 import {render} from 'solid-js/web';
 import {makeFullMid} from '@appManagers/utils/messages/fullMid';
 import ejectBubble from '@components/chat/bubbles/ejectBubble';
@@ -48,6 +49,7 @@ let isTestPeerNonContactRequestCurrent: typeof import('@components/chat/bubbles'
 let retainMessageLinkPolicyOnCleanup: typeof import('@components/chat/bubbles').retainMessageLinkPolicyOnCleanup;
 let setBubbleHiddenLinksPending: typeof import('@components/chat/bubbles').setBubbleHiddenLinksPending;
 let shouldForceHideNonContactLinkTest: typeof import('@components/chat/bubbles').shouldForceHideNonContactLinkTest;
+const originalResizeObserver = globalThis.ResizeObserver;
 
 beforeAll(async() => {
   class IntersectionObserverMock {
@@ -85,6 +87,7 @@ beforeAll(async() => {
 }, 60_000);
 
 afterEach(() => {
+  vi.stubGlobal('ResizeObserver', originalResizeObserver);
   document.body.replaceChildren();
 });
 
@@ -147,6 +150,52 @@ function makeTargetedEvent(type: string, target: Element) {
   const event = new Event(type, {bubbles: true, cancelable: true});
   Object.defineProperty(event, 'target', {value: target});
   return event;
+}
+
+function captureChatResizeObserver() {
+  let callback: ResizeObserverCallback;
+  class ResizeObserverMock {
+    constructor(onResize: ResizeObserverCallback) {
+      callback = onResize;
+    }
+
+    observe() {}
+    disconnect() {}
+  }
+
+  vi.stubGlobal('ResizeObserver', ResizeObserverMock);
+  return {
+    flush(target: Element) {
+      callback([{target} as ResizeObserverEntry], {} as ResizeObserver);
+    }
+  };
+}
+
+function makeScrollRestoreHarness() {
+  const chatInnerMiddlewareHelper = getMiddleware();
+  const scrollContainer = document.createElement('div');
+  const chatInner = document.createElement('div');
+  scrollContainer.append(chatInner);
+  document.body.append(scrollContainer);
+
+  const scrollable = {
+    container: scrollContainer,
+    onSizeChange: vi.fn(),
+    setScrollPositionSilently: vi.fn()
+  };
+  const scrollSaver = new ScrollSaver(scrollable as any, '', true);
+  const restore = vi.spyOn(scrollSaver, 'restore').mockImplementation(() => undefined);
+  const onRenderScrollSet = vi.fn();
+  const log = Object.assign(vi.fn(), {bindPrefix: vi.fn(() => vi.fn())});
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chatInner,
+    chatInnerMiddlewareHelper,
+    log,
+    createScrollSaver: vi.fn(() => scrollSaver),
+    onRenderScrollSet
+  }) as any;
+
+  return {harness, chatInnerMiddlewareHelper, scrollContainer, restore, onRenderScrollSet};
 }
 
 function expectRetainedLinkEventsAllowed(...anchors: HTMLAnchorElement[]) {
@@ -1985,6 +2034,41 @@ test('a modification queued from inside a flush starts a new batch instead of be
 
   expect(reentrant).not.toHaveBeenCalled();
   expect(harness.batchingModifying).toEqual([reentrant]);
+});
+
+test('prepareToSaveScroll waits for ResizeObserver before restoring and reporting scroll state', async() => {
+  const resizeObserver = captureChatResizeObserver();
+  const {harness, scrollContainer, restore, onRenderScrollSet} = makeScrollRestoreHarness();
+  const {restoreScroll} = harness.prepareToSaveScroll(true, false, false);
+  let settled = false;
+  const restoring = restoreScroll();
+  void restoring.then(() => settled = true);
+
+  await Promise.resolve();
+
+  expect(settled).toBe(false);
+  expect(restore).not.toHaveBeenCalled();
+  expect(onRenderScrollSet).not.toHaveBeenCalled();
+
+  resizeObserver.flush(scrollContainer);
+  await restoring;
+
+  expect(restore).toHaveBeenCalledOnce();
+  expect(onRenderScrollSet).toHaveBeenCalledOnce();
+});
+
+test('prepareToSaveScroll skips onRenderScrollSet after its chat generation is disposed', async() => {
+  const resizeObserver = captureChatResizeObserver();
+  const {harness, chatInnerMiddlewareHelper, scrollContainer, restore, onRenderScrollSet} = makeScrollRestoreHarness();
+  const {restoreScroll} = harness.prepareToSaveScroll(true, false, false);
+  const restoring = restoreScroll();
+
+  chatInnerMiddlewareHelper.destroy();
+  await restoring;
+  resizeObserver.flush(scrollContainer);
+
+  expect(restore).not.toHaveBeenCalled();
+  expect(onRenderScrollSet).not.toHaveBeenCalled();
 });
 
 test.each([
