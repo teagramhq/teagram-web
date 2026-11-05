@@ -273,6 +273,42 @@ export function summarizeLongTaskAttribution(
   });
 }
 
+export function findLongTasksWithSignificantSpanWork(tasks: PerformanceTaskAttribution[], spanNames: string[]): PerformanceTaskAttribution[] {
+  const names = new Set(spanNames);
+  return tasks.filter(({durationMs, spans}) => {
+    const scrollSpans = spans.filter(({name}) => names.has(name));
+    for(const {startOffsetMs, syncMs} of scrollSpans) {
+      if(!Number.isFinite(startOffsetMs) || !Number.isFinite(syncMs)) {
+        throw new Error('History scroll span timing must be finite');
+      }
+    }
+    if(durationMs <= 50) return false;
+
+    const intervals = scrollSpans
+      .map(({startOffsetMs, syncMs}) => [Math.max(0, startOffsetMs), Math.min(durationMs, startOffsetMs + syncMs)] as [number, number])
+      .filter(([startMs, endMs]) => endMs > startMs)
+      .sort(([leftStart], [rightStart]) => leftStart - rightStart);
+    let scrollWorkMs = 0;
+    let currentStart = 0;
+    let currentEnd = 0;
+    let hasCurrent = false;
+
+    for(const [startMs, endMs] of intervals) {
+      if(!hasCurrent || startMs > currentEnd) {
+        if(hasCurrent) scrollWorkMs += currentEnd - currentStart;
+        currentStart = startMs;
+        currentEnd = endMs;
+        hasCurrent = true;
+      } else {
+        currentEnd = Math.max(currentEnd, endMs);
+      }
+    }
+    if(hasCurrent) scrollWorkMs += currentEnd - currentStart;
+
+    return scrollWorkMs > 50 || scrollWorkMs * 2 > durationMs;
+  });
+}
+
 // * `PerformanceObserver.observe()` ignores an entry type the browser does not support instead of throwing, so
 // * support has to be read from `supportedEntryTypes`. Self-contained on purpose: the e2e injects its source into
 // * the page with `toString()`.
