@@ -273,7 +273,7 @@ export function summarizeLongTaskAttribution(
   });
 }
 
-export function findLongTasksDominatedBySpans(tasks: PerformanceTaskAttribution[], spanNames: string[]): PerformanceTaskAttribution[] {
+export function findLongTasksWithSpanWorkOver50Ms(tasks: PerformanceTaskAttribution[], spanNames: string[]): PerformanceTaskAttribution[] {
   const names = new Set(spanNames);
   return tasks.filter(({durationMs, spans}) => {
     if(durationMs <= 50) return false;
@@ -300,7 +300,7 @@ export function findLongTasksDominatedBySpans(tasks: PerformanceTaskAttribution[
     }
     if(hasCurrent) scrollWorkMs += currentEnd - currentStart;
 
-    return scrollWorkMs > durationMs / 2;
+    return scrollWorkMs > 50;
   });
 }
 

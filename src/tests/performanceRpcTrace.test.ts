@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {findLongTasksDominatedBySpans, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
+import {findLongTasksWithSpanWorkOver50Ms, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
 
 describe('performance RPC trace summary', () => {
   test('excludes long tasks that start outside the scenario measurement window', async() => {
@@ -196,15 +196,15 @@ describe('long task attribution', () => {
     }]);
   });
 
-  test('flags a long task when history scroll work dominates it', () => {
+  test('flags a long task when history scroll span work exceeds 50 ms', () => {
     const scrollWork: PerformanceTaskAttribution = {
       startTimeMs: 20,
-      durationMs: 61,
-      spans: [{name: 'bubbles.processBatch', startOffsetMs: 2, syncMs: 40}],
+      durationMs: 130,
+      spans: [{name: 'bubbles.processBatch', startOffsetMs: 2, syncMs: 60}],
       stacks: []
     };
 
-    expect(findLongTasksDominatedBySpans([scrollWork], ['bubbles.processBatch'])).toEqual([scrollWork]);
+    expect(findLongTasksWithSpanWorkOver50Ms([scrollWork], ['bubbles.processBatch'])).toEqual([scrollWork]);
   });
 
   test('ignores a long task that only overlaps a short history scroll span', () => {
@@ -215,7 +215,7 @@ describe('long task attribution', () => {
       stacks: []
     };
 
-    expect(findLongTasksDominatedBySpans([overlappingWork], ['bubbles.processBatch'])).toEqual([]);
+    expect(findLongTasksWithSpanWorkOver50Ms([overlappingWork], ['bubbles.processBatch'])).toEqual([]);
   });
 
   test('does not count nested history scroll spans more than once', () => {
@@ -230,7 +230,7 @@ describe('long task attribution', () => {
       stacks: []
     };
 
-    expect(findLongTasksDominatedBySpans([nestedWork], ['bubbles.processBatch', 'scrollSaver.save', 'scrollSaver.restore'])).toEqual([]);
+    expect(findLongTasksWithSpanWorkOver50Ms([nestedWork], ['bubbles.processBatch', 'scrollSaver.save', 'scrollSaver.restore'])).toEqual([]);
   });
 });
 
