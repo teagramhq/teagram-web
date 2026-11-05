@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
+import {summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeCpuProfileLongTasks, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformanceCpuTaskSummary, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -33,6 +33,8 @@ type Metric = {
   peerChangePhases?: PerformancePhaseSummary[],
   cachedDialogReconcile?: CachedDialogReconcileSummary,
   cpu?: PerformanceCpuSummary,
+  longTaskDetails?: Array<{startTime: number, duration: number}>,
+  longTaskStacks?: PerformanceCpuTaskSummary[],
   droppedFramePercent?: number,
   droppedFrames?: number,
   frameIntervals?: number
@@ -171,7 +173,7 @@ async function begin(page: Page, requests: {value: number}, recordRpcSpans = tru
   }, {recordSpans: recordRpcSpans, traceEnabled});
 }
 
-async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false): Promise<Metric> {
+async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false, includeLongTaskDetails = false): Promise<Metric> {
   const requestCount = requests.value;
   await page.waitForTimeout(150);
   await waitForBundleResources(page);
@@ -252,6 +254,10 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
   return {
     ...metrics,
     cachedDialogReconcile,
+    ...(includeLongTaskDetails ? {longTaskDetails: longTasks.filter((entry: {startTime: number, duration: number}) => {
+      const {startTime, duration} = entry;
+      return startTime >= boundary.startedAtMs && startTime < boundary.startedAtMs + boundary.ms && duration > 50;
+    })} : {}),
     bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
     ms: boundary.ms,
@@ -361,9 +367,13 @@ async function startCpuProfile(page: Page) {
 }
 
 async function finishCpuProfile(session: Awaited<ReturnType<typeof startCpuProfile>>) {
+  return summarizeCpuProfile(await stopCpuProfile(session));
+}
+
+async function stopCpuProfile(session: Awaited<ReturnType<typeof startCpuProfile>>) {
   const {profile} = await session.send('Profiler.stop');
   await session.detach();
-  return summarizeCpuProfile(profile as PerformanceCpuProfile);
+  return profile as PerformanceCpuProfile;
 }
 
 async function signIn(page: Page, origin: string) {
@@ -416,7 +426,7 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   return capture(page, requests, await snapshotMeasurementBoundary(page));
 }
 
-async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, includePhases = false) {
+async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, includePhases = false, includeLongTaskDetails = false) {
   const hasPendingHistory = () => page.evaluate(() => {
     const bubbles = (window as any).appImManager.chat.bubbles;
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
@@ -474,7 +484,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     if(!required) return undefined;
     throw new Error(`scroll reached message ${currentMin}, expected ${targetMid}: ${JSON.stringify(scrollState)}`);
   }
-  return capture(page, requests, await snapshotMeasurementBoundary(page), true, includePhases);
+  return capture(page, requests, await snapshotMeasurementBoundary(page), true, includePhases, includeLongTaskDetails);
 }
 
 async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture, allowUnsupportedBase: boolean): Promise<Metric | undefined> {
@@ -765,8 +775,16 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
           peerChangePhases: summarizePerformancePhases(peerChangePhases)
         };
 
-        const scroll = await test.step('trace 100x scroll reconciliation work', () => scrollBackTwoThousand(page, requests, true, true));
-        if(scroll) scrollBack2k.push(scroll);
+        const scrollProfile = await startCpuProfile(page);
+        const scrollProfileStartedAtMs = await page.evaluate(() => performance.now());
+        const scroll = await test.step('trace 100x scroll reconciliation work', () => scrollBackTwoThousand(page, requests, true, true, true));
+        if(scroll) {
+          const profile = await stopCpuProfile(scrollProfile);
+          scrollBack2k.push({
+            ...scroll,
+            longTaskStacks: summarizeCpuProfileLongTasks(profile, scrollProfileStartedAtMs, scroll.longTaskDetails || [])
+          });
+        }
       }
     } finally {
       await context.close();

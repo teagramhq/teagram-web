@@ -22,7 +22,7 @@ import insertInDescendSortedArray from '@helpers/array/insertInDescendSortedArra
 import safeReplaceObject from '@helpers/object/safeReplaceObject';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
 import {AppManager} from '@appManagers/manager';
-import type {PeerMirrorBatch, PeerMirrorValue} from '@appManagers/peerMirrorBatch';
+import type {PeerMirrorBatch} from '@appManagers/peerMirrorBatch';
 import getDialogIndexKey from '@appManagers/utils/dialogs/getDialogIndexKey';
 import isObject from '@helpers/object/isObject';
 import getDialogIndex from '@appManagers/utils/dialogs/getDialogIndex';
@@ -2104,9 +2104,9 @@ export default class DialogsStorage extends AppManager {
     const limit = 100;
     const missingPeerIds: PeerId[] = [];
     const seenPeerIds: Set<PeerId> = new Set();
-    const peers: Record<string, PeerMirrorValue> = {};
-    const mirrorBatch: PeerMirrorBatch = (peerKey, peer) => {
-      peers[peerKey] = peer;
+    const peerKeys = new Set<string>();
+    const mirrorBatch: PeerMirrorBatch = (peerKey) => {
+      peerKeys.add(peerKey);
     };
     let offsetDate = 0, offsetId = 0, offsetPeerId: PeerId;
     try {
@@ -2176,7 +2176,7 @@ export default class DialogsStorage extends AppManager {
         offsetDate = (lastMessage as Message.message)?.date ?? 0;
       }
     } finally {
-      this.appPeersManager.mirrorApiPeers(peers, trace);
+      this.appPeersManager.mirrorApiPeers(peerKeys, trace);
       finishTrace?.({pageCount});
     }
   }

@@ -15,10 +15,18 @@ export type PerformanceRpcSummary = {
 export type PerformanceCpuProfile = {
   nodes: Array<{
     id: number,
-    callFrame: {functionName?: string, url?: string}
+    callFrame: {functionName?: string, url?: string, lineNumber?: number, columnNumber?: number},
+    children?: number[]
   }>,
   samples?: number[],
   timeDeltas?: number[]
+};
+
+export type PerformanceCpuTaskSummary = {
+  startTime: number,
+  duration: number,
+  sampledCpuMs: number,
+  topStacks: Array<{frames: string[], sampledCpuMs: number}>
 };
 
 export type PerformanceCpuSummary = {
@@ -131,4 +139,71 @@ export function summarizeCpuProfile(profile: PerformanceCpuProfile): Performance
       .slice(0, 20)
       .map((frame) => ({...frame, selfMs: Number(frame.selfMs.toFixed(2))}))
   };
+}
+
+export function summarizeCpuProfileLongTasks(
+  profile: PerformanceCpuProfile,
+  profileStartedAtMs: number,
+  tasks: Array<{startTime: number, duration: number}>
+): PerformanceCpuTaskSummary[] {
+  const nodes = new Map(profile.nodes.map((node) => [node.id, node]));
+  const parents = new Map<number, number>();
+  for(const node of profile.nodes) {
+    for(const childId of node.children || []) {
+      parents.set(childId, node.id);
+    }
+  }
+
+  const summaries = tasks.map(({startTime, duration}) => ({
+    startTime: Number(startTime.toFixed(2)),
+    duration: Number(duration.toFixed(2)),
+    sampledCpuMs: 0,
+    topStacksByKey: new Map<string, {frames: string[], sampledCpuMs: number}>()
+  }));
+  let elapsedMs = 0;
+
+  (profile.samples || []).forEach((nodeId, index) => {
+    const sampledMs = Math.max(0, profile.timeDeltas?.[index] || 0) / 1000;
+    elapsedMs += sampledMs;
+    if(!sampledMs) return;
+
+    const sampleTime = profileStartedAtMs + elapsedMs;
+    const taskIndex = tasks.findIndex(({startTime, duration}) => sampleTime >= startTime && sampleTime < startTime + duration);
+    if(taskIndex < 0) return;
+
+    const path: string[] = [];
+    let currentNodeId: number | undefined = nodeId;
+    while(currentNodeId !== undefined) {
+      const node = nodes.get(currentNodeId);
+      if(!node) break;
+
+      const {callFrame} = node;
+      const functionName = callFrame.functionName || '(anonymous)';
+      if(functionName !== '(root)') {
+        const script = callFrame.url ? new URL(callFrame.url, 'https://trace.invalid').pathname.split('/').filter(Boolean).slice(-2).join('/') || 'native' : 'native';
+        const line = callFrame.lineNumber === undefined ? '' : `:${callFrame.lineNumber + 1}`;
+        const column = callFrame.columnNumber === undefined ? '' : `:${callFrame.columnNumber + 1}`;
+        path.push(`${functionName} (${script}${line}${column})`);
+      }
+      currentNodeId = parents.get(currentNodeId);
+    }
+    path.reverse();
+
+    const summary = summaries[taskIndex];
+    summary.sampledCpuMs += sampledMs;
+    const key = path.join('\0');
+    const stack = summary.topStacksByKey.get(key) || {frames: path, sampledCpuMs: 0};
+    stack.sampledCpuMs += sampledMs;
+    summary.topStacksByKey.set(key, stack);
+  });
+
+  return summaries.map(({startTime, duration, sampledCpuMs, topStacksByKey}) => ({
+    startTime,
+    duration,
+    sampledCpuMs: Number(sampledCpuMs.toFixed(2)),
+    topStacks: [...topStacksByKey.values()]
+      .sort((left, right) => right.sampledCpuMs - left.sampledCpuMs)
+      .slice(0, 5)
+      .map(({frames, sampledCpuMs}) => ({frames, sampledCpuMs: Number(sampledCpuMs.toFixed(2))}))
+  }));
 }

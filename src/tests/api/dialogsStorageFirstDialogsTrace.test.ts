@@ -6,7 +6,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test('finishes the chat-list startup span when cached dialogs serve the first page', async() => {
+test('flushes current peers once after the cached-dialog walk completes', async() => {
   vi.stubEnv('VITE_PERF_TRACE', '1');
   vi.resetModules();
   const {PerformanceRpcTrace, performancePhaseTrace} = await import('@appManagers/performanceTrace');
@@ -23,9 +23,12 @@ test('finishes the chat-list startup span when cached dialogs serve the first pa
   }));
 
   const dialog = {peerId: 1};
+  const firstChat = {_: 'channel', id: 42, title: 'before clear'};
   const firstUser = {_: 'user', id: 1};
+  const currentFirstUser = {_: 'user', id: 1, first_name: 'current'};
   const secondUser = {_: 'user', id: 2};
-  const mirroredPeers: Record<string, any> = {};
+  const currentPeers: Record<string, any> = {};
+  const mirroredPeers: Record<string, any> = {'-42': firstChat};
   const storage = Object.create(DialogsStorage.prototype) as any;
   Object.assign(storage, {
     apiManager,
@@ -35,11 +38,22 @@ test('finishes the chat-list startup span when cached dialogs serve the first pa
       getInputPeerById: (peerId: number) => ({_: 'inputPeerUser', user_id: peerId}),
       saveApiPeers: vi.fn((result: any, _trace: unknown, mirrorBatch?: (peerKey: string, peer: any) => void) => {
         if(typeof mirrorBatch !== 'function') throw new Error('Peer mirror batch callback missing');
+        for(const chat of result.chats || []) {
+          const peerKey = String(-chat.id);
+          currentPeers[peerKey] = chat;
+          mirrorBatch(peerKey, chat);
+        }
         for(const user of result.users || []) {
-          mirrorBatch(String(user.id), user);
+          const peerKey = String(user.id);
+          currentPeers[peerKey] = user;
+          mirrorBatch(peerKey, user);
         }
       }),
-      mirrorApiPeers: vi.fn((peers: Record<string, any>) => Object.assign(mirroredPeers, peers))
+      mirrorApiPeers: vi.fn((peerKeys: Iterable<string>) => {
+        for(const peerKey of peerKeys) {
+          if(currentPeers[peerKey]) mirroredPeers[peerKey] = currentPeers[peerKey];
+        }
+      })
     },
     cachedListReconciled: false,
     cachedResults: {query: '', count: 0, dialogs: [], folderId: 0},
@@ -68,13 +82,18 @@ test('finishes the chat-list startup span when cached dialogs serve the first pa
     _: 'messages.dialogsSlice',
     count: 2,
     dialogs: [{_: 'dialog', peer: {_: 'peerUser', user_id: 1}, top_message: 11}],
-    chats: [],
+    chats: [firstChat],
     users: [firstUser],
     messages: [{id: 11, peer_id: {_: 'peerUser', user_id: 1}, date: 100}]
   };
   pendingPages[0](firstPage);
   await vi.waitFor(() => expect(pendingPages).toHaveLength(2));
   expect(storage.appPeersManager.mirrorApiPeers).not.toHaveBeenCalled();
+
+  // AppChatsManager.clear removes the peer while the second page is pending.
+  delete currentPeers['-42'];
+  delete mirroredPeers['-42'];
+  currentPeers['1'] = currentFirstUser;
 
   const secondPage: any = {
     _: 'messages.dialogs',
@@ -108,9 +127,9 @@ test('finishes the chat-list startup span when cached dialogs serve the first pa
   expect(saveApiPeers.mock.calls[1][2]).toBe(saveApiPeers.mock.calls[0][2]);
   expect(storage.appPeersManager.mirrorApiPeers).toHaveBeenCalledTimes(1);
   expect(storage.appPeersManager.mirrorApiPeers).toHaveBeenCalledWith(
-    {'1': firstUser, '2': secondUser},
+    new Set(['-42', '1', '2']),
     'cachedChannelDialogsReconcile'
   );
-  expect(mirroredPeers).toEqual({'1': firstUser, '2': secondUser});
+  expect(mirroredPeers).toEqual({'1': currentFirstUser, '2': secondUser});
   expect(result.dialogs).toEqual([dialog]);
 });

@@ -36,7 +36,15 @@ export class AppPeersManager extends AppManager {
     this.appUsersManager.saveApiUsers(object.users, undefined, trace, mirrorBatch);
   }
 
-  public mirrorApiPeers(peers: Record<string, PeerMirrorValue>, trace?: 'cachedChannelDialogsReconcile') {
+  public mirrorApiPeers(peerKeys: Iterable<string>, trace?: 'cachedChannelDialogsReconcile') {
+    // The paginated walk can outlive a clear or a newer peer update.
+    const peers: Record<string, PeerMirrorValue> = {};
+    for(const peerKey of peerKeys) {
+      const peer = this.getPeer(Number(peerKey) as PeerId) as Chat | User;
+      if(!peer || peer._ === 'chatEmpty' || peer._ === 'userEmpty') continue;
+      peers[peerKey] = peer;
+    }
+
     if(!Object.keys(peers).length) return;
 
     MTProtoMessagePort.getInstance<false>().invokeVoid('mirror', {

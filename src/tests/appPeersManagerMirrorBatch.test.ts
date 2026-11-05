@@ -1,4 +1,5 @@
 import {afterEach, expect, test, vi} from 'vitest';
+import '@helpers/peerIdPolyfill';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import {AppChatsManager} from '@appManagers/appChatsManager';
 import {AppPeersManager} from '@appManagers/appPeersManager';
@@ -26,50 +27,68 @@ test('chat and user managers collect their mirror values without sending individ
   expect(invokeVoid).not.toHaveBeenCalled();
 });
 
-test('flushes reconciled chat and user mirrors once after collecting multiple pages', () => {
+test('mirrors the current peers and drops chats cleared before flush', () => {
   vi.stubEnv('VITE_PERF_TRACE', '1');
   const invokeVoid = vi.fn();
   vi.spyOn(MTProtoMessagePort, 'getInstance').mockReturnValue({invokeVoid} as any);
 
   const chat = {_: 'channel', id: 42} as any;
   const user = {_: 'user', id: 7} as any;
-  const manager = Object.create(AppPeersManager.prototype) as any;
-  Object.assign(manager, {
-    appChatsManager: {
-      saveApiChats: vi.fn((_chats, _override, _trace, mirrorBatch) => mirrorBatch?.('chat-key', chat))
-    },
-    appUsersManager: {
-      saveApiUsers: vi.fn((_users, _override, _trace, mirrorBatch) => mirrorBatch?.('user-key', user))
-    },
+  const currentUser = {_: 'user', id: 7, first_name: 'current'} as any;
+  const peerKeys = new Set<string>();
+  const users: Record<string, any> = {'7': user};
+  const chatsManager = Object.create(AppChatsManager.prototype) as any;
+  Object.assign(chatsManager, {
+    chats: {'42': chat},
+    peersStorage: {isPeerNeeded: () => false},
+    appUsersManager: {modifyUsernamesCache: vi.fn()},
+    storage: {delete: vi.fn()},
     getAccountNumber: () => 1
   });
-
-  const peers: Record<string, any> = {};
-  const mirrorBatch = (peerKey: string, peer: any) => peers[peerKey] = peer;
+  chatsManager.saveApiChats = vi.fn((_chats, _override, _trace, mirrorBatch) => mirrorBatch?.('-42', chat));
+  const usersManager: any = {
+    getUser: (userId: number) => users[String(userId)],
+    saveApiUsers: vi.fn((_users, _override, _trace, mirrorBatch) => mirrorBatch?.('7', user))
+  };
+  const manager = Object.create(AppPeersManager.prototype) as any;
+  Object.assign(manager, {
+    appChatsManager: chatsManager,
+    appUsersManager: usersManager,
+    getAccountNumber: () => 1,
+    saveApiPeers: AppPeersManager.prototype.saveApiPeers
+  });
+  const mirrorBatch = (peerKey: string) => {
+    peerKeys.add(peerKey);
+  };
   manager.saveApiPeers({chats: [chat]}, 'cachedChannelDialogsReconcile', mirrorBatch);
   manager.saveApiPeers({users: [user]}, 'cachedChannelDialogsReconcile', mirrorBatch);
 
-  expect(manager.appChatsManager.saveApiChats).toHaveBeenCalledWith(
+  expect(chatsManager.saveApiChats).toHaveBeenCalledWith(
     [chat],
     undefined,
     'cachedChannelDialogsReconcile',
     mirrorBatch
   );
-  expect(manager.appUsersManager.saveApiUsers).toHaveBeenCalledWith(
+  expect(usersManager.saveApiUsers).toHaveBeenCalledWith(
     [user],
     undefined,
     'cachedChannelDialogsReconcile',
     mirrorBatch
   );
-  expect(peers).toEqual({'chat-key': chat, 'user-key': user});
+  expect(peerKeys).toEqual(new Set(['-42', '7']));
+
+  // AppChatsManager.clear can remove the collected chat while a later page is pending.
+  delete chatsManager.chats['42'];
+  users['7'] = currentUser;
+  expect(chatsManager.getChat(42)).toBeUndefined();
   expect(invokeVoid).not.toHaveBeenCalled();
 
-  manager.mirrorApiPeers(peers, 'cachedChannelDialogsReconcile');
+  manager.mirrorApiPeers(peerKeys, 'cachedChannelDialogsReconcile');
 
   expect(invokeVoid).toHaveBeenCalledTimes(1);
   expect(invokeVoid).toHaveBeenCalledWith('mirror', {
     name: 'peers',
-    value: {'chat-key': chat, 'user-key': user},
+    value: {'7': currentUser},
     merge: true,
     accountNumber: 1,
     trace: 'cachedChannelDialogsReconcile'
