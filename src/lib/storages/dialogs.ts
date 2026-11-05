@@ -2118,6 +2118,7 @@ export default class DialogsStorage extends AppManager {
     let offsetDate = 0, offsetId = 0, offsetPeerId: PeerId;
     try {
       for(;;) {
+        const chatUpdateIds = new Set<ChatId>();
         const result = await this.apiManager.invokeApiSingleProcess({
           method: 'messages.getDialogs',
           params: {
@@ -2134,7 +2135,7 @@ export default class DialogsStorage extends AppManager {
                 result,
                 trace,
                 mirrorBatch,
-                {skipEmptyChannelDialogReconciliation: true}
+                {skipEmptyChannelDialogReconciliation: true, chatUpdateIds}
               );
             }
 
@@ -2142,6 +2143,9 @@ export default class DialogsStorage extends AppManager {
           }
         });
         if(finishTrace) performancePhaseTrace.setPageCount(traceId!, ++pageCount);
+        if(chatUpdateIds.size) {
+          this.appPeersManager.mirrorApiPeers([], trace, traceId, undefined, chatUpdateIds);
+        }
 
         if(result._ === 'messages.dialogsNotModified') {
           return missingPeerIds;

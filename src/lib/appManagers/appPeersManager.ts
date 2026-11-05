@@ -37,7 +37,13 @@ export class AppPeersManager extends AppManager {
     this.appUsersManager.saveApiUsers(object.users, undefined, trace, mirrorBatch);
   }
 
-  public mirrorApiPeers(peerKeys: Iterable<string>, trace?: 'cachedChannelDialogsReconcile', traceId?: string, reconcilePhase?: PerformancePhase) {
+  public mirrorApiPeers(
+    peerKeys: Iterable<string>,
+    trace?: 'cachedChannelDialogsReconcile',
+    traceId?: string,
+    reconcilePhase?: PerformancePhase,
+    chatUpdateIds?: Iterable<ChatId>
+  ) {
     // The paginated walk can outlive a clear or a newer peer update.
     const peers: Record<string, PeerMirrorValue> = {};
     for(const peerKey of peerKeys) {
@@ -46,13 +52,15 @@ export class AppPeersManager extends AppManager {
       peers[peerKey] = peer;
     }
 
-    const traceOnly = !Object.keys(peers).length;
+    const chatUpdates = Array.from(chatUpdateIds ?? []);
+    const traceOnly = !Object.keys(peers).length && !chatUpdates.length;
     if(traceOnly && !traceId) return;
 
     MTProtoMessagePort.getInstance<false>().invokeVoid('mirror', {
       name: 'peers',
       value: peers,
       merge: true,
+      ...(chatUpdates.length ? {chatUpdateIds: chatUpdates} : {}),
       accountNumber: this.getAccountNumber(),
       // The walk reloads its missing dialogs itself; avoid starting a second empty-channel scan in the tab.
       skipEmptyChannelDialogReconciliation: true,

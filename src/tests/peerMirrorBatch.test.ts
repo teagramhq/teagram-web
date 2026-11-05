@@ -1,6 +1,6 @@
-import {expect, test} from 'vitest';
+import {expect, test, vi} from 'vitest';
 import {reconcilePeer, usePeers} from '@stores/peers';
-import reconcilePeerMirrorBatch from '@lib/apiManagerProxyUtils/peerMirrorBatch';
+import reconcilePeerMirrorBatch, {dispatchPeerMirrorBatchChatUpdates} from '@lib/apiManagerProxyUtils/peerMirrorBatch';
 
 test('merges batched peer mirrors into the existing mirror and peer store', () => {
   const preservedUserId = 900000001;
@@ -41,4 +41,19 @@ test('preserves active channel updates for empty-channel dialog reconciliation',
   expect(mirror[-channelId]).toBe(peer);
   expect(usePeers()[-channelId as PeerId]).toMatchObject({title: 'joined'});
   expect(activeChannelIds).toEqual([channelId]);
+});
+
+test('coalesces cached reconciliation chat updates without forwarding duplicate active-channel events', () => {
+  const dispatchEvent = vi.fn();
+  const dispatchEventSingle = vi.fn();
+
+  dispatchPeerMirrorBatchChatUpdates(
+    [42],
+    [42, 43, 43],
+    (chatId) => dispatchEvent(chatId),
+    (chatId) => dispatchEventSingle(chatId)
+  );
+
+  expect(dispatchEvent).toHaveBeenCalledExactlyOnceWith(42);
+  expect(dispatchEventSingle).toHaveBeenCalledExactlyOnceWith(43);
 });

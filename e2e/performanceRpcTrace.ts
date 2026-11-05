@@ -216,7 +216,7 @@ export function collectCachedDialogReconciles(
     }
     return phase.startedAtEpochMs + phase.durationMs > scenarioStartedAtEpochMs;
   }).map((phase) => {
-    // An interrupted walk never flushed its deferred peer mirrors, so it cost the main thread nothing.
+    // An interrupted walk can still flush per-page chat updates; use its recorded time when any were processed.
     const mainThreadTimeMs = mainThreadTimeByTraceId[phase.traceId] ?? (phase.interrupted ? 0 : undefined);
     if(!Number.isFinite(mainThreadTimeMs) || mainThreadTimeMs < 0) {
       throw new Error(`cached dialog reconciliation ${phase.traceId} has no main-thread time`);

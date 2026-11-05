@@ -46,6 +46,32 @@ test('cached dialog reconciliation skips duplicate empty-channel list reconcilia
   expect(dispatchEvent).toHaveBeenCalledWith('chat_update', 42, {skipEmptyChannelDialogReconciliation: true});
 });
 
+test('collects reconciliation chat updates while keeping worker-local listeners current', () => {
+  const chat = {_: 'channel', id: 42, title: 'same', pFlags: {}} as any;
+  const chatUpdateIds = new Set<number>();
+  const dispatchEvent = vi.fn();
+  const dispatchEventSingle = vi.fn();
+  const chatsManager = Object.create(AppChatsManager.prototype) as any;
+  Object.assign(chatsManager, {
+    chats: {'42': {...chat}},
+    appUsersManager: {setUsernameToCache: vi.fn(() => false)},
+    appStoriesManager: {saveApiPeerStories: vi.fn()},
+    appCommunitiesManager: {handlePeerLinkedCommunityUpdate: vi.fn()},
+    peersStorage: {isPeerNeeded: vi.fn(() => false)},
+    rootScope: {dispatchEvent, dispatchEventSingle},
+    mirrorChat: vi.fn()
+  });
+
+  chatsManager.saveApiChat(chat, undefined, undefined, undefined, {
+    skipEmptyChannelDialogReconciliation: true,
+    chatUpdateIds
+  });
+
+  expect(chatUpdateIds).toEqual(new Set([42]));
+  expect(dispatchEventSingle).toHaveBeenCalledWith('chat_update', 42, {skipEmptyChannelDialogReconciliation: true});
+  expect(dispatchEvent).not.toHaveBeenCalledWith('chat_update', 42, expect.anything());
+});
+
 test('mirrors the current peers and drops chats cleared before flush', () => {
   vi.stubEnv('VITE_PERF_TRACE', '1');
   const invokeVoid = vi.fn();
@@ -123,5 +149,35 @@ test('mirrors the current peers and drops chats cleared before flush', () => {
     trace: 'cachedChannelDialogsReconcile',
     traceId: 'walk-1',
     reconcilePhase
+  });
+});
+
+test('sends coalesced chat updates as a traced mirror batch', () => {
+  const invokeVoid = vi.fn();
+  vi.spyOn(MTProtoMessagePort, 'getInstance').mockReturnValue({invokeVoid} as any);
+  const manager = Object.create(AppPeersManager.prototype) as any;
+  Object.assign(manager, {
+    appChatsManager: {getChat: vi.fn()},
+    appUsersManager: {getUser: vi.fn()},
+    getAccountNumber: () => 1
+  });
+
+  manager.mirrorApiPeers(
+    [],
+    'cachedChannelDialogsReconcile',
+    'walk-2',
+    undefined,
+    new Set([42, 43])
+  );
+
+  expect(invokeVoid).toHaveBeenCalledWith('mirror', {
+    name: 'peers',
+    value: {},
+    merge: true,
+    accountNumber: 1,
+    skipEmptyChannelDialogReconciliation: true,
+    trace: 'cachedChannelDialogsReconcile',
+    traceId: 'walk-2',
+    chatUpdateIds: [42, 43]
   });
 });

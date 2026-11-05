@@ -126,14 +126,14 @@ test('flushes current peers once after the cached-dialog walk completes', async(
     firstPage,
     'cachedChannelDialogsReconcile',
     expect.any(Function),
-    {skipEmptyChannelDialogReconciliation: true}
+    expect.objectContaining({skipEmptyChannelDialogReconciliation: true, chatUpdateIds: expect.any(Set)})
   );
   expect(saveApiPeers).toHaveBeenNthCalledWith(
     2,
     secondPage,
     'cachedChannelDialogsReconcile',
     expect.any(Function),
-    {skipEmptyChannelDialogReconciliation: true}
+    expect.objectContaining({skipEmptyChannelDialogReconciliation: true, chatUpdateIds: expect.any(Set)})
   );
   expect(saveApiPeers.mock.calls[1][2]).toBe(saveApiPeers.mock.calls[0][2]);
   expect(storage.appPeersManager.mirrorApiPeers).toHaveBeenCalledTimes(1);

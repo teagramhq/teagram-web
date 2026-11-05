@@ -137,6 +137,16 @@ export class AppChatsManager extends AppManager {
     this.recommendations = {};
   };
 
+  private dispatchChatUpdate(chatId: ChatId, options?: PeerSaveOptions) {
+    const eventOptions = options?.skipEmptyChannelDialogReconciliation ? {skipEmptyChannelDialogReconciliation: true} : undefined;
+    if(options?.chatUpdateIds) {
+      this.rootScope.dispatchEventSingle('chat_update', chatId, eventOptions);
+      options.chatUpdateIds.add(chatId);
+    } else {
+      this.rootScope.dispatchEvent('chat_update', chatId, eventOptions);
+    }
+  }
+
   public saveApiChats(apiChats: any[], override?: boolean, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch, options?: PeerSaveOptions) {
     if(!apiChats || (apiChats as any).saved) return;
     (apiChats as any).saved = true;
@@ -293,7 +303,7 @@ export class AppChatsManager extends AppManager {
       if(mirrorBatch) this.mirrorChat(oldChat, trace, mirrorBatch);
       else if(trace) this.mirrorChat(oldChat, trace);
       else this.mirrorChat(oldChat);
-      this.rootScope.dispatchEvent('chat_update', chat.id, options?.skipEmptyChannelDialogReconciliation ? {skipEmptyChannelDialogReconciliation: true} : undefined);
+      this.dispatchChatUpdate(chat.id, options);
 
       storiesCallback?.();
 
@@ -331,7 +341,7 @@ export class AppChatsManager extends AppManager {
       chat._ === 'channelForbidden' ||
       (chat._ === 'channel' && (chat.pFlags.left || (chat as any).pFlags.kicked))
     )) {
-      this.rootScope.dispatchEvent('chat_update', chat.id, options?.skipEmptyChannelDialogReconciliation ? {skipEmptyChannelDialogReconciliation: true} : undefined);
+      this.dispatchChatUpdate(chat.id, options);
     }
 
     const communityId = chat._ === 'channel' ? chat.linked_community_id?.toChatId() : undefined;

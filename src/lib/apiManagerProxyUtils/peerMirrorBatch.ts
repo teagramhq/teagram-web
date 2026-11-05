@@ -23,3 +23,17 @@ export default function reconcilePeerMirrorBatch(mirror: PeerMap, peers: PeerMap
   });
   return newActiveChannelIds;
 }
+
+export function dispatchPeerMirrorBatchChatUpdates(
+  activeChannelIds: Iterable<ChatId>,
+  chatUpdateIds: Iterable<ChatId>,
+  dispatchActiveChannelUpdate: (chatId: ChatId) => void,
+  dispatchBatchedChatUpdate: (chatId: ChatId) => void
+) {
+  const pendingChatUpdateIds = new Set(chatUpdateIds);
+  for(const chatId of activeChannelIds) {
+    pendingChatUpdateIds.delete(chatId);
+    dispatchActiveChannelUpdate(chatId);
+  }
+  pendingChatUpdateIds.forEach(dispatchBatchedChatUpdate);
+}

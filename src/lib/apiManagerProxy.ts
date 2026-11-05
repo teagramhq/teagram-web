@@ -89,7 +89,8 @@ import {
   getNewActiveChannelMirrorChatId,
   reconcileObjectURLMirrorSnapshot,
   reconcileObjectURLMirrorValue,
-  reconcilePeerMirrorBatch
+  reconcilePeerMirrorBatch,
+  dispatchPeerMirrorBatchChatUpdates
 } from './apiManagerProxyUtils';
 
 function withRuntimeMtprotoTarget(url: string | URL) {
@@ -157,7 +158,8 @@ export type MirrorTaskPayload<
   traceId?: string,
   reconcilePhase?: PerformancePhase,
   traceOnly?: boolean,
-  skipEmptyChannelDialogReconciliation?: boolean
+  skipEmptyChannelDialogReconciliation?: boolean,
+  chatUpdateIds?: ChatId[]
 };
 
 export type NotificationBuildMessageTaskPayload = {
@@ -346,11 +348,13 @@ class ApiManagerProxy extends MTProtoMessagePort {
             this.mirrors.peers as Record<string, any>,
             payload.value
           );
-          activeChannelIds.forEach((chatId) => rootScope.dispatchEvent(
-            'chat_update',
-            chatId,
-            payload.skipEmptyChannelDialogReconciliation ? {skipEmptyChannelDialogReconciliation: true} : undefined
-          ));
+          const options = payload.skipEmptyChannelDialogReconciliation ? {skipEmptyChannelDialogReconciliation: true} : undefined;
+          dispatchPeerMirrorBatchChatUpdates(
+            activeChannelIds,
+            payload.chatUpdateIds ?? [],
+            (chatId) => rootScope.dispatchEvent('chat_update', chatId, options),
+            (chatId) => rootScope.dispatchEventSingle('chat_update', chatId, options)
+          );
           return false;
         }
 
