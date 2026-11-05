@@ -93,7 +93,7 @@ test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 });
 
-async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false) {
+async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false, observeAnimationFrames = false) {
   const bundleRequests = createBundleRequestTracker(new URL(origin).origin);
   bundleRequestTrackers.set(page, bundleRequests);
   page.on('request', (request) => {
@@ -104,8 +104,9 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   page.on('requestfailed', (request) => bundleRequests.requestFailed(request));
   page.on('worker', (worker) => bundleRequests.workerReady(worker.url()));
   await page.exposeBinding('__teagramBundleWorkerReady', (_source, url: string) => bundleRequests.workerReady(url));
-  await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
-  return page.addInitScript((injectColdStall: boolean) => {
+  // Only the diagnostic pass observes long animation frames; the gated windows stay as instrumented as on master.
+  if(observeAnimationFrames) await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
+  return page.addInitScript(({injectColdStall, observeAnimationFrames}: {injectColdStall: boolean, observeAnimationFrames: boolean}) => {
     // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
     const SharedWorkerConstructor = (window as any).SharedWorker;
     if(SharedWorkerConstructor) {
@@ -139,7 +140,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
       });
       observer.observe({type: 'longtask', buffered: true});
     } catch{}
-    perf.loafObserved = (window as any).__teagramObserveLongAnimationFrames(PerformanceObserver, (entries: any[]) => {
+    if(observeAnimationFrames) perf.loafObserved = (window as any).__teagramObserveLongAnimationFrames(PerformanceObserver, (entries: any[]) => {
       perf.longAnimationFrames.push(...entries.map((entry: any) => ({
         startTime: entry.startTime,
         duration: entry.duration,
@@ -173,7 +174,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
       requestAnimationFrame(sampleFrame);
     };
     perf.stopFrames = () => perf.frameActive = false;
-  }, injectColdStall);
+  }, {injectColdStall, observeAnimationFrames});
 }
 
 async function waitForBundleResources(page: Page) {
@@ -836,7 +837,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
     });
     const page = await context.newPage();
     const requests = {value: 0};
-    await installInstrumentation(page, requests, run.origin);
+    await installInstrumentation(page, requests, run.origin, false, true);
 
     try {
       const coldProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
