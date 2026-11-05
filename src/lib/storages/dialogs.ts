@@ -365,7 +365,7 @@ export default class DialogsStorage extends AppManager {
 
   public clear = (init = false) => {
     if(!init) {
-      this.storage.clear();
+      void this.storage.clear().catch((error) => this.log.error('Could not clear dialog storage', error));
 
       this.allDialogsLoaded = {};
       this.saveAllDialogsLoaded();

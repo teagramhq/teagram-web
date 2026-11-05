@@ -685,12 +685,13 @@ export class AppStickersManager extends AppManager {
     title: string,
     shortName: string,
     isEmoji: boolean,
-    software: 'folder' | 'zip'
+    software: string,
+    emojis?: string[]
   }) {
     const stickers: InputStickerSetItem[] = [];
     const peer = this.appPeersManager.getInputPeerSelf();
 
-    for(const file of options.files) {
+    for(const [index, file] of options.files.entries()) {
       const mimeType = getStickerFileMimeType(file.name);
       const uploadedFile = await this.apiFileManager.upload({file, fileName: file.name});
       const media: InputMedia.inputMediaUploadedDocument = {
@@ -710,7 +711,7 @@ export class AppStickersManager extends AppManager {
       stickers.push({
         _: 'inputStickerSetItem',
         document: getDocumentInput(document),
-        emoji: '🙂'
+        emoji: options.emojis?.[index] || '🙂'
       });
     }
 

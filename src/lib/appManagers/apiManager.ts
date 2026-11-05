@@ -336,6 +336,24 @@ export class ApiManager extends ApiManagerMethods {
     });
   }
 
+  private handleIdleNetworkerAuthKeyUnknown(networker: MTPNetworker, transport: MTTransport) {
+    if(networker.activeRequests || networker.transport !== transport || !this.isNetworkerCurrentForDc(networker.dcId, networker)) return;
+
+    if(this.rootScope.myId) {
+      this.onNetworkerDrain(networker);
+      this.logOutLocally().catch((error) => {
+        this.log.error('Failed to clear rejected auth session locally', error);
+      });
+      return;
+    }
+
+    const recoveryId = this.nextAuthKeyRecoveryId = (this.nextAuthKeyRecoveryId || 0) + 1;
+    (this.authKeyRecoveryTargets ??= new Map()).set(recoveryId, {networker, transport});
+    this.recoverUnknownAuthKey(recoveryId).catch((recoveryError) => {
+      this.log.error('Failed to recover unknown auth key', recoveryError);
+    });
+  }
+
   private chooseServer(dcId: DcId, connectionType: ConnectionType, transportType: TransportType) {
     return this.dcConfigurator.chooseServer(dcId, connectionType, transportType, connectionType === 'client', this.rootScope.premium);
   }
@@ -463,27 +481,7 @@ export class ApiManager extends ApiManagerMethods {
     const clear = async() => {
       if(wasCleared) return;
       wasCleared = true;
-
-      let accountNumberOnlyCredentialCleanup = false;
-      if(totalAccounts > 1 && accountData.userId !== undefined) {
-        try {
-          accountNumberOnlyCredentialCleanup = await AccountController.hasUserIdInOtherAccounts(accountNumber, accountData.userId);
-        } catch(error) {
-          this.log.error('failed to inspect account slots before credential cleanup', error);
-          accountNumberOnlyCredentialCleanup = true;
-        }
-      }
-
-      try {
-        await clearGuestCredentialsForAccount(accountData.userId, accountNumber, accountNumberOnlyCredentialCleanup);
-      } catch(error) {
-        this.log.error('failed to clear guest credentials during logout', error);
-        await clearAllGuestCredentials();
-      }
-
-      this.baseDcId = undefined;
-      await clearGuestAccountLocalState(accountNumber, totalAccounts, migrateAccountTo);
-      this.rootScope.dispatchEvent('logging_out', {accountNumber, migrateTo: migrateAccountTo});
+      await this.clearAccountLocally(accountNumber, totalAccounts, accountData, migrateAccountTo);
     };
 
     setTimeout(clear, 1e3);
@@ -495,6 +493,51 @@ export class ApiManager extends ApiManagerMethods {
     }).finally(clear)/* .then(() => {
       location.pathname = '/';
     }) */;
+  }
+
+  private async logOutLocally() {
+    if(this.loggingOut) return;
+
+    this.loggingOut = true;
+    try {
+      const accountNumber = this.getAccountNumber();
+      const [totalAccounts, accountData] = await Promise.all([
+        AccountController.getTotalAccounts(),
+        AccountController.get(accountNumber)
+      ]);
+      await this.clearAccountLocally(accountNumber, totalAccounts, accountData);
+    } catch(error) {
+      this.loggingOut = false;
+      throw error;
+    }
+  }
+
+  private async clearAccountLocally(
+    accountNumber: ActiveAccountNumber,
+    totalAccounts: number,
+    accountData: Awaited<ReturnType<typeof AccountController.get>>,
+    migrateAccountTo?: ActiveAccountNumber
+  ) {
+    let accountNumberOnlyCredentialCleanup = false;
+    if(totalAccounts > 1 && accountData.userId !== undefined) {
+      try {
+        accountNumberOnlyCredentialCleanup = await AccountController.hasUserIdInOtherAccounts(accountNumber, accountData.userId);
+      } catch(error) {
+        this.log.error('failed to inspect account slots before credential cleanup', error);
+        accountNumberOnlyCredentialCleanup = true;
+      }
+    }
+
+    try {
+      await clearGuestCredentialsForAccount(accountData.userId, accountNumber, accountNumberOnlyCredentialCleanup);
+    } catch(error) {
+      this.log.error('failed to clear guest credentials during logout', error);
+      await clearAllGuestCredentials();
+    }
+
+    this.baseDcId = undefined;
+    await clearGuestAccountLocalState(accountNumber, totalAccounts, migrateAccountTo);
+    this.rootScope.dispatchEvent('logging_out', {accountNumber, migrateTo: migrateAccountTo});
   }
 
   public async clearInvalidatedGuestAccount(accountNumber: ActiveAccountNumber, userId?: PeerId) {
@@ -653,7 +696,8 @@ export class ApiManager extends ApiManagerMethods {
           serverSalt: auth.serverSalt,
           isFileDownload: connectionType === 'download',
           isFileUpload: connectionType === 'upload',
-          isCurrentForDc: () => this.isNetworkerCurrentForDc(dcId, networker)
+          isCurrentForDc: () => this.isNetworkerCurrentForDc(dcId, networker),
+          onAuthKeyUnknown: (_networker, transport) => this.handleIdleNetworkerAuthKeyUnknown(networker, transport)
         });
 
         if(temporary) onTransport = async() => {
@@ -912,12 +956,20 @@ export class ApiManager extends ApiManagerMethods {
       }
 
       return promise.catch((error: ApiError) => {
+        let authKeyRecoveryPromise: Promise<unknown> | undefined;
         if(error?.code === -404 && error.type === 'AUTH_KEY_UNKNOWN' && cachedNetworker &&
           cachedNetworker.transport === requestTransport && this.isNetworkerCurrentForDc(cachedNetworker.dcId, cachedNetworker)) {
-          if(authKeyRecovery) {
+          if(authKeyRecovery || !this.rootScope.myId) {
             const recoveryId = this.nextAuthKeyRecoveryId = (this.nextAuthKeyRecoveryId || 0) + 1;
             (this.authKeyRecoveryTargets ??= new Map()).set(recoveryId, {networker: cachedNetworker, transport: requestTransport});
-            error = {...error, authKeyRecoveryId: recoveryId};
+
+            if(authKeyRecovery) {
+              error = {...error, authKeyRecoveryId: recoveryId};
+            } else {
+              authKeyRecoveryPromise = this.recoverUnknownAuthKey(recoveryId).catch((recoveryError) => {
+                this.log.error('Failed to recover unknown auth key', recoveryError);
+              });
+            }
           }
 
           if(this.rootScope.myId) this.logOut();
@@ -1036,6 +1088,12 @@ export class ApiManager extends ApiManagerMethods {
         } else {
           if(RepayRequestHandler.canHandleError(error))
             error = RepayRequestHandler.attachInvokeArgsToError(error, [method, params, options]);
+
+          if(authKeyRecoveryPromise) {
+            return authKeyRecoveryPromise.then(() => {
+              throw error;
+            });
+          }
 
           throw error;
         }

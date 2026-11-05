@@ -336,13 +336,13 @@ describe('TcpObfuscated abridged receive path', () => {
       onTransportData,
       setConnectionStatus: vi.fn()
     };
-    const {connection} = await createTransport(networker);
+    const {transport, connection} = await createTransport(networker);
 
     connection.message(packet(intPayload(code)));
     await flushMicrotasks();
 
     expect(onTransportError).toHaveBeenCalledOnce();
-    expect(onTransportError).toHaveBeenCalledWith(code);
+    expect(onTransportError).toHaveBeenCalledWith(code, transport);
     expect(onTransportData).not.toHaveBeenCalled();
     expect(connection.closeCount).toBe(0);
   });

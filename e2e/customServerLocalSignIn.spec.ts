@@ -903,7 +903,7 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await page.setViewportSize({width: 1280, height: 800});
     expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(serverHost);
     expect(await page.locator('meta[data-server-policy]').getAttribute('content'))
-    .toBe(`connect-src 'self' https://${serverHost} ${privateEndpoint.href};`);
+    .toBe(`connect-src 'self' https://${serverHost} ${privateEndpoint.href} https://api.telegram.org;`);
     expect(discoveryRequests).toEqual([
       '/.well-known/teagramd/client',
       '/.well-known/teagramd/client'
@@ -935,7 +935,7 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await expect(page.getByRole('button', {name: 'Change server'})).toBeFocused();
     await expect(usernameInput).toBeEnabled();
     await expect(page.locator('meta[data-server-policy-enforcement]'))
-    .toHaveAttribute('content', `connect-src 'self' https://${serverHost} ${privateEndpoint.href};`);
+    .toHaveAttribute('content', `connect-src 'self' https://${serverHost} ${privateEndpoint.href} https://api.telegram.org;`);
     const requestsBeforePolicyCheck = discoveryRequests.length;
     const unrelatedDiscovery = await page.evaluate(async(url) => {
       try {
@@ -1087,7 +1087,7 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await expect(pinnedPage.locator('#auth-pages')).toBeVisible({timeout: 30_000});
     expect(await pinnedPage.getByRole('dialog').count()).toBe(0);
     expect(await pinnedPage.locator('meta[data-server-policy]').getAttribute('content'))
-    .toBe(`connect-src 'self' ${privateEndpoint.href};`);
+    .toBe(`connect-src 'self' ${privateEndpoint.href} https://api.telegram.org;`);
     expect(pinnedCspViolations).toEqual([]);
     await pinnedPage.close();
   } finally {
@@ -1236,7 +1236,7 @@ async function runPrivateArtifactFirefoxEgress(
   await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('meta[data-server-policy]'))
-  .toHaveAttribute('content', `connect-src 'self' https://${serverHost} ${privateEndpoint.href};`);
+  .toHaveAttribute('content', `connect-src 'self' https://${serverHost} ${privateEndpoint.href} https://api.telegram.org;`);
   expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__)).toBe(serverHost);
   expect(discoveryRequests).toEqual([]);
   expect(cspViolations).toEqual([]);
@@ -1251,7 +1251,7 @@ async function runPrivateArtifactFirefoxEgress(
   });
   await pinnedPage.goto(appOrigin, {waitUntil: 'domcontentloaded'});
   await expect(pinnedPage.locator('meta[data-server-policy]'))
-  .toHaveAttribute('content', `connect-src 'self' https://${serverHost} ${privateEndpoint.href};`);
+  .toHaveAttribute('content', `connect-src 'self' https://${serverHost} ${privateEndpoint.href} https://api.telegram.org;`);
   expect(await pinnedPage.getByRole('dialog').count()).toBe(0);
   expect(pinnedCspViolations).toEqual([]);
   await expectUnrelatedConnectionsBlocked(pinnedPage, unrelatedHttpsRequests, webSocketFixture.unrelatedRequests, unrelatedWebSocketUrl);

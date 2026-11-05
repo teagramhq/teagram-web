@@ -70,6 +70,12 @@
   gap: 0.5rem;
 }
 
+.telegramSection {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
 .fileButtons {
   display: flex;
   flex-wrap: wrap;

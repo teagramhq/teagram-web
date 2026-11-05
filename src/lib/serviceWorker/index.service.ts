@@ -24,6 +24,7 @@ import {onBackgroundsFetch} from '@lib/serviceWorker/backgrounds';
 import {watchMtprotoOnDev} from '@lib/serviceWorker/watchMtprotoOnDev';
 import {watchCacheStoragesLifetime} from './clearOldCache';
 import {getActiveServerId} from '@config/serverContext';
+import {isTelegramBotApiUrl} from '@config/telegramBotApi';
 import {IDB} from '@lib/files/idb';
 
 // #if MTPROTO_SW
@@ -355,6 +356,8 @@ function isAuthorizedUnclaimedNavigationFetch(event: FetchEvent) {
 }
 
 const onFetch = (event: FetchEvent): void => {
+  if(isTelegramBotApiUrl(event.request.url)) return;
+
   if(event.clientId) {
     if(connectedServerIds.get(event.clientId) !== getActiveServerId()) return;
   } else if(!isAuthorizedUnclaimedNavigationFetch(event)) {
