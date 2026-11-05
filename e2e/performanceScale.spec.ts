@@ -921,26 +921,38 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
 }
 
 async function runTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixture) {
-  const context = await browser.newContext({
+  const contextOptions = {
     ignoreHTTPSErrors: true,
     viewport: {width: 1280, height: 800},
     storageState: run.storageState
-  });
-  const page = await context.newPage();
-  const requests = {value: 0};
-  await installInstrumentation(page, requests, run.origin);
+  };
+  let chatOpen: Metric;
+  let scrollBack2k: Metric | undefined;
 
+  const historyContext = await browser.newContext(contextOptions);
   try {
+    const page = await historyContext.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin);
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
-    const chatOpen = await openPartnerChat(page, requests, fixture);
-    const scrollBack2k = await scrollBackTwoThousand(page, requests, run.variant === 'head');
-    // The history scenario leaves the same chat scrolled up; start send timing from a clean list state.
-    await resetToChatList(page, run.origin);
+    chatOpen = await openPartnerChat(page, requests, fixture);
+    scrollBack2k = await scrollBackTwoThousand(page, requests, run.variant === 'head');
+  } finally {
+    await historyContext.close();
+  }
+
+  const sendContext = await browser.newContext(contextOptions);
+  try {
+    const page = await sendContext.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
     const send = await sendMessage(page, requests, fixture);
     return {chatOpen, scrollBack2k: scrollBack2k || {bundleBytes: chatOpen.bundleBytes}, send};
   } finally {
-    await context.close();
+    await sendContext.close();
   }
 }
 
