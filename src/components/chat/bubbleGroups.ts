@@ -298,12 +298,12 @@ export class BubbleGroup {
     item.group = undefined;
   }
 
-  mount(updateClassNames?: boolean, deferGroupUpdates = false) {
+  mount(updateClassNames?: boolean) {
     if(!this.groups.groups.includes(this) || !this.items.length) { // group can be already removed
       debugger;
 
       if(this.mounted) {
-        this.onItemUnmount(deferGroupUpdates);
+        this.onItemUnmount();
       }
 
       return;
@@ -319,7 +319,7 @@ export class BubbleGroup {
       this.updateClassNames();
     }
 
-    this.onItemMount(deferGroupUpdates);
+    this.onItemMount();
   }
 
   mountItem(item: GroupItem, idx = this.items.indexOf(item), offset = this.offset) {
@@ -331,21 +331,17 @@ export class BubbleGroup {
     item.mounted = true;
   }
 
-  unmountItem(item: GroupItem, removeBubble = true, deferGroupUpdate = false) {
+  unmountItem(item: GroupItem) {
     if(!item.mounted) {
       return;
     }
 
-    if(removeBubble) {
-      item.bubble.remove();
-    }
+    item.bubble.remove();
     item.mounted = false;
-    if(!deferGroupUpdate) {
-      this.onItemUnmount();
-    }
+    this.onItemUnmount();
   }
 
-  onItemMount(deferGroupUpdates = false) {
+  onItemMount() {
     if(this.mounted) {
       return;
     }
@@ -359,12 +355,10 @@ export class BubbleGroup {
     positionElementByIndex(this.container, dateContainer.container, STICKY_OFFSET + dateGroupsLength - 1 - idx - unmountedLength);
     ++dateContainer.groupsLength;
     this.mounted = true;
-    if(!deferGroupUpdates) {
-      this.groups?.updateGroupsClassNames();
-    }
+    this.groups?.updateGroupsClassNames();
   }
 
-  onItemUnmount(deferGroupUpdates = false) {
+  onItemUnmount() {
     if(!this.mounted) {
       return;
     }
@@ -373,14 +367,10 @@ export class BubbleGroup {
       this.container.remove();
       this.dateContainer && --this.dateContainer.groupsLength;
       this.dateContainer = undefined;
-      if(!deferGroupUpdates) {
-        this.chat.bubbles.deleteEmptyDateGroups();
-      }
+      this.chat.bubbles.deleteEmptyDateGroups();
       this.mounted = false;
       this.middlewareHelper.clean();
-      if(!deferGroupUpdates) {
-        this.groups?.updateGroupsClassNames();
-      }
+      this.groups?.updateGroupsClassNames();
     } else {
       this.updateClassNames();
     }
@@ -433,12 +423,7 @@ export default class BubbleGroups {
     this.removeItemFromCache(item);
   }
 
-  removeAndUnmountBubble(
-    bubble: HTMLElement,
-    deferredGroups?: Set<BubbleGroup>,
-    itemIndex?: number,
-    groupsFullyDeleted?: Set<BubbleGroup>
-  ) {
+  removeAndUnmountBubble(bubble: HTMLElement, deferredGroups?: Set<BubbleGroup>) {
     const item = this.getItemByBubble(bubble);
     if(!item) { // * can be a placeholder
       const parentElement = bubble.parentElement;
@@ -454,7 +439,7 @@ export default class BubbleGroups {
     }
 
     const items = this.itemsArr;
-    const index = itemIndex ?? items.indexOf(item);
+    const index = items.indexOf(item);
     const siblings = this.getSiblingsAtIndex(index, items);
 
     const group = item.group;
@@ -462,7 +447,7 @@ export default class BubbleGroups {
 
     const modifiedGroups: Set<BubbleGroup> = new Set();
     if(group) {
-      group.unmountItem(item, !groupsFullyDeleted?.has(group), !!deferredGroups);
+      group.unmountItem(item);
       modifiedGroups.add(group);
     }
 
@@ -475,11 +460,7 @@ export default class BubbleGroups {
     ) {
       const group = nextSibling.group;
       this.f(nextSibling.group.items);
-      if(deferredGroups) {
-        deferredGroups.add(group);
-      } else {
-        group.onItemUnmount();
-      }
+      group.onItemUnmount();
       modifiedGroups.add(previousSibling.group);
       const regrouped = this.groupUngrouped();
       if(deferredGroups) {
@@ -500,21 +481,13 @@ export default class BubbleGroups {
     // groups.sort((a, b) => (b.lastItem?.mid ?? 0) - (a.lastItem?.mid ?? 0));
 
     const [toMount, toUnmount] = partition(groups, (group) => !!group.items.length);
-    const hasMountedToUnmount = toUnmount.some((group) => group.mounted);
-    const needsGroupClassNames = hasMountedToUnmount || toMount.some((group) => !group.mounted);
     toUnmount.forEach((group) => {
-      group.onItemUnmount(true);
+      group.onItemUnmount();
     })
-    if(hasMountedToUnmount) {
-      this.chat.bubbles.deleteEmptyDateGroups();
-    }
 
     toMount.forEach((group) => {
-      group.mount(true, true);
+      group.mount(true);
     });
-    if(needsGroupClassNames) {
-      this.updateGroupsClassNames();
-    }
 
     this.addChatThreadSeparators();
     this.addContinueLastTopicReplyMarkup();

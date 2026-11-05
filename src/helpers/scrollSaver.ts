@@ -3,7 +3,7 @@ import type {ScrollableContextValue} from '@components/scrollable2';
 import {MOUNT_CLASS_TO} from '@config/debug';
 import {IS_SAFARI} from '@environment/userAgent';
 import getVisibleRect from '@helpers/dom/getVisibleRect';
-import {fastRaf, fastRafPromise} from '@helpers/schedulers';
+import {fastRaf} from '@helpers/schedulers';
 
 // let USE_REFLOW = false;
 // if(IS_SAFARI) {
@@ -96,13 +96,6 @@ export default class ScrollSaver {
     this.findAndSetElements();
     // console.warn('scroll save', this.elements);
     this._save();
-  }
-
-  public savePosition(bottomSliceHeight = 0) {
-    // Keep bottom trimming from canceling the scroll-height increase caused by prepending.
-    this.elements = [];
-    this._save();
-    this.scrollHeightMinusTop -= bottomSliceHeight;
   }
 
   public _save() {
@@ -223,16 +216,6 @@ export default class ScrollSaver {
     this.setScrollTop(scrollTop + diff, useReflow);
     // if(diff) debugger;
     // console.warn('scroll restore', rect, diff, newRect);
-  }
-
-  public async restoreAfterLayout(useReflow?: boolean) {
-    await fastRafPromise();
-    if(this.reverse) {
-      this.scrollHeight = this.scrollable.scrollSize;
-      this._restore(useReflow);
-    } else {
-      this.restore(useReflow);
-    }
   }
 
   public _restore(useReflow?: boolean) {

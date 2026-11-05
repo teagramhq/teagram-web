@@ -40,6 +40,7 @@ type Metric = {
   peerChangePhases?: PerformancePhaseSummary[],
   cpu?: PerformanceCpuSummary,
   longTaskAttribution?: PerformanceTaskAttribution[],
+  scrollSpanTracing?: {installed: string[], spanCount: number, loafObserved: boolean},
   droppedFramePercent?: number,
   droppedFrames?: number,
   frameIntervals?: number,
@@ -154,7 +155,10 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
         })));
       });
       observer.observe({type: 'long-animation-frame', buffered: true} as any);
-    } catch{}
+      perf.loafObserved = true;
+    } catch{
+      perf.loafObserved = false;
+    }
     perf.injectLongTask = (durationMs: number) => {
       const started = performance.now();
       while(performance.now() - started < durationMs) {}
@@ -402,12 +406,25 @@ async function finishCpuProfile(session: Awaited<ReturnType<typeof startCpuProfi
 
 // Records the synchronous part of the history, grouping, slicing and mount calls so each long task in the
 // scroll-back window can be joined to the work that began inside it. Only the diagnostic pass installs it.
+const SCROLL_SPAN_NAMES = [
+  'bubbles.getHistory1',
+  'bubbles.performHistoryResult',
+  'bubbles.groupBubbles',
+  'bubbles.prepareToSaveScroll',
+  'bubbles.getViewportSlice',
+  'bubbles.deleteViewportSlice',
+  'bubbles.commitBubbleReplacements',
+  'bubbleGroups.mountUnmountGroups'
+];
+
 async function installScrollSpanTracing(page: Page) {
-  await page.evaluate(() => {
+  const installed = await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
     const spans: Array<{name: string, startMs: number, syncMs: number}> = [];
+    const installedNames: string[] = [];
     const wrap = (target: any, method: string, name: string) => {
       if(!target || typeof target[method] !== 'function') return;
+      installedNames.push(name);
       const original = target[method];
       target[method] = function(...args: any[]) {
         const startMs = performance.now();
@@ -419,7 +436,7 @@ async function installScrollSpanTracing(page: Page) {
       };
     };
     const bubbles = (window as any).appImManager?.chat?.bubbles;
-    if(!bubbles) return;
+    if(!bubbles) return installedNames;
     wrap(bubbles, 'getHistory1', 'bubbles.getHistory1');
     wrap(bubbles, 'performHistoryResult', 'bubbles.performHistoryResult');
     wrap(bubbles, 'groupBubbles', 'bubbles.groupBubbles');
@@ -429,7 +446,10 @@ async function installScrollSpanTracing(page: Page) {
     wrap(bubbles, 'commitBubbleReplacements', 'bubbles.commitBubbleReplacements');
     wrap(bubbles.bubbleGroups, 'mountUnmountGroups', 'bubbleGroups.mountUnmountGroups');
     perf.scrollSpans = spans;
+    return installedNames;
   });
+  // An empty span list reads as "no history call ran", so a span that failed to install must fail the run.
+  expect(installed, 'scroll span tracing did not install every wrapped call').toEqual(SCROLL_SPAN_NAMES);
 }
 
 async function signIn(page: Page, origin: string) {
@@ -555,8 +575,15 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
       spans: (perf.scrollSpans || []) as PerformanceSpan[]
     };
   });
+  const tracing = await page.evaluate(() => {
+    const perf = (window as any).__teagramPerf;
+    return {spanCount: (perf.scrollSpans || []).length, loafObserved: perf.loafObserved === true};
+  });
+  expect(tracing.spanCount, 'scroll-back recorded no traced calls').toBeGreaterThan(0);
+  expect(tracing.loafObserved, 'long-animation-frame observer is not supported in the diagnostic browser').toBe(true);
   return {
     ...metric,
+    scrollSpanTracing: {installed: SCROLL_SPAN_NAMES, ...tracing},
     cpu: summarizeCpuProfile(stoppedProfile.profile),
     longTaskAttribution: summarizeLongTaskAttribution(tasks, spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs)
   };

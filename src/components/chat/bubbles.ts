@@ -147,7 +147,7 @@ import {avatarNew, findUpAvatar} from '@components/avatarNew';
 import Icon from '@components/icon';
 import wrapCallBubble from '@components/wrappers/callBubble';
 import {FullMid, makeFullMid, splitFullMid} from '@appManagers/utils/messages/fullMid';
-import {getCurrentMessageFullMid, HISTORY_RENDER_CHUNK_SIZE, renderHistoryInChunks} from './bubbles/renderQueue';
+import {getCurrentMessageFullMid} from './bubbles/renderQueue';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import setBlankToAnchor from '@lib/richTextProcessor/setBlankToAnchor';
 import addAnchorListener, {UNSAFE_ANCHOR_LINK_TYPES} from '@helpers/addAnchorListener';
@@ -4827,10 +4827,7 @@ export default class ChatBubbles {
   public destroyBubble(
     bubble: HTMLElement,
     animate?: boolean,
-    fullMid = getBubbleFullMid(bubble),
-    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>,
-    groupItemIndex?: number,
-    groupsFullyDeleted?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
+    fullMid = getBubbleFullMid(bubble)
   ) {
     const replacement = this.findPendingBubbleReplacement(bubble);
     if(replacement) {
@@ -4899,7 +4896,7 @@ export default class ChatBubbles {
     const scrollSaver = canBeDeleted && this.createScrollSaver(false);
     scrollSaver?.save();
 
-    this.bubbleGroups.removeAndUnmountBubble(bubble, deferredGroups, groupItemIndex, groupsFullyDeleted);
+    this.bubbleGroups.removeAndUnmountBubble(bubble);
     if(this.observer) {
       this.observer.unobserve(bubble, this.unreadedObserverCallback);
       this.unreaded.delete(bubble);
@@ -5017,12 +5014,7 @@ export default class ChatBubbles {
     animateSomethingWithScroll(promise, this.scrollable, scrollSaver);
   }
 
-  public deleteMessagesByIds(
-    fullMids: FullMid[],
-    permanent = true,
-    ignoreOnScroll?: boolean,
-    deferredGroupsToMount?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
-  ) {
+  public deleteMessagesByIds(fullMids: FullMid[], permanent = true, ignoreOnScroll?: boolean) {
     fullMids = fullMids.filter((fullMid) => {
       return !!this.getBubble(fullMid);
     });
@@ -5031,52 +5023,17 @@ export default class ChatBubbles {
       return;
     }
 
-    const deferredGroups = !permanent && ignoreOnScroll ?
-      deferredGroupsToMount || new Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>() :
-      undefined;
-    const bubblesToDelete = deferredGroups ?
-      new Set(fullMids.map((fullMid) => this.getBubble(fullMid))) :
-      undefined;
-    const groupIndexes = deferredGroups ?
-      new Map(this.bubbleGroups.itemsArr.map((item, idx) => [item.bubble, idx] as const)) :
-      undefined;
-    const groupsFullyDeleted = deferredGroups ?
-      new Set(this.bubbleGroups.groups.filter((group) => (
-        group.items.length && group.items.every((item) => bubblesToDelete.has(item.bubble))
-      ))) :
-      undefined;
-
+    const rendered = this.getRenderedHistory('desc');
     const indexes: Record<FullMid, number> = {};
-    if(!groupIndexes) {
-      this.getRenderedHistory('desc').forEach((mid, idx) => indexes[mid] = idx);
-    }
+    rendered.forEach((mid, idx) => indexes[mid] = idx);
 
     fullMids
     .slice()
-    .sort((a, b) => {
-      if(groupIndexes) {
-        const aIndex = groupIndexes.get(this.getBubble(a)) ?? -1;
-        const bIndex = groupIndexes.get(this.getBubble(b)) ?? -1;
-        return bIndex - aIndex;
-      }
-
-      return (indexes[a] ?? 0) - (indexes[b] ?? 0);
-    })
+    .sort((a, b) => (indexes[a] ?? 0) - (indexes[b] ?? 0))
     .forEach((fullMid) => {
       const bubble = this.getBubble(fullMid);
-      this.destroyBubble(
-        bubble,
-        permanent && liteMode.isAvailable('animations'),
-        fullMid,
-        deferredGroups,
-        groupIndexes?.get(bubble),
-        groupsFullyDeleted
-      );
+      this.destroyBubble(bubble, permanent && liteMode.isAvailable('animations'));
     });
-
-    if(deferredGroups?.size && !deferredGroupsToMount) {
-      this.bubbleGroups.mountUnmountGroups(Array.from(deferredGroups));
-    }
 
     this.scrollable.ignoreNextScrollEvent();
     if(permanent && this.chat.selection.isSelecting) {
@@ -6701,16 +6658,11 @@ export default class ChatBubbles {
 
     loadQueue = filterQueue(loadQueue);
 
-    const deferredGroups = new Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>();
     const {restoreScroll, scrollSaver} = this.prepareToSaveScroll(
       reverse,
       firstMid === newFirstMid,
-      lastMid === newLastMid,
-      deferredGroups
+      lastMid === newLastMid
     );
-    deferredGroups.forEach((group) => {
-      if(!groups.includes(group)) groups.push(group);
-    });
     // if(this.messagesQueueOnRender) {
     // this.messagesQueueOnRender();
     // }
@@ -6746,7 +6698,7 @@ export default class ChatBubbles {
 
     this.updatePlaceholderPosition?.();
 
-    await restoreScroll?.();
+    restoreScroll?.();
 
     m(pause(!this.chat.setPeerPromise ? 0 : 1000))
     .then(() => m(getHeavyAnimationPromise()))
@@ -11417,12 +11369,7 @@ export default class ChatBubbles {
     return container;
   }
 
-  private prepareToSaveScroll(
-    reverse?: boolean,
-    sliceTop?: boolean,
-    sliceBottom?: boolean,
-    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
-  ) {
+  private prepareToSaveScroll(reverse?: boolean, sliceTop?: boolean, sliceBottom?: boolean) {
     const isMounted = !!this.chatInner.parentElement;
     if(!isMounted) {
       return {};
@@ -11431,38 +11378,24 @@ export default class ChatBubbles {
     const log = this.log.bindPrefix('prepareToSaveScroll');
     log('save');
     const scrollSaver = this.createScrollSaver(reverse);
-    let viewportSlice: ReturnType<typeof getViewportSlice>;
+    scrollSaver.save(); // * let's save scroll position by point before the slicing, not after
+
     if((sliceTop || sliceBottom) && this.getRenderedLength() && !this.chat.setPeerPromise) {
-      viewportSlice = this.getViewportSlice(true);
+      const viewportSlice = this.getViewportSlice(true);
       if(!sliceTop) viewportSlice.invisibleTop.length = 0;
       if(!sliceBottom) viewportSlice.invisibleBottom.length = 0;
+      this.deleteViewportSlice(viewportSlice, true);
     }
-
-    if(reverse) {
-      const bottomSlice = viewportSlice?.invisibleBottom;
-      const bottomSliceHeight = bottomSlice?.length ?
-        bottomSlice[bottomSlice.length - 1].rect.bottom - bottomSlice[0].rect.top :
-        0;
-      scrollSaver.savePosition(bottomSliceHeight);
-    } else {
-      scrollSaver.save(); // * let's save scroll position by point before the slicing, not after
-    }
-
-    if(viewportSlice) this.deleteViewportSlice(viewportSlice, true, deferredGroups);
 
     // scrollSaver.save(); // ! slicing will corrupt scroll position
     // const saved = scrollSaver.getSaved();
     // const hadScroll = saved.scrollHeight !== saved.clientHeight;
 
     return {
-      restoreScroll: async() => {
+      restoreScroll: () => {
         log('restore');
         // scrollSaver.restore(_history.length === 1 && !reverse ? false : true);
-        if(reverse) {
-          await scrollSaver.restoreAfterLayout(reverse);
-        } else {
-          scrollSaver.restore(reverse);
-        }
+        scrollSaver.restore(reverse);
         this.onRenderScrollSet(scrollSaver.getSaved());
       },
       scrollSaver
@@ -11591,17 +11524,8 @@ export default class ChatBubbles {
       }
     }
 
-    // * an older page prepended to an already rendered chat is split over several tasks
-    const renderInChunks = reverse &&
-      messages.length > HISTORY_RENDER_CHUNK_SIZE &&
-      !this.chat.setPeerPromise &&
-      this.getRenderedHistory(undefined, true).length > 0;
-    const chunksMiddleware = renderInChunks ? this.getMiddleware() : undefined;
-
     let promises: Promise<any>[] = [];
-    if(renderInChunks) {
-      // * rendered below, chunk by chunk
-    } else if(this.chat.type === ChatType.Search && false) {
+    if(this.chat.type === ChatType.Search && false) {
       const length = history.length;
       if(reverse) for(let i = 0; i < length; ++i) promises.push(cb(messages[i]));
       else for(let i = length - 1; i >= 0; --i) promises.push(cb(messages[i]));
@@ -11611,17 +11535,7 @@ export default class ChatBubbles {
 
     try {
       // cannot combine them into one promise
-      if(renderInChunks) {
-        await renderHistoryInChunks(
-          messages,
-          HISTORY_RENDER_CHUNK_SIZE,
-          (chunk) => Promise.all(chunk.map(cb)),
-          () => pause(0),
-          chunksMiddleware
-        );
-      } else {
-        promises.length && await Promise.all(promises);
-      }
+      promises.length && await Promise.all(promises);
       await this.messagesQueuePromise;
     } finally {
       if(ephemeralMessages.length) {
@@ -12479,11 +12393,7 @@ export default class ChatBubbles {
     });
   }
 
-  public deleteViewportSlice(
-    slice: ReturnType<ChatBubbles['getViewportSlice']>,
-    ignoreScrollSaving?: boolean,
-    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
-  ) {
+  public deleteViewportSlice(slice: ReturnType<ChatBubbles['getViewportSlice']>, ignoreScrollSaving?: boolean) {
     if(DO_NOT_SLICE_VIEWPORT_ON_RENDER) {
       return;
     }
@@ -12524,7 +12434,7 @@ export default class ChatBubbles {
     }
 
     log('slicing mids', fullMids);
-    this.deleteMessagesByIds(fullMids, false, true, deferredGroups);
+    this.deleteMessagesByIds(fullMids, false, true);
 
     if(scrollSaver) {
       scrollSaver.restore();

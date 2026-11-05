@@ -2,11 +2,9 @@ import type {Message, PeerSettings} from '@layer';
 import '@helpers/peerIdPolyfill';
 import {getMiddleware} from '@helpers/middleware';
 import {render} from 'solid-js/web';
-import {makeFullMid, type FullMid} from '@appManagers/utils/messages/fullMid';
+import {makeFullMid} from '@appManagers/utils/messages/fullMid';
 import ejectBubble from '@components/chat/bubbles/ejectBubble';
 import {markMessageLinkEntity} from '@lib/richTextProcessor/filterDisabledEntities';
-import Scrollable from '@components/scrollable';
-import ScrollSaver from '@helpers/scrollSaver';
 
 const moduleMocks = vi.hoisted(() => {
   const noop = vi.fn();
@@ -43,7 +41,6 @@ vi.mock('@stores/stars', () => ({default: () => () => 0}));
 
 let ChatBubbles: typeof import('@components/chat/bubbles').default;
 let BubbleGroups: typeof import('@components/chat/bubbleGroups').default;
-let BubbleGroup: typeof import('@components/chat/bubbleGroups').BubbleGroup;
 let cancelPendingHiddenLinksEvent: typeof import('@components/chat/bubbles').cancelPendingHiddenLinksEvent;
 let disposeChatInnerMiddlewareAfterDetach: typeof import('@components/chat/bubbles').disposeChatInnerMiddlewareAfterDetach;
 let isBubbleUiCurrent: typeof import('@components/chat/bubbles').isBubbleUiCurrent;
@@ -82,9 +79,7 @@ beforeAll(async() => {
     setBubbleHiddenLinksPending,
     shouldForceHideNonContactLinkTest
   } = await import('@components/chat/bubbles'));
-  const bubbleGroupsModule = await import('@components/chat/bubbleGroups');
-  BubbleGroups = bubbleGroupsModule.default;
-  BubbleGroup = bubbleGroupsModule.BubbleGroup;
+  BubbleGroups = (await import('@components/chat/bubbleGroups')).default;
   // Importing the whole bubbles graph costs far more than the default hook
   // budget once the rest of the suite is competing for the same CPU.
 }, 60_000);
@@ -1095,7 +1090,7 @@ test('commits final group identity before a structural replacement is mounted', 
   middlewareHelper.destroy();
 });
 
-test('keeps a sender description poll in processBatch while coalescing viewport slice group mounts', async() => {
+test('keeps a sender description poll in processBatch when message_sent rekeys it during async work', async() => {
   const tempMessage = descriptionPollMessage(3.0001);
   const sentMessage = {...tempMessage, id: 101, mid: 101};
   const tempFullMid = makeFullMid(tempMessage);
@@ -1108,7 +1103,6 @@ test('keeps a sender description poll in processBatch while coalescing viewport 
     lastGroup: undefined as {lastMid?: string} | undefined,
     mountUnmountGroups: vi.fn()
   };
-  const viewportSliceGroup = {items: [] as any[]};
   let committedBubbles: ReadonlySet<HTMLElement> = new Set();
   const harness = Object.assign(Object.create(ChatBubbles.prototype), {
     bubbles,
@@ -1118,17 +1112,9 @@ test('keeps a sender description poll in processBatch while coalescing viewport 
     lazyLoadQueue: {setAllSeen: vi.fn()},
     getBubble: (fullMid: string) => bubbles[fullMid],
     makeFullMid: (currentMessage: Message.message) => makeFullMid(currentMessage),
-    groupBubbles: vi.fn(() => ({groups: [viewportSliceGroup], avatarPromises: []})),
+    groupBubbles: vi.fn(() => ({groups: [], avatarPromises: []})),
     setUnreadDelimiter: vi.fn(() => Promise.resolve()),
-    prepareToSaveScroll: vi.fn((
-      _reverse: boolean | undefined,
-      _sliceTop: boolean | undefined,
-      _sliceBottom: boolean | undefined,
-      deferredGroups?: Set<typeof viewportSliceGroup>
-    ) => {
-      deferredGroups?.add(viewportSliceGroup);
-      return {restoreScroll: vi.fn(), scrollSaver: {}};
-    }),
+    prepareToSaveScroll: vi.fn(() => ({restoreScroll: vi.fn(), scrollSaver: {}})),
     commitBubbleReplacements: vi.fn((renderedBubbles: ReadonlySet<HTMLElement>) => {
       committedBubbles = renderedBubbles;
     })
@@ -1170,9 +1156,7 @@ test('keeps a sender description poll in processBatch while coalescing viewport 
   expect(bubbles[tempFullMid]).toBeUndefined();
   expect(bubbles[sentFullMid]).toBe(bubble);
   expect(Array.from(committedBubbles)).toEqual([bubble]);
-  expect(harness.prepareToSaveScroll).toHaveBeenCalledWith(undefined, true, true, expect.any(Set));
   expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledOnce();
-  expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledWith([viewportSliceGroup]);
 });
 
 test('defers every affected BubbleGroup mount during an atomic replacement regroup', () => {
@@ -1198,216 +1182,6 @@ test('defers every affected BubbleGroup mount during an atomic replacement regro
   expect(group.unmountItem).toHaveBeenCalledOnce();
   expect(mountUnmountGroups).not.toHaveBeenCalled();
   expect(deferredGroups).toEqual(new Set([group]));
-});
-
-test('mounts affected groups once after deleting a viewport slice', () => {
-  const fullMids = ['10_1', '10_2'] as FullMid[];
-  const bubbles = new Map(fullMids.map((fullMid) => [fullMid, document.createElement('div')]));
-  const group: {items: Array<{bubble: HTMLElement}>} = {items: []};
-  const items = fullMids.map((fullMid) => ({bubble: bubbles.get(fullMid), group, mounted: true}));
-  group.items = items;
-  const bubbleGroups = {itemsArr: items, groups: [group], mountUnmountGroups: vi.fn()};
-  const harness = {
-    getBubble: (fullMid: FullMid) => bubbles.get(fullMid),
-    getRenderedHistory: () => fullMids,
-    destroyBubble: vi.fn((
-      _bubble: HTMLElement,
-      _animate: boolean | undefined,
-      _fullMid: FullMid,
-      deferredGroups?: Set<typeof group>,
-      groupItemIndex?: number,
-      groupsFullyDeleted?: Set<typeof group>
-    ) => {
-      deferredGroups?.add(group);
-      return {groupItemIndex, groupsFullyDeleted};
-    }),
-    scrollable: {ignoreNextScrollEvent: vi.fn(), onScroll: vi.fn()},
-    chat: {selection: {isSelecting: false}, animationGroup: {}},
-    bubbleGroups,
-    deleteEmptyDateGroups: vi.fn()
-  };
-
-  ChatBubbles.prototype.deleteMessagesByIds.call(harness as any, fullMids, false, true);
-
-  expect(harness.destroyBubble).toHaveBeenCalledTimes(fullMids.length);
-  const deferredGroups = harness.destroyBubble.mock.calls[0][3];
-  const groupsFullyDeleted = harness.destroyBubble.mock.calls[0][5];
-  expect(deferredGroups).toBeInstanceOf(Set);
-  expect(harness.destroyBubble.mock.calls.every((call) => call[3] === deferredGroups)).toBe(true);
-  expect(harness.destroyBubble.mock.calls.map((call) => call[2])).toEqual(['10_2', '10_1']);
-  expect(harness.destroyBubble.mock.calls.map((call) => call[4])).toEqual([1, 0]);
-  expect(groupsFullyDeleted).toEqual(new Set([group]));
-  expect(harness.destroyBubble.mock.calls.every((call) => call[5] === groupsFullyDeleted)).toBe(true);
-  expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledOnce();
-  expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledWith([group]);
-});
-
-test('coalesces date and group class refreshes during a group mount batch', () => {
-  const emptyGroup = {items: [] as any[], mounted: true, onItemUnmount: vi.fn()};
-  const newGroup = {items: [{}], mounted: false, mount: vi.fn()};
-  const deleteEmptyDateGroups = vi.fn();
-  const updateGroupsClassNames = vi.fn();
-  const harness = {
-    chat: {bubbles: {deleteEmptyDateGroups}},
-    addChatThreadSeparators: vi.fn(),
-    addContinueLastTopicReplyMarkup: vi.fn(),
-    updateGroupsClassNames
-  };
-
-  (BubbleGroups.prototype.mountUnmountGroups as any).call(harness, [emptyGroup, newGroup]);
-
-  expect(emptyGroup.onItemUnmount).toHaveBeenCalledWith(true);
-  expect(newGroup.mount).toHaveBeenCalledWith(true, true);
-  expect(deleteEmptyDateGroups).toHaveBeenCalledOnce();
-  expect(updateGroupsClassNames).toHaveBeenCalledOnce();
-});
-
-test('leaves viewport slice group mounting to the caller batch when given a deferred set', () => {
-  const fullMid = '10_1' as FullMid;
-  const bubble = document.createElement('div');
-  const group = {items: [] as any[]} as unknown as InstanceType<typeof BubbleGroup>;
-  const deferredGroups = new Set<InstanceType<typeof BubbleGroup>>();
-  const bubbleGroups = {itemsArr: [] as any[], groups: [] as any[], mountUnmountGroups: vi.fn()};
-  const harness = {
-    getBubble: (mid: FullMid) => mid === fullMid ? bubble : undefined,
-    getRenderedHistory: () => [fullMid],
-    destroyBubble: vi.fn((
-      _bubble: HTMLElement,
-      _animate: boolean | undefined,
-      _mid: FullMid,
-      groups?: Set<InstanceType<typeof BubbleGroup>>
-    ) => groups?.add(group)),
-    scrollable: {ignoreNextScrollEvent: vi.fn(), onScroll: vi.fn()},
-    chat: {selection: {isSelecting: false}, animationGroup: {}},
-    bubbleGroups,
-    deleteEmptyDateGroups: vi.fn()
-  };
-
-  ChatBubbles.prototype.deleteMessagesByIds.call(harness as any, [fullMid], false, true, deferredGroups);
-
-  expect(harness.destroyBubble).toHaveBeenCalledWith(bubble, false, fullMid, deferredGroups, undefined, expect.any(Set));
-  expect(deferredGroups).toEqual(new Set([group]));
-  expect(bubbleGroups.mountUnmountGroups).not.toHaveBeenCalled();
-});
-
-test('passes deferred viewport groups through prepareToSaveScroll', () => {
-  const slice = {invisibleTop: [], visible: [], invisibleBottom: []} as any;
-  const deferredGroups = new Set<InstanceType<typeof BubbleGroup>>();
-  const deleteViewportSlice = vi.fn();
-  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
-    chatInner: {parentElement: document.body},
-    log: {bindPrefix: () => vi.fn()},
-    createScrollSaver: () => ({save: vi.fn()}),
-    chat: {setPeerPromise: undefined},
-    getRenderedLength: () => 1,
-    getViewportSlice: () => slice,
-    deleteViewportSlice
-  }) as any;
-
-  (ChatBubbles.prototype as any).prepareToSaveScroll.call(harness, false, false, true, deferredGroups);
-
-  expect(deleteViewportSlice).toHaveBeenCalledWith(slice, true, deferredGroups);
-});
-
-test('passes deferred viewport groups through deleteViewportSlice', () => {
-  const bubble = document.createElement('div');
-  bubble.dataset.peerId = '' + peerId;
-  bubble.dataset.mid = '1';
-  const slice = {
-    invisibleTop: [],
-    visible: [],
-    invisibleBottom: [{element: bubble, rect: new DOMRect()}]
-  } as any;
-  const deferredGroups = new Set<InstanceType<typeof BubbleGroup>>();
-  const deleteMessagesByIds = vi.fn();
-  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
-    log: {bindPrefix: () => vi.fn()},
-    chat: {getMessageByPeer: vi.fn()},
-    setLoaded: vi.fn(),
-    deleteMessagesByIds,
-    scrollable: {}
-  }) as any;
-
-  (ChatBubbles.prototype as any).deleteViewportSlice.call(harness, slice, true, deferredGroups);
-
-  expect(deleteMessagesByIds).toHaveBeenCalledWith([makeFullMid(peerId, 1)], false, true, deferredGroups);
-});
-
-test('defers group updates and removes a fully sliced group as one container', () => {
-  const container = document.createElement('div');
-  const bubble = document.createElement('div');
-  container.append(bubble);
-  document.body.append(container);
-  const dateContainer = {groupsLength: 1};
-  const deleteEmptyDateGroups = vi.fn();
-  const updateGroupsClassNames = vi.fn();
-  const group: any = {
-    items: [],
-    mounted: true,
-    container,
-    dateContainer,
-    chat: {bubbles: {deleteEmptyDateGroups}},
-    middlewareHelper: {clean: vi.fn()},
-    groups: undefined
-  };
-  const bubbleGroups = {
-    chat: group.chat,
-    updateGroupsClassNames,
-    addChatThreadSeparators: vi.fn(),
-    addContinueLastTopicReplyMarkup: vi.fn()
-  };
-  group.groups = bubbleGroups;
-  const onItemUnmount = vi.fn((deferGroupUpdates?: boolean) => (
-    BubbleGroup.prototype.onItemUnmount.call(group, deferGroupUpdates)
-  ));
-  group.onItemUnmount = onItemUnmount;
-  const item = {bubble, mounted: true};
-
-  (BubbleGroup.prototype.unmountItem as any).call(group, item, false, true);
-
-  expect(item.mounted).toBe(false);
-  expect(bubble.isConnected).toBe(true);
-  expect(onItemUnmount).not.toHaveBeenCalled();
-
-  (BubbleGroups.prototype.mountUnmountGroups as any).call(bubbleGroups, [group]);
-
-  expect(onItemUnmount).toHaveBeenCalledWith(true);
-  expect(container.isConnected).toBe(false);
-  expect(bubble.isConnected).toBe(false);
-  expect(dateContainer.groupsLength).toBe(0);
-  expect(deleteEmptyDateGroups).toHaveBeenCalledOnce();
-  expect(updateGroupsClassNames).toHaveBeenCalledOnce();
-});
-
-test('passes deferred removal details through BubbleGroups for a fully sliced group', () => {
-  const bubble = document.createElement('div');
-  const group = {items: [] as any[], unmountItem: vi.fn()};
-  const item: {bubble: HTMLElement, mounted: boolean, group?: typeof group} = {bubble, mounted: true, group};
-  group.items.push(item);
-  const itemsArr = [item] as any;
-  const deferredGroups = new Set<typeof group>();
-  const groupsFullyDeleted = new Set([group]);
-  const getSiblingsAtIndex = vi.fn(() => [undefined, undefined] as const);
-  const groupsHarness = {
-    itemsArr,
-    getItemByBubble: () => item,
-    getSiblingsAtIndex,
-    removeItem: vi.fn(),
-    mountUnmountGroups: vi.fn()
-  };
-
-  (BubbleGroups.prototype.removeAndUnmountBubble as any).call(
-    groupsHarness,
-    bubble,
-    deferredGroups,
-    0,
-    groupsFullyDeleted
-  );
-
-  expect(getSiblingsAtIndex).toHaveBeenCalledWith(0, itemsArr);
-  expect(group.unmountItem).toHaveBeenCalledWith(item, false, true);
-  expect(deferredGroups).toEqual(new Set([group]));
-  expect(groupsHarness.mountUnmountGroups).not.toHaveBeenCalled();
 });
 
 test('reconciles only the latest streamed revision queued during the initial async render', async() => {
@@ -2251,79 +2025,4 @@ test.each([
 
   expect(chatUpdate).toBeTypeOf('function');
   await expect(chatUpdate(chatId)).resolves.toBeUndefined();
-});
-
-test('preserves the visible bubble when prepending history slices messages below the viewport', async() => {
-  vi.useFakeTimers();
-
-  const container = document.createElement('div');
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  container.append(bubble);
-  document.body.append(container);
-
-  let mutated = false;
-  let scrollTop = 400;
-  Object.defineProperties(container, {
-    scrollTop: {
-      configurable: true,
-      get: () => scrollTop,
-      set: (value: number) => scrollTop = value
-    },
-    scrollHeight: {
-      configurable: true,
-      get: () => mutated ? 1_050 : 1_000
-    },
-    clientHeight: {configurable: true, value: 500}
-  });
-  const makeRect = (top: number, height: number): DOMRect => ({
-    x: 0,
-    y: top,
-    top,
-    bottom: top + height,
-    left: 0,
-    right: 400,
-    width: 400,
-    height,
-    toJSON: () => ({})
-  });
-  container.getBoundingClientRect = () => makeRect(0, 500);
-  bubble.getBoundingClientRect = () => makeRect(mutated ? 300 : 100, 50);
-
-  const scrollable = new Scrollable(undefined, 'test', 300, undefined, container);
-  const scrollSaver = new ScrollSaver(scrollable, '.bubble', true);
-  const savePosition = vi.spyOn(scrollSaver, 'savePosition');
-  const slice: ReturnType<InstanceType<typeof ChatBubbles>['getViewportSlice']> = {
-    invisibleTop: [],
-    visible: [{element: bubble, rect: makeRect(100, 50), visibleRect: {rect: makeRect(100, 50), overflow: {top: false, right: false, bottom: false, left: false, vertical: 0, horizontal: 0}}}],
-    invisibleBottom: [
-      {element: document.createElement('div'), rect: makeRect(800, 50), visibleRect: null},
-      {element: document.createElement('div'), rect: makeRect(900, 50), visibleRect: null}
-    ]
-  };
-  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
-    chatInner: {parentElement: document.body},
-    log: {bindPrefix: () => vi.fn()},
-    chat: {setPeerPromise: undefined},
-    createScrollSaver: () => scrollSaver,
-    getRenderedLength: () => 1,
-    getViewportSlice: () => slice,
-    deleteViewportSlice: () => mutated = true,
-    onRenderScrollSet: vi.fn()
-  }) as any;
-
-  try {
-    const prepareToSaveScroll = (ChatBubbles.prototype as any).prepareToSaveScroll;
-    const {restoreScroll} = prepareToSaveScroll.call(harness, true, false, true);
-    expect(savePosition).toHaveBeenCalledWith(150);
-    const restoration = restoreScroll();
-
-    await vi.advanceTimersToNextFrame();
-    await restoration;
-
-    expect(scrollTop).toBe(600);
-  } finally {
-    scrollable.destroy();
-    vi.useRealTimers();
-  }
 });

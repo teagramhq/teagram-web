@@ -81,9 +81,8 @@ export class ScrollableBase {
 
   public isHeavyAnimationInProgress = false;
   protected needCheckAfterAnimation = false;
-  protected scrollDistanceToEndOnScroll?: number;
 
-  public checkForTriggers?: (scrollPosition?: number, scrollSize?: number, clientSize?: number) => void;
+  public checkForTriggers?: () => void;
 
   public scrollPositionProperty: 'scrollTop' | 'scrollLeft';
   public scrollSizeProperty: 'scrollHeight' | 'scrollWidth';
@@ -228,42 +227,29 @@ export class ScrollableBase {
       this.onScrollMeasure = 0;
 
       const scrollPosition = this.scrollPosition;
-      // Keep geometry reads ahead of the chat callback's class changes.
-      const updateCustomThumb = !IS_OVERLAY_SCROLL_SUPPORTED() && this.thumb;
-      const checkScrollTriggers = this.onScrolledTop || this.onScrolledBottom;
-      const needsScrollSize = updateCustomThumb || checkScrollTriggers;
-      const scrollSize = needsScrollSize ? this.scrollSize : undefined;
-      const clientSize = needsScrollSize ? this.clientSize : undefined;
-      const offsetSize = this.onAdditionalScroll && checkScrollTriggers ? this.offsetSize : undefined;
-      this.scrollDistanceToEndOnScroll = offsetSize === undefined ? undefined : scrollSize - Math.round(scrollPosition + offsetSize);
+      this.lastScrollDirection = this.lastScrollPosition === scrollPosition ? 0 : (this.lastScrollPosition < scrollPosition ? 1 : -1); // * 1 - bottom, -1 - top
+      this.lastScrollPosition = scrollPosition;
 
-      try {
-        this.lastScrollDirection = this.lastScrollPosition === scrollPosition ? 0 : (this.lastScrollPosition < scrollPosition ? 1 : -1); // * 1 - bottom, -1 - top
-        this.lastScrollPosition = scrollPosition;
+      this.updateThumb(scrollPosition);
 
-        if(this.checkForTriggers) {
-          this.checkForTriggers(scrollPosition, scrollSize, clientSize);
-        }
+      // lastScrollDirection check is useless here, every callback should decide on its own
+      if(this.onAdditionalScroll/*  && this.lastScrollDirection !== 0 */) {
+        this.onAdditionalScroll();
+      }
 
-        // lastScrollDirection check is useless here, every callback should decide on its own
-        if(this.onAdditionalScroll/*  && this.lastScrollDirection !== 0 */) {
-          this.onAdditionalScroll();
-        }
-
-        this.updateThumb(scrollPosition, scrollSize, clientSize);
-      } finally {
-        this.scrollDistanceToEndOnScroll = undefined;
+      if(this.checkForTriggers) {
+        this.checkForTriggers();
       }
     });
   };
 
-  public updateThumb(scrollPosition = this.scrollPosition, scrollSize?: number, clientSize?: number) {
+  public updateThumb(scrollPosition = this.scrollPosition) {
     if(IS_OVERLAY_SCROLL_SUPPORTED() || !this.thumb) {
       return;
     }
 
-    scrollSize ??= this.scrollSize;
-    clientSize ??= this.clientSize;
+    const scrollSize = this.container[this.scrollSizeProperty];
+    const clientSize = this.container[this.clientSizeProperty];
     const divider = scrollSize / clientSize / 0.75;
     const thumbSize = Math.max(20, clientSize / divider);
     const value = scrollPosition / (scrollSize - clientSize) * clientSize;
@@ -327,10 +313,6 @@ export class ScrollableBase {
   }
 
   public getDistanceToEnd() {
-    if(this.scrollDistanceToEndOnScroll !== undefined) {
-      return this.scrollDistanceToEndOnScroll;
-    }
-
     return this.scrollSize - Math.round(this.scrollPosition + this.offsetSize);
   }
 
@@ -448,7 +430,7 @@ export default class Scrollable extends ScrollableBase {
     this.log('setVirtualContainer:', el, this);
   }
 
-  public checkForTriggers = (scrollPosition?: number, scrollSize?: number, clientSize?: number) => {
+  public checkForTriggers = () => {
     if((!this.onScrolledTop && !this.onScrolledBottom)) return;
 
     if(this.isHeavyAnimationInProgress) {
@@ -456,9 +438,7 @@ export default class Scrollable extends ScrollableBase {
       return;
     }
 
-    scrollPosition ??= this.scrollPosition;
-    scrollSize ??= this.scrollSize;
-    clientSize ??= this.clientSize;
+    const {scrollSize, scrollPosition, clientSize} = this;
     if(!scrollSize) { // незачем вызывать триггеры если блок пустой или не виден
       return;
     }

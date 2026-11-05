@@ -1,6 +1,6 @@
 import '@helpers/peerIdPolyfill';
 import {describe, expect, test} from 'vitest';
-import {getCurrentMessageFullMid, renderHistoryInChunks} from '@components/chat/bubbles/renderQueue';
+import {getCurrentMessageFullMid} from '@components/chat/bubbles/renderQueue';
 import {makeFullMid} from '@appManagers/utils/messages/fullMid';
 import {Message} from '@layer';
 
@@ -68,58 +68,5 @@ describe('chat bubble render queue', () => {
 
     expect(bubbles.get(currentFullMid)).not.toBe(latePendingBubble);
     expect(bubbles.get(currentFullMid)).toBe(sentBubble);
-  });
-});
-
-describe('renderHistoryInChunks', () => {
-  test('renders chunks in order and yields between them', async() => {
-    const events: string[] = [];
-    await renderHistoryInChunks([1, 2, 3, 4, 5], 2, async(chunk) => {
-      events.push('render:' + chunk.join(','));
-    }, async() => {
-      events.push('yield');
-    });
-
-    expect(events).toEqual(['render:1,2', 'yield', 'render:3,4', 'yield', 'render:5']);
-  });
-
-  test('does not start the next chunk before the previous one settles', async() => {
-    const events: string[] = [];
-    let release: () => void;
-    const first = new Promise<void>((resolve) => release = resolve);
-    const done = renderHistoryInChunks([1, 2, 3], 2, (chunk) => {
-      events.push('render:' + chunk.join(','));
-      return chunk[0] === 1 ? first : Promise.resolve();
-    }, async() => {
-      events.push('yield');
-    });
-
-    await Promise.resolve();
-    expect(events).toEqual(['render:1,2']);
-    release();
-    await done;
-    expect(events).toEqual(['render:1,2', 'yield', 'render:3']);
-  });
-
-  test('stops when the caller is no longer current', async() => {
-    const rendered: number[][] = [];
-    let current = true;
-    await renderHistoryInChunks([1, 2, 3, 4], 2, async(chunk) => {
-      rendered.push(chunk);
-      current = false;
-    }, async() => {}, () => current);
-
-    expect(rendered).toEqual([[1, 2]]);
-  });
-
-  test('renders a short list as one chunk without yielding', async() => {
-    const events: string[] = [];
-    await renderHistoryInChunks([1, 2], 8, async(chunk) => {
-      events.push('render:' + chunk.join(','));
-    }, async() => {
-      events.push('yield');
-    });
-
-    expect(events).toEqual(['render:1,2']);
   });
 });
