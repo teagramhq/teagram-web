@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {summarizeCpuProfile, summarizePerformancePhases, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
+import {observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
 
 describe('performance RPC trace summary', () => {
   test('excludes long tasks that start outside the scenario measurement window', async() => {
@@ -18,6 +18,79 @@ describe('performance RPC trace summary', () => {
       blockingTimeMs: 35,
       maxLongTaskDurationMs: 75
     });
+  });
+
+  test('attributes measured long tasks to overlapping long-animation-frame scripts without URL queries', () => {
+    const trace = summarizeLongTaskTrace([
+      {startTime: 110, duration: 80},
+      {startTime: 190, duration: 51},
+      {startTime: 300, duration: 100}
+    ], [
+      {
+        startTime: 105,
+        duration: 100,
+        scripts: [{
+          sourceURL: 'https://localhost:4176/assets/app.js?token=private',
+          sourceFunctionName: 'renderMessages',
+          invoker: 'EventListener.handleEvent',
+          invokerType: 'event-listener',
+          executionStart: 125,
+          duration: 55,
+          forcedStyleAndLayoutDuration: 12
+        }]
+      },
+      {
+        startTime: 180,
+        duration: 80,
+        scripts: [{
+          sourceURL: 'https://localhost:4176/assets/scroll.js',
+          sourceFunctionName: 'onScroll',
+          invoker: 'Window.requestAnimationFrame',
+          invokerType: 'user-callback',
+          executionStart: 185,
+          duration: 60,
+          forcedStyleAndLayoutDuration: 20
+        }]
+      }
+    ], 100, 200);
+
+    expect(trace).toEqual([
+      {
+        startTimeMs: 10,
+        durationMs: 80,
+        scripts: [
+          {
+            functionName: 'renderMessages',
+            script: '/assets/app.js',
+            invoker: 'EventListener.handleEvent',
+            invokerType: 'event-listener',
+            durationMs: 55,
+            forcedStyleAndLayoutDurationMs: 12
+          },
+          {
+            functionName: 'onScroll',
+            script: '/assets/scroll.js',
+            invoker: 'Window.requestAnimationFrame',
+            invokerType: 'user-callback',
+            durationMs: 60,
+            forcedStyleAndLayoutDurationMs: 20
+          }
+        ]
+      },
+      {
+        startTimeMs: 90,
+        durationMs: 51,
+        scripts: [{
+          functionName: 'onScroll',
+          script: '/assets/scroll.js',
+          invoker: 'Window.requestAnimationFrame',
+          invokerType: 'user-callback',
+          durationMs: 60,
+          forcedStyleAndLayoutDurationMs: 20
+        }]
+      }
+    ]);
+    expect(JSON.stringify(trace)).not.toContain('private');
   });
 
   test('counts RPC calls and subtracts overlapping waits only once', () => {
@@ -41,18 +114,33 @@ describe('performance RPC trace summary', () => {
   test('summarizes sampled client CPU by function without retaining trace arguments', () => {
     const summary = summarizeCpuProfile({
       nodes: [
-        {id: 1, callFrame: {functionName: '(root)', url: ''}},
-        {id: 2, callFrame: {functionName: 'hydrateDialogs', url: 'http://localhost:4176/assets/app.js?token=private'}},
-        {id: 3, callFrame: {functionName: 'renderBubble', url: 'http://localhost:4176/assets/app.js'}}
+        {id: 1, callFrame: {functionName: '(root)', url: ''}, children: [2]},
+        {id: 2, callFrame: {functionName: 'performHistoryResult', url: 'http://localhost:4176/assets/app.js?token=private'}, children: [3]},
+        {id: 3, callFrame: {functionName: 'deleteViewportSlice', url: 'http://localhost:4176/assets/app.js'}, children: [4]},
+        {id: 4, callFrame: {functionName: 'remove', url: ''}}
       ],
-      samples: [2, 3, 2],
+      samples: [2, 4, 4],
       timeDeltas: [1_000, 2_000, 3_000]
     });
 
     expect(summary.sampledCpuMs).toBe(6);
     expect(summary.topFrames).toEqual([
-      {functionName: 'hydrateDialogs', script: '/assets/app.js', selfMs: 4},
-      {functionName: 'renderBubble', script: '/assets/app.js', selfMs: 2}
+      {functionName: 'remove', script: '/native', selfMs: 5},
+      {functionName: 'performHistoryResult', script: '/assets/app.js', selfMs: 1}
+    ]);
+    expect(summary.topStacks).toEqual([
+      {
+        frames: [
+          {functionName: 'performHistoryResult', script: '/assets/app.js'},
+          {functionName: 'deleteViewportSlice', script: '/assets/app.js'},
+          {functionName: 'remove', script: '/native'}
+        ],
+        selfMs: 5
+      },
+      {
+        frames: [{functionName: 'performHistoryResult', script: '/assets/app.js'}],
+        selfMs: 1
+      }
     ]);
     expect(JSON.stringify(summary)).not.toContain('private');
   });
@@ -70,5 +158,94 @@ describe('performance RPC trace summary', () => {
       {name: 'chat.finishPeerChange.bubbles', durationMs: 22.2}
     ]);
     expect(JSON.stringify(summary)).not.toContain('peerId');
+  });
+});
+
+describe('long task attribution', () => {
+  const profile = {
+    nodes: [
+      {id: 1, callFrame: {functionName: '(root)'}, children: [2, 3]},
+      {id: 2, callFrame: {functionName: 'mountUnmountGroups', url: 'https://x.test/assets/chat.js?t=1'}},
+      {id: 3, callFrame: {functionName: 'onMirrorTask', url: 'https://x.test/assets/proxy.js'}}
+    ],
+    // samples end at 1010, 1030, 1070 and 1120 ms on the page clock when the profile starts at 1000
+    samples: [3, 2, 2, 3],
+    timeDeltas: [10_000, 20_000, 40_000, 50_000]
+  };
+
+  test('joins spans and CPU samples to the long task they ran in', () => {
+    const result = summarizeLongTaskAttribution(
+      [{startTime: 1020, duration: 60}, {startTime: 1500, duration: 10}],
+      [
+        {name: 'bubbles.mountUnmountGroups', startMs: 1040, syncMs: 25.123},
+        {name: 'bubbles.performHistoryResult', startMs: 900, syncMs: 5}
+      ],
+      profile,
+      1000,
+      1000
+    );
+
+    expect(result).toEqual([{
+      startTimeMs: 20,
+      durationMs: 60,
+      spans: [{name: 'bubbles.mountUnmountGroups', startOffsetMs: 20, syncMs: 25.12}],
+      stacks: [
+        {frames: [{functionName: 'mountUnmountGroups', script: '/assets/chat.js'}], selfMs: 50},
+        {frames: [{functionName: 'onMirrorTask', script: '/assets/proxy.js'}], selfMs: 10}
+      ]
+    }]);
+  });
+});
+
+describe('long-animation-frame observation', () => {
+  function makeObserver(supportedEntryTypes: string[] | undefined) {
+    const observed: unknown[] = [];
+    class FakeObserver {
+      static supportedEntryTypes = supportedEntryTypes;
+      constructor(public callback: (list: {getEntries(): unknown[]}) => void) {}
+      observe(options: unknown) {
+        observed.push(options);
+      }
+    }
+    return {FakeObserver, observed};
+  }
+
+  test('reports an unsupported entry type without throwing or observing', () => {
+    const {FakeObserver, observed} = makeObserver(['longtask', 'paint']);
+
+    expect(observeLongAnimationFrames(FakeObserver, () => {})).toBe(false);
+    expect(observed).toEqual([]);
+  });
+
+  test('reports a browser without supportedEntryTypes as unsupported', () => {
+    const {FakeObserver} = makeObserver(undefined);
+
+    expect(observeLongAnimationFrames(FakeObserver, () => {})).toBe(false);
+  });
+
+  test('observes buffered entries when the type is supported', () => {
+    const {FakeObserver, observed} = makeObserver(['longtask', 'long-animation-frame']);
+
+    expect(observeLongAnimationFrames(FakeObserver, () => {})).toBe(true);
+    expect(observed).toEqual([{type: 'long-animation-frame', buffered: true}]);
+  });
+
+  test('is false when observing throws', () => {
+    class ThrowingObserver {
+      static supportedEntryTypes = ['long-animation-frame'];
+      observe() {
+        throw new Error('unsupported');
+      }
+    }
+
+    expect(observeLongAnimationFrames(ThrowingObserver, () => {})).toBe(false);
+  });
+
+  test('stays self-contained so its source can be injected into the page', () => {
+    const injected = new Function(`return ${observeLongAnimationFrames.toString()}`)() as typeof observeLongAnimationFrames;
+    const {FakeObserver} = makeObserver(['long-animation-frame']);
+
+    expect(injected(FakeObserver, () => {})).toBe(true);
+    expect(injected({supportedEntryTypes: []}, () => {})).toBe(false);
   });
 });
