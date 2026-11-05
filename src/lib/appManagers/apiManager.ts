@@ -909,13 +909,22 @@ export class ApiManager extends ApiManagerMethods {
         };
       }
 
-      return promise.catch((error: ApiError) => {
+      return promise.catch(async(error: ApiError) => {
         if(error?.code === -404 && error.type === 'AUTH_KEY_UNKNOWN' && cachedNetworker &&
           cachedNetworker.transport === requestTransport && this.isNetworkerCurrentForDc(cachedNetworker.dcId, cachedNetworker)) {
-          if(authKeyRecovery) {
+          if(authKeyRecovery || !this.rootScope.myId) {
             const recoveryId = this.nextAuthKeyRecoveryId = (this.nextAuthKeyRecoveryId || 0) + 1;
             (this.authKeyRecoveryTargets ??= new Map()).set(recoveryId, {networker: cachedNetworker, transport: requestTransport});
-            error = {...error, authKeyRecoveryId: recoveryId};
+
+            if(authKeyRecovery) {
+              error = {...error, authKeyRecoveryId: recoveryId};
+            } else {
+              try {
+                await this.recoverUnknownAuthKey(recoveryId);
+              } catch(recoveryError) {
+                this.log.error('Failed to recover unknown auth key', recoveryError);
+              }
+            }
           }
 
           if(this.rootScope.myId) this.logOut();
