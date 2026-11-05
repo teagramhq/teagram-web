@@ -555,14 +555,13 @@ test('private artifact boots from a direct sticker set URL', async({page}, testI
   test.skip(testInfo.project.name !== 'private-artifact-chromium', 'requires the production artifact preview');
 
   const brokenScripts: string[] = [];
-  const assetsUnderSharePath: string[] = [];
+  const requestsUnderSharePath: string[] = [];
   const pageErrors: string[] = [];
   const appOrigin = new URL(testInfo.project.use.baseURL as string).origin;
-  const assetResourceTypes = new Set(['script', 'stylesheet', 'image', 'font', 'manifest']);
   page.on('request', (request) => {
-    if(!assetResourceTypes.has(request.resourceType())) return;
+    if(request.isNavigationRequest()) return;
     const url = new URL(request.url());
-    if(url.origin === appOrigin && url.pathname.startsWith('/addstickers/')) assetsUnderSharePath.push(url.href);
+    if(url.origin === appOrigin && url.pathname.startsWith('/addstickers/')) requestsUnderSharePath.push(url.href);
   });
   page.on('response', (response) => {
     if(response.request().resourceType() !== 'script') return;
@@ -577,13 +576,13 @@ test('private artifact boots from a direct sticker set URL', async({page}, testI
   expect(response?.status()).toBe(200);
   expect(brokenScripts).toEqual([]);
   await expect(page.locator('#auth-flow-root')).toBeAttached({timeout: 30_000});
-  expect(new URL(page.url()).pathname).toBe('/addstickers/cats_a');
+  expect(new URL(page.url()).pathname).toBe('/');
   const fragmentTargetPaths = await page.evaluate(() => [
     new URL('#message-tail', document.baseURI).pathname,
     new URL('#star-sparkle', document.baseURI).pathname
   ]);
-  expect(fragmentTargetPaths).toEqual(['/addstickers/cats_a', '/addstickers/cats_a']);
-  expect(assetsUnderSharePath).toEqual([]);
+  expect(fragmentTargetPaths).toEqual(['/', '/']);
+  expect(requestsUnderSharePath).toEqual([]);
   expect(pageErrors).toEqual([]);
 });
 

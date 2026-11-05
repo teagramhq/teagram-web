@@ -119,6 +119,17 @@ export function isPotentialStickerSetShareLink(value: string) {
   return !!match && SHORT_NAME_PATTERN.test(match[2]);
 }
 
+export function captureInitialStickerSetShareLink() {
+  const url = new URL(window.location.href);
+  const stickerSetUrl = new URL(url.pathname, url.origin).href;
+  if(!isPotentialStickerSetShareLink(stickerSetUrl)) return;
+
+  window.history.replaceState(window.history.state, '', `/${url.search}${url.hash}`);
+  return stickerSetUrl;
+}
+
+export const initialStickerSetShareLink = typeof window === 'undefined' ? undefined : captureInitialStickerSetShareLink();
+
 export async function processInitialStickerSetShareLink(
   href: string,
   configPromise: Promise<{me_url_prefix: string}>,

@@ -76,6 +76,13 @@ jobs:
       - name: Test, typecheck and prepare bundle
         run: pnpm test --run && pnpm run typecheck && pnpm run generate-changelog
 
+      - name: Test direct sticker share install in the popup sandbox
+        run: >-
+          pnpm exec playwright test
+          e2e/popupSandbox.spec.ts
+          --project=chromium
+          --grep "opens and installs a sticker set from a direct share URL"
+
       - name: Build and audit production bundle
         env:
           MTPROTO_TARGET_MODE: ${{ steps.target.outputs.mode }}

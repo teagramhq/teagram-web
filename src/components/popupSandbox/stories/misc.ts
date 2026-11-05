@@ -142,7 +142,7 @@ defineStories('Composer & bots', [
     managers: getStickerSetPreviewManagers(getLocalStickerSetConfig),
     open: async() => {
       const {default: showStickersPopup} = await import('@components/popups/stickers');
-      const href = new URL(location.pathname, location.origin).toString();
+      const href = new URL('/addstickers/sandbox_stickers', location.origin).toString();
       const config = getLocalStickerSetConfig();
       await processInitialStickerSetShareLink(href, Promise.resolve(config), (set) => {
         if(!set.isEmoji) showStickersPopup({_: 'inputStickerSetShortName', short_name: set.shortName});
