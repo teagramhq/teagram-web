@@ -152,7 +152,9 @@ export type MirrorTaskPayload<
   previousUrls?: string[],
   merge?: boolean,
   accountNumber: ActiveAccountNumber,
-  trace?: 'cachedChannelDialogsReconcile'
+  trace?: 'cachedChannelDialogsReconcile',
+  traceId?: string,
+  traceOnly?: boolean
 };
 
 export type NotificationBuildMessageTaskPayload = {
@@ -1626,10 +1628,13 @@ class ApiManagerProxy extends MTProtoMessagePort {
     if(!isSettingsUpdate && accountNumber !== getCurrentAccount()) return;
 
     const traceMirror = (import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1') &&
-      payload.trace === 'cachedChannelDialogsReconcile';
+      payload.trace === 'cachedChannelDialogsReconcile' &&
+      typeof payload.traceId === 'string';
     const perf = traceMirror ? (globalThis as any).__teagramPerf : undefined;
     const startedAt = perf ? performance.now() : 0;
     try {
+      if(payload.traceOnly) return;
+
       const newActiveChannelId = name === 'peers' && key ?
         getNewActiveChannelMirrorChatId(this.mirrors.peers[key.toPeerId()], value) :
         undefined;
@@ -1650,7 +1655,21 @@ class ApiManagerProxy extends MTProtoMessagePort {
         rootScope.dispatchEvent('chat_update', newActiveChannelId);
       }
     } finally {
-      if(perf) perf.cachedDialogsReconcileMainThreadMs += performance.now() - startedAt;
+      if(perf) {
+        const elapsedMs = performance.now() - startedAt;
+        const traceId = payload.traceId!;
+        const mainThreadTimes = perf.cachedDialogsReconcileMainThreadMsByTraceId as Record<string, number>;
+        let storedTimes: Record<string, number> = {};
+        try {
+          storedTimes = JSON.parse(window.sessionStorage.getItem('teagram-perf-cached-dialog-reconcile-main-thread-ms') || '{}');
+        } catch{}
+        const total = Math.max(mainThreadTimes[traceId] || 0, storedTimes[traceId] || 0) + elapsedMs;
+        mainThreadTimes[traceId] = total;
+        storedTimes[traceId] = total;
+        try {
+          window.sessionStorage.setItem('teagram-perf-cached-dialog-reconcile-main-thread-ms', JSON.stringify(storedTimes));
+        } catch{}
+      }
     }
   };
 

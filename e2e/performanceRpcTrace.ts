@@ -66,10 +66,22 @@ export type PerformancePhaseSummary = {
 };
 
 export type CachedDialogReconcileSummary = {
+  walks: CachedDialogReconcileRunSummary[]
+};
+
+export type CachedDialogReconcileRunSummary = {
+  traceId: string,
   pageCount: number | null,
   startRelativeToScenarioMs: number,
-  endRelativeToScenarioMs: number | null,
+  endRelativeToScenarioMs: number,
   mainThreadTimeMs: number
+};
+
+export type CachedDialogReconcilePhase = {
+  traceId: string,
+  pageCount?: number,
+  startedAtEpochMs: number,
+  durationMs: number | null
 };
 
 export const CACHED_DIALOG_RECONCILE_PHASE_NAME = 'worker.dialogs.cachedChannelReconcile';
@@ -131,17 +143,55 @@ export function summarizePerformancePhases<T extends {name: string, durationMs: 
 }
 
 export function summarizeCachedDialogReconcile(
-  phase: {pageCount?: number, startedAtEpochMs: number, durationMs: number | null},
+  phase: CachedDialogReconcilePhase,
   scenarioStartedAtEpochMs: number,
   mainThreadTimeMs: number
-): CachedDialogReconcileSummary {
+): CachedDialogReconcileRunSummary {
+  if(phase.durationMs === null) {
+    throw new Error(`cached dialog reconciliation ${phase.traceId} has no completion time`);
+  }
   const startRelativeToScenarioMs = phase.startedAtEpochMs - scenarioStartedAtEpochMs;
   return {
+    traceId: phase.traceId,
     pageCount: phase.pageCount ?? null,
     startRelativeToScenarioMs: Number(startRelativeToScenarioMs.toFixed(2)),
-    endRelativeToScenarioMs: phase.durationMs === null ? null : Number((startRelativeToScenarioMs + phase.durationMs).toFixed(2)),
+    endRelativeToScenarioMs: Number((startRelativeToScenarioMs + phase.durationMs).toFixed(2)),
     mainThreadTimeMs: Number(mainThreadTimeMs.toFixed(2))
   };
+}
+
+export function collectCachedDialogReconciles(
+  phases: CachedDialogReconcilePhase[],
+  scenarioStartedAtEpochMs: number,
+  scenarioEndedAtEpochMs: number,
+  mainThreadTimeByTraceId: Record<string, number>
+): CachedDialogReconcileSummary {
+  const walks = phases.filter((phase) => {
+    if(phase.startedAtEpochMs >= scenarioEndedAtEpochMs) return false;
+    if(phase.durationMs === null) {
+      throw new Error(`cached dialog reconciliation ${phase.traceId} is still running`);
+    }
+    return phase.startedAtEpochMs + phase.durationMs > scenarioStartedAtEpochMs;
+  }).map((phase) => {
+    const mainThreadTimeMs = mainThreadTimeByTraceId[phase.traceId];
+    if(!Number.isFinite(mainThreadTimeMs) || mainThreadTimeMs < 0) {
+      throw new Error(`cached dialog reconciliation ${phase.traceId} has no main-thread time`);
+    }
+    return summarizeCachedDialogReconcile(phase, scenarioStartedAtEpochMs, mainThreadTimeMs);
+  });
+  return {walks};
+}
+
+function hasCompleteCachedDialogReconcileSummary(summary: CachedDialogReconcileSummary | undefined) {
+  return !!summary && Array.isArray(summary.walks) && summary.walks.every((walk) => (
+    typeof walk.traceId === 'string' &&
+    Number.isFinite(walk.pageCount) &&
+    walk.pageCount! >= 0 &&
+    Number.isFinite(walk.startRelativeToScenarioMs) &&
+    Number.isFinite(walk.endRelativeToScenarioMs) &&
+    Number.isFinite(walk.mainThreadTimeMs) &&
+    walk.mainThreadTimeMs >= 0
+  ));
 }
 
 export function validateCachedDialogReconcileSummaries(
@@ -154,15 +204,7 @@ export function validateCachedDialogReconcileSummaries(
   }
 
   samples.forEach(({cachedDialogReconcile}, index) => {
-    if(
-      !cachedDialogReconcile ||
-      !Number.isFinite(cachedDialogReconcile.pageCount) ||
-      cachedDialogReconcile.pageCount! <= 0 ||
-      !Number.isFinite(cachedDialogReconcile.startRelativeToScenarioMs) ||
-      !Number.isFinite(cachedDialogReconcile.endRelativeToScenarioMs) ||
-      !Number.isFinite(cachedDialogReconcile.mainThreadTimeMs) ||
-      cachedDialogReconcile.mainThreadTimeMs <= 0
-    ) {
+    if(!hasCompleteCachedDialogReconcileSummary(cachedDialogReconcile)) {
       throw new Error(`100x ${scenario} measured repeat ${index + 1} has incomplete reconciliation data`);
     }
   });
@@ -179,13 +221,7 @@ export function validateCachedDialogReconcileDiagnostics(
 
   samples.forEach(({cachedDialogReconcile, longTaskTrace}, index) => {
     if(
-      !cachedDialogReconcile ||
-      !Number.isFinite(cachedDialogReconcile.pageCount) ||
-      cachedDialogReconcile.pageCount! <= 0 ||
-      !Number.isFinite(cachedDialogReconcile.startRelativeToScenarioMs) ||
-      !Number.isFinite(cachedDialogReconcile.endRelativeToScenarioMs) ||
-      !Number.isFinite(cachedDialogReconcile.mainThreadTimeMs) ||
-      cachedDialogReconcile.mainThreadTimeMs <= 0 ||
+      !hasCompleteCachedDialogReconcileSummary(cachedDialogReconcile) ||
       !Array.isArray(longTaskTrace)
     ) {
       throw new Error(`100x ${scenario} diagnostic repeat ${index + 1} has incomplete reconciliation or long-task data`);

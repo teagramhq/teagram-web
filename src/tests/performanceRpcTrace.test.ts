@@ -1,13 +1,15 @@
 import {describe, expect, test} from 'vitest';
-import {observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries} from '../../e2e/performanceRpcTrace';
+import {collectCachedDialogReconciles, observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries} from '../../e2e/performanceRpcTrace';
 import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
 
 test('summarizes cached dialog reconciliation relative to a scenario', () => {
   expect(summarizeCachedDialogReconcile({
+    traceId: 'reconcile-1',
     pageCount: 30,
     startedAtEpochMs: 1_000,
     durationMs: 2_500
   }, 2_000, 640)).toEqual({
+    traceId: 'reconcile-1',
     pageCount: 30,
     startRelativeToScenarioMs: -1_000,
     endRelativeToScenarioMs: 1_500,
@@ -15,17 +17,42 @@ test('summarizes cached dialog reconciliation relative to a scenario', () => {
   });
 });
 
+test('associates only walks that overlap each measured scenario and records no-walk windows', () => {
+  const laterWalk = {
+    traceId: 'later-walk',
+    pageCount: 4,
+    startedAtEpochMs: 17_700,
+    durationMs: 500
+  };
+  const mainThreadTimeByTraceId = {'later-walk': 12.5};
+
+  expect(collectCachedDialogReconciles([laterWalk], 0, 1_450, mainThreadTimeByTraceId)).toEqual({walks: []});
+  expect(collectCachedDialogReconciles([laterWalk], 17_500, 18_000, mainThreadTimeByTraceId)).toEqual({
+    walks: [{
+      traceId: 'later-walk',
+      pageCount: 4,
+      startRelativeToScenarioMs: 200,
+      endRelativeToScenarioMs: 700,
+      mainThreadTimeMs: 12.5
+    }]
+  });
+  expect(() => collectCachedDialogReconciles([laterWalk], 17_500, 18_000, {})).toThrow('main-thread time');
+});
+
 test('requires a complete reconciliation summary on every measured scenario repeat', () => {
   const summary = {
-    pageCount: 30,
-    startRelativeToScenarioMs: -100,
-    endRelativeToScenarioMs: 2_500,
-    mainThreadTimeMs: 640
+    walks: [{
+      traceId: 'reconcile-1',
+      pageCount: 30,
+      startRelativeToScenarioMs: -100,
+      endRelativeToScenarioMs: 2_500,
+      mainThreadTimeMs: 640
+    }]
   };
 
   expect(() => validateCachedDialogReconcileSummaries([
     {cachedDialogReconcile: summary},
-    {cachedDialogReconcile: summary}
+    {cachedDialogReconcile: {walks: []}}
   ], 'scrollBack2k', 2)).not.toThrow();
   expect(() => validateCachedDialogReconcileSummaries([
     {cachedDialogReconcile: summary},
@@ -36,7 +63,7 @@ test('requires a complete reconciliation summary on every measured scenario repe
 test('keeps completed reconciliation measurements when the scenario trace resets', async() => {
   const trace = new PerformancePhaseTrace(true);
   const startedAtEpochMs = performance.timeOrigin + performance.now() - 10;
-  const finish = trace.start('worker.dialogs.cachedChannelReconcile', {startedAtEpochMs});
+  const finish = trace.start('worker.dialogs.cachedChannelReconcile', {startedAtEpochMs, traceId: 'reconcile-test'});
   trace.start('worker.storage.load')();
 
   const helpers = await import('../../e2e/performanceRpcTrace') as unknown as {
@@ -47,8 +74,9 @@ test('keeps completed reconciliation measurements when the scenario trace resets
   trace.reset(getPreservedPhases());
   finish({pageCount: 30});
 
-  const phase = trace.getSnapshot()[0];
+  const phase = {...trace.getSnapshot()[0], traceId: 'reconcile-test'};
   expect(summarizeCachedDialogReconcile(phase, startedAtEpochMs - 25, 12.5)).toEqual({
+    traceId: 'reconcile-test',
     pageCount: 30,
     startRelativeToScenarioMs: 25,
     endRelativeToScenarioMs: Number((25 + phase.durationMs!).toFixed(2)),
@@ -60,15 +88,18 @@ test('validates each independent diagnostic repeat with a reconcile summary and 
   const validate = (await import('../../e2e/performanceRpcTrace') as any).validateCachedDialogReconcileDiagnostics;
   expect(validate).toBeTypeOf('function');
   const summary = {
-    pageCount: 30,
-    startRelativeToScenarioMs: -100,
-    endRelativeToScenarioMs: 2_500,
-    mainThreadTimeMs: 640
+    walks: [{
+      traceId: 'reconcile-1',
+      pageCount: 30,
+      startRelativeToScenarioMs: -100,
+      endRelativeToScenarioMs: 2_500,
+      mainThreadTimeMs: 640
+    }]
   };
 
   expect(() => validate([
     {cachedDialogReconcile: summary, longTaskTrace: []},
-    {cachedDialogReconcile: {...summary, startRelativeToScenarioMs: -80}, longTaskTrace: [{startTimeMs: 10}]}
+    {cachedDialogReconcile: {walks: [{...summary.walks[0], startRelativeToScenarioMs: -80}]}, longTaskTrace: [{startTimeMs: 10}]}
   ], 'contactSearch', 2)).not.toThrow();
 });
 
@@ -82,7 +113,7 @@ test('rejects independent diagnostic repeats with incomplete reconciliation evid
   const validate = (await import('../../e2e/performanceRpcTrace') as any).validateCachedDialogReconcileDiagnostics;
   expect(validate).toBeTypeOf('function');
   expect(() => validate([
-    {cachedDialogReconcile: {pageCount: 30, startRelativeToScenarioMs: -100, endRelativeToScenarioMs: null, mainThreadTimeMs: 640}, longTaskTrace: []}
+    {cachedDialogReconcile: {walks: [{traceId: 'reconcile-1', pageCount: 30, startRelativeToScenarioMs: -100, endRelativeToScenarioMs: null, mainThreadTimeMs: 640}]}, longTaskTrace: []}
   ], 'contactSearch', 1)).toThrow('100x contactSearch diagnostic repeat 1 has incomplete reconciliation or long-task data');
 });
 

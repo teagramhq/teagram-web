@@ -2,6 +2,7 @@ export type PerformancePhase = {
   name: string,
   startedAtEpochMs: number,
   durationMs: number | null,
+  traceId?: string,
   accountNumber?: number,
   pageCount?: number
 };
@@ -35,7 +36,7 @@ export class PerformancePhaseTrace {
 
   public start(
     name: string,
-    details: {accountNumber?: number, startedAtEpochMs?: number} = {}
+    details: {accountNumber?: number, startedAtEpochMs?: number, traceId?: string} = {}
   ): (summary?: {pageCount?: number}) => void {
     if(!this.enabled && !this.alwaysEnabledNames.has(name)) return () => {};
 
@@ -45,6 +46,7 @@ export class PerformancePhaseTrace {
       name,
       startedAtEpochMs,
       durationMs: null,
+      ...(details.traceId === undefined ? {} : {traceId: details.traceId}),
       ...(details.accountNumber === undefined ? {} : {accountNumber: details.accountNumber})
     };
     this.phases.push(phase);

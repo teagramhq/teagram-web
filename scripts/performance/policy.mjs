@@ -451,12 +451,15 @@ export function formatPerformanceTraceTable(diagnostics) {
 
   const reconcileRows = SCENARIOS.map(({key}) => key).flatMap((scenario) => {
     const samples = Array.isArray(diagnostics?.[scenario]) ? diagnostics[scenario] : [];
-    const traces = samples.map((sample) => sample.cachedDialogReconcile).filter(Boolean);
-    if(!traces.length) return [];
+    if(!samples.length) return [];
+    const traces = samples.flatMap((sample) => Array.isArray(sample.cachedDialogReconcile?.walks) ? sample.cachedDialogReconcile.walks : []);
+    const noWalkRepeats = samples.filter((sample) => Array.isArray(sample.cachedDialogReconcile?.walks) && !sample.cachedDialogReconcile.walks.length).length;
 
     const medianField = (field) => median(traces.map((trace) => trace[field]).filter(Number.isFinite));
     return [[
       scenario,
+      traces.length,
+      noWalkRepeats,
       show(medianField('pageCount')),
       show(medianField('startRelativeToScenarioMs')),
       show(medianField('endRelativeToScenarioMs')),
@@ -468,10 +471,10 @@ export function formatPerformanceTraceTable(diagnostics) {
       '',
       '### Cached channel dialog reconciliation diagnostics',
       '',
-      'Median of per-repeat summaries from separate opt-in 100x diagnostic runs. Offsets use each diagnostic scenario window; individual repeats are retained in `diagnostics.100x`.',
+      'Per-walk summaries from separate opt-in 100x diagnostic runs. Empty `walks` arrays count scenarios where no walk overlapped the window; individual repeats remain in `diagnostics.100x`. Offsets use each diagnostic scenario window.',
       '',
-      '| Scenario | Pages | Start offset (ms) | End offset (ms) | Main-thread time (ms) |',
-      '| --- | ---: | ---: | ---: | ---: |',
+      '| Scenario | Walks | No-walk repeats | Median pages | Median start offset (ms) | Median end offset (ms) | Median main-thread time (ms) |',
+      '| --- | ---: | ---: | ---: | ---: | ---: | ---: |',
       ...reconcileRows.map((row) => `| ${row.join(' | ')} |`)
     );
   }

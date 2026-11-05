@@ -44,6 +44,8 @@ import getDialogKey from '@appManagers/utils/dialogs/getDialogKey';
 import getDialogThreadId from '@appManagers/utils/dialogs/getDialogThreadId';
 import {isTempId} from '@appManagers/utils/messages/isTempId';
 
+let cachedDialogReconcileTraceSequence = 0;
+
 export enum FilterType {
   Folder,
   Forum,
@@ -2099,7 +2101,8 @@ export default class DialogsStorage extends AppManager {
     const trace = import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1' ?
       'cachedChannelDialogsReconcile' as const :
       undefined;
-    const finishTrace = trace ? performancePhaseTrace.start('worker.dialogs.cachedChannelReconcile') : undefined;
+    const traceId = trace ? `${Math.trunc(performance.timeOrigin)}-${++cachedDialogReconcileTraceSequence}` : undefined;
+    const finishTrace = trace ? performancePhaseTrace.start('worker.dialogs.cachedChannelReconcile', {traceId}) : undefined;
     let pageCount = 0;
     const limit = 100;
     const missingPeerIds: PeerId[] = [];
@@ -2176,7 +2179,7 @@ export default class DialogsStorage extends AppManager {
         offsetDate = (lastMessage as Message.message)?.date ?? 0;
       }
     } finally {
-      this.appPeersManager.mirrorApiPeers(peerKeys, trace);
+      this.appPeersManager.mirrorApiPeers(peerKeys, trace, traceId);
       finishTrace?.({pageCount});
     }
   }

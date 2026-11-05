@@ -114,39 +114,31 @@ test('reports startup phase medians across every cold and warm trace repeat', ()
 test('reports cached dialog reconciliation timing and main-thread time by scenario', () => {
   const diagnostics = {
     coldChatList: [{cachedDialogReconcile: {
-      pageCount: 30,
-      startRelativeToScenarioMs: -100,
-      endRelativeToScenarioMs: 2_500,
-      mainThreadTimeMs: 640
+      walks: [{traceId: 'cold', pageCount: 30, startRelativeToScenarioMs: -100, endRelativeToScenarioMs: 2_500, mainThreadTimeMs: 640}]
     }}],
     scrollBack2k: [{cachedDialogReconcile: {
-      pageCount: 30,
-      startRelativeToScenarioMs: -2_000,
-      endRelativeToScenarioMs: -50,
-      mainThreadTimeMs: 12
+      walks: [{traceId: 'scroll', pageCount: 30, startRelativeToScenarioMs: -2_000, endRelativeToScenarioMs: -50, mainThreadTimeMs: 12}]
     }}]
   };
 
   const table = formatPerformanceTraceTable(diagnostics);
 
   assert.match(table, /### Cached channel dialog reconciliation diagnostics/);
-  assert.match(table, /\| coldChatList \| 30\.0 \| -100\.0 \| 2500\.0 \| 640\.0 \|/);
-  assert.match(table, /\| scrollBack2k \| 30\.0 \| -2000\.0 \| -50\.0 \| 12\.0 \|/);
+  assert.match(table, /\| coldChatList \| 1 \| 0 \| 30\.0 \| -100\.0 \| 2500\.0 \| 640\.0 \|/);
+  assert.match(table, /\| scrollBack2k \| 1 \| 0 \| 30\.0 \| -2000\.0 \| -50\.0 \| 12\.0 \|/);
 });
 
 test('reports reconciliation summaries for every diagnostic scenario', () => {
-  const summary = {
-    pageCount: 30,
-    startRelativeToScenarioMs: -100,
-    endRelativeToScenarioMs: 2_500,
-    mainThreadTimeMs: 640
-  };
-  const diagnostics = Object.fromEntries(SCENARIOS.map(({key}) => [key, [{cachedDialogReconcile: summary}]]));
+  const summary = {traceId: 'reconcile', pageCount: 30, startRelativeToScenarioMs: -100, endRelativeToScenarioMs: 2_500, mainThreadTimeMs: 640};
+  const diagnostics = Object.fromEntries(SCENARIOS.map(({key}) => [key, [{cachedDialogReconcile: {walks: [summary]}}]]));
+  diagnostics.coldChatList = [{cachedDialogReconcile: {walks: []}}];
   const table = formatPerformanceTraceTable(diagnostics);
 
   assert.match(table, /separate opt-in 100x diagnostic runs/);
+  assert.match(table, /\| coldChatList \| 0 \| 1 \| n\/a \| n\/a \| n\/a \| n\/a \|/);
   for(const {key} of SCENARIOS) {
-    assert.ok(table.includes(`| ${key} | 30.0 | -100.0 | 2500.0 | 640.0 |`), `${key} reconciliation summary is missing from the trace table`);
+    if(key === 'coldChatList') continue;
+    assert.ok(table.includes(`| ${key} | 1 | 0 | 30.0 | -100.0 | 2500.0 | 640.0 |`), `${key} reconciliation summary is missing from the trace table`);
   }
 });
 
