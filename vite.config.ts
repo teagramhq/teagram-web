@@ -236,7 +236,7 @@ const baseConfig = defineConfig({
     setupFiles: ['./src/tests/setup.ts']
   },
   server: serverOptions,
-  base: '',
+  base: '/',
   // Pin the dep-optimizer's scan to the real entry (index.html → src/index.ts).
   // Otherwise Vite auto-globs every *.html (stats.html, public/*.html, the icomoon
   // demo.html) as scan entries, and a parse error in any of them (e.g. the stale

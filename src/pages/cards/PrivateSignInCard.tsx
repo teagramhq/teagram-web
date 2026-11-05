@@ -955,7 +955,7 @@ export default function PrivateSignInCard(_props: {spec: Spec}) {
             class={styles.logoContainer}
             size={120}
             element={
-              <img class={styles.logo} src="assets/img/logo.svg" alt="" aria-hidden="true"/>
+              <img class={styles.logo} src="/assets/img/logo.svg" alt="" aria-hidden="true"/>
             }
           />
           <MediaHeader.Title>Teagram</MediaHeader.Title>

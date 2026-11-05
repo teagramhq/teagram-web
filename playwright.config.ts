@@ -7,7 +7,7 @@ import {defineConfig, devices} from '@playwright/test';
 // self-contained worker would be a *dedicated* worker with different commit timing. So these run
 // against the actual dev server in a real browser. Lottie renders without login (the login page
 // itself plays .tgs animations), so a plain HTTP Vite preview is enough - no auth/seed needed.
-const PORT = 8099;
+const PORT = Number(process.env.TWEB_PREVIEW_PORT || 8099);
 
 export default defineConfig({
   testDir: './e2e',

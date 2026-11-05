@@ -92,7 +92,7 @@ export default class FeaturesCarousel {
           frame = document.createElement('div');
           frame.classList.add('device-frame');
           frame.append(img);
-          renderImageFromUrl(img, 'assets/img/android-device.svg');
+          renderImageFromUrl(img, '/assets/img/android-device.svg');
           frame.classList.toggle('bottom', feature.videoPosition !== 'top');
           slideTopSectionContainer.append(frame);
         }

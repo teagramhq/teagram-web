@@ -172,7 +172,7 @@ export default async function showStarReactionPopup(peerId: PeerId, mid: number,
           <div class="popup-star-reaction-senders-avatar-wrap">
             {anonymous ? (
               <div class="popup-star-reaction-senders-item-anonymous">
-                <img src="assets/img/anon_paid_reaction.png" alt="Anonymous" />
+                <img src="/assets/img/anon_paid_reaction.png" alt="Anonymous" />
               </div>
             ) : (
               <AvatarNewTsx peerId={senderPeerId} size={60} />

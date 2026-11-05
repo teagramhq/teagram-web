@@ -5,6 +5,7 @@
  */
 
 import noop from '@helpers/noop';
+import {processInitialStickerSetShareLink} from '@helpers/stickerSetLink';
 import {defineStories} from '../registry';
 import {
   channelChat,
@@ -18,6 +19,67 @@ import {
   storyItem,
   userFullWithRating
 } from '../fixtures';
+
+const stickerSetConfig = {me_url_prefix: 'https://teagram.test/'};
+const getLocalStickerSetConfig = () => ({me_url_prefix: `${window.location.origin}/`});
+
+const getStickerSetPreviewManagers = (getConfig: () => unknown = () => stickerSetConfig) => ({
+  apiManager: {getConfig},
+  appStickersManager: {
+    getStickerSet: () => ({
+      set: {
+        _: 'stickerSet',
+        pFlags: {},
+        id: '8001',
+        access_hash: '8001',
+        title: 'Sandbox Stickers',
+        short_name: 'sandbox_stickers',
+        count: 1,
+        hash: 0
+      },
+      documents: [stickerDocument],
+      packs: [] as any[]
+      }),
+      toggleStickerSets: () => true
+  }
+});
+
+const getStickerPackImportFixtureManagers = (options: {
+  mode?: 'on' | 'off',
+  configFailure?: boolean,
+  takenName?: string,
+  createErrors?: unknown[]
+} = {}) => {
+  let createCount = 0;
+  return ({
+  apiManager: {
+    getAppConfig: () => options.configFailure ? Promise.reject(new Error('internal config detail')) : ({sticker_import_mode: options.mode || 'on'}),
+    getConfig: () => stickerSetConfig
+  },
+  appStickersManager: {
+    checkStickerSetShortName: (name: string) => name !== options.takenName,
+    suggestStickerSetShortName: () => 'sandbox_imported',
+    createStickerSet: () => {
+      const error = options.createErrors?.[createCount++];
+      return error ? Promise.reject(error) : true;
+    },
+    getStickerSet: () => ({
+      set: {
+        _: 'stickerSet',
+        pFlags: {},
+        id: '8002',
+        access_hash: '8002',
+        title: 'Imported Pack',
+        short_name: 'sandbox_imported',
+        count: 1,
+        hash: 0
+      },
+      documents: [stickerDocument],
+      packs: [] as any[]
+    })
+  }
+  });
+};
 
 defineStories('Composer & bots', [
   {
@@ -57,27 +119,80 @@ defineStories('Composer & bots', [
     id: 'stickers',
     fixtureOnly: true,
     title: 'Sticker set preview',
-    managers: {
-      appStickersManager: {
-        getStickerSet: () => ({
-          set: {
-            _: 'stickerSet',
-            pFlags: {},
-            id: '8001',
-            access_hash: '8001',
-            title: 'Sandbox Stickers',
-            short_name: 'sandbox_stickers',
-            count: 1,
-            hash: 0
-          },
-          documents: [stickerDocument],
-          packs: []
-        })
-      }
-    },
+    managers: getStickerSetPreviewManagers(),
     open: async(ctx) => {
       const {default: showStickersPopup} = await import('@components/popups/stickers');
       showStickersPopup({_: 'inputStickerSetShortName', short_name: 'sandbox_stickers'});
+    }
+  },
+  {
+    id: 'stickersWithoutShareLinks',
+    fixtureOnly: true,
+    title: 'Sticker set preview without a share link',
+    managers: getStickerSetPreviewManagers(() => Promise.reject(new Error('config unavailable'))),
+    open: async() => {
+      const {default: showStickersPopup} = await import('@components/popups/stickers');
+      showStickersPopup({_: 'inputStickerSetShortName', short_name: 'sandbox_stickers'});
+    }
+  },
+  {
+    id: 'stickerShareLink',
+    fixtureOnly: true,
+    title: 'Install a sticker set from a share link',
+    managers: getStickerSetPreviewManagers(getLocalStickerSetConfig),
+    open: async() => {
+      const {default: showStickersPopup} = await import('@components/popups/stickers');
+      const href = new URL('/addstickers/sandbox_stickers', location.origin).toString();
+      const config = getLocalStickerSetConfig();
+      await processInitialStickerSetShareLink(href, Promise.resolve(config), (set) => {
+        if(!set.isEmoji) showStickersPopup({_: 'inputStickerSetShortName', short_name: set.shortName});
+      });
+    }
+  },
+  {
+    id: 'stickerPackImport',
+    fixtureOnly: true,
+    title: 'Import a sticker pack',
+    managers: getStickerPackImportFixtureManagers(),
+    open: async() => {
+      const {default: showStickerPackImportPopup} = await import('@components/popups/stickerPackImport');
+      showStickerPackImportPopup();
+    }
+  },
+  {
+    id: 'stickerPackImportOff',
+    fixtureOnly: true,
+    title: 'Sticker pack import disabled',
+    managers: getStickerPackImportFixtureManagers({mode: 'off'}),
+    open: async() => {
+      const {default: showStickerPackImportPopup} = await import('@components/popups/stickerPackImport');
+      showStickerPackImportPopup();
+    }
+  },
+  {
+    id: 'stickerPackImportConfigFailed',
+    fixtureOnly: true,
+    title: 'Sticker pack import config failed',
+    managers: getStickerPackImportFixtureManagers({configFailure: true}),
+    open: async() => {
+      const {default: showStickerPackImportPopup} = await import('@components/popups/stickerPackImport');
+      showStickerPackImportPopup();
+    }
+  },
+  {
+    id: 'stickerPackImportErrors',
+    fixtureOnly: true,
+    title: 'Sticker pack import errors',
+    managers: getStickerPackImportFixtureManagers({
+      takenName: 'taken_name',
+      createErrors: [
+        {type: 'STICKER_SET_INVALID'},
+        Object.assign(new Error('internal server detail'), {type: 'STICKER_SET_INVALID'})
+      ]
+    }),
+    open: async() => {
+      const {default: showStickerPackImportPopup} = await import('@components/popups/stickerPackImport');
+      showStickerPackImportPopup();
     }
   },
   {

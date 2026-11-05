@@ -10,6 +10,7 @@ type InternalLinkAnchorType =
   | 'execBotCommand'
   | 'searchByHashtag'
   | 'addstickers'
+  | 'stickerSet'
   | 'im'
   | 'resolve'
   | 'privatepost'

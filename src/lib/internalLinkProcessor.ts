@@ -38,6 +38,7 @@ import {getMiddleware} from '@helpers/middleware';
 import anchorCallback from '@helpers/dom/anchorCallback';
 import PopupStarGiftInfo from '@components/popups/starGiftInfo';
 import noop from '@helpers/noop';
+import {logger} from '@lib/logger';
 import appSidebarRight from '@components/sidebarRight';
 import pause from '@helpers/schedulers/pause';
 import namedPromises from '@helpers/namedPromises';
@@ -59,6 +60,7 @@ import parseBotAdminRights from '@appManagers/utils/bots/parseBotAdminRights';
 import isEphemeralMessage from '@appManagers/utils/messages/isEphemeralMessage';
 import parseChatSpecificTag from '@lib/richTextProcessor/parseChatSpecificTag';
 import searchByTag from '@lib/richTextProcessor/searchByTag';
+import {handleStickerSetShareLinkClick, initialStickerSetShareLink, processInitialStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
 
 /**
  * A link whose section we know but whose path we do not — the one thing worse
@@ -68,6 +70,8 @@ import searchByTag from '@lib/richTextProcessor/searchByTag';
 const showUnsupportedLinkToast = () => {
   toastNew({langPackKey: 'Link.NotSupported'});
 };
+
+const stickerSetLinkLogger = logger('StickerSetLink');
 
 export class InternalLinkProcessor {
   protected managers: AppManagers;
@@ -84,6 +88,41 @@ export class InternalLinkProcessor {
 
   public construct(managers: AppManagers) {
     this.managers = managers;
+
+    const updateStickerSetLinkPrefix = (config: Awaited<ReturnType<AppManagers['apiManager']['getConfig']>>) => {
+      setStickerSetLinkPrefix(config.me_url_prefix);
+    };
+    rootScope.addEventListener('config', updateStickerSetLinkPrefix);
+    const configPromise = Promise.resolve(managers.apiManager.getConfig());
+    configPromise.then(updateStickerSetLinkPrefix, noop);
+    void processInitialStickerSetShareLink(initialStickerSetShareLink || window.location.href, configPromise, (stickerSet) => {
+      void this.processInternalLink({
+        _: stickerSet.isEmoji ? INTERNAL_LINK_TYPE.EMOJI_SET : INTERNAL_LINK_TYPE.STICKER_SET,
+        set: stickerSet.shortName
+      });
+    }).catch((err) => {
+      stickerSetLinkLogger.error('Could not process the initial sticker set link', err);
+      toastNew({langPackKey: 'Teagram.Import.ShareLinkFailed'});
+    });
+
+    addAnchorListener<{}>({
+      name: 'stickerSet',
+      noCancelEvent: true,
+      callback: ({element, event, masked}) => {
+        if(!element) return;
+
+        return handleStickerSetShareLinkClick(element.href, !!masked, (stickerSet) => {
+          cancelEvent(event);
+          return this.processInternalLink({
+            _: stickerSet.isEmoji ? INTERNAL_LINK_TYPE.EMOJI_SET : INTERNAL_LINK_TYPE.STICKER_SET,
+            set: stickerSet.shortName
+          });
+        }, () => {
+          cancelEvent(event);
+          (window as any).showMaskedAlert(element, event);
+        });
+      }
+    });
 
     addAnchorListener<{}>({
       name: 'showMaskedAlert',

@@ -48,7 +48,7 @@ import showStarsPayPopup from '@components/popups/starsPay';
 import {renderComponent} from '@helpers/solid/renderComponent';
 
 const USE_NATIVE_SYMBOL = true;
-const iconPath = 'assets/img/';
+const iconPath = '/assets/img/';
 const icons = [
   'amex',
   'card',

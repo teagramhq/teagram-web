@@ -499,7 +499,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           //   insertPart(entity, '<span class="emoji">', '</span>');
           // } else {
           element = document.createElement('img');
-          (element as HTMLImageElement).src = `assets/img/emoji/${entity.unicode}.png`;
+          (element as HTMLImageElement).src = `/assets/img/emoji/${entity.unicode}.png`;
           property = 'alt';
           element.className = 'emoji emoji-image';
 
@@ -523,7 +523,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           insertPart(entity, '<span class="emoji" contenteditable="false">', '</span>');
         } */
         /* if(!isSupported) {
-          insertPart(entity, `<img src="assets/img/emoji/${entity.unicode}.png" alt="`, `" class="emoji">`);
+          insertPart(entity, `<img src="/assets/img/emoji/${entity.unicode}.png" alt="`, `" class="emoji">`);
         } */
 
         break;
@@ -569,6 +569,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           const wrapped = wrapUrl(url, (entity as MessageEntity.messageEntityTextUrl).safe);
           url = wrapped.url;
           onclick = wrapped.onclick;
+          const pendingStickerSetLink = !!wrapped.pendingStickerSetLink;
 
           if(options.whitelistedDomains) {
             try {
@@ -597,11 +598,12 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
             // inner = encodeEntities(replaceUrlEncodings(entityText));
           }
 
-          const currentContext = !!onclick;
+          const currentContext = !!onclick && !pendingStickerSetLink;
+          const pendingStickerSetClick = pendingStickerSetLink && onclick === 'stickerSet';
           if(
-            !onclick &&
             masked &&
             !currentContext &&
+            !pendingStickerSetClick &&
             !options.passMaskedLinks
           ) {
             onclick = 'showMaskedAlert';
@@ -621,7 +623,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           }
 
           if(onclick) {
-            element.setAttribute('onclick', onclick + '(this)');
+            element.setAttribute('onclick', onclick === 'stickerSet' ? 'stickerSet(this,event)' : onclick + '(this)');
           }
         }
 

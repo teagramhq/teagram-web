@@ -68,7 +68,7 @@ export function TablePeer(props: {
       {props.peerId === NULL_PEER_ID ? (
         <>
           <div class="popup-star-gift-info-anonymous">
-            <img src="assets/img/anon_paid_reaction.png" alt="Anonymous" />
+            <img src="/assets/img/anon_paid_reaction.png" alt="Anonymous" />
           </div>
           {i18n('StarGiftHiddenUser')}
         </>

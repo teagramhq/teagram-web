@@ -491,8 +491,8 @@ export function BlurBrush() {
   return (
     <svg width="120" height="48" viewBox="0 0 120 48" fill="none" xmlns="http://www.w3.org/2000/svg">
       <g clip-path="url(#clip0_6102_2545)">
-        <image href="assets/img/media-editor-blurred-color-wheel.png" x="91" y="12" width="26" height="24" />
-        <image href="assets/img/media-editor-blurred-color-wheel.png" x="91" y="12" width="26" height="24" />
+        <image href="/assets/img/media-editor-blurred-color-wheel.png" x="91" y="12" width="26" height="24" />
+        <image href="/assets/img/media-editor-blurred-color-wheel.png" x="91" y="12" width="26" height="24" />
         <g filter="url(#filter3_iiii_6102_2545)">
           <path
             d="M-2 15H75.441C75.7836 15 76.0968 15.1936 76.25 15.5V15.5C76.4032 15.8064 76.7164 16 77.059 16H92.941C93.2836 16 93.5968 15.8064 93.75 15.5V15.5C93.9032 15.1936 94.2164 15 94.559 15H98C99.1046 15 100 15.8954 100 17V31C100 32.1046 99.1046 33 98 33H94.559C94.2164 33 93.9032 32.8064 93.75 32.5V32.5C93.5968 32.1936 93.2836 32 92.941 32H77.059C76.7164 32 76.4032 32.1936 76.25 32.5V32.5C76.0968 32.8064 75.7836 33 75.441 33H-2V15Z"
@@ -515,7 +515,7 @@ export function BlurBrush() {
         </mask>
         <image
           opacity="1"
-          href="assets/img/media-editor-blurred-color-wheel.png"
+          href="/assets/img/media-editor-blurred-color-wheel.png"
           x="91"
           y="12"
           width="26"

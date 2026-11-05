@@ -207,7 +207,7 @@ export default function showStarsPayPopup(options: StarsPayOptions): StarsPayHan
       (async() => {
         const img = document.createElement('img');
         img.classList.add('popup-stars-image');
-        await renderImageFromUrlPromise(img, `assets/img/${maybe2x(boost ? 'stars' : 'stars_pay')}.png`);
+        await renderImageFromUrlPromise(img, `/assets/img/${maybe2x(boost ? 'stars' : 'stars_pay')}.png`);
         return img;
       })(),
       (async() => {
