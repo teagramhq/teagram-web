@@ -6698,7 +6698,7 @@ export default class ChatBubbles {
 
     this.updatePlaceholderPosition?.();
 
-    restoreScroll?.();
+    await restoreScroll?.();
 
     m(pause(!this.chat.setPeerPromise ? 0 : 1000))
     .then(() => m(getHeavyAnimationPromise()))
@@ -11377,6 +11377,7 @@ export default class ChatBubbles {
 
     const log = this.log.bindPrefix('prepareToSaveScroll');
     log('save');
+    const middleware = this.chatInnerMiddlewareHelper?.get();
     const scrollSaver = this.createScrollSaver(reverse);
     scrollSaver.save(); // * let's save scroll position by point before the slicing, not after
 
@@ -11392,10 +11393,12 @@ export default class ChatBubbles {
     // const hadScroll = saved.scrollHeight !== saved.clientHeight;
 
     return {
-      restoreScroll: () => {
+      restoreScroll: async() => {
         log('restore');
+        if(!middleware?.()) return;
         // scrollSaver.restore(_history.length === 1 && !reverse ? false : true);
-        scrollSaver.restore(reverse);
+        await scrollSaver.restoreAfterLayout(reverse, middleware);
+        if(!middleware?.()) return;
         this.onRenderScrollSet(scrollSaver.getSaved());
       },
       scrollSaver

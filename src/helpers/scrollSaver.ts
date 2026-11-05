@@ -218,6 +218,27 @@ export default class ScrollSaver {
     // console.warn('scroll restore', rect, diff, newRect);
   }
 
+  // ResizeObserver runs after layout, so restoring a mounted batch can inspect its anchor without forcing layout.
+  public restoreAfterLayout(useReflow?: boolean, isCurrent?: () => boolean) {
+    return new Promise<void>((resolve, reject) => {
+      const observer = new ResizeObserver(() => {
+        observer.disconnect();
+        if(isCurrent && !isCurrent()) {
+          resolve();
+          return;
+        }
+
+        try {
+          this.restore(useReflow);
+          resolve();
+        } catch(err) {
+          reject(err);
+        }
+      });
+      observer.observe(this.container);
+    });
+  }
+
   public _restore(useReflow?: boolean) {
     const {scrollHeightMinusTop: previousScrollHeightMinusTop, scrollable} = this;
     // if(previousScrollHeightMinusTop === undefined) {
