@@ -1,36 +1,28 @@
-import {getDatabaseState} from '@config/databases/state';
-import type {AccountDatabase} from '@config/databases/state';
 import type {ActiveAccountNumber} from '@lib/accounts/types';
-import AppStorage from '@lib/storage';
 import {isValidTelegramBotToken} from '@helpers/telegramStickerPackImport';
-
-const TOKEN_KEY = 'telegramBotToken';
-
-type TelegramTokenStorage = AppStorage<Record<string, string>, AccountDatabase>;
-
-const storages = new Map<string, TelegramTokenStorage>();
-
-function getTokenStorage(accountNumber: ActiveAccountNumber) {
-  const database = getDatabaseState(accountNumber);
-  let storage = storages.get(database.name);
-  if(!storage) {
-    storage = new AppStorage(database, 'session', [TOKEN_KEY]);
-    storages.set(database.name, storage);
-  }
-
-  return storage;
-}
+import sessionStorage, {getTelegramBotTokenStorageKey} from '@lib/sessionStorage';
+import type {TelegramBotTokenStorageKey} from '@lib/sessionStorage';
 
 export async function getSavedTelegramBotToken(accountNumber: ActiveAccountNumber) {
-  const token = await getTokenStorage(accountNumber).get(TOKEN_KEY, false);
+  const token = await sessionStorage.get(getTelegramBotTokenStorageKey(accountNumber), false);
   return typeof token === 'string' && isValidTelegramBotToken(token) ? token : undefined;
 }
 
 export async function saveTelegramBotToken(accountNumber: ActiveAccountNumber, token: string) {
   if(!isValidTelegramBotToken(token)) throw new Error('Enter a valid Telegram bot token.');
-  await getTokenStorage(accountNumber).set({[TOKEN_KEY]: token});
+  const values: Partial<Record<TelegramBotTokenStorageKey, string>> = {
+    [getTelegramBotTokenStorageKey(accountNumber)]: token
+  };
+  await sessionStorage.set(values);
+  await sessionStorage.flush();
 }
 
 export async function removeTelegramBotToken(accountNumber: ActiveAccountNumber) {
-  await getTokenStorage(accountNumber).delete(TOKEN_KEY);
+  const key = getTelegramBotTokenStorageKey(accountNumber);
+  await sessionStorage.delete(key);
+  await sessionStorage.flush();
+
+  if(await sessionStorage.get(key, false) !== undefined) {
+    throw new Error('Could not remove the saved Telegram bot token.');
+  }
 }

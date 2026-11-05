@@ -4,8 +4,13 @@ import {MOUNT_CLASS_TO} from '@config/debug';
 import type {AppInstance} from '@lib/singleInstance';
 import type {UserAuth} from '@appManagers/constants';
 import LocalStorageController from '@lib/localStorage';
-import {AccountSessionData} from '@lib/accounts/types';
+import type {AccountSessionData, ActiveAccountNumber} from '@lib/accounts/types';
 import type {GuestCredentialRecords} from '@lib/guestAccountTypes';
+
+export type TelegramBotTokenStorageKey = `telegramBotToken${ActiveAccountNumber}`;
+
+export const getTelegramBotTokenStorageKey = (accountNumber: ActiveAccountNumber): TelegramBotTokenStorageKey =>
+  `telegramBotToken${accountNumber}`;
 
 
 type StorageValues = {
@@ -36,7 +41,7 @@ type StorageValues = {
   current_account?: number, // 1 if not set
   should_animate_auth?: number,
   should_animate_main?: number
-}
+} & Partial<Record<TelegramBotTokenStorageKey, string>>;
 
 /**
  * @deprecated use these keys only for going to and from 'A' (a.k.a. 'Z') version
@@ -72,6 +77,7 @@ const sessionStorage = new LocalStorageController<StorageValues & DeprecatedStor
   'account3',
   'account4',
   'guestCredentials',
+  ...([1, 2, 3, 4] as ActiveAccountNumber[]).map(getTelegramBotTokenStorageKey),
   'auth_key_fingerprint',
   'user_auth',
   'dc'

@@ -8,7 +8,7 @@ import CacheStorageController from '@lib/files/cacheStorage';
 import {IDB} from '@lib/files/idb';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 import {saveEncryptionKeyForHandoff} from '@lib/passcode/keyHandoff';
-import sessionStorage from '@lib/sessionStorage';
+import sessionStorage, {getTelegramBotTokenStorageKey} from '@lib/sessionStorage';
 import type {TrueDcId} from '@types';
 import {clearGuestCredentialsForAccount} from '@lib/guestCredentialStorage';
 
@@ -30,13 +30,15 @@ export async function clearGuestAccountLocalState(
           'k_build',
           'auth_key_fingerprint'
         ];
+        keys.push(getTelegramBotTokenStorageKey(1));
         for(let i = 1; i <= 5; ++i) {
           keys.push(`dc${i as TrueDcId}_server_salt`);
           keys.push(`dc${i as TrueDcId}_auth_key`);
           keys.push(`dc${i as TrueDcId}_hash`); // WebA only
         }
 
-        return Promise.all(keys.map((key) => sessionStorage.delete(key)));
+        await Promise.all(keys.map((key) => sessionStorage.delete(key)));
+        await sessionStorage.flush();
       })(),
       AppStoragesManager.clearAllStoresForAccount(1),
       AppStoragesManager.clearSessionStores(),
