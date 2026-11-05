@@ -4833,7 +4833,8 @@ export default class ChatBubbles {
   public destroyBubble(
     bubble: HTMLElement,
     animate?: boolean,
-    fullMid = getBubbleFullMid(bubble)
+    fullMid = getBubbleFullMid(bubble),
+    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
   ) {
     const replacement = this.findPendingBubbleReplacement(bubble);
     if(replacement) {
@@ -4902,7 +4903,7 @@ export default class ChatBubbles {
     const scrollSaver = canBeDeleted && this.createScrollSaver(false);
     scrollSaver?.save();
 
-    this.bubbleGroups.removeAndUnmountBubble(bubble);
+    this.bubbleGroups.removeAndUnmountBubble(bubble, deferredGroups);
     if(this.observer) {
       this.observer.unobserve(bubble, this.unreadedObserverCallback);
       this.unreaded.delete(bubble);
@@ -5020,7 +5021,12 @@ export default class ChatBubbles {
     animateSomethingWithScroll(promise, this.scrollable, scrollSaver);
   }
 
-  public deleteMessagesByIds(fullMids: FullMid[], permanent = true, ignoreOnScroll?: boolean) {
+  public deleteMessagesByIds(
+    fullMids: FullMid[],
+    permanent = true,
+    ignoreOnScroll?: boolean,
+    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
+  ) {
     fullMids = fullMids.filter((fullMid) => {
       return !!this.getBubble(fullMid);
     });
@@ -5038,7 +5044,7 @@ export default class ChatBubbles {
     .sort((a, b) => (indexes[a] ?? 0) - (indexes[b] ?? 0))
     .forEach((fullMid) => {
       const bubble = this.getBubble(fullMid);
-      this.destroyBubble(bubble, permanent && liteMode.isAvailable('animations'));
+      this.destroyBubble(bubble, permanent && liteMode.isAvailable('animations'), fullMid, deferredGroups);
     });
 
     this.scrollable.ignoreNextScrollEvent();
@@ -6664,10 +6670,12 @@ export default class ChatBubbles {
 
     loadQueue = filterQueue(loadQueue);
 
+    const deferredGroups = new Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>();
     const {restoreScroll, scrollSaver} = this.prepareToSaveScroll(
       reverse,
       firstMid === newFirstMid,
-      lastMid === newLastMid
+      lastMid === newLastMid,
+      deferredGroups
     );
     // if(this.messagesQueueOnRender) {
     // this.messagesQueueOnRender();
@@ -6696,6 +6704,9 @@ export default class ChatBubbles {
       }
     });
 
+    for(const group of deferredGroups) {
+      if(!groups.includes(group)) groups.push(group);
+    }
     this.bubbleGroups.mountUnmountGroups(groups);
     if(this.chat.selection.isSelecting) {
       this.chat.selection.refreshSelectionGroup();
@@ -11375,7 +11386,12 @@ export default class ChatBubbles {
     return container;
   }
 
-  private prepareToSaveScroll(reverse?: boolean, sliceTop?: boolean, sliceBottom?: boolean) {
+  private prepareToSaveScroll(
+    reverse?: boolean,
+    sliceTop?: boolean,
+    sliceBottom?: boolean,
+    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
+  ) {
     const isMounted = !!this.chatInner.parentElement;
     if(!isMounted) {
       return {};
@@ -11396,7 +11412,7 @@ export default class ChatBubbles {
       const viewportSlice = this.getViewportSlice(true);
       if(!sliceTop) viewportSlice.invisibleTop.length = 0;
       if(!sliceBottom) viewportSlice.invisibleBottom.length = 0;
-      this.deleteViewportSlice(viewportSlice, true);
+      this.deleteViewportSlice(viewportSlice, true, deferredGroups);
     }
 
     // scrollSaver.save(); // ! slicing will corrupt scroll position
@@ -12431,7 +12447,11 @@ export default class ChatBubbles {
     });
   }
 
-  public deleteViewportSlice(slice: ReturnType<ChatBubbles['getViewportSlice']>, ignoreScrollSaving?: boolean) {
+  public deleteViewportSlice(
+    slice: ReturnType<ChatBubbles['getViewportSlice']>,
+    ignoreScrollSaving?: boolean,
+    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
+  ) {
     if(DO_NOT_SLICE_VIEWPORT_ON_RENDER) {
       return;
     }
@@ -12472,7 +12492,7 @@ export default class ChatBubbles {
     }
 
     log('slicing mids', fullMids);
-    this.deleteMessagesByIds(fullMids, false, true);
+    this.deleteMessagesByIds(fullMids, false, true, deferredGroups);
 
     if(scrollSaver) {
       scrollSaver.restore();

@@ -1334,6 +1334,97 @@ test('keeps a sender description poll in processBatch when message_sent rekeys i
   expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledOnce();
 });
 
+test('passes viewport-slice group changes to its history batch', () => {
+  const bubbles: HTMLElement[] = [100, 101].map((mid) => {
+    const bubble = document.createElement('div');
+    bubble.dataset.peerId = String(peerId);
+    bubble.dataset.mid = String(mid);
+    return bubble;
+  });
+  const fullMids = bubbles.map((bubble) => makeFullMid(peerId, Number(bubble.dataset.mid)));
+  const bubblesByFullMid = new Map(fullMids.map((fullMid, index) => [fullMid, bubbles[index]]));
+  const groups = bubbles.map(() => ({}));
+  const deferredGroups = new Set();
+  const destroyBubble = vi.fn((bubble: HTMLElement, _animate: boolean, _fullMid: string, modifiedGroups: Set<object>) => {
+    modifiedGroups.add(groups[bubbles.indexOf(bubble)]);
+  });
+  const bubbleGroups = {mountUnmountGroups: vi.fn()};
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chat: {
+      getMessageByPeer: vi.fn(() => undefined),
+      selection: {isSelecting: false}
+    },
+    scrollable: {
+      scrollPosition: 100,
+      ignoreNextScrollEvent: vi.fn()
+    },
+    bubbleGroups,
+    log: {bindPrefix: vi.fn(() => vi.fn())},
+    getBubble: (fullMid: ReturnType<typeof makeFullMid>) => bubblesByFullMid.get(fullMid),
+    getRenderedHistory: vi.fn(() => fullMids),
+    destroyBubble,
+    setLoaded: vi.fn(),
+    deleteEmptyDateGroups: vi.fn()
+  }) as any;
+
+  harness.deleteViewportSlice({
+    invisibleTop: [{element: bubbles[0]}],
+    visible: [],
+    invisibleBottom: [{element: bubbles[1]}]
+  }, true, deferredGroups);
+
+  expect(destroyBubble).toHaveBeenCalledTimes(2);
+  expect(destroyBubble.mock.calls.map((call) => call[3])).toEqual([deferredGroups, deferredGroups]);
+  expect(deferredGroups).toEqual(new Set(groups));
+  expect(bubbleGroups.mountUnmountGroups).not.toHaveBeenCalled();
+});
+
+test('mounts viewport-slice groups with the history batch groups once', async() => {
+  const messageToRender = descriptionPollMessage(100);
+  const bubble = document.createElement('div');
+  const fullMid = makeFullMid(messageToRender);
+  const batchGroup = {};
+  const slicedGroup = {};
+  const mountUnmountGroups = vi.fn();
+  const log = Object.assign(vi.fn(), {
+    groupCollapsed: vi.fn(),
+    groupEnd: vi.fn()
+  });
+  let queuedGroups: Set<object>;
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    changedMids: new Map(),
+    bubbleGroups: {
+      firstGroup: undefined,
+      lastGroup: undefined,
+      mountUnmountGroups
+    },
+    chat: {selection: {isSelecting: false}, setPeerPromise: false},
+    lazyLoadQueue: {setAllSeen: vi.fn()},
+    getBubble: (currentFullMid: string) => currentFullMid === fullMid ? bubble : undefined,
+    makeFullMid: (currentMessage: Message.message) => makeFullMid(currentMessage),
+    groupBubbles: vi.fn(() => ({groups: [batchGroup], avatarPromises: []})),
+    setUnreadDelimiter: vi.fn(() => Promise.resolve()),
+    prepareToSaveScroll: vi.fn((_reverse: boolean, _sliceTop: boolean, _sliceBottom: boolean, deferredGroups: Set<object>) => {
+      queuedGroups = deferredGroups;
+      deferredGroups.add(slicedGroup);
+      return {restoreScroll: vi.fn(), scrollSaver: {}};
+    }),
+    commitBubbleReplacements: vi.fn()
+  }) as any;
+
+  await harness.processBatch([{
+    message: messageToRender,
+    bubble,
+    reverse: false,
+    promises: [],
+    updatePosition: true
+  }], (promise: Promise<unknown>) => promise, log);
+
+  expect(queuedGroups).toBeInstanceOf(Set);
+  expect(mountUnmountGroups).toHaveBeenCalledOnce();
+  expect(mountUnmountGroups).toHaveBeenCalledWith([batchGroup, slicedGroup]);
+});
+
 test('defers every affected BubbleGroup mount during an atomic replacement regroup', () => {
   const bubble = document.createElement('div');
   const group = {unmountItem: vi.fn()};
