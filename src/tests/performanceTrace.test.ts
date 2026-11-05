@@ -16,6 +16,16 @@ describe('performance trace collectors', () => {
     expect(trace.getSnapshot()[0].pageCount).toBe(5);
   });
 
+  test('preserves completed page timestamps in independent snapshots', () => {
+    const trace = new PerformancePhaseTrace(true);
+    trace.start('worker.walk', {traceId: 'walk', pageCount: 0});
+    trace.setPageCount('walk', 1, 1_100);
+    const first = trace.getSnapshot();
+    trace.setPageCount('walk', 2, 1_200);
+    expect(first[0].pageCompletedAtEpochMs).toEqual([1_100]);
+    expect(trace.getSnapshot()[0].pageCompletedAtEpochMs).toEqual([1_100, 1_200]);
+  });
+
   test('records named phases in the page performance timeline', () => {
     const name = 'main.chatlist.mount.test';
     performance.clearMeasures(name);

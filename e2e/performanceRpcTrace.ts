@@ -75,6 +75,7 @@ export type CachedDialogReconcileRunSummary = {
   startRelativeToScenarioMs: number,
   endRelativeToScenarioMs: number,
   mainThreadTimeMs: number,
+  pageCompletionOffsetsMs?: number[],
   // The page navigated away and took the worker with it before the walk finished; the end is that navigation.
   interrupted?: boolean
 };
@@ -85,6 +86,7 @@ export type CachedDialogReconcilePhase = {
   startedAtEpochMs: number,
   durationMs: number | null,
   interrupted?: boolean
+  pageCompletedAtEpochMs?: number[]
 };
 
 export type CachedDialogReconcileWindow = {
@@ -221,7 +223,13 @@ export function collectCachedDialogReconciles(
     if(!Number.isFinite(mainThreadTimeMs) || mainThreadTimeMs < 0) {
       throw new Error(`cached dialog reconciliation ${phase.traceId} has no main-thread time`);
     }
-    return summarizeCachedDialogReconcile(phase, scenarioStartedAtEpochMs, mainThreadTimeMs);
+    const summary = summarizeCachedDialogReconcile(phase, scenarioStartedAtEpochMs, mainThreadTimeMs);
+    if(phase.pageCompletedAtEpochMs) {
+      summary.pageCompletionOffsetsMs = phase.pageCompletedAtEpochMs
+      .filter((time) => time >= scenarioStartedAtEpochMs && time < scenarioEndedAtEpochMs)
+      .map((time) => Number((time - scenarioStartedAtEpochMs).toFixed(2)));
+    }
+    return summary;
   });
   return {walks};
 }

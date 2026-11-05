@@ -39,6 +39,17 @@ test('associates only walks that overlap each measured scenario and records no-w
   expect(() => collectCachedDialogReconciles([laterWalk], 17_500, 18_000, {})).toThrow('main-thread time');
 });
 
+test('reports only page completions inside each scenario window', () => {
+  const phase = {
+    traceId: 'walk', pageCount: 4, startedAtEpochMs: 1_000, durationMs: 5_000,
+    pageCompletedAtEpochMs: [1_200, 2_000, 2_500, 4_000]
+  };
+  const summary = collectCachedDialogReconciles([phase], 2_000, 3_000, {walk: 1});
+  expect(summary.walks[0].pageCompletionOffsetsMs).toEqual([0, 500]);
+  const outside = collectCachedDialogReconciles([phase], 4_100, 5_000, {walk: 1});
+  expect(outside.walks[0].pageCompletionOffsetsMs).toEqual([]);
+});
+
 test('attributes a long warm-list walk to every overlapping scroll repeat', () => {
   expect(collectCachedDialogReconcileSummaries([
     {scenarioStartedAtEpochMs: 0, scenarioEndedAtEpochMs: 1_000},

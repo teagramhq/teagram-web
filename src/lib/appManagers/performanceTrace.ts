@@ -5,6 +5,7 @@ export type PerformancePhase = {
   traceId?: string,
   accountNumber?: number,
   pageCount?: number
+  pageCompletedAtEpochMs?: number[]
 };
 
 export type PerformanceRpcCall = {
@@ -48,7 +49,7 @@ export class PerformancePhaseTrace {
       durationMs: null,
       ...(details.traceId === undefined ? {} : {traceId: details.traceId}),
       ...(details.accountNumber === undefined ? {} : {accountNumber: details.accountNumber}),
-      ...(details.pageCount === undefined ? {} : {pageCount: details.pageCount})
+      ...(details.pageCount === undefined ? {} : {pageCount: details.pageCount, pageCompletedAtEpochMs: []})
     };
     this.phases.push(phase);
 
@@ -64,9 +65,12 @@ export class PerformancePhaseTrace {
   }
 
   // A phase that is still running reports the pages seen so far, for a reader that never sees it finish.
-  public setPageCount(traceId: string, pageCount: number) {
+  public setPageCount(traceId: string, pageCount: number, completedAtEpochMs?: number) {
     const phase = this.phases.find((candidate) => candidate.traceId === traceId && candidate.durationMs === null);
-    if(phase) phase.pageCount = pageCount;
+    if(phase) {
+      phase.pageCount = pageCount;
+      if(completedAtEpochMs !== undefined) phase.pageCompletedAtEpochMs?.push(completedAtEpochMs);
+    }
   }
 
   public reset(preserveNames: string[] = []) {
@@ -89,7 +93,7 @@ export class PerformancePhaseTrace {
   }
 
   public getSnapshot() {
-    return this.phases.map((phase) => ({...phase}));
+    return this.phases.map((phase) => ({...phase, ...(phase.pageCompletedAtEpochMs ? {pageCompletedAtEpochMs: [...phase.pageCompletedAtEpochMs]} : {})}));
   }
 }
 

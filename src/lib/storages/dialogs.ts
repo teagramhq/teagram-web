@@ -2169,7 +2169,7 @@ export default class DialogsStorage extends AppManager {
             return result;
           }
         });
-        if(finishTrace) performancePhaseTrace.setPageCount(traceId!, ++pageCount);
+        if(finishTrace) performancePhaseTrace.setPageCount(traceId!, ++pageCount, performance.timeOrigin + performance.now());
         await flushPage();
 
         if(result._ === 'messages.dialogsNotModified') {
