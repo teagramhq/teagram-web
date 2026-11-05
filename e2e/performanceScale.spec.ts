@@ -503,7 +503,8 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
   });
 
-  await waitForHistorySettled(page);
+  // Only the diagnostic pass waits: the gated window must keep the chat-open history tail it always had.
+  if(profileTrace) await waitForHistorySettled(page);
   await begin(page, requests, profileTrace, profileTrace);
   if(profileTrace) await installScrollSpanTracing(page);
   const cpuProfile = profileTrace ? await startCpuProfile(page) : undefined;
