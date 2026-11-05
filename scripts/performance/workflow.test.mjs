@@ -68,6 +68,23 @@ test('extra timing samples are reported without changing the three-repeat policy
       serverCommit: 'server-v1',
       fixtureServerCommit: 'fixture-server-v1',
       requireBase: true,
+      diagnostics: {
+        '100x': {
+          sendMessage: {
+            ms: 123,
+            requests: 0,
+            domNodes: 1_000,
+            domNodeCounts: {bubbleGroups: 12},
+            longTasksOver50Ms: 0,
+            blockingTimeMs: 0,
+            rpcCallCount: 1,
+            rpcWallMs: 81,
+            nonRpcElapsedMs: 42,
+            rpcCalls: [{method: 'messages.sendMessage', durationMs: 81, outcome: 'success'}],
+            cpu: {topFrames: [{functionName: 'sendMessage', script: '/input.ts', selfMs: 22}]}
+          }
+        }
+      },
       variants
     };
   };
@@ -129,4 +146,6 @@ test('extra timing samples are reported without changing the three-repeat policy
   assert.equal(policySection(elevenSendSampleSummary), policySection(threeSampleSummary));
   assert.match(fiveSampleSummary, /Open long-history chat \| head \| 5 \| 1000\.0/);
   assert.match(elevenSendSampleSummary, /Send a message \| head \| 11 \| 1100\.0 \| 50\.0 \| 1150\.0/);
+  assert.match(threeSampleSummary, /100x send action diagnostic/);
+  assert.match(threeSampleSummary, /\| 123\.0 \| 1 \| 81\.0 \| 42\.0 \| 0 \| 1000 \| 12 \| 0 \| 0\.0 \| messages\.sendMessage \(81\.0 ms, success\) \| sendMessage \/input\.ts \(22\.0 ms\) \|/);
 });

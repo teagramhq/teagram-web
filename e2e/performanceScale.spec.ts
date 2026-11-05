@@ -787,9 +787,10 @@ async function describeRow(row: Locator) {
   return {first, second: await sample()};
 }
 
-async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture) {
+async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false) {
   let composerReadyAfterFirstBubbleMs = 0;
   let firstBubbleAtMs = 0;
+  let cpu: PerformanceCpuSummary | undefined;
   try {
     const activeSearch = page.locator('#search-container.active');
     if(await activeSearch.count()) {
@@ -812,11 +813,13 @@ async function sendMessage(page: Page, requests: {value: number}, fixture: Fixtu
     await expect(composer).toBeVisible({timeout: 60_000});
     await expect(composer).toBeEditable({timeout: 60_000});
     composerReadyAfterFirstBubbleMs = await page.evaluate((startedAt) => performance.now() - startedAt, firstBubbleAtMs);
-    await begin(page, requests);
+    const cpuProfile = traceRpc ? await startCpuProfile(page) : undefined;
+    await begin(page, requests, true, traceRpc);
     const text = `web-perf-${process.env.GITHUB_RUN_ID || 'local'}-${Date.now()}`;
     await composer.fill(text);
     await composer.press('Enter');
     await expect(page.locator('#page-chats .bubbles .bubble.is-out').filter({hasText: text})).toBeVisible({timeout: 60_000});
+    if(cpuProfile) cpu = await finishCpuProfile(cpuProfile);
   } catch(error) {
     console.error('send a message failed', JSON.stringify(await describeSendState(page, fixture)));
     throw error;
@@ -824,9 +827,10 @@ async function sendMessage(page: Page, requests: {value: number}, fixture: Fixtu
   const firstBubbleToSentMs = await page.evaluate((startedAt) => performance.now() - startedAt, firstBubbleAtMs);
   const boundary = await snapshotMeasurementBoundary(page);
   return {
-    ...await capture(page, requests, boundary),
+    ...await capture(page, requests, boundary, false, traceRpc),
     composerReadyAfterFirstBubbleMs,
-    firstBubbleToSentMs
+    firstBubbleToSentMs,
+    ...(cpu ? {cpu} : {})
   };
 }
 
@@ -1030,6 +1034,24 @@ async function runSendTimingRepeat(browser: Browser, run: VariantRun, fixture: F
   }
 }
 
+async function traceSendMessage(browser: Browser, run: VariantRun, fixture: Fixture) {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    return await sendMessage(page, requests, fixture, true);
+  } finally {
+    await context.close();
+  }
+}
+
 async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
   const coldChatList: Metric[] = [];
   const warmChatList: Metric[] = [];
@@ -1101,7 +1123,8 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
     }
   }
 
-  return {coldChatList, warmChatList, chatOpen: chatOpen!, scrollBack2k: scrollBack2k!, scrollBack2kRepeats};
+  const sendMessage = await test.step('trace 100x send action RPC and CPU cost', () => traceSendMessage(browser, run, fixture));
+  return {coldChatList, warmChatList, chatOpen: chatOpen!, scrollBack2k: scrollBack2k!, scrollBack2kRepeats, sendMessage};
 }
 
 test('measures the scale fixture in interleaved base and head runs', async({browser}) => {
