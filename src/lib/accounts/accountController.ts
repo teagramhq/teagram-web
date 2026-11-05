@@ -133,12 +133,17 @@ export class AccountController extends StaticUtilityClass {
    */
   static async shiftAccounts(upTo: ActiveAccountNumber) {
     for(let i = upTo; i <= MAX_ACCOUNTS; i++) {
-      await sessionStorage.delete(`account${i as ActiveAccountNumber}`);
+      const accountNumber = i as ActiveAccountNumber;
+      await sessionStorage.delete(`account${accountNumber}`);
+
       if(i < MAX_ACCOUNTS) {
-        const toMove = await this.get((i + 1) as ActiveAccountNumber);
+        const nextAccountNumber = (i + 1) as ActiveAccountNumber;
+        const toMove = await this.get(nextAccountNumber);
         toMove.userId && (await this.update(i as ActiveAccountNumber, toMove, true));
       }
     }
+
+    await sessionStorage.flush();
   }
 
   /**

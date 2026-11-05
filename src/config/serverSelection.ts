@@ -1,5 +1,6 @@
 import type {MtprotoTarget} from '@config/mtprotoTarget';
 import {validatePrivateEndpoint, validateMtprotoTarget} from '@config/mtprotoTarget';
+import {TELEGRAM_BOT_API_ORIGIN} from '@config/telegramBotApi';
 import {notifyGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
 
 export const SERVER_CHOICE_KEY = 'teagram.server-choice.v1';
@@ -122,6 +123,7 @@ export function getServerConnectSources(host: string, target?: MtprotoTarget) {
   if(httpsOrigin.origin !== location.origin) sources.add(httpsOrigin.origin);
   if(target?.mode === 'private') sources.add(target.endpoint);
   else sources.add(websocketOrigin.origin);
+  sources.add(TELEGRAM_BOT_API_ORIGIN);
   return [...sources];
 }
 
