@@ -62,6 +62,7 @@ if(args?.help) {
   process.stdout.write(`${HELP}\n`);
 } else if(args) {
   const guestSignupOnly = args.guestSignupOnly === true;
+  const guestSignupGateOff = args.guestSignupGateOff === true;
   let cleanupError;
   let operationError;
   let browserScriptInstalled = false;
@@ -123,7 +124,7 @@ if(args?.help) {
       harnessRevision: args.harnessRevision,
       serverRevision: args.serverRevision,
       webRevision: args.webRevision
-    }, {requireArtifact: !controlsOnly, guestSignupOnly});
+    }, {requireArtifact: !controlsOnly, guestSignupOnly, guestSignupGateOff});
     const {serverReady, artifactReady} = readiness;
     const credentials = readSyntheticCredentials(serverReady.credentials, args.runId, authProgress ? 1 : 2);
 
@@ -468,7 +469,8 @@ if(args?.help) {
       guestSignup: browserResult.guestSignup,
       contextCount: browserResult.contextCount,
       screenshotsCaptured: browserResult.screenshotsCaptured,
-      network: browserResult.network
+      network: browserResult.network,
+      turnstileSignInEnabled: !guestSignupGateOff
     })}\n`);
   } else if(!controlsOnlyDone) {
 

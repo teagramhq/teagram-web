@@ -4231,6 +4231,31 @@ describe('real client scenario contract', () => {
     expect(() => parseRealClientArgs([...args, '--guest-signup'])).toThrow('option was provided more than once');
   });
 
+  it('keeps gate-off guest signup explicit and limited to the guest browser mode', () => {
+    const args = [
+      '--readiness-file', './fixture.jsonl',
+      '--harness-revision', READINESS_PINS.harnessRevision,
+      '--server-revision', READINESS_PINS.serverRevision,
+      '--web-revision', READINESS_PINS.webRevision,
+      '--run-id', READINESS_PINS.runId,
+      '--guest-signup',
+      '--guest-signup-gate-off'
+    ];
+
+    expect(parseRealClientArgs(args)).toMatchObject({
+      guestSignupOnly: true,
+      guestSignupGateOff: true
+    });
+    expect(() => parseRealClientArgs([
+      '--readiness-file', './fixture.jsonl',
+      '--harness-revision', READINESS_PINS.harnessRevision,
+      '--server-revision', READINESS_PINS.serverRevision,
+      '--web-revision', READINESS_PINS.webRevision,
+      '--run-id', READINESS_PINS.runId,
+      '--guest-signup-gate-off'
+    ])).toThrow('requires --guest-signup');
+  });
+
   it('accepts the previously supported scenario selections without poll', () => {
     const args = [
       '--readiness-file', './fixture.jsonl',
@@ -4285,6 +4310,28 @@ describe('real client scenario contract', () => {
       security: {...serverReady.security, finalAuthKeys: 2}
     }), READINESS_PINS, {requireArtifact: false, guestSignupOnly: true}))
     .toThrow('server-ready security evidence is incomplete');
+  });
+
+  it('requires the disabled sign-in gate in explicit gate-off guest signup readiness', () => {
+    const serverReady = buildServerReady();
+    serverReady.security = {
+      ...serverReady.security,
+      registrationClosed: false,
+      guestSignUpEnabled: true,
+      turnstileSignInEnabled: false,
+      finalAuthKeys: 0
+    };
+    const text = JSON.stringify(serverReady);
+
+    expect(parseFixtureReadiness(text, READINESS_PINS, {
+      requireArtifact: false,
+      guestSignupOnly: true,
+      guestSignupGateOff: true
+    })).toEqual({serverReady, artifactReady: undefined});
+    expect(() => parseFixtureReadiness(text, READINESS_PINS, {
+      requireArtifact: false,
+      guestSignupOnly: true
+    })).toThrow('server-ready security evidence is incomplete');
   });
 
   it('requires the observer-controls-only flag to be explicit and complete', () => {
@@ -5351,8 +5398,9 @@ describe('real client username field readiness', () => {
   function runOuterRealClientRunner(browserOutput: string, {
     browserExitCode = 0,
     failRunnerCleanup = false,
-    guestSignupOnly = false
-  }: {browserExitCode?: number, failRunnerCleanup?: boolean, guestSignupOnly?: boolean} = {}) {
+    guestSignupOnly = false,
+    guestSignupGateOff = false
+  }: {browserExitCode?: number, failRunnerCleanup?: boolean, guestSignupOnly?: boolean, guestSignupGateOff?: boolean} = {}) {
     const fixtureDirectory = mkdtempSync(join(tmpdir(), 'real-client-runner-contract-'));
     const secretDirectory = mkdtempSync(join(tmpdir(), `teagram-fixture-${READINESS_PINS.runId}.`));
     const passwordFiles = [join(secretDirectory, 'a-password'), join(secretDirectory, 'b-password')];
@@ -5402,7 +5450,7 @@ describe('real client username field readiness', () => {
         ...serverReadyBase.security,
         registrationClosed: false,
         guestSignUpEnabled: true,
-        turnstileSignInEnabled: true,
+        turnstileSignInEnabled: !guestSignupGateOff,
         finalAuthKeys: 0
       }} : {}),
       credentials: passwordFiles.map((passwordFile, index) => ({
@@ -5458,7 +5506,7 @@ describe('real client username field readiness', () => {
         '--server-revision', READINESS_PINS.serverRevision,
         '--web-revision', READINESS_PINS.webRevision,
         '--run-id', READINESS_PINS.runId,
-        ...(guestSignupOnly ? ['--guest-signup'] : ['--auth-progress-one-submission'])
+        ...(guestSignupOnly ? ['--guest-signup', ...(guestSignupGateOff ? ['--guest-signup-gate-off'] : [])] : ['--auth-progress-one-submission'])
       ], {
         encoding: 'utf8',
         env: {
@@ -5623,6 +5671,42 @@ describe('real client username field readiness', () => {
       guestSignup,
       contextCount: 1,
       screenshotsCaptured: 2
+    });
+  });
+
+  it('emits a gate-off guest signup report only when the readiness proves the gate is disabled', () => {
+    const guestSignup = {
+      availabilityVisible: true,
+      appConfigLoaded: true,
+      turnstileActions: ['signup'],
+      authorized: true
+    };
+    const browserReport = {
+      status: 'passed',
+      mode: 'guest_signup',
+      runId: READINESS_PINS.runId,
+      harnessRevision: READINESS_PINS.harnessRevision,
+      serverRevision: READINESS_PINS.serverRevision,
+      webRevision: READINESS_PINS.webRevision,
+      guestSignup,
+      contextCount: 1,
+      controlContextCount: Object.keys(observation.CONTROL_EXPECTATIONS).length,
+      screenshotsCaptured: 2,
+      network: {unexpectedAttempts: 0, observerErrors: 0}
+    };
+
+    const outer = runOuterRealClientRunner(`${JSON.stringify(browserReport)}\n`, {
+      guestSignupOnly: true,
+      guestSignupGateOff: true
+    });
+
+    expect(outer.status).toBe(0);
+    expect(outer.stderr).toBe('');
+    expect(JSON.parse(outer.stdout.trim())).toMatchObject({
+      status: 'passed',
+      mode: 'guest_signup',
+      turnstileSignInEnabled: false,
+      guestSignup
     });
   });
 
