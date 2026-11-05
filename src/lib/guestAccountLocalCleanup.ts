@@ -36,7 +36,8 @@ export async function clearGuestAccountLocalState(
           keys.push(`dc${i as TrueDcId}_hash`); // WebA only
         }
 
-        return Promise.all(keys.map((key) => sessionStorage.delete(key)));
+        await Promise.all(keys.map((key) => sessionStorage.delete(key)));
+        await sessionStorage.flush();
       })(),
       AppStoragesManager.clearAllStoresForAccount(1),
       AppStoragesManager.clearSessionStores(),

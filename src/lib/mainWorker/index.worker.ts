@@ -27,6 +27,7 @@ import CacheStorageController from '@lib/files/cacheStorage';
 import {ApiManager} from '@appManagers/apiManager';
 import {useAutoLock} from '@lib/mainWorker/useAutoLock';
 import pushSingleManager from '@appManagers/pushSingleManager';
+import telegramStickerPackTokenStorageManager from '@lib/mainWorker/telegramStickerPackTokenStorageManager';
 import {createBroadcastChannelWrapper} from '@lib/broadcastChannelWrapper';
 import {notifyMtprotoWorkerReady} from '@helpers/mtprotoWorkerReady';
 import {MainBroadcastChannelEvents, unversionedMainBroadcastChannelName} from '@config/broadcastChannel';
@@ -55,7 +56,8 @@ const mainBroadcastChannel = createBroadcastChannelWrapper<MainBroadcastChannelE
 let isLocked = true;
 
 const singleManagers = {
-  [pushSingleManager.name]: pushSingleManager
+  [pushSingleManager.name]: pushSingleManager,
+  [telegramStickerPackTokenStorageManager.name]: telegramStickerPackTokenStorageManager
 };
 
 port.addMultipleEventsListeners({
