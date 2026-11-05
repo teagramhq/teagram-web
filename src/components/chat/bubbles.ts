@@ -4614,6 +4614,7 @@ export default class ChatBubbles {
 
     const retry = top && this.deferredHistoryRetry;
     if(retry) {
+      const peerId = this.peerId;
       const retryPromise = Promise.resolve().then(retry).then(() => true);
       this.getHistoryTopPromise = retryPromise;
       retryPromise.then(() => {
@@ -4621,9 +4622,12 @@ export default class ChatBubbles {
         this.getHistoryTopPromise = undefined;
         this.scrollable.onScroll();
       }, (error: unknown) => {
-        if(this.getHistoryTopPromise !== retryPromise) return;
+        if(this.getHistoryTopPromise !== retryPromise) {
+          if(error !== PEER_CHANGED_ERROR) this.log.warn('deferred history retry failed:', peerId, true, error, {stale: true});
+          return;
+        }
         this.getHistoryTopPromise = undefined;
-        if(error !== PEER_CHANGED_ERROR) this.log.error('deferred history retry failed:', error);
+        if(error !== PEER_CHANGED_ERROR) this.log.error('deferred history retry failed:', peerId, true, error);
       });
       return;
     }
@@ -11914,6 +11918,7 @@ export default class ChatBubbles {
             }, 0);
           });
         });
+        // Observe rejection until getHistory1 attaches the deferred paging wait; it still receives the original promise.
         void renderRemainder.catch(noop);
         onDeferredHistory?.(renderRemainder);
       } else {
@@ -13130,6 +13135,7 @@ export default class ChatBubbles {
   }
 
   public getHistory1(maxId?: FullMid, reverse?: boolean, isBackLimit?: boolean, additionalFullMid?: FullMid, justLoad?: boolean) {
+    const peerId = this.peerId;
     const middleware = this.getMiddleware(justLoad ? undefined : () => {
       return (reverse ? this.getHistoryTopPromise : this.getHistoryBottomPromise) === waitPromise;
     });
@@ -13166,9 +13172,12 @@ export default class ChatBubbles {
         // this.scrollable.onScroll();
       }
     }, (error: unknown) => {
-      if(!middleware() || (reverse ? this.getHistoryTopPromise : this.getHistoryBottomPromise) !== waitPromise) return;
+      if(!middleware() || (reverse ? this.getHistoryTopPromise : this.getHistoryBottomPromise) !== waitPromise) {
+        if(error !== PEER_CHANGED_ERROR) this.log.warn('history load failed:', peerId, reverse, error, {stale: true});
+        return;
+      }
       (reverse ? this.getHistoryTopPromise = undefined : this.getHistoryBottomPromise = undefined);
-      if(error !== PEER_CHANGED_ERROR) this.log.error('history load failed:', error);
+      if(error !== PEER_CHANGED_ERROR) this.log.error('history load failed:', peerId, reverse, error);
     });
 
     return result;
