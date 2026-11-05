@@ -24,3 +24,7 @@ test('Playwright reports a performance-test timeout before the job is cancelled'
   assert.ok(testTimeoutMinutes < jobTimeoutMinutes, 'the Playwright timeout must leave time for summary and artifact upload');
   assert.match(playwrightConfig, /reporter:\s*\[\['list',\s*\{printSteps:\s*true\}\]\]/, 'the reporter must stream in-progress scenario steps');
 });
+
+test('a hung browser action fails its own step instead of consuming the test timeout', () => {
+  assert.match(playwrightConfig, /actionTimeout:\s*60_000/);
+});

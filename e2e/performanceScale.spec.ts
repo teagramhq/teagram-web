@@ -761,16 +761,38 @@ async function globalSearch(page: Page, requests: {value: number}, scale: Scale)
   return capture(page, requests, await snapshotMeasurementBoundary(page));
 }
 
+async function describeSendState(page: Page, fixture: Fixture) {
+  const state = page.evaluate((partner) => {
+    const chat = (window as any).appImManager?.chat;
+    const input = document.querySelector('.input-message-input:not(.input-field-input-fake)');
+    return {
+      peerId: String(chat?.peerId ?? ''),
+      peerChangeFailed: !!chat?.peerChangeFailed,
+      partnerRows: document.querySelectorAll(`#chatlist-container .chatlist-chat[data-peer-id="${partner}"]`).length,
+      chatRows: document.querySelectorAll('#chatlist-container .chatlist-chat').length,
+      bubbles: document.querySelectorAll('#page-chats .bubbles .bubble[data-mid]').length,
+      composer: input ? {editable: input.getAttribute('contenteditable'), hidden: !(input as HTMLElement).offsetParent} : null,
+      pageClasses: document.querySelector('#page-chats')?.className
+    };
+  }, fixture.partner).catch((error: unknown) => ({evaluateError: String(error)}));
+  return Promise.race([state, new Promise((resolve) => setTimeout(() => resolve('page unresponsive'), 5_000))]);
+}
+
 async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture) {
-  await page.keyboard.press('Escape');
-  await page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first().click();
-  await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible();
-  await begin(page, requests);
-  const text = `web-perf-${process.env.GITHUB_RUN_ID || 'local'}-${Date.now()}`;
-  const composer = page.locator('.input-message-input:not(.input-field-input-fake)[contenteditable="true"]');
-  await composer.fill(text);
-  await composer.press('Enter');
-  await expect(page.locator('#page-chats .bubbles .bubble.is-out').filter({hasText: text})).toBeVisible({timeout: 60_000});
+  try {
+    await page.keyboard.press('Escape');
+    await page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first().click();
+    await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible();
+    await begin(page, requests);
+    const text = `web-perf-${process.env.GITHUB_RUN_ID || 'local'}-${Date.now()}`;
+    const composer = page.locator('.input-message-input:not(.input-field-input-fake)[contenteditable="true"]');
+    await composer.fill(text);
+    await composer.press('Enter');
+    await expect(page.locator('#page-chats .bubbles .bubble.is-out').filter({hasText: text})).toBeVisible({timeout: 60_000});
+  } catch(error) {
+    console.error('send a message failed', JSON.stringify(await describeSendState(page, fixture)));
+    throw error;
+  }
   return capture(page, requests, await snapshotMeasurementBoundary(page));
 }
 

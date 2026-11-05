@@ -13,7 +13,8 @@ export default defineConfig({
   use: {
     headless: true,
     ignoreHTTPSErrors: true,
-    viewport: {width: 1280, height: 800}
+    viewport: {width: 1280, height: 800},
+    actionTimeout: 60_000
   },
   projects: [{
     name: 'performance-chromium',
