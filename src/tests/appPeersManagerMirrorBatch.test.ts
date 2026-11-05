@@ -181,3 +181,64 @@ test('sends coalesced chat updates as a traced mirror batch', () => {
     chatUpdateIds: [42, 43]
   });
 });
+
+test('sends peer-save broadcasts in the traced mirror message', () => {
+  const invokeVoid = vi.fn();
+  vi.spyOn(MTProtoMessagePort, 'getInstance').mockReturnValue({invokeVoid} as any);
+  const manager = Object.create(AppPeersManager.prototype) as any;
+  Object.assign(manager, {
+    appChatsManager: {getChat: vi.fn()},
+    appUsersManager: {getUser: vi.fn(() => ({_: 'user', id: 7}))},
+    getAccountNumber: () => 1
+  });
+  const events = [{name: 'user_update', args: [7]}, {name: 'peer_title_edit', args: [{peerId: 7}]}];
+
+  manager.mirrorApiPeers([], 'cachedChannelDialogsReconcile', 'walk-3', undefined, undefined, events);
+
+  expect(invokeVoid).toHaveBeenCalledWith('mirror', expect.objectContaining({
+    events,
+    trace: 'cachedChannelDialogsReconcile',
+    traceId: 'walk-3'
+  }));
+});
+
+test('drops captured updates for peers removed before their notification batch', () => {
+  const invokeVoid = vi.fn();
+  vi.spyOn(MTProtoMessagePort, 'getInstance').mockReturnValue({invokeVoid} as any);
+  const manager = Object.create(AppPeersManager.prototype) as any;
+  Object.assign(manager, {
+    appChatsManager: {getChat: vi.fn(() => undefined)},
+    appUsersManager: {getUser: vi.fn(() => undefined)},
+    getAccountNumber: () => 1
+  });
+
+  manager.mirrorApiPeers([], 'cachedChannelDialogsReconcile', 'walk-4', undefined, undefined, [
+    {name: 'chat_update', args: [42]},
+    {name: 'user_update', args: [7]}
+  ]);
+
+  expect(invokeVoid).toHaveBeenCalledWith('mirror', expect.objectContaining({traceOnly: true}));
+  expect(invokeVoid.mock.calls[0][1]).not.toHaveProperty('events');
+});
+
+test('attaches the current worker status when a reconciliation update is sent', () => {
+  const invokeVoid = vi.fn();
+  vi.spyOn(MTProtoMessagePort, 'getInstance').mockReturnValue({invokeVoid} as any);
+  const status = {_: 'userStatusOnline', expires: 42};
+  const getUserStatus = vi.fn(() => status);
+  const manager = Object.create(AppPeersManager.prototype) as any;
+  Object.assign(manager, {
+    appChatsManager: {getChat: vi.fn()},
+    appUsersManager: {getUser: vi.fn(() => ({_: 'user', id: 7})), getUserStatus},
+    getAccountNumber: () => 1
+  });
+
+  manager.mirrorApiPeers([], 'cachedChannelDialogsReconcile', 'walk-5', undefined, undefined, [
+    {name: 'user_update', args: [7, {statusFromWorker: true}]}
+  ]);
+
+  expect(getUserStatus).toHaveBeenCalledExactlyOnceWith(7);
+  expect(invokeVoid).toHaveBeenCalledWith('mirror', expect.objectContaining({
+    events: [{name: 'user_update', args: [7, {statusFromWorker: true, status}]}]
+  }));
+});

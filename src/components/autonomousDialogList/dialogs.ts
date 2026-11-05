@@ -144,7 +144,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       }
     });
 
-    this.listenerSetter.add(rootScope)('user_update', async(userId) => {
+    this.listenerSetter.add(rootScope)('user_update', async(userId, options) => {
       if(!this.isActive) {
         return;
       }
@@ -155,7 +155,9 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
         return;
       }
 
-      const status = await this.managers.appUsersManager.getUserStatus(userId);
+      const status = options?.statusFromWorker ?
+        options.status :
+        await this.managers.appUsersManager.getUserStatus(userId);
       const online = status?._ === 'userStatusOnline';
       this.setOnlineStatus(dom.avatarEl.node, online);
     });

@@ -6,7 +6,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test('flushes current peers once after the cached-dialog walk completes', async() => {
+test('flushes current peers page by page without restoring peers cleared later', async() => {
   vi.stubEnv('VITE_PERF_TRACE', '1');
   vi.resetModules();
   const {PerformanceRpcTrace, performancePhaseTrace} = await import('@appManagers/performanceTrace');
@@ -32,6 +32,7 @@ test('flushes current peers once after the cached-dialog walk completes', async(
   const storage = Object.create(DialogsStorage.prototype) as any;
   Object.assign(storage, {
     apiManager,
+    rootScope: {collectBroadcastEvents: (_events: unknown[], callback: () => void) => callback()},
     appPeersManager: {
       isBotforum: () => false,
       getPeerId: (peer: {user_id: number}) => peer.user_id,
@@ -96,12 +97,15 @@ test('flushes current peers once after the cached-dialog walk completes', async(
     pageCount: 1,
     durationMs: null
   });
-  expect(storage.appPeersManager.mirrorApiPeers).not.toHaveBeenCalled();
+  expect(storage.appPeersManager.mirrorApiPeers).toHaveBeenCalledWith(
+    ['-42', '1'], 'cachedChannelDialogsReconcile', expect.any(String), undefined, undefined, undefined, []
+  );
 
   // AppChatsManager.clear removes the peer while the second page is pending.
   delete currentPeers['-42'];
   delete mirroredPeers['-42'];
   currentPeers['1'] = currentFirstUser;
+  mirroredPeers['1'] = currentFirstUser;
 
   const secondPage: any = {
     _: 'messages.dialogs',
@@ -126,19 +130,19 @@ test('flushes current peers once after the cached-dialog walk completes', async(
     firstPage,
     'cachedChannelDialogsReconcile',
     expect.any(Function),
-    expect.objectContaining({skipEmptyChannelDialogReconciliation: true, chatUpdateIds: expect.any(Set)})
+    expect.objectContaining({skipEmptyChannelDialogReconciliation: true})
   );
   expect(saveApiPeers).toHaveBeenNthCalledWith(
     2,
     secondPage,
     'cachedChannelDialogsReconcile',
     expect.any(Function),
-    expect.objectContaining({skipEmptyChannelDialogReconciliation: true, chatUpdateIds: expect.any(Set)})
+    expect.objectContaining({skipEmptyChannelDialogReconciliation: true})
   );
   expect(saveApiPeers.mock.calls[1][2]).toBe(saveApiPeers.mock.calls[0][2]);
-  expect(storage.appPeersManager.mirrorApiPeers).toHaveBeenCalledTimes(1);
+  expect(storage.appPeersManager.mirrorApiPeers).toHaveBeenCalledTimes(3);
   expect(storage.appPeersManager.mirrorApiPeers).toHaveBeenCalledWith(
-    new Set(['-42', '1', '2']),
+    [],
     'cachedChannelDialogsReconcile',
     expect.stringMatching(/^\d+-\d+$/),
     expect.objectContaining({

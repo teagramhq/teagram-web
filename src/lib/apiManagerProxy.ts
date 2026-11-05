@@ -90,7 +90,8 @@ import {
   reconcileObjectURLMirrorSnapshot,
   reconcileObjectURLMirrorValue,
   reconcilePeerMirrorBatch,
-  dispatchPeerMirrorBatchChatUpdates
+  dispatchPeerMirrorBatchChatUpdates,
+  applyPeerMirrorBatch
 } from './apiManagerProxyUtils';
 
 function withRuntimeMtprotoTarget(url: string | URL) {
@@ -111,6 +112,19 @@ import type {
   CommunityPeerLinkRequestsState
 } from '@appManagers/appCommunitiesManager';
 
+const commonEventNames = new Set<keyof BroadcastEvents>([
+  'language_change',
+  'settings_updated',
+  'theme_changed',
+  'theme_change',
+  'background_change',
+  'logging_out',
+  'notification_count_update',
+  'account_logged_in',
+  'notification_cancel',
+  'notification_cancel_up_to',
+  'toggle_using_passcode'
+]);
 
 export type Mirrors = {
   state: State,
@@ -159,7 +173,9 @@ export type MirrorTaskPayload<
   reconcilePhase?: PerformancePhase,
   traceOnly?: boolean,
   skipEmptyChannelDialogReconciliation?: boolean,
-  chatUpdateIds?: ChatId[]
+  chatUpdateIds?: ChatId[],
+  events?: Array<{name: string, args: any[]}>,
+  suppressedActiveChatUpdateIds?: ChatId[]
 };
 
 export type NotificationBuildMessageTaskPayload = {
@@ -344,11 +360,25 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
       peers: (payload) => {
         if(payload.merge) {
+          const options = payload.skipEmptyChannelDialogReconciliation ? {skipEmptyChannelDialogReconciliation: true} : undefined;
+          if(payload.events || payload.suppressedActiveChatUpdateIds) {
+            applyPeerMirrorBatch(
+              this.mirrors.peers as Record<string, any>,
+              payload.value,
+              [
+                ...(payload.events ?? []),
+                ...(payload.chatUpdateIds ?? []).map((chatId) => ({name: 'chat_update', args: [chatId, options]}))
+              ],
+              (chatId) => rootScope.dispatchEvent('chat_update', chatId, options),
+              ({name, args}) => rootScope.dispatchEventSingle(name as any, ...args),
+              payload.suppressedActiveChatUpdateIds
+            );
+            return false;
+          }
           const activeChannelIds = reconcilePeerMirrorBatch(
             this.mirrors.peers as Record<string, any>,
             payload.value
           );
-          const options = payload.skipEmptyChannelDialogReconciliation ? {skipEmptyChannelDialogReconciliation: true} : undefined;
           dispatchPeerMirrorBatchChatUpdates(
             activeChannelIds,
             payload.chatUpdateIds ?? [],
@@ -463,20 +493,6 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
     this.registerServiceWorker();
     this.registerCryptoWorker();
-
-    const commonEventNames = new Set<keyof BroadcastEvents>([
-      'language_change',
-      'settings_updated',
-      'theme_changed',
-      'theme_change',
-      'background_change',
-      'logging_out',
-      'notification_count_update',
-      'account_logged_in',
-      'notification_cancel',
-      'notification_cancel_up_to',
-      'toggle_using_passcode'
-    ]);
 
     // const perf = performance.now();
     this.addMultipleEventsListeners({
@@ -1636,7 +1652,12 @@ class ApiManagerProxy extends MTProtoMessagePort {
     payload.previousUrls?.forEach(forgetLoadedURL);
 
     const isSettingsUpdate = name === 'state' && key === 'settings';
-    if(!isSettingsUpdate && accountNumber !== getCurrentAccount()) return;
+    if(!isSettingsUpdate && accountNumber !== getCurrentAccount()) {
+      payload.events?.forEach(({name, args}) => {
+        if(commonEventNames.has(name as keyof BroadcastEvents)) rootScope.dispatchEventSingle(name as any, ...args);
+      });
+      return;
+    }
 
     const traceMirror = (import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1') &&
       payload.trace === 'cachedChannelDialogsReconcile' &&

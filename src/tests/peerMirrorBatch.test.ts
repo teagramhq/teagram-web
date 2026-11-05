@@ -1,6 +1,6 @@
 import {expect, test, vi} from 'vitest';
 import {reconcilePeer, usePeers} from '@stores/peers';
-import reconcilePeerMirrorBatch, {dispatchPeerMirrorBatchChatUpdates} from '@lib/apiManagerProxyUtils/peerMirrorBatch';
+import reconcilePeerMirrorBatch, {dispatchPeerMirrorBatchChatUpdates, applyPeerMirrorBatch} from '@lib/apiManagerProxyUtils/peerMirrorBatch';
 
 test('merges batched peer mirrors into the existing mirror and peer store', () => {
   const preservedUserId = 900000001;
@@ -56,4 +56,53 @@ test('coalesces cached reconciliation chat updates without forwarding duplicate 
 
   expect(dispatchEvent).toHaveBeenCalledExactlyOnceWith(42);
   expect(dispatchEventSingle).toHaveBeenCalledExactlyOnceWith(43);
+});
+
+test('applies a changed channel mirror before delivering its update', () => {
+  const channelId = 900000005;
+  const peerId = -channelId;
+  const mirror: Record<string, any> = {[peerId]: {_: 'channel', id: channelId, pFlags: {}, title: 'old'}};
+  const next = {_: 'channel', id: channelId, pFlags: {call_active: true}, title: 'new'} as any;
+  const seen: unknown[] = [];
+
+  applyPeerMirrorBatch(mirror, {[peerId]: next}, [{name: 'chat_update', args: [channelId]}], () => {}, (event) => {
+    seen.push({name: event.name, title: mirror[peerId].title, callActive: mirror[peerId].pFlags.call_active});
+  });
+
+  expect(seen).toEqual([{name: 'chat_update', title: 'new', callActive: true}]);
+});
+
+test('leaves an unchanged peer mirror in place during a reconciliation batch', () => {
+  const id = 900000006;
+  const existing = {_: 'user', id, first_name: 'same', pFlags: {}} as any;
+  const mirror: Record<string, any> = {[id]: existing};
+  reconcilePeer(id as PeerId, existing);
+
+  reconcilePeerMirrorBatch(mirror, {[id]: {_: 'user', id, first_name: 'same', pFlags: {}} as any});
+
+  expect(mirror[id]).toBe(existing);
+});
+
+test('applies a peer mirror that removes an undefined property', () => {
+  const id = 900000007;
+  const existing = {_: 'user', id, first_name: 'same', phone: undefined, pFlags: {}} as any;
+  const mirror: Record<string, any> = {[id]: existing};
+  const next = {_: 'user', id, first_name: 'same', pFlags: {}} as any;
+
+  reconcilePeerMirrorBatch(mirror, {[id]: next});
+
+  expect(mirror[id]).toBe(next);
+  expect(mirror[id]).not.toHaveProperty('phone');
+});
+
+test('applies a peer mirror when nested object sharing changes', () => {
+  const id = 900000008;
+  const existing = {_: 'user', id, pFlags: {}, extra: [{value: 1}, {value: 1}]} as any;
+  const shared = {value: 1};
+  const next = {_: 'user', id, pFlags: {}, extra: [shared, shared]} as any;
+  const mirror: Record<string, any> = {[id]: existing};
+
+  reconcilePeerMirrorBatch(mirror, {[id]: next});
+
+  expect(mirror[id]).toBe(next);
 });

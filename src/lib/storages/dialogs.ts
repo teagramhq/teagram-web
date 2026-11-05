@@ -22,7 +22,7 @@ import insertInDescendSortedArray from '@helpers/array/insertInDescendSortedArra
 import safeReplaceObject from '@helpers/object/safeReplaceObject';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
 import {AppManager} from '@appManagers/manager';
-import type {PeerMirrorBatch} from '@appManagers/peerMirrorBatch';
+import type {PeerMirrorBatch, PeerMirrorEvent} from '@appManagers/peerMirrorBatch';
 import getDialogIndexKey from '@appManagers/utils/dialogs/getDialogIndexKey';
 import isObject from '@helpers/object/isObject';
 import getDialogIndex from '@appManagers/utils/dialogs/getDialogIndex';
@@ -46,6 +46,7 @@ import {isTempId} from '@appManagers/utils/messages/isTempId';
 
 let cachedDialogReconcileTraceSequence = 0;
 const CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE = 25;
+const CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE = 10;
 
 export enum FilterType {
   Folder,
@@ -2112,13 +2113,36 @@ export default class DialogsStorage extends AppManager {
     const missingPeerIds: PeerId[] = [];
     const seenPeerIds: Set<PeerId> = new Set();
     const peerKeys = new Set<string>();
+    const events: PeerMirrorEvent[] = [];
     const mirrorBatch: PeerMirrorBatch = (peerKey) => {
       peerKeys.add(peerKey);
+    };
+    const flushPage = async() => {
+      const keys = [...peerKeys];
+      const pageEvents = events.splice(0).map((event) => {
+        if(event.name !== 'user_update') return event;
+        return {...event, args: [event.args[0], {...event.args[1], statusFromWorker: true}]};
+      });
+      peerKeys.clear();
+      const chatUpdates = pageEvents.filter((event) => event.name === 'chat_update').map((event) => event.args[0] as ChatId);
+      for(let offset = 0; offset < keys.length; offset += CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE) {
+        this.appPeersManager.mirrorApiPeers(
+          keys.slice(offset, offset + CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE),
+          trace, traceId, undefined, undefined, undefined, chatUpdates
+        );
+        await pause(0);
+      }
+      for(let offset = 0; offset < pageEvents.length; offset += CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE) {
+        this.appPeersManager.mirrorApiPeers(
+          [], trace, traceId, undefined, undefined,
+          pageEvents.slice(offset, offset + CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE)
+        );
+        await pause(0);
+      }
     };
     let offsetDate = 0, offsetId = 0, offsetPeerId: PeerId;
     try {
       for(;;) {
-        const chatUpdateIds = new Set<ChatId>();
         const result = await this.apiManager.invokeApiSingleProcess({
           method: 'messages.getDialogs',
           params: {
@@ -2131,21 +2155,16 @@ export default class DialogsStorage extends AppManager {
           },
           processResult: (result) => {
             if(result._ !== 'messages.dialogsNotModified') {
-              this.appPeersManager.saveApiPeers(
-                result,
-                trace,
-                mirrorBatch,
-                {skipEmptyChannelDialogReconciliation: true, chatUpdateIds}
-              );
+              this.rootScope.collectBroadcastEvents(events, () => this.appPeersManager.saveApiPeers(
+                result, trace, mirrorBatch, {skipEmptyChannelDialogReconciliation: true}
+              ));
             }
 
             return result;
           }
         });
         if(finishTrace) performancePhaseTrace.setPageCount(traceId!, ++pageCount);
-        if(chatUpdateIds.size) {
-          this.appPeersManager.mirrorApiPeers([], trace, traceId, undefined, chatUpdateIds);
-        }
+        await flushPage();
 
         if(result._ === 'messages.dialogsNotModified') {
           return missingPeerIds;
@@ -2188,9 +2207,10 @@ export default class DialogsStorage extends AppManager {
         offsetDate = (lastMessage as Message.message)?.date ?? 0;
       }
     } finally {
+      await flushPage();
       finishTrace?.({pageCount});
       const reconcilePhase = traceId ? performancePhaseTrace.getSnapshot().find((phase) => phase.traceId === traceId) : undefined;
-      this.appPeersManager.mirrorApiPeers(peerKeys, trace, traceId, reconcilePhase);
+      this.appPeersManager.mirrorApiPeers([], trace, traceId, reconcilePhase);
     }
   }
 
