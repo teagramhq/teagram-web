@@ -12,6 +12,7 @@ export type FirstBubbleBoundary = {
   ms: number,
   startedAtMs: number,
   domNodes: number,
+  domClassCounts: Record<string, number>,
   domNodeCounts: DomNodeCounts,
   preInteractionMs?: number
 };
@@ -56,10 +57,18 @@ export async function waitForFirstVisibleBubble(page: Page) {
       const rect = bubble.getBoundingClientRect();
       if(style.display === 'none' || style.visibility === 'hidden' || !rect.width || !rect.height) continue;
 
+      const ms = performance.now() - perf.clickAt;
+      const elements = [...document.querySelectorAll('*')];
+      const domClassCounts: Record<string, number> = {};
+      for(const element of elements) for(const name of element.classList) {
+        const key = `${element.tagName.toLowerCase()}.${name}`;
+        domClassCounts[key] = (domClassCounts[key] || 0) + 1;
+      }
       perf.firstBubbleBoundary = {
-        ms: performance.now() - perf.clickAt,
+        ms,
         startedAtMs: perf.clickAt,
-        domNodes: document.querySelectorAll('*').length,
+        domNodes: elements.length,
+        domClassCounts,
         domNodeCounts: {
           bubbles: document.querySelectorAll('.bubbles .bubble[data-mid]').length,
           bubbleGroups: document.querySelectorAll('.bubbles .bubbles-group').length,

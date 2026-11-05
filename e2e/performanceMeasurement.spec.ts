@@ -59,6 +59,7 @@ test('records the first visible bubble when it is mounted', async({page}) => {
     return {boundary: perf.firstBubbleBoundary, insertedAt: perf.insertedAt};
   });
   expect(result.boundary.domNodes).toBeGreaterThan(0);
+  expect(result.boundary.domClassCounts['div.bubble']).toBe(1);
   expect(result.boundary.preInteractionMs).toBeGreaterThanOrEqual(0);
   expect(Math.abs(result.boundary.startedAtMs + result.boundary.ms - result.insertedAt)).toBeLessThan(50);
 });

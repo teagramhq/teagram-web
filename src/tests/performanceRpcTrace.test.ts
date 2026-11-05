@@ -2,6 +2,16 @@ import {describe, expect, test} from 'vitest';
 import {findLongTasksWithSignificantSpanWork, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
 
 describe('performance RPC trace summary', () => {
+  test('counts RPC invocations in the elapsed window relative to its start', async() => {
+    const trace = await import('../../e2e/performanceRpcTrace') as any;
+    const result = trace.rpcInvocationsInWindow([
+      {method: 'before', startedAtEpochMs: 1099},
+      {method: 'first', startedAtEpochMs: 1100},
+      {method: 'last', startedAtEpochMs: 1199},
+      {method: 'after', startedAtEpochMs: 1201}
+    ], 1000, 100, 100);
+    expect(result.map((call: {method: string}) => call.method)).toEqual(['first', 'last']);
+  });
   test('excludes long tasks that start outside the scenario measurement window', async() => {
     const trace = await import('../../e2e/performanceRpcTrace') as any;
     const summary = trace.summarizeLongTaskWindow?.([

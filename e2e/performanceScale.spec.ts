@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Locator, type Page
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {findLongTasksWithSignificantSpanWork, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {findLongTasksWithSignificantSpanWork, observeLongAnimationFrames, rpcInvocationsInWindow, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
 import {startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
 
 type Fixture = {
@@ -21,6 +21,7 @@ type Metric = {
   ms: number,
   requests: number,
   domNodes: number,
+  domClassCounts: Record<string, number>,
   domNodeCounts: DomNodeCounts,
   bundleBytes: number,
   longTasksOver50Ms: number,
@@ -58,6 +59,7 @@ type MeasurementBoundary = {
   ms: number,
   startedAtMs: number,
   domNodes: number,
+  domClassCounts: Metric['domClassCounts'],
   domNodeCounts: Metric['domNodeCounts'],
   preInteractionMs?: number
 };
@@ -210,8 +212,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
   const requestCount = requests.value;
   await page.waitForTimeout(150);
   await waitForBundleResources(page);
-  const captured = await page.evaluate(async({boundary, scroll, includePhases}) => {
-    const {ms} = boundary;
+  const captured = await page.evaluate(async({scroll, includePhases}) => {
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
     const resourceCaptureEndedAt = performance.now();
@@ -232,9 +233,6 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
         outcome: 'pending' | 'success' | 'error'
       }>
     } : {enabled: false, recording: false, callCount: 0, invocations: [], calls: []};
-    const rpcInvocations = rpcTrace.invocations.filter((invocation) => {
-      return invocation.startedAtEpochMs - performance.timeOrigin <= ms;
-    });
     const workerPhases = includePhases ? (await apiManager.getPerformancePhaseTrace() as Array<{name: string, startedAtEpochMs: number, durationMs: number | null, accountNumber?: number}>).map((phase) => ({
       ...phase,
       startMs: Math.max(0, phase.startedAtEpochMs - performance.timeOrigin)
@@ -244,12 +242,6 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       startMs: Math.max(0, phase.startTime),
       durationMs: phase.duration
     })) : undefined;
-    const rpcCalls = rpcTrace.calls.map((call) => ({
-      method: call.method,
-      startedAtMs: Math.max(0, call.startedAtEpochMs - performance.timeOrigin),
-      durationMs: call.durationMs,
-      outcome: call.outcome
-    })).filter((call) => call.startedAtMs <= ms);
     return {
       bundleResources: resources.map((entry) => ({
         name: entry.name,
@@ -263,27 +255,39 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       longAnimationFrames: scroll ? perf.longAnimationFrames : [],
       rpcTraceEnabled: rpcTrace.enabled,
       rpcSpansRecorded: rpcTrace.recording,
-      rpcCallCount: rpcTrace.recording ? rpcInvocations.length : rpcTrace.callCount,
-      rpcCalls,
+      rpcCallCount: rpcTrace.callCount,
+      rpcInvocations: rpcTrace.invocations,
+      rpcRawCalls: rpcTrace.calls,
+      timeOrigin: performance.timeOrigin,
       workerPhases,
       mainPhases,
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
-  }, {boundary, scroll, includePhases});
-  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, ...metrics} = captured;
+  }, {scroll, includePhases});
+  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, rpcInvocations, rpcRawCalls, timeOrigin, ...metrics} = captured;
   if(includePhases) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
+  const rpcCalls = rpcInvocationsInWindow(rpcRawCalls, timeOrigin, boundary.startedAtMs, boundary.ms).map((call) => ({
+    method: call.method,
+    startedAtMs: call.startedAtEpochMs - timeOrigin - boundary.startedAtMs,
+    durationMs: call.durationMs,
+    outcome: call.outcome
+  }));
+  const rpcCallCount = metrics.rpcSpansRecorded ? rpcInvocationsInWindow(rpcInvocations, timeOrigin, boundary.startedAtMs, boundary.ms).length : metrics.rpcCallCount;
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
-  const rpcSummary = summarizeRpcTrace(metrics.rpcCalls as PerformanceRpcCall[], boundary.ms);
+  const rpcSummary = summarizeRpcTrace(rpcCalls, boundary.ms);
   return {
     ...metrics,
+    rpcCallCount,
+    rpcCalls,
     bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
     ...(scroll ? {longTaskTrace: summarizeLongTaskTrace(longTasks, longAnimationFrames, boundary.startedAtMs, boundary.ms)} : {}),
     ms: boundary.ms,
     requests: requestCount,
     domNodes: boundary.domNodes,
+    domClassCounts: boundary.domClassCounts,
     domNodeCounts: boundary.domNodeCounts,
     preInteractionMs: boundary.preInteractionMs,
     rpcWallMs: metrics.rpcSpansRecorded ? rpcSummary.rpcWallMs : null,
@@ -391,10 +395,18 @@ function evaluateWithControlSamples(key: string, baseSamples: Metric[], headSamp
 async function snapshotMeasurementBoundary(page: Page): Promise<MeasurementBoundary> {
   return page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
+    const ms = performance.now() - perf.started;
+    const elements = [...document.querySelectorAll('*')];
+    const domClassCounts: Record<string, number> = {};
+    for(const element of elements) for(const name of element.classList) {
+      const key = `${element.tagName.toLowerCase()}.${name}`;
+      domClassCounts[key] = (domClassCounts[key] || 0) + 1;
+    }
     return {
-      ms: performance.now() - perf.started,
+      ms,
       startedAtMs: perf.started,
-      domNodes: document.querySelectorAll('*').length,
+      domNodes: elements.length,
+      domClassCounts,
       domNodeCounts: {
         bubbles: document.querySelectorAll('.bubbles .bubble[data-mid]').length,
         bubbleGroups: document.querySelectorAll('.bubbles .bubbles-group').length,
@@ -549,15 +561,15 @@ async function reloadChatList(page: Page, requests: {value: number}) {
   return capture(page, requests, await snapshotMeasurementBoundary(page));
 }
 
-async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture) {
+async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
-  await begin(page, requests);
+  await begin(page, requests, true, traceRpc);
   await startMeasurementAtClick(row);
   await row.click();
   const boundary = await waitForFirstVisibleBubble(page);
   expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
-  return capture(page, requests, boundary);
+  return capture(page, requests, boundary, false, traceRpc);
 }
 
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}) {
@@ -1110,6 +1122,20 @@ async function traceSendMessage(browser: Browser, run: VariantRun, fixture: Fixt
   }
 }
 
+async function traceChatOpen(browser: Browser, run: VariantRun, fixture: Fixture) {
+  const context = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 800}, storageState: run.storageState});
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    return await openPartnerChat(page, requests, fixture, true);
+  } finally {
+    await context.close();
+  }
+}
+
 async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
   const coldChatList: Metric[] = [];
   const warmChatList: Metric[] = [];
@@ -1237,6 +1263,29 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
   const traceRun = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
   report.diagnostics['100x'] = await test.step('trace 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRun!, fixtures['100x']!));
+  if(report.requireBase) {
+    const baseTraceOrigin = process.env.PERF_TRACE_BASE_ORIGIN_100X;
+    expect(baseTraceOrigin, '100x traced base origin is missing').toBeTruthy();
+    const traceRuns = {
+      base: withOrigin(preparedVariants['100x'].base!, 'base', baseTraceOrigin!),
+      head: traceRun
+    };
+    const rpcComparison: Record<Variant, {chatOpen: Metric[], sendMessage: Metric[]}> = {
+      base: {chatOpen: [], sendMessage: []},
+      head: {chatOpen: [], sendMessage: []}
+    };
+    for(let repeat = 0; repeat < PERFORMANCE_REPEATS; ++repeat) {
+      const order: Variant[] = repeat % 2 ? ['head', 'base'] : ['base', 'head'];
+      for(const variant of order) {
+        const chatOpen = await traceChatOpen(browser, traceRuns[variant], fixtures['100x']!);
+        const sendMessage = await traceSendMessage(browser, traceRuns[variant], fixtures['100x']!);
+        expect(chatOpen.rpcSpansRecorded && sendMessage.rpcSpansRecorded, `${variant} RPC spans were not recorded`).toBe(true);
+        rpcComparison[variant].chatOpen.push(chatOpen);
+        rpcComparison[variant].sendMessage.push(sendMessage);
+      }
+    }
+    report.diagnostics['100x'].rpcComparison = rpcComparison;
+  }
 
   // Report-only timing repeats share this array, but only policy repeats carry scroll traces.
   const headScrollRepeats = report.variants.head['100x'].scrollBack2k.slice(0, PERFORMANCE_REPEATS);

@@ -149,7 +149,7 @@ jobs:
           TG_RSA_KEY_PATH=$RUNNER_TEMP/teagram-perf-server-key.pem
           TG_BLOB_DIR_1X=$RUNNER_TEMP/teagram-perf-blobs-1x
           TG_BLOB_DIR_100X=$RUNNER_TEMP/teagram-perf-blobs-100x
-          TG_WEBSOCKET_ALLOWED_ORIGINS=http://localhost:4173,http://localhost:4174,http://localhost:4175,http://localhost:4176,http://localhost:4177
+          TG_WEBSOCKET_ALLOWED_ORIGINS=http://localhost:4173,http://localhost:4174,http://localhost:4175,http://localhost:4176,http://localhost:4177,http://localhost:4178
           TG_REGISTRATION=closed
           TG_RATE_LIMIT_SEND_CODE_IP=100
           TG_RATE_LIMIT_SEND_CODE_IP_PHONES=100
@@ -224,11 +224,15 @@ jobs:
             git worktree add --detach "$base_directory" "$PERF_BASE_SHA"
             ln -s "$GITHUB_WORKSPACE/node_modules" "$base_directory/node_modules"
             (cd "$base_directory" && pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-dist")
+            (cd "$base_directory" && VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-trace-dist")
             echo "PERF_BASE_DIST=$RUNNER_TEMP/teagram-web-base-dist" >> "$GITHUB_ENV"
+            echo "PERF_TRACE_BASE_DIST=$RUNNER_TEMP/teagram-web-base-trace-dist" >> "$GITHUB_ENV"
+            echo 'PERF_TRACE_BASE_ORIGIN_100X=http://localhost:4178' >> "$GITHUB_ENV"
             echo 'PERF_BASE_ORIGIN_1X=http://localhost:4173' >> "$GITHUB_ENV"
             echo 'PERF_BASE_ORIGIN_100X=http://localhost:4175' >> "$GITHUB_ENV"
           else
             echo "PERF_BASE_DIST=$RUNNER_TEMP/teagram-web-head-dist" >> "$GITHUB_ENV"
+            echo "PERF_TRACE_BASE_DIST=$RUNNER_TEMP/teagram-web-trace-dist" >> "$GITHUB_ENV"
             echo 'PERF_BASE_ORIGIN_1X=' >> "$GITHUB_ENV"
             echo 'PERF_BASE_ORIGIN_100X=' >> "$GITHUB_ENV"
           fi
@@ -253,6 +257,8 @@ jobs:
           echo "$!" >> "$PERF_SERVICE_PID_FILE"
           nohup node scripts/performance/serve-dist.mjs "$PERF_TRACE_HEAD_DIST" 4177 > "$RUNNER_TEMP/teagram-perf-trace-web-100x.log" 2>&1 < /dev/null &
           echo "$!" >> "$PERF_SERVICE_PID_FILE"
+          nohup node scripts/performance/serve-dist.mjs "$PERF_TRACE_BASE_DIST" 4178 > "$RUNNER_TEMP/teagram-perf-trace-base-web-100x.log" 2>&1 < /dev/null &
+          echo "$!" >> "$PERF_SERVICE_PID_FILE"
           nohup node scripts/performance/https-proxy.mjs > "$RUNNER_TEMP/teagram-perf-proxy.log" 2>&1 < /dev/null &
           echo "$!" >> "$PERF_SERVICE_PID_FILE"
           ready=0
@@ -260,6 +266,7 @@ jobs:
           if curl -fsS http://localhost:4174/ >/dev/null && \
             curl -fsS http://localhost:4176/ >/dev/null && \
             curl -fsS http://localhost:4177/ >/dev/null && \
+            curl -fsS http://localhost:4178/ >/dev/null && \
             curl -kfsS --resolve teagramd.test:18443:127.0.0.1 \
               -H 'Origin: http://localhost:4174' \
               https://teagramd.test:18443/.well-known/teagramd/client >/dev/null && \
