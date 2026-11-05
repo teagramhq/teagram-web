@@ -144,15 +144,28 @@ export function summarizeCachedDialogReconcile(
   };
 }
 
-export function attachCachedDialogReconcileSummaries<T extends {cachedDialogReconcile?: CachedDialogReconcileSummary}>(
-  measuredSamples: T[],
-  diagnosticSamples: Array<{cachedDialogReconcile?: CachedDialogReconcileSummary}>,
-  scenario: string
-): T[] {
-  return measuredSamples.map((sample, index) => {
-    const summary = diagnosticSamples[index]?.cachedDialogReconcile;
-    if(!summary) throw new Error(`100x ${scenario} repeat ${index + 1} is missing its cached dialog reconciliation summary`);
-    return {...sample, cachedDialogReconcile: summary};
+export function validateCachedDialogReconcileDiagnostics(
+  samples: Array<{cachedDialogReconcile?: CachedDialogReconcileSummary, longTaskTrace?: unknown}>,
+  scenario: string,
+  expectedRepeatCount: number
+) {
+  if(samples.length !== expectedRepeatCount) {
+    throw new Error(`100x ${scenario} has ${samples.length} diagnostic repeats; expected ${expectedRepeatCount}`);
+  }
+
+  samples.forEach(({cachedDialogReconcile, longTaskTrace}, index) => {
+    if(
+      !cachedDialogReconcile ||
+      !Number.isFinite(cachedDialogReconcile.pageCount) ||
+      cachedDialogReconcile.pageCount! <= 0 ||
+      !Number.isFinite(cachedDialogReconcile.startRelativeToScenarioMs) ||
+      !Number.isFinite(cachedDialogReconcile.endRelativeToScenarioMs) ||
+      !Number.isFinite(cachedDialogReconcile.mainThreadTimeMs) ||
+      cachedDialogReconcile.mainThreadTimeMs <= 0 ||
+      !Array.isArray(longTaskTrace)
+    ) {
+      throw new Error(`100x ${scenario} diagnostic repeat ${index + 1} has incomplete reconciliation or long-task data`);
+    }
   });
 }
 

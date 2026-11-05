@@ -129,12 +129,12 @@ test('reports cached dialog reconciliation timing and main-thread time by scenar
 
   const table = formatPerformanceTraceTable(diagnostics);
 
-  assert.match(table, /### Cached channel dialog reconciliation/);
+  assert.match(table, /### Cached channel dialog reconciliation diagnostics/);
   assert.match(table, /\| coldChatList \| 30\.0 \| -100\.0 \| 2500\.0 \| 640\.0 \|/);
   assert.match(table, /\| scrollBack2k \| 30\.0 \| -2000\.0 \| -50\.0 \| 12\.0 \|/);
 });
 
-test('reports reconciliation summaries for every measured scenario', () => {
+test('reports reconciliation summaries for every diagnostic scenario', () => {
   const summary = {
     pageCount: 30,
     startRelativeToScenarioMs: -100,
@@ -144,6 +144,7 @@ test('reports reconciliation summaries for every measured scenario', () => {
   const diagnostics = Object.fromEntries(SCENARIOS.map(({key}) => [key, [{cachedDialogReconcile: summary}]]));
   const table = formatPerformanceTraceTable(diagnostics);
 
+  assert.match(table, /separate opt-in 100x diagnostic runs/);
   for(const {key} of SCENARIOS) {
     assert.ok(table.includes(`| ${key} | 30.0 | -100.0 | 2500.0 | 640.0 |`), `${key} reconciliation summary is missing from the trace table`);
   }

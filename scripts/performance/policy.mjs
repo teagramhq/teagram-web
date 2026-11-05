@@ -466,9 +466,9 @@ export function formatPerformanceTraceTable(diagnostics) {
   if(reconcileRows.length) {
     lines.push(
       '',
-      '### Cached channel dialog reconciliation',
+      '### Cached channel dialog reconciliation diagnostics',
       '',
-      'Median page count, start and end offsets from each scenario start, and main-thread peer-mirror time.',
+      'Median of per-repeat summaries from separate opt-in 100x diagnostic runs. Offsets use each diagnostic scenario window; individual repeats are retained in `diagnostics.100x`.',
       '',
       '| Scenario | Pages | Start offset (ms) | End offset (ms) | Main-thread time (ms) |',
       '| --- | ---: | ---: | ---: | ---: |',

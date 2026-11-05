@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {attachCachedDialogReconcileSummaries, CACHED_DIALOG_RECONCILE_PHASE_NAME, getScenarioPreservedPerformancePhases, observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {CACHED_DIALOG_RECONCILE_PHASE_NAME, getScenarioPreservedPerformancePhases, observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -1071,18 +1071,13 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
     }
   }
 
-  const measured = report.variants.head['100x'];
   for(const scenario of scenarios) {
-    const measuredSamples = measured[scenario];
-    expect(measuredSamples?.length, `100x ${scenario} has no measured repeats`).toBeGreaterThan(0);
-    measured[scenario] = attachCachedDialogReconcileSummaries(measuredSamples, traceSamples[scenario], scenario);
-    for(const [index, sample] of measured[scenario].entries()) {
-      const summary = sample.cachedDialogReconcile;
-      expect(summary?.pageCount, `100x ${scenario} measured repeat ${index + 1} has no reconciliation page count`).toBeGreaterThan(0);
-      expect(Number.isFinite(summary?.startRelativeToScenarioMs), `100x ${scenario} measured repeat ${index + 1} has no reconciliation start offset`).toBe(true);
-      expect(Number.isFinite(summary?.endRelativeToScenarioMs), `100x ${scenario} measured repeat ${index + 1} has no reconciliation end offset`).toBe(true);
-      expect(summary?.mainThreadTimeMs, `100x ${scenario} measured repeat ${index + 1} has no reconciliation main-thread time`).toBeGreaterThan(0);
-    }
+    const expectedRepeatCount = scenario === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
+    validateCachedDialogReconcileDiagnostics(traceSamples[scenario], scenario, expectedRepeatCount);
+    expect(
+      report.variants.head['100x'][scenario].every((sample) => sample.cachedDialogReconcile === undefined),
+      `100x ${scenario} diagnostics must remain separate from gated measurements`
+    ).toBe(true);
   }
 
   return traceSamples;

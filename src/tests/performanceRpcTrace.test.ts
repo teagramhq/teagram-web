@@ -38,35 +38,34 @@ test('keeps completed reconciliation measurements when the scenario trace resets
   });
 });
 
-test('attaches reconciliation summaries to every measured scenario repeat', async() => {
-  const attachSummaries = (await import('../../e2e/performanceRpcTrace') as any).attachCachedDialogReconcileSummaries;
-  expect(attachSummaries).toBeTypeOf('function');
-
-  const firstSummary = {
+test('validates each independent diagnostic repeat with a reconcile summary and task trace', async() => {
+  const validate = (await import('../../e2e/performanceRpcTrace') as any).validateCachedDialogReconcileDiagnostics;
+  expect(validate).toBeTypeOf('function');
+  const summary = {
     pageCount: 30,
     startRelativeToScenarioMs: -100,
     endRelativeToScenarioMs: 2_500,
     mainThreadTimeMs: 640
   };
-  const secondSummary = {...firstSummary, startRelativeToScenarioMs: -80, endRelativeToScenarioMs: 2_520};
-  expect(attachSummaries(
-    [{ms: 100}, {ms: 120}],
-    [{cachedDialogReconcile: firstSummary}, {cachedDialogReconcile: secondSummary}],
-    'contactSearch'
-  )).toEqual([
-    {ms: 100, cachedDialogReconcile: firstSummary},
-    {ms: 120, cachedDialogReconcile: secondSummary}
-  ]);
+
+  expect(() => validate([
+    {cachedDialogReconcile: summary, longTaskTrace: []},
+    {cachedDialogReconcile: {...summary, startRelativeToScenarioMs: -80}, longTaskTrace: [{startTimeMs: 10}]}
+  ], 'contactSearch', 2)).not.toThrow();
 });
 
-test('fails when a measured scenario repeat has no reconciliation summary', async() => {
-  const attachSummaries = (await import('../../e2e/performanceRpcTrace') as any).attachCachedDialogReconcileSummaries;
-  expect(attachSummaries).toBeTypeOf('function');
-  expect(() => attachSummaries(
-    [{ms: 100}, {ms: 120}],
-    [{cachedDialogReconcile: {pageCount: 30, startRelativeToScenarioMs: -100, endRelativeToScenarioMs: 2_500, mainThreadTimeMs: 640}}],
-    'contactSearch'
-  )).toThrow('100x contactSearch repeat 2 is missing its cached dialog reconciliation summary');
+test('requires the expected number of independent diagnostic repeats', async() => {
+  const validate = (await import('../../e2e/performanceRpcTrace') as any).validateCachedDialogReconcileDiagnostics;
+  expect(validate).toBeTypeOf('function');
+  expect(() => validate([], 'contactSearch', 2)).toThrow('100x contactSearch has 0 diagnostic repeats; expected 2');
+});
+
+test('rejects independent diagnostic repeats with incomplete reconciliation evidence', async() => {
+  const validate = (await import('../../e2e/performanceRpcTrace') as any).validateCachedDialogReconcileDiagnostics;
+  expect(validate).toBeTypeOf('function');
+  expect(() => validate([
+    {cachedDialogReconcile: {pageCount: 30, startRelativeToScenarioMs: -100, endRelativeToScenarioMs: null, mainThreadTimeMs: 640}, longTaskTrace: []}
+  ], 'contactSearch', 1)).toThrow('100x contactSearch diagnostic repeat 1 has incomplete reconciliation or long-task data');
 });
 
 describe('performance RPC trace summary', () => {
