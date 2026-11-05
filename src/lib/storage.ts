@@ -236,7 +236,15 @@ export default class AppStorage<
 
     try {
       const storage = await this.getStorage();
-      const hasSensitiveKey = keys.some((key) => this.sensitiveKeys.has(key));
+      let hasSensitiveKey = false;
+      if(storage instanceof IDBStorage && this.sensitiveKeys.size) {
+        for(const key of keys) {
+          if(this.sensitiveKeys.has(key)) {
+            hasSensitiveKey = true;
+            break;
+          }
+        }
+      }
       const valuesPromise = storage instanceof IDBStorage ?
         storage.get(keys as string[], undefined, hasSensitiveKey) :
         storage.get(keys as string[]);
