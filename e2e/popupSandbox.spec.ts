@@ -261,6 +261,111 @@ test('imports a valid ZIP through the worker and sends its bytes as a ZIP source
   await expect.poll(importCall).toEqual({software: 'zip', names: ['cat.webp'], bytes: [[5, 6, 7]]});
 });
 
+test('imports a Telegram sticker pack through the Bot API without sending its token to Teagram', async({page}) => {
+  const token = `987654321:${'Z'.repeat(35)}`;
+  const telegramRequests: string[] = [];
+  await page.route('https://api.telegram.org/**', async(route) => {
+    const url = new URL(route.request().url());
+    telegramRequests.push(url.toString());
+    if(url.pathname.endsWith('/getStickerSet')) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ok: true,
+          result: {
+            name: 'SomePack',
+            title: 'Telegram Cats',
+            sticker_type: 'regular',
+            stickers: [{
+              file_id: 'telegram-file-id',
+              file_unique_id: 'telegram-file-unique-id',
+              type: 'regular',
+              width: 512,
+              height: 512,
+              is_animated: false,
+              is_video: false,
+              emoji: '🐈',
+              file_size: 3
+            }]
+          }
+        })
+      });
+      return;
+    }
+
+    if(url.pathname.endsWith('/getFile')) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ok: true, result: {file_id: 'telegram-file-id', file_unique_id: 'telegram-file-unique-id', file_size: 3, file_path: 'stickers/cat.webp'}})
+      });
+      return;
+    }
+
+    await route.fulfill({status: 200, contentType: 'image/webp', body: Buffer.from([5, 6, 7])});
+  });
+
+  const importPopup = await openSandboxStory(page, 'stickerPackImport');
+  await importPopup.locator('input[name="telegram-pack-link"]').fill('https://t.me/addstickers/SomePack');
+  await importPopup.locator('input[name="telegram-bot-token"]').fill(token);
+  await importPopup.getByRole('button', {name: 'Download from Telegram'}).click();
+  await expect(importPopup.getByText('Downloaded 1 of 1 files.', {exact: true})).toBeVisible();
+  await expect(importPopup.locator('input[name="sticker-pack-title"]')).toHaveValue('Telegram Cats');
+  await importPopup.locator('input[name="sticker-pack-short-name"]').fill('telegram_cats');
+  await expect(importPopup.getByText('Link is available', {exact: true})).toBeVisible();
+  await importPopup.getByLabel('I have the right to share this pack.').check();
+  await importPopup.getByRole('button', {name: 'Import pack'}).click();
+
+  const importedPack = () => page.evaluate(async() => {
+    const call = window.popupSandbox.calls().find((entry) => entry.manager === 'appStickersManager' && entry.method === 'createStickerSet');
+    if(!call) return undefined;
+    const options = call.args[0] as {files: File[], software: string, emojis: string[]};
+    return {
+      software: options.software,
+      emojis: options.emojis,
+      names: options.files.map((file) => file.name),
+      bytes: await Promise.all(options.files.map(async(file) => Array.from(new Uint8Array(await file.arrayBuffer()))))
+    };
+  });
+
+  await expect.poll(importedPack).toEqual({
+    software: 'https://t.me/addstickers/SomePack',
+    emojis: ['🐈'],
+    names: ['sticker-001.webp'],
+    bytes: [[5, 6, 7]]
+  });
+  expect(telegramRequests.map((request) => new URL(request).origin)).toEqual([
+    'https://api.telegram.org',
+    'https://api.telegram.org',
+    'https://api.telegram.org'
+  ]);
+  expect(JSON.stringify(await importedPack())).not.toContain(token);
+});
+
+test('shows a redacted Telegram Bot API error and does not upload a failed pack', async({page}) => {
+  const token = `123456789:${'Y'.repeat(35)}`;
+  const consoleMessages: string[] = [];
+  page.on('console', (message) => consoleMessages.push(message.text()));
+  await page.route('https://api.telegram.org/**', async(route) => {
+    await route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: JSON.stringify({ok: false, description: `Unauthorized ${token}`})
+    });
+  });
+
+  const importPopup = await openSandboxStory(page, 'stickerPackImport');
+  await importPopup.locator('input[name="telegram-pack-link"]').fill('https://t.me/addstickers/MissingPack');
+  await importPopup.locator('input[name="telegram-bot-token"]').fill(token);
+  await importPopup.getByRole('button', {name: 'Download from Telegram'}).click();
+  await expect(importPopup.getByRole('alert')).toContainText('Unauthorized [redacted]');
+
+  expect(await page.evaluate(() => window.popupSandbox.calls()
+    .filter((call) => call.manager === 'appStickersManager' && call.method === 'createStickerSet'))).toEqual([]);
+  expect(consoleMessages.join('\n')).not.toContain(token);
+});
+
 test('does not show the import controls when sticker import is disabled', async({page}, testInfo) => {
   const importPopup = await openSandboxStory(page, 'stickerPackImportOff');
 

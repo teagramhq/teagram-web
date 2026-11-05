@@ -53,6 +53,7 @@ const getStickerPackImportFixtureManagers = (options: {
   let createCount = 0;
   return ({
   apiManager: {
+    getAccountNumber: () => 1,
     getAppConfig: () => options.configFailure ? Promise.reject(new Error('internal config detail')) : ({sticker_import_mode: options.mode || 'on'}),
     getConfig: () => stickerSetConfig
   },

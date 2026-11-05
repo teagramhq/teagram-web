@@ -65,11 +65,13 @@ export default class AppStorage<
 
   private isEncryptable: boolean;
   private encryptedStoreName?: T['stores'][number]['encryptedName'];
+  private sensitiveKeys: Set<keyof Storage>;
 
   private log: ReturnType<typeof logger>;
 
-  constructor(private db: T, private storeName: T['stores'][number]['name']) {
+  constructor(private db: T, private storeName: T['stores'][number]['name'], sensitiveKeys: (keyof Storage)[] = []) {
     this.log = logger(`AS-${db.name}-${storeName}`);
+    this.sensitiveKeys = new Set(sensitiveKeys);
 
     this.cache = {};
     this.getPromises = new Map();
@@ -145,7 +147,11 @@ export default class AppStorage<
         // console.log('setItem: have set', key/* , value */);
       } catch(e) {
         // this.useCS = false;
-        this.log.error('set error', e, keys, values);
+        if(keys.some((key) => this.sensitiveKeys.has(key as keyof Storage))) {
+          this.log.error('set error for sensitive storage values', keys);
+        } else {
+          this.log.error('set error', e, keys, values);
+        }
       }
     }
 

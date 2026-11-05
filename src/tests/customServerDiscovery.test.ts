@@ -59,7 +59,8 @@ describe('custom server discovery', () => {
     } as any)).toEqual([
       '\u0027self\u0027',
       'https://demo.example',
-      'wss://demo.example:2443/apiws'
+      'wss://demo.example:2443/apiws',
+      'https://api.telegram.org'
     ]);
   });
 
