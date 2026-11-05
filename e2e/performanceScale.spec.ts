@@ -785,7 +785,11 @@ async function describeRow(row: Locator) {
 
 async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture) {
   try {
-    await page.keyboard.press('Escape');
+    const activeSearch = page.locator('#search-container.active');
+    if(await activeSearch.count()) {
+      await page.locator('#column-left .sidebar-back-button.is-visible').click();
+      await expect(activeSearch).toHaveCount(0);
+    }
     const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
     await expect(row).toBeVisible({timeout: 60_000});
     try {
