@@ -272,10 +272,6 @@ export type ChatUpdateOptions = {
   skipEmptyChannelDialogReconciliation?: boolean
 };
 
-export function shouldReconcileEmptyChannelDialog(options?: ChatUpdateOptions) {
-  return !options?.skipEmptyChannelDialogReconciliation;
-}
-
 export type BroadcastEventsListeners = {
   [name in keyof BroadcastEvents]: name extends 'chat_update' ? (e: ChatId, options?: ChatUpdateOptions) => void : (e: BroadcastEvents[name]) => void
 };
