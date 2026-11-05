@@ -147,7 +147,7 @@ import {avatarNew, findUpAvatar} from '@components/avatarNew';
 import Icon from '@components/icon';
 import wrapCallBubble from '@components/wrappers/callBubble';
 import {FullMid, makeFullMid, splitFullMid} from '@appManagers/utils/messages/fullMid';
-import {getCurrentMessageFullMid} from './bubbles/renderQueue';
+import {getCurrentMessageFullMid, HISTORY_RENDER_CHUNK_SIZE, renderHistoryInChunks} from './bubbles/renderQueue';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import setBlankToAnchor from '@lib/richTextProcessor/setBlankToAnchor';
 import addAnchorListener, {UNSAFE_ANCHOR_LINK_TYPES} from '@helpers/addAnchorListener';
@@ -11591,8 +11591,17 @@ export default class ChatBubbles {
       }
     }
 
+    // * an older page prepended to an already rendered chat is split over several tasks
+    const renderInChunks = reverse &&
+      messages.length > HISTORY_RENDER_CHUNK_SIZE &&
+      !this.chat.setPeerPromise &&
+      this.getRenderedHistory(undefined, true).length > 0;
+    const chunksMiddleware = renderInChunks ? this.getMiddleware() : undefined;
+
     let promises: Promise<any>[] = [];
-    if(this.chat.type === ChatType.Search && false) {
+    if(renderInChunks) {
+      // * rendered below, chunk by chunk
+    } else if(this.chat.type === ChatType.Search && false) {
       const length = history.length;
       if(reverse) for(let i = 0; i < length; ++i) promises.push(cb(messages[i]));
       else for(let i = length - 1; i >= 0; --i) promises.push(cb(messages[i]));
@@ -11602,7 +11611,17 @@ export default class ChatBubbles {
 
     try {
       // cannot combine them into one promise
-      promises.length && await Promise.all(promises);
+      if(renderInChunks) {
+        await renderHistoryInChunks(
+          messages,
+          HISTORY_RENDER_CHUNK_SIZE,
+          (chunk) => Promise.all(chunk.map(cb)),
+          () => pause(0),
+          chunksMiddleware
+        );
+      } else {
+        promises.length && await Promise.all(promises);
+      }
       await this.messagesQueuePromise;
     } finally {
       if(ephemeralMessages.length) {
