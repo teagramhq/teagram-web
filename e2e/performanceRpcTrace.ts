@@ -243,8 +243,10 @@ export function summarizeLongTaskAttribution(
   spans: PerformanceSpan[],
   profile: PerformanceCpuProfile,
   perfStartMs: number,
-  windowStartMs: number
+  windowStartMs: number,
+  windowDurationMs: number
 ): PerformanceTaskAttribution[] {
+  const windowEndMs = windowStartMs + windowDurationMs;
   const callFrames = new Map(profile.nodes.map(({id, callFrame}) => [id, callFrame]));
   const parentIds = new Map<number, number>();
   profile.nodes.forEach(({id, children = []}) => {
@@ -260,7 +262,9 @@ export function summarizeLongTaskAttribution(
     samples.push({nodeId, endMs: perfStartMs + elapsedUs / 1000, deltaMs: delta / 1000});
   });
 
-  return tasks.filter(({duration}) => duration > 50).map((task) => {
+  return tasks.filter(({startTime, duration}) => {
+    return startTime >= windowStartMs && startTime < windowEndMs && duration > 50;
+  }).map((task) => {
     const taskEnd = task.startTime + task.duration;
     const byStack = new Map<string, {frames: Array<{functionName: string, script: string}>, selfMs: number}>();
     samples.forEach(({nodeId, endMs, deltaMs}) => {

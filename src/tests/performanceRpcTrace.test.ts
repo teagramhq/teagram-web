@@ -219,6 +219,7 @@ describe('long task attribution', () => {
       ],
       profile,
       1000,
+      1000,
       1000
     );
 
@@ -230,6 +231,20 @@ describe('long task attribution', () => {
         {frames: [{functionName: 'mountUnmountGroups', script: '/assets/chat.js'}], selfMs: 50},
         {frames: [{functionName: 'onMirrorTask', script: '/assets/proxy.js'}], selfMs: 10}
       ]
+    }]);
+  });
+
+  test('excludes diagnostic long tasks that start after the scenario window', async() => {
+    const summarizeWithinWindow = (await import('../../e2e/performanceRpcTrace') as any).summarizeLongTaskAttribution;
+
+    expect(summarizeWithinWindow([
+      {startTime: 1020, duration: 60},
+      {startTime: 1150, duration: 80}
+    ], [], {nodes: [], samples: [], timeDeltas: []}, 1000, 1000, 100)).toEqual([{
+      startTimeMs: 20,
+      durationMs: 60,
+      spans: [],
+      stacks: []
     }]);
   });
 });

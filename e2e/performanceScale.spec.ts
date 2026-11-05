@@ -663,7 +663,7 @@ async function scrollBackTwoThousand(
     ...metric,
     scrollSpanTracing: {installed: SCROLL_SPAN_NAMES, ...tracing},
     cpu: summarizeCpuProfile(stoppedProfile.profile),
-    longTaskAttribution: summarizeLongTaskAttribution(tasks, spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs)
+    longTaskAttribution: summarizeLongTaskAttribution(tasks, spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs, boundary.ms)
   };
 }
 
