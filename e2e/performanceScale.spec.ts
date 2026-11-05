@@ -43,6 +43,7 @@ type Metric = {
   frameIntervals?: number,
   longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>,
   preInteractionMs?: number,
+  appSendUiMs?: number,
   composerReadyAfterFirstBubbleMs?: number,
   firstBubbleToSentMs?: number
 };
@@ -787,9 +788,63 @@ async function describeRow(row: Locator) {
   return {first, second: await sample()};
 }
 
+async function installSendUiTiming(page: Page, text: string) {
+  await page.evaluate((sendText) => {
+    const composer = document.querySelector<HTMLElement>('.input-message-input:not(.input-field-input-fake)[contenteditable="true"]');
+    const bubbles = document.querySelector<HTMLElement>('#page-chats .bubbles');
+    if(!composer || !bubbles) throw new Error('send UI timing could not find the active composer and bubbles');
+
+    const state: {startedAt: number | null, elapsedMs: number | null} = {startedAt: null, elapsedMs: null};
+    const matchesBubble = (node: Node, searchDescendants = false) => {
+      const element = node instanceof Element ? node : node.parentElement;
+      if(!element) return false;
+      const bubble = element.closest('.bubble.is-out') || (searchDescendants ? element.querySelector('.bubble.is-out') : null);
+      return Boolean(bubble?.textContent?.includes(sendText));
+    };
+    const recordBubbleInsertion = (records: MutationRecord[]) => {
+      if(state.startedAt === null || state.elapsedMs !== null) return;
+      const matchingBubble = records.some((record) => {
+        return [...record.addedNodes].some((node) => matchesBubble(node, true)) || matchesBubble(record.target);
+      });
+      if(matchingBubble) {
+        state.elapsedMs = performance.now() - state.startedAt;
+        observer.disconnect();
+      }
+    };
+    const onKeydown = (event: KeyboardEvent) => {
+      if(event.key !== 'Enter' || event.shiftKey || event.isComposing || state.startedAt !== null) return;
+      state.startedAt = performance.now();
+    };
+    const observer = new MutationObserver(recordBubbleInsertion);
+    observer.observe(bubbles, {childList: true, subtree: true, characterData: true});
+    composer.addEventListener('keydown', onKeydown, true);
+    (window as any).__teagramSendUiTiming = {
+      state,
+      cleanup: () => {
+        observer.disconnect();
+        composer.removeEventListener('keydown', onKeydown, true);
+        delete (window as any).__teagramSendUiTiming;
+      }
+    };
+  }, text);
+}
+
+async function finishSendUiTiming(page: Page) {
+  const elapsedMs = await page.evaluate(() => {
+    const timing = (window as any).__teagramSendUiTiming;
+    if(!timing) return undefined;
+    const {elapsedMs} = timing.state;
+    timing.cleanup();
+    return elapsedMs;
+  });
+  if(!Number.isFinite(elapsedMs)) throw new Error('in-page Enter-to-bubble timing did not observe the outgoing bubble');
+  return elapsedMs as number;
+}
+
 async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false) {
   let composerReadyAfterFirstBubbleMs = 0;
   let firstBubbleAtMs = 0;
+  let appSendUiMs = 0;
   let cpu: PerformanceCpuSummary | undefined;
   try {
     const activeSearch = page.locator('#search-container.active');
@@ -814,11 +869,13 @@ async function sendMessage(page: Page, requests: {value: number}, fixture: Fixtu
     await expect(composer).toBeEditable({timeout: 60_000});
     composerReadyAfterFirstBubbleMs = await page.evaluate((startedAt) => performance.now() - startedAt, firstBubbleAtMs);
     const cpuProfile = traceRpc ? await startCpuProfile(page) : undefined;
-    await begin(page, requests, true, traceRpc);
     const text = `web-perf-${process.env.GITHUB_RUN_ID || 'local'}-${Date.now()}`;
+    await installSendUiTiming(page, text);
+    await begin(page, requests, true, traceRpc);
     await composer.fill(text);
     await composer.press('Enter');
     await expect(page.locator('#page-chats .bubbles .bubble.is-out').filter({hasText: text})).toBeVisible({timeout: 60_000});
+    appSendUiMs = await finishSendUiTiming(page);
     if(cpuProfile) cpu = await finishCpuProfile(cpuProfile);
   } catch(error) {
     console.error('send a message failed', JSON.stringify(await describeSendState(page, fixture)));
@@ -828,6 +885,7 @@ async function sendMessage(page: Page, requests: {value: number}, fixture: Fixtu
   const boundary = await snapshotMeasurementBoundary(page);
   return {
     ...await capture(page, requests, boundary, false, traceRpc),
+    appSendUiMs,
     composerReadyAfterFirstBubbleMs,
     firstBubbleToSentMs,
     ...(cpu ? {cpu} : {})

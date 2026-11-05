@@ -60,8 +60,8 @@ test('extra timing samples are reported without changing the three-repeat policy
     }
     variants.base['100x'].chatOpen = Array.from({length: 3}, () => makeSample(100));
     variants.head['100x'].chatOpen = timingSamples.map(makeSample);
-    variants.base['100x'].sendMessage = sendSamples.base.map(makeSample);
-    variants.head['100x'].sendMessage = sendSamples.head.map(makeSample);
+    variants.base['100x'].sendMessage = sendSamples.base.map((ms) => ({...makeSample(ms), appSendUiMs: ms - 20}));
+    variants.head['100x'].sendMessage = sendSamples.head.map((ms) => ({...makeSample(ms), appSendUiMs: ms - 20}));
     return {
       measurementVersion: 2,
       fixtureVersion: 'fixture-v1',
@@ -72,6 +72,7 @@ test('extra timing samples are reported without changing the three-repeat policy
         '100x': {
           sendMessage: {
             ms: 123,
+            appSendUiMs: 101,
             requests: 0,
             domNodes: 1_000,
             domNodeCounts: {bubbleGroups: 12},
@@ -145,7 +146,7 @@ test('extra timing samples are reported without changing the three-repeat policy
   assert.equal(policySection(fiveSampleSummary), policySection(threeSampleSummary));
   assert.equal(policySection(elevenSendSampleSummary), policySection(threeSampleSummary));
   assert.match(fiveSampleSummary, /Open long-history chat \| head \| 5 \| 1000\.0/);
-  assert.match(elevenSendSampleSummary, /Send a message \| head \| 11 \| 1100\.0 \| 50\.0 \| 1150\.0/);
+  assert.match(elevenSendSampleSummary, /Send a message \| head \| 11 \| 1100\.0 \| 1080\.0 \| 50\.0 \| 1150\.0/);
   assert.match(threeSampleSummary, /100x send action diagnostic/);
-  assert.match(threeSampleSummary, /\| 123\.0 \| 1 \| 81\.0 \| 42\.0 \| 0 \| 1000 \| 12 \| 0 \| 0\.0 \| messages\.sendMessage \(81\.0 ms, success\) \| sendMessage \/input\.ts \(22\.0 ms\) \|/);
+  assert.match(threeSampleSummary, /\| 123\.0 \| 101\.0 \| 1 \| 81\.0 \| 42\.0 \| 0 \| 1000 \| 12 \| 0 \| 0\.0 \| messages\.sendMessage \(81\.0 ms, success\) \| sendMessage \/input\.ts \(22\.0 ms\) \|/);
 });

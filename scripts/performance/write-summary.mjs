@@ -39,12 +39,13 @@ function formatPerformanceSamplesTable(report, scale = '100x') {
   const lines = [
     `### ${scale} repeated scenario samples`,
     '',
-    '| Scenario | Variant | Repeat | Time (ms) | Composer ready after first bubble (ms) | First bubble to sent (ms) | preInteractionMs | Requests | DOM nodes | Long tasks >50 ms | Blocking (ms) | Dropped frames |',
-    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'
+    '| Scenario | Variant | Repeat | Time (ms) | App Enter-to-bubble (ms) | Composer ready after first bubble (ms) | First bubble to sent (ms) | preInteractionMs | Requests | DOM nodes | Long tasks >50 ms | Blocking (ms) | Dropped frames |',
+    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'
   ];
   for(const {label, variant, index, sample} of rows) {
-    lines.push(`| ${label} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.composerReadyAfterFirstBubbleMs)} | ${show(sample.firstBubbleToSentMs)} | ${show(sample.preInteractionMs)} | ${show(sample.requests, 0)} | ${show(sample.domNodes, 0)} | ${show(sample.longTasksOver50Ms, 0)} | ${show(sample.blockingTimeMs)} | ${show(sample.droppedFramePercent)}% |`);
+    lines.push(`| ${label} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.appSendUiMs)} | ${show(sample.composerReadyAfterFirstBubbleMs)} | ${show(sample.firstBubbleToSentMs)} | ${show(sample.preInteractionMs)} | ${show(sample.requests, 0)} | ${show(sample.domNodes, 0)} | ${show(sample.longTasksOver50Ms, 0)} | ${show(sample.blockingTimeMs)} | ${show(sample.droppedFramePercent)}% |`);
   }
+  lines.push('', 'For send rows, `Time` is the automation-observed interval and `App Enter-to-bubble` measures in-page time from Enter keydown to the matching outgoing bubble insertion.');
   return lines.join('\n');
 }
 
@@ -58,9 +59,9 @@ function formatSendActionDiagnosticTable(report) {
   const lines = [
     '### 100x send action diagnostic',
     '',
-    '| Action (ms) | RPC calls | RPC wall (ms) | Non-RPC (ms) | Requests | DOM nodes | Bubble groups | Long tasks >50 ms | Blocking (ms) | RPC methods | Top CPU frames |',
-    '| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |',
-    `| ${show(sample.ms)} | ${show(sample.rpcCallCount, 0)} | ${show(sample.rpcWallMs)} | ${show(sample.nonRpcElapsedMs)} | ${show(sample.requests, 0)} | ${show(sample.domNodes, 0)} | ${show(sample.domNodeCounts?.bubbleGroups, 0)} | ${show(sample.longTasksOver50Ms, 0)} | ${show(sample.blockingTimeMs)} | ${rpcCalls} | ${cpuFrames} |`
+    '| Automation action (ms) | App Enter-to-bubble (ms) | RPC calls | RPC wall (ms) | Non-RPC (ms) | Requests | DOM nodes | Bubble groups | Long tasks >50 ms | Blocking (ms) | RPC methods | Top CPU frames |',
+    '| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |',
+    `| ${show(sample.ms)} | ${show(sample.appSendUiMs)} | ${show(sample.rpcCallCount, 0)} | ${show(sample.rpcWallMs)} | ${show(sample.nonRpcElapsedMs)} | ${show(sample.requests, 0)} | ${show(sample.domNodes, 0)} | ${show(sample.domNodeCounts?.bubbleGroups, 0)} | ${show(sample.longTasksOver50Ms, 0)} | ${show(sample.blockingTimeMs)} | ${rpcCalls} | ${cpuFrames} |`
   ];
   return lines.join('\n');
 }
