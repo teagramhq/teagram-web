@@ -171,6 +171,11 @@ export function readStickerPackZipBytes(bytes: Uint8Array): StickerPackZipBytesR
     const normalizedName = entry.name.replace(/\\/g, '/');
     const isDirectory = normalizedName.endsWith('/');
     const name = getBasename(normalizedName);
+    if(normalizedName.split('/').includes('__MACOSX') || name.startsWith('._')) {
+      entry.terminate();
+      return;
+    }
+
     const extension = getStickerFileExtension(name);
     const originalSize = entry.originalSize;
 

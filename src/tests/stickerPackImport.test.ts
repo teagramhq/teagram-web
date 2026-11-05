@@ -2,7 +2,7 @@ import {deflateSync, zipSync} from 'fflate';
 import {describe, expect, it, vi} from 'vitest';
 import {readStickerPackZip, validateStickerPackFiles} from '@helpers/stickerPackImport';
 import {BoundedZipInflate, readStickerPackZipBytes} from '@helpers/stickerPackImportZip';
-import {getStickerFileMimeType} from '@helpers/stickerPackCommon';
+import {getStickerFileMimeType, isStickerPackImportEnabled} from '@helpers/stickerPackCommon';
 import {createStickerSetShareLink, parseStickerSetShareLink, processInitialStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
 
 const makeFile = (name: string, size: number) => new File([new Uint8Array(size)], name);
@@ -49,6 +49,25 @@ describe('sticker pack import files', () => {
     expect(result.files.map((file) => file.name)).toEqual(['cat.webp']);
     expect(Array.from(result.files[0].chunks.flatMap((chunk) => Array.from(chunk)))).toEqual([1, 2, 3]);
     expect(result.rejected).toEqual([]);
+  });
+
+  it('skips macOS AppleDouble metadata entries before format validation', () => {
+    const archive = zipSync({
+      '__MACOSX/._cat.webp': Uint8Array.from([9, 9]),
+      'nested/._dog.webp': Uint8Array.from([8, 8]),
+      'cat.webp': Uint8Array.from([1, 2, 3])
+    });
+    const result = readStickerPackZipBytes(archive);
+
+    expect(result.error).toBeUndefined();
+    expect(result.files.map((file) => file.name)).toEqual(['cat.webp']);
+    expect(result.rejected).toEqual([]);
+  });
+
+  it('shows the settings import row only when server config explicitly enables it', () => {
+    expect(isStickerPackImportEnabled('on')).toBe(true);
+    expect(isStickerPackImportEnabled('off')).toBe(false);
+    expect(isStickerPackImportEnabled(undefined)).toBe(false);
   });
 
   it('uses one explicit MIME map and rejects unknown extensions', () => {

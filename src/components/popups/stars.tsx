@@ -901,7 +901,7 @@ export default class PopupStars extends PopupElement {
         }
         const img = document.createElement('img');
         img.classList.add('popup-stars-image');
-        await renderImageFromUrlPromise(img, `assets/img/${maybe2x(this.giftPeerId ? 'stars_pay' : 'stars')}.png`);
+        await renderImageFromUrlPromise(img, `/assets/img/${maybe2x(this.giftPeerId ? 'stars_pay' : 'stars')}.png`);
         return img;
       })(),
       this.peerId || this.paymentForm?.bot_id || this.giftPeerId ? wrapPeerTitle({peerId: this.peerId || this.giftPeerId || this.paymentForm.bot_id.toPeerId(false)}) : undefined,

@@ -275,7 +275,7 @@ function GiftOptionsPage(props: {
         <div class={styles.recipientAvatar}>
           <img
             class={styles.recipientBackground}
-            src={`assets/img/${maybe2x('stars_pay')}.png`}
+            src={`/assets/img/${maybe2x('stars_pay')}.png`}
           />
           <AvatarNewTsx peerId={props.peerId} size={100} />
         </div>

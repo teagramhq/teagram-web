@@ -5,6 +5,7 @@
  */
 
 import noop from '@helpers/noop';
+import {processInitialStickerSetShareLink} from '@helpers/stickerSetLink';
 import {defineStories} from '../registry';
 import {
   channelChat,
@@ -20,6 +21,7 @@ import {
 } from '../fixtures';
 
 const stickerSetConfig = {me_url_prefix: 'https://teagram.test/'};
+const getLocalStickerSetConfig = () => ({me_url_prefix: `${window.location.origin}/`});
 
 const getStickerSetPreviewManagers = (getConfig: () => unknown = () => stickerSetConfig) => ({
   apiManager: {getConfig},
@@ -37,7 +39,8 @@ const getStickerSetPreviewManagers = (getConfig: () => unknown = () => stickerSe
       },
       documents: [stickerDocument],
       packs: [] as any[]
-    })
+      }),
+      toggleStickerSets: () => true
   }
 });
 
@@ -130,6 +133,20 @@ defineStories('Composer & bots', [
     open: async() => {
       const {default: showStickersPopup} = await import('@components/popups/stickers');
       showStickersPopup({_: 'inputStickerSetShortName', short_name: 'sandbox_stickers'});
+    }
+  },
+  {
+    id: 'stickerShareLink',
+    fixtureOnly: true,
+    title: 'Install a sticker set from a share link',
+    managers: getStickerSetPreviewManagers(getLocalStickerSetConfig),
+    open: async() => {
+      const {default: showStickersPopup} = await import('@components/popups/stickers');
+      const href = new URL(location.pathname, location.origin).toString();
+      const config = getLocalStickerSetConfig();
+      await processInitialStickerSetShareLink(href, Promise.resolve(config), (set) => {
+        if(!set.isEmoji) showStickersPopup({_: 'inputStickerSetShortName', short_name: set.shortName});
+      });
     }
   },
   {

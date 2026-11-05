@@ -20,6 +20,14 @@ function makeManager({
 }
 
 describe('ApiFileManager object URLs', () => {
+  it('recognizes root-absolute local assets', () => {
+    const manager = Object.create(ApiFileManager.prototype) as ApiFileManager;
+
+    expect((manager as any).isLocalWebFile('/assets/img/logo.svg')).toBe(true);
+    const relativeAssetPath = ['assets', 'img/logo.svg'].join('/');
+    expect((manager as any).isLocalWebFile(relativeAssetPath)).toBe(false);
+  });
+
   it('re-reads the canonical context before concurrent downloads create a URL', async() => {
     const media = {_: 'document', id: 'concurrent'} as any;
     const blob = new Blob(['downloaded']);

@@ -857,9 +857,9 @@ export class UiNotificationsManager {
 
     this.titleChanged = true;
     document.title = I18n.format('Notifications.Count', true, [count]);
-    // this.setFavicon('assets/img/favicon_unread.ico');
+    // this.setFavicon('/assets/img/favicon_unread.ico');
 
-    // fetch('assets/img/favicon.ico')
+    // fetch('/assets/img/favicon.ico')
     // .then((res) => res.blob())
     // .then((blob) => {
     // const img = document.createElement('img');

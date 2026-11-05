@@ -4,6 +4,10 @@ export type StickerPackRejectedFile = {name: string, reason: StickerPackRejectio
 
 export const SHORT_NAME_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
 
+export function isStickerPackImportEnabled(mode?: 'on' | 'off') {
+  return mode === 'on';
+}
+
 export const STICKER_FILE_LIMITS = {
   webp: {size: 512 * 1024, mimeType: 'image/webp'},
   tgs: {size: 64 * 1024, mimeType: 'application/x-tgsticker'},

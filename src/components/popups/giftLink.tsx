@@ -216,7 +216,7 @@ export default async function showGiftLinkPopup(
 
     // after mount: `decode()` on an image still being moved into the tree rejects as "broken"
     onMount(() => {
-      renderImageFromUrl(img, `assets/img/premium-star${window.devicePixelRatio > 1 ? '@2x' : ''}.png`);
+      renderImageFromUrl(img, `/assets/img/premium-star${window.devicePixelRatio > 1 ? '@2x' : ''}.png`);
     });
 
     return (

@@ -25,6 +25,7 @@ import {IconTsx} from '@components/iconTsx';
 import {mountSolidComponent} from '@helpers/solid/wrapSolidComponent';
 import showStickerPackImportPopup from '@components/popups/stickerPackImport';
 import {useAppConfig} from '@stores/appState';
+import {isStickerPackImportEnabled} from '@helpers/stickerPackCommon';
 
 const StickersAndEmoji: Component = () => {
   const [tab] = useSuperTab();
@@ -182,7 +183,7 @@ const StickersAndEmoji: Component = () => {
       renderComponent({
         element: section.content,
         Component: () => (
-          <Show when={useAppConfig()?.sticker_import_mode === 'on'}>
+          <Show when={isStickerPackImportEnabled(useAppConfig()?.sticker_import_mode)}>
             <Row clickable={showStickerPackImportPopup}>
               <Row.Icon icon="stickers_face" />
               <Row.Title>{i18n('Teagram.Import.Pack')}</Row.Title>

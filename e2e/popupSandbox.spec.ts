@@ -145,6 +145,31 @@ test('every popup story opens and becomes visible', async({page}) => {
   expect(failed, `\n${failed.join('\n')}\n`).toEqual([]);
 });
 
+test('opens and installs a sticker set from a direct share URL on a deep route', async({page}) => {
+  const badDeepAssetRequests: string[] = [];
+  page.on('response', (response) => {
+    const url = new URL(response.url());
+    if(
+      url.pathname.startsWith('/addstickers/assets/') ||
+      (url.pathname.startsWith('/assets/') && response.status() >= 400)
+    ) badDeepAssetRequests.push(`${response.status()} ${url.pathname}`);
+  });
+
+  await page.goto('/addstickers/sandbox_stickers?popups=1#stickerShareLink');
+  await page.waitForFunction(() => !!window.popupSandbox, null, {timeout: 30_000});
+  await page.evaluate(() => window.popupSandbox.ready());
+
+  const stickerPopup = page.locator('.popup-stickers');
+  await expect(stickerPopup).toBeVisible();
+  await expect(stickerPopup.getByText('Sandbox Stickers', {exact: true})).toBeVisible();
+
+  await stickerPopup.getByRole('button', {name: /add/i}).click();
+  await expect.poll(() => page.evaluate(() => window.popupSandbox.calls()
+    .filter((call) => call.manager === 'appStickersManager' && call.method === 'toggleStickerSets')
+    .map((call) => (call.args[0] as Array<{id: string}>).map((set) => set.id)))).toEqual([['8001']]);
+  expect(badDeepAssetRequests).toEqual([]);
+});
+
 test('imports a folder pack and opens its shareable sticker set', async({page}, testInfo) => {
   // A webkitdirectory input only accepts a real directory path, so the folder is written to this test's output dir.
   const folder = testInfo.outputPath('pack');

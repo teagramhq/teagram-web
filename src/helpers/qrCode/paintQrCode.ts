@@ -45,7 +45,7 @@ const logoUrlCache = new Map<string, Promise<string>>();
 function getLogoUrl(logoColor: string): Promise<string> {
   let url = logoUrlCache.get(logoColor);
   if(!url) {
-    url = fetch('assets/img/logo_padded.svg')
+      url = fetch('/assets/img/logo_padded.svg')
     .then((res) => {
       if(!res.ok) throw new Error('QR logo unavailable');
       return res.text();

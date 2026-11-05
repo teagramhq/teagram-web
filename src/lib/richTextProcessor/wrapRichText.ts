@@ -499,7 +499,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           //   insertPart(entity, '<span class="emoji">', '</span>');
           // } else {
           element = document.createElement('img');
-          (element as HTMLImageElement).src = `assets/img/emoji/${entity.unicode}.png`;
+          (element as HTMLImageElement).src = `/assets/img/emoji/${entity.unicode}.png`;
           property = 'alt';
           element.className = 'emoji emoji-image';
 
@@ -523,7 +523,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           insertPart(entity, '<span class="emoji" contenteditable="false">', '</span>');
         } */
         /* if(!isSupported) {
-          insertPart(entity, `<img src="assets/img/emoji/${entity.unicode}.png" alt="`, `" class="emoji">`);
+          insertPart(entity, `<img src="/assets/img/emoji/${entity.unicode}.png" alt="`, `" class="emoji">`);
         } */
 
         break;

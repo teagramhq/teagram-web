@@ -1616,7 +1616,7 @@ export class AppDialogsManager {
 
       Promise.all([
         this.updateContactsLength(false),
-        renderImageFromUrlPromise(img, 'assets/img/EmptyChats.svg'),
+        renderImageFromUrlPromise(img, '/assets/img/EmptyChats.svg'),
         fastRafPromise()
       ]).then(([usersLength]) => {
         placeholderContainer.classList.add('visible');

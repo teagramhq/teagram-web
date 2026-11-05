@@ -161,7 +161,7 @@ export class LottieLoader {
   }
 
   public makeAssetUrl(name: LottieAssetName) {
-    return 'assets/tgs/' + name + '.json';
+    return '/assets/tgs/' + name + '.json';
   }
 
   public loadAnimationAsAsset(params: Omit<LottieOptions, 'animationData' | 'name'>, name: LottieAssetName) {

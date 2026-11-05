@@ -707,7 +707,7 @@ export class ApiFileManager extends AppManager {
   }
 
   private isLocalWebFile(url: string) {
-    return url?.startsWith('assets/');
+    return url?.startsWith('/assets/');
   }
 
   private isWebAppExtFile(url: string) {
