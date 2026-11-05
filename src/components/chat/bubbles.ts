@@ -765,6 +765,12 @@ export default class ChatBubbles {
 
   private middlewareHelper = getMiddleware();
   private chatInnerMiddlewareHelper: ReturnType<typeof getMiddleware>;
+  private pendingScrollRestore?: {
+    middleware: Middleware,
+    scrollSaver: ScrollSaver,
+    restorePromise: Promise<boolean>,
+    queueWait: Promise<boolean>
+  };
 
   private log: ReturnType<typeof logger>;
 
@@ -11378,8 +11384,13 @@ export default class ChatBubbles {
     const log = this.log.bindPrefix('prepareToSaveScroll');
     log('save');
     const middleware = this.chatInnerMiddlewareHelper?.get();
-    const scrollSaver = this.createScrollSaver(reverse);
-    scrollSaver.save(); // * let's save scroll position by point before the slicing, not after
+    const existingRestore = this.pendingScrollRestore;
+    const pendingRestore = existingRestore?.middleware === middleware && middleware?.() ? existingRestore : undefined;
+    if(existingRestore && !pendingRestore && this.pendingScrollRestore === existingRestore) {
+      this.pendingScrollRestore = undefined;
+    }
+    const scrollSaver = pendingRestore?.scrollSaver ?? this.createScrollSaver(reverse);
+    if(!pendingRestore) scrollSaver.save(); // * let's save scroll position by point before the slicing, not after
 
     if((sliceTop || sliceBottom) && this.getRenderedLength() && !this.chat.setPeerPromise) {
       const viewportSlice = this.getViewportSlice(true);
@@ -11396,12 +11407,34 @@ export default class ChatBubbles {
       restoreScroll: async() => {
         log('restore');
         if(!middleware?.()) return;
+        if(pendingRestore) {
+          await pendingRestore.queueWait;
+          return;
+        }
+
+        const currentRestore = this.pendingScrollRestore;
+        if(currentRestore?.middleware === middleware) {
+          await currentRestore.queueWait;
+          return;
+        }
+
         // scrollSaver.restore(_history.length === 1 && !reverse ? false : true);
         const restorePromise = scrollSaver.restoreAfterLayout(reverse, middleware).then((restored) => {
           if(restored && middleware?.()) this.onRenderScrollSet(scrollSaver.getSaved());
           return restored;
         });
-        await withTimeout(restorePromise, MEDIA_PROMISES_TIMEOUT, false);
+        const createdPendingRestore = {
+          middleware,
+          scrollSaver,
+          restorePromise,
+          queueWait: withTimeout(restorePromise, MEDIA_PROMISES_TIMEOUT, false)
+        };
+        this.pendingScrollRestore = createdPendingRestore;
+        const clearPendingRestore = () => {
+          if(this.pendingScrollRestore === createdPendingRestore) this.pendingScrollRestore = undefined;
+        };
+        void restorePromise.then(clearPendingRestore, clearPendingRestore);
+        await createdPendingRestore.queueWait;
       },
       scrollSaver
     };

@@ -154,22 +154,41 @@ function makeTargetedEvent(type: string, target: Element) {
 }
 
 function captureChatResizeObserver() {
-  let callback: ResizeObserverCallback;
+  const observers: {callback: ResizeObserverCallback, disconnected: boolean}[] = [];
   const disconnect = vi.fn();
   class ResizeObserverMock {
+    private observer: {callback: ResizeObserverCallback, disconnected: boolean};
+
     constructor(onResize: ResizeObserverCallback) {
-      callback = onResize;
+      this.observer = {callback: onResize, disconnected: false};
+      observers.push(this.observer);
     }
 
     observe() {}
-    disconnect = disconnect;
+    disconnect = vi.fn(() => {
+      this.observer.disconnected = true;
+      disconnect();
+    });
   }
 
   vi.stubGlobal('ResizeObserver', ResizeObserverMock);
   return {
     disconnect,
+    get observerCount() {
+      return observers.length;
+    },
     flush(target: Element) {
-      callback([{target} as ResizeObserverEntry], {} as ResizeObserver);
+      const observer = observers[0];
+      if(observer && !observer.disconnected) {
+        observer.callback([{target} as ResizeObserverEntry], {} as ResizeObserver);
+      }
+    },
+    flushAll(target: Element) {
+      observers.forEach((observer) => {
+        if(!observer.disconnected) {
+          observer.callback([{target} as ResizeObserverEntry], {} as ResizeObserver);
+        }
+      });
     }
   };
 }
@@ -256,15 +275,23 @@ function makeScrollRestoreHarness() {
       scrollContainer.scrollTop = value;
     }
   };
-  const scrollSaver = new ScrollSaver(scrollable as any, '.bubble', true);
-  const restore = vi.spyOn(scrollSaver, 'restore');
+  const restore = vi.fn();
+  const createScrollSaver = vi.fn(() => {
+    const scrollSaver = new ScrollSaver(scrollable as any, '.bubble', true);
+    const restoreOriginal = scrollSaver.restore.bind(scrollSaver);
+    vi.spyOn(scrollSaver, 'restore').mockImplementation((useReflow) => {
+      restore(useReflow);
+      restoreOriginal(useReflow);
+    });
+    return scrollSaver;
+  });
   const onRenderScrollSet = vi.fn();
   const log = Object.assign(vi.fn(), {bindPrefix: vi.fn(() => vi.fn())});
   const harness = Object.assign(Object.create(ChatBubbles.prototype), {
     chatInner,
     chatInnerMiddlewareHelper,
     log,
-    createScrollSaver: vi.fn(() => scrollSaver),
+    createScrollSaver,
     onRenderScrollSet
   }) as any;
 
@@ -275,6 +302,7 @@ function makeScrollRestoreHarness() {
     bubble,
     restore,
     onRenderScrollSet,
+    createScrollSaver,
     prependBubble(position: {top: number, bottom: number}) {
       const prepended = document.createElement('div');
       prepended.classList.add('bubble');
@@ -2207,6 +2235,55 @@ test('preserves a scroll restore after the queue wait deadline until layout is d
   expect(getScrollTop()).toBe(150);
   expect(bubble.getBoundingClientRect().top).toBe(120);
   expect(resizeObserver.disconnect).toHaveBeenCalledOnce();
+});
+
+test('coalesces scroll restores when two batches mount before layout delivery', async() => {
+  vi.useFakeTimers();
+  const resizeObserver = captureChatResizeObserver();
+  const {
+    harness,
+    scrollContainer,
+    bubble,
+    restore,
+    onRenderScrollSet,
+    createScrollSaver,
+    setBubblePosition,
+    setScrollHeight,
+    setLayoutDirty,
+    getScrollTop,
+    prependBubble
+  } = makeScrollRestoreHarness();
+
+  const firstBatch = harness.prepareToSaveScroll(true, false, false);
+  prependBubble({top: 60, bottom: 100});
+  setBubblePosition({top: 160, bottom: 200});
+  setScrollHeight(1040);
+  setLayoutDirty(true);
+  const firstRestore = firstBatch.restoreScroll();
+
+  await vi.advanceTimersByTimeAsync(10_000);
+  await firstRestore;
+
+  setLayoutDirty(false);
+  const secondBatch = harness.prepareToSaveScroll(true, false, false);
+  prependBubble({top: 20, bottom: 60});
+  setBubblePosition({top: 190, bottom: 230});
+  setScrollHeight(1070);
+  setLayoutDirty(true);
+  const secondRestore = secondBatch.restoreScroll();
+
+  await vi.advanceTimersByTimeAsync(10_000);
+  await secondRestore;
+  setLayoutDirty(false);
+  resizeObserver.flushAll(scrollContainer);
+  await Promise.resolve();
+
+  expect(getScrollTop()).toBe(170);
+  expect(bubble.getBoundingClientRect().top).toBe(120);
+  expect(createScrollSaver).toHaveBeenCalledOnce();
+  expect(resizeObserver.observerCount).toBe(1);
+  expect(restore).toHaveBeenCalledOnce();
+  expect(onRenderScrollSet).toHaveBeenCalledOnce();
 });
 
 test.each([
