@@ -287,15 +287,43 @@ test('reports send and scroll timing repeats without blocking on their timing re
   assert.match(samplesTable, /Send a message \| head \| 1 \| 160\.0/);
 });
 
-test('requires five paired chat-open samples while reporting send and scroll repeats', () => {
-  const result = evaluatePerformance(report({requireTimingRepeats: true}));
+test('keeps three-repeat policy while reporting extra timing samples', () => {
+  const head = scaleVariants({'100x': {chatOpen: [{ms: 100}, {ms: 110}]}});
+  const result = evaluatePerformance(report({head, requireTimingRepeats: true}));
+  const samples = scaleVariants({'100x': {
+    chatOpen: Array.from({length: PERFORMANCE_TIMING_REPEATS}, () => ({ms: 100})),
+    scrollBack2k: Array.from({length: PERFORMANCE_TIMING_REPEATS}, () => ({ms: 200})),
+    sendMessage: Array.from({length: PERFORMANCE_TIMING_REPEATS}, () => ({ms: 50}))
+  }});
+  const samplesTable = formatPerformanceSamplesTable({variants: {head: samples}});
+  const scenarios = [
+    ['chatOpen', 'Open long-history chat'],
+    ['scrollBack2k', 'Scroll back 2,000 messages'],
+    ['sendMessage', 'Send a message']
+  ];
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes(`expected at least ${PERFORMANCE_TIMING_REPEATS} repeat measurements`)));
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes(`base bundle baseline requires ${PERFORMANCE_TIMING_REPEATS} repeats`)));
-  for(const key of ['scrollBack2k', 'sendMessage']) {
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes(`expected at least ${PERFORMANCE_REPEATS} repeat measurements`)));
+  for(const [key, label] of scenarios) {
     assert.equal(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes(`expected at least ${PERFORMANCE_TIMING_REPEATS} repeat measurements`)), false);
     assert.equal(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes(`base bundle baseline requires ${PERFORMANCE_TIMING_REPEATS} repeats`)), false);
+    assert.equal((samplesTable.match(new RegExp(`${label} \\| head \\|`, 'g')) || []).length, PERFORMANCE_TIMING_REPEATS);
   }
+});
+
+test('keeps the existing calibration history version', () => {
+  assert.equal(PERFORMANCE_MEASUREMENT_VERSION, 2);
+});
+
+test('keeps extra timing samples out of policy medians', () => {
+  const head = scaleVariants({'100x': {chatOpen: [
+    {ms: 100}, {ms: 100}, {ms: 300}, {ms: 600}, {ms: 700}
+  ]}});
+  const history = mainHistory(20, {'100x': {chatOpen: {ms: 100}}});
+  const result = evaluatePerformance(report({head, requireTimingRepeats: true}), history);
+  const row = result.rows.find((item) => item.scale === '100x' && item.key === 'chatOpen');
+
+  assert.equal(row.head.ms, 100);
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes('budget')), false);
 });
 
 test('formats raw repeated timing samples with chat-open input delay and page metrics', () => {

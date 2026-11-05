@@ -22,8 +22,9 @@ other scenarios continue using the shared measurement version.
 On pull requests, scrolling fails if any 100x repeat records a task over 50 ms
 or the pooled dropped-frame percentage reaches 1%; dropped-frame percentage is
 pooled across all frame intervals from the scroll repeats. Chat open, scroll
-back, and send measurements use five same-run paired repeats. Send and scroll
-timing samples are reported in the sample table and do not add timing gates.
+back, and send measurements collect five same-run paired repeats in PR artifacts.
+The existing three-sample policy and calibration version are unchanged; extra
+timing samples are report-only. Send and scroll timing add no timing gates.
 Every scenario and size needs three base bundle measurements or the performance
 gate fails closed.
 The 100x cold chat-list measurement uses six fresh contexts for the paired

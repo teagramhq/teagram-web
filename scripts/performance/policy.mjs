@@ -11,7 +11,7 @@ export const SCENARIOS = [
 ];
 
 export const SCALES = ['1x', '100x'];
-export const PERFORMANCE_MEASUREMENT_VERSION = 3;
+export const PERFORMANCE_MEASUREMENT_VERSION = 2;
 export const PERFORMANCE_REPEATS = 3;
 export const PERFORMANCE_TIMING_REPEATS = 5;
 // Cold-load pairs need additional samples to outvote occasional runner long tasks.
@@ -193,13 +193,15 @@ export function evaluatePerformance(report, history = []) {
     for(const scenario of SCENARIOS) {
       const rawBaseSamples = report.variants?.base?.[scale]?.[scenario.key];
       const rawHeadSamples = report.variants?.head?.[scale]?.[scenario.key];
-      const baseSamples = Array.isArray(rawBaseSamples) ? rawBaseSamples : [];
-      const headSamples = Array.isArray(rawHeadSamples) ? rawHeadSamples : [];
+      const isReportOnlyTimingScenario = scale === '100x' && ['chatOpen', 'scrollBack2k', 'sendMessage'].includes(scenario.key);
+      const allBaseSamples = Array.isArray(rawBaseSamples) ? rawBaseSamples : [];
+      const allHeadSamples = Array.isArray(rawHeadSamples) ? rawHeadSamples : [];
+      // Keep additional timing repeats in the artifact without changing master's policy inputs.
+      const baseSamples = isReportOnlyTimingScenario ? allBaseSamples.slice(0, PERFORMANCE_REPEATS) : allBaseSamples;
+      const headSamples = isReportOnlyTimingScenario ? allHeadSamples.slice(0, PERFORMANCE_REPEATS) : allHeadSamples;
       const base = summarizeSamples(baseSamples);
       const head = summarizeSamples(headSamples);
-      const isTimingRepeatScenario = scale === '100x' && scenario.key === 'chatOpen';
-      const requiredRepeats = report.requireTimingRepeats && isTimingRepeatScenario ? PERFORMANCE_TIMING_REPEATS :
-        scale === '100x' && scenario.key === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
+      const requiredRepeats = scale === '100x' && scenario.key === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
       const mainValues = historyFor(history, scale, scenario.key, report);
       const calibrated = mainValues.length >= CALIBRATION_RUNS;
       const scrollHistory = scale === '100x' && scenario.key === 'scrollBack2k' ? historyScrollMetrics(history, report) : [];
@@ -247,9 +249,8 @@ export function evaluatePerformance(report, history = []) {
       });
 
       if(report.requireBase) {
-        const requiredBaseRepeats = report.requireTimingRepeats && isTimingRepeatScenario ? PERFORMANCE_TIMING_REPEATS : PERFORMANCE_REPEATS;
-        if(baseSamples.length < requiredBaseRepeats) {
-          addFailure(blockingFailures, scale, scenario.key, `base bundle baseline requires ${requiredBaseRepeats} repeats, got ${baseSamples.length}`);
+        if(baseSamples.length < PERFORMANCE_REPEATS) {
+          addFailure(blockingFailures, scale, scenario.key, `base bundle baseline requires ${PERFORMANCE_REPEATS} repeats, got ${baseSamples.length}`);
         }
         if(scale === '100x' && scenario.key === 'coldChatList' && baseSamples.length < COLD_CHAT_LIST_REPEATS) {
           addFailure(blockingFailures, scale, scenario.key, `base cold-load baseline requires ${COLD_CHAT_LIST_REPEATS} repeats, got ${baseSamples.length}`);
@@ -257,9 +258,6 @@ export function evaluatePerformance(report, history = []) {
         baseSamples.forEach((sample, index) => {
           if(!Number.isFinite(sample?.bundleBytes)) {
             addFailure(blockingFailures, scale, scenario.key, `base bundle measurement is missing or invalid in sample ${index + 1}`);
-          }
-          if(report.requireTimingRepeats && isTimingRepeatScenario && !Number.isFinite(sample?.ms)) {
-            addFailure(blockingFailures, scale, scenario.key, `base timing measurement is missing or invalid in sample ${index + 1}`);
           }
           if(scale === '100x' && scenario.key !== 'scrollBack2k' && scenario.key !== 'dateJump') {
             if(!Number.isFinite(sample?.longTasksOver50Ms)) {
