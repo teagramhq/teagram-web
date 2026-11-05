@@ -2,9 +2,8 @@ import {getStickerFileExtension, getStickerPackMaxCount, SHORT_NAME_PATTERN, STI
 import type {StickerPackType, ValidatedStickerPackFiles} from '@helpers/stickerPackCommon';
 import {validateStickerPackFiles} from '@helpers/stickerPackImport';
 import {MAX_ZIP_TOTAL_SIZE} from '@helpers/stickerPackImportZip';
-import {TELEGRAM_BOT_API_ORIGIN} from '@config/telegramBotApi';
+import {isValidTelegramBotToken, TELEGRAM_BOT_API_ORIGIN} from '@config/telegramBotApi';
 
-const BOT_TOKEN_PATTERN = /^\d+:[A-Za-z0-9_-]{30,}$/;
 const MAX_TELEGRAM_PACK_FILES = 201;
 const DEFAULT_STICKER_EMOJI = '🙂';
 
@@ -41,9 +40,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-export function isValidTelegramBotToken(token: string) {
-  return BOT_TOKEN_PATTERN.test(token);
-}
+export {isValidTelegramBotToken};
 
 export function parseTelegramStickerPackLink(value: string): TelegramStickerPackLink | undefined {
   let url: URL;

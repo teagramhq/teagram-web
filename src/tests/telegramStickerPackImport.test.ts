@@ -1,12 +1,6 @@
-import {afterEach, beforeAll, beforeEach, describe, expect, it, vi} from 'vitest';
-import {getSavedTelegramBotToken, removeTelegramBotToken, saveTelegramBotToken} from '@helpers/telegramStickerPackTokenStorage';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 import {downloadTelegramStickerPack, isValidTelegramBotToken, parseTelegramStickerPackLink} from '@helpers/telegramStickerPackImport';
 import {AppStickersManager} from '@appManagers/appStickersManager';
-import AccountController from '@lib/accounts/accountController';
-import {getDatabaseState} from '@config/databases/state';
-import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
-import IDBStorage from '@lib/files/idb';
-import appSessionStorage from '@lib/sessionStorage';
 import type {ValidatedStickerPackFiles} from '@helpers/stickerPackCommon';
 
 const makeJsonResponse = (url: string, body: unknown, status = 200) => {
@@ -31,10 +25,6 @@ const mockTelegramFetch = (handler: (url: URL) => Response | Promise<Response>) 
 };
 
 const token = `123456789:${'A'.repeat(35)}`;
-
-beforeAll(() => {
-  DeferredIsUsingPasscode.resolveDeferred(false);
-});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -237,170 +227,6 @@ describe('Telegram pack links and Bot API downloads', () => {
 
     await expect(downloadTelegramStickerPack(link, token)).rejects.toThrow(/response host/i);
     expect(fetchMock).toHaveBeenCalledOnce();
-  });
-});
-
-describe('Telegram bot token storage', () => {
-  const accountNumber = 4;
-  const tokenKey = `telegramBotToken${accountNumber}`;
-  const savedToken = `987654321:${'B'.repeat(35)}`;
-
-  const createEncryptedStorage = (initialEntries: Record<string, unknown> = {}, beforeFlush = async() => {}) => {
-    const persisted = new Map(Object.entries(initialEntries));
-    const pending = new Map(persisted);
-    const proxy = vi.spyOn(appSessionStorage, 'encryptedStorageProxy') as any;
-    proxy.mockImplementation(async(type: string, ...args: any[]) => {
-      if(type === 'get') {
-        const [keys, useCache = true] = args as [string[], boolean?];
-        const source = useCache ? pending : persisted;
-        return keys.map((key) => source.get(key));
-      }
-
-      if(type === 'save') {
-        const [keys, values] = args as [string[], unknown[]];
-        keys.forEach((key, index) => pending.set(key, values[index]));
-        return;
-      }
-
-      if(type === 'delete') {
-        const names = Array.isArray(args[0]) ? args[0] : [args[0]];
-        names.forEach((key) => pending.delete(key));
-        return;
-      }
-
-      if(type === 'flush') {
-        await beforeFlush();
-        persisted.clear();
-        pending.forEach((value, key) => persisted.set(key, value));
-      }
-    });
-
-    return {
-      proxy,
-      persisted,
-      simulateReload() {
-        pending.clear();
-        persisted.forEach((value, key) => pending.set(key, value));
-      }
-    };
-  };
-
-  const clearTestToken = async() => {
-    DeferredIsUsingPasscode.resolveDeferred(false);
-    await appSessionStorage.localStorageProxy('delete', tokenKey);
-    await new IDBStorage(getDatabaseState(accountNumber), 'session').delete('telegramBotToken');
-  };
-
-  beforeEach(clearTestToken);
-
-  afterEach(async() => {
-    DeferredIsUsingPasscode.resolveDeferred(false);
-    vi.restoreAllMocks();
-    await clearTestToken();
-  });
-
-  it('writes through encrypted session storage when a passcode is enabled after the import flow opens', async() => {
-    DeferredIsUsingPasscode.resolveDeferred(false);
-    expect(await getSavedTelegramBotToken(accountNumber)).toBeUndefined();
-
-    const encryptedStorage = createEncryptedStorage();
-    DeferredIsUsingPasscode.resolveDeferred(true);
-    await saveTelegramBotToken(accountNumber, savedToken);
-
-    expect(encryptedStorage.proxy).toHaveBeenCalledWith('save', [tokenKey], [savedToken]);
-    expect(encryptedStorage.proxy).toHaveBeenCalledWith('flush');
-    expect(await appSessionStorage.localStorageProxy('get', tokenKey, false)).toBeUndefined();
-    expect(await getSavedTelegramBotToken(accountNumber)).toBe(savedToken);
-  });
-
-  it('waits for encrypted deletion to flush and reads the token as absent after reload', async() => {
-    let startedFlush!: () => void;
-    const flushStarted = new Promise<void>((resolve) => { startedFlush = resolve; });
-    let finishFlush!: () => void;
-    const flushGate = new Promise<void>((resolve) => { finishFlush = resolve; });
-    const encryptedStorage = createEncryptedStorage({[tokenKey]: savedToken}, async() => {
-      startedFlush();
-      await flushGate;
-    });
-    DeferredIsUsingPasscode.resolveDeferred(true);
-
-    const removal = removeTelegramBotToken(accountNumber);
-    const firstResult = await Promise.race([
-      removal.then(() => 'removed', () => 'failed'),
-      flushStarted.then(() => 'flushing')
-    ]);
-    expect(firstResult).toBe('flushing');
-    await flushStarted;
-    let settled = false;
-    void removal.then(() => { settled = true; }, () => { settled = true; });
-    expect(settled).toBe(false);
-
-    finishFlush();
-    await removal;
-    encryptedStorage.simulateReload();
-
-    expect(encryptedStorage.persisted.has(tokenKey)).toBe(false);
-    expect(await getSavedTelegramBotToken(accountNumber)).toBeUndefined();
-  });
-
-  it('propagates encrypted flush failures and preserves the saved token after reload', async() => {
-    const encryptedStorage = createEncryptedStorage({[tokenKey]: savedToken}, async() => {
-      throw new Error('encrypted session storage flush failed');
-    });
-    DeferredIsUsingPasscode.resolveDeferred(true);
-
-    await expect(removeTelegramBotToken(accountNumber)).rejects.toThrow('encrypted session storage flush failed');
-    encryptedStorage.simulateReload();
-
-    expect(await getSavedTelegramBotToken(accountNumber)).toBe(savedToken);
-  });
-
-  it('reports a plaintext removal failure if storage still returns the token', async() => {
-    DeferredIsUsingPasscode.resolveDeferred(false);
-    await saveTelegramBotToken(accountNumber, savedToken);
-    const localStorageProxy = appSessionStorage.localStorageProxy.bind(appSessionStorage);
-    vi.spyOn(appSessionStorage, 'localStorageProxy').mockImplementation(async(type, ...args) => {
-      if(type === 'delete' && args[0] === tokenKey) return undefined as any;
-      return localStorageProxy(type, ...args);
-    });
-
-    await expect(removeTelegramBotToken(accountNumber)).rejects.toThrow(/remove/i);
-    expect(await getSavedTelegramBotToken(accountNumber)).toBe(savedToken);
-  });
-
-  it('clears the saved token when its account is logged out', async() => {
-    await saveTelegramBotToken(accountNumber, savedToken);
-    await AccountController.shiftAccounts(accountNumber);
-
-    expect(await getSavedTelegramBotToken(accountNumber)).toBeUndefined();
-  });
-
-  it('moves saved tokens with accounts when logout shifts account slots', async() => {
-    DeferredIsUsingPasscode.resolveDeferred(false);
-    const account3TokenKey = 'telegramBotToken3';
-    const account3 = await appSessionStorage.get('account3', false);
-    const account4 = await appSessionStorage.get('account4', false);
-    const account3Token = await appSessionStorage.get(account3TokenKey as any, false);
-    const account4Token = await appSessionStorage.get(tokenKey as any, false);
-
-    try {
-      await AccountController.update(3, {userId: 300 as PeerId}, true);
-      await AccountController.update(4, {userId: 400 as PeerId}, true);
-      await saveTelegramBotToken(accountNumber, savedToken);
-      await AccountController.shiftAccounts(3);
-
-      expect(await getSavedTelegramBotToken(3)).toBe(savedToken);
-      expect(await getSavedTelegramBotToken(4)).toBeUndefined();
-    } finally {
-      const keys = ['account3', 'account4', account3TokenKey, tokenKey];
-      await Promise.all(keys.map((key) => appSessionStorage.localStorageProxy('delete', key)));
-      const values: Record<string, unknown> = {};
-      if(account3 !== undefined) values.account3 = account3;
-      if(account4 !== undefined) values.account4 = account4;
-      if(account3Token !== undefined) values[account3TokenKey] = account3Token;
-      if(account4Token !== undefined) values[tokenKey] = account4Token;
-      if(Object.keys(values).length) await appSessionStorage.localStorageProxy('set', values);
-    }
   });
 });
 

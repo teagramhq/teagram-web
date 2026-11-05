@@ -3,7 +3,7 @@ import App from '@config/app';
 import tsNow from '@helpers/tsNow';
 import type {TrueDcId} from '@types';
 
-import sessionStorage, {getTelegramBotTokenStorageKey} from '@lib/sessionStorage';
+import sessionStorage from '@lib/sessionStorage';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 import StaticUtilityClass from '@lib/staticUtilityClass';
 
@@ -134,25 +134,12 @@ export class AccountController extends StaticUtilityClass {
   static async shiftAccounts(upTo: ActiveAccountNumber) {
     for(let i = upTo; i <= MAX_ACCOUNTS; i++) {
       const accountNumber = i as ActiveAccountNumber;
-      const tokenKey = getTelegramBotTokenStorageKey(accountNumber);
-      await Promise.all([
-        sessionStorage.delete(`account${accountNumber}`),
-        sessionStorage.delete(tokenKey)
-      ]);
+      await sessionStorage.delete(`account${accountNumber}`);
 
       if(i < MAX_ACCOUNTS) {
         const nextAccountNumber = (i + 1) as ActiveAccountNumber;
-        const nextTokenKey = getTelegramBotTokenStorageKey(nextAccountNumber);
-        const [toMove, token] = await Promise.all([
-          this.get(nextAccountNumber),
-          sessionStorage.get(nextTokenKey, false)
-        ]);
+        const toMove = await this.get(nextAccountNumber);
         toMove.userId && (await this.update(i as ActiveAccountNumber, toMove, true));
-
-        if(toMove.userId && token) {
-          const values: Partial<Record<typeof tokenKey, string>> = {[tokenKey]: token};
-          await sessionStorage.set(values);
-        }
       }
     }
 

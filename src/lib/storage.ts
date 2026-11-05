@@ -143,19 +143,20 @@ export default class AppStorage<
         } */
 
         const storage = await this.getStorage();
-        storage.save(keys, values);
+        await storage.save(keys, values);
         // console.log('setItem: have set', key/* , value */);
       } catch(e) {
         // this.useCS = false;
         if(keys.some((key) => this.sensitiveKeys.has(key as keyof Storage))) {
           this.log.error('set error for sensitive storage values', keys);
+          deferred.reject(e);
         } else {
           this.log.error('set error', e, keys, values);
         }
       }
     }
 
-    deferred.resolve();
+    if(!deferred.isRejected) deferred.resolve();
 
     if(set.size) {
       this.saveThrottled();
@@ -183,13 +184,16 @@ export default class AppStorage<
         } */
 
         const storage = await this.getStorage();
-        storage.delete(keys);
+        await storage.delete(keys);
       } catch(e) {
         this.log.error('delete error', e, keys);
+        if(keys.some((key) => this.sensitiveKeys.has(key as keyof Storage))) {
+          deferred.reject(e);
+        }
       }
     }
 
-    deferred.resolve();
+    if(!deferred.isRejected) deferred.resolve();
 
     if(set.size) {
       this.deleteThrottled();
@@ -199,8 +203,9 @@ export default class AppStorage<
   private _get = async() => {
     const keys = Array.from(this.getPromises.keys());
 
-    const storage = await this.getStorage();
-    storage.get(keys as string[]).then((values) => {
+    try {
+      const storage = await this.getStorage();
+      const values = await storage.get(keys as string[]);
       for(let i = 0, length = keys.length; i < length; ++i) {
         const key = keys[i];
         const deferred = this.getPromises.get(key);
@@ -210,29 +215,29 @@ export default class AppStorage<
           this.getPromises.delete(key);
         }
       }
-
-      // console.log('[AS]: get time', keys, performance.now() - perf);
-    }, (error: ApiError) => {
+    } catch(error) {
+      const apiError = error as ApiError;
       const ignoreErrors: Set<ErrorType> = new Set(['NO_ENTRY_FOUND', 'STORAGE_OFFLINE']);
-      if(!ignoreErrors.has(error.type)) {
-        this.useStorage = false;
-        this.log.error('get error', error, keys, this.storeName);
+      const isSensitive = keys.some((key) => this.sensitiveKeys.has(key));
+      if(isSensitive || !ignoreErrors.has(apiError?.type)) {
+        if(!isSensitive) this.useStorage = false;
+        this.log.error(isSensitive ? 'get error for sensitive storage values' : 'get error', isSensitive ? keys : error, this.storeName);
       }
 
       for(let i = 0, length = keys.length; i < length; ++i) {
         const key = keys[i];
         const deferred = this.getPromises.get(key);
         if(deferred) {
-          // deferred.reject(error);
-          deferred.resolve(undefined);
+          if(this.sensitiveKeys.has(key)) deferred.reject(error);
+          else deferred.resolve(undefined);
           this.getPromises.delete(key);
         }
       }
-    }).finally(() => {
+    } finally {
       if(this.getPromises.size) {
         this.getThrottled();
       }
-    });
+    }
   };
 
   public isAvailable() {
@@ -252,9 +257,22 @@ export default class AppStorage<
   }
 
   public async get<T extends keyof Storage>(key: T, useCache = true): Promise<Storage[T]> {
+    if(!this.useStorage && this.sensitiveKeys.has(key)) {
+      throw new Error('Sensitive storage is unavailable.');
+    }
+
     if(this.cache.hasOwnProperty(key) && useCache) {
       return this.getFromCache(key);
     } else if(this.useStorage) {
+      if(!useCache) {
+        const storage = await this.getStorage();
+        if(storage instanceof EncryptedStorageLayer) {
+          const [value] = await storage.get<Storage[T]>([key as string], false);
+          this.cache[key] = value;
+          return value;
+        }
+      }
+
       const r = this.getPromises.get(key);
       if(r) return r as any;
 
@@ -281,7 +299,13 @@ export default class AppStorage<
 
   public async getAllEntries() {
     const storage = await this.getStorage();
+    if(this.sensitiveKeys.size) return storage.getAllEntries();
     return storage.getAllEntries().catch(() => [] as IDBStorage.Entries);
+  }
+
+  public async flush() {
+    const storage = await this.getStorage();
+    if(storage instanceof EncryptedStorageLayer) await storage.flush();
   }
 
   private warnAboutSaving() {
@@ -299,6 +323,10 @@ export default class AppStorage<
     const canUseStorage = this.useStorage && !onlyLocal && !this.savingFreezed;
 
     this.warnAboutSaving();
+
+    if((!this.useStorage || this.savingFreezed) && Object.keys(obj).some((key) => this.sensitiveKeys.has(key as keyof Storage))) {
+      return Promise.reject(new Error('Sensitive storage is unavailable.'));
+    }
 
     let setSomething = false;
     for(const key in obj) {
@@ -339,6 +367,10 @@ export default class AppStorage<
     } */
 
     this.warnAboutSaving();
+
+    if((!this.useStorage || this.savingFreezed) && this.sensitiveKeys.has(key)) {
+      return Promise.reject(new Error('Sensitive storage is unavailable.'));
+    }
 
     // ! it is needed here
     key = '' + (key as string);
@@ -429,8 +461,10 @@ export default class AppStorage<
       await callback();
     } catch(err) {
       console.error('freezeSavingAsync callback error:', err);
+      throw err;
+    } finally {
+      this.STORAGES.forEach((storage) => storage.savingFreezed = false);
     }
-    this.STORAGES.forEach((storage) => storage.savingFreezed = false);
   }
 
   private async toggleEncrypted(shouldEncrypt: boolean) {
@@ -465,7 +499,7 @@ export default class AppStorage<
 
   public static async toggleEncryptedForAll(shouldEncrypt: boolean) {
     // this.freezeSaving()
-    this.freezeSavingAsync(async() => {
+    await this.freezeSavingAsync(async() => {
       await Promise.all(
         this.STORAGES.map((storage) => storage.toggleEncrypted(shouldEncrypt))
       );
@@ -473,7 +507,7 @@ export default class AppStorage<
   }
 
   public static async reEncryptEncrypted() {
-    this.freezeSavingAsync(async() => {
+    await this.freezeSavingAsync(async() => {
       await Promise.all(
         this.STORAGES.map((storage) => storage.reEncrypt())
       );
