@@ -44,7 +44,9 @@ test('extra timing samples are reported without changing the three-repeat policy
     maxLongTaskDurationMs: 0,
     frameIntervals: 100,
     droppedFrames: 0,
-    droppedFramePercent: 0
+    droppedFramePercent: 0,
+    composerReadyAfterFirstBubbleMs: 50,
+    firstBubbleToSentMs: ms + 50
   });
   const makeReport = (timingSamples, sendSamples) => {
     const variants = {};
@@ -126,5 +128,5 @@ test('extra timing samples are reported without changing the three-repeat policy
   assert.equal(policySection(fiveSampleSummary), policySection(threeSampleSummary));
   assert.equal(policySection(elevenSendSampleSummary), policySection(threeSampleSummary));
   assert.match(fiveSampleSummary, /Open long-history chat \| head \| 5 \| 1000\.0/);
-  assert.match(elevenSendSampleSummary, /Send a message \| head \| 11 \| 1100\.0/);
+  assert.match(elevenSendSampleSummary, /Send a message \| head \| 11 \| 1100\.0 \| 50\.0 \| 1150\.0/);
 });

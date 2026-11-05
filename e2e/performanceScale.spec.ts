@@ -42,7 +42,9 @@ type Metric = {
   droppedFrames?: number,
   frameIntervals?: number,
   longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>,
-  preInteractionMs?: number
+  preInteractionMs?: number,
+  composerReadyAfterFirstBubbleMs?: number,
+  firstBubbleToSentMs?: number
 };
 
 type VariantRun = {
@@ -786,6 +788,8 @@ async function describeRow(row: Locator) {
 }
 
 async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture) {
+  let composerReadyAfterFirstBubbleMs = 0;
+  let firstBubbleAtMs = 0;
   try {
     const activeSearch = page.locator('#search-container.active');
     if(await activeSearch.count()) {
@@ -801,9 +805,15 @@ async function sendMessage(page: Page, requests: {value: number}, fixture: Fixtu
       throw error;
     }
     await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible();
+    firstBubbleAtMs = await page.evaluate(() => performance.now());
+    const composer = page.locator('.input-message-input:not(.input-field-input-fake)[contenteditable="true"]');
+    // Deferred peer setup can finish after the first bubble is visible. Keep that readiness wait
+    // reportable, but start the send-action clock only once the composer can accept input.
+    await expect(composer).toBeVisible({timeout: 60_000});
+    await expect(composer).toBeEditable({timeout: 60_000});
+    composerReadyAfterFirstBubbleMs = await page.evaluate((startedAt) => performance.now() - startedAt, firstBubbleAtMs);
     await begin(page, requests);
     const text = `web-perf-${process.env.GITHUB_RUN_ID || 'local'}-${Date.now()}`;
-    const composer = page.locator('.input-message-input:not(.input-field-input-fake)[contenteditable="true"]');
     await composer.fill(text);
     await composer.press('Enter');
     await expect(page.locator('#page-chats .bubbles .bubble.is-out').filter({hasText: text})).toBeVisible({timeout: 60_000});
@@ -811,7 +821,13 @@ async function sendMessage(page: Page, requests: {value: number}, fixture: Fixtu
     console.error('send a message failed', JSON.stringify(await describeSendState(page, fixture)));
     throw error;
   }
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+  const firstBubbleToSentMs = await page.evaluate((startedAt) => performance.now() - startedAt, firstBubbleAtMs);
+  const boundary = await snapshotMeasurementBoundary(page);
+  return {
+    ...await capture(page, requests, boundary),
+    composerReadyAfterFirstBubbleMs,
+    firstBubbleToSentMs
+  };
 }
 
 async function prepareVariant(browser: Browser, variant: Variant, origin: string): Promise<VariantRun> {
