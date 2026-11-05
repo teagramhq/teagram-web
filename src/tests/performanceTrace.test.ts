@@ -79,6 +79,29 @@ describe('performance trace collectors', () => {
     expect(trace.getSnapshot()[0].durationMs).toBeGreaterThanOrEqual(50);
   });
 
+  test('records phase counters supplied at completion', () => {
+    const trace = new PerformancePhaseTrace(true);
+    const finish = trace.start('worker.dialogs.cachedChannelReconcile');
+
+    finish({pageCount: 30});
+
+    expect(trace.getSnapshot()).toMatchObject([
+      {name: 'worker.dialogs.cachedChannelReconcile', pageCount: 30}
+    ]);
+  });
+
+  test('preserves selected phases when resetting other profile spans', () => {
+    const trace = new PerformancePhaseTrace(true);
+    trace.start('worker.dialogs.cachedChannelReconcile')({pageCount: 30});
+    trace.start('worker.storage.load')();
+
+    trace.reset(['worker.dialogs.cachedChannelReconcile']);
+
+    expect(trace.getSnapshot()).toMatchObject([
+      {name: 'worker.dialogs.cachedChannelReconcile', pageCount: 30}
+    ]);
+  });
+
   test('counts RPC calls without recording their spans when detail tracing is disabled', () => {
     const trace = new PerformanceRpcTrace(true);
     trace.reset(false);

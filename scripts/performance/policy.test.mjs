@@ -111,6 +111,29 @@ test('reports startup phase medians across every cold and warm trace repeat', ()
   assert.match(table, /\| worker\.managers\.create \(account 2\) \| 350\.0 \| 45\.0 \| 550\.0 \| 80\.0 \|/);
 });
 
+test('reports cached dialog reconciliation timing and main-thread time by scenario', () => {
+  const diagnostics = {
+    coldChatList: [{cachedDialogReconcile: {
+      pageCount: 30,
+      startRelativeToScenarioMs: -100,
+      endRelativeToScenarioMs: 2_500,
+      mainThreadTimeMs: 640
+    }}],
+    scrollBack2k: [{cachedDialogReconcile: {
+      pageCount: 30,
+      startRelativeToScenarioMs: -2_000,
+      endRelativeToScenarioMs: -50,
+      mainThreadTimeMs: 12
+    }}]
+  };
+
+  const table = formatPerformanceTraceTable(diagnostics);
+
+  assert.match(table, /### Cached channel dialog reconciliation/);
+  assert.match(table, /\| coldChatList \| 30\.0 \| -100\.0 \| 2500\.0 \| 640\.0 \|/);
+  assert.match(table, /\| scrollBack2k \| 30\.0 \| -2000\.0 \| -50\.0 \| 12\.0 \|/);
+});
+
 test('blocks an added 100 ms task when the 100x cold-load base already has long tasks', () => {
   const base = scaleVariants({'100x': {coldChatList: [
     {longTasksOver50Ms: 3, blockingTimeMs: 140, maxLongTaskDurationMs: 118},

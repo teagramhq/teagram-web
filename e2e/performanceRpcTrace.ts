@@ -30,7 +30,15 @@ export type PerformancePhaseSummary = {
   name: string,
   durationMs: number | null,
   accountNumber?: number,
+  pageCount?: number,
   startMs?: number
+};
+
+export type CachedDialogReconcileSummary = {
+  pageCount: number | null,
+  startRelativeToScenarioMs: number,
+  endRelativeToScenarioMs: number | null,
+  mainThreadTimeMs: number
 };
 
 export function summarizeLongTaskWindow(entries: Array<{startTime: number, duration: number}>, startedAtMs: number, elapsedMs: number) {
@@ -43,13 +51,28 @@ export function summarizeLongTaskWindow(entries: Array<{startTime: number, durat
   };
 }
 
-export function summarizePerformancePhases<T extends {name: string, durationMs: number | null, accountNumber?: number, startMs?: number}>(phases: T[]): PerformancePhaseSummary[] {
-  return phases.map(({name, durationMs, accountNumber, startMs}) => ({
+export function summarizePerformancePhases<T extends {name: string, durationMs: number | null, accountNumber?: number, pageCount?: number, startMs?: number}>(phases: T[]): PerformancePhaseSummary[] {
+  return phases.map(({name, durationMs, accountNumber, pageCount, startMs}) => ({
     name,
     durationMs: Number.isFinite(durationMs) ? Number(durationMs!.toFixed(2)) : null,
     ...(accountNumber === undefined ? {} : {accountNumber}),
+    ...(pageCount === undefined ? {} : {pageCount}),
     ...(startMs === undefined ? {} : {startMs: Number(startMs.toFixed(2))})
   }));
+}
+
+export function summarizeCachedDialogReconcile(
+  phase: {pageCount?: number, startedAtEpochMs: number, durationMs: number | null},
+  scenarioStartedAtEpochMs: number,
+  mainThreadTimeMs: number
+): CachedDialogReconcileSummary {
+  const startRelativeToScenarioMs = phase.startedAtEpochMs - scenarioStartedAtEpochMs;
+  return {
+    pageCount: phase.pageCount ?? null,
+    startRelativeToScenarioMs: Number(startRelativeToScenarioMs.toFixed(2)),
+    endRelativeToScenarioMs: phase.durationMs === null ? null : Number((startRelativeToScenarioMs + phase.durationMs).toFixed(2)),
+    mainThreadTimeMs: Number(mainThreadTimeMs.toFixed(2))
+  };
 }
 
 export function summarizeRpcTrace(rpcCalls: PerformanceRpcCall[], elapsedMs: number): PerformanceRpcSummary {

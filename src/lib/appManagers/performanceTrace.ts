@@ -2,7 +2,8 @@ export type PerformancePhase = {
   name: string,
   startedAtEpochMs: number,
   durationMs: number | null,
-  accountNumber?: number
+  accountNumber?: number,
+  pageCount?: number
 };
 
 export type PerformanceRpcCall = {
@@ -30,7 +31,10 @@ export class PerformancePhaseTrace {
     this.enabled = enabled;
   }
 
-  public start(name: string, details: {accountNumber?: number, startedAtEpochMs?: number} = {}) {
+  public start(
+    name: string,
+    details: {accountNumber?: number, startedAtEpochMs?: number} = {}
+  ): (summary?: {pageCount?: number}) => void {
     if(!this.enabled) return () => {};
 
     const started = performance.now();
@@ -44,17 +48,18 @@ export class PerformancePhaseTrace {
     this.phases.push(phase);
 
     let finished = false;
-    return () => {
+    return (summary = {}) => {
       if(finished) return;
       finished = true;
+      if(summary.pageCount !== undefined) phase.pageCount = summary.pageCount;
       const duration = Number((performance.timeOrigin + performance.now() - startedAtEpochMs).toFixed(2));
       phase.durationMs = duration;
       if(name.startsWith('main.')) performance.measure(name, {start: startedAtEpochMs - performance.timeOrigin, duration});
     };
   }
 
-  public reset() {
-    this.phases = [];
+  public reset(preserveNames: string[] = []) {
+    this.phases = this.phases.filter(({name}) => preserveNames.includes(name));
   }
 
   public track<T>(name: string, operation: () => T): T {

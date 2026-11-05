@@ -2095,69 +2095,78 @@ export default class DialogsStorage extends AppManager {
   }
 
   private async getServerChannelsMissingLocally() {
+    const finishTrace = import.meta.env.VITE_PERF_TRACE === '1' ?
+      performancePhaseTrace.start('worker.dialogs.cachedChannelReconcile') :
+      undefined;
+    let pageCount = 0;
     const limit = 100;
     const missingPeerIds: PeerId[] = [];
     const seenPeerIds: Set<PeerId> = new Set();
     let offsetDate = 0, offsetId = 0, offsetPeerId: PeerId;
-    for(;;) {
-      const result = await this.apiManager.invokeApiSingleProcess({
-        method: 'messages.getDialogs',
-        params: {
-          folder_id: FOLDER_ID_ALL,
-          offset_date: offsetDate,
-          offset_id: offsetId,
-          offset_peer: offsetPeerId ? this.appPeersManager.getInputPeerById(offsetPeerId) : {_: 'inputPeerEmpty'},
-          limit,
-          hash: '0'
-        },
-        processResult: (result) => {
-          if(result._ !== 'messages.dialogsNotModified') {
-            this.appPeersManager.saveApiPeers(result);
+    try {
+      for(;;) {
+        const result = await this.apiManager.invokeApiSingleProcess({
+          method: 'messages.getDialogs',
+          params: {
+            folder_id: FOLDER_ID_ALL,
+            offset_date: offsetDate,
+            offset_id: offsetId,
+            offset_peer: offsetPeerId ? this.appPeersManager.getInputPeerById(offsetPeerId) : {_: 'inputPeerEmpty'},
+            limit,
+            hash: '0'
+          },
+          processResult: (result) => {
+            if(result._ !== 'messages.dialogsNotModified') {
+              this.appPeersManager.saveApiPeers(result, import.meta.env.VITE_PERF_TRACE === '1' ? 'cachedChannelDialogsReconcile' : undefined);
+            }
+
+            return result;
+          }
+        });
+        if(finishTrace) ++pageCount;
+
+        if(result._ === 'messages.dialogsNotModified') {
+          return missingPeerIds;
+        }
+
+        let hasNewPeer = false;
+        const dialogs = result.dialogs.filter((dialog) => dialog._ === 'dialog');
+        for(const dialog of dialogs) {
+          const peerId = this.appPeersManager.getPeerId(dialog.peer);
+          if(seenPeerIds.has(peerId)) {
+            continue;
           }
 
-          return result;
-        }
-      });
-
-      if(result._ === 'messages.dialogsNotModified') {
-        return missingPeerIds;
-      }
-
-      let hasNewPeer = false;
-      const dialogs = result.dialogs.filter((dialog) => dialog._ === 'dialog');
-      for(const dialog of dialogs) {
-        const peerId = this.appPeersManager.getPeerId(dialog.peer);
-        if(seenPeerIds.has(peerId)) {
-          continue;
+          seenPeerIds.add(peerId);
+          hasNewPeer = true;
+          if(
+            dialog.peer._ === 'peerChannel' &&
+            !this.getDialogOnly(peerId) &&
+            this.appChatsManager.isInChat(peerId.toChatId())
+          ) {
+            missingPeerIds.push(peerId);
+          }
         }
 
-        seenPeerIds.add(peerId);
-        hasNewPeer = true;
+        const lastDialog = dialogs[dialogs.length - 1];
         if(
-          dialog.peer._ === 'peerChannel' &&
-          !this.getDialogOnly(peerId) &&
-          this.appChatsManager.isInChat(peerId.toChatId())
+          result._ !== 'messages.dialogsSlice' ||
+          !hasNewPeer ||
+          seenPeerIds.size >= result.count
         ) {
-          missingPeerIds.push(peerId);
+          return missingPeerIds;
         }
-      }
 
-      const lastDialog = dialogs[dialogs.length - 1];
-      if(
-        result._ !== 'messages.dialogsSlice' ||
-        !hasNewPeer ||
-        seenPeerIds.size >= result.count
-      ) {
-        return missingPeerIds;
+        // * the next page starts after the last dialog's top message, the way the server orders the list
+        offsetPeerId = this.appPeersManager.getPeerId(lastDialog.peer);
+        offsetId = lastDialog.top_message;
+        const lastMessage = result.messages.find((message) => {
+          return message.id === offsetId && this.appPeersManager.getPeerId(message.peer_id) === offsetPeerId;
+        });
+        offsetDate = (lastMessage as Message.message)?.date ?? 0;
       }
-
-      // * the next page starts after the last dialog's top message, the way the server orders the list
-      offsetPeerId = this.appPeersManager.getPeerId(lastDialog.peer);
-      offsetId = lastDialog.top_message;
-      const lastMessage = result.messages.find((message) => {
-        return message.id === offsetId && this.appPeersManager.getPeerId(message.peer_id) === offsetPeerId;
-      });
-      offsetDate = (lastMessage as Message.message)?.date ?? 0;
+    } finally {
+      finishTrace?.({pageCount});
     }
   }
 

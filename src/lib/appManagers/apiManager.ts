@@ -762,8 +762,8 @@ export class ApiManager extends ApiManagerMethods {
     return [];
   }
 
-  public resetPerformancePhaseTrace() {
-    if(import.meta.env.VITE_PERF_TRACE === '1') performancePhaseTrace.reset();
+  public resetPerformancePhaseTrace(preserveNames: string[] = []) {
+    if(import.meta.env.VITE_PERF_TRACE === '1') performancePhaseTrace.reset(preserveNames);
   }
 
   public startFirstDialogsDispatchTrace(startedAtEpochMs: number) {

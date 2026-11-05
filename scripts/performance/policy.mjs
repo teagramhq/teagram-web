@@ -448,6 +448,33 @@ export function formatPerformanceTraceTable(diagnostics) {
     const phase = entry.cold || entry.warm;
     lines.push(`| ${label(phase)} | ${show(entry.cold?.startMs)} | ${show(entry.cold?.durationMs)} | ${show(entry.warm?.startMs)} | ${show(entry.warm?.durationMs)} |`);
   }
+
+  const reconcileRows = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k'].flatMap((scenario) => {
+    const samples = Array.isArray(diagnostics?.[scenario]) ? diagnostics[scenario] : [];
+    const traces = samples.map((sample) => sample.cachedDialogReconcile).filter(Boolean);
+    if(!traces.length) return [];
+
+    const medianField = (field) => median(traces.map((trace) => trace[field]).filter(Number.isFinite));
+    return [[
+      scenario,
+      show(medianField('pageCount')),
+      show(medianField('startRelativeToScenarioMs')),
+      show(medianField('endRelativeToScenarioMs')),
+      show(medianField('mainThreadTimeMs'))
+    ]];
+  });
+  if(reconcileRows.length) {
+    lines.push(
+      '',
+      '### Cached channel dialog reconciliation',
+      '',
+      'Median page count, start and end offsets from each scenario start, and main-thread peer-mirror time.',
+      '',
+      '| Scenario | Pages | Start offset (ms) | End offset (ms) | Main-thread time (ms) |',
+      '| --- | ---: | ---: | ---: | ---: |',
+      ...reconcileRows.map((row) => `| ${row.join(' | ')} |`)
+    );
+  }
   return lines.join('\n');
 }
 

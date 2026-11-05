@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {summarizeCpuProfile, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
+import {summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -31,6 +31,7 @@ type Metric = {
   workerPhases?: PerformancePhaseSummary[],
   mainPhases?: PerformancePhaseSummary[],
   peerChangePhases?: PerformancePhaseSummary[],
+  cachedDialogReconcile?: CachedDialogReconcileSummary,
   cpu?: PerformanceCpuSummary,
   droppedFramePercent?: number,
   droppedFrames?: number,
@@ -113,6 +114,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
     const perf: any = (window as any).__teagramPerf = {
       longTasks: [] as Array<{startTime: number, duration: number}>,
       frameIntervals: [] as number[],
+      cachedDialogsReconcileMainThreadMs: 0,
       frameActive: false,
       started: performance.now(),
       resourceUrlBaseline: [] as string[]
@@ -161,6 +163,7 @@ async function begin(page: Page, requests: {value: number}, recordRpcSpans = tru
     const perf = (window as any).__teagramPerf;
     perf.longTasks = [];
     perf.frameIntervals = [];
+    perf.cachedDialogsReconcileMainThreadMs = 0;
     perf.resourceUrlBaseline = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).map((entry) => entry.name);
     performance.clearResourceTimings();
     if(traceEnabled) performance.clearMeasures();
@@ -197,7 +200,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     const rpcInvocations = rpcTrace.invocations.filter((invocation) => {
       return invocation.startedAtEpochMs - performance.timeOrigin <= ms;
     });
-    const workerPhases = includePhases ? (await apiManager.getPerformancePhaseTrace() as Array<{name: string, startedAtEpochMs: number, durationMs: number | null, accountNumber?: number}>).map((phase) => ({
+    const workerPhases = includePhases ? (await apiManager.getPerformancePhaseTrace() as Array<{name: string, startedAtEpochMs: number, durationMs: number | null, accountNumber?: number, pageCount?: number}>).map((phase) => ({
       ...phase,
       startMs: Math.max(0, phase.startedAtEpochMs - performance.timeOrigin)
     })) : undefined;
@@ -206,6 +209,12 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       startMs: Math.max(0, phase.startTime),
       durationMs: phase.duration
     })) : undefined;
+    const reconcilePhase = workerPhases?.find(({name}) => name === 'worker.dialogs.cachedChannelReconcile');
+    const cachedDialogReconcile = reconcilePhase ? summarizeCachedDialogReconcile(
+      reconcilePhase,
+      performance.timeOrigin + boundary.startedAtMs,
+      perf.cachedDialogsReconcileMainThreadMs
+    ) : undefined;
     const rpcCalls = rpcTrace.calls.map((call) => ({
       method: call.method,
       startedAtMs: Math.max(0, call.startedAtEpochMs - performance.timeOrigin),
@@ -228,6 +237,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       rpcCalls,
       workerPhases,
       mainPhases,
+      cachedDialogReconcile,
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
@@ -403,13 +413,13 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   return capture(page, requests, await snapshotMeasurementBoundary(page));
 }
 
-async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean) {
+async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, includePhases = false) {
   const hasPendingHistory = () => page.evaluate(() => {
     const bubbles = (window as any).appImManager.chat.bubbles;
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
   });
 
-  await begin(page, requests, false);
+  await begin(page, requests, false, includePhases);
   await page.evaluate(() => (window as any).__teagramPerf.startFrames());
   const initial = await page.evaluate(() => {
     const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));
@@ -461,7 +471,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     if(!required) return undefined;
     throw new Error(`scroll reached message ${currentMin}, expected ${targetMid}: ${JSON.stringify(scrollState)}`);
   }
-  return capture(page, requests, await snapshotMeasurementBoundary(page), true);
+  return capture(page, requests, await snapshotMeasurementBoundary(page), true, includePhases);
 }
 
 async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture, allowUnsupportedBase: boolean): Promise<Metric | undefined> {
@@ -703,6 +713,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
 async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
   const coldChatList: Metric[] = [];
   const warmChatList: Metric[] = [];
+  const scrollBack2k: Metric[] = [];
   let chatOpen: Metric;
 
   for(let repeat = 0; repeat < COLD_CHAT_LIST_REPEATS; ++repeat) {
@@ -724,7 +735,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
       coldChatList.push({...coldCapture, ...(coldProfile ? {cpu: await finishCpuProfile(coldProfile)} : {})});
 
       await begin(page, requests, true, true);
-      await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
+      await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace(['worker.dialogs.cachedChannelReconcile']));
       const warmProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
       await page.reload({waitUntil: 'domcontentloaded'});
       await waitForChatList(page);
@@ -736,7 +747,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
         await expect(row).toBeVisible({timeout: 60_000});
         await begin(page, requests, true, true);
-        await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
+        await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace(['worker.dialogs.cachedChannelReconcile']));
         await installPeerChangeTracing(page);
         const chatProfile = await startCpuProfile(page);
         await row.click();
@@ -750,13 +761,16 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
           cpu: chatCpu,
           peerChangePhases: summarizePerformancePhases(peerChangePhases)
         };
+
+        const scroll = await test.step('trace 100x scroll reconciliation work', () => scrollBackTwoThousand(page, requests, true, true));
+        if(scroll) scrollBack2k.push(scroll);
       }
     } finally {
       await context.close();
     }
   }
 
-  return {coldChatList, warmChatList, chatOpen: chatOpen!};
+  return {coldChatList, warmChatList, chatOpen: chatOpen!, scrollBack2k};
 }
 
 test('measures the scale fixture in interleaved base and head runs', async({browser}) => {

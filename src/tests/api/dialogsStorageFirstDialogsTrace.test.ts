@@ -55,4 +55,10 @@ test('finishes the chat-list startup span when cached dialogs serve the first pa
 
   finishReconciliation({_: 'messages.dialogs', count: 0, dialogs: [], chats: [], users: []});
   await Promise.resolve();
+  await vi.waitFor(() => {
+    expect(performancePhaseTrace.getSnapshot().find(({name: phaseName}) => phaseName === 'worker.dialogs.cachedChannelReconcile')).toMatchObject({
+      pageCount: 1,
+      durationMs: expect.any(Number)
+    });
+  });
 });

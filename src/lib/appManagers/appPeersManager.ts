@@ -30,9 +30,9 @@ export class AppPeersManager extends AppManager {
     else appUsersManager.saveApiUser(instance);
   } */
 
-  public saveApiPeers(object: {chats?: Chat[], users?: User[]}) {
-    this.appChatsManager.saveApiChats(object.chats);
-    this.appUsersManager.saveApiUsers(object.users);
+  public saveApiPeers(object: {chats?: Chat[], users?: User[]}, trace?: 'cachedChannelDialogsReconcile') {
+    this.appChatsManager.saveApiChats(object.chats, undefined, trace);
+    this.appUsersManager.saveApiUsers(object.users, undefined, trace);
   }
 
   public canPinMessage(peerId: PeerId) {

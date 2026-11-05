@@ -149,7 +149,8 @@ export type MirrorTaskPayload<
   value?: any,
   previousUrl?: string,
   previousUrls?: string[],
-  accountNumber: ActiveAccountNumber
+  accountNumber: ActiveAccountNumber,
+  trace?: 'cachedChannelDialogsReconcile'
 };
 
 export type NotificationBuildMessageTaskPayload = {
@@ -1613,24 +1614,33 @@ class ApiManagerProxy extends MTProtoMessagePort {
     const isSettingsUpdate = name === 'state' && key === 'settings';
     if(!isSettingsUpdate && accountNumber !== getCurrentAccount()) return;
 
-    const newActiveChannelId = name === 'peers' && key ?
-      getNewActiveChannelMirrorChatId(this.mirrors.peers[key.toPeerId()], value) :
-      undefined;
-    const result = this.processMirrorTaskMap[name]?.(payload);
-    if(result === false) {
-      return;
-    }
+    const traceMirror = import.meta.env.VITE_PERF_TRACE === '1' && payload.trace === 'cachedChannelDialogsReconcile';
+    const startedAt = traceMirror ? performance.now() : 0;
+    try {
+      const newActiveChannelId = name === 'peers' && key ?
+        getNewActiveChannelMirrorChatId(this.mirrors.peers[key.toPeerId()], value) :
+        undefined;
+      const result = this.processMirrorTaskMap[name]?.(payload);
+      if(result === false) {
+        return;
+      }
 
-    if(!payload.hasOwnProperty('key')) {
-      this.mirrors[name] = value;
-      return;
-    }
+      if(!payload.hasOwnProperty('key')) {
+        this.mirrors[name] = value;
+        return;
+      }
 
-    const mirror = this.mirrors[name] ??= {} as any;
-    setDeepProperty(mirror, key, value, true);
+      const mirror = this.mirrors[name] ??= {} as any;
+      setDeepProperty(mirror, key, value, true);
 
-    if(newActiveChannelId !== undefined) {
-      rootScope.dispatchEvent('chat_update', newActiveChannelId);
+      if(newActiveChannelId !== undefined) {
+        rootScope.dispatchEvent('chat_update', newActiveChannelId);
+      }
+    } finally {
+      if(traceMirror) {
+        const perf = (globalThis as any).__teagramPerf;
+        if(perf) perf.cachedDialogsReconcileMainThreadMs += performance.now() - startedAt;
+      }
     }
   };
 
