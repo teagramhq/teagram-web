@@ -72,6 +72,12 @@ export type CachedDialogReconcileSummary = {
   mainThreadTimeMs: number
 };
 
+export const CACHED_DIALOG_RECONCILE_PHASE_NAME = 'worker.dialogs.cachedChannelReconcile';
+
+export function getScenarioPreservedPerformancePhases() {
+  return [CACHED_DIALOG_RECONCILE_PHASE_NAME];
+}
+
 export function summarizeLongTaskWindow(entries: Array<{startTime: number, duration: number}>, startedAtMs: number, elapsedMs: number) {
   const endAtMs = startedAtMs + elapsedMs;
   const tasks = entries.filter(({startTime, duration}) => startTime >= startedAtMs && startTime < endAtMs && duration > 50);

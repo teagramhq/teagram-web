@@ -1,5 +1,6 @@
 import {describe, expect, test} from 'vitest';
 import {observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
+import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
 
 test('summarizes cached dialog reconciliation relative to a scenario', () => {
   expect(summarizeCachedDialogReconcile({
@@ -11,6 +12,29 @@ test('summarizes cached dialog reconciliation relative to a scenario', () => {
     startRelativeToScenarioMs: -1_000,
     endRelativeToScenarioMs: 1_500,
     mainThreadTimeMs: 640
+  });
+});
+
+test('keeps completed reconciliation measurements when the scenario trace resets', async() => {
+  const trace = new PerformancePhaseTrace(true);
+  const startedAtEpochMs = performance.timeOrigin + performance.now() - 10;
+  const finish = trace.start('worker.dialogs.cachedChannelReconcile', {startedAtEpochMs});
+  trace.start('worker.storage.load')();
+
+  const helpers = await import('../../e2e/performanceRpcTrace') as unknown as {
+    getScenarioPreservedPerformancePhases?: unknown
+  };
+  expect(helpers.getScenarioPreservedPerformancePhases).toBeTypeOf('function');
+  const getPreservedPhases = helpers.getScenarioPreservedPerformancePhases as () => string[];
+  trace.reset(getPreservedPhases());
+  finish({pageCount: 30});
+
+  const phase = trace.getSnapshot()[0];
+  expect(summarizeCachedDialogReconcile(phase, startedAtEpochMs - 25, 12.5)).toEqual({
+    pageCount: 30,
+    startRelativeToScenarioMs: 25,
+    endRelativeToScenarioMs: Number((25 + phase.durationMs!).toFixed(2)),
+    mainThreadTimeMs: 12.5
   });
 });
 

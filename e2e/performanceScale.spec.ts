@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {CACHED_DIALOG_RECONCILE_PHASE_NAME, getScenarioPreservedPerformancePhases, observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -57,8 +57,15 @@ type VariantRun = {
 type MeasurementBoundary = {
   ms: number,
   startedAtMs: number,
+  startedAtEpochMs: number,
   domNodes: number,
   domNodeCounts: Metric['domNodeCounts']
+};
+
+type CachedDialogReconcileTarget = {
+  metric: Metric,
+  scenario: string,
+  scenarioStartedAtEpochMs: number
 };
 
 const scales: Scale[] = ['1x', '100x'];
@@ -89,6 +96,7 @@ const preparedVariants: Record<Scale, Partial<Record<Variant, VariantRun>>> = {'
 const bundleRequestTrackers = new WeakMap<Page, BundleRequestTracker>();
 
 const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
+const scenarioPreservedPerformancePhases = getScenarioPreservedPerformancePhases();
 
 test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
@@ -124,15 +132,27 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
       });
     }
     performance.setResourceTimingBufferSize(1_000);
+    // Cached dialog reconciliation can outlive the warm reload in this diagnostic context.
+    const reconcileTimeStorageKey = 'teagram-perf-cached-dialog-reconcile-main-thread-ms';
+    let cachedDialogsReconcileMainThreadMs = 0;
+    if(location.origin !== 'null') {
+      const storedTime = Number(sessionStorage.getItem(reconcileTimeStorageKey));
+      if(Number.isFinite(storedTime) && storedTime >= 0) cachedDialogsReconcileMainThreadMs = storedTime;
+    }
     const perf: any = (window as any).__teagramPerf = {
       longTasks: [] as Array<{startTime: number, duration: number}>,
       longAnimationFrames: [] as Array<{startTime: number, duration: number, scripts: Array<Record<string, unknown>>}>,
-      cachedDialogsReconcileMainThreadMs: 0,
+      cachedDialogsReconcileMainThreadMs,
       frameIntervals: [] as number[],
       frameActive: false,
       started: performance.now(),
       resourceUrlBaseline: [] as string[]
     };
+    window.addEventListener('pagehide', () => {
+      if(location.origin !== 'null') {
+        sessionStorage.setItem(reconcileTimeStorageKey, String(perf.cachedDialogsReconcileMainThreadMs));
+      }
+    });
     try {
       const observer = new PerformanceObserver((list) => {
         perf.longTasks.push(...list.getEntries().filter((entry) => entry.duration > 50).map((entry) => ({
@@ -192,7 +212,6 @@ async function begin(page: Page, requests: {value: number}, recordRpcSpans = tru
     const perf = (window as any).__teagramPerf;
     perf.longTasks = [];
     perf.frameIntervals = [];
-    perf.cachedDialogsReconcileMainThreadMs = 0;
     perf.resourceUrlBaseline = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).map((entry) => entry.name);
     performance.clearResourceTimings();
     if(traceEnabled) performance.clearMeasures();
@@ -204,7 +223,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
   const requestCount = requests.value;
   await page.waitForTimeout(150);
   await waitForBundleResources(page);
-  const captured = await page.evaluate(async({boundary, scroll, includePhases}) => {
+  const captured = await page.evaluate(async({boundary, scroll, includePhases, reconcilePhaseName}) => {
     const {ms} = boundary;
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
@@ -233,7 +252,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       ...phase,
       startMs: Math.max(0, phase.startedAtEpochMs - performance.timeOrigin)
     })) : undefined;
-    const reconcilePhase = workerPhases?.find(({name}) => name === 'worker.dialogs.cachedChannelReconcile');
+    const reconcilePhase = workerPhases?.find(({name}) => name === reconcilePhaseName);
     const mainPhases = includePhases ? performance.getEntriesByType('measure').filter((phase) => phase.name.startsWith('main.')).map((phase) => ({
       name: phase.name,
       startMs: Math.max(0, phase.startTime),
@@ -269,7 +288,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
-  }, {boundary, scroll, includePhases});
+  }, {boundary, scroll, includePhases, reconcilePhaseName: CACHED_DIALOG_RECONCILE_PHASE_NAME});
   const {bundleResources, origin, timeOrigin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, reconcilePhase, reconcileMainThreadTimeMs, ...metrics} = captured;
   const cachedDialogReconcile = reconcilePhase ? summarizeCachedDialogReconcile(
     reconcilePhase,
@@ -294,6 +313,46 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     workerPhases: includePhases ? summarizePerformancePhases(metrics.workerPhases || []) : undefined,
     mainPhases: includePhases ? summarizePerformancePhases(metrics.mainPhases || []) : undefined
   };
+}
+
+async function finalizeCachedDialogReconcileSummaries(page: Page, targets: CachedDialogReconcileTarget[]) {
+  if(!targets.length) return;
+
+  const readPhaseDuration = () => page.evaluate(async(phaseName) => {
+    const apiManager = (window as any).rootScope.managers.apiManager;
+    const phases = await apiManager.getPerformancePhaseTrace() as Array<{name: string, durationMs: number | null}>;
+    return phases.find(({name}) => name === phaseName)?.durationMs ?? -1;
+  }, CACHED_DIALOG_RECONCILE_PHASE_NAME);
+  await expect.poll(readPhaseDuration, {
+    message: 'cached dialog reconciliation did not finish after the measured scenarios',
+    timeout: 120_000,
+    intervals: [100]
+  }).toBeGreaterThan(0);
+
+  const {phase, mainThreadTimeMs} = await page.evaluate(async(phaseName) => {
+    const apiManager = (window as any).rootScope.managers.apiManager;
+    const phases = await apiManager.getPerformancePhaseTrace() as Array<{
+      name: string,
+      startedAtEpochMs: number,
+      durationMs: number | null,
+      pageCount?: number
+    }>;
+    return {
+      phase: phases.find(({name}) => name === phaseName),
+      mainThreadTimeMs: (window as any).__teagramPerf.cachedDialogsReconcileMainThreadMs
+    };
+  }, CACHED_DIALOG_RECONCILE_PHASE_NAME);
+  expect(phase?.pageCount, 'cached dialog reconciliation recorded no server pages').toBeGreaterThan(0);
+  expect(phase?.durationMs, 'cached dialog reconciliation has no completed end time').toBeGreaterThan(0);
+  expect(mainThreadTimeMs, 'cached dialog reconciliation main-thread time is missing').toBeGreaterThan(0);
+
+  for(const target of targets) {
+    const summary = summarizeCachedDialogReconcile(phase!, target.scenarioStartedAtEpochMs, mainThreadTimeMs);
+    expect(summary.pageCount, `${target.scenario} reconciliation page count is missing`).toBeGreaterThan(0);
+    expect(summary.endRelativeToScenarioMs, `${target.scenario} reconciliation end offset is missing`).not.toBeNull();
+    expect(summary.mainThreadTimeMs, `${target.scenario} reconciliation main-thread time is missing`).toBeGreaterThan(0);
+    target.metric.cachedDialogReconcile = summary;
+  }
 }
 
 async function installPeerChangeTracing(page: Page) {
@@ -376,9 +435,11 @@ function evaluateWithControlSamples(key: string, baseSamples: Metric[], headSamp
 async function snapshotMeasurementBoundary(page: Page): Promise<MeasurementBoundary> {
   return page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
+    const startedAtMs = perf.started;
     return {
-      ms: performance.now() - perf.started,
-      startedAtMs: perf.started,
+      ms: performance.now() - startedAtMs,
+      startedAtMs,
+      startedAtEpochMs: performance.timeOrigin + startedAtMs,
       domNodes: document.querySelectorAll('*').length,
       domNodeCounts: {
         bubbles: document.querySelectorAll('.bubbles .bubble[data-mid]').length,
@@ -511,7 +572,13 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   return capture(page, requests, await snapshotMeasurementBoundary(page));
 }
 
-async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, profileTrace = false) {
+async function scrollBackTwoThousand(
+  page: Page,
+  requests: {value: number},
+  required: boolean,
+  profileTrace = false,
+  onMeasurementBoundary?: (boundary: MeasurementBoundary) => void
+) {
   const hasPendingHistory = () => page.evaluate(() => {
     const bubbles = (window as any).appImManager.chat.bubbles;
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
@@ -574,6 +641,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     throw new Error(`scroll reached message ${currentMin}, expected ${targetMid}: ${JSON.stringify(scrollState)}`);
   }
   const boundary = await snapshotMeasurementBoundary(page);
+  onMeasurementBoundary?.(boundary);
   const stoppedProfile = cpuProfile ? await stopCpuProfile(cpuProfile) : undefined;
   const metric = await capture(page, requests, boundary, true, profileTrace);
   if(!stoppedProfile) return metric;
@@ -853,27 +921,32 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
     await installInstrumentation(page, requests, run.origin, false, true);
 
     try {
+      const reconcileTargets: CachedDialogReconcileTarget[] = [];
       const coldProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
       await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
       await waitForChatList(page);
       const coldBoundary = await snapshotMeasurementBoundary(page);
       const coldCapture = await capture(page, requests, coldBoundary, false, true);
-      coldChatList.push({...coldCapture, ...(coldProfile ? {cpu: await finishCpuProfile(coldProfile)} : {})});
+      const coldSample = {...coldCapture, ...(coldProfile ? {cpu: await finishCpuProfile(coldProfile)} : {})};
+      coldChatList.push(coldSample);
+      reconcileTargets.push({metric: coldSample, scenario: 'coldChatList', scenarioStartedAtEpochMs: coldBoundary.startedAtEpochMs});
 
       await begin(page, requests, true, true);
-      await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
+      await page.evaluate((preserveNames) => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace(preserveNames), scenarioPreservedPerformancePhases);
       const warmProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
       await page.reload({waitUntil: 'domcontentloaded'});
       await waitForChatList(page);
       const warmBoundary = await snapshotMeasurementBoundary(page);
       const warmCapture = await capture(page, requests, warmBoundary, false, true);
-      warmChatList.push({...warmCapture, ...(warmProfile ? {cpu: await finishCpuProfile(warmProfile)} : {})});
+      const warmSample = {...warmCapture, ...(warmProfile ? {cpu: await finishCpuProfile(warmProfile)} : {})};
+      warmChatList.push(warmSample);
+      reconcileTargets.push({metric: warmSample, scenario: 'warmChatList', scenarioStartedAtEpochMs: warmBoundary.startedAtEpochMs});
 
       if(repeat < PERFORMANCE_REPEATS) {
         const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
         await expect(row).toBeVisible({timeout: 60_000});
         await begin(page, requests, true, true);
-        await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
+        await page.evaluate((preserveNames) => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace(preserveNames), scenarioPreservedPerformancePhases);
         await installPeerChangeTracing(page);
         const chatProfile = await startCpuProfile(page);
         await row.click();
@@ -881,22 +954,35 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         const chatOpenBoundary = await snapshotMeasurementBoundary(page);
         const chatCpu = await finishCpuProfile(chatProfile);
         const chatOpenCapture = await capture(page, requests, chatOpenBoundary, false, true);
-        const peerChangePhases = await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []);
+        const chatOpenSample = {
+          ...chatOpenCapture,
+          cpu: chatCpu,
+          peerChangePhases: summarizePerformancePhases(await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []))
+        };
+        reconcileTargets.push({metric: chatOpenSample, scenario: 'chatOpen', scenarioStartedAtEpochMs: chatOpenBoundary.startedAtEpochMs});
         if(repeat === 0) {
-          chatOpen = {
-            ...chatOpenCapture,
-            cpu: chatCpu,
-            peerChangePhases: summarizePerformancePhases(peerChangePhases)
-          };
+          chatOpen = chatOpenSample;
         }
         // Every diagnostic repeat scrolls back, so each one's long tasks carry their own CPU stacks and spans.
-        const scrolled = await test.step(`profile 100x scroll back 2,000 messages (repeat ${repeat + 1})`, () => scrollBackTwoThousand(page, requests, true, true));
+        let scrollBoundary: MeasurementBoundary | undefined;
+        const scrolled = await test.step(`profile 100x scroll back 2,000 messages (repeat ${repeat + 1})`, () => scrollBackTwoThousand(
+          page,
+          requests,
+          true,
+          true,
+          (boundary) => scrollBoundary = boundary
+        ));
         if(!scrolled || !('cpu' in scrolled)) throw new Error('scroll-back profile did not reach 2,000 messages');
         expect(scrolled.rpcSpansRecorded, 'scroll-back RPC spans were not recorded').toBe(true);
         expect(scrolled.cpu.sampledCpuMs, 'scroll-back CPU profile was empty').toBeGreaterThan(0);
+        if(!scrollBoundary) throw new Error('scroll-back measurement boundary was not recorded');
         scrollBack2kRepeats.push(scrolled);
+        reconcileTargets.push({metric: scrolled, scenario: 'scrollBack2k', scenarioStartedAtEpochMs: scrollBoundary.startedAtEpochMs});
         if(repeat === 0) scrollBack2k = scrolled;
       }
+
+      // Finish the measured windows first, then wait for the diagnostic phase so each window gets its final page and time totals.
+      await finalizeCachedDialogReconcileSummaries(page, reconcileTargets);
     } finally {
       await context.close();
     }
