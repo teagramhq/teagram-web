@@ -1,6 +1,7 @@
 import {beforeEach, describe, expect, it, vi} from 'vitest';
 import '@helpers/peerIdPolyfill';
 import SlicedArray from '@helpers/slicedArray';
+import deferredPromise from '@helpers/cancellablePromise';
 import {AppMessagesManager, HistoryStorage, MessagesStorage} from '@appManagers/appMessagesManager';
 import {AppMessagesIdsManager} from '@appManagers/appMessagesIdsManager';
 import {EPHEMERAL_MESSAGE_ID_OFFSET} from '@appManagers/constants';
@@ -829,10 +830,7 @@ describe('AppMessagesManager ephemeral messages', () => {
     manager.insertEphemeralMessage(makeEphemeralMessage(80));
     const storageSize = storage.size;
     const error = {type: 'MESSAGE_ID_INVALID'} as ApiError;
-    const messagePromise = {
-      reject: vi.fn(),
-      resolve: vi.fn()
-    };
+    const messagePromise = deferredPromise<void>();
     const outgoingMessage: Message.message = {
       _: 'message',
       pFlags: {out: true},

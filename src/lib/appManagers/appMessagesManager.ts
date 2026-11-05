@@ -2853,9 +2853,12 @@ export class AppMessagesManager extends AppManager {
             toggleError(error, repayRequest);
             throw error;
           });
-        });
+        }, noop);
 
         const messagePromise = message.promise as CancellablePromise<void>;
+        // The upload deferred reports the failure to its caller; the local
+        // message promise may have no observer of its own.
+        messagePromise.catch(noop);
         sentDeferred.then(
           () => messagePromise.resolve(),
           (err) => messagePromise.reject(err)
@@ -3184,16 +3187,14 @@ export class AppMessagesManager extends AppManager {
       return;
     }
 
-    if(activeEphemeralContext) {
-      if(options.sendFileDetails.length > 1 && !activeEphemeralContext.replyTo) {
-        return;
-      }
-
-      return this.sendFile({...options, ...options.sendFileDetails[0]});
+    if(activeEphemeralContext && options.sendFileDetails.length > 1 && !activeEphemeralContext.replyTo) {
+      return;
     }
 
-    if(options.sendFileDetails.length === 1) {
-      return this.sendFile({...options, ...options.sendFileDetails[0]});
+    if(activeEphemeralContext || options.sendFileDetails.length === 1) {
+      const result = await this.sendFile({...options, ...options.sendFileDetails[0]});
+      await result?.promise;
+      return;
     }
 
     let caption = options.caption || '';

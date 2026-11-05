@@ -1,4 +1,10 @@
 import SuperMessagePort from '@lib/superMessagePort';
+import {AppMessagesManager} from '@appManagers/appMessagesManager';
+import deferredPromise from '@helpers/cancellablePromise';
+import handleMediaSendFailure from '@components/popups/mediaSendError';
+
+const mediaMocks = vi.hoisted(() => ({toastNew: vi.fn()}));
+vi.mock('@components/toast', () => ({toastNew: mediaMocks.toastNew}));
 
 type TestMethods = {
   call: (payload: {
@@ -168,5 +174,94 @@ describe('SuperMessagePort structured-clone failures', () => {
     await expect(pending).rejects.toBe(error);
     await expect(client.invoke('call', {kind: 'value', value: 'blocked'})).rejects.toBe(error);
     expect(client.awaitingCount).toBe(0);
+  });
+});
+
+describe('media uploads across the manager worker port', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  it.each([
+    {outcome: 'rejected', kind: 'photo', mimeType: 'image/jpeg', isMedia: true, isEphemeral: false},
+    {outcome: 'rejected', kind: 'document', mimeType: 'application/pdf', isMedia: false, isEphemeral: false},
+    {outcome: 'canceled', kind: 'photo', mimeType: 'image/jpeg', isMedia: true, isEphemeral: false},
+    {outcome: 'successful', kind: 'photo', mimeType: 'image/jpeg', isMedia: true, isEphemeral: false},
+    {outcome: 'rejected', kind: 'photo', mimeType: 'image/jpeg', isMedia: true, isEphemeral: true}
+  ])('handles a $outcome $kind upload across the port (ephemeral: $isEphemeral)', async({outcome, kind, mimeType, isMedia, isEphemeral}) => {
+    const {client, worker} = createPair();
+    const upload = deferredPromise<any>();
+    const uploadFile = vi.fn(() => upload);
+    const message: any = {_: 'message', id: 1, pFlags: {}, random_id: '123'};
+    Object.defineProperties(message, {
+      send: {writable: true, configurable: true},
+      promise: {value: deferredPromise<void>(), writable: true, configurable: true}
+    });
+    const manager = new AppMessagesManager() as any;
+    Object.assign(manager, {
+      appPeersManager: {
+        getPeerMigratedTo: (): PeerId => undefined,
+        getInputPeerById: () => ({_: 'inputPeerSelf'})
+      },
+      getEphemeralSendContext: () => isEphemeral ? {receiverId: 1} : undefined,
+      checkSendOptions: async(): Promise<void> => undefined,
+      generateOutgoingMessage: () => message,
+      makeDocumentAndMetaForSendingFile: (): any => ({
+        document: isMedia ? undefined : {_: 'document', id: '1'},
+        photo: isMedia ? {_: 'photo', id: '1'} : undefined,
+        apiFileName: kind,
+        actionName: undefined,
+        fileType: mimeType,
+        mediaUnread: false,
+        attributes: [],
+        attachType: kind
+      }),
+      getInputEntities: (): any[] => [],
+      uploadFilePromises: {},
+      apiFileManager: {upload: uploadFile},
+      apiManager: {invokeApi: vi.fn().mockResolvedValue({_: 'updates', updates: [], users: [], chats: [], date: 0, seq: 0})},
+      apiUpdatesManager: {processUpdateMessage: vi.fn(), processPaidMessageUpdate: vi.fn()},
+      sendSmthLazyLoadQueue: {push: ({load}: any): void => void load().catch(() => {})},
+      beforeMessageSending: (outgoing: any) => outgoing.send(),
+      cancelPendingMessage: vi.fn(),
+      setTyping: vi.fn(),
+      onMessagesSendError: vi.fn(),
+      registerEphemeralRetry: vi.fn(),
+      rootScope: {dispatchEvent: vi.fn()},
+      log: Object.assign(vi.fn(), {error: vi.fn()})
+    });
+
+    worker.addEventListener('call', () => manager.sendGrouped({
+      peerId: 1 as PeerId,
+      isMedia,
+      sendFileDetails: [{file: new File(['data'], kind, {type: mimeType})}]
+    }));
+    const request = client.invoke('call', {kind: 'value'});
+    let settled = false;
+    request.then(() => settled = true, () => settled = true);
+    const handled = handleMediaSendFailure(request);
+
+    await vi.waitFor(() => expect(uploadFile).toHaveBeenCalledOnce());
+    expect(settled).toBe(false);
+    if(outcome === 'successful') {
+      upload.resolve({_: 'inputFile', id: '1', parts: 1, name: kind, md5_checksum: ''});
+    } else {
+      upload.reject({type: outcome === 'canceled' ? 'UPLOAD_CANCELED' : 'UPLOAD_DISABLED', code: 403});
+    }
+    await handled;
+
+    if(outcome === 'rejected') {
+      expect(mediaMocks.toastNew).toHaveBeenCalledWith({langPackKey: 'Error.AnError'});
+    } else {
+      expect(mediaMocks.toastNew).not.toHaveBeenCalled();
+    }
+    if(outcome === 'successful') {
+      expect(manager.cancelPendingMessage).not.toHaveBeenCalled();
+      expect(manager.apiManager.invokeApi).toHaveBeenCalledWith('messages.sendMedia', expect.any(Object));
+    } else {
+      expect(manager.cancelPendingMessage).toHaveBeenCalledWith('123');
+    }
+    if(isEphemeral) {
+      expect(manager.registerEphemeralRetry).toHaveBeenCalledOnce();
+      expect(manager.onMessagesSendError).not.toHaveBeenCalled();
+    }
   });
 });
