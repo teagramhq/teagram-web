@@ -42,6 +42,7 @@ vi.mock('@stores/stars', () => ({default: () => () => 0}));
 
 let ChatBubbles: typeof import('@components/chat/bubbles').default;
 let BubbleGroups: typeof import('@components/chat/bubbleGroups').default;
+let BubbleGroup: typeof import('@components/chat/bubbleGroups').BubbleGroup;
 let cancelPendingHiddenLinksEvent: typeof import('@components/chat/bubbles').cancelPendingHiddenLinksEvent;
 let disposeChatInnerMiddlewareAfterDetach: typeof import('@components/chat/bubbles').disposeChatInnerMiddlewareAfterDetach;
 let isBubbleUiCurrent: typeof import('@components/chat/bubbles').isBubbleUiCurrent;
@@ -81,7 +82,7 @@ beforeAll(async() => {
     setBubbleHiddenLinksPending,
     shouldForceHideNonContactLinkTest
   } = await import('@components/chat/bubbles'));
-  BubbleGroups = (await import('@components/chat/bubbleGroups')).default;
+  ({default: BubbleGroups, BubbleGroup} = await import('@components/chat/bubbleGroups'));
   // Importing the whole bubbles graph costs far more than the default hook
   // budget once the rest of the suite is competing for the same CPU.
 }, 60_000);
@@ -1446,8 +1447,21 @@ test('defers every affected BubbleGroup mount during an atomic replacement regro
   (BubbleGroups.prototype.removeAndUnmountBubble as any).call(groupsHarness, bubble, deferredGroups);
 
   expect(group.unmountItem).toHaveBeenCalledOnce();
+  expect(group.unmountItem).toHaveBeenCalledWith(item, true);
   expect(mountUnmountGroups).not.toHaveBeenCalled();
   expect(deferredGroups).toEqual(new Set([group]));
+});
+
+test('defers group class updates when a bubble is removed in a batch', () => {
+  const bubble = document.createElement('div');
+  const item = {bubble, mounted: true};
+  const onItemUnmount = vi.fn();
+
+  (BubbleGroup.prototype.unmountItem as any).call({onItemUnmount}, item, true);
+
+  expect(item.mounted).toBe(false);
+  expect(bubble.isConnected).toBe(false);
+  expect(onItemUnmount).not.toHaveBeenCalled();
 });
 
 test('reconciles only the latest streamed revision queued during the initial async render', async() => {

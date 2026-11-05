@@ -977,12 +977,13 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   expect(headScrollRepeats).toHaveLength(PERFORMANCE_REPEATS);
   headScrollRepeats.forEach((metric, repeat) => {
     expect(metric.longTaskAttribution, `100x head scroll repeat ${repeat + 1} is missing attributed long-task traces`).toBeDefined();
+    expect(metric.longTaskTrace, `100x head scroll repeat ${repeat + 1} is missing long-task script traces`).toBeDefined();
     const historyPathTasks = metric.longTaskAttribution!.filter((task) => {
       return task.spans.some(({name}) => SCROLL_SPAN_NAMES.includes(name));
     });
     expect(
       historyPathTasks,
-      `100x head scroll repeat ${repeat + 1} had long tasks inside history scroll work: ${JSON.stringify(historyPathTasks)}`
+      `100x head scroll repeat ${repeat + 1} had long tasks inside history scroll work: ${JSON.stringify({historyPathTasks, longTaskTrace: metric.longTaskTrace})}`
     ).toEqual([]);
   });
 });
