@@ -210,11 +210,6 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       durationMs: phase.duration
     })) : undefined;
     const reconcilePhase = workerPhases?.find(({name}) => name === 'worker.dialogs.cachedChannelReconcile');
-    const cachedDialogReconcile = reconcilePhase ? summarizeCachedDialogReconcile(
-      reconcilePhase,
-      performance.timeOrigin + boundary.startedAtMs,
-      perf.cachedDialogsReconcileMainThreadMs
-    ) : undefined;
     const rpcCalls = rpcTrace.calls.map((call) => ({
       method: call.method,
       startedAtMs: Math.max(0, call.startedAtEpochMs - performance.timeOrigin),
@@ -228,27 +223,35 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
         decodedBodySize: entry.decodedBodySize
       })),
       origin: location.origin,
+      timeOrigin: performance.timeOrigin,
       resourceCaptureEndedAt,
       resourceUrlBaseline: perf.resourceUrlBaseline,
       longTasks,
+      reconcilePhase,
+      reconcileMainThreadTimeMs: perf.cachedDialogsReconcileMainThreadMs,
       rpcTraceEnabled: rpcTrace.enabled,
       rpcSpansRecorded: rpcTrace.recording,
       rpcCallCount: rpcTrace.recording ? rpcInvocations.length : rpcTrace.callCount,
       rpcCalls,
       workerPhases,
       mainPhases,
-      cachedDialogReconcile,
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
   }, {boundary, scroll, includePhases});
-  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, ...metrics} = captured;
+  const {bundleResources, origin, timeOrigin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, reconcilePhase, reconcileMainThreadTimeMs, ...metrics} = captured;
+  const cachedDialogReconcile = reconcilePhase ? summarizeCachedDialogReconcile(
+    reconcilePhase,
+    timeOrigin + boundary.startedAtMs,
+    reconcileMainThreadTimeMs
+  ) : undefined;
   if(includePhases) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
   const rpcSummary = summarizeRpcTrace(metrics.rpcCalls as PerformanceRpcCall[], boundary.ms);
   return {
     ...metrics,
+    cachedDialogReconcile,
     bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
     ms: boundary.ms,
