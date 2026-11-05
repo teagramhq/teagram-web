@@ -143,10 +143,11 @@ export default class AppStorage<
         } */
 
         const storage = await this.getStorage();
-        const savePromise = storage.save(keys, values);
-        const hasSensitiveKey = this.sensitiveKeys.size > 0 && keys.some((key) => this.sensitiveKeys.has(key as keyof Storage));
-        if(hasSensitiveKey) await savePromise;
-        else savePromise.catch((error) => this.log.error('set error', error, keys, values));
+        if(this.sensitiveKeys.size && keys.some((key) => this.sensitiveKeys.has(key as keyof Storage))) {
+          await storage.save(keys, values);
+        } else {
+          storage.save(keys, values);
+        }
         // console.log('setItem: have set', key/* , value */);
       } catch(e) {
         // this.useCS = false;
@@ -187,10 +188,11 @@ export default class AppStorage<
         } */
 
         const storage = await this.getStorage();
-        const deletePromise = storage.delete(keys);
-        const hasSensitiveKey = this.sensitiveKeys.size > 0 && keys.some((key) => this.sensitiveKeys.has(key as keyof Storage));
-        if(hasSensitiveKey) await deletePromise;
-        else deletePromise.catch((error) => this.log.error('delete error', error, keys));
+        if(this.sensitiveKeys.size && keys.some((key) => this.sensitiveKeys.has(key as keyof Storage))) {
+          await storage.delete(keys);
+        } else {
+          storage.delete(keys);
+        }
       } catch(e) {
         this.log.error('delete error', e, keys);
         if(keys.some((key) => this.sensitiveKeys.has(key as keyof Storage))) {
