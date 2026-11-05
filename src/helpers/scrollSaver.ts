@@ -3,6 +3,7 @@ import type {ScrollableContextValue} from '@components/scrollable2';
 import {MOUNT_CLASS_TO} from '@config/debug';
 import {IS_SAFARI} from '@environment/userAgent';
 import getVisibleRect from '@helpers/dom/getVisibleRect';
+import type {Middleware} from '@helpers/middleware';
 import {fastRaf} from '@helpers/schedulers';
 
 // let USE_REFLOW = false;
@@ -216,6 +217,54 @@ export default class ScrollSaver {
     this.setScrollTop(scrollTop + diff, useReflow);
     // if(diff) debugger;
     // console.warn('scroll restore', rect, diff, newRect);
+  }
+
+  // ResizeObserver runs after layout, so restoring a mounted batch can inspect its anchor without forcing layout.
+  public restoreAfterLayout(useReflow?: boolean, middleware?: Middleware) {
+    return new Promise<boolean>((resolve, reject) => {
+      if(middleware && !middleware()) {
+        resolve(false);
+        return;
+      }
+
+      let observer: ResizeObserver | undefined;
+      let settled = false;
+      const lifecycleHelper = middleware?.create();
+      const cancel = () => {
+        if(settled) return;
+        settled = true;
+        observer?.disconnect();
+        resolve(false);
+      };
+      lifecycleHelper?.onDestroy(cancel);
+
+      try {
+        observer = new ResizeObserver(() => {
+          if(settled) return;
+          settled = true;
+          observer?.disconnect();
+          try {
+            if(!middleware || middleware()) {
+              this.restore(useReflow);
+              resolve(true);
+            } else {
+              resolve(false);
+            }
+          } catch(err) {
+            reject(err);
+          } finally {
+            lifecycleHelper?.destroy();
+          }
+        });
+        observer.observe(this.container);
+      } catch(err) {
+        if(settled) return;
+        settled = true;
+        observer?.disconnect();
+        lifecycleHelper?.destroy();
+        reject(err);
+      }
+    });
   }
 
   public _restore(useReflow?: boolean) {
