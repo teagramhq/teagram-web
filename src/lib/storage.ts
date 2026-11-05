@@ -143,7 +143,10 @@ export default class AppStorage<
         } */
 
         const storage = await this.getStorage();
-        await storage.save(keys, values);
+        const savePromise = storage.save(keys, values);
+        const hasSensitiveKey = this.sensitiveKeys.size > 0 && keys.some((key) => this.sensitiveKeys.has(key as keyof Storage));
+        if(hasSensitiveKey) await savePromise;
+        else savePromise.catch((error) => this.log.error('set error', error, keys, values));
         // console.log('setItem: have set', key/* , value */);
       } catch(e) {
         // this.useCS = false;
@@ -184,7 +187,10 @@ export default class AppStorage<
         } */
 
         const storage = await this.getStorage();
-        await storage.delete(keys);
+        const deletePromise = storage.delete(keys);
+        const hasSensitiveKey = this.sensitiveKeys.size > 0 && keys.some((key) => this.sensitiveKeys.has(key as keyof Storage));
+        if(hasSensitiveKey) await deletePromise;
+        else deletePromise.catch((error) => this.log.error('delete error', error, keys));
       } catch(e) {
         this.log.error('delete error', e, keys);
         if(keys.some((key) => this.sensitiveKeys.has(key as keyof Storage))) {
@@ -203,29 +209,16 @@ export default class AppStorage<
   private _get = async() => {
     const keys = Array.from(this.getPromises.keys());
 
-    try {
-      const storage = await this.getStorage();
-      const values = await storage.get(keys as string[]);
-      for(let i = 0, length = keys.length; i < length; ++i) {
-        const key = keys[i];
-        const deferred = this.getPromises.get(key);
-        if(deferred) {
-          // @ts-ignore
-          deferred.resolve(this.cache[key] = values[i]);
-          this.getPromises.delete(key);
-        }
-      }
-    } catch(error) {
+    const handleError = (error: unknown) => {
       const apiError = error as ApiError;
       const ignoreErrors: Set<ErrorType> = new Set(['NO_ENTRY_FOUND', 'STORAGE_OFFLINE']);
-      const isSensitive = keys.some((key) => this.sensitiveKeys.has(key));
-      if(isSensitive || !ignoreErrors.has(apiError?.type)) {
-        if(!isSensitive) this.useStorage = false;
-        this.log.error(isSensitive ? 'get error for sensitive storage values' : 'get error', isSensitive ? keys : error, this.storeName);
+      const hasSensitiveKey = keys.some((key) => this.sensitiveKeys.has(key));
+      if(hasSensitiveKey || !ignoreErrors.has(apiError?.type)) {
+        if(!hasSensitiveKey) this.useStorage = false;
+        this.log.error(hasSensitiveKey ? 'get error for sensitive storage values' : 'get error', hasSensitiveKey ? keys : error, this.storeName);
       }
 
-      for(let i = 0, length = keys.length; i < length; ++i) {
-        const key = keys[i];
+      for(const key of keys) {
         const deferred = this.getPromises.get(key);
         if(deferred) {
           if(this.sensitiveKeys.has(key)) deferred.reject(error);
@@ -233,10 +226,30 @@ export default class AppStorage<
           this.getPromises.delete(key);
         }
       }
-    } finally {
-      if(this.getPromises.size) {
-        this.getThrottled();
-      }
+    };
+
+    const handleFinish = () => {
+      if(this.getPromises.size) this.getThrottled();
+    };
+
+    try {
+      const storage = await this.getStorage();
+      storage.get(keys as string[]).then((values) => {
+        for(let i = 0, length = keys.length; i < length; ++i) {
+          const key = keys[i];
+          const deferred = this.getPromises.get(key);
+          if(deferred) {
+            // @ts-ignore
+            deferred.resolve(this.cache[key] = values[i]);
+            this.getPromises.delete(key);
+          }
+        }
+
+        // console.log('[AS]: get time', keys, performance.now() - perf);
+      }, handleError).finally(handleFinish);
+    } catch(error) {
+      handleError(error);
+      handleFinish();
     }
   };
 
@@ -264,7 +277,7 @@ export default class AppStorage<
     if(this.cache.hasOwnProperty(key) && useCache) {
       return this.getFromCache(key);
     } else if(this.useStorage) {
-      if(!useCache) {
+      if(!useCache && this.sensitiveKeys.has(key)) {
         const storage = await this.getStorage();
         if(storage instanceof EncryptedStorageLayer) {
           const [value] = await storage.get<Storage[T]>([key as string], false);
