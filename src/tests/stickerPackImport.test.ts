@@ -3,7 +3,7 @@ import {describe, expect, it, vi} from 'vitest';
 import {readStickerPackZip, validateStickerPackFiles} from '@helpers/stickerPackImport';
 import {BoundedZipInflate, readStickerPackZipBytes} from '@helpers/stickerPackImportZip';
 import {getStickerFileMimeType, isStickerPackImportEnabled} from '@helpers/stickerPackCommon';
-import {createStickerSetShareLink, parseStickerSetShareLink, processInitialStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
+import {captureInitialStickerSetShareLink, createStickerSetShareLink, parseStickerSetShareLink, processInitialStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
 
 const makeFile = (name: string, size: number) => new File([new Uint8Array(size)], name);
 
@@ -186,6 +186,33 @@ describe('sticker pack import files', () => {
 });
 
 describe('sticker set share links', () => {
+  it.each([
+    ['query', '?x=1'],
+    ['fragment', '#fragment']
+  ])('does not capture a direct route with a %s suffix', (_kind, suffix) => {
+    history.replaceState(history.state, '', `/addstickers/cats_a${suffix}`);
+
+    try {
+      expect(captureInitialStickerSetShareLink()).toBeUndefined();
+      expect(location.pathname).toBe('/');
+      expect(`${location.search}${location.hash}`).toBe(suffix);
+    } finally {
+      history.replaceState(history.state, '', '/');
+    }
+  });
+
+  it('retains the exact direct URL before normalizing the app route', () => {
+    history.replaceState(history.state, '', '/addstickers/cats_a');
+
+    try {
+      const originalHref = location.href;
+      expect(captureInitialStickerSetShareLink()).toBe(originalHref);
+      expect(location.pathname).toBe('/');
+    } finally {
+      history.replaceState(history.state, '', '/');
+    }
+  });
+
   it('builds and parses a link using the server prefix and set type', () => {
     const stickers = createStickerSetShareLink('https://teagram.test/links/', 'cats_a', false);
     const emoji = createStickerSetShareLink('https://teagram.test/links/', 'faces_2', true);

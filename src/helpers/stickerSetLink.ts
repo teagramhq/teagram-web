@@ -32,6 +32,11 @@ export function setStickerSetLinkPrefix(prefix: string) {
   return true;
 }
 
+function getPotentialStickerSetRoute(pathname: string) {
+  const match = /\/(addstickers|addemoji)\/([^/]+)$/.exec(pathname);
+  return match && SHORT_NAME_PATTERN.test(match[2]) ? match : undefined;
+}
+
 export function getStickerSetLinkPrefix() {
   return stickerSetLinkPrefix;
 }
@@ -115,17 +120,17 @@ export function isPotentialStickerSetShareLink(value: string) {
     url.hash
   ) return false;
 
-  const match = /\/(addstickers|addemoji)\/([^/]+)$/.exec(url.pathname);
-  return !!match && SHORT_NAME_PATTERN.test(match[2]);
+  return !!getPotentialStickerSetRoute(url.pathname);
 }
 
 export function captureInitialStickerSetShareLink() {
-  const url = new URL(window.location.href);
-  const stickerSetUrl = new URL(url.pathname, url.origin).href;
-  if(!isPotentialStickerSetShareLink(stickerSetUrl)) return;
-
-  window.history.replaceState(window.history.state, '', `/${url.search}${url.hash}`);
-  return stickerSetUrl;
+  const href = window.location.href;
+  const url = new URL(href);
+  const stickerSetLink = isPotentialStickerSetShareLink(href) ? href : undefined;
+  if(getPotentialStickerSetRoute(url.pathname)) {
+    window.history.replaceState(window.history.state, '', `/${url.search}${url.hash}`);
+  }
+  return stickerSetLink;
 }
 
 export const initialStickerSetShareLink = typeof window === 'undefined' ? undefined : captureInitialStickerSetShareLink();
