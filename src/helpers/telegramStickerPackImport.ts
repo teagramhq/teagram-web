@@ -24,6 +24,15 @@ export type TelegramStickerPackDownload = {
   files: ValidatedStickerPackFiles,
   emojis: string[]
 };
+export type TelegramStickerPackUploadDetails = Pick<TelegramStickerPackDownload, 'files' | 'type' | 'source' | 'emojis'> & {title: string};
+export type TelegramStickerPackUploadOptions = {
+  files: ValidatedStickerPackFiles,
+  title: string,
+  shortName: string,
+  isEmoji: boolean,
+  software: string,
+  emojis: string[]
+};
 
 type TelegramSticker = Record<string, unknown>;
 type TelegramFile = {file_path: string, file_size?: number};
@@ -41,6 +50,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export {isValidTelegramBotToken};
+
+export function getTelegramStickerPackUploadOptions(
+  pack: TelegramStickerPackUploadDetails,
+  shortName: string
+): TelegramStickerPackUploadOptions {
+  return {
+    files: pack.files,
+    title: pack.title,
+    shortName,
+    isEmoji: pack.type === 'emoji',
+    software: pack.source,
+    emojis: pack.emojis
+  };
+}
 
 export function parseTelegramStickerPackLink(value: string): TelegramStickerPackLink | undefined {
   let url: URL;

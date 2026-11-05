@@ -1,7 +1,6 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {downloadTelegramStickerPack, isValidTelegramBotToken, parseTelegramStickerPackLink} from '@helpers/telegramStickerPackImport';
+import {downloadTelegramStickerPack, getTelegramStickerPackUploadOptions, isValidTelegramBotToken, parseTelegramStickerPackLink} from '@helpers/telegramStickerPackImport';
 import {AppStickersManager} from '@appManagers/appStickersManager';
-import type {ValidatedStickerPackFiles} from '@helpers/stickerPackCommon';
 
 const makeJsonResponse = (url: string, body: unknown, status = 200) => {
   const response = new Response(JSON.stringify(body), {
@@ -231,16 +230,43 @@ describe('Telegram pack links and Bot API downloads', () => {
 });
 
 describe('Telegram sticker pack upload boundary', () => {
-  it('sends the canonical source and original emojis to Teagram without the bot token', async() => {
-    const token = `123456789:${'C'.repeat(35)}`;
-    const apiRequests: Array<{method: string, params: Record<string, any>}> = [];
-    const file = new File([Uint8Array.from([5, 6, 7])], 'sticker-001.webp', {type: 'image/webp'});
+  it('keeps a token-bearing import out of every Teagram request through the actual upload manager', async() => {
+    const importToken = `123456789:${'C'.repeat(35)}`;
+    const telegramRequests: URL[] = [];
+    const telegramFetch = mockTelegramFetch((url) => {
+      telegramRequests.push(url);
+      if(url.pathname.endsWith('/getStickerSet')) {
+        return makeJsonResponse(url.toString(), {
+          ok: true,
+          result: {
+            name: 'Cats_2',
+            title: 'Telegram Cats',
+            sticker_type: 'regular',
+            stickers: [{file_id: 'telegram-file-1', emoji: '🐈'}]
+          }
+        });
+      }
+      if(url.pathname.endsWith('/getFile')) {
+        return makeJsonResponse(url.toString(), {
+          ok: true,
+          result: {file_id: 'telegram-file-1', file_path: 'stickers/cat.webp', file_size: 3}
+        });
+      }
+      return makeFileResponse(url.toString(), [5, 6, 7]);
+    });
+    const link = parseTelegramStickerPackLink('https://t.me/addstickers/Cats_2')!;
+    const downloadedPack = await downloadTelegramStickerPack(link, importToken);
+    const teagramRequests: Array<{method: string, params: Record<string, any>}> = [];
+    const uploadCalls: Array<Record<string, unknown>> = [];
     const manager = {
       appPeersManager: {getInputPeerSelf: () => ({_: 'inputPeerSelf'})},
-      apiFileManager: {upload: vi.fn(async() => ({_: 'inputFile', id: 1, parts: 1, name: file.name, md5_checksum: ''}))},
+      apiFileManager: {upload: vi.fn(async(options: Record<string, any>) => {
+        uploadCalls.push(options);
+        return {_:'inputFile', id: 1, parts: 1, name: options.file.name, md5_checksum: ''};
+      })},
       apiManager: {
         invokeApi: vi.fn(async(method: string, params: Record<string, any>) => {
-          apiRequests.push({method, params});
+          teagramRequests.push({method, params});
           if(method === 'messages.uploadMedia') {
             return {
               _: 'messageMediaDocument',
@@ -264,18 +290,25 @@ describe('Telegram sticker pack upload boundary', () => {
       appUsersManager: {getSelf: () => ({id: '42'}), getUserInput: (id: string) => ({_: 'inputUser', user_id: id})}
     };
 
-    await AppStickersManager.prototype.createStickerSet.call(manager as any, {
-      files: [file] as ValidatedStickerPackFiles,
-      title: 'Telegram Cats',
-      shortName: 'telegram_cats',
-      isEmoji: false,
-      software: 'https://t.me/addstickers/Cats_2',
-      emojis: ['🐈']
-    });
+    expect(await AppStickersManager.prototype.checkStickerSetShortName.call(manager as any, 'telegram_cats')).toBe(true);
+    await AppStickersManager.prototype.createStickerSet.call(
+      manager as any,
+      getTelegramStickerPackUploadOptions(downloadedPack, 'telegram_cats')
+    );
 
-    const createRequest = apiRequests.find(({method}) => method === 'stickers.createStickerSet');
+    expect(telegramFetch).toHaveBeenCalledTimes(3);
+    expect(telegramRequests.every(({origin}) => origin === 'https://api.telegram.org')).toBe(true);
+    expect(telegramRequests.some(({pathname}) => pathname.includes(importToken))).toBe(true);
+    expect(teagramRequests.map(({method}) => method)).toEqual([
+      'stickers.checkShortName',
+      'messages.uploadMedia',
+      'stickers.createStickerSet'
+    ]);
+    expect(manager.apiFileManager.upload).toHaveBeenCalledOnce();
+    expect(JSON.stringify({teagramRequests, uploadCalls})).not.toContain(importToken);
+
+    const createRequest = teagramRequests.find(({method}) => method === 'stickers.createStickerSet');
     expect(createRequest?.params.software).toBe('https://t.me/addstickers/Cats_2');
     expect(createRequest?.params.stickers.map((sticker: {emoji: string}) => sticker.emoji)).toEqual(['🐈']);
-    expect(JSON.stringify(apiRequests)).not.toContain(token);
   });
 });

@@ -1,6 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
-const idbDatabase = vi.hoisted(() => ({stores: new Map<string, Map<string, unknown>>()}));
+const idbDatabase = vi.hoisted(() => ({stores: new Map<string, Map<string, unknown>>(), debugLogs: [] as unknown[], debugLogging: false}));
 
 vi.mock('@lib/apiManagerProxy', () => ({
   default: {
@@ -21,8 +21,10 @@ vi.mock('@lib/files/idb', () => ({
       idbDatabase.stores.set(key, this.store);
     }
 
-    async get<T>(keys: string | string[]): Promise<T | T[]> {
-      return Array.isArray(keys) ? keys.map((key) => this.store.get(key)) as T[] : this.store.get(keys) as T;
+    async get<T>(keys: string | string[], _storeName?: string, suppressValueLogging = false): Promise<T | T[]> {
+      const values = Array.isArray(keys) ? keys.map((key) => this.store.get(key)) as T[] : this.store.get(keys) as T;
+      if(idbDatabase.debugLogging) idbDatabase.debugLogs.push(suppressValueLogging ? '[redacted]' : values);
+      return values;
     }
 
     async save(keys: string | string[], values: unknown | unknown[]) {
@@ -102,6 +104,8 @@ beforeEach(async() => {
   EncryptionKeyStore.save(undefined);
   await AppStorage.toggleEncryptedForAll(false);
   await clearMockDatabases();
+  idbDatabase.debugLogs.length = 0;
+  idbDatabase.debugLogging = false;
   try {
     await removeTelegramBotToken(accountNumber);
   } catch{}
@@ -117,6 +121,8 @@ afterEach(async() => {
   } catch{}
   await new IDBStorage(getDatabaseState(accountNumber), 'session').delete('telegramBotToken');
   await clearMockDatabases();
+  idbDatabase.debugLogs.length = 0;
+  idbDatabase.debugLogging = false;
 });
 
 describe('Telegram bot token storage', () => {
@@ -127,6 +133,20 @@ describe('Telegram bot token storage', () => {
     expect(localStorageValues()).not.toContain(savedToken);
     expect(await accountSession.get('telegramBotToken')).toBe(savedToken);
     expect(await getSavedTelegramBotToken(accountNumber)).toBe(savedToken);
+  });
+
+  it('does not include a saved token in debug logs when it is read', async() => {
+    await saveTelegramBotToken(accountNumber, savedToken);
+    idbDatabase.debugLogs.length = 0;
+    idbDatabase.debugLogging = true;
+
+    try {
+      expect(await getSavedTelegramBotToken(accountNumber)).toBe(savedToken);
+      expect(idbDatabase.debugLogs).toContain('[redacted]');
+      expect(JSON.stringify(idbDatabase.debugLogs)).not.toContain(savedToken);
+    } finally {
+      idbDatabase.debugLogging = false;
+    }
   });
 
   it('keeps tokens out of localStorage when a passcode is enabled after the import flow opens', async() => {

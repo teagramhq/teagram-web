@@ -400,9 +400,9 @@ class IDBStorage<T extends Database<any>, StoreName extends string = T['stores']
     return blob.size || blob.byteLength || blob.length;
   } */
 
-  public get<T>(entryName: string[], storeName?: StoreName): Promise<T[]>;
-  public get<T>(entryName: string, storeName?: StoreName): Promise<T>;
-  public get<T>(entryName: string | string[], storeName?: StoreName): Promise<T> | Promise<T[]> {
+  public get<T>(entryName: string[], storeName?: StoreName, suppressValueLogging?: boolean): Promise<T[]>;
+  public get<T>(entryName: string, storeName?: StoreName, suppressValueLogging?: boolean): Promise<T>;
+  public get<T>(entryName: string | string[], storeName?: StoreName, suppressValueLogging = false): Promise<T> | Promise<T[]> {
     // return Promise.reject();
 
     const isArray = Array.isArray(entryName);
@@ -419,14 +419,15 @@ class IDBStorage<T extends Database<any>, StoreName extends string = T['stores']
     return this.getObjectStore<T>('readonly', (objectStore) => {
       const promises = (entryName as string[]).map((entryName) => objectStore.get(entryName));
       return isArray ? promises : promises[0];
-    }, DEBUG ? 'get: ' + (entryName as string[]).join(', ') : '', storeName);
+    }, DEBUG ? 'get: ' + (entryName as string[]).join(', ') : '', storeName, suppressValueLogging);
   }
 
   private async getObjectStore<T>(
     mode: IDBTransactionMode,
     callback: (objectStore: IDBObjectStore, onComplete: () => void, onError: () => void) => IDBRequest | IDBRequest[],
     log?: string,
-    storeName = this.storeName
+    storeName = this.storeName,
+    suppressValueLogging = false
   ) {
     let perf: number;
 
@@ -464,7 +465,7 @@ class IDBStorage<T extends Database<any>, StoreName extends string = T['stores']
       resolve(isArray ? results : results[0]);
 
       if(log) {
-        this.log(log + ': resolved', isArray ? results : results[0]);
+        this.log(log + ': resolved', suppressValueLogging ? '[redacted]' : isArray ? results : results[0]);
       }
     };
 

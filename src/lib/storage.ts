@@ -236,7 +236,11 @@ export default class AppStorage<
 
     try {
       const storage = await this.getStorage();
-      storage.get(keys as string[]).then((values) => {
+      const hasSensitiveKey = keys.some((key) => this.sensitiveKeys.has(key));
+      const valuesPromise = storage instanceof IDBStorage ?
+        storage.get(keys as string[], undefined, hasSensitiveKey) :
+        storage.get(keys as string[]);
+      valuesPromise.then((values) => {
         for(let i = 0, length = keys.length; i < length; ++i) {
           const key = keys[i];
           const deferred = this.getPromises.get(key);

@@ -13,7 +13,7 @@ import {createStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stick
 import {readStickerPackZip, StickerPackType, validateStickerPackFiles, StickerPackRejectedFile} from '@helpers/stickerPackImport';
 import {SHORT_NAME_PATTERN} from '@helpers/stickerPackCommon';
 import type {StickerPackZipError} from '@helpers/stickerPackImportZip';
-import {downloadTelegramStickerPack, isValidTelegramBotToken, parseTelegramStickerPackLink, TelegramStickerPackImportError} from '@helpers/telegramStickerPackImport';
+import {downloadTelegramStickerPack, getTelegramStickerPackUploadOptions, isValidTelegramBotToken, parseTelegramStickerPackLink, TelegramStickerPackImportError} from '@helpers/telegramStickerPackImport';
 import {getSavedTelegramBotToken, removeTelegramBotToken, saveTelegramBotToken} from '@helpers/telegramStickerPackTokenStorage';
 import {logger} from '@lib/logger';
 import styles from './stickerPackImport.module.scss';
@@ -301,14 +301,21 @@ const StickerPackImportPopup = () => {
         return false;
       }
 
-      await managers.appStickersManager.createStickerSet({
-        files,
-        title: title().trim(),
-        shortName: finalName,
-        isEmoji: type() === 'emoji',
-        software,
-        emojis: source() === 'telegram' ? sourceEmojis() : undefined
-      });
+      const createOptions = source() === 'telegram' ?
+        getTelegramStickerPackUploadOptions({
+          files,
+          title: title().trim(),
+          type: type(),
+          source: software,
+          emojis: sourceEmojis()
+        }, finalName) : {
+          files,
+          title: title().trim(),
+          shortName: finalName,
+          isEmoji: type() === 'emoji',
+          software
+        };
+      await managers.appStickersManager.createStickerSet(createOptions);
 
       popupContext()?.hide();
       showStickersPopup(getStickerSetInputByShortName(finalName), type() === 'emoji');
