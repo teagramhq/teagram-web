@@ -49,7 +49,7 @@ test('flushes current peers once after the cached-dialog walk completes', async(
           mirrorBatch(peerKey, user);
         }
       }),
-      mirrorApiPeers: vi.fn((peerKeys: Iterable<string>) => {
+      mirrorApiPeers: vi.fn((peerKeys: Iterable<string>, _trace?: 'cachedChannelDialogsReconcile', _traceId?: string) => {
         for(const peerKey of peerKeys) {
           if(currentPeers[peerKey]) mirroredPeers[peerKey] = currentPeers[peerKey];
         }
@@ -107,7 +107,8 @@ test('flushes current peers once after the cached-dialog walk completes', async(
   await vi.waitFor(() => {
     expect(performancePhaseTrace.getSnapshot().find(({name: phaseName}) => phaseName === 'worker.dialogs.cachedChannelReconcile')).toMatchObject({
       pageCount: 2,
-      durationMs: expect.any(Number)
+      durationMs: expect.any(Number),
+      traceId: expect.stringMatching(/^\d+-\d+$/)
     });
   });
 
@@ -128,7 +129,8 @@ test('flushes current peers once after the cached-dialog walk completes', async(
   expect(storage.appPeersManager.mirrorApiPeers).toHaveBeenCalledTimes(1);
   expect(storage.appPeersManager.mirrorApiPeers).toHaveBeenCalledWith(
     new Set(['-42', '1', '2']),
-    'cachedChannelDialogsReconcile'
+    'cachedChannelDialogsReconcile',
+    expect.stringMatching(/^\d+-\d+$/)
   );
   expect(mirroredPeers).toEqual({'1': currentFirstUser, '2': secondUser});
   expect(result.dialogs).toEqual([dialog]);
