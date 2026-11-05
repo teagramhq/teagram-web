@@ -1,9 +1,18 @@
 import type {Locator, Page} from '@playwright/test';
 
+export type DomNodeCounts = {
+  bubbles: number,
+  bubbleGroups: number,
+  dateGroups: number,
+  groupAvatars: number,
+  deletePlaceholders: number
+};
+
 export type FirstBubbleBoundary = {
   ms: number,
   startedAtMs: number,
   domNodes: number,
+  domNodeCounts: DomNodeCounts,
   preInteractionMs?: number
 };
 
@@ -51,6 +60,13 @@ export async function waitForFirstVisibleBubble(page: Page) {
         ms: performance.now() - perf.clickAt,
         startedAtMs: perf.clickAt,
         domNodes: document.querySelectorAll('*').length,
+        domNodeCounts: {
+          bubbles: document.querySelectorAll('.bubbles .bubble[data-mid]').length,
+          bubbleGroups: document.querySelectorAll('.bubbles .bubbles-group').length,
+          dateGroups: document.querySelectorAll('.bubbles .bubbles-date-group').length,
+          groupAvatars: document.querySelectorAll('.bubbles .bubbles-group-avatar-container').length,
+          deletePlaceholders: document.querySelectorAll('.bubbles .bubble-delete-placeholder').length
+        },
         preInteractionMs: perf.preInteractionMs
       };
       return true;

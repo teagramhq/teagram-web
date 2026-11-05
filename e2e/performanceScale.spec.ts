@@ -4,7 +4,7 @@ import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, PERFORMANCE_TIMING_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
 import {findLongTasksWithSignificantSpanWork, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
-import {startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
+import {startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
 
 type Fixture = {
   owner: number,
@@ -19,13 +19,7 @@ type Metric = {
   ms: number,
   requests: number,
   domNodes: number,
-  domNodeCounts: {
-    bubbles: number,
-    bubbleGroups: number,
-    dateGroups: number,
-    groupAvatars: number,
-    deletePlaceholders: number
-  },
+  domNodeCounts: DomNodeCounts,
   bundleBytes: number,
   longTasksOver50Ms: number,
   blockingTimeMs: number,
