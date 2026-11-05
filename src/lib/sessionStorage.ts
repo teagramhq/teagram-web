@@ -4,9 +4,8 @@ import {MOUNT_CLASS_TO} from '@config/debug';
 import type {AppInstance} from '@lib/singleInstance';
 import type {UserAuth} from '@appManagers/constants';
 import LocalStorageController from '@lib/localStorage';
-import {AccountSessionData} from '@lib/accounts/types';
+import type {AccountSessionData} from '@lib/accounts/types';
 import type {GuestCredentialRecords} from '@lib/guestAccountTypes';
-
 
 type StorageValues = {
   state_id: number,
@@ -36,7 +35,7 @@ type StorageValues = {
   current_account?: number, // 1 if not set
   should_animate_auth?: number,
   should_animate_main?: number
-}
+};
 
 /**
  * @deprecated use these keys only for going to and from 'A' (a.k.a. 'Z') version

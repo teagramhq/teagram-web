@@ -1,6 +1,7 @@
 import type {Message, PeerSettings} from '@layer';
 import '@helpers/peerIdPolyfill';
 import {getMiddleware} from '@helpers/middleware';
+import ScrollSaver from '@helpers/scrollSaver';
 import {render} from 'solid-js/web';
 import {makeFullMid} from '@appManagers/utils/messages/fullMid';
 import ejectBubble from '@components/chat/bubbles/ejectBubble';
@@ -41,6 +42,7 @@ vi.mock('@stores/stars', () => ({default: () => () => 0}));
 
 let ChatBubbles: typeof import('@components/chat/bubbles').default;
 let BubbleGroups: typeof import('@components/chat/bubbleGroups').default;
+let BubbleGroup: typeof import('@components/chat/bubbleGroups').BubbleGroup;
 let cancelPendingHiddenLinksEvent: typeof import('@components/chat/bubbles').cancelPendingHiddenLinksEvent;
 let disposeChatInnerMiddlewareAfterDetach: typeof import('@components/chat/bubbles').disposeChatInnerMiddlewareAfterDetach;
 let isBubbleUiCurrent: typeof import('@components/chat/bubbles').isBubbleUiCurrent;
@@ -48,6 +50,7 @@ let isTestPeerNonContactRequestCurrent: typeof import('@components/chat/bubbles'
 let retainMessageLinkPolicyOnCleanup: typeof import('@components/chat/bubbles').retainMessageLinkPolicyOnCleanup;
 let setBubbleHiddenLinksPending: typeof import('@components/chat/bubbles').setBubbleHiddenLinksPending;
 let shouldForceHideNonContactLinkTest: typeof import('@components/chat/bubbles').shouldForceHideNonContactLinkTest;
+const originalResizeObserver = globalThis.ResizeObserver;
 
 beforeAll(async() => {
   class IntersectionObserverMock {
@@ -79,12 +82,14 @@ beforeAll(async() => {
     setBubbleHiddenLinksPending,
     shouldForceHideNonContactLinkTest
   } = await import('@components/chat/bubbles'));
-  BubbleGroups = (await import('@components/chat/bubbleGroups')).default;
+  ({default: BubbleGroups, BubbleGroup} = await import('@components/chat/bubbleGroups'));
   // Importing the whole bubbles graph costs far more than the default hook
   // budget once the rest of the suite is competing for the same CPU.
 }, 60_000);
 
 afterEach(() => {
+  vi.useRealTimers();
+  vi.stubGlobal('ResizeObserver', originalResizeObserver);
   document.body.replaceChildren();
 });
 
@@ -147,6 +152,177 @@ function makeTargetedEvent(type: string, target: Element) {
   const event = new Event(type, {bubbles: true, cancelable: true});
   Object.defineProperty(event, 'target', {value: target});
   return event;
+}
+
+function captureChatResizeObserver() {
+  const observers: {callback: ResizeObserverCallback, disconnected: boolean}[] = [];
+  const disconnect = vi.fn();
+  class ResizeObserverMock {
+    private observer: {callback: ResizeObserverCallback, disconnected: boolean};
+
+    constructor(onResize: ResizeObserverCallback) {
+      this.observer = {callback: onResize, disconnected: false};
+      observers.push(this.observer);
+    }
+
+    observe() {}
+    disconnect = vi.fn(() => {
+      this.observer.disconnected = true;
+      disconnect();
+    });
+  }
+
+  vi.stubGlobal('ResizeObserver', ResizeObserverMock);
+  return {
+    disconnect,
+    get observerCount() {
+      return observers.length;
+    },
+    flush(target: Element) {
+      const observer = observers[0];
+      if(observer && !observer.disconnected) {
+        observer.callback([{target} as ResizeObserverEntry], {} as ResizeObserver);
+      }
+    },
+    flushAll(target: Element) {
+      observers.forEach((observer) => {
+        if(!observer.disconnected) {
+          observer.callback([{target} as ResizeObserverEntry], {} as ResizeObserver);
+        }
+      });
+    }
+  };
+}
+
+function makeScrollRect(top: number, bottom: number): DOMRect {
+  return {
+    x: 0,
+    y: top,
+    top,
+    right: 200,
+    bottom,
+    left: 0,
+    width: 200,
+    height: bottom - top,
+    toJSON: () => ({})
+  } as DOMRect;
+}
+
+function makeScrollRestoreHarness() {
+  const chatInnerMiddlewareHelper = getMiddleware();
+  const scrollContainer = document.createElement('div');
+  const chatInner = document.createElement('div');
+  const bubble = document.createElement('div');
+  bubble.classList.add('bubble');
+  chatInner.append(bubble);
+  scrollContainer.append(chatInner);
+  document.body.append(scrollContainer);
+
+  const initialScrollTop = 100;
+  let scrollTop = initialScrollTop;
+  let scrollHeight = 1000;
+  let layoutDirty = false;
+  let bubblePosition = {top: 120, bottom: 160};
+  const requireCleanLayout = () => {
+    if(layoutDirty) throw new Error('layout read before ResizeObserver delivery');
+  };
+  bubble.getBoundingClientRect = () => {
+    requireCleanLayout();
+    const scrollDelta = scrollTop - initialScrollTop;
+    return makeScrollRect(bubblePosition.top - scrollDelta, bubblePosition.bottom - scrollDelta);
+  };
+  scrollContainer.getBoundingClientRect = () => {
+    requireCleanLayout();
+    return makeScrollRect(100, 300);
+  };
+  Object.defineProperties(scrollContainer, {
+    scrollTop: {
+      get() {
+        requireCleanLayout();
+        return scrollTop;
+      },
+      set(value: number) {
+        requireCleanLayout();
+        scrollTop = value;
+      }
+    },
+    scrollHeight: {
+      get() {
+        requireCleanLayout();
+        return scrollHeight;
+      }
+    },
+    clientHeight: {
+      get() {
+        requireCleanLayout();
+        return 200;
+      }
+    }
+  });
+
+  const scrollable = {
+    container: scrollContainer,
+    get scrollPosition() {
+      return scrollContainer.scrollTop;
+    },
+    get scrollSize() {
+      return scrollContainer.scrollHeight;
+    },
+    get clientSize() {
+      return scrollContainer.clientHeight;
+    },
+    onSizeChange: vi.fn(),
+    setScrollPositionSilently(value: number) {
+      scrollContainer.scrollTop = value;
+    }
+  };
+  const restore = vi.fn();
+  const createScrollSaver = vi.fn(() => {
+    const scrollSaver = new ScrollSaver(scrollable as any, '.bubble', true);
+    const restoreOriginal = scrollSaver.restore.bind(scrollSaver);
+    vi.spyOn(scrollSaver, 'restore').mockImplementation((useReflow) => {
+      restore(useReflow);
+      restoreOriginal(useReflow);
+    });
+    return scrollSaver;
+  });
+  const onRenderScrollSet = vi.fn();
+  const log = Object.assign(vi.fn(), {bindPrefix: vi.fn(() => vi.fn())});
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chatInner,
+    chatInnerMiddlewareHelper,
+    log,
+    createScrollSaver,
+    onRenderScrollSet
+  }) as any;
+
+  return {
+    harness,
+    chatInnerMiddlewareHelper,
+    scrollContainer,
+    bubble,
+    restore,
+    onRenderScrollSet,
+    createScrollSaver,
+    prependBubble(position: {top: number, bottom: number}) {
+      const prepended = document.createElement('div');
+      prepended.classList.add('bubble');
+      prepended.getBoundingClientRect = () => makeScrollRect(position.top, position.bottom);
+      chatInner.prepend(prepended);
+    },
+    setBubblePosition(position: {top: number, bottom: number}) {
+      bubblePosition = position;
+    },
+    setScrollHeight(value: number) {
+      scrollHeight = value;
+    },
+    setLayoutDirty(value: boolean) {
+      layoutDirty = value;
+    },
+    getScrollTop() {
+      return scrollTop;
+    }
+  };
 }
 
 function expectRetainedLinkEventsAllowed(...anchors: HTMLAnchorElement[]) {
@@ -1159,6 +1335,97 @@ test('keeps a sender description poll in processBatch when message_sent rekeys i
   expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledOnce();
 });
 
+test('passes viewport-slice group changes to its history batch', () => {
+  const bubbles: HTMLElement[] = [100, 101].map((mid) => {
+    const bubble = document.createElement('div');
+    bubble.dataset.peerId = String(peerId);
+    bubble.dataset.mid = String(mid);
+    return bubble;
+  });
+  const fullMids = bubbles.map((bubble) => makeFullMid(peerId, Number(bubble.dataset.mid)));
+  const bubblesByFullMid = new Map(fullMids.map((fullMid, index) => [fullMid, bubbles[index]]));
+  const groups = bubbles.map(() => ({}));
+  const deferredGroups = new Set();
+  const destroyBubble = vi.fn((bubble: HTMLElement, _animate: boolean, _fullMid: string, modifiedGroups: Set<object>) => {
+    modifiedGroups.add(groups[bubbles.indexOf(bubble)]);
+  });
+  const bubbleGroups = {mountUnmountGroups: vi.fn()};
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chat: {
+      getMessageByPeer: vi.fn(() => undefined),
+      selection: {isSelecting: false}
+    },
+    scrollable: {
+      scrollPosition: 100,
+      ignoreNextScrollEvent: vi.fn()
+    },
+    bubbleGroups,
+    log: {bindPrefix: vi.fn(() => vi.fn())},
+    getBubble: (fullMid: ReturnType<typeof makeFullMid>) => bubblesByFullMid.get(fullMid),
+    getRenderedHistory: vi.fn(() => fullMids),
+    destroyBubble,
+    setLoaded: vi.fn(),
+    deleteEmptyDateGroups: vi.fn()
+  }) as any;
+
+  harness.deleteViewportSlice({
+    invisibleTop: [{element: bubbles[0]}],
+    visible: [],
+    invisibleBottom: [{element: bubbles[1]}]
+  }, true, deferredGroups);
+
+  expect(destroyBubble).toHaveBeenCalledTimes(2);
+  expect(destroyBubble.mock.calls.map((call) => call[3])).toEqual([deferredGroups, deferredGroups]);
+  expect(deferredGroups).toEqual(new Set(groups));
+  expect(bubbleGroups.mountUnmountGroups).not.toHaveBeenCalled();
+});
+
+test('mounts viewport-slice groups with the history batch groups once', async() => {
+  const messageToRender = descriptionPollMessage(100);
+  const bubble = document.createElement('div');
+  const fullMid = makeFullMid(messageToRender);
+  const batchGroup = {};
+  const slicedGroup = {};
+  const mountUnmountGroups = vi.fn();
+  const log = Object.assign(vi.fn(), {
+    groupCollapsed: vi.fn(),
+    groupEnd: vi.fn()
+  });
+  let queuedGroups: Set<object>;
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    changedMids: new Map(),
+    bubbleGroups: {
+      firstGroup: undefined,
+      lastGroup: undefined,
+      mountUnmountGroups
+    },
+    chat: {selection: {isSelecting: false}, setPeerPromise: false},
+    lazyLoadQueue: {setAllSeen: vi.fn()},
+    getBubble: (currentFullMid: string) => currentFullMid === fullMid ? bubble : undefined,
+    makeFullMid: (currentMessage: Message.message) => makeFullMid(currentMessage),
+    groupBubbles: vi.fn(() => ({groups: [batchGroup], avatarPromises: []})),
+    setUnreadDelimiter: vi.fn(() => Promise.resolve()),
+    prepareToSaveScroll: vi.fn((_reverse: boolean, _sliceTop: boolean, _sliceBottom: boolean, deferredGroups: Set<object>) => {
+      queuedGroups = deferredGroups;
+      deferredGroups.add(slicedGroup);
+      return {restoreScroll: vi.fn(), scrollSaver: {}};
+    }),
+    commitBubbleReplacements: vi.fn()
+  }) as any;
+
+  await harness.processBatch([{
+    message: messageToRender,
+    bubble,
+    reverse: false,
+    promises: [],
+    updatePosition: true
+  }], (promise: Promise<unknown>) => promise, log);
+
+  expect(queuedGroups).toBeInstanceOf(Set);
+  expect(mountUnmountGroups).toHaveBeenCalledOnce();
+  expect(mountUnmountGroups).toHaveBeenCalledWith([batchGroup, slicedGroup]);
+});
+
 test('defers every affected BubbleGroup mount during an atomic replacement regroup', () => {
   const bubble = document.createElement('div');
   const group = {unmountItem: vi.fn()};
@@ -1180,8 +1447,21 @@ test('defers every affected BubbleGroup mount during an atomic replacement regro
   (BubbleGroups.prototype.removeAndUnmountBubble as any).call(groupsHarness, bubble, deferredGroups);
 
   expect(group.unmountItem).toHaveBeenCalledOnce();
+  expect(group.unmountItem).toHaveBeenCalledWith(item, true);
   expect(mountUnmountGroups).not.toHaveBeenCalled();
   expect(deferredGroups).toEqual(new Set([group]));
+});
+
+test('defers group class updates when a bubble is removed in a batch', () => {
+  const bubble = document.createElement('div');
+  const item = {bubble, mounted: true};
+  const onItemUnmount = vi.fn();
+
+  (BubbleGroup.prototype.unmountItem as any).call({onItemUnmount}, item, true);
+
+  expect(item.mounted).toBe(false);
+  expect(bubble.isConnected).toBe(false);
+  expect(onItemUnmount).not.toHaveBeenCalled();
 });
 
 test('reconciles only the latest streamed revision queued during the initial async render', async() => {
@@ -1985,6 +2265,130 @@ test('a modification queued from inside a flush starts a new batch instead of be
 
   expect(reentrant).not.toHaveBeenCalled();
   expect(harness.batchingModifying).toEqual([reentrant]);
+});
+
+test('prepareToSaveScroll waits for ResizeObserver before restoring and reporting scroll state', async() => {
+  const resizeObserver = captureChatResizeObserver();
+  const {harness, scrollContainer, restore, onRenderScrollSet} = makeScrollRestoreHarness();
+  const {restoreScroll} = harness.prepareToSaveScroll(true, false, false);
+  let settled = false;
+  const restoring = restoreScroll();
+  void restoring.then(() => settled = true);
+
+  await Promise.resolve();
+
+  expect(settled).toBe(false);
+  expect(restore).not.toHaveBeenCalled();
+  expect(onRenderScrollSet).not.toHaveBeenCalled();
+
+  resizeObserver.flush(scrollContainer);
+  await restoring;
+
+  expect(restore).toHaveBeenCalledOnce();
+  expect(onRenderScrollSet).toHaveBeenCalledOnce();
+});
+
+test('prepareToSaveScroll skips onRenderScrollSet after its chat generation is disposed', async() => {
+  const resizeObserver = captureChatResizeObserver();
+  const {harness, chatInnerMiddlewareHelper, scrollContainer, restore, onRenderScrollSet} = makeScrollRestoreHarness();
+  const {restoreScroll} = harness.prepareToSaveScroll(true, false, false);
+  const restoring = restoreScroll();
+
+  chatInnerMiddlewareHelper.destroy();
+  await restoring;
+  resizeObserver.flush(scrollContainer);
+
+  expect(restore).not.toHaveBeenCalled();
+  expect(onRenderScrollSet).not.toHaveBeenCalled();
+});
+
+test('preserves a scroll restore after the queue wait deadline until layout is delivered', async() => {
+  vi.useFakeTimers();
+  const resizeObserver = captureChatResizeObserver();
+  const {
+    harness,
+    scrollContainer,
+    bubble,
+    restore,
+    onRenderScrollSet,
+    prependBubble,
+    setBubblePosition,
+    setScrollHeight,
+    setLayoutDirty,
+    getScrollTop
+  } = makeScrollRestoreHarness();
+  const {restoreScroll} = harness.prepareToSaveScroll(true, false, false);
+  prependBubble({top: 60, bottom: 100});
+  setBubblePosition({top: 170, bottom: 210});
+  setScrollHeight(1050);
+  setLayoutDirty(true);
+  const restoring = restoreScroll();
+
+  await vi.advanceTimersByTimeAsync(10_000);
+  await restoring;
+
+  expect(restore).not.toHaveBeenCalled();
+  expect(onRenderScrollSet).not.toHaveBeenCalled();
+  expect(resizeObserver.disconnect).not.toHaveBeenCalled();
+
+  setLayoutDirty(false);
+  resizeObserver.flush(scrollContainer);
+  await Promise.resolve();
+
+  expect(restore).toHaveBeenCalledOnce();
+  expect(onRenderScrollSet).toHaveBeenCalledOnce();
+  expect(getScrollTop()).toBe(150);
+  expect(bubble.getBoundingClientRect().top).toBe(120);
+  expect(resizeObserver.disconnect).toHaveBeenCalledOnce();
+});
+
+test('coalesces scroll restores when two batches mount before layout delivery', async() => {
+  vi.useFakeTimers();
+  const resizeObserver = captureChatResizeObserver();
+  const {
+    harness,
+    scrollContainer,
+    bubble,
+    restore,
+    onRenderScrollSet,
+    createScrollSaver,
+    setBubblePosition,
+    setScrollHeight,
+    setLayoutDirty,
+    getScrollTop,
+    prependBubble
+  } = makeScrollRestoreHarness();
+
+  const firstBatch = harness.prepareToSaveScroll(true, false, false);
+  prependBubble({top: 60, bottom: 100});
+  setBubblePosition({top: 160, bottom: 200});
+  setScrollHeight(1040);
+  setLayoutDirty(true);
+  const firstRestore = firstBatch.restoreScroll();
+
+  await vi.advanceTimersByTimeAsync(10_000);
+  await firstRestore;
+
+  setLayoutDirty(false);
+  const secondBatch = harness.prepareToSaveScroll(true, false, false);
+  prependBubble({top: 20, bottom: 60});
+  setBubblePosition({top: 190, bottom: 230});
+  setScrollHeight(1070);
+  setLayoutDirty(true);
+  const secondRestore = secondBatch.restoreScroll();
+
+  await vi.advanceTimersByTimeAsync(10_000);
+  await secondRestore;
+  setLayoutDirty(false);
+  resizeObserver.flushAll(scrollContainer);
+  await Promise.resolve();
+
+  expect(getScrollTop()).toBe(170);
+  expect(bubble.getBoundingClientRect().top).toBe(120);
+  expect(createScrollSaver).toHaveBeenCalledOnce();
+  expect(resizeObserver.observerCount).toBe(1);
+  expect(restore).toHaveBeenCalledOnce();
+  expect(onRenderScrollSet).toHaveBeenCalledOnce();
 });
 
 test.each([

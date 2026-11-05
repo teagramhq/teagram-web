@@ -13,10 +13,17 @@ import {createStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stick
 import {readStickerPackZip, StickerPackType, validateStickerPackFiles, StickerPackRejectedFile} from '@helpers/stickerPackImport';
 import {SHORT_NAME_PATTERN} from '@helpers/stickerPackCommon';
 import type {StickerPackZipError} from '@helpers/stickerPackImportZip';
+import {downloadTelegramStickerPack, getTelegramStickerPackUploadOptions, isValidTelegramBotToken, parseTelegramStickerPackLink, TelegramStickerPackImportError} from '@helpers/telegramStickerPackImport';
+import {getSavedTelegramBotToken, removeTelegramBotToken, saveTelegramBotToken} from '@helpers/telegramStickerPackTokenStorage';
 import {logger} from '@lib/logger';
 import styles from './stickerPackImport.module.scss';
 
 const importLogger = logger('StickerPackImportPopup');
+
+const safeErrorName = (error: unknown) => {
+  const name = error instanceof Error ? error.name : '';
+  return /^[A-Za-z][A-Za-z0-9]{0,40}$/.test(name) ? name : 'unknown';
+};
 
 const getServerErrorText = (error: unknown) => {
   if(!error || typeof error !== 'object' || error instanceof Error) return i18n('Error.AnError').textContent;
@@ -41,9 +48,17 @@ const StickerPackImportPopup = () => {
   const [shortName, setShortName] = createSignal('');
   const [shortNameStatus, setShortNameStatus] = createSignal<'idle' | 'invalid' | 'checking' | 'available' | 'taken' | 'error'>('idle');
   const [rightsConfirmed, setRightsConfirmed] = createSignal(false);
-  const [source, setSource] = createSignal<'folder' | 'zip'>();
+  const [source, setSource] = createSignal<'folder' | 'zip' | 'telegram'>();
   const [sourceFiles, setSourceFiles] = createSignal<File[]>([]);
   const [sourceRejected, setSourceRejected] = createSignal<StickerPackRejectedFile[]>([]);
+  const [sourceEmojis, setSourceEmojis] = createSignal<string[]>([]);
+  const [telegramSource, setTelegramSource] = createSignal<string>();
+  const [telegramLink, setTelegramLink] = createSignal('');
+  const [telegramTokenInput, setTelegramTokenInput] = createSignal('');
+  const [telegramTokenSaved, setTelegramTokenSaved] = createSignal(false);
+  const [telegramLoading, setTelegramLoading] = createSignal(false);
+  const [telegramProgress, setTelegramProgress] = createSignal<{current: number, total: number}>();
+  const [telegramError, setTelegramError] = createSignal<string>();
   const [archiveError, setArchiveError] = createSignal<StickerPackZipError>();
   const [readingArchive, setReadingArchive] = createSignal(false);
   const [configLoading, setConfigLoading] = createSignal(true);
@@ -56,7 +71,7 @@ const StickerPackImportPopup = () => {
   const [folderInput, setFolderInput] = createSignal<HTMLInputElement>();
   const validation = createMemo(() => validateStickerPackFiles(sourceFiles(), type()));
   const rejected = createMemo(() => [...sourceRejected(), ...validation().rejected]);
-  const disabled = () => uploading() || configLoading() || configError() || importModeOff();
+  const disabled = () => uploading() || telegramLoading() || configLoading() || configError() || importModeOff();
 
   const loadConfig = async(force = false) => {
     setConfigLoading(true);
@@ -72,8 +87,19 @@ const StickerPackImportPopup = () => {
     }
   };
 
+  const loadSavedTelegramToken = async() => {
+    try {
+      const token = await getSavedTelegramBotToken(await managers.apiManager.getAccountNumber());
+      setTelegramTokenSaved(!!token);
+    } catch(error) {
+      importLogger.warn('Could not load saved Telegram bot token', safeErrorName(error));
+      setTelegramTokenSaved(false);
+    }
+  };
+
   onMount(() => {
     void loadConfig();
+    void loadSavedTelegramToken();
   });
 
   let nameCheckVersion = 0;
@@ -110,6 +136,9 @@ const StickerPackImportPopup = () => {
   const onFolderChange = (event: Event) => {
     const input = event.currentTarget as HTMLInputElement;
     setSource('folder');
+    setSourceEmojis([]);
+    setTelegramSource(undefined);
+    setTelegramError(undefined);
     setArchiveError(undefined);
     setSourceRejected([]);
     setSourceFiles(Array.from(input.files || []));
@@ -124,6 +153,9 @@ const StickerPackImportPopup = () => {
     if(!archive) return;
 
     setSource('zip');
+    setSourceEmojis([]);
+    setTelegramSource(undefined);
+    setTelegramError(undefined);
     setReadingArchive(true);
     setSourceFiles([]);
     setSourceRejected([]);
@@ -139,6 +171,97 @@ const StickerPackImportPopup = () => {
       setArchiveError('internal_error');
     } finally {
       setReadingArchive(false);
+    }
+  };
+
+  const onTelegramLinkInput = (value: string) => {
+    setTelegramLink(value);
+    setTelegramError(undefined);
+    if(source() === 'telegram') {
+      setSource(undefined);
+      setSourceFiles([]);
+      setSourceEmojis([]);
+      setTelegramSource(undefined);
+    }
+  };
+
+  const downloadTelegramPack = async() => {
+    const link = parseTelegramStickerPackLink(telegramLink());
+    if(!link) {
+      setTelegramError(i18n('Teagram.Import.TelegramLinkInvalid').textContent);
+      return;
+    }
+
+    let token = telegramTokenInput().trim();
+    if(!token) {
+      try {
+        token = await getSavedTelegramBotToken(await managers.apiManager.getAccountNumber()) || '';
+      } catch(error) {
+        importLogger.warn('Could not load saved Telegram bot token', safeErrorName(error));
+        setTelegramError(i18n('Teagram.Import.TelegramFailed').textContent);
+        return;
+      }
+    }
+
+    if(!token) {
+      setTelegramError(i18n('Teagram.Import.TelegramTokenRequired').textContent);
+      return;
+    }
+    if(!isValidTelegramBotToken(token)) {
+      setTelegramError(i18n('Teagram.Import.TelegramTokenInvalid').textContent);
+      return;
+    }
+
+    setTelegramError(undefined);
+    setUploadError(undefined);
+    setSource(undefined);
+    setSourceFiles([]);
+    setSourceEmojis([]);
+    setTelegramSource(undefined);
+    setSourceRejected([]);
+    setArchiveError(undefined);
+    setTelegramProgress(undefined);
+    setTelegramLoading(true);
+    try {
+      const result = await downloadTelegramStickerPack(link, token, setTelegramProgress);
+      setType(result.type);
+      setTitle(result.title);
+      setSourceFiles(result.files);
+      setSourceEmojis(result.emojis);
+      setTelegramSource(result.source);
+      setSource('telegram');
+
+      try {
+        await saveTelegramBotToken(await managers.apiManager.getAccountNumber(), token);
+        setTelegramTokenSaved(true);
+        setTelegramTokenInput('');
+      } catch(error) {
+        importLogger.warn('Could not save Telegram bot token', safeErrorName(error));
+        setTelegramError(i18n('Teagram.Import.TelegramTokenSaveFailed').textContent);
+      }
+    } catch(error) {
+      setSource(undefined);
+      setSourceFiles([]);
+      setSourceEmojis([]);
+      setTelegramSource(undefined);
+      setTelegramError(error instanceof TelegramStickerPackImportError ?
+        error.code === 'network' ? i18n('Teagram.Import.TelegramNetworkFailed').textContent : error.message :
+        i18n('Teagram.Import.TelegramFailed').textContent);
+    } finally {
+      token = '';
+      setTelegramLoading(false);
+    }
+  };
+
+  const removeSavedTelegramToken = async() => {
+    if(disabled()) return;
+    try {
+      await removeTelegramBotToken(await managers.apiManager.getAccountNumber());
+      setTelegramTokenSaved(false);
+      setTelegramTokenInput('');
+      setTelegramError(undefined);
+    } catch{
+      setTelegramError(i18n('Teagram.Import.TelegramTokenRemoveFailed').textContent);
     }
   };
 
@@ -185,20 +308,28 @@ const StickerPackImportPopup = () => {
 
       const files = validation().files;
       const finalName = shortName().trim();
-      const software = source();
+      const software = source() === 'telegram' ? telegramSource() : source();
       if(!software) return false;
       if(!(await managers.appStickersManager.checkStickerSetShortName(finalName))) {
         setShortNameStatus('taken');
         return false;
       }
 
-      await managers.appStickersManager.createStickerSet({
-        files,
-        title: title().trim(),
-        shortName: finalName,
-        isEmoji: type() === 'emoji',
-        software
-      });
+      const createOptions = source() === 'telegram' ?
+        getTelegramStickerPackUploadOptions({
+          files,
+          title: title().trim(),
+          type: type(),
+          source: software,
+          emojis: sourceEmojis()
+        }, finalName) : {
+          files,
+          title: title().trim(),
+          shortName: finalName,
+          isEmoji: type() === 'emoji',
+          software
+        };
+      await managers.appStickersManager.createStickerSet(createOptions);
 
       popupContext()?.hide();
       showStickersPopup(getStickerSetInputByShortName(finalName), type() === 'emoji');
@@ -259,9 +390,9 @@ const StickerPackImportPopup = () => {
             }>
               <Show when={!importModeOff()} fallback={<div class={styles.status} role="status">{i18n('Teagram.Import.Disabled')}</div>}>
                 <div class={styles.content}>
-                  <fieldset class={styles.typeField} disabled={disabled()}>
+                  <fieldset class={styles.typeField} disabled={disabled() || source() === 'telegram'}>
                     <legend>{i18n('Teagram.Import.Type')}</legend>
-                    <Row class={styles.radioOption} disabled={disabled()}>
+                    <Row class={styles.radioOption} disabled={disabled() || source() === 'telegram'}>
                       <Row.RadioField>
                         <RadioFieldTsx
                           name="sticker-pack-type"
@@ -273,7 +404,7 @@ const StickerPackImportPopup = () => {
                       </Row.RadioField>
                       <Row.Title>{i18n('Teagram.Import.Stickers')}</Row.Title>
                     </Row>
-                    <Row class={styles.radioOption} disabled={disabled()}>
+                    <Row class={styles.radioOption} disabled={disabled() || source() === 'telegram'}>
                       <Row.RadioField>
                         <RadioFieldTsx
                           name="sticker-pack-type"
@@ -323,6 +454,61 @@ const StickerPackImportPopup = () => {
                     <div class={styles.hint} role="status">{nameStatusText()}</div>
                   </Show>
 
+                  <div class={styles.telegramSection}>
+                    <div class={styles.sectionLabel}>{i18n('Teagram.Import.Telegram')}</div>
+                    <div class={styles.field}>
+                      <InputFieldTsx
+                        label="Teagram.Import.TelegramLink"
+                        name="telegram-pack-link"
+                        plainText
+                        maxLength={256}
+                        autocomplete="off"
+                        value={telegramLink()}
+                        onRawInput={onTelegramLinkInput}
+                        disabled={disabled()}
+                        instanceRef={(value: InputField) => {
+                          value.input.setAttribute('autocapitalize', 'off');
+                          value.input.spellcheck = false;
+                        }}
+                      />
+                    </div>
+                    <div class={styles.field}>
+                      <InputFieldTsx
+                        label="Teagram.Import.TelegramToken"
+                        name="telegram-bot-token"
+                        plainText
+                        autocomplete="off"
+                        value={telegramTokenInput()}
+                        onRawInput={setTelegramTokenInput}
+                        disabled={disabled()}
+                        instanceRef={(value: InputField) => {
+                          const input = value.input as HTMLInputElement;
+                          input.type = 'password';
+                          input.setAttribute('autocomplete', 'new-password');
+                          input.setAttribute('autocapitalize', 'off');
+                          input.spellcheck = false;
+                        }}
+                      />
+                    </div>
+                    <div class={styles.hint}>{i18n('Teagram.Import.TelegramTokenHelp')}</div>
+                    <div class={styles.fileButtons}>
+                      <button class="btn btn-primary btn-color-primary" type="button" disabled={disabled()} onClick={() => void downloadTelegramPack()}>
+                        {telegramLoading() ? i18n('Loading') : i18n('Teagram.Import.DownloadTelegram')}
+                      </button>
+                      <Show when={telegramTokenSaved()}>
+                        <button class="btn btn-transparent primary" type="button" disabled={disabled()} onClick={() => void removeSavedTelegramToken()}>
+                          {i18n('Teagram.Import.RemoveTelegramToken')}
+                        </button>
+                      </Show>
+                    </div>
+                    <Show when={telegramProgress()}>
+                      {(progress) => <div class={styles.hint} role="status">{i18n('Teagram.Import.TelegramProgress', [progress().current, progress().total])}</div>}
+                    </Show>
+                    <Show when={telegramError()}>
+                      <div class={styles.error} role="alert">{telegramError()}</div>
+                    </Show>
+                  </div>
+
                   <div class={styles.fileSection}>
                     <div class={styles.sectionLabel}>{i18n('Teagram.Import.Files')}</div>
                     <div class={styles.fileButtons}>
@@ -358,7 +544,7 @@ const StickerPackImportPopup = () => {
                     </Show>
                     <Show when={source()}>
                       <div class={styles.hint}>
-                        {i18n('Teagram.Import.FilesSelected', [validation().files.length, source() === 'zip' ? i18n('Teagram.Import.Zip') : i18n('Teagram.Import.Folder')])}
+                        {i18n('Teagram.Import.FilesSelected', [validation().files.length, source() === 'telegram' ? i18n('Teagram.Import.Telegram') : source() === 'zip' ? i18n('Teagram.Import.Zip') : i18n('Teagram.Import.Folder')])}
                       </div>
                     </Show>
                     <Show when={archiveError()}>
