@@ -59,8 +59,8 @@ const PAGE_DIAGNOSTIC_LIMIT = 16;
 const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
 const PAGE_DIAGNOSTIC_FIELD_LIMIT = 256;
 const PAGE_DIAGNOSTIC_VALUE_TYPES = new Set(['undefined', 'null', 'boolean', 'number', 'string', 'object', 'function']);
-const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'unknown']);
-const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set(AVAILABLE_SCENARIOS);
+const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'guest-signup', 'unknown']);
+const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set([...AVAILABLE_SCENARIOS, 'guest-signup']);
 const PAGE_ERROR_EVENT_CAPTURE_KEY = '__teagramPageErrorEvents';
 const pageErrorDiagnosticCounts = new WeakMap();
 const pageErrorDiagnosticMessageHashes = new WeakMap();
@@ -299,6 +299,7 @@ function readRuntimeInput() {
 
 function validateRuntimeInput(config) {
   const authProgress = config?.authProgressOneSubmission === true;
+  const guestSignupOnly = config?.guestSignupOnly === true;
   const pollCreationNegativeControl = config?.pollCreationNegativeControl === true;
   const selectedScenarios = Array.isArray(config?.scenarios) ? config.scenarios : [];
   const hasPollScenario = selectedScenarios.includes('poll');
@@ -322,13 +323,15 @@ function validateRuntimeInput(config) {
       (config.traceDirectory !== undefined && config.traceDirectory !== `/tmp/real-client-traces-${config.runId}`) ||
       (config.observationOnly !== undefined && config.observationOnly !== true) ||
       (config.authProgressOneSubmission !== undefined && !authProgress) ||
+      (config.guestSignupOnly !== undefined && !guestSignupOnly) ||
       (config.pageErrorDiagnostics !== undefined && typeof config.pageErrorDiagnostics !== 'boolean') ||
       (config.pollCreationNegativeControl !== undefined && !pollCreationNegativeControl) ||
       (config.observationOnly === true && config.pageErrorDiagnostics === true) ||
       (authProgress && config.observationOnly === true) ||
+      (guestSignupOnly && (authProgress || config.observationOnly === true || config.pollCreationNegativeControl === true || config.scenarios !== undefined)) ||
       (pollCreationNegativeControl && (authProgress || config.observationOnly === true)) ||
       (pollCreationNegativeControl && !hasPollScenario) ||
-      (!authProgress && config.observationOnly !== true &&
+      (!authProgress && !guestSignupOnly && config.observationOnly !== true &&
         (!Array.isArray(config.scenarios) || JSON.stringify(config.scenarios) !== JSON.stringify(expectedScenarios))) ||
       !Array.isArray(config.accounts) || config.accounts.length !== (authProgress ? 1 : 2)) {
     failStage('runtime_input_validation');
@@ -6161,6 +6164,126 @@ async function main(dependencies = {}) {
     // fixture's own probe controls: no app context, no artifact.
     if(runtime.observationOnly === true) {
       report = buildObserverOnlyReport(registry, controls);
+      return;
+    }
+
+    if(runtime.guestSignupOnly === true) {
+      currentScenario = 'guest-signup';
+      currentStage = 'guest_context';
+      const guestContext = await browser.newContext({viewport: {width: 1280, height: 900}});
+      contexts.push(guestContext);
+      if(runtime.traceDirectory) {
+        await guestContext.tracing.start({screenshots: true, snapshots: false, sources: false});
+        traceContexts.push({context: guestContext, name: 'alice', active: false});
+      }
+      const guestPage = await guestContext.newPage();
+      appPages.alice = guestPage;
+      await installPageErrorEventCapture(guestPage);
+      appObservers.alice = observation.createContextObserver('alice');
+      appNetworkObservers.alice = createNetworkObserver(
+        guestPage,
+        'alice',
+        appObservers.alice,
+        pageErrorAssets.alice,
+        runtime.pageErrorDiagnostics === true ? (details, source) => recordPageErrorProtocolEvent(
+          guestPage,
+          details,
+          source,
+          readPageScenarioStep(guestPage)
+        ) : undefined
+      );
+      observers.push(appNetworkObservers.alice);
+      await appNetworkObservers.alice.start(registry);
+      guestPage.on('pageerror', (error) => recordPageError(
+        pageErrors,
+        'alice',
+        error,
+        pageErrorAssets.alice,
+        readClientErrorScenarioStep(guestPage),
+        pageErrorDiagnosticOptions(guestPage)
+      ));
+      await countClientErrors(guestPage, () => readClientErrorScenarioStep(guestPage));
+      await guestPage.addInitScript(() => {
+        window.__fixtureTurnstileActions = [];
+        window.turnstile = {
+          render(container, callbacks) {
+            window.__fixtureTurnstileActions.push(callbacks.action);
+            const complete = document.createElement('button');
+            complete.type = 'button';
+            complete.textContent = 'Complete security check';
+            complete.dataset.testid = 'fixture-turnstile-complete';
+            complete.addEventListener('click', () => callbacks.callback('fixture-turnstile-signup-token'));
+            container.append(complete);
+            return 'fixture-turnstile-widget';
+          },
+          reset() {},
+          remove() {}
+        };
+      });
+
+      const response = await guestPage.goto(PRIVATE_CSP_ORIGIN, {waitUntil: 'domcontentloaded', timeout: 30_000});
+      if(response?.status() !== 200) failStage('guest_artifact_load');
+      await guestPage.locator('#auth-pages').waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_auth_card'));
+      const discovery = await guestPage.evaluate(() => ({
+        guestSignUpEnabled: window.__TEAGRAM_ACTIVE_GUEST_SIGN_UP__,
+        turnstileSiteKey: window.__TEAGRAM_ACTIVE_TURNSTILE_SITE_KEY__
+      }));
+      if(discovery.guestSignUpEnabled !== true || discovery.turnstileSiteKey !== 'fixture-turnstile-site-key') {
+        failStage('guest_discovery_capabilities');
+      }
+      const guestButton = guestPage.getByRole('button', {name: 'Try it as a guest'});
+      await guestButton.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_availability_button'));
+      const registrationButton = guestPage.getByRole('button', {name: 'Create account'});
+      await registrationButton.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_app_config'));
+      if(await guestPage.getByText('Unable to check whether account creation is available.', {exact: true}).count() > 0) {
+        failStage('guest_registration_availability_error');
+      }
+      await captureState(guestPage, runtime.screenshotDirectory, 'guest-availability', capturedScreenshots);
+      await guestPage.waitForFunction(() => {
+        const button = [...document.querySelectorAll('button')].find((item) => item.getAttribute('aria-label') === 'Try it as a guest');
+        return button && !button.disabled;
+      }, null, {timeout: 30_000}).catch(() => failStage('guest_restore_ready'));
+      await guestButton.click().catch(() => failStage('guest_create_click'));
+      const challenge = guestPage.getByTestId('turnstile-challenge');
+      await challenge.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_turnstile_challenge'));
+      if(await challenge.getAttribute('data-sitekey') !== 'fixture-turnstile-site-key') failStage('guest_turnstile_site_key');
+      await guestPage.getByTestId('fixture-turnstile-complete').click().catch(() => failStage('guest_turnstile_complete'));
+      const termsDialog = guestPage.getByRole('dialog');
+      await termsDialog.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('guest_terms_dialog'));
+      await termsDialog.getByRole('button', {name: 'Accept'}).click().catch(() => failStage('guest_terms_accept'));
+      await guestPage.waitForFunction(() => {
+        const chats = document.querySelector('#page-chats');
+        return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+      }, null, {timeout: 45_000}).catch(() => failStage('guest_account_authorized'));
+      const turnstileActions = await guestPage.evaluate(() => window.__fixtureTurnstileActions);
+      if(JSON.stringify(turnstileActions) !== JSON.stringify(['signup'])) failStage('guest_turnstile_action');
+      await captureState(guestPage, runtime.screenshotDirectory, 'guest-created', capturedScreenshots);
+      await Promise.all(observers.map((observer) => observer.waitForSetup()));
+      await registry.waitForSetup();
+      const egress = summarizeEgress(observers);
+      const guestNetwork = appNetworkObservers.alice.summary();
+      gateBreakdown = summarizeBrowserGateBreakdown({networkObservers: appNetworkObservers, pageErrors});
+      if(egress.unexpectedAttempts !== 0 || egress.observerErrors !== 0 || pageErrors.alice.length !== 0) {
+        failStage('browser_egress_or_page_errors');
+      }
+      appObservers.alice.state.windowElapsed = true;
+      report = {
+        status: 'passed',
+        mode: 'guest_signup',
+        scenarios: [{name: 'guest-signup', status: 'passed'}],
+        contextCount: 1,
+        controlContextCount: CONTROL_PLAN.length,
+        screenshotsCaptured: capturedScreenshots.count,
+        guestSignup: {availabilityVisible: true, appConfigLoaded: true, turnstileActions, authorized: true},
+        gateBreakdown,
+        network: {unexpectedAttempts: egress.unexpectedAttempts, observerErrors: egress.observerErrors, guest: {
+          workerTargets: guestNetwork.workerTargets,
+          allowedWebSockets: guestNetwork.allowedWebSockets,
+          attemptsBySource: guestNetwork.attemptsBySource,
+          unexpectedAttemptsBySource: guestNetwork.unexpectedAttemptsBySource,
+          allowedWebSocketsBySource: guestNetwork.allowedWebSocketsBySource
+        }}
+      };
       return;
     }
 

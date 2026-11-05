@@ -159,6 +159,8 @@ export function parseRealClientArgs(argv) {
     ['--scenarios', 'scenarioSelection'],
     ['--observer-controls-only', 'observerControlsOnly'],
     ['--auth-progress-one-submission', 'authProgressOneSubmission'],
+    ['--guest-signup', 'guestSignupOnly'],
+    ['--guest-signup-gate-off', 'guestSignupGateOff'],
     ['--page-error-diagnostics', 'pageErrorDiagnostics'],
     ['--poll-creation-negative-control', 'pollCreationNegativeControl']
   ]);
@@ -171,7 +173,8 @@ export function parseRealClientArgs(argv) {
     if(options.has(name)) {
       throw new Error(`option was provided more than once: ${name}`);
     }
-    if(name === '--observer-controls-only' || name === '--auth-progress-one-submission' ||
+    if(name === '--observer-controls-only' || name === '--auth-progress-one-submission' || name === '--guest-signup' ||
+        name === '--guest-signup-gate-off' ||
         name === '--page-error-diagnostics' || name === '--poll-creation-negative-control') {
       options.set(name, true);
       continue;
@@ -187,10 +190,18 @@ export function parseRealClientArgs(argv) {
 
   const controlsOnly = options.get('--observer-controls-only') === true;
   const authProgress = options.get('--auth-progress-one-submission') === true;
+  const guestSignupOnly = options.get('--guest-signup') === true;
+  const guestSignupGateOff = options.get('--guest-signup-gate-off') === true;
   const pageErrorDiagnostics = options.get('--page-error-diagnostics') === true;
   const pollCreationNegativeControl = options.get('--poll-creation-negative-control') === true;
   if(authProgress && (controlsOnly || options.has('--scenarios'))) {
     throw new Error('--auth-progress-one-submission cannot be combined with --scenarios or --observer-controls-only');
+  }
+  if(guestSignupGateOff && !guestSignupOnly) {
+    throw new Error('--guest-signup-gate-off requires --guest-signup');
+  }
+  if(guestSignupOnly && (controlsOnly || authProgress || options.has('--scenarios') || pageErrorDiagnostics || pollCreationNegativeControl)) {
+    throw new Error('--guest-signup cannot be combined with other browser modes');
   }
   if(controlsOnly && pageErrorDiagnostics) {
     throw new Error('--page-error-diagnostics cannot be combined with --observer-controls-only');
@@ -198,11 +209,12 @@ export function parseRealClientArgs(argv) {
   if(pollCreationNegativeControl && (controlsOnly || authProgress)) {
     throw new Error('--poll-creation-negative-control cannot be combined with --observer-controls-only or --auth-progress-one-submission');
   }
-  if(!controlsOnly && !authProgress && !options.has('--scenarios')) {
+  if(!controlsOnly && !authProgress && !guestSignupOnly && !options.has('--scenarios')) {
     throw new Error('scenario selection is required');
   }
 
-  const optional = new Set(['--scenarios', '--observer-controls-only', '--auth-progress-one-submission', '--page-error-diagnostics', '--poll-creation-negative-control']);
+  const optional = new Set(['--scenarios', '--observer-controls-only', '--auth-progress-one-submission', '--guest-signup',
+    '--guest-signup-gate-off', '--page-error-diagnostics', '--poll-creation-negative-control']);
   const missing = [...names.keys()].filter((name) => !optional.has(name) && !options.has(name));
   if(missing.length) {
     throw new Error(`missing required options: ${missing.join(',')}`);
@@ -218,7 +230,7 @@ export function parseRealClientArgs(argv) {
   if(controlsOnly) {
     parsed.scenarios = [...REQUIRED_SCENARIOS];
   } else if(!authProgress) {
-    parsed.scenarios = parseRequiredScenarios(parsed.scenarioSelection);
+    if(!guestSignupOnly) parsed.scenarios = parseRequiredScenarios(parsed.scenarioSelection);
   }
   if(pollCreationNegativeControl) {
     if(!parsed.scenarios.includes('poll')) {
@@ -279,7 +291,7 @@ export function parseFixtureReadiness(text, expected, options = {}) {
     throw new Error('fixture artifact identity is invalid');
   }
 
-  assertServerReadyEvidence(serverReady);
+  assertServerReadyEvidence(serverReady, options);
   if(requireArtifact) {
     assertArtifactReadyEvidence(artifactReady);
   }
@@ -341,19 +353,22 @@ function assertEventPins(event, name, expected) {
   }
 }
 
-function assertServerReadyEvidence(ready) {
+function assertServerReadyEvidence(ready, {guestSignupOnly = false, guestSignupGateOff = false} = {}) {
   const security = ready.security;
   const evidence = ready.evidence;
   const workers = evidence?.workerProbes;
   const observer = evidence?.observerControlledAttempts;
   const workerTypes = ['page', 'shared_worker', 'service_worker'];
 
-  if(security?.registrationClosed !== true ||
-      security.guestSignUpEnabled === true || security.turnstileTestMode === true ||
+  if((guestSignupOnly
+      ? security?.registrationClosed !== false || security.guestSignUpEnabled !== true ||
+        security.turnstileSignInEnabled !== !guestSignupGateOff || security.finalAuthKeys !== 0
+      : security?.registrationClosed !== true || security.guestSignUpEnabled === true || security.finalAuthKeys !== 2) ||
+      security.turnstileTestMode === true ||
       security.loginCodeLogging !== false ||
       security.electionClosed !== true || security.administratorIsNull !== true ||
       security.ordinaryUsers !== 2 || security.usernameAccounts !== 2 ||
-      security.passwordVerifiers !== 2 || security.initialAuthKeys !== 0 || security.initialMessages !== 0 || security.finalAuthKeys !== 2 ||
+      security.passwordVerifiers !== 2 || security.initialAuthKeys !== 0 || security.initialMessages !== 0 ||
       evidence?.httpStatus !== 200 || evidence.wssUpgradeStatus !== 101 || evidence.allowedWssObserved !== 1 ||
       evidence.unexpectedAttempts !== 0 || evidence.unexpectedDetectionVerified !== true ||
       evidence.directTCP?.attempted !== 5 || evidence.directTCP.blocked !== 5 ||
