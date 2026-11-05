@@ -3754,6 +3754,8 @@
 "Teagram.Import.TelegramProgress" = "Downloaded %s of %s files.";
 "Teagram.Import.TelegramLinkInvalid" = "Enter a valid public t.me sticker or emoji pack link.";
 "Teagram.Import.TelegramFailed" = "Couldn’t download this Telegram pack. Check the link and try again.";
+"Teagram.Import.TelegramNetworkFailed" = "Your browser couldn’t reach api.telegram.org. Check your connection or browser policy and try again.";
+"Teagram.Import.TelegramTokenSaveFailed" = "Pack downloaded, but the bot token couldn’t be saved. The pack is ready to import.";
 "Teagram.Import.TelegramTokenRequired" = "Enter a Telegram bot token.";
 "Teagram.Import.TelegramTokenInvalid" = "Enter a valid Telegram bot token.";
 "Teagram.Import.RemoveTelegramToken" = "Remove saved token";

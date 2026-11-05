@@ -1,4 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
+import {isTelegramBotApiUrl} from '@config/telegramBotApi';
 import {downloadTelegramStickerPack, getTelegramStickerPackUploadOptions, isValidTelegramBotToken, parseTelegramStickerPackLink} from '@helpers/telegramStickerPackImport';
 import {AppStickersManager} from '@appManagers/appStickersManager';
 
@@ -30,6 +31,14 @@ afterEach(() => {
 });
 
 describe('Telegram pack links and Bot API downloads', () => {
+  it('bypasses the service worker only for the HTTPS Telegram Bot API origin', () => {
+    expect(isTelegramBotApiUrl('https://api.telegram.org')).toBe(true);
+    expect(isTelegramBotApiUrl('https://api.telegram.org/bot123/method')).toBe(true);
+    expect(isTelegramBotApiUrl('https://api.telegram.org.evil.example/x')).toBe(false);
+    expect(isTelegramBotApiUrl('https://api.telegram.org@evil.example/')).toBe(false);
+    expect(isTelegramBotApiUrl('http://api.telegram.org/')).toBe(false);
+  });
+
   it('parses only a public Telegram sticker or custom emoji pack link and rebuilds its source', () => {
     expect(parseTelegramStickerPackLink('https://t.me/addstickers/Cats_2')).toEqual({
       name: 'Cats_2',
@@ -215,6 +224,17 @@ describe('Telegram pack links and Bot API downloads', () => {
 
     await expect(downloadTelegramStickerPack(link, token)).rejects.toThrow(/too large/i);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a Telegram emoji pack with 202 stickers before downloading files', async() => {
+    const fetchMock = mockTelegramFetch((url) => makeJsonResponse(url.toString(), {
+      ok: true,
+      result: {name: 'Faces_2', title: 'Faces', sticker_type: 'custom_emoji', stickers: Array.from({length: 202}, () => ({}))}
+    }));
+    const link = parseTelegramStickerPackLink('https://t.me/addemoji/Faces_2')!;
+
+    await expect(downloadTelegramStickerPack(link, token)).rejects.toThrow(/too many stickers/i);
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('rejects a Bot API response whose final URL has another origin', async() => {

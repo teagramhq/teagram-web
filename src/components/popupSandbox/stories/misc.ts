@@ -161,6 +161,31 @@ defineStories('Composer & bots', [
     }
   },
   {
+    id: 'stickerPackImportTokenSaveFailed',
+    fixtureOnly: true,
+    title: 'Imported sticker pack with token storage failure',
+    managers: getStickerPackImportFixtureManagers(),
+    open: async() => {
+      const apiManagerProxy = (await import('@lib/apiManagerProxy')).default as any;
+      const invoke = apiManagerProxy.invoke;
+      apiManagerProxy.invoke = function(...args: any[]) {
+        const [method, payload] = args;
+        if(
+          method === 'singleManager' &&
+          payload?.name === 'telegramStickerPackTokenStorageManager' &&
+          payload?.method === 'saveTelegramBotToken'
+        ) {
+          return Promise.reject(new Error('Session storage is unavailable.'));
+        }
+
+        return invoke.apply(this, args);
+      };
+
+      const {default: showStickerPackImportPopup} = await import('@components/popups/stickerPackImport');
+      showStickerPackImportPopup();
+    }
+  },
+  {
     id: 'stickerPackImportOff',
     fixtureOnly: true,
     title: 'Sticker pack import disabled',

@@ -343,6 +343,56 @@ test('imports a Telegram sticker pack through the Bot API without sending its to
   expect(JSON.stringify(await importedPack())).not.toContain(token);
 });
 
+test('keeps a downloaded Telegram pack ready to import when saving its token fails', async({page}, testInfo) => {
+  const token = `987654321:${'Z'.repeat(35)}`;
+  await page.route('https://api.telegram.org/**', async(route) => {
+    const url = new URL(route.request().url());
+    if(url.pathname.endsWith('/getStickerSet')) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ok: true,
+          result: {
+            name: 'SomePack',
+            title: 'Telegram Cats',
+            sticker_type: 'regular',
+            stickers: [{file_id: 'telegram-file-id', emoji: '🐈', file_size: 3}]
+          }
+        })
+      });
+      return;
+    }
+
+    if(url.pathname.endsWith('/getFile')) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ok: true, result: {file_id: 'telegram-file-id', file_size: 3, file_path: 'stickers/cat.webp'}})
+      });
+      return;
+    }
+
+    await route.fulfill({status: 200, contentType: 'image/webp', body: Buffer.from([5, 6, 7])});
+  });
+
+  const importPopup = await openSandboxStory(page, 'stickerPackImportTokenSaveFailed');
+  await importPopup.locator('input[name="telegram-pack-link"]').fill('https://t.me/addstickers/SomePack');
+  await importPopup.locator('input[name="telegram-bot-token"]').fill(token);
+  await importPopup.getByRole('button', {name: 'Download from Telegram'}).click();
+  await expect(importPopup.getByRole('alert')).toHaveText('Pack downloaded, but the bot token couldn’t be saved. The pack is ready to import.');
+  await expect(importPopup.locator('input[name="sticker-pack-title"]')).toHaveValue('Telegram Cats');
+  await expect(importPopup.locator('input[name="telegram-bot-token"]')).toHaveValue(token);
+  await capturePopupScreenshot(page, testInfo, 'telegram-pack-ready-after-token-save-failure');
+
+  await importPopup.locator('input[name="sticker-pack-short-name"]').fill('telegram_cats');
+  await expect(importPopup.getByText('Link is available', {exact: true})).toBeVisible();
+  await importPopup.getByLabel('I have the right to share this pack.').check();
+  await importPopup.getByRole('button', {name: 'Import pack'}).click();
+  await expect.poll(() => page.evaluate(() => window.popupSandbox.calls()
+    .filter((call) => call.manager === 'appStickersManager' && call.method === 'createStickerSet').length)).toBe(1);
+});
+
 test('shows a redacted Telegram Bot API error and does not upload a failed pack', async({page}) => {
   const token = `123456789:${'Y'.repeat(35)}`;
   const consoleMessages: string[] = [];

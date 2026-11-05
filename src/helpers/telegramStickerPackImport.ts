@@ -3,9 +3,11 @@ import type {StickerPackType, ValidatedStickerPackFiles} from '@helpers/stickerP
 import {validateStickerPackFiles} from '@helpers/stickerPackImport';
 import {MAX_ZIP_TOTAL_SIZE} from '@helpers/stickerPackImportZip';
 import {isValidTelegramBotToken, TELEGRAM_BOT_API_ORIGIN} from '@config/telegramBotApi';
+import {logger} from '@lib/logger';
 
 const MAX_TELEGRAM_PACK_FILES = 201;
 const DEFAULT_STICKER_EMOJI = '🙂';
+const telegramStickerPackImportLogger = logger('TelegramStickerPackImport');
 
 const FETCH_OPTIONS: RequestInit = {
   mode: 'cors',
@@ -39,10 +41,15 @@ type TelegramFile = {file_path: string, file_size?: number};
 type TelegramMethod = 'getStickerSet' | 'getCustomEmojiStickers' | 'getFile';
 
 export class TelegramStickerPackImportError extends Error {
-  constructor(message: string) {
+  constructor(message: string, public code?: 'network') {
     super(message);
     this.name = 'TelegramStickerPackImportError';
   }
+}
+
+function safeErrorName(error: unknown) {
+  const name = error instanceof Error ? error.name : '';
+  return /^[A-Za-z][A-Za-z0-9]{0,40}$/.test(name) ? name : 'unknown';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -129,8 +136,9 @@ async function requestTelegramApi(token: string, method: TelegramMethod, paramet
   let response: Response;
   try {
     response = await fetch(url.toString(), FETCH_OPTIONS);
-  } catch{
-    throw new TelegramStickerPackImportError('Could not reach Telegram. Check your connection and try again.');
+  } catch(error) {
+    telegramStickerPackImportLogger.warn('Could not reach Telegram Bot API', safeErrorName(error));
+    throw new TelegramStickerPackImportError('Your browser could not reach api.telegram.org.', 'network');
   }
 
   assertTelegramResponse(response);
@@ -322,8 +330,9 @@ async function downloadTelegramFile(token: string, filePath: string, fileLimit: 
   let response: Response;
   try {
     response = await fetch(url.toString(), {...FETCH_OPTIONS, signal: controller.signal});
-  } catch{
-    throw new TelegramStickerPackImportError('Could not download a Telegram sticker file. Check your connection and try again.');
+  } catch(error) {
+    telegramStickerPackImportLogger.warn('Could not download Telegram sticker file', safeErrorName(error));
+    throw new TelegramStickerPackImportError('Your browser could not reach api.telegram.org.', 'network');
   }
 
   assertTelegramResponse(response);
@@ -354,7 +363,8 @@ async function downloadTelegramFile(token: string, filePath: string, fileLimit: 
     }
   } catch(error) {
     if(error instanceof TelegramStickerPackImportError) throw error;
-    throw new TelegramStickerPackImportError('Could not download a Telegram sticker file. Check your connection and try again.');
+    telegramStickerPackImportLogger.warn('Could not read Telegram sticker download', safeErrorName(error));
+    throw new TelegramStickerPackImportError('Your browser could not reach api.telegram.org.', 'network');
   }
 
   const bytes = new Uint8Array(size);

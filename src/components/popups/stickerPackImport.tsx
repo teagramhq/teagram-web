@@ -20,6 +20,11 @@ import styles from './stickerPackImport.module.scss';
 
 const importLogger = logger('StickerPackImportPopup');
 
+const safeErrorName = (error: unknown) => {
+  const name = error instanceof Error ? error.name : '';
+  return /^[A-Za-z][A-Za-z0-9]{0,40}$/.test(name) ? name : 'unknown';
+};
+
 const getServerErrorText = (error: unknown) => {
   if(!error || typeof error !== 'object' || error instanceof Error) return i18n('Error.AnError').textContent;
   const type = (error as Partial<ApiError>)?.type;
@@ -86,7 +91,8 @@ const StickerPackImportPopup = () => {
     try {
       const token = await getSavedTelegramBotToken(await managers.apiManager.getAccountNumber());
       setTelegramTokenSaved(!!token);
-    } catch{
+    } catch(error) {
+      importLogger.warn('Could not load saved Telegram bot token', safeErrorName(error));
       setTelegramTokenSaved(false);
     }
   };
@@ -190,7 +196,8 @@ const StickerPackImportPopup = () => {
     if(!token) {
       try {
         token = await getSavedTelegramBotToken(await managers.apiManager.getAccountNumber()) || '';
-      } catch{
+      } catch(error) {
+        importLogger.warn('Could not load saved Telegram bot token', safeErrorName(error));
         setTelegramError(i18n('Teagram.Import.TelegramFailed').textContent);
         return;
       }
@@ -217,22 +224,29 @@ const StickerPackImportPopup = () => {
     setTelegramLoading(true);
     try {
       const result = await downloadTelegramStickerPack(link, token, setTelegramProgress);
-      await saveTelegramBotToken(await managers.apiManager.getAccountNumber(), token);
-      setTelegramTokenSaved(true);
-      setTelegramTokenInput('');
       setType(result.type);
       setTitle(result.title);
       setSourceFiles(result.files);
       setSourceEmojis(result.emojis);
       setTelegramSource(result.source);
       setSource('telegram');
+
+      try {
+        await saveTelegramBotToken(await managers.apiManager.getAccountNumber(), token);
+        setTelegramTokenSaved(true);
+        setTelegramTokenInput('');
+      } catch(error) {
+        importLogger.warn('Could not save Telegram bot token', safeErrorName(error));
+        setTelegramError(i18n('Teagram.Import.TelegramTokenSaveFailed').textContent);
+      }
     } catch(error) {
       setSource(undefined);
       setSourceFiles([]);
       setSourceEmojis([]);
       setTelegramSource(undefined);
       setTelegramError(error instanceof TelegramStickerPackImportError ?
-        error.message : i18n('Teagram.Import.TelegramFailed').textContent);
+        error.code === 'network' ? i18n('Teagram.Import.TelegramNetworkFailed').textContent : error.message :
+        i18n('Teagram.Import.TelegramFailed').textContent);
     } finally {
       token = '';
       setTelegramLoading(false);

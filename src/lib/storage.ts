@@ -152,7 +152,7 @@ export default class AppStorage<
       } catch(e) {
         // this.useCS = false;
         if(keys.some((key) => this.sensitiveKeys.has(key as keyof Storage))) {
-          this.log.error('set error for sensitive storage values', keys);
+          this.log.error('set error for sensitive storage values', e, keys);
           deferred.reject(e);
         } else {
           this.log.error('set error', e, keys, values);
@@ -217,7 +217,7 @@ export default class AppStorage<
       const hasSensitiveKey = keys.some((key) => this.sensitiveKeys.has(key));
       if(hasSensitiveKey || !ignoreErrors.has(apiError?.type)) {
         if(!hasSensitiveKey) this.useStorage = false;
-        this.log.error(hasSensitiveKey ? 'get error for sensitive storage values' : 'get error', hasSensitiveKey ? keys : error, this.storeName);
+        this.log.error(hasSensitiveKey ? 'get error for sensitive storage values' : 'get error', error, keys, this.storeName);
       }
 
       for(const key of keys) {
@@ -435,7 +435,10 @@ export default class AppStorage<
         await otherStorage.clear();
       }
     }
-    catch{}
+    catch(error) {
+      this.log.error('clear error', error, this.storeName);
+      throw error;
+    }
   }
 
   public async unfreezeAsync(callback: () => Promise<unknown>) {
