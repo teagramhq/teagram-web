@@ -614,7 +614,16 @@ function getMainMidForGrouped(mids: number[]) {
 }
 
 export function getInitialHistoryLoadCount(viewportHeight: number) {
+  return Math.min(40, Math.max(8, Math.floor(viewportHeight / 40)));
+}
+
+function getViewportHistoryLoadCount(viewportHeight: number) {
   return Math.min(40, Math.max(8, Math.ceil(viewportHeight / 80)));
+}
+
+// Fetch enough to fill the viewport, while mounting a smaller slice for first paint.
+function getFirstPaintHistoryLoadCount(viewportHeight: number) {
+  return Math.ceil(getViewportHistoryLoadCount(viewportHeight) / 2);
 }
 
 const getSponsoredPhoto = (sponsoredMessage: SponsoredMessage) => {
@@ -11840,7 +11849,7 @@ export default class ChatBubbles {
     };
 
     try {
-      const firstPaintCount = Math.max(3, Math.ceil(getInitialHistoryLoadCount(windowSize.height) / 2));
+      const firstPaintCount = getFirstPaintHistoryLoadCount(windowSize.height);
       if(prioritizeFirstPaint && messages.length > firstPaintCount) {
         let firstBatchEnd = firstPaintCount;
         const firstBatchLastMessage = messages[firstBatchEnd - 1];
@@ -13188,7 +13197,7 @@ export default class ChatBubbles {
     // already rendered for this peer to choose the larger follow-up page size.
     const hasRenderedPeerHistory = !isBroadcast && !this.isFirstLoad &&
       this.getRenderedHistory(undefined, true).some((fullMid) => splitFullMid(fullMid).peerId === peerId);
-    const realLoadCount = isBroadcast ? 20 : (hasRenderedPeerHistory ? Math.max(35, pageCount) : pageCount);
+    const realLoadCount = isBroadcast ? 20 : (hasRenderedPeerHistory ? Math.max(35, getViewportHistoryLoadCount(windowSize.height)) : pageCount);
     // const realLoadCount = pageCount;//const realLoadCount = 50;
     let loadCount = realLoadCount;
 

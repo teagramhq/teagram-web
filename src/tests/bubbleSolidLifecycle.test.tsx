@@ -2044,38 +2044,71 @@ test('logs malformed gift profile data and keeps the button hidden', async() => 
 });
 
 test('does not use previous-peer bubbles to enlarge the initial history request', async() => {
-  const previousPeerId = 11 as PeerId;
-  const getRenderedHistory = vi.fn(() => [makeFullMid(previousPeerId, 100)]);
-  const requestHistory = vi.fn((..._args: unknown[]) => Promise.resolve({
-    cached: true,
-    result: Promise.resolve({history: []})
-  }));
-  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
-    chat: {peerId, isBroadcast: false},
-    getRenderedHistory,
-    requestHistory,
-    scrollable: {onScroll: vi.fn()},
-    isFirstLoad: true,
-    log: vi.fn()
-  }) as any;
+  const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
+  Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
+  try {
+    const previousPeerId = 11 as PeerId;
+    const getRenderedHistory = vi.fn(() => [makeFullMid(previousPeerId, 100)]);
+    const requestHistory = vi.fn((..._args: unknown[]) => Promise.resolve({
+      cached: true,
+      result: Promise.resolve({history: []})
+    }));
+    const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+      chat: {peerId, isBroadcast: false},
+      getRenderedHistory,
+      requestHistory,
+      scrollable: {onScroll: vi.fn()},
+      isFirstLoad: true,
+      log: vi.fn()
+    }) as any;
 
-  await harness.getHistory(undefined, true, undefined, undefined, true);
+    await harness.getHistory(undefined, true, undefined, undefined, true);
 
-  expect(requestHistory.mock.calls[0][1]).toBe(10);
-  expect(getRenderedHistory).not.toHaveBeenCalled();
+    expect(requestHistory.mock.calls[0][1]).toBe(20);
+    expect(getRenderedHistory).not.toHaveBeenCalled();
+  } finally {
+    if(previousHeight) Object.defineProperty(windowSize, 'height', previousHeight);
+    else delete (windowSize as any).height;
+  }
 });
 
-test('limits the first history render to a viewport-sized page', () => {
-  expect(getInitialHistoryLoadCount(800)).toBe(10);
-  expect(getInitialHistoryLoadCount(400)).toBe(8);
-  expect(getInitialHistoryLoadCount(3_000)).toBe(38);
+test('requests enough initial history to fill the viewport', () => {
+  expect(getInitialHistoryLoadCount(800)).toBe(20);
+  expect(getInitialHistoryLoadCount(400)).toBe(10);
+  expect(getInitialHistoryLoadCount(3_000)).toBe(40);
+});
+
+test('keeps larger history pages for later scrolling', async() => {
+  const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
+  Object.defineProperty(windowSize, 'height', {configurable: true, value: 3_000});
+  try {
+    const requestHistory = vi.fn((..._args: unknown[]) => Promise.resolve({
+      cached: true,
+      result: Promise.resolve({history: []})
+    }));
+    const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+      chat: {peerId, isBroadcast: false},
+      getRenderedHistory: vi.fn(() => [makeFullMid(peerId, 100)]),
+      requestHistory,
+      scrollable: {onScroll: vi.fn()},
+      isFirstLoad: false,
+      log: vi.fn()
+    }) as any;
+
+    await harness.getHistory(undefined, true, undefined, undefined, true);
+
+    expect(requestHistory.mock.calls[0][1]).toBe(38);
+  } finally {
+    if(previousHeight) Object.defineProperty(windowSize, 'height', previousHeight);
+    else delete (windowSize as any).height;
+  }
 });
 
 test('renders the newest first-paint batch before the remaining initial history', async() => {
   const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
   Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
 
-  const messages = Array.from({length: 10}, (_, index) => ({
+  const messages = Array.from({length: 20}, (_, index) => ({
     ...message(),
     id: 100 - index,
     mid: 100 - index
