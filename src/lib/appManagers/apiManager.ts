@@ -499,12 +499,17 @@ export class ApiManager extends ApiManagerMethods {
     if(this.loggingOut) return;
 
     this.loggingOut = true;
-    const accountNumber = this.getAccountNumber();
-    const [totalAccounts, accountData] = await Promise.all([
-      AccountController.getTotalAccounts(),
-      AccountController.get(accountNumber)
-    ]);
-    await this.clearAccountLocally(accountNumber, totalAccounts, accountData);
+    try {
+      const accountNumber = this.getAccountNumber();
+      const [totalAccounts, accountData] = await Promise.all([
+        AccountController.getTotalAccounts(),
+        AccountController.get(accountNumber)
+      ]);
+      await this.clearAccountLocally(accountNumber, totalAccounts, accountData);
+    } catch(error) {
+      this.loggingOut = false;
+      throw error;
+    }
   }
 
   private async clearAccountLocally(

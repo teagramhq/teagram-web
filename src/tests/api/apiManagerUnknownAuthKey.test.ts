@@ -276,6 +276,79 @@ describe('unknown auth keys', () => {
     expect(guestCredentialStorage.clearGuestCredentialsForAccount).toHaveBeenCalledWith(42, 1, false);
   });
 
+  it('retries local reauthentication after bound-account cleanup fails', async() => {
+    const {manager} = createManager({code: -404, type: 'AUTH_KEY_UNKNOWN'}, 42);
+    let accountData: Record<string, unknown> = {
+      userId: 42,
+      dc2_auth_key: 'aa'.repeat(256),
+      dc2_server_salt: '11'.repeat(8)
+    };
+    const dispatchEvent = vi.fn();
+    Object.assign(manager, {accountNumber: 1, baseDcId: 2, rootScope: {myId: 42, dispatchEvent}});
+    vi.spyOn(AccountController, 'getTotalAccounts').mockResolvedValue(1);
+    vi.spyOn(AccountController, 'get').mockImplementation(async() => structuredClone(accountData) as any);
+    vi.spyOn(guestCredentialStorage, 'clearGuestCredentialsForAccount').mockResolvedValue(undefined);
+    const cleanupError = new Error('local cleanup failed');
+    let cleanupAttempts = 0;
+    const clearLocalState = vi.spyOn(guestAccountLocalCleanup, 'clearGuestAccountLocalState').mockImplementation(async() => {
+      cleanupAttempts++;
+      if(cleanupAttempts === 1) throw cleanupError;
+      accountData = {};
+    });
+    const invokeApi = vi.spyOn(manager, 'invokeApi').mockResolvedValue(undefined as any);
+    Object.assign(manager, {authKeyRecoveryTargets: new Map(), nextAuthKeyRecoveryId: 0});
+
+    let currentNetworker: MTPNetworker | undefined;
+    const isCurrentForDc = vi.spyOn(manager as any, 'isNetworkerCurrentForDc').mockImplementation((dcId, networker) => {
+      return networker === currentNetworker;
+    });
+    const drainNetworker = vi.spyOn(manager as any, 'onNetworkerDrain').mockImplementation((networker) => {
+      if(currentNetworker === networker) currentNetworker = undefined;
+    });
+    const createIdleNetworker = (transport: MTTransport) => {
+      const networker = Object.create(MTPNetworker.prototype) as MTPNetworker;
+      Object.assign(networker, {
+        dcId: 2,
+        transport,
+        activeRequests: 0,
+        isCurrentForDc: () => currentNetworker === networker,
+        onAuthKeyUnknown: (source: MTPNetworker, failedTransport: MTTransport) => {
+          (manager as any).handleIdleNetworkerAuthKeyUnknown(source, failedTransport);
+        },
+        sentMessages: {},
+        log: vi.fn(),
+        clearNextReq: vi.fn(),
+        pendingMessages: {},
+        pendingAcks: [],
+        pendingResendReq: [],
+        sentResendReq: new Map()
+      });
+      return networker;
+    };
+
+    const firstTransport = {} as MTTransport;
+    const firstNetworker = createIdleNetworker(firstTransport);
+    currentNetworker = firstNetworker;
+    (firstNetworker as any).onTransportError(-404, firstTransport);
+    await vi.waitFor(() => expect((manager as any).log.error).toHaveBeenCalledWith(
+      'Failed to clear rejected auth session locally',
+      cleanupError
+    ));
+
+    const secondTransport = {} as MTTransport;
+    const secondNetworker = createIdleNetworker(secondTransport);
+    currentNetworker = secondNetworker;
+    (secondNetworker as any).onTransportError(-404, secondTransport);
+    await vi.waitFor(() => expect(dispatchEvent).toHaveBeenCalledWith('logging_out', {accountNumber: 1}));
+
+    expect(isCurrentForDc).toHaveBeenCalled();
+    expect(drainNetworker).toHaveBeenCalledTimes(2);
+    expect(clearLocalState).toHaveBeenCalledTimes(2);
+    expect(accountData).toEqual({});
+    expect(manager.logOut).not.toHaveBeenCalled();
+    expect(invokeApi).not.toHaveBeenCalled();
+  });
+
   it('uses the production networker wiring to send req_pq after repeated idle WebSocket rejections', async() => {
     vi.stubGlobal('navigator', {...navigator, locks: {request: (_name: string, callback: () => Promise<unknown>) => callback()}});
     const rejectedKey = 'aa'.repeat(256);
