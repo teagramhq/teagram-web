@@ -272,6 +272,9 @@ jobs:
               https://teagramd.test:18443/.well-known/teagramd/client >/dev/null && \
             curl -kfsS --resolve teagramd.test:18443:127.0.0.1 \
               -H 'Origin: http://localhost:4176' \
+              https://teagramd.test:18443/.well-known/teagramd/client >/dev/null && \
+            curl -kfsS --resolve teagramd.test:18443:127.0.0.1 \
+              -H 'Origin: http://localhost:4178' \
               https://teagramd.test:18443/.well-known/teagramd/client >/dev/null; then
               ready=1
               break
