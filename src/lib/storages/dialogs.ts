@@ -1420,6 +1420,7 @@ export default class DialogsStorage extends AppManager {
     // this.appMessagesManager.log('applyConversation', dialogsResult);
 
     const updatedDialogs: BroadcastEvents['dialogs_multiupdate'] = new Map();
+    const reconcilePeerIds = isDialog ? new Set<PeerId>() : undefined;
     const getUpdateCache = (peerId: PeerId) => {
       let cache = updatedDialogs.get(peerId);
       if(!cache) {
@@ -1432,6 +1433,7 @@ export default class DialogsStorage extends AppManager {
     items.forEach((dialog) => {
       assumeType<AnyDialog>(dialog);
       const peerId = this.getDialogPeerId(dialog);
+      reconcilePeerIds?.add(peerId);
       let topMid = dialog.top_message;
 
       const {pendingTopMsgs} = this.appMessagesManager;
@@ -1502,7 +1504,11 @@ export default class DialogsStorage extends AppManager {
     });
 
     if(updatedDialogs.size) {
-      this.rootScope.dispatchEvent('dialogs_multiupdate', updatedDialogs);
+      if(reconcilePeerIds) {
+        this.rootScope.dispatchEvent('dialogs_multiupdate', updatedDialogs, {reconcilePeerIds: [...reconcilePeerIds]});
+      } else {
+        this.rootScope.dispatchEvent('dialogs_multiupdate', updatedDialogs);
+      }
     }
   }
 

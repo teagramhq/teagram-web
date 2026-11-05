@@ -277,9 +277,14 @@ export type UserUpdateOptions = {
   status?: UserStatus
 };
 
+export type DialogsMultiupdateOptions = {
+  reconcilePeerIds: PeerId[]
+};
+
 export type BroadcastEventsListeners = {
   [name in keyof BroadcastEvents]: name extends 'chat_update' ? (e: ChatId, options?: ChatUpdateOptions) => void :
-    name extends 'user_update' ? (e: UserId, options?: UserUpdateOptions) => void : (e: BroadcastEvents[name]) => void
+    name extends 'user_update' ? (e: UserId, options?: UserUpdateOptions) => void :
+      name extends 'dialogs_multiupdate' ? (e: BroadcastEvents[name], options?: DialogsMultiupdateOptions) => void : (e: BroadcastEvents[name]) => void
 };
 
 export class RootScope extends EventListenerBase<BroadcastEventsListeners> {

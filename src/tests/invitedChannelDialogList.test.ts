@@ -263,6 +263,65 @@ describe('invited channel dialog rows', () => {
     await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
   });
 
+  it('retries only watched peers identified by a dialog update', () => {
+    const {list} = createList();
+    const first = (-101) as PeerId;
+    const second = (-102) as PeerId;
+    list.emptyChannelDialogReconcileDisposers.set(first, vi.fn());
+    list.emptyChannelDialogReconcileDisposers.set(second, vi.fn());
+    const request = list.requestEmptyChannelDialogReconcile = vi.fn();
+    const updateDialog = list.updateDialog = vi.fn();
+    const dialog = {_: 'dialog', peerId: second} as Dialog;
+
+    list.handleDialogsMultiupdate(new Map([[second, {dialog}]]), {reconcilePeerIds: [second, (-999) as PeerId]});
+    expect(updateDialog).toHaveBeenCalledExactlyOnceWith(dialog);
+    expect(request).toHaveBeenCalledExactlyOnceWith(second);
+
+    request.mockClear();
+    list.handleDialogsMultiupdate(new Map(), {reconcilePeerIds: []});
+    expect(request).not.toHaveBeenCalled();
+
+    list.handleDialogsMultiupdate(new Map());
+    expect(request.mock.calls.map((call: any[]) => call[0] as PeerId)).toEqual([first, second]);
+  });
+
+  it('restores a watched empty channel when its page notification names it', async() => {
+    const peerId = (990020 as ChatId).toPeerId(true);
+    const dialog = createDialog(0);
+    const {list, sortedList} = createList('unknown');
+    const cache: {dialog?: Dialog} = {};
+    const reloadConversation = vi.fn().mockResolvedValue(undefined);
+    list.managers.appMessagesManager = {
+      getDialogOnly: vi.fn(() => Promise.resolve(cache.dialog)),
+      reloadConversation
+    };
+    const channel = {_:'channel', id: 990020, pFlags: {}} as any;
+    (apiManagerProxy as any).getPeer.mockReturnValue(channel);
+    reconcilePeer(peerId, channel);
+
+    list.handleChatUpdate(990020 as ChatId);
+    await vi.waitFor(() => expect(reloadConversation).toHaveBeenCalled());
+    await vi.waitFor(() => expect(list.emptyChannelDialogReconcilePromises.size).toBe(0));
+    cache.dialog = dialog;
+
+    list.handleDialogsMultiupdate(new Map(), {reconcilePeerIds: [peerId]});
+    await vi.waitFor(() => expect(sortedList.has(peerId)).toBe(true));
+  });
+
+  it('keeps watcher retries proportional to affected peers at scale', () => {
+    const {list} = createList();
+    const peers = Array.from({length: 1000}, (_, index) => (-(index + 1)) as PeerId);
+    peers.forEach((peerId) => list.emptyChannelDialogReconcileDisposers.set(peerId, vi.fn()));
+    const request = list.requestEmptyChannelDialogReconcile = vi.fn();
+
+    peers.slice(0, 50).forEach((peerId) => {
+      list.handleDialogsMultiupdate(new Map([[peerId, {}]]), {reconcilePeerIds: [peerId]});
+    });
+
+    expect(request).toHaveBeenCalledTimes(50);
+    expect(request.mock.calls.map((call: any[]) => call[0] as PeerId)).toEqual(peers.slice(0, 50));
+  });
+
   it.each([
     {membership: 'left' as const},
     {membership: 'kicked' as const},
