@@ -329,6 +329,45 @@ test('reuses new-peer metadata and skips bot startup lookups for regular peers',
   expect(harness.passEntities).toEqual({messageEntityBotCommand: true});
 });
 
+test('dismisses the loading indicator only after current chat messages are mounted', () => {
+  const container = document.createElement('div');
+  const chatInner = document.createElement('div');
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.dataset.mid = '1';
+  const preloader = {detached: false, detach: vi.fn()};
+  const harness = {container, chatInner, preloader};
+  const dismiss = () => (ChatBubbles.prototype as any).dismissPreloaderForVisibleHistory.call(harness);
+
+  chatInner.append(bubble);
+  dismiss();
+  expect(preloader.detach).not.toHaveBeenCalled();
+  container.append(chatInner);
+  document.body.append(container);
+  bubble.remove();
+  dismiss();
+  expect(preloader.detach).not.toHaveBeenCalled();
+  chatInner.append(bubble);
+  dismiss();
+  expect(preloader.detach).toHaveBeenCalledWith(true);
+  container.remove();
+});
+
+test('immediate preloader dismissal removes its nodes before the next frame', async() => {
+  const {default: ProgressivePreloader} = await import('@components/preloader');
+  const container = document.createElement('div');
+  document.body.append(container);
+  const preloader = new ProgressivePreloader({cancelable: false});
+  preloader.attach(container);
+  expect(container.querySelector('.preloader-container')).not.toBeNull();
+  preloader.detach(true);
+  expect(container.querySelector('.preloader-container')).toBeNull();
+  preloader.attach(container);
+  expect(container.querySelector('.preloader-container')).not.toBeNull();
+  preloader.detach(true);
+  container.remove();
+});
+
 test('prepares cached peer completion while initial history renders', async() => {
   const pendingHistory = new Promise<void>(() => {});
   const {harness, finishPeerChange} = makeSetPeerHarness(pendingHistory);
@@ -3585,6 +3624,7 @@ test('keeps a sender description poll in processBatch when message_sent rekeys i
     changedMids,
     bubbleGroups,
     chat: {selection: {isSelecting: false}, setPeerPromise: false},
+    preloader: {detached: true},
     lazyLoadQueue: {setAllSeen: vi.fn()},
     getBubble: (fullMid: string) => bubbles[fullMid],
     makeFullMid: (currentMessage: Message.message) => makeFullMid(currentMessage),
@@ -3700,6 +3740,7 @@ test('mounts viewport-slice groups with the history batch groups once', async() 
       mountUnmountGroups
     },
     chat: {selection: {isSelecting: false}, setPeerPromise: false},
+    preloader: {detached: true},
     lazyLoadQueue: {setAllSeen: vi.fn()},
     getBubble: (currentFullMid: string) => currentFullMid === fullMid ? bubble : undefined,
     makeFullMid: (currentMessage: Message.message) => makeFullMid(currentMessage),

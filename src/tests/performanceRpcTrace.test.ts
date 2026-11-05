@@ -12,6 +12,16 @@ describe('performance RPC trace summary', () => {
     ], 1000, 100, 100);
     expect(result.map((call: {method: string}) => call.method)).toEqual(['first', 'last']);
   });
+
+  test('reports method counts for every invocation inside the measurement window', async() => {
+    const trace = await import('../../e2e/performanceRpcTrace') as any;
+    expect(trace.rpcMethodCounts([
+      {method: 'messages.getHistory', startedAtEpochMs: 1100},
+      {method: 'messages.getHistory', startedAtEpochMs: 1110},
+      {method: 'messages.search', startedAtEpochMs: 1120},
+      {method: 'messages.search', startedAtEpochMs: 1201}
+    ], 1000, 100, 100)).toEqual({'messages.getHistory': 2, 'messages.search': 1});
+  });
   test('excludes long tasks that start outside the scenario measurement window', async() => {
     const trace = await import('../../e2e/performanceRpcTrace') as any;
     const summary = trace.summarizeLongTaskWindow?.([

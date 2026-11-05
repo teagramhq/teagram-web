@@ -6319,6 +6319,7 @@ export default class ChatBubbles {
           // Keep the previous chat paired with its header until all new-peer UI setup is ready.
           this.chat.revealPreparedBackground();
           this.scrollable.replaceChildren(this.paddingTop, chatInner, this.paddingBottom);
+          this.dismissPreloaderForVisibleHistory();
           releasePeerInnerMounted();
         } catch(error) {
           rejectPeerInnerMounted(error);
@@ -6785,6 +6786,12 @@ export default class ChatBubbles {
     });
   }
 
+  private dismissPreloaderForVisibleHistory() {
+    if(!this.preloader.detached && this.chatInner.isConnected && this.container.contains(this.chatInner) && this.chatInner.querySelector('.bubble[data-mid]')) {
+      this.preloader.detach(true);
+    }
+  }
+
   private async processBatch(...args: Parameters<ChatBubbles['batchProcessor']['process']>) {
     let [loadQueue, m, log] = args;
 
@@ -6918,6 +6925,7 @@ export default class ChatBubbles {
       if(!groups.includes(group)) groups.push(group);
     }
     this.bubbleGroups.mountUnmountGroups(groups);
+    this.dismissPreloaderForVisibleHistory();
     if(this.chat.selection.isSelecting) {
       this.chat.selection.refreshSelectionGroup();
     }
