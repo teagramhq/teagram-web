@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
+import {observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
 
 describe('performance RPC trace summary', () => {
   test('excludes long tasks that start outside the scenario measurement window', async() => {
@@ -194,5 +194,58 @@ describe('long task attribution', () => {
         {frames: [{functionName: 'onMirrorTask', script: '/assets/proxy.js'}], selfMs: 10}
       ]
     }]);
+  });
+});
+
+describe('long-animation-frame observation', () => {
+  function makeObserver(supportedEntryTypes: string[] | undefined) {
+    const observed: unknown[] = [];
+    class FakeObserver {
+      static supportedEntryTypes = supportedEntryTypes;
+      constructor(public callback: (list: {getEntries(): unknown[]}) => void) {}
+      observe(options: unknown) {
+        observed.push(options);
+      }
+    }
+    return {FakeObserver, observed};
+  }
+
+  test('reports an unsupported entry type without throwing or observing', () => {
+    const {FakeObserver, observed} = makeObserver(['longtask', 'paint']);
+
+    expect(observeLongAnimationFrames(FakeObserver, () => {})).toBe(false);
+    expect(observed).toEqual([]);
+  });
+
+  test('reports a browser without supportedEntryTypes as unsupported', () => {
+    const {FakeObserver} = makeObserver(undefined);
+
+    expect(observeLongAnimationFrames(FakeObserver, () => {})).toBe(false);
+  });
+
+  test('observes buffered entries when the type is supported', () => {
+    const {FakeObserver, observed} = makeObserver(['longtask', 'long-animation-frame']);
+
+    expect(observeLongAnimationFrames(FakeObserver, () => {})).toBe(true);
+    expect(observed).toEqual([{type: 'long-animation-frame', buffered: true}]);
+  });
+
+  test('is false when observing throws', () => {
+    class ThrowingObserver {
+      static supportedEntryTypes = ['long-animation-frame'];
+      observe() {
+        throw new Error('unsupported');
+      }
+    }
+
+    expect(observeLongAnimationFrames(ThrowingObserver, () => {})).toBe(false);
+  });
+
+  test('stays self-contained so its source can be injected into the page', () => {
+    const injected = new Function(`return ${observeLongAnimationFrames.toString()}`)() as typeof observeLongAnimationFrames;
+    const {FakeObserver} = makeObserver(['long-animation-frame']);
+
+    expect(injected(FakeObserver, () => {})).toBe(true);
+    expect(injected({supportedEntryTypes: []}, () => {})).toBe(false);
   });
 });

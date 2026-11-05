@@ -272,3 +272,18 @@ export function summarizeLongTaskAttribution(
     };
   });
 }
+
+// * `PerformanceObserver.observe()` ignores an entry type the browser does not support instead of throwing, so
+// * support has to be read from `supportedEntryTypes`. Self-contained on purpose: the e2e injects its source into
+// * the page with `toString()`.
+export function observeLongAnimationFrames(Observer: any, onEntries: (entries: any[]) => void): boolean {
+  const supported = Observer && Observer.supportedEntryTypes;
+  if(!supported || typeof supported.indexOf !== 'function' || supported.indexOf('long-animation-frame') === -1) return false;
+
+  try {
+    new Observer((list: any) => onEntries(list.getEntries())).observe({type: 'long-animation-frame', buffered: true});
+    return true;
+  } catch{
+    return false;
+  }
+}
