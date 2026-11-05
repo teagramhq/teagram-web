@@ -340,7 +340,7 @@ export class ApiManager extends ApiManagerMethods {
     if(networker.activeRequests || networker.transport !== transport || !this.isNetworkerCurrentForDc(networker.dcId, networker)) return;
 
     if(this.rootScope.myId) {
-      this.logOut();
+      this.onNetworkerDrain(networker);
       return;
     }
 

@@ -217,6 +217,38 @@ describe('unknown auth keys', () => {
     expect(targets.get(1)).toEqual({networker, transport});
   });
 
+  it('drops a bound idle networker without logging out or rotating its key', () => {
+    const {manager, networker: requestNetworker} = createManager({code: -404, type: 'AUTH_KEY_UNKNOWN'}, 42);
+    const transport = requestNetworker.transport;
+    const drainNetworker = vi.spyOn(manager as any, 'onNetworkerDrain').mockImplementation(() => {});
+    const recoverUnknownAuthKey = vi.spyOn(manager, 'recoverUnknownAuthKey');
+    Object.assign(manager, {authKeyRecoveryTargets: new Map(), nextAuthKeyRecoveryId: 0});
+    const networker = Object.create(MTPNetworker.prototype) as MTPNetworker;
+    Object.assign(networker, {
+      dcId: 2,
+      transport,
+      activeRequests: 0,
+      isCurrentForDc: () => true,
+      onAuthKeyUnknown: (source: MTPNetworker, failedTransport: MTTransport) => {
+        (manager as any).handleIdleNetworkerAuthKeyUnknown(source, failedTransport);
+      },
+      sentMessages: {},
+      log: vi.fn(),
+      clearNextReq: vi.fn(),
+      pendingMessages: {},
+      pendingAcks: [],
+      pendingResendReq: [],
+      sentResendReq: new Map()
+    });
+
+    (networker as any).onTransportError(-404, transport);
+
+    expect(drainNetworker).toHaveBeenCalledOnce();
+    expect(drainNetworker).toHaveBeenCalledWith(networker);
+    expect(manager.logOut).not.toHaveBeenCalled();
+    expect(recoverUnknownAuthKey).not.toHaveBeenCalled();
+  });
+
   it('uses the production networker wiring to send req_pq after repeated idle WebSocket rejections', async() => {
     vi.stubGlobal('navigator', {...navigator, locks: {request: (_name: string, callback: () => Promise<unknown>) => callback()}});
     const rejectedKey = 'aa'.repeat(256);
