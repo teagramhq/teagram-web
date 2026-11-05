@@ -6,6 +6,8 @@ import {PerformanceRpcTrace} from '@appManagers/performanceTrace';
 import AccountController from '@lib/accounts/accountController';
 import CryptoWorker from '@lib/crypto/cryptoMessagePort';
 import bytesFromHex from '@helpers/bytes/bytesFromHex';
+import * as guestAccountLocalCleanup from '@lib/guestAccountLocalCleanup';
+import * as guestCredentialStorage from '@lib/guestCredentialStorage';
 import {Authorizer} from '@lib/mtproto/authorizer';
 import {MTAuthKey} from '@lib/mtproto/authKey';
 import MTPNetworker from '@lib/mtproto/networker';
@@ -217,12 +219,30 @@ describe('unknown auth keys', () => {
     expect(targets.get(1)).toEqual({networker, transport});
   });
 
-  it('drops a bound idle networker without logging out or rotating its key', () => {
+  it('locally reauthenticates a bound account after repeated idle unknown-key errors', async() => {
     const {manager, networker: requestNetworker} = createManager({code: -404, type: 'AUTH_KEY_UNKNOWN'}, 42);
     const transport = requestNetworker.transport;
-    const drainNetworker = vi.spyOn(manager as any, 'onNetworkerDrain').mockImplementation(() => {});
+    let accountData: Record<string, unknown> = {
+      userId: 42,
+      dc2_auth_key: 'aa'.repeat(256),
+      dc2_server_salt: '11'.repeat(8)
+    };
+    const dispatchEvent = vi.fn();
+    Object.assign(manager, {accountNumber: 1, baseDcId: 2, rootScope: {myId: 42, dispatchEvent}});
+    vi.spyOn(AccountController, 'getTotalAccounts').mockResolvedValue(1);
+    vi.spyOn(AccountController, 'get').mockImplementation(async() => structuredClone(accountData) as any);
+    vi.spyOn(guestCredentialStorage, 'clearGuestCredentialsForAccount').mockResolvedValue(undefined);
+    const clearLocalState = vi.spyOn(guestAccountLocalCleanup, 'clearGuestAccountLocalState').mockImplementation(async() => {
+      accountData = {};
+    });
+    const invokeApi = vi.spyOn(manager, 'invokeApi').mockResolvedValue(undefined as any);
     const recoverUnknownAuthKey = vi.spyOn(manager, 'recoverUnknownAuthKey');
     Object.assign(manager, {authKeyRecoveryTargets: new Map(), nextAuthKeyRecoveryId: 0});
+    let isCurrent = true;
+    vi.spyOn(manager as any, 'isNetworkerCurrentForDc').mockImplementation(() => isCurrent);
+    const drainNetworker = vi.spyOn(manager as any, 'onNetworkerDrain').mockImplementation(() => {
+      isCurrent = false;
+    });
     const networker = Object.create(MTPNetworker.prototype) as MTPNetworker;
     Object.assign(networker, {
       dcId: 2,
@@ -242,11 +262,18 @@ describe('unknown auth keys', () => {
     });
 
     (networker as any).onTransportError(-404, transport);
+    await vi.waitFor(() => expect(dispatchEvent).toHaveBeenCalledWith('logging_out', {accountNumber: 1}));
+    (networker as any).onTransportError(-404, transport);
 
     expect(drainNetworker).toHaveBeenCalledOnce();
     expect(drainNetworker).toHaveBeenCalledWith(networker);
     expect(manager.logOut).not.toHaveBeenCalled();
+    expect(invokeApi).not.toHaveBeenCalled();
     expect(recoverUnknownAuthKey).not.toHaveBeenCalled();
+    expect(accountData).toEqual({});
+    expect(clearLocalState).toHaveBeenCalledOnce();
+    expect(clearLocalState).toHaveBeenCalledWith(1, 1, undefined);
+    expect(guestCredentialStorage.clearGuestCredentialsForAccount).toHaveBeenCalledWith(42, 1, false);
   });
 
   it('uses the production networker wiring to send req_pq after repeated idle WebSocket rejections', async() => {

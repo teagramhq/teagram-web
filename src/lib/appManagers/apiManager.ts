@@ -341,6 +341,9 @@ export class ApiManager extends ApiManagerMethods {
 
     if(this.rootScope.myId) {
       this.onNetworkerDrain(networker);
+      this.logOutLocally().catch((error) => {
+        this.log.error('Failed to clear rejected auth session locally', error);
+      });
       return;
     }
 
@@ -478,27 +481,7 @@ export class ApiManager extends ApiManagerMethods {
     const clear = async() => {
       if(wasCleared) return;
       wasCleared = true;
-
-      let accountNumberOnlyCredentialCleanup = false;
-      if(totalAccounts > 1 && accountData.userId !== undefined) {
-        try {
-          accountNumberOnlyCredentialCleanup = await AccountController.hasUserIdInOtherAccounts(accountNumber, accountData.userId);
-        } catch(error) {
-          this.log.error('failed to inspect account slots before credential cleanup', error);
-          accountNumberOnlyCredentialCleanup = true;
-        }
-      }
-
-      try {
-        await clearGuestCredentialsForAccount(accountData.userId, accountNumber, accountNumberOnlyCredentialCleanup);
-      } catch(error) {
-        this.log.error('failed to clear guest credentials during logout', error);
-        await clearAllGuestCredentials();
-      }
-
-      this.baseDcId = undefined;
-      await clearGuestAccountLocalState(accountNumber, totalAccounts, migrateAccountTo);
-      this.rootScope.dispatchEvent('logging_out', {accountNumber, migrateTo: migrateAccountTo});
+      await this.clearAccountLocally(accountNumber, totalAccounts, accountData, migrateAccountTo);
     };
 
     setTimeout(clear, 1e3);
@@ -510,6 +493,46 @@ export class ApiManager extends ApiManagerMethods {
     }).finally(clear)/* .then(() => {
       location.pathname = '/';
     }) */;
+  }
+
+  private async logOutLocally() {
+    if(this.loggingOut) return;
+
+    this.loggingOut = true;
+    const accountNumber = this.getAccountNumber();
+    const [totalAccounts, accountData] = await Promise.all([
+      AccountController.getTotalAccounts(),
+      AccountController.get(accountNumber)
+    ]);
+    await this.clearAccountLocally(accountNumber, totalAccounts, accountData);
+  }
+
+  private async clearAccountLocally(
+    accountNumber: ActiveAccountNumber,
+    totalAccounts: number,
+    accountData: Awaited<ReturnType<typeof AccountController.get>>,
+    migrateAccountTo?: ActiveAccountNumber
+  ) {
+    let accountNumberOnlyCredentialCleanup = false;
+    if(totalAccounts > 1 && accountData.userId !== undefined) {
+      try {
+        accountNumberOnlyCredentialCleanup = await AccountController.hasUserIdInOtherAccounts(accountNumber, accountData.userId);
+      } catch(error) {
+        this.log.error('failed to inspect account slots before credential cleanup', error);
+        accountNumberOnlyCredentialCleanup = true;
+      }
+    }
+
+    try {
+      await clearGuestCredentialsForAccount(accountData.userId, accountNumber, accountNumberOnlyCredentialCleanup);
+    } catch(error) {
+      this.log.error('failed to clear guest credentials during logout', error);
+      await clearAllGuestCredentials();
+    }
+
+    this.baseDcId = undefined;
+    await clearGuestAccountLocalState(accountNumber, totalAccounts, migrateAccountTo);
+    this.rootScope.dispatchEvent('logging_out', {accountNumber, migrateTo: migrateAccountTo});
   }
 
   public async clearInvalidatedGuestAccount(accountNumber: ActiveAccountNumber, userId?: PeerId) {
