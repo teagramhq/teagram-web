@@ -1,5 +1,5 @@
 import {readFileSync, writeFileSync} from 'node:fs';
-import {expect, test, type Browser, type BrowserContext, type Page, type Request} from '@playwright/test';
+import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, PERFORMANCE_TIMING_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
@@ -772,10 +772,30 @@ async function describeSendState(page: Page, fixture: Fixture) {
   return Promise.race([state, new Promise((resolve) => setTimeout(() => resolve('page unresponsive'), 5_000))]);
 }
 
+async function describeRow(row: Locator) {
+  const sample = () => row.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return {x: rect.x, y: rect.y, width: rect.width, height: rect.height, opacity: style.opacity, visibility: style.visibility, transform: style.transform};
+  }, undefined, {timeout: 5_000}).catch((error: unknown) => ({error: String(error)}));
+  const first = await sample();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  return {first, second: await sample()};
+}
+
 async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture) {
   try {
     await page.keyboard.press('Escape');
-    await page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first().click();
+    const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
+    await expect(row).toBeVisible({timeout: 60_000});
+    try {
+      await row.click({timeout: 15_000});
+    } catch(error) {
+      // The row can keep re-laying out right after a cold load, which Playwright reads as never stable.
+      // Record its geometry and deliver the click event directly; the bubble checks below still fail if the chat does not open.
+      console.warn('partner row never stabilised', JSON.stringify(await describeRow(row)), String(error).split('\n')[0]);
+      await row.dispatchEvent('click');
+    }
     await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible();
     await begin(page, requests);
     const text = `web-perf-${process.env.GITHUB_RUN_ID || 'local'}-${Date.now()}`;
