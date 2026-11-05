@@ -273,13 +273,18 @@ export function summarizeLongTaskAttribution(
   });
 }
 
-export function findLongTasksWithSpanWorkOver50Ms(tasks: PerformanceTaskAttribution[], spanNames: string[]): PerformanceTaskAttribution[] {
+export function findLongTasksWithSignificantSpanWork(tasks: PerformanceTaskAttribution[], spanNames: string[]): PerformanceTaskAttribution[] {
   const names = new Set(spanNames);
   return tasks.filter(({durationMs, spans}) => {
+    const scrollSpans = spans.filter(({name}) => names.has(name));
+    for(const {startOffsetMs, syncMs} of scrollSpans) {
+      if(!Number.isFinite(startOffsetMs) || !Number.isFinite(syncMs)) {
+        throw new Error('History scroll span timing must be finite');
+      }
+    }
     if(durationMs <= 50) return false;
 
-    const intervals = spans
-      .filter(({name}) => names.has(name))
+    const intervals = scrollSpans
       .map(({startOffsetMs, syncMs}) => [Math.max(0, startOffsetMs), Math.min(durationMs, startOffsetMs + syncMs)] as [number, number])
       .filter(([startMs, endMs]) => endMs > startMs)
       .sort(([leftStart], [rightStart]) => leftStart - rightStart);
@@ -300,7 +305,7 @@ export function findLongTasksWithSpanWorkOver50Ms(tasks: PerformanceTaskAttribut
     }
     if(hasCurrent) scrollWorkMs += currentEnd - currentStart;
 
-    return scrollWorkMs > 50;
+    return scrollWorkMs > 50 || scrollWorkMs * 2 > durationMs;
   });
 }
 

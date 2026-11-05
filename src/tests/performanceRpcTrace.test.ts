@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {findLongTasksWithSpanWorkOver50Ms, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
+import {findLongTasksWithSignificantSpanWork, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
 
 describe('performance RPC trace summary', () => {
   test('excludes long tasks that start outside the scenario measurement window', async() => {
@@ -204,7 +204,54 @@ describe('long task attribution', () => {
       stacks: []
     };
 
-    expect(findLongTasksWithSpanWorkOver50Ms([scrollWork], ['bubbles.processBatch'])).toEqual([scrollWork]);
+    expect(findLongTasksWithSignificantSpanWork([scrollWork], ['bubbles.processBatch'])).toEqual([scrollWork]);
+  });
+
+  test('flags a long task dominated by history scroll work below 50 ms', () => {
+    const dominatedWork: PerformanceTaskAttribution = {
+      startTimeMs: 20,
+      durationMs: 61,
+      spans: [{name: 'bubbles.processBatch', startOffsetMs: 2, syncMs: 45}],
+      stacks: []
+    };
+
+    expect(findLongTasksWithSignificantSpanWork([dominatedWork], ['bubbles.processBatch'])).toEqual([dominatedWork]);
+  });
+
+  test('counts disjoint history scroll spans toward the task work', () => {
+    const disjointWork: PerformanceTaskAttribution = {
+      startTimeMs: 20,
+      durationMs: 100,
+      spans: [
+        {name: 'bubbles.processBatch', startOffsetMs: 0, syncMs: 30},
+        {name: 'scrollSaver.save', startOffsetMs: 40, syncMs: 30}
+      ],
+      stacks: []
+    };
+
+    expect(findLongTasksWithSignificantSpanWork([disjointWork], ['bubbles.processBatch', 'scrollSaver.save'])).toEqual([disjointWork]);
+  });
+
+  test('throws when a selected scroll span has a non-finite start offset', () => {
+    const invalidWork: PerformanceTaskAttribution = {
+      startTimeMs: 20,
+      durationMs: 61,
+      spans: [{name: 'bubbles.processBatch', startOffsetMs: Number.NaN, syncMs: 45}],
+      stacks: []
+    };
+
+    expect(() => findLongTasksWithSignificantSpanWork([invalidWork], ['bubbles.processBatch'])).toThrow(/finite/);
+  });
+
+  test('throws when a selected scroll span has non-finite work', () => {
+    const invalidWork: PerformanceTaskAttribution = {
+      startTimeMs: 20,
+      durationMs: 61,
+      spans: [{name: 'bubbles.processBatch', startOffsetMs: 2, syncMs: Number.NaN}],
+      stacks: []
+    };
+
+    expect(() => findLongTasksWithSignificantSpanWork([invalidWork], ['bubbles.processBatch'])).toThrow(/finite/);
   });
 
   test('ignores a long task that only overlaps a short history scroll span', () => {
@@ -215,7 +262,7 @@ describe('long task attribution', () => {
       stacks: []
     };
 
-    expect(findLongTasksWithSpanWorkOver50Ms([overlappingWork], ['bubbles.processBatch'])).toEqual([]);
+    expect(findLongTasksWithSignificantSpanWork([overlappingWork], ['bubbles.processBatch'])).toEqual([]);
   });
 
   test('does not count nested history scroll spans more than once', () => {
@@ -230,7 +277,7 @@ describe('long task attribution', () => {
       stacks: []
     };
 
-    expect(findLongTasksWithSpanWorkOver50Ms([nestedWork], ['bubbles.processBatch', 'scrollSaver.save', 'scrollSaver.restore'])).toEqual([]);
+    expect(findLongTasksWithSignificantSpanWork([nestedWork], ['bubbles.processBatch', 'scrollSaver.save', 'scrollSaver.restore'])).toEqual([]);
   });
 });
 

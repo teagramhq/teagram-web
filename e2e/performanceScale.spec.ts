@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {findLongTasksWithSpanWorkOver50Ms, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {findLongTasksWithSignificantSpanWork, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -978,10 +978,10 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   headScrollRepeats.forEach((metric, repeat) => {
     expect(metric.longTaskAttribution, `100x head scroll repeat ${repeat + 1} is missing attributed long-task traces`).toBeDefined();
     expect(metric.longTaskTrace, `100x head scroll repeat ${repeat + 1} is missing long-task script traces`).toBeDefined();
-    const historyPathTasks = findLongTasksWithSpanWorkOver50Ms(metric.longTaskAttribution!, SCROLL_SPAN_NAMES);
+    const historyPathTasks = findLongTasksWithSignificantSpanWork(metric.longTaskAttribution!, SCROLL_SPAN_NAMES);
     expect(
       historyPathTasks,
-      `100x head scroll repeat ${repeat + 1} had over 50 ms of history scroll work in a long task: ${JSON.stringify({historyPathTasks, longTaskTrace: metric.longTaskTrace})}`
+      `100x head scroll repeat ${repeat + 1} had a long task with over 50 ms or over half its duration in history scroll work: ${JSON.stringify({historyPathTasks, longTaskTrace: metric.longTaskTrace})}`
     ).toEqual([]);
   });
 });
