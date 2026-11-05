@@ -27,6 +27,25 @@ test('chat and user managers collect their mirror values without sending individ
   expect(invokeVoid).not.toHaveBeenCalled();
 });
 
+test('cached dialog reconciliation skips duplicate empty-channel list reconciliation', () => {
+  const chat = {_: 'channel', id: 42, title: 'same', pFlags: {}} as any;
+  const dispatchEvent = vi.fn();
+  const chatsManager = Object.create(AppChatsManager.prototype) as any;
+  Object.assign(chatsManager, {
+    chats: {'42': {...chat}},
+    appUsersManager: {setUsernameToCache: vi.fn(() => false)},
+    appStoriesManager: {saveApiPeerStories: vi.fn()},
+    appCommunitiesManager: {handlePeerLinkedCommunityUpdate: vi.fn()},
+    peersStorage: {isPeerNeeded: vi.fn(() => false)},
+    rootScope: {dispatchEvent},
+    mirrorChat: vi.fn()
+  });
+
+  chatsManager.saveApiChat(chat, undefined, undefined, undefined, {skipEmptyChannelDialogReconciliation: true});
+
+  expect(dispatchEvent).toHaveBeenCalledWith('chat_update', 42, {skipEmptyChannelDialogReconciliation: true});
+});
+
 test('mirrors the current peers and drops chats cleared before flush', () => {
   vi.stubEnv('VITE_PERF_TRACE', '1');
   const invokeVoid = vi.fn();
@@ -60,14 +79,16 @@ test('mirrors the current peers and drops chats cleared before flush', () => {
   const mirrorBatch = (peerKey: string) => {
     peerKeys.add(peerKey);
   };
-  manager.saveApiPeers({chats: [chat]}, 'cachedChannelDialogsReconcile', mirrorBatch);
+  const saveOptions = {skipEmptyChannelDialogReconciliation: true};
+  manager.saveApiPeers({chats: [chat]}, 'cachedChannelDialogsReconcile', mirrorBatch, saveOptions);
   manager.saveApiPeers({users: [user]}, 'cachedChannelDialogsReconcile', mirrorBatch);
 
   expect(chatsManager.saveApiChats).toHaveBeenCalledWith(
     [chat],
     undefined,
     'cachedChannelDialogsReconcile',
-    mirrorBatch
+    mirrorBatch,
+    saveOptions
   );
   expect(usersManager.saveApiUsers).toHaveBeenCalledWith(
     [user],
@@ -98,6 +119,7 @@ test('mirrors the current peers and drops chats cleared before flush', () => {
     value: {'7': currentUser},
     merge: true,
     accountNumber: 1,
+    skipEmptyChannelDialogReconciliation: true,
     trace: 'cachedChannelDialogsReconcile',
     traceId: 'walk-1',
     reconcilePhase

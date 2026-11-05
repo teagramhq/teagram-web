@@ -23,7 +23,7 @@ import callbackify from '@helpers/callbackify';
 import {SlicedCachedFetcher} from '@appManagers/utils/chats/slicedCachedFetcher';
 import {CHAT_LEGACY_ADMIN_RIGHTS} from '@lib/appManagers/utils/chats/constants';
 import {getStickerSetInputById} from '@lib/appManagers/utils/stickers/getStickerSetInput';
-import type {PeerMirrorBatch} from '@appManagers/peerMirrorBatch';
+import type {PeerMirrorBatch, PeerSaveOptions} from '@appManagers/peerMirrorBatch';
 
 export type Channel = Chat.channel;
 export type ChatPhotoUpload = {
@@ -137,13 +137,13 @@ export class AppChatsManager extends AppManager {
     this.recommendations = {};
   };
 
-  public saveApiChats(apiChats: any[], override?: boolean, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch) {
+  public saveApiChats(apiChats: any[], override?: boolean, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch, options?: PeerSaveOptions) {
     if(!apiChats || (apiChats as any).saved) return;
     (apiChats as any).saved = true;
-    apiChats.forEach((chat) => this.saveApiChat(chat, override, trace, mirrorBatch));
+    apiChats.forEach((chat) => this.saveApiChat(chat, override, trace, mirrorBatch, options));
   }
 
-  public saveApiChat(chat: Chat, override?: boolean, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch) {
+  public saveApiChat(chat: Chat, override?: boolean, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch, options?: PeerSaveOptions) {
     if(
       !chat ||
       chat._ === 'chatEmpty'
@@ -293,7 +293,7 @@ export class AppChatsManager extends AppManager {
       if(mirrorBatch) this.mirrorChat(oldChat, trace, mirrorBatch);
       else if(trace) this.mirrorChat(oldChat, trace);
       else this.mirrorChat(oldChat);
-      this.rootScope.dispatchEvent('chat_update', chat.id);
+      this.rootScope.dispatchEvent('chat_update', chat.id, options?.skipEmptyChannelDialogReconciliation ? {skipEmptyChannelDialogReconciliation: true} : undefined);
 
       storiesCallback?.();
 
@@ -331,7 +331,7 @@ export class AppChatsManager extends AppManager {
       chat._ === 'channelForbidden' ||
       (chat._ === 'channel' && (chat.pFlags.left || (chat as any).pFlags.kicked))
     )) {
-      this.rootScope.dispatchEvent('chat_update', chat.id);
+      this.rootScope.dispatchEvent('chat_update', chat.id, options?.skipEmptyChannelDialogReconciliation ? {skipEmptyChannelDialogReconciliation: true} : undefined);
     }
 
     const communityId = chat._ === 'channel' ? chat.linked_community_id?.toChatId() : undefined;

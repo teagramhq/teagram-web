@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries} from '../../e2e/performanceRpcTrace';
+import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
 import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
 
 test('summarizes cached dialog reconciliation relative to a scenario', () => {
@@ -223,6 +223,23 @@ test('requires attributed long-task traces on every measured scroll repeat', asy
   expect(() => validate([
     {longTasksOver50Ms: 1, longTaskTrace: [{...task, scripts: []}]}
   ], 'scrollBack2k', 1)).toThrow('100x scrollBack2k measured repeat 1 has incomplete long-task attribution');
+});
+
+test('returns history-path task attribution for the performance artifact', () => {
+  const historyTask: PerformanceTaskAttribution = {
+    startTimeMs: 100,
+    durationMs: 70,
+    spans: [{name: 'bubbles.prepareToSaveScroll', startOffsetMs: 5, syncMs: 15}],
+    stacks: []
+  };
+  const reconcileTask: PerformanceTaskAttribution = {
+    startTimeMs: 120,
+    durationMs: 80,
+    spans: [{name: 'dialogs.cachedChannelReconcile', startOffsetMs: 2, syncMs: 25}],
+    stacks: []
+  };
+
+  expect(selectHistoryPathTasks([historyTask, reconcileTask], ['bubbles.prepareToSaveScroll'])).toEqual([historyTask]);
 });
 
 describe('performance RPC trace summary', () => {

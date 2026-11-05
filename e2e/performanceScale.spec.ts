@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {CACHED_DIALOG_RECONCILE_PHASE_NAME, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateCachedDialogReconcileSummaries, validateMeasuredLongTaskTraces, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {CACHED_DIALOG_RECONCILE_PHASE_NAME, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateCachedDialogReconcileSummaries, validateMeasuredLongTaskTraces, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -41,6 +41,7 @@ type Metric = {
   cachedDialogReconcile?: CachedDialogReconcileSummary,
   cpu?: PerformanceCpuSummary,
   longTaskAttribution?: PerformanceTaskAttribution[],
+  historyPathTasks?: PerformanceTaskAttribution[],
   scrollSpanTracing?: {installed: string[], spanCount: number, loafObserved: boolean},
   droppedFramePercent?: number,
   droppedFrames?: number,
@@ -69,6 +70,14 @@ type CachedDialogReconcileTarget = {
   scenarioEndedAtEpochMs: number,
   pageStartedAtEpochMs: number,
   phaseSnapshots: CachedDialogReconcilePhase[]
+};
+
+type ScrollBackTraceOptions = {
+  captureCpuStacks?: boolean,
+  traceRpc?: boolean,
+  waitForHistory?: boolean,
+  includeLongTaskTrace?: boolean,
+  onMeasurementBoundary?: (boundary: MeasurementBoundary) => void
 };
 
 const scales: Scale[] = ['1x', '100x'];
@@ -584,13 +593,20 @@ async function finishCpuProfile(session: Awaited<ReturnType<typeof startCpuProfi
   return summarizeCpuProfile(profile);
 }
 
-// Records the synchronous part of the history, grouping, slicing and mount calls so each long task in the
-// scroll-back window can be joined to the work that began inside it. Only the diagnostic pass installs it.
+// Records the synchronous part of history processing, scroll save/restore and mounting so long tasks in
+// every measured head repeat can be joined to the work that ran inside them.
 const SCROLL_SPAN_NAMES = [
+  'bubbles.processBatch',
   'bubbles.getHistory1',
   'bubbles.performHistoryResult',
   'bubbles.groupBubbles',
   'bubbles.prepareToSaveScroll',
+  'bubbles.createScrollSaver',
+  'scrollSaver.save',
+  'scrollSaver.restoreAfterLayout',
+  'scrollSaver.restore',
+  'bubbles.restoreScroll',
+  'bubbles.onRenderScrollSet',
   'bubbles.getViewportSlice',
   'bubbles.deleteViewportSlice',
   'bubbles.commitBubbleReplacements',
@@ -602,34 +618,53 @@ async function installScrollSpanTracing(page: Page) {
     const perf = (window as any).__teagramPerf;
     const spans: Array<{name: string, startMs: number, syncMs: number}> = [];
     const installedNames: string[] = [];
-    const wrap = (target: any, method: string, name: string) => {
+    const wrappedScrollSavers = new WeakSet<object>();
+    const wrap = (target: any, method: string, name: string, onResult?: (result: any) => void) => {
       if(!target || typeof target[method] !== 'function') return;
-      installedNames.push(name);
+      if(!installedNames.includes(name)) installedNames.push(name);
       const original = target[method];
       target[method] = function(...args: any[]) {
         const startMs = performance.now();
+        let result: any;
         try {
-          return original.apply(this, args);
+          result = original.apply(this, args);
         } finally {
           spans.push({name, startMs, syncMs: performance.now() - startMs});
         }
+        onResult?.(result);
+        return result;
       };
     };
     const bubbles = (window as any).appImManager?.chat?.bubbles;
     if(!bubbles) return installedNames;
+    const instrumentScrollSaver = (scrollSaver: any) => {
+      if(!scrollSaver || typeof scrollSaver !== 'object' || wrappedScrollSavers.has(scrollSaver)) return;
+      wrappedScrollSavers.add(scrollSaver);
+      wrap(scrollSaver, 'save', 'scrollSaver.save');
+      wrap(scrollSaver, 'restoreAfterLayout', 'scrollSaver.restoreAfterLayout');
+      wrap(scrollSaver, 'restore', 'scrollSaver.restore');
+    };
+    wrap(bubbles.batchProcessor, 'process', 'bubbles.processBatch');
     wrap(bubbles, 'getHistory1', 'bubbles.getHistory1');
     wrap(bubbles, 'performHistoryResult', 'bubbles.performHistoryResult');
     wrap(bubbles, 'groupBubbles', 'bubbles.groupBubbles');
-    wrap(bubbles, 'prepareToSaveScroll', 'bubbles.prepareToSaveScroll');
+    wrap(bubbles, 'prepareToSaveScroll', 'bubbles.prepareToSaveScroll', (result) => {
+      instrumentScrollSaver(result?.scrollSaver);
+      wrap(result, 'restoreScroll', 'bubbles.restoreScroll');
+    });
+    wrap(bubbles, 'createScrollSaver', 'bubbles.createScrollSaver', instrumentScrollSaver);
+    wrap(bubbles, 'onRenderScrollSet', 'bubbles.onRenderScrollSet');
     wrap(bubbles, 'getViewportSlice', 'bubbles.getViewportSlice');
     wrap(bubbles, 'deleteViewportSlice', 'bubbles.deleteViewportSlice');
     wrap(bubbles, 'commitBubbleReplacements', 'bubbles.commitBubbleReplacements');
     wrap(bubbles.bubbleGroups, 'mountUnmountGroups', 'bubbleGroups.mountUnmountGroups');
     perf.scrollSpans = spans;
+    perf.scrollSpanInstalled = installedNames;
     return installedNames;
   });
-  // An empty span list reads as "no history call ran", so a span that failed to install must fail the run.
-  expect(installed, 'scroll span tracing did not install every wrapped call').toEqual(SCROLL_SPAN_NAMES);
+  // An empty span list reads as "no history call ran", so core hooks must install before scrolling starts.
+  expect(installed).toContain('bubbles.processBatch');
+  expect(installed).toContain('bubbles.createScrollSaver');
 }
 
 async function signIn(page: Page, origin: string) {
@@ -682,27 +717,27 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   return capture(page, requests, await snapshotMeasurementBoundary(page));
 }
 
-async function scrollBackTwoThousand(
-  page: Page,
-  requests: {value: number},
-  required: boolean,
-  profileTrace = false,
-  onMeasurementBoundary?: (boundary: MeasurementBoundary) => void,
-  includeLongTaskTrace = profileTrace
-) {
+async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}) {
+  const {
+    captureCpuStacks = false,
+    traceRpc = false,
+    waitForHistory = false,
+    includeLongTaskTrace = captureCpuStacks,
+    onMeasurementBoundary
+  } = options;
   const hasPendingHistory = () => page.evaluate(() => {
     const bubbles = (window as any).appImManager.chat.bubbles;
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
   });
 
   // Only the diagnostic pass waits: the gated window must keep the chat-open history tail it always had.
-  if(profileTrace) await waitForHistorySettled(page);
-  await beginScenario(page, requests, profileTrace);
+  if(waitForHistory) await waitForHistorySettled(page);
+  if(captureCpuStacks) await installScrollSpanTracing(page);
+  await beginScenario(page, requests, traceRpc);
   if(includeLongTaskTrace) {
     expect(await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames()), 'long-animation-frame observer is not supported in the measured browser').toBe(true);
   }
-  if(profileTrace) await installScrollSpanTracing(page);
-  const cpuProfile = profileTrace ? await startCpuProfile(page) : undefined;
+  const cpuProfile = captureCpuStacks ? await startCpuProfile(page) : undefined;
   await page.evaluate(() => (window as any).__teagramPerf.startFrames());
   const initial = await page.evaluate(() => {
     const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));
@@ -757,7 +792,7 @@ async function scrollBackTwoThousand(
   const boundary = await snapshotMeasurementBoundary(page);
   onMeasurementBoundary?.(boundary);
   const stoppedProfile = cpuProfile ? await stopCpuProfile(cpuProfile) : undefined;
-  const metric = await capture(page, requests, boundary, true, profileTrace, includeLongTaskTrace);
+  const metric = await capture(page, requests, boundary, true, traceRpc, includeLongTaskTrace);
   if(!stoppedProfile) return metric;
 
   const {tasks, spans} = await page.evaluate(() => {
@@ -769,15 +804,22 @@ async function scrollBackTwoThousand(
   });
   const tracing = await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
-    return {spanCount: (perf.scrollSpans || []).length, loafObserved: perf.loafObserved === true};
+    return {
+      installed: perf.scrollSpanInstalled || [],
+      spanCount: (perf.scrollSpans || []).length,
+      loafObserved: perf.loafObserved === true
+    };
   });
   expect(tracing.spanCount, 'scroll-back recorded no traced calls').toBeGreaterThan(0);
   expect(tracing.loafObserved, 'long-animation-frame observer is not supported in the diagnostic browser').toBe(true);
+  expect([...tracing.installed].sort(), 'scroll-back tracing did not install every wrapped call').toEqual([...SCROLL_SPAN_NAMES].sort());
+  const windowEndMs = boundary.startedAtMs + boundary.ms;
+  const windowTasks = tasks.filter(({startTime}) => startTime >= boundary.startedAtMs && startTime < windowEndMs);
   return {
     ...metric,
-    scrollSpanTracing: {installed: SCROLL_SPAN_NAMES, ...tracing},
+    scrollSpanTracing: tracing,
     cpu: summarizeCpuProfile(stoppedProfile.profile),
-    longTaskAttribution: summarizeLongTaskAttribution(tasks, spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs, boundary.ms)
+    longTaskAttribution: summarizeLongTaskAttribution(windowTasks, spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs, boundary.ms)
   };
 }
 
@@ -993,9 +1035,10 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   });
   const page = await context.newPage();
   const requests = {value: 0};
-  const reconcileTargets = variant === 'head' && scale === '100x' ? [] as CachedDialogReconcileTarget[] : undefined;
-  const captureMeasuredLongTaskTrace = variant === 'head' && scale === '100x';
-  await installInstrumentation(page, requests, origin);
+  const captureScrollAttribution = variant === 'head' && scale === '100x';
+  const reconcileTargets = captureScrollAttribution ? [] as CachedDialogReconcileTarget[] : undefined;
+  const captureMeasuredLongTaskTrace = captureScrollAttribution;
+  await installInstrumentation(page, requests, origin, false, captureScrollAttribution);
 
   try {
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
@@ -1011,7 +1054,15 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture));
     measured.chatOpen.push(chatOpen);
     await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpen, 'chatOpen');
-    const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(page, requests, variant === 'head', false, undefined, captureMeasuredLongTaskTrace));
+    const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(
+      page,
+      requests,
+      variant === 'head',
+      captureScrollAttribution ? {
+        captureCpuStacks: true,
+        includeLongTaskTrace: captureMeasuredLongTaskTrace
+      } : undefined
+    ));
     if(scroll) {
       measured.scrollBack2k.push(scroll);
       await addCachedDialogReconcileTarget(page, reconcileTargets, scroll, 'scrollBack2k');
@@ -1103,13 +1154,12 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpenSample, 'chatOpen');
         // Every diagnostic repeat scrolls back, so each one's long tasks carry their own CPU stacks and spans.
         let scrollBoundary: MeasurementBoundary | undefined;
-        const scrolled = await test.step(`profile 100x scroll back 2,000 messages (repeat ${repeat + 1})`, () => scrollBackTwoThousand(
-          page,
-          requests,
-          true,
-          true,
-          (boundary) => scrollBoundary = boundary
-        ));
+        const scrolled = await test.step(`profile 100x scroll back 2,000 messages (repeat ${repeat + 1})`, () => scrollBackTwoThousand(page, requests, true, {
+          captureCpuStacks: true,
+          traceRpc: true,
+          waitForHistory: true,
+          onMeasurementBoundary: (boundary) => scrollBoundary = boundary
+        }));
         if(!scrolled || !('cpu' in scrolled)) throw new Error('scroll-back profile did not reach 2,000 messages');
         expect(scrolled.rpcSpansRecorded, 'scroll-back RPC spans were not recorded').toBe(true);
         expect(scrolled.cpu.sampledCpuMs, 'scroll-back CPU profile was empty').toBeGreaterThan(0);
@@ -1230,6 +1280,14 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
   const traceRun = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
   report.diagnostics['100x'] = await test.step('trace 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRun!, fixtures['100x']!));
+
+  const headScrollRepeats = report.variants.head['100x'].scrollBack2k;
+  expect(headScrollRepeats).toHaveLength(PERFORMANCE_REPEATS);
+  headScrollRepeats.forEach((metric, repeat) => {
+    expect(metric.longTaskAttribution, `100x head scroll repeat ${repeat + 1} is missing attributed long-task traces`).toBeDefined();
+    expect(metric.longTaskTrace, `100x head scroll repeat ${repeat + 1} is missing long-task script traces`).toBeDefined();
+    metric.historyPathTasks = selectHistoryPathTasks(metric.longTaskAttribution!, SCROLL_SPAN_NAMES);
+  });
 });
 
 test('blocks repeated injected 100 ms main-thread stalls during cold chat list load', async({browser}) => {

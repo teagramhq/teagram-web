@@ -31,3 +31,14 @@ test('merges batched peer mirrors into the existing mirror and peer store', () =
   expect(usePeers()[activeChannelPeerId as PeerId]).toMatchObject({title: 'joined'});
   expect(newActiveChannelIds).toEqual([activeChannelId]);
 });
+
+test('preserves active channel updates for empty-channel dialog reconciliation', () => {
+  const channelId = 900000004;
+  const peer = {_: 'channel', id: channelId, title: 'joined', pFlags: {}} as any;
+  const mirror: Record<string, any> = {};
+  const activeChannelIds = reconcilePeerMirrorBatch(mirror, {[-channelId]: peer});
+
+  expect(mirror[-channelId]).toBe(peer);
+  expect(usePeers()[-channelId as PeerId]).toMatchObject({title: 'joined'});
+  expect(activeChannelIds).toEqual([channelId]);
+});

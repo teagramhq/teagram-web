@@ -26,7 +26,7 @@ import noop from '@helpers/noop';
 import {Chat, Message} from '@layer';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import {AppDialogsManager, DialogDom} from '@lib/appDialogsManager';
-import rootScope from '@lib/rootScope';
+import rootScope, {shouldReconcileEmptyChannelDialog, type ChatUpdateOptions} from '@lib/rootScope';
 import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
 import {runWithHotReloadGuard} from '@lib/solidjs/runWithHotReloadGuard';
 import {FilterType} from '@lib/storages/dialogs';
@@ -159,7 +159,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       this.setOnlineStatus(dom.avatarEl.node, online);
     });
 
-    this.listenerSetter.add(rootScope)('chat_update', (chatId) => this.handleChatUpdate(chatId));
+    this.listenerSetter.add(rootScope)('chat_update', (chatId, options) => this.handleChatUpdate(chatId, options));
 
     this.listenerSetter.add(rootScope)('dialog_flush', ({dialog}) => {
       if(!this.isActive || !dialog) {
@@ -305,9 +305,9 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     return this.appDialogsManager.xd === this;
   }
 
-  public handleChatUpdate(chatId: ChatId) {
+  public handleChatUpdate(chatId: ChatId, options?: ChatUpdateOptions) {
     const peerId = chatId.toPeerId(true);
-    if(this.isActive && !this.sortedList.has(peerId)) {
+    if(shouldReconcileEmptyChannelDialog(options) && this.isActive && !this.sortedList.has(peerId)) {
       const channel = apiManagerProxy.getPeer(peerId) as Chat;
       if(
         channel?._ === 'channel' &&

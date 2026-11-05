@@ -19,7 +19,7 @@ import getPeerPhoto from '@appManagers/utils/peers/getPeerPhoto';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import callbackify from '@helpers/callbackify';
-import type {PeerMirrorBatch, PeerMirrorValue} from '@appManagers/peerMirrorBatch';
+import type {PeerMirrorBatch, PeerMirrorValue, PeerSaveOptions} from '@appManagers/peerMirrorBatch';
 import type {PerformancePhase} from '@appManagers/performanceTrace';
 
 export type PeerType = 'channel' | 'community' | 'chat' | 'megagroup' | 'group' | 'saved' | 'savedDialog' | 'monoforum' | 'monoforum_thread' | 'botforum_thread';
@@ -32,8 +32,8 @@ export class AppPeersManager extends AppManager {
     else appUsersManager.saveApiUser(instance);
   } */
 
-  public saveApiPeers(object: {chats?: Chat[], users?: User[]}, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch) {
-    this.appChatsManager.saveApiChats(object.chats, undefined, trace, mirrorBatch);
+  public saveApiPeers(object: {chats?: Chat[], users?: User[]}, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch, options?: PeerSaveOptions) {
+    this.appChatsManager.saveApiChats(object.chats, undefined, trace, mirrorBatch, options);
     this.appUsersManager.saveApiUsers(object.users, undefined, trace, mirrorBatch);
   }
 
@@ -54,6 +54,8 @@ export class AppPeersManager extends AppManager {
       value: peers,
       merge: true,
       accountNumber: this.getAccountNumber(),
+      // The walk reloads its missing dialogs itself; avoid starting a second empty-channel scan in the tab.
+      skipEmptyChannelDialogReconciliation: true,
       ...(trace ? {trace} : {}),
       ...(traceId ? {traceId} : {}),
       ...(reconcilePhase ? {reconcilePhase} : {}),

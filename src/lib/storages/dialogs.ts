@@ -45,6 +45,7 @@ import getDialogThreadId from '@appManagers/utils/dialogs/getDialogThreadId';
 import {isTempId} from '@appManagers/utils/messages/isTempId';
 
 let cachedDialogReconcileTraceSequence = 0;
+const CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE = 25;
 
 export enum FilterType {
   Folder,
@@ -2088,7 +2089,10 @@ export default class DialogsStorage extends AppManager {
     this.cachedListReconciled = true;
     try {
       const missingPeerIds = await this.getServerChannelsMissingLocally();
-      await Promise.all(missingPeerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
+      for(let offset = 0; offset < missingPeerIds.length; offset += CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE) {
+        const peerIds = missingPeerIds.slice(offset, offset + CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE);
+        await Promise.all(peerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
+      }
       if(missingPeerIds.some((peerId) => !this.getDialogOnly(peerId) && this.appChatsManager.isInChat(peerId.toChatId()))) {
         this.cachedListReconciled = false;
       }
@@ -2129,7 +2133,8 @@ export default class DialogsStorage extends AppManager {
               this.appPeersManager.saveApiPeers(
                 result,
                 trace,
-                mirrorBatch
+                mirrorBatch,
+                {skipEmptyChannelDialogReconciliation: true}
               );
             }
 

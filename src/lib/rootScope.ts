@@ -268,8 +268,16 @@ export type BroadcastEvents = {
   'auto_delete_period_update': {peerId: PeerId, period: number},
 };
 
+export type ChatUpdateOptions = {
+  skipEmptyChannelDialogReconciliation?: boolean
+};
+
+export function shouldReconcileEmptyChannelDialog(options?: ChatUpdateOptions) {
+  return !options?.skipEmptyChannelDialogReconciliation;
+}
+
 export type BroadcastEventsListeners = {
-  [name in keyof BroadcastEvents]: (e: BroadcastEvents[name]) => void
+  [name in keyof BroadcastEvents]: name extends 'chat_update' ? (e: ChatId, options?: ChatUpdateOptions) => void : (e: BroadcastEvents[name]) => void
 };
 
 export class RootScope extends EventListenerBase<BroadcastEventsListeners> {

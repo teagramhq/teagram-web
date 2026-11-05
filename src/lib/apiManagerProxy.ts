@@ -156,7 +156,8 @@ export type MirrorTaskPayload<
   trace?: 'cachedChannelDialogsReconcile',
   traceId?: string,
   reconcilePhase?: PerformancePhase,
-  traceOnly?: boolean
+  traceOnly?: boolean,
+  skipEmptyChannelDialogReconciliation?: boolean
 };
 
 export type NotificationBuildMessageTaskPayload = {
@@ -345,7 +346,11 @@ class ApiManagerProxy extends MTProtoMessagePort {
             this.mirrors.peers as Record<string, any>,
             payload.value
           );
-          activeChannelIds.forEach((chatId) => rootScope.dispatchEvent('chat_update', chatId));
+          activeChannelIds.forEach((chatId) => rootScope.dispatchEvent(
+            'chat_update',
+            chatId,
+            payload.skipEmptyChannelDialogReconciliation ? {skipEmptyChannelDialogReconciliation: true} : undefined
+          ));
           return false;
         }
 
