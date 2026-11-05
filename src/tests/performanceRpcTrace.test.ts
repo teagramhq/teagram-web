@@ -110,6 +110,21 @@ test('summarizes an interrupted walk without a main-thread flush', () => {
   expect(() => collectCachedDialogReconciles([{...interrupted, interrupted: undefined}], 0, 5_000, {})).toThrow('main-thread time');
 });
 
+test('requires a page count for interrupted reconciliation walks', () => {
+  const summary = {walks: [{
+    traceId: 'dead-walk',
+    pageCount: null as number | null,
+    startRelativeToScenarioMs: -1_000,
+    endRelativeToScenarioMs: 14_000,
+    mainThreadTimeMs: 0,
+    interrupted: true
+  }]};
+
+  expect(() => validateCachedDialogReconcileSummaries([
+    {cachedDialogReconcile: summary}
+  ], 'scrollBack2k', 1)).toThrow('100x scrollBack2k measured repeat 1 has incomplete reconciliation data');
+});
+
 test('requires a complete reconciliation summary on every measured scenario repeat', () => {
   const summary = {
     walks: [{

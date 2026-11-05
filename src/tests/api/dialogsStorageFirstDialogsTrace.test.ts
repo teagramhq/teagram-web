@@ -77,6 +77,10 @@ test('flushes current peers once after the cached-dialog walk completes', async(
     durationMs: expect.any(Number)
   });
   expect(performancePhaseTrace.getSnapshot().some(({name: phaseName}) => phaseName === 'worker.dialogs.firstPage')).toBe(false);
+  expect(performancePhaseTrace.getSnapshot().find(({name: phaseName}) => phaseName === 'worker.dialogs.cachedChannelReconcile')).toMatchObject({
+    pageCount: 0,
+    durationMs: null
+  });
 
   const firstPage: any = {
     _: 'messages.dialogsSlice',
@@ -88,6 +92,10 @@ test('flushes current peers once after the cached-dialog walk completes', async(
   };
   pendingPages[0](firstPage);
   await vi.waitFor(() => expect(pendingPages).toHaveLength(2));
+  expect(performancePhaseTrace.getSnapshot().find(({name: phaseName}) => phaseName === 'worker.dialogs.cachedChannelReconcile')).toMatchObject({
+    pageCount: 1,
+    durationMs: null
+  });
   expect(storage.appPeersManager.mirrorApiPeers).not.toHaveBeenCalled();
 
   // AppChatsManager.clear removes the peer while the second page is pending.

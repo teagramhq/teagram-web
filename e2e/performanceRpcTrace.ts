@@ -242,7 +242,8 @@ export function collectCachedDialogReconcileSummaries(
 function hasCompleteCachedDialogReconcileSummary(summary: CachedDialogReconcileSummary | undefined) {
   return !!summary && Array.isArray(summary.walks) && summary.walks.every((walk) => (
     typeof walk.traceId === 'string' &&
-    (walk.interrupted || (Number.isFinite(walk.pageCount) && walk.pageCount! >= 0)) &&
+    Number.isFinite(walk.pageCount) &&
+    walk.pageCount! >= 0 &&
     Number.isFinite(walk.startRelativeToScenarioMs) &&
     Number.isFinite(walk.endRelativeToScenarioMs) &&
     Number.isFinite(walk.mainThreadTimeMs) &&

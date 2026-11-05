@@ -4,7 +4,9 @@ import {PerformancePhaseTrace, PerformanceRpcTrace} from '@lib/appManagers/perfo
 describe('performance trace collectors', () => {
   test('reports the pages seen so far on a running phase only', () => {
     const trace = new PerformancePhaseTrace(true);
-    const finish = trace.start('worker.walk', {traceId: 'walk-1'});
+    const finish = trace.start('worker.walk', {traceId: 'walk-1', pageCount: 0});
+
+    expect(trace.getSnapshot()[0]).toMatchObject({traceId: 'walk-1', durationMs: null, pageCount: 0});
 
     trace.setPageCount('walk-1', 4);
     expect(trace.getSnapshot()[0]).toMatchObject({traceId: 'walk-1', durationMs: null, pageCount: 4});

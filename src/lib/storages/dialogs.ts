@@ -2102,7 +2102,7 @@ export default class DialogsStorage extends AppManager {
       'cachedChannelDialogsReconcile' as const :
       undefined;
     const traceId = trace ? `${Math.trunc(performance.timeOrigin)}-${++cachedDialogReconcileTraceSequence}` : undefined;
-    const finishTrace = trace ? performancePhaseTrace.start('worker.dialogs.cachedChannelReconcile', {traceId}) : undefined;
+    const finishTrace = trace ? performancePhaseTrace.start('worker.dialogs.cachedChannelReconcile', {traceId, pageCount: 0}) : undefined;
     let pageCount = 0;
     const limit = 100;
     const missingPeerIds: PeerId[] = [];
