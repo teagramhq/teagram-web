@@ -336,6 +336,21 @@ export class ApiManager extends ApiManagerMethods {
     });
   }
 
+  private handleIdleNetworkerAuthKeyUnknown(networker: MTPNetworker, transport: MTTransport) {
+    if(networker.activeRequests || networker.transport !== transport || !this.isNetworkerCurrentForDc(networker.dcId, networker)) return;
+
+    if(this.rootScope.myId) {
+      this.logOut();
+      return;
+    }
+
+    const recoveryId = this.nextAuthKeyRecoveryId = (this.nextAuthKeyRecoveryId || 0) + 1;
+    (this.authKeyRecoveryTargets ??= new Map()).set(recoveryId, {networker, transport});
+    this.recoverUnknownAuthKey(recoveryId).catch((recoveryError) => {
+      this.log.error('Failed to recover unknown auth key', recoveryError);
+    });
+  }
+
   private chooseServer(dcId: DcId, connectionType: ConnectionType, transportType: TransportType) {
     return this.dcConfigurator.chooseServer(dcId, connectionType, transportType, connectionType === 'client', this.rootScope.premium);
   }
@@ -653,7 +668,8 @@ export class ApiManager extends ApiManagerMethods {
           serverSalt: auth.serverSalt,
           isFileDownload: connectionType === 'download',
           isFileUpload: connectionType === 'upload',
-          isCurrentForDc: () => this.isNetworkerCurrentForDc(dcId, networker)
+          isCurrentForDc: () => this.isNetworkerCurrentForDc(dcId, networker),
+          onAuthKeyUnknown: (_networker, transport) => this.handleIdleNetworkerAuthKeyUnknown(networker, transport)
         });
 
         if(temporary) onTransport = async() => {

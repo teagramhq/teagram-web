@@ -127,6 +127,41 @@ describe('unknown auth keys', () => {
     expect(invalidateNetworkers).toHaveBeenCalledOnce();
   });
 
+  it('recovers a current idle networker when its transport reports an unknown auth key', () => {
+    const {manager, networker: requestNetworker} = createManager({code: -404, type: 'AUTH_KEY_UNKNOWN'}, 0);
+    const transport = requestNetworker.transport;
+    const recoverUnknownAuthKey = vi.spyOn(manager, 'recoverUnknownAuthKey').mockResolvedValue(true);
+    const targets = new Map();
+    Object.assign(manager, {authKeyRecoveryTargets: targets, nextAuthKeyRecoveryId: 0});
+    const networker = Object.create(MTPNetworker.prototype) as MTPNetworker;
+    Object.assign(networker, {
+      dcId: 2,
+      transport,
+      activeRequests: 0,
+      isCurrentForDc: () => true,
+      onAuthKeyUnknown: (source: MTPNetworker, failedTransport: MTTransport) => {
+        (manager as any).handleIdleNetworkerAuthKeyUnknown(source, failedTransport);
+      },
+      sentMessages: {},
+      log: vi.fn(),
+      clearNextReq: vi.fn(),
+      pendingMessages: {},
+      pendingAcks: [],
+      pendingResendReq: [],
+      sentResendReq: new Map()
+    });
+
+    (networker as any).onTransportError(-404, transport);
+    (networker as any).onTransportError(-404, {} as MTTransport);
+    networker.activeRequests = 1;
+    (networker as any).onTransportError(-404, transport);
+    (networker as any).onTransportError(-429, transport);
+
+    expect(recoverUnknownAuthKey).toHaveBeenCalledOnce();
+    expect(recoverUnknownAuthKey).toHaveBeenCalledWith(1);
+    expect(targets.get(1)).toEqual({networker, transport});
+  });
+
   it('ignores an unknown-key error from a stale networker', async() => {
     const {manager} = createManager({code: -404, type: 'AUTH_KEY_UNKNOWN'}, 42, false);
 
