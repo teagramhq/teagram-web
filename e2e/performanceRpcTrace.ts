@@ -89,6 +89,10 @@ export type CachedDialogReconcileWindow = {
   scenarioEndedAtEpochMs: number
 };
 
+export function reuseCachedPrivateWorkerUrl(cachedUrl: string | null, currentUrl: string) {
+  return cachedUrl?.startsWith('blob:') && currentUrl.startsWith('blob:') ? cachedUrl : currentUrl;
+}
+
 export function mergeCachedDialogReconcilePhaseSnapshots(snapshots: CachedDialogReconcilePhase[][]): CachedDialogReconcilePhase[] {
   const phasesByTraceId = new Map<string, CachedDialogReconcilePhase>();
   snapshots.flat().forEach((phase) => {

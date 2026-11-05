@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {CACHED_DIALOG_RECONCILE_PHASE_NAME, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateCachedDialogReconcileSummaries, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {CACHED_DIALOG_RECONCILE_PHASE_NAME, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, reuseCachedPrivateWorkerUrl, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateCachedDialogReconcileSummaries, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -117,14 +117,29 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   await page.exposeBinding('__teagramBundleWorkerReady', (_source, url: string) => bundleRequests.workerReady(url));
   // The diagnostic pass adds broad trace capture; gated windows use only the cached-dialog reconciliation timer.
   if(observeAnimationFrames) await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
-  return page.addInitScript(({injectColdStall, observeAnimationFrames}: {injectColdStall: boolean, observeAnimationFrames: boolean}) => {
+  const initScript = ({injectColdStall, observeAnimationFrames}: {injectColdStall: boolean, observeAnimationFrames: boolean}, reuseWorkerUrl: typeof reuseCachedPrivateWorkerUrl) => {
     // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
     const SharedWorkerConstructor = (window as any).SharedWorker;
     if(SharedWorkerConstructor) {
       (window as any).SharedWorker = new Proxy(SharedWorkerConstructor, {
         construct(target, args, newTarget) {
+          const workerUrlKey = 'teagram-perf-private-worker-url';
+          let currentWorkerUrl = String(args[0]);
+          if(currentWorkerUrl.startsWith('blob:')) {
+            try {
+              const cachedWorkerUrl = sessionStorage.getItem(workerUrlKey);
+              const stableWorkerUrl = reuseWorkerUrl(cachedWorkerUrl, currentWorkerUrl);
+              if(stableWorkerUrl !== currentWorkerUrl) URL.revokeObjectURL(currentWorkerUrl);
+              else sessionStorage.setItem(workerUrlKey, stableWorkerUrl);
+              args = [stableWorkerUrl, ...args.slice(1)];
+              currentWorkerUrl = stableWorkerUrl;
+            } catch{}
+          }
           const worker = Reflect.construct(target, args, newTarget) as SharedWorker;
-          const url = new URL(String(args[0]), location.href).href;
+          const url = new URL(currentWorkerUrl, location.href).href;
+          (window as any).__teagramPerfSharedWorkerUrl = url;
+          const perf = (window as any).__teagramPerf;
+          if(perf) perf.sharedWorkerUrl = url;
           worker.port.addEventListener('message', () => {
             void (window as any).__teagramBundleWorkerReady(url);
           }, {once: true});
@@ -199,7 +214,28 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
       requestAnimationFrame(sampleFrame);
     };
     perf.stopFrames = () => perf.frameActive = false;
-  }, {injectColdStall, observeAnimationFrames});
+  };
+  return page.addInitScript({content: `(${initScript.toString()})(${JSON.stringify({injectColdStall, observeAnimationFrames})}, ${reuseCachedPrivateWorkerUrl.toString()});`});
+}
+
+async function keepPerformanceWorkerAlive(context: BrowserContext, page: Page, origin: string) {
+  const workerUrl = await page.evaluate(() => (window as any).__teagramPerfSharedWorkerUrl as string | undefined);
+  expect(workerUrl?.startsWith('blob:'), 'private shared worker URL was not captured').toBe(true);
+
+  const anchor = await context.newPage();
+  await anchor.route('**/*', (route) => route.fulfill({
+    status: 200,
+    contentType: 'text/html',
+    body: '<!doctype html><html><body></body></html>'
+  }));
+  await anchor.goto(origin, {waitUntil: 'domcontentloaded'});
+  await anchor.evaluate((url) => {
+    const worker = new SharedWorker(url, {type: 'module'});
+    worker.port.addEventListener('message', () => {});
+    worker.port.start();
+    (window as any).__teagramPerfWorkerKeepalive = worker;
+  }, workerUrl!);
+  await page.bringToFront();
 }
 
 async function waitForBundleResources(page: Page) {
@@ -978,6 +1014,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     const coldChatList = await test.step('cold chat list', async() => capture(page, requests, await snapshotMeasurementBoundary(page)));
     measured.coldChatList.push(coldChatList);
     await addCachedDialogReconcileTarget(page, reconcileTargets, coldChatList, 'coldChatList');
+    if(reconcileTargets) await keepPerformanceWorkerAlive(context, page, origin);
     const warmChatList = await test.step('warm chat list', () => reloadChatList(page, requests));
     measured.warmChatList.push(warmChatList);
     await addCachedDialogReconcileTarget(page, reconcileTargets, warmChatList, 'warmChatList');
@@ -1048,6 +1085,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
       await addCachedDialogReconcileTarget(page, reconcileTargets, coldSample, 'coldChatList');
 
       if(repeat < PERFORMANCE_REPEATS) {
+        await keepPerformanceWorkerAlive(context, page, run.origin);
         await beginScenario(page, requests, true);
         const warmProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
         await page.reload({waitUntil: 'domcontentloaded'});

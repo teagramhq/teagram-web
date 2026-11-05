@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries} from '../../e2e/performanceRpcTrace';
+import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, reuseCachedPrivateWorkerUrl, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries} from '../../e2e/performanceRpcTrace';
 import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
 
 test('summarizes cached dialog reconciliation relative to a scenario', () => {
@@ -71,6 +71,15 @@ test('keeps a completed async reconciliation phase over a stale pending snapshot
     [{...completed, durationMs: null, pageCount: undefined}],
     [completed]
   ])).toEqual([completed]);
+});
+
+test('reuses the private worker URL across measured page reloads', () => {
+  expect(reuseCachedPrivateWorkerUrl('blob:https://example.test/worker-1', 'blob:https://example.test/worker-2'))
+    .toBe('blob:https://example.test/worker-1');
+  expect(reuseCachedPrivateWorkerUrl(null, 'blob:https://example.test/worker-2'))
+    .toBe('blob:https://example.test/worker-2');
+  expect(reuseCachedPrivateWorkerUrl('blob:https://example.test/worker-1', 'https://example.test/worker.js'))
+    .toBe('https://example.test/worker.js');
 });
 
 test('requires a complete reconciliation summary on every measured scenario repeat', () => {
