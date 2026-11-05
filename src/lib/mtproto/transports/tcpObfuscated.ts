@@ -394,7 +394,7 @@ export default class TcpObfuscated implements MTTransport {
             if(packet.byteLength === 4) {
               const code = new DataView(packet.buffer, packet.byteOffset, packet.byteLength).getInt32(0, true);
               if(code < 0) {
-                this.networker.onTransportError(code);
+                this.networker.onTransportError(code, this);
                 return;
               }
             }
