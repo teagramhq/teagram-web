@@ -203,6 +203,28 @@ test('rejects independent diagnostic repeats with incomplete reconciliation evid
   ], 'contactSearch', 1)).toThrow('100x contactSearch diagnostic repeat 1 has incomplete reconciliation or long-task data');
 });
 
+test('requires attributed long-task traces on every measured scroll repeat', async() => {
+  const validate = (await import('../../e2e/performanceRpcTrace') as any).validateMeasuredLongTaskTraces;
+  expect(validate).toBeTypeOf('function');
+  const task = {
+    startTimeMs: 10,
+    durationMs: 80,
+    scripts: [{functionName: 'onMessage', script: '/app.js', invoker: 'MessagePort.onmessage', invokerType: 'event-listener', durationMs: 70, forcedStyleAndLayoutDurationMs: 0}]
+  };
+
+  expect(() => validate([
+    {longTasksOver50Ms: 1, longTaskTrace: [task]},
+    {longTasksOver50Ms: 0, longTaskTrace: []}
+  ], 'scrollBack2k', 2)).not.toThrow();
+  expect(() => validate([
+    {longTasksOver50Ms: 1, longTaskTrace: [task]},
+    {longTasksOver50Ms: 1}
+  ], 'scrollBack2k', 2)).toThrow('100x scrollBack2k measured repeat 2 has incomplete long-task attribution');
+  expect(() => validate([
+    {longTasksOver50Ms: 1, longTaskTrace: [{...task, scripts: []}]}
+  ], 'scrollBack2k', 1)).toThrow('100x scrollBack2k measured repeat 1 has incomplete long-task attribution');
+});
+
 describe('performance RPC trace summary', () => {
   test('excludes long tasks that start outside the scenario measurement window', async() => {
     const trace = await import('../../e2e/performanceRpcTrace') as any;
@@ -445,6 +467,14 @@ describe('long-animation-frame observation', () => {
 
     expect(observeLongAnimationFrames(FakeObserver, () => {})).toBe(true);
     expect(observed).toEqual([{type: 'long-animation-frame', buffered: true}]);
+  });
+
+  test('returns the observer handle so the capture window can disconnect it', () => {
+    const {FakeObserver} = makeObserver(['long-animation-frame']);
+    let capturedObserver: unknown;
+
+    expect(observeLongAnimationFrames(FakeObserver, () => {}, (observer) => capturedObserver = observer)).toBe(true);
+    expect(capturedObserver).toBeInstanceOf(FakeObserver);
   });
 
   test('is false when observing throws', () => {

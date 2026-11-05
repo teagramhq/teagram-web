@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {CACHED_DIALOG_RECONCILE_PHASE_NAME, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateCachedDialogReconcileSummaries, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {CACHED_DIALOG_RECONCILE_PHASE_NAME, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateCachedDialogReconcileSummaries, validateMeasuredLongTaskTraces, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -116,8 +116,8 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   page.on('requestfailed', (request) => bundleRequests.requestFailed(request));
   page.on('worker', (worker) => bundleRequests.workerReady(worker.url()));
   await page.exposeBinding('__teagramBundleWorkerReady', (_source, url: string) => bundleRequests.workerReady(url));
-  // The diagnostic pass adds broad trace capture; gated windows use only the cached-dialog reconciliation timer.
-  if(observeAnimationFrames) await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
+  // The gated scroll repeat starts this observer only for the measured window.
+  await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
   return page.addInitScript(({injectColdStall, observeAnimationFrames}: {injectColdStall: boolean, observeAnimationFrames: boolean}) => {
     // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
     const SharedWorkerConstructor = (window as any).SharedWorker;
@@ -157,6 +157,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
       started: performance.now(),
       resourceUrlBaseline: [] as string[]
     };
+    let longAnimationFrameObserver: PerformanceObserver | undefined;
     try {
       const observer = new PerformanceObserver((list) => {
         perf.longTasks.push(...list.getEntries().filter((entry) => entry.duration > 50).map((entry) => ({
@@ -166,21 +167,30 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
       });
       observer.observe({type: 'longtask', buffered: true});
     } catch{}
-    if(observeAnimationFrames) perf.loafObserved = (window as any).__teagramObserveLongAnimationFrames(PerformanceObserver, (entries: any[]) => {
-      perf.longAnimationFrames.push(...entries.map((entry: any) => ({
-        startTime: entry.startTime,
-        duration: entry.duration,
-        scripts: (entry.scripts || []).map((script: any) => ({
-          sourceURL: script.sourceURL,
-          sourceFunctionName: script.sourceFunctionName,
-          invoker: script.invoker,
-          invokerType: script.invokerType,
-          executionStart: script.executionStart,
-          duration: script.duration,
-          forcedStyleAndLayoutDuration: script.forcedStyleAndLayoutDuration
-        }))
-      })));
-    });
+    perf.startLongAnimationFrames = () => {
+      if(longAnimationFrameObserver) return true;
+      perf.loafObserved = (window as any).__teagramObserveLongAnimationFrames(PerformanceObserver, (entries: any[]) => {
+        perf.longAnimationFrames.push(...entries.map((entry: any) => ({
+          startTime: entry.startTime,
+          duration: entry.duration,
+          scripts: (entry.scripts || []).map((script: any) => ({
+            sourceURL: script.sourceURL,
+            sourceFunctionName: script.sourceFunctionName,
+            invoker: script.invoker,
+            invokerType: script.invokerType,
+            executionStart: script.executionStart,
+            duration: script.duration,
+            forcedStyleAndLayoutDuration: script.forcedStyleAndLayoutDuration
+          }))
+        })));
+      }, (observer: PerformanceObserver) => longAnimationFrameObserver = observer);
+      return perf.loafObserved;
+    };
+    perf.stopLongAnimationFrames = () => {
+      longAnimationFrameObserver?.disconnect();
+      longAnimationFrameObserver = undefined;
+    };
+    if(observeAnimationFrames) perf.startLongAnimationFrames();
     perf.injectLongTask = (durationMs: number) => {
       const started = performance.now();
       while(performance.now() - started < durationMs) {}
@@ -215,6 +225,7 @@ async function begin(page: Page, requests: {value: number}, recordRpcSpans = tru
     if(traceEnabled) await (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace(recordSpans);
     const perf = (window as any).__teagramPerf;
     perf.longTasks = [];
+    perf.longAnimationFrames = [];
     perf.frameIntervals = [];
     perf.resourceUrlBaseline = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).map((entry) => entry.name);
     performance.clearResourceTimings();
@@ -231,13 +242,14 @@ async function beginScenario(page: Page, requests: {value: number}, traceEnabled
 
   await begin(page, requests, true, true);
   await page.evaluate((preserveNames) => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace(preserveNames), scenarioPreservedPerformancePhases);
+  await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames());
 }
 
-async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false): Promise<Metric> {
+async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false, includeLongTaskTrace = includePhases): Promise<Metric> {
   const requestCount = requests.value;
   await page.waitForTimeout(150);
   await waitForBundleResources(page);
-  const captured = await page.evaluate(async({boundary, scroll, includePhases}) => {
+  const captured = await page.evaluate(async({boundary, scroll, includePhases, includeLongTaskTrace}) => {
     const {ms} = boundary;
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
@@ -277,6 +289,9 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       durationMs: call.durationMs,
       outcome: call.outcome
     })).filter((call) => call.startedAtMs <= ms);
+    const longAnimationFrames = includeLongTaskTrace ? perf.longAnimationFrames.slice() : [];
+    const loafObserved = perf.loafObserved === true;
+    if(includeLongTaskTrace) perf.stopLongAnimationFrames();
     return {
       bundleResources: resources.map((entry) => ({
         name: entry.name,
@@ -288,7 +303,8 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       resourceCaptureEndedAt,
       resourceUrlBaseline: perf.resourceUrlBaseline,
       longTasks,
-      longAnimationFrames: includePhases ? perf.longAnimationFrames : [],
+      longAnimationFrames,
+      loafObserved,
       rpcTraceEnabled: rpcTrace.enabled,
       rpcSpansRecorded: rpcTrace.recording,
       rpcCallCount: rpcTrace.recording ? rpcInvocations.length : rpcTrace.callCount,
@@ -299,16 +315,17 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
-  }, {boundary, scroll, includePhases});
-  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, ...metrics} = captured;
+  }, {boundary, scroll, includePhases, includeLongTaskTrace});
+  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, loafObserved, ...metrics} = captured;
   if(includePhases) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
+  if(includeLongTaskTrace) expect(loafObserved, 'long-animation-frame observer is not supported in the measured browser').toBe(true);
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
   const rpcSummary = summarizeRpcTrace(metrics.rpcCalls as PerformanceRpcCall[], boundary.ms);
   return {
     ...metrics,
     bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
-    ...(includePhases ? {longTaskTrace: summarizeLongTaskTrace(longTasks, longAnimationFrames, boundary.startedAtMs, boundary.ms)} : {}),
+    ...(includeLongTaskTrace ? {longTaskTrace: summarizeLongTaskTrace(longTasks, longAnimationFrames, boundary.startedAtMs, boundary.ms)} : {}),
     ms: boundary.ms,
     requests: requestCount,
     domNodes: boundary.domNodes,
@@ -670,7 +687,8 @@ async function scrollBackTwoThousand(
   requests: {value: number},
   required: boolean,
   profileTrace = false,
-  onMeasurementBoundary?: (boundary: MeasurementBoundary) => void
+  onMeasurementBoundary?: (boundary: MeasurementBoundary) => void,
+  includeLongTaskTrace = profileTrace
 ) {
   const hasPendingHistory = () => page.evaluate(() => {
     const bubbles = (window as any).appImManager.chat.bubbles;
@@ -680,6 +698,9 @@ async function scrollBackTwoThousand(
   // Only the diagnostic pass waits: the gated window must keep the chat-open history tail it always had.
   if(profileTrace) await waitForHistorySettled(page);
   await beginScenario(page, requests, profileTrace);
+  if(includeLongTaskTrace) {
+    expect(await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames()), 'long-animation-frame observer is not supported in the measured browser').toBe(true);
+  }
   if(profileTrace) await installScrollSpanTracing(page);
   const cpuProfile = profileTrace ? await startCpuProfile(page) : undefined;
   await page.evaluate(() => (window as any).__teagramPerf.startFrames());
@@ -736,7 +757,7 @@ async function scrollBackTwoThousand(
   const boundary = await snapshotMeasurementBoundary(page);
   onMeasurementBoundary?.(boundary);
   const stoppedProfile = cpuProfile ? await stopCpuProfile(cpuProfile) : undefined;
-  const metric = await capture(page, requests, boundary, true, profileTrace);
+  const metric = await capture(page, requests, boundary, true, profileTrace, includeLongTaskTrace);
   if(!stoppedProfile) return metric;
 
   const {tasks, spans} = await page.evaluate(() => {
@@ -973,6 +994,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   const page = await context.newPage();
   const requests = {value: 0};
   const reconcileTargets = variant === 'head' && scale === '100x' ? [] as CachedDialogReconcileTarget[] : undefined;
+  const captureMeasuredLongTaskTrace = variant === 'head' && scale === '100x';
   await installInstrumentation(page, requests, origin);
 
   try {
@@ -989,7 +1011,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture));
     measured.chatOpen.push(chatOpen);
     await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpen, 'chatOpen');
-    const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(page, requests, variant === 'head'));
+    const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(page, requests, variant === 'head', false, undefined, captureMeasuredLongTaskTrace));
     if(scroll) {
       measured.scrollBack2k.push(scroll);
       await addCachedDialogReconcileTarget(page, reconcileTargets, scroll, 'scrollBack2k');
@@ -1203,6 +1225,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
     const expectedRepeatCount = scenario === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
     validateCachedDialogReconcileSummaries(report.variants.head['100x'][scenario], scenario, expectedRepeatCount);
   }
+  validateMeasuredLongTaskTraces(report.variants.head['100x'].scrollBack2k, 'scrollBack2k', PERFORMANCE_REPEATS);
   const traceOrigin = process.env.PERF_TRACE_HEAD_ORIGIN_100X;
   expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
   const traceRun = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);

@@ -286,6 +286,27 @@ export function validateCachedDialogReconcileDiagnostics(
   });
 }
 
+export function validateMeasuredLongTaskTraces(
+  samples: Array<{longTasksOver50Ms?: number, longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>}>,
+  scenario: string,
+  expectedRepeatCount: number
+) {
+  if(samples.length !== expectedRepeatCount) {
+    throw new Error(`100x ${scenario} has ${samples.length} measured repeats; expected ${expectedRepeatCount}`);
+  }
+
+  samples.forEach(({longTasksOver50Ms, longTaskTrace}, index) => {
+    if(
+      !Number.isFinite(longTasksOver50Ms) ||
+      !Array.isArray(longTaskTrace) ||
+      longTaskTrace.length !== longTasksOver50Ms ||
+      longTaskTrace.some(({scripts}) => !Array.isArray(scripts) || !scripts.length)
+    ) {
+      throw new Error(`100x ${scenario} measured repeat ${index + 1} has incomplete long-task attribution`);
+    }
+  });
+}
+
 export function summarizeRpcTrace(rpcCalls: PerformanceRpcCall[], elapsedMs: number): PerformanceRpcSummary {
   const intervals = rpcCalls.map(({startedAtMs, durationMs}) => {
     const start = Math.max(0, Math.min(elapsedMs, startedAtMs));
@@ -451,12 +472,14 @@ export function summarizeLongTaskAttribution(
 // * `PerformanceObserver.observe()` ignores an entry type the browser does not support instead of throwing, so
 // * support has to be read from `supportedEntryTypes`. Self-contained on purpose: the e2e injects its source into
 // * the page with `toString()`.
-export function observeLongAnimationFrames(Observer: any, onEntries: (entries: any[]) => void): boolean {
+export function observeLongAnimationFrames(Observer: any, onEntries: (entries: any[]) => void, onObserver?: (observer: any) => void): boolean {
   const supported = Observer && Observer.supportedEntryTypes;
   if(!supported || typeof supported.indexOf !== 'function' || supported.indexOf('long-animation-frame') === -1) return false;
 
   try {
-    new Observer((list: any) => onEntries(list.getEntries())).observe({type: 'long-animation-frame', buffered: true});
+    const observer = new Observer((list: any) => onEntries(list.getEntries()));
+    observer.observe({type: 'long-animation-frame', buffered: true});
+    onObserver?.(observer);
     return true;
   } catch{
     return false;
