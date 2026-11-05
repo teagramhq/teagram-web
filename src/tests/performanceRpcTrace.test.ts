@@ -74,12 +74,20 @@ test('keeps a completed async reconciliation phase over a stale pending snapshot
 });
 
 test('reuses the private worker URL across measured page reloads', () => {
-  expect(reuseCachedPrivateWorkerUrl('blob:https://example.test/worker-1', 'blob:https://example.test/worker-2'))
+  expect(reuseCachedPrivateWorkerUrl('blob:https://example.test/worker-1', 'blob:https://example.test/worker-2', true))
     .toBe('blob:https://example.test/worker-1');
-  expect(reuseCachedPrivateWorkerUrl(null, 'blob:https://example.test/worker-2'))
+  expect(reuseCachedPrivateWorkerUrl(null, 'blob:https://example.test/worker-2', true))
     .toBe('blob:https://example.test/worker-2');
-  expect(reuseCachedPrivateWorkerUrl('blob:https://example.test/worker-1', 'https://example.test/worker.js'))
+  expect(reuseCachedPrivateWorkerUrl('blob:https://example.test/worker-1', 'https://example.test/worker.js', true))
     .toBe('https://example.test/worker.js');
+});
+
+test('leaves private worker URLs untouched outside reconciliation measurements', () => {
+  expect(reuseCachedPrivateWorkerUrl(
+    'blob:https://example.test/worker-1',
+    'blob:https://example.test/worker-2',
+    false
+  )).toBe('blob:https://example.test/worker-2');
 });
 
 test('requires a complete reconciliation summary on every measured scenario repeat', () => {

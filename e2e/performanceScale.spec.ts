@@ -104,7 +104,7 @@ test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 });
 
-async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false, observeAnimationFrames = false) {
+async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false, observeAnimationFrames = false, reusePrivateWorkerUrl = false) {
   const bundleRequests = createBundleRequestTracker(new URL(origin).origin);
   bundleRequestTrackers.set(page, bundleRequests);
   page.on('request', (request) => {
@@ -117,7 +117,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   await page.exposeBinding('__teagramBundleWorkerReady', (_source, url: string) => bundleRequests.workerReady(url));
   // The diagnostic pass adds broad trace capture; gated windows use only the cached-dialog reconciliation timer.
   if(observeAnimationFrames) await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
-  const initScript = ({injectColdStall, observeAnimationFrames}: {injectColdStall: boolean, observeAnimationFrames: boolean}, reuseWorkerUrl: typeof reuseCachedPrivateWorkerUrl) => {
+  const initScript = ({injectColdStall, observeAnimationFrames, reusePrivateWorkerUrl}: {injectColdStall: boolean, observeAnimationFrames: boolean, reusePrivateWorkerUrl: boolean}, reuseWorkerUrl: typeof reuseCachedPrivateWorkerUrl) => {
     // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
     const SharedWorkerConstructor = (window as any).SharedWorker;
     if(SharedWorkerConstructor) {
@@ -125,7 +125,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
         construct(target, args, newTarget) {
           const workerUrlKey = 'teagram-perf-private-worker-url';
           let currentWorkerUrl = String(args[0]);
-          if(currentWorkerUrl.startsWith('blob:')) {
+          if(reusePrivateWorkerUrl && currentWorkerUrl.startsWith('blob:')) {
             try {
               const cachedWorkerUrl = sessionStorage.getItem(workerUrlKey);
               const stableWorkerUrl = reuseWorkerUrl(cachedWorkerUrl, currentWorkerUrl);
@@ -215,7 +215,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
     };
     perf.stopFrames = () => perf.frameActive = false;
   };
-  return page.addInitScript({content: `(${initScript.toString()})(${JSON.stringify({injectColdStall, observeAnimationFrames})}, ${reuseCachedPrivateWorkerUrl.toString()});`});
+  return page.addInitScript({content: `(${initScript.toString()})(${JSON.stringify({injectColdStall, observeAnimationFrames, reusePrivateWorkerUrl})}, ${reuseCachedPrivateWorkerUrl.toString()});`});
 }
 
 async function keepPerformanceWorkerAlive(context: BrowserContext, page: Page, origin: string) {
@@ -1005,7 +1005,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   const page = await context.newPage();
   const requests = {value: 0};
   const reconcileTargets = variant === 'head' && scale === '100x' ? [] as CachedDialogReconcileTarget[] : undefined;
-  await installInstrumentation(page, requests, origin);
+  await installInstrumentation(page, requests, origin, false, false, Boolean(reconcileTargets));
 
   try {
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
@@ -1071,7 +1071,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
     });
     const page = await context.newPage();
     const requests = {value: 0};
-    await installInstrumentation(page, requests, run.origin, false, true);
+    await installInstrumentation(page, requests, run.origin, false, true, true);
 
     try {
       const reconcileTargets: CachedDialogReconcileTarget[] = [];
