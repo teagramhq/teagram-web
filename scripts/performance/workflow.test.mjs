@@ -7,6 +7,7 @@ import {test} from 'node:test';
 
 const workflow = readFileSync(new URL('../../.github/workflows/performance.yml', import.meta.url), 'utf8');
 const playwrightConfig = readFileSync(new URL('../../playwright.performance.config.ts', import.meta.url), 'utf8');
+const performanceScale = readFileSync(new URL('../../e2e/performanceScale.spec.ts', import.meta.url), 'utf8');
 
 test('performance comparisons use uninstrumented head and base bundles', () => {
   assert.match(workflow, /^\s+pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
@@ -30,6 +31,10 @@ test('Playwright reports a performance-test timeout before the job is cancelled'
 
 test('a hung browser action fails its own step instead of consuming the test timeout', () => {
   assert.match(playwrightConfig, /actionTimeout:\s*60_000/);
+});
+
+test('report-only scroll repeats do not expand the policy trace assertions', () => {
+  assert.match(performanceScale, /const headScrollRepeats = report\.variants\.head\['100x'\]\.scrollBack2k\.slice\(0, PERFORMANCE_REPEATS\);/);
 });
 
 test('extra timing samples are reported without changing the three-repeat policy verdict', () => {

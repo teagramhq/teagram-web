@@ -1238,7 +1238,8 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   const traceRun = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
   report.diagnostics['100x'] = await test.step('trace 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRun!, fixtures['100x']!));
 
-  const headScrollRepeats = report.variants.head['100x'].scrollBack2k;
+  // Report-only timing repeats share this array, but only policy repeats carry scroll traces.
+  const headScrollRepeats = report.variants.head['100x'].scrollBack2k.slice(0, PERFORMANCE_REPEATS);
   expect(headScrollRepeats).toHaveLength(PERFORMANCE_REPEATS);
   headScrollRepeats.forEach((metric, repeat) => {
     expect(metric.longTaskAttribution, `100x head scroll repeat ${repeat + 1} is missing attributed long-task traces`).toBeDefined();
