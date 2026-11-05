@@ -765,6 +765,12 @@ export default class ChatBubbles {
 
   private middlewareHelper = getMiddleware();
   private chatInnerMiddlewareHelper: ReturnType<typeof getMiddleware>;
+  private pendingScrollRestore?: {
+    middleware: Middleware,
+    scrollSaver: ScrollSaver,
+    restorePromise: Promise<boolean>,
+    queueWait: Promise<boolean>
+  };
 
   private log: ReturnType<typeof logger>;
 
@@ -4827,7 +4833,8 @@ export default class ChatBubbles {
   public destroyBubble(
     bubble: HTMLElement,
     animate?: boolean,
-    fullMid = getBubbleFullMid(bubble)
+    fullMid = getBubbleFullMid(bubble),
+    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
   ) {
     const replacement = this.findPendingBubbleReplacement(bubble);
     if(replacement) {
@@ -4896,7 +4903,7 @@ export default class ChatBubbles {
     const scrollSaver = canBeDeleted && this.createScrollSaver(false);
     scrollSaver?.save();
 
-    this.bubbleGroups.removeAndUnmountBubble(bubble);
+    this.bubbleGroups.removeAndUnmountBubble(bubble, deferredGroups);
     if(this.observer) {
       this.observer.unobserve(bubble, this.unreadedObserverCallback);
       this.unreaded.delete(bubble);
@@ -5014,7 +5021,12 @@ export default class ChatBubbles {
     animateSomethingWithScroll(promise, this.scrollable, scrollSaver);
   }
 
-  public deleteMessagesByIds(fullMids: FullMid[], permanent = true, ignoreOnScroll?: boolean) {
+  public deleteMessagesByIds(
+    fullMids: FullMid[],
+    permanent = true,
+    ignoreOnScroll?: boolean,
+    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
+  ) {
     fullMids = fullMids.filter((fullMid) => {
       return !!this.getBubble(fullMid);
     });
@@ -5032,7 +5044,7 @@ export default class ChatBubbles {
     .sort((a, b) => (indexes[a] ?? 0) - (indexes[b] ?? 0))
     .forEach((fullMid) => {
       const bubble = this.getBubble(fullMid);
-      this.destroyBubble(bubble, permanent && liteMode.isAvailable('animations'));
+      this.destroyBubble(bubble, permanent && liteMode.isAvailable('animations'), fullMid, deferredGroups);
     });
 
     this.scrollable.ignoreNextScrollEvent();
@@ -6658,10 +6670,12 @@ export default class ChatBubbles {
 
     loadQueue = filterQueue(loadQueue);
 
+    const deferredGroups = new Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>();
     const {restoreScroll, scrollSaver} = this.prepareToSaveScroll(
       reverse,
       firstMid === newFirstMid,
-      lastMid === newLastMid
+      lastMid === newLastMid,
+      deferredGroups
     );
     // if(this.messagesQueueOnRender) {
     // this.messagesQueueOnRender();
@@ -6690,6 +6704,9 @@ export default class ChatBubbles {
       }
     });
 
+    for(const group of deferredGroups) {
+      if(!groups.includes(group)) groups.push(group);
+    }
     this.bubbleGroups.mountUnmountGroups(groups);
     if(this.chat.selection.isSelecting) {
       this.chat.selection.refreshSelectionGroup();
@@ -6698,7 +6715,7 @@ export default class ChatBubbles {
 
     this.updatePlaceholderPosition?.();
 
-    restoreScroll?.();
+    await restoreScroll?.();
 
     m(pause(!this.chat.setPeerPromise ? 0 : 1000))
     .then(() => m(getHeavyAnimationPromise()))
@@ -11369,7 +11386,12 @@ export default class ChatBubbles {
     return container;
   }
 
-  private prepareToSaveScroll(reverse?: boolean, sliceTop?: boolean, sliceBottom?: boolean) {
+  private prepareToSaveScroll(
+    reverse?: boolean,
+    sliceTop?: boolean,
+    sliceBottom?: boolean,
+    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
+  ) {
     const isMounted = !!this.chatInner.parentElement;
     if(!isMounted) {
       return {};
@@ -11377,14 +11399,20 @@ export default class ChatBubbles {
 
     const log = this.log.bindPrefix('prepareToSaveScroll');
     log('save');
-    const scrollSaver = this.createScrollSaver(reverse);
-    scrollSaver.save(); // * let's save scroll position by point before the slicing, not after
+    const middleware = this.chatInnerMiddlewareHelper?.get();
+    const existingRestore = this.pendingScrollRestore;
+    const pendingRestore = existingRestore?.middleware === middleware && middleware?.() ? existingRestore : undefined;
+    if(existingRestore && !pendingRestore && this.pendingScrollRestore === existingRestore) {
+      this.pendingScrollRestore = undefined;
+    }
+    const scrollSaver = pendingRestore?.scrollSaver ?? this.createScrollSaver(reverse);
+    if(!pendingRestore) scrollSaver.save(); // * let's save scroll position by point before the slicing, not after
 
     if((sliceTop || sliceBottom) && this.getRenderedLength() && !this.chat.setPeerPromise) {
       const viewportSlice = this.getViewportSlice(true);
       if(!sliceTop) viewportSlice.invisibleTop.length = 0;
       if(!sliceBottom) viewportSlice.invisibleBottom.length = 0;
-      this.deleteViewportSlice(viewportSlice, true);
+      this.deleteViewportSlice(viewportSlice, true, deferredGroups);
     }
 
     // scrollSaver.save(); // ! slicing will corrupt scroll position
@@ -11392,11 +11420,37 @@ export default class ChatBubbles {
     // const hadScroll = saved.scrollHeight !== saved.clientHeight;
 
     return {
-      restoreScroll: () => {
+      restoreScroll: async() => {
         log('restore');
+        if(!middleware?.()) return;
+        if(pendingRestore) {
+          await pendingRestore.queueWait;
+          return;
+        }
+
+        const currentRestore = this.pendingScrollRestore;
+        if(currentRestore?.middleware === middleware) {
+          await currentRestore.queueWait;
+          return;
+        }
+
         // scrollSaver.restore(_history.length === 1 && !reverse ? false : true);
-        scrollSaver.restore(reverse);
-        this.onRenderScrollSet(scrollSaver.getSaved());
+        const restorePromise = scrollSaver.restoreAfterLayout(reverse, middleware).then((restored) => {
+          if(restored && middleware?.()) this.onRenderScrollSet(scrollSaver.getSaved());
+          return restored;
+        });
+        const createdPendingRestore = {
+          middleware,
+          scrollSaver,
+          restorePromise,
+          queueWait: withTimeout(restorePromise, MEDIA_PROMISES_TIMEOUT, false)
+        };
+        this.pendingScrollRestore = createdPendingRestore;
+        const clearPendingRestore = () => {
+          if(this.pendingScrollRestore === createdPendingRestore) this.pendingScrollRestore = undefined;
+        };
+        void restorePromise.then(clearPendingRestore, clearPendingRestore);
+        await createdPendingRestore.queueWait;
       },
       scrollSaver
     };
@@ -12393,7 +12447,11 @@ export default class ChatBubbles {
     });
   }
 
-  public deleteViewportSlice(slice: ReturnType<ChatBubbles['getViewportSlice']>, ignoreScrollSaving?: boolean) {
+  public deleteViewportSlice(
+    slice: ReturnType<ChatBubbles['getViewportSlice']>,
+    ignoreScrollSaving?: boolean,
+    deferredGroups?: Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>
+  ) {
     if(DO_NOT_SLICE_VIEWPORT_ON_RENDER) {
       return;
     }
@@ -12434,7 +12492,7 @@ export default class ChatBubbles {
     }
 
     log('slicing mids', fullMids);
-    this.deleteMessagesByIds(fullMids, false, true);
+    this.deleteMessagesByIds(fullMids, false, true, deferredGroups);
 
     if(scrollSaver) {
       scrollSaver.restore();
