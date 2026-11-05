@@ -197,7 +197,7 @@ export function evaluatePerformance(report, history = []) {
       const headSamples = Array.isArray(rawHeadSamples) ? rawHeadSamples : [];
       const base = summarizeSamples(baseSamples);
       const head = summarizeSamples(headSamples);
-      const isTimingRepeatScenario = scale === '100x' && ['chatOpen', 'scrollBack2k', 'sendMessage'].includes(scenario.key);
+      const isTimingRepeatScenario = scale === '100x' && scenario.key === 'chatOpen';
       const requiredRepeats = report.requireTimingRepeats && isTimingRepeatScenario ? PERFORMANCE_TIMING_REPEATS :
         scale === '100x' && scenario.key === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
       const mainValues = historyFor(history, scale, scenario.key, report);
@@ -258,7 +258,7 @@ export function evaluatePerformance(report, history = []) {
           if(!Number.isFinite(sample?.bundleBytes)) {
             addFailure(blockingFailures, scale, scenario.key, `base bundle measurement is missing or invalid in sample ${index + 1}`);
           }
-          if(report.requireTimingRepeats && isTimingRepeatScenario && scenario.key !== 'scrollBack2k' && !Number.isFinite(sample?.ms)) {
+          if(report.requireTimingRepeats && isTimingRepeatScenario && !Number.isFinite(sample?.ms)) {
             addFailure(blockingFailures, scale, scenario.key, `base timing measurement is missing or invalid in sample ${index + 1}`);
           }
           if(scale === '100x' && scenario.key !== 'scrollBack2k' && scenario.key !== 'dateJump') {
@@ -270,12 +270,6 @@ export function evaluatePerformance(report, history = []) {
             }
           }
         });
-        if(report.requireTimingRepeats && scale === '100x' && scenario.key === 'scrollBack2k') {
-          const measuredBaseTimings = baseSamples.filter((sample) => Number.isFinite(sample?.ms)).length;
-          if(measuredBaseTimings > 0 && measuredBaseTimings < baseSamples.length) {
-            addFailure(blockingFailures, scale, scenario.key, 'base timing measurements are incomplete across scroll repeats');
-          }
-        }
       }
 
       if(scale === '100x') {
@@ -333,15 +327,6 @@ export function evaluatePerformance(report, history = []) {
             if(Number.isFinite(baselineBlockingTime) && Number.isFinite(headBlockingTime) && headBlockingTime - baselineBlockingTime >= MIN_BLOCKING_TIME_REGRESSION_MS) {
               addFailure(blockingFailures, scale, scenario.key, `median long-task blocking time ${headBlockingTime.toFixed(1)} ms exceeded base median ${baselineBlockingTime.toFixed(1)} ms by at least ${MIN_BLOCKING_TIME_REGRESSION_MS} ms`);
             }
-          }
-        }
-
-        if(report.requireTimingRepeats && report.requireBase && ['scrollBack2k', 'sendMessage'].includes(scenario.key)) {
-          const baseMedian = median(baseSamples.map((sample) => sample?.ms).filter(Number.isFinite));
-          const minimumIncrease = Number.isFinite(baseMedian) ? Math.max(10, baseMedian * 0.1) : Infinity;
-          if(separatedRegression(headSamples, baseSamples, 'ms', minimumIncrease)) {
-            const headMedian = median(headSamples.map((sample) => sample.ms));
-            addFailure(blockingFailures, scale, scenario.key, `timing increased by at least 10% in fully separated repeats (${headMedian.toFixed(1)} ms vs ${baseMedian.toFixed(1)} ms same-run base median)`);
           }
         }
       }

@@ -795,10 +795,8 @@ async function sendMessage(page: Page, requests: {value: number}, fixture: Fixtu
     try {
       await row.click({timeout: 15_000});
     } catch(error) {
-      // The row can keep re-laying out right after a cold load, which Playwright reads as never stable.
-      // Record its geometry and deliver the click event directly; the bubble checks below still fail if the chat does not open.
       console.warn('partner row never stabilised', JSON.stringify(await describeRow(row)), String(error).split('\n')[0]);
-      await row.dispatchEvent('click');
+      throw error;
     }
     await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible();
     await begin(page, requests);

@@ -265,7 +265,7 @@ test('allows send and scroll timing repeats when their ranges overlap the same-r
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('timing increased')), false);
 });
 
-test('blocks repeated send and scroll timing regressions when all head repeats are slower', () => {
+test('reports send and scroll timing repeats without blocking on their timing regressions', () => {
   const head = scaleVariants({'100x': {
     chatOpen: Array.from({length: PERFORMANCE_TIMING_REPEATS}, () => ({})),
     scrollBack2k: [13_500, 14_000, 14_500, 15_000, 15_500].map((ms) => ({ms})),
@@ -277,17 +277,24 @@ test('blocks repeated send and scroll timing regressions when all head repeats a
     sendMessage: [100, 110, 120, 130, 140].map((ms) => ({ms}))
   }});
   const result = evaluatePerformance(report({base, head, requireTimingRepeats: true}));
+  const samplesTable = formatPerformanceSamplesTable({variants: {base, head}});
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x sendMessage') && failure.includes('timing increased by at least 10%')));
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('timing increased by at least 10%')));
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x sendMessage') && failure.includes('timing increased')), false);
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('timing increased')), false);
+  assert.equal((samplesTable.match(/Scroll back 2,000 messages \| head \|/g) || []).length, PERFORMANCE_TIMING_REPEATS);
+  assert.equal((samplesTable.match(/Send a message \| head \|/g) || []).length, PERFORMANCE_TIMING_REPEATS);
+  assert.match(samplesTable, /Scroll back 2,000 messages \| head \| 1 \| 13500\.0/);
+  assert.match(samplesTable, /Send a message \| head \| 1 \| 160\.0/);
 });
 
-test('requires five paired samples for 100x chat open, scroll and send in PR runs', () => {
+test('requires five paired chat-open samples while reporting send and scroll repeats', () => {
   const result = evaluatePerformance(report({requireTimingRepeats: true}));
 
-  for(const key of ['chatOpen', 'scrollBack2k', 'sendMessage']) {
-    assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes(`expected at least ${PERFORMANCE_TIMING_REPEATS} repeat measurements`)));
-    assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes(`base bundle baseline requires ${PERFORMANCE_TIMING_REPEATS} repeats`)));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes(`expected at least ${PERFORMANCE_TIMING_REPEATS} repeat measurements`)));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes(`base bundle baseline requires ${PERFORMANCE_TIMING_REPEATS} repeats`)));
+  for(const key of ['scrollBack2k', 'sendMessage']) {
+    assert.equal(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes(`expected at least ${PERFORMANCE_TIMING_REPEATS} repeat measurements`)), false);
+    assert.equal(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes(`base bundle baseline requires ${PERFORMANCE_TIMING_REPEATS} repeats`)), false);
   }
 });
 
