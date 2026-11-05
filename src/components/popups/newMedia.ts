@@ -7,6 +7,7 @@ import type {MessageSendingParams, SendFileDetails} from '@appManagers/appMessag
 import type {ChatRights} from '@appManagers/appChatsManager';
 import PopupElement from '.';
 import {toastNew} from '@components/toast';
+import handleMediaSendFailure from '@components/popups/mediaSendError';
 import SendContextMenu from '@components/chat/sendContextMenu';
 import {createPosterFromMedia, createPosterFromVideo} from '@helpers/createPoster';
 import {MyDocument} from '@appManagers/appDocsManager';
@@ -1079,7 +1080,7 @@ export default class PopupNewMedia extends PopupElement {
       }
 
       if(!this.chat.input.editMessage) {
-        this.managers.appMessagesManager.sendGrouped({
+        handleMediaSendFailure(this.managers.appMessagesManager.sendGrouped({
           ...sendingParams,
           caption,
           entities,
@@ -1087,7 +1088,7 @@ export default class PopupNewMedia extends PopupElement {
           isMedia,
           // clearDraft: true,
           ...w
-        });
+        }));
       } else {
         this.managers.appMessagesManager.editMessageMedia({
           message: this.chat.input.editMessage,
