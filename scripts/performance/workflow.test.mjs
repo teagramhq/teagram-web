@@ -93,7 +93,8 @@ test('extra timing samples are reported without changing the three-repeat policy
           PERF_REPORT_PATH: reportPath,
           PERF_HISTORY_DIRECTORY: historyDirectory,
           PERF_BROWSER_OUTCOME: 'success',
-          GITHUB_EVENT_NAME: 'pull_request'
+          GITHUB_EVENT_NAME: 'pull_request',
+          GITHUB_STEP_SUMMARY: ''
         }
       });
       assert.equal(result.status, 0, result.stderr);
