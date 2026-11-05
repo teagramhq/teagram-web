@@ -792,7 +792,7 @@ function showServerCheckShell(host: string) {
   <div class="${styles.placeholder} ${styles.placeholderTop}"></div>
   <div class="${styles.cardsContainer}"><div class="${styles.card}">
     <div>
-      <div class="${mediaHeaderStyles.sticker} ${styles.logoContainer}" style="--sticker-size: 120px;"><img class="${styles.logo}" src="assets/img/logo.svg" alt="" aria-hidden="true"></div>
+      <div class="${mediaHeaderStyles.sticker} ${styles.logoContainer}" style="--sticker-size: 120px;"><img class="${styles.logo}" src="/assets/img/logo.svg" alt="" aria-hidden="true"></div>
       <div class="${mediaHeaderStyles.title} text-center text-overflow-wrap">Teagram</div>
       <div class="${mediaHeaderStyles.subtitle} text-center secondary" data-text="Teagram.Server.Subtitle"></div>
     </div>

@@ -3,7 +3,7 @@ import {getOverlayRoot} from '@helpers/appWindow';
 import deepEqual from '@helpers/object/deepEqual';
 import tsNow from '@helpers/tsNow';
 
-const ASSETS_PATH = 'assets/audio/';
+const ASSETS_PATH = '/assets/audio/';
 
 type PlayOptions<AssetMap extends Record<string, string>> = {
   name: keyof AssetMap,

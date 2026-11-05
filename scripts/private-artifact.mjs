@@ -173,10 +173,10 @@ const PRIVATE_ROOT_RUNTIME_ASSET_REFERENCE_PATTERN = /["'`](browserconfig\.xml|d
 const PRIVATE_RUNTIME_AUDIO_ASSET_NAME_PATTERN = /(['"`])([A-Za-z0-9_-]+\.mp3)\1/g;
 const PRIVATE_DYNAMIC_RUNTIME_ASSET_REFERENCE_PATTERNS = Object.freeze([
   Object.freeze({name: 'changelogs', pattern: /["'`]changelogs\/(?=["'`]|\$\{)/}),
-  Object.freeze({name: 'lottie', pattern: /["'`]assets\/tgs\/(?=["'`]|\$\{)/}),
-  Object.freeze({name: 'audio', pattern: /["'`]assets\/audio\/(?=["'`]|\$\{)/}),
-  Object.freeze({name: 'emoji', pattern: /["'`]assets\/img\/emoji\/(?=["'`]|\$\{)/}),
-  Object.freeze({name: 'images', pattern: /["'`]assets\/img\/(?=["'`]|\$\{)/})
+  Object.freeze({name: 'lottie', pattern: /["'`]\/?assets\/tgs\/(?=["'`]|\$\{)/}),
+  Object.freeze({name: 'audio', pattern: /["'`]\/?assets\/audio\/(?=["'`]|\$\{)/}),
+  Object.freeze({name: 'emoji', pattern: /["'`]\/?assets\/img\/emoji\/(?=["'`]|\$\{)/}),
+  Object.freeze({name: 'images', pattern: /["'`]\/?assets\/img\/(?=["'`]|\$\{)/})
 ]);
 
 const PRIVATE_ROUTE_LOCK = {

@@ -390,6 +390,7 @@ const generated: GeneratedSettingsSearchData = {
     {id: 'AppStickersAndEmojiTab:SuggestStickersAll', sectionId: 'AppStickersAndEmojiTab', kind: 'option', titleLangKey: 'SuggestStickersAll'},
     {id: 'AppStickersAndEmojiTab:SuggestStickersInstalled', sectionId: 'AppStickersAndEmojiTab', kind: 'option', titleLangKey: 'SuggestStickersInstalled'},
     {id: 'AppStickersAndEmojiTab:SuggestStickersNone', sectionId: 'AppStickersAndEmojiTab', kind: 'option', titleLangKey: 'SuggestStickersNone'},
+    {id: 'AppStickersAndEmojiTab:Teagram.Import.Pack', sectionId: 'AppStickersAndEmojiTab', kind: 'row', titleLangKey: 'Teagram.Import.Pack'},
     {id: 'AppStickersAndEmojiTab:Telegram.InstalledStickerPacksController', sectionId: 'AppStickersAndEmojiTab', kind: 'row', titleLangKey: 'Telegram.InstalledStickerPacksController'},
     {id: 'AppTwoStepVerificationEmailConfirmationTab:ResendCode', sectionId: 'AppTwoStepVerificationEmailConfirmationTab', kind: 'row', titleLangKey: 'ResendCode'},
     {id: 'AppTwoStepVerificationEmailConfirmationTab:TwoStepAuth.EmailCodeChangeEmail', sectionId: 'AppTwoStepVerificationEmailConfirmationTab', kind: 'row', titleLangKey: 'TwoStepAuth.EmailCodeChangeEmail'},

@@ -6,6 +6,7 @@
 // a non-painting tab still boots
 import '@helpers/dom/previewUnfreeze';
 import '@helpers/dom/previewRaf';
+import '@helpers/stickerSetLink';
 
 // Capture valid invite fragments before app modules can inspect the URL.
 import {

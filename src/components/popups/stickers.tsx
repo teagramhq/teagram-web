@@ -20,6 +20,8 @@ import wrapCustomEmoji from '@components/wrappers/customEmoji';
 import emoticonsDropdown from '@components/emoticonsDropdown';
 import ButtonMenuToggle from '@components/buttonMenuToggle';
 import {copyTextToClipboard} from '@helpers/clipboard';
+import {createStickerSetShareLink, setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
+import {logger} from '@lib/logger';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
 import {onMediaCaptionClick} from '@components/mediaViewer';
 import DEBUG from '@config/debug';
@@ -28,7 +30,7 @@ import appDownloadManager from '@lib/appDownloadManager';
 import pause from '@helpers/schedulers/pause';
 import toArray from '@helpers/array/toArray';
 import ListenerSetter from '@helpers/listenerSetter';
-import {createSignal, JSX, onCleanup, onMount, Show, untrack, useContext} from 'solid-js';
+import {createSignal, For, JSX, onCleanup, onMount, Show, untrack, useContext} from 'solid-js';
 import {subscribeOn} from '@helpers/solid/subscribeOn';
 import MyShow from '@helpers/solid/myShow';
 import Button from '@components/button';
@@ -36,6 +38,7 @@ import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 
 const ANIMATION_GROUP: AnimationItemGroup = 'STICKERS-POPUP';
 export const STICKERS_POPUP_KIND = Symbol('stickers-popup');
+const stickersPopupLogger = logger('StickersPopup');
 
 const TEST_LOADING_DELAY = 0;
 
@@ -70,6 +73,7 @@ export default function showStickersPopup(
     const [isAdd, setIsAdd] = createSignal(false);
     const [buttonText, setButtonText] = createSignal<JSX.Element>();
     const [containers, setContainers] = createSignal<JSX.Element>();
+    const [shareLinks, setShareLinks] = createSignal<string[]>([]);
 
     let rawSetsRef: Awaited<ReturnType<AppStickersManager['getStickerSet']>>[];
 
@@ -189,6 +193,16 @@ export default function showStickersPopup(
 
       isEmojis ??= !!firstSet.set.pFlags.emojis;
 
+      try {
+        const config = await managers.apiManager.getConfig();
+        if(!setStickerSetLinkPrefix(config.me_url_prefix)) throw new Error('Invalid sticker set link prefix');
+        setShareLinks(rawSets.map((set) => createStickerSetShareLink(config.me_url_prefix, set.set.short_name, !!isEmojis)));
+      } catch(err) {
+        stickersPopupLogger.error('Could not create sticker set share links', err);
+        setShareLinks([]);
+        toastNew({langPackKey: 'Teagram.Import.ShareLinkFailed'});
+      }
+
       attachClickEvent(scrollableEl, onStickersClick, {listenerSetter});
 
       const {destroy} = createStickersContextMenu({
@@ -277,10 +291,10 @@ export default function showStickersPopup(
       const buttons: ButtonMenuItemOptionsVerifiable[] = [{
         icon: 'copy',
         text: 'CopyLink',
+        verify: () => shareLinks().length > 0,
         onClick: () => {
-          const prefix = `https://t.me/${isEmojis ? 'addemoji' : 'addstickers'}/`;
-          const text = rawSets.map((set) => prefix + set.set.short_name).join('\n');
-          copyTextToClipboard(text);
+          const links = shareLinks();
+          if(links.length) copyTextToClipboard(links.join('\n'));
         }
       }];
 
@@ -349,7 +363,21 @@ export default function showStickersPopup(
             withBorders="top"
           >
             <Show when={isLoaded()} fallback={putPreloader(undefined, true)}>
-              {containers()}
+              <>
+                {containers()}
+                <Show when={shareLinks().length > 0}>
+                  <div class="sticker-set-share-links">
+                    <For each={shareLinks()}>{(link) => (
+                      <div class="sticker-set-share-link">
+                        <input aria-label={i18n('Teagram.Import.ShareLink').textContent} readOnly value={link} />
+                        <button class="btn btn-transparent primary" type="button" onClick={() => copyTextToClipboard(link)}>
+                          {i18n('CopyLink')}
+                        </button>
+                      </div>
+                    )}</For>
+                  </div>
+                </Show>
+              </>
             </Show>
           </PopupElement.Scrollable>
         </PopupElement.Body>

@@ -22,8 +22,8 @@ import {animateValue, simpleEasing} from '@helpers/animateValue';
 import {CancellablePromise} from '@helpers/cancellablePromise';
 
 const SHADER_URLS: DotRendererShaderURLs = {
-  vertex: 'assets/img/spoiler_vertex.glsl',
-  fragment: 'assets/img/spoiler_fragment.glsl'
+  vertex: '/assets/img/spoiler_vertex.glsl',
+  fragment: '/assets/img/spoiler_fragment.glsl'
 };
 
 const TEXT_SPOILER_WIDTH = 240;

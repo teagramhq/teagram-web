@@ -1,8 +1,10 @@
 import {afterEach, describe, expect, test, vi} from 'vitest';
 import wrapUrl from '@lib/richTextProcessor/wrapUrl';
+import {setStickerSetLinkPrefix} from '@helpers/stickerSetLink';
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  setStickerSetLinkPrefix('');
 });
 
 describe('wrapUrl Telegram links', () => {
@@ -71,5 +73,15 @@ describe('wrapUrl Telegram links', () => {
     const url = 'https://t.me:99999/durov';
     expect(() => wrapUrl(url)).not.toThrow();
     expect(wrapUrl(url)).toEqual({url, onclick: undefined});
+  });
+
+  test('routes only a sticker set link under the configured server prefix', () => {
+    vi.stubGlobal('stickerSet', vi.fn());
+    setStickerSetLinkPrefix('https://teagram.test/links/');
+
+    expect(wrapUrl('https://teagram.test/links/addstickers/cats_a').onclick).toBe('stickerSet');
+    expect(wrapUrl('https://teagram.test/links/addemoji/faces_2').onclick).toBe('stickerSet');
+    expect(wrapUrl('https://teagram.test/addstickers/cats_a').onclick).toBeUndefined();
+    expect(wrapUrl('https://teagram.test/links/addstickers/cats_a/extra').onclick).toBeUndefined();
   });
 });

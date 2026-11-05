@@ -627,7 +627,7 @@ export default class PopupBoostsViaGifts extends PopupElement {
       </>
     );
 
-    renderImageFromUrl(img, `assets/img/premiumboostsstar${window.devicePixelRatio > 1 ? '@2x' : ''}.png`);
+    renderImageFromUrl(img, `/assets/img/premiumboostsstar${window.devicePixelRatio > 1 ? '@2x' : ''}.png`);
 
     BoostsConfirmButton({
       button: this.btnConfirm,

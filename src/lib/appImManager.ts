@@ -337,7 +337,7 @@ export class AppImManager extends EventListenerBase<{
         const slug = (wallpaper as WallPaper.wallPaper)?.slug;
         if(!slug) return;
 
-        const url = 'assets/img/' + slug + '.svg' + (IS_FIREFOX ? '?1' : '');
+        const url = '/assets/img/' + slug + '.svg' + (IS_FIREFOX ? '?1' : '');
         ChatBackgroundStore.setBackgroundUrlToCache({slug, url});
       });
     });
