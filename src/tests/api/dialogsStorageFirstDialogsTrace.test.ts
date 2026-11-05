@@ -18,8 +18,8 @@ test('finishes the chat-list startup span when cached dialogs serve the first pa
   const apiManager = Object.create(ApiManager.prototype) as any;
   apiManager.performanceRpcTrace = new PerformanceRpcTrace(true);
   let finishReconciliation: (result: any) => void;
-  apiManager.invokeApiSingleProcess = vi.fn(() => new Promise((resolve) => {
-    finishReconciliation = resolve;
+  apiManager.invokeApiSingleProcess = vi.fn(({processResult}) => new Promise((resolve) => {
+    finishReconciliation = (result) => resolve(processResult ? processResult(result) : result);
   }));
 
   const dialog = {peerId: 1};
@@ -53,7 +53,8 @@ test('finishes the chat-list startup span when cached dialogs serve the first pa
   });
   expect(performancePhaseTrace.getSnapshot().some(({name: phaseName}) => phaseName === 'worker.dialogs.firstPage')).toBe(false);
 
-  finishReconciliation({_: 'messages.dialogs', count: 0, dialogs: [], chats: [], users: []});
+  const reconcileResult: any = {_: 'messages.dialogs', count: 0, dialogs: [], chats: [], users: []};
+  finishReconciliation(reconcileResult);
   await Promise.resolve();
   await vi.waitFor(() => {
     expect(performancePhaseTrace.getSnapshot().find(({name: phaseName}) => phaseName === 'worker.dialogs.cachedChannelReconcile')).toMatchObject({
@@ -61,4 +62,10 @@ test('finishes the chat-list startup span when cached dialogs serve the first pa
       durationMs: expect.any(Number)
     });
   });
+  expect(storage.appPeersManager.saveApiPeers).toHaveBeenCalledWith(
+    reconcileResult,
+    'cachedChannelDialogsReconcile',
+    true
+  );
+  expect(result.dialogs).toEqual([dialog]);
 });

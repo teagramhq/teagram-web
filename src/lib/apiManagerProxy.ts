@@ -87,7 +87,8 @@ import {
   deleteObjectURLMirrorValue,
   getNewActiveChannelMirrorChatId,
   reconcileObjectURLMirrorSnapshot,
-  reconcileObjectURLMirrorValue
+  reconcileObjectURLMirrorValue,
+  reconcilePeerMirrorBatch
 } from './apiManagerProxyUtils';
 
 function withRuntimeMtprotoTarget(url: string | URL) {
@@ -149,6 +150,7 @@ export type MirrorTaskPayload<
   value?: any,
   previousUrl?: string,
   previousUrls?: string[],
+  merge?: boolean,
   accountNumber: ActiveAccountNumber,
   trace?: 'cachedChannelDialogsReconcile'
 };
@@ -334,6 +336,15 @@ class ApiManagerProxy extends MTProtoMessagePort {
       },
 
       peers: (payload) => {
+        if(payload.merge) {
+          const activeChannelIds = reconcilePeerMirrorBatch(
+            this.mirrors.peers as Record<string, any>,
+            payload.value
+          );
+          activeChannelIds.forEach((chatId) => rootScope.dispatchEvent('chat_update', chatId));
+          return false;
+        }
+
         if(payload.key) {
           reconcilePeer(payload.key.toPeerId(), payload.value as any);
         } else {

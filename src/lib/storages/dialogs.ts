@@ -2117,7 +2117,11 @@ export default class DialogsStorage extends AppManager {
           },
           processResult: (result) => {
             if(result._ !== 'messages.dialogsNotModified') {
-              this.appPeersManager.saveApiPeers(result, import.meta.env.VITE_PERF_TRACE === '1' ? 'cachedChannelDialogsReconcile' : undefined);
+              this.appPeersManager.saveApiPeers(
+                result,
+                import.meta.env.VITE_PERF_TRACE === '1' ? 'cachedChannelDialogsReconcile' : undefined,
+                true
+              );
             }
 
             return result;

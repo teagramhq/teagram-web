@@ -19,6 +19,7 @@ import getPeerPhoto from '@appManagers/utils/peers/getPeerPhoto';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import callbackify from '@helpers/callbackify';
+import type {PeerMirrorBatch, PeerMirrorValue} from '@appManagers/peerMirrorBatch';
 
 export type PeerType = 'channel' | 'community' | 'chat' | 'megagroup' | 'group' | 'saved' | 'savedDialog' | 'monoforum' | 'monoforum_thread' | 'botforum_thread';
 export class AppPeersManager extends AppManager {
@@ -30,9 +31,24 @@ export class AppPeersManager extends AppManager {
     else appUsersManager.saveApiUser(instance);
   } */
 
-  public saveApiPeers(object: {chats?: Chat[], users?: User[]}, trace?: 'cachedChannelDialogsReconcile') {
-    this.appChatsManager.saveApiChats(object.chats, undefined, trace);
-    this.appUsersManager.saveApiUsers(object.users, undefined, trace);
+  public saveApiPeers(object: {chats?: Chat[], users?: User[]}, trace?: 'cachedChannelDialogsReconcile', batchMirrors = false) {
+    const peers: Record<string, PeerMirrorValue> = {};
+    const mirrorBatch: PeerMirrorBatch | undefined = batchMirrors ? (peerKey, peer) => {
+      peers[peerKey] = peer;
+    } : undefined;
+
+    this.appChatsManager.saveApiChats(object.chats, undefined, trace, mirrorBatch);
+    this.appUsersManager.saveApiUsers(object.users, undefined, trace, mirrorBatch);
+
+    if(mirrorBatch && Object.keys(peers).length) {
+      MTProtoMessagePort.getInstance<false>().invokeVoid('mirror', {
+        name: 'peers',
+        value: peers,
+        merge: true,
+        accountNumber: this.getAccountNumber(),
+        ...(import.meta.env.VITE_PERF_TRACE === '1' && trace ? {trace} : {})
+      });
+    }
   }
 
   public canPinMessage(peerId: PeerId) {
