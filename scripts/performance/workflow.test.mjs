@@ -46,7 +46,7 @@ test('extra timing samples are reported without changing the three-repeat policy
     droppedFrames: 0,
     droppedFramePercent: 0
   });
-  const makeReport = (timingSamples) => {
+  const makeReport = (timingSamples, sendSamples) => {
     const variants = {};
     for(const variant of ['base', 'head']) {
       variants[variant] = {'1x': {}, '100x': {}};
@@ -58,6 +58,8 @@ test('extra timing samples are reported without changing the three-repeat policy
     }
     variants.base['100x'].chatOpen = Array.from({length: 3}, () => makeSample(100));
     variants.head['100x'].chatOpen = timingSamples.map(makeSample);
+    variants.base['100x'].sendMessage = sendSamples.base.map(makeSample);
+    variants.head['100x'].sendMessage = sendSamples.head.map(makeSample);
     return {
       measurementVersion: 2,
       fixtureVersion: 'fixture-v1',
@@ -67,14 +69,15 @@ test('extra timing samples are reported without changing the three-repeat policy
       variants
     };
   };
-  const summaryFor = (timingSamples) => {
+  const summaryFor = (timingSamples, sendSamples = {base: [100, 100, 100], head: [100, 100, 100]}, eventName = 'pull_request') => {
     const directory = mkdtempSync(join(tmpdir(), 'tweb-performance-summary-'));
     const reportPath = join(directory, 'report.json');
-    const report = makeReport(timingSamples);
+    const report = makeReport(timingSamples, sendSamples);
     const historyDirectory = join(directory, 'history');
     mkdirSync(historyDirectory);
     const historyVariants = JSON.parse(JSON.stringify(report.variants.head));
     historyVariants['100x'].chatOpen = Array.from({length: 3}, () => makeSample(100));
+    historyVariants['100x'].sendMessage = historyVariants['100x'].sendMessage.slice(0, 3);
     writeFileSync(reportPath, JSON.stringify(report));
     for(let index = 0; index < 20; ++index) {
       writeFileSync(join(historyDirectory, `history-${index}.json`), JSON.stringify({
@@ -93,11 +96,19 @@ test('extra timing samples are reported without changing the three-repeat policy
           PERF_REPORT_PATH: reportPath,
           PERF_HISTORY_DIRECTORY: historyDirectory,
           PERF_BROWSER_OUTCOME: 'success',
-          GITHUB_EVENT_NAME: 'pull_request',
+          GITHUB_EVENT_NAME: eventName,
+          GITHUB_REF: eventName === 'push' ? 'refs/heads/master' : '',
+          GITHUB_RUN_ID: 'zz-run',
+          GITHUB_RUN_ATTEMPT: '1',
           GITHUB_STEP_SUMMARY: ''
         }
       });
       assert.equal(result.status, 0, result.stderr);
+      if(eventName === 'push') {
+        const savedHistory = JSON.parse(readFileSync(join(historyDirectory, 'zz-run-1.json'), 'utf8'));
+        assert.equal(savedHistory.variants.base['100x'].sendMessage.length, 3);
+        assert.equal(savedHistory.variants.head['100x'].sendMessage.length, 3);
+      }
       return result.stdout;
     } finally {
       rmSync(directory, {recursive: true, force: true});
@@ -106,8 +117,14 @@ test('extra timing samples are reported without changing the three-repeat policy
 
   const threeSampleSummary = summaryFor([100, 100, 190]);
   const fiveSampleSummary = summaryFor([100, 100, 190, 900, 1_000]);
+  const elevenSendSampleSummary = summaryFor([100, 100, 190], {
+    base: [100, 100, 100, 200, 300, 400, 500, 600, 700, 800, 900],
+    head: [100, 100, 100, 200, 300, 400, 500, 600, 700, 800, 1_100]
+  }, 'push');
   const policySection = (summary) => summary.split('\n### 100x repeated scenario samples')[0];
 
   assert.equal(policySection(fiveSampleSummary), policySection(threeSampleSummary));
+  assert.equal(policySection(elevenSendSampleSummary), policySection(threeSampleSummary));
   assert.match(fiveSampleSummary, /Open long-history chat \| head \| 5 \| 1000\.0/);
+  assert.match(elevenSendSampleSummary, /Send a message \| head \| 11 \| 1100\.0/);
 });

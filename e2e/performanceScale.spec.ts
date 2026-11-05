@@ -15,6 +15,7 @@ type Fixture = {
 type Scale = '1x' | '100x';
 type Variant = 'base' | 'head';
 const PERFORMANCE_TIMING_REPEATS = 5;
+const REPORT_ONLY_SEND_REPEATS = 11;
 
 type Metric = {
   ms: number,
@@ -995,6 +996,24 @@ async function runTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixtu
   }
 }
 
+async function runSendTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixture) {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    return await sendMessage(page, requests, fixture);
+  } finally {
+    await context.close();
+  }
+}
+
 async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
   const coldChatList: Metric[] = [];
   const warmChatList: Metric[] = [];
@@ -1094,6 +1113,15 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
         report.variants[variant]['100x'].chatOpen.push(measured.chatOpen);
         report.variants[variant]['100x'].scrollBack2k.push(measured.scrollBack2k);
         report.variants[variant]['100x'].sendMessage.push(measured.send);
+      }
+    }
+
+    for(let repeat = PERFORMANCE_TIMING_REPEATS; repeat < REPORT_ONLY_SEND_REPEATS; ++repeat) {
+      const order = repeat % 2 === 0 ? timingVariants : [...timingVariants].reverse();
+      for(const variant of order) {
+        const run = preparedVariants['100x'][variant]!;
+        const sample = await test.step(`100x ${variant} report-only send repeat ${repeat + 1}`, () => runSendTimingRepeat(browser, run, fixtures['100x']!));
+        report.variants[variant]['100x'].sendMessage.push(sample);
       }
     }
   }

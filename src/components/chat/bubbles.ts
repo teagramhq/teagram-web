@@ -6183,7 +6183,7 @@ export default class ChatBubbles {
             log.error('peer change preparation timed out:', peerId, pendingParts, timeoutError);
             prepared.failPeerChange();
           } else {
-            log.warn('peer change preparation timed out:', peerId, pendingParts, timeoutError, {stale: true});
+            log.warn('peer change preparation timed out:', peerId, this.chat.peerId, pendingParts, timeoutError, {stale: true});
           }
           throw isCurrent ? timeoutError : PEER_CHANGED_ERROR;
         }
@@ -6229,6 +6229,7 @@ export default class ChatBubbles {
       if(!samePeer) {
         this.preloader.attach(this.container);
       }
+      animationIntersector.lockGroup(this.chat.animationGroup);
 
       this.setPeerCached = result.cached;
       log.warn('got history');// warning
@@ -6246,7 +6247,7 @@ export default class ChatBubbles {
         if(isCurrent) {
           log.error('setPeer failed before mount', peerId, error);
         } else {
-          log.warn('setPeer failed before mount', peerId, error, {stale: true});
+          log.warn('setPeer failed before mount', peerId, this.chat.peerId, error, {stale: true});
         }
       }
       if(isCurrent) {
@@ -6265,6 +6266,7 @@ export default class ChatBubbles {
       releasePeerInnerMounted = resolve;
       rejectPeerInnerMounted = reject;
     }) : Promise.resolve();
+    // This observes early rejection until peerUiReadyPromise awaits and propagates the original promise.
     void peerInnerMounted.catch((): undefined => undefined);
     if(!samePeer) {
       void (async() => {
@@ -6316,7 +6318,6 @@ export default class ChatBubbles {
       peerInnerMounted.then(() => ({ready: true as const}));
     const peerReadyPromise = Promise.all([historyRenderPromise, peerUiReadyPromise]);
 
-    animationIntersector.lockGroup(this.chat.animationGroup);
     const setPeerPromise = peerReadyPromise.then(async() => {
       log.warn('promise fulfilled');
 
@@ -6505,7 +6506,7 @@ export default class ChatBubbles {
         if(isCurrent) {
           log.error('setPeer promise error:', peerId, err);
         } else {
-          log.warn('setPeer promise error:', peerId, err, {stale: true});
+          log.warn('setPeer promise error:', peerId, this.chat.peerId, err, {stale: true});
         }
       }
       if(isCurrent) {

@@ -1006,6 +1006,8 @@ test('does not fail the active peer when stale input preparation rejects', async
   }) as {ready: Promise<{error: unknown, name: string} | undefined>, apply: () => Promise<void>};
 
   isCurrent = false;
+  const supersedingPeerId = (peerId + 1) as PeerId;
+  chat.peerId = supersedingPeerId;
   input.peerChanging = true;
   rejectInputSetup(failure);
   await expect(prepared.ready).resolves.toEqual({error: failure, name: 'input'});
@@ -1017,7 +1019,7 @@ test('does not fail the active peer when stale input preparation rejects', async
   expect(messageInput.contentEditable).toBe('true');
   expect(chat.peerChangeFailed).toBe(false);
   expect(moduleMocks.toastNew).not.toHaveBeenCalled();
-  expect(chat.log.warn).toHaveBeenCalledWith('stale peer change part failed:', peerId, 'input', failure, {stale: true});
+  expect(chat.log.warn).toHaveBeenCalledWith('stale peer change part failed:', peerId, supersedingPeerId, 'input', failure, {stale: true});
 });
 
 test('warns when stale topbar preparation rejects without failing or publishing that peer', async() => {
@@ -1038,11 +1040,13 @@ test('warns when stale topbar preparation rejects without failing or publishing 
   }) as {ready: Promise<{error: unknown, name: string} | undefined>, apply: () => Promise<void>};
 
   isCurrent = false;
+  const supersedingPeerId = (peerId + 1) as PeerId;
+  chat.peerId = supersedingPeerId;
   rejectTopbarSetup(failure);
   await expect(prepared.ready).resolves.toEqual({error: failure, name: 'topbar'});
   await prepared.apply();
 
-  expect(chat.log.warn).toHaveBeenCalledWith('stale peer change part failed:', peerId, 'topbar', failure, {stale: true});
+  expect(chat.log.warn).toHaveBeenCalledWith('stale peer change part failed:', peerId, supersedingPeerId, 'topbar', failure, {stale: true});
   expect(failPeerChange).not.toHaveBeenCalled();
   expect(dispatchEvent).not.toHaveBeenCalledWith('peer_changed', chat);
 });
@@ -1182,6 +1186,26 @@ test('rejects prepared UI readiness when mounting the new chat fails', async() =
   } finally {
     unlockGroup.mockRestore();
     animationIntersector.unlockGroup(animationGroup);
+  }
+});
+
+test('releases the lazy queue when locking the animation group throws', async() => {
+  const failure = new Error('animation group lock failed');
+  const {harness, chat, setPeerLogger} = makeMountableSetPeerHarness();
+  const animationIntersector = (await import('@components/animationIntersector')).default;
+  const lockGroup = vi.spyOn(animationIntersector, 'lockGroup').mockImplementation(() => {
+    throw failure;
+  });
+
+  try {
+    await expect(harness.setPeer({peerId, samePeer: false, sameSearch: false})).rejects.toBe(failure);
+
+    expect(setPeerLogger.error).toHaveBeenCalledWith('setPeer failed before mount', peerId, failure);
+    expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
+    expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
+  } finally {
+    lockGroup.mockRestore();
+    animationIntersector.unlockGroup(chat.animationGroup);
   }
 });
 
@@ -1437,16 +1461,17 @@ test('logs a superseded history request failure without cleaning up the active p
   const first = harness.setPeer({peerId: firstPeerId, samePeer: false, sameSearch: false});
   await vi.waitFor(() => expect(getHistory1).toHaveBeenCalledTimes(1));
   const second = await harness.setPeer({peerId: secondPeerId, samePeer: false, sameSearch: false});
+  chat.peerId = secondPeerId;
   rejectFirstHistory(new Error('old peer history failed'));
 
   await expect(first).rejects.toThrow('old peer history failed');
   await second.promise;
 
-  expect(setPeerLogger.warn).toHaveBeenCalledWith('setPeer failed before mount', firstPeerId, expect.any(Error), {stale: true});
+  expect(setPeerLogger.warn).toHaveBeenCalledWith('setPeer failed before mount', firstPeerId, secondPeerId, expect.any(Error), {stale: true});
   expect(setPeerLogger.error).not.toHaveBeenCalledWith('setPeer failed before mount', firstPeerId, expect.anything());
   expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
   expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
-  expect(chat.peerId).toBe(peerId);
+  expect(chat.peerId).toBe(secondPeerId);
 });
 
 test('logs a superseded history render failure without detaching the active peer preloader', async() => {
@@ -1479,6 +1504,7 @@ test('logs a superseded history render failure without detaching the active peer
   await vi.waitFor(() => expect(harness.scrollable.replaceChildren).toHaveBeenCalledTimes(1));
   const firstFailure = expect(first.promise).rejects.toThrow('old peer render failed');
   const second = await harness.setPeer({peerId: secondPeerId, samePeer: false, sameSearch: false});
+  chat.peerId = secondPeerId;
   const detachCallsBeforeFailure = harness.preloader.detach.mock.calls.length;
   const unlockCallsBeforeFailure = harness.lazyLoadQueue.unlock.mock.calls.length;
   rejectFirstRender(new Error('old peer render failed'));
@@ -1489,7 +1515,7 @@ test('logs a superseded history render failure without detaching the active peer
   resolveSecondRender();
   await second.promise;
 
-  expect(setPeerLogger.warn).toHaveBeenCalledWith('setPeer promise error:', firstPeerId, expect.any(Error), {stale: true});
+  expect(setPeerLogger.warn).toHaveBeenCalledWith('setPeer promise error:', firstPeerId, secondPeerId, expect.any(Error), {stale: true});
   expect(setPeerLogger.error).not.toHaveBeenCalledWith('setPeer promise error:', firstPeerId, expect.anything());
   expect(harness.preloader.detach).toHaveBeenCalledTimes(detachCallsBeforeFailure + 1);
   expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(unlockCallsBeforeFailure + 1);
@@ -1640,7 +1666,7 @@ test('keeps cached bubbles unmounted and fails closed when peer preparation time
   }
 });
 
-test('does not log a preparation timeout after the peer transition is superseded', async() => {
+test('logs both peer ids when preparation times out after the transition is superseded', async() => {
   const firstReady = new Promise<undefined>(() => {});
   const {harness, chat, setPeerLogger} = makeMountableSetPeerHarness();
   chat.finishPeerChange = vi.fn()
@@ -1664,14 +1690,16 @@ test('does not log a preparation timeout after the peer transition is superseded
   vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']});
   try {
     const first = await harness.setPeer({peerId, samePeer: false, sameSearch: false});
-    const second = await harness.setPeer({peerId: (peerId + 1) as PeerId, samePeer: false, sameSearch: false});
+    const supersedingPeerId = (peerId + 1) as PeerId;
+    const second = await harness.setPeer({peerId: supersedingPeerId, samePeer: false, sameSearch: false});
+    chat.peerId = supersedingPeerId;
     await second.promise;
 
     const firstFailure = expect(first.promise).rejects.toBe(PEER_CHANGED_ERROR);
     await vi.advanceTimersByTimeAsync(30_000);
     await firstFailure;
 
-    expect(setPeerLogger.warn).toHaveBeenCalledWith('peer change preparation timed out:', peerId, ['topbar'], expect.any(Error), {stale: true});
+    expect(setPeerLogger.warn).toHaveBeenCalledWith('peer change preparation timed out:', peerId, supersedingPeerId, ['topbar'], expect.any(Error), {stale: true});
     expect(setPeerLogger.error).not.toHaveBeenCalledWith('peer change preparation timed out:', expect.anything(), expect.anything(), expect.anything());
     expect(setPeerLogger.error).not.toHaveBeenCalledWith('setPeer promise error:', expect.anything(), expect.anything());
   } finally {
