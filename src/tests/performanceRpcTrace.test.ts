@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {summarizeCpuProfile, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
+import {summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
 
 describe('performance RPC trace summary', () => {
   test('excludes long tasks that start outside the scenario measurement window', async() => {
@@ -158,5 +158,41 @@ describe('performance RPC trace summary', () => {
       {name: 'chat.finishPeerChange.bubbles', durationMs: 22.2}
     ]);
     expect(JSON.stringify(summary)).not.toContain('peerId');
+  });
+});
+
+describe('long task attribution', () => {
+  const profile = {
+    nodes: [
+      {id: 1, callFrame: {functionName: '(root)'}, children: [2, 3]},
+      {id: 2, callFrame: {functionName: 'mountUnmountGroups', url: 'https://x.test/assets/chat.js?t=1'}},
+      {id: 3, callFrame: {functionName: 'onMirrorTask', url: 'https://x.test/assets/proxy.js'}}
+    ],
+    // samples end at 1010, 1030, 1070 and 1120 ms on the page clock when the profile starts at 1000
+    samples: [3, 2, 2, 3],
+    timeDeltas: [10_000, 20_000, 40_000, 50_000]
+  };
+
+  test('joins spans and CPU samples to the long task they ran in', () => {
+    const result = summarizeLongTaskAttribution(
+      [{startTime: 1020, duration: 60}, {startTime: 1500, duration: 10}],
+      [
+        {name: 'bubbles.mountUnmountGroups', startMs: 1040, syncMs: 25.123},
+        {name: 'bubbles.performHistoryResult', startMs: 900, syncMs: 5}
+      ],
+      profile,
+      1000,
+      1000
+    );
+
+    expect(result).toEqual([{
+      startTimeMs: 20,
+      durationMs: 60,
+      spans: [{name: 'bubbles.mountUnmountGroups', startOffsetMs: 20, syncMs: 25.12}],
+      stacks: [
+        {frames: [{functionName: 'mountUnmountGroups', script: '/assets/chat.js'}], selfMs: 50},
+        {frames: [{functionName: 'onMirrorTask', script: '/assets/proxy.js'}], selfMs: 10}
+      ]
+    }]);
   });
 });

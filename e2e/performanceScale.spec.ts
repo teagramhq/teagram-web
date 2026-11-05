@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {summarizeCpuProfile, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall} from './performanceRpcTrace';
+import {summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -39,6 +39,7 @@ type Metric = {
   mainPhases?: PerformancePhaseSummary[],
   peerChangePhases?: PerformancePhaseSummary[],
   cpu?: PerformanceCpuSummary,
+  longTaskAttribution?: PerformanceTaskAttribution[],
   droppedFramePercent?: number,
   droppedFrames?: number,
   frameIntervals?: number,
@@ -381,14 +382,54 @@ async function startCpuProfile(page: Page) {
   const session = await page.context().newCDPSession(page);
   await session.send('Profiler.enable');
   await session.send('Profiler.setSamplingInterval', {interval: 1_000});
+  const beforeStart = await page.evaluate(() => performance.now());
   await session.send('Profiler.start');
-  return session;
+  const afterStart = await page.evaluate(() => performance.now());
+  // The profile's deltas count from the moment it started; the midpoint keeps the page-clock anchor within a few ms.
+  return Object.assign(session, {perfStartMs: (beforeStart + afterStart) / 2});
+}
+
+async function stopCpuProfile(session: Awaited<ReturnType<typeof startCpuProfile>>) {
+  const {profile} = await session.send('Profiler.stop');
+  await session.detach();
+  return {profile: profile as PerformanceCpuProfile, perfStartMs: session.perfStartMs};
 }
 
 async function finishCpuProfile(session: Awaited<ReturnType<typeof startCpuProfile>>) {
-  const {profile} = await session.send('Profiler.stop');
-  await session.detach();
-  return summarizeCpuProfile(profile as PerformanceCpuProfile);
+  const {profile} = await stopCpuProfile(session);
+  return summarizeCpuProfile(profile);
+}
+
+// Records the synchronous part of the history, grouping, slicing and mount calls so each long task in the
+// scroll-back window can be joined to the work that began inside it. Only the diagnostic pass installs it.
+async function installScrollSpanTracing(page: Page) {
+  await page.evaluate(() => {
+    const perf = (window as any).__teagramPerf;
+    const spans: Array<{name: string, startMs: number, syncMs: number}> = [];
+    const wrap = (target: any, method: string, name: string) => {
+      if(!target || typeof target[method] !== 'function') return;
+      const original = target[method];
+      target[method] = function(...args: any[]) {
+        const startMs = performance.now();
+        try {
+          return original.apply(this, args);
+        } finally {
+          spans.push({name, startMs, syncMs: performance.now() - startMs});
+        }
+      };
+    };
+    const bubbles = (window as any).appImManager?.chat?.bubbles;
+    if(!bubbles) return;
+    wrap(bubbles, 'getHistory1', 'bubbles.getHistory1');
+    wrap(bubbles, 'performHistoryResult', 'bubbles.performHistoryResult');
+    wrap(bubbles, 'groupBubbles', 'bubbles.groupBubbles');
+    wrap(bubbles, 'prepareToSaveScroll', 'bubbles.prepareToSaveScroll');
+    wrap(bubbles, 'getViewportSlice', 'bubbles.getViewportSlice');
+    wrap(bubbles, 'deleteViewportSlice', 'bubbles.deleteViewportSlice');
+    wrap(bubbles, 'commitBubbleReplacements', 'bubbles.commitBubbleReplacements');
+    wrap(bubbles.bubbleGroups, 'mountUnmountGroups', 'bubbleGroups.mountUnmountGroups');
+    perf.scrollSpans = spans;
+  });
 }
 
 async function signIn(page: Page, origin: string) {
@@ -449,6 +490,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
 
   await waitForHistorySettled(page);
   await begin(page, requests, profileTrace, profileTrace);
+  if(profileTrace) await installScrollSpanTracing(page);
   const cpuProfile = profileTrace ? await startCpuProfile(page) : undefined;
   await page.evaluate(() => (window as any).__teagramPerf.startFrames());
   const initial = await page.evaluate(() => {
@@ -502,9 +544,22 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     throw new Error(`scroll reached message ${currentMin}, expected ${targetMid}: ${JSON.stringify(scrollState)}`);
   }
   const boundary = await snapshotMeasurementBoundary(page);
-  const cpu = cpuProfile ? await finishCpuProfile(cpuProfile) : undefined;
+  const stoppedProfile = cpuProfile ? await stopCpuProfile(cpuProfile) : undefined;
   const metric = await capture(page, requests, boundary, true, profileTrace);
-  return cpu ? {...metric, cpu} : metric;
+  if(!stoppedProfile) return metric;
+
+  const {tasks, spans} = await page.evaluate(() => {
+    const perf = (window as any).__teagramPerf;
+    return {
+      tasks: perf.longTasks as Array<{startTime: number, duration: number}>,
+      spans: (perf.scrollSpans || []) as PerformanceSpan[]
+    };
+  });
+  return {
+    ...metric,
+    cpu: summarizeCpuProfile(stoppedProfile.profile),
+    longTaskAttribution: summarizeLongTaskAttribution(tasks, spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs)
+  };
 }
 
 async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture: Fixture, allowUnsupportedBase: boolean): Promise<Metric | undefined> {
@@ -748,6 +803,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
   const warmChatList: Metric[] = [];
   let chatOpen: Metric;
   let scrollBack2k: Metric;
+  const scrollBack2kRepeats: Metric[] = [];
 
   for(let repeat = 0; repeat < COLD_CHAT_LIST_REPEATS; ++repeat) {
     const context = await browser.newContext({
@@ -776,7 +832,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
       const warmCapture = await capture(page, requests, warmBoundary, false, true);
       warmChatList.push({...warmCapture, ...(warmProfile ? {cpu: await finishCpuProfile(warmProfile)} : {})});
 
-      if(repeat === 0) {
+      if(repeat < PERFORMANCE_REPEATS) {
         const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
         await expect(row).toBeVisible({timeout: 60_000});
         await begin(page, requests, true, true);
@@ -789,22 +845,27 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         const chatCpu = await finishCpuProfile(chatProfile);
         const chatOpenCapture = await capture(page, requests, chatOpenBoundary, false, true);
         const peerChangePhases = await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []);
-        chatOpen = {
-          ...chatOpenCapture,
-          cpu: chatCpu,
-          peerChangePhases: summarizePerformancePhases(peerChangePhases)
-        };
-        scrollBack2k = await test.step('profile 100x scroll back 2,000 messages', () => scrollBackTwoThousand(page, requests, true, true));
-        if(!scrollBack2k || !('cpu' in scrollBack2k)) throw new Error('scroll-back profile did not reach 2,000 messages');
-        expect(scrollBack2k.rpcSpansRecorded, 'scroll-back RPC spans were not recorded').toBe(true);
-        expect(scrollBack2k.cpu.sampledCpuMs, 'scroll-back CPU profile was empty').toBeGreaterThan(0);
+        if(repeat === 0) {
+          chatOpen = {
+            ...chatOpenCapture,
+            cpu: chatCpu,
+            peerChangePhases: summarizePerformancePhases(peerChangePhases)
+          };
+        }
+        // Every diagnostic repeat scrolls back, so each one's long tasks carry their own CPU stacks and spans.
+        const scrolled = await test.step(`profile 100x scroll back 2,000 messages (repeat ${repeat + 1})`, () => scrollBackTwoThousand(page, requests, true, true));
+        if(!scrolled || !('cpu' in scrolled)) throw new Error('scroll-back profile did not reach 2,000 messages');
+        expect(scrolled.rpcSpansRecorded, 'scroll-back RPC spans were not recorded').toBe(true);
+        expect(scrolled.cpu.sampledCpuMs, 'scroll-back CPU profile was empty').toBeGreaterThan(0);
+        scrollBack2kRepeats.push(scrolled);
+        if(repeat === 0) scrollBack2k = scrolled;
       }
     } finally {
       await context.close();
     }
   }
 
-  return {coldChatList, warmChatList, chatOpen: chatOpen!, scrollBack2k: scrollBack2k!};
+  return {coldChatList, warmChatList, chatOpen: chatOpen!, scrollBack2k: scrollBack2k!, scrollBack2kRepeats};
 }
 
 test('measures the scale fixture in interleaved base and head runs', async({browser}) => {

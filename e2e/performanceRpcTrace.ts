@@ -22,6 +22,19 @@ export type PerformanceCpuProfile = {
   timeDeltas?: number[]
 };
 
+export type PerformanceSpan = {
+  name: string,
+  startMs: number,
+  syncMs: number
+};
+
+export type PerformanceTaskAttribution = {
+  startTimeMs: number,
+  durationMs: number,
+  spans: Array<{name: string, startOffsetMs: number, syncMs: number}>,
+  stacks: Array<{frames: Array<{functionName: string, script: string}>, selfMs: number}>
+};
+
 type LongAnimationFrameScript = {
   sourceURL?: string,
   sourceFunctionName?: string,
@@ -191,4 +204,71 @@ export function summarizeCpuProfile(profile: PerformanceCpuProfile): Performance
       .slice(0, 20)
       .map((stack) => ({...stack, selfMs: Number(stack.selfMs.toFixed(2))}))
   };
+}
+
+// * Attributes each long task to the instrumented spans that began inside it and to the CPU samples
+// * taken while it ran. `perfStartMs` is `performance.now()` read right after the profiler started,
+// * which anchors the profile's relative time deltas to the page clock the long tasks use.
+export function summarizeLongTaskAttribution(
+  tasks: Array<{startTime: number, duration: number}>,
+  spans: PerformanceSpan[],
+  profile: PerformanceCpuProfile,
+  perfStartMs: number,
+  windowStartMs: number
+): PerformanceTaskAttribution[] {
+  const callFrames = new Map(profile.nodes.map(({id, callFrame}) => [id, callFrame]));
+  const parentIds = new Map<number, number>();
+  profile.nodes.forEach(({id, children = []}) => {
+    children.forEach((childId) => parentIds.set(childId, id));
+  });
+  const round = (value: number) => Number(value.toFixed(2));
+
+  const samples: Array<{nodeId: number, endMs: number, deltaMs: number}> = [];
+  let elapsedUs = 0;
+  (profile.samples || []).forEach((nodeId, index) => {
+    const delta = Math.max(0, profile.timeDeltas?.[index] || 0);
+    elapsedUs += delta;
+    samples.push({nodeId, endMs: perfStartMs + elapsedUs / 1000, deltaMs: delta / 1000});
+  });
+
+  return tasks.filter(({duration}) => duration > 50).map((task) => {
+    const taskEnd = task.startTime + task.duration;
+    const byStack = new Map<string, {frames: Array<{functionName: string, script: string}>, selfMs: number}>();
+    samples.forEach(({nodeId, endMs, deltaMs}) => {
+      const overlap = Math.min(endMs, taskEnd) - Math.max(endMs - deltaMs, task.startTime);
+      if(overlap <= 0) return;
+
+      const frames: Array<{functionName: string, script: string}> = [];
+      let currentNodeId: number | undefined = nodeId;
+      while(currentNodeId !== undefined && frames.length < 20) {
+        const callFrame = callFrames.get(currentNodeId);
+        if(!callFrame) break;
+        const functionName = callFrame.functionName || '(anonymous)';
+        if(functionName !== '(root)') {
+          const path = callFrame.url ? new URL(callFrame.url, 'https://trace.invalid').pathname : '';
+          const script = path ? path.split('/').slice(-2).join('/') : 'native';
+          frames.push({functionName, script: script.startsWith('/') ? script : `/${script}`});
+        }
+        currentNodeId = parentIds.get(currentNodeId);
+      }
+
+      const stackFrames = frames.reverse().slice(-10);
+      const key = JSON.stringify(stackFrames);
+      const entry = byStack.get(key) || {frames: stackFrames, selfMs: 0};
+      entry.selfMs += overlap;
+      byStack.set(key, entry);
+    });
+
+    return {
+      startTimeMs: round(task.startTime - windowStartMs),
+      durationMs: round(task.duration),
+      spans: spans
+        .filter(({startMs}) => startMs >= task.startTime && startMs < taskEnd)
+        .map(({name, startMs, syncMs}) => ({name, startOffsetMs: round(startMs - task.startTime), syncMs: round(syncMs)})),
+      stacks: [...byStack.values()]
+        .sort((left, right) => right.selfMs - left.selfMs)
+        .slice(0, 6)
+        .map((stack) => ({...stack, selfMs: round(stack.selfMs)}))
+    };
+  });
 }
