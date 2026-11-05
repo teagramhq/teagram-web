@@ -1,10 +1,53 @@
 import {mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
-import {evaluatePerformance, formatPerformanceSamplesTable, formatPerformanceTable, formatPerformanceTraceTable} from './policy.mjs';
+import {evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PERFORMANCE_REPEATS} from './policy.mjs';
 
 const reportPath = resolve(process.env.PERF_REPORT_PATH || '.performance-report.json');
 const historyDirectory = resolve(process.env.PERF_HISTORY_DIRECTORY || '.performance-history');
 const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
+const timingSampleScenarios = ['chatOpen', 'scrollBack2k', 'sendMessage'];
+function policyReportWithMasterRepeatCount(source) {
+  const report = structuredClone(source);
+  for(const variant of Object.values(report.variants || {})) {
+    for(const scenario of timingSampleScenarios) {
+      const samples = variant?.['100x']?.[scenario];
+      if(Array.isArray(samples)) {
+        variant['100x'][scenario] = samples.slice(0, PERFORMANCE_REPEATS);
+      }
+    }
+  }
+  return report;
+}
+
+function formatPerformanceSamplesTable(report, scale = '100x') {
+  const scenarios = [
+    ['chatOpen', 'Open long-history chat'],
+    ['scrollBack2k', 'Scroll back 2,000 messages'],
+    ['sendMessage', 'Send a message']
+  ];
+  const rows = [];
+  for(const [key, label] of scenarios) {
+    for(const variant of ['base', 'head']) {
+      const samples = report.variants?.[variant]?.[scale]?.[key];
+      if(!Array.isArray(samples)) continue;
+      samples.forEach((sample, index) => rows.push({label, variant, index, sample}));
+    }
+  }
+  if(!rows.length) return '';
+
+  const show = (value, digits = 1) => Number.isFinite(value) ? value.toFixed(digits) : '—';
+  const lines = [
+    `### ${scale} repeated scenario samples`,
+    '',
+    '| Scenario | Variant | Repeat | Time (ms) | preInteractionMs | Requests | DOM nodes | Long tasks >50 ms | Blocking (ms) | Dropped frames |',
+    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'
+  ];
+  for(const {label, variant, index, sample} of rows) {
+    lines.push(`| ${label} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.preInteractionMs)} | ${show(sample.requests, 0)} | ${show(sample.domNodes, 0)} | ${show(sample.longTasksOver50Ms, 0)} | ${show(sample.blockingTimeMs)} | ${show(sample.droppedFramePercent)}% |`);
+  }
+  return lines.join('\n');
+}
+
 let report = {variants: {}};
 const failures = [];
 
@@ -27,7 +70,7 @@ try {
   if(error.code !== 'ENOENT') failures.push(`history could not be read: ${error.message}`);
 }
 
-const evaluation = evaluatePerformance(report, history);
+const evaluation = evaluatePerformance(policyReportWithMasterRepeatCount(report), history);
 failures.push(...evaluation.blockingFailures);
 if(process.env.PERF_BROWSER_OUTCOME !== 'success') {
   failures.push(`browser performance run did not succeed (${process.env.PERF_BROWSER_OUTCOME || 'not run'})`);

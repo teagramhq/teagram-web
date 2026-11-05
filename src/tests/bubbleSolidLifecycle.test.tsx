@@ -1017,6 +1017,34 @@ test('does not fail the active peer when stale input preparation rejects', async
   expect(messageInput.contentEditable).toBe('true');
   expect(chat.peerChangeFailed).toBe(false);
   expect(moduleMocks.toastNew).not.toHaveBeenCalled();
+  expect(chat.log.warn).toHaveBeenCalledWith('stale peer change part failed:', peerId, 'input', failure, {stale: true});
+});
+
+test('warns when stale topbar preparation rejects without failing or publishing that peer', async() => {
+  let rejectTopbarSetup!: (error: Error) => void;
+  const topbarSetup = new Promise<() => void>((_resolve, reject) => {
+    rejectTopbarSetup = reject;
+  });
+  const failure = new Error('stale topbar setup failed');
+  const {chat, input, dispatchEvent} = makePeerChangeChat();
+  let isCurrent = true;
+  chat.topbar.finishPeerChange = vi.fn(() => topbarSetup);
+  const failPeerChange = vi.spyOn(input, 'failPeerChange');
+
+  const prepared = await Chat.prototype.finishPeerChange.call(chat, {
+    peerId,
+    middleware: () => isCurrent,
+    deferUiCallbacks: true
+  }) as {ready: Promise<{error: unknown, name: string} | undefined>, apply: () => Promise<void>};
+
+  isCurrent = false;
+  rejectTopbarSetup(failure);
+  await expect(prepared.ready).resolves.toEqual({error: failure, name: 'topbar'});
+  await prepared.apply();
+
+  expect(chat.log.warn).toHaveBeenCalledWith('stale peer change part failed:', peerId, 'topbar', failure, {stale: true});
+  expect(failPeerChange).not.toHaveBeenCalled();
+  expect(dispatchEvent).not.toHaveBeenCalledWith('peer_changed', chat);
 });
 
 test('does not apply peer UI callbacks when the generation goes stale during apply', async() => {
@@ -1388,6 +1416,100 @@ test('keeps the new peer preloader attached when superseded history is canceled'
   }
 });
 
+test('logs a superseded history request failure without cleaning up the active peer', async() => {
+  let rejectFirstHistory!: (error: Error) => void;
+  const firstHistory = new Promise<any>((_resolve, reject) => {
+    rejectFirstHistory = reject;
+  });
+  const {harness, chat, getHistory1, setPeerLogger} = makeMountableSetPeerHarness();
+  const firstPeerId = peerId;
+  const secondPeerId = (peerId + 1) as PeerId;
+  getHistory1.mockReturnValueOnce(firstHistory).mockReturnValueOnce(Promise.resolve({
+    cached: true,
+    promise: Promise.resolve(),
+    waitPromise: Promise.resolve()
+  }));
+  harness.middlewareHelper.get = () => {
+    const generation = harness.setPeerTempId;
+    return () => harness.setPeerTempId === generation;
+  };
+
+  const first = harness.setPeer({peerId: firstPeerId, samePeer: false, sameSearch: false});
+  await vi.waitFor(() => expect(getHistory1).toHaveBeenCalledTimes(1));
+  const second = await harness.setPeer({peerId: secondPeerId, samePeer: false, sameSearch: false});
+  rejectFirstHistory(new Error('old peer history failed'));
+
+  await expect(first).rejects.toThrow('old peer history failed');
+  await second.promise;
+
+  expect(setPeerLogger.warn).toHaveBeenCalledWith('setPeer failed before mount', firstPeerId, expect.any(Error), {stale: true});
+  expect(setPeerLogger.error).not.toHaveBeenCalledWith('setPeer failed before mount', firstPeerId, expect.anything());
+  expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
+  expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
+  expect(chat.peerId).toBe(peerId);
+});
+
+test('logs a superseded history render failure without detaching the active peer preloader', async() => {
+  let rejectFirstRender!: (error: Error) => void;
+  let resolveSecondRender!: () => void;
+  const firstRender = new Promise<void>((_resolve, reject) => {
+    rejectFirstRender = reject;
+  });
+  const secondRender = new Promise<void>((resolve) => {
+    resolveSecondRender = resolve;
+  });
+  const {harness, chat, getHistory1, setPeerLogger} = makeMountableSetPeerHarness();
+  const firstPeerId = peerId;
+  const secondPeerId = (peerId + 1) as PeerId;
+  getHistory1.mockReturnValueOnce(Promise.resolve({
+    cached: true,
+    promise: firstRender,
+    waitPromise: Promise.resolve()
+  })).mockReturnValueOnce(Promise.resolve({
+    cached: true,
+    promise: secondRender,
+    waitPromise: Promise.resolve()
+  }));
+  harness.middlewareHelper.get = () => {
+    const generation = harness.setPeerTempId;
+    return () => harness.setPeerTempId === generation;
+  };
+
+  const first = await harness.setPeer({peerId: firstPeerId, samePeer: false, sameSearch: false});
+  await vi.waitFor(() => expect(harness.scrollable.replaceChildren).toHaveBeenCalledTimes(1));
+  const firstFailure = expect(first.promise).rejects.toThrow('old peer render failed');
+  const second = await harness.setPeer({peerId: secondPeerId, samePeer: false, sameSearch: false});
+  const detachCallsBeforeFailure = harness.preloader.detach.mock.calls.length;
+  const unlockCallsBeforeFailure = harness.lazyLoadQueue.unlock.mock.calls.length;
+  rejectFirstRender(new Error('old peer render failed'));
+  await firstFailure;
+  expect(harness.preloader.detach).toHaveBeenCalledTimes(detachCallsBeforeFailure);
+  expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(unlockCallsBeforeFailure);
+
+  resolveSecondRender();
+  await second.promise;
+
+  expect(setPeerLogger.warn).toHaveBeenCalledWith('setPeer promise error:', firstPeerId, expect.any(Error), {stale: true});
+  expect(setPeerLogger.error).not.toHaveBeenCalledWith('setPeer promise error:', firstPeerId, expect.anything());
+  expect(harness.preloader.detach).toHaveBeenCalledTimes(detachCallsBeforeFailure + 1);
+  expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(unlockCallsBeforeFailure + 1);
+});
+
+test('cleans up when cached history setup throws synchronously', async() => {
+  const failure = new Error('cached history promise getter failed');
+  const {harness, getHistory1, setPeerLogger} = makeMountableSetPeerHarness();
+  getHistory1.mockReturnValueOnce(Promise.resolve(Object.defineProperty({
+    cached: true,
+    waitPromise: Promise.resolve()
+  }, 'promise', {get: () => {throw failure}})) as any);
+
+  await expect(harness.setPeer({peerId, samePeer: false, sameSearch: false})).rejects.toBe(failure);
+
+  expect(setPeerLogger.error).toHaveBeenCalledWith('setPeer failed before mount', peerId, failure);
+  expect(harness.preloader.detach).toHaveBeenCalledTimes(1);
+  expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
+});
+
 test('detaches the prior peer preloader when the current peer fails before mounting', async() => {
   let rejectFirstHistory!: (error: Error) => void;
   const firstHistory = new Promise<void>((_resolve, reject) => {
@@ -1549,6 +1671,7 @@ test('does not log a preparation timeout after the peer transition is superseded
     await vi.advanceTimersByTimeAsync(30_000);
     await firstFailure;
 
+    expect(setPeerLogger.warn).toHaveBeenCalledWith('peer change preparation timed out:', peerId, ['topbar'], expect.any(Error), {stale: true});
     expect(setPeerLogger.error).not.toHaveBeenCalledWith('peer change preparation timed out:', expect.anything(), expect.anything(), expect.anything());
     expect(setPeerLogger.error).not.toHaveBeenCalledWith('setPeer promise error:', expect.anything(), expect.anything());
   } finally {

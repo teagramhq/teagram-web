@@ -1324,6 +1324,8 @@ export default class Chat extends EventListenerBase<{
 
           if(middleware()) {
             this.log.error('peer change part failed:', peerId, name, error);
+          } else {
+            this.log.warn('stale peer change part failed:', peerId, name, error, {stale: true});
           }
           return {name, error};
         }

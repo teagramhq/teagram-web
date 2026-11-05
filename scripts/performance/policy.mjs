@@ -13,7 +13,6 @@ export const SCENARIOS = [
 export const SCALES = ['1x', '100x'];
 export const PERFORMANCE_MEASUREMENT_VERSION = 2;
 export const PERFORMANCE_REPEATS = 3;
-export const PERFORMANCE_TIMING_REPEATS = 5;
 // Cold-load pairs need additional samples to outvote occasional runner long tasks.
 export const COLD_CHAT_LIST_REPEATS = 6;
 
@@ -193,12 +192,8 @@ export function evaluatePerformance(report, history = []) {
     for(const scenario of SCENARIOS) {
       const rawBaseSamples = report.variants?.base?.[scale]?.[scenario.key];
       const rawHeadSamples = report.variants?.head?.[scale]?.[scenario.key];
-      const isReportOnlyTimingScenario = scale === '100x' && ['chatOpen', 'scrollBack2k', 'sendMessage'].includes(scenario.key);
-      const allBaseSamples = Array.isArray(rawBaseSamples) ? rawBaseSamples : [];
-      const allHeadSamples = Array.isArray(rawHeadSamples) ? rawHeadSamples : [];
-      // Keep additional timing repeats in the artifact without changing master's policy inputs.
-      const baseSamples = isReportOnlyTimingScenario ? allBaseSamples.slice(0, PERFORMANCE_REPEATS) : allBaseSamples;
-      const headSamples = isReportOnlyTimingScenario ? allHeadSamples.slice(0, PERFORMANCE_REPEATS) : allHeadSamples;
+      const baseSamples = Array.isArray(rawBaseSamples) ? rawBaseSamples : [];
+      const headSamples = Array.isArray(rawHeadSamples) ? rawHeadSamples : [];
       const base = summarizeSamples(baseSamples);
       const head = summarizeSamples(headSamples);
       const requiredRepeats = scale === '100x' && scenario.key === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
@@ -395,35 +390,6 @@ export function formatPerformanceTable(evaluation) {
     const scenarioFailure = evaluation.blockingFailures.some((failure) => failure.startsWith(`${row.scale} ${row.key}:`));
     const gate = row.budgetStatus === 'failed' || scenarioFailure ? 'failed' : row.scrollGateStatus || (row.budgetStatus === 'warming' ? overBudget ? 'over budget (report only)' : 'report only' : 'calibrated');
     lines.push(`| ${row.label} (${row.scale}) | ${show(row.head.ms, 1)} | ${budget} | ${noise} | ${ratio} | ${scrollNoise} | ${show(row.base.ms, 1)} | ${show(row.head.requests)} | ${show(row.head.domNodes)} | ${show(row.head.longTasksOver50Ms)} | ${show(row.head.blockingTimeMs, 1)} | ${show(row.head.droppedFramePercent, 2)}% | ${show(row.head.bundleBytes)} | ${gate} |`);
-  }
-  return lines.join('\n');
-}
-
-export function formatPerformanceSamplesTable(report, scale = '100x') {
-  const scenarios = [
-    ['chatOpen', 'Open long-history chat'],
-    ['scrollBack2k', 'Scroll back 2,000 messages'],
-    ['sendMessage', 'Send a message']
-  ];
-  const rows = [];
-  for(const [key, label] of scenarios) {
-    for(const variant of ['base', 'head']) {
-      const samples = report.variants?.[variant]?.[scale]?.[key];
-      if(!Array.isArray(samples)) continue;
-      samples.forEach((sample, index) => rows.push({label, variant, index, sample}));
-    }
-  }
-  if(!rows.length) return '';
-
-  const show = (value, digits = 1) => Number.isFinite(value) ? value.toFixed(digits) : '—';
-  const lines = [
-    `### ${scale} repeated scenario samples`,
-    '',
-    '| Scenario | Variant | Repeat | Time (ms) | preInteractionMs | Requests | DOM nodes | Long tasks >50 ms | Blocking (ms) | Dropped frames |',
-    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'
-  ];
-  for(const {label, variant, index, sample} of rows) {
-    lines.push(`| ${label} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.preInteractionMs)} | ${show(sample.requests, 0)} | ${show(sample.domNodes, 0)} | ${show(sample.longTasksOver50Ms, 0)} | ${show(sample.blockingTimeMs)} | ${show(sample.droppedFramePercent)}% |`);
   }
   return lines.join('\n');
 }

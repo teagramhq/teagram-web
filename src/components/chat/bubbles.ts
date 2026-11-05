@@ -6054,8 +6054,6 @@ export default class ChatBubbles {
       chatInner.classList.add('bubbles-inner');
     }
 
-    this.lazyLoadQueue.lock();
-
     let haveToScrollToBubble: boolean;
     let scrollFromDown: boolean;
     let scrollFromUp: boolean;
@@ -6065,8 +6063,12 @@ export default class ChatBubbles {
       prepared: PreparedPeerChange,
       ready: Awaited<PreparedPeerChange['ready']>
     } | {error: unknown} | undefined> | undefined;
-    let result: Awaited<ReturnType<ChatBubbles['getHistory']>>;
+    let cached: boolean;
+    let historyRenderFailed = false;
+    let historyRenderError: unknown;
+    let historyRenderPromise: Promise<unknown>;
     try {
+      this.lazyLoadQueue.lock();
       const canScroll = samePeer && sameSearch;
       // const haveToScrollToBubble = (topMessage && (isJump || samePeer)) || isTarget;
       haveToScrollToBubble = canScroll || (topMessageFullMid !== EMPTY_FULL_MID && isJump) || isTarget;
@@ -6172,18 +6174,18 @@ export default class ChatBubbles {
         const timeoutMarker = Symbol('peer change preparation timeout');
         const ready = await withTimeout(prepared.ready, PEER_CHANGE_PREPARATION_TIMEOUT, timeoutMarker);
         if(ready === timeoutMarker) {
-          if(!middleware()) {
-            throw PEER_CHANGED_ERROR;
-          }
           const pendingParts = prepared.getPendingParts();
           const timeoutError = new Error(
             `peer change preparation timed out after ${PEER_CHANGE_PREPARATION_TIMEOUT}ms: ${pendingParts.join(', ') || 'unknown part'}`
           );
-          if(middleware()) {
+          const isCurrent = middleware();
+          if(isCurrent) {
             log.error('peer change preparation timed out:', peerId, pendingParts, timeoutError);
+            prepared.failPeerChange();
+          } else {
+            log.warn('peer change preparation timed out:', peerId, pendingParts, timeoutError, {stale: true});
           }
-          prepared.failPeerChange();
-          throw timeoutError;
+          throw isCurrent ? timeoutError : PEER_CHANGED_ERROR;
         }
 
         return {prepared, ready};
@@ -6223,15 +6225,32 @@ export default class ChatBubbles {
           return historyRequest;
         })]) :
         historyRequest;
-      result = await m(historyResultPromise);
+      const result = await m(historyResultPromise);
       if(!samePeer) {
         this.preloader.attach(this.container);
       }
+
+      this.setPeerCached = result.cached;
+      log.warn('got history');// warning
+
+      const {promise, cached: isCached} = result;
+      cached = isCached;
+      historyRenderPromise = m(promise).catch((error: unknown) => {
+        historyRenderFailed = true;
+        historyRenderError = error;
+        throw error;
+      });
     } catch(error) {
-      if(middleware() && error !== PEER_CHANGED_ERROR) {
-        log.error('setPeer failed before mount', peerId, error);
+      const isCurrent = middleware();
+      if(error !== PEER_CHANGED_ERROR) {
+        if(isCurrent) {
+          log.error('setPeer failed before mount', peerId, error);
+        } else {
+          log.warn('setPeer failed before mount', peerId, error, {stale: true});
+        }
       }
-      if(middleware()) {
+      if(isCurrent) {
+        this.setPeerCached = undefined;
         this.preloader.detach();
         if(!samePeer && error !== PEER_CHANGED_ERROR) {
           this.chat.peerChangeFailed = true;
@@ -6240,12 +6259,6 @@ export default class ChatBubbles {
       }
       throw error;
     }
-
-    this.setPeerCached = result.cached;
-
-    log.warn('got history');// warning
-
-    const {promise, cached} = result;
     let releasePeerInnerMounted!: () => void;
     let rejectPeerInnerMounted!: (error: unknown) => void;
     const peerInnerMounted = !samePeer ? new Promise<void>((resolve, reject) => {
@@ -6253,13 +6266,6 @@ export default class ChatBubbles {
       rejectPeerInnerMounted = reject;
     }) : Promise.resolve();
     void peerInnerMounted.catch((): undefined => undefined);
-    let historyRenderFailed = false;
-    let historyRenderError: unknown;
-    const historyRenderPromise = m(promise).catch((error: unknown) => {
-      historyRenderFailed = true;
-      historyRenderError = error;
-      throw error;
-    });
     if(!samePeer) {
       void (async() => {
         try {
@@ -6495,8 +6501,12 @@ export default class ChatBubbles {
       // this.chatInner.classList.remove('disable-hover', 'is-scrolling'); // warning, performance!
     }).catch((err: unknown) => {
       const isCurrent = middleware();
-      if(isCurrent && err !== PEER_CHANGED_ERROR) {
-        log.error('setPeer promise error:', peerId, err);
+      if(err !== PEER_CHANGED_ERROR) {
+        if(isCurrent) {
+          log.error('setPeer promise error:', peerId, err);
+        } else {
+          log.warn('setPeer promise error:', peerId, err, {stale: true});
+        }
       }
       if(isCurrent) {
         this.preloader.detach();
