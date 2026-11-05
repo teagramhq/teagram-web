@@ -1242,6 +1242,26 @@ test('mounts affected groups once after deleting a viewport slice', () => {
   expect(bubbleGroups.mountUnmountGroups).toHaveBeenCalledWith([group]);
 });
 
+test('coalesces date and group class refreshes during a group mount batch', () => {
+  const emptyGroup = {items: [] as any[], mounted: true, onItemUnmount: vi.fn()};
+  const newGroup = {items: [{}], mounted: false, mount: vi.fn()};
+  const deleteEmptyDateGroups = vi.fn();
+  const updateGroupsClassNames = vi.fn();
+  const harness = {
+    chat: {bubbles: {deleteEmptyDateGroups}},
+    addChatThreadSeparators: vi.fn(),
+    addContinueLastTopicReplyMarkup: vi.fn(),
+    updateGroupsClassNames
+  };
+
+  (BubbleGroups.prototype.mountUnmountGroups as any).call(harness, [emptyGroup, newGroup]);
+
+  expect(emptyGroup.onItemUnmount).toHaveBeenCalledWith(true);
+  expect(newGroup.mount).toHaveBeenCalledWith(true, true);
+  expect(deleteEmptyDateGroups).toHaveBeenCalledOnce();
+  expect(updateGroupsClassNames).toHaveBeenCalledOnce();
+});
+
 test('leaves viewport slice group mounting to the caller batch when given a deferred set', () => {
   const fullMid = '10_1' as FullMid;
   const bubble = document.createElement('div');
@@ -1320,6 +1340,7 @@ test('defers group updates and removes a fully sliced group as one container', (
   document.body.append(container);
   const dateContainer = {groupsLength: 1};
   const deleteEmptyDateGroups = vi.fn();
+  const updateGroupsClassNames = vi.fn();
   const group: any = {
     items: [],
     mounted: true,
@@ -1327,9 +1348,18 @@ test('defers group updates and removes a fully sliced group as one container', (
     dateContainer,
     chat: {bubbles: {deleteEmptyDateGroups}},
     middlewareHelper: {clean: vi.fn()},
-    groups: {updateGroupsClassNames: vi.fn()}
+    groups: undefined
   };
-  const onItemUnmount = vi.fn(() => BubbleGroup.prototype.onItemUnmount.call(group));
+  const bubbleGroups = {
+    chat: group.chat,
+    updateGroupsClassNames,
+    addChatThreadSeparators: vi.fn(),
+    addContinueLastTopicReplyMarkup: vi.fn()
+  };
+  group.groups = bubbleGroups;
+  const onItemUnmount = vi.fn((deferGroupUpdates?: boolean) => (
+    BubbleGroup.prototype.onItemUnmount.call(group, deferGroupUpdates)
+  ));
   group.onItemUnmount = onItemUnmount;
   const item = {bubble, mounted: true};
 
@@ -1339,12 +1369,14 @@ test('defers group updates and removes a fully sliced group as one container', (
   expect(bubble.isConnected).toBe(true);
   expect(onItemUnmount).not.toHaveBeenCalled();
 
-  group.onItemUnmount();
+  (BubbleGroups.prototype.mountUnmountGroups as any).call(bubbleGroups, [group]);
 
+  expect(onItemUnmount).toHaveBeenCalledWith(true);
   expect(container.isConnected).toBe(false);
   expect(bubble.isConnected).toBe(false);
   expect(dateContainer.groupsLength).toBe(0);
   expect(deleteEmptyDateGroups).toHaveBeenCalledOnce();
+  expect(updateGroupsClassNames).toHaveBeenCalledOnce();
 });
 
 test('passes deferred removal details through BubbleGroups for a fully sliced group', () => {

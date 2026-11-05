@@ -18,6 +18,13 @@ type Metric = {
   ms: number,
   requests: number,
   domNodes: number,
+  domNodeCounts: {
+    bubbles: number,
+    bubbleGroups: number,
+    dateGroups: number,
+    groupAvatars: number,
+    deletePlaceholders: number
+  },
   bundleBytes: number,
   longTasksOver50Ms: number,
   blockingTimeMs: number,
@@ -47,7 +54,8 @@ type VariantRun = {
 type MeasurementBoundary = {
   ms: number,
   startedAtMs: number,
-  domNodes: number
+  domNodes: number,
+  domNodeCounts: Metric['domNodeCounts']
 };
 
 const scales: Scale[] = ['1x', '100x'];
@@ -266,6 +274,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     ms: boundary.ms,
     requests: requestCount,
     domNodes: boundary.domNodes,
+    domNodeCounts: boundary.domNodeCounts,
     rpcWallMs: metrics.rpcSpansRecorded ? rpcSummary.rpcWallMs : null,
     nonRpcElapsedMs: metrics.rpcSpansRecorded ? rpcSummary.nonRpcElapsedMs : null,
     workerPhases: includePhases ? summarizePerformancePhases(metrics.workerPhases || []) : undefined,
@@ -356,7 +365,14 @@ async function snapshotMeasurementBoundary(page: Page): Promise<MeasurementBound
     return {
       ms: performance.now() - perf.started,
       startedAtMs: perf.started,
-      domNodes: document.querySelectorAll('*').length
+      domNodes: document.querySelectorAll('*').length,
+      domNodeCounts: {
+        bubbles: document.querySelectorAll('.bubbles .bubble[data-mid]').length,
+        bubbleGroups: document.querySelectorAll('.bubbles .bubbles-group').length,
+        dateGroups: document.querySelectorAll('.bubbles .bubbles-date-group').length,
+        groupAvatars: document.querySelectorAll('.bubbles .bubbles-group-avatar-container').length,
+        deletePlaceholders: document.querySelectorAll('.bubbles .bubble-delete-placeholder').length
+      }
     };
   });
 }
