@@ -52,7 +52,7 @@ export class AppPeersManager extends AppManager {
       value: peers,
       merge: true,
       accountNumber: this.getAccountNumber(),
-      ...(import.meta.env.VITE_PERF_TRACE === '1' && trace ? {trace} : {})
+      ...(trace ? {trace} : {})
     });
   }
 

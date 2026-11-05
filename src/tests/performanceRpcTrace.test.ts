@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
+import {observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries} from '../../e2e/performanceRpcTrace';
 import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
 
 test('summarizes cached dialog reconciliation relative to a scenario', () => {
@@ -13,6 +13,24 @@ test('summarizes cached dialog reconciliation relative to a scenario', () => {
     endRelativeToScenarioMs: 1_500,
     mainThreadTimeMs: 640
   });
+});
+
+test('requires a complete reconciliation summary on every measured scenario repeat', () => {
+  const summary = {
+    pageCount: 30,
+    startRelativeToScenarioMs: -100,
+    endRelativeToScenarioMs: 2_500,
+    mainThreadTimeMs: 640
+  };
+
+  expect(() => validateCachedDialogReconcileSummaries([
+    {cachedDialogReconcile: summary},
+    {cachedDialogReconcile: summary}
+  ], 'scrollBack2k', 2)).not.toThrow();
+  expect(() => validateCachedDialogReconcileSummaries([
+    {cachedDialogReconcile: summary},
+    {}
+  ], 'scrollBack2k', 2)).toThrow('100x scrollBack2k measured repeat 2 has incomplete reconciliation data');
 });
 
 test('keeps completed reconciliation measurements when the scenario trace resets', async() => {

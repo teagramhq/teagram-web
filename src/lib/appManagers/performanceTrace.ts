@@ -25,17 +25,19 @@ export type PerformanceRpcHandle = {
 
 export class PerformancePhaseTrace {
   private readonly enabled: boolean;
+  private readonly alwaysEnabledNames: Set<string>;
   private phases: PerformancePhase[] = [];
 
-  constructor(enabled: boolean) {
+  constructor(enabled: boolean, alwaysEnabledNames: string[] = []) {
     this.enabled = enabled;
+    this.alwaysEnabledNames = new Set(alwaysEnabledNames);
   }
 
   public start(
     name: string,
     details: {accountNumber?: number, startedAtEpochMs?: number} = {}
   ): (summary?: {pageCount?: number}) => void {
-    if(!this.enabled) return () => {};
+    if(!this.enabled && !this.alwaysEnabledNames.has(name)) return () => {};
 
     const started = performance.now();
     const startedAtEpochMs = details.startedAtEpochMs ?? performance.timeOrigin + started;
@@ -158,4 +160,9 @@ export class PerformanceRpcTrace {
   }
 }
 
-export const performancePhaseTrace = new PerformancePhaseTrace(import.meta.env.VITE_PERF_TRACE === '1');
+const reconcileTraceEnabled = import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1';
+
+export const performancePhaseTrace = new PerformancePhaseTrace(
+  import.meta.env.VITE_PERF_TRACE === '1',
+  reconcileTraceEnabled ? ['worker.dialogs.cachedChannelReconcile'] : []
+);

@@ -144,6 +144,30 @@ export function summarizeCachedDialogReconcile(
   };
 }
 
+export function validateCachedDialogReconcileSummaries(
+  samples: Array<{cachedDialogReconcile?: CachedDialogReconcileSummary}>,
+  scenario: string,
+  expectedRepeatCount: number
+) {
+  if(samples.length !== expectedRepeatCount) {
+    throw new Error(`100x ${scenario} has ${samples.length} measured repeats; expected ${expectedRepeatCount}`);
+  }
+
+  samples.forEach(({cachedDialogReconcile}, index) => {
+    if(
+      !cachedDialogReconcile ||
+      !Number.isFinite(cachedDialogReconcile.pageCount) ||
+      cachedDialogReconcile.pageCount! <= 0 ||
+      !Number.isFinite(cachedDialogReconcile.startRelativeToScenarioMs) ||
+      !Number.isFinite(cachedDialogReconcile.endRelativeToScenarioMs) ||
+      !Number.isFinite(cachedDialogReconcile.mainThreadTimeMs) ||
+      cachedDialogReconcile.mainThreadTimeMs <= 0
+    ) {
+      throw new Error(`100x ${scenario} measured repeat ${index + 1} has incomplete reconciliation data`);
+    }
+  });
+}
+
 export function validateCachedDialogReconcileDiagnostics(
   samples: Array<{cachedDialogReconcile?: CachedDialogReconcileSummary, longTaskTrace?: unknown}>,
   scenario: string,

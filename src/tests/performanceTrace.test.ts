@@ -56,6 +56,19 @@ describe('performance trace collectors', () => {
     expect(performance.getEntriesByName(name, 'measure')).toEqual([]);
   });
 
+  test('records only allowlisted phases while the general trace is disabled', () => {
+    const reconcileName = 'worker.dialogs.cachedChannelReconcile';
+    const trace = new PerformancePhaseTrace(false, [reconcileName]);
+    const finish = trace.start(reconcileName);
+    trace.start('worker.storage.load')();
+
+    finish({pageCount: 4});
+
+    expect(trace.getSnapshot()).toMatchObject([
+      {name: reconcileName, pageCount: 4, durationMs: expect.any(Number)}
+    ]);
+  });
+
   test('records worker phases without retaining arbitrary details', () => {
     const trace = new PerformancePhaseTrace(true);
     const finish = trace.start('worker.storage.load', {accountNumber: 2});

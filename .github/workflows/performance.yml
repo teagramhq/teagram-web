@@ -217,7 +217,7 @@ jobs:
           PERF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
+          VITE_PERF_RECONCILE_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
           VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-trace-dist"
           if [ -n "$PERF_BASE_SHA" ]; then
             base_directory="$RUNNER_TEMP/teagram-web-base"

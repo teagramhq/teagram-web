@@ -1625,8 +1625,10 @@ class ApiManagerProxy extends MTProtoMessagePort {
     const isSettingsUpdate = name === 'state' && key === 'settings';
     if(!isSettingsUpdate && accountNumber !== getCurrentAccount()) return;
 
-    const traceMirror = import.meta.env.VITE_PERF_TRACE === '1' && payload.trace === 'cachedChannelDialogsReconcile';
-    const startedAt = traceMirror ? performance.now() : 0;
+    const traceMirror = (import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1') &&
+      payload.trace === 'cachedChannelDialogsReconcile';
+    const perf = traceMirror ? (globalThis as any).__teagramPerf : undefined;
+    const startedAt = perf ? performance.now() : 0;
     try {
       const newActiveChannelId = name === 'peers' && key ?
         getNewActiveChannelMirrorChatId(this.mirrors.peers[key.toPeerId()], value) :
@@ -1648,10 +1650,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
         rootScope.dispatchEvent('chat_update', newActiveChannelId);
       }
     } finally {
-      if(traceMirror) {
-        const perf = (globalThis as any).__teagramPerf;
-        if(perf) perf.cachedDialogsReconcileMainThreadMs += performance.now() - startedAt;
-      }
+      if(perf) perf.cachedDialogsReconcileMainThreadMs += performance.now() - startedAt;
     }
   };
 

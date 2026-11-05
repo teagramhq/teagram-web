@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {CACHED_DIALOG_RECONCILE_PHASE_NAME, getScenarioPreservedPerformancePhases, observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {CACHED_DIALOG_RECONCILE_PHASE_NAME, getScenarioPreservedPerformancePhases, observeLongAnimationFrames, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateCachedDialogReconcileSummaries, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -63,7 +63,7 @@ type MeasurementBoundary = {
 };
 
 type CachedDialogReconcileTarget = {
-  metric: Metric,
+  metric: Partial<Metric>,
   scenario: string,
   scenarioStartedAtEpochMs: number
 };
@@ -113,7 +113,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   page.on('requestfailed', (request) => bundleRequests.requestFailed(request));
   page.on('worker', (worker) => bundleRequests.workerReady(worker.url()));
   await page.exposeBinding('__teagramBundleWorkerReady', (_source, url: string) => bundleRequests.workerReady(url));
-  // Only the diagnostic pass observes long animation frames; the gated windows stay as instrumented as on master.
+  // The diagnostic pass adds broad trace capture; gated windows use only the cached-dialog reconciliation timer.
   if(observeAnimationFrames) await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
   return page.addInitScript(({injectColdStall, observeAnimationFrames}: {injectColdStall: boolean, observeAnimationFrames: boolean}) => {
     // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
@@ -364,6 +364,16 @@ async function finalizeCachedDialogReconcileSummaries(page: Page, targets: Cache
     expect(summary.mainThreadTimeMs, `${target.scenario} reconciliation main-thread time is missing`).toBeGreaterThan(0);
     target.metric.cachedDialogReconcile = summary;
   }
+}
+
+async function addCachedDialogReconcileTarget(page: Page, targets: CachedDialogReconcileTarget[] | undefined, metric: Partial<Metric>, scenario: string) {
+  if(!targets) return;
+
+  const scenarioStartedAtEpochMs = await page.evaluate(() => {
+    const perf = (window as any).__teagramPerf;
+    return performance.timeOrigin + perf.started;
+  });
+  targets.push({metric, scenario, scenarioStartedAtEpochMs});
 }
 
 async function installPeerChangeTracing(page: Page) {
@@ -815,7 +825,16 @@ async function runColdChatList(browser: Browser, run: VariantRun): Promise<Metri
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     await waitForChatList(page);
-    return await capture(page, requests, await snapshotMeasurementBoundary(page));
+    const boundary = await snapshotMeasurementBoundary(page);
+    const sample = await capture(page, requests, boundary);
+    if(run.variant === 'head') {
+      await finalizeCachedDialogReconcileSummaries(page, [{
+        metric: sample,
+        scenario: 'coldChatList',
+        scenarioStartedAtEpochMs: boundary.startedAtEpochMs
+      }]);
+    }
+    return sample;
   } finally {
     await context.close();
   }
@@ -894,20 +913,27 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   });
   const page = await context.newPage();
   const requests = {value: 0};
+  const reconcileTargets = variant === 'head' && scale === '100x' ? [] as CachedDialogReconcileTarget[] : undefined;
   await installInstrumentation(page, requests, origin);
 
   try {
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     await waitForChatList(page);
-    measured.coldChatList.push(await test.step('cold chat list', async() => capture(page, requests, await snapshotMeasurementBoundary(page))));
-    measured.warmChatList.push(await test.step('warm chat list', () => reloadChatList(page, requests)));
+    const coldChatList = await test.step('cold chat list', async() => capture(page, requests, await snapshotMeasurementBoundary(page)));
+    measured.coldChatList.push(coldChatList);
+    await addCachedDialogReconcileTarget(page, reconcileTargets, coldChatList, 'coldChatList');
+    const warmChatList = await test.step('warm chat list', () => reloadChatList(page, requests));
+    measured.warmChatList.push(warmChatList);
+    await addCachedDialogReconcileTarget(page, reconcileTargets, warmChatList, 'warmChatList');
 
     const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture));
     measured.chatOpen.push(chatOpen);
+    await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpen, 'chatOpen');
     const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(page, requests, variant === 'head'));
     if(scroll) {
       measured.scrollBack2k.push(scroll);
+      await addCachedDialogReconcileTarget(page, reconcileTargets, scroll, 'scrollBack2k');
     } else {
       // The base build may not reach the older history window. Its open-chat bundle is still the route baseline.
       measured.scrollBack2k.push({bundleBytes: chatOpen.bundleBytes});
@@ -915,6 +941,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     const jump = await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture, variant === 'base'), {timeout: 120_000});
     if(jump) {
       measured.dateJump.push(jump);
+      await addCachedDialogReconcileTarget(page, reconcileTargets, jump, 'dateJump');
     } else {
       // The base build may lack the calendar control. Its open-chat bundle is still the route baseline.
       measured.dateJump.push({bundleBytes: chatOpen.bundleBytes});
@@ -923,10 +950,19 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     // Reset both variants to the same signed-in chat-list state before contacts measurements.
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
-    measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
-    measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
-    measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
-    measured.sendMessage.push(await test.step('send a message', () => sendMessage(page, requests, fixture)));
+    const contactsList = await test.step('open contacts', () => openContacts(page, requests));
+    measured.contactsList.push(contactsList);
+    await addCachedDialogReconcileTarget(page, reconcileTargets, contactsList, 'contactsList');
+    const contactSearch = await test.step('search contacts', () => searchContacts(page, requests, scale));
+    measured.contactSearch.push(contactSearch);
+    await addCachedDialogReconcileTarget(page, reconcileTargets, contactSearch, 'contactSearch');
+    const globalSearchSample = await test.step('global message search', () => globalSearch(page, requests, scale));
+    measured.globalSearch.push(globalSearchSample);
+    await addCachedDialogReconcileTarget(page, reconcileTargets, globalSearchSample, 'globalSearch');
+    const sendMessageSample = await test.step('send a message', () => sendMessage(page, requests, fixture));
+    measured.sendMessage.push(sendMessageSample);
+    await addCachedDialogReconcileTarget(page, reconcileTargets, sendMessageSample, 'sendMessage');
+    if(reconcileTargets) await finalizeCachedDialogReconcileSummaries(page, reconcileTargets);
   } finally {
     await context.close();
   }
@@ -1074,10 +1110,6 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
   for(const scenario of scenarios) {
     const expectedRepeatCount = scenario === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
     validateCachedDialogReconcileDiagnostics(traceSamples[scenario], scenario, expectedRepeatCount);
-    expect(
-      report.variants.head['100x'][scenario].every((sample) => sample.cachedDialogReconcile === undefined),
-      `100x ${scenario} diagnostics must remain separate from gated measurements`
-    ).toBe(true);
   }
 
   return traceSamples;
@@ -1107,6 +1139,10 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       const sample = await test.step(`${coldScale} ${variant} cold chat list round ${repeat + 1}`, () => runColdChatList(browser, run));
       report.variants[variant][coldScale].coldChatList.push(sample);
     }
+  }
+  for(const scenario of scenarios) {
+    const expectedRepeatCount = scenario === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
+    validateCachedDialogReconcileSummaries(report.variants.head['100x'][scenario], scenario, expectedRepeatCount);
   }
   const traceOrigin = process.env.PERF_TRACE_HEAD_ORIGIN_100X;
   expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();

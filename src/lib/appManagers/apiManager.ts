@@ -758,7 +758,9 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public getPerformancePhaseTrace() {
-    if(import.meta.env.VITE_PERF_TRACE === '1') return performancePhaseTrace.getSnapshot();
+    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1') {
+      return performancePhaseTrace.getSnapshot();
+    }
     return [];
   }
 

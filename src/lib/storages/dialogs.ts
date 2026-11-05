@@ -2096,10 +2096,10 @@ export default class DialogsStorage extends AppManager {
   }
 
   private async getServerChannelsMissingLocally() {
-    const trace = import.meta.env.VITE_PERF_TRACE === '1' ? 'cachedChannelDialogsReconcile' : undefined;
-    const finishTrace = trace ?
-      performancePhaseTrace.start('worker.dialogs.cachedChannelReconcile') :
+    const trace = import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1' ?
+      'cachedChannelDialogsReconcile' as const :
       undefined;
+    const finishTrace = trace ? performancePhaseTrace.start('worker.dialogs.cachedChannelReconcile') : undefined;
     let pageCount = 0;
     const limit = 100;
     const missingPeerIds: PeerId[] = [];
