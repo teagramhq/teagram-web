@@ -2071,6 +2071,67 @@ test('limits the first history render to a viewport-sized page', () => {
   expect(getInitialHistoryLoadCount(3_000)).toBe(38);
 });
 
+test('renders the newest first-paint batch before the remaining initial history', async() => {
+  const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
+  Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
+
+  const messages = Array.from({length: 10}, (_, index) => ({
+    ...message(),
+    id: 100 - index,
+    mid: 100 - index
+  }));
+  const renderedMids: number[] = [];
+  let releaseFirstBatch!: () => void;
+  const queuePromise = new Promise<void>((resolve) => {
+    releaseFirstBatch = resolve;
+  });
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chat: {type: ChatType.Chat},
+    chatInner: {parentElement: undefined},
+    scrollable: {loadedAll: {top: true, bottom: true}},
+    needReflowScroll: false,
+    sponsoredMessageEvery: undefined,
+    messagesQueueOnRenderAdditional: undefined,
+    safeRenderMessage: vi.fn(({message}: {message: Message.message}) => {
+      renderedMids.push(message.mid);
+      return Promise.resolve();
+    }),
+    checkIfEmptyPlaceholderNeeded: vi.fn(async() => undefined),
+    log: Object.assign(vi.fn(), {bindPrefix: vi.fn(() => vi.fn())})
+  }) as any;
+  Object.defineProperty(harness, 'messagesQueuePromise', {
+    configurable: true,
+    get: () => queuePromise
+  });
+
+  const renderPromise = (ChatBubbles.prototype.performHistoryResult as any).call(
+    harness,
+    {history: messages},
+    true,
+    false,
+    true
+  );
+
+  try {
+    await vi.waitFor(() => expect(renderedMids).toHaveLength(5));
+    expect(renderedMids).toEqual([100, 99, 98, 97, 96]);
+
+    releaseFirstBatch();
+    await renderPromise;
+    expect(renderedMids).toHaveLength(5);
+    await vi.waitFor(() => expect(renderedMids).toHaveLength(messages.length));
+
+    expect(renderedMids).toEqual(messages.map(({mid}) => mid));
+  } finally {
+    releaseFirstBatch();
+    if(previousHeight) {
+      Object.defineProperty(windowSize, 'height', previousHeight);
+    } else {
+      delete (windowSize as any).height;
+    }
+  }
+});
+
 function message(): Message.message {
   return {
     _: 'message',

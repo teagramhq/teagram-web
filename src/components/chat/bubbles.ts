@@ -11640,7 +11640,9 @@ export default class ChatBubbles {
   public async performHistoryResult(
     historyResult: LocalHistoryResult | {history: (Message.message | Message.messageService | number)[]},
     reverse: boolean,
-    includeEphemeralHistory = false
+    includeEphemeralHistory = false,
+    prioritizeFirstPaint = false,
+    onDeferredHistory?: (promise: Promise<void>) => void
   ) {
     const log = false || true ? this.log.bindPrefix('perform-' + (Math.random() * 1000 | 0)) : undefined;
     log?.('start', this.chatInner.parentElement, historyResult);
@@ -11759,19 +11761,59 @@ export default class ChatBubbles {
       }
     }
 
-    let promises: Promise<any>[] = [];
-    if(this.chat.type === ChatType.Search && false) {
-      const length = history.length;
-      if(reverse) for(let i = 0; i < length; ++i) promises.push(cb(messages[i]));
-      else for(let i = length - 1; i >= 0; --i) promises.push(cb(messages[i]));
-    } else {
-      promises = messages.map(cb);
-    }
+    const renderMessages = async(batch: typeof messages) => {
+      let promises: Promise<any>[] = [];
+      if(this.chat.type === ChatType.Search && false) {
+        const length = batch.length;
+        if(reverse) for(let i = 0; i < length; ++i) promises.push(cb(batch[i]));
+        else for(let i = length - 1; i >= 0; --i) promises.push(cb(batch[i]));
+      } else {
+        promises = batch.map(cb);
+      }
 
-    try {
-      // cannot combine them into one promise
       promises.length && await Promise.all(promises);
       await this.messagesQueuePromise;
+    };
+
+    try {
+      const firstPaintCount = Math.max(3, Math.ceil(getInitialHistoryLoadCount(windowSize.height) / 2));
+      if(prioritizeFirstPaint && messages.length > firstPaintCount) {
+        let firstBatchEnd = firstPaintCount;
+        const firstBatchLastMessage = messages[firstBatchEnd - 1];
+        const groupedId = firstBatchLastMessage?._ === 'message' ? firstBatchLastMessage.grouped_id : undefined;
+        while(groupedId) {
+          const nextMessage = messages[firstBatchEnd];
+          if(nextMessage?._ !== 'message' || nextMessage.grouped_id !== groupedId) break;
+          ++firstBatchEnd;
+        }
+
+        await renderMessages(messages.slice(0, firstBatchEnd));
+
+        const renderedPeerId = this.peerId;
+        const renderedChatInner = this.chatInner;
+        const renderedBubbleGroups = this.bubbleGroups;
+        const renderRemainder = new Promise<void>((resolve) => {
+          // Let the newly mounted chat paint its newest bubbles before building the rest of the page.
+          fastRaf(() => {
+            window.setTimeout(() => {
+              if(this.peerId !== renderedPeerId || this.chatInner !== renderedChatInner || this.bubbleGroups !== renderedBubbleGroups) {
+                resolve();
+                return;
+              }
+
+              void renderMessages(messages.slice(firstBatchEnd)).then(resolve, (error: unknown) => {
+                if(error !== PEER_CHANGED_ERROR) {
+                  this.log.error('deferred history render failed:', error);
+                }
+                resolve();
+              });
+            }, 0);
+          });
+        });
+        onDeferredHistory?.(renderRemainder);
+      } else {
+        await renderMessages(messages);
+      }
     } finally {
       if(ephemeralMessages.length) {
         this.pendingEphemeralHistory = Math.max(0, this.pendingEphemeralHistory - 1);
@@ -11785,7 +11827,9 @@ export default class ChatBubbles {
     // * have to check again, because it can be skipped above
     const placeholderPromise = this.checkIfEmptyPlaceholderNeeded();
     placeholderPromise && await placeholderPromise;
-    this.messagesQueuePromise && await this.messagesQueuePromise;
+    if(!prioritizeFirstPaint) {
+      this.messagesQueuePromise && await this.messagesQueuePromise;
+    }
 
     if(this.scrollable.loadedAll.top && this.messagesQueueOnRenderAdditional) {
       this.messagesQueueOnRenderAdditional();
@@ -13041,6 +13085,7 @@ export default class ChatBubbles {
     middleware?: () => boolean
   ): Promise<{cached: boolean, promise: Promise<void>, waitPromise: Promise<any>}> {
     const peerId = this.peerId;
+    const prioritizeFirstPaint = this.isFirstLoad && reverse && !isBackLimit && !additionalFullMid && this.chat.type === ChatType.Chat;
 
     const isBroadcast = this.chat.isBroadcast;
     // console.time('appImManager call getHistory');
@@ -13115,6 +13160,7 @@ export default class ChatBubbles {
       appMessagesManager.getHistory(this.peerId, maxId, loadCount, backLimit); */
     let result: AckedResult<MyHistoryResult> = await this.requestHistory(maxId, loadCount, backLimit) as any;
     let resultPromise: typeof result['result'];
+    let deferredHistoryPromise: Promise<void> | undefined;
 
     this.log('i vin brehnya', result, maxId, loadCount, backLimit);
 
@@ -13153,7 +13199,9 @@ export default class ChatBubbles {
           historyResult.history.unshift(splitFullMid(additionalFullMid).mid);
         }
 
-        return this.performHistoryResult(historyResult, reverse, true);
+        return this.performHistoryResult(historyResult, reverse, true, prioritizeFirstPaint, (promise) => {
+          deferredHistoryPromise = promise;
+        });
       });
     };
 
@@ -13194,7 +13242,8 @@ export default class ChatBubbles {
       promise = sup(await result.result);
     }
 
-    const waitPromise = isAdditionRender ? processPromise(resultPromise) : promise;
+    // Keep history paging serialized through the deferred tail while peer mounting waits only for first paint.
+    const waitPromise = isAdditionRender ? processPromise(resultPromise) : (prioritizeFirstPaint ? promise.then(() => deferredHistoryPromise) : promise);
 
     if(isFirstMessageRender && liteMode.isAvailable('animations')/*  && false */) {
       let times = isAdditionRender ? 2 : 1;
