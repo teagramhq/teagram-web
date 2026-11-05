@@ -1,4 +1,5 @@
 import ScrollSaver from '@helpers/scrollSaver';
+import {getMiddleware} from '@helpers/middleware';
 
 type Rect = {top: number, bottom: number};
 
@@ -115,17 +116,23 @@ function makeScrollSaver(reverse: boolean) {
 
 function captureResizeObserver() {
   let callback: ResizeObserverCallback;
+  const disconnect = vi.fn();
   class ResizeObserverMock {
     constructor(onResize: ResizeObserverCallback) {
       callback = onResize;
     }
 
     observe() {}
-    disconnect() {}
+    disconnect = disconnect;
   }
 
   vi.stubGlobal('ResizeObserver', ResizeObserverMock);
-  return (element: Element) => callback([{target: element} as ResizeObserverEntry], {} as ResizeObserver);
+  return {
+    disconnect,
+    flush(element: Element) {
+      callback([{target: element} as ResizeObserverEntry], {} as ResizeObserver);
+    }
+  };
 }
 
 afterEach(() => {
@@ -134,7 +141,7 @@ afterEach(() => {
 });
 
 test('restores the top anchor after prepending history above it', async() => {
-  const flushResizeObserver = captureResizeObserver();
+  const resizeObserver = captureResizeObserver();
   const {saver, prependBubble, setPosition, setScrollHeight, setLayoutDirty, getScrollTop, bubbles} = makeScrollSaver(true);
   document.body.append(bubbles[0].parentElement!);
   saver.save();
@@ -148,15 +155,16 @@ test('restores the top anchor after prepending history above it', async() => {
   expect(() => restoring = saver.restoreAfterLayout()).not.toThrow();
 
   setLayoutDirty(false);
-  flushResizeObserver(bubbles[0].parentElement!);
+  resizeObserver.flush(bubbles[0].parentElement!);
   await restoring!;
 
   expect(getScrollTop()).toBe(150);
   expect(bubbles[0].getBoundingClientRect().top).toBe(120);
+  expect(resizeObserver.disconnect).toHaveBeenCalledOnce();
 });
 
 test('keeps the bottom anchor still when history is appended below it', async() => {
-  const flushResizeObserver = captureResizeObserver();
+  const resizeObserver = captureResizeObserver();
   const {saver, appendBubble, setScrollHeight, setLayoutDirty, getScrollTop, bubbles} = makeScrollSaver(false);
   document.body.append(bubbles[0].parentElement!);
   saver.save();
@@ -169,28 +177,37 @@ test('keeps the bottom anchor still when history is appended below it', async() 
   expect(() => restoring = saver.restoreAfterLayout()).not.toThrow();
 
   setLayoutDirty(false);
-  flushResizeObserver(bubbles[0].parentElement!);
+  resizeObserver.flush(bubbles[0].parentElement!);
   await restoring!;
 
   expect(getScrollTop()).toBe(100);
   expect(bubbles[1].getBoundingClientRect().bottom).toBe(280);
+  expect(resizeObserver.disconnect).toHaveBeenCalledOnce();
 });
 
-test('skips a pending restore after its chat generation is disposed', async() => {
-  const flushResizeObserver = captureResizeObserver();
+test('disconnects and settles a pending restore when its chat generation is disposed', async() => {
+  const resizeObserver = captureResizeObserver();
   const {saver, setPosition, setLayoutDirty, getScrollTop, bubbles} = makeScrollSaver(true);
+  const chatMiddlewareHelper = getMiddleware();
+  const middleware = chatMiddlewareHelper.get();
   document.body.append(bubbles[0].parentElement!);
   saver.save();
 
   setPosition(bubbles[0], {top: 150, bottom: 190});
   setLayoutDirty(true);
 
-  let restoring: Promise<void>;
-  expect(() => restoring = saver.restoreAfterLayout(undefined, () => false)).not.toThrow();
+  const restoring = saver.restoreAfterLayout(undefined, middleware);
+  let settled = false;
+  void restoring.then(() => settled = true);
+  chatMiddlewareHelper.destroy();
+  await Promise.resolve();
+
+  expect(settled).toBe(true);
+  expect(resizeObserver.disconnect).toHaveBeenCalledOnce();
+  expect(getScrollTop()).toBe(100);
 
   setLayoutDirty(false);
-  flushResizeObserver(bubbles[0].parentElement!);
-  await restoring!;
-
+  resizeObserver.flush(bubbles[0].parentElement!);
+  await restoring;
   expect(getScrollTop()).toBe(100);
 });

@@ -3,6 +3,7 @@ import type {ScrollableContextValue} from '@components/scrollable2';
 import {MOUNT_CLASS_TO} from '@config/debug';
 import {IS_SAFARI} from '@environment/userAgent';
 import getVisibleRect from '@helpers/dom/getVisibleRect';
+import type {Middleware} from '@helpers/middleware';
 import {fastRaf} from '@helpers/schedulers';
 
 // let USE_REFLOW = false;
@@ -219,23 +220,46 @@ export default class ScrollSaver {
   }
 
   // ResizeObserver runs after layout, so restoring a mounted batch can inspect its anchor without forcing layout.
-  public restoreAfterLayout(useReflow?: boolean, isCurrent?: () => boolean) {
+  public restoreAfterLayout(useReflow?: boolean, middleware?: Middleware) {
     return new Promise<void>((resolve, reject) => {
-      const observer = new ResizeObserver(() => {
-        observer.disconnect();
-        if(isCurrent && !isCurrent()) {
-          resolve();
-          return;
-        }
+      if(middleware && !middleware()) {
+        resolve();
+        return;
+      }
 
-        try {
-          this.restore(useReflow);
-          resolve();
-        } catch(err) {
-          reject(err);
-        }
-      });
-      observer.observe(this.container);
+      let observer: ResizeObserver | undefined;
+      let settled = false;
+      const lifecycleHelper = middleware?.create();
+      const cancel = () => {
+        if(settled) return;
+        settled = true;
+        observer?.disconnect();
+        resolve();
+      };
+      lifecycleHelper?.onDestroy(cancel);
+
+      try {
+        observer = new ResizeObserver(() => {
+          if(settled) return;
+          settled = true;
+          observer?.disconnect();
+          try {
+            if(!middleware || middleware()) this.restore(useReflow);
+            resolve();
+          } catch(err) {
+            reject(err);
+          } finally {
+            lifecycleHelper?.destroy();
+          }
+        });
+        observer.observe(this.container);
+      } catch(err) {
+        if(settled) return;
+        settled = true;
+        observer?.disconnect();
+        lifecycleHelper?.destroy();
+        reject(err);
+      }
     });
   }
 
