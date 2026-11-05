@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace} from '../../e2e/performanceRpcTrace';
+import {findLongTasksDominatedBySpans, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
 
 describe('performance RPC trace summary', () => {
   test('excludes long tasks that start outside the scenario measurement window', async() => {
@@ -194,6 +194,43 @@ describe('long task attribution', () => {
         {frames: [{functionName: 'onMirrorTask', script: '/assets/proxy.js'}], selfMs: 10}
       ]
     }]);
+  });
+
+  test('flags a long task when history scroll work dominates it', () => {
+    const scrollWork: PerformanceTaskAttribution = {
+      startTimeMs: 20,
+      durationMs: 61,
+      spans: [{name: 'bubbles.processBatch', startOffsetMs: 2, syncMs: 40}],
+      stacks: []
+    };
+
+    expect(findLongTasksDominatedBySpans([scrollWork], ['bubbles.processBatch'])).toEqual([scrollWork]);
+  });
+
+  test('ignores a long task that only overlaps a short history scroll span', () => {
+    const overlappingWork: PerformanceTaskAttribution = {
+      startTimeMs: 20,
+      durationMs: 61,
+      spans: [{name: 'bubbles.processBatch', startOffsetMs: 2, syncMs: 17}],
+      stacks: []
+    };
+
+    expect(findLongTasksDominatedBySpans([overlappingWork], ['bubbles.processBatch'])).toEqual([]);
+  });
+
+  test('does not count nested history scroll spans more than once', () => {
+    const nestedWork: PerformanceTaskAttribution = {
+      startTimeMs: 20,
+      durationMs: 61,
+      spans: [
+        {name: 'bubbles.processBatch', startOffsetMs: 0, syncMs: 20},
+        {name: 'scrollSaver.save', startOffsetMs: 5, syncMs: 20},
+        {name: 'scrollSaver.restore', startOffsetMs: 10, syncMs: 15}
+      ],
+      stacks: []
+    };
+
+    expect(findLongTasksDominatedBySpans([nestedWork], ['bubbles.processBatch', 'scrollSaver.save', 'scrollSaver.restore'])).toEqual([]);
   });
 });
 

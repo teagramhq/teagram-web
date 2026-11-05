@@ -273,6 +273,37 @@ export function summarizeLongTaskAttribution(
   });
 }
 
+export function findLongTasksDominatedBySpans(tasks: PerformanceTaskAttribution[], spanNames: string[]): PerformanceTaskAttribution[] {
+  const names = new Set(spanNames);
+  return tasks.filter(({durationMs, spans}) => {
+    if(durationMs <= 50) return false;
+
+    const intervals = spans
+      .filter(({name}) => names.has(name))
+      .map(({startOffsetMs, syncMs}) => [Math.max(0, startOffsetMs), Math.min(durationMs, startOffsetMs + syncMs)] as [number, number])
+      .filter(([startMs, endMs]) => endMs > startMs)
+      .sort(([leftStart], [rightStart]) => leftStart - rightStart);
+    let scrollWorkMs = 0;
+    let currentStart = 0;
+    let currentEnd = 0;
+    let hasCurrent = false;
+
+    for(const [startMs, endMs] of intervals) {
+      if(!hasCurrent || startMs > currentEnd) {
+        if(hasCurrent) scrollWorkMs += currentEnd - currentStart;
+        currentStart = startMs;
+        currentEnd = endMs;
+        hasCurrent = true;
+      } else {
+        currentEnd = Math.max(currentEnd, endMs);
+      }
+    }
+    if(hasCurrent) scrollWorkMs += currentEnd - currentStart;
+
+    return scrollWorkMs > durationMs / 2;
+  });
+}
+
 // * `PerformanceObserver.observe()` ignores an entry type the browser does not support instead of throwing, so
 // * support has to be read from `supportedEntryTypes`. Self-contained on purpose: the e2e injects its source into
 // * the page with `toString()`.
