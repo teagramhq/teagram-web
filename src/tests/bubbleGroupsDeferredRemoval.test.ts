@@ -36,6 +36,7 @@ function makeMessage(mid: number, fromId: PeerId): Message.message {
 }
 
 function createHarness() {
+  const dateContainer = {container: document.createElement('div'), groupsLength: 0};
   const chat = {
     type: ChatType.Chat,
     peerId: 1 as PeerId,
@@ -45,6 +46,8 @@ function createHarness() {
     isMonoforum: false,
     bubbles: {
       getDateForDateContainer: () => ({dateTimestamp: 100000}),
+      getDateContainerByTimestamp: () => dateContainer,
+      deleteEmptyDateGroups: vi.fn(),
       getMiddleware: () => ({create: () => ({get: vi.fn(), clean: vi.fn()})})
     }
   } as any;
@@ -57,15 +60,15 @@ function createHarness() {
     groups.prepareForGrouping(bubble, makeMessage(mid, fromId as PeerId), false);
   }
 
-  groups.groupUngrouped();
+  groups.mountUnmountGroups(Array.from(groups.groupUngrouped()));
 
   const ungroupedBubble = document.createElement('div');
   bubbles.set(1, ungroupedBubble);
   groups.prepareForGrouping(ungroupedBubble, makeMessage(1, 3 as PeerId), false);
 
-  const mountUnmountGroups = vi.spyOn(groups, 'mountUnmountGroups').mockImplementation(() => {});
+  const mountUnmountGroups = vi.spyOn(groups, 'mountUnmountGroups');
 
-  return {groups, bubbles, mountUnmountGroups};
+  return {groups, bubbles, dateContainer, mountUnmountGroups};
 }
 
 function getGroupMemberships(groups: BubbleGroups) {
@@ -77,9 +80,14 @@ function getGroupMemberships(groups: BubbleGroups) {
 describe('deferred bubble group removal', () => {
   it('tracks regrouped groups and matches immediate removal', () => {
     const immediate = createHarness();
+    const immediateEmptiedGroup = immediate.groups.getItemByBubble(immediate.bubbles.get(3)).group;
+    expect(immediateEmptiedGroup.container.parentElement).toBe(immediate.dateContainer.container);
     immediate.groups.removeAndUnmountBubble(immediate.bubbles.get(4));
+    expect(immediateEmptiedGroup.container.parentElement).toBeNull();
 
     const deferred = createHarness();
+    const emptiedGroup = deferred.groups.getItemByBubble(deferred.bubbles.get(3)).group;
+    expect(emptiedGroup.container.parentElement).toBe(deferred.dateContainer.container);
     const deferredGroups = new Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>();
     deferred.groups.removeAndUnmountBubble(deferred.bubbles.get(4), deferredGroups);
 
@@ -87,6 +95,12 @@ describe('deferred bubble group removal', () => {
     expect(getGroupMemberships(deferred.groups)).toEqual([[1], [3, 5]]);
     const regroupedGroup = deferred.groups.getItemByBubble(deferred.bubbles.get(1)).group;
     expect(deferredGroups.has(regroupedGroup)).toBe(true);
+    expect(deferredGroups.has(emptiedGroup)).toBe(true);
     expect(deferred.mountUnmountGroups).not.toHaveBeenCalled();
+    expect(emptiedGroup.container.parentElement).toBe(deferred.dateContainer.container);
+
+    deferred.groups.mountUnmountGroups(Array.from(deferredGroups));
+    expect(emptiedGroup.container.parentElement).toBeNull();
+    expect(emptiedGroup.mounted).toBe(false);
   });
 });
