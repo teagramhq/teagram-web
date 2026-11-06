@@ -1183,20 +1183,29 @@ export default class ChatBubbles {
       let cancelledBubbleReplacement = false;
       let _bubble = this.getBubble(fullTempMid);
       if(_bubble) {
-        const replacement = this.cancelPendingBubbleReplacement(_bubble);
-        cancelledBubbleReplacement = replacement.cancelled;
-        const bubble = _bubble = replacement.bubble;
-        delete this.bubbles[fullTempMid];
-        this.bubbles[fullMid] = bubble;
-        bubble.dataset.mid = '' + mid;
-        if(replacement.cancelled && message._ === 'message') {
-          // A staging candidate can be cancelled before its async render publishes the final
-          // grouping snapshot. Rebuild from the server message now; changing only `mid/message`
-          // would leave date/from/single/group membership from the temporary item.
-          bubble.dataset.timestamp = '' + message.date;
-          this.repositionMessageBubblePreservingScroll(bubble, message);
-        } else if(this.chat.type === ChatType.Scheduled) {
-          this.bubbleGroups.changeBubbleMessage(bubble, message);
+        let bubble = _bubble;
+        const existingBubble = this.getBubble(fullMid);
+        if(existingBubble && existingBubble !== _bubble) {
+          // The server echo may have rendered before the acknowledgement was matched to the
+          // pending message. Keep that bubble and remove the temporary duplicate.
+          this.deleteMessagesByIds([fullTempMid], true, true);
+          _bubble = bubble = existingBubble;
+        } else {
+          const replacement = this.cancelPendingBubbleReplacement(_bubble);
+          cancelledBubbleReplacement = replacement.cancelled;
+          bubble = _bubble = replacement.bubble;
+          delete this.bubbles[fullTempMid];
+          this.bubbles[fullMid] = bubble;
+          bubble.dataset.mid = '' + mid;
+          if(replacement.cancelled && message._ === 'message') {
+            // A staging candidate can be cancelled before its async render publishes the final
+            // grouping snapshot. Rebuild from the server message now; changing only `mid/message`
+            // would leave date/from/single/group membership from the temporary item.
+            bubble.dataset.timestamp = '' + message.date;
+            this.repositionMessageBubblePreservingScroll(bubble, message);
+          } else if(this.chat.type === ChatType.Scheduled) {
+            this.bubbleGroups.changeBubbleMessage(bubble, message);
+          }
         }
 
         const context = this.contexts.get(bubble);

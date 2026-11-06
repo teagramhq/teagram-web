@@ -11318,6 +11318,18 @@ export class AppMessagesManager extends AppManager {
     delete this.pendingByRandomId[randomId];
     this.deletePendingTopMsg(peerId, tempId);
 
+    const dialog = this.getDialogOnly(peerId);
+    if(dialog?.top_message === tempId) {
+      this.setDialogTopMessage(finalMessage, dialog);
+    }
+
+    if(threadId) {
+      const threadDialog = this.dialogsStorage.getAnyDialog(peerId, threadId);
+      if(threadDialog?.top_message === tempId) {
+        this.setDialogTopMessage(finalMessage, threadDialog);
+      }
+    }
+
     this.finalizePendingMessageCallbacks(storage, tempId, finalMessage);
 
     return tempMessage;

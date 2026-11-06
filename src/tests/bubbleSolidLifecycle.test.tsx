@@ -3667,7 +3667,7 @@ test('commits final group identity before a structural replacement is mounted', 
   middlewareHelper.destroy();
 });
 
-test('renders a pending bubble before replaying an early message ID acknowledgement', () => {
+test.each([false, true])('renders a pending bubble before replaying an early message ID acknowledgement (server echo rendered: %s)', (serverEchoRenderedBeforeRegistration) => {
   const randomId = '42';
   const tempId = 3.0001;
   const serverId = 100;
@@ -3711,6 +3711,7 @@ test('renders a pending bubble before replaying an early message ID acknowledgem
     pFlags: {is_outgoing: true}
   } as any;
   const serverMessage = {mid: serverId, peerId, _: 'message', pFlags: {is_outgoing: true}} as any;
+  const dialog = {_: 'dialog', top_message: serverId};
   const storedMessages = new Map<number, any>([[serverId, serverMessage]]);
   const queuedCallbacks: Array<() => void> = [];
   const bubbles: Record<string, HTMLElement> = {};
@@ -3720,6 +3721,7 @@ test('renders a pending bubble before replaying an early message ID acknowledgem
     type: ChatType.Chat,
     peerId,
     threadId: undefined,
+    selection: {isSelecting: false},
     isForum: false,
     isBotforum: false,
     appImManager: {chats: []},
@@ -3736,7 +3738,12 @@ test('renders a pending bubble before replaying an early message ID acknowledgem
     }
 
     setScroll() {
-      this.scrollable = {container: document.createElement('div'), loadedAll: {bottom: true}};
+      this.scrollable = {
+        container: document.createElement('div'),
+        loadedAll: {bottom: true},
+        ignoreNextScrollEvent: vi.fn(),
+        onScroll: vi.fn()
+      };
     }
   };
   const bubbleHarness = Object.assign(new TestChatBubbles(chat, {}), {
@@ -3751,22 +3758,30 @@ test('renders a pending bubble before replaying an early message ID acknowledgem
     batchProcessor: {queuePromise: undefined},
     bubbleGroups: {
       getItemByBubble: () => ({mid: tempId, reverse: false}),
-      removeAndUnmountBubble: vi.fn(),
-      mountUnmountGroups: vi.fn()
+      removeAndUnmountBubble: vi.fn((bubble: HTMLElement) => bubble.remove()),
+      mountUnmountGroups: vi.fn((groups: any[]) => {
+        groups.forEach((group) => group.items.forEach((item: any) => document.body.append(item.bubble)));
+      })
     },
+    skippedMids: new Set(),
+    hiddenLinksPendingBubbles: new Set(),
     setupReadMetrics: vi.fn(),
     updateHasMessages: vi.fn(),
+    deleteEmptyDateGroups: vi.fn(),
+    getRenderedHistory: () => Object.keys(bubbles),
     updateSolidMessageBodyIdentity: vi.fn(),
     cancelPendingBubbleReplacement: (bubble: HTMLElement) => ({bubble, cancelled: false}),
     renderNewMessage: vi.fn((message: any) => {
       const bubble = document.createElement('div');
       bubble.className = 'bubble';
       bubble.dataset.mid = String(message.mid);
+      (bubble as any).middlewareHelper = {destroy: vi.fn()};
       document.body.append(bubble);
       bubbles[makeFullMid(message)] = bubble;
     }),
-    groupBubbles: (): {groups: any[]} => ({groups: []})
+    groupBubbles: (items: any[]): {groups: any[]} => ({groups: items.map((item) => ({items: [item]}))})
   }) as any;
+  const deleteMessagesByIds = vi.spyOn(bubbleHarness, 'deleteMessagesByIds');
 
   try {
     bubbleHarness.constructPeerHelpers();
@@ -3784,7 +3799,11 @@ test('renders a pending bubble before replaying an early message ID acknowledgem
       saveMessages: (messages: any[]) => messages.forEach((message) => storedMessages.set(message.mid, message)),
       getMessageFromStorage: (_storage: unknown, mid: number) => storedMessages.get(mid),
       deleteMessageFromStorage: (_storage: unknown, mid: number) => storedMessages.delete(mid),
-      setDialogTopMessage: vi.fn(),
+      dialogsStorage: {
+        getDialogOnly: () => dialog,
+        generateIndexForDialog: vi.fn()
+      },
+      scheduleHandleNewDialogs: vi.fn(),
       updateMessageContextForInserting: vi.fn(),
       updateMessageContextForDeletion: vi.fn(),
       deletePendingTopMsg: vi.fn(),
@@ -3801,27 +3820,39 @@ test('renders a pending bubble before replaying an early message ID acknowledgem
       adoptStreamedMessageDraft: vi.fn()
     });
 
+    if(serverEchoRenderedBeforeRegistration) {
+      history.unshift(serverId);
+      rootScope.dispatchEvent('history_append', {storageKey: messagesStorageKey, message: serverMessage});
+    }
     manager.onUpdateMessageId({random_id: randomId, id: serverId});
-    history.unshift(serverId);
+    if(!serverEchoRenderedBeforeRegistration) history.unshift(serverId);
     manager.beforeMessageSending(tempMessage, {processAfter: (callback: () => void) => queuedCallbacks.push(callback)});
 
     expect(queuedCallbacks).toHaveLength(1);
-    expect(bubbles[makeFullMid(peerId, serverId)]).toBeUndefined();
+    const serverBubble = bubbles[makeFullMid(peerId, serverId)];
+    expect(!!serverBubble).toBe(serverEchoRenderedBeforeRegistration);
     expect(eventOrder).not.toContain('history_update');
     expect(manager.pendingByRandomId[randomId]).toBeDefined();
+    expect(dialog.top_message).toBe(tempId);
     queuedCallbacks[0]();
 
     expect(eventOrder.filter((event) => ['history_append', 'message_sent', 'history_update'].includes(event))).toEqual([
+      ...(serverEchoRenderedBeforeRegistration ? ['history_append'] : []),
       'history_append',
       'message_sent',
       'history_update'
     ]);
-    expect(bubbleHarness.renderNewMessage).toHaveBeenCalledOnce();
+    expect(bubbleHarness.renderNewMessage).toHaveBeenCalledTimes(serverEchoRenderedBeforeRegistration ? 2 : 1);
     expect(bubbleHarness.renderNewMessage).toHaveBeenCalledWith(tempMessage, true);
     expect(document.body.querySelectorAll('.bubble')).toHaveLength(1);
     expect(document.body.querySelector('.bubble')?.getAttribute('data-mid')).toBe(String(serverId));
     expect(bubbles[makeFullMid(peerId, tempId)]).toBeUndefined();
-    expect(bubbles[makeFullMid(peerId, serverId)]).toBe(document.body.querySelector('.bubble'));
+    expect(bubbles[makeFullMid(peerId, serverId)]).toBe(serverBubble || document.body.querySelector('.bubble'));
+    expect(dialog.top_message).toBe(serverId);
+    if(serverEchoRenderedBeforeRegistration) {
+      expect(serverBubble?.isConnected).toBe(true);
+      expect(deleteMessagesByIds).toHaveBeenCalledWith([makeFullMid(peerId, tempId)], true, true);
+    }
     expect(history.mids).toEqual([serverId]);
     expect(manager.pendingByRandomId[randomId]).toBeUndefined();
   } finally {

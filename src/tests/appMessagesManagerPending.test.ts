@@ -36,6 +36,7 @@ describe('AppMessagesManager pending message reconciliation', () => {
       getMonoforumThreadId: (): undefined => undefined,
       saveMessages: (messages: any[]) => messages.forEach((message) => storedMessages.set(message.mid, message)),
       getMessageFromStorage: (_storage: unknown, mid: number) => storedMessages.get(mid),
+      getDialogOnly: (): undefined => undefined,
       setDialogTopMessage: vi.fn(),
       updateMessageContextForInserting: vi.fn(),
       updateMessageContextForDeletion: vi.fn(),
@@ -91,6 +92,7 @@ describe('AppMessagesManager pending message reconciliation', () => {
       appMessagesIdsManager: {generateMessageId: (id: number) => id},
       getMessageFromStorage: (_storage: unknown, mid: number) =>
         mid === tempId ? tempMessage : mid === serverId ? serverMessage : undefined,
+      getDialogOnly: (): undefined => undefined,
       getHistoryStorage: () => ({history: {delete: historyDelete}}),
       updateMessageContextForDeletion: vi.fn(),
       rootScope: {dispatchEvent},
