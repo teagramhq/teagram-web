@@ -3,30 +3,21 @@ import type {ActiveAccountNumber} from '@lib/accounts/types';
 import {authenticatePrivateUsername} from '@/pages/privateUsernameAuth';
 import type {PrivateUsernameAuthResult, PrivateUsernameRegistration} from '@/pages/privateUsernameAuth';
 import type {RequestTurnstileChallenge} from '@/pages/turnstileSignup';
-import type {GuestCredentialRecord, GuestCredentialRecords} from '@lib/guestAccountTypes';
+import type {GuestAccountContext, GuestCredentialRecord, GuestCredentialRecords, GuestServerIdentity} from '@lib/guestAccountTypes';
+import {chooseGuestCredentialRecord as chooseRecord, getGuestCredentialRecords as getRecords, matchingGuestRecords as matchingRecords, sameGuestUserId as sameUserId} from '@lib/guestAccountRecords';
+import {getActiveGuestServerIdentity, isGuestServerIdentityCurrent} from '@lib/guestAccountIdentity';
+import {createGuestAccountServerLock} from '@lib/guestAccountLock';
+import {hasGuestWipeGenerationChanged, isGuestSnapshotIdentityCurrent} from '@lib/guestAccountSnapshotIdentity';
 import {listenForGuestCredentialInvalidation, notifyGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
 import AccountController from '@lib/accounts/accountController';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
-import {getActiveDemoWipeGeneration, getActiveServerHost, getRuntimeServerId} from '@config/serverContext';
-import {getServerPin} from '@config/serverSelection';
-import {getMtprotoTarget} from '@config/mtprotoTarget';
 import {saveGuestCredentials} from '@lib/guestCredentialStorage';
 import sessionStorage from '@lib/sessionStorage';
 
-const GUEST_USERNAME_PATTERN = /^guest_[a-z2-7]{16}$/;
-const GUEST_PASSWORD_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+export type {GuestAccountContext, GuestServerIdentity} from '@lib/guestAccountTypes';
+export {createGuestAccountServerLock} from '@lib/guestAccountLock';
+
 const BASE32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567';
-
-export type GuestServerIdentity = {
-  serverId: string,
-  keyFingerprint: string,
-  wipeGeneration?: string
-};
-
-export type GuestAccountContext = GuestServerIdentity & {
-  accountNumber: ActiveAccountNumber,
-  accountUserId?: PeerId
-};
 
 export type GuestAccountLifecycleResult =
   | {kind: 'authorized', user: User, username: string}
@@ -110,51 +101,12 @@ function getErrorType(error: unknown) {
   return isRecord(error) && typeof error.type === 'string' ? error.type : undefined;
 }
 
-function sameUserId(left?: PeerId, right?: PeerId) {
-  return left === undefined ? right === undefined : right !== undefined && String(left) === String(right);
-}
-
-function isCredentialRecord(value: unknown): value is GuestCredentialRecord {
-  if(!isRecord(value)) return false;
-  return value.version === 1 && typeof value.serverId === 'string' && !!value.serverId &&
-    typeof value.keyFingerprint === 'string' && !!value.keyFingerprint &&
-    typeof value.username === 'string' && GUEST_USERNAME_PATTERN.test(value.username) &&
-    typeof value.password === 'string' && GUEST_PASSWORD_PATTERN.test(value.password) &&
-    (value.status === 'provisional' || value.status === 'committed') &&
-    (value.wipeGeneration === undefined || typeof value.wipeGeneration === 'string') &&
-    (value.accountUserId === undefined || typeof value.accountUserId === 'string' || typeof value.accountUserId === 'number') &&
-    (value.accountNumber === undefined || value.accountNumber === 1 || value.accountNumber === 2 ||
-      value.accountNumber === 3 || value.accountNumber === 4);
-}
-
 function resultFromAuthError(result: PrivateUsernameAuthResult): GuestAccountLifecycleResult {
   if(result.kind === 'error' || result.kind === 'termsAcceptanceError') {
     return result.errorType ? {kind: 'error', errorType: result.errorType} : {kind: 'error'};
   }
   if(result.kind === 'termsDeclined') return {kind: 'termsDeclined'};
   return {kind: 'error'};
-}
-
-function matchingRecords(records: GuestCredentialRecords, identity: GuestServerIdentity) {
-  return records.filter((record) => record.serverId === identity.serverId && record.keyFingerprint === identity.keyFingerprint);
-}
-
-function chooseRecord(records: GuestCredentialRecords, context: GuestAccountContext) {
-  const scoped = matchingRecords(records, context);
-  if(context.accountUserId !== undefined) {
-    const accountRecord = scoped.find((record) => sameUserId(record.accountUserId, context.accountUserId));
-    if(accountRecord) return accountRecord;
-    return undefined;
-  }
-  return scoped.find((record) => record.accountNumber === context.accountNumber) || (scoped.length === 1 ? scoped[0] : undefined);
-}
-
-function getRecords(value: unknown): GuestCredentialRecords {
-  if(value === undefined) return [];
-  if(!Array.isArray(value) || !value.every(isCredentialRecord)) {
-    throw Object.assign(new Error('Guest credential storage is invalid'), {type: 'GUEST_CREDENTIAL_STORAGE_INVALID'});
-  }
-  return value;
 }
 
 export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleDependencies) {
@@ -555,45 +507,22 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
 
     async isSnapshotIdentityCurrent() {
       const identity = dependencies.getServerIdentity();
-      const rejectSnapshot = (reason: string) => {
-        console.error('guest snapshot identity mismatch', reason);
-        return false;
-      };
-      if(!identity.wipeGeneration) return rejectSnapshot('wipe generation unavailable');
-      return runLocked(identity, async(cancelled) => {
-        const accountNumber = dependencies.getCurrentAccountNumber();
-        const accountUserId = await dependencies.getAccountUserId(accountNumber);
-        if(accountUserId === undefined) return rejectSnapshot('account user id unavailable');
-        const context: GuestAccountContext = {...identity, accountNumber, accountUserId};
-        if(cancelled.value || !isContextCurrent(context)) return rejectSnapshot('guest context changed before reading credentials');
-        const record = chooseRecord(await readRecords(), context);
-        if(!record) return false;
-        if(record.status !== 'committed') return rejectSnapshot('guest record is not committed');
-        if(record.wipeGeneration !== identity.wipeGeneration) return rejectSnapshot('wipe generation mismatch');
-        if(record.accountNumber !== undefined && record.accountNumber !== accountNumber) return rejectSnapshot('account number mismatch');
-        if(record.accountUserId === undefined) return rejectSnapshot('guest record account user id unavailable');
-        if(!sameUserId(record.accountUserId, accountUserId)) return rejectSnapshot('guest record account user id mismatch');
-        const currentUserId = await dependencies.getAccountUserId(accountNumber);
-        if(cancelled.value || !isContextCurrent(context)) return rejectSnapshot('guest context changed during verification');
-        if(!sameUserId(currentUserId, accountUserId)) return rejectSnapshot('account user changed during verification');
-        return true;
-      });
+      return runLocked(identity, (cancelled) => isGuestSnapshotIdentityCurrent(identity, cancelled, {
+        getCurrentAccountNumber: dependencies.getCurrentAccountNumber,
+        getAccountUserId: dependencies.getAccountUserId,
+        readRecords,
+        isContextCurrent
+      }));
     },
 
     async hasWipeGenerationChanged() {
       const identity = dependencies.getServerIdentity();
-      return runLocked(identity, async(cancelled) => {
-        const accountNumber = dependencies.getCurrentAccountNumber();
-        const accountUserId = await dependencies.getAccountUserId(accountNumber);
-        const context: GuestAccountContext = {...identity, accountNumber, accountUserId};
-        if(!isContextCurrent(context)) return false;
-        const records = await readRecords();
-        if(cancelled.value || !isContextCurrent(context)) return false;
-        const record = chooseRecord(records, context);
-        if(!record || identity.wipeGeneration === undefined || record.wipeGeneration === undefined ||
-          identity.wipeGeneration === record.wipeGeneration) return false;
-        return true;
-      });
+      return runLocked(identity, (cancelled) => hasGuestWipeGenerationChanged(identity, cancelled, {
+        getCurrentAccountNumber: dependencies.getCurrentAccountNumber,
+        getAccountUserId: dependencies.getAccountUserId,
+        readRecords,
+        isContextCurrent
+      }));
     },
 
     async forget() {
@@ -633,15 +562,6 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
   };
 }
 
-export function createGuestAccountServerLock<T>(name: string, callback: () => Promise<T>) {
-  if(typeof navigator === 'undefined' || !navigator.locks) {
-    return Promise.reject(Object.assign(new Error('This browser cannot safely serialize guest account creation'), {
-      type: 'GUEST_LOCK_UNAVAILABLE'
-    }));
-  }
-  return navigator.locks.request(name, callback);
-}
-
 export type GuestAccountManagers = {
   apiManager: {
     invokeApi: (method: any, params?: any, options?: any) => Promise<any>,
@@ -655,28 +575,6 @@ export type GuestAccountManagers = {
     updateSettings: (settings: {newPassword?: string}) => Promise<unknown>
   }
 };
-
-function getActiveGuestServerIdentity(): GuestServerIdentity {
-  const serverId = getRuntimeServerId();
-  if(serverId === 'default') {
-    const target = getMtprotoTarget();
-    return {
-      serverId,
-      keyFingerprint: target.mode === 'private' ? target.fingerprint : 'telegram-default',
-      wipeGeneration: getActiveDemoWipeGeneration()
-    };
-  }
-
-  if(!/^custom-[0-9a-f]{64}$/.test(serverId)) {
-    throw Object.assign(new Error('The selected server identity is invalid'), {type: 'GUEST_SERVER_ID_INVALID'});
-  }
-  const host = getActiveServerHost();
-  const pin = host && getServerPin(host);
-  if(!host || !pin || pin.host !== host || !/^[0-9a-f]{64}$/.test(pin.key_fingerprint)) {
-    throw Object.assign(new Error('The selected server is not pinned'), {type: 'GUEST_SERVER_NOT_PINNED'});
-  }
-  return {serverId, keyFingerprint: pin.key_fingerprint, wipeGeneration: getActiveDemoWipeGeneration()};
-}
 
 export async function isCurrentAccountGuest(authorizedUserId?: PeerId) {
   const identity = getActiveGuestServerIdentity();
@@ -713,15 +611,7 @@ export function createCurrentGuestAccountLifecycle(
 
   return createGuestAccountLifecycle({
     getServerIdentity: getActiveGuestServerIdentity,
-    isServerIdentityCurrent: (identity) => {
-      try {
-        const current = getActiveGuestServerIdentity();
-        return current.serverId === identity.serverId && current.keyFingerprint === identity.keyFingerprint &&
-          current.wipeGeneration === identity.wipeGeneration;
-      } catch{
-        return false;
-      }
-    },
+    isServerIdentityCurrent: isGuestServerIdentityCurrent,
     getCurrentAccountNumber: getCurrentAccount,
     getAccountUserId: async(accountNumber) => (await AccountController.get(accountNumber)).userId,
     readCredentials: () => sessionStorage.get('guestCredentials', false),
