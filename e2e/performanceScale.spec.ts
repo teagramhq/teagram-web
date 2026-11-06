@@ -300,7 +300,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       durationMs: phase.duration
     })) : undefined;
     const longAnimationFrames = includeLongTaskTrace ? perf.longAnimationFrames.slice() : [];
-    const loafObserved = perf.loafObserved === true;
+    const loafObserved = perf.loafObserved as boolean | undefined;
     if(includeLongTaskTrace) perf.stopLongAnimationFrames();
     return {
       bundleResources: resources.map((entry) => ({
@@ -329,7 +329,8 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
   }, {scroll, includePhases, includeLongTaskTrace});
   const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, loafObserved, rpcInvocations, rpcRawCalls, timeOrigin, ...metrics} = captured;
   if(includePhases) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
-  if(includeLongTaskTrace) expect(loafObserved, 'long-animation-frame observer is not supported in the measured browser').toBe(true);
+  // Pages that never started the observer (the RPC comparison, base builds) report no frames; only a refused start is an error.
+  if(includeLongTaskTrace) expect(loafObserved, 'long-animation-frame observer is not supported in the measured browser').not.toBe(false);
   const rpcCalls = rpcInvocationsInWindow(rpcRawCalls, timeOrigin, boundary.startedAtMs, boundary.ms).map((call) => ({
     method: call.method,
     startedAtMs: call.startedAtEpochMs - timeOrigin - boundary.startedAtMs,
