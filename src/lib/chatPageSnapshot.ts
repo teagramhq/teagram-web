@@ -24,11 +24,25 @@ let pending = Promise.resolve();
 const storages = new Map<ActiveAccountNumber, StateStorage>();
 const generations = [0, 0, 0, 0, 0];
 const guardKey = () => scopeServerStorageKey('chat-page-snapshot-guard');
+const openGuardKey = () => scopeServerStorageKey('chat-page-snapshot-open-guard');
 
-function readGuard() {
+function readRawGuard() {
   if(typeof window === 'undefined') return '';
   try {
     return localStorage.getItem(guardKey()) || '';
+  } catch(error) {
+    console.error('failed to read chat page snapshot guard', error);
+    return undefined;
+  }
+}
+
+function readGuard() {
+  const guard = readRawGuard();
+  if(!guard?.startsWith('blocked:')) return guard;
+  try {
+    const open = localStorage.getItem(openGuardKey()) === guard;
+    if(readRawGuard() !== guard) return undefined;
+    return open ? `open:${guard.slice(8)}` : guard;
   } catch(error) {
     console.error('failed to read chat page snapshot guard', error);
     return undefined;
@@ -43,11 +57,10 @@ export function blockSnapshotReads() {
 }
 
 export function unblockSnapshotReads(expected: string) {
-  const guard = localStorage.getItem(guardKey());
-  if(guard === expected && guard?.startsWith('blocked:')) localStorage.setItem(guardKey(), `open:${guard.slice(8)}`);
+  if(expected?.startsWith('blocked:') && readRawGuard() === expected) localStorage.setItem(openGuardKey(), expected);
 }
 
-export function snapshotReadGuard() { return readGuard(); }
+export function snapshotReadGuard() { return readRawGuard(); }
 
 export function chatPageSnapshotGeneration(accountNumber: ActiveAccountNumber) {
   return generations[accountNumber];
