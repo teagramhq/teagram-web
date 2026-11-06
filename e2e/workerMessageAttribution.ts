@@ -38,6 +38,7 @@ export function summarizeWorkerMessageAttribution(tasks: Array<{startTime: numbe
     return {
       startTimeMs: Number((task.startTime - windowStart).toFixed(2)),
       durationMs: task.duration,
+      unaccountedMs: Number(Math.max(0, task.duration - [...byType.values()].reduce((total, value) => total + value, 0)).toFixed(2)),
       messages: [...byType].map(([type, durationMs]) => ({
         type,
         durationMs: Number(durationMs.toFixed(2)),

@@ -40,6 +40,7 @@ type Metric = {
   peerChangePhases?: PerformancePhaseSummary[],
   cpu?: PerformanceCpuSummary,
   longTaskAttribution?: PerformanceTaskAttribution[],
+  workerMessageAttribution?: ReturnType<typeof summarizeWorkerMessageAttribution>,
   scrollSpanTracing?: {installed: string[], spanCount: number, loafObserved: boolean},
   droppedFramePercent?: number,
   droppedFrames?: number,
@@ -68,6 +69,7 @@ type MeasurementBoundary = {
 
 type ScrollBackTraceOptions = {
   captureCpuStacks?: boolean,
+  captureWorkerMessages?: boolean,
   traceRpc?: boolean,
   waitForHistory?: boolean
 };
@@ -106,7 +108,7 @@ test.afterAll(() => {
   if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 });
 
-async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false, observeAnimationFrames = false) {
+async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false, observeAnimationFrames = false, recordWorkerMessages = observeAnimationFrames) {
   const bundleRequests = createBundleRequestTracker(new URL(origin).origin);
   bundleRequestTrackers.set(page, bundleRequests);
   page.on('request', (request) => {
@@ -118,7 +120,8 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   page.on('worker', (worker) => bundleRequests.workerReady(worker.url()));
   await page.exposeBinding('__teagramBundleWorkerReady', (_source, url: string) => bundleRequests.workerReady(url));
   // Only the diagnostic pass observes long animation frames; the gated windows stay as instrumented as on master.
-  if(observeAnimationFrames) await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()}; window.__teagramInstallWorkerMessageAttribution = ${installWorkerMessageAttribution.toString()};`});
+  if(observeAnimationFrames) await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
+  if(recordWorkerMessages) await page.addInitScript({content: `window.__teagramInstallWorkerMessageAttribution = ${installWorkerMessageAttribution.toString()};`});
   return page.addInitScript(({injectColdStall, observeAnimationFrames}: {injectColdStall: boolean, observeAnimationFrames: boolean}) => {
     // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
     const SharedWorkerConstructor = (window as any).SharedWorker;
@@ -576,7 +579,7 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
 }
 
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}) {
-  const {captureCpuStacks = false, traceRpc = false, waitForHistory = false} = options;
+  const {captureCpuStacks = false, captureWorkerMessages = captureCpuStacks, traceRpc = false, waitForHistory = false} = options;
   const hasPendingHistory = () => page.evaluate(() => {
     const bubbles = (window as any).appImManager.chat.bubbles;
     return !!(bubbles.getHistoryTopPromise || bubbles.getHistoryBottomPromise);
@@ -584,8 +587,8 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
 
   // Only the diagnostic pass waits: the gated window must keep the chat-open history tail it always had.
   if(waitForHistory) await waitForHistorySettled(page);
-  if(captureCpuStacks) {
-    await installScrollSpanTracing(page);
+  if(captureCpuStacks) await installScrollSpanTracing(page);
+  if(captureWorkerMessages) {
     await page.evaluate(() => {
       const perf = (window as any).__teagramPerf;
       perf.workerMessages = (window as any).__teagramInstallWorkerMessageAttribution((window as any).apiManagerProxy, () => performance.now());
@@ -648,19 +651,26 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   const boundary = await snapshotMeasurementBoundary(page);
   const stoppedProfile = cpuProfile ? await stopCpuProfile(cpuProfile) : undefined;
   const metric = await capture(page, requests, boundary, true, traceRpc);
-  if(!stoppedProfile) return metric;
-
-  const {tasks, spans, workerMessages} = await page.evaluate(() => {
+  if(!stoppedProfile && !captureWorkerMessages) return metric;
+  const {tasks, spans, workerMessages} = await page.evaluate((captureWorkerMessages) => {
     const perf = (window as any).__teagramPerf;
+    const workerMessages = captureWorkerMessages ? perf.workerMessages.spans : [];
+    if(captureWorkerMessages) perf.workerMessages.restore();
     return {
       tasks: perf.longTasks as Array<{startTime: number, duration: number}>,
       spans: (perf.scrollSpans || []) as PerformanceSpan[],
-      workerMessages: perf.workerMessages.spans as Array<{type: string, startTime: number, duration: number}>
+      workerMessages: workerMessages as Array<{type: string, startTime: number, duration: number}>
     };
-  });
+  }, captureWorkerMessages);
+  const windowEndMs = boundary.startedAtMs + boundary.ms;
+  const windowTasks = tasks.filter(({startTime}) => startTime >= boundary.startedAtMs && startTime < windowEndMs);
+  const workerAttribution = captureWorkerMessages ? {
+    workerMessageAttribution: summarizeWorkerMessageAttribution(windowTasks, workerMessages, boundary.startedAtMs)
+  } : {};
+  if(!stoppedProfile) return {...metric, ...workerAttribution};
+
   const tracing = await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
-    perf.workerMessages.restore();
     return {
       installed: perf.scrollSpanInstalled || [],
       spanCount: (perf.scrollSpans || []).length,
@@ -670,11 +680,9 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   expect(tracing.spanCount, 'scroll-back recorded no traced calls').toBeGreaterThan(0);
   expect(tracing.loafObserved, 'long-animation-frame observer is not supported in the diagnostic browser').toBe(true);
   expect([...tracing.installed].sort(), 'scroll-back tracing did not install every wrapped call').toEqual([...SCROLL_SPAN_NAMES].sort());
-  const windowEndMs = boundary.startedAtMs + boundary.ms;
-  const windowTasks = tasks.filter(({startTime}) => startTime >= boundary.startedAtMs && startTime < windowEndMs);
   return {
     ...metric,
-    workerMessageAttribution: summarizeWorkerMessageAttribution(windowTasks, workerMessages, boundary.startedAtMs),
+    ...workerAttribution,
     scrollSpanTracing: tracing,
     cpu: summarizeCpuProfile(stoppedProfile.profile),
     longTaskAttribution: summarizeLongTaskAttribution(windowTasks, spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs)
@@ -1075,11 +1083,12 @@ async function runTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixtu
   try {
     const page = await historyContext.newPage();
     const requests = {value: 0};
-    await installInstrumentation(page, requests, run.origin);
+    const captureWorkerMessages = run.variant === 'head';
+    await installInstrumentation(page, requests, run.origin, false, false, captureWorkerMessages);
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
     chatOpen = await openPartnerChat(page, requests, fixture);
-    scrollBack2k = await scrollBackTwoThousand(page, requests, run.variant === 'head');
+    scrollBack2k = await scrollBackTwoThousand(page, requests, run.variant === 'head', {captureWorkerMessages});
   } finally {
     await historyContext.close();
   }

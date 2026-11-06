@@ -18,6 +18,7 @@ test('records batched message kinds without changing processing order or results
   expect(summarizeWorkerMessageAttribution([{startTime: 100, duration: 80}], recording.spans)).toEqual([{
     startTimeMs: 100,
     durationMs: 80,
+    unaccountedMs: 10,
     messages: [
       {type: 'invoke:update:updateNewMessage', durationMs: 30, percent: 37.5},
       {type: 'result:managers:appMessagesManager:getHistory', durationMs: 40, percent: 50}
@@ -44,4 +45,22 @@ test('the page-injected recorder is self-contained', () => {
   const recording = injected(port, () => 10);
   expect(port.processTaskMap.result({type: 'result', payload: {taskId: 1, result: {_: 'messages.messages'}}})).toBe(42);
   expect(recording.spans[0].type).toBe('result:messages.messages');
+});
+
+test('reports unaccounted task time alongside clipped message work', () => {
+  expect(summarizeWorkerMessageAttribution([
+    {startTime: 100, duration: 80},
+    {startTime: 200, duration: 40}
+  ], [
+    {type: 'invoke:event:dialogs_multiupdate', startTime: 90, duration: 40},
+    {type: 'result:manager:dialogsStorage:getDialogIndex', startTime: 170, duration: 20}
+  ], 90)).toEqual([{
+    startTimeMs: 10,
+    durationMs: 80,
+    unaccountedMs: 40,
+    messages: [
+      {type: 'invoke:event:dialogs_multiupdate', durationMs: 30, percent: 37.5},
+      {type: 'result:manager:dialogsStorage:getDialogIndex', durationMs: 10, percent: 12.5}
+    ]
+  }]);
 });
