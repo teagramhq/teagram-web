@@ -72,7 +72,10 @@ function createDeferred<T>() {
   return {promise, resolve};
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe('guest account lifecycle', () => {
   it('generates a lowercase username with 80 random bits and a 32-byte password', () => {
@@ -550,6 +553,12 @@ describe('guest account lifecycle', () => {
       wipeGeneration: 'week-42', accountUserId: 42, accountNumber: 1}];
     const lifecycle = createGuestAccountLifecycle(state.dependencies);
     expect(await lifecycle.isSnapshotIdentityCurrent()).toBe(true);
+    state.records[0].status = 'provisional';
+    expect(await lifecycle.isSnapshotIdentityCurrent()).toBe(false);
+    state.records[0].status = 'committed';
+    state.accountUserId = undefined;
+    expect(await lifecycle.isSnapshotIdentityCurrent()).toBe(false);
+    state.accountUserId = 42;
     state.records[0].accountNumber = 2;
     expect(await lifecycle.isSnapshotIdentityCurrent()).toBe(false);
     state.records[0].accountNumber = 1;
@@ -557,6 +566,23 @@ describe('guest account lifecycle', () => {
     expect(await lifecycle.isSnapshotIdentityCurrent()).toBe(false);
     delete state.records[0].wipeGeneration;
     expect(await lifecycle.isSnapshotIdentityCurrent()).toBe(false);
+  });
+
+  it('logs guest snapshot identity mismatches but keeps an absent record silent', async() => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-42'};
+    state.accountUserId = 42;
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const lifecycle = createGuestAccountLifecycle(state.dependencies);
+
+    expect(await lifecycle.isSnapshotIdentityCurrent()).toBe(false);
+    expect(log).not.toHaveBeenCalled();
+
+    state.records = [{version: 1, serverId: IDENTITY.serverId, keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`, password: 'P'.repeat(43), status: 'committed',
+      wipeGeneration: 'week-41', accountUserId: 42, accountNumber: 1}];
+    expect(await lifecycle.isSnapshotIdentityCurrent()).toBe(false);
+    expect(log).toHaveBeenCalledWith('guest snapshot identity mismatch', 'wipe generation mismatch');
   });
 
   it('rejects a snapshot when guest invalidation interrupts the identity check', async() => {

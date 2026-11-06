@@ -10,6 +10,7 @@ const rows = [
 ];
 
 beforeEach(async() => {
+  vi.restoreAllMocks();
   vi.resetModules();
   ({paintChatPageSnapshot, replaceChatPageSnapshot, watchChatPageSnapshot} = await import('@lib/chatPageSnapshotView'));
   document.body.innerHTML = '<div id="page-chats" style="display:none"><div id="chatlist-container"><div id="folders-container"></div></div></div>';
@@ -62,10 +63,21 @@ it('paints the saved page and permits a harmless click', () => {
   expect(() => (document.querySelector('.chatlist-chat') as HTMLElement).click()).not.toThrow();
 });
 
-it('does not paint an absent or mismatched page', () => {
+it('does not paint an absent or empty saved page', () => {
   paintChatPageSnapshot(undefined);
+  paintChatPageSnapshot([]);
   expect(document.querySelectorAll('.chatlist-chat')).toHaveLength(0);
   expect(document.getElementById('page-chats').style.display).toBe('none');
+});
+
+it.each(['chatlist-container', 'page-chats'] as const)('logs when the snapshot cannot find #%s', (id) => {
+  if(id === 'page-chats') document.body.append(document.getElementById('chatlist-container')!);
+  document.getElementById(id).remove();
+  const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+  paintChatPageSnapshot(rows);
+
+  expect(log).toHaveBeenCalledWith(`Could not paint chat page snapshot: missing #${id}`);
 });
 
 it('shows a saved avatar thumbnail when available', () => {

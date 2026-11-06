@@ -555,19 +555,28 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
 
     async isSnapshotIdentityCurrent() {
       const identity = dependencies.getServerIdentity();
-      if(!identity.wipeGeneration) return false;
+      const rejectSnapshot = (reason: string) => {
+        console.error('guest snapshot identity mismatch', reason);
+        return false;
+      };
+      if(!identity.wipeGeneration) return rejectSnapshot('wipe generation unavailable');
       return runLocked(identity, async(cancelled) => {
         const accountNumber = dependencies.getCurrentAccountNumber();
         const accountUserId = await dependencies.getAccountUserId(accountNumber);
-        if(accountUserId === undefined) return false;
+        if(accountUserId === undefined) return rejectSnapshot('account user id unavailable');
         const context: GuestAccountContext = {...identity, accountNumber, accountUserId};
-        if(cancelled.value || !isContextCurrent(context)) return false;
+        if(cancelled.value || !isContextCurrent(context)) return rejectSnapshot('guest context changed before reading credentials');
         const record = chooseRecord(await readRecords(), context);
-        if(!record || record.status !== 'committed' || record.wipeGeneration !== identity.wipeGeneration ||
-          (record.accountNumber !== undefined && record.accountNumber !== accountNumber) ||
-          record.accountUserId === undefined || !sameUserId(record.accountUserId, accountUserId)) return false;
+        if(!record) return false;
+        if(record.status !== 'committed') return rejectSnapshot('guest record is not committed');
+        if(record.wipeGeneration !== identity.wipeGeneration) return rejectSnapshot('wipe generation mismatch');
+        if(record.accountNumber !== undefined && record.accountNumber !== accountNumber) return rejectSnapshot('account number mismatch');
+        if(record.accountUserId === undefined) return rejectSnapshot('guest record account user id unavailable');
+        if(!sameUserId(record.accountUserId, accountUserId)) return rejectSnapshot('guest record account user id mismatch');
         const currentUserId = await dependencies.getAccountUserId(accountNumber);
-        return !cancelled.value && isContextCurrent(context) && sameUserId(currentUserId, accountUserId);
+        if(cancelled.value || !isContextCurrent(context)) return rejectSnapshot('guest context changed during verification');
+        if(!sameUserId(currentUserId, accountUserId)) return rejectSnapshot('account user changed during verification');
+        return true;
       });
     },
 

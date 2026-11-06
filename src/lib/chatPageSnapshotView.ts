@@ -27,7 +27,14 @@ export function paintChatPageSnapshot(rows: ChatPageRow[] | undefined) {
   if(livePageArrived || !rows?.length) return;
   const container = document.getElementById('chatlist-container');
   const page = document.getElementById('page-chats');
-  if(!container || !page) return;
+  if(!container) {
+    console.error('Could not paint chat page snapshot: missing #chatlist-container');
+    return;
+  }
+  if(!page) {
+    console.error('Could not paint chat page snapshot: missing #page-chats');
+    return;
+  }
 
   const scrollable = snapshotElement = element('div', 'chat-page-snapshot scrollable scrollable-y chatlist-parts');
   const top = element('div', 'chatlist-top');

@@ -81,6 +81,7 @@ import appChatBackground from '@components/chat/bubbles/chatBackground';
 import {getActiveDemoWipeGeneration, getActiveServerHost, getRuntimeServerId, isAutoGuestEnabled} from '@config/serverContext';
 import {getServerSelectionAction} from '@config/serverSelection';
 import {createCurrentGuestAccountLifecycle, type GuestAccountManagers} from '@lib/guestAccountLifecycle';
+import {paintChatPageSnapshotSafely, paintGuestChatPageSnapshotIfCurrent} from '@lib/chatPageSnapshotStartup';
 import {markAutoGuestAttempted, markAutoGuestResetDetected} from '@lib/autoGuest';
 // import commonStateStorage from '@lib/commonStateStorage';
 // import { STATE_INIT } from '@config/state';
@@ -592,17 +593,23 @@ const onDocumentReady = async() => {
       const server = getActiveServerHost();
       const serverId = getRuntimeServerId();
       const generation = getActiveDemoWipeGeneration();
-      void createCurrentGuestAccountLifecycle(rootScope.managers as unknown as GuestAccountManagers).isSnapshotIdentityCurrent()
-      .then(async(current) => {
-        if(!current) return;
-        const key = await getChatPageKey(account);
-        if(account === getCurrentAccount() && server === getActiveServerHost() &&
-          serverId === getRuntimeServerId() && generation === getActiveDemoWipeGeneration() && key) {
-          paintChatPageSnapshot(apiManagerProxy.readChatPageSnapshot(key));
-        }
-      }).catch((error) => console.error('Could not verify the guest session before painting the chat snapshot', error));
+      void paintGuestChatPageSnapshotIfCurrent({
+        accountNumber: account,
+        serverHost: server,
+        serverId,
+        wipeGeneration: generation,
+        isSnapshotIdentityCurrent: () => createCurrentGuestAccountLifecycle(rootScope.managers as unknown as GuestAccountManagers).isSnapshotIdentityCurrent(),
+        getChatPageKey,
+        getCurrentAccountNumber: getCurrentAccount,
+        getActiveServerHost,
+        getRuntimeServerId,
+        getActiveDemoWipeGeneration,
+        readSnapshot: (key) => apiManagerProxy.readChatPageSnapshot(key),
+        paint: paintChatPageSnapshot,
+        clear: replaceChatPageSnapshot
+      });
     } else {
-      paintChatPageSnapshot(apiManagerProxy.readChatPageSnapshot());
+      paintChatPageSnapshotSafely(() => apiManagerProxy.readChatPageSnapshot(), paintChatPageSnapshot, replaceChatPageSnapshot);
     }
   }
 

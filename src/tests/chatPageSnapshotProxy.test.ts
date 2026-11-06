@@ -11,6 +11,9 @@ const rows = [{peerId: 42 as PeerId, title: 'Alice', preview: 'Hello', date: 1, 
 
 vi.mock('@environment/webpSupport', () => ({default: false}));
 vi.mock('@helpers/setWorkerProxy', () => ({makeWorkerURL: () => ''}));
+vi.mock('@helpers/toggleStorages', () => ({default: async() => {}}));
+vi.mock('@lib/telegramMeWebManager', () => ({default: {setAuthorized: async() => {}}}));
+vi.mock('@lib/webPushApiManager', () => ({default: {unsubscribe: async() => {}}}));
 vi.mock('@appManagers/utils/state/loadState', () => ({default: async() => ({
   1: {resetStorages: new Map(testState.reset ? [['dialogs', []]] : []), state: {}, common: {settings: {}}, newVersion: 1, oldVersion: 1}
 })}));
@@ -22,7 +25,10 @@ vi.mock('@lib/chatPageSnapshot', async(importOriginal) => ({
   getChatPageKey: async() => { if(testState.reject) throw new Error('key failed'); return key; },
   loadChatPageSnapshot: async(value: unknown) => { testState.loaded = !!value; },
   readChatPageSnapshot: () => testState.loaded ? rows : undefined,
-  forgetLoadedChatPageSnapshot: () => { testState.loaded = false; },
+  forgetLoadedChatPageSnapshot: () => {
+    testState.loaded = false;
+    window.dispatchEvent(new Event('chat-page-snapshot-invalidated'));
+  },
   recoverPasscodeSnapshots: async() => {}
 }));
 
@@ -44,4 +50,19 @@ it.each(['normal', 'reset', 'rejected'] as const)('wires the synchronous snapsho
   Object.assign(proxy, {dispatchUserAuth: () => {}, mirrors: {}, log: {error: () => {}}});
   await proxy.loadAllStates();
   expect(proxy.readChatPageSnapshot()).toEqual(mode === 'normal' ? rows : undefined);
+});
+
+it('removes painted snapshot rows when the API proxy handles logout', async() => {
+  const {paintChatPageSnapshot, watchChatPageSnapshot} = await import('@lib/chatPageSnapshotView');
+  const {default: rootScope} = await import('@lib/rootScope');
+  vi.spyOn(apiManagerProxy as any, 'invokeVoid').mockResolvedValue(undefined);
+  vi.spyOn(apiManagerProxy as any, 'onLoggedOut').mockResolvedValue(undefined);
+  document.body.innerHTML = '<div id="page-chats"><div id="chatlist-container"></div></div>';
+  watchChatPageSnapshot(1, false);
+  paintChatPageSnapshot(rows);
+  expect(document.querySelector('.chat-page-snapshot')).not.toBeNull();
+
+  rootScope.dispatchEventSingle('logging_out', {accountNumber: 1});
+
+  expect(document.querySelector('.chat-page-snapshot')).toBeNull();
 });
