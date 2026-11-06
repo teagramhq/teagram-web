@@ -14,10 +14,8 @@ let stopWatching: () => void;
 
 function getWeekNumber(date: Date) {
   const weekDate = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-  const dayNumber = weekDate.getUTCDay() || 7;
-  weekDate.setUTCDate(weekDate.getUTCDate() + 4 - dayNumber);
-  const yearStart = new Date(Date.UTC(weekDate.getUTCFullYear(), 0, 1));
-  return Math.ceil((((weekDate.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+  weekDate.setUTCDate(weekDate.getUTCDate() + 4 - (weekDate.getUTCDay() || 7));
+  return Math.ceil((weekDate.getTime() - Date.UTC(weekDate.getUTCFullYear(), 0, 1) + 86400000) / 604800000);
 }
 
 function formatSnapshotDate(time: Date) {

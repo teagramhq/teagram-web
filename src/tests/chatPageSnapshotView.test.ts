@@ -113,6 +113,21 @@ it('uses the normal chat row date format for today, this week and a previous yea
   }
 });
 
+it('matches the normal date format around an ISO week boundary', async() => {
+  const {formatDateAccordingToTodayNew} = await import('@helpers/date');
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date(2025, 0, 2, 12));
+  try {
+    const dates = [new Date(2025, 0, 1, 9), new Date(2025, 0, 5, 9), new Date(2025, 0, 6, 9)];
+    paintChatPageSnapshot(dates.map((date, index) => ({...rows[0], peerId: (42 + index) as PeerId, date: date.getTime() / 1000})));
+    expect(Array.from(document.querySelectorAll('.chat-page-snapshot .message-time'), (node) => node.textContent)).toEqual(
+      dates.map((date) => formatDateAccordingToTodayNew(date).textContent)
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it('uses the peer color and abbreviation for a two-part avatar name', () => {
   paintChatPageSnapshot([{...rows[0], title: 'Alice Brown', avatarColor: 'pink'}]);
   const avatar = document.querySelector<HTMLElement>('.dialog-avatar');
