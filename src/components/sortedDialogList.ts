@@ -26,6 +26,9 @@ export default class SortedDialogList {
   private virtualList: ReturnType<typeof createDeferredSortedVirtualList<SortedDialogListItem>>;
   private totalCount = 0;
   private totalCountOffset = 0;
+  private pendingAdds: PendingDialogAdd[] = [];
+  private activeAdds = new Set<PendingDialogAdd>();
+  private addTimer: ReturnType<typeof setTimeout>;
 
   /**
    * The custom emoji from the last message gets destroyed completely when removing the dialog
@@ -250,14 +253,46 @@ export default class SortedDialogList {
     });
   }
 
-  public async add(key: any, canFinish: () => boolean = () => true) {
-    const item = await this.createItemForKey(key);
-    if(!canFinish()) {
-      return;
-    }
+  public add(key: any, canFinish: () => boolean = () => true) {
+    return new Promise<void>((resolve, reject) => {
+      this.pendingAdds.push({key, canFinish, resolve, reject, cancelled: false});
+      this.scheduleAdds();
+    });
+  }
 
-    this.virtualList.addItems([item]);
-    // this.virtualList.setTotalCount(prev => prev + 1);
+  private scheduleAdds() {
+    if(this.addTimer || !this.pendingAdds.length) return;
+    this.addTimer = setTimeout(() => {
+      this.addTimer = undefined;
+      this.flushAdds();
+    }, 0);
+  }
+
+  private flushAdds() {
+    // A large dialog update can create thousands of rows at once. Start small groups
+    // in separate tasks so input and painting can run while every row is built.
+    const requests = this.pendingAdds.splice(0, 8);
+    requests.forEach((request) => {
+      if(request.cancelled) {
+        request.resolve();
+        return;
+      }
+      this.activeAdds.add(request);
+      this.createItemForKey(request.key).then((item) => {
+        if(request.cancelled || !request.canFinish()) {
+          if(item.value.type === 'dialog') item.value.value.destroy();
+        } else {
+          this.virtualList.addItems([item]);
+        }
+      }).then(request.resolve, request.reject).finally(() => this.activeAdds.delete(request));
+    });
+    this.scheduleAdds();
+  }
+
+  private cancelAdds(key?: any) {
+    for(const request of [...this.pendingAdds, ...this.activeAdds]) {
+      if(key === undefined || request.key === key) request.cancelled = true;
+    }
   }
 
   public async addPinned(key: any) {
@@ -279,6 +314,7 @@ export default class SortedDialogList {
   }
 
   public delete(key: any, adjustTotalCount = true) {
+    this.cancelAdds(key);
     batch(() => {
       // * Pinned entries live in their own collection, but every read API merges both - has(),
       // * getDialogElement() and getAllDialogElementsMap() all see them - so callers routinely
@@ -349,12 +385,14 @@ export default class SortedDialogList {
   }
 
   public clear() {
+    this.cancelAdds();
     this.totalCount = 0;
     this.totalCountOffset = 0;
     this.virtualList?.clear();
   }
 
   public destroy() {
+    this.cancelAdds();
     this.virtualList?.dispose();
   }
 }
@@ -419,3 +457,11 @@ type SortedDialogListItem = {
   type: 'dialog',
   value: DialogElement;
 }
+
+type PendingDialogAdd = {
+  key: any,
+  canFinish: () => boolean,
+  resolve: () => void,
+  reject: (reason: unknown) => void,
+  cancelled: boolean
+};
