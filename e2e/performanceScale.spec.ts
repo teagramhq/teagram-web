@@ -1,5 +1,6 @@
 import {installWorkerMessageAttribution, summarizeRecorderComparison, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
-import {readFileSync, writeFileSync} from 'node:fs';
+import {readFileSync} from 'node:fs';
+import {writePerformanceReport} from './performanceReport';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
@@ -109,7 +110,7 @@ const bundleRequestTrackers = new WeakMap<Page, BundleRequestTracker>();
 const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
 
 test.afterAll(() => {
-  if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  if(reportPath) writePerformanceReport(reportPath, report);
 });
 
 async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false, observeAnimationFrames = false, recordWorkerMessages = observeAnimationFrames) {
