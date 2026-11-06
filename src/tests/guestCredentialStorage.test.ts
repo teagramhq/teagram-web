@@ -36,7 +36,8 @@ vi.mock('@lib/guestAccountLocalCleanup', () => ({
 vi.mock('@lib/guestCredentialBroadcast', () => ({notifyGuestCredentialInvalidation: mocks.notify}));
 vi.mock('@lib/chatPageSnapshot', async(importOriginal) => ({
   ...await importOriginal<typeof import('@lib/chatPageSnapshot')>(),
-  clearChatPageSnapshot: vi.fn(async() => {})
+  beginChatPageSnapshotShift: vi.fn(async() => []),
+  finishChatPageSnapshotShift: vi.fn(async() => {})
 }));
 
 import {clearAllGuestCredentials, clearGuestCredentialsForAccount, saveGuestCredentials} from '@lib/guestCredentialStorage';

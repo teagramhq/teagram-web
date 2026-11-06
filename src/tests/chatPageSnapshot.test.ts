@@ -1,6 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
-import {chatPageSnapshotGeneration, clearChatPageSnapshot, disableChatPageSnapshots, enableChatPageSnapshots, forgetLoadedChatPageSnapshot, getChatPageKey, loadChatPageSnapshot, readChatPageSnapshot, writeChatPageSnapshot} from '@lib/chatPageSnapshot';
+import {captureChatPageSnapshotEpoch, chatPageSnapshotGeneration, clearChatPageSnapshot, disableChatPageSnapshots, enableChatPageSnapshots, forgetLoadedChatPageSnapshot, getChatPageKey, loadChatPageSnapshot, readChatPageSnapshot, writeChatPageSnapshot} from '@lib/chatPageSnapshot';
 import AccountController from '@lib/accounts/accountController';
 import DialogsStorage from '@lib/storages/dialogs';
 import loadStorages from '@appManagers/utils/storages/loadStorages';
@@ -12,15 +12,17 @@ const key = {accountNumber: 1 as const, userId: 123 as PeerId, server: 'server-a
 const rows = [{peerId: 42 as PeerId, title: 'Alice', preview: 'Hello', date: 10, unread: 2, markedUnread: false, muted: false, pinned: true}];
 
 describe('chat page snapshot storage', () => {
+  let epoch: string;
   beforeEach(async() => {
     await enableChatPageSnapshots();
     DeferredIsUsingPasscode.resolveDeferred(false);
     await clearChatPageSnapshot(1);
+    epoch = await captureChatPageSnapshotEpoch(1);
   });
   afterEach(() => vi.restoreAllMocks());
 
   it('persists a first page and reads it only for the same identity', async() => {
-    await writeChatPageSnapshot(key, rows);
+    await writeChatPageSnapshot(key, rows, epoch);
     await loadChatPageSnapshot(key);
     expect(readChatPageSnapshot(key)).toEqual(rows);
     expect(readChatPageSnapshot({...key, server: 'server-b'})).toBeUndefined();
@@ -30,25 +32,25 @@ describe('chat page snapshot storage', () => {
   });
 
   it('drops the snapshot', async() => {
-    await writeChatPageSnapshot(key, rows);
+    await writeChatPageSnapshot(key, rows, epoch);
     await clearChatPageSnapshot(1);
     await loadChatPageSnapshot(key);
     expect(readChatPageSnapshot(key)).toBeUndefined();
   });
 
   it('neither writes nor reads when passcode is enabled', async() => {
-    await writeChatPageSnapshot(key, rows);
+    await writeChatPageSnapshot(key, rows, epoch);
     await loadChatPageSnapshot(key);
     DeferredIsUsingPasscode.resolveDeferred(true);
     expect(readChatPageSnapshot(key)).toBeUndefined();
-    await writeChatPageSnapshot(key, rows);
+    await writeChatPageSnapshot(key, rows, epoch);
     expect(readChatPageSnapshot(key)).toBeUndefined();
   });
 
   it('drops an existing snapshot and blocks queued writes when passcode is enabled', async() => {
-    await writeChatPageSnapshot(key, rows);
+    await writeChatPageSnapshot(key, rows, epoch);
     await disableChatPageSnapshots();
-    await writeChatPageSnapshot(key, rows);
+    await writeChatPageSnapshot(key, rows, epoch);
     await enableChatPageSnapshots();
     await loadChatPageSnapshot(key);
     expect(readChatPageSnapshot(key)).toBeUndefined();
@@ -66,7 +68,7 @@ describe('chat page snapshot storage', () => {
   });
 
   it('drops the snapshot when storage reset is applied', async() => {
-    await writeChatPageSnapshot(key, rows);
+    await writeChatPageSnapshot(key, rows, epoch);
     const store = {getAll: async(): Promise<unknown[]> => [], clear: async() => {}, get: async(): Promise<undefined> => undefined, set: async() => {}};
     const reset = Promise.resolve({storages: new Map([['dialogs', []]]), callback: async() => {}});
     await loadStorages(1, {users: store, chats: store, dialogs: store} as any, reset as any);
@@ -75,14 +77,14 @@ describe('chat page snapshot storage', () => {
   });
 
   it('drops the snapshot when the account logs out', async() => {
-    await writeChatPageSnapshot(key, rows);
+    await writeChatPageSnapshot(key, rows, epoch);
     const generation = chatPageSnapshotGeneration(1);
     vi.spyOn(AccountController, 'getTotalAccounts').mockResolvedValue(1);
     vi.spyOn(AccountController, 'get').mockResolvedValue({});
     const manager = Object.create(ApiManager.prototype) as any;
     Object.assign(manager, {accountNumber: 1, clearAccountLocally: async() => {}});
     await manager.logOut();
-    await writeChatPageSnapshot(key, rows, generation);
+    await writeChatPageSnapshot(key, rows, epoch, generation);
     await loadChatPageSnapshot(key);
     expect(readChatPageSnapshot(key)).toBeUndefined();
   });
@@ -96,6 +98,7 @@ describe('chat page snapshot storage', () => {
     const storage = Object.create(DialogsStorage.prototype) as any;
     Object.assign(storage, {
       getAccountNumber: () => 1,
+      snapshotEpoch: Promise.resolve(epoch),
       getDialogsInner: () => kind === 'cached' ? page : Promise.resolve(page),
       appPeersManager: {getPeer: () => ({_: 'user', first_name: 'Alice'}), getPeerPhoto: (): undefined => undefined},
       appMessagesManager: {getDialogUnreadCount: () => 2},

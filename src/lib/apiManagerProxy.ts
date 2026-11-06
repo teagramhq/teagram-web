@@ -17,7 +17,7 @@ import telegramMeWebManager from '@lib/telegramMeWebManager';
 import pause from '@helpers/schedulers/pause';
 import ENVIRONMENT from '@environment/index';
 import loadStateForAllAccountsOnce from '@appManagers/utils/state/loadState';
-import {forgetLoadedChatPageSnapshot, getChatPageKey, loadChatPageSnapshot, readChatPageSnapshot} from '@lib/chatPageSnapshot';
+import {forgetLoadedChatPageSnapshot, getChatPageKey, loadChatPageSnapshot, readChatPageSnapshot, setChatPageAccountGuard} from '@lib/chatPageSnapshot';
 import type {ChatPageKey} from '@lib/chatPageSnapshot';
 import opusDecodeController from '@lib/opusDecodeController';
 import MTProtoMessagePort, {ThreadedWorkerEvents} from '@lib/mainWorker/mainMessagePort';
@@ -474,6 +474,10 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
       localStorageProxy: (payload) => {
         return sessionStorage.localStorageProxy(payload.type, ...payload.args);
+      },
+
+      updateChatPageAccountGuard: ({serverId, accountNumber}) => {
+        setChatPageAccountGuard(serverId, accountNumber);
       },
 
       passcodeKeyHandoff: (payload) => {

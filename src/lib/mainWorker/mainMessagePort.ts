@@ -84,6 +84,7 @@ export default class MTProtoMessagePort<Master extends boolean = true> extends S
   convertWebp: (payload: {fileName: string, bytes: Uint8Array}) => Promise<Uint8Array>,
   convertOpus: (payload: {fileName: string, bytes: Uint8Array}) => Promise<Uint8Array>,
   localStorageProxy: (payload: LocalStorageProxyTask['payload']) => Promise<any>,
+  updateChatPageAccountGuard: (payload: {serverId: string, accountNumber: ActiveAccountNumber}) => void,
   // Tab-scoped hand-off of the passcode key across an account-switch reload; see
   // @lib/passcode/keyHandoff for why it must not go through localStorage.
   passcodeKeyHandoff: (payload: string) => void,

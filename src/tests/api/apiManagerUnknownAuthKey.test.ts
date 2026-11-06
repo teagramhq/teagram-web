@@ -272,7 +272,7 @@ describe('unknown auth keys', () => {
     expect(recoverUnknownAuthKey).not.toHaveBeenCalled();
     expect(accountData).toEqual({});
     expect(clearLocalState).toHaveBeenCalledOnce();
-    expect(clearLocalState).toHaveBeenCalledWith(1, 1, undefined);
+    expect(clearLocalState).toHaveBeenCalledWith(1, 1, undefined, expect.any(Function));
     expect(guestCredentialStorage.clearGuestCredentialsForAccount).toHaveBeenCalledWith(42, 1, false);
   });
 

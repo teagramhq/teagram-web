@@ -42,7 +42,7 @@ import {isDialog, isSavedDialog, isForumTopic} from '@appManagers/utils/dialogs/
 import getDialogKey from '@appManagers/utils/dialogs/getDialogKey';
 import getDialogThreadId from '@appManagers/utils/dialogs/getDialogThreadId';
 import {isTempId} from '@appManagers/utils/messages/isTempId';
-import {chatPageSnapshotGeneration, getChatPageKey, sameChatPageKey, writeChatPageSnapshot} from '@lib/chatPageSnapshot';
+import {captureChatPageSnapshotEpoch, chatPageSnapshotGeneration, getChatPageKey, sameChatPageKey, writeChatPageSnapshot} from '@lib/chatPageSnapshot';
 import type {ChatPageRow} from '@lib/chatPageSnapshot';
 import AccountController from '@lib/accounts/accountController';
 
@@ -87,6 +87,7 @@ export const GLOBAL_FOLDER_ID: REAL_FOLDER_ID = undefined;
 
 // let spentTime = 0;
 export default class DialogsStorage extends AppManager {
+  private snapshotEpoch: Promise<string | undefined>;
   private storage: AppStoragesManager['storages']['dialogs'];
 
   private dialogs: {[peerId: PeerId]: Dialog};
@@ -136,6 +137,10 @@ export default class DialogsStorage extends AppManager {
   }
 
   protected after() {
+    this.snapshotEpoch = captureChatPageSnapshotEpoch(this.getAccountNumber()).catch((error): undefined => {
+      this.log.error('failed to capture chat page snapshot epoch', error);
+      return undefined;
+    });
     this.clear(true);
 
     const onFilterUpdate = (filter: MyDialogFilter) => {
@@ -1915,7 +1920,7 @@ export default class DialogsStorage extends AppManager {
     const identity = shouldSnapshot ? getChatPageKey(this.getAccountNumber()) : undefined;
     const result = this.getDialogsInner(options);
     if(shouldSnapshot) {
-      Promise.all([Promise.resolve(result), identity]).then(([page, key]) => this.saveFirstChatPage(page.dialogs, generation, key)).catch((error) => {
+      Promise.all([Promise.resolve(result), identity, this.snapshotEpoch]).then(([page, key, epoch]) => this.saveFirstChatPage(page.dialogs, generation, key, epoch)).catch((error) => {
         this.log.error('failed to save chat page snapshot', error);
       });
     }
@@ -1926,8 +1931,8 @@ export default class DialogsStorage extends AppManager {
     return result;
   }
 
-  private async saveFirstChatPage(dialogs: AnyDialog[], generation: number, key: Awaited<ReturnType<typeof getChatPageKey>>) {
-    if(!key) return;
+  private async saveFirstChatPage(dialogs: AnyDialog[], generation: number, key: Awaited<ReturnType<typeof getChatPageKey>>, epoch: string) {
+    if(!key || !epoch) return;
     const accountNumber = this.getAccountNumber();
     const rows: ChatPageRow[] = dialogs.filter(isDialog).slice(0, 20).map((dialog) => {
       const peer = this.appPeersManager.getPeer(dialog.peerId);
@@ -1950,7 +1955,7 @@ export default class DialogsStorage extends AppManager {
     });
     await AccountController.withAccountWriteLock(accountNumber, async() => {
       if(sameChatPageKey(key, await getChatPageKey(accountNumber))) {
-        await writeChatPageSnapshot(key, rows, generation);
+        await writeChatPageSnapshot(key, rows, epoch, generation);
       }
     });
   }
