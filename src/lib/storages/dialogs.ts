@@ -1925,7 +1925,7 @@ export default class DialogsStorage extends AppManager {
     const result = this.getDialogsInner(options);
     if(shouldSnapshot) {
       Promise.all([Promise.resolve(result), identity, this.snapshotEpoch, this.snapshotOwner]).then(([page, key, epoch, owner]) => {
-        return this.refreshFirstChatPage(options, page, key, epoch, owner);
+        return this.refreshFirstChatPage(page, key, epoch, owner);
       }).catch((error) => {
         this.log.error('failed to save chat page snapshot', error);
       });
@@ -1938,7 +1938,6 @@ export default class DialogsStorage extends AppManager {
   }
 
   private async refreshFirstChatPage(
-    options: Parameters<DialogsStorage['getDialogs']>[0],
     page: Awaited<ReturnType<DialogsStorage['getDialogs']>>,
     key: ChatPageKey,
     previousEpoch: string,
@@ -1949,25 +1948,10 @@ export default class DialogsStorage extends AppManager {
       this.snapshotOwner = Promise.resolve(key);
       this.snapshotMayBind = false;
     }
-    if(!owner) return;
-    const sameOwner = (candidate: ChatPageKey) => candidate && candidate.userId === owner.userId &&
-      candidate.server === owner.server && candidate.authKeyId === owner.authKeyId;
-    if(!sameOwner(key)) {
-      // A logout can shift account slots while this manager still owns its original data.
-      const keys = await Promise.all(([1, 2, 3, 4] as const).map(getChatPageKey));
-      const matches = keys.filter(sameOwner);
-      key = matches.length === 1 ? matches[0] : undefined;
-    }
-    if(!key) return;
-    const epoch = await captureChatPageSnapshotEpoch(key.accountNumber);
-    if(!epoch) return;
+    if(!owner || !key || !previousEpoch || !sameChatPageKey(owner, key) ||
+      key.accountNumber !== this.getAccountNumber()) return;
     const generation = chatPageSnapshotGeneration(key.accountNumber);
-    if(key.accountNumber !== this.getAccountNumber() || epoch !== previousEpoch) {
-      // Do not attach a page that started before invalidation to the new epoch.
-      page = await this.getDialogsInner({...options, forceLocal: true, recursion: true});
-    }
-    if(key.accountNumber === this.getAccountNumber()) this.snapshotEpoch = Promise.resolve(epoch);
-    await this.saveFirstChatPage(page.dialogs, generation, key, epoch);
+    await this.saveFirstChatPage(page.dialogs, generation, key, previousEpoch);
   }
 
   private async saveFirstChatPage(dialogs: AnyDialog[], generation: number, key: ChatPageKey, epoch: string) {

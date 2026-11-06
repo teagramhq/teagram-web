@@ -27,11 +27,12 @@ async function transaction(mode: IDBTransactionMode, run: (store: IDBObjectStore
 export async function captureSnapshotEpoch(accountNumber: ActiveAccountNumber) {
   let epoch: string;
   await transaction('readwrite', (store) => {
+    const blocked = store.get(blockedKey);
     const request = store.get(epochKey(accountNumber));
     request.onsuccess = () => {
       const current: Epoch = request.result || {id: crypto.randomUUID(), invalidations: []};
       if(!request.result) store.put(current, epochKey(accountNumber));
-      if(!current.invalidations.length) epoch = current.id;
+      if(!blocked.result && !current.invalidations.length) epoch = current.id;
     };
   });
   return epoch;
@@ -92,7 +93,13 @@ export function blockSnapshots(token?: string) {
   return transaction('readwrite', (store) => {
     const previous = store.get(blockedKey);
     previous.onsuccess = () => { store.put(token || previous.result || 'legacy', blockedKey); };
-    for(const account of [1, 2, 3, 4] as ActiveAccountNumber[]) store.delete(snapshotKey(account));
+    for(const account of [1, 2, 3, 4] as ActiveAccountNumber[]) {
+      const current = store.get(epochKey(account));
+      current.onsuccess = () => {
+        store.put({id: crypto.randomUUID(), invalidations: current.result?.invalidations || []} satisfies Epoch, epochKey(account));
+      };
+      store.delete(snapshotKey(account));
+    }
   });
 }
 

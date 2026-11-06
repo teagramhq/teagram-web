@@ -21,6 +21,7 @@ it('prevents an independent stale worker from writing after passcode activation'
   expect(first.readChatPageSnapshot(key)).toEqual(rows);
   const guard = second.blockSnapshotReads();
   await second.disableChatPageSnapshots(guard);
+  expect(await first.captureChatPageSnapshotEpoch(1)).toBeUndefined();
   expect(first.readChatPageSnapshot(key)).toBeUndefined();
   await first.writeChatPageSnapshot(key, rows, epoch);
   await first.loadChatPageSnapshot(key);
@@ -28,6 +29,14 @@ it('prevents an independent stale worker from writing after passcode activation'
   await second.enableChatPageSnapshots(guard);
   second.unblockSnapshotReads(guard);
   expect(first.readChatPageSnapshot(key)).toBeUndefined();
+  await first.writeChatPageSnapshot(key, rows, epoch);
+  await first.loadChatPageSnapshot(key);
+  expect(first.readChatPageSnapshot(key)).toBeUndefined();
+  const freshEpoch = await first.captureChatPageSnapshotEpoch(1);
+  expect(freshEpoch).not.toBe(epoch);
+  await first.writeChatPageSnapshot(key, rows, freshEpoch);
+  await first.loadChatPageSnapshot(key);
+  expect(first.readChatPageSnapshot(key)).toEqual(rows);
 
   const racingGuard = second.blockSnapshotReads();
   await Promise.all([

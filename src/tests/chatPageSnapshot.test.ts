@@ -131,7 +131,7 @@ describe('chat page snapshot storage', () => {
     });
   });
 
-  it.each(['old epoch', 'started while blocked'])('writes a later page after invalidation: %s', async(kind) => {
+  it.each(['old epoch', 'started while blocked'])('fails closed after invalidation: %s', async(kind) => {
     vi.spyOn(sessionStorage, 'getFresh').mockResolvedValue({userId: 123 as PeerId, dcId: 2, dc2_auth_key: '12'.repeat(256)});
     const accountKey = await getChatPageKey(1);
     const token = await beginChatPageSnapshotInvalidation(1);
@@ -143,14 +143,17 @@ describe('chat page snapshot storage', () => {
       getDialogsInner: () => page
     });
     await finishChatPageSnapshotInvalidation(1, token);
-    await storage.getDialogs({filterId: 0, offsetIndex: 0, snapshot: true});
-    await vi.waitFor(async() => {
-      await loadChatPageSnapshot(accountKey);
-      expect(readChatPageSnapshot(accountKey)).toEqual(rows);
-    });
+    await storage.refreshFirstChatPage(page, accountKey, initialEpoch, accountKey);
+    await storage.refreshFirstChatPage(page, accountKey, initialEpoch, accountKey);
+    await loadChatPageSnapshot(accountKey);
+    expect(readChatPageSnapshot(accountKey)).toBeUndefined();
+    const freshEpoch = await captureChatPageSnapshotEpoch(1);
+    await storage.refreshFirstChatPage(page, accountKey, freshEpoch, accountKey);
+    await loadChatPageSnapshot(accountKey);
+    expect(readChatPageSnapshot(accountKey)).toEqual(rows);
   });
 
-  it('re-reads the page after invalidation instead of storing an in-flight page', async() => {
+  it('discards an in-flight page after invalidation', async() => {
     vi.spyOn(sessionStorage, 'getFresh').mockResolvedValue({userId: 123 as PeerId, dcId: 2, dc2_auth_key: '12'.repeat(256)});
     const accountKey = await getChatPageKey(1);
     let resolvePage: (value: any) => void;
@@ -161,18 +164,57 @@ describe('chat page snapshot storage', () => {
       snapshotOwner: Promise.resolve(accountKey),
       getDialogsInner: (options: {recursion?: boolean}) => options.recursion ? newPage : oldPage
     });
+    const refresh = storage.refreshFirstChatPage.bind(storage);
+    let completed: Promise<void>;
+    storage.refreshFirstChatPage = (...args: any[]) => (completed = refresh(...args));
     const loading = storage.getDialogs({filterId: 0, offsetIndex: 0, snapshot: true});
     const token = await beginChatPageSnapshotInvalidation(1);
     await finishChatPageSnapshotInvalidation(1, token);
     resolvePage({dialogs: [{...newPage.dialogs[0], topMessage: {_: 'message', message: 'Old', date: 1}}]});
     await loading;
-    await vi.waitFor(async() => {
-      await loadChatPageSnapshot(accountKey);
-      expect(readChatPageSnapshot(accountKey)).toEqual(rows);
-    });
+    await vi.waitFor(() => expect(completed).toBeDefined());
+    await completed;
+    await loadChatPageSnapshot(accountKey);
+    expect(readChatPageSnapshot(accountKey)).toBeUndefined();
+    completed = undefined;
+    await storage.getDialogs({filterId: 0, offsetIndex: 0, snapshot: true});
+    await vi.waitFor(() => expect(completed).toBeDefined());
+    await completed;
+    await loadChatPageSnapshot(accountKey);
+    expect(readChatPageSnapshot(accountKey)).toBeUndefined();
   });
 
-  it('writes a remaining account under its new slot after logout shifts accounts', async() => {
+  it('does not restore an unchanged in-memory page after another worker resets storage', async() => {
+    vi.spyOn(sessionStorage, 'getFresh').mockResolvedValue({userId: 123 as PeerId, dcId: 2, dc2_auth_key: '12'.repeat(256)});
+    const accountKey = await getChatPageKey(1);
+    const page = makePage();
+    let resolvePage: (value: any) => void;
+    const pending = new Promise((resolve) => { resolvePage = resolve; });
+    const storage = makeStorage({
+      snapshotEpoch: Promise.resolve(epoch),
+      snapshotOwner: Promise.resolve(accountKey),
+      getDialogsInner: (options: {recursion?: boolean}) => options.recursion ? page : pending
+    });
+    const refresh = storage.refreshFirstChatPage.bind(storage);
+    let completed: Promise<void>;
+    storage.refreshFirstChatPage = (...args: any[]) => (completed = refresh(...args));
+    const loading = storage.getDialogs({filterId: 0, offsetIndex: 0, snapshot: true});
+
+    vi.resetModules();
+    (await import('@lib/passcode/deferredIsUsingPasscode')).default.resolveDeferred(false);
+    const resetInOtherWorker = (await import('@appManagers/utils/storages/loadStorages')).default;
+    const store = {getAll: async(): Promise<unknown[]> => [], clear: async() => {}, get: async(): Promise<undefined> => undefined, set: async() => {}};
+    const reset = Promise.resolve({storages: new Map([['dialogs', []]]), callback: async() => {}});
+    await resetInOtherWorker(1, {users: store, chats: store, dialogs: store} as any, reset as any);
+    resolvePage(page);
+    await loading;
+    await vi.waitFor(() => expect(completed).toBeDefined());
+    await completed;
+    await loadChatPageSnapshot(accountKey);
+    expect(readChatPageSnapshot(accountKey)).toBeUndefined();
+  });
+
+  it('does not write a remaining account from a worker invalidated by a slot shift', async() => {
     const oldAccount = {userId: 123 as PeerId, dcId: 2, dc2_auth_key: '12'.repeat(256)};
     const replacement = {userId: 456 as PeerId, dcId: 2, dc2_auth_key: '34'.repeat(256)};
     let shifted = false;
@@ -193,12 +235,10 @@ describe('chat page snapshot storage', () => {
     const held = await beginChatPageSnapshotShift(1);
     shifted = true;
     await finishChatPageSnapshotShift(held);
-    await storage.getDialogs({filterId: 0, offsetIndex: 0, snapshot: true});
     const newKey = await getChatPageKey(1);
-    await vi.waitFor(async() => {
-      await loadChatPageSnapshot(newKey);
-      expect(readChatPageSnapshot(newKey)).toEqual(rows);
-    });
+    await storage.refreshFirstChatPage(page, newKey, oldEpoch, owner);
+    await loadChatPageSnapshot(newKey);
+    expect(readChatPageSnapshot(newKey)).toBeUndefined();
     await loadChatPageSnapshot(await getChatPageKey(2));
     expect(readChatPageSnapshot(await getChatPageKey(2))).toBeUndefined();
   });
@@ -215,7 +255,7 @@ describe('chat page snapshot storage', () => {
     const replacementKey = await getChatPageKey(1);
     const storage = Object.create(DialogsStorage.prototype) as any;
     Object.assign(storage, {getAccountNumber: () => 1});
-    await storage.refreshFirstChatPage({filterId: 0, snapshot: true}, {dialogs: []}, replacementKey, epoch, owner);
+    await storage.refreshFirstChatPage({dialogs: []}, replacementKey, epoch, owner);
     await loadChatPageSnapshot(replacementKey);
     expect(readChatPageSnapshot(replacementKey)).toBeUndefined();
   });
@@ -230,7 +270,7 @@ describe('chat page snapshot storage', () => {
     const newKey = await getChatPageKey(1);
     const storage = Object.create(DialogsStorage.prototype) as any;
     Object.assign(storage, {getAccountNumber: () => 1});
-    await storage.refreshFirstChatPage({filterId: 0, snapshot: true}, {dialogs: []}, newKey, epoch, owner);
+    await storage.refreshFirstChatPage({dialogs: []}, newKey, epoch, owner);
     await loadChatPageSnapshot(newKey);
     expect(readChatPageSnapshot(newKey)).toBeUndefined();
   });
@@ -242,7 +282,7 @@ describe('chat page snapshot storage', () => {
     }) as any);
     const owner = {...await getChatPageKey(1), accountNumber: 2 as const};
     const storage = makeStorage({getAccountNumber: () => 2});
-    await storage.refreshFirstChatPage({filterId: 0, snapshot: true}, makePage(), undefined, epoch, owner);
+    await storage.refreshFirstChatPage(makePage(), undefined, epoch, owner);
     const firstKey = await getChatPageKey(1);
     await loadChatPageSnapshot(firstKey);
     expect(readChatPageSnapshot(firstKey)).toBeUndefined();
