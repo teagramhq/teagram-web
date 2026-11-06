@@ -268,6 +268,27 @@ test('rejects independent diagnostic repeats with incomplete reconciliation evid
   ], 'contactSearch', 1)).toThrow('100x contactSearch diagnostic repeat 1 has incomplete reconciliation or long-task data');
 });
 
+test('requires a completed cached-dialog walk for each required warm-flow diagnostic repeat', async() => {
+  const validate = (await import('../../e2e/performanceRpcTrace') as any).validateCachedDialogReconcileDiagnostics;
+  expect(validate).toBeTypeOf('function');
+  const completedWalk = {
+    traceId: 'reconcile-1',
+    pageCount: 30,
+    startRelativeToScenarioMs: -100,
+    endRelativeToScenarioMs: 2_500,
+    mainThreadTimeMs: 640
+  };
+  expect(() => validate([
+    {cachedDialogReconcile: {walks: [completedWalk]}, longTaskTrace: []}
+  ], 'dateJump', 1, true)).not.toThrow();
+  expect(() => validate([
+    {cachedDialogReconcile: {walks: []}, longTaskTrace: []}
+  ], 'dateJump', 1, true)).toThrow('100x dateJump diagnostic repeat 1 has no completed cached-dialog walk');
+  expect(() => validate([
+    {cachedDialogReconcile: {walks: [{...completedWalk, interrupted: true}]}, longTaskTrace: []}
+  ], 'dateJump', 1, true)).toThrow('100x dateJump diagnostic repeat 1 has no completed cached-dialog walk');
+});
+
 test('records missing and partial measured attribution without failing', async() => {
   const {classifyMeasuredLongTaskTrace} = await import('../../e2e/performanceRpcTrace');
   const task = {
