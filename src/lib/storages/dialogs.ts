@@ -520,6 +520,28 @@ export default class DialogsStorage extends AppManager {
     return offsetDate;
   }
 
+  /**
+   * The server pages the dialog list by the last dialog's top message and peer, not by date, so a
+   * page request that carries only `offset_date` is served the first page again. This is the
+   * cursor after the oldest loaded dialog of the folder.
+   */
+  public getOffsetCursor(folderId: number): {peerId: PeerId, id: number} | undefined {
+    let cursor: {peerId: PeerId, id: number} | undefined;
+    for(const key in this.dialogs) {
+      const dialog = this.dialogs[key as any as PeerId];
+      const id = dialog && !dialog.pFlags?.pinned && getServerMessageId(dialog.top_message);
+      if(!id || (folderId !== GLOBAL_FOLDER_ID && (dialog.folder_id ?? FOLDER_ID_ALL) !== folderId)) {
+        continue;
+      }
+
+      if(!cursor || id < cursor.id) {
+        cursor = {peerId: dialog.peerId, id};
+      }
+    }
+
+    return cursor;
+  }
+
   private generateFolder(id: number) {
     const folder: Folder = {
       dialogs: [],

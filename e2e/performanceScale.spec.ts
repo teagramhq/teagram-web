@@ -1000,12 +1000,8 @@ async function openContacts(page: Page, requests: {value: number}, traceEnabled 
   page.on('pageerror', recordPageError);
   try {
     await beginScenario(page, requests, traceEnabled);
-    const toolsButton = page.locator('#column-left .sidebar-tools-button.is-visible');
-    await expect(toolsButton).toBeVisible();
-    await toolsButton.click();
-    const contactsOption = page.locator('.btn-menu.active .btn-menu-item').filter({hasText: /^Contacts$/});
-    await expect(contactsOption).toBeVisible();
-    await contactsOption.click();
+    await page.locator('.sidebar-tools-button').click();
+    await page.getByText('Contacts', {exact: true}).last().click();
     try {
       await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
     } catch(error) {

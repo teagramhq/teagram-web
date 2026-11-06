@@ -656,6 +656,7 @@ export class AppMessagesManager extends AppManager {
   }} = {};
 
   private reloadConversationsPromise: Promise<void>;
+  private dialogsOffsetCursorKeys: Map<number, string>;
   private reloadConversationsPeers: Map<PeerId, {inputDialogPeer: InputDialogPeer, promise: CancellablePromise<Dialog>, sentRequest?: boolean}> = new Map();
 
   private groupedTempId = 0;
@@ -4981,18 +4982,35 @@ export class AppMessagesManager extends AppManager {
       // ! ВНИМАНИЕ: ОЧЕНЬ СЛОЖНАЯ ЛОГИКА:
       // ! если делать запрос сначала по папке 0, потом по папке 1, по индексу 0 в массиве будет один и тот же диалог, с dialog.pFlags.pinned, ЛОЛ???
       // ! т.е., с запросом folder_id: 1, и exclude_pinned: 0, в результате будут ещё и закреплённые с папки 0
+      // ! the server pages by the last dialog's top message and peer and ignores the date, so a
+      // ! next page without them is the first page again, and filling the list never ends
+      const cursor = offsetDate ? this.dialogsStorage.getOffsetCursor(folderId) : undefined;
+      const cursorKey = cursor ? `${cursor.peerId}_${cursor.id}` : undefined;
+      if(cursorKey && this.dialogsOffsetCursorKeys?.get(folderId) === cursorKey) {
+        // * the previous page did not move the cursor, so there is nothing after it
+        this.dialogsStorage.setDialogsLoaded(folderId, true, filterType);
+        return Promise.resolve({isEnd: true, count: this.dialogsStorage.getFolderDialogs(folderId, false, filterType).length, dialogs: []});
+      }
+
       promise = this.apiManager.invokeApiSingleProcess({
         method: method = 'messages.getDialogs',
         params: params = {
           folder_id: folderId,
           offset_date: offsetDate,
-          offset_id: offsetId,
-          offset_peer: this.appPeersManager.getInputPeerById(offsetPeerId),
+          offset_id: cursor?.id ?? offsetId,
+          offset_peer: this.appPeersManager.getInputPeerById(cursor?.peerId ?? offsetPeerId),
           limit: useLimit,
           hash: '0'
         },
         options: requestOptions,
-        processResult
+        processResult: (result) => {
+          const processed = processResult(result);
+          if(cursorKey && processed) {
+            (this.dialogsOffsetCursorKeys ||= new Map()).set(folderId, cursorKey);
+          }
+
+          return processed;
+        }
       });
     }
 
