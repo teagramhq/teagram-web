@@ -652,20 +652,21 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   const stoppedProfile = cpuProfile ? await stopCpuProfile(cpuProfile) : undefined;
   const metric = await capture(page, requests, boundary, true, traceRpc);
   if(!stoppedProfile && !captureWorkerMessages) return metric;
-  const {tasks, spans, workerMessages} = await page.evaluate((captureWorkerMessages) => {
+  const {tasks, spans, workerMessages, workerBatches} = await page.evaluate((captureWorkerMessages) => {
     const perf = (window as any).__teagramPerf;
     const workerMessages = captureWorkerMessages ? perf.workerMessages.spans : [];
     if(captureWorkerMessages) perf.workerMessages.restore();
     return {
       tasks: perf.longTasks as Array<{startTime: number, duration: number}>,
       spans: (perf.scrollSpans || []) as PerformanceSpan[],
-      workerMessages: workerMessages as Array<{type: string, startTime: number, duration: number}>
+      workerMessages: workerMessages as Array<{type: string, startTime: number, duration: number, recorderStart?: number, recorderEnd?: number}>,
+      workerBatches: (captureWorkerMessages ? perf.workerMessages.batches : []) as Array<{startTime: number, endTime: number, size: number}>
     };
   }, captureWorkerMessages);
   const windowEndMs = boundary.startedAtMs + boundary.ms;
   const windowTasks = tasks.filter(({startTime}) => startTime >= boundary.startedAtMs && startTime < windowEndMs);
   const workerAttribution = captureWorkerMessages ? {
-    workerMessageAttribution: summarizeWorkerMessageAttribution(windowTasks, workerMessages, boundary.startedAtMs)
+    workerMessageAttribution: summarizeWorkerMessageAttribution(windowTasks, workerMessages, boundary.startedAtMs, workerBatches)
   } : {};
   if(!stoppedProfile) return {...metric, ...workerAttribution};
 
