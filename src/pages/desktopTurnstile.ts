@@ -7,6 +7,7 @@ type TurnstileEvent = 'turnstile_error' | 'turnstile_token';
 type TurnstileCallbacks = {
   sitekey: string,
   action: TurnstileAction,
+  'response-field': boolean,
   callback: (token: string) => void,
   'expired-callback': () => void,
   'error-callback': () => void
@@ -133,6 +134,7 @@ export function mountDesktopTurnstilePage() {
       widgetId = turnstile.render(widgetContainer, {
         sitekey,
         action,
+        'response-field': false,
         callback: handleToken,
         'expired-callback': () => reportError('expired', MESSAGES.expired),
         'error-callback': () => reportError('widget_error', MESSAGES.failed)

@@ -5,6 +5,7 @@ import {mountDesktopTurnstilePage} from '@/pages/desktopTurnstile';
 type TurnstileCallbacks = {
   sitekey: string,
   action: 'signin' | 'signup',
+  'response-field': boolean,
   callback: (token: string) => void,
   'expired-callback': () => void,
   'error-callback': () => void
@@ -110,7 +111,11 @@ describe('desktop Turnstile entry', () => {
 
     const callbacks = getCallbacks();
     expect(api.render).toHaveBeenCalledOnce();
-    expect(api.render).toHaveBeenCalledWith(widget, expect.objectContaining({sitekey: 'valid_key-1', action: 'signup'}));
+    expect(api.render).toHaveBeenCalledWith(widget, expect.objectContaining({
+      sitekey: 'valid_key-1',
+      action: 'signup',
+      'response-field': false
+    }));
     expect(message.textContent).toBe('');
 
     callbacks?.callback('secret-turnstile-token');
