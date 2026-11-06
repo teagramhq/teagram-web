@@ -329,6 +329,7 @@ export function evaluatePerformance(report, history = []) {
       if(report.requireBase && Number.isFinite(head.bundleBytes) && Number.isFinite(base.bundleBytes) && head.bundleBytes > base.bundleBytes * 1.02) {
         addFailure(blockingFailures, scale, scenario.key, `bundle grew from ${base.bundleBytes} to ${head.bundleBytes} bytes (over 2%)`);
       }
+
       const budgetMs = scale === '100x' ? scenario.budgetMs : null;
       const absoluteBudgetFailure = budgetMs !== null && Number.isFinite(head.ms) && head.ms > budgetMs;
       const relativeTimingFailure = hasTimingRegression(headSamples, mainValues);
