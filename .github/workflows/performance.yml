@@ -191,6 +191,7 @@ jobs:
               websocket_port=2446
             fi
             nohup env TG_POSTGRES_DSN="$dsn" TG_BLOB_DIR="$blob_dir" \
+              TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT=0 \
               TG_LISTEN_ADDR="127.0.0.1:$listen_port" TG_ADVERTISE_ADDR="teagramd.test:$listen_port" \
               TG_WEBSOCKET_LISTEN_ADDR="127.0.0.1:$websocket_port" \
               "$RUNNER_TEMP/teagramd" > "$RUNNER_TEMP/teagram-perf-server-$scale.log" 2>&1 < /dev/null &
