@@ -2447,12 +2447,14 @@ export default class ChatInput {
     const previousSendAs = this.sendAs;
     const sendAs = this.createSendAs();
     const filteredAttachMenuButtons = this.filterAttachMenuButtons();
+    const isBroadcast = this.chat.isBroadcast;
+    const isBot = this.chat.isBot;
+    const canSendPromise = this.chat?.canSend('send_messages') || true;
+    const canSendPlainPromise = peerId.isUser() ? canSendPromise : this.chat?.canSend('send_plain') || true;
 
     const [
-      isBroadcast,
       isBroadcastGroup,
       canPinMessage,
-      isBot,
       canSend,
       canSendPlain,
       neededFakeContainer,
@@ -2461,31 +2463,23 @@ export default class ChatInput {
       setSendAsCallback,
       peerTitleShort,
       isPremiumRequired,
-      appConfig,
       autoDeletePeriod,
       canManageAutoDelete,
-      peerMuted,
-      ackedGlobalPrivacy
+      peerMuted
     ] = await Promise.all([
-      this.managers.appPeersManager.isBroadcast(peerId),
-      this.managers.appPeersManager.isBroadcastGroup(peerId),
-      this.managers.appPeersManager.canPinMessage(peerId),
-      this.managers.appPeersManager.isBot(peerId),
-      this.chat?.canSend('send_messages') || true,
-      this.chat?.canSend('send_plain') || true,
+      this.chat.isChannel ? this.managers.appPeersManager.isBroadcastGroup(peerId) : false,
+      this.chat.type === ChatType.Pinned ? this.managers.appPeersManager.canPinMessage(peerId) : false,
+      canSendPromise,
+      canSendPlainPromise,
       this.getNeededFakeContainer(startParam),
-      modifyAckedPromise(this.managers.acknowledged.appProfileManager.getProfileByPeerId(peerId)),
+      isBot ? modifyAckedPromise(this.managers.acknowledged.appProfileManager.getProfileByPeerId(peerId)) : undefined,
       btnScheduled && !this.chat.threadId ? modifyAckedPromise(this.managers.acknowledged.appMessagesManager.getScheduledMessages(peerId)) : undefined,
       sendAs ? (sendAs.setPeerId(peerId), sendAs.updateManual(true)) : undefined,
       wrapPeerTitle({peerId, onlyFirstName: true}),
-      this.chat.isPremiumRequiredToContact(),
-      apiManagerProxy.getAppConfig(),
+      this.chat.isPremiumRequired,
       modifyAckedPromise(this.chat.getAutoDeletePeriod()),
       this.chat.canManageAutoDelete(),
-      this.managers.appNotificationsManager.isPeerLocalMuted({peerId, respectType: false}),
-      this.btnSendGift ?
-        modifyAckedPromise(this.managers.acknowledged.appPrivacyManager.getGlobalPrivacySettings()) :
-        undefined
+      this.managers.appNotificationsManager.isPeerLocalMuted({peerId, respectType: false})
     ]);
 
     const placeholderParams = this.messageInput ? await this.getPlaceholderParams(canSendPlain) : undefined;
@@ -2550,7 +2544,7 @@ export default class ChatInput {
 
       let haveSomethingInControl = false;
       if(this.chat && this.frozenBtn) {
-        const good = !haveSomethingInControl && appConfig.freeze_since_date && !canSend;
+        const good = !haveSomethingInControl && this.chat.appConfig.freeze_since_date && !canSend;
         haveSomethingInControl ||= good;
         this.frozenBtn.classList.toggle('hide', !good);
       }
@@ -2649,19 +2643,9 @@ export default class ChatInput {
 
       if(this.btnSendGift) {
         // Default to hidden so the previous chat's state never leaks.
-        // Cached acked.result → callbackify fires synchronously inside
-        // this render closure (same tick as the hide above → no visible
-        // flicker, button settles into the correct state immediately).
-        // Cold first-load → async toggle once both fetches resolve.
         this.btnSendGift.classList.add('hide');
-        if(this.giftButtonBasePeerEligible(peerId) && !isBot) {
-          callbackify(ackedPeerFull.result, (peerFull) => {
-            if(!middleware()) return;
-            callbackify(ackedGlobalPrivacy.result, (globalPrivacy) => {
-              if(!middleware()) return;
-              this.btnSendGift.classList.toggle('hide', !this.shouldShowGiftButton(peerFull as UserFull.userFull, globalPrivacy));
-            });
-          });
+        if(!isBot) {
+          this.updateGiftButtonVisibility(middleware);
         }
       }
 
@@ -2710,6 +2694,13 @@ export default class ChatInput {
       this.peerChanging = false;
       // console.warn('[input] finishpeerchange ends');
     };
+  }
+
+  public failPeerChange() {
+    this.peerChanging = false;
+    this.restoreInputLock = undefined;
+    this.chatInput.classList.add('is-hidden');
+    this.messageInput.contentEditable = 'false';
   }
 
   private updateOffset(
@@ -2770,20 +2761,35 @@ export default class ChatInput {
     return ownDisplay || peerDisplay;
   }
 
-  private async updateGiftButtonVisibility() {
+  private async updateGiftButtonVisibility(middleware?: () => boolean) {
     if(!this.btnSendGift || !this.chat) return;
-    const peerId = this.chat.peerId;
+    const chat = this.chat;
+    const peerId = chat.peerId;
     if(!this.giftButtonBasePeerEligible(peerId)) {
       this.btnSendGift.classList.add('hide');
       return;
     }
-    const [isBot, userFull, globalPrivacy] = await Promise.all([
-      this.managers.appPeersManager.isBot(peerId),
-      this.managers.appProfileManager.getProfile(peerId.toUserId()),
-      this.managers.appPrivacyManager.getGlobalPrivacySettings()
-    ]);
-    if(this.chat?.peerId !== peerId) return;
-    this.btnSendGift.classList.toggle('hide', isBot || !this.shouldShowGiftButton(userFull, globalPrivacy));
+
+    const isCurrentChat = () => {
+      const currentChat = this.chat;
+      return (!middleware || middleware()) &&
+        currentChat?.peerId === peerId &&
+        currentChat.type === ChatType.Chat;
+    };
+
+    try {
+      const [isBot, userFull, globalPrivacy] = await Promise.all([
+        this.managers.appPeersManager.isBot(peerId),
+        this.managers.appProfileManager.getProfile(peerId.toUserId()),
+        this.managers.appPrivacyManager.getGlobalPrivacySettings()
+      ]);
+      if(!isCurrentChat()) return;
+
+      this.btnSendGift.classList.toggle('hide', isBot || !this.shouldShowGiftButton(userFull, globalPrivacy));
+    } catch(error) {
+      chat.log.error('gift button visibility error:', error);
+      if(isCurrentChat()) this.btnSendGift.classList.add('hide');
+    }
   }
 
   private updateBotCommands(userFull: UserFull.userFull, skipAnimation?: boolean) {
@@ -2841,10 +2847,7 @@ export default class ChatInput {
       key = 'Channel.Persmission.MessageBlock';
     } else if(threadId && !isForum && !peerId.isUser()) {
       key = 'Comment';
-    } else if(
-      await this.managers.appPeersManager.isBroadcast(peerId) ||
-      await this.managers.appPeersManager.isBroadcastGroup(peerId)
-    ) {
+    } else if(this.chat.isBroadcast || (this.chat.isChannel && await this.managers.appPeersManager.isBroadcastGroup(peerId))) {
       key = 'ChannelBroadcast';
     } else if(this.chat.isMonoforum && this.chat.canManageDirectMessages) {
       key = this.inputState.store.isSuggestingUneditablePostChange ?
@@ -2856,7 +2859,7 @@ export default class ChatInput {
       key = 'OffThreadMessage'
     } else if(
       (this.sendAsPeerId !== undefined && this.sendAsPeerId !== rootScope.myId) ||
-      await this.managers.appMessagesManager.isAnonymousSending(peerId)
+      this.chat.isAnonymousSending
     ) {
       key = 'SendAnonymously';
     } else if(type === ChatType.Stories) {

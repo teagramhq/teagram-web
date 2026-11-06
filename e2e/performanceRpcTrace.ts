@@ -115,6 +115,18 @@ export function summarizePerformancePhases<T extends {name: string, durationMs: 
   }));
 }
 
+export function rpcInvocationsInWindow<T extends {startedAtEpochMs: number}>(calls: T[], timeOrigin: number, startedAtMs: number, elapsedMs: number): T[] {
+  const start = timeOrigin + startedAtMs;
+  return calls.filter((call) => call.startedAtEpochMs >= start && call.startedAtEpochMs <= start + elapsedMs);
+}
+
+export function rpcMethodCounts(calls: Array<{method: string, startedAtEpochMs: number}>, timeOrigin: number, startedAtMs: number, elapsedMs: number) {
+  return rpcInvocationsInWindow(calls, timeOrigin, startedAtMs, elapsedMs).reduce((counts, {method}) => {
+    counts[method] = (counts[method] || 0) + 1;
+    return counts;
+  }, {} as Record<string, number>);
+}
+
 export function summarizeRpcTrace(rpcCalls: PerformanceRpcCall[], elapsedMs: number): PerformanceRpcSummary {
   const intervals = rpcCalls.map(({startedAtMs, durationMs}) => {
     const start = Math.max(0, Math.min(elapsedMs, startedAtMs));

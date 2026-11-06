@@ -23,6 +23,10 @@ test('routes each web origin to its matching fixture server', () => {
     http: 'http://127.0.0.1:2446',
     websocket: 'ws://127.0.0.1:2446'
   });
+  assert.deepEqual(targetFor('teagramd.test', 'http://localhost:4178'), {
+    http: 'http://127.0.0.1:2446',
+    websocket: 'ws://127.0.0.1:2446'
+  });
 });
 
 test('rejects unrecognized browser origins', () => {

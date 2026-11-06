@@ -21,12 +21,18 @@ Cold chat-list history also requires a matching cold-load measurement version;
 other scenarios continue using the shared measurement version.
 On pull requests, scrolling fails if any 100x repeat records a task over 50 ms
 or the pooled dropped-frame percentage reaches 1%; dropped-frame percentage is
-pooled across all frame intervals from the three scroll repeats.
+pooled across all frame intervals from the scroll repeats. Chat open, scroll
+back, and send measurements collect five same-run paired repeats in PR artifacts.
+The existing three-sample policy and calibration version are unchanged; extra
+timing samples are report-only. Send and scroll timing add no timing gates.
 Every scenario and size needs three base bundle measurements or the performance
 gate fails closed.
 The 100x cold chat-list measurement uses six fresh contexts for the paired
 blocking-time gate and its negative control. Its timing starts at navigation so
 the existing cold-load budget still includes the document fetch.
+Chat-open timing starts when the browser dispatches the chat-list row's click;
+the separate `preInteractionMs` field records the time before that event so
+browser-driver delay does not count against client response time.
 Because the base client has no date-jump flow, its open-chat
 bundle is the date-jump baseline; that row has no base timing sample. If the
 base client cannot load 2,000 older messages, its open-chat bundle is the scroll

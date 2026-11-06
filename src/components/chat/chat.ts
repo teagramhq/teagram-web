@@ -6,11 +6,12 @@ import EventListenerBase from '@helpers/eventListenerBase';
 import {logger, LogTypes} from '@lib/logger';
 import rootScope from '@lib/rootScope';
 import appSidebarRight from '@components/sidebarRight';
-import ChatBubbles, {FullMid, splitFullMid} from '@components/chat/bubbles';
+import ChatBubbles, {FullMid, PEER_CHANGED_ERROR, splitFullMid} from '@components/chat/bubbles';
 import ChatContextMenu from '@components/chat/contextMenu';
 import ChatInput from '@components/chat/input';
 import ChatSelection from '@components/chat/selection';
 import ChatTopbar from '@components/chat/topbar';
+import getPeerTitle from '@components/wrappers/getPeerTitle';
 import {HIDDEN_PEER_ID, NULL_PEER_ID, REPLIES_HIDDEN_CHANNEL_ID, REPLIES_PEER_ID, SEND_PAID_WITH_STARS_DELAY, SERVICE_PEER_ID, VERIFICATION_CODES_BOT_ID} from '@appManagers/constants';
 import {AppPrivateSearchTab} from '@components/solidJsTabs/tabs';
 import mediaSizes, {ScreenSize} from '@helpers/mediaSizes';
@@ -48,6 +49,7 @@ import useIsNightTheme from '@hooks/useIsNightTheme';
 import useStars, {setReservedStars} from '@stores/stars';
 import PopupElement from '@components/popups';
 import PopupStars from '@components/popups/stars';
+import {toastNew} from '@components/toast';
 import {getPendingPaidReactionKey, PENDING_PAID_REACTION_SENT_ABORT_REASON, PENDING_PAID_REACTIONS} from '@components/chat/reactions';
 import showUndoablePaidTooltip, {paidReactionLangKeys} from '@components/chat/undoablePaidTooltip';
 import namedPromises from '@helpers/namedPromises';
@@ -73,6 +75,13 @@ import focusSearchInput from '@components/chat/focusSearchInput';
 
 export type ChatSearchKeys = Pick<RequestHistoryOptions, 'query' | 'isCacheableSearch' | 'isPublicHashtag' | 'savedReaction' | 'fromPeerId' | 'inputFilter' | 'hashtagType'>;
 export const CHAT_SEARCH_KEYS: (keyof ChatSearchKeys)[] = ['query', 'isCacheableSearch', 'isPublicHashtag', 'savedReaction', 'fromPeerId', 'inputFilter', 'hashtagType'];
+
+export type DeferredPeerChange = {
+  ready: Promise<{error: unknown, name: string} | undefined>,
+  apply: () => Promise<void>,
+  failPeerChange: () => void,
+  getPendingParts: () => string[]
+};
 
 // * after this long an in-flight peer change is treated as abandoned rather than as a reason to
 // * ignore further attempts to open the same chat
@@ -113,6 +122,7 @@ export default class Chat extends EventListenerBase<{
   public setPeerPromise: Promise<void>;
   private setPeerPromiseStartedAt: number;
   public peerChanged: boolean;
+  public peerChangeFailed = false;
 
   public log: ReturnType<typeof logger>;
 
@@ -1042,7 +1052,8 @@ export default class Chat extends EventListenerBase<{
       this.inited = true;
     }
 
-    const samePeer = this.appImManager.isSamePeer(this, options);
+    const samePeer = this.appImManager.isSamePeer(this, options) && !this.peerChangeFailed;
+    this.peerChangeFailed = false;
     if(!samePeer) {
       this.appImManager.dispatchEvent('peer_changing', this);
       this.peerIdSignal[1](this.peerId = peerId || NULL_PEER_ID);
@@ -1142,8 +1153,12 @@ export default class Chat extends EventListenerBase<{
     const bubblesSetPeerPromise = this.bubbles.setPeer({...options, samePeer, sameSearch});
     this.setPeerPromiseStartedAt = Date.now();
     const setPeerPromise = this.setPeerPromise = bubblesSetPeerPromise.then((result) => {
-      return result.promise;
-    }).catch(noop).finally(() => {
+      return result?.promise;
+    }).catch((error: unknown) => {
+      if(error !== PEER_CHANGED_ERROR) {
+        this.log.error('chat peer change failed:', peerId, error);
+      }
+    }).finally(() => {
       if(this.setPeerPromise === setPeerPromise) {
         this.setPeerPromise = null;
       }
@@ -1200,8 +1215,9 @@ export default class Chat extends EventListenerBase<{
     startParam?: string,
     middleware: () => boolean,
     text?: string,
-    entities?: MessageEntity[]
-  }) {
+    entities?: MessageEntity[],
+    deferUiCallbacks?: boolean
+  }): Promise<DeferredPeerChange | void> {
     if(this.peerChanged) return;
 
     const peerId = this.peerId;
@@ -1213,41 +1229,196 @@ export default class Chat extends EventListenerBase<{
     this.cleanup(false);
 
     const sharedMediaTab = this.sharedMediaTab;
+    let didReportPeerChangeFailure = false;
+    const failPeerChange = () => {
+      if(!middleware()) {
+        return;
+      }
 
-    const callbacksObj = await namedPromises({
+      this.peerChanged = false;
+      this.peerChangeFailed = true;
+      if(this.container) {
+        this.container.hidden = true;
+      }
+      this.input?.failPeerChange();
+      if(!didReportPeerChangeFailure) {
+        didReportPeerChangeFailure = true;
+        const peerTitlePromise = getPeerTitle({peerId, plainText: true}).catch((error: unknown): string | undefined => {
+          this.log.error('failed to get peer title for peer change failure:', peerId, error);
+          return undefined;
+        });
+        void peerTitlePromise.then((title) => {
+          if(middleware()) {
+            toastNew({
+              langPackKey: title ? 'Teagram.Chat.PeerChangeFailed' : 'Teagram.Chat.PeerChangeFailedUnnamed',
+              ...(title ? {langPackArguments: [title]} : {})
+            });
+          }
+        }).catch((error: unknown) => {
+          this.log.error('failed to show peer change failure toast:', peerId, error);
+        });
+      }
+    };
+
+    const peerChangePromises = {
       topbar: this.topbar?.finishPeerChange(options),
       bubbles: this.bubbles?.finishPeerChange(),
       input: this.input?.finishPeerChange(options),
       sharedMedia: sharedMediaTab?.fillProfileElements(),
       backgrounds: this.handleBackgrounds()
-    }, this.log);
+    };
+    const pendingPeerChangeParts = new Set(Object.keys(peerChangePromises));
 
-    const callbacks = Object.values(callbacksObj);
+    let didApplyUiCallbacks = false;
+    const applyFinalUiChanges = () => {
+      if(sharedMediaTab) {
+        appSidebarRight.replaceSharedMediaTab(sharedMediaTab);
+        this.sharedMediaTabs.filter((tab) => tab !== sharedMediaTab).forEach((tab) => this.destroySharedMediaTab(tab));
+      }
+
+      if(this.container) {
+        if(!this.peerChangeFailed) {
+          this.container.hidden = false;
+        }
+        this.container.dataset.type = this.type === ChatType.Search ? 'chat' : this.type;
+        this.container.classList.toggle('can-click-date', [ChatType.Chat, ChatType.Discussion, ChatType.Saved].includes(this.type));
+      }
+
+      this.log.setPrefix('CHAT-' + peerId + '-' + this.type);
+
+      if(this.isMainChat) {
+        this.appImManager.dispatchEvent('peer_changed', this);
+      }
+    };
+    const applyUiCallbacks = (callbacks: Array<[string, (() => void) | undefined]>) => {
+      if(didApplyUiCallbacks || !middleware()) {
+        return;
+      }
+      didApplyUiCallbacks = true;
+
+      callbacks.forEach(([name, callback]) => {
+        try {
+          callback?.();
+        } catch(error) {
+          if(name === 'input') {
+            failPeerChange();
+          }
+
+          throw error;
+        }
+      });
+
+      applyFinalUiChanges();
+    };
+
+    if(options.deferUiCallbacks) {
+      type PeerChangePart = {name: string, callback: (() => void) | undefined} | {name: string, error: unknown};
+      const preparedParts = Object.entries(peerChangePromises).map(async([name, promise]): Promise<PeerChangePart> => {
+        try {
+          const result = await namedPromises({[name]: promise}, this.log);
+          pendingPeerChangeParts.delete(name);
+          return {name, callback: result[name] as (() => void) | undefined};
+        } catch(error) {
+          pendingPeerChangeParts.delete(name);
+          failPeerChange();
+
+          if(middleware()) {
+            this.log.error('peer change part failed:', peerId, name, error);
+          } else {
+            this.log.warn('stale peer change part failed:', peerId, this.peerId, name, error, {stale: true});
+          }
+          return {name, error};
+        }
+      });
+      const allPrepared = Promise.all(preparedParts).then((): undefined => undefined);
+      const firstPreparationError = new Promise<{error: unknown, name: string}>((resolve) => {
+        preparedParts.forEach((part) => {
+          part.then((result) => {
+            if('error' in result) resolve({error: result.error, name: result.name});
+          });
+        });
+      });
+      const ready = Promise.race([allPrepared, firstPreparationError]);
+      let applyPromise: Promise<void> | undefined;
+      const apply = (): Promise<void> => {
+        if(applyPromise) {
+          return applyPromise;
+        }
+        if(didApplyUiCallbacks || !middleware()) {
+          return Promise.resolve();
+        }
+        didApplyUiCallbacks = true;
+        applyPromise = (async() => {
+          let inputPeerChangeError: unknown;
+          let didInputPeerChangeFail = false;
+          for(const part of preparedParts) {
+            const result = await part;
+            if(!middleware()) {
+              return;
+            }
+            if('error' in result) {
+              if(result.name === 'input') {
+                failPeerChange();
+                if(!didInputPeerChangeFail) {
+                  didInputPeerChangeFail = true;
+                  inputPeerChangeError = result.error;
+                }
+              }
+              continue;
+            }
+            try {
+              result.callback?.();
+            } catch(error) {
+              this.log.error('peer change apply part failed:', peerId, result.name, error);
+              if(result.name === 'input') {
+                failPeerChange();
+                if(!didInputPeerChangeFail) {
+                  didInputPeerChangeFail = true;
+                  inputPeerChangeError = error;
+                }
+              }
+            }
+          }
+
+          if(middleware()) {
+            try {
+              sharedMediaTab?.loadSidebarMedia(true);
+            } catch(error) {
+              this.log.error('peer change apply part failed:', peerId, 'sharedMedia', error);
+            }
+          }
+          if(!middleware()) {
+            return;
+          }
+
+          applyFinalUiChanges();
+          if(didInputPeerChangeFail) {
+            throw inputPeerChangeError;
+          }
+        })();
+        return applyPromise;
+      };
+
+      return {ready, apply, failPeerChange, getPendingParts: () => Array.from(pendingPeerChangeParts)};
+    }
+
+    let callbacksObj: Awaited<ReturnType<typeof namedPromises<typeof peerChangePromises>>>;
+    try {
+      callbacksObj = await namedPromises(peerChangePromises, this.log);
+    } catch(error) {
+      // namedPromises rejects the whole preparation, so none of its UI callbacks run. Fail the
+      // transition and release the input lock instead of leaving the selected peer half-open.
+      failPeerChange();
+      throw error;
+    }
+    const callbacks = Object.entries(callbacksObj) as Array<[string, (() => void) | undefined]>;
     sharedMediaTab?.loadSidebarMedia(true);
 
     if(!middleware()) {
       return;
     }
 
-    callbacks.forEach((callback) => {
-      callback?.();
-    });
-
-    if(sharedMediaTab) {
-      appSidebarRight.replaceSharedMediaTab(sharedMediaTab);
-      this.sharedMediaTabs.filter((tab) => tab !== sharedMediaTab).forEach((tab) => this.destroySharedMediaTab(tab));
-    }
-
-    if(this.container) {
-      this.container.dataset.type = this.type === ChatType.Search ? 'chat' : this.type;
-      this.container.classList.toggle('can-click-date', [ChatType.Chat, ChatType.Discussion, ChatType.Saved].includes(this.type));
-    }
-
-    this.log.setPrefix('CHAT-' + peerId + '-' + this.type);
-
-    if(this.isMainChat) {
-      this.appImManager.dispatchEvent('peer_changed', this);
-    }
+    applyUiCallbacks(callbacks);
   }
 
   public getMessage(mid: number | FullMid) {

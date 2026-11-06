@@ -1,9 +1,10 @@
 import {readFileSync, writeFileSync} from 'node:fs';
-import {expect, test, type Browser, type BrowserContext, type Page} from '@playwright/test';
+import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {findLongTasksWithSignificantSpanWork, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {findLongTasksWithSignificantSpanWork, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
 
 type Fixture = {
   owner: number,
@@ -13,23 +14,21 @@ type Fixture = {
 
 type Scale = '1x' | '100x';
 type Variant = 'base' | 'head';
+const PERFORMANCE_TIMING_REPEATS = 5;
+const REPORT_ONLY_SEND_REPEATS = 11;
 
 type Metric = {
   ms: number,
   requests: number,
   domNodes: number,
-  domNodeCounts: {
-    bubbles: number,
-    bubbleGroups: number,
-    dateGroups: number,
-    groupAvatars: number,
-    deletePlaceholders: number
-  },
+  domClassCounts: Record<string, number>,
+  domNodeCounts: DomNodeCounts,
   bundleBytes: number,
   longTasksOver50Ms: number,
   blockingTimeMs: number,
   maxLongTaskDurationMs: number,
   rpcCallCount: number,
+  rpcMethodCounts?: Record<string, number>,
   rpcWallMs: number | null,
   nonRpcElapsedMs: number | null,
   rpcTraceEnabled: boolean,
@@ -44,7 +43,11 @@ type Metric = {
   droppedFramePercent?: number,
   droppedFrames?: number,
   frameIntervals?: number,
-  longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>
+  longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>,
+  preInteractionMs?: number,
+  appSendUiMs?: number,
+  composerReadyAfterFirstBubbleMs?: number,
+  firstBubbleToSentMs?: number
 };
 
 type VariantRun = {
@@ -57,7 +60,9 @@ type MeasurementBoundary = {
   ms: number,
   startedAtMs: number,
   domNodes: number,
-  domNodeCounts: Metric['domNodeCounts']
+  domClassCounts: Metric['domClassCounts'],
+  domNodeCounts: Metric['domNodeCounts'],
+  preInteractionMs?: number
 };
 
 type ScrollBackTraceOptions = {
@@ -84,6 +89,7 @@ const report = {
   serverCommit: process.env.PERF_SERVER_COMMIT || '',
   fixtureServerCommit: process.env.PERF_FIXTURE_SERVER_COMMIT || '',
   requireBase: process.env.PERF_REQUIRE_BASE === 'true',
+  requireTimingRepeats: process.env.PERF_REQUIRE_BASE === 'true',
   diagnostics: {} as Record<string, Record<string, unknown>>,
   variants: {
     base: {'1x': {}, '100x': {}},
@@ -207,8 +213,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
   const requestCount = requests.value;
   await page.waitForTimeout(150);
   await waitForBundleResources(page);
-  const captured = await page.evaluate(async({boundary, scroll, includePhases}) => {
-    const {ms} = boundary;
+  const captured = await page.evaluate(async({scroll, includePhases}) => {
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
     const resourceCaptureEndedAt = performance.now();
@@ -229,9 +234,6 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
         outcome: 'pending' | 'success' | 'error'
       }>
     } : {enabled: false, recording: false, callCount: 0, invocations: [], calls: []};
-    const rpcInvocations = rpcTrace.invocations.filter((invocation) => {
-      return invocation.startedAtEpochMs - performance.timeOrigin <= ms;
-    });
     const workerPhases = includePhases ? (await apiManager.getPerformancePhaseTrace() as Array<{name: string, startedAtEpochMs: number, durationMs: number | null, accountNumber?: number}>).map((phase) => ({
       ...phase,
       startMs: Math.max(0, phase.startedAtEpochMs - performance.timeOrigin)
@@ -241,12 +243,6 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       startMs: Math.max(0, phase.startTime),
       durationMs: phase.duration
     })) : undefined;
-    const rpcCalls = rpcTrace.calls.map((call) => ({
-      method: call.method,
-      startedAtMs: Math.max(0, call.startedAtEpochMs - performance.timeOrigin),
-      durationMs: call.durationMs,
-      outcome: call.outcome
-    })).filter((call) => call.startedAtMs <= ms);
     return {
       bundleResources: resources.map((entry) => ({
         name: entry.name,
@@ -260,28 +256,42 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       longAnimationFrames: scroll ? perf.longAnimationFrames : [],
       rpcTraceEnabled: rpcTrace.enabled,
       rpcSpansRecorded: rpcTrace.recording,
-      rpcCallCount: rpcTrace.recording ? rpcInvocations.length : rpcTrace.callCount,
-      rpcCalls,
+      rpcCallCount: rpcTrace.callCount,
+      rpcInvocations: rpcTrace.invocations,
+      rpcRawCalls: rpcTrace.calls,
+      timeOrigin: performance.timeOrigin,
       workerPhases,
       mainPhases,
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
       droppedFrames: scroll && intervals.length ? droppedFrames : undefined,
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
-  }, {boundary, scroll, includePhases});
-  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, ...metrics} = captured;
+  }, {scroll, includePhases});
+  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, rpcInvocations, rpcRawCalls, timeOrigin, ...metrics} = captured;
   if(includePhases) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
+  const rpcCalls = rpcInvocationsInWindow(rpcRawCalls, timeOrigin, boundary.startedAtMs, boundary.ms).map((call) => ({
+    method: call.method,
+    startedAtMs: call.startedAtEpochMs - timeOrigin - boundary.startedAtMs,
+    durationMs: call.durationMs,
+    outcome: call.outcome
+  }));
+  const rpcCallCount = metrics.rpcSpansRecorded ? rpcInvocationsInWindow(rpcInvocations, timeOrigin, boundary.startedAtMs, boundary.ms).length : metrics.rpcCallCount;
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
-  const rpcSummary = summarizeRpcTrace(metrics.rpcCalls as PerformanceRpcCall[], boundary.ms);
+  const rpcSummary = summarizeRpcTrace(rpcCalls, boundary.ms);
   return {
     ...metrics,
+    rpcCallCount,
+    ...(metrics.rpcSpansRecorded ? {rpcMethodCounts: rpcMethodCounts(rpcInvocations, timeOrigin, boundary.startedAtMs, boundary.ms)} : {}),
+    rpcCalls,
     bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
     ...(scroll ? {longTaskTrace: summarizeLongTaskTrace(longTasks, longAnimationFrames, boundary.startedAtMs, boundary.ms)} : {}),
     ms: boundary.ms,
     requests: requestCount,
     domNodes: boundary.domNodes,
+    domClassCounts: boundary.domClassCounts,
     domNodeCounts: boundary.domNodeCounts,
+    preInteractionMs: boundary.preInteractionMs,
     rpcWallMs: metrics.rpcSpansRecorded ? rpcSummary.rpcWallMs : null,
     nonRpcElapsedMs: metrics.rpcSpansRecorded ? rpcSummary.nonRpcElapsedMs : null,
     workerPhases: includePhases ? summarizePerformancePhases(metrics.workerPhases || []) : undefined,
@@ -293,9 +303,17 @@ async function installPeerChangeTracing(page: Page) {
   return page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
     const phases: Array<{name: string, startMs: number, durationMs: number}> = [];
+    const wrappedTargets = new WeakMap<object, Set<string>>();
     const base = performance.now();
     const wrap = (target: any, method: string, name: string) => {
       if(!target || typeof target[method] !== 'function') return;
+      let wrappedMethods = wrappedTargets.get(target);
+      if(!wrappedMethods) {
+        wrappedMethods = new Set();
+        wrappedTargets.set(target, wrappedMethods);
+      }
+      if(wrappedMethods.has(method)) return;
+      wrappedMethods.add(method);
       const original = target[method];
       target[method] = function(...args: any[]) {
         const started = performance.now();
@@ -321,15 +339,25 @@ async function installPeerChangeTracing(page: Page) {
     };
     const chat = (window as any).appImManager?.chat;
     if(!chat) return [];
+    const wrapPeerChangeParts = () => {
+      wrap(chat.bubbles, 'setPeer', 'bubbles.setPeer');
+      wrap(chat.bubbles, 'getHistory1', 'bubbles.getHistory1');
+      wrap(chat.bubbles, 'performHistoryResult', 'bubbles.performHistoryResult');
+      wrap(chat.bubbles, 'finishPeerChange', 'bubbles.finishPeerChange');
+      wrap(chat.input, 'finishPeerChange', 'input.finishPeerChange');
+      wrap(chat.topbar, 'finishPeerChange', 'topbar.finishPeerChange');
+    };
     wrap(chat, 'setPeer', 'chat.setPeer');
     wrap(chat, 'onChangePeer', 'chat.onChangePeer');
     wrap(chat, 'finishPeerChange', 'chat.finishPeerChange');
-    wrap(chat.bubbles, 'setPeer', 'bubbles.setPeer');
-    wrap(chat.bubbles, 'getHistory1', 'bubbles.getHistory1');
-    wrap(chat.bubbles, 'performHistoryResult', 'bubbles.performHistoryResult');
-    wrap(chat.bubbles, 'finishPeerChange', 'bubbles.finishPeerChange');
-    wrap(chat.input, 'finishPeerChange', 'input.finishPeerChange');
-    wrap(chat.topbar, 'finishPeerChange', 'topbar.finishPeerChange');
+    wrap(chat, 'init', 'chat.init');
+    const originalInit = chat.init;
+    chat.init = function(...args: any[]) {
+      const result = originalInit.apply(this, args);
+      wrapPeerChangeParts();
+      return result;
+    };
+    wrapPeerChangeParts();
     perf.peerChangePhases = phases;
     return phases;
   });
@@ -369,17 +397,26 @@ function evaluateWithControlSamples(key: string, baseSamples: Metric[], headSamp
 async function snapshotMeasurementBoundary(page: Page): Promise<MeasurementBoundary> {
   return page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
+    const ms = performance.now() - perf.started;
+    const elements = [...document.querySelectorAll('*')];
+    const domClassCounts: Record<string, number> = {};
+    for(const element of elements) for(const name of element.classList) {
+      const key = `${element.tagName.toLowerCase()}.${name}`;
+      domClassCounts[key] = (domClassCounts[key] || 0) + 1;
+    }
     return {
-      ms: performance.now() - perf.started,
+      ms,
       startedAtMs: perf.started,
-      domNodes: document.querySelectorAll('*').length,
+      domNodes: elements.length,
+      domClassCounts,
       domNodeCounts: {
         bubbles: document.querySelectorAll('.bubbles .bubble[data-mid]').length,
         bubbleGroups: document.querySelectorAll('.bubbles .bubbles-group').length,
         dateGroups: document.querySelectorAll('.bubbles .bubbles-date-group').length,
         groupAvatars: document.querySelectorAll('.bubbles .bubbles-group-avatar-container').length,
         deletePlaceholders: document.querySelectorAll('.bubbles .bubble-delete-placeholder').length
-      }
+      },
+      preInteractionMs: perf.preInteractionMs
     };
   });
 }
@@ -497,6 +534,11 @@ async function waitForChatList(page: Page) {
   await expect(page.locator('#page-chats #chatlist-container .chatlist-chat').first()).toBeVisible({timeout: 120_000});
 }
 
+async function resetToChatList(page: Page, origin: string) {
+  await page.goto(origin, {waitUntil: 'domcontentloaded'});
+  await waitForChatList(page);
+}
+
 async function waitForHistorySettled(page: Page) {
   let previousDomNodes = -1;
   let stableSamples = 0;
@@ -521,13 +563,15 @@ async function reloadChatList(page: Page, requests: {value: number}) {
   return capture(page, requests, await snapshotMeasurementBoundary(page));
 }
 
-async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture) {
+async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
-  await begin(page, requests);
+  await begin(page, requests, true, traceRpc);
+  await startMeasurementAtClick(row);
   await row.click();
-  await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+  const boundary = await waitForFirstVisibleBubble(page);
+  expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
+  return capture(page, requests, boundary, false, traceRpc);
 }
 
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}) {
@@ -681,12 +725,33 @@ async function jumpToFixtureDate(page: Page, requests: {value: number}, fixture:
 }
 
 async function openContacts(page: Page, requests: {value: number}) {
+  // appDialogsManager preloads the shared Lottie worker 200 ms after startup.
+  // The reload before this scenario can render the chat list before that timer
+  // fires, which would charge the startup worker request to opening Contacts.
+  await page.waitForTimeout(250);
+  await expect.poll(async() => page.evaluate(() => {
+    const worker = performance.getEntriesByType('resource').find((entry) => entry.name.includes('tlottie.worker')) as PerformanceResourceTiming | undefined;
+    return !!worker && worker.responseEnd > 0;
+  }), {timeout: 10_000}).toBe(true);
   await waitForBundleResources(page);
-  await begin(page, requests);
-  await page.locator('.sidebar-tools-button').click();
-  await page.getByText('Contacts', {exact: true}).last().click();
-  await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+
+  const workerRequests: string[] = [];
+  const recordWorkerRequest = (request: Request) => {
+    if(request.url().includes('tlottie.worker')) workerRequests.push(request.url());
+  };
+  page.on('request', recordWorkerRequest);
+  try {
+    await begin(page, requests);
+    await page.locator('.sidebar-tools-button').click();
+    await page.getByText('Contacts', {exact: true}).last().click();
+    await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
+    const boundary = await snapshotMeasurementBoundary(page);
+    const sample = await capture(page, requests, boundary);
+    expect(workerRequests).toEqual([]);
+    return sample;
+  } finally {
+    page.off('request', recordWorkerRequest);
+  }
 }
 
 async function searchContacts(page: Page, requests: {value: number}, scale: Scale) {
@@ -709,17 +774,136 @@ async function globalSearch(page: Page, requests: {value: number}, scale: Scale)
   return capture(page, requests, await snapshotMeasurementBoundary(page));
 }
 
-async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture) {
-  await page.keyboard.press('Escape');
-  await page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first().click();
-  await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible();
-  await begin(page, requests);
-  const text = `web-perf-${process.env.GITHUB_RUN_ID || 'local'}-${Date.now()}`;
-  const composer = page.locator('.input-message-input:not(.input-field-input-fake)[contenteditable="true"]');
-  await composer.fill(text);
-  await composer.press('Enter');
-  await expect(page.locator('#page-chats .bubbles .bubble.is-out').filter({hasText: text})).toBeVisible({timeout: 60_000});
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+async function describeSendState(page: Page, fixture: Fixture) {
+  const state = page.evaluate((partner) => {
+    const chat = (window as any).appImManager?.chat;
+    const input = document.querySelector('.input-message-input:not(.input-field-input-fake)');
+    return {
+      peerId: String(chat?.peerId ?? ''),
+      peerChangeFailed: !!chat?.peerChangeFailed,
+      partnerRows: document.querySelectorAll(`#chatlist-container .chatlist-chat[data-peer-id="${partner}"]`).length,
+      chatRows: document.querySelectorAll('#chatlist-container .chatlist-chat').length,
+      bubbles: document.querySelectorAll('#page-chats .bubbles .bubble[data-mid]').length,
+      composer: input ? {editable: input.getAttribute('contenteditable'), hidden: !(input as HTMLElement).offsetParent} : null,
+      pageClasses: document.querySelector('#page-chats')?.className
+    };
+  }, fixture.partner).catch((error: unknown) => ({evaluateError: String(error)}));
+  return Promise.race([state, new Promise((resolve) => setTimeout(() => resolve('page unresponsive'), 5_000))]);
+}
+
+async function describeRow(row: Locator) {
+  const sample = () => row.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return {x: rect.x, y: rect.y, width: rect.width, height: rect.height, opacity: style.opacity, visibility: style.visibility, transform: style.transform};
+  }, undefined, {timeout: 5_000}).catch((error: unknown) => ({error: String(error)}));
+  const first = await sample();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  return {first, second: await sample()};
+}
+
+async function installSendUiTiming(page: Page, text: string) {
+  await page.evaluate((sendText) => {
+    const composer = document.querySelector<HTMLElement>('.input-message-input:not(.input-field-input-fake)[contenteditable="true"]');
+    const bubbles = document.querySelector<HTMLElement>('#page-chats .bubbles');
+    if(!composer || !bubbles) throw new Error('send UI timing could not find the active composer and bubbles');
+
+    const state: {startedAt: number | null, elapsedMs: number | null} = {startedAt: null, elapsedMs: null};
+    const matchesBubble = (node: Node, searchDescendants = false) => {
+      const element = node instanceof Element ? node : node.parentElement;
+      if(!element) return false;
+      const bubble = element.closest('.bubble.is-out') || (searchDescendants ? element.querySelector('.bubble.is-out') : null);
+      return Boolean(bubble?.textContent?.includes(sendText));
+    };
+    const recordBubbleInsertion = (records: MutationRecord[]) => {
+      if(state.startedAt === null || state.elapsedMs !== null) return;
+      const matchingBubble = records.some((record) => {
+        return [...record.addedNodes].some((node) => matchesBubble(node, true)) || matchesBubble(record.target);
+      });
+      if(matchingBubble) {
+        state.elapsedMs = performance.now() - state.startedAt;
+        observer.disconnect();
+      }
+    };
+    const onKeydown = (event: KeyboardEvent) => {
+      if(event.key !== 'Enter' || event.shiftKey || event.isComposing || state.startedAt !== null) return;
+      state.startedAt = performance.now();
+    };
+    const observer = new MutationObserver(recordBubbleInsertion);
+    observer.observe(bubbles, {childList: true, subtree: true, characterData: true});
+    composer.addEventListener('keydown', onKeydown, true);
+    (window as any).__teagramSendUiTiming = {
+      state,
+      cleanup: () => {
+        observer.disconnect();
+        composer.removeEventListener('keydown', onKeydown, true);
+        delete (window as any).__teagramSendUiTiming;
+      }
+    };
+  }, text);
+}
+
+async function finishSendUiTiming(page: Page) {
+  const elapsedMs = await page.evaluate(() => {
+    const timing = (window as any).__teagramSendUiTiming;
+    if(!timing) return undefined;
+    const {elapsedMs} = timing.state;
+    timing.cleanup();
+    return elapsedMs;
+  });
+  if(!Number.isFinite(elapsedMs)) throw new Error('in-page Enter-to-bubble timing did not observe the outgoing bubble');
+  return elapsedMs as number;
+}
+
+async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false) {
+  let composerReadyAfterFirstBubbleMs = 0;
+  let firstBubbleAtMs = 0;
+  let appSendUiMs = 0;
+  let cpu: PerformanceCpuSummary | undefined;
+  try {
+    const activeSearch = page.locator('#search-container.active');
+    if(await activeSearch.count()) {
+      await page.locator('#column-left .sidebar-back-button.is-visible').click();
+      await expect(activeSearch).toHaveCount(0);
+    }
+    const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
+    await expect(row).toBeVisible({timeout: 60_000});
+    try {
+      await row.click({timeout: 15_000});
+    } catch(error) {
+      console.warn('partner row never stabilised', JSON.stringify(await describeRow(row)), String(error).split('\n')[0]);
+      throw error;
+    }
+    await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible();
+    firstBubbleAtMs = await page.evaluate(() => performance.now());
+    const composer = page.locator('.input-message-input:not(.input-field-input-fake)[contenteditable="true"]');
+    // Deferred peer setup can finish after the first bubble is visible. Keep that readiness wait
+    // reportable, but start the send-action clock only once the composer can accept input.
+    await expect(composer).toBeVisible({timeout: 60_000});
+    await expect(composer).toBeEditable({timeout: 60_000});
+    composerReadyAfterFirstBubbleMs = await page.evaluate((startedAt) => performance.now() - startedAt, firstBubbleAtMs);
+    const cpuProfile = traceRpc ? await startCpuProfile(page) : undefined;
+    const text = `web-perf-${process.env.GITHUB_RUN_ID || 'local'}-${Date.now()}`;
+    await installSendUiTiming(page, text);
+    await begin(page, requests, true, traceRpc);
+    await composer.fill(text);
+    await composer.press('Enter');
+    await expect(page.locator('#page-chats .bubbles .bubble.is-out').filter({hasText: text})).toBeVisible({timeout: 60_000});
+    appSendUiMs = await finishSendUiTiming(page);
+    if(cpuProfile) cpu = await finishCpuProfile(cpuProfile);
+  } catch(error) {
+    console.error('send a message failed', JSON.stringify(await describeSendState(page, fixture)));
+    throw error;
+  }
+  const firstBubbleToSentMs = await page.evaluate((startedAt) => performance.now() - startedAt, firstBubbleAtMs);
+  const boundary = await snapshotMeasurementBoundary(page);
+  return {
+    ...await capture(page, requests, boundary, false, traceRpc),
+    appSendUiMs,
+    composerReadyAfterFirstBubbleMs,
+    firstBubbleToSentMs,
+    ...(cpu ? {cpu} : {})
+  };
 }
 
 async function prepareVariant(browser: Browser, variant: Variant, origin: string): Promise<VariantRun> {
@@ -858,12 +1042,97 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     }
 
     // Reset both variants to the same signed-in chat-list state before contacts measurements.
-    await page.goto(origin, {waitUntil: 'domcontentloaded'});
-    await waitForChatList(page);
+    await resetToChatList(page, origin);
     measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
     measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
     measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
     measured.sendMessage.push(await test.step('send a message', () => sendMessage(page, requests, fixture)));
+  } finally {
+    await context.close();
+  }
+}
+
+async function runTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixture) {
+  const contextOptions = {
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  };
+  let chatOpen: Metric;
+  let scrollBack2k: Metric | undefined;
+
+  const historyContext = await browser.newContext(contextOptions);
+  try {
+    const page = await historyContext.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    chatOpen = await openPartnerChat(page, requests, fixture);
+    scrollBack2k = await scrollBackTwoThousand(page, requests, run.variant === 'head');
+  } finally {
+    await historyContext.close();
+  }
+
+  const sendContext = await browser.newContext(contextOptions);
+  try {
+    const page = await sendContext.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    const send = await sendMessage(page, requests, fixture);
+    return {chatOpen, scrollBack2k: scrollBack2k || {bundleBytes: chatOpen.bundleBytes}, send};
+  } finally {
+    await sendContext.close();
+  }
+}
+
+async function runSendTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixture) {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    return await sendMessage(page, requests, fixture);
+  } finally {
+    await context.close();
+  }
+}
+
+async function traceSendMessage(browser: Browser, run: VariantRun, fixture: Fixture) {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    return await sendMessage(page, requests, fixture, true);
+  } finally {
+    await context.close();
+  }
+}
+
+async function traceChatOpen(browser: Browser, run: VariantRun, fixture: Fixture) {
+  const context = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 800}, storageState: run.storageState});
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    return await openPartnerChat(page, requests, fixture, true);
   } finally {
     await context.close();
   }
@@ -910,9 +1179,9 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace());
         await installPeerChangeTracing(page);
         const chatProfile = await startCpuProfile(page);
+        await startMeasurementAtClick(row);
         await row.click();
-        await expect(page.locator('#page-chats .bubbles .bubble[data-mid]').first()).toBeVisible({timeout: 60_000});
-        const chatOpenBoundary = await snapshotMeasurementBoundary(page);
+        const chatOpenBoundary = await waitForFirstVisibleBubble(page);
         const chatCpu = await finishCpuProfile(chatProfile);
         const chatOpenCapture = await capture(page, requests, chatOpenBoundary, false, true);
         const peerChangePhases = await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []);
@@ -940,7 +1209,8 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
     }
   }
 
-  return {coldChatList, warmChatList, chatOpen: chatOpen!, scrollBack2k: scrollBack2k!, scrollBack2kRepeats};
+  const sendMessage = await test.step('trace 100x send action RPC and CPU cost', () => traceSendMessage(browser, run, fixture));
+  return {coldChatList, warmChatList, chatOpen: chatOpen!, scrollBack2k: scrollBack2k!, scrollBack2kRepeats, sendMessage};
 }
 
 test('measures the scale fixture in interleaved base and head runs', async({browser}) => {
@@ -954,6 +1224,29 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       const order = round % 2 === 0 ? variants : [...variants].reverse();
       for(const variant of order) {
         await test.step(`${scale} ${variant} round ${round + 1}`, () => runVariant(browser, preparedVariants[scale][variant]!, scale, fixture!));
+      }
+    }
+  }
+
+  if(report.requireTimingRepeats) {
+    const timingVariants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
+    for(let repeat = PERFORMANCE_REPEATS; repeat < PERFORMANCE_TIMING_REPEATS; ++repeat) {
+      const order = repeat % 2 === 0 ? timingVariants : [...timingVariants].reverse();
+      for(const variant of order) {
+        const run = preparedVariants['100x'][variant]!;
+        const measured = await test.step(`100x ${variant} targeted timing repeat ${repeat + 1}`, () => runTimingRepeat(browser, run, fixtures['100x']!));
+        report.variants[variant]['100x'].chatOpen.push(measured.chatOpen);
+        report.variants[variant]['100x'].scrollBack2k.push(measured.scrollBack2k);
+        report.variants[variant]['100x'].sendMessage.push(measured.send);
+      }
+    }
+
+    for(let repeat = PERFORMANCE_TIMING_REPEATS; repeat < REPORT_ONLY_SEND_REPEATS; ++repeat) {
+      const order = repeat % 2 === 0 ? timingVariants : [...timingVariants].reverse();
+      for(const variant of order) {
+        const run = preparedVariants['100x'][variant]!;
+        const sample = await test.step(`100x ${variant} report-only send repeat ${repeat + 1}`, () => runSendTimingRepeat(browser, run, fixtures['100x']!));
+        report.variants[variant]['100x'].sendMessage.push(sample);
       }
     }
   }
@@ -972,8 +1265,32 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
   const traceRun = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
   report.diagnostics['100x'] = await test.step('trace 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRun!, fixtures['100x']!));
+  if(report.requireBase) {
+    const baseTraceOrigin = process.env.PERF_TRACE_BASE_ORIGIN_100X;
+    expect(baseTraceOrigin, '100x traced base origin is missing').toBeTruthy();
+    const traceRuns = {
+      base: withOrigin(preparedVariants['100x'].base!, 'base', baseTraceOrigin!),
+      head: traceRun
+    };
+    const rpcComparison: Record<Variant, {chatOpen: Metric[], sendMessage: Metric[]}> = {
+      base: {chatOpen: [], sendMessage: []},
+      head: {chatOpen: [], sendMessage: []}
+    };
+    for(let repeat = 0; repeat < PERFORMANCE_REPEATS; ++repeat) {
+      const order: Variant[] = repeat % 2 ? ['head', 'base'] : ['base', 'head'];
+      for(const variant of order) {
+        const chatOpen = await traceChatOpen(browser, traceRuns[variant], fixtures['100x']!);
+        const sendMessage = await traceSendMessage(browser, traceRuns[variant], fixtures['100x']!);
+        expect(chatOpen.rpcSpansRecorded && sendMessage.rpcSpansRecorded, `${variant} RPC spans were not recorded`).toBe(true);
+        rpcComparison[variant].chatOpen.push(chatOpen);
+        rpcComparison[variant].sendMessage.push(sendMessage);
+      }
+    }
+    report.diagnostics['100x'].rpcComparison = rpcComparison;
+  }
 
-  const headScrollRepeats = report.variants.head['100x'].scrollBack2k;
+  // Report-only timing repeats share this array, but only policy repeats carry scroll traces.
+  const headScrollRepeats = report.variants.head['100x'].scrollBack2k.slice(0, PERFORMANCE_REPEATS);
   expect(headScrollRepeats).toHaveLength(PERFORMANCE_REPEATS);
   headScrollRepeats.forEach((metric, repeat) => {
     expect(metric.longTaskAttribution, `100x head scroll repeat ${repeat + 1} is missing attributed long-task traces`).toBeDefined();
