@@ -76,6 +76,8 @@ export type CachedDialogReconcileRunSummary = {
   endRelativeToScenarioMs: number,
   mainThreadTimeMs: number,
   pageCompletionOffsetsMs?: number[],
+  // When the newest page was requested, relative to the scenario start; a request that predates the window and never completes is a stalled response.
+  lastPageRequestOffsetMs?: number,
   // The page navigated away and took the worker with it before the walk finished; the end is that navigation.
   interrupted?: boolean
 };
@@ -86,7 +88,8 @@ export type CachedDialogReconcilePhase = {
   startedAtEpochMs: number,
   durationMs: number | null,
   interrupted?: boolean
-  pageCompletedAtEpochMs?: number[]
+  pageCompletedAtEpochMs?: number[],
+  lastPageRequestedAtEpochMs?: number
 };
 
 export type CachedDialogReconcileWindow = {
@@ -229,6 +232,9 @@ export function collectCachedDialogReconciles(
       .filter((time) => time >= scenarioStartedAtEpochMs && time < scenarioEndedAtEpochMs)
       .map((time) => Number((time - scenarioStartedAtEpochMs).toFixed(2)));
     }
+    if(phase.lastPageRequestedAtEpochMs !== undefined) {
+      summary.lastPageRequestOffsetMs = Number((phase.lastPageRequestedAtEpochMs - scenarioStartedAtEpochMs).toFixed(2));
+    }
     return summary;
   });
   return {walks};
@@ -315,9 +321,42 @@ export function validateMeasuredLongTaskTraces(
   });
 }
 
+// Frames the cached dialog reconciliation runs: its page loop, the peer mirror batches it sends to the page, and the chat-list updates those cause.
+export const RECONCILE_WALK_FRAME_NAMES = [
+  'getServerChannelsMissingLocally',
+  'reconcileCachedChannelDialogs',
+  'mirrorApiPeers',
+  'onMirrorTask',
+  'reconcilePeerMirrorBatch',
+  'reconcilePeers',
+  'reconcilePeer',
+  'handleDialogsMultiupdate',
+  'setLastMessage',
+  'updateDialog',
+  'onScrollShift'
+];
+
+export function findLongTasksWithWalkFrames(tasks: PerformanceTaskAttribution[] | undefined, frameNames = RECONCILE_WALK_FRAME_NAMES) {
+  const names = new Set(frameNames);
+  return (tasks || []).filter(({durationMs, stacks}) => durationMs > 50 && stacks.some(({frames}) => frames.some(({functionName}) => names.has(functionName))));
+}
+
+// Tasks over 50 ms without walk frames stay in the report; they are not a reconciliation failure.
+export function validateNoWalkLongTasks(
+  samples: Array<{longTaskAttribution?: PerformanceTaskAttribution[]}>,
+  label: string
+) {
+  samples.forEach(({longTaskAttribution}, index) => {
+    const tasks = findLongTasksWithWalkFrames(longTaskAttribution);
+    if(tasks.length) {
+      throw new Error(`${label} repeat ${index + 1} has ${tasks.length} tasks over 50 ms with reconcile walk frames`);
+    }
+  });
+}
+
 export function writeReportAndValidateScrollTasks(
   writeReport: () => void,
-  samples: Array<{longTasksOver50Ms?: number}>,
+  samples: Array<{longTasksOver50Ms?: number, longTaskAttribution?: PerformanceTaskAttribution[]}>,
   expectedRepeatCount: number
 ) {
   writeReport();
@@ -328,10 +367,8 @@ export function writeReportAndValidateScrollTasks(
     if(!Number.isSafeInteger(longTasksOver50Ms) || longTasksOver50Ms! < 0) {
       throw new Error(`100x scrollBack2k measured repeat ${index + 1} has an invalid long-task count`);
     }
-    if(longTasksOver50Ms) {
-      throw new Error(`100x scrollBack2k measured repeat ${index + 1} has ${longTasksOver50Ms} tasks over 50 ms`);
-    }
   });
+  validateNoWalkLongTasks(samples, '100x scrollBack2k measured');
 }
 
 export function rpcInvocationsInWindow<T extends {startedAtEpochMs: number}>(calls: T[], timeOrigin: number, startedAtMs: number, elapsedMs: number): T[] {

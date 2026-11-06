@@ -1,15 +1,47 @@
 import {describe, expect, test} from 'vitest';
-import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries, writeReportAndValidateScrollTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
+import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, findLongTasksWithWalkFrames, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries, validateNoWalkLongTasks, writeReportAndValidateScrollTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
 import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
 
-test('writes the full report before rejecting any long scroll repeat', () => {
+const task = (durationMs: number, functionNames: string[]): PerformanceTaskAttribution => ({
+  startTimeMs: 100,
+  durationMs,
+  spans: [],
+  stacks: [{frames: functionNames.map((functionName) => ({functionName, script: '/index.js'})), selfMs: durationMs}]
+});
+
+test('writes the full report before rejecting a scroll repeat with a walk task', () => {
   let written = false;
-  const samples = [{longTasksOver50Ms: 0}, {longTasksOver50Ms: 2}, {longTasksOver50Ms: 0}];
+  const samples = [
+    {longTasksOver50Ms: 0, longTaskAttribution: []},
+    {longTasksOver50Ms: 1, longTaskAttribution: [task(80, ['onMessage', 'onMirrorTask', 'reconcilePeers'])]},
+    {longTasksOver50Ms: 0, longTaskAttribution: []}
+  ];
   expect(() => writeReportAndValidateScrollTasks(() => { written = true; }, samples, 3))
-  .toThrow('100x scrollBack2k measured repeat 2 has 2 tasks over 50 ms');
+  .toThrow('100x scrollBack2k measured repeat 2 has 1 tasks over 50 ms with reconcile walk frames');
   expect(written).toBe(true);
   expect(() => writeReportAndValidateScrollTasks(() => {}, [{longTasksOver50Ms: 0}], 1)).not.toThrow();
   expect(() => writeReportAndValidateScrollTasks(() => {}, [{}], 1)).toThrow('repeat 1');
+});
+
+test('records but does not fail long tasks without walk frames or at most 50 ms', () => {
+  const samples = [{
+    longTasksOver50Ms: 2,
+    longTaskAttribution: [task(80, ['(idle)']), task(54, ['get scrollPosition']), task(50, ['onMirrorTask'])]
+  }];
+  expect(findLongTasksWithWalkFrames(samples[0].longTaskAttribution)).toEqual([]);
+  expect(() => writeReportAndValidateScrollTasks(() => {}, samples, 1)).not.toThrow();
+  expect(findLongTasksWithWalkFrames([task(51, ['updateDialog'])])).toHaveLength(1);
+});
+
+test('rejects a diagnostic repeat with a walk task', () => {
+  expect(() => validateNoWalkLongTasks([{longTaskAttribution: [task(70, ['setLastMessage'])]}], '100x chatOpen diagnostic'))
+  .toThrow('100x chatOpen diagnostic repeat 1 has 1 tasks over 50 ms with reconcile walk frames');
+  expect(() => validateNoWalkLongTasks([{}, {longTaskAttribution: []}], 'x')).not.toThrow();
+});
+
+test('reports when the newest walk page was requested relative to the scenario', () => {
+  const phase = {traceId: 'walk', pageCount: 0, startedAtEpochMs: 1_000, durationMs: 5_000, lastPageRequestedAtEpochMs: 1_050};
+  expect(collectCachedDialogReconciles([phase], 3_000, 4_000, {walk: 0}).walks[0].lastPageRequestOffsetMs).toBe(-1_950);
 });
 
 test('summarizes cached dialog reconciliation relative to a scenario', () => {

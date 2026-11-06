@@ -5,7 +5,8 @@ export type PerformancePhase = {
   traceId?: string,
   accountNumber?: number,
   pageCount?: number
-  pageCompletedAtEpochMs?: number[]
+  pageCompletedAtEpochMs?: number[],
+  lastPageRequestedAtEpochMs?: number
 };
 
 export type PerformanceRpcCall = {
@@ -71,6 +72,12 @@ export class PerformancePhaseTrace {
       phase.pageCount = pageCount;
       if(completedAtEpochMs !== undefined) phase.pageCompletedAtEpochMs?.push(completedAtEpochMs);
     }
+  }
+
+  // The newest page request tells a reader whether a walk that is not advancing is waiting on a response or never asked.
+  public setPageRequested(traceId: string, requestedAtEpochMs: number) {
+    const phase = this.phases.find((candidate) => candidate.traceId === traceId && candidate.durationMs === null);
+    if(phase) phase.lastPageRequestedAtEpochMs = requestedAtEpochMs;
   }
 
   public reset(preserveNames: string[] = []) {

@@ -2,6 +2,18 @@ import {describe, expect, test} from 'vitest';
 import {PerformancePhaseTrace, PerformanceRpcTrace} from '@lib/appManagers/performanceTrace';
 
 describe('performance trace collectors', () => {
+  test('reports the newest page request on a running phase only', () => {
+    const trace = new PerformancePhaseTrace(true);
+    const finish = trace.start('worker.walk', {traceId: 'walk-1'});
+
+    trace.setPageRequested('walk-1', 1_500);
+    expect(trace.getSnapshot()[0]).toMatchObject({traceId: 'walk-1', durationMs: null, lastPageRequestedAtEpochMs: 1_500});
+
+    finish();
+    trace.setPageRequested('walk-1', 2_500);
+    expect(trace.getSnapshot()[0].lastPageRequestedAtEpochMs).toBe(1_500);
+  });
+
   test('reports the pages seen so far on a running phase only', () => {
     const trace = new PerformancePhaseTrace(true);
     const finish = trace.start('worker.walk', {traceId: 'walk-1', pageCount: 0});

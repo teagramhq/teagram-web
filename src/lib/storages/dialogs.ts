@@ -2158,6 +2158,7 @@ export default class DialogsStorage extends AppManager {
     let walkFailed = false;
     try {
       for(;;) {
+        if(finishTrace) performancePhaseTrace.setPageRequested(traceId!, performance.timeOrigin + performance.now());
         const result = await this.apiManager.invokeApiSingleProcess({
           method: 'messages.getDialogs',
           params: {
