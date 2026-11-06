@@ -61,10 +61,6 @@ export async function readSnapshot(accountNumber: ActiveAccountNumber) {
   return snapshot;
 }
 
-export function clearSnapshot(accountNumber: ActiveAccountNumber) {
-  return invalidateSnapshot(accountNumber, false);
-}
-
 export async function invalidateSnapshot(accountNumber: ActiveAccountNumber, hold: boolean) {
   const token = hold ? crypto.randomUUID() : undefined;
   await transaction('readwrite', (store) => {

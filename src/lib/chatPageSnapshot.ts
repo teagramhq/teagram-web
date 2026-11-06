@@ -1,14 +1,11 @@
 import type {AccountSessionData, ActiveAccountNumber} from '@lib/accounts/types';
 import type {ChatPhoto, UserProfilePhoto} from '@layer';
-import StateStorage from '@lib/stateStorage';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 import sessionStorage from '@lib/sessionStorage';
 import bytesFromHex from '@helpers/bytes/bytesFromHex';
 import bytesToHex from '@helpers/bytes/bytesToHex';
 import {getMtprotoTarget} from '@config/mtprotoTarget';
 import App from '@config/app';
-import {getDatabaseState} from '@config/databases/state';
-import IDBStorage from '@lib/files/idb';
 import * as snapshotStorage from '@lib/chatPageSnapshotStorage';
 import {getActiveServerId, scopeServerStorageKey} from '@config/serverContext';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
@@ -23,7 +20,6 @@ let loadedAccountGuard: string;
 let loadGeneration = 0;
 let disabled = false;
 let pending = Promise.resolve();
-const storages = new Map<ActiveAccountNumber, StateStorage>();
 const generations = [0, 0, 0, 0, 0];
 const guardKey = () => scopeServerStorageKey('chat-page-snapshot-guard');
 const openGuardKey = () => scopeServerStorageKey('chat-page-snapshot-open-guard');
@@ -89,6 +85,24 @@ export function unblockSnapshotReads(expected: string) {
 
 export function snapshotReadGuard() { return readRawGuard(); }
 
+export function withPasscodeSnapshotLock<T>(callback: () => Promise<T>) {
+  if(typeof navigator !== 'undefined' && navigator.locks) {
+    return navigator.locks.request(scopeServerStorageKey('chat-page-snapshot-passcode'), callback);
+  }
+  return callback();
+}
+
+export async function recoverPasscodeSnapshots() {
+  // Without a cross-tab lock an activation may still be between blocking and persisting.
+  if(typeof navigator === 'undefined' || !navigator.locks) return;
+  await withPasscodeSnapshotLock(async() => {
+    const guard = snapshotReadGuard();
+    if(!guard?.startsWith('blocked:') || readGuard() !== guard) return;
+    await enableChatPageSnapshots(guard);
+    unblockSnapshotReads(guard);
+  });
+}
+
 export function chatPageSnapshotGeneration(accountNumber: ActiveAccountNumber) {
   return generations[accountNumber];
 }
@@ -119,23 +133,10 @@ export function sameChatPageKey(a: ChatPageKey, b: ChatPageKey) {
     a.server === b.server && a.authKeyId === b.authKeyId;
 }
 
-function storageFor(accountNumber: ActiveAccountNumber) {
-  let storage = storages.get(accountNumber);
-  if(!storage) storages.set(accountNumber, storage = new StateStorage(accountNumber));
-  return storage;
-}
-
 function enqueue(operation: () => Promise<void>) {
   const result = pending.then(operation);
   pending = result.catch((error) => { console.error('chat page snapshot storage failed', error); });
   return result;
-}
-
-async function clearLegacySnapshot(accountNumber: ActiveAccountNumber) {
-  await storageFor(accountNumber).delete('chatPageSnapshot');
-  if(await DeferredIsUsingPasscode.isUsingPasscode()) {
-    await new IDBStorage(getDatabaseState(accountNumber), 'session').delete('chatPageSnapshot');
-  }
 }
 
 export function writeChatPageSnapshot(key: ChatPageKey, rows: ChatPageRow[], epoch: string, generation = chatPageSnapshotGeneration(key.accountNumber)) {
@@ -177,17 +178,6 @@ export function forgetLoadedChatPageSnapshot() {
   loadedSnapshot = undefined;
 }
 
-export function clearChatPageSnapshot(accountNumber: ActiveAccountNumber) {
-  ++generations[accountNumber];
-  forgetLoadedChatPageSnapshot();
-  return enqueue(async() => {
-    await updateAccountGuard(accountNumber);
-    await snapshotStorage.clearSnapshot(accountNumber);
-    await updateAccountGuard(accountNumber);
-    await clearLegacySnapshot(accountNumber);
-  });
-}
-
 export async function beginChatPageSnapshotInvalidation(accountNumber: ActiveAccountNumber) {
   ++generations[accountNumber];
   forgetLoadedChatPageSnapshot();
@@ -195,8 +185,12 @@ export async function beginChatPageSnapshotInvalidation(accountNumber: ActiveAcc
   await enqueue(async() => {
     await updateAccountGuard(accountNumber);
     token = await snapshotStorage.invalidateSnapshot(accountNumber, true);
-    await updateAccountGuard(accountNumber);
-    await clearLegacySnapshot(accountNumber);
+    try {
+      await updateAccountGuard(accountNumber);
+    } catch(error) {
+      await snapshotStorage.finishInvalidation(accountNumber, token);
+      throw error;
+    }
   });
   return token;
 }
@@ -227,10 +221,7 @@ export async function disableChatPageSnapshots(token?: string) {
   disabled = true;
   forgetLoadedChatPageSnapshot();
   await snapshotStorage.blockSnapshots(token);
-  await Promise.all(([1, 2, 3, 4] as ActiveAccountNumber[]).map((accountNumber) => {
-    ++generations[accountNumber];
-    return enqueue(() => clearLegacySnapshot(accountNumber));
-  }));
+  for(const accountNumber of [1, 2, 3, 4] as ActiveAccountNumber[]) ++generations[accountNumber];
 }
 
 export async function enableChatPageSnapshots(token?: string) {

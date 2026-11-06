@@ -2,6 +2,81 @@ import {expect, it, vi} from 'vitest';
 import {getCommonDatabaseState} from '@config/databases/state';
 import IDBStorage from '@lib/files/idb';
 
+it('recovers an abandoned passcode block at boot under the cross-tab lock', async() => {
+  vi.resetModules();
+  const snapshots = await import('@lib/chatPageSnapshot');
+  (await import('@lib/passcode/deferredIsUsingPasscode')).default.resolveDeferred(false);
+  vi.stubGlobal('navigator', {locks: {request: async(_name: string, callback: () => Promise<unknown>) => callback()}});
+  try {
+    const guard = snapshots.blockSnapshotReads();
+    await snapshots.disableChatPageSnapshots(guard);
+    expect(await snapshots.captureChatPageSnapshotEpoch(1)).toBeUndefined();
+    await snapshots.recoverPasscodeSnapshots();
+    expect(await snapshots.captureChatPageSnapshotEpoch(1)).toBeTruthy();
+    expect(Object.keys(localStorage).some((key) => key.includes('snapshot-open-guard') && localStorage.getItem(key) === guard)).toBe(true);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it('does not recover a block while passcode metadata is present', async() => {
+  vi.resetModules();
+  const snapshots = await import('@lib/chatPageSnapshot');
+  (await import('@lib/passcode/deferredIsUsingPasscode')).default.resolveDeferred(false);
+  vi.stubGlobal('navigator', {locks: {request: async(_name: string, callback: () => Promise<unknown>) => callback()}});
+  const store = new IDBStorage(getCommonDatabaseState(), 'session');
+  const guard = snapshots.blockSnapshotReads();
+  try {
+    await snapshots.disableChatPageSnapshots(guard);
+    await store.save('passcode', {verificationHash: new Uint8Array([1])});
+    await expect(snapshots.recoverPasscodeSnapshots()).rejects.toBeDefined();
+    expect(await snapshots.captureChatPageSnapshotEpoch(1)).toBeUndefined();
+  } finally {
+    await store.delete('passcode');
+    await snapshots.enableChatPageSnapshots(guard);
+    snapshots.unblockSnapshotReads(guard);
+    vi.unstubAllGlobals();
+  }
+});
+
+it('does not recover a block while another tab is enabling a passcode', async() => {
+  vi.resetModules();
+  const snapshots = await import('@lib/chatPageSnapshot');
+  (await import('@lib/passcode/deferredIsUsingPasscode')).default.resolveDeferred(false);
+  let queue = Promise.resolve();
+  vi.stubGlobal('navigator', {locks: {request: (_name: string, callback: () => Promise<unknown>) => {
+    const result = queue.then(callback);
+    queue = result.then(() => {}, () => {});
+    return result;
+  }}});
+  const store = new IDBStorage(getCommonDatabaseState(), 'session');
+  let release: () => void;
+  let signalStarted: () => void;
+  const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  let guard: string;
+  try {
+    const activation = snapshots.withPasscodeSnapshotLock(async() => {
+      guard = snapshots.blockSnapshotReads();
+      await snapshots.disableChatPageSnapshots(guard);
+      signalStarted();
+      await barrier;
+      await store.save('passcode', {verificationHash: new Uint8Array([1])});
+    });
+    await started;
+    const recovery = snapshots.recoverPasscodeSnapshots();
+    release();
+    await activation;
+    await expect(recovery).rejects.toBeDefined();
+    expect(await snapshots.captureChatPageSnapshotEpoch(1)).toBeUndefined();
+  } finally {
+    await store.delete('passcode');
+    await snapshots.enableChatPageSnapshots(guard);
+    snapshots.unblockSnapshotReads(guard);
+    vi.unstubAllGlobals();
+  }
+});
+
 it('prevents an independent stale worker from writing after passcode activation', async() => {
   vi.resetModules();
   const first = await import('@lib/chatPageSnapshot');
@@ -14,7 +89,8 @@ it('prevents an independent stale worker from writing after passcode activation'
 
   const key = {accountNumber: 1 as const, userId: 123 as PeerId, server: 'server', authKeyId: 'key'};
   const rows = [{peerId: 42 as PeerId, title: 'Alice', preview: 'Private', date: 1, unread: 0, markedUnread: false, muted: false, pinned: false}];
-  await first.clearChatPageSnapshot(1);
+  const cleared = await first.beginChatPageSnapshotInvalidation(1);
+  await first.finishChatPageSnapshotInvalidation(1, cleared);
   const epoch = await first.captureChatPageSnapshotEpoch(1);
   await first.writeChatPageSnapshot(key, rows, epoch);
   await first.loadChatPageSnapshot(key);
@@ -105,7 +181,8 @@ it.each(['logout', 'reset'])('rejects an old worker write after %s invalidation'
   (await import('@lib/passcode/deferredIsUsingPasscode')).default.resolveDeferred(false);
   const key = {accountNumber: 1 as const, userId: 123 as PeerId, server: 'server', authKeyId: 'key'};
   const rows = [{peerId: 42 as PeerId, title: 'Alice', preview: 'Private', date: 1, unread: 0, markedUnread: false, muted: false, pinned: false}];
-  await first.clearChatPageSnapshot(1);
+  const cleared = await first.beginChatPageSnapshotInvalidation(1);
+  await first.finishChatPageSnapshotInvalidation(1, cleared);
   const oldGeneration = stale.chatPageSnapshotGeneration(1);
   const oldEpoch = await stale.captureChatPageSnapshotEpoch(1);
   await stale.writeChatPageSnapshot(key, rows, oldEpoch, oldGeneration);

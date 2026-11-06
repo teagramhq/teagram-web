@@ -1,11 +1,14 @@
 import {expect, it, vi} from 'vitest';
 
-const state = vi.hoisted(() => ({events: [] as string[]}));
+const state = vi.hoisted(() => ({events: [] as string[], rejectPrepare: false}));
 
 vi.mock('@lib/solidjs/hotReloadGuard', () => ({useLockScreenHotReloadGuard: () => ({
   rootScope: {dispatchEvent: () => {}},
   apiManagerProxy: {
-    invoke: async(type: string) => { state.events.push(type); },
+    invoke: async(type: string) => {
+      state.events.push(type);
+      if(type === 'preparePasscodeSnapshots' && state.rejectPrepare) throw new Error('prepare failed');
+    },
     serviceMessagePort: {invoke: async() => {}}
   }
 })}));
@@ -24,7 +27,21 @@ vi.mock('@lib/accounts/accountController', () => ({default: {updateStorageForLeg
 vi.mock('@lib/passcode/keyStore', () => ({default: {save: () => {}}}));
 
 import {usePasscodeActions} from '@lib/passcode/actions';
-import {blockSnapshotReads} from '@lib/chatPageSnapshot';
+import {blockSnapshotReads, snapshotReadGuard} from '@lib/chatPageSnapshot';
+
+it('unblocks snapshots if preparation fails before passcode persistence', async() => {
+  state.events.length = 0;
+  state.rejectPrepare = true;
+  try {
+    await expect(usePasscodeActions().enablePasscode('a passcode')).rejects.toThrow('prepare failed');
+    expect(state.events).toContain('resumePasscodeSnapshots');
+    const guard = snapshotReadGuard();
+    expect(Object.keys(localStorage).some((key) => key.includes('snapshot-open-guard') && localStorage.getItem(key) === guard)).toBe(true);
+    expect(state.events).not.toContain('save-passcode');
+  } finally {
+    state.rejectPrepare = false;
+  }
+});
 
 it('clears snapshots before making a local passcode persistent', async() => {
   state.events.length = 0;

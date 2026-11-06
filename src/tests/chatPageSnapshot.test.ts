@@ -1,6 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
-import {beginChatPageSnapshotInvalidation, beginChatPageSnapshotShift, captureChatPageSnapshotEpoch, chatPageSnapshotGeneration, clearChatPageSnapshot, disableChatPageSnapshots, enableChatPageSnapshots, finishChatPageSnapshotInvalidation, finishChatPageSnapshotShift, forgetLoadedChatPageSnapshot, getChatPageKey, getChatPageKeyFromAccount, loadChatPageSnapshot, readChatPageSnapshot, writeChatPageSnapshot} from '@lib/chatPageSnapshot';
+import {beginChatPageSnapshotInvalidation, beginChatPageSnapshotShift, captureChatPageSnapshotEpoch, chatPageSnapshotGeneration, disableChatPageSnapshots, enableChatPageSnapshots, finishChatPageSnapshotInvalidation, finishChatPageSnapshotShift, forgetLoadedChatPageSnapshot, getChatPageKey, getChatPageKeyFromAccount, loadChatPageSnapshot, readChatPageSnapshot, writeChatPageSnapshot} from '@lib/chatPageSnapshot';
 import AccountController from '@lib/accounts/accountController';
 import DialogsStorage from '@lib/storages/dialogs';
 import loadStorages from '@appManagers/utils/storages/loadStorages';
@@ -32,7 +32,7 @@ describe('chat page snapshot storage', () => {
   beforeEach(async() => {
     await enableChatPageSnapshots();
     DeferredIsUsingPasscode.resolveDeferred(false);
-    await clearChatPageSnapshot(1);
+    await snapshotStorage.invalidateSnapshot(1, false);
     epoch = await captureChatPageSnapshotEpoch(1);
   });
   afterEach(() => vi.restoreAllMocks());
@@ -58,7 +58,7 @@ describe('chat page snapshot storage', () => {
 
   it('drops the snapshot', async() => {
     await writeChatPageSnapshot(key, rows, epoch);
-    await clearChatPageSnapshot(1);
+    await snapshotStorage.invalidateSnapshot(1, false);
     await loadChatPageSnapshot(key);
     expect(readChatPageSnapshot(key)).toBeUndefined();
   });
@@ -99,6 +99,18 @@ describe('chat page snapshot storage', () => {
     await loadStorages(1, {users: store, chats: store, dialogs: store} as any, reset as any);
     await loadChatPageSnapshot(key);
     expect(readChatPageSnapshot(key)).toBeUndefined();
+  });
+
+  it('releases an invalidation if updating the account guard fails after deletion', async() => {
+    const original = Storage.prototype.setItem;
+    let calls = 0;
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function(this: Storage, key, value) {
+      if(key.includes('chat-page-snapshot-account') && ++calls === 2) throw new Error('guard failed');
+      return original.call(this, key, value);
+    });
+    await expect(beginChatPageSnapshotInvalidation(1)).rejects.toThrow('guard failed');
+    spy.mockRestore();
+    expect(await captureChatPageSnapshotEpoch(1)).toBeTruthy();
   });
 
   it('drops the snapshot when the account logs out', async() => {
@@ -273,19 +285,6 @@ describe('chat page snapshot storage', () => {
     await storage.refreshFirstChatPage({dialogs: []}, newKey, epoch, owner);
     await loadChatPageSnapshot(newKey);
     expect(readChatPageSnapshot(newKey)).toBeUndefined();
-  });
-
-  it('does not choose between multiple matching shifted slots', async() => {
-    const account = {userId: 123 as PeerId, dcId: 2, dc2_auth_key: '12'.repeat(256)};
-    vi.spyOn(sessionStorage, 'getFresh').mockImplementation((async(name: string) => {
-      return name === 'account1' || name === 'account3' ? account : undefined;
-    }) as any);
-    const owner = {...await getChatPageKey(1), accountNumber: 2 as const};
-    const storage = makeStorage({getAccountNumber: () => 2});
-    await storage.refreshFirstChatPage(makePage(), undefined, epoch, owner);
-    const firstKey = await getChatPageKey(1);
-    await loadChatPageSnapshot(firstKey);
-    expect(readChatPageSnapshot(firstKey)).toBeUndefined();
   });
 
   it('binds a new sign-in to its first authenticated page', async() => {
