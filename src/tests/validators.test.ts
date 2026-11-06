@@ -1,4 +1,5 @@
-import {isUsernameValid, isWebAppNameValid} from '../lib/richTextProcessor/validators';
+import {isUsernameValid} from '../lib/richTextProcessor/validators';
+import {isWebAppNameValid} from '../lib/richTextProcessor/webAppNameValidator';
 
 describe('isUsernameValid', () => {
   it('uses only username rules supplied by appConfig', () => {
