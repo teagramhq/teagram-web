@@ -1422,6 +1422,41 @@ async function traceChatOpen(browser: Browser, run: VariantRun, fixture: Fixture
   }
 }
 
+async function traceDateJump(browser: Browser, run: VariantRun, fixture: Fixture) {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    const reconcileTargets: CachedDialogReconcileTarget[] = [];
+    await installInstrumentation(page, requests, run.origin, false, true);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+
+    await beginScenario(page, requests, true);
+    await page.reload({waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
+    await expect(row).toBeVisible({timeout: 60_000});
+    await beginScenario(page, requests, true);
+    await startMeasurementAtClick(row);
+    await row.click();
+    await waitForFirstVisibleBubble(page);
+
+    let dateJumpBoundary: MeasurementBoundary | undefined;
+    const jumped = await jumpToFixtureDate(page, requests, fixture, false, true, (boundary) => dateJumpBoundary = boundary);
+    if(!jumped || !dateJumpBoundary) throw new Error('date-jump profile did not record its measurement boundary');
+    await addCachedDialogReconcileTarget(page, reconcileTargets, jumped, 'dateJump');
+    await finalizeCachedDialogReconcileSummaries(page, reconcileTargets);
+    return jumped;
+  } finally {
+    await context.close();
+  }
+}
+
 async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
   const traceSamples = Object.fromEntries(scenarios.map((scenario) => [scenario, [] as Metric[]])) as Record<string, Metric[]>;
   report.diagnostics['100x'] = traceSamples;
@@ -1475,20 +1510,8 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         };
         traceSamples.chatOpen.push(chatOpenSample);
         await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpenSample, 'chatOpen');
-        let dateJumpBoundary: MeasurementBoundary | undefined;
-        const jumped = await test.step(`profile 100x date jump (repeat ${repeat + 1})`, () => jumpToFixtureDate(
-          page,
-          requests,
-          fixture,
-          false,
-          true,
-          (boundary) => dateJumpBoundary = boundary
-        ));
-        if(!jumped || !dateJumpBoundary) throw new Error('date-jump profile did not record its measurement boundary');
-        traceSamples.dateJump.push(jumped);
-        await addCachedDialogReconcileTarget(page, reconcileTargets, jumped, 'dateJump');
 
-        // Capture the date jump while the warm cached-dialog walk is still active, then profile history loading.
+        // Every diagnostic repeat scrolls back, so each one's long tasks carry their own CPU stacks and spans.
         let scrollBoundary: MeasurementBoundary | undefined;
         const scrolled = await test.step(`profile 100x scroll back 2,000 messages (repeat ${repeat + 1})`, () => scrollBackTwoThousand(page, requests, true, {
           captureCpuStacks: true,
@@ -1558,6 +1581,11 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
       await finalizeCachedDialogReconcileSummaries(page, reconcileTargets);
     } finally {
       await context.close();
+    }
+
+    if(repeat < PERFORMANCE_REPEATS) {
+      const jumped = await test.step(`profile 100x date jump (repeat ${repeat + 1})`, () => traceDateJump(browser, run, fixture));
+      traceSamples.dateJump.push(jumped);
     }
   }
 
