@@ -10,6 +10,7 @@ import {makeFullMid, type FullMid} from '@appManagers/utils/messages/fullMid';
 import ejectBubble from '@components/chat/bubbles/ejectBubble';
 import {ChatType} from '@components/chat/chatType';
 import {markMessageLinkEntity} from '@lib/richTextProcessor/filterDisabledEntities';
+import {AppMessagesManager} from '@appManagers/appMessagesManager';
 
 const moduleMocks = vi.hoisted(() => {
   const noop = vi.fn();
@@ -3664,6 +3665,171 @@ test('commits final group identity before a structural replacement is mounted', 
   expect(newBubble.isConnected).toBe(true);
 
   middlewareHelper.destroy();
+});
+
+test('renders a pending bubble before replaying an early message ID acknowledgement', () => {
+  const randomId = '42';
+  const tempId = 3.0001;
+  const serverId = 100;
+  const messagesStorageKey = '10_history';
+  const eventOrder: string[] = [];
+  const listeners = new Map<string, Set<Function>>();
+  const rootScope = moduleMocks.rootScope as any;
+  const originalRootScopeMethods = {
+    addEventListener: rootScope.addEventListener,
+    removeEventListener: rootScope.removeEventListener,
+    dispatchEvent: rootScope.dispatchEvent,
+    dispatchEventSingle: rootScope.dispatchEventSingle
+  };
+  const dispatch = (event: string, ...args: any[]) => {
+    eventOrder.push(event);
+    listeners.get(event)?.forEach((listener) => listener(...args));
+  };
+  Object.assign(rootScope, {
+    addEventListener: (event: string, listener: Function) => {
+      let eventListeners = listeners.get(event);
+      if(!eventListeners) listeners.set(event, eventListeners = new Set());
+      eventListeners.add(listener);
+    },
+    removeEventListener: (event: string, listener: Function) => listeners.get(event)?.delete(listener),
+    dispatchEvent: dispatch,
+    dispatchEventSingle: dispatch
+  });
+
+  const history = {
+    mids: [] as number[],
+    unshift(mid: number) { this.mids.unshift(mid); },
+    delete(mid: number) { this.mids = this.mids.filter((value) => value !== mid); }
+  };
+  const storage = {key: messagesStorageKey, history};
+  const tempMessage = {
+    id: tempId,
+    mid: tempId,
+    peerId,
+    random_id: randomId,
+    _: 'message',
+    pFlags: {is_outgoing: true}
+  } as any;
+  const serverMessage = {mid: serverId, peerId, _: 'message', pFlags: {is_outgoing: true}} as any;
+  const storedMessages = new Map<number, any>([[serverId, serverMessage]]);
+  const queuedCallbacks: Array<() => void> = [];
+  const bubbles: Record<string, HTMLElement> = {};
+  const chat = {
+    log: Object.assign(vi.fn(), {bindPrefix: () => vi.fn()}),
+    messagesStorageKey,
+    type: ChatType.Chat,
+    peerId,
+    threadId: undefined,
+    isForum: false,
+    isBotforum: false,
+    appImManager: {chats: []},
+    container: document.createElement('div'),
+    setMessageId: vi.fn()
+  } as any;
+  const TestChatBubbles = class extends (ChatBubbles as any) {
+    constructor(chat: any, managers: any) {
+      super(chat, managers);
+    }
+
+    createChatInner() {
+      return document.createElement('div');
+    }
+
+    setScroll() {
+      this.scrollable = {container: document.createElement('div'), loadedAll: {bottom: true}};
+    }
+  };
+  const bubbleHarness = Object.assign(new TestChatBubbles(chat, {}), {
+    bubbles,
+    changedMids: new Map(),
+    needUpdate: [],
+    unreadOut: new Set(),
+    updateLocalOnEdit: new Map(),
+    contexts: new Map(),
+    streamedMessageFinals: new Map(),
+    renderNewPromises: new Set(),
+    batchProcessor: {queuePromise: undefined},
+    bubbleGroups: {
+      getItemByBubble: () => ({mid: tempId, reverse: false}),
+      removeAndUnmountBubble: vi.fn(),
+      mountUnmountGroups: vi.fn()
+    },
+    setupReadMetrics: vi.fn(),
+    updateHasMessages: vi.fn(),
+    updateSolidMessageBodyIdentity: vi.fn(),
+    cancelPendingBubbleReplacement: (bubble: HTMLElement) => ({bubble, cancelled: false}),
+    renderNewMessage: vi.fn((message: any) => {
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.dataset.mid = String(message.mid);
+      document.body.append(bubble);
+      bubbles[makeFullMid(message)] = bubble;
+    }),
+    groupBubbles: (): {groups: any[]} => ({groups: []})
+  }) as any;
+
+  try {
+    bubbleHarness.constructPeerHelpers();
+
+    const manager = new AppMessagesManager() as any;
+    Object.assign(manager, {
+      pendingByRandomId: {},
+      pendingByMessageId: {},
+      appPeersManager: {isChannel: () => false},
+      appMessagesIdsManager: {generateMessageId: (id: number) => id},
+      getMessagePeer: () => peerId,
+      getHistoryMessagesStorage: () => storage,
+      getHistoryStorage: () => storage,
+      getMonoforumThreadId: (): undefined => undefined,
+      saveMessages: (messages: any[]) => messages.forEach((message) => storedMessages.set(message.mid, message)),
+      getMessageFromStorage: (_storage: unknown, mid: number) => storedMessages.get(mid),
+      deleteMessageFromStorage: (_storage: unknown, mid: number) => storedMessages.delete(mid),
+      setDialogTopMessage: vi.fn(),
+      updateMessageContextForInserting: vi.fn(),
+      updateMessageContextForDeletion: vi.fn(),
+      deletePendingTopMsg: vi.fn(),
+      rootScope,
+      finalizePendingMessageCallbacks: (messageStorage: any, pendingId: number, message: any) => {
+        rootScope.dispatchEvent('message_sent', {
+          storageKey: messageStorage.key,
+          tempId: pendingId,
+          tempMessage,
+          mid: message.mid,
+          message
+        });
+      },
+      adoptStreamedMessageDraft: vi.fn()
+    });
+
+    manager.onUpdateMessageId({random_id: randomId, id: serverId});
+    history.unshift(serverId);
+    manager.beforeMessageSending(tempMessage, {processAfter: (callback: () => void) => queuedCallbacks.push(callback)});
+
+    expect(queuedCallbacks).toHaveLength(1);
+    expect(bubbles[makeFullMid(peerId, serverId)]).toBeUndefined();
+    expect(eventOrder).not.toContain('history_update');
+    expect(manager.pendingByRandomId[randomId]).toBeDefined();
+    queuedCallbacks[0]();
+
+    expect(eventOrder.filter((event) => ['history_append', 'message_sent', 'history_update'].includes(event))).toEqual([
+      'history_append',
+      'message_sent',
+      'history_update'
+    ]);
+    expect(bubbleHarness.renderNewMessage).toHaveBeenCalledOnce();
+    expect(bubbleHarness.renderNewMessage).toHaveBeenCalledWith(tempMessage, true);
+    expect(document.body.querySelectorAll('.bubble')).toHaveLength(1);
+    expect(document.body.querySelector('.bubble')?.getAttribute('data-mid')).toBe(String(serverId));
+    expect(bubbles[makeFullMid(peerId, tempId)]).toBeUndefined();
+    expect(bubbles[makeFullMid(peerId, serverId)]).toBe(document.body.querySelector('.bubble'));
+    expect(history.mids).toEqual([serverId]);
+    expect(manager.pendingByRandomId[randomId]).toBeUndefined();
+  } finally {
+    bubbleHarness.listenerSetter.removeAll();
+    bubbleHarness.appWindowUnsubs.forEach((unsubscribe: () => void) => unsubscribe());
+    Object.assign(rootScope, originalRootScopeMethods);
+    document.body.replaceChildren();
+  }
 });
 
 test('keeps a sender description poll in processBatch when message_sent rekeys it during async work', async() => {

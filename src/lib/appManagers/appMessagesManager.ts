@@ -3988,7 +3988,9 @@ export class AppMessagesManager extends AppManager {
       const pendingMessageId = this.pendingMessageIdsByRandomId[message.random_id];
       if(pendingMessageId !== undefined) {
         delete this.pendingMessageIdsByRandomId[message.random_id];
-        this.onUpdateMessageId({_: 'updateMessageID', random_id: message.random_id, id: pendingMessageId});
+        callbacks.push(() => {
+          this.onUpdateMessageId({_: 'updateMessageID', random_id: message.random_id, id: pendingMessageId});
+        });
       }
     }
 
