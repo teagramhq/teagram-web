@@ -28,11 +28,26 @@ describe('dialog list updates', () => {
     const pending = Array.from({length: 24}, (_, index) => list.add(index));
 
     await vi.advanceTimersToNextTimerAsync();
-    expect(create.mock.calls.length).toBeGreaterThan(0);
-    expect(create.mock.calls.length).toBeLessThan(24);
+    expect(create.mock.calls.length).toBe(8);
     await vi.runAllTimersAsync();
     await Promise.all(pending);
     expect(list.getSortedItems().map((item) => item.id)).toEqual(Array.from({length: 24}, (_, i) => 23 - i));
+    list.destroy();
+  });
+
+  it('starts a new row on the first tick after clearing a cancelled backlog', async() => {
+    vi.useFakeTimers();
+    const list = createList();
+    const create = vi.spyOn(list, 'createItemForKey').mockImplementation(async(key) => ({
+      id: key, index: key, value: {type: 'custom-sorted-dialog', value: {render: () => document.createElement('li')}} as any
+    }));
+    const cancelled = Array.from({length: 24}, (_, index) => list.add(index));
+    list.clear();
+    const live = list.add(99);
+    await vi.advanceTimersToNextTimerAsync();
+    expect(create).toHaveBeenCalledWith(99);
+    await vi.runAllTimersAsync();
+    await Promise.all([...cancelled, live]);
     list.destroy();
   });
 

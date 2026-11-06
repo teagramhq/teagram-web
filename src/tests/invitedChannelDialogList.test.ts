@@ -62,6 +62,7 @@ const createList = (membership: ChannelMembership = 'active') => {
   const list = Object.create(AutonomousDialogList.prototype) as any;
   Object.assign(list, {
     filterId: 0,
+    log: {warn: vi.fn()},
     indexKey: 'index_0',
     hasReachedTheEnd: false,
     sortedList,
@@ -224,6 +225,7 @@ describe('invited channel dialog rows', () => {
       await vi.runAllTimersAsync();
       expect(create).not.toHaveBeenCalled();
       expect(list.sortedList.has(dialog.peerId)).toBe(false);
+      expect(list.log.warn).toHaveBeenCalledWith('Dialog missing during filter validation', dialog.peerId);
     } finally {
       managers.appMessagesManager = previous;
       list.sortedList.destroy();

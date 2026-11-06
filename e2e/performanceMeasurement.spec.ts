@@ -1,11 +1,35 @@
 import {expect, test} from '@playwright/test';
-import {getContactsFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
+import {finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
+
+test('retains the incomplete scroll error when trace cleanup fails', async() => {
+  await expect(finishIncompleteScroll('scroll reached message 30, expected 20', true, async() => {
+    throw new Error('trace failed');
+  })).rejects.toThrow('scroll reached message 30, expected 20; frame trace cleanup failed: Error: trace failed');
+  await expect(finishIncompleteScroll('scroll reached message 30, expected 20', false, async() => {})).resolves.toBeUndefined();
+});
 
 test('reports contacts container state when no contact rows appear', async({page}) => {
   await page.setContent('<div id="contacts-container"><input class="input-search-input" value="x"><ul id="contacts"></ul></div>');
   expect(await getContactsFailureDetails(page)).toEqual({
     containerCount: 1, listCount: 1, rowCount: 0, searchLength: 1
   });
+});
+
+test('reports unavailable contact diagnostics without replacing the scenario error', async({page}) => {
+  await page.close();
+  expect(await getContactsFailureDetails(page)).toBeNull();
+  expect(await getContactsRpcFailureDetails(page)).toEqual({error: 'page unavailable'});
+});
+
+test('distinguishes a timed-out contact RPC trace from an empty trace', async({page}) => {
+  await page.evaluate(() => {
+    (window as any).rootScope = {managers: {apiManager: {getPerformanceRpcTrace: () => new Promise(() => {})}}};
+  });
+  expect(await getContactsRpcFailureDetails(page)).toEqual({timedOut: true});
+  await page.evaluate(() => {
+    (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace = () => Promise.resolve({calls: []});
+  });
+  expect(await getContactsRpcFailureDetails(page)).toEqual([]);
 });
 
 test('starts the measured window when the browser dispatches the click', async({page}) => {

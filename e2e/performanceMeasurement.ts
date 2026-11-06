@@ -1,12 +1,38 @@
 import type {Locator, Page} from '@playwright/test';
 
+export async function finishIncompleteScroll(message: string, required: boolean, stopTrace?: () => Promise<unknown>) {
+  if(stopTrace) {
+    try {
+      await stopTrace();
+    } catch(error) {
+      throw new Error(`${message}; frame trace cleanup failed: ${String(error)}`);
+    }
+  }
+  if(required) throw new Error(message);
+}
+
 export async function getContactsFailureDetails(page: Page) {
   return page.evaluate(() => ({
     containerCount: document.querySelectorAll('#contacts-container').length,
     listCount: document.querySelectorAll('#contacts-container #contacts').length,
     rowCount: document.querySelectorAll('#contacts-container .chatlist-chat').length,
     searchLength: document.querySelector<HTMLInputElement>('#contacts-container .input-search-input')?.value.length ?? null
-  }));
+  })).catch((): null => null);
+}
+
+export async function getContactsRpcFailureDetails(page: Page) {
+  return page.evaluate(async() => {
+    try {
+      const manager = (window as any).rootScope.managers.apiManager;
+      const timeout = new Promise<{timedOut: true}>((resolve) => setTimeout(() => resolve({timedOut: true}), 2_000));
+      const trace = await Promise.race([manager.getPerformanceRpcTrace(), timeout]) as
+        {calls: Array<{method: string, durationMs: number | null, outcome: string}>} | {timedOut: true} | null;
+      if(trace && 'calls' in trace) return trace.calls.filter((call) => call.method === 'contacts.getContacts');
+      return trace ?? null;
+    } catch(error) {
+      return {error: String(error)};
+    }
+  }).catch(() => ({error: 'page unavailable'}));
 }
 
 export type DomNodeCounts = {

@@ -275,7 +275,14 @@ export default class SortedDialogList {
   private flushAdds() {
     // A large dialog update can create thousands of rows at once. Start small groups
     // in separate tasks so input and painting can run while every row is built.
-    const requests = this.pendingAdds.splice(0, 8);
+    const requests: PendingDialogAdd[] = [];
+    let consumed = 0;
+    while(consumed < this.pendingAdds.length && requests.length < 8) {
+      const request = this.pendingAdds[consumed++];
+      if(request.cancelled) request.resolve();
+      else requests.push(request);
+    }
+    this.pendingAdds.splice(0, consumed);
     requests.forEach((request) => {
       if(request.cancelled) {
         request.resolve();

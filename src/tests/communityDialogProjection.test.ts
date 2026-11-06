@@ -102,6 +102,31 @@ async function createRealSortedList() {
 describe('Community dialog projection counts', () => {
   afterEach(() => vi.useRealTimers());
 
+  test('keeps existing children visible and reports a failed community row', async() => {
+    const peerId = (100 as ChatId).toPeerId(true);
+    const failure = new Error('row failed');
+    const rows = new Set<any>([peerId]);
+    const log = {error: vi.fn()};
+    const sortedList = {
+      has: (key: any) => rows.has(key),
+      delete: (key: any) => rows.delete(key),
+      cancelPending: vi.fn(),
+      blockAnimation: () => () => {},
+      add: vi.fn().mockRejectedValue(failure)
+    };
+    const list = Object.create(AutonomousDialogList.prototype) as any;
+    Object.assign(list, {
+      sortedList, log, filterId: 0, filterPinnedPeerIds: new Set(),
+      communityProjectionRows: new Map(), projectedPeerIds: new Set(), projectedPeerFolderIds: new Map(),
+      communityProjectionGeneration: 0, communityProjectionDestroyed: false, communityProjectionPromise: Promise.resolve(),
+      communityProjectionSnapshot: [{communityId: 200 as ChatId, dialogs: [{peerId, folderId: 0}]}],
+      createCommunityProjectionRow: () => ({})
+    });
+    await expect(list.scheduleCommunityProjection()).rejects.toBe(failure);
+    expect(rows.has(peerId)).toBe(true);
+    expect(log.error).toHaveBeenCalledWith('Community projection failed', failure);
+  });
+
   test('keeps a pending peer pinned in a custom filter', async() => {
     vi.useFakeTimers();
     const sortedList = await createRealSortedList();
@@ -154,8 +179,10 @@ describe('Community dialog projection counts', () => {
     const row = {render: () => document.createElement('li')};
     let finishPeer!: (item: any) => void;
     let finishRow!: (item: any) => void;
+    let finishLaterPeer!: (item: any) => void;
     const create = vi.spyOn(sortedList, 'createItemForKey').mockImplementation((key) => new Promise((resolve) => {
       if(key === peerId) finishPeer = resolve;
+      else if(key === laterPeerId) finishLaterPeer = resolve;
       else finishRow = resolve;
     }));
     const list = Object.create(AutonomousDialogList.prototype) as any;
@@ -171,6 +198,10 @@ describe('Community dialog projection counts', () => {
     }], () => true);
     await vi.advanceTimersToNextTimerAsync();
     const pendingLaterPeer = sortedList.add(laterPeerId);
+    await vi.advanceTimersToNextTimerAsync();
+    const destroyLater = vi.fn();
+    finishLaterPeer({id: laterPeerId, index: 1, value: {type: 'dialog', value: {destroy: destroyLater}}});
+    await pendingLaterPeer;
     const destroy = vi.fn();
     finishPeer({id: peerId, index: 1, value: {type: 'dialog', value: {destroy}}});
     await pendingPeer;
@@ -178,12 +209,13 @@ describe('Community dialog projection counts', () => {
     const destroyedWhileCommunityPending = destroy.mock.calls.length;
     finishRow({id: row, index: 2, value: {type: 'custom-sorted-dialog', value: row}});
     await projection;
-    await vi.runAllTimersAsync();
-    await pendingLaterPeer;
+    const laterPeerHidden = !sortedList.has(laterPeerId);
     sortedList.destroy();
     expect(visibleWhileCommunityPending).toBe(false);
     expect(destroyedWhileCommunityPending).toBe(1);
-    expect(create).not.toHaveBeenCalledWith(laterPeerId);
+    expect(create).toHaveBeenCalledWith(laterPeerId);
+    expect(laterPeerHidden).toBe(true);
+    expect(destroyLater).toHaveBeenCalledOnce();
   });
 
   test('keeps first-load animations blocked through Community projection', async() => {

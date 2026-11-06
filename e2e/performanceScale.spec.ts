@@ -4,7 +4,7 @@ import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
 import {CACHED_DIALOG_RECONCILE_PHASE_NAME, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateNoWalkLongTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
-import {getContactsFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
+import {finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
 
 type Fixture = {
@@ -866,9 +866,12 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   onMeasurementBoundary?.(boundary);
   const stoppedProfile = cpuProfile ? await stopCpuProfile(cpuProfile) : undefined;
   if(currentMin > targetMid) {
-    if(frameTrace) await stopFrameTrace(frameTrace);
-    if(!required) return undefined;
-    throw new Error(`scroll reached message ${currentMin}, expected ${targetMid}: ${JSON.stringify(scrollState)}`);
+    await finishIncompleteScroll(
+      `scroll reached message ${currentMin}, expected ${targetMid}: ${JSON.stringify(scrollState)}`,
+      required,
+      frameTrace ? () => stopFrameTrace(frameTrace) : undefined
+    );
+    return undefined;
   }
   const metric = await capture(page, requests, boundary, true, traceRpc, includeLongTaskTrace);
   const frameEvents = frameTrace ? await stopFrameTrace(frameTrace) : undefined;
@@ -1001,16 +1004,7 @@ async function openContacts(page: Page, requests: {value: number}, traceEnabled 
       await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
     } catch(error) {
       const dom = await getContactsFailureDetails(page);
-      const contactsRpc = traceEnabled ? await page.evaluate(async() => {
-        try {
-          const manager = (window as any).rootScope.managers.apiManager;
-          const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000));
-          const trace = await Promise.race([manager.getPerformanceRpcTrace(), timeout]) as {calls: Array<{method: string, durationMs: number | null, outcome: string}>} | null;
-          return trace?.calls.filter((call) => call.method === 'contacts.getContacts') ?? null;
-        } catch(traceError) {
-          return {error: String(traceError)};
-        }
-      }) : null;
+      const contactsRpc = traceEnabled ? await getContactsRpcFailureDetails(page) : null;
       if(error instanceof Error) {
         error.message += `\nContacts diagnostics: ${JSON.stringify({dom, pageErrors, contactsRpc})}`;
       }

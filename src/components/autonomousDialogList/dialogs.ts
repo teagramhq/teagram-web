@@ -699,6 +699,9 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       } finally {
         unblock();
       }
+    }).catch((error) => {
+      this.log.error('Community projection failed', error);
+      throw error;
     });
 
     return this.communityProjectionPromise;
@@ -744,7 +747,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
         if(!hiddenInFilter) continue;
 
         hiddenPeerIds.add(peerId);
-        hidePeer(peerId);
+        this.sortedList.cancelPending(peerId);
       }
     }
 
@@ -871,6 +874,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     keys.forEach(async(key) => {
       const dialog = await rootScope.managers.appMessagesManager.getDialogOnly(key);
       if(!dialog) {
+        this.log.warn('Dialog missing during filter validation', key);
         this.sortedList.delete(key);
         return;
       }
