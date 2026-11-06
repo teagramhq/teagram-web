@@ -7,12 +7,15 @@ test('records batched message kinds without changing processing order or results
   const port: any = {awaiting: {7: {taskType: 'managers', taskName: 'appMessagesManager', taskMethod: 'getHistory'}}, processTaskMap: {}};
   port.processTaskMap.invoke = (task: any) => { order.push(task.payload.type); time += 30; return 1; };
   port.processTaskMap.result = () => { order.push('result'); time += 40; return 2; };
-  port.processTaskMap.batch = (task: any) => task.payload.map((child: any) => port.processTaskMap[child.type](child));
+  const result: unknown[] = [];
+  port.onMessage = (event: any) => { result.push(port.processTaskMap[event.data.type](event.data)); };
+  port.processTaskMap.batch = () => { throw new Error('the recorder dispatches batch children itself'); };
   const recording = installWorkerMessageAttribution(port, () => time);
-  const result = port.processTaskMap.batch({type: 'batch', payload: [
+  const batch = {type: 'batch', payload: [
     {type: 'invoke', payload: {type: 'update', payload: {_: 'updateNewMessage'}}},
     {type: 'result', payload: {taskId: 7}}
-  ]});
+  ]};
+  port.processTaskMap.batch(batch, null, {data: batch});
   expect(result).toEqual([1, 2]);
   expect(order).toEqual(['update', 'result']);
   expect(summarizeWorkerMessageAttribution([{startTime: 100, duration: 80}], recording.spans)).toEqual([{
@@ -74,11 +77,14 @@ test('coalesces consecutive peer messages without losing measured time or proces
   const order: number[] = [];
   const port: any = {awaiting: {}, processTaskMap: {}};
   port.processTaskMap.invoke = (task: any) => { order.push(task.id); now += 2; };
-  port.processTaskMap.batch = (task: any) => task.payload.forEach((child: any) => port.processTaskMap.invoke(child));
+  port.processTaskMap.batch = () => {};
+  port.onMessage = (event: any) => port.processTaskMap.invoke(event.data);
   const recording = installWorkerMessageAttribution(port, () => now);
+  const invokeWrapper = port.processTaskMap.invoke;
   const batch = {type: 'batch', payload: [1, 2, 3].map((id) => ({id, type: 'invoke', payload: {type: 'mirror', payload: {name: 'peers'}}}))};
-  port.processTaskMap.batch(batch);
+  port.processTaskMap.batch(batch, null, {data: batch});
   expect(order).toEqual([1, 2, 3]);
+  expect(port.processTaskMap.invoke).toBe(invokeWrapper);
   expect(recording.spans).toHaveLength(1);
   expect(summarizeWorkerMessageAttribution([{startTime: 10, duration: 60}], recording.spans, 0, recording.batches)[0]).toMatchObject({
     messageCount: 3,

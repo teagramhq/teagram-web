@@ -6,7 +6,6 @@ export function installWorkerMessageAttribution(port: any, now: () => number) {
   const spans: MessageSpan[] = [];
   const batches: BatchSpan[] = [];
   const originals: Record<string, any> = {};
-  let activeBatch: {name?: string, start: number, count: number} | undefined;
   let lastType: string, lastInvoke: string, lastDetail: string, lastTaskType: string, lastTaskName: string, lastTaskMethod: string, lastResult: string, lastName: string;
   const wrappers: Record<string, any> = {};
   const getName = (type: string, task: any) => {
@@ -29,41 +28,58 @@ export function installWorkerMessageAttribution(port: any, now: () => number) {
     }
     return lastName;
   };
+  let depth = 0;
+  const swap = (useOriginals: boolean) => {
+    for(const type of Object.keys(originals)) if(type !== 'batch') port.processTaskMap[type] = useOriginals ? originals[type] : wrappers[type];
+  };
   for(const type of Object.keys(port.processTaskMap)) {
     const original = originals[type] = port.processTaskMap[type];
     if(type === 'batch') {
-      wrappers[type] = function(task: any, ...args: any[]) {
-        const previousBatch = activeBatch;
+      // The batch handler only forwards each child to `port.onMessage`, so the recorder runs that loop itself and
+      // classifies children inline. Per-child handler wrappers would sit in the hot dispatch path (their indirection
+      // alone costs about 0.5 ms per 10,000 messages); the per-type handlers are put back for the duration of the loop.
+      wrappers[type] = function(task: any, source: any, event: any) {
         const startTime = now();
-        activeBatch = {start: startTime, count: 0};
+        const current: {name?: string, start: number, count: number} = {start: startTime, count: 0};
+        if(depth++ === 0) swap(true);
         try {
-          return original.call(this, task, ...args);
+          const newEvent = {data: event.data, source: event.source, currentTarget: event.currentTarget};
+          const children = task.payload;
+          for(let index = 0; index < children.length; ++index) {
+            const child = children[index];
+            let name: string;
+            if(child.type === 'invoke' && lastType === 'invoke') {
+              // Same invoke kind as the previous child: reuse its name without the generic classification.
+              const invoke = child.payload.type;
+              const inner = child.payload.payload;
+              name = invoke === lastInvoke && (invoke === 'event' || invoke === 'mirror' ? inner?.name : inner?._) === lastDetail ? lastName : getName('invoke', child);
+            } else name = getName(child.type, child);
+            if(name !== current.name) {
+              const at = now();
+              if(current.count) spans.push({type: current.name!, startTime: current.start, duration: at - current.start, endTime: at, messageCount: current.count});
+              current.name = name;
+              current.start = at;
+              current.count = 0;
+            }
+            ++current.count;
+            newEvent.data = child;
+            port.onMessage(newEvent);
+          }
         } finally {
+          if(--depth === 0) swap(false);
           const endTime = now();
-          if(activeBatch.count) spans.push({type: activeBatch.name!, startTime: activeBatch.start, duration: endTime - activeBatch.start, endTime, messageCount: activeBatch.count});
+          if(current.count) spans.push({type: current.name!, startTime: current.start, duration: endTime - current.start, endTime, messageCount: current.count});
           batches.push({startTime, endTime, size: task.payload.length});
-          activeBatch = previousBatch;
         }
       };
       port.processTaskMap[type] = wrappers[type];
       continue;
     }
-    wrappers[type] = function(task: any, ...args: any[]) {
+    wrappers[type] = function(task: any, source: any, event: any) {
       const name = getName(type, task);
-      if(activeBatch) {
-        if(name !== activeBatch.name) {
-          const at = now();
-          if(activeBatch.count) spans.push({type: activeBatch.name!, startTime: activeBatch.start, duration: at - activeBatch.start, endTime: at, messageCount: activeBatch.count});
-          activeBatch.name = name;
-          activeBatch.start = at;
-          activeBatch.count = 0;
-        }
-        ++activeBatch.count;
-        return original.call(this, task, ...args);
-      }
       const started = now();
       try {
-        return original.call(this, task, ...args);
+        return original(task, source, event);
       } finally {
         const endTime = now();
         spans.push({type: name, startTime: started, duration: endTime - started, endTime, messageCount: 1});
