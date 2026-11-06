@@ -1,6 +1,16 @@
 import {describe, expect, test} from 'vitest';
-import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
+import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileSummaries, writeReportAndValidateScrollTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
 import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
+
+test('writes the full report before rejecting any long scroll repeat', () => {
+  let written = false;
+  const samples = [{longTasksOver50Ms: 0}, {longTasksOver50Ms: 2}, {longTasksOver50Ms: 0}];
+  expect(() => writeReportAndValidateScrollTasks(() => { written = true; }, samples, 3))
+  .toThrow('100x scrollBack2k measured repeat 2 has 2 tasks over 50 ms');
+  expect(written).toBe(true);
+  expect(() => writeReportAndValidateScrollTasks(() => {}, [{longTasksOver50Ms: 0}], 1)).not.toThrow();
+  expect(() => writeReportAndValidateScrollTasks(() => {}, [{}], 1)).toThrow('repeat 1');
+});
 
 test('summarizes cached dialog reconciliation relative to a scenario', () => {
   expect(summarizeCachedDialogReconcile({

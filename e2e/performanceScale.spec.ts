@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Page} from '@playw
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {CACHED_DIALOG_RECONCILE_PHASE_NAME, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateCachedDialogReconcileSummaries, validateMeasuredLongTaskTraces, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {CACHED_DIALOG_RECONCILE_PHASE_NAME, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateMeasuredLongTaskTraces, writeReportAndValidateScrollTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
 
 type Fixture = {
   owner: number,
@@ -109,9 +109,14 @@ const bundleRequestTrackers = new WeakMap<Page, BundleRequestTracker>();
 
 const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
 const scenarioPreservedPerformancePhases = getScenarioPreservedPerformancePhases();
+let measurementsComplete = false;
 
 test.afterAll(() => {
-  if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  const writeReport = () => { if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`); };
+  if(!measurementsComplete) return writeReport();
+  const scrollSamples = report.variants.head['100x'].scrollBack2k;
+  writeReportAndValidateScrollTasks(writeReport, scrollSamples, PERFORMANCE_REPEATS);
+  validateMeasuredLongTaskTraces(scrollSamples, 'scrollBack2k', PERFORMANCE_REPEATS);
 });
 
 async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false, observeAnimationFrames = false) {
@@ -950,13 +955,7 @@ async function runColdChatList(browser: Browser, run: VariantRun): Promise<Metri
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     await waitForChatList(page);
     const boundary = await snapshotMeasurementBoundary(page);
-    const sample = await capture(page, requests, boundary);
-    if(run.variant === 'head') {
-      const reconcileTargets: CachedDialogReconcileTarget[] = [];
-      await addCachedDialogReconcileTarget(page, reconcileTargets, sample, 'coldChatList');
-      await finalizeCachedDialogReconcileSummaries(page, reconcileTargets);
-    }
-    return sample;
+    return await capture(page, requests, boundary);
   } finally {
     await context.close();
   }
@@ -1036,7 +1035,6 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   const page = await context.newPage();
   const requests = {value: 0};
   const captureScrollAttribution = variant === 'head' && scale === '100x';
-  const reconcileTargets = captureScrollAttribution ? [] as CachedDialogReconcileTarget[] : undefined;
   const captureMeasuredLongTaskTrace = captureScrollAttribution;
   await installInstrumentation(page, requests, origin, false, captureScrollAttribution);
 
@@ -1046,14 +1044,11 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     await waitForChatList(page);
     const coldChatList = await test.step('cold chat list', async() => capture(page, requests, await snapshotMeasurementBoundary(page)));
     measured.coldChatList.push(coldChatList);
-    await addCachedDialogReconcileTarget(page, reconcileTargets, coldChatList, 'coldChatList');
     const warmChatList = await test.step('warm chat list', () => reloadChatList(page, requests));
     measured.warmChatList.push(warmChatList);
-    await addCachedDialogReconcileTarget(page, reconcileTargets, warmChatList, 'warmChatList');
 
     const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture));
     measured.chatOpen.push(chatOpen);
-    await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpen, 'chatOpen');
     const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(
       page,
       requests,
@@ -1065,7 +1060,6 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     ));
     if(scroll) {
       measured.scrollBack2k.push(scroll);
-      await addCachedDialogReconcileTarget(page, reconcileTargets, scroll, 'scrollBack2k');
     } else {
       // The base build may not reach the older history window. Its open-chat bundle is still the route baseline.
       measured.scrollBack2k.push({bundleBytes: chatOpen.bundleBytes});
@@ -1073,7 +1067,6 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     const jump = await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture, variant === 'base'), {timeout: 120_000});
     if(jump) {
       measured.dateJump.push(jump);
-      await addCachedDialogReconcileTarget(page, reconcileTargets, jump, 'dateJump');
     } else {
       // The base build may lack the calendar control. Its open-chat bundle is still the route baseline.
       measured.dateJump.push({bundleBytes: chatOpen.bundleBytes});
@@ -1084,17 +1077,12 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     await waitForChatList(page);
     const contactsList = await test.step('open contacts', () => openContacts(page, requests));
     measured.contactsList.push(contactsList);
-    await addCachedDialogReconcileTarget(page, reconcileTargets, contactsList, 'contactsList');
     const contactSearch = await test.step('search contacts', () => searchContacts(page, requests, scale));
     measured.contactSearch.push(contactSearch);
-    await addCachedDialogReconcileTarget(page, reconcileTargets, contactSearch, 'contactSearch');
     const globalSearchSample = await test.step('global message search', () => globalSearch(page, requests, scale));
     measured.globalSearch.push(globalSearchSample);
-    await addCachedDialogReconcileTarget(page, reconcileTargets, globalSearchSample, 'globalSearch');
     const sendMessageSample = await test.step('send a message', () => sendMessage(page, requests, fixture));
     measured.sendMessage.push(sendMessageSample);
-    await addCachedDialogReconcileTarget(page, reconcileTargets, sendMessageSample, 'sendMessage');
-    if(reconcileTargets) await finalizeCachedDialogReconcileSummaries(page, reconcileTargets);
   } finally {
     await context.close();
   }
@@ -1271,11 +1259,6 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       report.variants[variant][coldScale].coldChatList.push(sample);
     }
   }
-  for(const scenario of scenarios) {
-    const expectedRepeatCount = scenario === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
-    validateCachedDialogReconcileSummaries(report.variants.head['100x'][scenario], scenario, expectedRepeatCount);
-  }
-  validateMeasuredLongTaskTraces(report.variants.head['100x'].scrollBack2k, 'scrollBack2k', PERFORMANCE_REPEATS);
   const traceOrigin = process.env.PERF_TRACE_HEAD_ORIGIN_100X;
   expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
   const traceRun = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
@@ -1288,6 +1271,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
     expect(metric.longTaskTrace, `100x head scroll repeat ${repeat + 1} is missing long-task script traces`).toBeDefined();
     metric.historyPathTasks = selectHistoryPathTasks(metric.longTaskAttribution!, SCROLL_SPAN_NAMES);
   });
+  measurementsComplete = true;
 });
 
 test('blocks repeated injected 100 ms main-thread stalls during cold chat list load', async({browser}) => {

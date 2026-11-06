@@ -315,6 +315,25 @@ export function validateMeasuredLongTaskTraces(
   });
 }
 
+export function writeReportAndValidateScrollTasks(
+  writeReport: () => void,
+  samples: Array<{longTasksOver50Ms?: number}>,
+  expectedRepeatCount: number
+) {
+  writeReport();
+  if(samples.length !== expectedRepeatCount) {
+    throw new Error(`100x scrollBack2k has ${samples.length} measured repeats; expected ${expectedRepeatCount}`);
+  }
+  samples.forEach(({longTasksOver50Ms}, index) => {
+    if(!Number.isSafeInteger(longTasksOver50Ms) || longTasksOver50Ms! < 0) {
+      throw new Error(`100x scrollBack2k measured repeat ${index + 1} has an invalid long-task count`);
+    }
+    if(longTasksOver50Ms) {
+      throw new Error(`100x scrollBack2k measured repeat ${index + 1} has ${longTasksOver50Ms} tasks over 50 ms`);
+    }
+  });
+}
+
 export function summarizeRpcTrace(rpcCalls: PerformanceRpcCall[], elapsedMs: number): PerformanceRpcSummary {
   const intervals = rpcCalls.map(({startedAtMs, durationMs}) => {
     const start = Math.max(0, Math.min(elapsedMs, startedAtMs));
