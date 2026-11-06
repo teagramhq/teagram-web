@@ -103,7 +103,26 @@ test('compares recorder costs and sampled garbage collection for matched scroll 
     recorded: {longTasksOver50Ms: 0, blockingTimeMs: 0, cpu: {sampledGcMs: 0}}
   }]);
   expect(result).toEqual([
-    {longTaskCountDelta: 1, blockingTimeDeltaMs: 30, sampledGcDeltaMs: 8},
-    {longTaskCountDelta: 0, blockingTimeDeltaMs: 0, sampledGcDeltaMs: 0}
+    {longTaskCountDelta: 1, blockingTimeDeltaMs: 30, sampledGcDeltaMs: 8, comparableLargeBatches: []},
+    {longTaskCountDelta: 0, blockingTimeDeltaMs: 0, sampledGcDeltaMs: 0, comparableLargeBatches: []}
+  ]);
+});
+
+test('identifies matching large batches that actually occurred inside long tasks', async() => {
+  const {summarizeRecorderComparison} = await import('../../e2e/workerMessageAttribution');
+  const sample = (at: number, size: number) => ({
+    longTasksOver50Ms: 1,
+    blockingTimeMs: 30,
+    cpu: {sampledGcMs: 10},
+    workerBatchEvents: [{at, size, kind: 'invoke:mirror:peers'}],
+    longTaskTrace: [{startTimeMs: 10, durationMs: 80}]
+  });
+  const pairs = [
+    {unrecorded: sample(20, 10001), recorded: sample(30, 10001)},
+    {unrecorded: sample(100, 10001), recorded: sample(30, 10001)},
+    {unrecorded: sample(20, 9999), recorded: sample(30, 10001)}
+  ];
+  expect(summarizeRecorderComparison(pairs).map((pair) => pair.comparableLargeBatches)).toEqual([
+    [{size: 10001, kind: 'invoke:mirror:peers'}], [], []
   ]);
 });

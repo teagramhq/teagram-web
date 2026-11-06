@@ -115,3 +115,52 @@ test('records a bubble that becomes visible after a stylesheet visibility change
   const boundary = await waitForFirstVisibleBubble(page);
   expect(boundary.domNodes).toBeGreaterThan(0);
 });
+
+test('arms worker recording and starts the window before queued worker messages run', async({page}) => {
+  const measurement = await import('./performanceMeasurement') as any;
+  expect(typeof measurement.beginMeasurement).toBe('function');
+  await page.evaluate(() => {
+    const channel = new MessageChannel();
+    const perf: any = (window as any).__teagramPerf = {started: -1, longTasks: [{startTime: 1}], frameIntervals: [1]};
+    channel.port1.onmessage = () => { perf.startedAtMessage = perf.started; };
+    (window as any).__teagramInstallWorkerMessageAttribution = () => {
+      channel.port2.postMessage('queued');
+      return {spans: [] as unknown[]};
+    };
+    (window as any).apiManagerProxy = {};
+  });
+  const requests = {value: 5};
+  await measurement.beginMeasurement(page, requests, true, false, true);
+  await page.waitForFunction(() => (window as any).__teagramPerf.startedAtMessage !== undefined);
+  const result = await page.evaluate(() => (window as any).__teagramPerf);
+  expect(requests.value).toBe(0);
+  expect(result.started).toBeGreaterThan(0);
+  expect(result.startedAtMessage).toBe(result.started);
+  expect(result.longTasks).toEqual([]);
+  expect(result.workerMessages).toEqual({spans: []});
+});
+
+test('observes the same large worker batches with recording enabled or disabled', async({page}) => {
+  const measurement = await import('./performanceMeasurement') as any;
+  for(const recording of [false, true]) {
+    await page.evaluate(() => {
+      const channel = new MessageChannel();
+      (window as any).__teagramPerf = {started: -1};
+      (window as any).apiManagerProxy = {listenPorts: [channel.port1]};
+      (window as any).__testSend = (data: unknown) => channel.port2.postMessage(data);
+      (window as any).__teagramInstallWorkerMessageAttribution = () => ({spans: [] as unknown[]});
+      channel.port1.start();
+    });
+    await measurement.beginMeasurement(page, {value: 0}, true, false, recording, true);
+    await page.evaluate(() => {
+      (window as any).__testSend({type: 'batch', payload: [{type: 'result', payload: {}}, ...Array.from({length: 1000}, () => ({type: 'invoke', payload: {type: 'mirror', payload: {name: 'peers'}}}))]});
+    });
+    await page.waitForFunction(() => (window as any).__teagramPerf.workerBatchProbe.events.length > 0);
+    const batches = await page.evaluate(() => {
+      const probe = (window as any).__teagramPerf.workerBatchProbe;
+      probe.stop();
+      return probe.events.map(({size, kind}: any) => ({size, kind}));
+    });
+    expect(batches).toEqual([{size: 1001, kind: 'invoke:mirror:peers'}]);
+  }
+});

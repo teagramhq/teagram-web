@@ -360,3 +360,19 @@ test('reports sampled garbage collection even when it is not a top frame', () =>
   const summary = summarizeCpuProfile({nodes, samples: [...nodes.map(({id}) => id), 1], timeDeltas: [...nodes.map(() => 1_000), 1_000]});
   expect(summary.sampledGcMs).toBe(1);
 });
+
+test('counts sampled GC only inside the scroll window when profiling starts earlier', async() => {
+  const trace = await import('../../e2e/performanceRpcTrace') as any;
+  expect(typeof trace.summarizeCpuProfileWindow).toBe('function');
+  const profile = {
+    nodes: [
+      {id: 1, callFrame: {functionName: '(garbage collector)'}},
+      {id: 2, callFrame: {functionName: 'render'}}
+    ],
+    samples: [1, 2, 1, 1],
+    timeDeltas: [10_000, 10_000, 10_000, 10_000]
+  };
+  const summary = trace.summarizeCpuProfileWindow(profile, 100, 115, 25);
+  expect(summary.sampledCpuMs).toBe(25);
+  expect(summary.sampledGcMs).toBe(20);
+});

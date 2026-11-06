@@ -222,6 +222,23 @@ export function summarizeCpuProfile(profile: PerformanceCpuProfile): Performance
   };
 }
 
+// Limit an already-running profile to the measured window, clipping boundary samples.
+export function summarizeCpuProfileWindow(profile: PerformanceCpuProfile, profileStartMs: number, windowStartMs: number, elapsedMs: number) {
+  const samples: number[] = [];
+  const timeDeltas: number[] = [];
+  let sampleEndMs = profileStartMs;
+  for(const [index, nodeId] of (profile.samples || []).entries()) {
+    const sampleStartMs = sampleEndMs;
+    sampleEndMs += Math.max(0, profile.timeDeltas?.[index] || 0) / 1000;
+    const overlapMs = Math.min(sampleEndMs, windowStartMs + elapsedMs) - Math.max(sampleStartMs, windowStartMs);
+    if(overlapMs > 0) {
+      samples.push(nodeId);
+      timeDeltas.push(overlapMs * 1000);
+    }
+  }
+  return summarizeCpuProfile({nodes: profile.nodes, samples, timeDeltas});
+}
+
 // * Attributes each long task to the instrumented spans that began inside it and to the CPU samples
 // * taken while it ran. `perfStartMs` is `performance.now()` read right after the profiler started,
 // * which anchors the profile's relative time deltas to the page clock the long tasks use.

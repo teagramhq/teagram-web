@@ -17,6 +17,40 @@ export type FirstBubbleBoundary = {
   preInteractionMs?: number
 };
 
+export async function beginMeasurement(page: Page, requests: {value: number}, recordRpcSpans = true, traceEnabled = false, captureWorkerMessages = false, observeWorkerBatches = false) {
+  requests.value = 0;
+  await page.evaluate(async({recordSpans, traceEnabled, captureWorkerMessages, observeWorkerBatches}) => {
+    if(traceEnabled) await (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace(recordSpans);
+    const perf = (window as any).__teagramPerf;
+    if(captureWorkerMessages) {
+      perf.workerMessages = (window as any).__teagramInstallWorkerMessageAttribution((window as any).apiManagerProxy, () => performance.now());
+    }
+    if(observeWorkerBatches) {
+      const ports = (window as any).apiManagerProxy.listenPorts as MessagePort[];
+      if(!ports.length) throw new Error('Worker batch probe has no listen ports');
+      const events: Array<{at: number, size: number, kind: string}> = [];
+      const onMessage = (event: MessageEvent) => {
+        const task = event.data;
+        if(task?.type !== 'batch' || !Array.isArray(task.payload) || task.payload.length < 1000) return;
+        const sample = task.payload[Math.floor(task.payload.length / 2)];
+        const invoke = sample?.type === 'invoke' ? sample.payload?.type : undefined;
+        const detail = invoke === 'mirror' || invoke === 'event' ? sample.payload?.payload?.name : undefined;
+        events.push({at: performance.now(), size: task.payload.length, kind: [sample?.type, invoke, detail].filter(Boolean).join(':')});
+      };
+      for(const port of ports) port.addEventListener('message', onMessage);
+      perf.workerBatchProbe = {events, stop: () => {
+        for(const port of ports) port.removeEventListener('message', onMessage);
+      }};
+    }
+    perf.longTasks = [];
+    perf.frameIntervals = [];
+    perf.resourceUrlBaseline = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).map((entry) => entry.name);
+    performance.clearResourceTimings();
+    if(traceEnabled) performance.clearMeasures();
+    perf.started = performance.now();
+  }, {recordSpans: recordRpcSpans, traceEnabled, captureWorkerMessages, observeWorkerBatches});
+}
+
 export async function startMeasurementAtClick(target: Locator) {
   await target.evaluate((element) => {
     const perf = (window as any).__teagramPerf as {

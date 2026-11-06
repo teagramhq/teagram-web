@@ -92,13 +92,29 @@ export function summarizeWorkerMessageAttribution(tasks: Array<{startTime: numbe
 type RecorderControlSample = {
   longTasksOver50Ms: number,
   blockingTimeMs: number,
-  cpu: {sampledGcMs: number}
+  cpu: {sampledGcMs: number},
+  workerBatchEvents?: Array<{at: number, size: number, kind: string}>,
+  longTaskTrace?: Array<{startTimeMs: number, durationMs: number}>
 };
 
 export function summarizeRecorderComparison(pairs: Array<{unrecorded: RecorderControlSample, recorded: RecorderControlSample}>) {
-  return pairs.map(({unrecorded, recorded}) => ({
-    longTaskCountDelta: recorded.longTasksOver50Ms - unrecorded.longTasksOver50Ms,
-    blockingTimeDeltaMs: Number((recorded.blockingTimeMs - unrecorded.blockingTimeMs).toFixed(2)),
-    sampledGcDeltaMs: Number((recorded.cpu.sampledGcMs - unrecorded.cpu.sampledGcMs).toFixed(2))
-  }));
+  const longTaskBatches = (sample: RecorderControlSample) => (sample.workerBatchEvents || []).filter(({at}) =>
+    (sample.longTaskTrace || []).some(({startTimeMs, durationMs}) => at >= startTimeMs - 1 && at <= startTimeMs + durationMs + 1)
+  );
+  return pairs.map(({unrecorded, recorded}) => {
+    const available = longTaskBatches(unrecorded).slice();
+    const comparableLargeBatches: Array<{size: number, kind: string}> = [];
+    for(const batch of longTaskBatches(recorded)) {
+      const index = available.findIndex((other) => other.size === batch.size && other.kind === batch.kind);
+      if(index === -1) continue;
+      available.splice(index, 1);
+      comparableLargeBatches.push({size: batch.size, kind: batch.kind});
+    }
+    return {
+      longTaskCountDelta: recorded.longTasksOver50Ms - unrecorded.longTasksOver50Ms,
+      blockingTimeDeltaMs: Number((recorded.blockingTimeMs - unrecorded.blockingTimeMs).toFixed(2)),
+      sampledGcDeltaMs: Number((recorded.cpu.sampledGcMs - unrecorded.cpu.sampledGcMs).toFixed(2)),
+      comparableLargeBatches
+    };
+  });
 }
