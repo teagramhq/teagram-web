@@ -1,32 +1,17 @@
 import styles from '@/pages/authFlow.module.scss';
+import {loadTurnstile} from '@lib/turnstile';
+import type {TurnstileApi, TurnstileWindow} from '@lib/turnstile';
+import type {TurnstileAction} from '@/pages/turnstileSignup';
 
-type TurnstileAction = 'signin' | 'signup';
 type TurnstileErrorCode = 'bad_params' | 'expired' | 'widget_error';
 type TurnstileEvent = 'turnstile_error' | 'turnstile_token';
 
-type TurnstileCallbacks = {
-  sitekey: string,
-  action: TurnstileAction,
-  'response-field': boolean,
-  callback: (token: string) => void,
-  'expired-callback': () => void,
-  'error-callback': () => void
-};
-
-type TurnstileApi = {
-  render: (container: HTMLElement, callbacks: TurnstileCallbacks) => string,
-  reset: (widgetId: string) => void,
-  remove: (widgetId: string) => void
-};
-
-type TurnstileWindow = Window & {
+type DesktopTurnstileWindow = TurnstileWindow & {
   TelegramWebviewProxy?: {
     postEvent: (event: TurnstileEvent, payload: string) => void
-  },
-  turnstile?: TurnstileApi
+  }
 };
 
-const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
 const MESSAGES = {
   openDesktop: 'Open this security check from Teagram Desktop.',
   loading: 'Loading security check…',
@@ -37,7 +22,7 @@ const MESSAGES = {
 };
 
 export function mountDesktopTurnstilePage() {
-  const pageWindow = window as TurnstileWindow;
+  const pageWindow = window as DesktopTurnstileWindow;
   const message = document.getElementById('turnstile-message')!;
   const widgetContainer = document.getElementById('turnstile-widget')!;
   const params = new URLSearchParams(pageWindow.location.hash.slice(1));
@@ -151,19 +136,5 @@ export function mountDesktopTurnstilePage() {
   }
 
   showStatus(MESSAGES.loading);
-  const script = document.createElement('script');
-  script.src = TURNSTILE_SCRIPT_URL;
-  script.async = true;
-  script.defer = true;
-  script.onload = () => {
-    const loadedApi = pageWindow.turnstile;
-    if(!loadedApi) {
-      reportError('widget_error', MESSAGES.unavailable);
-      return;
-    }
-
-    renderWidget(loadedApi);
-  };
-  script.onerror = () => reportError('widget_error', MESSAGES.unavailable);
-  document.head.append(script);
+  void loadTurnstile().then(renderWidget, () => reportError('widget_error', MESSAGES.unavailable));
 }

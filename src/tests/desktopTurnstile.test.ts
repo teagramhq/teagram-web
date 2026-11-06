@@ -1,15 +1,9 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 
+import type {TurnstileRenderOptions} from '@lib/turnstile';
 import {mountDesktopTurnstilePage} from '@/pages/desktopTurnstile';
 
-type TurnstileCallbacks = {
-  sitekey: string,
-  action: 'signin' | 'signup',
-  'response-field': boolean,
-  callback: (token: string) => void,
-  'expired-callback': () => void,
-  'error-callback': () => void
-};
+type TurnstileCallbacks = TurnstileRenderOptions;
 
 type FakeTurnstile = {
   render: ReturnType<typeof vi.fn>;
@@ -66,6 +60,7 @@ afterEach(() => {
   window.history.replaceState(null, '', '/');
   delete (window as any).TelegramWebviewProxy;
   delete (window as any).turnstile;
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -83,6 +78,31 @@ describe('desktop Turnstile entry', () => {
     expect(postEvent).toHaveBeenCalledWith('turnstile_error', '{"code":"bad_params"}');
   });
 
+  it('renders a 256-character sitekey', () => {
+    const sitekey = 'a'.repeat(256);
+    const postEvent = installBridge();
+    const {api} = installTurnstile();
+    preparePage('sitekey=' + sitekey + '&action=signin');
+
+    mountDesktopTurnstilePage();
+
+    expect(api.render).toHaveBeenCalledWith(expect.any(HTMLElement), expect.objectContaining({sitekey}));
+    expect(postEvent).not.toHaveBeenCalled();
+  });
+
+  it('rejects a 257-character sitekey', () => {
+    const {message} = preparePage('sitekey=' + 'a'.repeat(257) + '&action=signin');
+    const postEvent = installBridge();
+    const {api} = installTurnstile();
+
+    mountDesktopTurnstilePage();
+
+    expect(message.textContent).toBe('The security check failed. Try again.');
+    expect(api.render).not.toHaveBeenCalled();
+    expect(postEvent).toHaveBeenCalledOnce();
+    expect(postEvent).toHaveBeenCalledWith('turnstile_error', '{"code":"bad_params"}');
+  });
+
   it('does not load the widget or use another message channel without the bridge', () => {
     const {message} = preparePage('sitekey=valid_key-1&action=signin');
     const {api} = installTurnstile();
@@ -96,7 +116,7 @@ describe('desktop Turnstile entry', () => {
     expect(postMessage).not.toHaveBeenCalled();
   });
 
-  it('loads Turnstile only for the bridge and posts one token with the parsed action', () => {
+  it('loads Turnstile only for the bridge and posts one token with the parsed action', async() => {
     const {message, widget} = preparePage('sitekey=valid_key-1&action=signup');
     const postEvent = installBridge();
 
@@ -108,6 +128,7 @@ describe('desktop Turnstile entry', () => {
 
     const {api, getCallbacks} = installTurnstile();
     script?.onload?.(new Event('load'));
+    await Promise.resolve();
 
     const callbacks = getCallbacks();
     expect(api.render).toHaveBeenCalledOnce();
@@ -126,6 +147,34 @@ describe('desktop Turnstile entry', () => {
     expect(document.body.textContent).not.toContain('secret-turnstile-token');
     expect(window.location.hash).not.toContain('secret-turnstile-token');
     expect(widget.childNodes).toHaveLength(0);
+  });
+
+  it('reports when the Turnstile script fails to load', async() => {
+    const {message} = preparePage('sitekey=valid_key-1&action=signin');
+    const postEvent = installBridge();
+
+    mountDesktopTurnstilePage();
+    const script = document.querySelector<HTMLScriptElement>('script[src^="https://challenges.cloudflare.com/"]');
+    script?.onerror?.(new Event('error'));
+    await Promise.resolve();
+
+    expect(message.textContent).toBe('The security check couldn’t load. Try again.');
+    expect(postEvent).toHaveBeenCalledOnce();
+    expect(postEvent).toHaveBeenCalledWith('turnstile_error', '{"code":"widget_error"}');
+  });
+
+  it('reports when the Turnstile script takes more than 15 seconds to load', async() => {
+    vi.useFakeTimers();
+    const {message} = preparePage('sitekey=valid_key-1&action=signin');
+    const postEvent = installBridge();
+
+    mountDesktopTurnstilePage();
+    await vi.advanceTimersByTimeAsync(15000);
+    await Promise.resolve();
+
+    expect(message.textContent).toBe('The security check couldn’t load. Try again.');
+    expect(postEvent).toHaveBeenCalledOnce();
+    expect(postEvent).toHaveBeenCalledWith('turnstile_error', '{"code":"widget_error"}');
   });
 
   it('posts a fixed widget error code and resets the widget', () => {
