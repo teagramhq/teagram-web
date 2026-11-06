@@ -1,4 +1,4 @@
-import type {ActiveAccountNumber} from '@lib/accounts/types';
+import type {AccountSessionData, ActiveAccountNumber} from '@lib/accounts/types';
 import type {ChatPhoto, UserProfilePhoto} from '@layer';
 import StateStorage from '@lib/stateStorage';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
@@ -97,6 +97,10 @@ export const captureChatPageSnapshotEpoch = snapshotStorage.captureSnapshotEpoch
 
 export async function getChatPageKey(accountNumber: ActiveAccountNumber): Promise<ChatPageKey | undefined> {
   const account = await sessionStorage.getFresh(`account${accountNumber}`);
+  return getChatPageKeyFromAccount(accountNumber, account);
+}
+
+export async function getChatPageKeyFromAccount(accountNumber: ActiveAccountNumber, account: AccountSessionData): Promise<ChatPageKey | undefined> {
   if(!account) return;
   const authKey = account[`dc${account.dcId || App.baseDcId}_auth_key`];
   if(!account.userId || !authKey || !/^[\da-f]{512}$/i.test(authKey)) return;

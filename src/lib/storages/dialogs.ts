@@ -44,6 +44,7 @@ import getDialogThreadId from '@appManagers/utils/dialogs/getDialogThreadId';
 import {isTempId} from '@appManagers/utils/messages/isTempId';
 import {captureChatPageSnapshotEpoch, chatPageSnapshotGeneration, getChatPageKey, sameChatPageKey, writeChatPageSnapshot} from '@lib/chatPageSnapshot';
 import type {ChatPageRow} from '@lib/chatPageSnapshot';
+import type {ChatPageKey} from '@lib/chatPageSnapshot';
 import AccountController from '@lib/accounts/accountController';
 
 export enum FilterType {
@@ -88,6 +89,8 @@ export const GLOBAL_FOLDER_ID: REAL_FOLDER_ID = undefined;
 // let spentTime = 0;
 export default class DialogsStorage extends AppManager {
   private snapshotEpoch: Promise<string | undefined>;
+  private snapshotOwner: Promise<ChatPageKey | undefined>;
+  private snapshotMayBind: boolean;
   private storage: AppStoragesManager['storages']['dialogs'];
 
   private dialogs: {[peerId: PeerId]: Dialog};
@@ -141,6 +144,8 @@ export default class DialogsStorage extends AppManager {
       this.log.error('failed to capture chat page snapshot epoch', error);
       return undefined;
     });
+    this.snapshotMayBind = !this.appStateManager.userId;
+    this.snapshotOwner = Promise.resolve(this.appStateManager.snapshotOwner);
     this.clear(true);
 
     const onFilterUpdate = (filter: MyDialogFilter) => {
@@ -1916,11 +1921,12 @@ export default class DialogsStorage extends AppManager {
       (options.filterType === undefined || options.filterType === FilterType.Folder);
     const finish = !options.recursion && !options.query && options.offsetIndex === undefined ?
       performancePhaseTrace.start('worker.dialogs.firstPage') : undefined;
-    const generation = shouldSnapshot ? chatPageSnapshotGeneration(this.getAccountNumber()) : undefined;
     const identity = shouldSnapshot ? getChatPageKey(this.getAccountNumber()) : undefined;
     const result = this.getDialogsInner(options);
     if(shouldSnapshot) {
-      Promise.all([Promise.resolve(result), identity, this.snapshotEpoch]).then(([page, key, epoch]) => this.saveFirstChatPage(page.dialogs, generation, key, epoch)).catch((error) => {
+      Promise.all([Promise.resolve(result), identity, this.snapshotEpoch, this.snapshotOwner]).then(([page, key, epoch, owner]) => {
+        return this.refreshFirstChatPage(options, page, key, epoch, owner);
+      }).catch((error) => {
         this.log.error('failed to save chat page snapshot', error);
       });
     }
@@ -1931,9 +1937,41 @@ export default class DialogsStorage extends AppManager {
     return result;
   }
 
-  private async saveFirstChatPage(dialogs: AnyDialog[], generation: number, key: Awaited<ReturnType<typeof getChatPageKey>>, epoch: string) {
-    if(!key || !epoch) return;
-    const accountNumber = this.getAccountNumber();
+  private async refreshFirstChatPage(
+    options: Parameters<DialogsStorage['getDialogs']>[0],
+    page: Awaited<ReturnType<DialogsStorage['getDialogs']>>,
+    key: ChatPageKey,
+    previousEpoch: string,
+    owner: ChatPageKey
+  ) {
+    if(!owner && this.snapshotMayBind && key) {
+      owner = key;
+      this.snapshotOwner = Promise.resolve(key);
+      this.snapshotMayBind = false;
+    }
+    if(!owner) return;
+    const sameOwner = (candidate: ChatPageKey) => candidate && candidate.userId === owner.userId &&
+      candidate.server === owner.server && candidate.authKeyId === owner.authKeyId;
+    if(!sameOwner(key)) {
+      // A logout can shift account slots while this manager still owns its original data.
+      const keys = await Promise.all(([1, 2, 3, 4] as const).map(getChatPageKey));
+      const matches = keys.filter(sameOwner);
+      key = matches.length === 1 ? matches[0] : undefined;
+    }
+    if(!key) return;
+    const epoch = await captureChatPageSnapshotEpoch(key.accountNumber);
+    if(!epoch) return;
+    const generation = chatPageSnapshotGeneration(key.accountNumber);
+    if(key.accountNumber !== this.getAccountNumber() || epoch !== previousEpoch) {
+      // Do not attach a page that started before invalidation to the new epoch.
+      page = await this.getDialogsInner({...options, forceLocal: true, recursion: true});
+    }
+    if(key.accountNumber === this.getAccountNumber()) this.snapshotEpoch = Promise.resolve(epoch);
+    await this.saveFirstChatPage(page.dialogs, generation, key, epoch);
+  }
+
+  private async saveFirstChatPage(dialogs: AnyDialog[], generation: number, key: ChatPageKey, epoch: string) {
+    const accountNumber = key.accountNumber;
     const rows: ChatPageRow[] = dialogs.filter(isDialog).slice(0, 20).map((dialog) => {
       const peer = this.appPeersManager.getPeer(dialog.peerId);
       const user = peer?._ === 'user' ? peer : undefined;
@@ -2053,7 +2091,7 @@ export default class DialogsStorage extends AppManager {
     const loadedAll = this.isDialogsLoaded(realFolderId, filterType);
     const isEnoughDialogs = curDialogStorage.length >= (offset + limit);
     if((isServerSearchSupported ? false : query) || loadedAll || isEnoughDialogs || forceLocal) {
-      if(!query && !offset && filterId === FOLDER_ID_ALL) {
+      if(!query && !offset && filterId === FOLDER_ID_ALL && !recursion) {
         if(import.meta.env.VITE_PERF_TRACE === '1') this.apiManager.finishFirstDialogsTrace();
         this.reconcileCachedChannelDialogs();
       }
