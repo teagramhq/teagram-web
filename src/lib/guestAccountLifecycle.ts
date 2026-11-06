@@ -16,6 +16,7 @@ import sessionStorage from '@lib/sessionStorage';
 
 export type {GuestAccountContext, GuestServerIdentity} from '@lib/guestAccountTypes';
 export {createGuestAccountServerLock} from '@lib/guestAccountLock';
+export {isCurrentAccountGuest} from '@lib/currentGuestAccountSnapshotIdentity';
 
 const BASE32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567';
 
@@ -575,23 +576,6 @@ export type GuestAccountManagers = {
     updateSettings: (settings: {newPassword?: string}) => Promise<unknown>
   }
 };
-
-export async function isCurrentAccountGuest(authorizedUserId?: PeerId) {
-  const identity = getActiveGuestServerIdentity();
-  const accountNumber = getCurrentAccount();
-  const [storedRecords, account] = await Promise.all([
-    sessionStorage.get('guestCredentials', false),
-    authorizedUserId === undefined ? AccountController.get(accountNumber) : Promise.resolve({userId: authorizedUserId})
-  ]);
-  if(getCurrentAccount() !== accountNumber) return false;
-  const record = chooseRecord(getRecords(storedRecords), {
-    ...identity,
-    accountNumber,
-    accountUserId: account.userId
-  });
-  return !!record && record.accountUserId !== undefined &&
-    account.userId !== undefined && sameUserId(record.accountUserId, account.userId);
-}
 
 export function createCurrentGuestAccountLifecycle(
   managers: GuestAccountManagers,

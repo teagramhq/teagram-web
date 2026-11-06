@@ -1,7 +1,7 @@
 import AccountController from '@lib/accounts/accountController';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
 import sessionStorage from '@lib/sessionStorage';
-import {getGuestCredentialRecords} from '@lib/guestAccountRecords';
+import {chooseGuestCredentialRecord, getGuestCredentialRecords, sameGuestUserId} from '@lib/guestAccountRecords';
 import {getActiveGuestServerIdentity, isGuestServerIdentityCurrent} from '@lib/guestAccountIdentity';
 import {createGuestAccountServerLock} from '@lib/guestAccountLock';
 import {hasGuestWipeGenerationChanged, isGuestSnapshotIdentityCurrent} from '@lib/guestAccountSnapshotIdentity';
@@ -44,4 +44,21 @@ export function hasCurrentGuestWipeGenerationChanged() {
   return withCurrentGuestAccountLock(identity, (cancelled) =>
     hasGuestWipeGenerationChanged(identity, cancelled, createDependencies())
   );
+}
+
+export async function isCurrentAccountGuest(authorizedUserId?: PeerId) {
+  const identity = getActiveGuestServerIdentity();
+  const accountNumber = getCurrentAccount();
+  const [storedRecords, account] = await Promise.all([
+    sessionStorage.get('guestCredentials', false),
+    authorizedUserId === undefined ? AccountController.get(accountNumber) : Promise.resolve({userId: authorizedUserId})
+  ]);
+  if(getCurrentAccount() !== accountNumber) return false;
+  const record = chooseGuestCredentialRecord(getGuestCredentialRecords(storedRecords), {
+    ...identity,
+    accountNumber,
+    accountUserId: account.userId
+  });
+  return !!record && record.accountUserId !== undefined &&
+    account.userId !== undefined && sameGuestUserId(record.accountUserId, account.userId);
 }

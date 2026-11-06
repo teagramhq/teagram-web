@@ -3,7 +3,7 @@ import {PendingSuggestion} from '@components/sidebarLeft/pendingSuggestionItem';
 import {DEMO_SERVER_HOST} from '@config/serverSelection';
 import {getActiveServerHost, isAutoGuestEnabled} from '@config/serverContext';
 import {i18n} from '@lib/langPack';
-import {isCurrentAccountGuest} from '@lib/guestAccountLifecycle';
+import {isCurrentAccountGuest} from '@lib/currentGuestAccountSnapshotIdentity';
 import {markAutoGuestAttempted} from '@lib/autoGuest';
 import rootScope from '@lib/rootScope';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
