@@ -595,7 +595,6 @@ export class AppMessagesManager extends AppManager {
   private pendingByRandomId: {
     [randomId: string]: PendingMessageDetails
   } = {};
-  private pendingMessageIdsByRandomId: {[randomId: string]: number} = {};
   private pendingByMessageId: {[mid: string]: Long} = {};
   private pendingAfterMsgs: {[peerId: PeerId]: PendingAfterMsg} = {};
   public pendingTopMsgs: {[peerId in PeerId | `${PeerId}_${number}`]: number} = {};
@@ -3984,14 +3983,6 @@ export class AppMessagesManager extends AppManager {
           this.pendingTopMsgs[`${peerId}_${options.threadId}`] = messageId;
         }
       }
-
-      const pendingMessageId = this.pendingMessageIdsByRandomId[message.random_id];
-      if(pendingMessageId !== undefined) {
-        delete this.pendingMessageIdsByRandomId[message.random_id];
-        callbacks.push(() => {
-          this.onUpdateMessageId({_: 'updateMessageID', random_id: message.random_id, id: pendingMessageId});
-        });
-      }
     }
 
     if(message.reactions) {
@@ -4517,7 +4508,6 @@ export class AppMessagesManager extends AppManager {
   }
 
   public cancelPendingMessage(randomId: string, preserveMedia = false) {
-    delete this.pendingMessageIdsByRandomId[randomId];
     const pendingData = this.pendingByRandomId[randomId];
 
     /* if(DEBUG) {
@@ -9477,8 +9467,6 @@ export class AppMessagesManager extends AppManager {
     const randomId = update.random_id;
     const pendingData = this.pendingByRandomId[randomId];
     if(!pendingData) {
-      this.log.bindPrefix('updateMessageID').debug('buffering unmatched updateMessageID', randomId, update.id);
-      this.pendingMessageIdsByRandomId[randomId] = update.id;
       return;
     }
 
@@ -11284,7 +11272,6 @@ export class AppMessagesManager extends AppManager {
   }
 
   public finalizePendingMessage(randomId: Long, finalMessage: MyMessage) {
-    delete this.pendingMessageIdsByRandomId[randomId];
     const pendingData = this.pendingByRandomId[randomId];
     if(!pendingData) {
       return;

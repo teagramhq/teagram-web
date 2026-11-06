@@ -7394,6 +7394,12 @@ export default class ChatBubbles {
     propagateFailure?: boolean
   }) {
     const fullMid = this.makeFullMid(message);
+    // history_append renders asynchronously, so the send can be acknowledged before this optimistic
+    // message reaches safeRenderMessage. Drop that stale append and let the server echo render it.
+    if(this.changedMids && getCurrentMessageFullMid(fullMid, getMid(message), this.changedMids) !== fullMid) {
+      return;
+    }
+
     if(!message || this.renderingMessages.has(fullMid) || (this.getBubble(fullMid) && !bubble)) {
       return;
     }

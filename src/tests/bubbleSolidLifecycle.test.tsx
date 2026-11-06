@@ -3667,7 +3667,7 @@ test('commits final group identity before a structural replacement is mounted', 
   middlewareHelper.destroy();
 });
 
-test.each([false, true])('renders a pending bubble before replaying an early message ID acknowledgement (server echo rendered: %s)', (serverEchoRenderedBeforeRegistration) => {
+test('does not render a delayed pending append after its acknowledgement and server echo', async() => {
   const randomId = '42';
   const tempId = 3.0001;
   const serverId = 100;
@@ -3707,14 +3707,21 @@ test.each([false, true])('renders a pending bubble before replaying an early mes
     mid: tempId,
     peerId,
     random_id: randomId,
+    message: 'hello from a delayed optimistic render',
+    date: 100,
     _: 'message',
+    pFlags: {is_outgoing: true},
+    send: () => eventOrder.push('send_rpc_request')
+  } as any;
+  const serverMessage = {
+    ...tempMessage,
+    id: serverId,
+    mid: serverId,
+    message: 'hello from a delayed optimistic render',
     pFlags: {is_outgoing: true}
   } as any;
-  const serverMessage = {mid: serverId, peerId, _: 'message', pFlags: {is_outgoing: true}} as any;
-  const dialog = {_: 'dialog', top_message: serverId};
-  const storedMessages = new Map<number, any>([[serverId, serverMessage]]);
-  const queuedCallbacks: Array<() => void> = [];
-  const bubbles: Record<string, HTMLElement> = {};
+  const storedMessages = new Map<number, any>();
+  const dialog = {_: 'dialog', top_message: 0};
   const chat = {
     log: Object.assign(vi.fn(), {bindPrefix: () => vi.fn()}),
     messagesStorageKey,
@@ -3729,8 +3736,8 @@ test.each([false, true])('renders a pending bubble before replaying an early mes
     setMessageId: vi.fn()
   } as any;
   const TestChatBubbles = class extends (ChatBubbles as any) {
-    constructor(chat: any, managers: any) {
-      super(chat, managers);
+    constructor(chat: any) {
+      super(chat, {});
     }
 
     createChatInner() {
@@ -3746,119 +3753,152 @@ test.each([false, true])('renders a pending bubble before replaying an early mes
       };
     }
   };
-  const bubbleHarness = Object.assign(new TestChatBubbles(chat, {}), {
+  const bubbles: Record<string, HTMLElement> = {};
+  const middlewareHelper = getMiddleware();
+  const chatDestroyMiddlewareHelper = getMiddleware();
+  const chatInnerMiddlewareHelper = chatDestroyMiddlewareHelper.get().create();
+  let releasePendingRender: () => void = () => undefined;
+  const pendingRenderGate = new Promise<void>((resolve) => releasePendingRender = resolve);
+  const historyRenderPromises: Promise<unknown>[] = [];
+  const renderQueue: Promise<unknown>[] = [];
+  const renderNewMessage = vi.fn((message: any) => {
+    if(message.mid === tempId) {
+      eventOrder.push('pending_render_scheduled');
+      const promise = pendingRenderGate.then(() => {
+        eventOrder.push('pending_render_resumed');
+        return bubbleHarness.safeRenderMessage({message});
+      });
+      historyRenderPromises.push(promise);
+      return promise;
+    }
+
+    const promise = bubbleHarness.safeRenderMessage({message});
+    historyRenderPromises.push(promise);
+    return promise;
+  });
+  const bubbleHarness = Object.assign(new TestChatBubbles(chat), {
     bubbles,
-    changedMids: new Map(),
+    changedMids: new Map<number, number>(),
+    renderingMessages: new Set<string>(),
     needUpdate: [],
-    unreadOut: new Set(),
-    updateLocalOnEdit: new Map(),
-    contexts: new Map(),
-    streamedMessageFinals: new Map(),
-    renderNewPromises: new Set(),
-    batchProcessor: {queuePromise: undefined},
-    bubbleGroups: {
-      getItemByBubble: () => ({mid: tempId, reverse: false}),
-      removeAndUnmountBubble: vi.fn((bubble: HTMLElement) => bubble.remove()),
-      mountUnmountGroups: vi.fn((groups: any[]) => {
-        groups.forEach((group) => group.items.forEach((item: any) => document.body.append(item.bubble)));
-      })
-    },
-    skippedMids: new Set(),
-    hiddenLinksPendingBubbles: new Set(),
+    unreadOut: new Set<number>(),
+    updateLocalOnEdit: new Map<HTMLElement, Function>(),
+    contexts: new Map<HTMLElement, unknown>(),
+    streamedMessageFinals: new Map<string, unknown>(),
+    renderNewPromises: new Set<Promise<unknown>>(),
+    chatInner: document.createElement('div'),
+    chatInnerMiddlewareHelper,
+    bubbleGroups: {changeBubbleByBubble: vi.fn(), getItemByBubble: vi.fn()},
+    skippedMids: new Set<string>(),
+    bubblesToReplace: new Map<HTMLElement, unknown>(),
+    hiddenLinksPendingBubbles: new Set<HTMLElement>(),
     setupReadMetrics: vi.fn(),
     updateHasMessages: vi.fn(),
-    deleteEmptyDateGroups: vi.fn(),
-    getRenderedHistory: () => Object.keys(bubbles),
-    updateSolidMessageBodyIdentity: vi.fn(),
-    cancelPendingBubbleReplacement: (bubble: HTMLElement) => ({bubble, cancelled: false}),
-    renderNewMessage: vi.fn((message: any) => {
-      const bubble = document.createElement('div');
-      bubble.className = 'bubble';
-      bubble.dataset.mid = String(message.mid);
-      (bubble as any).middlewareHelper = {destroy: vi.fn()};
-      document.body.append(bubble);
-      bubbles[makeFullMid(message)] = bubble;
+    getMiddleware: () => middlewareHelper.get(),
+    getBubble: (fullMid: string) => bubbles[fullMid],
+    makeFullMid: (message: any) => makeFullMid(message),
+    renderNewMessage,
+    renderMessage: vi.fn(({message, bubble}: {message: any, bubble: HTMLElement}) => {
+      eventOrder.push(`render:${message.mid}`);
+      bubble.classList.add('bubble');
+      if(message.pFlags?.is_outgoing) bubble.classList.add('is-sending');
+      bubble.textContent = message.message;
+      return Promise.resolve({bubble, message, promises: []});
     }),
-    groupBubbles: (items: any[]): {groups: any[]} => ({groups: items.map((item) => ({items: [item]}))})
+    renderMessagesQueue: vi.fn((promise: Promise<any>) => {
+      const queued = Promise.resolve(promise).then((result) => {
+        if(result) document.body.append(result.bubble);
+        return result;
+      });
+      renderQueue.push(queued);
+      return queued;
+    }),
+    reconcilePendingStreamedMessageUpdate: vi.fn(),
+    log: {error: vi.fn()}
   }) as any;
-  const deleteMessagesByIds = vi.spyOn(bubbleHarness, 'deleteMessagesByIds');
+
+  const manager = new AppMessagesManager() as any;
+  const queuedSendCallbacks: Array<() => void> = [];
+  Object.assign(manager, {
+    pendingByRandomId: {},
+    pendingByMessageId: {},
+    appPeersManager: {isChannel: () => false},
+    appMessagesIdsManager: {generateMessageId: (id: number) => id},
+    getMessagePeer: () => peerId,
+    getHistoryMessagesStorage: () => storage,
+    getHistoryStorage: () => storage,
+    getMonoforumThreadId: (): undefined => undefined,
+    saveMessages: (messages: any[]) => messages.forEach((message) => storedMessages.set(message.mid, message)),
+    getMessageFromStorage: (_storage: unknown, mid: number) => storedMessages.get(mid),
+    deleteMessageFromStorage: (_storage: unknown, mid: number) => storedMessages.delete(mid),
+    getDialogOnly: () => dialog,
+    setDialogTopMessage: (message: any, target = dialog) => target.top_message = message.mid,
+    updateMessageContextForInserting: vi.fn(),
+    updateMessageContextForDeletion: vi.fn(),
+    deletePendingTopMsg: vi.fn(),
+    rootScope,
+    finalizePendingMessageCallbacks: (messageStorage: any, pendingId: number, message: any) => {
+      rootScope.dispatchEvent('message_sent', {
+        storageKey: messageStorage.key,
+        tempId: pendingId,
+        tempMessage,
+        mid: message.mid,
+        message
+      });
+    },
+    adoptStreamedMessageDraft: vi.fn()
+  });
 
   try {
     bubbleHarness.constructPeerHelpers();
-
-    const manager = new AppMessagesManager() as any;
-    Object.assign(manager, {
-      log: {bindPrefix: () => ({debug: vi.fn()})},
-      pendingByRandomId: {},
-      pendingByMessageId: {},
-      appPeersManager: {isChannel: () => false},
-      appMessagesIdsManager: {generateMessageId: (id: number) => id},
-      getMessagePeer: () => peerId,
-      getHistoryMessagesStorage: () => storage,
-      getHistoryStorage: () => storage,
-      getMonoforumThreadId: (): undefined => undefined,
-      saveMessages: (messages: any[]) => messages.forEach((message) => storedMessages.set(message.mid, message)),
-      getMessageFromStorage: (_storage: unknown, mid: number) => storedMessages.get(mid),
-      deleteMessageFromStorage: (_storage: unknown, mid: number) => storedMessages.delete(mid),
-      dialogsStorage: {
-        getDialogOnly: () => dialog,
-        generateIndexForDialog: vi.fn()
-      },
-      scheduleHandleNewDialogs: vi.fn(),
-      updateMessageContextForInserting: vi.fn(),
-      updateMessageContextForDeletion: vi.fn(),
-      deletePendingTopMsg: vi.fn(),
-      rootScope,
-      finalizePendingMessageCallbacks: (messageStorage: any, pendingId: number, message: any) => {
-        rootScope.dispatchEvent('message_sent', {
-          storageKey: messageStorage.key,
-          tempId: pendingId,
-          tempMessage,
-          mid: message.mid,
-          message
-        });
-      },
-      adoptStreamedMessageDraft: vi.fn()
+    manager.beforeMessageSending(tempMessage, {
+      processAfter: (callback: () => void) => queuedSendCallbacks.push(callback)
     });
 
-    if(serverEchoRenderedBeforeRegistration) {
-      history.unshift(serverId);
-      rootScope.dispatchEvent('history_append', {storageKey: messagesStorageKey, message: serverMessage});
-    }
-    manager.onUpdateMessageId({random_id: randomId, id: serverId});
-    if(!serverEchoRenderedBeforeRegistration) history.unshift(serverId);
-    manager.beforeMessageSending(tempMessage, {processAfter: (callback: () => void) => queuedCallbacks.push(callback)});
-
-    expect(queuedCallbacks).toHaveLength(1);
-    const serverBubble = bubbles[makeFullMid(peerId, serverId)];
-    expect(!!serverBubble).toBe(serverEchoRenderedBeforeRegistration);
-    expect(eventOrder).not.toContain('history_update');
     expect(manager.pendingByRandomId[randomId]).toBeDefined();
-    expect(dialog.top_message).toBe(tempId);
-    queuedCallbacks[0]();
+    queuedSendCallbacks[0]();
+    expect(renderNewMessage).toHaveBeenCalledWith(tempMessage, true);
+    expect(bubbles).toEqual({});
 
-    expect(eventOrder.filter((event) => ['history_append', 'message_sent', 'history_update'].includes(event))).toEqual([
-      ...(serverEchoRenderedBeforeRegistration ? ['history_append'] : []),
-      'history_append',
-      'message_sent',
-      'history_update'
-    ]);
-    expect(bubbleHarness.renderNewMessage).toHaveBeenCalledTimes(serverEchoRenderedBeforeRegistration ? 2 : 1);
-    expect(bubbleHarness.renderNewMessage).toHaveBeenCalledWith(tempMessage, true);
-    expect(document.body.querySelectorAll('.bubble')).toHaveLength(1);
-    expect(document.body.querySelector('.bubble')?.getAttribute('data-mid')).toBe(String(serverId));
+    eventOrder.push('updateMessageID');
+    manager.onUpdateMessageId({random_id: randomId, id: serverId});
+    eventOrder.push('send_rpc_reply');
+    storedMessages.set(serverId, serverMessage);
+    manager.checkPendingMessage(serverMessage);
+    rootScope.dispatchEvent('history_multiappend', serverMessage);
+
+    await Promise.all(renderQueue);
+    expect(bubbles[makeFullMid(peerId, serverId)]).toBeDefined();
     expect(bubbles[makeFullMid(peerId, tempId)]).toBeUndefined();
-    expect(bubbles[makeFullMid(peerId, serverId)]).toBe(serverBubble || document.body.querySelector('.bubble'));
+
+    releasePendingRender();
+    await Promise.all([...renderQueue, ...historyRenderPromises]);
+
+    expect(eventOrder.filter((event) => [
+      'history_append', 'send_rpc_request', 'updateMessageID', 'send_rpc_reply', 'message_sent', 'history_multiappend',
+      'pending_render_scheduled', 'pending_render_resumed', `render:${serverId}`, `render:${tempId}`
+    ].includes(event))).toEqual([
+      'history_append',
+      'pending_render_scheduled',
+      'send_rpc_request',
+      'updateMessageID',
+      'send_rpc_reply',
+      'message_sent',
+      'history_multiappend',
+      `render:${serverId}`,
+      'pending_render_resumed'
+    ]);
+    expect(document.body.querySelectorAll('.bubble')).toHaveLength(1);
+    expect((document.body.querySelector('.bubble') as HTMLElement | null)?.dataset.mid).toBe(String(serverId));
     expect(dialog.top_message).toBe(serverId);
-    if(serverEchoRenderedBeforeRegistration) {
-      expect(serverBubble?.isConnected).toBe(true);
-      expect(deleteMessagesByIds).toHaveBeenCalledWith([makeFullMid(peerId, tempId)], true, true);
-    }
-    expect(history.mids).toEqual([serverId]);
     expect(manager.pendingByRandomId[randomId]).toBeUndefined();
   } finally {
+    releasePendingRender();
+    await Promise.allSettled([...renderQueue, ...historyRenderPromises]);
     bubbleHarness.listenerSetter.removeAll();
     bubbleHarness.appWindowUnsubs.forEach((unsubscribe: () => void) => unsubscribe());
+    middlewareHelper.destroy();
+    chatDestroyMiddlewareHelper.destroy();
     Object.assign(rootScope, originalRootScopeMethods);
     document.body.replaceChildren();
   }
