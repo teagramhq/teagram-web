@@ -80,7 +80,8 @@ import {preventCrossTabDynamicImportDeadlock} from '@helpers/preventDeadlock';
 import appChatBackground from '@components/chat/bubbles/chatBackground';
 import {getActiveDemoWipeGeneration, getActiveServerHost, getRuntimeServerId, isAutoGuestEnabled} from '@config/serverContext';
 import {getServerSelectionAction} from '@config/serverSelection';
-import {createCurrentGuestAccountLifecycle, type GuestAccountManagers} from '@lib/guestAccountLifecycle';
+import type {GuestAccountManagers} from '@lib/guestAccountLifecycle';
+import {loadCurrentGuestAccountLifecycle} from '@lib/loadCurrentGuestAccountLifecycle';
 import {paintChatPageSnapshotSafely, paintGuestChatPageSnapshotIfCurrent} from '@lib/chatPageSnapshotStartup';
 import {markAutoGuestAttempted, markAutoGuestResetDetected} from '@lib/autoGuest';
 // import commonStateStorage from '@lib/commonStateStorage';
@@ -586,9 +587,12 @@ const onDocumentReady = async() => {
       apiManagerProxy.loadAllStates()
   );
   const stateResult = allStates[getCurrentAccount()];
+  const autoGuestEnabled = isAutoGuestEnabled();
+  const guestAccountLifecyclePromise = autoGuestEnabled ?
+    loadCurrentGuestAccountLifecycle(rootScope.managers as unknown as GuestAccountManagers) : undefined;
   if(stateResult.state.authState._ === 'authStateSignedIn') {
-    watchChatPageSnapshot(getCurrentAccount(), isAutoGuestEnabled());
-    if(isAutoGuestEnabled()) {
+    watchChatPageSnapshot(getCurrentAccount(), autoGuestEnabled);
+    if(autoGuestEnabled) {
       const account = getCurrentAccount();
       const server = getActiveServerHost();
       const serverId = getRuntimeServerId();
@@ -598,7 +602,7 @@ const onDocumentReady = async() => {
         serverHost: server,
         serverId,
         wipeGeneration: generation,
-        isSnapshotIdentityCurrent: () => createCurrentGuestAccountLifecycle(rootScope.managers as unknown as GuestAccountManagers).isSnapshotIdentityCurrent(),
+        isSnapshotIdentityCurrent: async() => (await guestAccountLifecyclePromise!).isSnapshotIdentityCurrent(),
         getChatPageKey,
         getCurrentAccountNumber: getCurrentAccount,
         getActiveServerHost,
@@ -713,9 +717,9 @@ const onDocumentReady = async() => {
   setDocumentLangPackProperties(langPack);
 
   let authState = stateResult.state.authState;
-  if(isAutoGuestEnabled()) {
+  if(autoGuestEnabled) {
     try {
-      if(await createCurrentGuestAccountLifecycle(rootScope.managers as unknown as GuestAccountManagers).hasWipeGenerationChanged()) {
+      if(await (await guestAccountLifecyclePromise!).hasWipeGenerationChanged()) {
         markAutoGuestResetDetected();
         if(authState._ === 'authStateSignedIn') {
           rootScope.managers.appStateManager.pushToState('authState', authState = {_: 'authStateSignIn'});
