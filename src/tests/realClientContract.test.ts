@@ -6528,10 +6528,12 @@ describe('real client group name form', () => {
 
   it('names the fill step and describes the form without page text', async() => {
     const page = await browser.newPage();
+    const capturedScreenshots = {count: 0};
     try {
       await page.setContent(groupFormMarkup({nameField: false}));
-      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
+      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS, {captureScreenshot: false}))
       .rejects.toThrow('alice_group_name_fill');
+      expect(capturedScreenshots.count).toBe(0);
       const state = await captureGroupNameFormState();
       expect(state).toEqual({
         formCount: 1,
@@ -6554,11 +6556,13 @@ describe('real client group name form', () => {
 
   it('names the confirm step when the filled name never shows the button', async() => {
     const page = await browser.newPage();
+    const capturedScreenshots = {count: 0};
     try {
       await page.setContent(groupFormMarkup().replace(/<script>[\s\S]*<\/script>/, ''));
       await page.locator('.btn-corner').evaluate((button: HTMLElement) => button.setAttribute('disabled', 'true'));
-      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, {count: 0}, CONTRACT_WAIT_TIMEOUT_MS))
+      await expect(nameNewGroup(page, 'browser-ci-group-0123abcd', screenshotDirectory, capturedScreenshots, CONTRACT_WAIT_TIMEOUT_MS, {captureScreenshot: false}))
       .rejects.toThrow('alice_group_name_confirm');
+      expect(capturedScreenshots.count).toBe(0);
       const state = await captureGroupNameFormState();
       expect(state).toMatchObject({
         nameFieldMatches: 1,

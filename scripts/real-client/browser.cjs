@@ -1692,7 +1692,7 @@ async function openComposer(page, stage, chat = page.locator('#column-center'), 
 
 // Each step of the new-group name form fails under its own stage, so a
 // failure names the step and the form summary describes what it waited on.
-async function nameNewGroup(page, groupName, screenshotDirectory, capturedScreenshots, timeoutMs = GROUP_NAME_STEP_TIMEOUT_MS) {
+async function nameNewGroup(page, groupName, screenshotDirectory, capturedScreenshots, timeoutMs = GROUP_NAME_STEP_TIMEOUT_MS, options = {}) {
   groupNameFormTrace = {page, stepWait: 'none'};
   const step = (stage) => (error) => {
     groupNameFormTrace.stepWait = classifyLocatorError(error);
@@ -1701,8 +1701,10 @@ async function nameNewGroup(page, groupName, screenshotDirectory, capturedScreen
   currentStage = 'alice_group_name_form';
   const groupForm = page.locator(GROUP_NAME_FORM_SELECTOR);
   await groupForm.waitFor({state: 'visible', timeout: timeoutMs}).catch(step('alice_group_name_form'));
-  currentStage = 'alice_group_name_screenshot';
-  await captureState(page, screenshotDirectory, 'alice-group-name', capturedScreenshots).catch(step('alice_group_name_screenshot'));
+  if(options.captureScreenshot !== false) {
+    currentStage = 'alice_group_name_screenshot';
+    await captureState(page, screenshotDirectory, 'alice-group-name', capturedScreenshots).catch(step('alice_group_name_screenshot'));
+  }
   currentStage = 'alice_group_name_fill';
   await groupForm.locator(GROUP_NAME_FIELD_SELECTOR).fill(groupName, {timeout: timeoutMs}).catch(step('alice_group_name_fill'));
   currentStage = 'alice_group_name_confirm';
