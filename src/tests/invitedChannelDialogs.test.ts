@@ -589,6 +589,7 @@ describe('invited channel dialogs', () => {
     const cachedListReconciled = dialogsStorage.cachedListReconciled;
     const cachedListReconcileRetryPeerIds = dialogsStorage.cachedListReconcileRetryPeerIds;
     const cachedListReconcileAttempts = dialogsStorage.cachedListReconcileAttempts;
+    const cachedListReconcileRecoveryPending = dialogsStorage.cachedListReconcileRecoveryPending;
     const requests: string[] = [];
     const listParams: any[] = [];
     apiManager.invokeApiSingleProcess = (options: any) => {
@@ -626,6 +627,7 @@ describe('invited channel dialogs', () => {
     dialogsStorage.setDialogsLoaded(GLOBAL_FOLDER_ID, true);
     dialogsStorage.cachedListReconcileRetryPeerIds = undefined;
     dialogsStorage.cachedListReconcileAttempts = 0;
+    dialogsStorage.cachedListReconcileRecoveryPending = false;
     dialogsStorage.cachedListReconciled = false;
     const restore = () => {
       apiManager.invokeApi = originalInvoke;
@@ -633,6 +635,7 @@ describe('invited channel dialogs', () => {
       dialogsStorage.allDialogsLoaded = allDialogsLoaded;
       dialogsStorage.cachedListReconcileRetryPeerIds = cachedListReconcileRetryPeerIds;
       dialogsStorage.cachedListReconcileAttempts = cachedListReconcileAttempts;
+      dialogsStorage.cachedListReconcileRecoveryPending = cachedListReconcileRecoveryPending;
       dialogsStorage.cachedListReconciled = cachedListReconciled;
     };
 

@@ -32,6 +32,8 @@ import defineNotNumerableProperties from '@helpers/object/defineNotNumerableProp
 import setDialogIndex from '@appManagers/utils/dialogs/setDialogIndex';
 import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
 import {performancePhaseTrace} from '@appManagers/performanceTrace';
+import {ConnectionStatus} from '@lib/mtproto/connectionStatus';
+import type {ConnectionStatusChange} from '@lib/mtproto/connectionStatus';
 import noop from '@helpers/noop';
 import pause from '@helpers/schedulers/pause';
 import {BroadcastEvents} from '@lib/rootScope';
@@ -138,6 +140,7 @@ export default class DialogsStorage extends AppManager {
   private cachedListReconciled: boolean;
   private cachedListReconcileRetryPeerIds: PeerId[];
   private cachedListReconcileAttempts: number;
+  private cachedListReconcileRecoveryPending: boolean;
   private cachedListReconcileGeneration: number;
   private savedDialogsOffsetDate: number;
   private savedDialogsPinnedOrder: PeerId[];
@@ -243,6 +246,8 @@ export default class DialogsStorage extends AppManager {
 
       this.processChangedUnreadOrUnmuted(peerId);
     });
+
+    this.rootScope.addEventListener('connection_status_change', (status) => this.onConnectionStatusChange(status));
 
     this.rootScope.addEventListener('user_auth', () => {
       this.rootScope.addEventListener('premium_toggle', () => {
@@ -408,6 +413,7 @@ export default class DialogsStorage extends AppManager {
   public clear = (init = false) => {
     this.cachedListReconcileRetryPeerIds = undefined;
     this.cachedListReconcileAttempts = 0;
+    this.cachedListReconcileRecoveryPending = false;
     this.cachedListReconciled = false;
     this.cachedListReconcileGeneration = (this.cachedListReconcileGeneration || 0) + 1;
 
@@ -2228,7 +2234,8 @@ export default class DialogsStorage extends AppManager {
       if(generation !== (this.cachedListReconcileGeneration || 0)) return;
 
       this.cachedListReconcileRetryPeerIds = undefined;
-      this.cachedListReconciled = attempts >= CACHED_DIALOG_RECONCILE_MAX_ATTEMPTS;
+      this.cachedListReconcileRecoveryPending = attempts >= CACHED_DIALOG_RECONCILE_MAX_ATTEMPTS;
+      this.cachedListReconciled = this.cachedListReconcileRecoveryPending;
       return;
     }
 
@@ -2252,7 +2259,18 @@ export default class DialogsStorage extends AppManager {
 
     const shouldRetry = unresolvedPeerIds.length > 0 && attempts < CACHED_DIALOG_RECONCILE_MAX_ATTEMPTS;
     this.cachedListReconcileRetryPeerIds = shouldRetry ? unresolvedPeerIds : undefined;
+    this.cachedListReconcileRecoveryPending = false;
     this.cachedListReconciled = !shouldRetry;
+  }
+
+  private onConnectionStatusChange(status: ConnectionStatusChange) {
+    if(!this.cachedListReconcileRecoveryPending || status.status !== ConnectionStatus.Connected || status.isFileNetworker) {
+      return;
+    }
+
+    this.cachedListReconcileRecoveryPending = false;
+    this.cachedListReconcileAttempts = 0;
+    this.cachedListReconciled = false;
   }
 
   private async getServerChannelsMissingLocally() {

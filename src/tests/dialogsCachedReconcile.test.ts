@@ -1,5 +1,6 @@
 import {expect, test, vi} from 'vitest';
 import '@helpers/peerIdPolyfill';
+import {ConnectionStatus} from '@lib/mtproto/connectionStatus';
 import type DialogsStorage from '@lib/storages/dialogs';
 
 test('reloads missing cached dialogs in bounded worker batches', async() => {
@@ -75,13 +76,18 @@ test('retries unresolved peers on the next cached first-page read and stops at t
   }
 });
 
-test('counts failed server-list walks against the same session retry cap', async() => {
+test('re-arms a bounded server-list retry after a network connection recovers', async() => {
   const failure = new Error('dialog page failed');
-  const getServerChannelsMissingLocally = vi.fn().mockRejectedValue(failure);
+  const getServerChannelsMissingLocally = vi.fn()
+  .mockRejectedValueOnce(failure)
+  .mockRejectedValueOnce(failure)
+  .mockResolvedValueOnce([]);
   const log = {error: vi.fn()};
   const storage = Object.create((await import('@lib/storages/dialogs')).default.prototype) as DialogsStorage & any;
   Object.assign(storage, {
     cachedListReconciled: false,
+    cachedListReconcileAttempts: 0,
+    cachedListReconcileRecoveryPending: false,
     getServerChannelsMissingLocally,
     log
   });
@@ -93,10 +99,25 @@ test('counts failed server-list walks against the same session retry cap', async
   await storage.reconcileCachedChannelDialogs();
   expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(2);
   expect(storage.cachedListReconciled).toBe(true);
+  expect(storage.cachedListReconcileRecoveryPending).toBe(true);
 
   await storage.reconcileCachedChannelDialogs();
   expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(2);
   expect(log.error).toHaveBeenCalledTimes(2);
+
+  storage.onConnectionStatusChange({status: ConnectionStatus.Connected, isFileNetworker: true});
+  expect(storage.cachedListReconciled).toBe(true);
+
+  storage.onConnectionStatusChange({status: ConnectionStatus.Connected, isFileNetworker: false});
+  expect(storage.cachedListReconcileRecoveryPending).toBe(false);
+  expect(storage.cachedListReconcileAttempts).toBe(0);
+  expect(storage.cachedListReconciled).toBe(false);
+
+  await storage.reconcileCachedChannelDialogs();
+
+  expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(3);
+  expect(storage.cachedListReconciled).toBe(true);
+  expect(storage.cachedListReconcileRecoveryPending).toBe(false);
 });
 
 test('mirrors each reconciliation page before delivering its peer events', async() => {
