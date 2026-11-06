@@ -1,20 +1,20 @@
-.title,
-.subtitle {
+.media-header__title,
+.media-header__subtitle {
   padding-inline: 1rem;
 }
 
-.marginBottom {
+.media-header__margin-bottom {
   margin-bottom: 1rem;
 }
 
-.title {
+.media-header__title {
   font-size: var(--font-size-24);
   line-height: var(--line-height-24);
   font-weight: var(--font-weight-bold);
   margin-bottom: .25rem;
 }
 
-.subtitle {
+.media-header__subtitle {
   font-size: var(--font-size-16);
   line-height: var(--line-height-16);
   margin-top: .125rem;
@@ -26,7 +26,7 @@
   }
 }
 
-.sticker {
+.media-header__sticker {
   --sticker-size: 130px;
   position: relative;
   margin: .125rem auto .5rem;
@@ -37,7 +37,7 @@
   justify-content: center;
 }
 
-.lottie {
+.media-header__lottie {
   width: var(--size);
   height: var(--size);
   max-width: 100%;

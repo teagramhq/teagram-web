@@ -81,6 +81,14 @@ test('counts only new same-origin bundle resources once per URL', () => {
   assert.equal(scenarioBundleBytes(resources, 'https://app.example', 10, ['https://app.example/chat-list.js']), 55);
 });
 
+test('blocks a startup chat-list request regression against the same-run base', () => {
+  const base = scaleVariants({'1x': {warmChatList: {requests: 60}}});
+  const head = scaleVariants({'1x': {warmChatList: {requests: 62}}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('1x warmChatList') && failure.includes('request')));
+});
+
 test('blocks a 100 ms main-thread task on 100x cold load from the first run', () => {
   const head = scaleVariants({
     '1x': {coldChatList: {longTasksOver50Ms: 1}},
