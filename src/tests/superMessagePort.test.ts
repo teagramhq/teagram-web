@@ -104,7 +104,7 @@ describe('SuperMessagePort structured-clone failures', () => {
     expect(received).toEqual(Array.from({length: 1001}, (_, i) => i));
     const batches = posted.mock.calls.map(([task]) => task).filter((task) => task.type === 'batch');
     expect(batches.length).toBeGreaterThan(1);
-    expect(Math.max(...batches.map((task) => task.payload.length))).toBeLessThanOrEqual(100);
+    expect(Math.max(...batches.map((task) => task.payload.length))).toBeLessThanOrEqual(20);
   });
 
   test('degrades an uncloneable batch and keeps cloneable sibling invokes alive', async() => {
