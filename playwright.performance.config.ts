@@ -8,12 +8,13 @@ export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
   workers: 1,
-  timeout: 60 * 60 * 1000,
-  reporter: [['list']],
+  timeout: 45 * 60 * 1000,
+  reporter: [['list', {printSteps: true}]],
   use: {
     headless: true,
     ignoreHTTPSErrors: true,
-    viewport: {width: 1280, height: 800}
+    viewport: {width: 1280, height: 800},
+    actionTimeout: 60_000
   },
   projects: [{
     name: 'performance-chromium',

@@ -256,7 +256,7 @@ export default class ProgressivePreloader {
     }
   }
 
-  public detach() {
+  public detach(immediate = false) {
     if(this.detached) {
       return;
     }
@@ -282,11 +282,11 @@ export default class ProgressivePreloader {
         element: this.preloader,
         className: 'is-visible',
         forwards: false,
-        duration: TRANSITION_TIME,
+        duration: immediate ? 0 : TRANSITION_TIME,
         onTransitionEnd: () => {
           this.preloader.remove();
         },
-        useRafs: 1
+        useRafs: immediate ? 0 : 1
       });
       // });
       // })/* , 5e3) */;

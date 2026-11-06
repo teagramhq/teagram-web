@@ -502,6 +502,10 @@
 	height: 100%;
 }
 
+.chat[hidden] {
+	display: none !important;
+}
+
 .chat {
   --chat-topbar-height: 3rem;
   --chat-input-height-surplus: 0px;
