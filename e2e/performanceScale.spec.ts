@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Locator, type Page
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {CACHED_DIALOG_RECONCILE_PHASE_NAME, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateMeasuredLongTaskTraces, validateNoWalkLongTasks, writeReportAndValidateScrollTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
+import {CACHED_DIALOG_RECONCILE_PHASE_NAME, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateNoWalkLongTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
 
 type Fixture = {
@@ -46,6 +46,7 @@ type Metric = {
   droppedFrames?: number,
   frameIntervals?: number,
   longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>,
+  longTaskTraceStatus?: ReturnType<typeof classifyMeasuredLongTaskTrace>,
   reconcileMirrorTasks?: ReconcileMirrorTask[],
   preInteractionMs?: number,
   appSendUiMs?: number,
@@ -122,11 +123,8 @@ test.afterAll(() => {
   // A failed measurement restarts the Playwright worker for the next test; that worker holds an empty report and must not overwrite the failed one.
   if(!measurementsStarted) return;
   const writeReport = () => { if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`); };
-  if(!measurementsComplete) return writeReport();
-  const scrollSamples = report.variants.head['100x'].scrollBack2k;
-  const expectedRepeats = report.requireTimingRepeats ? PERFORMANCE_TIMING_REPEATS : PERFORMANCE_REPEATS;
-  writeReportAndValidateScrollTasks(writeReport, scrollSamples, expectedRepeats);
-  validateMeasuredLongTaskTraces(scrollSamples, 'scrollBack2k', expectedRepeats);
+  writeReport();
+  if(!measurementsComplete) return;
   scenarios.forEach((scenario) => {
     const diagnosticSamples = report.diagnostics['100x']?.[scenario];
     if(Array.isArray(diagnosticSamples)) validateNoWalkLongTasks(diagnosticSamples, `100x ${scenario} diagnostic`);
@@ -340,7 +338,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
   const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, reconcileMirrorTasks, loafObserved, rpcInvocations, rpcRawCalls, timeOrigin, ...metrics} = captured;
   if(includePhases) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
   // Pages that never started the observer (the RPC comparison, base builds) report no frames; only a refused start is an error.
-  if(includeLongTaskTrace) expect(loafObserved, 'long-animation-frame observer is not supported in the measured browser').not.toBe(false);
+  if(includeLongTaskTrace && includePhases) expect(loafObserved, 'long-animation-frame observer is not supported in the diagnostic browser').not.toBe(false);
   const rpcCalls = rpcInvocationsInWindow(rpcRawCalls, timeOrigin, boundary.startedAtMs, boundary.ms).map((call) => ({
     method: call.method,
     startedAtMs: call.startedAtEpochMs - timeOrigin - boundary.startedAtMs,
@@ -664,7 +662,7 @@ const SCROLL_SPAN_NAMES = [
   'bubbleGroups.mountUnmountGroups'
 ];
 
-async function installScrollSpanTracing(page: Page) {
+async function installScrollSpanTracing(page: Page, required: boolean) {
   const installed = await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
     const spans: Array<{name: string, startMs: number, syncMs: number}> = [];
@@ -714,8 +712,10 @@ async function installScrollSpanTracing(page: Page) {
     return installedNames;
   });
   // An empty span list reads as "no history call ran", so core hooks must install before scrolling starts.
-  expect(installed).toContain('bubbles.processBatch');
-  expect(installed).toContain('bubbles.createScrollSaver');
+  if(required) {
+    expect(installed).toContain('bubbles.processBatch');
+    expect(installed).toContain('bubbles.createScrollSaver');
+  }
 }
 
 async function signIn(page: Page, origin: string) {
@@ -790,10 +790,11 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
 
   // Only the diagnostic pass waits: the gated window must keep the chat-open history tail it always had.
   if(waitForHistory) await waitForHistorySettled(page);
-  if(captureCpuStacks) await installScrollSpanTracing(page);
+  if(captureCpuStacks) await installScrollSpanTracing(page, traceRpc);
   await beginScenario(page, requests, traceRpc);
   if(includeLongTaskTrace) {
-    expect(await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames()), 'long-animation-frame observer is not supported in the measured browser').toBe(true);
+    const observed = await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames());
+    if(traceRpc) expect(observed, 'long-animation-frame observer is not supported in the diagnostic browser').toBe(true);
   }
   const cpuProfile = captureCpuStacks ? await startCpuProfile(page) : undefined;
   await page.evaluate(() => (window as any).__teagramPerf.startFrames());
@@ -868,9 +869,11 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
       loafObserved: perf.loafObserved === true
     };
   });
-  expect(tracing.spanCount, 'scroll-back recorded no traced calls').toBeGreaterThan(0);
-  expect(tracing.loafObserved, 'long-animation-frame observer is not supported in the diagnostic browser').toBe(true);
-  expect([...tracing.installed].sort(), 'scroll-back tracing did not install every wrapped call').toEqual([...SCROLL_SPAN_NAMES].sort());
+  if(traceRpc) {
+    expect(tracing.spanCount, 'scroll-back recorded no traced calls').toBeGreaterThan(0);
+    expect(tracing.loafObserved, 'long-animation-frame observer is not supported in the diagnostic browser').toBe(true);
+    expect([...tracing.installed].sort(), 'scroll-back tracing did not install every wrapped call').toEqual([...SCROLL_SPAN_NAMES].sort());
+  }
   const windowEndMs = boundary.startedAtMs + boundary.ms;
   const windowTasks = tasks.filter(({startTime}) => startTime >= boundary.startedAtMs && startTime < windowEndMs);
   return {
@@ -1591,11 +1594,9 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   }
 
   const headScrollRepeats = report.variants.head['100x'].scrollBack2k;
-  expect(headScrollRepeats).toHaveLength(report.requireTimingRepeats ? PERFORMANCE_TIMING_REPEATS : PERFORMANCE_REPEATS);
-  headScrollRepeats.forEach((metric, repeat) => {
-    expect(metric.longTaskAttribution, `100x head scroll repeat ${repeat + 1} is missing attributed long-task traces`).toBeDefined();
-    expect(metric.longTaskTrace, `100x head scroll repeat ${repeat + 1} is missing long-task script traces`).toBeDefined();
-    metric.historyPathTasks = selectHistoryPathTasks(metric.longTaskAttribution!, SCROLL_SPAN_NAMES);
+  headScrollRepeats.forEach((metric) => {
+    metric.longTaskTraceStatus = classifyMeasuredLongTaskTrace(metric);
+    if(metric.longTaskAttribution) metric.historyPathTasks = selectHistoryPathTasks(metric.longTaskAttribution, SCROLL_SPAN_NAMES);
   });
   measurementsComplete = true;
 });

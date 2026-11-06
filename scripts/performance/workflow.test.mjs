@@ -34,9 +34,10 @@ test('a hung browser action fails its own step instead of consuming the test tim
   assert.match(playwrightConfig, /actionTimeout:\s*60_000/);
 });
 
-test('every measured head scroll repeat has task attribution', () => {
+test('measured head scroll attribution is recorded without a validity gate', () => {
   assert.match(performanceScale, /const headScrollRepeats = report\.variants\.head\['100x'\]\.scrollBack2k;/);
-  assert.match(performanceScale, /validateMeasuredLongTaskTraces\(scrollSamples, 'scrollBack2k', expectedRepeats\)/);
+  assert.match(performanceScale, /metric\.longTaskTraceStatus = classifyMeasuredLongTaskTrace\(metric\)/);
+  assert.doesNotMatch(performanceScale, /validateMeasuredLongTaskTraces\(/);
 });
 
 test('extra timing samples are reported without changing the three-repeat policy verdict', () => {

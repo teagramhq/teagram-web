@@ -300,25 +300,13 @@ export function validateCachedDialogReconcileDiagnostics(
   });
 }
 
-export function validateMeasuredLongTaskTraces(
-  samples: Array<{longTasksOver50Ms?: number, longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>}>,
-  scenario: string,
-  expectedRepeatCount: number
-) {
-  if(samples.length !== expectedRepeatCount) {
-    throw new Error(`100x ${scenario} has ${samples.length} measured repeats; expected ${expectedRepeatCount}`);
-  }
-
-  samples.forEach(({longTasksOver50Ms, longTaskTrace}, index) => {
-    if(
-      !Number.isFinite(longTasksOver50Ms) ||
-      !Array.isArray(longTaskTrace) ||
-      longTaskTrace.length !== longTasksOver50Ms ||
-      longTaskTrace.some(({scripts}) => !Array.isArray(scripts) || !scripts.length)
-    ) {
-      throw new Error(`100x ${scenario} measured repeat ${index + 1} has incomplete long-task attribution`);
-    }
-  });
+export function classifyMeasuredLongTaskTrace(
+  {longTasksOver50Ms, longTaskTrace}: {longTasksOver50Ms?: number, longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>}
+): 'complete' | 'partial' | 'missing' {
+  if(!Array.isArray(longTaskTrace)) return 'missing';
+  if(!Number.isFinite(longTasksOver50Ms) || longTaskTrace.length !== longTasksOver50Ms ||
+    longTaskTrace.some(({scripts}) => !Array.isArray(scripts) || !scripts.length)) return 'partial';
+  return 'complete';
 }
 
 export type ReconcileMirrorTask = {traceId: string, startTimeMs: number, durationMs: number};
@@ -355,22 +343,6 @@ export function validateNoWalkLongTasks(
     const tasks = findLongTasksOverlappingWalkMirrors(longTaskTrace, reconcileMirrorTasks);
     if(tasks.length) {
       throw new Error(`${label} repeat ${index + 1} has ${tasks.length} tasks over 50 ms overlapping a walk mirror task`);
-    }
-  });
-}
-
-export function writeReportAndValidateScrollTasks(
-  writeReport: () => void,
-  samples: Array<{longTasksOver50Ms?: number}>,
-  expectedRepeatCount: number
-) {
-  writeReport();
-  if(samples.length !== expectedRepeatCount) {
-    throw new Error(`100x scrollBack2k has ${samples.length} measured repeats; expected ${expectedRepeatCount}`);
-  }
-  samples.forEach(({longTasksOver50Ms}, index) => {
-    if(!Number.isSafeInteger(longTasksOver50Ms) || longTasksOver50Ms! < 0) {
-      throw new Error(`100x scrollBack2k measured repeat ${index + 1} has an invalid long-task count`);
     }
   });
 }

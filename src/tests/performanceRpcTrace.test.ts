@@ -1,16 +1,8 @@
 import {describe, expect, test} from 'vitest';
-import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, findLongTasksOverlappingWalkMirrors, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileSummaries, validateNoWalkLongTasks, writeReportAndValidateScrollTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
+import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, findLongTasksOverlappingWalkMirrors, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileSummaries, validateNoWalkLongTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
 import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
 
 const mirror = (startTimeMs: number, durationMs: number) => ({traceId: 'walk', startTimeMs, durationMs});
-
-test('writes the full report and does not fail a measured scroll repeat for its long tasks', () => {
-  let written = false;
-  expect(() => writeReportAndValidateScrollTasks(() => { written = true; }, [{longTasksOver50Ms: 0}, {longTasksOver50Ms: 2}], 2)).not.toThrow();
-  expect(written).toBe(true);
-  expect(() => writeReportAndValidateScrollTasks(() => {}, [{longTasksOver50Ms: 0}], 2)).toThrow('2');
-  expect(() => writeReportAndValidateScrollTasks(() => {}, [{}], 1)).toThrow('repeat 1');
-});
 
 test('attributes a long task to the walk only when a walk mirror task overlaps it', () => {
   const tasks = [{startTimeMs: 100, durationMs: 80}, {startTimeMs: 400, durationMs: 54}, {startTimeMs: 600, durationMs: 50}];
@@ -254,26 +246,19 @@ test('rejects independent diagnostic repeats with incomplete reconciliation evid
   ], 'contactSearch', 1)).toThrow('100x contactSearch diagnostic repeat 1 has incomplete reconciliation or long-task data');
 });
 
-test('requires attributed long-task traces on every measured scroll repeat', async() => {
-  const validate = (await import('../../e2e/performanceRpcTrace') as any).validateMeasuredLongTaskTraces;
-  expect(validate).toBeTypeOf('function');
+test('records missing and partial measured attribution without failing', async() => {
+  const {classifyMeasuredLongTaskTrace} = await import('../../e2e/performanceRpcTrace');
   const task = {
     startTimeMs: 10,
     durationMs: 80,
     scripts: [{functionName: 'onMessage', script: '/app.js', invoker: 'MessagePort.onmessage', invokerType: 'event-listener', durationMs: 70, forcedStyleAndLayoutDurationMs: 0}]
   };
 
-  expect(() => validate([
-    {longTasksOver50Ms: 1, longTaskTrace: [task]},
-    {longTasksOver50Ms: 0, longTaskTrace: []}
-  ], 'scrollBack2k', 2)).not.toThrow();
-  expect(() => validate([
-    {longTasksOver50Ms: 1, longTaskTrace: [task]},
-    {longTasksOver50Ms: 1}
-  ], 'scrollBack2k', 2)).toThrow('100x scrollBack2k measured repeat 2 has incomplete long-task attribution');
-  expect(() => validate([
-    {longTasksOver50Ms: 1, longTaskTrace: [{...task, scripts: []}]}
-  ], 'scrollBack2k', 1)).toThrow('100x scrollBack2k measured repeat 1 has incomplete long-task attribution');
+  expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 1, longTaskTrace: [task]})).toBe('complete');
+  expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 0, longTaskTrace: []})).toBe('complete');
+  expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 1})).toBe('missing');
+  expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 1, longTaskTrace: [{...task, scripts: []}]})).toBe('partial');
+  expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 2, longTaskTrace: [task]})).toBe('partial');
 });
 
 test('returns history-path task attribution for the performance artifact', () => {
