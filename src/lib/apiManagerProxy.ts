@@ -1694,13 +1694,17 @@ class ApiManagerProxy extends MTProtoMessagePort {
         let storedTimes: Record<string, number> = {};
         try {
           storedTimes = JSON.parse(window.sessionStorage.getItem('teagram-perf-cached-dialog-reconcile-main-thread-ms') || '{}');
-        } catch{}
+        } catch(err) {
+          this.log.error('cached dialog reconcile trace storage read failed', err);
+        }
         const total = Math.max(mainThreadTimes[traceId] || 0, storedTimes[traceId] || 0) + elapsedMs;
         mainThreadTimes[traceId] = total;
         storedTimes[traceId] = total;
         try {
           window.sessionStorage.setItem('teagram-perf-cached-dialog-reconcile-main-thread-ms', JSON.stringify(storedTimes));
-        } catch{}
+        } catch(err) {
+          this.log.error('cached dialog reconcile trace storage write failed', err);
+        }
         const phase = payload.reconcilePhase;
         if(phase?.traceId && phase.durationMs !== null && Number.isFinite(phase.durationMs)) {
           const phaseStorageKey = 'teagram-perf-cached-dialog-reconcile-phases';
@@ -1708,7 +1712,9 @@ class ApiManagerProxy extends MTProtoMessagePort {
           try {
             const parsed = JSON.parse(window.sessionStorage.getItem(phaseStorageKey) || '{}');
             if(parsed && typeof parsed === 'object' && !Array.isArray(parsed)) storedPhases = parsed;
-          } catch{}
+          } catch(err) {
+            this.log.error('cached dialog reconcile phase storage read failed', err);
+          }
           storedPhases[phase.traceId] = phase;
           const traceIds = Object.keys(storedPhases);
           if(traceIds.length > 100) {
@@ -1716,7 +1722,9 @@ class ApiManagerProxy extends MTProtoMessagePort {
           }
           try {
             window.sessionStorage.setItem(phaseStorageKey, JSON.stringify(storedPhases));
-          } catch{}
+          } catch(err) {
+            this.log.error('cached dialog reconcile phase storage write failed', err);
+          }
         }
       }
     }

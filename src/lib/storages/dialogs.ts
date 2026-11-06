@@ -2105,6 +2105,7 @@ export default class DialogsStorage extends AppManager {
       }
     } catch(err) {
       this.cachedListReconciled = false;
+      this.log.error('cached channel dialog reconcile failed', err);
     }
   }
 
@@ -2154,6 +2155,7 @@ export default class DialogsStorage extends AppManager {
       }
     };
     let offsetDate = 0, offsetId = 0, offsetPeerId: PeerId;
+    let walkFailed = false;
     try {
       for(;;) {
         const result = await this.apiManager.invokeApiSingleProcess({
@@ -2219,11 +2221,20 @@ export default class DialogsStorage extends AppManager {
         });
         offsetDate = (lastMessage as Message.message)?.date ?? 0;
       }
+    } catch(err) {
+      walkFailed = true;
+      throw err;
     } finally {
-      await flushPage();
-      finishTrace?.({pageCount});
-      const reconcilePhase = traceId ? performancePhaseTrace.getSnapshot().find((phase) => phase.traceId === traceId) : undefined;
-      this.appPeersManager.mirrorApiPeers([], trace, traceId, reconcilePhase);
+      try {
+        await flushPage();
+      } catch(err) {
+        this.log.error('cached channel dialog reconcile flush failed', err);
+        if(!walkFailed) throw err;
+      } finally {
+        finishTrace?.({pageCount});
+        const reconcilePhase = traceId ? performancePhaseTrace.getSnapshot().find((phase) => phase.traceId === traceId) : undefined;
+        this.appPeersManager.mirrorApiPeers([], trace, traceId, reconcilePhase);
+      }
     }
   }
 

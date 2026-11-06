@@ -150,3 +150,75 @@ test('marks captured user updates for synchronous status reads', async() => {
     {name: 'user_update', args: [8, {statusFromWorker: true}]}
   ]);
 });
+
+test('a failed second page keeps first-page updates and allows a retry', async() => {
+  const failure = new Error('second page failed');
+  const page: any = {_: 'messages.dialogsSlice', count: 2, dialogs: [
+    {_: 'dialog', peer: {_: 'peerChannel', id: 42}, top_message: 1}
+  ], messages: [], chats: [{_: 'channel', id: 42}]};
+  let capturedEvents: any[];
+  const mirrorApiPeers = vi.fn();
+  const invokeApiSingleProcess = vi.fn()
+  .mockImplementationOnce(async({processResult}: any) => processResult(page))
+  .mockRejectedValueOnce(failure)
+  .mockImplementationOnce(async({processResult}: any) => processResult({_: 'messages.dialogs', dialogs: [], messages: [], chats: []}));
+  const log = {error: vi.fn()};
+  const storage = Object.create((await import('@lib/storages/dialogs')).default.prototype) as DialogsStorage & any;
+  Object.assign(storage, {
+    log,
+    rootScope: {collectBroadcastEvents: (events: any[], callback: () => void) => { capturedEvents = events; callback(); }},
+    apiManager: {invokeApiSingleProcess},
+    appPeersManager: {
+      saveApiPeers: (result: any, _trace: unknown, mirrorBatch: any) => result.chats.forEach((chat: any) => {
+        mirrorBatch(String(-chat.id), chat);
+        capturedEvents.push({name: 'chat_update', args: [chat.id]});
+      }),
+      getPeerId: ({id}: any) => id,
+      getInputPeerById: () => ({_: 'inputPeerEmpty'}),
+      mirrorApiPeers
+    },
+    appChatsManager: {isInChat: () => false},
+    cachedListReconciled: false,
+    getDialogOnly: () => ({})
+  });
+
+  await storage.reconcileCachedChannelDialogs();
+  expect(mirrorApiPeers.mock.calls.some((call) => call[0].includes('-42'))).toBe(true);
+  expect(mirrorApiPeers.mock.calls.some((call) => call[5]?.some((event: any) => event.name === 'chat_update'))).toBe(true);
+  expect(log.error).toHaveBeenCalledWith('cached channel dialog reconcile failed', failure);
+  expect(storage.cachedListReconciled).toBe(false);
+  await storage.reconcileCachedChannelDialogs();
+  expect(invokeApiSingleProcess).toHaveBeenCalledTimes(3);
+  expect(storage.cachedListReconciled).toBe(true);
+});
+
+test('a failing final flush preserves the original walk error', async() => {
+  const failure = new Error('walk failed');
+  const flushFailure = new Error('flush failed');
+  const log = {error: vi.fn()};
+  vi.stubEnv('VITE_PERF_RECONCILE_TRACE', '1');
+  const {performancePhaseTrace} = await import('@appManagers/performanceTrace');
+  const finishTrace = vi.fn();
+  const startTrace = vi.spyOn(performancePhaseTrace, 'start').mockReturnValue(finishTrace);
+  const storage = Object.create((await import('@lib/storages/dialogs')).default.prototype) as DialogsStorage & any;
+  Object.assign(storage, {
+    log,
+    rootScope: {collectBroadcastEvents: (events: any[], callback: () => void) => callback()},
+    apiManager: {invokeApiSingleProcess: async({processResult}: any) => {
+      processResult({_: 'messages.dialogs', chats: [], users: [], dialogs: [], messages: []});
+      throw failure;
+    }},
+    appPeersManager: {
+      saveApiPeers: (_result: any, _trace: unknown, mirrorBatch: any) => mirrorBatch('-42', {}),
+      mirrorApiPeers: vi.fn().mockImplementationOnce(() => { throw flushFailure; })
+    }
+  });
+  try {
+    await expect(storage.getServerChannelsMissingLocally()).rejects.toBe(failure);
+    expect(log.error).toHaveBeenCalledWith('cached channel dialog reconcile flush failed', flushFailure);
+    expect(finishTrace).toHaveBeenCalledWith({pageCount: 0});
+  } finally {
+    startTrace.mockRestore();
+    vi.unstubAllEnvs();
+  }
+});
