@@ -1,5 +1,58 @@
 import {expect, test} from '@playwright/test';
 import {beginMeasurement, startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
+import {createServer, type ServerResponse} from 'node:http';
+import * as bundleMeasurement from './performanceBundleBytes';
+
+test('forgets an abandoned shared-worker request after document reload', async({page}) => {
+  const held: ServerResponse[] = [];
+  let releaseResponses = false;
+  const replyToWorker = (response: ServerResponse) => {
+    if(!response.destroyed) response.end('onconnect = (event) => event.ports[0].postMessage("ready");');
+  };
+  const server = createServer((request, response) => {
+    if(request.url === '/worker.js') {
+      response.setHeader('Content-Type', 'text/javascript');
+      if(releaseResponses) replyToWorker(response);
+      else held.push(response);
+    } else {
+      response.setHeader('Content-Type', 'text/html');
+      response.end('<script>const worker = new SharedWorker("/worker.js"); worker.port.onmessage = () => window.workerReady(); fetch("/worker.js").then(r => r.text());</script>');
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    if(!address || typeof address === 'string') throw new Error('Server did not bind to a port');
+    const origin = `http://127.0.0.1:${address.port}`;
+    const tracker = bundleMeasurement.createBundleRequestTracker(origin);
+    let workerStarts = 0;
+    let readyCount = 0;
+    bundleMeasurement.trackBundleDocumentNavigation(page, tracker);
+    page.on('request', (request) => {
+      if(request.url().endsWith('/worker.js') && request.resourceType() === 'script') ++workerStarts;
+      tracker.requestStarted(request);
+    });
+    page.on('requestfinished', (request) => tracker.requestFinished(request));
+    page.on('requestfailed', (request) => tracker.requestFailed(request));
+    await page.exposeFunction('workerReady', () => { ++readyCount; tracker.workerReady(`${origin}/worker.js`); });
+    await page.goto(origin, {waitUntil: 'domcontentloaded'});
+    await expect.poll(() => workerStarts).toBe(1);
+    expect(readyCount).toBe(0);
+    await page.evaluate(() => { location.hash = 'same-document'; });
+    await expect(tracker.waitForIdle(10, 100)).rejects.toThrow('did not settle');
+    await page.reload({waitUntil: 'domcontentloaded'});
+    await expect.poll(() => workerStarts).toBe(2);
+    releaseResponses = true;
+    held.forEach(replyToWorker);
+    await tracker.waitForIdle(25, 3_000);
+    expect(workerStarts).toBe(2);
+    expect(readyCount).toBe(1);
+  } finally {
+    await page.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
 
 test('starts the measured window when the browser dispatches the click', async({page}) => {
   await page.setContent('<button>Open chat</button>');

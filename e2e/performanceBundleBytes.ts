@@ -1,4 +1,5 @@
 import {scenarioBundleBytes} from '../scripts/performance/policy.mjs';
+import type {Page} from '@playwright/test';
 
 export type BundleResource = Pick<PerformanceResourceTiming, 'name' | 'startTime' | 'decodedBodySize'>;
 
@@ -9,8 +10,23 @@ export type BundleRequestTracker = {
   requestFinished: (request: BundleRequest) => void,
   requestFailed: (request: BundleRequest) => void,
   workerReady: (url: string) => void,
+  documentNavigated: () => void,
   waitForIdle: (quietMs: number, timeoutMs: number) => Promise<void>
 };
+
+export function trackBundleDocumentNavigation(page: Page, tracker: BundleRequestTracker) {
+  // SharedWorker script requests can disappear on reload without a terminal event.
+  // A real navigation commits before its new document starts loading scripts.
+  let documentNavigationPending = false;
+  page.on('request', (request) => {
+    if(request.isNavigationRequest() && request.frame() === page.mainFrame()) documentNavigationPending = true;
+  });
+  page.on('framenavigated', (frame) => {
+    if(frame !== page.mainFrame() || !documentNavigationPending) return;
+    documentNavigationPending = false;
+    tracker.documentNavigated();
+  });
+}
 
 export function sumBundleBytes(resources: BundleResource[], origin: string, startedAtMs: number, endedAtMs: number, previouslyLoadedUrls: string[] = []) {
   const inWindow = resources.filter((entry) => entry.startTime >= startedAtMs && entry.startTime <= endedAtMs);
@@ -50,6 +66,12 @@ export function createBundleRequestTracker(origin: string): BundleRequestTracker
   const workerReady = (url: string) => {
     const request = [...pendingRequests].find((pendingRequest) => pendingRequest.url() === url);
     if(request) requestFinished(request);
+  };
+  const documentNavigated = () => {
+    if(!pendingRequests.size) return;
+    pendingRequests.clear();
+    lastActivityAt = Date.now();
+    notify();
   };
   const waitForIdle = (quietMs: number, timeoutMs: number) => new Promise<void>((resolve, reject) => {
     const startedAt = Date.now();
@@ -94,6 +116,7 @@ export function createBundleRequestTracker(origin: string): BundleRequestTracker
     requestFinished,
     requestFailed: requestFinished,
     workerReady,
+    documentNavigated,
     waitForIdle
   };
 }
