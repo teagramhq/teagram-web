@@ -33,6 +33,7 @@ import '@lib/polyfill';
 import '@lib/debug/mountLogExport'; // main-thread-only: wires window.downloadLogs / collectLogs
 import '@lib/debug/memoryReport'; // main-thread-only: wires window.memoryReport
 import apiManagerProxy from '@lib/apiManagerProxy';
+import {paintChatPageSnapshot, replaceChatPageSnapshot} from '@lib/chatPageSnapshotView';
 import {performancePhaseTrace} from '@lib/appManagers/performanceTrace';
 import getProxiedManagers from '@lib/getProxiedManagers';
 import themeController from '@helpers/themeController';
@@ -391,6 +392,7 @@ function setRootClasses() {
 }
 
 function onInstanceDeactivated(reason: InstanceDeactivateReason) {
+  replaceChatPageSnapshot();
   const onVersionClick = () => {
     appNavigationController.reload();
   };
@@ -582,6 +584,20 @@ const onDocumentReady = async() => {
       apiManagerProxy.loadAllStates()
   );
   const stateResult = allStates[getCurrentAccount()];
+  if(stateResult.state.authState._ === 'authStateSignedIn') {
+    if(isAutoGuestEnabled()) {
+      const account = getCurrentAccount();
+      const server = getActiveServerHost();
+      void createCurrentGuestAccountLifecycle(rootScope.managers as unknown as GuestAccountManagers).hasWipeGenerationChanged()
+      .then((changed) => {
+        if(!changed && account === getCurrentAccount() && server === getActiveServerHost()) {
+          paintChatPageSnapshot(apiManagerProxy.readChatPageSnapshot());
+        }
+      }, (error) => console.error('Could not verify the guest session before painting the chat snapshot', error));
+    } else {
+      paintChatPageSnapshot(apiManagerProxy.readChatPageSnapshot());
+    }
+  }
 
   // console.log(stateResult);
   // await pause(10000000);
