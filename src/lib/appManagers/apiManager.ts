@@ -42,6 +42,7 @@ import {isPrivateMtprotoTarget} from '@config/mtprotoTarget';
 import {recoverRejectedAuthKey, withAuthKeyRecoveryLock} from '@lib/mtproto/authKeyRecovery';
 import {clearAllGuestCredentials, clearGuestCredentialsForAccount} from '@lib/guestCredentialStorage';
 import {clearGuestAccountLocalState, clearInvalidatedGuestAccount as clearInvalidatedGuestAccountLocally} from '@lib/guestAccountLocalCleanup';
+import {beginChatPageSnapshotShift, finishChatPageSnapshotShift} from '@lib/chatPageSnapshot';
 /**
  * To not be used in an ApiManager instance as there is no account number attached to it
  */
@@ -464,51 +465,72 @@ export class ApiManager extends ApiManagerMethods {
 
     this.loggingOut = true;
 
-    const totalAccounts = await AccountController.getTotalAccounts();
     const accountNumber = this.getAccountNumber();
-    const accountData = await AccountController.get(accountNumber);
-
-    const logoutPromises: Promise<any>[] = [];
-
-    for(let dcId = 1; dcId <= 5; dcId++) {
-      const key = `dc${dcId as TrueDcId}_auth_key` as const;
-      if(accountData[key]) {
-        logoutPromises.push(this.invokeApi('auth.logOut', {}, {dcId, ignoreErrors: true}));
-      }
-    }
-
-    let wasCleared = false; // Prevent double logout 2 accounts in a row
-    const clear = async() => {
-      if(wasCleared) return;
-      wasCleared = true;
-      await this.clearAccountLocally(accountNumber, totalAccounts, accountData, migrateAccountTo);
+    let held: Awaited<ReturnType<typeof beginChatPageSnapshotShift>>;
+    let released = false;
+    const release = async() => {
+      if(!held || released) return;
+      await finishChatPageSnapshotShift(held);
+      released = true;
     };
+    try {
+      held = await beginChatPageSnapshotShift(accountNumber);
+      const totalAccounts = await AccountController.getTotalAccounts();
+      const accountData = await AccountController.get(accountNumber);
 
-    setTimeout(clear, 1e3);
+      const logoutPromises: Promise<any>[] = [];
 
-    // return;
+      for(let dcId = 1; dcId <= 5; dcId++) {
+        const key = `dc${dcId as TrueDcId}_auth_key` as const;
+        if(accountData[key]) {
+          logoutPromises.push(this.invokeApi('auth.logOut', {}, {dcId, ignoreErrors: true}));
+        }
+      }
 
-    return Promise.all(logoutPromises).catch((error) => {
-      error.handled = true;
-    }).finally(clear)/* .then(() => {
-      location.pathname = '/';
-    }) */;
+      let clearing: Promise<void>;
+      const clear = () => (clearing ??= (async() => {
+        try {
+          await this.clearAccountLocally(accountNumber, totalAccounts, accountData, migrateAccountTo, release);
+        } finally {
+          await release();
+        }
+      })());
+
+      setTimeout(clear, 1e3);
+      return await Promise.all(logoutPromises).catch((error) => {
+        error.handled = true;
+      }).finally(clear);
+    } catch(error) {
+      await release();
+      this.loggingOut = false;
+      throw error;
+    }
   }
 
   private async logOutLocally() {
     if(this.loggingOut) return;
 
     this.loggingOut = true;
+    const accountNumber = this.getAccountNumber();
+    let held: Awaited<ReturnType<typeof beginChatPageSnapshotShift>>;
+    let released = false;
+    const release = async() => {
+      if(!held || released) return;
+      await finishChatPageSnapshotShift(held);
+      released = true;
+    };
     try {
-      const accountNumber = this.getAccountNumber();
+      held = await beginChatPageSnapshotShift(accountNumber);
       const [totalAccounts, accountData] = await Promise.all([
         AccountController.getTotalAccounts(),
         AccountController.get(accountNumber)
       ]);
-      await this.clearAccountLocally(accountNumber, totalAccounts, accountData);
+      await this.clearAccountLocally(accountNumber, totalAccounts, accountData, undefined, release);
     } catch(error) {
       this.loggingOut = false;
       throw error;
+    } finally {
+      await release();
     }
   }
 
@@ -516,7 +538,8 @@ export class ApiManager extends ApiManagerMethods {
     accountNumber: ActiveAccountNumber,
     totalAccounts: number,
     accountData: Awaited<ReturnType<typeof AccountController.get>>,
-    migrateAccountTo?: ActiveAccountNumber
+    migrateAccountTo?: ActiveAccountNumber,
+    beforeClose?: () => Promise<void>
   ) {
     let accountNumberOnlyCredentialCleanup = false;
     if(totalAccounts > 1 && accountData.userId !== undefined) {
@@ -536,7 +559,7 @@ export class ApiManager extends ApiManagerMethods {
     }
 
     this.baseDcId = undefined;
-    await clearGuestAccountLocalState(accountNumber, totalAccounts, migrateAccountTo);
+    await clearGuestAccountLocalState(accountNumber, totalAccounts, migrateAccountTo, beforeClose);
     this.rootScope.dispatchEvent('logging_out', {accountNumber, migrateTo: migrateAccountTo});
   }
 
@@ -545,23 +568,39 @@ export class ApiManager extends ApiManagerMethods {
       throw Object.assign(new Error('Guest account context changed before local cleanup'), {type: 'GUEST_ACCOUNT_CONTEXT_CHANGED'});
     }
 
-    await clearInvalidatedGuestAccountLocally(accountNumber, userId);
+    const held = await beginChatPageSnapshotShift(accountNumber);
+    let released = false;
+    const release = async() => {
+      if(released) return;
+      await finishChatPageSnapshotShift(held);
+      released = true;
+    };
+    try {
+      await clearInvalidatedGuestAccountLocally(accountNumber, userId, release);
+    } finally {
+      await release();
+    }
     this.baseDcId = undefined;
     this.rootScope.dispatchEvent('logging_out', {accountNumber});
   }
 
   public static async forceLogOutAll() {
+    const held = await beginChatPageSnapshotShift(1);
     const clearAllStoresPromises = ([1, 2, 3, 4] as ActiveAccountNumber[])
     .map(accountNumber => AppStoragesManager.clearAllStoresForAccount(accountNumber));
 
-    await Promise.all([
-      sessionStorage.localStorageProxy('clear'),
-      clearAllGuestCredentials(),
-      commonStateStorage.clear(),
-      EncryptedStorageLayer.getInstance(getCommonDatabaseState(), 'localStorage__encrypted').clear(),
-      ...clearAllStoresPromises,
-      CacheStorageController.deleteAllStorages()
-    ]);
+    try {
+      await sessionStorage.localStorageProxy('clear');
+      await Promise.all([
+        clearAllGuestCredentials(),
+        commonStateStorage.clear(),
+        EncryptedStorageLayer.getInstance(getCommonDatabaseState(), 'localStorage__encrypted').clear(),
+        ...clearAllStoresPromises,
+        CacheStorageController.deleteAllStorages()
+      ]);
+    } finally {
+      await finishChatPageSnapshotShift(held);
+    }
 
     IDB.closeDatabases();
     globalRootScope.dispatchEvent('logging_out', {});

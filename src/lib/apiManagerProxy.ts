@@ -17,6 +17,8 @@ import telegramMeWebManager from '@lib/telegramMeWebManager';
 import pause from '@helpers/schedulers/pause';
 import ENVIRONMENT from '@environment/index';
 import loadStateForAllAccountsOnce from '@appManagers/utils/state/loadState';
+import {forgetLoadedChatPageSnapshot, getChatPageKey, loadChatPageSnapshot, readChatPageSnapshot, recoverPasscodeSnapshots, setChatPageAccountGuard} from '@lib/chatPageSnapshot';
+import type {ChatPageKey} from '@lib/chatPageSnapshot';
 import opusDecodeController from '@lib/opusDecodeController';
 import MTProtoMessagePort, {ThreadedWorkerEvents} from '@lib/mainWorker/mainMessagePort';
 import cryptoMessagePort from '@lib/crypto/cryptoMessagePort';
@@ -515,6 +517,10 @@ class ApiManagerProxy extends MTProtoMessagePort {
         return sessionStorage.localStorageProxy(payload.type, ...payload.args);
       },
 
+      updateChatPageAccountGuard: ({serverId, accountNumber}) => {
+        setChatPageAccountGuard(serverId, accountNumber);
+      },
+
       passcodeKeyHandoff: (payload) => {
         writeEncryptionKeyHandoff(payload);
       },
@@ -590,7 +596,10 @@ class ApiManagerProxy extends MTProtoMessagePort {
         CacheStorageController.temporarilyToggle(enabled);
       },
 
+      forgetChatPageSnapshot: () => forgetLoadedChatPageSnapshot(),
+
       toggleUsingPasscode: (payload) => {
+        if(payload.isUsingPasscode) forgetLoadedChatPageSnapshot();
         DeferredIsUsingPasscode.resolveDeferred(payload.isUsingPasscode);
         EncryptionKeyStore.save(payload.encryptionKey);
       }
@@ -677,6 +686,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
     });
 
     rootScope.addEventListener('logging_out', ({accountNumber, migrateTo}) => {
+      forgetLoadedChatPageSnapshot();
       // const toClear: CacheStorageDbName[] = ['cachedFiles', 'cachedStreamChunks'];
       Promise.all([
         toggleStorages(false, true),
@@ -699,6 +709,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
     });
 
     rootScope.addEventListener('toggle_using_passcode', (value) => {
+      if(value) forgetLoadedChatPageSnapshot();
       DeferredIsUsingPasscode.resolveDeferred(value);
     });
 
@@ -1341,6 +1352,18 @@ class ApiManagerProxy extends MTProtoMessagePort {
     this.dispatchUserAuth();
 
     const stateForThisAccount = loadedStates[getCurrentAccount()];
+    try {
+      if(!stateForThisAccount.common.settings?.passcode?.enabled) await recoverPasscodeSnapshots();
+      const accountNumber = getCurrentAccount();
+      await AccountController.withAccountWriteLock(accountNumber, async() => {
+        this.chatPageKey = await getChatPageKey(accountNumber);
+        await loadChatPageSnapshot(stateForThisAccount.resetStorages.size ? undefined : this.chatPageKey);
+      });
+    } catch(error) {
+      this.chatPageKey = undefined;
+      forgetLoadedChatPageSnapshot();
+      this.log.error('failed to load chat page snapshot', error);
+    }
     this.newVersion = stateForThisAccount.newVersion;
     this.oldVersion = stateForThisAccount.oldVersion;
     this.mirrors['state'] = stateForThisAccount.state;
@@ -1348,6 +1371,12 @@ class ApiManagerProxy extends MTProtoMessagePort {
     setAppSettingsSilent(stateForThisAccount.common.settings);
 
     return loadedStates;
+  }
+
+  private chatPageKey?: ChatPageKey;
+
+  public readChatPageSnapshot(key: ChatPageKey = this.chatPageKey) {
+    return key && readChatPageSnapshot(key);
   }
 
   private async dispatchUserAuth() {

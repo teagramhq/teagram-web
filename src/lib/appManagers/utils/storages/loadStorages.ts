@@ -7,6 +7,9 @@ import type AppStorage from '@lib/storage';
 import {recordPromiseBound} from '@helpers/recordPromise';
 import {logger} from '@lib/logger';
 import noop from '@helpers/noop';
+import {beginChatPageSnapshotLoadInvalidation, disableChatPageSnapshots, finishChatPageSnapshotInvalidation} from '@lib/chatPageSnapshot';
+import type {ActiveAccountNumber} from '@lib/accounts/types';
+import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 
 export type StoragesResults = Awaited<ReturnType<typeof loadStorages>>;
 
@@ -14,7 +17,7 @@ export type StoragesResults = Awaited<ReturnType<typeof loadStorages>>;
  * Will start loading storages before getting the state from the main thread \
  * In case of migration, will refetch the storages, because storages were modified
  */
-export default async function loadStorages(accountNumber: number, storages: StoragesStorages, resetStoragesPromise: ResetStoragesPromise, refetching?: boolean) {
+export default async function loadStorages(accountNumber: number, storages: StoragesStorages, resetStoragesPromise: ResetStoragesPromise, refetching?: boolean, snapshotEpoch?: string, onResetEpoch?: (epoch: string | undefined) => void) {
   const recordPromise = recordPromiseBound(logger('STORAGES-LOADER-' + accountNumber));
   const storagesKeys = Object.keys(storages) as Array<keyof StoragesStorages>;
   const storagesPromises: Promise<any>[] = storagesKeys.map((key) => {
@@ -37,44 +40,56 @@ export default async function loadStorages(accountNumber: number, storages: Stor
   // * will reset storages before setting the new state
   const {storages: resetStorages, refetch, callback} = await resetStoragesPromise;
   if(refetch && !refetching) {
-    return loadStorages(accountNumber, storages, resetStoragesPromise, true);
+    return loadStorages(accountNumber, storages, resetStoragesPromise, true, snapshotEpoch, onResetEpoch);
   }
 
-  if(resetStorages.size) {
-    const preserved: Record<keyof StoragesResults, Promise<any[]>> = {} as any;
-    for(const [key, preserve] of resetStorages) {
-      const promises = preserve.map((id) => (storages[key] as AppStorage<any, any>).get('' + id)); // important: need string here, not a number
-      preserved[key] = Promise.all(promises);
+  const account = accountNumber as ActiveAccountNumber;
+  const invalidation = resetStorages.size ? await beginChatPageSnapshotLoadInvalidation(account, snapshotEpoch) : undefined;
+  try {
+    if(await DeferredIsUsingPasscode.isUsingPasscode()) {
+      await disableChatPageSnapshots();
     }
 
-    await Promise.all(Object.values(preserved)).catch(noop);
-
-    const clearPromises: Promise<any>[] = [];
-    for(const [key] of resetStorages) {
-      storagesResults[key].length = 0;
-      clearPromises.push(storages[key].clear());
-    }
-
-    await Promise.all(clearPromises).catch(noop);
-
-    const preservePromises: Promise<any>[] = [];
-    for(const [key, preserve] of resetStorages) {
-      const preservedValues = await preserved[key];
-      for(let i = 0; i < preserve.length; ++i) {
-        const value = preservedValues[i];
-        storagesResults[key].push(value);
-        preservePromises.push((storages[key] as AppStorage<any, any>).set({[preserve[i]]: value}));
+    if(resetStorages.size) {
+      const preserved: Record<keyof StoragesResults, Promise<any[]>> = {} as any;
+      for(const [key, preserve] of resetStorages) {
+        const promises = preserve.map((id) => (storages[key] as AppStorage<any, any>).get('' + id)); // important: need string here, not a number
+        preserved[key] = Promise.all(promises);
       }
+
+      await Promise.all(Object.values(preserved)).catch(noop);
+
+      const clearPromises: Promise<any>[] = [];
+      for(const [key] of resetStorages) {
+        storagesResults[key].length = 0;
+        clearPromises.push(storages[key].clear());
+      }
+
+      await Promise.all(clearPromises).catch(noop);
+
+      const preservePromises: Promise<any>[] = [];
+      for(const [key, preserve] of resetStorages) {
+        const preservedValues = await preserved[key];
+        for(let i = 0; i < preserve.length; ++i) {
+          const value = preservedValues[i];
+          storagesResults[key].push(value);
+          preservePromises.push((storages[key] as AppStorage<any, any>).set({[preserve[i]]: value}));
+        }
+      }
+
+      await Promise.all(preservePromises).catch(noop);
+
+      resetStorages.clear();
     }
 
-    await Promise.all(preservePromises).catch(noop);
+    await callback();
 
-    resetStorages.clear();
+    if(invalidation) onResetEpoch?.(invalidation.nextEpoch);
+
+    return storagesResults;
+  } finally {
+    if(invalidation) await finishChatPageSnapshotInvalidation(account, invalidation.token);
   }
-
-  await callback();
-
-  return storagesResults;
 }
 
 // let promise: ReturnType<typeof loadStoragesInner>;

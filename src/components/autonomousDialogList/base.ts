@@ -257,6 +257,7 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
       offsetIndex: 0,
       limit: this.guessLoadCount(),
       filterId,
+      snapshot: true,
       filterType: this.getFilterType(),
       skipMigrated: this.skipMigrated
     });
@@ -269,6 +270,7 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
       offsetIndex,
       limit,
       filterId: this.getFilterId(),
+      snapshot: true,
       filterType: this.getFilterType(),
       skipMigrated: this.skipMigrated
     });
