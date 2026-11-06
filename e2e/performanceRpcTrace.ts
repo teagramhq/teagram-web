@@ -158,6 +158,10 @@ export function summarizeLongTaskTrace(
   return entries.filter(({startTime, duration}) => startTime >= startedAtMs && startTime < endAtMs && duration > 50).map((task) => ({
     startTimeMs: round(task.startTime - startedAtMs),
     durationMs: round(task.duration),
+    ...(task.startTime - startedAtMs !== round(task.startTime - startedAtMs) || task.duration !== round(task.duration) ? {
+      preciseStartTimeMs: task.startTime - startedAtMs,
+      preciseDurationMs: task.duration
+    } : {}),
     scripts: frames.flatMap((frame) => {
       const frameEnd = frame.startTime + frame.duration;
       if(frame.startTime >= task.startTime + task.duration || frameEnd <= task.startTime) {
@@ -309,7 +313,8 @@ export function classifyMeasuredLongTaskTrace(
   return 'complete';
 }
 
-export type ReconcileMirrorTask = {traceId: string, startTimeMs: number, durationMs: number};
+type OverlapTask = {startTimeMs: number, durationMs: number, preciseStartTimeMs?: number, preciseDurationMs?: number};
+export type ReconcileMirrorTask = OverlapTask & {traceId: string};
 
 // Keeps the walk's main-thread mirror tasks that start inside the window, relative to its start.
 export function summarizeReconcileMirrorTasks(
@@ -320,23 +325,40 @@ export function summarizeReconcileMirrorTasks(
   const round = (value: number) => Number(value.toFixed(2));
   return tasks
   .filter(({startedAtMs: taskStart}) => taskStart >= startedAtMs && taskStart < startedAtMs + elapsedMs)
-  .map(({traceId, startedAtMs: taskStart, durationMs}) => ({traceId, startTimeMs: round(taskStart - startedAtMs), durationMs: round(durationMs)}));
+  .map(({traceId, startedAtMs: taskStart, durationMs}) => ({
+    traceId, startTimeMs: round(taskStart - startedAtMs), durationMs: round(durationMs),
+    ...(taskStart - startedAtMs !== round(taskStart - startedAtMs) || durationMs !== round(durationMs) ? {
+      preciseStartTimeMs: taskStart - startedAtMs, preciseDurationMs: durationMs
+    } : {})
+  }));
 }
 
 // Stack frames cannot attribute a task to the walk because history responses share the mirror path;
 // a mirror task that carries the walk's traceId and runs inside the task can.
 export function findLongTasksOverlappingWalkMirrors(
-  tasks: Array<{startTimeMs: number, durationMs: number}> | undefined,
+  tasks: OverlapTask[] | undefined,
   mirrorTasks: ReconcileMirrorTask[] | undefined
 ) {
-  return (tasks || []).filter(({startTimeMs, durationMs}) => durationMs > 50 && (mirrorTasks || []).some((mirror) => (
-    mirror.startTimeMs < startTimeMs + durationMs && mirror.startTimeMs + mirror.durationMs > startTimeMs
-  )));
+  // Older reports have only hundredths of a millisecond. Preserve that precision
+  // in the fallback; new reports retain the original timings for the comparison.
+  const units = (value: number) => Math.round(value * 100);
+  return (tasks || []).filter((task) => (task.preciseDurationMs ?? task.durationMs) > 50 && (mirrorTasks || []).some((mirror) => {
+    if(task.preciseStartTimeMs === undefined && mirror.preciseStartTimeMs === undefined) {
+      return units(mirror.startTimeMs) < units(task.startTimeMs) + units(task.durationMs) &&
+        units(mirror.startTimeMs) + units(mirror.durationMs) > units(task.startTimeMs);
+    }
+    const taskStart = task.preciseStartTimeMs ?? task.startTimeMs;
+    const taskEnd = taskStart + (task.preciseDurationMs ?? task.durationMs);
+    const mirrorStart = mirror.preciseStartTimeMs ?? mirror.startTimeMs;
+    const mirrorEnd = mirrorStart + (mirror.preciseDurationMs ?? mirror.durationMs);
+    const epsilon = Number.EPSILON * Math.max(1, Math.abs(taskStart), Math.abs(taskEnd), Math.abs(mirrorStart), Math.abs(mirrorEnd)) * 4;
+    return mirrorStart < taskEnd - epsilon && mirrorEnd > taskStart + epsilon;
+  }));
 }
 
 // Tasks over 50 ms that no walk mirror task overlaps stay in the report; they are not a reconciliation failure.
 export function validateNoWalkLongTasks(
-  samples: Array<{longTaskTrace?: Array<{startTimeMs: number, durationMs: number}>, reconcileMirrorTasks?: ReconcileMirrorTask[]}>,
+  samples: Array<{longTaskTrace?: OverlapTask[], reconcileMirrorTasks?: ReconcileMirrorTask[]}>,
   label: string
 ) {
   samples.forEach(({longTaskTrace, reconcileMirrorTasks}, index) => {
@@ -459,7 +481,8 @@ export function summarizeLongTaskAttribution(
   profile: PerformanceCpuProfile,
   perfStartMs: number,
   windowStartMs: number,
-  windowDurationMs: number
+  windowDurationMs: number,
+  minimumDurationMs = 50
 ): PerformanceTaskAttribution[] {
   const windowEndMs = windowStartMs + windowDurationMs;
   const callFrames = new Map(profile.nodes.map(({id, callFrame}) => [id, callFrame]));
@@ -478,7 +501,7 @@ export function summarizeLongTaskAttribution(
   });
 
   return tasks.filter(({startTime, duration}) => {
-    return startTime >= windowStartMs && startTime < windowEndMs && duration > 50;
+    return startTime >= windowStartMs && startTime < windowEndMs && duration > minimumDurationMs;
   }).map((task) => {
     const taskEnd = task.startTime + task.duration;
     const byStack = new Map<string, {frames: Array<{functionName: string, script: string}>, selfMs: number}>();

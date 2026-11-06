@@ -32,6 +32,8 @@ import defineNotNumerableProperties from '@helpers/object/defineNotNumerableProp
 import setDialogIndex from '@appManagers/utils/dialogs/setDialogIndex';
 import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
 import {performancePhaseTrace} from '@appManagers/performanceTrace';
+import {ConnectionStatus} from '@lib/mtproto/connectionStatus';
+import type {ConnectionStatusChange} from '@lib/mtproto/connectionStatus';
 import noop from '@helpers/noop';
 import pause from '@helpers/schedulers/pause';
 import {BroadcastEvents} from '@lib/rootScope';
@@ -43,10 +45,15 @@ import {isDialog, isSavedDialog, isForumTopic} from '@appManagers/utils/dialogs/
 import getDialogKey from '@appManagers/utils/dialogs/getDialogKey';
 import getDialogThreadId from '@appManagers/utils/dialogs/getDialogThreadId';
 import {isTempId} from '@appManagers/utils/messages/isTempId';
+import {chatPageSnapshotGeneration, getChatPageKey, sameChatPageKey, writeChatPageSnapshot} from '@lib/chatPageSnapshot';
+import type {ChatPageRow} from '@lib/chatPageSnapshot';
+import type {ChatPageKey} from '@lib/chatPageSnapshot';
+import AccountController from '@lib/accounts/accountController';
 
 let cachedDialogReconcileTraceSequence = 0;
 const CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE = 25;
 const CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE = 4;
+const CACHED_DIALOG_RECONCILE_MAX_ATTEMPTS = 2;
 
 export enum FilterType {
   Folder,
@@ -85,10 +92,38 @@ export type ForumTopicsPaginationOffsets = {
   topic: number
 };
 
+export type DialogOffsetCursor = {
+  peerId: PeerId,
+  id: number
+};
+
+function isDialogOffsetCursor(value: unknown): value is DialogOffsetCursor {
+  if(!value || typeof value !== 'object') return false;
+  const {peerId, id} = value as Partial<DialogOffsetCursor>;
+  return typeof peerId === 'number' && Number.isSafeInteger(peerId) && peerId !== NULL_PEER_ID &&
+    typeof id === 'number' && Number.isSafeInteger(id) && id >= 0;
+}
+
+function normalizeDialogOffsetCursors(value: unknown): {[folder_id: number]: DialogOffsetCursor} {
+  if(!value || typeof value !== 'object' || Array.isArray(value)) return {};
+
+  const cursors: Record<string, DialogOffsetCursor> = {};
+  for(const [folderId, cursor] of Object.entries(value)) {
+    if(isDialogOffsetCursor(cursor)) {
+      cursors[folderId] = {...cursor};
+    }
+  }
+
+  return cursors as {[folder_id: number]: DialogOffsetCursor};
+}
+
 export const GLOBAL_FOLDER_ID: REAL_FOLDER_ID = undefined;
 
 // let spentTime = 0;
 export default class DialogsStorage extends AppManager {
+  private snapshotEpoch: Promise<string | undefined>;
+  private snapshotOwner: Promise<ChatPageKey | undefined>;
+  private snapshotMayBind: boolean;
   private storage: AppStoragesManager['storages']['dialogs'];
 
   private dialogs: {[peerId: PeerId]: Dialog};
@@ -99,9 +134,14 @@ export default class DialogsStorage extends AppManager {
 
   private allDialogsLoaded: {[folder_id: number]: boolean};
   private dialogsOffsetDate: {[folder_id: number]: number};
+  private dialogsOffsetCursors: {[folder_id: number]: DialogOffsetCursor};
   private pinnedOrders: {[folder_id: number]: PeerId[]};
   private savedDialogsLoaded: boolean;
   private cachedListReconciled: boolean;
+  private cachedListReconcileRetryPeerIds: PeerId[];
+  private cachedListReconcileAttempts: number;
+  private cachedListReconcileRecoveryPending: boolean;
+  private cachedListReconcileGeneration: number;
   private savedDialogsOffsetDate: number;
   private savedDialogsPinnedOrder: PeerId[];
   private dialogsNum: number;
@@ -138,6 +178,9 @@ export default class DialogsStorage extends AppManager {
   }
 
   protected after() {
+    this.snapshotEpoch = this.appStoragesManager.snapshotEpoch;
+    this.snapshotMayBind = !this.appStateManager.userId;
+    this.snapshotOwner = Promise.resolve(this.appStateManager.snapshotOwner);
     this.clear(true);
 
     const onFilterUpdate = (filter: MyDialogFilter) => {
@@ -203,6 +246,8 @@ export default class DialogsStorage extends AppManager {
 
       this.processChangedUnreadOrUnmuted(peerId);
     });
+
+    this.rootScope.addEventListener('connection_status_change', (status) => this.onConnectionStatusChange(status));
 
     this.rootScope.addEventListener('user_auth', () => {
       this.rootScope.addEventListener('premium_toggle', () => {
@@ -272,6 +317,7 @@ export default class DialogsStorage extends AppManager {
       }
 
       this.allDialogsLoaded = state.allDialogsLoaded || {};
+      this.dialogsOffsetCursors = normalizeDialogOffsetCursors(state.dialogsOffsetCursors);
 
       if(dialogs.length) {
         this.appDraftsManager.addMissedDialogs();
@@ -365,11 +411,19 @@ export default class DialogsStorage extends AppManager {
   }
 
   public clear = (init = false) => {
+    this.cachedListReconcileRetryPeerIds = undefined;
+    this.cachedListReconcileAttempts = 0;
+    this.cachedListReconcileRecoveryPending = false;
+    this.cachedListReconciled = false;
+    this.cachedListReconcileGeneration = (this.cachedListReconcileGeneration || 0) + 1;
+
     if(!init) {
       void this.storage.clear().catch((error) => this.log.error('Could not clear dialog storage', error));
 
       this.allDialogsLoaded = {};
       this.saveAllDialogsLoaded();
+      this.dialogsOffsetCursors = {};
+      this.appStateManager.pushToState('dialogsOffsetCursors', this.dialogsOffsetCursors);
 
       // * clear not numerable properties
       this.pinnedOrders = Object.assign({}, this.pinnedOrders);
@@ -379,6 +433,7 @@ export default class DialogsStorage extends AppManager {
       this.savePinnedOrders();
     } else {
       this.allDialogsLoaded = {};
+      this.dialogsOffsetCursors = {};
       this.pinnedOrders = {};
       for(const folderId of REAL_FOLDERS) {
         this.pinnedOrders[folderId] = [];
@@ -493,6 +548,23 @@ export default class DialogsStorage extends AppManager {
     }
 
     return offsetDate;
+  }
+
+  /** The next server page must start after the raw tail of the last fetched page. */
+  public getOffsetCursor(folderId: number): DialogOffsetCursor | undefined {
+    const cursor = this.dialogsOffsetCursors?.[folderId];
+    return cursor && {...cursor};
+  }
+
+  public setOffsetCursor(folderId: number, dialog: {peer: Peer, top_message: number}): DialogOffsetCursor {
+    const cursor = {
+      peerId: this.appPeersManager.getPeerId(dialog.peer),
+      id: getServerMessageId(dialog.top_message)
+    };
+    this.dialogsOffsetCursors ||= {};
+    this.dialogsOffsetCursors[folderId] = cursor;
+    this.appStateManager.pushToState('dialogsOffsetCursors', this.dialogsOffsetCursors);
+    return {...cursor};
   }
 
   private generateFolder(id: number) {
@@ -1906,22 +1978,78 @@ export default class DialogsStorage extends AppManager {
     skipMigrated?: boolean,
     forceLocal?: boolean,
     recursion?: boolean,
-    filterType?: FilterType
+    filterType?: FilterType,
+    snapshot?: boolean
   }): MaybePromise<{
     dialogs: Folder['dialogs'],
     count: number,
     isTopEnd: boolean,
     isEnd: boolean
   }> {
-    if(!options.recursion && !options.query && options.offsetIndex === undefined) {
-      const finish = performancePhaseTrace.start('worker.dialogs.firstPage');
-      const result = this.getDialogsInner(options);
+    const shouldSnapshot = options.snapshot && !options.recursion && !options.query && !options.offsetIndex &&
+      (options.filterId ?? FOLDER_ID_ALL) === FOLDER_ID_ALL &&
+      (options.filterType === undefined || options.filterType === FilterType.Folder);
+    const finish = !options.recursion && !options.query && options.offsetIndex === undefined ?
+      performancePhaseTrace.start('worker.dialogs.firstPage') : undefined;
+    const identity = shouldSnapshot ? getChatPageKey(this.getAccountNumber()) : undefined;
+    const result = this.getDialogsInner(options);
+    if(shouldSnapshot) {
+      Promise.all([Promise.resolve(result), identity, this.snapshotEpoch, this.snapshotOwner]).then(([page, key, epoch, owner]) => {
+        return this.refreshFirstChatPage(page, key, epoch, owner);
+      }).catch((error) => {
+        this.log.error('failed to save chat page snapshot', error);
+      });
+    }
+    if(finish) {
       if(result instanceof Promise) result.finally(finish).catch(noop);
       else finish();
-      return result;
     }
+    return result;
+  }
 
-    return this.getDialogsInner(options);
+  private async refreshFirstChatPage(
+    page: Awaited<ReturnType<DialogsStorage['getDialogs']>>,
+    key: ChatPageKey,
+    previousEpoch: string,
+    owner: ChatPageKey
+  ) {
+    if(!owner && this.snapshotMayBind && key) {
+      owner = key;
+      this.snapshotOwner = Promise.resolve(key);
+      this.snapshotMayBind = false;
+    }
+    if(!owner || !key || !previousEpoch || !sameChatPageKey(owner, key) ||
+      key.accountNumber !== this.getAccountNumber()) return;
+    const generation = chatPageSnapshotGeneration(key.accountNumber);
+    await this.saveFirstChatPage(page.dialogs, generation, key, previousEpoch);
+  }
+
+  private async saveFirstChatPage(dialogs: AnyDialog[], generation: number, key: ChatPageKey, epoch: string) {
+    const accountNumber = key.accountNumber;
+    const rows: ChatPageRow[] = dialogs.filter(isDialog).slice(0, 20).map((dialog) => {
+      const peer = this.appPeersManager.getPeer(dialog.peerId);
+      const user = peer?._ === 'user' ? peer : undefined;
+      const title = user ? [user.first_name, user.last_name].filter(Boolean).join(' ') :
+        peer && 'title' in peer ? peer.title : '';
+      const message = dialog.topMessage || this.appMessagesManager.getMessageByPeer(dialog.peerId, dialog.top_message);
+      const text = message?._ === 'message' ? message.message : '';
+      return {
+        peerId: dialog.peerId,
+        title: title || 'Deleted account',
+        avatar: this.appPeersManager.getPeerPhoto(dialog.peerId),
+        preview: text || (message?._ === 'messageService' ? 'Service message' : message ? 'Media' : ''),
+        date: message?.date || 0,
+        unread: this.appMessagesManager.getDialogUnreadCount(dialog),
+        markedUnread: !!dialog.pFlags?.unread_mark && !dialog.unread_count,
+        muted: !this.isDialogUnmuted(dialog),
+        pinned: !!dialog.pFlags?.pinned
+      };
+    });
+    await AccountController.withAccountWriteLock(accountNumber, async() => {
+      if(sameChatPageKey(key, await getChatPageKey(accountNumber))) {
+        await writeChatPageSnapshot(key, rows, epoch, generation);
+      }
+    });
   }
 
   private getDialogsInner(options: Parameters<DialogsStorage['getDialogs']>[0]): ReturnType<DialogsStorage['getDialogs']> {
@@ -2017,7 +2145,7 @@ export default class DialogsStorage extends AppManager {
     const loadedAll = this.isDialogsLoaded(realFolderId, filterType);
     const isEnoughDialogs = curDialogStorage.length >= (offset + limit);
     if((isServerSearchSupported ? false : query) || loadedAll || isEnoughDialogs || forceLocal) {
-      if(!query && !offset && filterId === FOLDER_ID_ALL) {
+      if(!query && !offset && filterId === FOLDER_ID_ALL && !recursion) {
         if(import.meta.env.VITE_PERF_TRACE === '1') this.apiManager.finishFirstDialogsTrace();
         this.reconcileCachedChannelDialogs();
       }
@@ -2085,28 +2213,64 @@ export default class DialogsStorage extends AppManager {
    * previous worker was going away (its `getPeerDialogs` unanswered) or while offline is missing
    * from that cache for good, so once per start compare it with the server's list and fetch the
    * channel dialogs it lacks. The server's chats decide membership, so a left, kicked or banned
-   * channel is never fetched back. Until every listed channel is restored, the next cached first
-   * page retries the comparison.
+   * channel is never fetched back. If any dialog is still missing, retry only those peers with
+   * once on the next cached first-page read without walking the server list again.
    */
   private async reconcileCachedChannelDialogs() {
-    if(this.cachedListReconciled) {
+    if(this.cachedListReconciled) return;
+
+    const generation = this.cachedListReconcileGeneration || 0;
+    const attempts = (this.cachedListReconcileAttempts || 0) + 1;
+    this.cachedListReconcileAttempts = attempts;
+    this.cachedListReconciled = true;
+    const retryPeerIds = this.cachedListReconcileRetryPeerIds;
+    let missingPeerIds: PeerId[];
+    try {
+      missingPeerIds = retryPeerIds ?
+        retryPeerIds.filter((peerId) => this.appChatsManager.isInChat(peerId.toChatId())) :
+        await this.getServerChannelsMissingLocally();
+    } catch(err) {
+      this.log.error('cached channel dialog reconcile failed', err);
+      if(generation !== (this.cachedListReconcileGeneration || 0)) return;
+
+      this.cachedListReconcileRetryPeerIds = undefined;
+      this.cachedListReconcileRecoveryPending = attempts >= CACHED_DIALOG_RECONCILE_MAX_ATTEMPTS;
+      this.cachedListReconciled = this.cachedListReconcileRecoveryPending;
       return;
     }
 
-    this.cachedListReconciled = true;
-    try {
-      const missingPeerIds = await this.getServerChannelsMissingLocally();
-      for(let offset = 0; offset < missingPeerIds.length; offset += CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE) {
-        const peerIds = missingPeerIds.slice(offset, offset + CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE);
-        await Promise.all(peerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
-      }
-      if(missingPeerIds.some((peerId) => !this.getDialogOnly(peerId) && this.appChatsManager.isInChat(peerId.toChatId()))) {
-        this.cachedListReconciled = false;
-      }
-    } catch(err) {
-      this.cachedListReconciled = false;
-      this.log.error('cached channel dialog reconcile failed', err);
+    if(generation !== (this.cachedListReconcileGeneration || 0)) {
+      return;
     }
+
+    for(let offset = 0; offset < missingPeerIds.length; offset += CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE) {
+      const peerIds = missingPeerIds.slice(offset, offset + CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE);
+      await Promise.allSettled(peerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
+    }
+
+    if(generation !== (this.cachedListReconcileGeneration || 0)) return;
+
+    const unresolvedPeerIds = missingPeerIds.filter((peerId) => {
+      return this.appChatsManager.isInChat(peerId.toChatId()) && !this.getDialogOnly(peerId);
+    });
+    for(const peerId of unresolvedPeerIds) {
+      this.log.error('cached channel dialog reconcile peer unresolved', peerId);
+    }
+
+    const shouldRetry = unresolvedPeerIds.length > 0 && attempts < CACHED_DIALOG_RECONCILE_MAX_ATTEMPTS;
+    this.cachedListReconcileRetryPeerIds = shouldRetry ? unresolvedPeerIds : undefined;
+    this.cachedListReconcileRecoveryPending = false;
+    this.cachedListReconciled = !shouldRetry;
+  }
+
+  private onConnectionStatusChange(status: ConnectionStatusChange) {
+    if(!this.cachedListReconcileRecoveryPending || status.status !== ConnectionStatus.Connected || status.isFileNetworker) {
+      return;
+    }
+
+    this.cachedListReconcileRecoveryPending = false;
+    this.cachedListReconcileAttempts = 0;
+    this.cachedListReconciled = false;
   }
 
   private async getServerChannelsMissingLocally() {

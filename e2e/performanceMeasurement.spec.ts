@@ -1,5 +1,36 @@
 import {expect, test} from '@playwright/test';
-import {startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
+import {beginMeasurement, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
+
+test('retains the incomplete scroll error when trace cleanup fails', async() => {
+  await expect(finishIncompleteScroll('scroll reached message 30, expected 20', true, async() => {
+    throw new Error('trace failed');
+  })).rejects.toThrow('scroll reached message 30, expected 20; frame trace cleanup failed: Error: trace failed');
+  await expect(finishIncompleteScroll('scroll reached message 30, expected 20', false, async() => {})).resolves.toBeUndefined();
+});
+
+test('reports contacts container state when no contact rows appear', async({page}) => {
+  await page.setContent('<div id="contacts-container"><input class="input-search-input" value="x"><ul id="contacts"></ul></div>');
+  expect(await getContactsFailureDetails(page)).toEqual({
+    containerCount: 1, listCount: 1, rowCount: 0, searchLength: 1
+  });
+});
+
+test('reports unavailable contact diagnostics without replacing the scenario error', async({page}) => {
+  await page.close();
+  expect(await getContactsFailureDetails(page)).toBeNull();
+  expect(await getContactsRpcFailureDetails(page)).toEqual({error: 'page unavailable'});
+});
+
+test('distinguishes a timed-out contact RPC trace from an empty trace', async({page}) => {
+  await page.evaluate(() => {
+    (window as any).rootScope = {managers: {apiManager: {getPerformanceRpcTrace: () => new Promise(() => {})}}};
+  });
+  expect(await getContactsRpcFailureDetails(page)).toEqual({timedOut: true});
+  await page.evaluate(() => {
+    (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace = () => Promise.resolve({calls: []});
+  });
+  expect(await getContactsRpcFailureDetails(page)).toEqual([]);
+});
 
 test('starts the measured window when the browser dispatches the click', async({page}) => {
   await page.setContent('<button>Open chat</button>');
@@ -114,4 +145,39 @@ test('records a bubble that becomes visible after a stylesheet visibility change
 
   const boundary = await waitForFirstVisibleBubble(page);
   expect(boundary.domNodes).toBeGreaterThan(0);
+});
+
+test('arms worker recording and starts the window before queued worker messages run', async({page}) => {
+  const measurement = await import('./performanceMeasurement') as any;
+  expect(typeof measurement.beginMeasurement).toBe('function');
+  await page.evaluate(() => {
+    const channel = new MessageChannel();
+    const perf: any = (window as any).__teagramPerf = {started: -1, longTasks: [{startTime: 1}], frameIntervals: [1], frameWindows: [{startMs: 1, endMs: 2}]};
+    channel.port1.onmessage = () => { perf.startedAtMessage = perf.started; };
+    (window as any).__teagramInstallWorkerMessageAttribution = () => {
+      channel.port2.postMessage('queued');
+      return {spans: [] as unknown[]};
+    };
+    (window as any).apiManagerProxy = {};
+  });
+  const requests = {value: 5};
+  await measurement.beginMeasurement(page, requests, true, false, true);
+  await page.waitForFunction(() => (window as any).__teagramPerf.startedAtMessage !== undefined);
+  const result = await page.evaluate(() => (window as any).__teagramPerf);
+  expect(requests.value).toBe(0);
+  expect(result.started).toBeGreaterThan(0);
+  expect(result.startedAtMessage).toBe(result.started);
+  expect(result.longTasks).toEqual([]);
+  expect(result.frameWindows).toEqual([]);
+  expect(result.workerMessages).toEqual({spans: []});
+});
+
+
+test('ordinary measurements do not install worker recording', async({page}) => {
+  await page.evaluate(() => {
+    (window as any).__teagramPerf = {};
+    (window as any).__teagramInstallWorkerMessageAttribution = () => { throw new Error('recorder unexpectedly installed'); };
+  });
+  await beginMeasurement(page, {value: 0});
+  expect(await page.evaluate(() => (window as any).__teagramPerf.workerMessages)).toBeUndefined();
 });

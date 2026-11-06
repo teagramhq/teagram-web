@@ -31,7 +31,7 @@ import useStars, {hasTonTransactions} from '@stores/stars';
 import PopupStars from '@components/popups/stars';
 import {renderPeerProfile} from '@components/peerProfile';
 import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
-import showMyQrCodePopup from '@components/popups/myQrCode';
+import showMyQrCodePopup from '@components/popups/lazyMyQrCode';
 import showSendGiftPicker from '@components/popups/sendGiftPicker';
 import {formatNanoton} from '@helpers/paymentsWrapCurrencyAmount';
 import showLogOutPopup from '@components/popups/logOut';

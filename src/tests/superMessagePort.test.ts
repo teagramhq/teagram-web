@@ -93,6 +93,20 @@ function createPair() {
 }
 
 describe('SuperMessagePort structured-clone failures', () => {
+  test('splits a large batch while preserving delivery order', async() => {
+    const {client, worker, clientPort} = createPair();
+    const posted = vi.spyOn(clientPort, 'postMessage');
+    const received: number[] = [];
+    worker.addEventListener('notify', ({value}) => received.push(value));
+    for(let i = 0; i < 1001; i++) client.invokeVoid('notify', {value: i});
+
+    await vi.waitFor(() => expect(received).toHaveLength(1001));
+    expect(received).toEqual(Array.from({length: 1001}, (_, i) => i));
+    const batches = posted.mock.calls.map(([task]) => task).filter((task) => task.type === 'batch');
+    expect(batches.length).toBeGreaterThan(1);
+    expect(Math.max(...batches.map((task) => task.payload.length))).toBeLessThanOrEqual(100);
+  });
+
   test('degrades an uncloneable batch and keeps cloneable sibling invokes alive', async() => {
     const {client, worker} = createPair();
     worker.addEventListener('call', (payload) => payload.value);
