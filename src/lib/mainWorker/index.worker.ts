@@ -33,6 +33,7 @@ import {notifyMtprotoWorkerReady} from '@helpers/mtprotoWorkerReady';
 import {MainBroadcastChannelEvents, unversionedMainBroadcastChannelName} from '@config/broadcastChannel';
 import objectUrlRegistry from '@lib/mainWorker/objectUrlRegistry';
 import SharedObjectUrlCache, {getSharedObjectURLCacheStats, resetSharedObjectURLCaches} from '@lib/mainWorker/sharedObjectUrlCache';
+import {disableChatPageSnapshots, enableChatPageSnapshots} from '@lib/chatPageSnapshot';
 
 
 const log = logger('MTPROTO');
@@ -250,7 +251,13 @@ port.addMultipleEventsListeners({
     selfTerminate();
   },
 
+  preparePasscodeSnapshots: async(_payload, source) => {
+    await disableChatPageSnapshots();
+    await port.invokeExceptSourceAsync('forgetChatPageSnapshot', undefined, source);
+  },
+
   toggleUsingPasscode: async(payload, source) => {
+    if(payload.isUsingPasscode) await disableChatPageSnapshots();
     DeferredIsUsingPasscode.resolveDeferred(payload.isUsingPasscode);
     EncryptionKeyStore.save(payload.encryptionKey);
 
@@ -260,6 +267,7 @@ port.addMultipleEventsListeners({
         sessionStorage.encryptEncryptable() :
         sessionStorage.decryptEncryptable()
     ]);
+    if(!payload.isUsingPasscode) enableChatPageSnapshots();
 
     pushSingleManager.registerAgain();
 

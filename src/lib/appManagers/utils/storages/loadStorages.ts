@@ -7,6 +7,9 @@ import type AppStorage from '@lib/storage';
 import {recordPromiseBound} from '@helpers/recordPromise';
 import {logger} from '@lib/logger';
 import noop from '@helpers/noop';
+import {clearChatPageSnapshot} from '@lib/chatPageSnapshot';
+import type {ActiveAccountNumber} from '@lib/accounts/types';
+import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 
 export type StoragesResults = Awaited<ReturnType<typeof loadStorages>>;
 
@@ -38,6 +41,10 @@ export default async function loadStorages(accountNumber: number, storages: Stor
   const {storages: resetStorages, refetch, callback} = await resetStoragesPromise;
   if(refetch && !refetching) {
     return loadStorages(accountNumber, storages, resetStoragesPromise, true);
+  }
+
+  if(resetStorages.size || await DeferredIsUsingPasscode.isUsingPasscode()) {
+    await clearChatPageSnapshot(accountNumber as ActiveAccountNumber);
   }
 
   if(resetStorages.size) {

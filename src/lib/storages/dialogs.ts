@@ -42,6 +42,9 @@ import {isDialog, isSavedDialog, isForumTopic} from '@appManagers/utils/dialogs/
 import getDialogKey from '@appManagers/utils/dialogs/getDialogKey';
 import getDialogThreadId from '@appManagers/utils/dialogs/getDialogThreadId';
 import {isTempId} from '@appManagers/utils/messages/isTempId';
+import {chatPageSnapshotGeneration, getChatPageKey, sameChatPageKey, writeChatPageSnapshot} from '@lib/chatPageSnapshot';
+import type {ChatPageRow} from '@lib/chatPageSnapshot';
+import AccountController from '@lib/accounts/accountController';
 
 export enum FilterType {
   Folder,
@@ -1895,22 +1898,61 @@ export default class DialogsStorage extends AppManager {
     skipMigrated?: boolean,
     forceLocal?: boolean,
     recursion?: boolean,
-    filterType?: FilterType
+    filterType?: FilterType,
+    snapshot?: boolean
   }): MaybePromise<{
     dialogs: Folder['dialogs'],
     count: number,
     isTopEnd: boolean,
     isEnd: boolean
   }> {
-    if(!options.recursion && !options.query && options.offsetIndex === undefined) {
-      const finish = performancePhaseTrace.start('worker.dialogs.firstPage');
-      const result = this.getDialogsInner(options);
+    const shouldSnapshot = options.snapshot && !options.recursion && !options.query && !options.offsetIndex &&
+      (options.filterId ?? FOLDER_ID_ALL) === FOLDER_ID_ALL &&
+      (options.filterType === undefined || options.filterType === FilterType.Folder);
+    const finish = !options.recursion && !options.query && options.offsetIndex === undefined ?
+      performancePhaseTrace.start('worker.dialogs.firstPage') : undefined;
+    const generation = shouldSnapshot ? chatPageSnapshotGeneration(this.getAccountNumber()) : undefined;
+    const identity = shouldSnapshot ? getChatPageKey(this.getAccountNumber()) : undefined;
+    const result = this.getDialogsInner(options);
+    if(shouldSnapshot) {
+      Promise.all([Promise.resolve(result), identity]).then(([page, key]) => this.saveFirstChatPage(page.dialogs, generation, key)).catch((error) => {
+        this.log.error('failed to save chat page snapshot', error);
+      });
+    }
+    if(finish) {
       if(result instanceof Promise) result.finally(finish).catch(noop);
       else finish();
-      return result;
     }
+    return result;
+  }
 
-    return this.getDialogsInner(options);
+  private async saveFirstChatPage(dialogs: AnyDialog[], generation: number, key: Awaited<ReturnType<typeof getChatPageKey>>) {
+    if(!key) return;
+    const accountNumber = this.getAccountNumber();
+    const rows: ChatPageRow[] = dialogs.filter(isDialog).slice(0, 20).map((dialog) => {
+      const peer = this.appPeersManager.getPeer(dialog.peerId);
+      const user = peer?._ === 'user' ? peer : undefined;
+      const title = user ? [user.first_name, user.last_name].filter(Boolean).join(' ') :
+        peer && 'title' in peer ? peer.title : '';
+      const message = dialog.topMessage || this.appMessagesManager.getMessageByPeer(dialog.peerId, dialog.top_message);
+      const text = message?._ === 'message' ? message.message : '';
+      return {
+        peerId: dialog.peerId,
+        title: title || 'Deleted account',
+        avatar: this.appPeersManager.getPeerPhoto(dialog.peerId),
+        preview: text || (message?._ === 'messageService' ? 'Service message' : message ? 'Media' : ''),
+        date: message?.date || 0,
+        unread: this.appMessagesManager.getDialogUnreadCount(dialog),
+        markedUnread: !!dialog.pFlags?.unread_mark && !dialog.unread_count,
+        muted: !this.isDialogUnmuted(dialog),
+        pinned: !!dialog.pFlags?.pinned
+      };
+    });
+    await AccountController.withAccountWriteLock(accountNumber, async() => {
+      if(sameChatPageKey(key, await getChatPageKey(accountNumber))) {
+        await writeChatPageSnapshot(key, rows, generation);
+      }
+    });
   }
 
   private getDialogsInner(options: Parameters<DialogsStorage['getDialogs']>[0]): ReturnType<DialogsStorage['getDialogs']> {

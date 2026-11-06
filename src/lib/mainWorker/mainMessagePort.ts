@@ -57,6 +57,7 @@ export default class MTProtoMessagePort<Master extends boolean = true> extends S
   setInterval: (timeout: number) => number,
   clearInterval: (intervalId: number) => void,
   terminate: () => void,
+  preparePasscodeSnapshots: (payload: void, source: MessageEventSource) => Promise<void>,
   toggleUsingPasscode: (payload: ToggleUsingPasscodePayload, source: MessageEventSource) => void,
   changePasscode: (payload: {toStore: PasscodeStorageValue, encryptionKey: CryptoKey}, source: MessageEventSource) => void,
   saveEncryptionKey: (payload: CryptoKey, source: MessageEventSource) => void,
@@ -97,6 +98,7 @@ export default class MTProtoMessagePort<Master extends boolean = true> extends S
   saveEncryptionKey: (payload: CryptoKey, source: MessageEventSource) => void,
   toggleCacheStorage: (value: boolean, source: MessageEventSource) => void,
   toggleUsingPasscode: (payload: ToggleUsingPasscodePayload, source: MessageEventSource) => void,
+  forgetChatPageSnapshot: (payload: void) => void,
 } & MTProtoBroadcastEvent, Master> {
   private static INSTANCE: MTProtoMessagePort;
   // In Modes.noWorker, both the proxy (master) and the worker-side port live

@@ -42,6 +42,7 @@ import {isPrivateMtprotoTarget} from '@config/mtprotoTarget';
 import {recoverRejectedAuthKey, withAuthKeyRecoveryLock} from '@lib/mtproto/authKeyRecovery';
 import {clearAllGuestCredentials, clearGuestCredentialsForAccount} from '@lib/guestCredentialStorage';
 import {clearGuestAccountLocalState, clearInvalidatedGuestAccount as clearInvalidatedGuestAccountLocally} from '@lib/guestAccountLocalCleanup';
+import {clearChatPageSnapshot} from '@lib/chatPageSnapshot';
 /**
  * To not be used in an ApiManager instance as there is no account number attached to it
  */
@@ -464,6 +465,13 @@ export class ApiManager extends ApiManagerMethods {
 
     this.loggingOut = true;
 
+    try {
+      await clearChatPageSnapshot(this.getAccountNumber());
+    } catch(error) {
+      this.loggingOut = false;
+      throw error;
+    }
+
     const totalAccounts = await AccountController.getTotalAccounts();
     const accountNumber = this.getAccountNumber();
     const accountData = await AccountController.get(accountNumber);
@@ -501,6 +509,7 @@ export class ApiManager extends ApiManagerMethods {
     this.loggingOut = true;
     try {
       const accountNumber = this.getAccountNumber();
+      await clearChatPageSnapshot(accountNumber);
       const [totalAccounts, accountData] = await Promise.all([
         AccountController.getTotalAccounts(),
         AccountController.get(accountNumber)
@@ -545,12 +554,14 @@ export class ApiManager extends ApiManagerMethods {
       throw Object.assign(new Error('Guest account context changed before local cleanup'), {type: 'GUEST_ACCOUNT_CONTEXT_CHANGED'});
     }
 
+    await clearChatPageSnapshot(accountNumber);
     await clearInvalidatedGuestAccountLocally(accountNumber, userId);
     this.baseDcId = undefined;
     this.rootScope.dispatchEvent('logging_out', {accountNumber});
   }
 
   public static async forceLogOutAll() {
+    await Promise.all(([1, 2, 3, 4] as ActiveAccountNumber[]).map(clearChatPageSnapshot));
     const clearAllStoresPromises = ([1, 2, 3, 4] as ActiveAccountNumber[])
     .map(accountNumber => AppStoragesManager.clearAllStoresForAccount(accountNumber));
 

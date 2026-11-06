@@ -10,6 +10,7 @@ import {useLockScreenHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 import EncryptionKeyStore from '@lib/passcode/keyStore';
 import {createEncryptionArtifactsForPasscode, deriveEncryptionKey, hashPasscode} from '@lib/passcode/utils';
+import {forgetLoadedChatPageSnapshot} from '@lib/chatPageSnapshot';
 
 export type PasscodeActions = ReturnType<typeof usePasscodeActions>;
 
@@ -44,6 +45,9 @@ export function usePasscodeActions() {
       await createEncryptionArtifactsForPasscode(passcode);
 
     passcode = ''; // forget
+
+    forgetLoadedChatPageSnapshot();
+    await apiManagerProxy.invoke('preparePasscodeSnapshots', undefined);
 
     await commonStateStorage.set({
       passcode: {
