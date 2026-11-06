@@ -32,6 +32,7 @@ jobs:
         run: |
           echo "PERF_FIXTURE_DIRECTORY=$RUNNER_TEMP/teagram-perf-fixture" >> "$GITHUB_ENV"
           echo "PERF_REPORT_PATH=$RUNNER_TEMP/teagram-web-performance.json" >> "$GITHUB_ENV"
+          echo "PERF_RECORDER_REPLAY_PATH=$RUNNER_TEMP/teagram-recorder-replay.json" >> "$GITHUB_ENV"
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47 # v4.0.0
@@ -286,6 +287,11 @@ jobs:
             exit 1
           fi
 
+      - name: Run worker recorder replay
+        id: recorder_replay
+        continue-on-error: true
+        run: pnpm exec playwright test -c playwright.performance.config.ts e2e/workerMessageReplay.spec.ts --project=performance-chromium --workers=1
+
       - name: Run scale browser scenarios and 100 ms negative control
         id: browser
         env:
@@ -307,6 +313,7 @@ jobs:
         if: always()
         env:
           PERF_BROWSER_OUTCOME: ${{ steps.browser.outcome || 'not-run' }}
+          PERF_RECORDER_REPLAY_OUTCOME: ${{ steps.recorder_replay.outcome || 'not-run' }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_REF: ${{ github.ref }}
           GITHUB_RUN_ID: ${{ github.run_id }}

@@ -89,6 +89,10 @@ try {
   if(error.code !== 'ENOENT') failures.push(`history could not be read: ${error.message}`);
 }
 
+if(process.env.PERF_RECORDER_REPLAY_OUTCOME && process.env.PERF_RECORDER_REPLAY_OUTCOME !== 'success') {
+  failures.push(`worker recorder replay did not succeed (${process.env.PERF_RECORDER_REPLAY_OUTCOME || 'not run'})`);
+}
+
 const evaluation = evaluatePerformance(policyReportWithMasterRepeatCount(report), history);
 failures.push(...evaluation.blockingFailures);
 if(process.env.PERF_BROWSER_OUTCOME !== 'success') {
