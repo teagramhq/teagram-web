@@ -1608,34 +1608,30 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
 
 test('blocks repeated injected 100 ms main-thread stalls during cold chat list load', async({browser}) => {
   test.skip(!report.requireBase, 'negative control requires same-run base measurements');
-  const preparedBase = preparedVariants['100x'].base;
   const preparedHead = preparedVariants['100x'].head;
-  expect(preparedBase, '100x base sign-in snapshot was not prepared').toBeTruthy();
   expect(preparedHead, '100x head sign-in snapshot was not prepared').toBeTruthy();
 
-  // Each repeat captures from document initialization so cold-start noise remains in the control window.
-  const baseControlSamples: Metric[] = [];
+  // Use the same bundle for both samples so a real improvement cannot mask the injected stall.
+  const controlSamples: Metric[] = [];
   const negativeSamples: Metric[] = [];
   for(let repeat = 0; repeat < COLD_CHAT_LIST_REPEATS; ++repeat) {
-    const order: Variant[] = repeat % 2 === 0 ? ['base', 'head'] : ['head', 'base'];
-    for(const variant of order) {
-      const isHead = variant === 'head';
-      const run = isHead ? preparedHead! : preparedBase!;
-      const {sample, injectedTask} = await measureColdControlWindow(browser, run, isHead);
+    const order = repeat % 2 === 0 ? [false, true] : [true, false];
+    for(const injectStall of order) {
+      const {sample, injectedTask} = await measureColdControlWindow(browser, preparedHead!, injectStall);
 
-      if(isHead) {
+      if(injectStall) {
         expect(sample.longTasksOver50Ms).toBeGreaterThan(0);
         expect(injectedTask?.duration).toBeGreaterThanOrEqual(100);
         expect(injectedTask?.observed).toBe(true);
         expect(sample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
         negativeSamples.push(sample);
       } else {
-        baseControlSamples.push(sample);
+        controlSamples.push(sample);
       }
     }
   }
-  const coldLoadEvaluation = evaluateWithControlSamples('coldChatList', baseControlSamples, negativeSamples);
+  const coldLoadEvaluation = evaluateWithControlSamples('coldChatList', controlSamples, negativeSamples);
   const coldLoadFailures = coldLoadEvaluation.blockingFailures.filter((failure) => failure.startsWith('100x coldChatList: '));
   const blockingTimes = (samples: Metric[]) => samples.map((sample) => sample.blockingTimeMs);
-  expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `100 ms control was not blocked: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs same-phase base ${JSON.stringify(blockingTimes(baseControlSamples))} ms`).toBe(true);
+  expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `100 ms control was not blocked: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs same-phase head ${JSON.stringify(blockingTimes(controlSamples))} ms`).toBe(true);
 });
