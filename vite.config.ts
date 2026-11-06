@@ -237,7 +237,7 @@ const baseConfig = defineConfig({
   },
   server: serverOptions,
   base: '/',
-  // Pin the dep-optimizer's scan to the real entry (index.html → src/index.ts).
+  // Pin the dep-optimizer's scan to the real entries (index.html and turnstile.html).
   // Otherwise Vite auto-globs every *.html (stats.html, public/*.html, the icomoon
   // demo.html) as scan entries, and a parse error in any of them (e.g. the stale
   // public/*.js build artifacts with merge-conflict markers) aborts the whole scan
@@ -251,7 +251,7 @@ const baseConfig = defineConfig({
     // page survives that with a full reload — a worker just fails to load with
     // an empty error event, which is what killed every conference call with
     // "An error occurred".
-    entries: ['index.html', 'src/**/*.worker.{ts,js}']
+    entries: ['index.html', 'turnstile.html', 'src/**/*.worker.{ts,js}']
   },
   build: {
     target: 'es2020',
@@ -269,13 +269,13 @@ const baseConfig = defineConfig({
     emptyOutDir: true,
     minify: NO_MINIFY ? false : undefined,
     rolldownOptions: {
+      input: {
+        app: resolve(rootDir, 'index.html'),
+        turnstile: resolve(rootDir, 'turnstile.html')
+      },
       output: {
         sourcemapIgnoreList: serverOptions.sourcemapIgnoreList
       }
-      // input: {
-      //   main: './index.html',
-      //   sw: './src/index.service.ts'
-      // }
     }
     // cssCodeSplit: true
   },

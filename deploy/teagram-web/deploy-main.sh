@@ -174,7 +174,8 @@ git archive --format=tar "$SHA" \
   src/lib/lottie/lottieLoader.ts \
   src/config/emoji.ts \
   deploy/teagram-web/Dockerfile \
-  deploy/teagram-web/nginx.conf |
+  deploy/teagram-web/nginx.conf \
+  deploy/teagram-web/security-headers.conf |
   tar -xf - -C "$VERIFY_CONTEXT"
 mkdir -p "$VERIFY_CONTEXT/dist-private"
 cp -a "$WORK_DIR/dist-private/." "$VERIFY_CONTEXT/dist-private/"
