@@ -50,7 +50,8 @@ function formatPerformanceSamplesTable(report, scale = '100x') {
 }
 
 function formatSendActionDiagnosticTable(report) {
-  const sample = report.diagnostics?.['100x']?.sendMessage;
+  const sendSamples = report.diagnostics?.['100x']?.sendMessage;
+  const sample = Array.isArray(sendSamples) ? sendSamples[0] : sendSamples;
   if(!sample) return '';
 
   const show = (value, digits = 1) => Number.isFinite(value) ? value.toFixed(digits) : '—';

@@ -77,6 +77,7 @@ import Modes from '@config/modes';
 import {getMtprotoTarget, isPrivateMtprotoTarget} from '@config/mtprotoTarget';
 import {getActiveServerId, getActiveServerQuery} from '@config/serverContext';
 import {waitForMtprotoWorkerReady} from '@helpers/mtprotoWorkerReady';
+import type {PerformancePhase} from '@appManagers/performanceTrace';
 import {toast} from '@components/toast';
 import appNavigationController from '@components/appNavigationController';
 import {BroadcastChannelWrapper, createBroadcastChannelWrapper} from './broadcastChannelWrapper';
@@ -87,7 +88,10 @@ import {
   deleteObjectURLMirrorValue,
   getNewActiveChannelMirrorChatId,
   reconcileObjectURLMirrorSnapshot,
-  reconcileObjectURLMirrorValue
+  reconcileObjectURLMirrorValue,
+  reconcilePeerMirrorBatch,
+  dispatchPeerMirrorBatchChatUpdates,
+  applyPeerMirrorBatch
 } from './apiManagerProxyUtils';
 
 function withRuntimeMtprotoTarget(url: string | URL) {
@@ -108,6 +112,19 @@ import type {
   CommunityPeerLinkRequestsState
 } from '@appManagers/appCommunitiesManager';
 
+const commonEventNames = new Set<keyof BroadcastEvents>([
+  'language_change',
+  'settings_updated',
+  'theme_changed',
+  'theme_change',
+  'background_change',
+  'logging_out',
+  'notification_count_update',
+  'account_logged_in',
+  'notification_cancel',
+  'notification_cancel_up_to',
+  'toggle_using_passcode'
+]);
 
 export type Mirrors = {
   state: State,
@@ -149,7 +166,16 @@ export type MirrorTaskPayload<
   value?: any,
   previousUrl?: string,
   previousUrls?: string[],
-  accountNumber: ActiveAccountNumber
+  merge?: boolean,
+  accountNumber: ActiveAccountNumber,
+  trace?: 'cachedChannelDialogsReconcile',
+  traceId?: string,
+  reconcilePhase?: PerformancePhase,
+  traceOnly?: boolean,
+  skipEmptyChannelDialogReconciliation?: boolean,
+  chatUpdateIds?: ChatId[],
+  events?: Array<{name: string, args: any[]}>,
+  suppressedActiveChatUpdateIds?: ChatId[]
 };
 
 export type NotificationBuildMessageTaskPayload = {
@@ -333,6 +359,35 @@ class ApiManagerProxy extends MTProtoMessagePort {
       },
 
       peers: (payload) => {
+        if(payload.merge) {
+          const options = payload.skipEmptyChannelDialogReconciliation ? {skipEmptyChannelDialogReconciliation: true} : undefined;
+          if(payload.events || payload.suppressedActiveChatUpdateIds) {
+            applyPeerMirrorBatch(
+              this.mirrors.peers as Record<string, any>,
+              payload.value,
+              [
+                ...(payload.events ?? []),
+                ...(payload.chatUpdateIds ?? []).map((chatId) => ({name: 'chat_update', args: [chatId, options]}))
+              ],
+              (chatId) => rootScope.dispatchEvent('chat_update', chatId, options),
+              ({name, args}) => rootScope.dispatchEventSingle(name as any, ...args),
+              payload.suppressedActiveChatUpdateIds
+            );
+            return false;
+          }
+          const activeChannelIds = reconcilePeerMirrorBatch(
+            this.mirrors.peers as Record<string, any>,
+            payload.value
+          );
+          dispatchPeerMirrorBatchChatUpdates(
+            activeChannelIds,
+            payload.chatUpdateIds ?? [],
+            (chatId) => rootScope.dispatchEvent('chat_update', chatId, options),
+            (chatId) => rootScope.dispatchEventSingle('chat_update', chatId, options)
+          );
+          return false;
+        }
+
         if(payload.key) {
           reconcilePeer(payload.key.toPeerId(), payload.value as any);
         } else {
@@ -438,20 +493,6 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
     this.registerServiceWorker();
     this.registerCryptoWorker();
-
-    const commonEventNames = new Set<keyof BroadcastEvents>([
-      'language_change',
-      'settings_updated',
-      'theme_changed',
-      'theme_change',
-      'background_change',
-      'logging_out',
-      'notification_count_update',
-      'account_logged_in',
-      'notification_cancel',
-      'notification_cancel_up_to',
-      'toggle_using_passcode'
-    ]);
 
     // const perf = performance.now();
     this.addMultipleEventsListeners({
@@ -1611,26 +1652,83 @@ class ApiManagerProxy extends MTProtoMessagePort {
     payload.previousUrls?.forEach(forgetLoadedURL);
 
     const isSettingsUpdate = name === 'state' && key === 'settings';
-    if(!isSettingsUpdate && accountNumber !== getCurrentAccount()) return;
-
-    const newActiveChannelId = name === 'peers' && key ?
-      getNewActiveChannelMirrorChatId(this.mirrors.peers[key.toPeerId()], value) :
-      undefined;
-    const result = this.processMirrorTaskMap[name]?.(payload);
-    if(result === false) {
+    if(!isSettingsUpdate && accountNumber !== getCurrentAccount()) {
+      payload.events?.forEach(({name, args}) => {
+        if(commonEventNames.has(name as keyof BroadcastEvents)) rootScope.dispatchEventSingle(name as any, ...args);
+      });
       return;
     }
 
-    if(!payload.hasOwnProperty('key')) {
-      this.mirrors[name] = value;
-      return;
-    }
+    const traceMirror = (import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1') &&
+      payload.trace === 'cachedChannelDialogsReconcile' &&
+      typeof payload.traceId === 'string';
+    const perf = traceMirror ? (globalThis as any).__teagramPerf : undefined;
+    const startedAt = perf ? performance.now() : 0;
+    try {
+      if(payload.traceOnly) return;
 
-    const mirror = this.mirrors[name] ??= {} as any;
-    setDeepProperty(mirror, key, value, true);
+      const newActiveChannelId = name === 'peers' && key ?
+        getNewActiveChannelMirrorChatId(this.mirrors.peers[key.toPeerId()], value) :
+        undefined;
+      const result = this.processMirrorTaskMap[name]?.(payload);
+      if(result === false) {
+        return;
+      }
 
-    if(newActiveChannelId !== undefined) {
-      rootScope.dispatchEvent('chat_update', newActiveChannelId);
+      if(!payload.hasOwnProperty('key')) {
+        this.mirrors[name] = value;
+        return;
+      }
+
+      const mirror = this.mirrors[name] ??= {} as any;
+      setDeepProperty(mirror, key, value, true);
+
+      if(newActiveChannelId !== undefined) {
+        rootScope.dispatchEvent('chat_update', newActiveChannelId);
+      }
+    } finally {
+      if(perf) {
+        const elapsedMs = performance.now() - startedAt;
+        const traceId = payload.traceId!;
+        const mainThreadTimes = perf.cachedDialogsReconcileMainThreadMsByTraceId as Record<string, number>;
+        let storedTimes: Record<string, number> = {};
+        try {
+          storedTimes = JSON.parse(window.sessionStorage.getItem('teagram-perf-cached-dialog-reconcile-main-thread-ms') || '{}');
+        } catch(err) {
+          this.log.error('cached dialog reconcile trace storage read failed', err);
+        }
+        const total = Math.max(mainThreadTimes[traceId] || 0, storedTimes[traceId] || 0) + elapsedMs;
+        // Each mirror task keeps its interval so a long task can be attributed to the walk by overlap.
+        (perf.cachedDialogsReconcileMirrorTasks ??= []).push({traceId, startedAtMs: startedAt, durationMs: elapsedMs});
+        mainThreadTimes[traceId] = total;
+        storedTimes[traceId] = total;
+        try {
+          window.sessionStorage.setItem('teagram-perf-cached-dialog-reconcile-main-thread-ms', JSON.stringify(storedTimes));
+        } catch(err) {
+          this.log.error('cached dialog reconcile trace storage write failed', err);
+        }
+        const phase = payload.reconcilePhase;
+        if(phase?.traceId && phase.durationMs !== null && Number.isFinite(phase.durationMs)) {
+          const phaseStorageKey = 'teagram-perf-cached-dialog-reconcile-phases';
+          let storedPhases: Record<string, PerformancePhase> = {};
+          try {
+            const parsed = JSON.parse(window.sessionStorage.getItem(phaseStorageKey) || '{}');
+            if(parsed && typeof parsed === 'object' && !Array.isArray(parsed)) storedPhases = parsed;
+          } catch(err) {
+            this.log.error('cached dialog reconcile phase storage read failed', err);
+          }
+          storedPhases[phase.traceId] = phase;
+          const traceIds = Object.keys(storedPhases);
+          if(traceIds.length > 100) {
+            traceIds.slice(0, traceIds.length - 100).forEach((oldTraceId) => delete storedPhases[oldTraceId]);
+          }
+          try {
+            window.sessionStorage.setItem(phaseStorageKey, JSON.stringify(storedPhases));
+          } catch(err) {
+            this.log.error('cached dialog reconcile phase storage write failed', err);
+          }
+        }
+      }
     }
   };
 

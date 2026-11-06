@@ -26,7 +26,8 @@ import noop from '@helpers/noop';
 import {Chat, Message} from '@layer';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import {AppDialogsManager, DialogDom} from '@lib/appDialogsManager';
-import rootScope from '@lib/rootScope';
+import rootScope, {type BroadcastEvents, type ChatUpdateOptions, type DialogsMultiupdateOptions} from '@lib/rootScope';
+import shouldReconcileEmptyChannelDialog from '@components/autonomousDialogList/shouldReconcileEmptyChannelDialog';
 import SolidJSHotReloadGuardProvider from '@lib/solidjs/hotReloadGuardProvider';
 import {runWithHotReloadGuard} from '@lib/solidjs/runWithHotReloadGuard';
 import {FilterType} from '@lib/storages/dialogs';
@@ -143,7 +144,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       }
     });
 
-    this.listenerSetter.add(rootScope)('user_update', async(userId) => {
+    this.listenerSetter.add(rootScope)('user_update', async(userId, options) => {
       if(!this.isActive) {
         return;
       }
@@ -154,12 +155,14 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
         return;
       }
 
-      const status = await this.managers.appUsersManager.getUserStatus(userId);
+      const status = options?.statusFromWorker ?
+        options.status :
+        await this.managers.appUsersManager.getUserStatus(userId);
       const online = status?._ === 'userStatusOnline';
       this.setOnlineStatus(dom.avatarEl.node, online);
     });
 
-    this.listenerSetter.add(rootScope)('chat_update', (chatId) => this.handleChatUpdate(chatId));
+    this.listenerSetter.add(rootScope)('chat_update', (chatId, options) => this.handleChatUpdate(chatId, options));
 
     this.listenerSetter.add(rootScope)('dialog_flush', ({dialog}) => {
       if(!this.isActive || !dialog) {
@@ -212,22 +215,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       setStreamedMessagePreview(draft.peerId);
     });
 
-    this.listenerSetter.add(rootScope)('dialogs_multiupdate', (dialogs) => {
-      if(!this.isActive) {
-        return;
-      }
-
-      for(const [peerId, {dialog, topics}] of dialogs) {
-        if(!isDialog(dialog)) {
-          continue;
-        }
-
-        this.updateDialog(dialog);
-        this.appDialogsManager.processContact?.(peerId.toPeerId());
-      }
-
-      this.reconcileWatchedEmptyChannelDialogs();
-    });
+    this.listenerSetter.add(rootScope)('dialogs_multiupdate', (dialogs, options) => this.handleDialogsMultiupdate(dialogs, options));
 
     this.listenerSetter.add(rootScope)('dialog_drop', (dialog) => {
       if(!this.isActive || !isDialog(dialog)) {
@@ -305,9 +293,21 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     return this.appDialogsManager.xd === this;
   }
 
-  public handleChatUpdate(chatId: ChatId) {
+  private handleDialogsMultiupdate(dialogs: BroadcastEvents['dialogs_multiupdate'], options?: DialogsMultiupdateOptions) {
+    if(!this.isActive) return;
+
+    for(const [peerId, {dialog}] of dialogs) {
+      if(!isDialog(dialog)) continue;
+      this.updateDialog(dialog);
+      this.appDialogsManager.processContact?.(peerId.toPeerId());
+    }
+
+    this.reconcileWatchedEmptyChannelDialogs(options?.reconcilePeerIds);
+  }
+
+  public handleChatUpdate(chatId: ChatId, options?: ChatUpdateOptions) {
     const peerId = chatId.toPeerId(true);
-    if(this.isActive && !this.sortedList.has(peerId)) {
+    if(shouldReconcileEmptyChannelDialog(options) && this.isActive && !this.sortedList.has(peerId)) {
       const channel = apiManagerProxy.getPeer(peerId) as Chat;
       if(
         channel?._ === 'channel' &&
@@ -345,9 +345,10 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     this.requestEmptyChannelDialogReconcile(peerId);
   }
 
-  private reconcileWatchedEmptyChannelDialogs() {
-    for(const peerId of this.emptyChannelDialogReconcileDisposers.keys()) {
-      this.requestEmptyChannelDialogReconcile(peerId);
+  private reconcileWatchedEmptyChannelDialogs(peerIds?: Iterable<PeerId>) {
+    const candidates = peerIds ? new Set(peerIds) : this.emptyChannelDialogReconcileDisposers.keys();
+    for(const peerId of candidates) {
+      if(this.emptyChannelDialogReconcileDisposers.has(peerId)) this.requestEmptyChannelDialogReconcile(peerId);
     }
   }
 

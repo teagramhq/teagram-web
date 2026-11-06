@@ -4898,7 +4898,13 @@ export class AppMessagesManager extends AppManager {
       if(hasPrepend) {
         this.scheduleHandleNewDialogs();
       } else {
-        this.rootScope.dispatchEvent('dialogs_multiupdate', new Map());
+        const reconcilePeerIds = filterType === FilterType.Folder && !isSearch ?
+          items.filter(isDialog).map((dialog) => dialog.peerId) : undefined;
+        if(reconcilePeerIds) {
+          this.rootScope.dispatchEvent('dialogs_multiupdate', new Map(), {reconcilePeerIds});
+        } else {
+          this.rootScope.dispatchEvent('dialogs_multiupdate', new Map());
+        }
       }
 
       log('end', {isEnd, hasPrepend, offsetDate: this.dialogsStorage.getOffsetDate(folderId, filterType)});

@@ -12,6 +12,11 @@ export type VerticalVirtualListItemProps<T = any> = {
   animating: boolean;
 };
 
+export function applyScrollShift(host: HTMLElement, amount: number) {
+  if(amount === 0) return;
+  host.scrollTop -= amount;
+}
+
 const VerticalVirtualList: Component<{
   ref: Ref<HTMLUListElement>;
   list: any[];
@@ -48,7 +53,7 @@ const VerticalVirtualList: Component<{
 
   const onScrollShift = (amount: number) => {
     untrack(() => {
-      props.scrollableHost.scrollTop -= amount;
+      applyScrollShift(props.scrollableHost, amount);
     });
   };
 

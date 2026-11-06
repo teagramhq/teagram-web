@@ -27,6 +27,7 @@ import callbackify from '@helpers/callbackify';
 import {NULL_PEER_ID, TEST_NO_STORIES} from '@appManagers/constants';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import pause from '@helpers/schedulers/pause';
+import type {PeerMirrorBatch} from '@appManagers/peerMirrorBatch';
 
 export type User = MTUser.user;
 export type TopPeerType = 'correspondents' | 'bots_inline' | 'bots_app' | 'bots_guestchat';
@@ -573,10 +574,10 @@ export class AppUsersManager extends AppManager {
     return new SearchIndex<UserId>(SEARCH_OPTIONS);
   }
 
-  public saveApiUsers(apiUsers: MTUser[], override?: boolean) {
+  public saveApiUsers(apiUsers: MTUser[], override?: boolean, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch) {
     if(!apiUsers || (apiUsers as any).saved) return;
     (apiUsers as any).saved = true;
-    apiUsers.forEach((user) => this.saveApiUser(user, override));
+    apiUsers.forEach((user) => this.saveApiUser(user, override, trace, mirrorBatch));
   }
 
   public modifyUsernamesCache(peer: Parameters<typeof getPeerActiveUsernames>[0], save: boolean) {
@@ -629,7 +630,7 @@ export class AppUsersManager extends AppManager {
     (userStatus as any).saved = true;
   }
 
-  public saveApiUser(user: MTUser, override?: boolean) {
+  public saveApiUser(user: MTUser, override?: boolean, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch) {
     if(!user || user._ === 'userEmpty') return;
 
     const userId = user.id;
@@ -687,7 +688,9 @@ export class AppUsersManager extends AppManager {
     const peerId = userId.toPeerId(false);
     if(oldUser === undefined) {
       this.users[userId] = user;
-      this.mirrorUser(user);
+      if(mirrorBatch) this.mirrorUser(user, trace, mirrorBatch);
+      else if(trace) this.mirrorUser(user, trace);
+      else this.mirrorUser(user);
     } else {
       const changedTitle = user.first_name !== oldUser.first_name ||
         user.last_name !== oldUser.last_name ||
@@ -716,7 +719,9 @@ export class AppUsersManager extends AppManager {
       const storiesCallback = this.appStoriesManager.saveApiPeerStories(user, oldUser);
 
       safeReplaceObject(oldUser, user);
-      this.mirrorUser(oldUser);
+      if(mirrorBatch) this.mirrorUser(oldUser, trace, mirrorBatch);
+      else if(trace) this.mirrorUser(oldUser, trace);
+      else this.mirrorUser(oldUser);
 
       this.rootScope.dispatchEvent('user_update', userId);
 
@@ -752,12 +757,18 @@ export class AppUsersManager extends AppManager {
     }
   }
 
-  private mirrorUser(user: User) {
+  private mirrorUser(user: User, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch) {
+    if(mirrorBatch) {
+      mirrorBatch('' + user.id, user);
+      return;
+    }
+
     MTProtoMessagePort.getInstance<false>().invokeVoid('mirror', {
       name: 'peers',
       key: '' + user.id,
       value: user,
-      accountNumber: this.getAccountNumber()
+      accountNumber: this.getAccountNumber(),
+      ...(import.meta.env.VITE_PERF_TRACE === '1' && trace ? {trace} : {})
     });
   }
 

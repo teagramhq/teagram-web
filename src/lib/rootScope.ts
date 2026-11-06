@@ -1,4 +1,4 @@
-import type {Message, StickerSet, Update, NotifyPeer, PeerNotifySettings, PollResults, Poll, WebPage, GroupCall, GroupCallParticipant, ReactionCount, MessagePeerReaction, PhoneCall, Config, Reaction, AttachMenuBot, PeerSettings, StoryItem, PeerStories, SavedDialog, SavedReactionTag, InputSavedStarGift, LangPackDifference, StarsAmount, MessageEntity, HelpPromoData, StoriesStealthMode, StoryAlbum, GlobalPrivacySettings, ConnectedBot} from '@layer';
+import type {Message, StickerSet, Update, NotifyPeer, PeerNotifySettings, PollResults, Poll, WebPage, GroupCall, GroupCallParticipant, ReactionCount, MessagePeerReaction, PhoneCall, Config, Reaction, AttachMenuBot, PeerSettings, StoryItem, PeerStories, SavedDialog, SavedReactionTag, InputSavedStarGift, LangPackDifference, StarsAmount, MessageEntity, HelpPromoData, StoriesStealthMode, StoryAlbum, GlobalPrivacySettings, ConnectedBot, UserStatus} from '@layer';
 import type {Dialog, ForumTopic, MessagesStorageKey, MyEphemeralMessage, MyMessage} from '@appManagers/appMessagesManager';
 import type {MyDialogFilter} from '@lib/storages/filters';
 import type {AnyDialog, Folder} from '@lib/storages/dialogs';
@@ -268,11 +268,27 @@ export type BroadcastEvents = {
   'auto_delete_period_update': {peerId: PeerId, period: number},
 };
 
+export type ChatUpdateOptions = {
+  skipEmptyChannelDialogReconciliation?: boolean
+};
+
+export type UserUpdateOptions = {
+  statusFromWorker?: boolean,
+  status?: UserStatus
+};
+
+export type DialogsMultiupdateOptions = {
+  reconcilePeerIds: PeerId[]
+};
+
 export type BroadcastEventsListeners = {
-  [name in keyof BroadcastEvents]: (e: BroadcastEvents[name]) => void
+  [name in keyof BroadcastEvents]: name extends 'chat_update' ? (e: ChatId, options?: ChatUpdateOptions) => void :
+    name extends 'user_update' ? (e: UserId, options?: UserUpdateOptions) => void :
+      name extends 'dialogs_multiupdate' ? (e: BroadcastEvents[name], options?: DialogsMultiupdateOptions) => void : (e: BroadcastEvents[name]) => void
 };
 
 export class RootScope extends EventListenerBase<BroadcastEventsListeners> {
+  private broadcastEventCollector?: Array<{name: string, args: any[]}>;
   public myId: PeerId;
   private connectionStatus: {[name: string]: ConnectionStatusChange};
   public managers: AppManagers;
@@ -302,6 +318,10 @@ export class RootScope extends EventListenerBase<BroadcastEventsListeners> {
 
     this.dispatchEvent = (e, ...args) => {
       super.dispatchEvent(e, ...args);
+      if(this.broadcastEventCollector) {
+        this.broadcastEventCollector.push({name: e as string, args});
+        return;
+      }
       (async() => {
         const accountNumber = this.managers ? await this.managers.apiManager.getAccountNumber() : undefined;
         MTProtoMessagePort.getInstance().invokeVoid('event', {
@@ -311,6 +331,16 @@ export class RootScope extends EventListenerBase<BroadcastEventsListeners> {
         });
       })();
     };
+  }
+
+  public collectBroadcastEvents(events: Array<{name: string, args: any[]}>, callback: () => void) {
+    const previous = this.broadcastEventCollector;
+    this.broadcastEventCollector = events;
+    try {
+      callback();
+    } finally {
+      this.broadcastEventCollector = previous;
+    }
   }
 
   public getConnectionStatus() {

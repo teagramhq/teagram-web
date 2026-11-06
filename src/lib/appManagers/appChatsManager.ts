@@ -23,6 +23,7 @@ import callbackify from '@helpers/callbackify';
 import {SlicedCachedFetcher} from '@appManagers/utils/chats/slicedCachedFetcher';
 import {CHAT_LEGACY_ADMIN_RIGHTS} from '@lib/appManagers/utils/chats/constants';
 import {getStickerSetInputById} from '@lib/appManagers/utils/stickers/getStickerSetInput';
+import type {PeerMirrorBatch, PeerSaveOptions} from '@appManagers/peerMirrorBatch';
 
 export type Channel = Chat.channel;
 export type ChatPhotoUpload = {
@@ -136,13 +137,23 @@ export class AppChatsManager extends AppManager {
     this.recommendations = {};
   };
 
-  public saveApiChats(apiChats: any[], override?: boolean) {
-    if(!apiChats || (apiChats as any).saved) return;
-    (apiChats as any).saved = true;
-    apiChats.forEach((chat) => this.saveApiChat(chat, override));
+  private dispatchChatUpdate(chatId: ChatId, options?: PeerSaveOptions) {
+    const eventOptions = options?.skipEmptyChannelDialogReconciliation ? {skipEmptyChannelDialogReconciliation: true} : undefined;
+    if(options?.chatUpdateIds) {
+      this.rootScope.dispatchEventSingle('chat_update', chatId, eventOptions);
+      options.chatUpdateIds.add(chatId);
+    } else {
+      this.rootScope.dispatchEvent('chat_update', chatId, eventOptions);
+    }
   }
 
-  public saveApiChat(chat: Chat, override?: boolean) {
+  public saveApiChats(apiChats: any[], override?: boolean, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch, options?: PeerSaveOptions) {
+    if(!apiChats || (apiChats as any).saved) return;
+    (apiChats as any).saved = true;
+    apiChats.forEach((chat) => this.saveApiChat(chat, override, trace, mirrorBatch, options));
+  }
+
+  public saveApiChat(chat: Chat, override?: boolean, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch, options?: PeerSaveOptions) {
     if(
       !chat ||
       chat._ === 'chatEmpty'
@@ -184,7 +195,9 @@ export class AppChatsManager extends AppManager {
         this.chats[id] = communityToSave;
       }
 
-      this.mirrorChat(communityToSave);
+      if(mirrorBatch) this.mirrorChat(communityToSave, trace, mirrorBatch);
+      else if(trace) this.mirrorChat(communityToSave, trace);
+      else this.mirrorChat(communityToSave);
       this.appCommunitiesManager.handleCommunityUpdate(id);
       const newPhotoId = communityToSave._ === 'community' &&
         communityToSave.photo?._ === 'chatPhoto' ?
@@ -262,7 +275,9 @@ export class AppChatsManager extends AppManager {
     const peerId = chat.id.toPeerId(true);
     if(oldChat === undefined) {
       this.chats[chat.id] = chat;
-      this.mirrorChat(chat);
+      if(mirrorBatch) this.mirrorChat(chat, trace, mirrorBatch);
+      else if(trace) this.mirrorChat(chat, trace);
+      else this.mirrorChat(chat);
     } else {
       const oldPhotoId = ((oldChat as Chat.chat).photo as ChatPhoto.chatPhoto)?.photo_id;
       const newPhotoId = ((chat as Chat.chat).photo as ChatPhoto.chatPhoto)?.photo_id;
@@ -285,8 +300,10 @@ export class AppChatsManager extends AppManager {
       const storiesCallback = this.appStoriesManager.saveApiPeerStories(chat as Chat.channel, oldChat as Chat.channel);
 
       safeReplaceObject(oldChat, chat);
-      this.mirrorChat(oldChat);
-      this.rootScope.dispatchEvent('chat_update', chat.id);
+      if(mirrorBatch) this.mirrorChat(oldChat, trace, mirrorBatch);
+      else if(trace) this.mirrorChat(oldChat, trace);
+      else this.mirrorChat(oldChat);
+      this.dispatchChatUpdate(chat.id, options);
 
       storiesCallback?.();
 
@@ -324,7 +341,7 @@ export class AppChatsManager extends AppManager {
       chat._ === 'channelForbidden' ||
       (chat._ === 'channel' && (chat.pFlags.left || (chat as any).pFlags.kicked))
     )) {
-      this.rootScope.dispatchEvent('chat_update', chat.id);
+      this.dispatchChatUpdate(chat.id, options);
     }
 
     const communityId = chat._ === 'channel' ? chat.linked_community_id?.toChatId() : undefined;
@@ -337,14 +354,20 @@ export class AppChatsManager extends AppManager {
     }
   }
 
-  private mirrorChat(chat: Exclude<Chat, Chat.chatEmpty> | ChatId) {
+  private mirrorChat(chat: Exclude<Chat, Chat.chatEmpty> | ChatId, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch) {
     const isChat = typeof(chat) === 'object';
     const chatId = isChat ? chat.id : chat;
+    if(mirrorBatch && isChat) {
+      mirrorBatch('' + chatId.toPeerId(true), chat as Exclude<Chat, Chat.chatEmpty>);
+      return;
+    }
+
     MTProtoMessagePort.getInstance<false>().invokeVoid('mirror', {
       name: 'peers',
       key: '' + chatId.toPeerId(true),
       value: isChat ? chat : undefined,
-      accountNumber: this.getAccountNumber()
+      accountNumber: this.getAccountNumber(),
+      ...(import.meta.env.VITE_PERF_TRACE === '1' && trace ? {trace} : {})
     });
   }
 
