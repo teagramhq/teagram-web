@@ -1,7 +1,6 @@
 import {BigInteger} from 'big-integer';
 import {bigIntFromBytes, bigIntToBytes} from '@helpers/bigInt/bigIntConversion';
 import addPadding from '@helpers/bytes/addPadding';
-import bufferConcats from '@helpers/bytes/bufferConcats';
 import subtle from '@lib/crypto/subtle';
 
 const COUNTER_LENGTH = 16;
@@ -64,14 +63,14 @@ export default class CTR {
       const leftLength2 = COUNTER_LENGTH - leftLength;
       if(toEncrypt.length < leftLength2) {
         // Hold the counter until the current block is complete.
-        const left = bufferConcats(new Uint8Array(leftLength), toEncrypt);
+        const left = (new Uint8Array(leftLength)).concat(toEncrypt);
         const performed = await this.perform(left);
         this.leftLength += toEncrypt.length;
         return new Uint8Array(performed.slice(leftLength));
       }
 
       // const left = this.encLeft.concat(toEncrypt.slice(0, leftLength2));
-      const left = bufferConcats(new Uint8Array(leftLength), toEncrypt.slice(0, leftLength2));
+      const left = (new Uint8Array(leftLength)).concat(toEncrypt.slice(0, leftLength2));
 
       const performed = await this.perform(left);
 
@@ -84,7 +83,7 @@ export default class CTR {
 
     const tail = new Uint8Array(await this.perform(toEncrypt));
 
-    const result = head ? bufferConcats(head, tail) : tail;
+    const result = head ? head.concat(tail) : tail;
 
     let length = toEncrypt.length;
     const leftAfter = length % COUNTER_LENGTH;
