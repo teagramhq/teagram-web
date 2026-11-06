@@ -52,6 +52,25 @@ export type FirstBubbleBoundary = {
   preInteractionMs?: number
 };
 
+export async function beginMeasurement(page: Page, requests: {value: number}, recordRpcSpans = true, traceEnabled = false, captureWorkerMessages = false) {
+  requests.value = 0;
+  await page.evaluate(async({recordSpans, traceEnabled, captureWorkerMessages}) => {
+    if(traceEnabled) await (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace(recordSpans);
+    const perf = (window as any).__teagramPerf;
+    if(captureWorkerMessages) {
+      perf.workerMessages = (window as any).__teagramInstallWorkerMessageAttribution((window as any).apiManagerProxy, () => performance.now());
+    }
+    perf.longTasks = [];
+    perf.longAnimationFrames = [];
+    perf.frameIntervals = [];
+    perf.frameWindows = [];
+    perf.resourceUrlBaseline = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).map((entry) => entry.name);
+    performance.clearResourceTimings();
+    if(traceEnabled) performance.clearMeasures();
+    perf.started = performance.now();
+  }, {recordSpans: recordRpcSpans, traceEnabled, captureWorkerMessages});
+}
+
 export async function startMeasurementAtClick(target: Locator) {
   await target.evaluate((element) => {
     const perf = (window as any).__teagramPerf as {

@@ -1,10 +1,12 @@
-import {readFileSync, writeFileSync} from 'node:fs';
+import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
+import {readFileSync} from 'node:fs';
+import {writePerformanceReport} from './performanceReport';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
 import {CACHED_DIALOG_RECONCILE_PHASE_NAME, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateNoWalkLongTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
-import {finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
+import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
 
 type Fixture = {
@@ -41,6 +43,7 @@ type Metric = {
   cachedDialogReconcile?: CachedDialogReconcileSummary,
   cpu?: PerformanceCpuSummary,
   longTaskAttribution?: PerformanceTaskAttribution[],
+  workerMessageAttribution?: ReturnType<typeof summarizeWorkerMessageAttribution>,
   historyPathTasks?: PerformanceTaskAttribution[],
   scrollSpanTracing?: {installed: string[], spanCount: number, loafObserved: boolean},
   droppedFramePercent?: number,
@@ -85,6 +88,7 @@ type CachedDialogReconcileTarget = {
 type ScrollBackTraceOptions = {
   captureCpuStacks?: boolean,
   captureFrameTrace?: boolean,
+  captureWorkerMessages?: boolean,
   traceRpc?: boolean,
   waitForHistory?: boolean,
   includeLongTaskTrace?: boolean,
@@ -103,6 +107,13 @@ const fixtures: Record<Scale, Fixture | undefined> = Object.fromEntries(scales.m
 const username = process.env.PERF_USERNAME;
 const password = process.env.PERF_PASSWORD;
 const reportPath = process.env.PERF_REPORT_PATH;
+const recorderReplayPath = process.env.PERF_RECORDER_REPLAY_PATH;
+let recorderReplay: unknown;
+try {
+  if(recorderReplayPath) recorderReplay = JSON.parse(readFileSync(recorderReplayPath, 'utf8'));
+} catch {
+  // The replay gate reports missing or failed measurements.
+}
 const report = {
   measurementVersion: PERFORMANCE_MEASUREMENT_VERSION,
   fixtureVersion: process.env.PERF_FIXTURE_VERSION || '',
@@ -125,10 +136,8 @@ let measurementsStarted = false;
 let measurementsComplete = false;
 
 test.afterAll(() => {
-  // A failed measurement restarts the Playwright worker for the next test; that worker holds an empty report and must not overwrite the failed one.
   if(!measurementsStarted) return;
-  const writeReport = () => { if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`); };
-  writeReport();
+  if(reportPath) writePerformanceReport(reportPath, report);
   if(!measurementsComplete) return;
   scenarios.forEach((scenario) => {
     const diagnosticSamples = report.diagnostics['100x']?.[scenario];
@@ -136,7 +145,7 @@ test.afterAll(() => {
   });
 });
 
-async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false, observeAnimationFrames = false) {
+async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false, observeAnimationFrames = false, recordWorkerMessages = observeAnimationFrames) {
   const bundleRequests = createBundleRequestTracker(new URL(origin).origin);
   bundleRequestTrackers.set(page, bundleRequests);
   page.on('request', (request) => {
@@ -149,6 +158,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   await page.exposeBinding('__teagramBundleWorkerReady', (_source, url: string) => bundleRequests.workerReady(url));
   // The gated scroll repeat starts this observer only for the measured window.
   await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
+  if(recordWorkerMessages) await page.addInitScript({content: `window.__teagramInstallWorkerMessageAttribution = ${installWorkerMessageAttribution.toString()};`});
   return page.addInitScript(({injectColdStall, observeAnimationFrames}: {injectColdStall: boolean, observeAnimationFrames: boolean}) => {
     // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
     const SharedWorkerConstructor = (window as any).SharedWorker;
@@ -253,29 +263,9 @@ async function waitForBundleResources(page: Page) {
   await bundleRequests.waitForIdle(500, 10_000);
 }
 
-async function begin(page: Page, requests: {value: number}, recordRpcSpans = true, traceEnabled = false) {
-  requests.value = 0;
-  await page.evaluate(async({recordSpans, traceEnabled}) => {
-    if(traceEnabled) await (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace(recordSpans);
-    const perf = (window as any).__teagramPerf;
-    perf.longTasks = [];
-    perf.longAnimationFrames = [];
-    perf.frameIntervals = [];
-    perf.frameWindows = [];
-    perf.resourceUrlBaseline = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).map((entry) => entry.name);
-    performance.clearResourceTimings();
-    if(traceEnabled) performance.clearMeasures();
-    perf.started = performance.now();
-  }, {recordSpans: recordRpcSpans, traceEnabled});
-}
-
-async function beginScenario(page: Page, requests: {value: number}, traceEnabled = false) {
-  if(!traceEnabled) {
-    await begin(page, requests);
-    return;
-  }
-
-  await begin(page, requests, true, true);
+async function beginScenario(page: Page, requests: {value: number}, traceEnabled = false, captureWorkerMessages = false) {
+  await begin(page, requests, true, traceEnabled, captureWorkerMessages);
+  if(!traceEnabled) return;
   await page.evaluate((preserveNames) => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace(preserveNames), scenarioPreservedPerformancePhases);
   await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames());
 }
@@ -795,6 +785,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   const {
     captureCpuStacks = false,
     captureFrameTrace = captureCpuStacks,
+    captureWorkerMessages = captureCpuStacks,
     traceRpc = false,
     waitForHistory = false,
     includeLongTaskTrace = captureCpuStacks,
@@ -809,7 +800,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   if(waitForHistory) await waitForHistorySettled(page);
   if(captureCpuStacks || captureFrameTrace) await installScrollSpanTracing(page, traceRpc);
   const frameTrace = captureFrameTrace ? await startFrameTrace(page) : undefined;
-  await beginScenario(page, requests, traceRpc);
+  await beginScenario(page, requests, traceRpc, captureWorkerMessages);
   if(includeLongTaskTrace) {
     const observed = await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames());
     expect(observed, 'long-animation-frame observer is not supported in the browser').toBe(true);
@@ -875,16 +866,30 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   }
   const metric = await capture(page, requests, boundary, true, traceRpc, includeLongTaskTrace);
   const frameEvents = frameTrace ? await stopFrameTrace(frameTrace) : undefined;
-  if(!stoppedProfile && !frameEvents) return metric;
-
-  const {tasks, spans, frameWindows} = await page.evaluate(() => {
+  if(!stoppedProfile && !frameEvents && !captureWorkerMessages) return metric;
+  const {tasks, spans, frameWindows, workerMessages, workerBatches} = await page.evaluate((captureWorkerMessages) => {
     const perf = (window as any).__teagramPerf;
+    const workerMessages = captureWorkerMessages ? perf.workerMessages.spans : [];
+    if(captureWorkerMessages) perf.workerMessages.restore();
     return {
       tasks: perf.longTasks as Array<{startTime: number, duration: number}>,
       spans: (perf.scrollSpans || []) as PerformanceSpan[],
-      frameWindows: perf.frameWindows as Array<{startMs: number, endMs: number}>
+      frameWindows: perf.frameWindows as Array<{startMs: number, endMs: number}>,
+      workerMessages: workerMessages as Array<{type: string, startTime: number, duration: number, endTime?: number, messageCount?: number}>,
+      workerBatches: (captureWorkerMessages ? perf.workerMessages.batches : []) as Array<{startTime: number, endTime: number, size: number}>
     };
-  });
+  }, captureWorkerMessages);
+  const windowEndMs = boundary.startedAtMs + boundary.ms;
+  const windowTasks = tasks.filter(({startTime}) => startTime >= boundary.startedAtMs && startTime < windowEndMs);
+  const workerAttribution = captureWorkerMessages ? {
+    workerMessageAttribution: summarizeWorkerMessageAttribution(windowTasks, workerMessages, boundary.startedAtMs, workerBatches).map((task) => ({
+      ...task, recorderReplayOverhead: recorderReplay || null
+    }))
+  } : {};
+  const droppedFrameAttribution = frameTrace ? summarizeDroppedFrames(frameWindows, frameEvents || [], spans) : undefined;
+  if(droppedFrameAttribution) expect(droppedFrameAttribution.reduce((sum, frame) => sum + frame.droppedFrames, 0), 'frame attribution must cover the measured drops').toBe(metric.droppedFrames || 0);
+  if(!stoppedProfile) return {...metric, ...workerAttribution, ...(droppedFrameAttribution ? {droppedFrameAttribution} : {})};
+
   const tracing = await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
     return {
@@ -898,20 +903,17 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     expect(tracing.loafObserved, 'long-animation-frame observer is not supported in the diagnostic browser').toBe(true);
     expect(SCROLL_SPAN_NAMES.filter((name) => !tracing.installed.includes(name)), 'scroll-back tracing did not install every wrapped call').toEqual([]);
   }
-  const windowEndMs = boundary.startedAtMs + boundary.ms;
-  const windowTasks = tasks.filter(({startTime}) => startTime >= boundary.startedAtMs && startTime < windowEndMs);
-  const droppedFrameAttribution = summarizeDroppedFrames(frameWindows, frameEvents || [], spans);
-  if(frameTrace) expect(droppedFrameAttribution.reduce((sum, frame) => sum + frame.droppedFrames, 0), 'frame attribution must cover the measured drops').toBe(metric.droppedFrames || 0);
   return {
     ...metric,
-    droppedFrameAttribution,
+    ...workerAttribution,
+    ...(droppedFrameAttribution ? {droppedFrameAttribution} : {}),
     scrollSpanTracing: tracing,
     ...(stoppedProfile ? {
       cpu: summarizeCpuProfile(stoppedProfile.profile),
-      droppedFrameCpu: summarizeLongTaskAttribution(
+      ...(droppedFrameAttribution ? {droppedFrameCpu: summarizeLongTaskAttribution(
         droppedFrameAttribution.map(({startMs, endMs}) => ({startTime: startMs, duration: endMs - startMs})),
         spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs, boundary.ms, 0
-      ),
+      )} : {}),
       longTaskAttribution: summarizeLongTaskAttribution(windowTasks, spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs, boundary.ms)
     } : {})
   };
@@ -1299,6 +1301,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       scale === '100x' ? {
         captureFrameTrace: true,
         captureCpuStacks: true,
+        captureWorkerMessages: captureScrollAttribution,
         includeLongTaskTrace: true
       } : undefined
     ));
@@ -1340,13 +1343,15 @@ async function runTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixtu
   try {
     const page = await historyContext.newPage();
     const requests = {value: 0};
-    await installInstrumentation(page, requests, run.origin, false, run.variant === 'head');
+    const captureWorkerMessages = run.variant === 'head';
+    await installInstrumentation(page, requests, run.origin, false, captureWorkerMessages);
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
     chatOpen = await openPartnerChat(page, requests, fixture);
     scrollBack2k = await scrollBackTwoThousand(page, requests, run.variant === 'head', {
       captureFrameTrace: true,
       captureCpuStacks: true,
+      captureWorkerMessages,
       includeLongTaskTrace: true
     });
   } finally {
