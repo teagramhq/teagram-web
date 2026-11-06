@@ -3788,6 +3788,7 @@ test.each([false, true])('renders a pending bubble before replaying an early mes
 
     const manager = new AppMessagesManager() as any;
     Object.assign(manager, {
+      log: {bindPrefix: () => ({debug: vi.fn()})},
       pendingByRandomId: {},
       pendingByMessageId: {},
       appPeersManager: {isChannel: () => false},

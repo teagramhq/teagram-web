@@ -4,9 +4,10 @@ import {AppMessagesManager} from '@appManagers/appMessagesManager';
 
 describe('AppMessagesManager pending message reconciliation', () => {
   it.each([
-    {echoBeforeRegistration: false, echoOrder: 'after'},
-    {echoBeforeRegistration: true, echoOrder: 'before'}
-  ])('reconciles an early ID acknowledgement when the server echo arrives $echoOrder pending registration', ({echoBeforeRegistration}) => {
+    {echoBeforeRegistration: false, echoBeforeAcknowledgement: false, echoOrder: 'after pending registration'},
+    {echoBeforeRegistration: true, echoBeforeAcknowledgement: false, echoOrder: 'before acknowledgement'},
+    {echoBeforeRegistration: true, echoBeforeAcknowledgement: true, echoOrder: 'before acknowledgement and pending registration'}
+  ])('reconciles an early ID acknowledgement when the server echo arrives $echoOrder', ({echoBeforeRegistration, echoBeforeAcknowledgement}) => {
     const manager = new AppMessagesManager() as any;
     const randomId = '42';
     const peerId = 777 as PeerId;
@@ -24,10 +25,13 @@ describe('AppMessagesManager pending message reconciliation', () => {
     };
     const storedMessages = new Map<number, any>();
     const dispatchEvent = vi.fn();
+    const debugLog = vi.fn();
 
     Object.assign(manager, {
+      log: {bindPrefix: () => ({debug: debugLog})},
       pendingByRandomId: {},
       pendingByMessageId: {},
+      pendingMessageIdsByRandomId: {},
       appPeersManager: {isChannel: () => false},
       appMessagesIdsManager: {generateMessageId: (id: number) => id},
       getMessagePeer: () => peerId,
@@ -45,27 +49,103 @@ describe('AppMessagesManager pending message reconciliation', () => {
       adoptStreamedMessageDraft: vi.fn()
     });
 
-    manager.onUpdateMessageId({random_id: randomId, id: serverId});
-    if(echoBeforeRegistration) {
+    const storeServerEcho = () => {
       storedMessages.set(serverId, serverMessage);
       history.unshift(serverId);
+    };
+    if(echoBeforeRegistration && echoBeforeAcknowledgement) {
+      storeServerEcho();
     }
+    manager.onUpdateMessageId({random_id: randomId, id: serverId});
+    if(echoBeforeRegistration && !echoBeforeAcknowledgement) storeServerEcho();
 
     manager.beforeMessageSending(tempMessage, {processAfter: (callback: () => void) => callback()});
     if(!echoBeforeRegistration) {
-      storedMessages.set(serverId, serverMessage);
-      history.unshift(serverId);
+      storeServerEcho();
+      manager.checkPendingMessage(serverMessage);
     }
-    manager.checkPendingMessage(serverMessage);
 
     expect(history).toEqual([serverId]);
     expect(manager.pendingTopMsgs[peerId]).toBeUndefined();
     expect(manager.pendingByRandomId[randomId]).toBeUndefined();
+    expect(manager.pendingByMessageId[serverId]).toBeUndefined();
+    expect(manager.pendingMessageIdsByRandomId[randomId]).toBeUndefined();
+    expect(debugLog).toHaveBeenCalledWith('buffering unmatched updateMessageID', randomId, serverId);
     expect(dispatchEvent).toHaveBeenCalledWith('history_update', expect.objectContaining({
       storageKey: '777_history',
       message: serverMessage,
       tempId
     }));
+  });
+
+  it('clears a buffered ID acknowledgement when its pending message is finalized', () => {
+    const manager = new AppMessagesManager() as any;
+    const randomId = '42';
+    const tempId = 3.0001;
+    const serverId = 4;
+    const pendingData = {peerId: 777 as PeerId, tempId, storage: {key: '777_history'}};
+    const tempMessage = {mid: tempId, _: 'message', pFlags: {is_outgoing: true}};
+    const serverMessage = {mid: serverId, peerId: 777 as PeerId, _: 'message', pFlags: {is_outgoing: true}};
+
+    Object.assign(manager, {
+      pendingByRandomId: {[randomId]: pendingData},
+      pendingMessageIdsByRandomId: {[randomId]: serverId},
+      getHistoryStorage: () => ({history: {delete: vi.fn()}}),
+      getMessageFromStorage: (_storage: unknown, mid: number) => mid === tempId ? tempMessage : undefined,
+      updateMessageContextForDeletion: vi.fn(),
+      getDialogOnly: (): undefined => undefined,
+      rootScope: {dispatchEvent: vi.fn()},
+      deletePendingTopMsg: vi.fn(),
+      finalizePendingMessageCallbacks: vi.fn()
+    });
+
+    manager.finalizePendingMessage(randomId, serverMessage);
+
+    expect(manager.pendingMessageIdsByRandomId[randomId]).toBeUndefined();
+  });
+
+  it('clears a buffered ID acknowledgement when its pending message is canceled', () => {
+    const manager = new AppMessagesManager() as any;
+    const randomId = '42';
+    Object.assign(manager, {
+      pendingByRandomId: {},
+      pendingMessageIdsByRandomId: {[randomId]: 4}
+    });
+
+    expect(manager.cancelPendingMessage(randomId)).toBe(false);
+    expect(manager.pendingMessageIdsByRandomId[randomId]).toBeUndefined();
+  });
+
+  it('restores the thread dialog top message when a pending message is finalized', () => {
+    const manager = new AppMessagesManager() as any;
+    const randomId = '42';
+    const peerId = 777 as PeerId;
+    const tempId = 3.0001;
+    const serverId = 4;
+    const threadId = 55;
+    const pendingData = {peerId, tempId, threadId, storage: {key: '777_history'}};
+    const tempMessage = {mid: tempId, _: 'message', pFlags: {is_outgoing: true}};
+    const serverMessage = {mid: serverId, peerId, _: 'message', pFlags: {is_outgoing: true}};
+    const threadDialog = {_: 'forumTopic', top_message: tempId};
+    const setDialogTopMessage = vi.fn();
+
+    Object.assign(manager, {
+      pendingByRandomId: {[randomId]: pendingData},
+      pendingMessageIdsByRandomId: {},
+      getHistoryStorage: () => ({history: {delete: vi.fn()}}),
+      getMessageFromStorage: (_storage: unknown, mid: number) => mid === tempId ? tempMessage : undefined,
+      updateMessageContextForDeletion: vi.fn(),
+      getDialogOnly: (): undefined => undefined,
+      dialogsStorage: {getAnyDialog: () => threadDialog},
+      setDialogTopMessage,
+      rootScope: {dispatchEvent: vi.fn()},
+      deletePendingTopMsg: vi.fn(),
+      finalizePendingMessageCallbacks: vi.fn()
+    });
+
+    manager.finalizePendingMessage(randomId, serverMessage);
+
+    expect(setDialogTopMessage).toHaveBeenCalledWith(serverMessage, threadDialog);
   });
 
   it('finalizes a pending message when its server ID arrives after the server message', () => {

@@ -4517,6 +4517,7 @@ export class AppMessagesManager extends AppManager {
   }
 
   public cancelPendingMessage(randomId: string, preserveMedia = false) {
+    delete this.pendingMessageIdsByRandomId[randomId];
     const pendingData = this.pendingByRandomId[randomId];
 
     /* if(DEBUG) {
@@ -9476,6 +9477,7 @@ export class AppMessagesManager extends AppManager {
     const randomId = update.random_id;
     const pendingData = this.pendingByRandomId[randomId];
     if(!pendingData) {
+      this.log.bindPrefix('updateMessageID').debug('buffering unmatched updateMessageID', randomId, update.id);
       this.pendingMessageIdsByRandomId[randomId] = update.id;
       return;
     }
@@ -11282,6 +11284,7 @@ export class AppMessagesManager extends AppManager {
   }
 
   public finalizePendingMessage(randomId: Long, finalMessage: MyMessage) {
+    delete this.pendingMessageIdsByRandomId[randomId];
     const pendingData = this.pendingByRandomId[randomId];
     if(!pendingData) {
       return;
