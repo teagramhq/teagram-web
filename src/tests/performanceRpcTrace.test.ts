@@ -14,12 +14,34 @@ test('attributes a long task to the walk only when a walk mirror task overlaps i
   expect(findLongTasksOverlappingWalkMirrors(undefined, undefined)).toEqual([]);
 });
 
+test('does not attribute a task to a mirror ending exactly at its rounded start', () => {
+  const task = {startTimeMs: 59.8, durationMs: 52};
+  expect(findLongTasksOverlappingWalkMirrors([task], [mirror(59.7, 0.1)])).toEqual([]);
+  expect(findLongTasksOverlappingWalkMirrors([task], [mirror(59.71, 0.1)])).toEqual([task]);
+});
+
+test('uses precise timestamps to distinguish overlaps hidden by display rounding', () => {
+  const task = {startTimeMs: 59.8, durationMs: 52, preciseStartTimeMs: 59.805, preciseDurationMs: 52};
+  const adjacent = {...mirror(59.7, 0.1), preciseStartTimeMs: 59.699, preciseDurationMs: 0.105};
+  const overlapping = {...adjacent, preciseDurationMs: 0.11};
+  expect(findLongTasksOverlappingWalkMirrors([task], [adjacent])).toEqual([]);
+  expect(findLongTasksOverlappingWalkMirrors([task], [overlapping])).toEqual([task]);
+  const justOverThreshold = {...task, durationMs: 50, preciseDurationMs: 50.004};
+  expect(findLongTasksOverlappingWalkMirrors([justOverThreshold], [overlapping])).toEqual([justOverThreshold]);
+  const capturedTask = summarizeLongTaskTrace([{startTime: 159.805, duration: 52}], [], 100, 100);
+  const capturedMirror = summarizeReconcileMirrorTasks([{traceId: 'walk', startedAtMs: 159.699, durationMs: 0.11}], 100, 100);
+  expect(findLongTasksOverlappingWalkMirrors(capturedTask, capturedMirror)).toHaveLength(1);
+  expect(() => validateNoWalkLongTasks([{longTaskTrace: capturedTask, reconcileMirrorTasks: capturedMirror}], 'scroll')).toThrow('scroll repeat 1 has 1 tasks');
+});
+
 test('keeps only the walk mirror tasks that start inside the window, relative to it', () => {
-  expect(summarizeReconcileMirrorTasks([
+  const result = summarizeReconcileMirrorTasks([
     {traceId: 'walk', startedAtMs: 900, durationMs: 4},
     {traceId: 'walk', startedAtMs: 1_250.123, durationMs: 2.456},
     {traceId: 'walk', startedAtMs: 2_100, durationMs: 1}
-  ], 1_000, 1_000)).toEqual([{traceId: 'walk', startTimeMs: 250.12, durationMs: 2.46}]);
+  ], 1_000, 1_000);
+  expect(result).toMatchObject([{traceId: 'walk', startTimeMs: 250.12, durationMs: 2.46, preciseDurationMs: 2.456}]);
+  expect(result[0].preciseStartTimeMs).toBeCloseTo(250.123, 8);
 });
 
 test('rejects a diagnostic repeat whose long task overlaps a walk mirror task', () => {
