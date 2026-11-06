@@ -21,6 +21,17 @@ test('performance tracing uses a separate diagnostic bundle', () => {
   assert.match(workflow, /TG_WEBSOCKET_ALLOWED_ORIGINS=.*http:\/\/localhost:4177/);
 });
 
+test('chat-list metrics wait for the snapshot to be replaced by live rows', () => {
+  const waitForChatList = performanceScale.match(/async function waitForChatList\(page: Page\) \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(waitForChatList, 'the performance scenario must wait for its chat list');
+  const snapshotWait = waitForChatList.indexOf("page.locator('.chat-page-snapshot')");
+  const liveRowsWait = waitForChatList.indexOf("page.locator('#page-chats #folders-container .chatlist-chat')");
+  assert.ok(snapshotWait >= 0, 'snapshot rows must be absent before sampling');
+  assert.ok(liveRowsWait > snapshotWait, 'live rows must be visible after the snapshot is gone');
+  assert.match(waitForChatList.slice(snapshotWait), /toHaveCount\(0/);
+  assert.match(waitForChatList.slice(liveRowsWait), /toBeVisible/);
+});
+
 test('Playwright reports a performance-test timeout before the job is cancelled', () => {
   const jobTimeoutMinutes = Number(workflow.match(/^\s+timeout-minutes:\s*(\d+)/m)?.[1]);
   const testTimeoutMinutes = Number(playwrightConfig.match(/^\s+timeout:\s*(\d+)\s*\*\s*60\s*\*\s*1000/m)?.[1]);

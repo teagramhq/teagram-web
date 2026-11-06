@@ -739,7 +739,9 @@ async function signIn(page: Page, origin: string) {
 }
 
 async function waitForChatList(page: Page) {
-  await expect(page.locator('#page-chats #chatlist-container .chatlist-chat').first()).toBeVisible({timeout: 120_000});
+  const timeout = 120_000;
+  await expect(page.locator('.chat-page-snapshot')).toHaveCount(0, {timeout});
+  await expect(page.locator('#page-chats #folders-container .chatlist-chat').first()).toBeVisible({timeout});
 }
 
 async function resetToChatList(page: Page, origin: string) {
