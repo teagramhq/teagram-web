@@ -231,9 +231,9 @@ async function startLocalTlsProxy(options: {
 }
 
 function readDeploymentCsp() {
-  const edgeConfig = readFileSync(resolve('deploy/teagram-web/nginx.conf'), 'utf8');
-  const edgeCsp = edgeConfig.match(/add_header Content-Security-Policy "([^"]+)" always;/)?.[1];
-  if(!edgeCsp) throw new Error('deployment CSP is missing from deploy/teagram-web/nginx.conf');
+  const securityHeaders = readFileSync(resolve('deploy/teagram-web/security-headers.conf'), 'utf8');
+  const edgeCsp = securityHeaders.match(/add_header Content-Security-Policy "([^"]+)" always;/)?.[1];
+  if(!edgeCsp) throw new Error('deployment CSP is missing from deploy/teagram-web/security-headers.conf');
   return edgeCsp;
 }
 

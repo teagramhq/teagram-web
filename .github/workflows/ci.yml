@@ -401,6 +401,7 @@ jobs:
             .github/scripts/smoke-k8s-web.mjs \
             deploy/teagram-web/Dockerfile \
             deploy/teagram-web/nginx.conf \
+            deploy/teagram-web/security-headers.conf \
             scripts/private-artifact-release.mjs \
             scripts/verify-deployment-artifact.mjs \
             package.json \

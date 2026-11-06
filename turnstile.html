@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Teagram</title>
+  </head>
+  <body class="has-auth-pages">
+    <div id="auth-pages" class="whole">
+      <div id="turnstile-scrollable" class="scrollable scrollable-y no-scrollbar">
+        <div id="turnstile-top-spacer"></div>
+        <main id="turnstile-container">
+          <section id="turnstile-card" aria-labelledby="turnstile-title">
+            <h1 id="turnstile-title" class="text-center">Security check</h1>
+            <div id="turnstile-challenge">
+              <p id="turnstile-message" role="status" aria-live="polite" hidden></p>
+              <div id="turnstile-widget"></div>
+            </div>
+          </section>
+        </main>
+        <div id="turnstile-bottom-spacer"></div>
+      </div>
+    </div>
+    <script type="module" src="/src/pages/desktopTurnstileEntry.ts"></script>
+  </body>
+</html>

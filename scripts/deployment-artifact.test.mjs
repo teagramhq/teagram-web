@@ -81,9 +81,11 @@ afterAll(() => {
 describe('deployment artifact verification', () => {
   it('allows the fixed Cloudflare Turnstile origin in the deployed nginx CSP', () => {
     const nginx = readFileSync(resolve('deploy/teagram-web/nginx.conf'), 'utf8');
+    const securityHeaders = readFileSync(resolve('deploy/teagram-web/security-headers.conf'), 'utf8');
 
-    expect(nginx).toMatch(/script-src[^;]*https:\/\/challenges\.cloudflare\.com/);
-    expect(nginx).toContain("frame-src 'self' https://challenges.cloudflare.com;");
+    expect(nginx).toContain('include /etc/nginx/security-headers.conf;');
+    expect(securityHeaders).toMatch(/script-src[^;]*https:\/\/challenges\.cloudflare\.com/);
+    expect(securityHeaders).toContain("frame-src 'self' https://challenges.cloudflare.com;");
   });
 
   it('retains the legacy network during the browser sign-in regression check', () => {
@@ -240,7 +242,8 @@ describe('deployment artifact verification', () => {
       'CHANGELOG*.md',
       'src/lib/lottie/lottieLoader.ts',
       'src/config/emoji.ts',
-      'deploy/teagram-web/nginx.conf'
+      'deploy/teagram-web/nginx.conf',
+      'deploy/teagram-web/security-headers.conf'
     ]) {
       expect(deployScript).toContain(source);
     }
