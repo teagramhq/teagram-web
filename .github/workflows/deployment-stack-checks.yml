@@ -136,6 +136,26 @@ jobs:
           grep --fixed-strings --quiet 'Content-Security-Policy:' <<<"$document_headers"
           grep --fixed-strings --quiet "connect-src 'self'" <<<"$document_headers"
 
+          turnstile_document="$(docker exec "$container_name" wget --quiet --output-document=- http://127.0.0.1:8080/turnstile.html)"
+          grep --fixed-strings --quiet '<title>Teagram</title>' <<<"$turnstile_document"
+          grep --extended-regexp --quiet '<script[^>]*src=' <<<"$turnstile_document"
+          if grep --only-matching --extended-regexp '<script[^>]*>' <<<"$turnstile_document" | grep --invert-match --quiet 'src='; then
+            echo "Turnstile page contains an inline script"
+            exit 1
+          fi
+
+          turnstile_headers="$(docker exec "$container_name" wget --quiet --server-response --output-document=/dev/null http://127.0.0.1:8080/turnstile.html 2>&1)"
+          grep --fixed-strings --quiet 'Content-Security-Policy:' <<<"$turnstile_headers"
+          grep --fixed-strings --quiet "frame-ancestors 'none'" <<<"$turnstile_headers"
+          grep --fixed-strings --quiet 'X-Frame-Options: DENY' <<<"$turnstile_headers"
+          grep --fixed-strings --quiet 'Cross-Origin-Opener-Policy: same-origin' <<<"$turnstile_headers"
+
+          docker exec "$container_name" rm -- /usr/share/nginx/html/turnstile.html
+          if docker exec "$container_name" wget --quiet --output-document=/dev/null http://127.0.0.1:8080/turnstile.html; then
+            echo "missing Turnstile page used the web client fallback"
+            exit 1
+          fi
+
           marker=invite-capability-log-check-only
           docker exec "$container_name" wget --quiet --output-document=/dev/null \
             --header "Referer: https://example.invalid/$marker" \
