@@ -656,7 +656,6 @@ export class AppMessagesManager extends AppManager {
   }} = {};
 
   private reloadConversationsPromise: Promise<void>;
-  private dialogsOffsetCursorKeys: Map<number, string>;
   private reloadConversationsPeers: Map<PeerId, {inputDialogPeer: InputDialogPeer, promise: CancellablePromise<Dialog>, sentRequest?: boolean}> = new Map();
 
   private groupedTempId = 0;
@@ -4984,13 +4983,7 @@ export class AppMessagesManager extends AppManager {
       // ! т.е., с запросом folder_id: 1, и exclude_pinned: 0, в результате будут ещё и закреплённые с папки 0
       // ! the server pages by the last dialog's top message and peer and ignores the date, so a
       // ! next page without them is the first page again, and filling the list never ends
-      const cursor = offsetDate ? this.dialogsStorage.getOffsetCursor(folderId) : undefined;
-      const cursorKey = cursor ? `${cursor.peerId}_${cursor.id}` : undefined;
-      if(cursorKey && this.dialogsOffsetCursorKeys?.get(folderId) === cursorKey) {
-        // * the previous page did not move the cursor, so there is nothing after it
-        this.dialogsStorage.setDialogsLoaded(folderId, true, filterType);
-        return Promise.resolve({isEnd: true, count: this.dialogsStorage.getFolderDialogs(folderId, false, filterType).length, dialogs: []});
-      }
+      const cursor = this.dialogsStorage.getOffsetCursor(folderId);
 
       promise = this.apiManager.invokeApiSingleProcess({
         method: method = 'messages.getDialogs',
@@ -5004,12 +4997,34 @@ export class AppMessagesManager extends AppManager {
         },
         options: requestOptions,
         processResult: (result) => {
-          const processed = processResult(result);
-          if(cursorKey && processed) {
-            (this.dialogsOffsetCursorKeys ||= new Map()).set(folderId, cursorKey);
-          }
+          const hasCurrentCutoff = cutoffGeneration === undefined ||
+            cutoffGeneration === this.getChannelAvailableMinIdGeneration();
+          const pageDialogs = hasCurrentCutoff &&
+            (result._ === 'messages.dialogs' || result._ === 'messages.dialogsSlice') ? result.dialogs : undefined;
+          const serverDialogs = pageDialogs?.filter((dialog) => dialog._ === 'dialog');
+          const lastDialog = serverDialogs?.[serverDialogs.length - 1];
+          const pagePeerId = lastDialog && this.dialogsStorage.getDialogPeerId(lastDialog as any);
+          const pageCursor = lastDialog && pagePeerId !== undefined ? {
+            peerId: pagePeerId,
+            id: getServerMessageId(lastDialog.top_message)
+          } : undefined;
 
-          return processed;
+          const processed = processResult(result);
+          return Promise.resolve(processed).then((processedResult) => {
+            if(!processedResult || !pageCursor) {
+              return processedResult;
+            }
+
+            this.dialogsStorage.setOffsetCursor(folderId, pageCursor);
+
+            if(cursor && cursor.peerId === pageCursor.peerId && cursor.id === pageCursor.id) {
+              // * The server returned the same raw page tail, so there is no next page to request.
+              this.dialogsStorage.setDialogsLoaded(folderId, true, filterType);
+              return {...processedResult, isEnd: true};
+            }
+
+            return processedResult;
+          });
         }
       });
     }

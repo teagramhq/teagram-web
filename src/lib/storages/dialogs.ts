@@ -91,6 +91,11 @@ export type ForumTopicsPaginationOffsets = {
   topic: number
 };
 
+export type DialogOffsetCursor = {
+  peerId: PeerId,
+  id: number
+};
+
 export const GLOBAL_FOLDER_ID: REAL_FOLDER_ID = undefined;
 
 // let spentTime = 0;
@@ -108,6 +113,7 @@ export default class DialogsStorage extends AppManager {
 
   private allDialogsLoaded: {[folder_id: number]: boolean};
   private dialogsOffsetDate: {[folder_id: number]: number};
+  private dialogsOffsetCursors: {[folder_id: number]: DialogOffsetCursor};
   private pinnedOrders: {[folder_id: number]: PeerId[]};
   private savedDialogsLoaded: boolean;
   private cachedListReconciled: boolean;
@@ -288,6 +294,7 @@ export default class DialogsStorage extends AppManager {
       }
 
       this.allDialogsLoaded = state.allDialogsLoaded || {};
+      this.dialogsOffsetCursors = state.dialogsOffsetCursors || {};
 
       if(dialogs.length) {
         this.appDraftsManager.addMissedDialogs();
@@ -395,6 +402,8 @@ export default class DialogsStorage extends AppManager {
 
       this.allDialogsLoaded = {};
       this.saveAllDialogsLoaded();
+      this.dialogsOffsetCursors = {};
+      this.appStateManager.pushToState('dialogsOffsetCursors', this.dialogsOffsetCursors);
 
       // * clear not numerable properties
       this.pinnedOrders = Object.assign({}, this.pinnedOrders);
@@ -404,6 +413,7 @@ export default class DialogsStorage extends AppManager {
       this.savePinnedOrders();
     } else {
       this.allDialogsLoaded = {};
+      this.dialogsOffsetCursors = {};
       this.pinnedOrders = {};
       for(const folderId of REAL_FOLDERS) {
         this.pinnedOrders[folderId] = [];
@@ -520,26 +530,14 @@ export default class DialogsStorage extends AppManager {
     return offsetDate;
   }
 
-  /**
-   * The server pages the dialog list by the last dialog's top message and peer, not by date, so a
-   * page request that carries only `offset_date` is served the first page again. This is the
-   * cursor after the oldest loaded dialog of the folder.
-   */
-  public getOffsetCursor(folderId: number): {peerId: PeerId, id: number} | undefined {
-    let cursor: {peerId: PeerId, id: number} | undefined;
-    for(const key in this.dialogs) {
-      const dialog = this.dialogs[key as any as PeerId];
-      const id = dialog && !dialog.pFlags?.pinned && getServerMessageId(dialog.top_message);
-      if(!id || (folderId !== GLOBAL_FOLDER_ID && (dialog.folder_id ?? FOLDER_ID_ALL) !== folderId)) {
-        continue;
-      }
+  /** The next server page must start after the raw tail of the last fetched page. */
+  public getOffsetCursor(folderId: number): DialogOffsetCursor | undefined {
+    return this.dialogsOffsetCursors[folderId];
+  }
 
-      if(!cursor || id < cursor.id) {
-        cursor = {peerId: dialog.peerId, id};
-      }
-    }
-
-    return cursor;
+  public setOffsetCursor(folderId: number, cursor: DialogOffsetCursor) {
+    this.dialogsOffsetCursors[folderId] = cursor;
+    this.appStateManager.pushToState('dialogsOffsetCursors', this.dialogsOffsetCursors);
   }
 
   private generateFolder(id: number) {
