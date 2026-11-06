@@ -62,8 +62,81 @@ export type PerformancePhaseSummary = {
   name: string,
   durationMs: number | null,
   accountNumber?: number,
+  pageCount?: number,
   startMs?: number
 };
+
+export type CachedDialogReconcileSummary = {
+  walks: CachedDialogReconcileRunSummary[]
+};
+
+export type CachedDialogReconcileRunSummary = {
+  traceId: string,
+  pageCount: number | null,
+  startRelativeToScenarioMs: number,
+  endRelativeToScenarioMs: number,
+  mainThreadTimeMs: number,
+  pageCompletionOffsetsMs?: number[],
+  // When the newest page was requested, relative to the scenario start; a request that predates the window and never completes is a stalled response.
+  lastPageRequestOffsetMs?: number,
+  // The page navigated away and took the worker with it before the walk finished; the end is that navigation.
+  interrupted?: boolean
+};
+
+export type CachedDialogReconcilePhase = {
+  traceId: string,
+  pageCount?: number,
+  startedAtEpochMs: number,
+  durationMs: number | null,
+  interrupted?: boolean
+  pageCompletedAtEpochMs?: number[],
+  lastPageRequestedAtEpochMs?: number
+};
+
+export type CachedDialogReconcileWindow = {
+  scenarioStartedAtEpochMs: number,
+  scenarioEndedAtEpochMs: number
+};
+
+export function mergeCachedDialogReconcilePhaseSnapshots(snapshots: CachedDialogReconcilePhase[][]): CachedDialogReconcilePhase[] {
+  const phasesByTraceId = new Map<string, CachedDialogReconcilePhase>();
+  snapshots.flat().forEach((phase) => {
+    const previous = phasesByTraceId.get(phase.traceId);
+    // Of two pending snapshots, the later one has seen more pages.
+    const laterPending = previous?.durationMs === null && phase.durationMs === null && (phase.pageCount ?? 0) >= (previous.pageCount ?? 0);
+    if(!previous || laterPending || (previous.durationMs === null && phase.durationMs !== null)) {
+      phasesByTraceId.set(phase.traceId, phase);
+    }
+  });
+  return [...phasesByTraceId.values()];
+}
+
+// A walk runs in the page's worker, so a navigation ends it without a completion record. A pending walk that
+// the live worker no longer reports ended when the next page started; a walk the live worker still reports
+// stays pending.
+export function settleInterruptedCachedDialogReconciles(
+  phases: CachedDialogReconcilePhase[],
+  livePendingTraceIds: Iterable<string>,
+  pageStartedAtEpochMs: number[]
+): CachedDialogReconcilePhase[] {
+  const live = new Set(livePendingTraceIds);
+  return phases.map((phase) => {
+    if(phase.durationMs !== null || live.has(phase.traceId)) return phase;
+    const interruptedAtEpochMs = Math.min(...pageStartedAtEpochMs.filter((startedAt) => startedAt > phase.startedAtEpochMs));
+    if(!Number.isFinite(interruptedAtEpochMs)) return phase;
+    return {
+      ...phase,
+      durationMs: Number((interruptedAtEpochMs - phase.startedAtEpochMs).toFixed(2)),
+      interrupted: true
+    };
+  });
+}
+
+export const CACHED_DIALOG_RECONCILE_PHASE_NAME = 'worker.dialogs.cachedChannelReconcile';
+
+export function getScenarioPreservedPerformancePhases() {
+  return [CACHED_DIALOG_RECONCILE_PHASE_NAME];
+}
 
 export function summarizeLongTaskWindow(entries: Array<{startTime: number, duration: number}>, startedAtMs: number, elapsedMs: number) {
   const endAtMs = startedAtMs + elapsedMs;
@@ -107,13 +180,172 @@ export function summarizeLongTaskTrace(
   }));
 }
 
-export function summarizePerformancePhases<T extends {name: string, durationMs: number | null, accountNumber?: number, startMs?: number}>(phases: T[]): PerformancePhaseSummary[] {
-  return phases.map(({name, durationMs, accountNumber, startMs}) => ({
+export function summarizePerformancePhases<T extends {name: string, durationMs: number | null, accountNumber?: number, pageCount?: number, startMs?: number}>(phases: T[]): PerformancePhaseSummary[] {
+  return phases.map(({name, durationMs, accountNumber, pageCount, startMs}) => ({
     name,
     durationMs: Number.isFinite(durationMs) ? Number(durationMs!.toFixed(2)) : null,
     ...(accountNumber === undefined ? {} : {accountNumber}),
+    ...(pageCount === undefined ? {} : {pageCount}),
     ...(startMs === undefined ? {} : {startMs: Number(startMs.toFixed(2))})
   }));
+}
+
+export function summarizeCachedDialogReconcile(
+  phase: CachedDialogReconcilePhase,
+  scenarioStartedAtEpochMs: number,
+  mainThreadTimeMs: number
+): CachedDialogReconcileRunSummary {
+  if(phase.durationMs === null) {
+    throw new Error(`cached dialog reconciliation ${phase.traceId} has no completion time`);
+  }
+  const startRelativeToScenarioMs = phase.startedAtEpochMs - scenarioStartedAtEpochMs;
+  return {
+    ...(phase.interrupted ? {interrupted: true} : {}),
+    traceId: phase.traceId,
+    pageCount: phase.pageCount ?? null,
+    startRelativeToScenarioMs: Number(startRelativeToScenarioMs.toFixed(2)),
+    endRelativeToScenarioMs: Number((startRelativeToScenarioMs + phase.durationMs).toFixed(2)),
+    mainThreadTimeMs: Number(mainThreadTimeMs.toFixed(2))
+  };
+}
+
+export function collectCachedDialogReconciles(
+  phases: CachedDialogReconcilePhase[],
+  scenarioStartedAtEpochMs: number,
+  scenarioEndedAtEpochMs: number,
+  mainThreadTimeByTraceId: Record<string, number>
+): CachedDialogReconcileSummary {
+  const walks = phases.filter((phase) => {
+    if(phase.startedAtEpochMs >= scenarioEndedAtEpochMs) return false;
+    if(phase.durationMs === null) {
+      throw new Error(`cached dialog reconciliation ${phase.traceId} is still running`);
+    }
+    return phase.startedAtEpochMs + phase.durationMs > scenarioStartedAtEpochMs;
+  }).map((phase) => {
+    // An interrupted walk can still flush per-page chat updates; use its recorded time when any were processed.
+    const mainThreadTimeMs = mainThreadTimeByTraceId[phase.traceId] ?? (phase.interrupted ? 0 : undefined);
+    if(!Number.isFinite(mainThreadTimeMs) || mainThreadTimeMs < 0) {
+      throw new Error(`cached dialog reconciliation ${phase.traceId} has no main-thread time`);
+    }
+    const summary = summarizeCachedDialogReconcile(phase, scenarioStartedAtEpochMs, mainThreadTimeMs);
+    if(phase.pageCompletedAtEpochMs) {
+      summary.pageCompletionOffsetsMs = phase.pageCompletedAtEpochMs
+      .filter((time) => time >= scenarioStartedAtEpochMs && time < scenarioEndedAtEpochMs)
+      .map((time) => Number((time - scenarioStartedAtEpochMs).toFixed(2)));
+    }
+    if(phase.lastPageRequestedAtEpochMs !== undefined) {
+      summary.lastPageRequestOffsetMs = Number((phase.lastPageRequestedAtEpochMs - scenarioStartedAtEpochMs).toFixed(2));
+    }
+    return summary;
+  });
+  return {walks};
+}
+
+export function collectCachedDialogReconcileSummaries(
+  windows: CachedDialogReconcileWindow[],
+  phases: CachedDialogReconcilePhase[],
+  mainThreadTimeByTraceId: Record<string, number>
+): CachedDialogReconcileSummary[] {
+  return windows.map(({scenarioStartedAtEpochMs, scenarioEndedAtEpochMs}) => collectCachedDialogReconciles(
+    phases,
+    scenarioStartedAtEpochMs,
+    scenarioEndedAtEpochMs,
+    mainThreadTimeByTraceId
+  ));
+}
+
+function hasCompleteCachedDialogReconcileSummary(summary: CachedDialogReconcileSummary | undefined) {
+  return !!summary && Array.isArray(summary.walks) && summary.walks.every((walk) => (
+    typeof walk.traceId === 'string' &&
+    Number.isFinite(walk.pageCount) &&
+    walk.pageCount! >= 0 &&
+    Number.isFinite(walk.startRelativeToScenarioMs) &&
+    Number.isFinite(walk.endRelativeToScenarioMs) &&
+    Number.isFinite(walk.mainThreadTimeMs) &&
+    walk.mainThreadTimeMs >= 0
+  ));
+}
+
+export function validateCachedDialogReconcileSummaries(
+  samples: Array<{cachedDialogReconcile?: CachedDialogReconcileSummary}>,
+  scenario: string,
+  expectedRepeatCount: number
+) {
+  if(samples.length !== expectedRepeatCount) {
+    throw new Error(`100x ${scenario} has ${samples.length} measured repeats; expected ${expectedRepeatCount}`);
+  }
+
+  samples.forEach(({cachedDialogReconcile}, index) => {
+    if(!hasCompleteCachedDialogReconcileSummary(cachedDialogReconcile)) {
+      throw new Error(`100x ${scenario} measured repeat ${index + 1} has incomplete reconciliation data`);
+    }
+  });
+}
+
+export function validateCachedDialogReconcileDiagnostics(
+  samples: Array<{cachedDialogReconcile?: CachedDialogReconcileSummary, longTaskTrace?: unknown}>,
+  scenario: string,
+  expectedRepeatCount: number
+) {
+  if(samples.length !== expectedRepeatCount) {
+    throw new Error(`100x ${scenario} has ${samples.length} diagnostic repeats; expected ${expectedRepeatCount}`);
+  }
+
+  samples.forEach(({cachedDialogReconcile, longTaskTrace}, index) => {
+    if(
+      !hasCompleteCachedDialogReconcileSummary(cachedDialogReconcile) ||
+      !Array.isArray(longTaskTrace)
+    ) {
+      throw new Error(`100x ${scenario} diagnostic repeat ${index + 1} has incomplete reconciliation or long-task data`);
+    }
+  });
+}
+
+export function classifyMeasuredLongTaskTrace(
+  {longTasksOver50Ms, longTaskTrace}: {longTasksOver50Ms?: number, longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>}
+): 'complete' | 'partial' | 'missing' {
+  if(!Array.isArray(longTaskTrace)) return 'missing';
+  if(!Number.isFinite(longTasksOver50Ms) || longTaskTrace.length !== longTasksOver50Ms ||
+    longTaskTrace.some(({scripts}) => !Array.isArray(scripts) || !scripts.length)) return 'partial';
+  return 'complete';
+}
+
+export type ReconcileMirrorTask = {traceId: string, startTimeMs: number, durationMs: number};
+
+// Keeps the walk's main-thread mirror tasks that start inside the window, relative to its start.
+export function summarizeReconcileMirrorTasks(
+  tasks: Array<{traceId: string, startedAtMs: number, durationMs: number}>,
+  startedAtMs: number,
+  elapsedMs: number
+): ReconcileMirrorTask[] {
+  const round = (value: number) => Number(value.toFixed(2));
+  return tasks
+  .filter(({startedAtMs: taskStart}) => taskStart >= startedAtMs && taskStart < startedAtMs + elapsedMs)
+  .map(({traceId, startedAtMs: taskStart, durationMs}) => ({traceId, startTimeMs: round(taskStart - startedAtMs), durationMs: round(durationMs)}));
+}
+
+// Stack frames cannot attribute a task to the walk because history responses share the mirror path;
+// a mirror task that carries the walk's traceId and runs inside the task can.
+export function findLongTasksOverlappingWalkMirrors(
+  tasks: Array<{startTimeMs: number, durationMs: number}> | undefined,
+  mirrorTasks: ReconcileMirrorTask[] | undefined
+) {
+  return (tasks || []).filter(({startTimeMs, durationMs}) => durationMs > 50 && (mirrorTasks || []).some((mirror) => (
+    mirror.startTimeMs < startTimeMs + durationMs && mirror.startTimeMs + mirror.durationMs > startTimeMs
+  )));
+}
+
+// Tasks over 50 ms that no walk mirror task overlaps stay in the report; they are not a reconciliation failure.
+export function validateNoWalkLongTasks(
+  samples: Array<{longTaskTrace?: Array<{startTimeMs: number, durationMs: number}>, reconcileMirrorTasks?: ReconcileMirrorTask[]}>,
+  label: string
+) {
+  samples.forEach(({longTaskTrace, reconcileMirrorTasks}, index) => {
+    const tasks = findLongTasksOverlappingWalkMirrors(longTaskTrace, reconcileMirrorTasks);
+    if(tasks.length) {
+      throw new Error(`${label} repeat ${index + 1} has ${tasks.length} tasks over 50 ms overlapping a walk mirror task`);
+    }
+  });
 }
 
 export function rpcInvocationsInWindow<T extends {startedAtEpochMs: number}>(calls: T[], timeOrigin: number, startedAtMs: number, elapsedMs: number): T[] {
@@ -247,8 +479,10 @@ export function summarizeLongTaskAttribution(
   spans: PerformanceSpan[],
   profile: PerformanceCpuProfile,
   perfStartMs: number,
-  windowStartMs: number
+  windowStartMs: number,
+  windowDurationMs: number
 ): PerformanceTaskAttribution[] {
+  const windowEndMs = windowStartMs + windowDurationMs;
   const callFrames = new Map(profile.nodes.map(({id, callFrame}) => [id, callFrame]));
   const parentIds = new Map<number, number>();
   profile.nodes.forEach(({id, children = []}) => {
@@ -264,7 +498,9 @@ export function summarizeLongTaskAttribution(
     samples.push({nodeId, endMs: perfStartMs + elapsedUs / 1000, deltaMs: delta / 1000});
   });
 
-  return tasks.filter(({duration}) => duration > 50).map((task) => {
+  return tasks.filter(({startTime, duration}) => {
+    return startTime >= windowStartMs && startTime < windowEndMs && duration > 50;
+  }).map((task) => {
     const taskEnd = task.startTime + task.duration;
     const byStack = new Map<string, {frames: Array<{functionName: string, script: string}>, selfMs: number}>();
     samples.forEach(({nodeId, endMs, deltaMs}) => {
@@ -306,6 +542,11 @@ export function summarizeLongTaskAttribution(
   });
 }
 
+export function selectHistoryPathTasks(tasks: PerformanceTaskAttribution[], spanNames: string[]) {
+  const selectedNames = new Set(spanNames);
+  return tasks.filter(({spans}) => spans.some(({name}) => selectedNames.has(name)));
+}
+
 export function findLongTasksWithSignificantSpanWork(tasks: PerformanceTaskAttribution[], spanNames: string[]): PerformanceTaskAttribution[] {
   const names = new Set(spanNames);
   return tasks.filter(({durationMs, spans}) => {
@@ -345,12 +586,14 @@ export function findLongTasksWithSignificantSpanWork(tasks: PerformanceTaskAttri
 // * `PerformanceObserver.observe()` ignores an entry type the browser does not support instead of throwing, so
 // * support has to be read from `supportedEntryTypes`. Self-contained on purpose: the e2e injects its source into
 // * the page with `toString()`.
-export function observeLongAnimationFrames(Observer: any, onEntries: (entries: any[]) => void): boolean {
+export function observeLongAnimationFrames(Observer: any, onEntries: (entries: any[]) => void, onObserver?: (observer: any) => void): boolean {
   const supported = Observer && Observer.supportedEntryTypes;
   if(!supported || typeof supported.indexOf !== 'function' || supported.indexOf('long-animation-frame') === -1) return false;
 
   try {
-    new Observer((list: any) => onEntries(list.getEntries())).observe({type: 'long-animation-frame', buffered: true});
+    const observer = new Observer((list: any) => onEntries(list.getEntries()));
+    observer.observe({type: 'long-animation-frame', buffered: true});
+    onObserver?.(observer);
     return true;
   } catch{
     return false;

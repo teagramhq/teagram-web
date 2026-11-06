@@ -1,5 +1,282 @@
 import {describe, expect, test} from 'vitest';
-import {findLongTasksWithSignificantSpanWork, observeLongAnimationFrames, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeRpcTrace, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
+import {collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, findLongTasksOverlappingWalkMirrors, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileSummaries, validateNoWalkLongTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
+import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
+
+const mirror = (startTimeMs: number, durationMs: number) => ({traceId: 'walk', startTimeMs, durationMs});
+
+test('attributes a long task to the walk only when a walk mirror task overlaps it', () => {
+  const tasks = [{startTimeMs: 100, durationMs: 80}, {startTimeMs: 400, durationMs: 54}, {startTimeMs: 600, durationMs: 50}];
+
+  expect(findLongTasksOverlappingWalkMirrors(tasks, [mirror(150, 3)])).toEqual([tasks[0]]);
+  expect(findLongTasksOverlappingWalkMirrors(tasks, [mirror(10, 90), mirror(180, 5), mirror(395, 10)])).toEqual([tasks[1]]);
+  expect(findLongTasksOverlappingWalkMirrors(tasks, [mirror(610, 5)])).toEqual([]);
+  expect(findLongTasksOverlappingWalkMirrors(tasks, [])).toEqual([]);
+  expect(findLongTasksOverlappingWalkMirrors(undefined, undefined)).toEqual([]);
+});
+
+test('keeps only the walk mirror tasks that start inside the window, relative to it', () => {
+  expect(summarizeReconcileMirrorTasks([
+    {traceId: 'walk', startedAtMs: 900, durationMs: 4},
+    {traceId: 'walk', startedAtMs: 1_250.123, durationMs: 2.456},
+    {traceId: 'walk', startedAtMs: 2_100, durationMs: 1}
+  ], 1_000, 1_000)).toEqual([{traceId: 'walk', startTimeMs: 250.12, durationMs: 2.46}]);
+});
+
+test('rejects a diagnostic repeat whose long task overlaps a walk mirror task', () => {
+  const overlapping = {longTaskTrace: [{startTimeMs: 100, durationMs: 70}], reconcileMirrorTasks: [mirror(120, 2)]};
+  expect(() => validateNoWalkLongTasks([overlapping], '100x chatOpen diagnostic'))
+  .toThrow('100x chatOpen diagnostic repeat 1 has 1 tasks over 50 ms overlapping a walk mirror task');
+  expect(() => validateNoWalkLongTasks([{}, {longTaskTrace: [{startTimeMs: 100, durationMs: 70}], reconcileMirrorTasks: []}], 'x')).not.toThrow();
+});
+
+test('reports when the newest walk page was requested relative to the scenario', () => {
+  const phase = {traceId: 'walk', pageCount: 0, startedAtEpochMs: 1_000, durationMs: 5_000, lastPageRequestedAtEpochMs: 1_050};
+  expect(collectCachedDialogReconciles([phase], 3_000, 4_000, {walk: 0}).walks[0].lastPageRequestOffsetMs).toBe(-1_950);
+});
+
+test('summarizes cached dialog reconciliation relative to a scenario', () => {
+  expect(summarizeCachedDialogReconcile({
+    traceId: 'reconcile-1',
+    pageCount: 30,
+    startedAtEpochMs: 1_000,
+    durationMs: 2_500
+  }, 2_000, 640)).toEqual({
+    traceId: 'reconcile-1',
+    pageCount: 30,
+    startRelativeToScenarioMs: -1_000,
+    endRelativeToScenarioMs: 1_500,
+    mainThreadTimeMs: 640
+  });
+});
+
+test('associates only walks that overlap each measured scenario and records no-walk windows', () => {
+  const laterWalk = {
+    traceId: 'later-walk',
+    pageCount: 4,
+    startedAtEpochMs: 17_700,
+    durationMs: 500
+  };
+  const mainThreadTimeByTraceId = {'later-walk': 12.5};
+
+  expect(collectCachedDialogReconciles([laterWalk], 0, 1_450, mainThreadTimeByTraceId)).toEqual({walks: []});
+  expect(collectCachedDialogReconciles([laterWalk], 17_500, 18_000, mainThreadTimeByTraceId)).toEqual({
+    walks: [{
+      traceId: 'later-walk',
+      pageCount: 4,
+      startRelativeToScenarioMs: 200,
+      endRelativeToScenarioMs: 700,
+      mainThreadTimeMs: 12.5
+    }]
+  });
+  expect(() => collectCachedDialogReconciles([laterWalk], 17_500, 18_000, {})).toThrow('main-thread time');
+});
+
+test('reports only page completions inside each scenario window', () => {
+  const phase = {
+    traceId: 'walk', pageCount: 4, startedAtEpochMs: 1_000, durationMs: 5_000,
+    pageCompletedAtEpochMs: [1_200, 2_000, 2_500, 4_000]
+  };
+  const summary = collectCachedDialogReconciles([phase], 2_000, 3_000, {walk: 1});
+  expect(summary.walks[0].pageCompletionOffsetsMs).toEqual([0, 500]);
+  const outside = collectCachedDialogReconciles([phase], 4_100, 5_000, {walk: 1});
+  expect(outside.walks[0].pageCompletionOffsetsMs).toEqual([]);
+});
+
+test('attributes a long warm-list walk to every overlapping scroll repeat', () => {
+  expect(collectCachedDialogReconcileSummaries([
+    {scenarioStartedAtEpochMs: 0, scenarioEndedAtEpochMs: 1_000},
+    {scenarioStartedAtEpochMs: 10_000, scenarioEndedAtEpochMs: 20_000},
+    {scenarioStartedAtEpochMs: 30_000, scenarioEndedAtEpochMs: 40_000},
+    {scenarioStartedAtEpochMs: 50_000, scenarioEndedAtEpochMs: 62_000},
+    {scenarioStartedAtEpochMs: 70_000, scenarioEndedAtEpochMs: 80_000}
+  ], [{
+    traceId: 'warm-list-walk',
+    pageCount: 50,
+    startedAtEpochMs: 500,
+    durationMs: 60_000
+  }], {'warm-list-walk': 18.6})).toEqual([
+    {walks: [{traceId: 'warm-list-walk', pageCount: 50, startRelativeToScenarioMs: 500, endRelativeToScenarioMs: 60_500, mainThreadTimeMs: 18.6}]},
+    {walks: [{traceId: 'warm-list-walk', pageCount: 50, startRelativeToScenarioMs: -9_500, endRelativeToScenarioMs: 50_500, mainThreadTimeMs: 18.6}]},
+    {walks: [{traceId: 'warm-list-walk', pageCount: 50, startRelativeToScenarioMs: -29_500, endRelativeToScenarioMs: 30_500, mainThreadTimeMs: 18.6}]},
+    {walks: [{traceId: 'warm-list-walk', pageCount: 50, startRelativeToScenarioMs: -49_500, endRelativeToScenarioMs: 10_500, mainThreadTimeMs: 18.6}]},
+    {walks: []}
+  ]);
+});
+
+test('keeps a completed async reconciliation phase over a stale pending snapshot', () => {
+  const completed = {
+    traceId: 'long-walk',
+    pageCount: 50,
+    startedAtEpochMs: 1_000,
+    durationMs: 60_000
+  };
+  expect(mergeCachedDialogReconcilePhaseSnapshots([
+    [{...completed, durationMs: null, pageCount: undefined}],
+    [completed]
+  ])).toEqual([completed]);
+});
+
+test('keeps the furthest pending snapshot of a walk', () => {
+  const pending = {traceId: 'long-walk', startedAtEpochMs: 1_000, durationMs: null as number | null};
+  expect(mergeCachedDialogReconcilePhaseSnapshots([
+    [{...pending, pageCount: 3}],
+    [{...pending, pageCount: 17}],
+    [{...pending, pageCount: 9}]
+  ])).toEqual([{...pending, pageCount: 17}]);
+});
+
+test('ends a walk its worker no longer reports at the next page start', () => {
+  const dead = {traceId: 'dead-walk', pageCount: 17, startedAtEpochMs: 1_000, durationMs: null as number | null};
+  const live = {traceId: 'live-walk', startedAtEpochMs: 4_000, durationMs: null as number | null};
+  const finished = {traceId: 'done-walk', pageCount: 50, startedAtEpochMs: 500, durationMs: 700};
+
+  expect(settleInterruptedCachedDialogReconciles([dead, live, finished], ['live-walk'], [0, 3_000, 9_000])).toEqual([
+    {...dead, durationMs: 2_000, interrupted: true},
+    live,
+    finished
+  ]);
+  expect(settleInterruptedCachedDialogReconciles([dead], [], [0])).toEqual([dead]);
+});
+
+test('summarizes an interrupted walk without a main-thread flush', () => {
+  const interrupted = {traceId: 'dead-walk', pageCount: 17, startedAtEpochMs: 1_000, durationMs: 2_000, interrupted: true};
+  expect(collectCachedDialogReconciles([interrupted], 0, 5_000, {})).toEqual({
+    walks: [{
+      traceId: 'dead-walk',
+      pageCount: 17,
+      startRelativeToScenarioMs: 1_000,
+      endRelativeToScenarioMs: 3_000,
+      mainThreadTimeMs: 0,
+      interrupted: true
+    }]
+  });
+  expect(() => collectCachedDialogReconciles([{...interrupted, interrupted: undefined}], 0, 5_000, {})).toThrow('main-thread time');
+});
+
+test('requires a page count for interrupted reconciliation walks', () => {
+  const summary = {walks: [{
+    traceId: 'dead-walk',
+    pageCount: null as number | null,
+    startRelativeToScenarioMs: -1_000,
+    endRelativeToScenarioMs: 14_000,
+    mainThreadTimeMs: 0,
+    interrupted: true
+  }]};
+
+  expect(() => validateCachedDialogReconcileSummaries([
+    {cachedDialogReconcile: summary}
+  ], 'scrollBack2k', 1)).toThrow('100x scrollBack2k measured repeat 1 has incomplete reconciliation data');
+});
+
+test('requires a complete reconciliation summary on every measured scenario repeat', () => {
+  const summary = {
+    walks: [{
+      traceId: 'reconcile-1',
+      pageCount: 30,
+      startRelativeToScenarioMs: -100,
+      endRelativeToScenarioMs: 2_500,
+      mainThreadTimeMs: 640
+    }]
+  };
+
+  expect(() => validateCachedDialogReconcileSummaries([
+    {cachedDialogReconcile: summary},
+    {cachedDialogReconcile: {walks: []}}
+  ], 'scrollBack2k', 2)).not.toThrow();
+  expect(() => validateCachedDialogReconcileSummaries([
+    {cachedDialogReconcile: summary},
+    {}
+  ], 'scrollBack2k', 2)).toThrow('100x scrollBack2k measured repeat 2 has incomplete reconciliation data');
+});
+
+test('keeps completed reconciliation measurements when the scenario trace resets', async() => {
+  const trace = new PerformancePhaseTrace(true);
+  const startedAtEpochMs = performance.timeOrigin + performance.now() - 10;
+  const finish = trace.start('worker.dialogs.cachedChannelReconcile', {startedAtEpochMs, traceId: 'reconcile-test'});
+  trace.start('worker.storage.load')();
+
+  const helpers = await import('../../e2e/performanceRpcTrace') as unknown as {
+    getScenarioPreservedPerformancePhases?: unknown
+  };
+  expect(helpers.getScenarioPreservedPerformancePhases).toBeTypeOf('function');
+  const getPreservedPhases = helpers.getScenarioPreservedPerformancePhases as () => string[];
+  trace.reset(getPreservedPhases());
+  finish({pageCount: 30});
+
+  const phase = {...trace.getSnapshot()[0], traceId: 'reconcile-test'};
+  expect(summarizeCachedDialogReconcile(phase, startedAtEpochMs - 25, 12.5)).toEqual({
+    traceId: 'reconcile-test',
+    pageCount: 30,
+    startRelativeToScenarioMs: 25,
+    endRelativeToScenarioMs: Number((25 + phase.durationMs!).toFixed(2)),
+    mainThreadTimeMs: 12.5
+  });
+});
+
+test('validates each independent diagnostic repeat with a reconcile summary and task trace', async() => {
+  const validate = (await import('../../e2e/performanceRpcTrace') as any).validateCachedDialogReconcileDiagnostics;
+  expect(validate).toBeTypeOf('function');
+  const summary = {
+    walks: [{
+      traceId: 'reconcile-1',
+      pageCount: 30,
+      startRelativeToScenarioMs: -100,
+      endRelativeToScenarioMs: 2_500,
+      mainThreadTimeMs: 640
+    }]
+  };
+
+  expect(() => validate([
+    {cachedDialogReconcile: summary, longTaskTrace: []},
+    {cachedDialogReconcile: {walks: [{...summary.walks[0], startRelativeToScenarioMs: -80}]}, longTaskTrace: [{startTimeMs: 10}]}
+  ], 'contactSearch', 2)).not.toThrow();
+});
+
+test('requires the expected number of independent diagnostic repeats', async() => {
+  const validate = (await import('../../e2e/performanceRpcTrace') as any).validateCachedDialogReconcileDiagnostics;
+  expect(validate).toBeTypeOf('function');
+  expect(() => validate([], 'contactSearch', 2)).toThrow('100x contactSearch has 0 diagnostic repeats; expected 2');
+});
+
+test('rejects independent diagnostic repeats with incomplete reconciliation evidence', async() => {
+  const validate = (await import('../../e2e/performanceRpcTrace') as any).validateCachedDialogReconcileDiagnostics;
+  expect(validate).toBeTypeOf('function');
+  expect(() => validate([
+    {cachedDialogReconcile: {walks: [{traceId: 'reconcile-1', pageCount: 30, startRelativeToScenarioMs: -100, endRelativeToScenarioMs: null, mainThreadTimeMs: 640}]}, longTaskTrace: []}
+  ], 'contactSearch', 1)).toThrow('100x contactSearch diagnostic repeat 1 has incomplete reconciliation or long-task data');
+});
+
+test('records missing and partial measured attribution without failing', async() => {
+  const {classifyMeasuredLongTaskTrace} = await import('../../e2e/performanceRpcTrace');
+  const task = {
+    startTimeMs: 10,
+    durationMs: 80,
+    scripts: [{functionName: 'onMessage', script: '/app.js', invoker: 'MessagePort.onmessage', invokerType: 'event-listener', durationMs: 70, forcedStyleAndLayoutDurationMs: 0}]
+  };
+
+  expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 1, longTaskTrace: [task]})).toBe('complete');
+  expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 0, longTaskTrace: []})).toBe('complete');
+  expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 1})).toBe('missing');
+  expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 1, longTaskTrace: [{...task, scripts: []}]})).toBe('partial');
+  expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 2, longTaskTrace: [task]})).toBe('partial');
+});
+
+test('returns history-path task attribution for the performance artifact', () => {
+  const historyTask: PerformanceTaskAttribution = {
+    startTimeMs: 100,
+    durationMs: 70,
+    spans: [{name: 'bubbles.prepareToSaveScroll', startOffsetMs: 5, syncMs: 15}],
+    stacks: []
+  };
+  const reconcileTask: PerformanceTaskAttribution = {
+    startTimeMs: 120,
+    durationMs: 80,
+    spans: [{name: 'dialogs.cachedChannelReconcile', startOffsetMs: 2, syncMs: 25}],
+    stacks: []
+  };
+
+  expect(selectHistoryPathTasks([historyTask, reconcileTask], ['bubbles.prepareToSaveScroll'])).toEqual([historyTask]);
+});
 
 describe('performance RPC trace summary', () => {
   test('counts RPC invocations in the elapsed window relative to its start', async() => {
@@ -202,6 +479,7 @@ describe('long task attribution', () => {
       ],
       profile,
       1000,
+      1000,
       1000
     );
 
@@ -213,6 +491,20 @@ describe('long task attribution', () => {
         {frames: [{functionName: 'mountUnmountGroups', script: '/assets/chat.js'}], selfMs: 50},
         {frames: [{functionName: 'onMirrorTask', script: '/assets/proxy.js'}], selfMs: 10}
       ]
+    }]);
+  });
+
+  test('excludes diagnostic long tasks that start after the scenario window', async() => {
+    const summarizeWithinWindow = (await import('../../e2e/performanceRpcTrace') as any).summarizeLongTaskAttribution;
+
+    expect(summarizeWithinWindow([
+      {startTime: 1020, duration: 60},
+      {startTime: 1150, duration: 80}
+    ], [], {nodes: [], samples: [], timeDeltas: []}, 1000, 1000, 100)).toEqual([{
+      startTimeMs: 20,
+      durationMs: 60,
+      spans: [],
+      stacks: []
     }]);
   });
 
@@ -332,6 +624,14 @@ describe('long-animation-frame observation', () => {
 
     expect(observeLongAnimationFrames(FakeObserver, () => {})).toBe(true);
     expect(observed).toEqual([{type: 'long-animation-frame', buffered: true}]);
+  });
+
+  test('returns the observer handle so the capture window can disconnect it', () => {
+    const {FakeObserver} = makeObserver(['long-animation-frame']);
+    let capturedObserver: unknown;
+
+    expect(observeLongAnimationFrames(FakeObserver, () => {}, (observer) => capturedObserver = observer)).toBe(true);
+    expect(capturedObserver).toBeInstanceOf(FakeObserver);
   });
 
   test('is false when observing throws', () => {

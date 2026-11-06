@@ -448,6 +448,36 @@ export function formatPerformanceTraceTable(diagnostics) {
     const phase = entry.cold || entry.warm;
     lines.push(`| ${label(phase)} | ${show(entry.cold?.startMs)} | ${show(entry.cold?.durationMs)} | ${show(entry.warm?.startMs)} | ${show(entry.warm?.durationMs)} |`);
   }
+
+  const reconcileRows = SCENARIOS.map(({key}) => key).flatMap((scenario) => {
+    const samples = Array.isArray(diagnostics?.[scenario]) ? diagnostics[scenario] : [];
+    if(!samples.length) return [];
+    const traces = samples.flatMap((sample) => Array.isArray(sample.cachedDialogReconcile?.walks) ? sample.cachedDialogReconcile.walks : []);
+    const noWalkRepeats = samples.filter((sample) => Array.isArray(sample.cachedDialogReconcile?.walks) && !sample.cachedDialogReconcile.walks.length).length;
+
+    const medianField = (field) => median(traces.map((trace) => trace[field]).filter(Number.isFinite));
+    return [[
+      scenario,
+      traces.length,
+      noWalkRepeats,
+      show(medianField('pageCount')),
+      show(medianField('startRelativeToScenarioMs')),
+      show(medianField('endRelativeToScenarioMs')),
+      show(medianField('mainThreadTimeMs'))
+    ]];
+  });
+  if(reconcileRows.length) {
+    lines.push(
+      '',
+      '### Cached channel dialog reconciliation diagnostics',
+      '',
+      'Per-walk summaries from separate opt-in 100x diagnostic runs. Empty `walks` arrays count scenarios where no walk overlapped the window; individual repeats remain in `diagnostics.100x`. Offsets use each diagnostic scenario window.',
+      '',
+      '| Scenario | Walks | No-walk repeats | Median pages | Median start offset (ms) | Median end offset (ms) | Median main-thread time (ms) |',
+      '| --- | ---: | ---: | ---: | ---: | ---: | ---: |',
+      ...reconcileRows.map((row) => `| ${row.join(' | ')} |`)
+    );
+  }
   return lines.join('\n');
 }
 

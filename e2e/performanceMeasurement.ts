@@ -43,6 +43,7 @@ export async function beginMeasurement(page: Page, requests: {value: number}, re
       }};
     }
     perf.longTasks = [];
+    perf.longAnimationFrames = [];
     perf.frameIntervals = [];
     perf.resourceUrlBaseline = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).map((entry) => entry.name);
     performance.clearResourceTimings();

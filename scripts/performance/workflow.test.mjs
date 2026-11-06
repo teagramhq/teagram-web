@@ -12,6 +12,7 @@ const performanceScale = readFileSync(new URL('../../e2e/performanceScale.spec.t
 test('performance comparisons use uninstrumented head and base bundles', () => {
   assert.match(workflow, /^\s+pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
   assert.match(workflow, /^\s+\(cd "\$base_directory" && pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
+  assert.doesNotMatch(workflow, /VITE_PERF_(?:RECONCILE_)?TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
 });
 
 test('performance tracing uses a separate diagnostic bundle', () => {
@@ -33,8 +34,10 @@ test('a hung browser action fails its own step instead of consuming the test tim
   assert.match(playwrightConfig, /actionTimeout:\s*60_000/);
 });
 
-test('report-only scroll repeats do not expand the policy trace assertions', () => {
-  assert.match(performanceScale, /const headScrollRepeats = report\.variants\.head\['100x'\]\.scrollBack2k\.slice\(0, PERFORMANCE_REPEATS\);/);
+test('measured head scroll attribution is recorded without a validity gate', () => {
+  assert.match(performanceScale, /const headScrollRepeats = report\.variants\.head\['100x'\]\.scrollBack2k;/);
+  assert.match(performanceScale, /metric\.longTaskTraceStatus = classifyMeasuredLongTaskTrace\(metric\)/);
+  assert.doesNotMatch(performanceScale, /validateMeasuredLongTaskTraces\(/);
 });
 
 test('extra timing samples are reported without changing the three-repeat policy verdict', () => {
@@ -75,7 +78,7 @@ test('extra timing samples are reported without changing the three-repeat policy
       requireBase: true,
       diagnostics: {
         '100x': {
-          sendMessage: {
+          sendMessage: [{
             ms: 123,
             appSendUiMs: 101,
             requests: 0,
@@ -88,7 +91,7 @@ test('extra timing samples are reported without changing the three-repeat policy
             nonRpcElapsedMs: 42,
             rpcCalls: [{method: 'messages.sendMessage', durationMs: 81, outcome: 'success'}],
             cpu: {topFrames: [{functionName: 'sendMessage', script: '/input.ts', selfMs: 22}]}
-          }
+          }]
         }
       },
       variants

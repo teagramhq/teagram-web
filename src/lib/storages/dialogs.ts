@@ -22,6 +22,7 @@ import insertInDescendSortedArray from '@helpers/array/insertInDescendSortedArra
 import safeReplaceObject from '@helpers/object/safeReplaceObject';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
 import {AppManager} from '@appManagers/manager';
+import type {PeerMirrorBatch, PeerMirrorEvent} from '@appManagers/peerMirrorBatch';
 import getDialogIndexKey from '@appManagers/utils/dialogs/getDialogIndexKey';
 import isObject from '@helpers/object/isObject';
 import getDialogIndex from '@appManagers/utils/dialogs/getDialogIndex';
@@ -42,6 +43,10 @@ import {isDialog, isSavedDialog, isForumTopic} from '@appManagers/utils/dialogs/
 import getDialogKey from '@appManagers/utils/dialogs/getDialogKey';
 import getDialogThreadId from '@appManagers/utils/dialogs/getDialogThreadId';
 import {isTempId} from '@appManagers/utils/messages/isTempId';
+
+let cachedDialogReconcileTraceSequence = 0;
+const CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE = 25;
+const CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE = 4;
 
 export enum FilterType {
   Folder,
@@ -1415,6 +1420,7 @@ export default class DialogsStorage extends AppManager {
     // this.appMessagesManager.log('applyConversation', dialogsResult);
 
     const updatedDialogs: BroadcastEvents['dialogs_multiupdate'] = new Map();
+    const reconcilePeerIds = isDialog ? new Set<PeerId>() : undefined;
     const getUpdateCache = (peerId: PeerId) => {
       let cache = updatedDialogs.get(peerId);
       if(!cache) {
@@ -1427,6 +1433,7 @@ export default class DialogsStorage extends AppManager {
     items.forEach((dialog) => {
       assumeType<AnyDialog>(dialog);
       const peerId = this.getDialogPeerId(dialog);
+      reconcilePeerIds?.add(peerId);
       let topMid = dialog.top_message;
 
       const {pendingTopMsgs} = this.appMessagesManager;
@@ -1497,7 +1504,11 @@ export default class DialogsStorage extends AppManager {
     });
 
     if(updatedDialogs.size) {
-      this.rootScope.dispatchEvent('dialogs_multiupdate', updatedDialogs);
+      if(reconcilePeerIds) {
+        this.rootScope.dispatchEvent('dialogs_multiupdate', updatedDialogs, {reconcilePeerIds: [...reconcilePeerIds]});
+      } else {
+        this.rootScope.dispatchEvent('dialogs_multiupdate', updatedDialogs);
+      }
     }
   }
 
@@ -2085,79 +2096,146 @@ export default class DialogsStorage extends AppManager {
     this.cachedListReconciled = true;
     try {
       const missingPeerIds = await this.getServerChannelsMissingLocally();
-      await Promise.all(missingPeerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
+      for(let offset = 0; offset < missingPeerIds.length; offset += CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE) {
+        const peerIds = missingPeerIds.slice(offset, offset + CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE);
+        await Promise.all(peerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
+      }
       if(missingPeerIds.some((peerId) => !this.getDialogOnly(peerId) && this.appChatsManager.isInChat(peerId.toChatId()))) {
         this.cachedListReconciled = false;
       }
     } catch(err) {
       this.cachedListReconciled = false;
+      this.log.error('cached channel dialog reconcile failed', err);
     }
   }
 
   private async getServerChannelsMissingLocally() {
+    const trace = import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1' ?
+      'cachedChannelDialogsReconcile' as const :
+      undefined;
+    const traceId = trace ? `${Math.trunc(performance.timeOrigin)}-${++cachedDialogReconcileTraceSequence}` : undefined;
+    const finishTrace = trace ? performancePhaseTrace.start('worker.dialogs.cachedChannelReconcile', {traceId, pageCount: 0}) : undefined;
+    let pageCount = 0;
     const limit = 100;
     const missingPeerIds: PeerId[] = [];
     const seenPeerIds: Set<PeerId> = new Set();
+    const peerKeys = new Set<string>();
+    const events: PeerMirrorEvent[] = [];
+    const mirrorBatch: PeerMirrorBatch = (peerKey) => {
+      peerKeys.add(peerKey);
+    };
+    const flushPage = async() => {
+      const keys = [...peerKeys];
+      const pageEvents = events.splice(0).map((event) => {
+        if(event.name !== 'user_update') return event;
+        return {...event, args: [event.args[0], {...event.args[1], statusFromWorker: true}]};
+      });
+      peerKeys.clear();
+      const chatUpdates = new Map<string, ChatId>();
+      pageEvents.forEach((event) => {
+        if(event.name !== 'chat_update') return;
+        const chatId = event.args[0] as ChatId;
+        chatUpdates.set(String(chatId.toPeerId(true)), chatId);
+      });
+      for(let offset = 0; offset < keys.length; offset += CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE) {
+        const batchKeys = keys.slice(offset, offset + CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE);
+        const suppressed = batchKeys.flatMap((key) => chatUpdates.has(key) ? [chatUpdates.get(key)!] : []);
+        this.appPeersManager.mirrorApiPeers(
+          batchKeys,
+          trace, traceId, undefined, undefined, undefined, suppressed
+        );
+        await pause(0);
+      }
+      for(let offset = 0; offset < pageEvents.length; offset += CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE) {
+        this.appPeersManager.mirrorApiPeers(
+          [], trace, traceId, undefined, undefined,
+          pageEvents.slice(offset, offset + CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE)
+        );
+        await pause(0);
+      }
+    };
     let offsetDate = 0, offsetId = 0, offsetPeerId: PeerId;
-    for(;;) {
-      const result = await this.apiManager.invokeApiSingleProcess({
-        method: 'messages.getDialogs',
-        params: {
-          folder_id: FOLDER_ID_ALL,
-          offset_date: offsetDate,
-          offset_id: offsetId,
-          offset_peer: offsetPeerId ? this.appPeersManager.getInputPeerById(offsetPeerId) : {_: 'inputPeerEmpty'},
-          limit,
-          hash: '0'
-        },
-        processResult: (result) => {
-          if(result._ !== 'messages.dialogsNotModified') {
-            this.appPeersManager.saveApiPeers(result);
+    let walkFailed = false;
+    try {
+      for(;;) {
+        if(finishTrace) performancePhaseTrace.setPageRequested(traceId!, performance.timeOrigin + performance.now());
+        const result = await this.apiManager.invokeApiSingleProcess({
+          method: 'messages.getDialogs',
+          params: {
+            folder_id: FOLDER_ID_ALL,
+            offset_date: offsetDate,
+            offset_id: offsetId,
+            offset_peer: offsetPeerId ? this.appPeersManager.getInputPeerById(offsetPeerId) : {_: 'inputPeerEmpty'},
+            limit,
+            hash: '0'
+          },
+          processResult: (result) => {
+            if(result._ !== 'messages.dialogsNotModified') {
+              this.rootScope.collectBroadcastEvents(events, () => this.appPeersManager.saveApiPeers(
+                result, trace, mirrorBatch, {skipEmptyChannelDialogReconciliation: true}
+              ));
+            }
+
+            return result;
+          }
+        });
+        if(finishTrace) performancePhaseTrace.setPageCount(traceId!, ++pageCount, performance.timeOrigin + performance.now());
+        await flushPage();
+
+        if(result._ === 'messages.dialogsNotModified') {
+          return missingPeerIds;
+        }
+
+        let hasNewPeer = false;
+        const dialogs = result.dialogs.filter((dialog) => dialog._ === 'dialog');
+        for(const dialog of dialogs) {
+          const peerId = this.appPeersManager.getPeerId(dialog.peer);
+          if(seenPeerIds.has(peerId)) {
+            continue;
           }
 
-          return result;
-        }
-      });
-
-      if(result._ === 'messages.dialogsNotModified') {
-        return missingPeerIds;
-      }
-
-      let hasNewPeer = false;
-      const dialogs = result.dialogs.filter((dialog) => dialog._ === 'dialog');
-      for(const dialog of dialogs) {
-        const peerId = this.appPeersManager.getPeerId(dialog.peer);
-        if(seenPeerIds.has(peerId)) {
-          continue;
+          seenPeerIds.add(peerId);
+          hasNewPeer = true;
+          if(
+            dialog.peer._ === 'peerChannel' &&
+            !this.getDialogOnly(peerId) &&
+            this.appChatsManager.isInChat(peerId.toChatId())
+          ) {
+            missingPeerIds.push(peerId);
+          }
         }
 
-        seenPeerIds.add(peerId);
-        hasNewPeer = true;
+        const lastDialog = dialogs[dialogs.length - 1];
         if(
-          dialog.peer._ === 'peerChannel' &&
-          !this.getDialogOnly(peerId) &&
-          this.appChatsManager.isInChat(peerId.toChatId())
+          result._ !== 'messages.dialogsSlice' ||
+          !hasNewPeer ||
+          seenPeerIds.size >= result.count
         ) {
-          missingPeerIds.push(peerId);
+          return missingPeerIds;
         }
-      }
 
-      const lastDialog = dialogs[dialogs.length - 1];
-      if(
-        result._ !== 'messages.dialogsSlice' ||
-        !hasNewPeer ||
-        seenPeerIds.size >= result.count
-      ) {
-        return missingPeerIds;
+        // * the next page starts after the last dialog's top message, the way the server orders the list
+        offsetPeerId = this.appPeersManager.getPeerId(lastDialog.peer);
+        offsetId = lastDialog.top_message;
+        const lastMessage = result.messages.find((message) => {
+          return message.id === offsetId && this.appPeersManager.getPeerId(message.peer_id) === offsetPeerId;
+        });
+        offsetDate = (lastMessage as Message.message)?.date ?? 0;
       }
-
-      // * the next page starts after the last dialog's top message, the way the server orders the list
-      offsetPeerId = this.appPeersManager.getPeerId(lastDialog.peer);
-      offsetId = lastDialog.top_message;
-      const lastMessage = result.messages.find((message) => {
-        return message.id === offsetId && this.appPeersManager.getPeerId(message.peer_id) === offsetPeerId;
-      });
-      offsetDate = (lastMessage as Message.message)?.date ?? 0;
+    } catch(err) {
+      walkFailed = true;
+      throw err;
+    } finally {
+      try {
+        await flushPage();
+      } catch(err) {
+        this.log.error('cached channel dialog reconcile flush failed', err);
+        if(!walkFailed) throw err;
+      } finally {
+        finishTrace?.({pageCount});
+        const reconcilePhase = traceId ? performancePhaseTrace.getSnapshot().find((phase) => phase.traceId === traceId) : undefined;
+        this.appPeersManager.mirrorApiPeers([], trace, traceId, reconcilePhase);
+      }
     }
   }
 
