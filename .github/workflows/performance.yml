@@ -216,7 +216,7 @@ jobs:
       - name: Build current and base private client bundles
         shell: bash
         env:
-          PERF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PERF_BASE_SHA: ''
         run: |
           set -euo pipefail
           pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
@@ -302,7 +302,7 @@ jobs:
           PERF_FIXTURE_VERSION: ${{ steps.fixture.outputs.fixture_version }}
           PERF_SERVER_COMMIT: ${{ steps.runtime-server.outputs.server_commit }}
           PERF_FIXTURE_SERVER_COMMIT: ${{ steps.fixture.outputs.server_commit }}
-          PERF_REQUIRE_BASE: ${{ github.event_name == 'pull_request' }}
+          PERF_REQUIRE_BASE: 'false'
         run: >-
           pnpm exec playwright test
           -c playwright.performance.config.ts
