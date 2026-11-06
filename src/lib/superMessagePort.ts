@@ -95,6 +95,8 @@ type Listeners = Record<string, ListenerCallback>;
 
 const USE_LOCKS = true;
 const USE_BATCHING = true;
+// Bound receiver work per message when a worker emits thousands of updates.
+const MAX_BATCH_TASKS = 100;
 
 // Stuck-invoke watchdog (DEBUG only).
 const STUCK_WATCHDOG_INTERVAL_MS = 2000;
@@ -455,7 +457,7 @@ class SuperMessagePort<
             batchTask = undefined;
             tasks.push(task);
           } else {
-            if(!batchTask) {
+            if(!batchTask || batchTask.payload.length >= MAX_BATCH_TASKS) {
               batchTask = this.createTask('batch', []);
               tasks.push(batchTask);
             }
