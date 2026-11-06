@@ -25,9 +25,33 @@ const guardKey = () => scopeServerStorageKey('chat-page-snapshot-guard');
 const openGuardKey = () => scopeServerStorageKey('chat-page-snapshot-open-guard');
 const accountGuardKey = (serverId: string, accountNumber: ActiveAccountNumber) =>
   `teagram.chat-page-snapshot-account:${serverId}:${accountNumber}`;
+const invalidatedEvent = 'chat-page-snapshot-invalidated';
+const accountGuardEvent = 'chat-page-snapshot-account-guard';
+
+export function watchChatPageSnapshotInvalidations(accountNumber: ActiveAccountNumber, callback: () => void) {
+  const serverId = getActiveServerId();
+  const accountKey = accountGuardKey(serverId, accountNumber);
+  const passcodeKey = guardKey();
+  const onStorage = (event: StorageEvent) => {
+    if(event.key === null || event.key === accountKey || event.key === passcodeKey) callback();
+  };
+  const onAccountGuard = (event: Event) => {
+    if((event as CustomEvent<string>).detail === accountKey) callback();
+  };
+  window.addEventListener('storage', onStorage);
+  window.addEventListener(invalidatedEvent, callback);
+  window.addEventListener(accountGuardEvent, onAccountGuard);
+  return () => {
+    window.removeEventListener('storage', onStorage);
+    window.removeEventListener(invalidatedEvent, callback);
+    window.removeEventListener(accountGuardEvent, onAccountGuard);
+  };
+}
 
 export function setChatPageAccountGuard(serverId: string, accountNumber: ActiveAccountNumber) {
-  localStorage.setItem(accountGuardKey(serverId, accountNumber), crypto.randomUUID());
+  const key = accountGuardKey(serverId, accountNumber);
+  localStorage.setItem(key, crypto.randomUUID());
+  if(typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(accountGuardEvent, {detail: key}));
 }
 
 async function updateAccountGuard(accountNumber: ActiveAccountNumber) {
@@ -176,6 +200,7 @@ export function readChatPageSnapshot(key: ChatPageKey): ChatPageRow[] | undefine
 export function forgetLoadedChatPageSnapshot() {
   ++loadGeneration;
   loadedSnapshot = undefined;
+  if(typeof window !== 'undefined') window.dispatchEvent(new Event(invalidatedEvent));
 }
 
 async function beginInvalidation(accountNumber: ActiveAccountNumber, expectedEpoch?: string) {

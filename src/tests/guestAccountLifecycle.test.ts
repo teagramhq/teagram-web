@@ -541,6 +541,59 @@ describe('guest account lifecycle', () => {
     expect(state.clearInvalidatedAccount).not.toHaveBeenCalled();
   });
 
+  it('permits a snapshot only for a confirmed current guest and wipe generation', async() => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-42'};
+    state.accountUserId = 42;
+    state.records = [{version: 1, serverId: IDENTITY.serverId, keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`, password: 'P'.repeat(43), status: 'committed',
+      wipeGeneration: 'week-42', accountUserId: 42, accountNumber: 1}];
+    const lifecycle = createGuestAccountLifecycle(state.dependencies);
+    expect(await lifecycle.isSnapshotIdentityCurrent()).toBe(true);
+    state.records[0].accountNumber = 2;
+    expect(await lifecycle.isSnapshotIdentityCurrent()).toBe(false);
+    state.records[0].accountNumber = 1;
+    state.records[0].wipeGeneration = 'week-41';
+    expect(await lifecycle.isSnapshotIdentityCurrent()).toBe(false);
+    delete state.records[0].wipeGeneration;
+    expect(await lifecycle.isSnapshotIdentityCurrent()).toBe(false);
+  });
+
+  it('rejects a snapshot when guest invalidation interrupts the identity check', async() => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-42'};
+    state.accountUserId = 42;
+    state.records = [{version: 1, serverId: IDENTITY.serverId, keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`, password: 'P'.repeat(43), status: 'committed',
+      wipeGeneration: 'week-42', accountUserId: 42, accountNumber: 1}];
+    let invalidate = () => {};
+    state.dependencies.subscribeInvalidation = (_server, callback) => { invalidate = callback; return () => {}; };
+    const read = state.dependencies.readCredentials;
+    state.dependencies.readCredentials = async() => { const records = await read(); invalidate(); return records; };
+    const lifecycle = createGuestAccountLifecycle(state.dependencies);
+    expect(await lifecycle.isSnapshotIdentityCurrent()).toBe(false);
+  });
+
+  it('rejects a snapshot if the current identity or account user changes during the check', async() => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-42'};
+    state.accountUserId = 42;
+    state.records = [{version: 1, serverId: IDENTITY.serverId, keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`, password: 'P'.repeat(43), status: 'committed',
+      wipeGeneration: 'week-42', accountUserId: 42, accountNumber: 1}];
+    state.dependencies.isServerIdentityCurrent = (identity) => identity.wipeGeneration === state.currentIdentity.wipeGeneration;
+    const read = state.dependencies.readCredentials;
+    state.dependencies.readCredentials = async() => {
+      const records = await read();
+      state.currentIdentity = {...state.currentIdentity, wipeGeneration: 'week-43'};
+      return records;
+    };
+    expect(await createGuestAccountLifecycle(state.dependencies).isSnapshotIdentityCurrent()).toBe(false);
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-42'};
+    state.dependencies.readCredentials = async() => { const records = await read(); state.accountUserId = 43; return records; };
+    expect(await createGuestAccountLifecycle(state.dependencies).isSnapshotIdentityCurrent()).toBe(false);
+  });
+
   it('surfaces a server lock failure while checking the wipe generation', async() => {
     const state = makeDependencies();
     state.dependencies.withServerLock = async<T>() => {

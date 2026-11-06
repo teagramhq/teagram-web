@@ -553,6 +553,24 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
       }
     },
 
+    async isSnapshotIdentityCurrent() {
+      const identity = dependencies.getServerIdentity();
+      if(!identity.wipeGeneration) return false;
+      return runLocked(identity, async(cancelled) => {
+        const accountNumber = dependencies.getCurrentAccountNumber();
+        const accountUserId = await dependencies.getAccountUserId(accountNumber);
+        if(accountUserId === undefined) return false;
+        const context: GuestAccountContext = {...identity, accountNumber, accountUserId};
+        if(cancelled.value || !isContextCurrent(context)) return false;
+        const record = chooseRecord(await readRecords(), context);
+        if(!record || record.status !== 'committed' || record.wipeGeneration !== identity.wipeGeneration ||
+          (record.accountNumber !== undefined && record.accountNumber !== accountNumber) ||
+          record.accountUserId === undefined || !sameUserId(record.accountUserId, accountUserId)) return false;
+        const currentUserId = await dependencies.getAccountUserId(accountNumber);
+        return !cancelled.value && isContextCurrent(context) && sameUserId(currentUserId, accountUserId);
+      });
+    },
+
     async hasWipeGenerationChanged() {
       const identity = dependencies.getServerIdentity();
       return runLocked(identity, async(cancelled) => {

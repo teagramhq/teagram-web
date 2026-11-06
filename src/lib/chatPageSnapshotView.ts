@@ -1,9 +1,20 @@
 import type {ChatPageRow} from '@lib/chatPageSnapshot';
 import getPreviewURLFromBytes from '@helpers/bytes/getPreviewURLFromBytes';
 import Icon from '@components/icon';
+import {watchChatPageSnapshotInvalidations} from '@lib/chatPageSnapshot';
+import {listenForGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
+import {getRuntimeServerId} from '@config/serverContext';
+import type {ActiveAccountNumber} from '@lib/accounts/types';
 
 let snapshotElement: HTMLElement;
 let livePageArrived = false;
+let stopWatching: () => void;
+
+export function watchChatPageSnapshot(accountNumber: ActiveAccountNumber, guest: boolean) {
+  const stopSnapshot = watchChatPageSnapshotInvalidations(accountNumber, replaceChatPageSnapshot);
+  const stopGuest = guest ? listenForGuestCredentialInvalidation(getRuntimeServerId(), replaceChatPageSnapshot, true) : undefined;
+  stopWatching = () => { stopSnapshot(); stopGuest?.(); };
+}
 
 function element(tag: string, className: string, text?: string) {
   const node = document.createElement(tag);
@@ -62,6 +73,8 @@ export function paintChatPageSnapshot(rows: ChatPageRow[] | undefined) {
 
 export function replaceChatPageSnapshot() {
   livePageArrived = true;
+  stopWatching?.();
+  stopWatching = undefined;
   snapshotElement?.remove();
   snapshotElement = undefined;
 }

@@ -2,6 +2,7 @@ import {beforeEach, expect, it, vi} from 'vitest';
 import '@lib/polyfill';
 let paintChatPageSnapshot: typeof import('@lib/chatPageSnapshotView')['paintChatPageSnapshot'];
 let replaceChatPageSnapshot: typeof import('@lib/chatPageSnapshotView')['replaceChatPageSnapshot'];
+let watchChatPageSnapshot: typeof import('@lib/chatPageSnapshotView')['watchChatPageSnapshot'];
 
 const rows = [
   {peerId: 42 as PeerId, title: 'Alice', preview: 'Hello', date: 1, unread: 2, markedUnread: false, muted: true, pinned: false},
@@ -10,8 +11,40 @@ const rows = [
 
 beforeEach(async() => {
   vi.resetModules();
-  ({paintChatPageSnapshot, replaceChatPageSnapshot} = await import('@lib/chatPageSnapshotView'));
+  ({paintChatPageSnapshot, replaceChatPageSnapshot, watchChatPageSnapshot} = await import('@lib/chatPageSnapshotView'));
   document.body.innerHTML = '<div id="page-chats" style="display:none"><div id="chatlist-container"><div id="folders-container"></div></div></div>';
+});
+
+it.each(['passcode', 'logout or reset', 'other tab', 'other tab passcode', 'guest wipe', 'other tab guest wipe'])(
+  'removes painted rows on %s invalidation', async(reason) => {
+    watchChatPageSnapshot(1, true);
+    paintChatPageSnapshot(rows);
+    const snapshots = await import('@lib/chatPageSnapshot');
+    if(reason === 'passcode') snapshots.blockSnapshotReads();
+    if(reason === 'logout or reset') snapshots.setChatPageAccountGuard('default', 1);
+    if(reason === 'other tab') window.dispatchEvent(new StorageEvent('storage', {key: 'teagram.chat-page-snapshot-account:default:1'}));
+    if(reason === 'other tab passcode') window.dispatchEvent(new StorageEvent('storage', {key: 'chat-page-snapshot-guard'}));
+    if(reason === 'guest wipe') (await import('@lib/guestCredentialBroadcast')).notifyGuestCredentialInvalidation('default');
+    if(reason === 'other tab guest wipe') window.dispatchEvent(new StorageEvent('storage', {key: 'guest-credential-lifecycle-clear.v1'}));
+    expect(document.querySelector('.chat-page-snapshot')).toBeNull();
+    paintChatPageSnapshot(rows);
+    expect(document.querySelector('.chat-page-snapshot')).toBeNull();
+  }
+);
+
+it('keeps the page when a different account is invalidated', async() => {
+  watchChatPageSnapshot(1, false);
+  paintChatPageSnapshot(rows);
+  (await import('@lib/chatPageSnapshot')).setChatPageAccountGuard('default', 2);
+  expect(document.querySelectorAll('.chatlist-chat')).toHaveLength(2);
+  replaceChatPageSnapshot();
+});
+
+it('does not paint if invalidated while guest verification is pending', async() => {
+  watchChatPageSnapshot(1, true);
+  (await import('@lib/guestCredentialBroadcast')).notifyGuestCredentialInvalidation('default');
+  paintChatPageSnapshot(rows);
+  expect(document.querySelector('.chat-page-snapshot')).toBeNull();
 });
 
 it('does not paint a late snapshot after the live page arrived', () => {

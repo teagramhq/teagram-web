@@ -33,7 +33,8 @@ import '@lib/polyfill';
 import '@lib/debug/mountLogExport'; // main-thread-only: wires window.downloadLogs / collectLogs
 import '@lib/debug/memoryReport'; // main-thread-only: wires window.memoryReport
 import apiManagerProxy from '@lib/apiManagerProxy';
-import {paintChatPageSnapshot, replaceChatPageSnapshot} from '@lib/chatPageSnapshotView';
+import {paintChatPageSnapshot, replaceChatPageSnapshot, watchChatPageSnapshot} from '@lib/chatPageSnapshotView';
+import {getChatPageKey} from '@lib/chatPageSnapshot';
 import {performancePhaseTrace} from '@lib/appManagers/performanceTrace';
 import getProxiedManagers from '@lib/getProxiedManagers';
 import themeController from '@helpers/themeController';
@@ -77,7 +78,7 @@ import useHasFoldersSidebar, {useIsSidebarCollapsed} from '@stores/foldersSideba
 import appNavigationController from '@components/appNavigationController';
 import {preventCrossTabDynamicImportDeadlock} from '@helpers/preventDeadlock';
 import appChatBackground from '@components/chat/bubbles/chatBackground';
-import {getActiveServerHost, isAutoGuestEnabled} from '@config/serverContext';
+import {getActiveDemoWipeGeneration, getActiveServerHost, getRuntimeServerId, isAutoGuestEnabled} from '@config/serverContext';
 import {getServerSelectionAction} from '@config/serverSelection';
 import {createCurrentGuestAccountLifecycle, type GuestAccountManagers} from '@lib/guestAccountLifecycle';
 import {markAutoGuestAttempted, markAutoGuestResetDetected} from '@lib/autoGuest';
@@ -585,15 +586,21 @@ const onDocumentReady = async() => {
   );
   const stateResult = allStates[getCurrentAccount()];
   if(stateResult.state.authState._ === 'authStateSignedIn') {
+    watchChatPageSnapshot(getCurrentAccount(), isAutoGuestEnabled());
     if(isAutoGuestEnabled()) {
       const account = getCurrentAccount();
       const server = getActiveServerHost();
-      void createCurrentGuestAccountLifecycle(rootScope.managers as unknown as GuestAccountManagers).hasWipeGenerationChanged()
-      .then((changed) => {
-        if(!changed && account === getCurrentAccount() && server === getActiveServerHost()) {
-          paintChatPageSnapshot(apiManagerProxy.readChatPageSnapshot());
+      const serverId = getRuntimeServerId();
+      const generation = getActiveDemoWipeGeneration();
+      void createCurrentGuestAccountLifecycle(rootScope.managers as unknown as GuestAccountManagers).isSnapshotIdentityCurrent()
+      .then(async(current) => {
+        if(!current) return;
+        const key = await getChatPageKey(account);
+        if(account === getCurrentAccount() && server === getActiveServerHost() &&
+          serverId === getRuntimeServerId() && generation === getActiveDemoWipeGeneration() && key) {
+          paintChatPageSnapshot(apiManagerProxy.readChatPageSnapshot(key));
         }
-      }, (error) => console.error('Could not verify the guest session before painting the chat snapshot', error));
+      }).catch((error) => console.error('Could not verify the guest session before painting the chat snapshot', error));
     } else {
       paintChatPageSnapshot(apiManagerProxy.readChatPageSnapshot());
     }
@@ -715,6 +722,7 @@ const onDocumentReady = async() => {
       }
     }
   }
+  if(authState._ !== 'authStateSignedIn') replaceChatPageSnapshot();
 
   const hash = location.hash;
   const splitted = hash.split('?');
