@@ -4,7 +4,7 @@ import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
 import {CACHED_DIALOG_RECONCILE_PHASE_NAME, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateNoWalkLongTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
-import {startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
+import {getContactsFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
 
 type Fixture = {
@@ -986,15 +986,36 @@ async function openContacts(page: Page, requests: {value: number}, traceEnabled 
   await waitForBundleResources(page);
 
   const workerRequests: string[] = [];
+  const pageErrors: string[] = [];
+  const recordPageError = (error: Error) => pageErrors.push(error.message);
   const recordWorkerRequest = (request: Request) => {
     if(request.url().includes('tlottie.worker')) workerRequests.push(request.url());
   };
   page.on('request', recordWorkerRequest);
+  page.on('pageerror', recordPageError);
   try {
     await beginScenario(page, requests, traceEnabled);
     await page.locator('.sidebar-tools-button').click();
     await page.getByText('Contacts', {exact: true}).last().click();
-    await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
+    try {
+      await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
+    } catch(error) {
+      const dom = await getContactsFailureDetails(page);
+      const contactsRpc = traceEnabled ? await page.evaluate(async() => {
+        try {
+          const manager = (window as any).rootScope.managers.apiManager;
+          const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000));
+          const trace = await Promise.race([manager.getPerformanceRpcTrace(), timeout]) as {calls: Array<{method: string, durationMs: number | null, outcome: string}>} | null;
+          return trace?.calls.filter((call) => call.method === 'contacts.getContacts') ?? null;
+        } catch(traceError) {
+          return {error: String(traceError)};
+        }
+      }) : null;
+      if(error instanceof Error) {
+        error.message += `\nContacts diagnostics: ${JSON.stringify({dom, pageErrors, contactsRpc})}`;
+      }
+      throw error;
+    }
     const boundary = await snapshotMeasurementBoundary(page);
     onMeasurementBoundary?.(boundary);
     const sample = await capture(page, requests, boundary, false, traceEnabled);
@@ -1002,6 +1023,7 @@ async function openContacts(page: Page, requests: {value: number}, traceEnabled 
     return sample;
   } finally {
     page.off('request', recordWorkerRequest);
+    page.off('pageerror', recordPageError);
   }
 }
 
@@ -1403,6 +1425,7 @@ async function traceChatOpen(browser: Browser, run: VariantRun, fixture: Fixture
 
 async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
   const traceSamples = Object.fromEntries(scenarios.map((scenario) => [scenario, [] as Metric[]])) as Record<string, Metric[]>;
+  report.diagnostics['100x'] = traceSamples;
 
   for(let repeat = 0; repeat < COLD_CHAT_LIST_REPEATS; ++repeat) {
     const context = await browser.newContext({

@@ -1,5 +1,14 @@
 import type {Locator, Page} from '@playwright/test';
 
+export async function getContactsFailureDetails(page: Page) {
+  return page.evaluate(() => ({
+    containerCount: document.querySelectorAll('#contacts-container').length,
+    listCount: document.querySelectorAll('#contacts-container #contacts').length,
+    rowCount: document.querySelectorAll('#contacts-container .chatlist-chat').length,
+    searchLength: document.querySelector<HTMLInputElement>('#contacts-container .input-search-input')?.value.length ?? null
+  }));
+}
+
 export type DomNodeCounts = {
   bubbles: number,
   bubbleGroups: number,

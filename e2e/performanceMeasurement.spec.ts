@@ -1,5 +1,12 @@
 import {expect, test} from '@playwright/test';
-import {startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
+import {getContactsFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
+
+test('reports contacts container state when no contact rows appear', async({page}) => {
+  await page.setContent('<div id="contacts-container"><input class="input-search-input" value="x"><ul id="contacts"></ul></div>');
+  expect(await getContactsFailureDetails(page)).toEqual({
+    containerCount: 1, listCount: 1, rowCount: 0, searchLength: 1
+  });
+});
 
 test('starts the measured window when the browser dispatches the click', async({page}) => {
   await page.setContent('<button>Open chat</button>');
