@@ -42,7 +42,7 @@ import {isDialog, isSavedDialog, isForumTopic} from '@appManagers/utils/dialogs/
 import getDialogKey from '@appManagers/utils/dialogs/getDialogKey';
 import getDialogThreadId from '@appManagers/utils/dialogs/getDialogThreadId';
 import {isTempId} from '@appManagers/utils/messages/isTempId';
-import {captureChatPageSnapshotEpoch, chatPageSnapshotGeneration, getChatPageKey, sameChatPageKey, writeChatPageSnapshot} from '@lib/chatPageSnapshot';
+import {chatPageSnapshotGeneration, getChatPageKey, sameChatPageKey, writeChatPageSnapshot} from '@lib/chatPageSnapshot';
 import type {ChatPageRow} from '@lib/chatPageSnapshot';
 import type {ChatPageKey} from '@lib/chatPageSnapshot';
 import AccountController from '@lib/accounts/accountController';
@@ -140,10 +140,7 @@ export default class DialogsStorage extends AppManager {
   }
 
   protected after() {
-    this.snapshotEpoch = captureChatPageSnapshotEpoch(this.getAccountNumber()).catch((error): undefined => {
-      this.log.error('failed to capture chat page snapshot epoch', error);
-      return undefined;
-    });
+    this.snapshotEpoch = this.appStoragesManager.snapshotEpoch;
     this.snapshotMayBind = !this.appStateManager.userId;
     this.snapshotOwner = Promise.resolve(this.appStateManager.snapshotOwner);
     this.clear(true);

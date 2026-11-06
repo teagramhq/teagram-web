@@ -6,11 +6,13 @@ import {AppManager} from '@appManagers/manager';
 import {ActiveAccountNumber} from '@lib/accounts/types';
 import createStorages from '@appManagers/utils/storages/createStorages';
 import loadStorages from '@appManagers/utils/storages/loadStorages';
+import {captureChatPageSnapshotEpoch} from '@lib/chatPageSnapshot';
 
 export class AppStoragesManager extends AppManager {
   private storages: ReturnType<typeof createStorages>;
   private resetStoragesPromise: ResetStoragesPromise;
   private loadStoragesPromise: ReturnType<typeof loadStorages>;
+  public readonly snapshotEpoch: Promise<string | undefined>;
 
   private _accountNumber: ActiveAccountNumber;
 
@@ -21,11 +23,15 @@ export class AppStoragesManager extends AppManager {
     this.name = 'STORAGES';
     this.storages = createStorages(accountNumber);
     this._accountNumber = accountNumber;
+    this.snapshotEpoch = captureChatPageSnapshotEpoch(accountNumber).catch((error): undefined => {
+      console.error('failed to capture chat page snapshot epoch', error);
+      return undefined;
+    });
     // this.loadPromise = deferredPromise();
   }
 
   public loadStorages() {
-    return (this.loadStoragesPromise ??= loadStorages(this._accountNumber, this.storages, this.resetStoragesPromise));
+    return (this.loadStoragesPromise ??= this.snapshotEpoch.then(() => loadStorages(this._accountNumber, this.storages, this.resetStoragesPromise)));
     // loadStorages(this.storages).then((storagesResults) => {
     // this.loadPromise.resolve(storagesResults);
     // });

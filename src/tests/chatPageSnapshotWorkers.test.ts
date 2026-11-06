@@ -2,6 +2,56 @@ import {expect, it, vi} from 'vitest';
 import {getCommonDatabaseState} from '@config/databases/state';
 import IDBStorage from '@lib/files/idb';
 
+it('binds the snapshot epoch before loading dialogs when another worker resets them', async() => {
+  vi.resetModules();
+  const first = await import('@lib/chatPageSnapshot');
+  (await import('@lib/passcode/deferredIsUsingPasscode')).default.resolveDeferred(false);
+  const {AppStoragesManager} = await import('@appManagers/appStoragesManager');
+  const key = {accountNumber: 1 as const, userId: 123 as PeerId, server: 'server', authKeyId: 'key'};
+  const rows = [{peerId: 42 as PeerId, title: 'Alice', preview: 'Private', date: 1, unread: 0, markedUnread: false, muted: false, pinned: false}];
+  const noReset = Promise.resolve({storages: new Map(), callback: async() => {}});
+  const manager = new AppStoragesManager(1, noReset as any) as any;
+  const store = {getAll: async() => rows.slice(), clear: async() => {}, get: async(): Promise<undefined> => undefined, set: async() => {}};
+  manager.storages = {users: store, chats: store, dialogs: store};
+  await manager.loadStorages();
+  const boundEpoch = await manager.snapshotEpoch;
+  expect(boundEpoch).toBeTruthy();
+
+  vi.resetModules();
+  const second = await import('@lib/chatPageSnapshot');
+  (await import('@lib/passcode/deferredIsUsingPasscode')).default.resolveDeferred(false);
+  const loadStorages = (await import('@appManagers/utils/storages/loadStorages')).default;
+  const reset = Promise.resolve({storages: new Map([['dialogs', []]]), callback: async() => {}});
+  await loadStorages(1, {users: store, chats: store, dialogs: store} as any, reset as any);
+  await first.writeChatPageSnapshot(key, rows, boundEpoch);
+  await first.loadChatPageSnapshot(key);
+  expect(first.readChatPageSnapshot(key)).toBeUndefined();
+
+  const freshManager = new AppStoragesManager(1, noReset as any) as any;
+  freshManager.storages = {users: store, chats: store, dialogs: store};
+  await freshManager.loadStorages();
+  const freshEpoch = await freshManager.snapshotEpoch;
+  expect(freshEpoch).not.toBe(boundEpoch);
+  await first.writeChatPageSnapshot(key, rows, freshEpoch);
+  await first.loadChatPageSnapshot(key);
+  expect(first.readChatPageSnapshot(key)).toEqual(rows);
+});
+
+it('keeps startup blocked when invalidation is already in progress', async() => {
+  vi.resetModules();
+  const snapshots = await import('@lib/chatPageSnapshot');
+  (await import('@lib/passcode/deferredIsUsingPasscode')).default.resolveDeferred(false);
+  const {AppStoragesManager} = await import('@appManagers/appStoragesManager');
+  const token = await snapshots.beginChatPageSnapshotInvalidation(1);
+  const reset = Promise.resolve({storages: new Map(), callback: async() => {}});
+  const manager = new AppStoragesManager(1, reset as any) as any;
+  const store = {getAll: async(): Promise<unknown[]> => []};
+  manager.storages = {users: store, chats: store, dialogs: store};
+  await manager.loadStorages();
+  await snapshots.finishChatPageSnapshotInvalidation(1, token);
+  expect(await manager.snapshotEpoch).toBeUndefined();
+});
+
 it('recovers an abandoned passcode block at boot under the cross-tab lock', async() => {
   vi.resetModules();
   const snapshots = await import('@lib/chatPageSnapshot');
