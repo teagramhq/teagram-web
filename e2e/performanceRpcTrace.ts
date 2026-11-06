@@ -321,42 +321,47 @@ export function validateMeasuredLongTaskTraces(
   });
 }
 
-// Frames the cached dialog reconciliation runs: its page loop, the peer mirror batches it sends to the page, and the chat-list updates those cause.
-export const RECONCILE_WALK_FRAME_NAMES = [
-  'getServerChannelsMissingLocally',
-  'reconcileCachedChannelDialogs',
-  'mirrorApiPeers',
-  'onMirrorTask',
-  'reconcilePeerMirrorBatch',
-  'reconcilePeers',
-  'reconcilePeer',
-  'handleDialogsMultiupdate',
-  'setLastMessage',
-  'updateDialog',
-  'onScrollShift'
-];
+export type ReconcileMirrorTask = {traceId: string, startTimeMs: number, durationMs: number};
 
-export function findLongTasksWithWalkFrames(tasks: PerformanceTaskAttribution[] | undefined, frameNames = RECONCILE_WALK_FRAME_NAMES) {
-  const names = new Set(frameNames);
-  return (tasks || []).filter(({durationMs, stacks}) => durationMs > 50 && stacks.some(({frames}) => frames.some(({functionName}) => names.has(functionName))));
+// Keeps the walk's main-thread mirror tasks that start inside the window, relative to its start.
+export function summarizeReconcileMirrorTasks(
+  tasks: Array<{traceId: string, startedAtMs: number, durationMs: number}>,
+  startedAtMs: number,
+  elapsedMs: number
+): ReconcileMirrorTask[] {
+  const round = (value: number) => Number(value.toFixed(2));
+  return tasks
+  .filter(({startedAtMs: taskStart}) => taskStart >= startedAtMs && taskStart < startedAtMs + elapsedMs)
+  .map(({traceId, startedAtMs: taskStart, durationMs}) => ({traceId, startTimeMs: round(taskStart - startedAtMs), durationMs: round(durationMs)}));
 }
 
-// Tasks over 50 ms without walk frames stay in the report; they are not a reconciliation failure.
+// Stack frames cannot attribute a task to the walk because history responses share the mirror path;
+// a mirror task that carries the walk's traceId and runs inside the task can.
+export function findLongTasksOverlappingWalkMirrors(
+  tasks: Array<{startTimeMs: number, durationMs: number}> | undefined,
+  mirrorTasks: ReconcileMirrorTask[] | undefined
+) {
+  return (tasks || []).filter(({startTimeMs, durationMs}) => durationMs > 50 && (mirrorTasks || []).some((mirror) => (
+    mirror.startTimeMs < startTimeMs + durationMs && mirror.startTimeMs + mirror.durationMs > startTimeMs
+  )));
+}
+
+// Tasks over 50 ms that no walk mirror task overlaps stay in the report; they are not a reconciliation failure.
 export function validateNoWalkLongTasks(
-  samples: Array<{longTaskAttribution?: PerformanceTaskAttribution[]}>,
+  samples: Array<{longTaskTrace?: Array<{startTimeMs: number, durationMs: number}>, reconcileMirrorTasks?: ReconcileMirrorTask[]}>,
   label: string
 ) {
-  samples.forEach(({longTaskAttribution}, index) => {
-    const tasks = findLongTasksWithWalkFrames(longTaskAttribution);
+  samples.forEach(({longTaskTrace, reconcileMirrorTasks}, index) => {
+    const tasks = findLongTasksOverlappingWalkMirrors(longTaskTrace, reconcileMirrorTasks);
     if(tasks.length) {
-      throw new Error(`${label} repeat ${index + 1} has ${tasks.length} tasks over 50 ms with reconcile walk frames`);
+      throw new Error(`${label} repeat ${index + 1} has ${tasks.length} tasks over 50 ms overlapping a walk mirror task`);
     }
   });
 }
 
 export function writeReportAndValidateScrollTasks(
   writeReport: () => void,
-  samples: Array<{longTasksOver50Ms?: number, longTaskAttribution?: PerformanceTaskAttribution[]}>,
+  samples: Array<{longTasksOver50Ms?: number}>,
   expectedRepeatCount: number
 ) {
   writeReport();
@@ -368,7 +373,6 @@ export function writeReportAndValidateScrollTasks(
       throw new Error(`100x scrollBack2k measured repeat ${index + 1} has an invalid long-task count`);
     }
   });
-  validateNoWalkLongTasks(samples, '100x scrollBack2k measured');
 }
 
 export function rpcInvocationsInWindow<T extends {startedAtEpochMs: number}>(calls: T[], timeOrigin: number, startedAtMs: number, elapsedMs: number): T[] {

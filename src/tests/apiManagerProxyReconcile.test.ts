@@ -73,3 +73,22 @@ test('logs failures writing both trace time and completed phases', async() => {
     delete (globalThis as any).__teagramPerf;
   }
 });
+
+test('records each walk mirror task interval for attribution', async() => {
+  vi.stubEnv('VITE_PERF_RECONCILE_TRACE', '1');
+  const proxy = (await import('@lib/apiManagerProxy')).default as any;
+  vi.spyOn(Storage.prototype, 'getItem').mockReturnValue('{}');
+  vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {});
+  (globalThis as any).__teagramPerf = {cachedDialogsReconcileMainThreadMsByTraceId: {}};
+  try {
+    proxy.onMirrorTask({name: 'peers', accountNumber: 1, traceOnly: true, trace: 'cachedChannelDialogsReconcile', traceId: 'trace'});
+    proxy.onMirrorTask({name: 'peers', accountNumber: 1, traceOnly: true});
+    const tasks = (globalThis as any).__teagramPerf.cachedDialogsReconcileMirrorTasks;
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({traceId: 'trace'});
+    expect(tasks[0].startedAtMs).toBeGreaterThan(0);
+    expect(tasks[0].durationMs).toBeGreaterThanOrEqual(0);
+  } finally {
+    delete (globalThis as any).__teagramPerf;
+  }
+});

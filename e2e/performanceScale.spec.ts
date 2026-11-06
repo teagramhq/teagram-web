@@ -3,7 +3,7 @@ import {expect, test, type Browser, type BrowserContext, type Locator, type Page
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {CACHED_DIALOG_RECONCILE_PHASE_NAME, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateMeasuredLongTaskTraces, validateNoWalkLongTasks, writeReportAndValidateScrollTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution} from './performanceRpcTrace';
+import {CACHED_DIALOG_RECONCILE_PHASE_NAME, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateMeasuredLongTaskTraces, validateNoWalkLongTasks, writeReportAndValidateScrollTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
 
 type Fixture = {
@@ -46,6 +46,7 @@ type Metric = {
   droppedFrames?: number,
   frameIntervals?: number,
   longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>,
+  reconcileMirrorTasks?: ReconcileMirrorTask[],
   preInteractionMs?: number,
   appSendUiMs?: number,
   composerReadyAfterFirstBubbleMs?: number,
@@ -179,6 +180,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
       longTasks: [] as Array<{startTime: number, duration: number}>,
       longAnimationFrames: [] as Array<{startTime: number, duration: number, scripts: Array<Record<string, unknown>>}>,
       cachedDialogsReconcileMainThreadMsByTraceId,
+      cachedDialogsReconcileMirrorTasks: [] as Array<{traceId: string, startedAtMs: number, durationMs: number}>,
       frameIntervals: [] as number[],
       frameActive: false,
       started: performance.now(),
@@ -321,6 +323,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       resourceUrlBaseline: perf.resourceUrlBaseline,
       longTasks,
       longAnimationFrames,
+      reconcileMirrorTasks: includePhases ? perf.cachedDialogsReconcileMirrorTasks.slice() : [],
       loafObserved,
       rpcTraceEnabled: rpcTrace.enabled,
       rpcSpansRecorded: rpcTrace.recording,
@@ -334,7 +337,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
   }, {scroll, includePhases, includeLongTaskTrace});
-  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, loafObserved, rpcInvocations, rpcRawCalls, timeOrigin, ...metrics} = captured;
+  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, reconcileMirrorTasks, loafObserved, rpcInvocations, rpcRawCalls, timeOrigin, ...metrics} = captured;
   if(includePhases) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
   // Pages that never started the observer (the RPC comparison, base builds) report no frames; only a refused start is an error.
   if(includeLongTaskTrace) expect(loafObserved, 'long-animation-frame observer is not supported in the measured browser').not.toBe(false);
@@ -355,6 +358,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
     ...(includeLongTaskTrace ? {longTaskTrace: summarizeLongTaskTrace(longTasks, longAnimationFrames, boundary.startedAtMs, boundary.ms)} : {}),
+    ...(includePhases ? {reconcileMirrorTasks: summarizeReconcileMirrorTasks(reconcileMirrorTasks, boundary.startedAtMs, boundary.ms)} : {}),
     ms: boundary.ms,
     requests: requestCount,
     domNodes: boundary.domNodes,

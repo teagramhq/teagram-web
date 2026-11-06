@@ -121,6 +121,42 @@ test('splits large pages into bounded mirror and notification tasks', async() =>
   mirrorCalls.forEach((call) => expect(call[6]).toEqual(call[0].map((key: string) => -Number(key))));
 });
 
+test('keeps every mirror and notification task of a 100-peer page within the batch bound', async() => {
+  const chats = Array.from({length: 100}, (_, index) => ({_: 'channel', id: index + 1}));
+  const page: any = {_: 'messages.dialogs', chats, dialogs: [], messages: []};
+  let capturedEvents: any[];
+  const mirrorApiPeers = vi.fn();
+  const storage = Object.create((await import('@lib/storages/dialogs')).default.prototype) as DialogsStorage & any;
+  Object.assign(storage, {
+    rootScope: {collectBroadcastEvents: (events: any[], callback: () => void) => {
+      capturedEvents = events;
+      callback();
+    }},
+    apiManager: {invokeApiSingleProcess: async({processResult}: any) => processResult(page)},
+    appPeersManager: {
+      saveApiPeers: (result: any, _trace: unknown, mirrorBatch: any) => result.chats.forEach((chat: any) => {
+        mirrorBatch(String((-chat.id) as PeerId), chat);
+        capturedEvents.push({name: 'chat_update', args: [chat.id]}, {name: 'user_update', args: [chat.id]});
+      }),
+      mirrorApiPeers
+    },
+    appChatsManager: {isInChat: vi.fn()},
+    getDialogOnly: () => ({})
+  });
+
+  await storage.getServerChannelsMissingLocally();
+
+  const calls = mirrorApiPeers.mock.calls;
+  const mirrorCalls = calls.filter((call) => call[0].length);
+  const eventCalls = calls.filter((call) => call[5]?.length);
+  const bound = 4;
+  mirrorCalls.forEach((call) => expect(call[0].length).toBeLessThanOrEqual(bound));
+  eventCalls.forEach((call) => expect(call[5].length).toBeLessThanOrEqual(bound));
+  expect(mirrorCalls.reduce((total, call) => total + call[0].length, 0)).toBe(100);
+  expect(eventCalls.reduce((total, call) => total + call[5].length, 0)).toBe(200);
+  expect(mirrorCalls).toHaveLength(25);
+});
+
 test('marks captured user updates for synchronous status reads', async() => {
   const page: any = {_: 'messages.dialogs', users: [{_: 'user', id: 7}], dialogs: [], messages: []};
   let capturedEvents: any[];

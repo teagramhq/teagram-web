@@ -1698,6 +1698,8 @@ class ApiManagerProxy extends MTProtoMessagePort {
           this.log.error('cached dialog reconcile trace storage read failed', err);
         }
         const total = Math.max(mainThreadTimes[traceId] || 0, storedTimes[traceId] || 0) + elapsedMs;
+        // Each mirror task keeps its interval so a long task can be attributed to the walk by overlap.
+        (perf.cachedDialogsReconcileMirrorTasks ??= []).push({traceId, startedAtMs: startedAt, durationMs: elapsedMs});
         mainThreadTimes[traceId] = total;
         storedTimes[traceId] = total;
         try {
