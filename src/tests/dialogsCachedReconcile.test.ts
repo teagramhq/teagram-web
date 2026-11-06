@@ -1,5 +1,6 @@
 import {expect, test, vi} from 'vitest';
 import '@helpers/peerIdPolyfill';
+import {ConnectionStatus} from '@lib/mtproto/connectionStatus';
 import type DialogsStorage from '@lib/storages/dialogs';
 
 test('reloads missing cached dialogs in bounded worker batches', async() => {
@@ -25,6 +26,98 @@ test('reloads missing cached dialogs in bounded worker batches', async() => {
 
   expect(reloadConversation).toHaveBeenCalledTimes(peerIds.length);
   expect(maxActiveReloads).toBeLessThanOrEqual(25);
+});
+
+test('retries unresolved peers on the next cached first-page read and stops at the session cap', async() => {
+  vi.useFakeTimers();
+  try {
+    const unresolvedPeerId = -1 as PeerId;
+    const resolvedPeerId = -2 as PeerId;
+    const loadedPeerIds = new Set<PeerId>();
+    const reloadConversation = vi.fn(async(peerId: PeerId) => {
+      if(peerId === resolvedPeerId) loadedPeerIds.add(peerId);
+    });
+    const getServerChannelsMissingLocally = vi.fn(async() => [unresolvedPeerId, resolvedPeerId]);
+    const log = {error: vi.fn()};
+    const storage = Object.create((await import('@lib/storages/dialogs')).default.prototype) as DialogsStorage & any;
+    Object.assign(storage, {
+      appMessagesManager: {reloadConversation},
+      appChatsManager: {isInChat: () => true},
+      cachedListReconciled: false,
+      getDialogOnly: (peerId: PeerId): {} | undefined => loadedPeerIds.has(peerId) ? {} : undefined,
+      getServerChannelsMissingLocally,
+      log
+    });
+
+    await storage.reconcileCachedChannelDialogs();
+
+    expect(reloadConversation.mock.calls.map(([peerId]: [PeerId]) => peerId)).toEqual([unresolvedPeerId, resolvedPeerId]);
+    expect(log.error).toHaveBeenCalledWith('cached channel dialog reconcile peer unresolved', unresolvedPeerId);
+    expect(storage.cachedListReconcileRetryPeerIds).toEqual([unresolvedPeerId]);
+    expect(storage.cachedListReconciled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(reloadConversation).toHaveBeenCalledTimes(2);
+
+    await storage.reconcileCachedChannelDialogs();
+
+    expect(reloadConversation.mock.calls.map(([peerId]: [PeerId]) => peerId)).toEqual([unresolvedPeerId, resolvedPeerId, unresolvedPeerId]);
+    expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(1);
+    expect(log.error).toHaveBeenNthCalledWith(2, 'cached channel dialog reconcile peer unresolved', unresolvedPeerId);
+    expect(storage.cachedListReconcileRetryPeerIds).toBeUndefined();
+    expect(storage.cachedListReconciled).toBe(true);
+
+    await storage.reconcileCachedChannelDialogs();
+
+    expect(reloadConversation).toHaveBeenCalledTimes(3);
+  } finally {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  }
+});
+
+test('re-arms a bounded server-list retry after a network connection recovers', async() => {
+  const failure = new Error('dialog page failed');
+  const getServerChannelsMissingLocally = vi.fn()
+  .mockRejectedValueOnce(failure)
+  .mockRejectedValueOnce(failure)
+  .mockResolvedValueOnce([]);
+  const log = {error: vi.fn()};
+  const storage = Object.create((await import('@lib/storages/dialogs')).default.prototype) as DialogsStorage & any;
+  Object.assign(storage, {
+    cachedListReconciled: false,
+    cachedListReconcileAttempts: 0,
+    cachedListReconcileRecoveryPending: false,
+    getServerChannelsMissingLocally,
+    log
+  });
+
+  await storage.reconcileCachedChannelDialogs();
+  expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(1);
+  expect(storage.cachedListReconciled).toBe(false);
+
+  await storage.reconcileCachedChannelDialogs();
+  expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(2);
+  expect(storage.cachedListReconciled).toBe(true);
+  expect(storage.cachedListReconcileRecoveryPending).toBe(true);
+
+  await storage.reconcileCachedChannelDialogs();
+  expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(2);
+  expect(log.error).toHaveBeenCalledTimes(2);
+
+  storage.onConnectionStatusChange({status: ConnectionStatus.Connected, isFileNetworker: true});
+  expect(storage.cachedListReconciled).toBe(true);
+
+  storage.onConnectionStatusChange({status: ConnectionStatus.Connected, isFileNetworker: false});
+  expect(storage.cachedListReconcileRecoveryPending).toBe(false);
+  expect(storage.cachedListReconcileAttempts).toBe(0);
+  expect(storage.cachedListReconciled).toBe(false);
+
+  await storage.reconcileCachedChannelDialogs();
+
+  expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(3);
+  expect(storage.cachedListReconciled).toBe(true);
+  expect(storage.cachedListReconcileRecoveryPending).toBe(false);
 });
 
 test('mirrors each reconciliation page before delivering its peer events', async() => {
@@ -187,7 +280,7 @@ test('marks captured user updates for synchronous status reads', async() => {
   ]);
 });
 
-test('a failed second page keeps first-page updates and allows a retry', async() => {
+test('a failed second page keeps first-page updates and retries on the next cached first-page read', async() => {
   const failure = new Error('second page failed');
   const page: any = {_: 'messages.dialogsSlice', count: 2, dialogs: [
     {_: 'dialog', peer: {_: 'peerChannel', id: 42}, top_message: 1}

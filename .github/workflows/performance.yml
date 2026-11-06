@@ -192,6 +192,7 @@ jobs:
               websocket_port=2446
             fi
             nohup env TG_POSTGRES_DSN="$dsn" TG_BLOB_DIR="$blob_dir" \
+              TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT=0 \
               TG_LISTEN_ADDR="127.0.0.1:$listen_port" TG_ADVERTISE_ADDR="teagramd.test:$listen_port" \
               TG_WEBSOCKET_LISTEN_ADDR="127.0.0.1:$websocket_port" \
               "$RUNNER_TEMP/teagramd" > "$RUNNER_TEMP/teagram-perf-server-$scale.log" 2>&1 < /dev/null &
@@ -326,7 +327,10 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: web-performance-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/teagram-web-performance.json
+          path: |
+            ${{ runner.temp }}/teagram-web-performance.json
+            ${{ runner.temp }}/teagram-perf-server-1x.log
+            ${{ runner.temp }}/teagram-perf-server-100x.log
           if-no-files-found: ignore
           retention-days: 14
 

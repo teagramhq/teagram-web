@@ -288,13 +288,20 @@ export function validateCachedDialogReconcileSummaries(
 export function validateCachedDialogReconcileDiagnostics(
   samples: Array<{cachedDialogReconcile?: CachedDialogReconcileSummary, longTaskTrace?: unknown}>,
   scenario: string,
-  expectedRepeatCount: number
+  expectedRepeatCount: number,
+  requireWalk = false
 ) {
   if(samples.length !== expectedRepeatCount) {
     throw new Error(`100x ${scenario} has ${samples.length} diagnostic repeats; expected ${expectedRepeatCount}`);
   }
 
   samples.forEach(({cachedDialogReconcile, longTaskTrace}, index) => {
+    const hasCompletedWalk = cachedDialogReconcile?.walks.some(({pageCount, interrupted}) => (
+      !interrupted && pageCount !== null && Number.isFinite(pageCount) && pageCount > 0
+    ));
+    if(requireWalk && !hasCompletedWalk) {
+      throw new Error(`100x ${scenario} diagnostic repeat ${index + 1} has no completed cached-dialog walk`);
+    }
     if(
       !hasCompleteCachedDialogReconcileSummary(cachedDialogReconcile) ||
       !Array.isArray(longTaskTrace)
