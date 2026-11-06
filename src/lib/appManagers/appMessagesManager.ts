@@ -4981,18 +4981,47 @@ export class AppMessagesManager extends AppManager {
       // ! ВНИМАНИЕ: ОЧЕНЬ СЛОЖНАЯ ЛОГИКА:
       // ! если делать запрос сначала по папке 0, потом по папке 1, по индексу 0 в массиве будет один и тот же диалог, с dialog.pFlags.pinned, ЛОЛ???
       // ! т.е., с запросом folder_id: 1, и exclude_pinned: 0, в результате будут ещё и закреплённые с папки 0
+      // ! the server pages by the last dialog's top message and peer and ignores the date, so a
+      // ! next page without them is the first page again, and filling the list never ends
+      const cursor = this.dialogsStorage.getOffsetCursor(folderId);
+
       promise = this.apiManager.invokeApiSingleProcess({
         method: method = 'messages.getDialogs',
         params: params = {
           folder_id: folderId,
           offset_date: offsetDate,
-          offset_id: offsetId,
-          offset_peer: this.appPeersManager.getInputPeerById(offsetPeerId),
+          offset_id: cursor?.id ?? offsetId,
+          offset_peer: this.appPeersManager.getInputPeerById(cursor?.peerId ?? offsetPeerId),
           limit: useLimit,
           hash: '0'
         },
         options: requestOptions,
-        processResult
+        processResult: (result) => {
+          const hasCurrentCutoff = cutoffGeneration === undefined ||
+            cutoffGeneration === this.getChannelAvailableMinIdGeneration();
+          const pageDialogs = hasCurrentCutoff &&
+            (result._ === 'messages.dialogs' || result._ === 'messages.dialogsSlice') ? result.dialogs : undefined;
+          const serverDialogs = pageDialogs?.filter((dialog) => dialog._ === 'dialog');
+          const lastDialog = serverDialogs?.[serverDialogs.length - 1];
+          const cursorSource = lastDialog && {peer: {...lastDialog.peer}, top_message: lastDialog.top_message};
+
+          const processed = processResult(result);
+          return Promise.resolve(processed).then((processedResult) => {
+            if(!processedResult || !cursorSource) {
+              return processedResult;
+            }
+
+            const pageCursor = this.dialogsStorage.setOffsetCursor(folderId, cursorSource);
+
+            if(cursor && cursor.peerId === pageCursor.peerId && cursor.id === pageCursor.id) {
+              // * The server returned the same raw page tail, so there is no next page to request.
+              this.dialogsStorage.setDialogsLoaded(folderId, true, filterType);
+              return {...processedResult, isEnd: true};
+            }
+
+            return processedResult;
+          });
+        }
       });
     }
 
