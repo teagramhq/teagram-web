@@ -67,6 +67,58 @@ function formatSendActionDiagnosticTable(report) {
   return lines.join('\n');
 }
 
+function median(values) {
+  if(!values.length) return undefined;
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = sorted.length >> 1;
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function formatChatListMeasurementTable(report) {
+  const scenarios = [
+    ['coldChatList', 'Cold chat list'],
+    ['warmChatList', 'Warm chat list']
+  ];
+  const rows = [];
+  for(const [key, label] of scenarios) {
+    for(const scale of ['1x', '100x']) {
+      for(const variant of ['base', 'head']) {
+        const samples = report.variants?.[variant]?.[scale]?.[key];
+        if(!Array.isArray(samples) || !samples.length) continue;
+        const values = (field, fallback) => samples.map((sample) => Number.isFinite(sample[field]) ? sample[field] : fallback(sample)).filter(Number.isFinite);
+        const state = [...new Set(samples.map((sample) => sample.firstVisibleChatListSource).filter(Boolean))].join(', ') || 'unrecorded';
+        rows.push({
+          label,
+          scale,
+          variant,
+          state,
+          firstVisibleMs: median(values('firstVisibleChatListMs', (sample) => sample.ms)),
+          liveBoundaryMs: median(values('liveBoundaryMs', (sample) => sample.ms)),
+          requests: median(values('requests', () => undefined)),
+          rpcCalls: median(values('rpcCallCount', () => undefined)),
+          domNodes: median(values('domNodes', () => undefined)),
+          longTasks: median(values('longTasksOver50Ms', () => undefined)),
+          blockingTimeMs: median(values('blockingTimeMs', () => undefined)),
+          bundleBytes: median(values('bundleBytes', () => undefined))
+        });
+      }
+    }
+  }
+  if(!rows.length) return '';
+
+  const show = (value, digits = 0) => Number.isFinite(value) ? value.toFixed(digits) : '—';
+  const lines = [
+    '### Chat-list paint and counter boundaries',
+    '',
+    '| Scenario | Scale | Variant | First visible (ms) | First visible state | Live boundary (ms) | Requests | RPC calls | DOM nodes | Long tasks >50 ms | Blocking (ms) | Bundle bytes |',
+    '| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'
+  ];
+  for(const row of rows) {
+    lines.push(`| ${row.label} | ${row.scale} | ${row.variant} | ${show(row.firstVisibleMs, 1)} | ${row.state} | ${show(row.liveBoundaryMs, 1)} | ${show(row.requests)} | ${show(row.rpcCalls)} | ${show(row.domNodes)} | ${show(row.longTasks)} | ${show(row.blockingTimeMs, 1)} | ${show(row.bundleBytes)} |`);
+  }
+  return lines.join('\n');
+}
+
 let report = {variants: {}};
 const failures = [];
 
@@ -101,6 +153,7 @@ if(process.env.PERF_BROWSER_OUTCOME !== 'success') {
 
 const table = formatPerformanceTable(evaluation);
 const traceTable = formatPerformanceTraceTable(report.diagnostics?.['100x']);
+const chatListMeasurementTable = formatChatListMeasurementTable(report);
 const samplesTable = formatPerformanceSamplesTable(report);
 const sendActionDiagnosticTable = formatSendActionDiagnosticTable(report);
 const summary = [
@@ -110,6 +163,7 @@ const summary = [
   '',
   table,
   ...(traceTable ? ['', traceTable] : []),
+  ...(chatListMeasurementTable ? ['', chatListMeasurementTable] : []),
   ...(samplesTable ? ['', samplesTable] : []),
   ...(sendActionDiagnosticTable ? ['', sendActionDiagnosticTable] : []),
   '',

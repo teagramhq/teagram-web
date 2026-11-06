@@ -1,5 +1,5 @@
 import {expect, test} from '@playwright/test';
-import {beginMeasurement, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
+import {beginMeasurement, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList} from './performanceMeasurement';
 import {createServer, type ServerResponse} from 'node:http';
 import * as bundleMeasurement from './performanceBundleBytes';
 
@@ -198,6 +198,43 @@ test('records a bubble that becomes visible after a stylesheet visibility change
 
   const boundary = await waitForFirstVisibleBubble(page);
   expect(boundary.domNodes).toBeGreaterThan(0);
+});
+
+test('records the first visible chat-list row from the startup observer', async({page}) => {
+  expect(typeof observeFirstVisibleChatList).toBe('function');
+  await page.setContent('<div id="page-chats"><div id="chatlist-container"></div><div id="folders-container"></div></div>');
+  await page.evaluate(() => {
+    (window as any).__teagramPerf = {started: performance.now()};
+  });
+  await page.evaluate(observeFirstVisibleChatList);
+  await page.waitForTimeout(30);
+  await page.evaluate(() => {
+    const snapshot = document.createElement('div');
+    snapshot.className = 'chat-page-snapshot';
+    const row = document.createElement('a');
+    row.className = 'chatlist-chat';
+    row.style.cssText = 'display:block;width:20px;height:20px';
+    snapshot.append(row);
+    document.getElementById('chatlist-container')?.append(snapshot);
+  });
+  const snapshotPaint = await waitForFirstVisibleChatList(page);
+  expect(snapshotPaint.source).toBe('snapshot');
+  expect(snapshotPaint.ms).toBeGreaterThanOrEqual(0);
+  expect(await page.locator('.chat-page-snapshot').count()).toBe(1);
+
+  await page.evaluate(() => {
+    document.querySelector('.chat-page-snapshot')?.remove();
+    const liveRow = document.createElement('a');
+    liveRow.className = 'chatlist-chat';
+    liveRow.style.cssText = 'display:block;width:20px;height:20px';
+    document.getElementById('folders-container')?.append(liveRow);
+    (window as any).__teagramPerf.started = performance.now();
+    (window as any).__teagramPerf.firstVisibleChatListBoundary = undefined;
+  });
+  await page.evaluate(observeFirstVisibleChatList);
+  const livePaint = await waitForFirstVisibleChatList(page);
+  expect(livePaint.source).toBe('live');
+  expect(livePaint.ms).toBeGreaterThanOrEqual(0);
 });
 
 test('arms worker recording and starts the window before queued worker messages run', async({page}) => {

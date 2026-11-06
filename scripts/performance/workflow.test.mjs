@@ -22,14 +22,22 @@ test('performance tracing uses a separate diagnostic bundle', () => {
 });
 
 test('chat-list metrics wait for the snapshot to be replaced by live rows', () => {
-  const waitForChatList = performanceScale.match(/async function waitForChatList\(page: Page\) \{([\s\S]*?)\n\}/)?.[1];
+  const waitForChatList = performanceScale.match(/async function waitForChatList\(page: Page\)[^{]*\{([\s\S]*?)\n\}/)?.[1];
   assert.ok(waitForChatList, 'the performance scenario must wait for its chat list');
+  assert.match(performanceScale, /observeFirstVisibleChatList\.toString\(\)/, 'first-visible timing must be observed from document startup');
+  const firstPaintWait = waitForChatList.indexOf('await waitForFirstVisibleChatList(page)');
   const snapshotWait = waitForChatList.indexOf("page.locator('.chat-page-snapshot')");
   const liveRowsWait = waitForChatList.indexOf("page.locator('#page-chats #folders-container .chatlist-chat')");
+  assert.ok(firstPaintWait >= 0 && firstPaintWait < snapshotWait, 'first paint must be recorded before waiting for replacement');
   assert.ok(snapshotWait >= 0, 'snapshot rows must be absent before sampling');
   assert.ok(liveRowsWait > snapshotWait, 'live rows must be visible after the snapshot is gone');
   assert.match(waitForChatList.slice(snapshotWait), /toHaveCount\(0/);
   assert.match(waitForChatList.slice(liveRowsWait), /toBeVisible/);
+  assert.match(performanceScale, /ms: boundary\.firstVisibleChatListMs \?\? boundary\.ms/);
+  assert.match(performanceScale, /liveBoundaryMs: boundary\.ms/);
+  assert.match(performanceScale, /requestBreakdownByPath\?\.clear\(\)/, 'request diagnostics must be sampled and reset per measurement');
+  assert.match(performanceScale, /includeRequestBreakdown/);
+  assert.match(performanceScale, /requestBreakdown\}/);
 });
 
 test('Playwright reports a performance-test timeout before the job is cancelled', () => {
@@ -55,7 +63,11 @@ test('extra timing samples are reported without changing the three-repeat policy
   const scenarioKeys = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
   const makeSample = (ms) => ({
     ms,
+    firstVisibleChatListMs: ms,
+    firstVisibleChatListSource: 'snapshot',
+    liveBoundaryMs: ms + 400,
     requests: 4,
+    rpcCallCount: 2,
     domNodes: 100,
     bundleBytes: 10_000,
     longTasksOver50Ms: 0,
@@ -167,5 +179,8 @@ test('extra timing samples are reported without changing the three-repeat policy
   assert.match(fiveSampleSummary, /Open long-history chat \| head \| 5 \| 1000\.0/);
   assert.match(elevenSendSampleSummary, /Send a message \| head \| 11 \| 1100\.0 \| 1080\.0 \| 50\.0 \| 1150\.0/);
   assert.match(threeSampleSummary, /100x send action diagnostic/);
+  assert.match(threeSampleSummary, /### Chat-list paint and counter boundaries/);
+  assert.match(threeSampleSummary, /\| Scenario \| Scale \| Variant \| First visible \(ms\) \| First visible state \| Live boundary \(ms\) \| Requests \| RPC calls \| DOM nodes \| Long tasks >50 ms \| Blocking \(ms\) \| Bundle bytes \|/);
+  assert.match(threeSampleSummary, /\| Cold chat list \| 1x \| head \| 100\.0 \| snapshot \| 500\.0 \| 4 \| 2 \| 100 \| 0 \| 0\.0 \| 10000 \|/);
   assert.match(threeSampleSummary, /\| 123\.0 \| 101\.0 \| 1 \| 81\.0 \| 42\.0 \| 0 \| 1000 \| 12 \| 0 \| 0\.0 \| messages\.sendMessage \(81\.0 ms, success\) \| sendMessage \/input\.ts \(22\.0 ms\) \|/);
 });
