@@ -595,6 +595,7 @@ export class AppMessagesManager extends AppManager {
   private pendingByRandomId: {
     [randomId: string]: PendingMessageDetails
   } = {};
+  private pendingMessageIdsByRandomId: {[randomId: string]: number} = {};
   private pendingByMessageId: {[mid: string]: Long} = {};
   private pendingAfterMsgs: {[peerId: PeerId]: PendingAfterMsg} = {};
   public pendingTopMsgs: {[peerId in PeerId | `${PeerId}_${number}`]: number} = {};
@@ -3982,6 +3983,12 @@ export class AppMessagesManager extends AppManager {
         if(options.threadId) {
           this.pendingTopMsgs[`${peerId}_${options.threadId}`] = messageId;
         }
+      }
+
+      const pendingMessageId = this.pendingMessageIdsByRandomId[message.random_id];
+      if(pendingMessageId !== undefined) {
+        delete this.pendingMessageIdsByRandomId[message.random_id];
+        this.onUpdateMessageId({_: 'updateMessageID', random_id: message.random_id, id: pendingMessageId});
       }
     }
 
@@ -9467,6 +9474,7 @@ export class AppMessagesManager extends AppManager {
     const randomId = update.random_id;
     const pendingData = this.pendingByRandomId[randomId];
     if(!pendingData) {
+      this.pendingMessageIdsByRandomId[randomId] = update.id;
       return;
     }
 
