@@ -223,6 +223,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       }
 
       const key = this.getDialogKey(dialog);
+      this.sortedList.cancelPending(key);
       if(
         REAL_FOLDERS.has(this.filterId) &&
         this.projectedPeerIds.has(dialog.peerId) &&
@@ -698,6 +699,9 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       } finally {
         unblock();
       }
+    }).catch((error) => {
+      this.log.error('Community projection failed', error);
+      throw error;
     });
 
     return this.communityProjectionPromise;
@@ -729,6 +733,24 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
 
     const hiddenPeerIds = new Set<PeerId>();
     const peerFolderIds = new Map<PeerId, number>();
+    const hidePeer = (peerId: PeerId) => {
+      this.sortedList.cancelPending(peerId);
+      if(this.sortedList.has(peerId)) this.sortedList.delete(peerId, false);
+    };
+    for(const item of projection) {
+      for(const {peerId, folderId, filterIndex} of item.dialogs) {
+        peerFolderIds.set(peerId, folderId);
+        const hiddenInFilter = REAL_FOLDERS.has(this.filterId) ?
+          folderId === this.filterId :
+          filterIndex !== undefined &&
+            !this.filterPinnedPeerIds.has(peerId);
+        if(!hiddenInFilter) continue;
+
+        hiddenPeerIds.add(peerId);
+        this.sortedList.cancelPending(peerId);
+      }
+    }
+
     for(const item of projection) {
       if(hasCommunityRows) {
         let row = this.communityProjectionRows.get(item.communityId);
@@ -746,22 +768,11 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
           return;
         }
       }
+    }
 
-      for(const {peerId, folderId, filterIndex} of item.dialogs) {
-        peerFolderIds.set(peerId, folderId);
-        const hiddenInFilter = REAL_FOLDERS.has(this.filterId) ?
-          folderId === this.filterId :
-          filterIndex !== undefined &&
-            !this.filterPinnedPeerIds.has(peerId);
-        if(!hiddenInFilter) {
-          continue;
-        }
-
-        hiddenPeerIds.add(peerId);
-        if(this.sortedList.has(peerId)) {
-          this.sortedList.delete(peerId, false);
-        }
-      }
+    // Updates can arrive while a community row is being built asynchronously.
+    for(const peerId of hiddenPeerIds) {
+      hidePeer(peerId);
     }
 
     for(const peerId of this.projectedPeerIds) {
@@ -856,8 +867,17 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
    * Удалит неподходящие чаты из списка, но не добавит их(!)
    */
   public async validateListForFilter() {
-    this.sortedList.getAllDialogElementsMap().forEach(async(_, key) => {
+    const keys = new Set([
+      ...this.sortedList.getAllDialogElementsMap().keys(),
+      ...this.sortedList.getPendingKeys().filter((key) => typeof key === 'number')
+    ]);
+    keys.forEach(async(key) => {
       const dialog = await rootScope.managers.appMessagesManager.getDialogOnly(key);
+      if(!dialog) {
+        this.log.warn('Dialog missing during filter validation', key);
+        this.sortedList.delete(key);
+        return;
+      }
       if(!this.testDialogForFilter(dialog)) {
         if(
           REAL_FOLDERS.has(this.filterId) &&
@@ -880,6 +900,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
         !this.filterPinnedPeerIds.has(dialog.peerId)
       )
     ) {
+      this.sortedList.cancelPending(dialog.peerId);
       if(
         REAL_FOLDERS.has(this.filterId) &&
         this.sortedList.has(dialog.peerId)
@@ -892,6 +913,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     }
 
     if(!this.testDialogForFilter(dialog)) {
+      this.sortedList.cancelPending(dialog.peerId);
       if(this.getDialogElement(dialog.peerId)) {
         this.deleteDialog(dialog);
       }

@@ -1,5 +1,5 @@
 import {expect, test} from '@playwright/test';
-import {beginMeasurement, startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
+import {beginMeasurement, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
 import {createServer, type ServerResponse} from 'node:http';
 import * as bundleMeasurement from './performanceBundleBytes';
 
@@ -52,6 +52,37 @@ test('forgets an abandoned shared-worker request after document reload', async({
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+});
+
+test('retains the incomplete scroll error when trace cleanup fails', async() => {
+  await expect(finishIncompleteScroll('scroll reached message 30, expected 20', true, async() => {
+    throw new Error('trace failed');
+  })).rejects.toThrow('scroll reached message 30, expected 20; frame trace cleanup failed: Error: trace failed');
+  await expect(finishIncompleteScroll('scroll reached message 30, expected 20', false, async() => {})).resolves.toBeUndefined();
+});
+
+test('reports contacts container state when no contact rows appear', async({page}) => {
+  await page.setContent('<div id="contacts-container"><input class="input-search-input" value="x"><ul id="contacts"></ul></div>');
+  expect(await getContactsFailureDetails(page)).toEqual({
+    containerCount: 1, listCount: 1, rowCount: 0, searchLength: 1
+  });
+});
+
+test('reports unavailable contact diagnostics without replacing the scenario error', async({page}) => {
+  await page.close();
+  expect(await getContactsFailureDetails(page)).toBeNull();
+  expect(await getContactsRpcFailureDetails(page)).toEqual({error: 'page unavailable'});
+});
+
+test('distinguishes a timed-out contact RPC trace from an empty trace', async({page}) => {
+  await page.evaluate(() => {
+    (window as any).rootScope = {managers: {apiManager: {getPerformanceRpcTrace: () => new Promise(() => {})}}};
+  });
+  expect(await getContactsRpcFailureDetails(page)).toEqual({timedOut: true});
+  await page.evaluate(() => {
+    (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace = () => Promise.resolve({calls: []});
+  });
+  expect(await getContactsRpcFailureDetails(page)).toEqual([]);
 });
 
 test('starts the measured window when the browser dispatches the click', async({page}) => {
@@ -174,7 +205,7 @@ test('arms worker recording and starts the window before queued worker messages 
   expect(typeof measurement.beginMeasurement).toBe('function');
   await page.evaluate(() => {
     const channel = new MessageChannel();
-    const perf: any = (window as any).__teagramPerf = {started: -1, longTasks: [{startTime: 1}], frameIntervals: [1]};
+    const perf: any = (window as any).__teagramPerf = {started: -1, longTasks: [{startTime: 1}], frameIntervals: [1], frameWindows: [{startMs: 1, endMs: 2}]};
     channel.port1.onmessage = () => { perf.startedAtMessage = perf.started; };
     (window as any).__teagramInstallWorkerMessageAttribution = () => {
       channel.port2.postMessage('queued');
@@ -190,6 +221,7 @@ test('arms worker recording and starts the window before queued worker messages 
   expect(result.started).toBeGreaterThan(0);
   expect(result.startedAtMessage).toBe(result.started);
   expect(result.longTasks).toEqual([]);
+  expect(result.frameWindows).toEqual([]);
   expect(result.workerMessages).toEqual({spans: []});
 });
 

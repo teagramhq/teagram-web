@@ -6,7 +6,8 @@ import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, trackBundleDocumentNavigation, type BundleRequestTracker} from './performanceBundleBytes';
 import {CACHED_DIALOG_RECONCILE_PHASE_NAME, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateNoWalkLongTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
-import {beginMeasurement as begin, startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
+import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
+import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
 
 type Fixture = {
   owner: number,
@@ -48,6 +49,9 @@ type Metric = {
   droppedFramePercent?: number,
   droppedFrames?: number,
   frameIntervals?: number,
+  droppedFrameAttribution?: ReturnType<typeof summarizeDroppedFrames>,
+  droppedFrameCpu?: PerformanceTaskAttribution[],
+  droppedFrameScripts?: ReturnType<typeof summarizeFrameScripts>,
   longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>,
   longTaskTraceStatus?: ReturnType<typeof classifyMeasuredLongTaskTrace>,
   reconcileMirrorTasks?: ReconcileMirrorTask[],
@@ -83,6 +87,7 @@ type CachedDialogReconcileTarget = {
 
 type ScrollBackTraceOptions = {
   captureCpuStacks?: boolean,
+  captureFrameTrace?: boolean,
   captureWorkerMessages?: boolean,
   traceRpc?: boolean,
   waitForHistory?: boolean,
@@ -191,6 +196,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
       cachedDialogsReconcileMainThreadMsByTraceId,
       cachedDialogsReconcileMirrorTasks: [] as Array<{traceId: string, startedAtMs: number, durationMs: number}>,
       frameIntervals: [] as number[],
+      frameWindows: [] as Array<{startMs: number, endMs: number}>,
       frameActive: false,
       started: performance.now(),
       resourceUrlBaseline: [] as string[]
@@ -236,12 +242,13 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
       return perf.injectedLongTask;
     };
     if(injectColdStall) setTimeout(() => perf.injectLongTask(100), 0);
-    perf.startFrames = () => {
+    perf.startFrames = (recordWindows: boolean) => {
       perf.frameActive = true;
       perf.lastFrame = performance.now();
       const sampleFrame = (time: number) => {
         if(!perf.frameActive) return;
         perf.frameIntervals.push(time - perf.lastFrame);
+        if(recordWindows) perf.frameWindows.push({startMs: perf.lastFrame, endMs: time});
         perf.lastFrame = time;
         requestAnimationFrame(sampleFrame);
       };
@@ -313,6 +320,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       resourceUrlBaseline: perf.resourceUrlBaseline,
       longTasks,
       longAnimationFrames,
+      frameWindows: scroll && includeLongTaskTrace ? perf.frameWindows.slice() as Array<{startMs: number, endMs: number}> : [],
       reconcileMirrorTasks: includePhases ? perf.cachedDialogsReconcileMirrorTasks.slice() : [],
       loafObserved,
       rpcTraceEnabled: rpcTrace.enabled,
@@ -327,7 +335,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       frameIntervals: scroll && intervals.length ? intervals.length : undefined
     };
   }, {scroll, includePhases, includeLongTaskTrace});
-  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, reconcileMirrorTasks, loafObserved, rpcInvocations, rpcRawCalls, timeOrigin, ...metrics} = captured;
+  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, frameWindows, reconcileMirrorTasks, loafObserved, rpcInvocations, rpcRawCalls, timeOrigin, ...metrics} = captured;
   if(includePhases) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
   // Pages that never started the observer (the RPC comparison, base builds) report no frames; only a refused start is an error.
   if(includeLongTaskTrace && includePhases) expect(loafObserved, 'long-animation-frame observer is not supported in the diagnostic browser').not.toBe(false);
@@ -348,6 +356,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
     ...(includeLongTaskTrace ? {longTaskTrace: summarizeLongTaskTrace(longTasks, longAnimationFrames, boundary.startedAtMs, boundary.ms)} : {}),
+    ...(scroll && includeLongTaskTrace ? {droppedFrameScripts: summarizeFrameScripts(summarizeDroppedFrames(frameWindows, [], []), longAnimationFrames)} : {}),
     ...(includePhases ? {reconcileMirrorTasks: summarizeReconcileMirrorTasks(reconcileMirrorTasks, boundary.startedAtMs, boundary.ms)} : {}),
     ms: boundary.ms,
     requests: requestCount,
@@ -699,6 +708,12 @@ async function installScrollSpanTracing(page: Page, required: boolean) {
     wrap(bubbles, 'deleteViewportSlice', 'bubbles.deleteViewportSlice');
     wrap(bubbles, 'commitBubbleReplacements', 'bubbles.commitBubbleReplacements');
     wrap(bubbles.bubbleGroups, 'mountUnmountGroups', 'bubbleGroups.mountUnmountGroups');
+    const dialogs = (window as any).appDialogsManager;
+    wrap(dialogs, 'addListDialog', 'dialogs.addListDialog');
+    wrap(dialogs, 'addDialogNew', 'dialogs.addDialogNew');
+    wrap(dialogs?.xd, 'add', 'chatList.add');
+    wrap(dialogs?.xd, 'update', 'chatList.update');
+    wrap(dialogs?.xd, 'delete', 'chatList.delete');
     perf.scrollSpans = spans;
     perf.scrollSpanInstalled = installedNames;
     return installedNames;
@@ -770,6 +785,7 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}) {
   const {
     captureCpuStacks = false,
+    captureFrameTrace = captureCpuStacks,
     captureWorkerMessages = captureCpuStacks,
     traceRpc = false,
     waitForHistory = false,
@@ -783,14 +799,15 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
 
   // Only the diagnostic pass waits: the gated window must keep the chat-open history tail it always had.
   if(waitForHistory) await waitForHistorySettled(page);
-  if(captureCpuStacks) await installScrollSpanTracing(page, traceRpc);
+  if(captureCpuStacks || captureFrameTrace) await installScrollSpanTracing(page, traceRpc);
+  const frameTrace = captureFrameTrace ? await startFrameTrace(page) : undefined;
   await beginScenario(page, requests, traceRpc, captureWorkerMessages);
   if(includeLongTaskTrace) {
     const observed = await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames());
-    if(traceRpc) expect(observed, 'long-animation-frame observer is not supported in the diagnostic browser').toBe(true);
+    expect(observed, 'long-animation-frame observer is not supported in the browser').toBe(true);
   }
   const cpuProfile = captureCpuStacks ? await startCpuProfile(page) : undefined;
-  await page.evaluate(() => (window as any).__teagramPerf.startFrames());
+  await page.evaluate((recordWindows) => (window as any).__teagramPerf.startFrames(recordWindows), captureFrameTrace);
   const initial = await page.evaluate(() => {
     const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));
     return {min: Math.min(...mids), max: Math.max(...mids)};
@@ -837,22 +854,28 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
       peerId: chat?.peerId
     };
   });
-  if(currentMin > targetMid) {
-    if(!required) return undefined;
-    throw new Error(`scroll reached message ${currentMin}, expected ${targetMid}: ${JSON.stringify(scrollState)}`);
-  }
   const boundary = await snapshotMeasurementBoundary(page);
   onMeasurementBoundary?.(boundary);
   const stoppedProfile = cpuProfile ? await stopCpuProfile(cpuProfile) : undefined;
+  if(currentMin > targetMid) {
+    await finishIncompleteScroll(
+      `scroll reached message ${currentMin}, expected ${targetMid}: ${JSON.stringify(scrollState)}`,
+      required,
+      frameTrace ? () => stopFrameTrace(frameTrace) : undefined
+    );
+    return undefined;
+  }
   const metric = await capture(page, requests, boundary, true, traceRpc, includeLongTaskTrace);
-  if(!stoppedProfile && !captureWorkerMessages) return metric;
-  const {tasks, spans, workerMessages, workerBatches} = await page.evaluate((captureWorkerMessages) => {
+  const frameEvents = frameTrace ? await stopFrameTrace(frameTrace) : undefined;
+  if(!stoppedProfile && !frameEvents && !captureWorkerMessages) return metric;
+  const {tasks, spans, frameWindows, workerMessages, workerBatches} = await page.evaluate((captureWorkerMessages) => {
     const perf = (window as any).__teagramPerf;
     const workerMessages = captureWorkerMessages ? perf.workerMessages.spans : [];
     if(captureWorkerMessages) perf.workerMessages.restore();
     return {
       tasks: perf.longTasks as Array<{startTime: number, duration: number}>,
       spans: (perf.scrollSpans || []) as PerformanceSpan[],
+      frameWindows: perf.frameWindows as Array<{startMs: number, endMs: number}>,
       workerMessages: workerMessages as Array<{type: string, startTime: number, duration: number, endTime?: number, messageCount?: number}>,
       workerBatches: (captureWorkerMessages ? perf.workerMessages.batches : []) as Array<{startTime: number, endTime: number, size: number}>
     };
@@ -864,7 +887,9 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
       ...task, recorderReplayOverhead: recorderReplay || null
     }))
   } : {};
-  if(!stoppedProfile) return {...metric, ...workerAttribution};
+  const droppedFrameAttribution = frameTrace ? summarizeDroppedFrames(frameWindows, frameEvents || [], spans) : undefined;
+  if(droppedFrameAttribution) expect(droppedFrameAttribution.reduce((sum, frame) => sum + frame.droppedFrames, 0), 'frame attribution must cover the measured drops').toBe(metric.droppedFrames || 0);
+  if(!stoppedProfile) return {...metric, ...workerAttribution, ...(droppedFrameAttribution ? {droppedFrameAttribution} : {})};
 
   const tracing = await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
@@ -877,14 +902,21 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   if(traceRpc) {
     expect(tracing.spanCount, 'scroll-back recorded no traced calls').toBeGreaterThan(0);
     expect(tracing.loafObserved, 'long-animation-frame observer is not supported in the diagnostic browser').toBe(true);
-    expect([...tracing.installed].sort(), 'scroll-back tracing did not install every wrapped call').toEqual([...SCROLL_SPAN_NAMES].sort());
+    expect(SCROLL_SPAN_NAMES.filter((name) => !tracing.installed.includes(name)), 'scroll-back tracing did not install every wrapped call').toEqual([]);
   }
   return {
     ...metric,
     ...workerAttribution,
+    ...(droppedFrameAttribution ? {droppedFrameAttribution} : {}),
     scrollSpanTracing: tracing,
-    cpu: summarizeCpuProfile(stoppedProfile.profile),
-    longTaskAttribution: summarizeLongTaskAttribution(windowTasks, spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs, boundary.ms)
+    ...(stoppedProfile ? {
+      cpu: summarizeCpuProfile(stoppedProfile.profile),
+      ...(droppedFrameAttribution ? {droppedFrameCpu: summarizeLongTaskAttribution(
+        droppedFrameAttribution.map(({startMs, endMs}) => ({startTime: startMs, duration: endMs - startMs})),
+        spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs, boundary.ms, 0
+      )} : {}),
+      longTaskAttribution: summarizeLongTaskAttribution(windowTasks, spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs, boundary.ms)
+    } : {})
   };
 }
 
@@ -960,15 +992,27 @@ async function openContacts(page: Page, requests: {value: number}, traceEnabled 
   await waitForBundleResources(page);
 
   const workerRequests: string[] = [];
+  const pageErrors: string[] = [];
+  const recordPageError = (error: Error) => pageErrors.push(error.message);
   const recordWorkerRequest = (request: Request) => {
     if(request.url().includes('tlottie.worker')) workerRequests.push(request.url());
   };
   page.on('request', recordWorkerRequest);
+  page.on('pageerror', recordPageError);
   try {
     await beginScenario(page, requests, traceEnabled);
     await page.locator('.sidebar-tools-button').click();
     await page.getByText('Contacts', {exact: true}).last().click();
-    await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
+    try {
+      await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
+    } catch(error) {
+      const dom = await getContactsFailureDetails(page);
+      const contactsRpc = traceEnabled ? await getContactsRpcFailureDetails(page) : null;
+      if(error instanceof Error) {
+        error.message += `\nContacts diagnostics: ${JSON.stringify({dom, pageErrors, contactsRpc})}`;
+      }
+      throw error;
+    }
     const boundary = await snapshotMeasurementBoundary(page);
     onMeasurementBoundary?.(boundary);
     const sample = await capture(page, requests, boundary, false, traceEnabled);
@@ -976,6 +1020,7 @@ async function openContacts(page: Page, requests: {value: number}, traceEnabled 
     return sample;
   } finally {
     page.off('request', recordWorkerRequest);
+    page.off('pageerror', recordPageError);
   }
 }
 
@@ -1237,7 +1282,6 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   const page = await context.newPage();
   const requests = {value: 0};
   const captureScrollAttribution = variant === 'head' && scale === '100x';
-  const captureMeasuredLongTaskTrace = captureScrollAttribution;
   await installInstrumentation(page, requests, origin, false, captureScrollAttribution);
 
   try {
@@ -1255,9 +1299,11 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       page,
       requests,
       variant === 'head',
-      captureScrollAttribution ? {
+      scale === '100x' ? {
+        captureFrameTrace: true,
         captureCpuStacks: true,
-        includeLongTaskTrace: captureMeasuredLongTaskTrace
+        captureWorkerMessages: captureScrollAttribution,
+        includeLongTaskTrace: true
       } : undefined
     ));
     if(scroll) {
@@ -1303,11 +1349,12 @@ async function runTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixtu
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
     chatOpen = await openPartnerChat(page, requests, fixture);
-    scrollBack2k = await scrollBackTwoThousand(page, requests, run.variant === 'head', captureWorkerMessages ? {
+    scrollBack2k = await scrollBackTwoThousand(page, requests, run.variant === 'head', {
+      captureFrameTrace: true,
       captureCpuStacks: true,
       captureWorkerMessages,
       includeLongTaskTrace: true
-    } : undefined);
+    });
   } finally {
     await historyContext.close();
   }
@@ -1378,6 +1425,7 @@ async function traceChatOpen(browser: Browser, run: VariantRun, fixture: Fixture
 
 async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
   const traceSamples = Object.fromEntries(scenarios.map((scenario) => [scenario, [] as Metric[]])) as Record<string, Metric[]>;
+  report.diagnostics['100x'] = traceSamples;
 
   for(let repeat = 0; repeat < COLD_CHAT_LIST_REPEATS; ++repeat) {
     const context = await browser.newContext({
