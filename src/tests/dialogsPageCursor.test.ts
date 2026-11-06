@@ -92,6 +92,9 @@ test('uses the persisted server cursor when cached dialogs contain an older outl
 test('writes cursor updates to account state', () => {
   const storage = createStorage();
   const cursor = {peerId: 8, id: 0};
+  (storage as any).dialogsOffsetCursors = undefined;
+
+  expect(storage.getOffsetCursor(undefined)).toBeUndefined();
 
   storage.setOffsetCursor(undefined, cursor);
 

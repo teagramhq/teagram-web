@@ -17,8 +17,11 @@ test('dialog page notifications identify the peers saved by that page', async() 
     appDraftsManager: {addMissedDialogs: vi.fn()},
     dialogsStorage: {
       getOffsetDate: () => 0,
+      getOffsetCursor: (): undefined => undefined,
       isVirtualFilter: () => false,
       filterDialogsForStorage: (dialogs: any[]) => dialogs,
+      getDialogPeerId: (dialog: any) => dialog.peerId,
+      setOffsetCursor: vi.fn(),
       saveDialog: vi.fn(),
       getFolderDialogs: (): any[] => [],
       setDialogsLoaded: vi.fn()

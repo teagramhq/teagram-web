@@ -532,10 +532,11 @@ export default class DialogsStorage extends AppManager {
 
   /** The next server page must start after the raw tail of the last fetched page. */
   public getOffsetCursor(folderId: number): DialogOffsetCursor | undefined {
-    return this.dialogsOffsetCursors[folderId];
+    return this.dialogsOffsetCursors?.[folderId];
   }
 
   public setOffsetCursor(folderId: number, cursor: DialogOffsetCursor) {
+    this.dialogsOffsetCursors ||= {};
     this.dialogsOffsetCursors[folderId] = cursor;
     this.appStateManager.pushToState('dialogsOffsetCursors', this.dialogsOffsetCursors);
   }
