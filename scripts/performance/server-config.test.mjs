@@ -9,6 +9,12 @@ const serverCheckout = process.env.PERF_SERVER_CHECKOUT || 'teagram-server';
 const serverTestHelpers = readFileSync(resolve(serverCheckout, 'internal/pgtest/pgtest.go'), 'utf8');
 const runtimeCommitPath = new URL('../../.github/perf-server-commit', import.meta.url);
 
+test('the diagnostic server records and uploads getDialogs timings for each fixture', () => {
+  assert.match(workflow, /go -C teagram-server build -tags performance/);
+  assert.match(workflow, /TG_PERF_PROFILE_GETDIALOGS=1 TG_PERF_FIXTURE="\$scale"/);
+  assert.match(workflow, /path:\s*\|[\s\S]*?teagram-perf-server-100x\.log/);
+});
+
 test('the Vitest suite leaves native performance tests to node:test', () => {
   assert.match(viteConfig, /exclude:[\s\S]*?'scripts\/performance\/\*\*\/\*\.test\.mjs'/);
 });
