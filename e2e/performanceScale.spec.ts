@@ -114,9 +114,12 @@ const bundleRequestTrackers = new WeakMap<Page, BundleRequestTracker>();
 
 const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
 const scenarioPreservedPerformancePhases = getScenarioPreservedPerformancePhases();
+let measurementsStarted = false;
 let measurementsComplete = false;
 
 test.afterAll(() => {
+  // A failed measurement restarts the Playwright worker for the next test; that worker holds an empty report and must not overwrite the failed one.
+  if(!measurementsStarted) return;
   const writeReport = () => { if(reportPath) writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`); };
   if(!measurementsComplete) return writeReport();
   const scrollSamples = report.variants.head['100x'].scrollBack2k;
@@ -1504,6 +1507,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
 
 test('measures the scale fixture in interleaved base and head runs', async({browser}) => {
   expect(reportPath).toBeTruthy();
+  measurementsStarted = true;
 
   for(const scale of scales) {
     const fixture = fixtures[scale];
