@@ -87,3 +87,18 @@ export function summarizeWorkerMessageAttribution(tasks: Array<{startTime: numbe
     };
   });
 }
+
+
+type RecorderControlSample = {
+  longTasksOver50Ms: number,
+  blockingTimeMs: number,
+  cpu: {sampledGcMs: number}
+};
+
+export function summarizeRecorderComparison(pairs: Array<{unrecorded: RecorderControlSample, recorded: RecorderControlSample}>) {
+  return pairs.map(({unrecorded, recorded}) => ({
+    longTaskCountDelta: recorded.longTasksOver50Ms - unrecorded.longTasksOver50Ms,
+    blockingTimeDeltaMs: Number((recorded.blockingTimeMs - unrecorded.blockingTimeMs).toFixed(2)),
+    sampledGcDeltaMs: Number((recorded.cpu.sampledGcMs - unrecorded.cpu.sampledGcMs).toFixed(2))
+  }));
+}

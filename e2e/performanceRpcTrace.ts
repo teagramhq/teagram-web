@@ -53,6 +53,7 @@ type LongAnimationFrame = {
 
 export type PerformanceCpuSummary = {
   sampledCpuMs: number,
+  sampledGcMs: number,
   topFrames: Array<{functionName: string, script: string, selfMs: number}>,
   topStacks: Array<{frames: Array<{functionName: string, script: string}>, selfMs: number}>
 };
@@ -165,6 +166,7 @@ export function summarizeCpuProfile(profile: PerformanceCpuProfile): Performance
   const selfTimeByFrame = new Map<string, {functionName: string, script: string, selfMs: number}>();
   const selfTimeByStack = new Map<string, {frames: Array<{functionName: string, script: string}>, selfMs: number}>();
   let sampledCpuMs = 0;
+  let sampledGcMs = 0;
 
   (profile.samples || []).forEach((nodeId, index) => {
     const selfMs = Math.max(0, profile.timeDeltas?.[index] || 0) / 1000;
@@ -172,6 +174,7 @@ export function summarizeCpuProfile(profile: PerformanceCpuProfile): Performance
 
     const callFrame = callFrames.get(nodeId);
     const functionName = callFrame?.functionName || '(anonymous)';
+    if(functionName === '(garbage collector)') sampledGcMs += selfMs;
     const path = callFrame?.url ? new URL(callFrame.url, 'https://trace.invalid').pathname : '';
     const script = path ? path.split('/').slice(-2).join('/') : 'native';
     const key = `${functionName}\0${script}`;
@@ -207,6 +210,7 @@ export function summarizeCpuProfile(profile: PerformanceCpuProfile): Performance
 
   return {
     sampledCpuMs: Number(sampledCpuMs.toFixed(2)),
+    sampledGcMs: Number(sampledGcMs.toFixed(2)),
     topFrames: [...selfTimeByFrame.values()]
       .sort((left, right) => right.selfMs - left.selfMs)
       .slice(0, 20)

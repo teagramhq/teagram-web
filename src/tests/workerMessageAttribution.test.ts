@@ -92,3 +92,18 @@ test('counts clock-resolution-sized messages and flags a near-threshold task', (
   ], 0, [{startTime: 20, endTime: 20, size: 2}]);
   expect(summary[0]).toMatchObject({messageCount: 2, batchSizes: [2], recorderOverheadMs: 2, measuredOverheadCouldCross50Ms: true});
 });
+
+test('compares recorder costs and sampled garbage collection for matched scroll runs', async() => {
+  const {summarizeRecorderComparison} = await import('../../e2e/workerMessageAttribution');
+  const result = summarizeRecorderComparison([{
+    unrecorded: {longTasksOver50Ms: 2, blockingTimeMs: 40, cpu: {sampledGcMs: 17}},
+    recorded: {longTasksOver50Ms: 3, blockingTimeMs: 70, cpu: {sampledGcMs: 25}}
+  }, {
+    unrecorded: {longTasksOver50Ms: 0, blockingTimeMs: 0, cpu: {sampledGcMs: 0}},
+    recorded: {longTasksOver50Ms: 0, blockingTimeMs: 0, cpu: {sampledGcMs: 0}}
+  }]);
+  expect(result).toEqual([
+    {longTaskCountDelta: 1, blockingTimeDeltaMs: 30, sampledGcDeltaMs: 8},
+    {longTaskCountDelta: 0, blockingTimeDeltaMs: 0, sampledGcDeltaMs: 0}
+  ]);
+});

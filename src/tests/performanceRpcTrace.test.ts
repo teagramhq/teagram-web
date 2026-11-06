@@ -353,3 +353,10 @@ describe('long-animation-frame observation', () => {
     expect(injected({supportedEntryTypes: []}, () => {})).toBe(false);
   });
 });
+
+test('reports sampled garbage collection even when it is not a top frame', () => {
+  const nodes = Array.from({length: 21}, (_, index) => ({id: index + 1, callFrame: {functionName: `frame${index}`}}));
+  nodes.push({id: 22, callFrame: {functionName: '(garbage collector)'}});
+  const summary = summarizeCpuProfile({nodes, samples: [...nodes.map(({id}) => id), 1], timeDeltas: [...nodes.map(() => 1_000), 1_000]});
+  expect(summary.sampledGcMs).toBe(1);
+});

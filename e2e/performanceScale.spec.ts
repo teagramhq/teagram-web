@@ -1,4 +1,4 @@
-import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
+import {installWorkerMessageAttribution, summarizeRecorderComparison, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
 import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
@@ -16,6 +16,7 @@ type Fixture = {
 type Scale = '1x' | '100x';
 type Variant = 'base' | 'head';
 const PERFORMANCE_TIMING_REPEATS = 5;
+const RECORDER_CONTROL_REPEATS = 6;
 const REPORT_ONLY_SEND_REPEATS = 11;
 
 type Metric = {
@@ -1071,6 +1072,27 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   }
 }
 
+async function runRecorderControl(browser: Browser, run: VariantRun, fixture: Fixture, captureWorkerMessages: boolean) {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin, false, true);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    await openPartnerChat(page, requests, fixture);
+    const scroll = await scrollBackTwoThousand(page, requests, true, {captureCpuStacks: true, captureWorkerMessages});
+    if(!scroll?.cpu || !scroll.cpu.sampledCpuMs) throw new Error('Recorder control CPU profile is empty');
+    return scroll as Metric & {cpu: PerformanceCpuSummary};
+  } finally {
+    await context.close();
+  }
+}
+
 async function runTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixture) {
   const contextOptions = {
     ignoreHTTPSErrors: true,
@@ -1281,10 +1303,23 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       report.variants[variant][coldScale].coldChatList.push(sample);
     }
   }
+  const recorderPairs: Array<{unrecorded: Metric & {cpu: PerformanceCpuSummary}, recorded: Metric & {cpu: PerformanceCpuSummary}}> = [];
+  report.diagnostics['100x'] = {recorderComparison: {pairs: recorderPairs}};
+  for(let repeat = 0; repeat < RECORDER_CONTROL_REPEATS; ++repeat) {
+    const pair = {} as {unrecorded: Metric & {cpu: PerformanceCpuSummary}, recorded: Metric & {cpu: PerformanceCpuSummary}};
+    const order: Array<'unrecorded' | 'recorded'> = repeat % 2 ? ['recorded', 'unrecorded'] : ['unrecorded', 'recorded'];
+    for(const mode of order) {
+      pair[mode] = await test.step(`100x recorder ${mode} control repeat ${repeat + 1}`, () =>
+        runRecorderControl(browser, preparedVariants['100x'].head!, fixtures['100x']!, mode === 'recorded'));
+    }
+    recorderPairs.push(pair);
+  }
+
   const traceOrigin = process.env.PERF_TRACE_HEAD_ORIGIN_100X;
   expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
   const traceRun = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
-  report.diagnostics['100x'] = await test.step('trace 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRun!, fixtures['100x']!));
+  const diagnostics = await test.step('trace 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRun!, fixtures['100x']!));
+  Object.assign(report.diagnostics['100x'], diagnostics, {recorderComparison: {pairs: recorderPairs, deltas: summarizeRecorderComparison(recorderPairs)}});
   if(report.requireBase) {
     const baseTraceOrigin = process.env.PERF_TRACE_BASE_ORIGIN_100X;
     expect(baseTraceOrigin, '100x traced base origin is missing').toBeTruthy();
