@@ -5003,19 +5003,15 @@ export class AppMessagesManager extends AppManager {
             (result._ === 'messages.dialogs' || result._ === 'messages.dialogsSlice') ? result.dialogs : undefined;
           const serverDialogs = pageDialogs?.filter((dialog) => dialog._ === 'dialog');
           const lastDialog = serverDialogs?.[serverDialogs.length - 1];
-          const pagePeerId = lastDialog && this.dialogsStorage.getDialogPeerId(lastDialog as any);
-          const pageCursor = lastDialog && pagePeerId !== undefined ? {
-            peerId: pagePeerId,
-            id: getServerMessageId(lastDialog.top_message)
-          } : undefined;
+          const cursorSource = lastDialog && {peer: {...lastDialog.peer}, top_message: lastDialog.top_message};
 
           const processed = processResult(result);
           return Promise.resolve(processed).then((processedResult) => {
-            if(!processedResult || !pageCursor) {
+            if(!processedResult || !cursorSource) {
               return processedResult;
             }
 
-            this.dialogsStorage.setOffsetCursor(folderId, pageCursor);
+            const pageCursor = this.dialogsStorage.setOffsetCursor(folderId, cursorSource);
 
             if(cursor && cursor.peerId === pageCursor.peerId && cursor.id === pageCursor.id) {
               // * The server returned the same raw page tail, so there is no next page to request.

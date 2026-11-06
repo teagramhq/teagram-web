@@ -27,26 +27,17 @@ test('reloads missing cached dialogs in bounded worker batches', async() => {
   expect(maxActiveReloads).toBeLessThanOrEqual(25);
 });
 
-test('retries failed peer batches with bounded backoff and without rewalking the server list', async() => {
+test('retries unresolved peers on the next cached first-page read and stops at the session cap', async() => {
   vi.useFakeTimers();
   try {
-    const firstPeerId = -1 as PeerId;
-    const secondPeerId = -2 as PeerId;
+    const unresolvedPeerId = -1 as PeerId;
+    const resolvedPeerId = -2 as PeerId;
     const loadedPeerIds = new Set<PeerId>();
-    const reloadAttempts = new Map<PeerId, number>();
-    const reloadedPeerIds: PeerId[] = [];
     const reloadConversation = vi.fn(async(peerId: PeerId) => {
-      reloadedPeerIds.push(peerId);
-      const attempt = (reloadAttempts.get(peerId) || 0) + 1;
-      reloadAttempts.set(peerId, attempt);
-      if(peerId === firstPeerId && attempt > 1 && attempt < 9) {
-        throw new Error(attempt === 2 ? 'retry batch failed' : 'peer still unavailable');
-      }
-      if((peerId === firstPeerId && attempt === 9) || (peerId === secondPeerId && attempt === 2)) {
-        loadedPeerIds.add(peerId);
-      }
+      if(peerId === resolvedPeerId) loadedPeerIds.add(peerId);
     });
-    const getServerChannelsMissingLocally = vi.fn(async() => [firstPeerId, secondPeerId]);
+    const getServerChannelsMissingLocally = vi.fn(async() => [unresolvedPeerId, resolvedPeerId]);
+    const log = {error: vi.fn()};
     const storage = Object.create((await import('@lib/storages/dialogs')).default.prototype) as DialogsStorage & any;
     Object.assign(storage, {
       appMessagesManager: {reloadConversation},
@@ -54,52 +45,58 @@ test('retries failed peer batches with bounded backoff and without rewalking the
       cachedListReconciled: false,
       getDialogOnly: (peerId: PeerId): {} | undefined => loadedPeerIds.has(peerId) ? {} : undefined,
       getServerChannelsMissingLocally,
-      log: {error: vi.fn()}
+      log
     });
 
     await storage.reconcileCachedChannelDialogs();
-    expect(reloadedPeerIds).toEqual([firstPeerId, secondPeerId]);
 
-    await vi.advanceTimersByTimeAsync(250);
-    expect(reloadedPeerIds).toEqual([firstPeerId, secondPeerId, firstPeerId, secondPeerId]);
-    expect(storage.cachedListReconcileRetryPeerIds).toEqual([firstPeerId]);
+    expect(reloadConversation.mock.calls.map(([peerId]: [PeerId]) => peerId)).toEqual([unresolvedPeerId, resolvedPeerId]);
+    expect(log.error).toHaveBeenCalledWith('cached channel dialog reconcile peer unresolved', unresolvedPeerId);
+    expect(storage.cachedListReconcileRetryPeerIds).toEqual([unresolvedPeerId]);
+    expect(storage.cachedListReconciled).toBe(false);
 
-    await vi.advanceTimersByTimeAsync(499);
-    expect(reloadedPeerIds).toHaveLength(4);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(reloadedPeerIds).toHaveLength(5);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(reloadConversation).toHaveBeenCalledTimes(2);
 
-    for(const [delay, expectedCount] of [[999, 5], [1_999, 6], [3_999, 7], [7_999, 8], [15_999, 9]] as const) {
-      await vi.advanceTimersByTimeAsync(delay);
-      expect(reloadedPeerIds).toHaveLength(expectedCount);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(reloadedPeerIds).toHaveLength(expectedCount + 1);
-    }
+    await storage.reconcileCachedChannelDialogs();
 
-    await vi.advanceTimersByTimeAsync(29_999);
-    expect(reloadedPeerIds).toHaveLength(10);
-    await vi.advanceTimersByTimeAsync(1);
-
-    expect(reloadedPeerIds).toEqual([
-      firstPeerId,
-      secondPeerId,
-      firstPeerId,
-      secondPeerId,
-      firstPeerId,
-      firstPeerId,
-      firstPeerId,
-      firstPeerId,
-      firstPeerId,
-      firstPeerId,
-      firstPeerId
-    ]);
+    expect(reloadConversation.mock.calls.map(([peerId]: [PeerId]) => peerId)).toEqual([unresolvedPeerId, resolvedPeerId, unresolvedPeerId]);
     expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(1);
+    expect(log.error).toHaveBeenNthCalledWith(2, 'cached channel dialog reconcile peer unresolved', unresolvedPeerId);
     expect(storage.cachedListReconcileRetryPeerIds).toBeUndefined();
     expect(storage.cachedListReconciled).toBe(true);
+
+    await storage.reconcileCachedChannelDialogs();
+
+    expect(reloadConversation).toHaveBeenCalledTimes(3);
   } finally {
     vi.clearAllTimers();
     vi.useRealTimers();
   }
+});
+
+test('counts failed server-list walks against the same session retry cap', async() => {
+  const failure = new Error('dialog page failed');
+  const getServerChannelsMissingLocally = vi.fn().mockRejectedValue(failure);
+  const log = {error: vi.fn()};
+  const storage = Object.create((await import('@lib/storages/dialogs')).default.prototype) as DialogsStorage & any;
+  Object.assign(storage, {
+    cachedListReconciled: false,
+    getServerChannelsMissingLocally,
+    log
+  });
+
+  await storage.reconcileCachedChannelDialogs();
+  expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(1);
+  expect(storage.cachedListReconciled).toBe(false);
+
+  await storage.reconcileCachedChannelDialogs();
+  expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(2);
+  expect(storage.cachedListReconciled).toBe(true);
+
+  await storage.reconcileCachedChannelDialogs();
+  expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(2);
+  expect(log.error).toHaveBeenCalledTimes(2);
 });
 
 test('mirrors each reconciliation page before delivering its peer events', async() => {
@@ -262,7 +259,7 @@ test('marks captured user updates for synchronous status reads', async() => {
   ]);
 });
 
-test('a failed second page keeps first-page updates and allows a retry', async() => {
+test('a failed second page keeps first-page updates and retries on the next cached first-page read', async() => {
   const failure = new Error('second page failed');
   const page: any = {_: 'messages.dialogsSlice', count: 2, dialogs: [
     {_: 'dialog', peer: {_: 'peerChannel', id: 42}, top_message: 1}
@@ -298,9 +295,6 @@ test('a failed second page keeps first-page updates and allows a retry', async()
   expect(mirrorApiPeers.mock.calls.some((call) => call[5]?.some((event: any) => event.name === 'chat_update'))).toBe(true);
   expect(log.error).toHaveBeenCalledWith('cached channel dialog reconcile failed', failure);
   expect(storage.cachedListReconciled).toBe(false);
-  expect(storage.cachedListReconcileRetryTimeout).toBeDefined();
-  clearTimeout(storage.cachedListReconcileRetryTimeout);
-  storage.cachedListReconcileRetryTimeout = undefined;
   await storage.reconcileCachedChannelDialogs();
   expect(invokeApiSingleProcess).toHaveBeenCalledTimes(3);
   expect(storage.cachedListReconciled).toBe(true);

@@ -51,8 +51,7 @@ import AccountController from '@lib/accounts/accountController';
 let cachedDialogReconcileTraceSequence = 0;
 const CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE = 25;
 const CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE = 4;
-const CACHED_DIALOG_RECONCILE_RETRY_INITIAL_DELAY_MS = 250;
-const CACHED_DIALOG_RECONCILE_RETRY_MAX_DELAY_MS = 30000;
+const CACHED_DIALOG_RECONCILE_MAX_ATTEMPTS = 2;
 
 export enum FilterType {
   Folder,
@@ -96,6 +95,26 @@ export type DialogOffsetCursor = {
   id: number
 };
 
+function isDialogOffsetCursor(value: unknown): value is DialogOffsetCursor {
+  if(!value || typeof value !== 'object') return false;
+  const {peerId, id} = value as Partial<DialogOffsetCursor>;
+  return typeof peerId === 'number' && Number.isSafeInteger(peerId) && peerId !== NULL_PEER_ID &&
+    typeof id === 'number' && Number.isSafeInteger(id) && id >= 0;
+}
+
+function normalizeDialogOffsetCursors(value: unknown): {[folder_id: number]: DialogOffsetCursor} {
+  if(!value || typeof value !== 'object' || Array.isArray(value)) return {};
+
+  const cursors: Record<string, DialogOffsetCursor> = {};
+  for(const [folderId, cursor] of Object.entries(value)) {
+    if(isDialogOffsetCursor(cursor)) {
+      cursors[folderId] = {...cursor};
+    }
+  }
+
+  return cursors as {[folder_id: number]: DialogOffsetCursor};
+}
+
 export const GLOBAL_FOLDER_ID: REAL_FOLDER_ID = undefined;
 
 // let spentTime = 0;
@@ -118,8 +137,7 @@ export default class DialogsStorage extends AppManager {
   private savedDialogsLoaded: boolean;
   private cachedListReconciled: boolean;
   private cachedListReconcileRetryPeerIds: PeerId[];
-  private cachedListReconcileRetryTimeout: number;
-  private cachedListReconcileRetryDelay: number;
+  private cachedListReconcileAttempts: number;
   private cachedListReconcileGeneration: number;
   private savedDialogsOffsetDate: number;
   private savedDialogsPinnedOrder: PeerId[];
@@ -294,7 +312,7 @@ export default class DialogsStorage extends AppManager {
       }
 
       this.allDialogsLoaded = state.allDialogsLoaded || {};
-      this.dialogsOffsetCursors = state.dialogsOffsetCursors || {};
+      this.dialogsOffsetCursors = normalizeDialogOffsetCursors(state.dialogsOffsetCursors);
 
       if(dialogs.length) {
         this.appDraftsManager.addMissedDialogs();
@@ -388,12 +406,8 @@ export default class DialogsStorage extends AppManager {
   }
 
   public clear = (init = false) => {
-    if(this.cachedListReconcileRetryTimeout !== undefined) {
-      ctx.clearTimeout(this.cachedListReconcileRetryTimeout);
-    }
-    this.cachedListReconcileRetryTimeout = undefined;
-    this.cachedListReconcileRetryDelay = undefined;
     this.cachedListReconcileRetryPeerIds = undefined;
+    this.cachedListReconcileAttempts = 0;
     this.cachedListReconciled = false;
     this.cachedListReconcileGeneration = (this.cachedListReconcileGeneration || 0) + 1;
 
@@ -532,13 +546,19 @@ export default class DialogsStorage extends AppManager {
 
   /** The next server page must start after the raw tail of the last fetched page. */
   public getOffsetCursor(folderId: number): DialogOffsetCursor | undefined {
-    return this.dialogsOffsetCursors?.[folderId];
+    const cursor = this.dialogsOffsetCursors?.[folderId];
+    return cursor && {...cursor};
   }
 
-  public setOffsetCursor(folderId: number, cursor: DialogOffsetCursor) {
+  public setOffsetCursor(folderId: number, dialog: {peer: Peer, top_message: number}): DialogOffsetCursor {
+    const cursor = {
+      peerId: this.appPeersManager.getPeerId(dialog.peer),
+      id: getServerMessageId(dialog.top_message)
+    };
     this.dialogsOffsetCursors ||= {};
     this.dialogsOffsetCursors[folderId] = cursor;
     this.appStateManager.pushToState('dialogsOffsetCursors', this.dialogsOffsetCursors);
+    return {...cursor};
   }
 
   private generateFolder(id: number) {
@@ -2188,68 +2208,51 @@ export default class DialogsStorage extends AppManager {
    * from that cache for good, so once per start compare it with the server's list and fetch the
    * channel dialogs it lacks. The server's chats decide membership, so a left, kicked or banned
    * channel is never fetched back. If any dialog is still missing, retry only those peers with
-   * bounded backoff without walking the server list again.
+   * once on the next cached first-page read without walking the server list again.
    */
   private async reconcileCachedChannelDialogs() {
-    if(this.cachedListReconciled || this.cachedListReconcileRetryTimeout !== undefined) {
-      return;
-    }
+    if(this.cachedListReconciled) return;
 
     const generation = this.cachedListReconcileGeneration || 0;
+    const attempts = (this.cachedListReconcileAttempts || 0) + 1;
+    this.cachedListReconcileAttempts = attempts;
     this.cachedListReconciled = true;
     const retryPeerIds = this.cachedListReconcileRetryPeerIds;
-    let missingPeerIds: PeerId[] | undefined;
+    let missingPeerIds: PeerId[];
     try {
       missingPeerIds = retryPeerIds ?
         retryPeerIds.filter((peerId) => this.appChatsManager.isInChat(peerId.toChatId())) :
         await this.getServerChannelsMissingLocally();
-      for(let offset = 0; offset < missingPeerIds.length; offset += CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE) {
-        const peerIds = missingPeerIds.slice(offset, offset + CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE);
-        const results = await Promise.allSettled(peerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
-        const failedReload = results.find((result) => result.status === 'rejected');
-        if(failedReload?.status === 'rejected') {
-          throw failedReload.reason;
-        }
-      }
     } catch(err) {
       this.log.error('cached channel dialog reconcile failed', err);
+      if(generation !== (this.cachedListReconcileGeneration || 0)) return;
+
+      this.cachedListReconcileRetryPeerIds = undefined;
+      this.cachedListReconciled = attempts >= CACHED_DIALOG_RECONCILE_MAX_ATTEMPTS;
+      return;
     }
 
     if(generation !== (this.cachedListReconcileGeneration || 0)) {
       return;
     }
 
-    if(!missingPeerIds) {
-      this.cachedListReconciled = false;
-      this.scheduleCachedChannelDialogRetry();
-      return;
+    for(let offset = 0; offset < missingPeerIds.length; offset += CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE) {
+      const peerIds = missingPeerIds.slice(offset, offset + CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE);
+      await Promise.allSettled(peerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
     }
+
+    if(generation !== (this.cachedListReconcileGeneration || 0)) return;
 
     const unresolvedPeerIds = missingPeerIds.filter((peerId) => {
       return this.appChatsManager.isInChat(peerId.toChatId()) && !this.getDialogOnly(peerId);
     });
-    this.cachedListReconcileRetryPeerIds = unresolvedPeerIds.length ? unresolvedPeerIds : undefined;
-    if(unresolvedPeerIds.length) {
-      this.cachedListReconciled = false;
-      this.scheduleCachedChannelDialogRetry();
-      return;
+    for(const peerId of unresolvedPeerIds) {
+      this.log.error('cached channel dialog reconcile peer unresolved', peerId);
     }
 
-    this.cachedListReconcileRetryDelay = undefined;
-    this.cachedListReconciled = true;
-  }
-
-  private scheduleCachedChannelDialogRetry() {
-    if(this.cachedListReconcileRetryTimeout !== undefined) {
-      return;
-    }
-
-    const delay = this.cachedListReconcileRetryDelay || CACHED_DIALOG_RECONCILE_RETRY_INITIAL_DELAY_MS;
-    this.cachedListReconcileRetryDelay = Math.min(delay * 2, CACHED_DIALOG_RECONCILE_RETRY_MAX_DELAY_MS);
-    this.cachedListReconcileRetryTimeout = ctx.setTimeout(() => {
-      this.cachedListReconcileRetryTimeout = undefined;
-      void this.reconcileCachedChannelDialogs();
-    }, delay);
+    const shouldRetry = unresolvedPeerIds.length > 0 && attempts < CACHED_DIALOG_RECONCILE_MAX_ATTEMPTS;
+    this.cachedListReconcileRetryPeerIds = shouldRetry ? unresolvedPeerIds : undefined;
+    this.cachedListReconciled = !shouldRetry;
   }
 
   private async getServerChannelsMissingLocally() {
