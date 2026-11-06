@@ -8,6 +8,7 @@ import {test} from 'node:test';
 const workflow = readFileSync(new URL('../../.github/workflows/performance.yml', import.meta.url), 'utf8');
 const playwrightConfig = readFileSync(new URL('../../playwright.performance.config.ts', import.meta.url), 'utf8');
 const performanceScale = readFileSync(new URL('../../e2e/performanceScale.spec.ts', import.meta.url), 'utf8');
+const chatPageSnapshotView = readFileSync(new URL('../../src/lib/chatPageSnapshotView.ts', import.meta.url), 'utf8');
 
 test('performance comparisons use uninstrumented head and base bundles', () => {
   assert.match(workflow, /^\s+pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
@@ -19,6 +20,11 @@ test('performance tracing uses a separate diagnostic bundle', () => {
   assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
   assert.match(workflow, /PERF_TRACE_HEAD_ORIGIN_100X=http:\/\/localhost:4177/);
   assert.match(workflow, /TG_WEBSOCKET_ALLOWED_ORIGINS=.*http:\/\/localhost:4177/);
+});
+
+test('snapshot date formatting does not request the lazy date chunk', () => {
+  assert.doesNotMatch(chatPageSnapshotView, /from ['"]@helpers\/date['"]/);
+  assert.match(chatPageSnapshotView, /IntlDateElement/);
 });
 
 test('chat-list metrics wait for the snapshot to be replaced by live rows', () => {

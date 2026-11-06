@@ -1,6 +1,6 @@
 import type {ChatPageRow} from '@lib/chatPageSnapshot';
 import getPreviewURLFromBytes from '@helpers/bytes/getPreviewURLFromBytes';
-import {formatDateAccordingToTodayNew} from '@helpers/date';
+import I18n from '@lib/langPack';
 import getAbbreviation from '@lib/richTextProcessor/getAbbreviation';
 import Icon from '@components/icon';
 import {watchChatPageSnapshotInvalidations} from '@lib/chatPageSnapshot';
@@ -11,6 +11,34 @@ import type {ActiveAccountNumber} from '@lib/accounts/types';
 let snapshotElement: HTMLElement;
 let livePageArrived = false;
 let stopWatching: () => void;
+
+function getWeekNumber(date: Date) {
+  const weekDate = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNumber = weekDate.getUTCDay() || 7;
+  weekDate.setUTCDate(weekDate.getUTCDate() + 4 - dayNumber);
+  const yearStart = new Date(Date.UTC(weekDate.getUTCFullYear(), 0, 1));
+  return Math.ceil((((weekDate.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+}
+
+function formatSnapshotDate(time: Date) {
+  const today = new Date();
+  const now = today.getTime() / 1000 | 0;
+  const timestamp = time.getTime() / 1000 | 0;
+  const options: Intl.DateTimeFormatOptions = {};
+  if((now - timestamp) < 86400 && today.getDate() === time.getDate()) {
+    options.hour = options.minute = '2-digit';
+  } else if(today.getFullYear() !== time.getFullYear()) {
+    options.year = options.day = 'numeric';
+    options.month = '2-digit';
+  } else if((now - timestamp) < (86400 * 7) && getWeekNumber(today) === getWeekNumber(time)) {
+    options.weekday = 'short';
+  } else {
+    options.month = 'short';
+    options.day = 'numeric';
+  }
+
+  return new I18n.IntlDateElement({date: time, options}).element;
+}
 
 export function watchChatPageSnapshot(accountNumber: ActiveAccountNumber, guest: boolean) {
   const stopSnapshot = watchChatPageSnapshotInvalidations(accountNumber, replaceChatPageSnapshot);
@@ -50,7 +78,7 @@ export function paintChatPageSnapshot(rows: ChatPageRow[] | undefined) {
     if(row.muted) title.append(Icon('nosound_filled', 'dialog-muted-icon'));
     const details = element('div', 'row-title-right row-title-right-secondary dialog-title-details');
     const time = element('span', 'message-time');
-    if(row.date) time.append(formatDateAccordingToTodayNew(new Date(row.date * 1000)));
+    if(row.date) time.append(formatSnapshotDate(new Date(row.date * 1000)));
     details.append(time);
     titleRow.append(title, details);
     const subtitle = element('div', 'row-row row-subtitle-row dialog-subtitle has-multiple-badges');
