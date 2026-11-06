@@ -1046,8 +1046,10 @@ async function openContacts(page: Page, requests: {value: number}, traceEnabled 
   page.on('pageerror', recordPageError);
   try {
     await beginScenario(page, requests, traceEnabled);
-    await page.locator('.sidebar-tools-button').click();
-    const toolsMenu = page.locator('.sidebar-tools-submenu');
+    const toolsButton = page.locator('.sidebar-tools-button');
+    await toolsButton.click();
+    await expect(toolsButton).toHaveClass(/menu-open/, {timeout: 10_000});
+    const toolsMenu = page.locator('.btn-menu.active');
     await expect(toolsMenu).toBeVisible({timeout: 10_000});
     await toolsMenu.getByText('Contacts', {exact: true}).click();
     try {
