@@ -1660,9 +1660,8 @@ test('blocks repeated injected 100 ms main-thread stalls during cold chat list l
   const preparedHead = preparedVariants['100x'].head;
   expect(preparedHead, '100x head sign-in snapshot was not prepared').toBeTruthy();
 
-  // Compare the same build with and without the injected stall. A faster head can otherwise
-  // hide the stall behind work that the base performs after the head has already painted.
-  const baseControlSamples: Metric[] = [];
+  // Use the same bundle for both samples so a real improvement cannot mask the injected stall.
+  const controlSamples: Metric[] = [];
   const negativeSamples: Metric[] = [];
   for(let repeat = 0; repeat < COLD_CHAT_LIST_REPEATS; ++repeat) {
     const order = repeat % 2 === 0 ? [false, true] : [true, false];
@@ -1676,12 +1675,12 @@ test('blocks repeated injected 100 ms main-thread stalls during cold chat list l
         expect(sample.maxLongTaskDurationMs).toBeGreaterThanOrEqual(100);
         negativeSamples.push(sample);
       } else {
-        baseControlSamples.push(sample);
+        controlSamples.push(sample);
       }
     }
   }
-  const coldLoadEvaluation = evaluateWithControlSamples('coldChatList', baseControlSamples, negativeSamples);
+  const coldLoadEvaluation = evaluateWithControlSamples('coldChatList', controlSamples, negativeSamples);
   const coldLoadFailures = coldLoadEvaluation.blockingFailures.filter((failure) => failure.startsWith('100x coldChatList: '));
   const blockingTimes = (samples: Metric[]) => samples.map((sample) => sample.blockingTimeMs);
-  expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `100 ms control was not blocked: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs unmodified head ${JSON.stringify(blockingTimes(baseControlSamples))} ms`).toBe(true);
+  expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `100 ms control was not blocked: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs same-phase head ${JSON.stringify(blockingTimes(controlSamples))} ms`).toBe(true);
 });
