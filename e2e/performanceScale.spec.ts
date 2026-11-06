@@ -1047,8 +1047,11 @@ async function openContacts(page: Page, requests: {value: number}, traceEnabled 
   try {
     await beginScenario(page, requests, traceEnabled);
     await page.locator('.sidebar-tools-button').click();
-    await page.getByText('Contacts', {exact: true}).last().click();
+    const toolsMenu = page.locator('.sidebar-tools-submenu');
+    await expect(toolsMenu).toBeVisible({timeout: 10_000});
+    await toolsMenu.getByText('Contacts', {exact: true}).click();
     try {
+      await expect(page.locator('#contacts-container')).toBeVisible({timeout: 10_000});
       await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
     } catch(error) {
       const dom = await getContactsFailureDetails(page);
