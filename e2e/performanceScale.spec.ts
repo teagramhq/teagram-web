@@ -280,7 +280,12 @@ async function waitForBundleResources(page: Page) {
   await bundleRequests.waitForIdle(500, 10_000);
 }
 
+function resetRequestBreakdown(page: Page) {
+  requestBreakdownsByPage.get(page)?.clear();
+}
+
 async function beginScenario(page: Page, requests: {value: number}, traceEnabled = false, captureWorkerMessages = false) {
+  resetRequestBreakdown(page);
   await begin(page, requests, true, traceEnabled, captureWorkerMessages);
   if(!traceEnabled) return;
   await page.evaluate((preserveNames) => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace(preserveNames), scenarioPreservedPerformancePhases);
@@ -802,6 +807,7 @@ async function waitForHistorySettled(page: Page) {
 }
 
 async function reloadChatList(page: Page, requests: {value: number}, variant: Variant) {
+  resetRequestBreakdown(page);
   await begin(page, requests);
   await page.reload({waitUntil: 'domcontentloaded'});
   const firstVisibleChatList = await waitForChatList(page);
@@ -812,6 +818,7 @@ async function reloadChatList(page: Page, requests: {value: number}, variant: Va
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
+  resetRequestBreakdown(page);
   await begin(page, requests, true, traceRpc);
   await startMeasurementAtClick(row);
   await row.click();
