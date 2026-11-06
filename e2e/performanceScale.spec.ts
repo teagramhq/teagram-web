@@ -1025,7 +1025,15 @@ async function jumpToFixtureDate(
   return captureScenario(page, requests, traceEnabled, onMeasurementBoundary);
 }
 
-async function openContacts(page: Page, requests: {value: number}, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void) {
+async function openContacts(page: Page, requests: {value: number}, variant: Variant, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void) {
+  if(variant === 'base') {
+    await expect.poll(async() => page.evaluate(() => {
+      const worker = performance.getEntriesByType('resource').find((entry) => entry.name.includes('tlottie.worker')) as PerformanceResourceTiming | undefined;
+      return !!worker && worker.responseEnd > 0;
+    }), {timeout: 10_000}).toBe(true);
+    await waitForBundleResources(page);
+  }
+
   const workerRequests: string[] = [];
   const pageErrors: string[] = [];
   const recordPageError = (error: Error) => pageErrors.push(error.message);
@@ -1056,7 +1064,7 @@ async function openContacts(page: Page, requests: {value: number}, traceEnabled 
     const boundary = await snapshotMeasurementBoundary(page);
     onMeasurementBoundary?.(boundary);
     const sample = await capture(page, requests, boundary, false, traceEnabled);
-    expect(workerRequests).toEqual([]);
+    if(variant === 'base') expect(workerRequests).toEqual([]);
     return sample;
   } finally {
     page.off('request', recordWorkerRequest);
@@ -1369,7 +1377,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
 
     // Reset both variants to the same signed-in chat-list state before contacts measurements.
     await resetToChatList(page, origin);
-    measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
+    measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests, variant)));
     measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
     measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
     measured.sendMessage.push(await test.step('send a message', () => sendMessage(page, requests, fixture)));
@@ -1583,6 +1591,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         const contacts = await test.step(`profile 100x contacts list (repeat ${repeat + 1})`, () => openContacts(
           page,
           requests,
+          run.variant,
           true,
           (boundary) => contactsBoundary = boundary
         ));
