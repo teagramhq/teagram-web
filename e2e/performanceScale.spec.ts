@@ -1003,7 +1003,7 @@ async function openContacts(page: Page, requests: {value: number}, traceEnabled 
     const toolsButton = page.locator('#column-left .sidebar-tools-button.is-visible');
     await expect(toolsButton).toBeVisible();
     await toolsButton.click();
-    const contactsOption = page.locator('.btn-menu.active').getByRole('button', {name: 'Contacts', exact: true});
+    const contactsOption = page.locator('.btn-menu.active .btn-menu-item').filter({hasText: /^Contacts$/});
     await expect(contactsOption).toBeVisible();
     await contactsOption.click();
     try {
