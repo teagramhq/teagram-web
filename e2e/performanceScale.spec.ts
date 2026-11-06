@@ -1,3 +1,4 @@
+import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
 import {readFileSync, writeFileSync} from 'node:fs';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
@@ -117,7 +118,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   page.on('worker', (worker) => bundleRequests.workerReady(worker.url()));
   await page.exposeBinding('__teagramBundleWorkerReady', (_source, url: string) => bundleRequests.workerReady(url));
   // Only the diagnostic pass observes long animation frames; the gated windows stay as instrumented as on master.
-  if(observeAnimationFrames) await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
+  if(observeAnimationFrames) await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()}; window.__teagramInstallWorkerMessageAttribution = ${installWorkerMessageAttribution.toString()};`});
   return page.addInitScript(({injectColdStall, observeAnimationFrames}: {injectColdStall: boolean, observeAnimationFrames: boolean}) => {
     // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
     const SharedWorkerConstructor = (window as any).SharedWorker;
@@ -583,7 +584,13 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
 
   // Only the diagnostic pass waits: the gated window must keep the chat-open history tail it always had.
   if(waitForHistory) await waitForHistorySettled(page);
-  if(captureCpuStacks) await installScrollSpanTracing(page);
+  if(captureCpuStacks) {
+    await installScrollSpanTracing(page);
+    await page.evaluate(() => {
+      const perf = (window as any).__teagramPerf;
+      perf.workerMessages = (window as any).__teagramInstallWorkerMessageAttribution((window as any).apiManagerProxy, () => performance.now());
+    });
+  }
   if(traceRpc) await begin(page, requests, true, true);
   else await begin(page, requests);
   const cpuProfile = captureCpuStacks ? await startCpuProfile(page) : undefined;
@@ -643,15 +650,17 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   const metric = await capture(page, requests, boundary, true, traceRpc);
   if(!stoppedProfile) return metric;
 
-  const {tasks, spans} = await page.evaluate(() => {
+  const {tasks, spans, workerMessages} = await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
     return {
       tasks: perf.longTasks as Array<{startTime: number, duration: number}>,
-      spans: (perf.scrollSpans || []) as PerformanceSpan[]
+      spans: (perf.scrollSpans || []) as PerformanceSpan[],
+      workerMessages: perf.workerMessages.spans as Array<{type: string, startTime: number, duration: number}>
     };
   });
   const tracing = await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
+    perf.workerMessages.restore();
     return {
       installed: perf.scrollSpanInstalled || [],
       spanCount: (perf.scrollSpans || []).length,
@@ -665,6 +674,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   const windowTasks = tasks.filter(({startTime}) => startTime >= boundary.startedAtMs && startTime < windowEndMs);
   return {
     ...metric,
+    workerMessageAttribution: summarizeWorkerMessageAttribution(windowTasks, workerMessages, boundary.startedAtMs),
     scrollSpanTracing: tracing,
     cpu: summarizeCpuProfile(stoppedProfile.profile),
     longTaskAttribution: summarizeLongTaskAttribution(windowTasks, spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs)
