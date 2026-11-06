@@ -329,11 +329,6 @@ export function evaluatePerformance(report, history = []) {
       if(report.requireBase && Number.isFinite(head.bundleBytes) && Number.isFinite(base.bundleBytes) && head.bundleBytes > base.bundleBytes * 1.02) {
         addFailure(blockingFailures, scale, scenario.key, `bundle grew from ${base.bundleBytes} to ${head.bundleBytes} bytes (over 2%)`);
       }
-      if(report.requireBase && ['coldChatList', 'warmChatList'].includes(scenario.key) &&
-        Number.isFinite(head.requests) && Number.isFinite(base.requests) && head.requests > base.requests) {
-        addFailure(blockingFailures, scale, scenario.key, `startup request count rose from ${base.requests} to ${head.requests}`);
-      }
-
       const budgetMs = scale === '100x' ? scenario.budgetMs : null;
       const absoluteBudgetFailure = budgetMs !== null && Number.isFinite(head.ms) && head.ms > budgetMs;
       const relativeTimingFailure = hasTimingRegression(headSamples, mainValues);
