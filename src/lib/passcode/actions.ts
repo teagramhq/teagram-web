@@ -10,7 +10,7 @@ import {useLockScreenHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 import EncryptionKeyStore from '@lib/passcode/keyStore';
 import {createEncryptionArtifactsForPasscode, deriveEncryptionKey, hashPasscode} from '@lib/passcode/utils';
-import {forgetLoadedChatPageSnapshot} from '@lib/chatPageSnapshot';
+import {blockSnapshotReads, snapshotReadGuard, unblockSnapshotReads} from '@lib/chatPageSnapshot';
 
 export type PasscodeActions = ReturnType<typeof usePasscodeActions>;
 
@@ -46,8 +46,8 @@ export function usePasscodeActions() {
 
     passcode = ''; // forget
 
-    forgetLoadedChatPageSnapshot();
-    await apiManagerProxy.invoke('preparePasscodeSnapshots', undefined);
+    const snapshotGuard = blockSnapshotReads();
+    await apiManagerProxy.invoke('preparePasscodeSnapshots', snapshotGuard);
 
     await commonStateStorage.set({
       passcode: {
@@ -93,6 +93,8 @@ export function usePasscodeActions() {
   }
 
   async function disablePasscode() {
+    const snapshotGuard = snapshotReadGuard();
+    if(snapshotGuard === undefined) throw new Error('Chat page snapshot guard is unavailable');
     const [, setAppSettings] = useAppSettings();
     await setAppSettings('passcode', 'enabled', false);
     rootScope.dispatchEvent('toggle_using_passcode', false);
@@ -108,7 +110,9 @@ export function usePasscodeActions() {
 
     await enableCacheStorages();
 
-    commonStateStorage.delete('passcode');
+    await commonStateStorage.delete('passcode');
+    await apiManagerProxy.invoke('resumePasscodeSnapshots', snapshotGuard);
+    unblockSnapshotReads(snapshotGuard);
   }
 
   /**

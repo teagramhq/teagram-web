@@ -251,10 +251,12 @@ port.addMultipleEventsListeners({
     selfTerminate();
   },
 
-  preparePasscodeSnapshots: async(_payload, source) => {
-    await disableChatPageSnapshots();
+  preparePasscodeSnapshots: async(token, source) => {
+    await disableChatPageSnapshots(token);
     await port.invokeExceptSourceAsync('forgetChatPageSnapshot', undefined, source);
   },
+
+  resumePasscodeSnapshots: (token) => enableChatPageSnapshots(token),
 
   toggleUsingPasscode: async(payload, source) => {
     if(payload.isUsingPasscode) await disableChatPageSnapshots();
@@ -267,7 +269,6 @@ port.addMultipleEventsListeners({
         sessionStorage.encryptEncryptable() :
         sessionStorage.decryptEncryptable()
     ]);
-    if(!payload.isUsingPasscode) enableChatPageSnapshots();
 
     pushSingleManager.registerAgain();
 

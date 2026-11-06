@@ -5,7 +5,7 @@ import AccountController from '@lib/accounts/accountController';
 import DialogsStorage from '@lib/storages/dialogs';
 import loadStorages from '@appManagers/utils/storages/loadStorages';
 import {ApiManager} from '@appManagers/apiManager';
-import StateStorage from '@lib/stateStorage';
+import * as snapshotStorage from '@lib/chatPageSnapshotStorage';
 import sessionStorage from '@lib/sessionStorage';
 
 const key = {accountNumber: 1 as const, userId: 123 as PeerId, server: 'server-a', authKeyId: 'abc'};
@@ -13,7 +13,7 @@ const rows = [{peerId: 42 as PeerId, title: 'Alice', preview: 'Hello', date: 10,
 
 describe('chat page snapshot storage', () => {
   beforeEach(async() => {
-    enableChatPageSnapshots();
+    await enableChatPageSnapshots();
     DeferredIsUsingPasscode.resolveDeferred(false);
     await clearChatPageSnapshot(1);
   });
@@ -49,14 +49,14 @@ describe('chat page snapshot storage', () => {
     await writeChatPageSnapshot(key, rows);
     await disableChatPageSnapshots();
     await writeChatPageSnapshot(key, rows);
-    enableChatPageSnapshots();
+    await enableChatPageSnapshots();
     await loadChatPageSnapshot(key);
     expect(readChatPageSnapshot(key)).toBeUndefined();
   });
 
   it('does not restore a read that finishes after logout', async() => {
     let finish: (value: any) => void;
-    vi.spyOn(StateStorage.prototype, 'get').mockReturnValue(new Promise((resolve) => { finish = resolve; }) as any);
+    vi.spyOn(snapshotStorage, 'readSnapshot').mockReturnValue(new Promise((resolve) => { finish = resolve; }) as any);
     const loading = loadChatPageSnapshot(key);
     await Promise.resolve();
     forgetLoadedChatPageSnapshot();

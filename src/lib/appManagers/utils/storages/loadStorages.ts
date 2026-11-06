@@ -7,7 +7,7 @@ import type AppStorage from '@lib/storage';
 import {recordPromiseBound} from '@helpers/recordPromise';
 import {logger} from '@lib/logger';
 import noop from '@helpers/noop';
-import {clearChatPageSnapshot} from '@lib/chatPageSnapshot';
+import {clearChatPageSnapshot, disableChatPageSnapshots} from '@lib/chatPageSnapshot';
 import type {ActiveAccountNumber} from '@lib/accounts/types';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 
@@ -43,7 +43,9 @@ export default async function loadStorages(accountNumber: number, storages: Stor
     return loadStorages(accountNumber, storages, resetStoragesPromise, true);
   }
 
-  if(resetStorages.size || await DeferredIsUsingPasscode.isUsingPasscode()) {
+  if(await DeferredIsUsingPasscode.isUsingPasscode()) {
+    await disableChatPageSnapshots();
+  } else if(resetStorages.size) {
     await clearChatPageSnapshot(accountNumber as ActiveAccountNumber);
   }
 

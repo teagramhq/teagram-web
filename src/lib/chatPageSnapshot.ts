@@ -9,17 +9,45 @@ import {getMtprotoTarget} from '@config/mtprotoTarget';
 import App from '@config/app';
 import {getDatabaseState} from '@config/databases/state';
 import IDBStorage from '@lib/files/idb';
+import * as snapshotStorage from '@lib/chatPageSnapshotStorage';
+import {scopeServerStorageKey} from '@config/serverContext';
 
 export type ChatPageKey = {accountNumber: ActiveAccountNumber, userId: PeerId, server: string, authKeyId: string};
 export type ChatPageRow = {peerId: PeerId, title: string, avatar?: ChatPhoto | UserProfilePhoto, preview: string, date: number, unread: number, markedUnread: boolean, muted: boolean, pinned: boolean};
 export type ChatPageSnapshot = {key: ChatPageKey, rows: ChatPageRow[]};
 
 let loadedSnapshot: ChatPageSnapshot;
+let loadedGuard: string;
 let loadGeneration = 0;
 let disabled = false;
 let pending = Promise.resolve();
 const storages = new Map<ActiveAccountNumber, StateStorage>();
 const generations = [0, 0, 0, 0, 0];
+const guardKey = () => scopeServerStorageKey('chat-page-snapshot-guard');
+
+function readGuard() {
+  if(typeof window === 'undefined') return '';
+  try {
+    return localStorage.getItem(guardKey()) || '';
+  } catch(error) {
+    console.error('failed to read chat page snapshot guard', error);
+    return undefined;
+  }
+}
+
+export function blockSnapshotReads() {
+  const guard = `blocked:${crypto.randomUUID()}`;
+  localStorage.setItem(guardKey(), guard);
+  forgetLoadedChatPageSnapshot();
+  return guard;
+}
+
+export function unblockSnapshotReads(expected: string) {
+  const guard = localStorage.getItem(guardKey());
+  if(guard === expected && guard?.startsWith('blocked:')) localStorage.setItem(guardKey(), `open:${guard.slice(8)}`);
+}
+
+export function snapshotReadGuard() { return readGuard(); }
 
 export function chatPageSnapshotGeneration(accountNumber: ActiveAccountNumber) {
   return generations[accountNumber];
@@ -61,22 +89,26 @@ export function writeChatPageSnapshot(key: ChatPageKey, rows: ChatPageRow[], gen
   return enqueue(async() => {
     const passcode = await DeferredIsUsingPasscode.isUsingPasscode();
     if(disabled || generation !== generations[key.accountNumber] || passcode) return;
-    await storageFor(key.accountNumber).set({chatPageSnapshot: {key, rows: rows.slice(0, 20)}});
+    await snapshotStorage.writeSnapshot({key, rows: rows.slice(0, 20)});
   });
 }
 
 export async function loadChatPageSnapshot(key?: ChatPageKey) {
   forgetLoadedChatPageSnapshot();
   const generation = loadGeneration;
-  if(!key || disabled || await DeferredIsUsingPasscode.isUsingPasscode()) return;
-  const snapshot = await storageFor(key.accountNumber).get('chatPageSnapshot', false);
-  if(generation === loadGeneration && !disabled && DeferredIsUsingPasscode.isUsingPasscodeUndeferred() === false) {
+  const guard = readGuard();
+  if(guard === undefined || guard.startsWith('blocked:') || !key || disabled || await DeferredIsUsingPasscode.isUsingPasscode()) return;
+  const snapshot = await snapshotStorage.readSnapshot(key.accountNumber);
+  if(generation === loadGeneration && guard === readGuard() && !disabled && DeferredIsUsingPasscode.isUsingPasscodeUndeferred() === false) {
     loadedSnapshot = snapshot;
+    loadedGuard = guard;
   }
 }
 
 export function readChatPageSnapshot(key: ChatPageKey): ChatPageRow[] | undefined {
-  if(disabled || DeferredIsUsingPasscode.isUsingPasscodeUndeferred() !== false || !loadedSnapshot) return;
+  const guard = readGuard();
+  if(guard === undefined || guard.startsWith('blocked:') || guard !== loadedGuard || disabled ||
+    DeferredIsUsingPasscode.isUsingPasscodeUndeferred() !== false || !loadedSnapshot) return;
   const saved = loadedSnapshot.key;
   if(!sameChatPageKey(saved, key) || !Array.isArray(loadedSnapshot.rows) || loadedSnapshot.rows.length > 20) return;
   return loadedSnapshot.rows;
@@ -91,6 +123,7 @@ export function clearChatPageSnapshot(accountNumber: ActiveAccountNumber) {
   ++generations[accountNumber];
   forgetLoadedChatPageSnapshot();
   return enqueue(async() => {
+    await snapshotStorage.clearSnapshot(accountNumber);
     await storageFor(accountNumber).delete('chatPageSnapshot');
     if(await DeferredIsUsingPasscode.isUsingPasscode()) {
       await new IDBStorage(getDatabaseState(accountNumber), 'session').delete('chatPageSnapshot');
@@ -98,12 +131,14 @@ export function clearChatPageSnapshot(accountNumber: ActiveAccountNumber) {
   });
 }
 
-export async function disableChatPageSnapshots() {
+export async function disableChatPageSnapshots(token?: string) {
   disabled = true;
   forgetLoadedChatPageSnapshot();
+  await snapshotStorage.blockSnapshots(token);
   await Promise.all(([1, 2, 3, 4] as ActiveAccountNumber[]).map(clearChatPageSnapshot));
 }
 
-export function enableChatPageSnapshots() {
+export async function enableChatPageSnapshots(token?: string) {
+  await snapshotStorage.unblockSnapshots(token);
   disabled = false;
 }
