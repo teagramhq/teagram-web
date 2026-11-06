@@ -6100,6 +6100,7 @@ export default class ChatBubbles {
     let historyRenderFailed = false;
     let historyRenderError: unknown;
     let historyRenderPromise: Promise<unknown>;
+    let historyRequestFailed = false;
     try {
       this.lazyLoadQueue.lock();
       const canScroll = samePeer && sameSearch;
@@ -6241,6 +6242,10 @@ export default class ChatBubbles {
           waitPromise: Promise.resolve()
         });
       }
+      historyRequest = historyRequest.catch((error: unknown) => {
+        historyRequestFailed = true;
+        throw error;
+      });
       // Observe preparation failures during the request, while keeping cached setup concurrent.
       const historyResultPromise = preparedPeerChangeReady ?
         Promise.race([historyRequest, preparedPeerChangeReady.then((preparedChange) => {
@@ -6288,8 +6293,14 @@ export default class ChatBubbles {
         this.preloader.detach();
         if(!samePeer && error !== PEER_CHANGED_ERROR) {
           this.chat.peerChangeFailed = true;
+          // Hide the old peer immediately while the prepared failure handler becomes available.
+          if(this.chat.container) this.chat.container.hidden = true;
         }
         this.lazyLoadQueue.unlock();
+      }
+      if(isCurrent && !samePeer && error !== PEER_CHANGED_ERROR && historyRequestFailed && preparedPeerChange) {
+        const prepared = await preparedPeerChange.catch((): undefined => undefined);
+        if(prepared && middleware()) prepared.failPeerChange();
       }
       throw error;
     }

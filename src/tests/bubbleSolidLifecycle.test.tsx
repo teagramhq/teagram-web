@@ -1366,6 +1366,7 @@ test('retries peer UI setup after history fails for a newly selected peer', asyn
     chat.peerChanged = true;
     return Promise.resolve({
       ready: Promise.resolve(undefined),
+      failPeerChange: vi.fn(),
       apply: async() => {
         appliedCallbacks.push('applied');
       }
@@ -1614,13 +1615,48 @@ test('detaches the prior peer preloader when the current peer fails before mount
 
 test('logs and unlocks when the initial history request rejects before mount', async() => {
   const failure = new Error('history request failed');
-  const {harness, getHistory1, setPeerLogger} = makeSetPeerHarness(Promise.resolve());
+  const {harness, chat, getHistory1, setPeerLogger} = makeSetPeerHarness(Promise.resolve());
+  Object.setPrototypeOf(chat, Chat.prototype);
+  Object.assign(chat, {
+    peerChanged: false,
+    peerChangeFailed: false,
+    cleanup: vi.fn(),
+    topbar: {finishPeerChange: vi.fn(async() => () => {})},
+    bubbles: {finishPeerChange: vi.fn(async() => () => {}), lazyLoadQueue: {queueId: 0}},
+    input: {finishPeerChange: vi.fn(async() => () => {}), failPeerChange: vi.fn()},
+    handleBackgrounds: vi.fn(async() => () => {}),
+    log: Object.assign(vi.fn(), {warn: vi.fn(), error: vi.fn(), setPrefix: vi.fn()}),
+    container: document.createElement('div')
+  });
+  chat.finishPeerChange = (options: any) => Chat.prototype.finishPeerChange.call(chat, options);
   getHistory1.mockReturnValue(Promise.reject(failure));
 
   await expect(harness.setPeer({peerId, samePeer: false, sameSearch: false})).rejects.toBe(failure);
 
   expect(harness.lazyLoadQueue.unlock).toHaveBeenCalledTimes(1);
   expect(setPeerLogger.error).toHaveBeenCalledWith(expect.any(String), peerId, failure);
+  expect(chat.container.hidden).toBe(true);
+  expect(chat.input.failPeerChange).toHaveBeenCalledOnce();
+  await expectPeerChangeFailedToast();
+});
+
+test('does not fail a newer peer when the old history failure awaits preparation', async() => {
+  const failure = new Error('history request failed');
+  let resolvePreparation!: (value: any) => void;
+  const preparation = new Promise<any>((resolve) => { resolvePreparation = resolve; });
+  const {harness, chat, getHistory1, finishPeerChange} = makeSetPeerHarness(Promise.resolve());
+  chat.container = document.createElement('div');
+  finishPeerChange.mockReturnValue(preparation);
+  getHistory1.mockReturnValue(Promise.reject(failure));
+  const rejected = harness.setPeer({peerId, samePeer: false, sameSearch: false}).catch((error: unknown) => error);
+  await vi.waitFor(() => expect(chat.container.hidden).toBe(true));
+  ++harness.setPeerTempId;
+  chat.container.hidden = false;
+  const failPeerChange = vi.fn();
+  resolvePreparation({ready: Promise.resolve(), apply: vi.fn(), failPeerChange, getPendingParts: (): string[] => []});
+  expect(await rejected).toBe(failure);
+  expect(failPeerChange).not.toHaveBeenCalled();
+  expect(chat.container.hidden).toBe(false);
 });
 
 test('releases the preloader and animation group when prepared peer setup rejects', async() => {
