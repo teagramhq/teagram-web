@@ -3864,6 +3864,7 @@ test('does not render a delayed pending append after its acknowledgement and ser
     manager.onUpdateMessageId({random_id: randomId, id: serverId});
     eventOrder.push('send_rpc_reply');
     storedMessages.set(serverId, serverMessage);
+    eventOrder.push('updateNewMessage');
     manager.checkPendingMessage(serverMessage);
     rootScope.dispatchEvent('history_multiappend', serverMessage);
 
@@ -3875,7 +3876,7 @@ test('does not render a delayed pending append after its acknowledgement and ser
     await Promise.all([...renderQueue, ...historyRenderPromises]);
 
     expect(eventOrder.filter((event) => [
-      'history_append', 'send_rpc_request', 'updateMessageID', 'send_rpc_reply', 'message_sent', 'history_multiappend',
+      'history_append', 'send_rpc_request', 'updateMessageID', 'send_rpc_reply', 'updateNewMessage', 'message_sent', 'history_multiappend',
       'pending_render_scheduled', 'pending_render_resumed', `render:${serverId}`, `render:${tempId}`
     ].includes(event))).toEqual([
       'history_append',
@@ -3883,6 +3884,7 @@ test('does not render a delayed pending append after its acknowledgement and ser
       'send_rpc_request',
       'updateMessageID',
       'send_rpc_reply',
+      'updateNewMessage',
       'message_sent',
       'history_multiappend',
       `render:${serverId}`,
