@@ -636,6 +636,11 @@ describe('invited channel dialogs', () => {
       }
 
       await dialogsStorage.getDialogs({limit: 20, filterId: 0});
+      if(failFirstList || failFirstPeerDialogs) {
+        const retryMethod = failFirstList ? 'messages.getDialogs' : 'messages.getPeerDialogs';
+        await vi.waitFor(() => expect(requests.filter((method) => method === retryMethod)).toHaveLength(2), {timeout: 5000});
+        await vi.waitFor(() => expect(dialogsStorage.cachedListReconciled).toBe(true), {timeout: 5000});
+      }
     } catch(err) {
       restore();
       throw err;
