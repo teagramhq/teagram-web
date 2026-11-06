@@ -39,7 +39,7 @@ import assumeType from '@helpers/assumeType';
 import makeError from '@helpers/makeError';
 import callbackify from '@helpers/callbackify';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
-import {getPeerAvatarColorByPeer} from '@appManagers/utils/peers/getPeerColorById';
+import {getPeerAvatarColorByPeer} from '@appManagers/utils/peers/getPeerAvatarColor';
 import {isDialog, isSavedDialog, isForumTopic} from '@appManagers/utils/dialogs/isDialog';
 import getDialogKey from '@appManagers/utils/dialogs/getDialogKey';
 import getDialogThreadId from '@appManagers/utils/dialogs/getDialogThreadId';
