@@ -12,7 +12,7 @@ export class AppStoragesManager extends AppManager {
   private storages: ReturnType<typeof createStorages>;
   private resetStoragesPromise: ResetStoragesPromise;
   private loadStoragesPromise: ReturnType<typeof loadStorages>;
-  public readonly snapshotEpoch: Promise<string | undefined>;
+  public snapshotEpoch: Promise<string | undefined>;
 
   private _accountNumber: ActiveAccountNumber;
 
@@ -31,7 +31,15 @@ export class AppStoragesManager extends AppManager {
   }
 
   public loadStorages() {
-    return (this.loadStoragesPromise ??= this.snapshotEpoch.then(() => loadStorages(this._accountNumber, this.storages, this.resetStoragesPromise)));
+    if(!this.loadStoragesPromise) {
+      let loadEpoch: string | undefined;
+      this.loadStoragesPromise = this.snapshotEpoch.then((initialEpoch) => {
+        loadEpoch = initialEpoch;
+        return loadStorages(this._accountNumber, this.storages, this.resetStoragesPromise, false, initialEpoch, (epoch) => { loadEpoch = epoch; });
+      });
+      this.snapshotEpoch = this.loadStoragesPromise.then(() => loadEpoch);
+    }
+    return this.loadStoragesPromise;
     // loadStorages(this.storages).then((storagesResults) => {
     // this.loadPromise.resolve(storagesResults);
     // });

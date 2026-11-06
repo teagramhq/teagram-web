@@ -2,6 +2,67 @@ import {expect, it, vi} from 'vitest';
 import {getCommonDatabaseState} from '@config/databases/state';
 import IDBStorage from '@lib/files/idb';
 
+it('writes the first page after this worker completes its own storage reset', async() => {
+  vi.resetModules();
+  const snapshots = await import('@lib/chatPageSnapshot');
+  (await import('@lib/passcode/deferredIsUsingPasscode')).default.resolveDeferred(false);
+  const {AppStoragesManager} = await import('@appManagers/appStoragesManager');
+  const DialogsStorage = (await import('@lib/storages/dialogs')).default;
+  const sessionStorage = (await import('@lib/sessionStorage')).default;
+  vi.spyOn(sessionStorage, 'getFresh').mockResolvedValue({userId: 123 as PeerId, dcId: 2, dc2_auth_key: '12'.repeat(256)});
+  const key = await snapshots.getChatPageKey(1);
+  const reset = Promise.resolve({storages: new Map([['dialogs', []]]), callback: async() => {}});
+  const manager = new AppStoragesManager(1, reset as any) as any;
+  const store = {getAll: async(): Promise<unknown[]> => [], clear: async() => {}, get: async(): Promise<undefined> => undefined, set: async() => {}};
+  manager.storages = {users: store, chats: store, dialogs: store};
+  await manager.loadStorages();
+  const page = {dialogs: [{_: 'dialog', peerId: 42, top_message: 3, pFlags: {pinned: true}, topMessage: {_: 'message', message: 'Hello', date: 10}}]};
+  const storage = Object.assign(Object.create(DialogsStorage.prototype), {
+    getAccountNumber: () => 1,
+    appPeersManager: {getPeer: () => ({_: 'user', first_name: 'Alice'}), getPeerPhoto: (): undefined => undefined},
+    appMessagesManager: {getDialogUnreadCount: () => 2},
+    appNotificationsManager: {isPeerLocalMuted: () => false}
+  });
+  await storage.refreshFirstChatPage(page, key, await manager.snapshotEpoch, key);
+  await snapshots.loadChatPageSnapshot(key);
+  expect(snapshots.readChatPageSnapshot(key)).toMatchObject([{peerId: 42, preview: 'Hello'}]);
+  vi.restoreAllMocks();
+});
+
+it.each(['before', 'during', 'after'] as const)('fences a local reset when another worker resets %s it', async(phase) => {
+  vi.resetModules();
+  const first = await import('@lib/chatPageSnapshot');
+  (await import('@lib/passcode/deferredIsUsingPasscode')).default.resolveDeferred(false);
+  const {AppStoragesManager} = await import('@appManagers/appStoragesManager');
+  vi.resetModules();
+  const second = await import('@lib/chatPageSnapshot');
+  (await import('@lib/passcode/deferredIsUsingPasscode')).default.resolveDeferred(false);
+  let signalStarted: () => void;
+  let release: () => void;
+  const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  const store = {
+    getAll: async(): Promise<unknown[]> => { if(phase === 'before') { signalStarted(); await barrier; } return []; },
+    clear: async() => {}, get: async(): Promise<undefined> => undefined, set: async() => {}
+  };
+  const reset = Promise.resolve({storages: new Map([['dialogs', []]]), callback: async() => {
+    if(phase === 'during') { signalStarted(); await barrier; }
+  }});
+  const manager = new AppStoragesManager(1, reset as any) as any;
+  manager.storages = {users: store, chats: store, dialogs: store};
+  const loading = manager.loadStorages();
+  if(phase === 'after') await loading;
+  else await started;
+  const token = await second.beginChatPageSnapshotInvalidation(1);
+  await second.finishChatPageSnapshotInvalidation(1, token);
+  if(phase !== 'after') { release(); await loading; }
+  const key = {accountNumber: 1 as const, userId: 123 as PeerId, server: 'server', authKeyId: 'key'};
+  const rows = [{peerId: 42 as PeerId, title: 'Alice', preview: 'Private', date: 1, unread: 0, markedUnread: false, muted: false, pinned: false}];
+  await first.writeChatPageSnapshot(key, rows, await manager.snapshotEpoch);
+  await first.loadChatPageSnapshot(key);
+  expect(first.readChatPageSnapshot(key)).toBeUndefined();
+});
+
 it('binds the snapshot epoch before loading dialogs when another worker resets them', async() => {
   vi.resetModules();
   const first = await import('@lib/chatPageSnapshot');

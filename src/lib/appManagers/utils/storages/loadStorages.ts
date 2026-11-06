@@ -7,7 +7,7 @@ import type AppStorage from '@lib/storage';
 import {recordPromiseBound} from '@helpers/recordPromise';
 import {logger} from '@lib/logger';
 import noop from '@helpers/noop';
-import {beginChatPageSnapshotInvalidation, disableChatPageSnapshots, finishChatPageSnapshotInvalidation} from '@lib/chatPageSnapshot';
+import {beginChatPageSnapshotLoadInvalidation, disableChatPageSnapshots, finishChatPageSnapshotInvalidation} from '@lib/chatPageSnapshot';
 import type {ActiveAccountNumber} from '@lib/accounts/types';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 
@@ -17,7 +17,7 @@ export type StoragesResults = Awaited<ReturnType<typeof loadStorages>>;
  * Will start loading storages before getting the state from the main thread \
  * In case of migration, will refetch the storages, because storages were modified
  */
-export default async function loadStorages(accountNumber: number, storages: StoragesStorages, resetStoragesPromise: ResetStoragesPromise, refetching?: boolean) {
+export default async function loadStorages(accountNumber: number, storages: StoragesStorages, resetStoragesPromise: ResetStoragesPromise, refetching?: boolean, snapshotEpoch?: string, onResetEpoch?: (epoch: string | undefined) => void) {
   const recordPromise = recordPromiseBound(logger('STORAGES-LOADER-' + accountNumber));
   const storagesKeys = Object.keys(storages) as Array<keyof StoragesStorages>;
   const storagesPromises: Promise<any>[] = storagesKeys.map((key) => {
@@ -40,11 +40,11 @@ export default async function loadStorages(accountNumber: number, storages: Stor
   // * will reset storages before setting the new state
   const {storages: resetStorages, refetch, callback} = await resetStoragesPromise;
   if(refetch && !refetching) {
-    return loadStorages(accountNumber, storages, resetStoragesPromise, true);
+    return loadStorages(accountNumber, storages, resetStoragesPromise, true, snapshotEpoch, onResetEpoch);
   }
 
   const account = accountNumber as ActiveAccountNumber;
-  const token = resetStorages.size ? await beginChatPageSnapshotInvalidation(account) : undefined;
+  const invalidation = resetStorages.size ? await beginChatPageSnapshotLoadInvalidation(account, snapshotEpoch) : undefined;
   try {
     if(await DeferredIsUsingPasscode.isUsingPasscode()) {
       await disableChatPageSnapshots();
@@ -84,9 +84,11 @@ export default async function loadStorages(accountNumber: number, storages: Stor
 
     await callback();
 
+    if(invalidation) onResetEpoch?.(invalidation.nextEpoch);
+
     return storagesResults;
   } finally {
-    if(token) await finishChatPageSnapshotInvalidation(account, token);
+    if(invalidation) await finishChatPageSnapshotInvalidation(account, invalidation.token);
   }
 }
 

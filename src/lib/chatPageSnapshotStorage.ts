@@ -61,18 +61,22 @@ export async function readSnapshot(accountNumber: ActiveAccountNumber) {
   return snapshot;
 }
 
-export async function invalidateSnapshot(accountNumber: ActiveAccountNumber, hold: boolean) {
+export async function invalidateSnapshot(accountNumber: ActiveAccountNumber, hold: boolean, expectedEpoch?: string) {
   const token = hold ? crypto.randomUUID() : undefined;
+  let nextEpoch: string;
   await transaction('readwrite', (store) => {
+    const blocked = store.get(blockedKey);
     const request = store.get(epochKey(accountNumber));
     request.onsuccess = () => {
       const invalidations: string[] = request.result?.invalidations || [];
+      const id = crypto.randomUUID();
+      if(expectedEpoch && request.result?.id === expectedEpoch && !invalidations.length && !blocked.result) nextEpoch = id;
       if(token) invalidations.push(token);
-      store.put({id: crypto.randomUUID(), invalidations} satisfies Epoch, epochKey(accountNumber));
+      store.put({id, invalidations} satisfies Epoch, epochKey(accountNumber));
       store.delete(snapshotKey(accountNumber));
     };
   });
-  return token;
+  return {token, nextEpoch};
 }
 
 export function finishInvalidation(accountNumber: ActiveAccountNumber, token: string) {

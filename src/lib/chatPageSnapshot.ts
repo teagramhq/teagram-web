@@ -178,13 +178,14 @@ export function forgetLoadedChatPageSnapshot() {
   loadedSnapshot = undefined;
 }
 
-export async function beginChatPageSnapshotInvalidation(accountNumber: ActiveAccountNumber) {
+async function beginInvalidation(accountNumber: ActiveAccountNumber, expectedEpoch?: string) {
   ++generations[accountNumber];
   forgetLoadedChatPageSnapshot();
   let token: string;
+  let nextEpoch: string;
   await enqueue(async() => {
     await updateAccountGuard(accountNumber);
-    token = await snapshotStorage.invalidateSnapshot(accountNumber, true);
+    ({token, nextEpoch} = await snapshotStorage.invalidateSnapshot(accountNumber, true, expectedEpoch));
     try {
       await updateAccountGuard(accountNumber);
     } catch(error) {
@@ -192,7 +193,15 @@ export async function beginChatPageSnapshotInvalidation(accountNumber: ActiveAcc
       throw error;
     }
   });
-  return token;
+  return {token, nextEpoch};
+}
+
+export async function beginChatPageSnapshotInvalidation(accountNumber: ActiveAccountNumber) {
+  return (await beginInvalidation(accountNumber)).token;
+}
+
+export function beginChatPageSnapshotLoadInvalidation(accountNumber: ActiveAccountNumber, expectedEpoch: string) {
+  return beginInvalidation(accountNumber, expectedEpoch);
 }
 
 export function finishChatPageSnapshotInvalidation(accountNumber: ActiveAccountNumber, token: string) {
