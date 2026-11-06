@@ -27,6 +27,14 @@ The existing three-sample policy and calibration version are unchanged; extra
 timing samples are report-only. Send and scroll timing add no timing gates.
 Every scenario and size needs three base bundle measurements or the performance
 gate fails closed.
+Each 100x scroll repeat in the JSON artifact includes `droppedFrameAttribution`,
+with the measured frame intervals, overlapping renderer trace events and
+instrumented history and chat-list spans. `droppedFrameCpu` joins sampled
+stacks to those same intervals; `droppedFrameScripts` records overlapping
+scripts from long animation frames, including scripts shorter than 50 ms. The
+timestamps use the page performance clock. Empty event or stack lists describe
+what was observed, not proof that no work ran. These diagnostics do not change
+the frame counter or budget.
 The 100x cold chat-list measurement uses six fresh contexts for the paired
 blocking-time gate and its negative control. Its timing starts at navigation so
 the existing cold-load budget still includes the document fetch.

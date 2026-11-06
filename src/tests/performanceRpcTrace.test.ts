@@ -470,6 +470,18 @@ describe('long task attribution', () => {
     timeDeltas: [10_000, 20_000, 40_000, 50_000]
   };
 
+  test('attributes CPU samples to a dropped-frame interval shorter than a long task', () => {
+    const result = summarizeLongTaskAttribution(
+      [{startTime: 1020, duration: 30}], [], profile, 1000, 1000, 1000, 0
+    );
+    expect(result).toEqual([{
+      startTimeMs: 20,
+      durationMs: 30,
+      spans: [],
+      stacks: [{frames: [{functionName: 'mountUnmountGroups', script: '/assets/chat.js'}], selfMs: 30}]
+    }]);
+  });
+
   test('joins spans and CPU samples to the long task they ran in', () => {
     const result = summarizeLongTaskAttribution(
       [{startTime: 1020, duration: 60}, {startTime: 1500, duration: 10}],
