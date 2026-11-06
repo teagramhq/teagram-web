@@ -11,7 +11,7 @@ import {getActiveServerId, scopeServerStorageKey} from '@config/serverContext';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 
 export type ChatPageKey = {accountNumber: ActiveAccountNumber, userId: PeerId, server: string, authKeyId: string};
-export type ChatPageRow = {peerId: PeerId, title: string, avatar?: ChatPhoto | UserProfilePhoto, preview: string, date: number, unread: number, markedUnread: boolean, muted: boolean, pinned: boolean};
+export type ChatPageRow = {peerId: PeerId, title: string, avatar?: ChatPhoto | UserProfilePhoto, avatarColor?: string, preview: string, date: number, unread: number, markedUnread: boolean, muted: boolean, pinned: boolean};
 export type ChatPageSnapshot = {key: ChatPageKey, rows: ChatPageRow[]};
 
 let loadedSnapshot: ChatPageSnapshot;

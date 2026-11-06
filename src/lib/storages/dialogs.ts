@@ -39,6 +39,7 @@ import assumeType from '@helpers/assumeType';
 import makeError from '@helpers/makeError';
 import callbackify from '@helpers/callbackify';
 import getPeerId from '@appManagers/utils/peers/getPeerId';
+import {getPeerAvatarColorByPeer} from '@appManagers/utils/peers/getPeerColorById';
 import {isDialog, isSavedDialog, isForumTopic} from '@appManagers/utils/dialogs/isDialog';
 import getDialogKey from '@appManagers/utils/dialogs/getDialogKey';
 import getDialogThreadId from '@appManagers/utils/dialogs/getDialogThreadId';
@@ -1975,6 +1976,7 @@ export default class DialogsStorage extends AppManager {
         peerId: dialog.peerId,
         title: title || 'Deleted account',
         avatar: this.appPeersManager.getPeerPhoto(dialog.peerId),
+        avatarColor: peer ? getPeerAvatarColorByPeer(peer) : undefined,
         preview: text || (message?._ === 'messageService' ? 'Service message' : message ? 'Media' : ''),
         date: message?.date || 0,
         unread: this.appMessagesManager.getDialogUnreadCount(dialog),

@@ -1,5 +1,7 @@
 import type {ChatPageRow} from '@lib/chatPageSnapshot';
 import getPreviewURLFromBytes from '@helpers/bytes/getPreviewURLFromBytes';
+import {formatDateAccordingToTodayNew} from '@helpers/date';
+import getAbbreviation from '@lib/richTextProcessor/getAbbreviation';
 import Icon from '@components/icon';
 import {watchChatPageSnapshotInvalidations} from '@lib/chatPageSnapshot';
 import {listenForGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
@@ -47,7 +49,8 @@ export function paintChatPageSnapshot(rows: ChatPageRow[] | undefined) {
     title.dir = 'auto';
     if(row.muted) title.append(Icon('nosound_filled', 'dialog-muted-icon'));
     const details = element('div', 'row-title-right row-title-right-secondary dialog-title-details');
-    const time = element('span', 'message-time', row.date ? new Date(row.date * 1000).toLocaleDateString(undefined, {month: 'short', day: 'numeric'}) : '');
+    const time = element('span', 'message-time');
+    if(row.date) time.append(formatDateAccordingToTodayNew(new Date(row.date * 1000)));
     details.append(time);
     titleRow.append(title, details);
     const subtitle = element('div', 'row-row row-subtitle-row dialog-subtitle has-multiple-badges');
@@ -61,7 +64,9 @@ export function paintChatPageSnapshot(rows: ChatPageRow[] | undefined) {
       badge.append(Icon('chatspinned'));
       subtitle.append(badge);
     }
-    const avatar = element('div', 'avatar avatar-like avatar-gradient dialog-avatar row-media row-media-bigger', row.title.trim().slice(0, 1));
+    const avatar = element('div', 'avatar avatar-like avatar-gradient dialog-avatar row-media row-media-bigger');
+    if(row.avatarColor) avatar.dataset.color = row.avatarColor;
+    avatar.textContent = getAbbreviation(row.title).text;
     if(row.avatar && 'stripped_thumb' in row.avatar && row.avatar.stripped_thumb?.length) {
       const image = document.createElement('img');
       image.className = 'avatar-photo avatar-photo-thumbnail';

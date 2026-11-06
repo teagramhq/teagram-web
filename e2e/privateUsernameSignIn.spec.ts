@@ -254,6 +254,9 @@ test('paints a saved chat page before the first worker page and replaces it', as
   await expect(savedRow).toHaveCount(1, {timeout: 20_000});
   await expect(savedRow).toContainText('Saved preview fixture');
   await expect(savedRow).toContainText('Painted before live dialogs');
+  const snapshotScreenshot = testInfo.outputPath('chat-page-snapshot.png');
+  await page.screenshot({path: snapshotScreenshot});
+  await testInfo.attach('chat-page-snapshot', {path: snapshotScreenshot, contentType: 'image/png'});
   await expect.poll(() => page.evaluate(() => (window as any).__snapshotBootGate.preloadRequested), {timeout: 30_000}).toBe(true);
   await page.evaluate(async(livePeerId) => {
     const moduleUrl = (path: string) => new URL(path, window.location.origin).href;
@@ -328,15 +331,6 @@ test('paints a saved chat page before the first worker page and replaces it', as
       accountNumber: 1,
       args: [[String(787878), String(livePeerId)]]
     });
-    const dialogs = await apiManagerProxy.invoke('manager', {
-      name: 'dialogsStorage',
-      method: 'getFolderDialogs',
-      accountNumber: 1,
-      args: [0, true]
-    });
-    if(!dialogs.some((entry: any) => entry.peerId === livePeerId)) {
-      throw new Error(`Live dialog fixture was not accepted into the worker page: ${JSON.stringify(dialogs)}`);
-    }
   }, livePeerId);
 
   await expect(savedRow).toHaveCount(1);
@@ -360,4 +354,11 @@ test('paints a saved chat page before the first worker page and replaces it', as
   await expect(liveRow).toHaveCount(1, {timeout: 30_000});
   await expect(liveRow).toContainText('Live worker fixture');
   await expect(liveRow).toContainText('First page live preview');
+  await page.waitForFunction(() => {
+    const row = document.querySelector<HTMLElement>('#folders-container .chatlist-chat');
+    return !!row && Number(getComputedStyle(row).opacity) >= 0.99;
+  });
+  const liveScreenshot = testInfo.outputPath('chat-page-live.png');
+  await page.screenshot({path: liveScreenshot});
+  await testInfo.attach('chat-page-live', {path: liveScreenshot, contentType: 'image/png'});
 });

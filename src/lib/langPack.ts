@@ -594,7 +594,7 @@ namespace I18n {
     const json = JSON.stringify(options);
     let dateTimeFormat = cachedDateTimeFormats.get(json);
     if(!dateTimeFormat) {
-      dateTimeFormat = new Intl.DateTimeFormat(lastRequestedNormalizedLangCode + (timeFormat ? '-u-hc-' + timeFormat : ''), options);
+      dateTimeFormat = new Intl.DateTimeFormat((lastRequestedNormalizedLangCode || App.langPackCode) + (timeFormat ? '-u-hc-' + timeFormat : ''), options);
       cachedDateTimeFormats.set(json, dateTimeFormat);
     }
 
