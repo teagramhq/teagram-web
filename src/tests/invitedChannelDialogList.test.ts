@@ -282,7 +282,10 @@ describe('invited channel dialog rows', () => {
     expect(request).not.toHaveBeenCalled();
 
     list.handleDialogsMultiupdate(new Map());
-    expect(request.mock.calls.map((call: any[]) => call[0] as PeerId)).toEqual([first, second]);
+    expect(request).not.toHaveBeenCalled();
+
+    list.handleDialogsMultiupdate(new Map([[second, {}]]));
+    expect(request).toHaveBeenCalledExactlyOnceWith(second);
   });
 
   it('restores a watched empty channel when its page notification names it', async() => {

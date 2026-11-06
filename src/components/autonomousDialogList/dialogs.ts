@@ -302,7 +302,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       this.appDialogsManager.processContact?.(peerId.toPeerId());
     }
 
-    this.reconcileWatchedEmptyChannelDialogs(options?.reconcilePeerIds);
+    this.reconcileWatchedEmptyChannelDialogs(options?.reconcilePeerIds ?? dialogs.keys());
   }
 
   public handleChatUpdate(chatId: ChatId, options?: ChatUpdateOptions) {
