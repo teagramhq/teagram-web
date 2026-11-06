@@ -109,6 +109,7 @@ export default class DialogsStorage extends AppManager {
   private pinnedOrders: {[folder_id: number]: PeerId[]};
   private savedDialogsLoaded: boolean;
   private cachedListReconciled: boolean;
+  private cachedListReconcileRetryPeerIds: PeerId[];
   private savedDialogsOffsetDate: number;
   private savedDialogsPinnedOrder: PeerId[];
   private dialogsNum: number;
@@ -2151,8 +2152,8 @@ export default class DialogsStorage extends AppManager {
    * previous worker was going away (its `getPeerDialogs` unanswered) or while offline is missing
    * from that cache for good, so once per start compare it with the server's list and fetch the
    * channel dialogs it lacks. The server's chats decide membership, so a left, kicked or banned
-   * channel is never fetched back. Until every listed channel is restored, the next cached first
-   * page retries the comparison.
+   * channel is never fetched back. If any dialog is still missing, the next cached first page retries
+   * those peers once without walking the server list again.
    */
   private async reconcileCachedChannelDialogs() {
     if(this.cachedListReconciled) {
@@ -2160,17 +2161,29 @@ export default class DialogsStorage extends AppManager {
     }
 
     this.cachedListReconciled = true;
+    const retryPeerIds = this.cachedListReconcileRetryPeerIds;
+    let missingPeerIds: PeerId[] | undefined;
+    this.cachedListReconcileRetryPeerIds = undefined;
     try {
-      const missingPeerIds = await this.getServerChannelsMissingLocally();
+      missingPeerIds = retryPeerIds ?
+        retryPeerIds.filter((peerId) => this.appChatsManager.isInChat(peerId.toChatId())) :
+        await this.getServerChannelsMissingLocally();
       for(let offset = 0; offset < missingPeerIds.length; offset += CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE) {
         const peerIds = missingPeerIds.slice(offset, offset + CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE);
         await Promise.all(peerIds.map((peerId) => this.appMessagesManager.reloadConversation(peerId)));
       }
-      if(missingPeerIds.some((peerId) => !this.getDialogOnly(peerId) && this.appChatsManager.isInChat(peerId.toChatId()))) {
+      const stillMissingPeerIds = missingPeerIds.filter((peerId) => !this.getDialogOnly(peerId));
+      if(!retryPeerIds && stillMissingPeerIds.length) {
+        this.cachedListReconcileRetryPeerIds = stillMissingPeerIds;
         this.cachedListReconciled = false;
       }
     } catch(err) {
-      this.cachedListReconciled = false;
+      if(retryPeerIds) {
+        this.cachedListReconciled = true;
+      } else {
+        this.cachedListReconcileRetryPeerIds = missingPeerIds;
+        this.cachedListReconciled = false;
+      }
       this.log.error('cached channel dialog reconcile failed', err);
     }
   }

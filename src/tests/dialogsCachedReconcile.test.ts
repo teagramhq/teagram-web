@@ -27,6 +27,28 @@ test('reloads missing cached dialogs in bounded worker batches', async() => {
   expect(maxActiveReloads).toBeLessThanOrEqual(25);
 });
 
+test('retries a missing channel dialog without walking the server list again', async() => {
+  const peerId = -1 as PeerId;
+  const reloadConversation = vi.fn(async() => undefined);
+  const getServerChannelsMissingLocally = vi.fn(async() => [peerId]);
+  const storage = Object.create((await import('@lib/storages/dialogs')).default.prototype) as DialogsStorage & any;
+  Object.assign(storage, {
+    appMessagesManager: {reloadConversation},
+    appChatsManager: {isInChat: () => true},
+    cachedListReconciled: false,
+    getDialogOnly: (): undefined => undefined,
+    getServerChannelsMissingLocally
+  });
+
+  await storage.reconcileCachedChannelDialogs();
+  await storage.reconcileCachedChannelDialogs();
+  await storage.reconcileCachedChannelDialogs();
+
+  expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(1);
+  expect(reloadConversation).toHaveBeenCalledTimes(2);
+  expect(storage.cachedListReconciled).toBe(true);
+});
+
 test('mirrors each reconciliation page before delivering its peer events', async() => {
   const pages: any[] = [
     {
