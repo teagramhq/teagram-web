@@ -20,8 +20,6 @@ test('records batched message kinds without changing processing order or results
     durationMs: 80,
     messageCount: 2,
     batchSizes: [],
-    recorderOverheadMs: 0,
-    measuredOverheadCouldCross50Ms: false,
     unaccountedMs: 10,
     messages: [
       {type: 'invoke:update:updateNewMessage', durationMs: 30, percent: 37.5},
@@ -63,8 +61,6 @@ test('reports unaccounted task time alongside clipped message work', () => {
     durationMs: 80,
     messageCount: 2,
     batchSizes: [],
-    recorderOverheadMs: 0,
-    measuredOverheadCouldCross50Ms: false,
     unaccountedMs: 40,
     messages: [
       {type: 'invoke:event:dialogs_multiupdate', durationMs: 30, percent: 37.5},
@@ -73,56 +69,19 @@ test('reports unaccounted task time alongside clipped message work', () => {
   }]);
 });
 
-test('reports recorder time and batch sizes for each observed long task', () => {
-  let time = 0;
+test('coalesces consecutive peer messages without losing measured time or processing order', () => {
+  let now = 10;
+  const order: number[] = [];
   const port: any = {awaiting: {}, processTaskMap: {}};
-  port.processTaskMap.invoke = () => { time += 40; };
+  port.processTaskMap.invoke = (task: any) => { order.push(task.id); now += 2; };
   port.processTaskMap.batch = (task: any) => task.payload.forEach((child: any) => port.processTaskMap.invoke(child));
-  const recording: any = installWorkerMessageAttribution(port, () => time++);
-  const message = {type: 'invoke', payload: {type: 'event', payload: {name: 'dialogs_multiupdate'}}};
-  port.processTaskMap.batch({type: 'batch', payload: [message, message]});
-  const summary = summarizeWorkerMessageAttribution([{startTime: 0, duration: 100}], recording.spans, 0, recording.batches);
-  expect(summary[0]).toMatchObject({messageCount: 2, batchSizes: [2], recorderOverheadMs: 4, measuredOverheadCouldCross50Ms: false});
-});
-
-test('counts clock-resolution-sized messages and flags a near-threshold task', () => {
-  const summary = summarizeWorkerMessageAttribution([{startTime: 10, duration: 51}], [
-    {type: 'result', startTime: 20, duration: 0, recorderStart: 20, recorderEnd: 20},
-    {type: 'invoke:event:update', startTime: 30, duration: 5, recorderStart: 29, recorderEnd: 36}
-  ], 0, [{startTime: 20, endTime: 20, size: 2}]);
-  expect(summary[0]).toMatchObject({messageCount: 2, batchSizes: [2], recorderOverheadMs: 2, measuredOverheadCouldCross50Ms: true});
-});
-
-test('compares recorder costs and sampled garbage collection for matched scroll runs', async() => {
-  const {summarizeRecorderComparison} = await import('../../e2e/workerMessageAttribution');
-  const result = summarizeRecorderComparison([{
-    unrecorded: {longTasksOver50Ms: 2, blockingTimeMs: 40, cpu: {sampledGcMs: 17}},
-    recorded: {longTasksOver50Ms: 3, blockingTimeMs: 70, cpu: {sampledGcMs: 25}}
-  }, {
-    unrecorded: {longTasksOver50Ms: 0, blockingTimeMs: 0, cpu: {sampledGcMs: 0}},
-    recorded: {longTasksOver50Ms: 0, blockingTimeMs: 0, cpu: {sampledGcMs: 0}}
-  }]);
-  expect(result).toEqual([
-    {longTaskCountDelta: 1, blockingTimeDeltaMs: 30, sampledGcDeltaMs: 8, comparableLargeBatches: []},
-    {longTaskCountDelta: 0, blockingTimeDeltaMs: 0, sampledGcDeltaMs: 0, comparableLargeBatches: []}
-  ]);
-});
-
-test('identifies matching large batches that actually occurred inside long tasks', async() => {
-  const {summarizeRecorderComparison} = await import('../../e2e/workerMessageAttribution');
-  const sample = (at: number, size: number) => ({
-    longTasksOver50Ms: 1,
-    blockingTimeMs: 30,
-    cpu: {sampledGcMs: 10},
-    workerBatchEvents: [{at, size, kind: 'invoke:mirror:peers'}],
-    longTaskTrace: [{startTimeMs: 10, durationMs: 80}]
+  const recording = installWorkerMessageAttribution(port, () => now);
+  const batch = {type: 'batch', payload: [1, 2, 3].map((id) => ({id, type: 'invoke', payload: {type: 'mirror', payload: {name: 'peers'}}}))};
+  port.processTaskMap.batch(batch);
+  expect(order).toEqual([1, 2, 3]);
+  expect(recording.spans).toHaveLength(1);
+  expect(summarizeWorkerMessageAttribution([{startTime: 10, duration: 60}], recording.spans, 0, recording.batches)[0]).toMatchObject({
+    messageCount: 3,
+    messages: [{type: 'invoke:mirror:peers', durationMs: 6, percent: 10}]
   });
-  const pairs = [
-    {unrecorded: sample(20, 10001), recorded: sample(30, 10001)},
-    {unrecorded: sample(100, 10001), recorded: sample(30, 10001)},
-    {unrecorded: sample(20, 9999), recorded: sample(30, 10001)}
-  ];
-  expect(summarizeRecorderComparison(pairs).map((pair) => pair.comparableLargeBatches)).toEqual([
-    [{size: 10001, kind: 'invoke:mirror:peers'}], [], []
-  ]);
 });

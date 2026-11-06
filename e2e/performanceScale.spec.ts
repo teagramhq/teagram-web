@@ -1,11 +1,11 @@
-import {installWorkerMessageAttribution, summarizeRecorderComparison, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
+import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
 import {readFileSync} from 'node:fs';
 import {writePerformanceReport} from './performanceReport';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {CACHED_DIALOG_RECONCILE_PHASE_NAME, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeCpuProfileWindow, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateNoWalkLongTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
+import {CACHED_DIALOG_RECONCILE_PHASE_NAME, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateNoWalkLongTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {beginMeasurement as begin, startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
 
 type Fixture = {
@@ -17,7 +17,6 @@ type Fixture = {
 type Scale = '1x' | '100x';
 type Variant = 'base' | 'head';
 const PERFORMANCE_TIMING_REPEATS = 5;
-const RECORDER_CONTROL_REPEATS = 6;
 const REPORT_ONLY_SEND_REPEATS = 11;
 
 type Metric = {
@@ -44,7 +43,6 @@ type Metric = {
   cpu?: PerformanceCpuSummary,
   longTaskAttribution?: PerformanceTaskAttribution[],
   workerMessageAttribution?: ReturnType<typeof summarizeWorkerMessageAttribution>,
-  workerBatchEvents?: Array<{at: number, size: number, kind: string}>,
   historyPathTasks?: PerformanceTaskAttribution[],
   scrollSpanTracing?: {installed: string[], spanCount: number, loafObserved: boolean},
   droppedFramePercent?: number,
@@ -85,9 +83,7 @@ type CachedDialogReconcileTarget = {
 
 type ScrollBackTraceOptions = {
   captureCpuStacks?: boolean,
-  prestartedCpuProfile?: Awaited<ReturnType<typeof startCpuProfile>>,
   captureWorkerMessages?: boolean,
-  observeWorkerBatches?: boolean,
   traceRpc?: boolean,
   waitForHistory?: boolean,
   includeLongTaskTrace?: boolean,
@@ -106,6 +102,13 @@ const fixtures: Record<Scale, Fixture | undefined> = Object.fromEntries(scales.m
 const username = process.env.PERF_USERNAME;
 const password = process.env.PERF_PASSWORD;
 const reportPath = process.env.PERF_REPORT_PATH;
+const recorderReplayPath = process.env.PERF_RECORDER_REPLAY_PATH;
+let recorderReplay: unknown;
+try {
+  if(recorderReplayPath) recorderReplay = JSON.parse(readFileSync(recorderReplayPath, 'utf8'));
+} catch {
+  // The replay gate reports missing or failed measurements.
+}
 const report = {
   measurementVersion: PERFORMANCE_MEASUREMENT_VERSION,
   fixtureVersion: process.env.PERF_FIXTURE_VERSION || '',
@@ -253,8 +256,8 @@ async function waitForBundleResources(page: Page) {
   await bundleRequests.waitForIdle(500, 10_000);
 }
 
-async function beginScenario(page: Page, requests: {value: number}, traceEnabled = false, captureWorkerMessages = false, observeWorkerBatches = false) {
-  await begin(page, requests, true, traceEnabled, captureWorkerMessages, observeWorkerBatches);
+async function beginScenario(page: Page, requests: {value: number}, traceEnabled = false, captureWorkerMessages = false) {
+  await begin(page, requests, true, traceEnabled, captureWorkerMessages);
   if(!traceEnabled) return;
   await page.evaluate((preserveNames) => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace(preserveNames), scenarioPreservedPerformancePhases);
   await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames());
@@ -766,9 +769,7 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}) {
   const {
     captureCpuStacks = false,
-    prestartedCpuProfile,
     captureWorkerMessages = captureCpuStacks,
-    observeWorkerBatches = false,
     traceRpc = false,
     waitForHistory = false,
     includeLongTaskTrace = captureCpuStacks,
@@ -782,12 +783,12 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   // Only the diagnostic pass waits: the gated window must keep the chat-open history tail it always had.
   if(waitForHistory) await waitForHistorySettled(page);
   if(captureCpuStacks) await installScrollSpanTracing(page, traceRpc);
-  await beginScenario(page, requests, traceRpc, captureWorkerMessages, observeWorkerBatches);
+  await beginScenario(page, requests, traceRpc, captureWorkerMessages);
   if(includeLongTaskTrace) {
     const observed = await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames());
     if(traceRpc) expect(observed, 'long-animation-frame observer is not supported in the diagnostic browser').toBe(true);
   }
-  const cpuProfile = prestartedCpuProfile || (captureCpuStacks ? await startCpuProfile(page) : undefined);
+  const cpuProfile = captureCpuStacks ? await startCpuProfile(page) : undefined;
   await page.evaluate(() => (window as any).__teagramPerf.startFrames());
   const initial = await page.evaluate(() => {
     const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));
@@ -843,30 +844,26 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   onMeasurementBoundary?.(boundary);
   const stoppedProfile = cpuProfile ? await stopCpuProfile(cpuProfile) : undefined;
   const metric = await capture(page, requests, boundary, true, traceRpc, includeLongTaskTrace);
-  if(!stoppedProfile && !captureWorkerMessages && !observeWorkerBatches) return metric;
-  const {tasks, spans, workerMessages, workerBatches, probeEvents} = await page.evaluate(({captureWorkerMessages, observeWorkerBatches}) => {
+  if(!stoppedProfile && !captureWorkerMessages) return metric;
+  const {tasks, spans, workerMessages, workerBatches} = await page.evaluate((captureWorkerMessages) => {
     const perf = (window as any).__teagramPerf;
     const workerMessages = captureWorkerMessages ? perf.workerMessages.spans : [];
     if(captureWorkerMessages) perf.workerMessages.restore();
-    if(observeWorkerBatches) perf.workerBatchProbe.stop();
     return {
       tasks: perf.longTasks as Array<{startTime: number, duration: number}>,
       spans: (perf.scrollSpans || []) as PerformanceSpan[],
-      workerMessages: workerMessages as Array<{type: string, startTime: number, duration: number, recorderStart?: number, recorderEnd?: number}>,
-      workerBatches: (captureWorkerMessages ? perf.workerMessages.batches : []) as Array<{startTime: number, endTime: number, size: number}>,
-      probeEvents: (observeWorkerBatches ? perf.workerBatchProbe.events : []) as Array<{at: number, size: number, kind: string}>
+      workerMessages: workerMessages as Array<{type: string, startTime: number, duration: number, endTime?: number, messageCount?: number}>,
+      workerBatches: (captureWorkerMessages ? perf.workerMessages.batches : []) as Array<{startTime: number, endTime: number, size: number}>
     };
-  }, {captureWorkerMessages, observeWorkerBatches});
+  }, captureWorkerMessages);
   const windowEndMs = boundary.startedAtMs + boundary.ms;
   const windowTasks = tasks.filter(({startTime}) => startTime >= boundary.startedAtMs && startTime < windowEndMs);
   const workerAttribution = captureWorkerMessages ? {
-    workerMessageAttribution: summarizeWorkerMessageAttribution(windowTasks, workerMessages, boundary.startedAtMs, workerBatches)
+    workerMessageAttribution: summarizeWorkerMessageAttribution(windowTasks, workerMessages, boundary.startedAtMs, workerBatches).map((task) => ({
+      ...task, recorderReplayOverhead: recorderReplay || null
+    }))
   } : {};
-  const workerProbe = observeWorkerBatches ? {
-    workerBatchEvents: probeEvents.filter(({at}) => at >= boundary.startedAtMs && at < windowEndMs)
-      .map((event) => ({...event, at: Number((event.at - boundary.startedAtMs).toFixed(2))}))
-  } : {};
-  if(!stoppedProfile) return {...metric, ...workerAttribution, ...workerProbe};
+  if(!stoppedProfile) return {...metric, ...workerAttribution};
 
   const tracing = await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
@@ -884,11 +881,8 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   return {
     ...metric,
     ...workerAttribution,
-    ...workerProbe,
     scrollSpanTracing: tracing,
-    cpu: prestartedCpuProfile ?
-      summarizeCpuProfileWindow(stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs, boundary.ms) :
-      summarizeCpuProfile(stoppedProfile.profile),
+    cpu: summarizeCpuProfile(stoppedProfile.profile),
     longTaskAttribution: summarizeLongTaskAttribution(windowTasks, spans, stoppedProfile.profile, stoppedProfile.perfStartMs, boundary.startedAtMs, boundary.ms)
   };
 }
@@ -1290,28 +1284,6 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   }
 }
 
-async function runRecorderControl(browser: Browser, run: VariantRun, fixture: Fixture, captureWorkerMessages: boolean) {
-  const context = await browser.newContext({
-    ignoreHTTPSErrors: true,
-    viewport: {width: 1280, height: 800},
-    storageState: run.storageState
-  });
-  try {
-    const page = await context.newPage();
-    const requests = {value: 0};
-    await installInstrumentation(page, requests, run.origin, false, true);
-    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
-    await waitForChatList(page);
-    const prestartedCpuProfile = await startCpuProfile(page);
-    await openPartnerChat(page, requests, fixture);
-    const scroll = await scrollBackTwoThousand(page, requests, true, {captureCpuStacks: true, prestartedCpuProfile, captureWorkerMessages, observeWorkerBatches: true});
-    if(!scroll?.cpu || !scroll.cpu.sampledCpuMs) throw new Error('Recorder control CPU profile is empty');
-    return scroll as Metric & {cpu: PerformanceCpuSummary};
-  } finally {
-    await context.close();
-  }
-}
-
 async function runTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixture) {
   const contextOptions = {
     ignoreHTTPSErrors: true,
@@ -1598,24 +1570,10 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       report.variants[variant][coldScale].coldChatList.push(sample);
     }
   }
-  const recorderPairs: Array<{unrecorded: Metric & {cpu: PerformanceCpuSummary}, recorded: Metric & {cpu: PerformanceCpuSummary}}> = [];
-  report.diagnostics['100x'] = {recorderComparison: {pairs: recorderPairs}};
-  for(let repeat = 0; repeat < RECORDER_CONTROL_REPEATS; ++repeat) {
-    const pair = {} as {unrecorded: Metric & {cpu: PerformanceCpuSummary}, recorded: Metric & {cpu: PerformanceCpuSummary}};
-    const order: Array<'unrecorded' | 'recorded'> = repeat % 2 ? ['recorded', 'unrecorded'] : ['unrecorded', 'recorded'];
-    for(const mode of order) {
-      pair[mode] = await test.step(`100x recorder ${mode} control repeat ${repeat + 1}`, () =>
-        runRecorderControl(browser, preparedVariants['100x'].head!, fixtures['100x']!, mode === 'recorded'));
-    }
-    recorderPairs.push(pair);
-  }
-
   const traceOrigin = process.env.PERF_TRACE_HEAD_ORIGIN_100X;
   expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
   const traceRun = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
-  const diagnostics = await test.step('trace 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRun!, fixtures['100x']!));
-  const recorderDeltas = summarizeRecorderComparison(recorderPairs);
-  Object.assign(report.diagnostics['100x'], diagnostics, {recorderComparison: {pairs: recorderPairs, deltas: recorderDeltas}});
+  report.diagnostics['100x'] = await test.step('trace 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRun!, fixtures['100x']!));
   if(report.requireBase) {
     const baseTraceOrigin = process.env.PERF_TRACE_BASE_ORIGIN_100X;
     expect(baseTraceOrigin, '100x traced base origin is missing').toBeTruthy();
@@ -1646,10 +1604,6 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
     if(metric.longTaskAttribution) metric.historyPathTasks = selectHistoryPathTasks(metric.longTaskAttribution, SCROLL_SPAN_NAMES);
   });
   measurementsComplete = true;
-  expect(
-    recorderDeltas.filter(({comparableLargeBatches}) => comparableLargeBatches.length > 0).length,
-    'Recorder controls need at least two pairs with matching large batches inside long tasks'
-  ).toBeGreaterThanOrEqual(2);
 });
 
 test('blocks repeated injected 100 ms main-thread stalls during cold chat list load', async({browser}) => {

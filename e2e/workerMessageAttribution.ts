@@ -1,49 +1,75 @@
-type MessageSpan = {
-  type: string,
-  startTime: number,
-  duration: number,
-  recorderStart?: number,
-  recorderEnd?: number
-};
+type MessageSpan = {type: string, startTime: number, duration: number, endTime?: number, messageCount?: number};
 type BatchSpan = {startTime: number, endTime: number, size: number};
 
-// Installed only on the measured page. Keep the original handlers and their return values intact.
+// Consecutive messages of the same type in one batch share a span to avoid per-message allocations.
 export function installWorkerMessageAttribution(port: any, now: () => number) {
   const spans: MessageSpan[] = [];
   const batches: BatchSpan[] = [];
   const originals: Record<string, any> = {};
+  let activeBatch: {name?: string, start: number, count: number} | undefined;
+  let lastType: string, lastInvoke: string, lastDetail: string, lastTaskType: string, lastTaskName: string, lastTaskMethod: string, lastResult: string, lastName: string;
+  const wrappers: Record<string, any> = {};
+  const getName = (type: string, task: any) => {
+    const payload = task.payload;
+    const pending = type === 'result' || type === 'ack' ? port.awaiting[payload.taskId] : undefined;
+    const invoke = type === 'invoke' ? payload.type : undefined;
+    const detail = invoke === 'event' || invoke === 'mirror' ? payload.payload?.name : payload?.payload?._;
+    if(type === 'invoke' && lastType === type && invoke === lastInvoke && detail === lastDetail) return lastName;
+    const result = typeof payload?.result?._ === 'string' ? payload.result._ : undefined;
+    if(type !== lastType || invoke !== lastInvoke || detail !== lastDetail || pending?.taskType !== lastTaskType ||
+      pending?.taskName !== lastTaskName || pending?.taskMethod !== lastTaskMethod || result !== lastResult) {
+      lastType = type;
+      lastInvoke = invoke;
+      lastDetail = detail;
+      lastTaskType = pending?.taskType;
+      lastTaskName = pending?.taskName;
+      lastTaskMethod = pending?.taskMethod;
+      lastResult = result;
+      lastName = (type === 'invoke' ? [type, invoke, detail] : [type, lastTaskType, lastTaskName, lastTaskMethod, result]).filter(Boolean).join(':');
+    }
+    return lastName;
+  };
   for(const type of Object.keys(port.processTaskMap)) {
     const original = originals[type] = port.processTaskMap[type];
     if(type === 'batch') {
-      port.processTaskMap[type] = function(task: any, ...args: any[]) {
+      wrappers[type] = function(task: any, ...args: any[]) {
+        const previousBatch = activeBatch;
         const startTime = now();
+        activeBatch = {start: startTime, count: 0};
         try {
           return original.call(this, task, ...args);
         } finally {
-          batches.push({startTime, endTime: now(), size: task.payload.length});
+          const endTime = now();
+          if(activeBatch.count) spans.push({type: activeBatch.name!, startTime: activeBatch.start, duration: endTime - activeBatch.start, endTime, messageCount: activeBatch.count});
+          batches.push({startTime, endTime, size: task.payload.length});
+          activeBatch = previousBatch;
         }
       };
+      port.processTaskMap[type] = wrappers[type];
       continue;
     }
-    port.processTaskMap[type] = function(task: any, ...args: any[]) {
-      const recorderStart = now();
-      const payload = task.payload;
-      const pending = type === 'result' || type === 'ack' ? port.awaiting[payload.taskId] : undefined;
-      const invokeKind = payload?.type === 'event' || payload?.type === 'mirror' ? payload.payload?.name : payload?.payload?._;
-      const resultKind = typeof payload?.result?._ === 'string' ? payload.result._ : undefined;
-      const name = type === 'invoke' ?
-        [type, payload.type, invokeKind] :
-        [type, pending?.taskType, pending?.taskName, pending?.taskMethod, resultKind];
+    wrappers[type] = function(task: any, ...args: any[]) {
+      const name = getName(type, task);
+      if(activeBatch) {
+        if(name !== activeBatch.name) {
+          const at = now();
+          if(activeBatch.count) spans.push({type: activeBatch.name!, startTime: activeBatch.start, duration: at - activeBatch.start, endTime: at, messageCount: activeBatch.count});
+          activeBatch.name = name;
+          activeBatch.start = at;
+          activeBatch.count = 0;
+        }
+        ++activeBatch.count;
+        return original.call(this, task, ...args);
+      }
       const started = now();
       try {
         return original.call(this, task, ...args);
       } finally {
-        const duration = now() - started;
-        const span: MessageSpan = {type: name.filter(Boolean).join(':'), startTime: started, duration, recorderStart};
-        spans.push(span);
-        span.recorderEnd = now();
+        const endTime = now();
+        spans.push({type: name, startTime: started, duration: endTime - started, endTime, messageCount: 1});
       }
     };
+    port.processTaskMap[type] = wrappers[type];
   }
   return {spans, batches, restore: () => {
     for(const type of Object.keys(originals)) port.processTaskMap[type] = originals[type];
@@ -53,68 +79,30 @@ export function installWorkerMessageAttribution(port: any, now: () => number) {
 export function summarizeWorkerMessageAttribution(tasks: Array<{startTime: number, duration: number}>, spans: MessageSpan[], windowStart = 0, batches: BatchSpan[] = []) {
   return tasks.filter(({duration}) => duration > 50).map((task) => {
     const byType = new Map<string, number>();
-    let recorderOverheadMs = 0;
     let messageCount = 0;
     const taskEnd = task.startTime + task.duration;
     const overlap = (start: number, end: number) => Math.max(0, Math.min(taskEnd, end) - Math.max(task.startTime, start));
     const intersects = (start: number, end: number) =>
       (start >= task.startTime && start < taskEnd) || overlap(start, end) > 0;
     for(const span of spans) {
-      const duration = overlap(span.startTime, span.startTime + span.duration);
-      if(!intersects(span.recorderStart ?? span.startTime, span.recorderEnd ?? span.startTime + span.duration)) continue;
-      ++messageCount;
+      const spanEnd = span.endTime ?? span.startTime + span.duration;
+      if(!intersects(span.startTime, spanEnd)) continue;
+      messageCount += span.messageCount ?? 1;
+      const wallTime = spanEnd - span.startTime;
+      const duration = wallTime > 0 ? span.duration * overlap(span.startTime, spanEnd) / wallTime : 0;
       if(duration > 0) byType.set(span.type, (byType.get(span.type) || 0) + duration);
-      if(span.recorderStart !== undefined && span.recorderEnd !== undefined) {
-        recorderOverheadMs += overlap(span.recorderStart, span.startTime);
-        recorderOverheadMs += overlap(span.startTime + span.duration, span.recorderEnd);
-      }
     }
     return {
       startTimeMs: Number((task.startTime - windowStart).toFixed(2)),
       durationMs: task.duration,
       messageCount,
       batchSizes: batches.filter(({startTime, endTime}) => intersects(startTime, endTime)).map(({size}) => size),
-      // This excludes the batch wrapper, clock resolution and any later GC caused by allocations.
-      recorderOverheadMs: Number(recorderOverheadMs.toFixed(2)),
-      // Long-task durations may be rounded, so retain a 1 ms margin around the threshold.
-      measuredOverheadCouldCross50Ms: recorderOverheadMs > 0 && task.duration - recorderOverheadMs < 51,
       unaccountedMs: Number(Math.max(0, task.duration - [...byType.values()].reduce((total, value) => total + value, 0)).toFixed(2)),
       messages: [...byType].map(([type, durationMs]) => ({
         type,
         durationMs: Number(durationMs.toFixed(2)),
         percent: Number((durationMs * 100 / task.duration).toFixed(2))
       }))
-    };
-  });
-}
-
-
-type RecorderControlSample = {
-  longTasksOver50Ms: number,
-  blockingTimeMs: number,
-  cpu: {sampledGcMs: number},
-  workerBatchEvents?: Array<{at: number, size: number, kind: string}>,
-  longTaskTrace?: Array<{startTimeMs: number, durationMs: number}>
-};
-
-export function summarizeRecorderComparison(pairs: Array<{unrecorded: RecorderControlSample, recorded: RecorderControlSample}>) {
-  const longTaskBatches = (sample: RecorderControlSample) => (sample.workerBatchEvents || []).filter(({at}) =>
-    (sample.longTaskTrace || []).some(({startTimeMs, durationMs}) => at >= startTimeMs - 1 && at <= startTimeMs + durationMs + 1)
-  );
-  return pairs.map(({unrecorded, recorded}) => {
-    const available = longTaskBatches(unrecorded).slice();
-    const comparableLargeBatches: Array<{size: number, kind: string}> = [];
-    for(const batch of longTaskBatches(recorded)) {
-      const index = available.findIndex((other) => other.size === batch.size && other.kind === batch.kind);
-      if(index === -1) continue;
-      available.splice(index, 1);
-      comparableLargeBatches.push({size: batch.size, kind: batch.kind});
-    }
-    return {
-      longTaskCountDelta: recorded.longTasksOver50Ms - unrecorded.longTasksOver50Ms,
-      blockingTimeDeltaMs: Number((recorded.blockingTimeMs - unrecorded.blockingTimeMs).toFixed(2)),
-      sampledGcDeltaMs: Number((recorded.cpu.sampledGcMs - unrecorded.cpu.sampledGcMs).toFixed(2)),
-      comparableLargeBatches
     };
   });
 }

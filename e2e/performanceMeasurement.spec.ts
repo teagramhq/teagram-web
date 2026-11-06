@@ -1,5 +1,5 @@
 import {expect, test} from '@playwright/test';
-import {startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
+import {beginMeasurement, startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
 
 test('starts the measured window when the browser dispatches the click', async({page}) => {
   await page.setContent('<button>Open chat</button>');
@@ -140,27 +140,12 @@ test('arms worker recording and starts the window before queued worker messages 
   expect(result.workerMessages).toEqual({spans: []});
 });
 
-test('observes the same large worker batches with recording enabled or disabled', async({page}) => {
-  const measurement = await import('./performanceMeasurement') as any;
-  for(const recording of [false, true]) {
-    await page.evaluate(() => {
-      const channel = new MessageChannel();
-      (window as any).__teagramPerf = {started: -1};
-      (window as any).apiManagerProxy = {listenPorts: [channel.port1]};
-      (window as any).__testSend = (data: unknown) => channel.port2.postMessage(data);
-      (window as any).__teagramInstallWorkerMessageAttribution = () => ({spans: [] as unknown[]});
-      channel.port1.start();
-    });
-    await measurement.beginMeasurement(page, {value: 0}, true, false, recording, true);
-    await page.evaluate(() => {
-      (window as any).__testSend({type: 'batch', payload: [{type: 'result', payload: {}}, ...Array.from({length: 1000}, () => ({type: 'invoke', payload: {type: 'mirror', payload: {name: 'peers'}}}))]});
-    });
-    await page.waitForFunction(() => (window as any).__teagramPerf.workerBatchProbe.events.length > 0);
-    const batches = await page.evaluate(() => {
-      const probe = (window as any).__teagramPerf.workerBatchProbe;
-      probe.stop();
-      return probe.events.map(({size, kind}: any) => ({size, kind}));
-    });
-    expect(batches).toEqual([{size: 1001, kind: 'invoke:mirror:peers'}]);
-  }
+
+test('ordinary measurements do not install worker recording', async({page}) => {
+  await page.evaluate(() => {
+    (window as any).__teagramPerf = {};
+    (window as any).__teagramInstallWorkerMessageAttribution = () => { throw new Error('recorder unexpectedly installed'); };
+  });
+  await beginMeasurement(page, {value: 0});
+  expect(await page.evaluate(() => (window as any).__teagramPerf.workerMessages)).toBeUndefined();
 });
