@@ -1026,16 +1026,6 @@ async function jumpToFixtureDate(
 }
 
 async function openContacts(page: Page, requests: {value: number}, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void) {
-  // appDialogsManager preloads the shared Lottie worker 200 ms after startup.
-  // The reload before this scenario can render the chat list before that timer
-  // fires, which would charge the startup worker request to opening Contacts.
-  await page.waitForTimeout(250);
-  await expect.poll(async() => page.evaluate(() => {
-    const worker = performance.getEntriesByType('resource').find((entry) => entry.name.includes('tlottie.worker')) as PerformanceResourceTiming | undefined;
-    return !!worker && worker.responseEnd > 0;
-  }), {timeout: 10_000}).toBe(true);
-  await waitForBundleResources(page);
-
   const workerRequests: string[] = [];
   const pageErrors: string[] = [];
   const recordPageError = (error: Error) => pageErrors.push(error.message);
