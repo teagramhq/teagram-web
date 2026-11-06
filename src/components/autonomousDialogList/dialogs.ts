@@ -223,6 +223,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
       }
 
       const key = this.getDialogKey(dialog);
+      this.sortedList.cancelPending(key);
       if(
         REAL_FOLDERS.has(this.filterId) &&
         this.projectedPeerIds.has(dialog.peerId) &&
@@ -856,8 +857,16 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
    * Удалит неподходящие чаты из списка, но не добавит их(!)
    */
   public async validateListForFilter() {
-    this.sortedList.getAllDialogElementsMap().forEach(async(_, key) => {
+    const keys = new Set([
+      ...this.sortedList.getAllDialogElementsMap().keys(),
+      ...this.sortedList.getPendingKeys().filter((key) => typeof key === 'number')
+    ]);
+    keys.forEach(async(key) => {
       const dialog = await rootScope.managers.appMessagesManager.getDialogOnly(key);
+      if(!dialog) {
+        this.sortedList.delete(key);
+        return;
+      }
       if(!this.testDialogForFilter(dialog)) {
         if(
           REAL_FOLDERS.has(this.filterId) &&
@@ -880,6 +889,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
         !this.filterPinnedPeerIds.has(dialog.peerId)
       )
     ) {
+      this.sortedList.cancelPending(dialog.peerId);
       if(
         REAL_FOLDERS.has(this.filterId) &&
         this.sortedList.has(dialog.peerId)
@@ -892,6 +902,7 @@ export class AutonomousDialogList extends AutonomousDialogListBase<Dialog> {
     }
 
     if(!this.testDialogForFilter(dialog)) {
+      this.sortedList.cancelPending(dialog.peerId);
       if(this.getDialogElement(dialog.peerId)) {
         this.deleteDialog(dialog);
       }

@@ -82,4 +82,25 @@ describe('dialog list updates', () => {
     expect(list.has(0)).toBe(true);
     list.destroy();
   });
+
+  it('keeps a newer pending add when an older cancelled add completes', async() => {
+    vi.useFakeTimers();
+    const list = createList();
+    let finish!: (item: any) => void;
+    const create = vi.spyOn(list, 'createItemForKey').mockImplementationOnce(() => new Promise((resolve) => finish = resolve));
+    const old = list.add(1);
+    await vi.advanceTimersToNextTimerAsync();
+    list.delete(1);
+    const newer = list.add(1);
+    finish({id: 1, index: 1, value: {type: 'dialog', value: {destroy: vi.fn()}}});
+    await old;
+    await Promise.resolve();
+    expect(list.getPendingKeys()).toEqual([1]);
+    list.cancelPending(1);
+    await vi.runAllTimersAsync();
+    await newer;
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(list.has(1)).toBe(false);
+    list.destroy();
+  });
 });

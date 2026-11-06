@@ -27,7 +27,7 @@ export default class SortedDialogList {
   private totalCount = 0;
   private totalCountOffset = 0;
   private pendingAdds: PendingDialogAdd[] = [];
-  private activeAdds = new Set<PendingDialogAdd>();
+  private pendingAddsByKey = new Map<any, Set<PendingDialogAdd>>();
   private addTimer: ReturnType<typeof setTimeout>;
 
   /**
@@ -255,7 +255,11 @@ export default class SortedDialogList {
 
   public add(key: any, canFinish: () => boolean = () => true) {
     return new Promise<void>((resolve, reject) => {
-      this.pendingAdds.push({key, canFinish, resolve, reject, cancelled: false});
+      const request = {key, canFinish, resolve, reject, cancelled: false};
+      this.pendingAdds.push(request);
+      let requests = this.pendingAddsByKey.get(key);
+      if(!requests) this.pendingAddsByKey.set(key, requests = new Set());
+      requests.add(request);
       this.scheduleAdds();
     });
   }
@@ -277,22 +281,38 @@ export default class SortedDialogList {
         request.resolve();
         return;
       }
-      this.activeAdds.add(request);
       this.createItemForKey(request.key).then((item) => {
         if(request.cancelled || !request.canFinish()) {
           if(item.value.type === 'dialog') item.value.value.destroy();
         } else {
           this.virtualList.addItems([item]);
         }
-      }).then(request.resolve, request.reject).finally(() => this.activeAdds.delete(request));
+      }).then(request.resolve, request.reject).finally(() => {
+        const pending = this.pendingAddsByKey.get(request.key);
+        pending?.delete(request);
+        if(pending && !pending.size) this.pendingAddsByKey.delete(request.key);
+      });
     });
     this.scheduleAdds();
   }
 
   private cancelAdds(key?: any) {
-    for(const request of [...this.pendingAdds, ...this.activeAdds]) {
-      if(key === undefined || request.key === key) request.cancelled = true;
+    if(key !== undefined) {
+      const requests = this.pendingAddsByKey.get(key);
+      requests?.forEach((request) => request.cancelled = true);
+      this.pendingAddsByKey.delete(key);
+      return;
     }
+    this.pendingAddsByKey.forEach((requests) => requests.forEach((request) => request.cancelled = true));
+    this.pendingAddsByKey.clear();
+  }
+
+  public cancelPending(key: any) {
+    this.cancelAdds(key);
+  }
+
+  public getPendingKeys() {
+    return [...this.pendingAddsByKey.keys()];
   }
 
   public async addPinned(key: any) {
