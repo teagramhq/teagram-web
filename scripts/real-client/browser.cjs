@@ -1817,6 +1817,13 @@ function classifyLocatorError(error) {
   return 'other';
 }
 
+function setOffscreenCanvasMode(pageUrl, disabled) {
+  const url = new URL(pageUrl);
+  if(disabled) url.searchParams.set('noOffscreenCanvas', '1');
+  else url.searchParams.delete('noOffscreenCanvas');
+  return url.href;
+}
+
 // Keeps bounded, sanitized diagnostics by the runner's current scenario step.
 const clientErrorCounts = new WeakMap();
 async function countClientErrors(page, getScenarioStep = readCurrentScenarioStep) {
@@ -2944,7 +2951,32 @@ async function setCustomEmojiStatus(page, otherPage, docId) {
   if(await page.locator('.popup-premium:visible').count()) failStage('alice_custom_emoji_status_premium_prompt');
 }
 
+async function reloadWithOffscreenCanvasMode(page, stage, disabled) {
+  setPageScenarioStep(page, `${stage}_reload`);
+  const url = setOffscreenCanvasMode(page.url(), disabled);
+  if(new URL(url).origin !== PRIVATE_CSP_ORIGIN) failStage(`${stage}_origin`);
+  await page.goto(url, {waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage(`${stage}_reload`));
+  await page.waitForFunction(() => {
+    const chats = document.querySelector('#page-chats');
+    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+  }, null, {timeout: 45_000}).catch(() => failStage(`${stage}_reload_chats`));
+  const modes = await page.evaluate(() => {
+    const searchParams = new URL(location.href).searchParams;
+    return {
+      noOffscreenCanvas: searchParams.get('noOffscreenCanvas'),
+      noCustomEmojiOffscreenCanvas: searchParams.get('noCustomEmojiOffscreenCanvas')
+    };
+  });
+  if((modes.noOffscreenCanvas === '1') !== disabled || modes.noCustomEmojiOffscreenCanvas !== '1') {
+    failStage(`${stage}_mode`);
+  }
+}
+
 async function runCustomEmojiScenario(alice, bob) {
+  currentStage = 'custom_emoji_canvas_reload';
+  await reloadWithOffscreenCanvasMode(alice.page, 'alice_custom_emoji_canvas', true);
+  await reloadWithOffscreenCanvasMode(bob.page, 'bob_custom_emoji_canvas', true);
+
   currentStage = 'alice_custom_emoji_set_install';
   await installCustomEmojiSet(alice.page, 'alice_custom_emoji');
   currentStage = 'bob_custom_emoji_set_install';
@@ -2983,6 +3015,9 @@ async function runCustomEmojiScenario(alice, bob) {
   await openComposer(bob.page, 'bob_custom_emoji_reaction_chat');
   await reactWithCustomEmoji(bob.page, alice.page, messageText, docId, 'bob_custom_emoji_reaction');
   await setCustomEmojiStatus(alice.page, bob.page, docId);
+
+  await reloadWithOffscreenCanvasMode(alice.page, 'alice_custom_emoji_canvas_restore', false);
+  await reloadWithOffscreenCanvasMode(bob.page, 'bob_custom_emoji_canvas_restore', false);
 }
 
 async function sendChannelText(page, channelName, screenshotDirectory, capturedScreenshots, timeoutMs = 30_000) {
@@ -6868,7 +6903,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setOffscreenCanvasMode, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

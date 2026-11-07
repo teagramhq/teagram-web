@@ -3894,6 +3894,20 @@ describe('discovery shared-worker network accounting', () => {
 });
 
 describe('real client scenario contract', () => {
+  it('toggles the shared canvas fallback without dropping the custom emoji mode', () => {
+    const url = new URL(`${APP_ORIGIN}/?noCustomEmojiOffscreenCanvas=1&fixture=custom-emoji`);
+    const withSharedFallback = new URL(realClientBrowser.setOffscreenCanvasMode(url.href, true));
+
+    expect(withSharedFallback.searchParams.get('noOffscreenCanvas')).toBe('1');
+    expect(withSharedFallback.searchParams.get('noCustomEmojiOffscreenCanvas')).toBe('1');
+    expect(withSharedFallback.searchParams.get('fixture')).toBe('custom-emoji');
+
+    const restored = new URL(realClientBrowser.setOffscreenCanvasMode(withSharedFallback.href, false));
+    expect(restored.searchParams.has('noOffscreenCanvas')).toBe(false);
+    expect(restored.searchParams.get('noCustomEmojiOffscreenCanvas')).toBe('1');
+    expect(restored.searchParams.get('fixture')).toBe('custom-emoji');
+  });
+
   it('requires exactly one recipient message with the expected text', () => {
     expect(getSingleExactMessageFailure(['browser-ci-hello'], 'browser-ci-hello')).toBe(null);
     expect(getSingleExactMessageFailure(['prefix browser-ci-hello'], 'browser-ci-hello')).toBe('content');
