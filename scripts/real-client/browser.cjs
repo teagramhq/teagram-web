@@ -5,7 +5,7 @@ const {chromium} = require('playwright');
 const observation = require('./observation.cjs');
 
 const REQUIRED_SCENARIOS = ['sign-in', 'first-message', 'message', 'group'];
-const OPTIONAL_SCENARIOS = ['channel', 'poll'];
+const OPTIONAL_SCENARIOS = ['custom-emoji', 'channel', 'poll'];
 const AVAILABLE_SCENARIOS = [...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS];
 const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
 const PRIVATE_CSP_WSS = 'wss://teagramd.test/apiws';
@@ -59,7 +59,7 @@ const PAGE_DIAGNOSTIC_LIMIT = 16;
 const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
 const PAGE_DIAGNOSTIC_FIELD_LIMIT = 256;
 const PAGE_DIAGNOSTIC_VALUE_TYPES = new Set(['undefined', 'null', 'boolean', 'number', 'string', 'object', 'function']);
-const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'unknown']);
+const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel', 'poll', 'unknown']);
 const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set(AVAILABLE_SCENARIOS);
 const PAGE_ERROR_EVENT_CAPTURE_KEY = '__teagramPageErrorEvents';
 const pageErrorDiagnosticCounts = new WeakMap();
@@ -2814,6 +2814,150 @@ async function toggleMessageReaction(page, otherPage, messageText, stage, expect
   if(pages.some((targetPage, index) => (clientErrorCounts.get(targetPage)?.consoleErrors ?? 0) !== pageErrors[index])) {
     failStage(`${stage}_console_errors`);
   }
+}
+
+async function installCustomEmojiSet(page, stage) {
+  setPageScenarioStep(page, `${stage}_set_link`);
+  const setLink = await page.evaluate(() => {
+    const link = document.createElement('a');
+    link.href = 'https://teagramd.test/addemoji/twemoji_custom_emojis';
+    link.setAttribute('onclick', 'stickerSet(this,event)');
+    link.textContent = 'Install custom emoji smoke set';
+    link.style.cssText = 'position:fixed;left:8px;top:8px;z-index:2147483647;padding:8px;background:white;color:black';
+    document.body.append(link);
+    return link.textContent;
+  });
+  await page.getByText(setLink, {exact: true}).click().catch(() => failStage(`${stage}_set_link`));
+  const link = page.getByText(setLink, {exact: true});
+  if(await link.count()) await link.evaluate((element) => element.remove());
+
+  const popup = page.locator('.popup-stickers');
+  await popup.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`${stage}_set_preview`));
+  const addButton = popup.locator('.popup-footer button');
+  await addButton.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_set_add_button`));
+  await page.waitForFunction(() => {
+    const button = document.querySelector('.popup-stickers .popup-footer button');
+    return button && !button.disabled && !/loading/i.test(button.textContent || '');
+  }, null, {timeout: 30_000}).catch(() => failStage(`${stage}_set_loaded`));
+  await addButton.click().catch(() => failStage(`${stage}_set_add`));
+  await page.waitForFunction(() => {
+    const button = document.querySelector('.popup-stickers .popup-footer button');
+    return button && /remove/i.test(button.textContent || '');
+  }, null, {timeout: 15_000}).catch(() => failStage(`${stage}_set_installed`));
+  await page.keyboard.press('Escape').catch(() => failStage(`${stage}_set_close`));
+  await popup.waitFor({state: 'detached', timeout: 15_000}).catch(() => failStage(`${stage}_set_close`));
+}
+
+async function selectCustomEmoji(page, stage, expectedDocId) {
+  setPageScenarioStep(page, `${stage}_picker`);
+  const dropdown = page.locator('.emoji-dropdown');
+  await dropdown.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_picker_visible`));
+
+  const customSelector = expectedDocId ?
+    `.custom-emoji[data-doc-id="${expectedDocId}"]` :
+    '.emoji-category:not(.hide) .custom-emoji';
+  const customEmoji = dropdown.locator(customSelector).first();
+  await customEmoji.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_custom_emoji_visible`));
+  const isLocked = await customEmoji.evaluate((element) => {
+    const category = element.closest('.emoji-category');
+    return element.matches('.premium-sticker-lock') || !!category?.querySelector('.category-title-lock, .premium-sticker-lock');
+  });
+  if(isLocked) failStage(`${stage}_premium_lock`);
+  const docId = await customEmoji.getAttribute('data-doc-id');
+  if(!docId || (expectedDocId && docId !== expectedDocId)) failStage(`${stage}_custom_emoji_identity`);
+  await customEmoji.click().catch(() => failStage(`${stage}_custom_emoji_click`));
+  if(await page.locator('.popup-premium:visible').count()) failStage(`${stage}_premium_prompt`);
+  return docId;
+}
+
+async function waitForCustomEmojiMessage(page, text, docId, stage) {
+  setPageScenarioStep(page, stage);
+  await page.waitForFunction(({text, docId}) => {
+    const messages = [...document.querySelectorAll('#column-center .bubble .message')]
+    .filter((message) => (message.textContent || '').includes(text));
+    return messages.length === 1 && [...messages[0].querySelectorAll('.custom-emoji')]
+    .some((emoji) => emoji.dataset.docId === docId);
+  }, {text, docId}, {timeout: 30_000}).catch(() => failStage(stage));
+}
+
+async function waitForCustomMessageReaction(page, text, docId, expectedCount, stage) {
+  setPageScenarioStep(page, stage);
+  await page.waitForFunction(({text, docId, expectedCount}) => {
+    const messages = [...document.querySelectorAll('#column-center .bubble .message')]
+    .filter((message) => (message.textContent || '').includes(text));
+    if(messages.length !== 1) return false;
+    const reactions = [...messages[0].closest('.bubble').querySelectorAll('reaction-element')];
+    const reaction = reactions.find((element) => {
+      return element.reactionCount?.reaction?._ === 'reactionCustomEmoji' &&
+        String(element.reactionCount.reaction.document_id) === docId;
+    });
+    return expectedCount === 0 ? !reaction : reaction?.reactionCount.count === expectedCount;
+  }, {text, docId, expectedCount}, {timeout: 30_000}).catch(() => failStage(stage));
+}
+
+async function reactWithCustomEmoji(page, otherPage, text, docId, stage) {
+  setPageScenarioStep(page, `${stage}_message`);
+  const message = page.locator('#column-center .bubble .message').filter({hasText: text});
+  if(await message.count() !== 1) failStage(`${stage}_message_count`);
+  await message.click({button: 'right'}).catch(() => failStage(`${stage}_context_menu`));
+
+  setPageScenarioStep(page, `${stage}_picker`);
+  const moreButton = page.locator('#bubble-contextmenu .btn-menu-reactions-more');
+  await moreButton.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_more_button`));
+  await moreButton.click().catch(() => failStage(`${stage}_more_click`));
+  await selectCustomEmoji(page, stage, docId);
+  await waitForCustomMessageReaction(page, text, docId, 1, `${stage}_sender`);
+  await waitForCustomMessageReaction(otherPage, text, docId, 1, `${stage}_receiver`);
+  if(await page.locator('.popup-premium:visible').count()) failStage(`${stage}_premium_prompt`);
+}
+
+async function setCustomEmojiStatus(page, otherPage, docId) {
+  setPageScenarioStep(page, 'alice_custom_emoji_status_open');
+  const statusButton = page.locator('.sidebar-emoji-status');
+  await statusButton.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_custom_emoji_status_button'));
+  await statusButton.click().catch(() => failStage('alice_custom_emoji_status_open'));
+  await selectCustomEmoji(page, 'alice_custom_emoji_status', docId);
+
+  setPageScenarioStep(page, 'alice_custom_emoji_status_sender');
+  await page.waitForFunction((docId) => {
+    return !!document.querySelector(`.sidebar-emoji-status-emoji .custom-emoji[data-doc-id="${docId}"]`);
+  }, docId, {timeout: 30_000}).catch(() => failStage('alice_custom_emoji_status_sender'));
+
+  setPageScenarioStep(otherPage, 'bob_custom_emoji_status_receiver');
+  await otherPage.waitForFunction((docId) => {
+    return !!document.querySelector(`#column-center .topbar .emoji-status .custom-emoji[data-doc-id="${docId}"]`);
+  }, docId, {timeout: 30_000}).catch(() => failStage('bob_custom_emoji_status_receiver'));
+  if(await page.locator('.popup-premium:visible').count()) failStage('alice_custom_emoji_status_premium_prompt');
+}
+
+async function runCustomEmojiScenario(alice, bob) {
+  currentStage = 'alice_custom_emoji_set_install';
+  await installCustomEmojiSet(alice.page, 'alice_custom_emoji');
+  currentStage = 'bob_custom_emoji_set_install';
+  await installCustomEmojiSet(bob.page, 'bob_custom_emoji');
+
+  const messageText = `browser-ci-custom-emoji-${runtime.runId.slice(0, 8)}`;
+  currentStage = 'alice_custom_emoji_send';
+  const input = await openComposer(alice.page, 'alice_custom_emoji_send');
+  await input.fill(messageText).catch(() => failStage('alice_custom_emoji_send_fill'));
+  await alice.page.locator('#column-center .toggle-emoticons').click()
+  .catch(() => failStage('alice_custom_emoji_send_picker'));
+  const docId = await selectCustomEmoji(alice.page, 'alice_custom_emoji_send');
+  await input.press('Enter').catch(() => failStage('alice_custom_emoji_send_submit'));
+  await waitForCustomEmojiMessage(alice.page, messageText, docId, 'alice_custom_emoji_send_visible');
+  await waitForCustomEmojiMessage(bob.page, messageText, docId, 'bob_custom_emoji_receive_visible');
+  if(await alice.page.locator('.popup-premium:visible').count()) failStage('alice_custom_emoji_send_premium_prompt');
+
+  await selectUniquePeer(
+    bob.page,
+    '#column-left .input-search-input',
+    '#search-container .row[data-peer-id]',
+    runtime.accounts[0].username,
+    'bob_custom_emoji_reaction_chat'
+  );
+  await openComposer(bob.page, 'bob_custom_emoji_reaction_chat');
+  await reactWithCustomEmoji(bob.page, alice.page, messageText, docId, 'bob_custom_emoji_reaction');
+  await setCustomEmojiStatus(alice.page, bob.page, docId);
 }
 
 async function sendChannelText(page, channelName, screenshotDirectory, capturedScreenshots, timeoutMs = 30_000) {
@@ -6112,6 +6256,10 @@ function shouldRunChannelScenario(runtimeConfig) {
   return runtimeConfig.scenarios.includes('channel');
 }
 
+function shouldRunCustomEmojiScenario(runtimeConfig) {
+  return runtimeConfig.scenarios.includes('custom-emoji');
+}
+
 function shouldRunPollScenario(runtimeConfig) {
   return runtimeConfig.scenarios.includes('poll');
 }
@@ -6391,6 +6539,12 @@ async function main(dependencies = {}) {
     await toggleMessageReaction(bob.page, alice.page, MESSAGE, 'bob_direct_reaction_set', 1);
     await toggleMessageReaction(bob.page, alice.page, MESSAGE, 'bob_direct_reaction_clear', 0);
     report.push({name: 'message', status: 'passed'});
+
+    if(shouldRunCustomEmojiScenario(runtime)) {
+      currentScenario = 'custom-emoji';
+      await runCustomEmojiScenario(alice, bob);
+      report.push({name: 'custom-emoji', status: 'passed'});
+    }
 
     currentScenario = 'group';
     currentStage = 'alice_new_group_menu';
@@ -6695,7 +6849,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunCustomEmojiScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

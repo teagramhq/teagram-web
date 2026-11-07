@@ -3913,57 +3913,65 @@ describe('real client scenario contract', () => {
 
   it('requires every scenario exactly once', () => {
     expect(() => parseRequiredScenarios('sign-in,message')).toThrow('required scenarios are missing');
-    expect(() => parseRequiredScenarios('sign-in,first-message,message,group,group')).toThrow('duplicate scenario');
-    expect(() => parseRequiredScenarios('sign-in,first-message,message,group,channel,unknown')).toThrow('unknown scenario');
+    expect(() => parseRequiredScenarios('sign-in,first-message,message,custom-emoji,group,group')).toThrow('duplicate scenario');
+    expect(() => parseRequiredScenarios('sign-in,first-message,message,custom-emoji,group,channel,unknown')).toThrow('unknown scenario');
     expect(parseRequiredScenarios('sign-in,first-message,message,group')).toEqual(['sign-in', 'first-message', 'message', 'group']);
-    expect(parseRequiredScenarios('sign-in,first-message,message,group,channel')).toEqual(['sign-in', 'first-message', 'message', 'group', 'channel']);
-    expect(parseRequiredScenarios('sign-in,first-message,message,group,poll')).toEqual(['sign-in', 'first-message', 'message', 'group', 'poll']);
-    expect(parseRequiredScenarios('sign-in,first-message,message,group,channel,poll')).toEqual(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']);
-    expect(parseRequiredScenarios('channel,poll,group,message,first-message,sign-in')).toEqual(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']);
+    expect(parseRequiredScenarios('sign-in,first-message,message,custom-emoji,group')).toEqual(['sign-in', 'first-message', 'message', 'group', 'custom-emoji']);
+    expect(parseRequiredScenarios('sign-in,first-message,message,custom-emoji,group,channel')).toEqual(['sign-in', 'first-message', 'message', 'group', 'custom-emoji', 'channel']);
+    expect(parseRequiredScenarios('sign-in,first-message,message,custom-emoji,group,poll')).toEqual(['sign-in', 'first-message', 'message', 'group', 'custom-emoji', 'poll']);
+    expect(parseRequiredScenarios('sign-in,first-message,message,custom-emoji,group,channel,poll')).toEqual(['sign-in', 'first-message', 'message', 'group', 'custom-emoji', 'channel', 'poll']);
+    expect(parseRequiredScenarios('channel,poll,group,custom-emoji,message,first-message,sign-in')).toEqual(['sign-in', 'first-message', 'message', 'group', 'custom-emoji', 'channel', 'poll']);
   });
 
   it('requires the first inbound private message scenario', () => {
     expect(() => parseRequiredScenarios('sign-in,message,group')).toThrow('required scenarios are missing');
-    expect(parseRequiredScenarios('sign-in,first-message,message,group')).toEqual(['sign-in', 'first-message', 'message', 'group']);
+    expect(parseRequiredScenarios('sign-in,first-message,message,custom-emoji,group')).toEqual(['sign-in', 'first-message', 'message', 'group', 'custom-emoji']);
+  });
+
+  it('runs the custom emoji scenario only when selected', () => {
+    expect(realClientBrowser.shouldRunCustomEmojiScenario({scenarios: ['sign-in', 'first-message', 'message', 'group']})).toBe(false);
+    expect(realClientBrowser.shouldRunCustomEmojiScenario({scenarios: ['sign-in', 'first-message', 'message', 'group', 'custom-emoji']})).toBe(true);
   });
 
   it('runs the channel scenario only when selected', () => {
-    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll']})).toBe(false);
-    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']})).toBe(true);
+    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'poll']})).toBe(false);
+    expect(realClientBrowser.shouldRunChannelScenario({scenarios: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel', 'poll']})).toBe(true);
   });
 
   it('runs the poll scenario only when selected', () => {
-    expect(realClientBrowser.shouldRunPollScenario({scenarios: ['sign-in', 'first-message', 'message', 'group']})).toBe(false);
-    expect(realClientBrowser.shouldRunPollScenario({scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel']})).toBe(false);
-    expect(realClientBrowser.shouldRunPollScenario({scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll']})).toBe(true);
+    expect(realClientBrowser.shouldRunPollScenario({scenarios: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group']})).toBe(false);
+    expect(realClientBrowser.shouldRunPollScenario({scenarios: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel']})).toBe(false);
+    expect(realClientBrowser.shouldRunPollScenario({scenarios: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'poll']})).toBe(true);
   });
 
   it('requires the selected optional channel scenario to pass', () => {
-    const scenarios = ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll'];
+    const scenarios = ['sign-in', 'first-message', 'message', 'group', 'custom-emoji', 'channel', 'poll'];
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'first-message', status: 'passed'},
       {name: 'message', status: 'passed'},
-      {name: 'group', status: 'passed'}
+      {name: 'group', status: 'passed'},
+      {name: 'custom-emoji', status: 'passed'}
     ], scenarios)).toThrow('channel did not execute');
     expect(assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'first-message', status: 'passed'},
       {name: 'message', status: 'passed'},
       {name: 'group', status: 'passed'},
+      {name: 'custom-emoji', status: 'passed'},
       {name: 'channel', status: 'passed'},
       {name: 'poll', status: 'passed'}
     ], scenarios)).toEqual(scenarios);
   });
 
   it('counts poll and optional channel screenshots separately for positive and negative runs', () => {
-    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group']})).toBe(20);
-    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel']})).toBe(30);
-    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll']})).toBe(34);
-    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']})).toBe(44);
-    expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll']})).toBe(24);
-    expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']})).toBe(34);
-    expect(() => realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'group']})).toThrow('negative control requires poll');
+    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group']})).toBe(20);
+    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel']})).toBe(30);
+    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'poll']})).toBe(34);
+    expect(realClientContract.expectedScreenshotCount({scenarios: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel', 'poll']})).toBe(44);
+    expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'poll']})).toBe(24);
+    expect(realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel', 'poll']})).toBe(34);
+    expect(() => realClientContract.expectedScreenshotCount({pollCreationNegativeControl: true, scenarios: ['sign-in', 'first-message', 'message', 'custom-emoji', 'group']})).toThrow('negative control requires poll');
   });
 
   it('keeps private-artifact observation to the two synthetic accounts', () => {
@@ -3977,11 +3985,11 @@ describe('real client scenario contract', () => {
       '--server-revision', realClientContract.POLL_NEGATIVE_CONTROL_SERVER_REVISION,
       '--web-revision', READINESS_PINS.webRevision,
       '--run-id', READINESS_PINS.runId,
-      '--scenarios', 'sign-in,first-message,message,group,channel,poll'
+      '--scenarios', 'sign-in,first-message,message,custom-emoji,group,channel,poll'
     ];
 
     expect(parseRealClientArgs([...args, '--poll-creation-negative-control'])).toMatchObject({
-      scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll'],
+      scenarios: ['sign-in', 'first-message', 'message', 'group', 'custom-emoji', 'channel', 'poll'],
       pollCreationNegativeControl: true
     });
     expect(realClientContract.POLL_NEGATIVE_CONTROL_EVIDENCE).toEqual([
@@ -4000,10 +4008,11 @@ describe('real client scenario contract', () => {
       {name: 'sign-in', status: 'passed'},
       {name: 'first-message', status: 'passed'},
       {name: 'message', status: 'passed'},
+      {name: 'custom-emoji', status: 'passed'},
       {name: 'group', status: 'passed'},
       {name: 'channel', status: 'skipped'},
       {name: 'poll', status: 'passed'}
-    ], ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll'])).toThrow('channel was skipped');
+    ], ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel', 'poll'])).toThrow('channel was skipped');
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'first-message', status: 'passed'},
@@ -4014,26 +4023,30 @@ describe('real client scenario contract', () => {
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'first-message', status: 'passed'},
-      {name: 'message', status: 'passed'}
+      {name: 'message', status: 'passed'},
+      {name: 'custom-emoji', status: 'passed'}
     ])).toThrow('group did not execute');
     expect(() => assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'first-message', status: 'passed'},
       {name: 'message', status: 'passed'},
+      {name: 'custom-emoji', status: 'passed'},
       {name: 'group', status: 'passed'}
-    ], ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll'])).toThrow('channel did not execute');
+    ], ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel', 'poll'])).toThrow('channel did not execute');
     expect(assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'first-message', status: 'passed'},
       {name: 'message', status: 'passed'},
+      {name: 'custom-emoji', status: 'passed'},
       {name: 'group', status: 'passed'},
       {name: 'channel', status: 'passed'},
       {name: 'poll', status: 'passed'}
-    ], ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll'])).toEqual(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']);
+    ], ['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel', 'poll'])).toEqual(['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel', 'poll']);
     expect(assertAllScenariosPassed([
       {name: 'sign-in', status: 'passed'},
       {name: 'first-message', status: 'passed'},
       {name: 'message', status: 'passed'},
+      {name: 'custom-emoji', status: 'passed'},
       {name: 'group', status: 'passed'}
     ])).toEqual(['sign-in', 'first-message', 'message', 'group']);
   });
@@ -4125,7 +4138,7 @@ describe('real client scenario contract', () => {
       leafSPKI: Buffer.alloc(32, 1).toString('base64'),
       frontIp: '127.0.0.1',
       screenshotDirectory: `/tmp/real-client-${runId}`,
-      scenarios: ['sign-in', 'first-message', 'message', 'group', 'poll'],
+      scenarios: ['sign-in', 'first-message', 'message', 'group', 'custom-emoji', 'poll'],
       accounts: [
         {username: `u${runId.slice(0, 30)}a`, password: 'b'.repeat(64)},
         {username: `u${runId.slice(0, 30)}b`, password: 'c'.repeat(64)}
@@ -4133,10 +4146,10 @@ describe('real client scenario contract', () => {
     };
 
     expect(() => validateRuntimeInput(runtime)).not.toThrow();
-    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']})).not.toThrow();
-    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'first-message', 'message', 'group']})).not.toThrow();
-    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel']})).not.toThrow();
-    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'first-message', 'message', 'group'], pollCreationNegativeControl: true})).toThrow('runtime_input_validation');
+    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'first-message', 'message', 'group', 'custom-emoji', 'channel', 'poll']})).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'first-message', 'message', 'group', 'custom-emoji']})).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'first-message', 'message', 'group', 'custom-emoji', 'channel']})).not.toThrow();
+    expect(() => validateRuntimeInput({...runtime, scenarios: ['sign-in', 'first-message', 'message', 'group', 'custom-emoji'], pollCreationNegativeControl: true})).toThrow('runtime_input_validation');
     expect(() => validateRuntimeInput({...runtime, pollCreationNegativeControl: false})).toThrow('runtime_input_validation');
     expect(() => validateRuntimeInput({...runtime, observationOnly: true, artifactDigest: null, manifestArtifactDigest: null})).not.toThrow();
     for(const malformed of [undefined, null, [runtime.manifestArtifactDigest], `sha256:${'f'.repeat(63)}`]) {
@@ -4191,7 +4204,7 @@ describe('real client scenario contract', () => {
       '--server-revision', '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       '--web-revision', 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       '--run-id', 'a'.repeat(32),
-      '--scenarios', 'sign-in,first-message,message,group,channel,poll'
+      '--scenarios', 'sign-in,first-message,message,custom-emoji,group,channel,poll'
     ];
 
     expect(parseRealClientArgs(args)).toEqual({
@@ -4200,7 +4213,7 @@ describe('real client scenario contract', () => {
       serverRevision: '47daaaea5c71b859d9865c03cabb50da5a1a013b',
       webRevision: 'b7523e39f5365f50ab6ecd7aa1fb4c79eedf08d8',
       runId: 'a'.repeat(32),
-      scenarios: ['sign-in', 'first-message', 'message', 'group', 'channel', 'poll']
+      scenarios: ['sign-in', 'first-message', 'message', 'group', 'custom-emoji', 'channel', 'poll']
     });
     expect(parseRealClientArgs(['--', ...args])).toEqual(parseRealClientArgs(args));
     expect(() => parseRealClientArgs([])).toThrow('missing required options');
@@ -4218,15 +4231,15 @@ describe('real client scenario contract', () => {
       '--run-id', READINESS_PINS.runId
     ];
 
-    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,first-message,message,group']).scenarios)
-    .toEqual(['sign-in', 'first-message', 'message', 'group']);
-    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,first-message,message,group,channel']).scenarios)
-    .toEqual(['sign-in', 'first-message', 'message', 'group', 'channel']);
+    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,first-message,message,custom-emoji,group']).scenarios)
+    .toEqual(['sign-in', 'first-message', 'message', 'group', 'custom-emoji']);
+    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,first-message,message,custom-emoji,group,channel']).scenarios)
+    .toEqual(['sign-in', 'first-message', 'message', 'group', 'custom-emoji', 'channel']);
     const negativeControlArgs = [...args];
     negativeControlArgs[negativeControlArgs.indexOf('--server-revision') + 1] = realClientContract.POLL_NEGATIVE_CONTROL_SERVER_REVISION;
     expect(() => parseRealClientArgs([
       ...negativeControlArgs,
-      '--scenarios', 'sign-in,first-message,message,group',
+      '--scenarios', 'sign-in,first-message,message,custom-emoji,group',
       '--poll-creation-negative-control'
     ])).toThrow('requires poll scenario');
   });
@@ -4261,7 +4274,7 @@ describe('real client scenario contract', () => {
       observerControlsOnly: true,
       scenarios: ['sign-in', 'first-message', 'message', 'group']
     });
-    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,first-message,message,group,channel,poll', '--observer-controls-only']).observerControlsOnly).toBe(true);
+    expect(parseRealClientArgs([...args, '--scenarios', 'sign-in,first-message,message,custom-emoji,group,channel,poll', '--observer-controls-only']).observerControlsOnly).toBe(true);
     expect(() => parseRealClientArgs(args)).toThrow('scenario selection is required');
     expect(() => parseRealClientArgs([...args, '--observer-controls-only', '--observer-controls-only'])).toThrow('option was provided more than once');
   });
@@ -4283,7 +4296,7 @@ describe('real client scenario contract', () => {
       runId: READINESS_PINS.runId,
       authProgressOneSubmission: true
     });
-    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,first-message,message,group,channel', '--auth-progress-one-submission']))
+    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,first-message,message,custom-emoji,group,channel', '--auth-progress-one-submission']))
     .toThrow('cannot be combined');
     expect(() => parseRealClientArgs([...args, '--observer-controls-only', '--auth-progress-one-submission']))
     .toThrow('cannot be combined');
@@ -4299,7 +4312,7 @@ describe('real client scenario contract', () => {
       '--server-revision', READINESS_PINS.serverRevision,
       '--web-revision', READINESS_PINS.webRevision,
       '--run-id', READINESS_PINS.runId,
-      '--scenarios', 'sign-in,first-message,message,group,channel',
+      '--scenarios', 'sign-in,first-message,message,custom-emoji,group,channel',
       '--auth-progress-one-submission'
     ], {encoding: 'utf8'});
 

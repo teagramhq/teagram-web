@@ -125,6 +125,43 @@ describe('custom emoji access without Premium', () => {
     expect(tab.content.classList.contains('has-premium')).toBe(true);
   });
 
+  it('removes Premium styling only from emoji sets in an unlocked picker', async() => {
+    for(const canUsePremiumEmojiAlways of [true, false]) {
+      const title = document.createElement('div');
+      const category = {
+        elements: {
+          container: document.createElement('div'),
+          title,
+          items: document.createElement('div'),
+          menuTabPadding: document.createElement('div')
+        },
+        middlewareHelper: {get: () => vi.fn()},
+        setCategoryItemsHeight: vi.fn()
+      };
+      const tab = Object.create(EmojiTab.prototype) as EmojiTab;
+      Object.assign(tab, {
+        canUsePremiumEmojiAlways,
+        createCategory: vi.fn(() => category),
+        positionCategory: vi.fn(),
+        createEmojiRendererForCategory: vi.fn(),
+        renderStickerSetThumb: vi.fn(),
+        isCategoryVisible: vi.fn(() => true),
+        onCategoryVisibility: vi.fn(),
+        managers: {appStickersManager: {getStickerSet: vi.fn().mockResolvedValue({documents: []})}}
+      });
+
+      (tab as any).renderEmojiSet({id: 'set', title: 'Custom emoji', count: 0, pFlags: {emojis: true}});
+      await Promise.resolve();
+
+      expect(category.elements.container.classList.contains('is-premium-set')).toBe(!canUsePremiumEmojiAlways);
+      if(canUsePremiumEmojiAlways) {
+        expect(title.querySelector('.category-title-lock')).toBeNull();
+      } else {
+        expect(title.querySelector('.category-title-lock')).not.toBeNull();
+      }
+    }
+  });
+
   it('renders custom emoji status while Premium features are hidden', async() => {
     mocks.apiManagerProxy.isPremiumFeaturesHidden.mockResolvedValue(true);
     const statusIcon = document.createElement('span');

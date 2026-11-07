@@ -994,7 +994,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
     this.positionCategory(category, prepend);
     const {container, menuTabPadding} = category.elements;
     category.elements.items.classList.add('not-local');
-    if(!isGroupSet) {
+    if(!isGroupSet && !this.canUsePremiumEmojiAlways) {
       category.elements.container.classList.add('is-premium-set');
       category.elements.title.prepend(Icon('premium_lock', 'category-title-lock'));
     }
