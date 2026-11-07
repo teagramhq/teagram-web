@@ -35,7 +35,7 @@ import partition from '@helpers/array/partition';
 import {PAID_REACTION_EMOJI_DOCID} from '@lib/customEmoji/constants';
 import {StarsStar} from '@components/popups/stars';
 import {cleanEmoji} from '@lib/richTextProcessor/fixEmoji';
-import {canReactionPickerUseCustomEmoji} from './reactionsMenuEmojiAccess';
+import {createReactionPickerEmojiTab} from './reactionsMenuEmojiAccess';
 
 const REACTIONS_CLASS_NAME = 'btn-menu-reactions';
 const REACTION_CLASS_NAME = REACTIONS_CLASS_NAME + '-reaction';
@@ -387,11 +387,10 @@ export class ChatReactionsMenu {
 
     const canShrink = this.noPacks && this.noSearch;
 
-    const emojiTab = new EmojiTab({
+    const emojiTab = createReactionPickerEmojiTab({
       noRegularEmoji: true,
       noPacks: this.noPacks,
       noSearch: this.noSearch,
-      canUsePremiumEmojiAlways: canReactionPickerUseCustomEmoji(this.isTags, this.isEffects),
       managers: this.managers,
       mainSets: this.isTags ? this.loadTags : (this.isEffects ? this.loadEffects : this.loadReactions),
       additionalLocalStickerSet: this.isEffects ? async() => {
@@ -465,7 +464,7 @@ export class ChatReactionsMenu {
         return this.splitAvailableEffects(availableEffects);
       } : undefined,
       showLocks: this.isEffects
-    });
+    }, this.isTags, this.isEffects, (options) => new EmojiTab(options));
 
     const emoticonsDropdown = new EmoticonsDropdown({
       tabsToRender: [emojiTab],

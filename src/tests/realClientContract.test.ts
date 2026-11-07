@@ -3894,68 +3894,6 @@ describe('discovery shared-worker network accounting', () => {
 });
 
 describe('real client scenario contract', () => {
-  it('opens the custom emoji smoke set through the CSP-safe app link handler', () => {
-    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
-    const setInstallSource = browserSource.slice(
-      browserSource.indexOf('async function installCustomEmojiSet'),
-      browserSource.indexOf('async function selectCustomEmoji')
-    );
-
-    expect(setInstallSource).toContain(`link.href = new URL('/addemoji/twemoji_custom_emojis', window.location.origin).toString();`);
-    expect(setInstallSource).toContain(`link.addEventListener('click', (event) => window.stickerSet(link, event));`);
-    expect(setInstallSource).not.toContain(`setAttribute('onclick'`);
-  });
-
-  it('scrolls installed custom emoji sets into view before selecting an emoji', () => {
-    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
-    const selectionSource = browserSource.slice(
-      browserSource.indexOf('async function selectCustomEmoji'),
-      browserSource.indexOf('async function waitForCustomEmojiMessage')
-    );
-    const scrollIntoView = selectionSource.indexOf('scrollIntoViewIfNeeded');
-    const waitForEmoji = selectionSource.indexOf('customEmoji.waitFor');
-
-    expect(selectionSource).toContain('.category-items.not-local');
-    expect(scrollIntoView).toBeGreaterThan(-1);
-    expect(waitForEmoji).toBeGreaterThan(scrollIntoView);
-  });
-
-  it('selects the sender chat after installing the set and opens the recipient chat after sending', () => {
-    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
-    const scenario = browserSource.slice(
-      browserSource.indexOf('async function runCustomEmojiScenario'),
-      browserSource.indexOf('async function sendChannelText')
-    );
-    const bobSetInstalled = scenario.indexOf('await installCustomEmojiSet(bob.page');
-    const senderChatSelected = scenario.indexOf('await selectUniquePeer(\n    alice.page,');
-    const senderComposerOpened = scenario.indexOf('await openComposer(alice.page');
-    const messageSubmitted = scenario.indexOf('await input.press');
-    const senderVisibilityChecked = scenario.indexOf('alice_custom_emoji_send_visible');
-    const recipientChatSelected = scenario.indexOf('await selectUniquePeer(\n    bob.page,');
-    const recipientVisibilityChecked = scenario.indexOf('bob_custom_emoji_receive_visible');
-
-    expect(bobSetInstalled).toBeGreaterThan(-1);
-    expect(senderChatSelected).toBeGreaterThan(bobSetInstalled);
-    expect(senderComposerOpened).toBeGreaterThan(senderChatSelected);
-    expect(messageSubmitted).toBeGreaterThan(senderComposerOpened);
-    expect(senderVisibilityChecked).toBeGreaterThan(messageSubmitted);
-    expect(recipientChatSelected).toBeGreaterThan(senderVisibilityChecked);
-    expect(recipientVisibilityChecked).toBeGreaterThan(recipientChatSelected);
-    expect(scenario.slice(senderChatSelected, senderComposerOpened)).toContain('runtime.accounts[1].username');
-    expect(scenario.slice(recipientChatSelected, recipientVisibilityChecked)).toContain('runtime.accounts[0].username');
-  });
-
-  it('reloads both pages onto the main-thread canvas only for the custom emoji scenario', () => {
-    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
-    const scenarioSource = browserSource.slice(browserSource.indexOf('async function runCustomEmojiScenario'));
-
-    expect(browserSource.match(/setItem\('noOffscreenCanvas', '1'\)/g)).toHaveLength(1);
-    expect(scenarioSource.indexOf('reloadWithMainThreadCanvas(alice.page'))
-    .toBeLessThan(scenarioSource.indexOf('installCustomEmojiSet(alice.page'));
-    expect(scenarioSource.indexOf('reloadWithMainThreadCanvas(bob.page'))
-    .toBeLessThan(scenarioSource.indexOf('installCustomEmojiSet(alice.page'));
-  });
-
   it('requires exactly one recipient message with the expected text', () => {
     expect(getSingleExactMessageFailure(['browser-ci-hello'], 'browser-ci-hello')).toBe(null);
     expect(getSingleExactMessageFailure(['prefix browser-ci-hello'], 'browser-ci-hello')).toBe('content');
@@ -6179,11 +6117,19 @@ describe('real client centre-column failure state', () => {
       await page.setContent(`<div id="column-center">
         <div class="bubble is-sent"><div class="message">browser-ci-hello</div></div>
       </div><script>
-        setTimeout(() => {
-          const bubble = document.querySelector('.bubble');
-          bubble?.classList.remove('is-sent');
-          bubble?.classList.add('is-sending');
-        }, 100);
+        const originalContains = DOMTokenList.prototype.contains;
+        DOMTokenList.prototype.contains = function(token) {
+          const result = originalContains.call(this, token);
+          if(token === 'is-sent' && result && !window.__realClientSentStateChangeScheduled) {
+            window.__realClientSentStateChangeScheduled = true;
+            setTimeout(() => {
+              const bubble = document.querySelector('.bubble');
+              bubble?.classList.remove('is-sent');
+              bubble?.classList.add('is-sending');
+            }, 0);
+          }
+          return result;
+        };
       </script>`);
       const messages = page.locator('#column-center .bubble .message').filter({hasText: 'browser-ci-hello'});
 

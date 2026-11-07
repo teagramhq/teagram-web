@@ -1,5 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import EmojiTab from '@components/emoticonsDropdown/tabs/emoji';
+import {CustomEmojiRendererElement} from '@lib/customEmoji/renderer';
 import PopupPremium from '@components/popups/premium';
 import generateTitleIcons from '@components/generateTitleIcons';
 import rootScope from '@lib/rootScope';
@@ -75,6 +76,17 @@ vi.mock('@stores/contentSettings', () => ({
   })
 }));
 vi.mock('@stores/stars', () => ({default: () => () => 0}));
+vi.mock('@lib/lottie/shouldRenderOffscreen', () => ({default: true}));
+vi.mock('@config/modes', () => ({
+  default: new Proxy({noCustomEmojiOffscreenCanvas: true}, {
+    get: (target, property) => Reflect.get(target, property) ?? false
+  })
+}));
+vi.mock('@lib/customEmoji/compositorChannels', () => ({ensureCompositor: vi.fn()}));
+vi.mock('@lib/customEmoji/compositorMessagePort', () => ({
+  default: {addEventListener: vi.fn(), invokeCompositorVoid: vi.fn()}
+}));
+vi.mock('@helpers/liteMode', () => ({default: {isAvailable: () => false}}));
 
 describe('custom emoji access without Premium', () => {
   let previousPremium: boolean;
@@ -159,6 +171,57 @@ describe('custom emoji access without Premium', () => {
       } else {
         expect(title.querySelector('.category-title-lock')).not.toBeNull();
       }
+    }
+  });
+
+  it('adds custom emoji to the items container when the real category visibility callback enters view', () => {
+    const categoryContainer = document.createElement('div');
+    const itemsContainer = document.createElement('div');
+    const customEmoji = Object.assign(document.createElement('span'), {docId: '42', clear: vi.fn()});
+    const emojiItem = document.createElement('div');
+    emojiItem.append(customEmoji);
+    const renderer = {add: vi.fn()};
+    const category = {
+      elements: {container: categoryContainer, items: itemsContainer, renderer},
+      items: [{docId: '42', element: emojiItem}]
+    };
+    const tab = new EmojiTab({
+      managers: {} as any,
+      isStandalone: true,
+      noRegularEmoji: true,
+      noSearch: true,
+      noPacks: true
+    });
+    (tab as any).categoriesMap.set(categoryContainer, category);
+
+    try {
+      (tab as any).onCategoryVisibility({target: categoryContainer, visible: true});
+    } finally {
+      tab.destroy();
+    }
+
+    expect(itemsContainer.contains(emojiItem)).toBe(true);
+    expect(renderer.add).toHaveBeenCalledOnce();
+    expect(renderer.add.mock.calls[0][0].addCustomEmojis.get('42')).toEqual(new Set([customEmoji]));
+  });
+
+  it('keeps custom emoji on the main-thread canvas when the dedicated mode is enabled', () => {
+    const transferControlToOffscreen = vi.fn(() => ({} as OffscreenCanvas));
+    const transferDescriptor = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'transferControlToOffscreen');
+    Object.defineProperty(HTMLCanvasElement.prototype, 'transferControlToOffscreen', {
+      configurable: true,
+      value: transferControlToOffscreen
+    });
+    let renderer: CustomEmojiRendererElement;
+    try {
+      renderer = CustomEmojiRendererElement.create({animationGroup: 'custom-emoji-access-test'} as any);
+
+      expect(renderer.offscreen).toBe(false);
+      expect(transferControlToOffscreen).not.toHaveBeenCalled();
+    } finally {
+      renderer?.destroy();
+      if(transferDescriptor) Object.defineProperty(HTMLCanvasElement.prototype, 'transferControlToOffscreen', transferDescriptor);
+      else delete (HTMLCanvasElement.prototype as any).transferControlToOffscreen;
     }
   });
 

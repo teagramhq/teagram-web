@@ -63,9 +63,10 @@ import getAttachMenuBotIcon from '@appManagers/utils/attachMenuBots/getAttachMen
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 import wrapUrl from '@lib/richTextProcessor/wrapUrl';
 import {updateSearchHelperResults} from '@components/sidebarLeft/searchHelperResults';
-import {AttachMenuBot, EmojiStatus, User} from '@layer';
+import {AttachMenuBot, User} from '@layer';
 import {Middleware, MiddlewareHelper} from '@helpers/middleware';
 import wrapEmojiStatus from '@components/wrappers/emojiStatus';
+import {getSidebarEmojiStatus, updateSidebarEmojiStatus} from './emojiStatus';
 
 const log = logger('SidebarLeft');
 import {makeMediaSize} from '@helpers/mediaSize';
@@ -276,7 +277,7 @@ export class AppSidebarLeft extends SidebarSlider {
 
     const wrapStatus = async(middleware: Middleware) => {
       const user = apiManagerProxy.getUser(rootScope.myId.toUserId());
-      const emojiStatus = user?.emoji_status as EmojiStatus.emojiStatus;
+      const emojiStatus = getSidebarEmojiStatus(user);
       if(!emojiStatus) {
         statusBtnIcon.replaceChildren();
         replaceButtonIcon(statusBtnIcon, 'star');
@@ -318,7 +319,10 @@ export class AppSidebarLeft extends SidebarSlider {
     const updateEmojiStatus = () => {
       const oldStatusMiddlewareHelper = statusMiddlewareHelper;
       statusMiddlewareHelper = this.getMiddleware().create();
-      wrapStatus(statusMiddlewareHelper.get()).finally(() => {
+      void updateSidebarEmojiStatus(
+        () => wrapStatus(statusMiddlewareHelper.get()),
+        (error) => log.error('Failed to update sidebar emoji status', error)
+      ).finally(() => {
         oldStatusMiddlewareHelper?.destroy();
       });
     };

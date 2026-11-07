@@ -1844,6 +1844,16 @@ async function countClientErrors(page, getScenarioStep = readCurrentScenarioStep
     diagnosticLimit: PAGE_DIAGNOSTIC_LIMIT,
     diagnosticFieldLimit: PAGE_DIAGNOSTIC_FIELD_LIMIT
   });
+  // Keep custom emoji on the main-thread canvas in the browser fixture. The URL
+  // mode is specific to emoji renderers, so normal Lottie offscreen rendering
+  // remains enabled for the other smoke scenarios.
+  await page.addInitScript(() => {
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set('noCustomEmojiOffscreenCanvas', '1');
+      window.history.replaceState(null, '', url);
+    } catch {}
+  });
 }
 
 function readCurrentScenarioStep() {
@@ -2934,37 +2944,20 @@ async function setCustomEmojiStatus(page, otherPage, docId) {
   if(await page.locator('.popup-premium:visible').count()) failStage('alice_custom_emoji_status_premium_prompt');
 }
 
-// Custom emoji draw through a worker-owned OffscreenCanvas. In this sandboxed
-// browser that path kills the renderer (Target crashed) as soon as a pack
-// renders, so this scenario reloads each page onto the app's main-thread canvas
-// fallback. Earlier scenarios keep the default path.
-async function reloadWithMainThreadCanvas(page, stage) {
-  setPageScenarioStep(page, `${stage}_flag`);
-  await page.evaluate(() => window.localStorage.setItem('noOffscreenCanvas', '1')).catch(() => failStage(`${stage}_flag`));
-  setPageScenarioStep(page, `${stage}_reload`);
-  await page.reload({waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage(`${stage}_reload`));
-  await page.waitForFunction(() => {
-    const chats = document.querySelector('#page-chats');
-    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
-  }, null, {timeout: 45_000}).catch(() => failStage(`${stage}_reload_chats`));
-}
-
 async function runCustomEmojiScenario(alice, bob) {
-  currentStage = 'custom_emoji_canvas_reload';
-  await reloadWithMainThreadCanvas(alice.page, 'alice_custom_emoji_canvas');
-  await reloadWithMainThreadCanvas(bob.page, 'bob_custom_emoji_canvas');
   currentStage = 'alice_custom_emoji_set_install';
   await installCustomEmojiSet(alice.page, 'alice_custom_emoji');
   currentStage = 'bob_custom_emoji_set_install';
   await installCustomEmojiSet(bob.page, 'bob_custom_emoji');
 
-  await selectUniquePeer(
+  const alicePeerId = await selectUniquePeer(
     alice.page,
     '#column-left .input-search-input',
     '#search-container .row[data-peer-id]',
     runtime.accounts[1].username,
     'alice_custom_emoji_send_chat'
   );
+  await waitForActivePeerId(alice.page, alicePeerId, 'alice_custom_emoji_send_chat_active');
 
   const messageText = `browser-ci-custom-emoji-${runtime.runId.slice(0, 8)}`;
   currentStage = 'alice_custom_emoji_send';
@@ -2976,13 +2969,14 @@ async function runCustomEmojiScenario(alice, bob) {
   await input.press('Enter').catch(() => failStage('alice_custom_emoji_send_submit'));
   await waitForCustomEmojiMessage(alice.page, messageText, docId, 'alice_custom_emoji_send_visible');
 
-  await selectUniquePeer(
+  const bobPeerId = await selectUniquePeer(
     bob.page,
     '#column-left .input-search-input',
     '#search-container .row[data-peer-id]',
     runtime.accounts[0].username,
     'bob_custom_emoji_receive_chat'
   );
+  await waitForActivePeerId(bob.page, bobPeerId, 'bob_custom_emoji_receive_chat_active');
   await waitForCustomEmojiMessage(bob.page, messageText, docId, 'bob_custom_emoji_receive_visible');
   if(await alice.page.locator('.popup-premium:visible').count()) failStage('alice_custom_emoji_send_premium_prompt');
 
