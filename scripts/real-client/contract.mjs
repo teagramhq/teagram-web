@@ -4,8 +4,8 @@ import {basename, dirname, isAbsolute} from 'node:path';
 
 import observation from './observation.cjs';
 
-export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'group']);
-export const OPTIONAL_SCENARIOS = Object.freeze(['custom-emoji', 'channel', 'poll']);
+export const REQUIRED_SCENARIOS = Object.freeze(['sign-in', 'first-message', 'message', 'custom-emoji', 'group']);
+export const OPTIONAL_SCENARIOS = Object.freeze(['channel', 'poll']);
 const AVAILABLE_SCENARIOS = Object.freeze([...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS]);
 export const POLL_NEGATIVE_CONTROL_SERVER_REVISION = '586403c1f4c92c09b006652278bdd02fd40ddf2d';
 export const POLL_NEGATIVE_CONTROL_EVIDENCE = Object.freeze([
