@@ -87,16 +87,24 @@ test.each(['worker-source fetch', 'proxy-URL request', 'second worker attachment
   const invokeVoid = vi.fn();
   const createProxyWorkerURLs = vi.fn();
   const registrationError = new Error(`${failureStage} failed`);
+  const earlyPort = {close: vi.fn()} as unknown as MessagePort;
   const attachedWorkers: Array<SharedWorker | globalThis.Worker> = [];
   let failWorkerSourceFetch = failureStage === 'worker-source fetch';
   let failSecondAttachment = failureStage === 'second worker attachment';
+  let portOnFetch: MessagePort | undefined;
 
   vi.stubGlobal('fetch', vi.fn(async() => {
     expect(attachedWorkers).toHaveLength(1);
     expect(messagePort.portListenerCount).toBe(1);
     if(failWorkerSourceFetch) {
       failWorkerSourceFetch = false;
+      messagePort.emitPort(earlyPort);
       throw registrationError;
+    }
+    if(portOnFetch) {
+      messagePort.emitPort(portOnFetch);
+      expect(invokeVoid).not.toHaveBeenCalled();
+      portOnFetch = undefined;
     }
     return {text: async() => ''};
   }));
@@ -136,9 +144,11 @@ test.each(['worker-source fetch', 'proxy-URL request', 'second worker attachment
   expect(attachedWorkers).toHaveLength(failureStage === 'second worker attachment' ? 2 : 1);
   expect(attachedWorkers.every((worker) => (worker as globalThis.Worker & {terminated: boolean}).terminated)).toBe(true);
   expect(invokeVoid).not.toHaveBeenCalled();
+  if(failureStage === 'worker-source fetch') expect(earlyPort.close).toHaveBeenCalledOnce();
 
   const retryWorkerPort = {close: vi.fn()} as unknown as MessagePort;
   failSecondAttachment = false;
+  portOnFetch = retryWorkerPort;
   attachedWorkers.length = 0;
   createProxyWorkerURLs.mockImplementation(() => {
     expect(invokeVoid).not.toHaveBeenCalled();
@@ -147,7 +157,11 @@ test.each(['worker-source fetch', 'proxy-URL request', 'second worker attachment
 
   await proxy.registerThreadedWorker(registration);
   expect(messagePort.portListenerCount).toBe(1);
-  messagePort.emitPort(retryWorkerPort);
   expect(invokeVoid).toHaveBeenCalledOnce();
   expect(invokeVoid).toHaveBeenCalledWith('threadedPort', 'lottie', undefined, [retryWorkerPort]);
+
+  const latePort = {close: vi.fn()} as unknown as MessagePort;
+  messagePort.emitPort(latePort);
+  expect(invokeVoid).toHaveBeenCalledTimes(2);
+  expect(invokeVoid).toHaveBeenLastCalledWith('threadedPort', 'lottie', undefined, [latePort]);
 });

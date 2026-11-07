@@ -1174,14 +1174,16 @@ class ApiManagerProxy extends MTProtoMessagePort {
     const constructor = IS_SHARED_WORKER_SUPPORTED && !(IS_SAFARI && type === 'lottie') ? SharedWorker : Worker;
     const createWorker = (url: string) => new constructor(url, {type: 'module'});
     const workers: Array<SharedWorker | Worker> = [];
-    const onPort = (_payload: void, _source: MessageEventSource, event: MessageEvent) => this.invokeVoid(
-      'threadedPort',
-      type,
-      undefined,
-      [event.ports[0]]
-    );
+    const pendingPorts: MessagePort[] = [];
+    let registrationSucceeded = false;
+    const forwardPort = (port: MessagePort) => this.invokeVoid('threadedPort', type, undefined, [port]);
+    const onPort = (_payload: void, _source: MessageEventSource, event: MessageEvent) => {
+      const port = event.ports[0];
+      if(registrationSucceeded) forwardPort(port);
+      else pendingPorts.push(port);
+    };
 
-    // Listen before starting workers; their port handshake can arrive while URLs are fetched.
+    // Buffer ports until URL and worker registration succeeds; failures must not consume remote pool slots.
     superMessagePort.addEventListener('port', onPort);
     try {
       const firstWorker = createWorker(originalUrl);
@@ -1199,8 +1201,13 @@ class ApiManagerProxy extends MTProtoMessagePort {
       if(DEBUG) {
         console.log('Workers URLs', type, urls);
       }
+
+      pendingPorts.forEach(forwardPort);
+      registrationSucceeded = true;
+      pendingPorts.length = 0;
     } catch(error) {
       superMessagePort.removeEventListener('port', onPort);
+      pendingPorts.forEach((port) => port.close());
       workers.forEach((worker) => {
         superMessagePort.detachPort((worker as SharedWorker).port || worker as any);
         (worker as Worker).terminate?.();
