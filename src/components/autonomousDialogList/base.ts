@@ -21,7 +21,6 @@ import SortedDialogList from '@components/sortedDialogList';
 import {AutonomousDialogList} from '@components/autonomousDialogList/dialogs';
 import {FOLDER_ID_ALL} from '@appManagers/constants';
 import {replaceChatPageSnapshot} from '@lib/chatPageSnapshotView';
-import lottieLoader from '@lib/lottie/lottieLoader';
 
 
 export const DIALOG_LOAD_COUNT = 20;
@@ -337,7 +336,9 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
     if(removePlaceholder) this.placeholder?.detach(this.sortedList.itemsLength());
 
     if(isInitialAllChatsPage) {
-      self.setTimeout(() => lottieLoader.loadLottieWorkers().catch(noop), 0);
+      self.setTimeout(() => import('@lib/lottie/lottieLoader')
+        .then(({default: lottieLoader}) => lottieLoader.loadLottieWorkers())
+        .catch(noop), 0);
     }
 
     return {

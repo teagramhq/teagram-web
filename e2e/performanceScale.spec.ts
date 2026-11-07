@@ -137,6 +137,7 @@ const report = {
   } as Record<Variant, Record<Scale, Record<string, Partial<Metric>[]>>>
 };
 const preparedVariants: Record<Scale, Partial<Record<Variant, VariantRun>>> = {'1x': {}, '100x': {}};
+let firstStickerBaseRun: VariantRun | undefined;
 const bundleRequestTrackers = new WeakMap<Page, BundleRequestTracker>();
 const requestBreakdownsByPage = new WeakMap<Page, Map<string, number>>();
 
@@ -814,7 +815,7 @@ async function reloadChatList(page: Page, requests: {value: number}, variant: Va
   await begin(page, requests);
   await page.reload({waitUntil: 'domcontentloaded'});
   const firstVisibleChatList = await waitForChatList(page);
-  expect(firstVisibleChatList.source).toBe(variant === 'head' ? 'snapshot' : 'live');
+  expect(firstVisibleChatList.source).toBe('snapshot');
   return capture(page, requests, await snapshotMeasurementBoundary(page, firstVisibleChatList), false, false, false, true);
 }
 
@@ -1252,7 +1253,7 @@ async function runColdChatList(browser: Browser, run: VariantRun): Promise<Metri
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     const firstVisibleChatList = await waitForChatList(page);
-    expect(firstVisibleChatList.source).toBe(run.variant === 'head' ? 'snapshot' : 'live');
+    expect(firstVisibleChatList.source).toBe('snapshot');
     const boundary = await snapshotMeasurementBoundary(page, firstVisibleChatList);
     return await capture(page, requests, boundary, false, false, false, true);
   } finally {
@@ -1274,7 +1275,7 @@ async function measureColdControlWindow(browser: Browser, run: VariantRun, injec
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     const firstVisibleChatList = await waitForChatList(page);
-    expect(firstVisibleChatList.source).toBe(run.variant === 'head' ? 'snapshot' : 'live');
+    expect(firstVisibleChatList.source).toBe('snapshot');
     const sample = await capture(page, requests, await snapshotMeasurementBoundary(page, firstVisibleChatList), false, false, false, true);
     return {sample, injectedTask: injectStall ? await injectedLongTask(page) : undefined};
   } finally {
@@ -1446,8 +1447,10 @@ test.beforeAll(async({browser}) => {
     const suffix = scale.toUpperCase();
     const headOrigin = process.env[`PERF_HEAD_ORIGIN_${suffix}`];
     const baseOrigin = process.env[`PERF_BASE_ORIGIN_${suffix}`];
+    const stickerBaseOrigin = process.env.PERF_STICKER_BASE_ORIGIN;
     expect(headOrigin, `${scale} head origin is missing`).toBeTruthy();
     if(report.requireBase) expect(baseOrigin, `${scale} base origin is missing`).toBeTruthy();
+    if(report.requireBase && scale === '1x') expect(stickerBaseOrigin, 'pre-178 sticker base origin is missing').toBeTruthy();
 
     const variants: Array<[Variant, string]> = report.requireBase ? [
       ['base', baseOrigin!],
@@ -1458,6 +1461,10 @@ test.beforeAll(async({browser}) => {
     for(const [variant, origin] of variants) {
       preparedVariants[scale][variant] = withOrigin(signedIn, variant, origin);
     }
+  }
+
+  if(report.requireBase) {
+    firstStickerBaseRun = withOrigin(preparedVariants['1x'].base!, 'base', process.env.PERF_STICKER_BASE_ORIGIN!);
   }
 });
 
@@ -1470,6 +1477,8 @@ test('measures first animated sticker frame after opening a chat', async({browse
   await seedFirstStickerMessage(browser, head, fixture);
 
   const variants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
+  const stickerRuns: Partial<Record<Variant, VariantRun>> = {head};
+  if(report.requireBase) stickerRuns.base = firstStickerBaseRun!;
   const conditions = variants.flatMap((variant) => [
     {variant, warmWorker: false},
     {variant, warmWorker: true}
@@ -1483,7 +1492,7 @@ test('measures first animated sticker frame after opening a chat', async({browse
     const order = repeat % 2 === 0 ? conditions : [...conditions].reverse();
     for(const {variant, warmWorker} of order) {
       const sample = await test.step(`1x ${variant} ${warmWorker ? 'warm' : 'cold'} first sticker repeat ${repeat + 1}`, async() => (
-        measureFirstStickerFrame(browser, preparedVariants['1x'][variant]!, fixture, warmWorker)
+        measureFirstStickerFrame(browser, stickerRuns[variant]!, fixture, warmWorker)
       ));
       expect(sample.workerReadyBeforeChat, `${variant} worker was not ready before the first sticker interaction`).toBe(true);
       samples[variant][warmWorker ? 'warm' : 'cold'].push(sample);
@@ -1536,7 +1545,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     const firstVisibleChatList = await waitForChatList(page);
-    expect(firstVisibleChatList.source).toBe(variant === 'head' ? 'snapshot' : 'live');
+    expect(firstVisibleChatList.source).toBe('snapshot');
     const coldChatList = await test.step('cold chat list', async() => capture(page, requests, await snapshotMeasurementBoundary(page, firstVisibleChatList), false, false, false, true));
     expect(coldChatList.ms).toBe(coldChatList.firstVisibleChatListMs);
     expect(coldChatList.liveBoundaryMs).toBeGreaterThanOrEqual(coldChatList.ms);
