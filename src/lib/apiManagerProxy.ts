@@ -1196,11 +1196,10 @@ class ApiManagerProxy extends MTProtoMessagePort {
         [event.ports[0]]
       ));
     } catch(error) {
-      const {default: cleanup} = await import('@lib/cleanupThreadedWorkerRegistration').catch((cleanupError) => {
-        this.log.error('failed to load worker registration cleanup', cleanupError);
-        throw error;
+      workers.forEach((worker) => {
+        superMessagePort.detachPort((worker as SharedWorker).port || worker as any);
+        (worker as Worker).terminate?.();
       });
-      cleanup(superMessagePort, workers);
       throw error;
     }
   }
