@@ -503,6 +503,14 @@ async function finalizeCachedDialogReconcileSummaries(page: Page, targets: Cache
   targets.forEach((target, index) => target.metric.cachedDialogReconcile = summaries[index]);
 }
 
+async function waitForCachedDialogReconcileBeforeNavigation(page: Page) {
+  await expect.poll(async() => (await readCachedDialogReconcileSnapshot(page)).livePendingTraceIds, {
+    message: 'cached dialog reconciliation did not finish before the diagnostic page navigation',
+    timeout: 120_000,
+    intervals: [100]
+  }).toEqual([]);
+}
+
 async function addCachedDialogReconcileTarget(page: Page, targets: CachedDialogReconcileTarget[] | undefined, metric: Partial<Metric>, scenario: string) {
   if(!targets) return;
   expect(Number.isFinite(metric.ms), `${scenario} measurement duration is missing`).toBe(true);
@@ -810,7 +818,7 @@ async function waitForHistorySettled(page: Page) {
   }, {timeout: 60_000, intervals: [100]}).toBe(true);
 }
 
-async function reloadChatList(page: Page, requests: {value: number}, variant: Variant) {
+async function reloadChatList(page: Page, requests: {value: number}) {
   resetRequestBreakdown(page);
   await begin(page, requests);
   await page.reload({waitUntil: 'domcontentloaded'});
@@ -1030,6 +1038,11 @@ async function jumpToFixtureDate(
 }
 
 async function openContacts(page: Page, requests: {value: number}, variant: Variant, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void) {
+  if(variant === 'base') {
+    // The base may already include lazy Lottie worker loading; only settle resources that actually started.
+    await waitForBundleResources(page);
+  }
+
   const workerRequests: string[] = [];
   const pageErrors: string[] = [];
   const recordPageError = (error: Error) => pageErrors.push(error.message);
@@ -1589,7 +1602,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     expect(coldChatList.ms).toBe(coldChatList.firstVisibleChatListMs);
     expect(coldChatList.liveBoundaryMs).toBeGreaterThanOrEqual(coldChatList.ms);
     measured.coldChatList.push(coldChatList);
-    const warmChatList = await test.step('warm chat list', () => reloadChatList(page, requests, variant));
+    const warmChatList = await test.step('warm chat list', () => reloadChatList(page, requests));
     expect(warmChatList.ms).toBe(warmChatList.firstVisibleChatListMs);
     expect(warmChatList.liveBoundaryMs).toBeGreaterThanOrEqual(warmChatList.ms);
     measured.warmChatList.push(warmChatList);
@@ -1778,7 +1791,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
       const coldProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
       await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
       const coldFirstVisibleChatList = await waitForChatList(page);
-      expect(coldFirstVisibleChatList.source).toBe(run.variant === 'head' ? 'snapshot' : 'live');
+      expect(coldFirstVisibleChatList.source).toBe('snapshot');
       const coldBoundary = await snapshotMeasurementBoundary(page, coldFirstVisibleChatList);
       const coldCapture = await capture(page, requests, coldBoundary, false, true, true, true);
       const coldSample = {...coldCapture, ...(coldProfile ? {cpu: await finishCpuProfile(coldProfile)} : {})};
@@ -1790,7 +1803,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         const warmProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
         await page.reload({waitUntil: 'domcontentloaded'});
         const warmFirstVisibleChatList = await waitForChatList(page);
-        expect(warmFirstVisibleChatList.source).toBe(run.variant === 'head' ? 'snapshot' : 'live');
+        expect(warmFirstVisibleChatList.source).toBe('snapshot');
         const warmBoundary = await snapshotMeasurementBoundary(page, warmFirstVisibleChatList);
         const warmCapture = await capture(page, requests, warmBoundary, false, true, true, true);
         const warmSample = {...warmCapture, ...(warmProfile ? {cpu: await finishCpuProfile(warmProfile)} : {})};
@@ -1830,6 +1843,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         traceSamples.scrollBack2k.push(scrolled);
         await addCachedDialogReconcileTarget(page, reconcileTargets, scrolled, 'scrollBack2k');
 
+        await waitForCachedDialogReconcileBeforeNavigation(page);
         await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
         await waitForChatList(page);
 
