@@ -3906,6 +3906,29 @@ describe('real client scenario contract', () => {
     expect(setInstallSource).not.toContain(`setAttribute('onclick'`);
   });
 
+  it('selects both chats again after installing the custom emoji set before sending', () => {
+    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
+    const scenario = browserSource.slice(
+      browserSource.indexOf('async function runCustomEmojiScenario'),
+      browserSource.indexOf('async function sendChannelText')
+    );
+    const bobSetInstalled = scenario.indexOf('await installCustomEmojiSet(bob.page');
+    const senderChatSelected = scenario.indexOf('await selectUniquePeer(\n    alice.page,');
+    const recipientChatSelected = scenario.indexOf('await selectUniquePeer(\n    bob.page,');
+    const senderComposerOpened = scenario.indexOf('await openComposer(alice.page');
+    const messageSubmitted = scenario.indexOf('await input.press');
+    const recipientVisibilityChecked = scenario.indexOf('bob_custom_emoji_receive_visible');
+
+    expect(bobSetInstalled).toBeGreaterThan(-1);
+    expect(senderChatSelected).toBeGreaterThan(bobSetInstalled);
+    expect(recipientChatSelected).toBeGreaterThan(senderChatSelected);
+    expect(senderComposerOpened).toBeGreaterThan(recipientChatSelected);
+    expect(messageSubmitted).toBeGreaterThan(senderComposerOpened);
+    expect(recipientVisibilityChecked).toBeGreaterThan(messageSubmitted);
+    expect(scenario.slice(senderChatSelected, recipientChatSelected)).toContain('runtime.accounts[1].username');
+    expect(scenario.slice(recipientChatSelected, senderComposerOpened)).toContain('runtime.accounts[0].username');
+  });
+
   it('requires exactly one recipient message with the expected text', () => {
     expect(getSingleExactMessageFailure(['browser-ci-hello'], 'browser-ci-hello')).toBe(null);
     expect(getSingleExactMessageFailure(['prefix browser-ci-hello'], 'browser-ci-hello')).toBe('content');
