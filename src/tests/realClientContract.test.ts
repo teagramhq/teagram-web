@@ -3906,7 +3906,7 @@ describe('real client scenario contract', () => {
     expect(setInstallSource).not.toContain(`setAttribute('onclick'`);
   });
 
-  it('selects both chats again after installing the custom emoji set before sending', () => {
+  it('selects the sender chat after installing the set and opens the recipient chat after sending', () => {
     const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
     const scenario = browserSource.slice(
       browserSource.indexOf('async function runCustomEmojiScenario'),
@@ -3914,19 +3914,21 @@ describe('real client scenario contract', () => {
     );
     const bobSetInstalled = scenario.indexOf('await installCustomEmojiSet(bob.page');
     const senderChatSelected = scenario.indexOf('await selectUniquePeer(\n    alice.page,');
-    const recipientChatSelected = scenario.indexOf('await selectUniquePeer(\n    bob.page,');
     const senderComposerOpened = scenario.indexOf('await openComposer(alice.page');
     const messageSubmitted = scenario.indexOf('await input.press');
+    const senderVisibilityChecked = scenario.indexOf('alice_custom_emoji_send_visible');
+    const recipientChatSelected = scenario.indexOf('await selectUniquePeer(\n    bob.page,');
     const recipientVisibilityChecked = scenario.indexOf('bob_custom_emoji_receive_visible');
 
     expect(bobSetInstalled).toBeGreaterThan(-1);
     expect(senderChatSelected).toBeGreaterThan(bobSetInstalled);
-    expect(recipientChatSelected).toBeGreaterThan(senderChatSelected);
-    expect(senderComposerOpened).toBeGreaterThan(recipientChatSelected);
+    expect(senderComposerOpened).toBeGreaterThan(senderChatSelected);
     expect(messageSubmitted).toBeGreaterThan(senderComposerOpened);
-    expect(recipientVisibilityChecked).toBeGreaterThan(messageSubmitted);
-    expect(scenario.slice(senderChatSelected, recipientChatSelected)).toContain('runtime.accounts[1].username');
-    expect(scenario.slice(recipientChatSelected, senderComposerOpened)).toContain('runtime.accounts[0].username');
+    expect(senderVisibilityChecked).toBeGreaterThan(messageSubmitted);
+    expect(recipientChatSelected).toBeGreaterThan(senderVisibilityChecked);
+    expect(recipientVisibilityChecked).toBeGreaterThan(recipientChatSelected);
+    expect(scenario.slice(senderChatSelected, senderComposerOpened)).toContain('runtime.accounts[1].username');
+    expect(scenario.slice(recipientChatSelected, recipientVisibilityChecked)).toContain('runtime.accounts[0].username');
   });
 
   it('requires exactly one recipient message with the expected text', () => {

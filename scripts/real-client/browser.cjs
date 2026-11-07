@@ -2943,13 +2943,6 @@ async function runCustomEmojiScenario(alice, bob) {
     runtime.accounts[1].username,
     'alice_custom_emoji_send_chat'
   );
-  await selectUniquePeer(
-    bob.page,
-    '#column-left .input-search-input',
-    '#search-container .row[data-peer-id]',
-    runtime.accounts[0].username,
-    'bob_custom_emoji_receive_chat'
-  );
 
   const messageText = `browser-ci-custom-emoji-${runtime.runId.slice(0, 8)}`;
   currentStage = 'alice_custom_emoji_send';
@@ -2960,6 +2953,14 @@ async function runCustomEmojiScenario(alice, bob) {
   const docId = await selectCustomEmoji(alice.page, 'alice_custom_emoji_send');
   await input.press('Enter').catch(() => failStage('alice_custom_emoji_send_submit'));
   await waitForCustomEmojiMessage(alice.page, messageText, docId, 'alice_custom_emoji_send_visible');
+
+  await selectUniquePeer(
+    bob.page,
+    '#column-left .input-search-input',
+    '#search-container .row[data-peer-id]',
+    runtime.accounts[0].username,
+    'bob_custom_emoji_receive_chat'
+  );
   await waitForCustomEmojiMessage(bob.page, messageText, docId, 'bob_custom_emoji_receive_visible');
   if(await alice.page.locator('.popup-premium:visible').count()) failStage('alice_custom_emoji_send_premium_prompt');
 
