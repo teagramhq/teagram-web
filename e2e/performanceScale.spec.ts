@@ -1035,10 +1035,7 @@ async function jumpToFixtureDate(
 
 async function openContacts(page: Page, requests: {value: number}, variant: Variant, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void) {
   if(variant === 'base') {
-    await expect.poll(async() => page.evaluate(() => {
-      const worker = performance.getEntriesByType('resource').find((entry) => entry.name.includes('tlottie.worker')) as PerformanceResourceTiming | undefined;
-      return !!worker && worker.responseEnd > 0;
-    }), {timeout: 10_000}).toBe(true);
+    // The base may already include lazy Lottie worker loading; only settle resources that actually started.
     await waitForBundleResources(page);
   }
 
