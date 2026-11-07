@@ -334,12 +334,6 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
 
     if(removePlaceholder) this.placeholder?.detach(this.sortedList.itemsLength());
 
-    if(isInitialAllChatsPage) {
-      self.setTimeout(() => import('@lib/lottie/lottieLoader')
-        .then(({default: lottieLoader}) => lottieLoader.loadLottieWorkers())
-        .catch((error) => this.log.error('Lottie worker preload failed', error)), 0);
-    }
-
     return {
       cursor: newOffsetIndex === Infinity ? undefined : newOffsetIndex,
       count: result.dialogs.length,

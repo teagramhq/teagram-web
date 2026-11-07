@@ -1351,7 +1351,7 @@ async function measureFirstStickerFrame(browser: Browser, run: VariantRun, fixtu
   }
 }
 
-async function seedFirstStickerMessage(browser: Browser, run: VariantRun, fixture: Fixture) {
+async function seedFirstStickerMessage(browser: Browser, run: VariantRun, fixture: Fixture): Promise<number> {
   const context = await browser.newContext({
     ignoreHTTPSErrors: true,
     viewport: {width: 1280, height: 800},
@@ -1364,7 +1364,7 @@ async function seedFirstStickerMessage(browser: Browser, run: VariantRun, fixtur
     await installInstrumentation(page, requests, run.origin);
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
-    await page.evaluate(async({asset, partner}) => {
+    const messageId = await page.evaluate(async({asset, partner}) => {
       let phase = 'load animation asset';
       try {
         const w = window as any;
@@ -1381,7 +1381,7 @@ async function seedFirstStickerMessage(browser: Browser, run: VariantRun, fixtur
         const randomId = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
 
         phase = 'send sticker message';
-        await managers.apiManager.invokeApi('messages.sendMedia', {
+        const sent: any = await managers.apiManager.invokeApi('messages.sendMedia', {
           peer: await managers.appPeersManager.getInputPeerById(partner),
           media: {
             _: 'inputMediaUploadedDocument',
@@ -1396,19 +1396,52 @@ async function seedFirstStickerMessage(browser: Browser, run: VariantRun, fixtur
           message: '',
           random_id: randomId
         });
+
+        const updates = sent?._ === 'updateShort' ? [sent.update] : sent?.updates || [];
+        const newMessage = updates.find((update: any) => (
+          update?._ === 'updateNewMessage' || update?._ === 'updateNewChannelMessage'
+        ));
+        const hasShortMessageId = [
+          'updateShortSentMessage',
+          'updateShortMessage',
+          'updateShortChatMessage'
+        ].includes(sent?._);
+        const messageId = hasShortMessageId ? sent.id : newMessage?.message?.id;
+        if(!Number.isSafeInteger(messageId)) throw new Error('sendMedia response did not include the new message id');
+        return messageId as number;
       } catch(error) {
         const details = error instanceof Error ? error.message : JSON.stringify(error);
         throw new Error(`failed to ${phase}: ${details}`);
       }
     }, {asset: FIRST_STICKER_ASSET, partner: fixture.partner});
+    return messageId;
+  } finally {
+    await context.close();
+  }
+}
 
-    await page.reload({waitUntil: 'domcontentloaded'});
+async function deleteSeededStickerMessage(browser: Browser, run: VariantRun, fixture: Fixture, messageId: number) {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+
+  try {
+    const page = await context.newPage();
+    await installInstrumentation(page, {value: 0}, run.origin);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
     const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
     await expect(row).toBeVisible({timeout: 60_000});
     await row.click();
-    await expect(page.locator('#page-chats .bubble.sticker-animated').first()).toBeVisible({timeout: 60_000});
-    await expect(page.locator('#page-chats .bubble.sticker-animated .media-sticker-wrapper').first()).toHaveAttribute('data-doc-id', /.+/);
+    const sticker = page.locator(`#page-chats .bubble.sticker-animated[data-mid="${messageId}"]`);
+    await expect(sticker).toBeVisible({timeout: 60_000});
+    await expect(sticker.locator('.media-sticker-wrapper')).toHaveAttribute('data-doc-id', /.+/);
+    await page.evaluate(async({peerId, messageId}) => {
+      await (window as any).rootScope.managers.appMessagesManager.deleteMessages(peerId, [messageId], true);
+    }, {peerId: fixture.partner, messageId});
+    await expect(sticker).toHaveCount(0, {timeout: 60_000});
   } finally {
     await context.close();
   }
@@ -1466,58 +1499,70 @@ test('measures first animated sticker frame after opening a chat', async({browse
 
   const fixture = fixtures['1x']!;
   const head = preparedVariants['1x'].head!;
-  await seedFirstStickerMessage(browser, head, fixture);
+  const messageId = await seedFirstStickerMessage(browser, head, fixture);
 
-  const variants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
-  const stickerRuns: Partial<Record<Variant, VariantRun>> = {head};
-  if(report.requireBase) stickerRuns.base = firstStickerBaseRun!;
-  const conditions = variants.flatMap((variant) => [
-    {variant, warmWorker: false},
-    {variant, warmWorker: true}
-  ]);
-  const samples: Record<Variant, Record<'cold' | 'warm', Awaited<ReturnType<typeof measureFirstStickerFrame>>[]>> = {
-    base: {cold: [], warm: []},
-    head: {cold: [], warm: []}
-  };
+  try {
+    const variants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
+    const stickerRuns: Partial<Record<Variant, VariantRun>> = {head};
+    if(report.requireBase) stickerRuns.base = firstStickerBaseRun!;
+    const conditions = variants.flatMap((variant) => [
+      {variant, warmWorker: false},
+      {variant, warmWorker: true}
+    ]);
+    const samples: Record<Variant, Record<'cold' | 'warm', Awaited<ReturnType<typeof measureFirstStickerFrame>>[]>> = {
+      base: {cold: [], warm: []},
+      head: {cold: [], warm: []}
+    };
 
-  for(let repeat = 0; repeat < FIRST_STICKER_REPEATS; ++repeat) {
-    const order = repeat % 2 === 0 ? conditions : [...conditions].reverse();
-    for(const {variant, warmWorker} of order) {
-      const sample = await test.step(`1x ${variant} ${warmWorker ? 'warm' : 'cold'} first sticker repeat ${repeat + 1}`, async() => (
-        measureFirstStickerFrame(browser, stickerRuns[variant]!, fixture, warmWorker)
-      ));
-      if(variant === 'head' || warmWorker) {
-        expect(sample.workerReadyBeforeChat, `${variant} worker was not ready before the first sticker interaction`).toBe(true);
+    for(let repeat = 0; repeat < FIRST_STICKER_REPEATS; ++repeat) {
+      const order = repeat % 2 === 0 ? conditions : [...conditions].reverse();
+      for(const {variant, warmWorker} of order) {
+        const sample = await test.step(`1x ${variant} ${warmWorker ? 'warm' : 'cold'} first sticker repeat ${repeat + 1}`, async() => (
+          measureFirstStickerFrame(browser, stickerRuns[variant]!, fixture, warmWorker)
+        ));
+        if(warmWorker) {
+          expect(sample.workerReadyBeforeChat, `${variant} worker was not ready before the first sticker interaction`).toBe(true);
+        } else if(variant === 'head') {
+          expect(sample.workerReadyBeforeChat, 'head worker was preloaded before the on-demand first sticker interaction').toBe(false);
+        }
+        samples[variant][warmWorker ? 'warm' : 'cold'].push(sample);
       }
-      samples[variant][warmWorker ? 'warm' : 'cold'].push(sample);
     }
-  }
 
-  const median = (values: number[]) => [...values].sort((left, right) => left - right)[Math.floor(values.length / 2)];
-  const medians = Object.fromEntries(variants.map((variant) => [variant, Object.fromEntries(
-    (['cold', 'warm'] as const).map((temperature) => {
-      const values = samples[variant][temperature];
-      expect(values).toHaveLength(FIRST_STICKER_REPEATS);
-      return [temperature, {
-        workerFrameMs: median(values.map((sample) => sample.clickToFirstFrameMs)),
-        visibleFrameMs: median(values.map((sample) => sample.clickToVisibleFrameMs))
-      }];
-    })
-  )]));
-  if(report.requireBase) {
-    const before = medians.base.cold.visibleFrameMs;
-    const after = medians.head.cold.visibleFrameMs;
-    expect(isWithinFirstStickerRegressionBudget(before, after), `head first visible frame median is more than 100 ms slower than base: ${before} ms -> ${after} ms`).toBe(true);
+    const median = (values: number[]) => [...values].sort((left, right) => left - right)[Math.floor(values.length / 2)];
+    const medians = Object.fromEntries(variants.map((variant) => [variant, Object.fromEntries(
+      (['cold', 'warm'] as const).map((temperature) => {
+        const values = samples[variant][temperature];
+        expect(values).toHaveLength(FIRST_STICKER_REPEATS);
+        return [temperature, {
+          workerFrameMs: median(values.map((sample) => sample.clickToFirstFrameMs)),
+          visibleFrameMs: median(values.map((sample) => sample.clickToVisibleFrameMs))
+        }];
+      })
+    )]));
+    report.diagnostics.firstSticker = {
+      scale: '1x',
+      repeats: FIRST_STICKER_REPEATS,
+      boundary: 'chat row click to first rendered pixels in the animated sticker bubble',
+      samples,
+      medians
+    };
+    console.log(`[first-sticker] ${JSON.stringify({medians, samples})}`);
+    measurementsComplete = true;
+
+    if(report.requireBase) {
+      const before = medians.base.cold.visibleFrameMs;
+      const cold = medians.head.cold.visibleFrameMs;
+      const coldWithinBudget = isWithinFirstStickerRegressionBudget(before, cold);
+      if(!coldWithinBudget) {
+        const warm = medians.head.warm.visibleFrameMs;
+        expect(isWithinFirstStickerRegressionBudget(before, warm), `warmed head first visible frame median is more than 100 ms slower than base: ${before} ms -> ${warm} ms`).toBe(true);
+      }
+      expect(coldWithinBudget, `head on-demand first visible frame median is more than 100 ms slower than base: ${before} ms -> ${cold} ms`).toBe(true);
+    }
+  } finally {
+    await deleteSeededStickerMessage(browser, head, fixture, messageId);
   }
-  report.diagnostics.firstSticker = {
-    scale: '1x',
-    repeats: FIRST_STICKER_REPEATS,
-    boundary: 'chat row click to first rendered pixels in the animated sticker bubble',
-    samples,
-    medians
-  };
-  console.log(`[first-sticker] ${JSON.stringify({medians, samples})}`);
-  measurementsComplete = true;
 });
 
 async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixture: Fixture) {

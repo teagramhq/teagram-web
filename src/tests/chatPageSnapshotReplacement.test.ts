@@ -34,21 +34,15 @@ async function createDialogList(filterId: number) {
   return {list, liveList};
 }
 
-it('replaces the snapshot when the worker first page is committed', async() => {
+it('replaces the snapshot without starting Lottie workers in the chat-list load', async() => {
   lottieMocks.loadLottieWorkers.mockClear();
   const {list, liveList} = await createDialogList(0);
-  lottieMocks.loadLottieWorkers.mockImplementation(() => {
-    expect(document.querySelector('.chat-page-snapshot')).toBeNull();
-    expect(liveList.textContent).toBe('Live page');
-    return Promise.resolve();
-  });
-
   await list.loadDialogsInner({canFinish: () => true});
   expect(document.querySelector('.chat-page-snapshot')).toBeNull();
   expect(document.getElementById('folders-container').textContent).toBe('Live page');
   expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
   await new Promise((resolve) => setTimeout(resolve, 0));
-  expect(lottieMocks.loadLottieWorkers).toHaveBeenCalledOnce();
+  expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
 });
 
 it.each([
@@ -63,17 +57,4 @@ it.each([
   expect(document.querySelector('.chat-page-snapshot')).not.toBeNull();
   expect(document.getElementById('folders-container').textContent).toBe('Live page');
   expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
-});
-
-it('reports a failed Lottie worker preload', async() => {
-  const error = new Error('transient worker startup failure');
-  lottieMocks.loadLottieWorkers.mockRejectedValueOnce(error);
-  const log = {error: vi.fn()};
-  const {list} = await createDialogList(0);
-  Object.assign(list, {log});
-
-  await list.loadDialogsInner({canFinish: () => true});
-  await vi.waitFor(() => {
-    expect(log.error).toHaveBeenCalledWith('Lottie worker preload failed', error);
-  });
 });
