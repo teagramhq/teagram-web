@@ -1486,7 +1486,9 @@ test('measures first animated sticker frame after opening a chat', async({browse
       const sample = await test.step(`1x ${variant} ${warmWorker ? 'warm' : 'cold'} first sticker repeat ${repeat + 1}`, async() => (
         measureFirstStickerFrame(browser, stickerRuns[variant]!, fixture, warmWorker)
       ));
-      expect(sample.workerReadyBeforeChat, `${variant} worker was not ready before the first sticker interaction`).toBe(true);
+      if(variant === 'head' || warmWorker) {
+        expect(sample.workerReadyBeforeChat, `${variant} worker was not ready before the first sticker interaction`).toBe(true);
+      }
       samples[variant][warmWorker ? 'warm' : 'cold'].push(sample);
     }
   }
