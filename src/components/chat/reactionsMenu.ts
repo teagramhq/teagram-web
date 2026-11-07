@@ -390,6 +390,7 @@ export class ChatReactionsMenu {
       noRegularEmoji: true,
       noPacks: this.noPacks,
       noSearch: this.noSearch,
+      canUsePremiumEmojiAlways: true,
       managers: this.managers,
       mainSets: this.isTags ? this.loadTags : (this.isEffects ? this.loadEffects : this.loadReactions),
       additionalLocalStickerSet: this.isEffects ? async() => {

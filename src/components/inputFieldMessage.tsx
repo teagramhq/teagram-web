@@ -164,6 +164,9 @@ const InputFieldMessage = (props: InputFieldMessageProps) => {
   let emoticonsDropdown: EmoticonsDropdown;
   const {button: emojiButton, dispose} = createEmojiDropdownButton({
     inputField,
+    noPacks: false,
+    noSearchGroups: false,
+    canUsePremiumEmojiAlways: true,
     class: additionalClass + '-emoji',
     animationGroup: props.animationGroup,
     customParentElement: getOverlayRoot,

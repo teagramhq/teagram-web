@@ -47,7 +47,7 @@ export default async function generateTitleIcons({
   if(!noPremiumIcon && wrapOptions?.middleware) {
     const emojiStatus = (peer as User.user | Chat.channel).emoji_status;
     const isPremiumFeaturesHidden = await apiManagerProxy.isPremiumFeaturesHidden();
-    if(emojiStatus && 'document_id' in emojiStatus && !isPremiumFeaturesHidden) {
+    if(emojiStatus && 'document_id' in emojiStatus) {
       const {middleware} = wrapOptions;
       const container = await wrapEmojiStatus({
         emojiStatus,
@@ -70,11 +70,6 @@ export default async function generateTitleIcons({
             const gift = await rootScope.managers.appGiftsManager.getGiftBySlug(emojiStatus.slug);
             PopupElement.createPopup(PopupStarGiftInfo, {gift});
             busy = false;
-          } else {
-            PopupPremium.show({
-              peerId,
-              emojiStatusId: emojiStatus.document_id
-            });
           }
         });
 

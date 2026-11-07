@@ -560,9 +560,12 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
       !this.preloaderDelay ? undefined : pause(this.preloaderDelay),
       !this.noRegularEmoji && this.managers.appEmojiManager.getRecentEmojis('native'),
       !this.isStandalone && this.managers.appEmojiManager.getRecentEmojis('custom'),
-      !this.noPacks && Promise.resolve(apiManagerProxy.isPremiumFeaturesHidden()).then((isPremiumPurchaseHidden) => {
-        return isPremiumPurchaseHidden ? undefined : this.managers.appEmojiManager.getCustomEmojis();
-      }),
+      !this.noPacks && (
+        this.canUsePremiumEmojiAlways ? this.managers.appEmojiManager.getCustomEmojis() :
+        Promise.resolve(apiManagerProxy.isPremiumFeaturesHidden()).then((isPremiumPurchaseHidden) => {
+          return isPremiumPurchaseHidden ? undefined : this.managers.appEmojiManager.getCustomEmojis();
+        })
+      ),
       mainSetsResult && Promise.all(Array.isArray(mainSetsResult) ? mainSetsResult : [mainSetsResult]),
       this.additionalSets?.(),
       this.additionalLocalStickerSet?.(),
@@ -865,10 +868,10 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
 
   public toggleCustomCategory() {
     const category = this.categories[CUSTOM_EMOJI_RECENT_ID];
-    const hasPremium = rootScope.premium || this.peerId === rootScope.myId || !!this.mainSets;
-    const canSeeCustomCategory = hasPremium || this.isStandalone;
+    const canSeeCustomEmoji = rootScope.premium || this.peerId === rootScope.myId || !!this.mainSets || !!this.canUsePremiumEmojiAlways;
+    const canSeeCustomCategory = canSeeCustomEmoji || this.isStandalone;
     super.toggleLocalCategory(category, !!category.items.length && canSeeCustomCategory);
-    this.content.classList.toggle('has-premium', hasPremium);
+    this.content.classList.toggle('has-premium', canSeeCustomEmoji);
   }
 
   protected toggleLocalCategory(category: EmojiTabCategory, visible: boolean) {
