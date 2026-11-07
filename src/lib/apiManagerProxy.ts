@@ -1158,14 +1158,11 @@ class ApiManagerProxy extends MTProtoMessagePort {
       Worker,
       typeof(SharedWorker) !== 'undefined' && SharedWorker
     ].filter(Boolean);
-    const worker = (() => {
-      originals.forEach((w) => window[w.name as any] = new Proxy(w, workerHandler));
-      try {
-        return _createWorker();
-      } finally {
-        originals.forEach((w) => window[w.name as any] = w as any);
-      }
-    })();
+    originals.forEach((w) => window[w.name as any] = new Proxy(w, workerHandler));
+
+    const worker = _createWorker();
+
+    originals.forEach((w) => window[w.name as any] = w as any);
 
     const originalUrl = (worker as any).url;
 
@@ -1180,50 +1177,20 @@ class ApiManagerProxy extends MTProtoMessagePort {
     // Keep MTProto/crypto on the shared worker, but hand the lottie pool per-tab dedicated Workers.
     const constructor = IS_SHARED_WORKER_SUPPORTED && !(IS_SAFARI && type === 'lottie') ? SharedWorker : Worker;
 
-    const workers: Array<SharedWorker | Worker> = [];
-    const pendingPorts: MessagePort[] = [];
-    let canForwardPorts = false;
-    const onPort = (_payload: void, _source: MessageEventSource, event: MessageEvent) => {
-      const port = event.ports[0];
-      if(canForwardPorts) {
-        this.invokeVoid('threadedPort', type, undefined, [port]);
-      } else {
-        pendingPorts.push(port);
-      }
-    };
-    superMessagePort.addEventListener('port', onPort);
+    superMessagePort.addEventListener('port', (payload, source, event) => {
+      this.invokeVoid('threadedPort', type, undefined, [event.ports[0]]);
+    });
 
-    try {
-      const firstWorker = createWorker(originalUrl);
-      workers.push(firstWorker);
-      attachWorkerToPort(firstWorker);
+    const firstWorker = createWorker(originalUrl);
+    attachWorkerToPort(firstWorker);
 
-      const blob = await get(originalUrl);
-      const urlsPromise = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
-      for(const url of urlsPromise.slice(1)) {
-        const worker = createWorker(url);
-        workers.push(worker);
-        attachWorkerToPort(worker);
-      }
+    const blob = await get(originalUrl);
+    const urlsPromise = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
+    const workers = urlsPromise.slice(1).map(createWorker);
+    workers.forEach(attachWorkerToPort);
 
-      if(DEBUG) {
-        console.log('Workers URLs', type, urlsPromise);
-      }
-
-      canForwardPorts = true;
-      for(const port of pendingPorts) {
-        this.invokeVoid('threadedPort', type, undefined, [port]);
-      }
-      pendingPorts.length = 0;
-    } catch(error) {
-      superMessagePort.removeEventListener('port', onPort);
-      pendingPorts.forEach((port) => port.close());
-      workers.forEach((worker) => {
-        const port = (worker as SharedWorker).port || worker as any;
-        superMessagePort.detachPort(port);
-        if(port === worker) (worker as Worker).terminate();
-      });
-      throw error;
+    if(DEBUG) {
+      console.log('Workers URLs', type, urlsPromise);
     }
   }
 
@@ -1338,7 +1305,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
     toast('Private MTProto worker failed to start. Reload the page to try again.', undefined, 10000);
   }
 
-  private attachWorkerToPort(
+  public attachWorkerToPort(
     worker: SharedWorker | Worker,
     messagePort: SuperMessagePort<any, any, any>,
     type: string
