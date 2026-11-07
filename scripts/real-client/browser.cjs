@@ -2855,8 +2855,12 @@ async function selectCustomEmoji(page, stage, expectedDocId) {
 
   const customSelector = expectedDocId ?
     `.custom-emoji[data-doc-id="${expectedDocId}"]` :
-    '.emoji-category:not(.hide) .custom-emoji';
-  const customEmoji = dropdown.locator(customSelector).first();
+    '.custom-emoji';
+  const customEmojiCategory = dropdown.locator('.emoji-category:not(.hide) .category-items.not-local').first();
+  await customEmojiCategory.waitFor({state: 'attached', timeout: 15_000})
+  .catch(() => failStage(`${stage}_custom_emoji_category`));
+  await customEmojiCategory.scrollIntoViewIfNeeded().catch(() => failStage(`${stage}_custom_emoji_category`));
+  const customEmoji = customEmojiCategory.locator(customSelector).first();
   await customEmoji.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_custom_emoji_visible`));
   const isLocked = await customEmoji.evaluate((element) => {
     const category = element.closest('.emoji-category');

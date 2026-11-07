@@ -3906,6 +3906,20 @@ describe('real client scenario contract', () => {
     expect(setInstallSource).not.toContain(`setAttribute('onclick'`);
   });
 
+  it('scrolls installed custom emoji sets into view before selecting an emoji', () => {
+    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
+    const selectionSource = browserSource.slice(
+      browserSource.indexOf('async function selectCustomEmoji'),
+      browserSource.indexOf('async function waitForCustomEmojiMessage')
+    );
+    const scrollIntoView = selectionSource.indexOf('scrollIntoViewIfNeeded');
+    const waitForEmoji = selectionSource.indexOf('customEmoji.waitFor');
+
+    expect(selectionSource).toContain('.category-items.not-local');
+    expect(scrollIntoView).toBeGreaterThan(-1);
+    expect(waitForEmoji).toBeGreaterThan(scrollIntoView);
+  });
+
   it('selects the sender chat after installing the set and opens the recipient chat after sending', () => {
     const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
     const scenario = browserSource.slice(
