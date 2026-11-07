@@ -2934,7 +2934,22 @@ async function setCustomEmojiStatus(page, otherPage, docId) {
   if(await page.locator('.popup-premium:visible').count()) failStage('alice_custom_emoji_status_premium_prompt');
 }
 
+async function probeEmojiPickerBeforeCustomSet(page, stage) {
+  setPageScenarioStep(page, `${stage}_toggle`);
+  const toggle = page.locator('#column-center .toggle-emoticons');
+  await toggle.click().catch(() => failStage(`${stage}_toggle`));
+  const dropdown = page.locator('.emoji-dropdown');
+  await dropdown.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_visible`));
+  await dropdown.locator('.emoji-category').first().waitFor({state: 'attached', timeout: 15_000})
+  .catch(() => failStage(`${stage}_loaded`));
+  await toggle.click().catch(() => failStage(`${stage}_close`));
+  await page.waitForFunction(() => !document.querySelector('.emoji-dropdown.active'), null, {timeout: 15_000})
+  .catch(() => failStage(`${stage}_close`));
+}
+
 async function runCustomEmojiScenario(alice, bob) {
+  currentStage = 'alice_emoji_picker_baseline';
+  await probeEmojiPickerBeforeCustomSet(alice.page, 'alice_emoji_picker_baseline');
   currentStage = 'alice_custom_emoji_set_install';
   await installCustomEmojiSet(alice.page, 'alice_custom_emoji');
   currentStage = 'bob_custom_emoji_set_install';

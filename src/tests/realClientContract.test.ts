@@ -3945,6 +3945,14 @@ describe('real client scenario contract', () => {
     expect(scenario.slice(recipientChatSelected, recipientVisibilityChecked)).toContain('runtime.accounts[0].username');
   });
 
+  it('opens the emoji picker before the custom set is installed to tell a picker crash from a pack crash', () => {
+    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
+    const scenarioSource = browserSource.slice(browserSource.indexOf('async function runCustomEmojiScenario'));
+
+    expect(scenarioSource.indexOf('probeEmojiPickerBeforeCustomSet(alice.page'))
+    .toBeLessThan(scenarioSource.indexOf('installCustomEmojiSet(alice.page'));
+  });
+
   it('requires exactly one recipient message with the expected text', () => {
     expect(getSingleExactMessageFailure(['browser-ci-hello'], 'browser-ci-hello')).toBe(null);
     expect(getSingleExactMessageFailure(['prefix browser-ci-hello'], 'browser-ci-hello')).toBe('content');
