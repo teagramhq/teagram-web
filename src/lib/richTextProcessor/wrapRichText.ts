@@ -75,7 +75,9 @@ export type WrapRichTextOptions = Partial<{
   customWraps?: Set<HTMLElement>,
   ignoreNextIndex?: number,
   doubleLinebreak?: number
-  textColor?: WrapSomethingOptions['textColor']
+  textColor?: WrapSomethingOptions['textColor'],
+  // * leave the emoji image's src in `data-src`, the caller loads it when the image is near view
+  deferEmojiImageSrc?: boolean
 }> & CustomEmojiRendererElementOptions;
 
 export const ENTITY_ELEMENT_MAP: WeakMap<HTMLElement, MessageEntity> = new WeakMap();
@@ -499,7 +501,11 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           //   insertPart(entity, '<span class="emoji">', '</span>');
           // } else {
           element = document.createElement('img');
-          (element as HTMLImageElement).src = `/assets/img/emoji/${entity.unicode}.png`;
+          if(options.deferEmojiImageSrc) {
+            element.dataset.src = `/assets/img/emoji/${entity.unicode}.png`;
+          } else {
+            (element as HTMLImageElement).src = `/assets/img/emoji/${entity.unicode}.png`;
+          }
           property = 'alt';
           element.className = 'emoji emoji-image';
 

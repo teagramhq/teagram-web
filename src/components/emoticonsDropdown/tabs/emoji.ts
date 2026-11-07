@@ -59,6 +59,7 @@ import {
   getEmojiSkinToneVariants
 } from '@helpers/emojiSkinTone';
 import showEmojiTonePicker from '@components/emoticonsDropdown/emojiTonePicker';
+import observeLazyEmojiImage, {loadLazyEmojiImage} from '@helpers/lazyEmojiImage';
 
 
 const loadedURLs: Set<string> = new Set();
@@ -83,7 +84,7 @@ export function appendEmoji(_emoji: AppEmoji, unify = false) {
     el = wrapSingleEmoji(emoji);
   } else {
     emoji = fixEmoji(emoji);
-    el = wrapEmojiText(emoji);
+    el = wrapEmojiText(emoji, false, undefined, true);
   }
 
   spanEmoji.append(el);
@@ -96,8 +97,11 @@ export function appendEmoji(_emoji: AppEmoji, unify = false) {
   if(spanEmoji.firstElementChild?.tagName === 'IMG') {
     const image = spanEmoji.firstElementChild as HTMLImageElement;
 
-    const url = image.src;
-    if(!loadedURLs.has(url)) {
+    const url = image.dataset.src !== undefined ? new URL(image.dataset.src, location.href).href : image.src;
+    if(loadedURLs.has(url)) {
+      loadLazyEmojiImage(image);
+    } else {
+      observeLazyEmojiImage(image);
       image.setAttribute('loading', 'lazy');
       const placeholder = document.createElement('span');
       placeholder.classList.add('emoji-placeholder');

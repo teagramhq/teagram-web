@@ -3,11 +3,11 @@ import {MessageEntity, TextWithEntities} from '@layer';
 import parseEntities from '@lib/richTextProcessor/parseEntities';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
 
-export default function wrapEmojiText(text: string, isDraft = false, entities?: MessageEntity[]) {
+export default function wrapEmojiText(text: string, isDraft = false, entities?: MessageEntity[], deferEmojiImageSrc?: boolean) {
   if(!text) return wrapRichText('');
 
   entities ??= parseEntities(text).filter((e) => e._ === 'messageEntityEmoji');
-  return wrapRichText(text, {entities, wrappingDraft: isDraft});
+  return wrapRichText(text, {entities, wrappingDraft: isDraft, deferEmojiImageSrc});
 }
 
 export function wrapEmojiTextWithEntities(obj: TextWithEntities, isDraft = false) {
