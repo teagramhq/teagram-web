@@ -129,22 +129,12 @@ export class LottieLoader {
       return Promise.resolve();
     }
 
-    if(this.loadPromise) {
-      return this.loadPromise;
-    }
-
-    const loadPromise = this.registerLottieWorkers().catch((error) => {
-      if(this.loadPromise === loadPromise) {
-        this.loadPromise = undefined;
-      }
-      throw error;
-    });
-    return this.loadPromise = loadPromise;
+    return this.registerLottieWorkers();
   }
 
   private async registerLottieWorkers() {
     const {registerLottieWorkers} = await import('@lib/lottie/registerLottieWorkers');
-    await registerLottieWorkers();
+    return registerLottieWorkers();
   }
 
   public makeAssetUrl(name: LottieAssetName) {
