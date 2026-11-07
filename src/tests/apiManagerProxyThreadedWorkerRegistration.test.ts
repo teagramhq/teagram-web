@@ -1,33 +1,44 @@
 import {afterEach, expect, test, vi} from 'vitest';
 
+const workerState = vi.hoisted(() => {
+  const instances: Array<{terminated: boolean, url: string}> = [];
+  class TestWorker extends EventTarget {
+    public terminated = false;
+
+    constructor(public url: string) {
+      super();
+      instances.push(this);
+    }
+
+    public postMessage() {}
+
+    public terminate() {
+      this.terminated = true;
+    }
+  }
+
+  vi.stubGlobal('IntersectionObserver', class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  });
+  vi.stubGlobal('Worker', TestWorker);
+  vi.stubGlobal('fetch', () => new Promise(() => {}));
+
+  return {instances, TestWorker};
+});
+
 vi.mock('@helpers/setWorkerProxy', () => ({makeWorkerURL: (url: string | URL) => new URL(url, location.href)}));
 vi.mock('@helpers/createPrivateWorkerBlobURL', () => ({rewritePrivateWorkerImports: (text: string) => text}));
+vi.mock('@components/animationIntersector', () => ({default: {}}));
 vi.mock('@environment/sharedWorkerSupport', () => ({default: false}));
-vi.mock('@environment/userAgent', () => ({IS_SAFARI: false}));
+vi.mock('@environment/webpSupport', () => ({default: false}));
+vi.mock('@environment/userAgent', async(importOriginal) => ({
+  ...await importOriginal<typeof import('@environment/userAgent')>(),
+  IS_SAFARI: false
+}));
 
-const workerInstances: Worker[] = [];
-class Worker extends EventTarget {
-  public terminated = false;
-
-  constructor(public url: string) {
-    super();
-    workerInstances.push(this);
-  }
-
-  public postMessage() {}
-
-  public terminate() {
-    this.terminated = true;
-  }
-}
-
-vi.stubGlobal('Worker', Worker);
-vi.stubGlobal('IntersectionObserver', class {
-  observe() {}
-  unobserve() {}
-  disconnect() {}
-});
-vi.stubGlobal('fetch', () => new Promise(() => {}));
+import apiManagerProxy from '@lib/apiManagerProxy';
 
 type PortListener = (payload: void, source: MessageEventSource, event: MessageEvent) => void;
 
@@ -64,20 +75,20 @@ class TestSuperMessagePort {
 }
 
 afterEach(() => {
-  workerInstances.length = 0;
+  workerState.instances.length = 0;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 test.each(['worker-source fetch', 'proxy-URL request'] as const)('cleans up an attached worker after a %s failure before retrying', async(failureStage) => {
-  const registerThreadedLottieWorker = (await import('@lib/lottie/registerThreadedWorker')).default;
-  workerInstances.length = 0;
-  vi.stubGlobal('Worker', Worker);
+  workerState.instances.length = 0;
+  vi.stubGlobal('Worker', workerState.TestWorker);
   const messagePort = new TestSuperMessagePort();
   const invokeVoid = vi.fn();
   const createProxyWorkerURLs = vi.fn();
   const failedWorkerPort = {close: vi.fn()} as unknown as MessagePort;
   const fetchError = new Error('worker source fetch failed');
+  const attachedWorkers: Array<SharedWorker | globalThis.Worker> = [];
 
   vi.stubGlobal('fetch', vi.fn(async() => {
     messagePort.emitPort(failedWorkerPort);
@@ -86,20 +97,29 @@ test.each(['worker-source fetch', 'proxy-URL request'] as const)('cleans up an a
   }));
   if(failureStage === 'proxy-URL request') createProxyWorkerURLs.mockRejectedValueOnce(fetchError);
 
+  const proxy = Object.create(Object.getPrototypeOf(apiManagerProxy)) as any;
+  proxy.attachWorkerToPort = (worker: SharedWorker | globalThis.Worker, superMessagePort: TestSuperMessagePort) => {
+    attachedWorkers.push(worker);
+    superMessagePort.attachPort((worker as SharedWorker).port || worker);
+  };
+  proxy.invoke = (method: string, params: unknown) => {
+    if(method === 'createProxyWorkerURLs') return createProxyWorkerURLs(params);
+    throw new Error(`unexpected API manager invocation: ${method}`);
+  };
+  proxy.invokeVoid = invokeVoid;
+
   const createWorker = () => new (window as any).Worker(new URL('/assets/lottie.worker.js', location.href), {type: 'module'});
   const registration = {
+    type: 'lottie',
     createWorker,
-    superMessagePort: messagePort as any,
-    attachWorkerToPort: (worker: globalThis.Worker | SharedWorker) => messagePort.attachPort((worker as SharedWorker).port || worker),
-    createProxyWorkerURLs,
-    forwardPort: (port: MessagePort) => invokeVoid('threadedPort', 'lottie', undefined, [port])
+    superMessagePort: messagePort as any
   };
 
-  await expect(registerThreadedLottieWorker(registration)).rejects.toBe(fetchError);
+  await expect(proxy.registerThreadedWorker(registration)).rejects.toBe(fetchError);
   expect(messagePort.attached).toEqual([]);
   expect(messagePort.detached).toHaveLength(1);
   expect(messagePort.portListenerCount).toBe(0);
-  expect(workerInstances[0].terminated).toBe(true);
+  expect((attachedWorkers[0] as globalThis.Worker & {terminated: boolean}).terminated).toBe(true);
   expect((failedWorkerPort as any).close).toHaveBeenCalledOnce();
   expect(invokeVoid).not.toHaveBeenCalled();
 
@@ -108,9 +128,12 @@ test.each(['worker-source fetch', 'proxy-URL request'] as const)('cleans up an a
     messagePort.emitPort(retryWorkerPort);
     return {text: async() => ''};
   }));
-  createProxyWorkerURLs.mockResolvedValue(['original-worker.js', 'proxy-worker.js']);
+  createProxyWorkerURLs.mockImplementation(() => {
+    expect(invokeVoid).not.toHaveBeenCalled();
+    return Promise.resolve(['original-worker.js', 'proxy-worker.js']);
+  });
 
-  await registerThreadedLottieWorker(registration);
+  await proxy.registerThreadedWorker(registration);
   expect(messagePort.portListenerCount).toBe(1);
   expect(invokeVoid).toHaveBeenCalledOnce();
   expect(invokeVoid).toHaveBeenCalledWith('threadedPort', 'lottie', undefined, [retryWorkerPort]);

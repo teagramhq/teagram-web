@@ -2,7 +2,6 @@ import {bindActiveWindowListener, getAppWindow} from '@helpers/appWindow';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import lottieMessagePort from '@lib/lottie/lottieMessagePort';
 import SHOULD_RENDER_OFFSCREEN from '@lib/lottie/shouldRenderOffscreen';
-import registerThreadedLottieWorker from '@lib/lottie/registerThreadedWorker';
 
 let loadPromise: Promise<void> | undefined;
 
@@ -10,15 +9,13 @@ export function registerLottieWorkers() {
   if(loadPromise) return loadPromise;
 
   const promise = (async() => {
-    await registerThreadedLottieWorker({
+    await apiManagerProxy.registerThreadedWorker({
+      type: 'lottie',
       createWorker: () => new Worker(
         new URL('./tlottie.worker.ts', import.meta.url),
         {type: 'module'}
       ),
-      superMessagePort: lottieMessagePort,
-      attachWorkerToPort: (worker) => apiManagerProxy.attachWorkerToPort(worker, lottieMessagePort, 'lottie'),
-      createProxyWorkerURLs: (params) => apiManagerProxy.invoke('createProxyWorkerURLs', params),
-      forwardPort: (port) => apiManagerProxy.invokeVoid('threadedPort', 'lottie', undefined, [port])
+      superMessagePort: lottieMessagePort
     });
 
     if(SHOULD_RENDER_OFFSCREEN) {

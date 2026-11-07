@@ -1160,37 +1160,71 @@ class ApiManagerProxy extends MTProtoMessagePort {
     ].filter(Boolean);
     originals.forEach((w) => window[w.name as any] = new Proxy(w, workerHandler));
 
-    const worker = _createWorker();
+    let initialWorker: SharedWorker | Worker;
+    try {
+      initialWorker = _createWorker();
+    } finally {
+      originals.forEach((w) => window[w.name as any] = w as any);
+    }
 
-    originals.forEach((w) => window[w.name as any] = w as any);
+    const originalUrl = (initialWorker as any).url;
 
-    const originalUrl = (worker as any).url;
-
+    // Safari silently wedges a {type:'module'} SharedWorker used for lottie sticker decoding:
+    // frames never arrive, no error is thrown, and every sticker canvas stays blank (never appended).
+    // Keep MTProto/crypto on the shared worker, but hand the lottie pool per-tab dedicated Workers.
+    const constructor = IS_SHARED_WORKER_SUPPORTED && !(IS_SAFARI && type === 'lottie') ? SharedWorker : Worker;
     const createWorker = (url: string) => new constructor(url, {type: 'module'});
     const attachWorkerToPort = (worker: SharedWorker | Worker) => this.attachWorkerToPort(
       worker,
       superMessagePort,
       type
     );
-    // Safari silently wedges a {type:'module'} SharedWorker used for lottie sticker decoding:
-    // frames never arrive, no error is thrown, and every sticker canvas stays blank (never appended).
-    // Keep MTProto/crypto on the shared worker, but hand the lottie pool per-tab dedicated Workers.
-    const constructor = IS_SHARED_WORKER_SUPPORTED && !(IS_SAFARI && type === 'lottie') ? SharedWorker : Worker;
 
-    superMessagePort.addEventListener('port', (payload, source, event) => {
-      this.invokeVoid('threadedPort', type, undefined, [event.ports[0]]);
-    });
+    const workers: Array<SharedWorker | Worker> = [];
+    const pendingPorts: MessagePort[] = [];
+    let canForwardPorts = false;
+    const forwardPort = (port: MessagePort) => this.invokeVoid('threadedPort', type, undefined, [port]);
+    const onPort = (_payload: void, _source: MessageEventSource, event: MessageEvent) => {
+      const port = event.ports[0];
+      if(canForwardPorts) {
+        forwardPort(port);
+      } else {
+        pendingPorts.push(port);
+      }
+    };
+    superMessagePort.addEventListener('port', onPort);
 
-    const firstWorker = createWorker(originalUrl);
-    attachWorkerToPort(firstWorker);
+    try {
+      const firstWorker = createWorker(originalUrl);
+      workers.push(firstWorker);
+      attachWorkerToPort(firstWorker);
 
-    const blob = await get(originalUrl);
-    const urlsPromise = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
-    const workers = urlsPromise.slice(1).map(createWorker);
-    workers.forEach(attachWorkerToPort);
+      const blob = await get(originalUrl);
+      const urls = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
+      for(const url of urls.slice(1)) {
+        const worker = createWorker(url);
+        workers.push(worker);
+        attachWorkerToPort(worker);
+      }
 
-    if(DEBUG) {
-      console.log('Workers URLs', type, urlsPromise);
+      if(DEBUG) {
+        console.log('Workers URLs', type, urls);
+      }
+
+      canForwardPorts = true;
+      for(const port of pendingPorts) {
+        forwardPort(port);
+      }
+      pendingPorts.length = 0;
+    } catch(error) {
+      superMessagePort.removeEventListener('port', onPort);
+      pendingPorts.forEach((port) => port.close());
+      workers.forEach((worker) => {
+        const port = (worker as SharedWorker).port || worker as any;
+        superMessagePort.detachPort(port);
+        if(port === worker) (worker as Worker).terminate();
+      });
+      throw error;
     }
   }
 
@@ -1305,7 +1339,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
     toast('Private MTProto worker failed to start. Reload the page to try again.', undefined, 10000);
   }
 
-  public attachWorkerToPort(
+  private attachWorkerToPort(
     worker: SharedWorker | Worker,
     messagePort: SuperMessagePort<any, any, any>,
     type: string

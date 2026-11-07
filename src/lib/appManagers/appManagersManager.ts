@@ -119,8 +119,7 @@ export class AppManagersManager {
     port.addEventListener('threadedPort', (type, source, event) => {
       const threadedWorker = this.threadedSharedWorkers[type];
       const port = event.ports[0];
-      // Registrations forward ports after URL creation; cap by the thread count
-      // because multiple tabs can race to populate the shared worker pool.
+      // Cap by the thread count because multiple tabs can race to populate the shared worker pool.
       if(threadedWorker.attached >= threadedWorker.threads) {
         port.close();
         return;

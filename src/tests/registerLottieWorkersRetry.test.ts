@@ -6,16 +6,9 @@ vi.mock('@helpers/appWindow', () => ({
   bindActiveWindowListener: vi.fn(),
   getAppWindow: vi.fn()
 }));
-vi.mock('@lib/apiManagerProxy', () => ({
-  default: {
-    attachWorkerToPort: vi.fn(),
-    invoke: vi.fn(),
-    invokeVoid: vi.fn()
-  }
-}));
+vi.mock('@lib/apiManagerProxy', () => ({default: {registerThreadedWorker: registerWorker}}));
 vi.mock('@lib/lottie/lottieMessagePort', () => ({default: {}}));
 vi.mock('@lib/lottie/shouldRenderOffscreen', () => ({default: false}));
-vi.mock('@lib/lottie/registerThreadedWorker', () => ({default: registerWorker}));
 
 import {registerLottieWorkers} from '@lib/lottie/registerLottieWorkers';
 
@@ -35,5 +28,6 @@ it('retries failed registration and shares the retry in flight', async() => {
 
   resolveRetry();
   await expect(Promise.all([retry, concurrentRetry])).resolves.toEqual([undefined, undefined]);
+  await expect(registerLottieWorkers()).resolves.toBeUndefined();
   expect(registerWorker).toHaveBeenCalledTimes(2);
 });
