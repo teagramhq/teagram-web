@@ -3901,7 +3901,7 @@ describe('real client scenario contract', () => {
       browserSource.indexOf('async function selectCustomEmoji')
     );
 
-    expect(setInstallSource).toContain(`link.href = new URL('/links/addemoji/twemoji_custom_emojis', window.location.origin).toString();`);
+    expect(setInstallSource).toContain(`link.href = new URL('/addemoji/twemoji_custom_emojis', window.location.origin).toString();`);
     expect(setInstallSource).toContain(`link.addEventListener('click', (event) => window.stickerSet(link, event));`);
     expect(setInstallSource).not.toContain(`setAttribute('onclick'`);
   });

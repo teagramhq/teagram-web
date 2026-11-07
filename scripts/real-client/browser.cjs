@@ -2820,7 +2820,7 @@ async function installCustomEmojiSet(page, stage) {
   setPageScenarioStep(page, `${stage}_set_link`);
   const setLink = await page.evaluate(() => {
     const link = document.createElement('a');
-    link.href = new URL('/links/addemoji/twemoji_custom_emojis', window.location.origin).toString();
+    link.href = new URL('/addemoji/twemoji_custom_emojis', window.location.origin).toString();
     link.addEventListener('click', (event) => window.stickerSet(link, event));
     link.textContent = 'Install custom emoji smoke set';
     link.style.cssText = 'position:fixed;left:8px;top:8px;z-index:2147483647;padding:8px;background:white;color:black';
