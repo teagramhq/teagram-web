@@ -8,6 +8,7 @@ import {createBundleRequestTracker, sumBundleBytes, trackBundleDocumentNavigatio
 import {CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateNoWalkLongTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
+import {LOTTIE_FRAME_BG_CSS, waitUntilOnScreen} from './lottieFrameMeasurement';
 
 type Fixture = {
   owner: number,
@@ -19,6 +20,8 @@ type Scale = '1x' | '100x';
 type Variant = 'base' | 'head';
 const PERFORMANCE_TIMING_REPEATS = 5;
 const REPORT_ONLY_SEND_REPEATS = 11;
+const FIRST_STICKER_REPEATS = 3;
+const FIRST_STICKER_ASSET = '/assets/tgs/key.json';
 
 type Metric = {
   ms: number,
@@ -1279,6 +1282,145 @@ async function measureColdControlWindow(browser: Browser, run: VariantRun, injec
   }
 }
 
+async function measureFirstStickerFrame(browser: Browser, run: VariantRun, fixture: Fixture, warmWorker: boolean) {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+
+    if(warmWorker) {
+      await page.evaluate(() => (window as any).lottieLoader.loadLottieWorkers());
+      await waitForBundleResources(page);
+    }
+
+    const workerReadyBeforeChat = await page.evaluate(() => (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).some((entry) => (
+      entry.name.includes('tlottie.worker') && entry.responseEnd > 0
+    )));
+
+    await page.evaluate((background) => {
+      const w = window as any;
+      const loader = w.lottieLoader;
+      const original = loader.loadAnimationWorker;
+      let captured = false;
+      loader.loadAnimationWorker = function(params: any) {
+        const container = Array.isArray(params.container) ? params.container[0] : params.container;
+        if(captured || !container?.closest('#page-chats .bubble.sticker-animated')) {
+          return original.call(this, params);
+        }
+
+        captured = true;
+        container.id = 'performance-first-sticker';
+        container.style.setProperty('background-color', background, 'important');
+        return Promise.resolve(original.call(this, params)).then((player: any) => {
+          const recordFirstFrame = () => w.__performanceFirstStickerFrameAt = performance.now();
+          if(player.hasRenderedFirstFrame) recordFirstFrame();
+          else player.addEventListener('firstFrame', recordFirstFrame, {once: true});
+          return player;
+        });
+      };
+    }, LOTTIE_FRAME_BG_CSS);
+
+    const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
+    await expect(row).toBeVisible({timeout: 60_000});
+    await startMeasurementAtClick(row);
+    await row.click();
+    await waitForFirstVisibleBubble(page);
+    await expect(page.locator('#page-chats .bubble.sticker-animated').first()).toBeVisible({timeout: 60_000});
+
+    const onScreenAt = await waitUntilOnScreen(page, page.locator('#performance-first-sticker'), 20_000);
+    const {clickAt, firstFrameAt} = await page.evaluate(() => ({
+      clickAt: (window as any).__teagramPerf.clickAt as number,
+      firstFrameAt: (window as any).__performanceFirstStickerFrameAt as number | undefined
+    }));
+    await page.evaluate(() => {
+      const container = document.getElementById('performance-first-sticker');
+      if(container) (window as any).lottieLoader.getAnimation(container)?.remove();
+      container?.remove();
+    });
+
+    expect(onScreenAt, `${run.variant} first sticker frame never reached the screen`).not.toBeNull();
+    expect(Number.isFinite(firstFrameAt), `${run.variant} firstFrame event was not recorded`).toBe(true);
+    return {
+      workerReadyBeforeChat,
+      clickToFirstFrameMs: firstFrameAt! - clickAt,
+      clickToVisibleFrameMs: onScreenAt! - clickAt
+    };
+  } finally {
+    await context.close();
+  }
+}
+
+async function seedFirstStickerMessage(browser: Browser, run: VariantRun, fixture: Fixture) {
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: {width: 1280, height: 800},
+    storageState: run.storageState
+  });
+
+  try {
+    const page = await context.newPage();
+    const requests = {value: 0};
+    await installInstrumentation(page, requests, run.origin);
+    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    await page.evaluate(async({asset, partner}) => {
+      let phase = 'load animation asset';
+      try {
+        const w = window as any;
+        const response = await fetch(asset);
+        if(!response.ok) throw new Error(`asset request returned ${response.status}`);
+        const json = await response.arrayBuffer();
+        const compressed = new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'));
+        const bytes = await new Response(compressed).arrayBuffer();
+        const file = new File([bytes], 'AnimatedSticker.tgs', {type: 'application/x-tgsticker'});
+        const managers = w.rootScope.managers;
+
+        phase = 'upload sticker document';
+        const uploaded = await managers.apiFileManager.upload({file, fileName: file.name});
+        const randomId = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+
+        phase = 'send sticker message';
+        await managers.apiManager.invokeApi('messages.sendMedia', {
+          peer: await managers.appPeersManager.getInputPeerById(partner),
+          media: {
+            _: 'inputMediaUploadedDocument',
+            file: uploaded,
+            mime_type: 'application/x-tgsticker',
+            pFlags: {},
+            attributes: [
+              {_: 'documentAttributeSticker', pFlags: {}, alt: '🔑', stickerset: {_: 'inputStickerSetEmpty'}},
+              {_: 'documentAttributeFilename', file_name: file.name}
+            ]
+          },
+          message: '',
+          random_id: randomId
+        });
+      } catch(error) {
+        const details = error instanceof Error ? error.message : JSON.stringify(error);
+        throw new Error(`failed to ${phase}: ${details}`);
+      }
+    }, {asset: FIRST_STICKER_ASSET, partner: fixture.partner});
+
+    await page.reload({waitUntil: 'domcontentloaded'});
+    await waitForChatList(page);
+    const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
+    await expect(row).toBeVisible({timeout: 60_000});
+    await row.click();
+    await expect(page.locator('#page-chats .bubble.sticker-animated').first()).toBeVisible({timeout: 60_000});
+    await expect(page.locator('#page-chats .bubble.sticker-animated .media-sticker-wrapper').first()).toHaveAttribute('data-doc-id', /.+/);
+  } finally {
+    await context.close();
+  }
+}
+
 // Both variants start from one signed-in snapshot so they share the auth key and cached client state.
 function withOrigin(run: VariantRun, variant: Variant, origin: string): VariantRun {
   return {
@@ -1317,6 +1459,62 @@ test.beforeAll(async({browser}) => {
       preparedVariants[scale][variant] = withOrigin(signedIn, variant, origin);
     }
   }
+});
+
+test('measures first animated sticker frame after opening a chat', async({browser}) => {
+  expect(reportPath).toBeTruthy();
+  measurementsStarted = true;
+
+  const fixture = fixtures['1x']!;
+  const head = preparedVariants['1x'].head!;
+  await seedFirstStickerMessage(browser, head, fixture);
+
+  const variants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
+  const conditions = variants.flatMap((variant) => [
+    {variant, warmWorker: false},
+    {variant, warmWorker: true}
+  ]);
+  const samples: Record<Variant, Record<'cold' | 'warm', Awaited<ReturnType<typeof measureFirstStickerFrame>>[]>> = {
+    base: {cold: [], warm: []},
+    head: {cold: [], warm: []}
+  };
+
+  for(let repeat = 0; repeat < FIRST_STICKER_REPEATS; ++repeat) {
+    const order = repeat % 2 === 0 ? conditions : [...conditions].reverse();
+    for(const {variant, warmWorker} of order) {
+      const sample = await test.step(`1x ${variant} ${warmWorker ? 'warm' : 'cold'} first sticker repeat ${repeat + 1}`, async() => (
+        measureFirstStickerFrame(browser, preparedVariants['1x'][variant]!, fixture, warmWorker)
+      ));
+      expect(sample.workerReadyBeforeChat, `${variant} worker was not ready before the first sticker interaction`).toBe(true);
+      samples[variant][warmWorker ? 'warm' : 'cold'].push(sample);
+    }
+  }
+
+  const median = (values: number[]) => [...values].sort((left, right) => left - right)[Math.floor(values.length / 2)];
+  const medians = Object.fromEntries(variants.map((variant) => [variant, Object.fromEntries(
+    (['cold', 'warm'] as const).map((temperature) => {
+      const values = samples[variant][temperature];
+      expect(values).toHaveLength(FIRST_STICKER_REPEATS);
+      return [temperature, {
+        workerFrameMs: median(values.map((sample) => sample.clickToFirstFrameMs)),
+        visibleFrameMs: median(values.map((sample) => sample.clickToVisibleFrameMs))
+      }];
+    })
+  )]));
+  if(report.requireBase) {
+    const before = medians.base.cold.visibleFrameMs;
+    const after = medians.head.cold.visibleFrameMs;
+    expect(Math.abs(after - before), `head first visible frame median differs from base by more than 100 ms: ${before} ms -> ${after} ms`).toBeLessThanOrEqual(100);
+  }
+  report.diagnostics.firstSticker = {
+    scale: '1x',
+    repeats: FIRST_STICKER_REPEATS,
+    boundary: 'chat row click to first rendered pixels in the animated sticker bubble',
+    samples,
+    medians
+  };
+  console.log(`[first-sticker] ${JSON.stringify({medians, samples})}`);
+  measurementsComplete = true;
 });
 
 async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixture: Fixture) {

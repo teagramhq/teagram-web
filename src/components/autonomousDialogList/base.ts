@@ -2,6 +2,7 @@ import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
 import DialogsPlaceholder from '@helpers/dialogsPlaceholder';
 import replaceContent from '@helpers/dom/replaceContent';
 import ListenerSetter from '@helpers/listenerSetter';
+import noop from '@helpers/noop';
 import throttle from '@helpers/schedulers/throttle';
 import {SequentialCursorFetcher, SequentialCursorFetcherResult} from '@helpers/sequentialCursorFetcher';
 import windowSize from '@helpers/windowSize';
@@ -20,6 +21,7 @@ import SortedDialogList from '@components/sortedDialogList';
 import {AutonomousDialogList} from '@components/autonomousDialogList/dialogs';
 import {FOLDER_ID_ALL} from '@appManagers/constants';
 import {replaceChatPageSnapshot} from '@lib/chatPageSnapshotView';
+import lottieLoader from '@lib/lottie/lottieLoader';
 
 
 export const DIALOG_LOAD_COUNT = 20;
@@ -325,13 +327,18 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
     this.loadedDialogsAtLeastOnce = true;
     this.hasReachedTheEnd = !!result.isEnd;
 
-    if(!offsetIndex && this.getFilterId() === FOLDER_ID_ALL &&
-      this.sortedList.list.closest('#folders-container')) {
+    const isInitialAllChatsPage = !!(!offsetIndex && this.getFilterId() === FOLDER_ID_ALL &&
+      this.sortedList.list.closest('#folders-container'));
+    if(isInitialAllChatsPage) {
       replaceChatPageSnapshot();
     }
     this.sortedList.addDeferredItems(items, result.count || 0);
 
     if(removePlaceholder) this.placeholder?.detach(this.sortedList.itemsLength());
+
+    if(isInitialAllChatsPage) {
+      self.setTimeout(() => lottieLoader.loadLottieWorkers().catch(noop), 0);
+    }
 
     return {
       cursor: newOffsetIndex === Infinity ? undefined : newOffsetIndex,
