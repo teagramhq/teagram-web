@@ -50,6 +50,7 @@ describe('LottiePlayer lifecycle', () => {
     let loggedError = false;
     try {
       player.renderFrame(bitmap as unknown as ImageBitmap, 1);
+      expect(vi.getTimerCount()).toBe(1);
       bitmap.close();
       player.remove();
       await vi.runAllTimersAsync();
