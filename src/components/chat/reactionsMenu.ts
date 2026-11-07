@@ -35,6 +35,7 @@ import partition from '@helpers/array/partition';
 import {PAID_REACTION_EMOJI_DOCID} from '@lib/customEmoji/constants';
 import {StarsStar} from '@components/popups/stars';
 import {cleanEmoji} from '@lib/richTextProcessor/fixEmoji';
+import {canReactionPickerUseCustomEmoji} from './reactionsMenuEmojiAccess';
 
 const REACTIONS_CLASS_NAME = 'btn-menu-reactions';
 const REACTION_CLASS_NAME = REACTIONS_CLASS_NAME + '-reaction';
@@ -390,6 +391,7 @@ export class ChatReactionsMenu {
       noRegularEmoji: true,
       noPacks: this.noPacks,
       noSearch: this.noSearch,
+      canUsePremiumEmojiAlways: canReactionPickerUseCustomEmoji(this.isTags, this.isEffects),
       managers: this.managers,
       mainSets: this.isTags ? this.loadTags : (this.isEffects ? this.loadEffects : this.loadReactions),
       additionalLocalStickerSet: this.isEffects ? async() => {

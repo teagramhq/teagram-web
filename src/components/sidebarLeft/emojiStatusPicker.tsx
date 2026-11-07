@@ -26,6 +26,7 @@ export function openEmojiStatusPicker(options: {
   const emojiTab = new EmojiTab({
     noRegularEmoji: true,
     managers: managers,
+    canUsePremiumEmojiAlways: true,
     mainSets: () => {
       const defaultStatuses = managers.appStickersManager.getLocalStickerSet('inputStickerSetEmojiDefaultStatuses')
       .then((stickerSet) => {
