@@ -6081,6 +6081,49 @@ describe('real client centre-column failure state', () => {
     }
   });
 
+  it('rejects if a second sent bubble appears during the stability window', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="bubble is-sent"><div class="message">browser-ci-hello</div></div>
+      </div><script>
+        setTimeout(() => {
+          const duplicate = document.createElement('div');
+          duplicate.className = 'bubble is-sent';
+          duplicate.innerHTML = '<div class="message">browser-ci-hello</div>';
+          document.querySelector('#column-center')?.append(duplicate);
+        }, 100);
+      </script>`);
+      const messages = page.locator('#column-center .bubble .message').filter({hasText: 'browser-ci-hello'});
+
+      await expect(waitForSingleSentMessage(messages, 'browser-ci-hello', 1_000)).rejects.toThrow('message count or sent state changed during stability window');
+      expect(await messages.count()).toBe(2);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('rejects if the sent state changes during the stability window', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="bubble is-sent"><div class="message">browser-ci-hello</div></div>
+      </div><script>
+        setTimeout(() => {
+          const bubble = document.querySelector('.bubble');
+          bubble?.classList.remove('is-sent');
+          bubble?.classList.add('is-sending');
+        }, 100);
+      </script>`);
+      const messages = page.locator('#column-center .bubble .message').filter({hasText: 'browser-ci-hello'});
+
+      await expect(waitForSingleSentMessage(messages, 'browser-ci-hello', 1_000)).rejects.toThrow('message count or sent state changed during stability window');
+      expect(await messages.first().evaluate((element: HTMLElement) => element.closest('.bubble')?.classList.contains('is-sending'))).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+
   // Emoji that `wrapRichText` draws as a custom emoji or an image keep their
   // characters only in `data-sticker-emoji` and `alt`.
   it('counts emoji drawn as custom emoji or images as message text', async() => {

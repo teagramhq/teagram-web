@@ -274,7 +274,18 @@ async function waitForSingleSentMessage(messages, expected, timeoutMs = 30_000) 
   const deadline = Date.now() + timeoutMs;
   while(true) {
     const states = await readMessageStates(messages);
-    if(states.length === 1 && states[0].text === expected && states[0].sent) return;
+    if(states.length === 1 && states[0].text === expected && states[0].sent) {
+      const stabilityDeadline = Date.now() + 600;
+      while(Date.now() < stabilityDeadline) {
+        const remaining = stabilityDeadline - Date.now();
+        await new Promise((resolve) => setTimeout(resolve, Math.min(100, remaining)));
+        const stableStates = await readMessageStates(messages);
+        if(stableStates.length !== 1 || stableStates[0].text !== expected || !stableStates[0].sent) {
+          throw new Error('message count or sent state changed during stability window');
+        }
+      }
+      return;
+    }
 
     const remaining = deadline - Date.now();
     if(remaining <= 0) throw new Error(`message did not settle to one sent bubble within ${timeoutMs}ms`);
