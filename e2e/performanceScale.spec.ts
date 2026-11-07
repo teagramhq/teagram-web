@@ -140,6 +140,8 @@ const preparedVariants: Record<Scale, Partial<Record<Variant, VariantRun>>> = {'
 let firstStickerBaseRun: VariantRun | undefined;
 const bundleRequestTrackers = new WeakMap<Page, BundleRequestTracker>();
 const requestBreakdownsByPage = new WeakMap<Page, Map<string, number>>();
+// Head pages schedule the production Lottie worker warm-up after the live chat list replaces the snapshot.
+const lottieWarmupPages = new WeakSet<Page>();
 
 const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
 const scenarioPreservedPerformancePhases = getScenarioPreservedPerformancePhases();
@@ -160,6 +162,8 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   const bundleRequests = createBundleRequestTracker(new URL(origin).origin);
   const requestBreakdown = new Map<string, number>();
   bundleRequestTrackers.set(page, bundleRequests);
+  const headOrigins = [process.env.PERF_HEAD_ORIGIN_1X, process.env.PERF_HEAD_ORIGIN_100X, process.env.PERF_TRACE_HEAD_ORIGIN_100X];
+  if(headOrigins.includes(origin)) lottieWarmupPages.add(page);
   requestBreakdownsByPage.set(page, requestBreakdown);
   trackBundleDocumentNavigation(page, bundleRequests);
   page.on('request', (request) => {
@@ -295,11 +299,22 @@ async function waitForLottieWorker(page: Page) {
   await waitForBundleResources(page);
 }
 
+// The head schedules the worker warm-up after the live replacement, which can land inside whichever
+// scenario is running. Let it finish first so scenario windows only contain their own requests.
+async function settleLottieWarmup(page: Page) {
+  if(!lottieWarmupPages.has(page)) return;
+  await expect.poll(() => page.evaluate(() => (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).some((entry) => (
+    entry.name.includes('tlottie.worker') && entry.responseEnd > 0
+  ))), {timeout: 30_000, message: 'Lottie worker warm-up did not finish after the live chat list'}).toBe(true);
+  await waitForBundleResources(page);
+}
+
 function resetRequestBreakdown(page: Page) {
   requestBreakdownsByPage.get(page)?.clear();
 }
 
 async function beginScenario(page: Page, requests: {value: number}, traceEnabled = false, captureWorkerMessages = false) {
+  await settleLottieWarmup(page);
   resetRequestBreakdown(page);
   await begin(page, requests, true, traceEnabled, captureWorkerMessages);
   if(!traceEnabled) return;
@@ -841,6 +856,7 @@ async function reloadChatList(page: Page, requests: {value: number}) {
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
+  await settleLottieWarmup(page);
   resetRequestBreakdown(page);
   await begin(page, requests, true, traceRpc);
   await startMeasurementAtClick(row);

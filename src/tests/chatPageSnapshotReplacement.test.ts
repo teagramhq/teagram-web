@@ -60,6 +60,7 @@ it('starts warming Lottie workers after the initial all-chats page has settled',
 
     expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(2000);
+    await vi.dynamicImportSettled();
     expect(lottieMocks.loadLottieWorkers).toHaveBeenCalledOnce();
   } finally {
     vi.clearAllTimers();
