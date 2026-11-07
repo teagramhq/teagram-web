@@ -62,4 +62,25 @@ describe('scenario bundle byte measurement', () => {
 
     expect(settled).toBe(true);
   });
+
+  test('drops abandoned requests on navigation but waits for the new document worker and fetch', async() => {
+    const tracker = createBundleRequestTracker('https://app.test');
+    const workerUrl = 'https://app.test/tlottie.worker.js';
+    const abandoned = {url: () => workerUrl};
+    const worker = {url: () => workerUrl};
+    const fetch = {url: () => workerUrl};
+    tracker.requestStarted(abandoned);
+    tracker.documentNavigated();
+    tracker.requestStarted(worker);
+    tracker.requestStarted(fetch);
+
+    let settled = false;
+    const waiting = tracker.waitForIdle(10, 500).then(() => settled = true);
+    tracker.workerReady(workerUrl);
+    await wait(20);
+    expect(settled).toBe(false);
+    tracker.requestFinished(fetch);
+    await waiting;
+    expect(settled).toBe(true);
+  });
 });

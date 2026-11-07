@@ -4,9 +4,9 @@ import {writePerformanceReport} from './performanceReport';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
-import {createBundleRequestTracker, sumBundleBytes, type BundleRequestTracker} from './performanceBundleBytes';
-import {CACHED_DIALOG_RECONCILE_PHASE_NAME, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateNoWalkLongTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
-import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble, type DomNodeCounts} from './performanceMeasurement';
+import {createBundleRequestTracker, sumBundleBytes, trackBundleDocumentNavigation, type BundleRequestTracker} from './performanceBundleBytes';
+import {CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateNoWalkLongTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
+import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
 
 type Fixture = {
@@ -23,10 +23,14 @@ const REPORT_ONLY_SEND_REPEATS = 11;
 type Metric = {
   ms: number,
   requests: number,
+  requestBreakdown?: Record<string, number>,
   domNodes: number,
   domClassCounts: Record<string, number>,
   domNodeCounts: DomNodeCounts,
   bundleBytes: number,
+  firstVisibleChatListMs?: number,
+  firstVisibleChatListSource?: FirstVisibleChatListBoundary['source'],
+  liveBoundaryMs?: number,
   longTasksOver50Ms: number,
   blockingTimeMs: number,
   maxLongTaskDurationMs: number,
@@ -73,6 +77,8 @@ type MeasurementBoundary = {
   domNodes: number,
   domClassCounts: Metric['domClassCounts'],
   domNodeCounts: Metric['domNodeCounts'],
+  firstVisibleChatListMs?: number,
+  firstVisibleChatListSource?: FirstVisibleChatListBoundary['source'],
   preInteractionMs?: number
 };
 
@@ -129,6 +135,7 @@ const report = {
 };
 const preparedVariants: Record<Scale, Partial<Record<Variant, VariantRun>>> = {'1x': {}, '100x': {}};
 const bundleRequestTrackers = new WeakMap<Page, BundleRequestTracker>();
+const requestBreakdownsByPage = new WeakMap<Page, Map<string, number>>();
 
 const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
 const scenarioPreservedPerformancePhases = getScenarioPreservedPerformancePhases();
@@ -147,9 +154,18 @@ test.afterAll(() => {
 
 async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false, observeAnimationFrames = false, recordWorkerMessages = observeAnimationFrames) {
   const bundleRequests = createBundleRequestTracker(new URL(origin).origin);
+  const requestBreakdown = new Map<string, number>();
   bundleRequestTrackers.set(page, bundleRequests);
+  requestBreakdownsByPage.set(page, requestBreakdown);
+  trackBundleDocumentNavigation(page, bundleRequests);
   page.on('request', (request) => {
-    if(request.resourceType() !== 'websocket') ++requestCounter.value;
+    if(request.resourceType() !== 'websocket') {
+      ++requestCounter.value;
+      const url = new URL(request.url());
+      const path = url.protocol === 'http:' || url.protocol === 'https:' ? url.pathname : url.protocol;
+      const key = `${request.method()} ${request.resourceType()} ${path}`;
+      requestBreakdown.set(key, (requestBreakdown.get(key) || 0) + 1);
+    }
     bundleRequests.requestStarted(request);
   });
   page.on('requestfinished', (request) => bundleRequests.requestFinished(request));
@@ -159,7 +175,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   // The gated scroll repeat starts this observer only for the measured window.
   await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
   if(recordWorkerMessages) await page.addInitScript({content: `window.__teagramInstallWorkerMessageAttribution = ${installWorkerMessageAttribution.toString()};`});
-  return page.addInitScript(({injectColdStall, observeAnimationFrames}: {injectColdStall: boolean, observeAnimationFrames: boolean}) => {
+  await page.addInitScript(({injectColdStall, observeAnimationFrames}: {injectColdStall: boolean, observeAnimationFrames: boolean}) => {
     // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
     const SharedWorkerConstructor = (window as any).SharedWorker;
     if(SharedWorkerConstructor) {
@@ -255,6 +271,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
     };
     perf.stopFrames = () => perf.frameActive = false;
   }, {injectColdStall, observeAnimationFrames});
+  return page.addInitScript({content: `(${observeFirstVisibleChatList.toString()})();`});
 }
 
 async function waitForBundleResources(page: Page) {
@@ -263,15 +280,24 @@ async function waitForBundleResources(page: Page) {
   await bundleRequests.waitForIdle(500, 10_000);
 }
 
+function resetRequestBreakdown(page: Page) {
+  requestBreakdownsByPage.get(page)?.clear();
+}
+
 async function beginScenario(page: Page, requests: {value: number}, traceEnabled = false, captureWorkerMessages = false) {
+  resetRequestBreakdown(page);
   await begin(page, requests, true, traceEnabled, captureWorkerMessages);
   if(!traceEnabled) return;
   await page.evaluate((preserveNames) => (window as any).rootScope.managers.apiManager.resetPerformancePhaseTrace(preserveNames), scenarioPreservedPerformancePhases);
   await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames());
 }
 
-async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false, includeLongTaskTrace = includePhases): Promise<Metric> {
+async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false, includeLongTaskTrace = includePhases, includeRequestBreakdown = false): Promise<Metric> {
   const requestCount = requests.value;
+  const requestBreakdownByPath = requestBreakdownsByPage.get(page);
+  const requestBreakdown = requestBreakdownByPath ? Object.fromEntries([...requestBreakdownByPath].sort(([left], [right]) => left.localeCompare(right))) : undefined;
+  requestBreakdownByPath?.clear();
+  if(includeRequestBreakdown) expect(Object.values(requestBreakdown || {}).reduce((total, count) => total + count, 0)).toBe(requestCount);
   await page.waitForTimeout(150);
   await waitForBundleResources(page);
   const captured = await page.evaluate(async({scroll, includePhases, includeLongTaskTrace}) => {
@@ -357,8 +383,14 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     ...(includeLongTaskTrace ? {longTaskTrace: summarizeLongTaskTrace(longTasks, longAnimationFrames, boundary.startedAtMs, boundary.ms)} : {}),
     ...(scroll && includeLongTaskTrace ? {droppedFrameScripts: summarizeFrameScripts(summarizeDroppedFrames(frameWindows, [], []), longAnimationFrames)} : {}),
     ...(includePhases ? {reconcileMirrorTasks: summarizeReconcileMirrorTasks(reconcileMirrorTasks, boundary.startedAtMs, boundary.ms)} : {}),
-    ms: boundary.ms,
+    ms: boundary.firstVisibleChatListMs ?? boundary.ms,
+    ...(boundary.firstVisibleChatListMs !== undefined ? {
+      firstVisibleChatListMs: boundary.firstVisibleChatListMs,
+      firstVisibleChatListSource: boundary.firstVisibleChatListSource,
+      liveBoundaryMs: boundary.ms
+    } : {}),
     requests: requestCount,
+    ...(includeRequestBreakdown ? {requestBreakdown} : {}),
     domNodes: boundary.domNodes,
     domClassCounts: boundary.domClassCounts,
     domNodeCounts: boundary.domNodeCounts,
@@ -475,7 +507,7 @@ async function addCachedDialogReconcileTarget(page: Page, targets: CachedDialogR
     const perf = (window as any).__teagramPerf;
     return {scenarioStartedAtEpochMs: performance.timeOrigin + perf.started, pageStartedAtEpochMs: performance.timeOrigin};
   });
-  const scenarioEndedAtEpochMs = scenarioStartedAtEpochMs + metric.ms!;
+  const scenarioEndedAtEpochMs = scenarioStartedAtEpochMs + cachedDialogReconcileWindowMs(metric)!;
   const phaseSnapshots = (await readCachedDialogReconcileSnapshot(page)).phases;
   targets.push({
     metric,
@@ -582,8 +614,8 @@ function evaluateWithControlSamples(key: string, baseSamples: Metric[], headSamp
   return evaluatePerformance({...report, variants: {...report.variants, base, head}});
 }
 
-async function snapshotMeasurementBoundary(page: Page): Promise<MeasurementBoundary> {
-  return page.evaluate(() => {
+async function snapshotMeasurementBoundary(page: Page, firstVisibleChatList?: FirstVisibleChatListBoundary): Promise<MeasurementBoundary> {
+  const boundary = await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
     const ms = performance.now() - perf.started;
     const elements = [...document.querySelectorAll('*')];
@@ -607,6 +639,13 @@ async function snapshotMeasurementBoundary(page: Page): Promise<MeasurementBound
       preInteractionMs: perf.preInteractionMs
     };
   });
+  return {
+    ...boundary,
+    ...(firstVisibleChatList ? {
+      firstVisibleChatListMs: firstVisibleChatList.ms,
+      firstVisibleChatListSource: firstVisibleChatList.source
+    } : {})
+  };
 }
 
 async function captureScenario(
@@ -737,8 +776,12 @@ async function signIn(page: Page, origin: string) {
   await expect(page.locator('#page-chats #chatlist-container .chatlist-chat').first()).toBeVisible({timeout: 120_000});
 }
 
-async function waitForChatList(page: Page) {
-  await expect(page.locator('#page-chats #chatlist-container .chatlist-chat').first()).toBeVisible({timeout: 120_000});
+async function waitForChatList(page: Page): Promise<FirstVisibleChatListBoundary> {
+  const firstVisible = await waitForFirstVisibleChatList(page);
+  const timeout = 120_000;
+  await expect(page.locator('.chat-page-snapshot')).toHaveCount(0, {timeout});
+  await expect(page.locator('#page-chats #folders-container .chatlist-chat').first()).toBeVisible({timeout});
+  return firstVisible;
 }
 
 async function resetToChatList(page: Page, origin: string) {
@@ -763,16 +806,19 @@ async function waitForHistorySettled(page: Page) {
   }, {timeout: 60_000, intervals: [100]}).toBe(true);
 }
 
-async function reloadChatList(page: Page, requests: {value: number}) {
+async function reloadChatList(page: Page, requests: {value: number}, variant: Variant) {
+  resetRequestBreakdown(page);
   await begin(page, requests);
   await page.reload({waitUntil: 'domcontentloaded'});
-  await waitForChatList(page);
-  return capture(page, requests, await snapshotMeasurementBoundary(page));
+  const firstVisibleChatList = await waitForChatList(page);
+  expect(firstVisibleChatList.source).toBe(variant === 'head' ? 'snapshot' : 'live');
+  return capture(page, requests, await snapshotMeasurementBoundary(page, firstVisibleChatList), false, false, false, true);
 }
 
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
+  resetRequestBreakdown(page);
   await begin(page, requests, true, traceRpc);
   await startMeasurementAtClick(row);
   await row.click();
@@ -979,16 +1025,14 @@ async function jumpToFixtureDate(
   return captureScenario(page, requests, traceEnabled, onMeasurementBoundary);
 }
 
-async function openContacts(page: Page, requests: {value: number}, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void) {
-  // appDialogsManager preloads the shared Lottie worker 200 ms after startup.
-  // The reload before this scenario can render the chat list before that timer
-  // fires, which would charge the startup worker request to opening Contacts.
-  await page.waitForTimeout(250);
-  await expect.poll(async() => page.evaluate(() => {
-    const worker = performance.getEntriesByType('resource').find((entry) => entry.name.includes('tlottie.worker')) as PerformanceResourceTiming | undefined;
-    return !!worker && worker.responseEnd > 0;
-  }), {timeout: 10_000}).toBe(true);
-  await waitForBundleResources(page);
+async function openContacts(page: Page, requests: {value: number}, variant: Variant, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void) {
+  if(variant === 'base') {
+    await expect.poll(async() => page.evaluate(() => {
+      const worker = performance.getEntriesByType('resource').find((entry) => entry.name.includes('tlottie.worker')) as PerformanceResourceTiming | undefined;
+      return !!worker && worker.responseEnd > 0;
+    }), {timeout: 10_000}).toBe(true);
+    await waitForBundleResources(page);
+  }
 
   const workerRequests: string[] = [];
   const pageErrors: string[] = [];
@@ -1000,9 +1044,14 @@ async function openContacts(page: Page, requests: {value: number}, traceEnabled 
   page.on('pageerror', recordPageError);
   try {
     await beginScenario(page, requests, traceEnabled);
-    await page.locator('.sidebar-tools-button').click();
-    await page.getByText('Contacts', {exact: true}).last().click();
+    const toolsButton = page.locator('.sidebar-tools-button');
+    await toolsButton.click();
+    await expect(toolsButton).toHaveClass(/menu-open/, {timeout: 10_000});
+    const toolsMenu = page.locator('.btn-menu.active');
+    await expect(toolsMenu).toBeVisible({timeout: 10_000});
+    await toolsMenu.getByText('Contacts', {exact: true}).click();
     try {
+      await expect(page.locator('#contacts-container')).toBeVisible({timeout: 10_000});
       await expect(page.locator('#contacts-container .chatlist-chat').first()).toBeVisible({timeout: 60_000});
     } catch(error) {
       const dom = await getContactsFailureDetails(page);
@@ -1015,7 +1064,7 @@ async function openContacts(page: Page, requests: {value: number}, traceEnabled 
     const boundary = await snapshotMeasurementBoundary(page);
     onMeasurementBoundary?.(boundary);
     const sample = await capture(page, requests, boundary, false, traceEnabled);
-    expect(workerRequests).toEqual([]);
+    if(variant === 'base') expect(workerRequests).toEqual([]);
     return sample;
   } finally {
     page.off('request', recordWorkerRequest);
@@ -1199,9 +1248,10 @@ async function runColdChatList(browser: Browser, run: VariantRun): Promise<Metri
     await installInstrumentation(page, requests, run.origin);
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
-    await waitForChatList(page);
-    const boundary = await snapshotMeasurementBoundary(page);
-    return await capture(page, requests, boundary);
+    const firstVisibleChatList = await waitForChatList(page);
+    expect(firstVisibleChatList.source).toBe(run.variant === 'head' ? 'snapshot' : 'live');
+    const boundary = await snapshotMeasurementBoundary(page, firstVisibleChatList);
+    return await capture(page, requests, boundary, false, false, false, true);
   } finally {
     await context.close();
   }
@@ -1220,8 +1270,9 @@ async function measureColdControlWindow(browser: Browser, run: VariantRun, injec
   try {
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
-    await waitForChatList(page);
-    const sample = await capture(page, requests, await snapshotMeasurementBoundary(page));
+    const firstVisibleChatList = await waitForChatList(page);
+    expect(firstVisibleChatList.source).toBe(run.variant === 'head' ? 'snapshot' : 'live');
+    const sample = await capture(page, requests, await snapshotMeasurementBoundary(page, firstVisibleChatList), false, false, false, true);
     return {sample, injectedTask: injectStall ? await injectedLongTask(page) : undefined};
   } finally {
     await context.close();
@@ -1286,10 +1337,15 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   try {
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
-    await waitForChatList(page);
-    const coldChatList = await test.step('cold chat list', async() => capture(page, requests, await snapshotMeasurementBoundary(page)));
+    const firstVisibleChatList = await waitForChatList(page);
+    expect(firstVisibleChatList.source).toBe(variant === 'head' ? 'snapshot' : 'live');
+    const coldChatList = await test.step('cold chat list', async() => capture(page, requests, await snapshotMeasurementBoundary(page, firstVisibleChatList), false, false, false, true));
+    expect(coldChatList.ms).toBe(coldChatList.firstVisibleChatListMs);
+    expect(coldChatList.liveBoundaryMs).toBeGreaterThanOrEqual(coldChatList.ms);
     measured.coldChatList.push(coldChatList);
-    const warmChatList = await test.step('warm chat list', () => reloadChatList(page, requests));
+    const warmChatList = await test.step('warm chat list', () => reloadChatList(page, requests, variant));
+    expect(warmChatList.ms).toBe(warmChatList.firstVisibleChatListMs);
+    expect(warmChatList.liveBoundaryMs).toBeGreaterThanOrEqual(warmChatList.ms);
     measured.warmChatList.push(warmChatList);
 
     const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture));
@@ -1321,7 +1377,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
 
     // Reset both variants to the same signed-in chat-list state before contacts measurements.
     await resetToChatList(page, origin);
-    measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests)));
+    measured.contactsList.push(await test.step('open contacts', () => openContacts(page, requests, variant)));
     measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
     measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
     measured.sendMessage.push(await test.step('send a message', () => sendMessage(page, requests, fixture)));
@@ -1475,9 +1531,10 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
       const reconcileTargets: CachedDialogReconcileTarget[] = [];
       const coldProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
       await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
-      await waitForChatList(page);
-      const coldBoundary = await snapshotMeasurementBoundary(page);
-      const coldCapture = await capture(page, requests, coldBoundary, false, true);
+      const coldFirstVisibleChatList = await waitForChatList(page);
+      expect(coldFirstVisibleChatList.source).toBe(run.variant === 'head' ? 'snapshot' : 'live');
+      const coldBoundary = await snapshotMeasurementBoundary(page, coldFirstVisibleChatList);
+      const coldCapture = await capture(page, requests, coldBoundary, false, true, true, true);
       const coldSample = {...coldCapture, ...(coldProfile ? {cpu: await finishCpuProfile(coldProfile)} : {})};
       traceSamples.coldChatList.push(coldSample);
       await addCachedDialogReconcileTarget(page, reconcileTargets, coldSample, 'coldChatList');
@@ -1486,9 +1543,10 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         await beginScenario(page, requests, true);
         const warmProfile = repeat === 0 ? await startCpuProfile(page) : undefined;
         await page.reload({waitUntil: 'domcontentloaded'});
-        await waitForChatList(page);
-        const warmBoundary = await snapshotMeasurementBoundary(page);
-        const warmCapture = await capture(page, requests, warmBoundary, false, true);
+        const warmFirstVisibleChatList = await waitForChatList(page);
+        expect(warmFirstVisibleChatList.source).toBe(run.variant === 'head' ? 'snapshot' : 'live');
+        const warmBoundary = await snapshotMeasurementBoundary(page, warmFirstVisibleChatList);
+        const warmCapture = await capture(page, requests, warmBoundary, false, true, true, true);
         const warmSample = {...warmCapture, ...(warmProfile ? {cpu: await finishCpuProfile(warmProfile)} : {})};
         traceSamples.warmChatList.push(warmSample);
         await addCachedDialogReconcileTarget(page, reconcileTargets, warmSample, 'warmChatList');
@@ -1533,6 +1591,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         const contacts = await test.step(`profile 100x contacts list (repeat ${repeat + 1})`, () => openContacts(
           page,
           requests,
+          run.variant,
           true,
           (boundary) => contactsBoundary = boundary
         ));

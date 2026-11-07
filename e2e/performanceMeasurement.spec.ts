@@ -1,5 +1,58 @@
 import {expect, test} from '@playwright/test';
-import {beginMeasurement, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, startMeasurementAtClick, waitForFirstVisibleBubble} from './performanceMeasurement';
+import {beginMeasurement, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList} from './performanceMeasurement';
+import {createServer, type ServerResponse} from 'node:http';
+import * as bundleMeasurement from './performanceBundleBytes';
+
+test('forgets an abandoned shared-worker request after document reload', async({page}) => {
+  const held: ServerResponse[] = [];
+  let releaseResponses = false;
+  const replyToWorker = (response: ServerResponse) => {
+    if(!response.destroyed) response.end('onconnect = (event) => event.ports[0].postMessage("ready");');
+  };
+  const server = createServer((request, response) => {
+    if(request.url === '/worker.js') {
+      response.setHeader('Content-Type', 'text/javascript');
+      if(releaseResponses) replyToWorker(response);
+      else held.push(response);
+    } else {
+      response.setHeader('Content-Type', 'text/html');
+      response.end('<script>const worker = new SharedWorker("/worker.js"); worker.port.onmessage = () => window.workerReady(); fetch("/worker.js").then(r => r.text());</script>');
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    if(!address || typeof address === 'string') throw new Error('Server did not bind to a port');
+    const origin = `http://127.0.0.1:${address.port}`;
+    const tracker = bundleMeasurement.createBundleRequestTracker(origin);
+    let workerStarts = 0;
+    let readyCount = 0;
+    bundleMeasurement.trackBundleDocumentNavigation(page, tracker);
+    page.on('request', (request) => {
+      if(request.url().endsWith('/worker.js') && request.resourceType() === 'script') ++workerStarts;
+      tracker.requestStarted(request);
+    });
+    page.on('requestfinished', (request) => tracker.requestFinished(request));
+    page.on('requestfailed', (request) => tracker.requestFailed(request));
+    await page.exposeFunction('workerReady', () => { ++readyCount; tracker.workerReady(`${origin}/worker.js`); });
+    await page.goto(origin, {waitUntil: 'domcontentloaded'});
+    await expect.poll(() => workerStarts).toBe(1);
+    expect(readyCount).toBe(0);
+    await page.evaluate(() => { location.hash = 'same-document'; });
+    await expect(tracker.waitForIdle(10, 100)).rejects.toThrow('did not settle');
+    await page.reload({waitUntil: 'domcontentloaded'});
+    await expect.poll(() => workerStarts).toBe(2);
+    releaseResponses = true;
+    held.forEach(replyToWorker);
+    await tracker.waitForIdle(25, 3_000);
+    expect(workerStarts).toBe(2);
+    expect(readyCount).toBe(1);
+  } finally {
+    await page.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
 
 test('retains the incomplete scroll error when trace cleanup fails', async() => {
   await expect(finishIncompleteScroll('scroll reached message 30, expected 20', true, async() => {
@@ -145,6 +198,43 @@ test('records a bubble that becomes visible after a stylesheet visibility change
 
   const boundary = await waitForFirstVisibleBubble(page);
   expect(boundary.domNodes).toBeGreaterThan(0);
+});
+
+test('records the first visible chat-list row from the startup observer', async({page}) => {
+  expect(typeof observeFirstVisibleChatList).toBe('function');
+  await page.setContent('<div id="page-chats"><div id="chatlist-container"></div><div id="folders-container"></div></div>');
+  await page.evaluate(() => {
+    (window as any).__teagramPerf = {started: performance.now()};
+  });
+  await page.evaluate(observeFirstVisibleChatList);
+  await page.waitForTimeout(30);
+  await page.evaluate(() => {
+    const snapshot = document.createElement('div');
+    snapshot.className = 'chat-page-snapshot';
+    const row = document.createElement('a');
+    row.className = 'chatlist-chat';
+    row.style.cssText = 'display:block;width:20px;height:20px';
+    snapshot.append(row);
+    document.getElementById('chatlist-container')?.append(snapshot);
+  });
+  const snapshotPaint = await waitForFirstVisibleChatList(page);
+  expect(snapshotPaint.source).toBe('snapshot');
+  expect(snapshotPaint.ms).toBeGreaterThanOrEqual(0);
+  expect(await page.locator('.chat-page-snapshot').count()).toBe(1);
+
+  await page.evaluate(() => {
+    document.querySelector('.chat-page-snapshot')?.remove();
+    const liveRow = document.createElement('a');
+    liveRow.className = 'chatlist-chat';
+    liveRow.style.cssText = 'display:block;width:20px;height:20px';
+    document.getElementById('folders-container')?.append(liveRow);
+    (window as any).__teagramPerf.started = performance.now();
+    (window as any).__teagramPerf.firstVisibleChatListBoundary = undefined;
+  });
+  await page.evaluate(observeFirstVisibleChatList);
+  const livePaint = await waitForFirstVisibleChatList(page);
+  expect(livePaint.source).toBe('live');
+  expect(livePaint.ms).toBeGreaterThanOrEqual(0);
 });
 
 test('arms worker recording and starts the window before queued worker messages run', async({page}) => {

@@ -3,8 +3,6 @@ import {JSX, Ref, Show, Suspense, lazy} from 'solid-js';
 import classNames from '@helpers/string/classNames';
 import type {LottieAssetName} from '@lib/lottie/lottieLoader';
 
-import styles from '@components/mediaHeader.module.scss';
-
 // Custom elements do not need to initialize the worker-backed Lottie manager.
 const LottieSticker = lazy(() => import('@components/mediaHeaderLottieSticker'));
 
@@ -32,7 +30,7 @@ function MediaHeader(props: {
   marginBottom?: boolean
 }): JSX.Element {
   return (
-    <div class={classNames(styles.container, props.marginBottom && styles.marginBottom, props.class)}>
+    <div class={classNames(props.marginBottom && 'media-header__margin-bottom', props.class)}>
       {props.children}
     </div>
   );
@@ -67,7 +65,7 @@ MediaHeader.Sticker = function MediaHeaderSticker(props: MediaHeaderStickerProps
 
   return (
     <div
-      class={classNames(styles.sticker, props.class)}
+      class={classNames('media-header__sticker', props.class)}
       style={{'--sticker-size': size() + 'px'}}
       ref={props.ref}
     >
@@ -77,7 +75,7 @@ MediaHeader.Sticker = function MediaHeaderSticker(props: MediaHeaderStickerProps
       >
         <Suspense>
           <LottieSticker
-            class={styles.lottie}
+            class="media-header__lottie"
             size={size()}
             restartOnClick={props.restartOnClick ?? true}
             name={props.name!}
@@ -101,7 +99,7 @@ export type MediaHeaderTitleProps = {
 
 MediaHeader.Title = function MediaHeaderTitle(props: MediaHeaderTitleProps): JSX.Element {
   return (
-    <div id={props.id} class={classNames(styles.title, 'text-center text-overflow-wrap', props.class)}>
+    <div id={props.id} class={classNames('media-header__title', 'text-center text-overflow-wrap', props.class)}>
       {props.children}
     </div>
   );
@@ -124,8 +122,8 @@ MediaHeader.Subtitle = function MediaHeaderSubtitle(props: MediaHeaderSubtitlePr
     <div
       id={props.id}
       class={classNames(
-        styles.subtitle,
-        props.secondary && styles.secondary,
+        'media-header__subtitle',
+        props.secondary && 'secondary',
         'text-center',
         props.class
       )}

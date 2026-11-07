@@ -244,6 +244,11 @@ export function collectCachedDialogReconciles(
   return {walks};
 }
 
+// The reconcile walk starts after the live list renders, so a snapshot paint must not close its window.
+export function cachedDialogReconcileWindowMs({ms, liveBoundaryMs}: {ms?: number, liveBoundaryMs?: number}) {
+  return liveBoundaryMs ?? ms;
+}
+
 export function collectCachedDialogReconcileSummaries(
   windows: CachedDialogReconcileWindow[],
   phases: CachedDialogReconcilePhase[],

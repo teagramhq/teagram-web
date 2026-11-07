@@ -91,7 +91,7 @@ vi.mock('@components/putPreloader', () => ({
 vi.mock('@components/mediaHeader', () => {
   const Header = (props: any) => <header>{props.children}</header>;
   Header.Sticker = (props: any) => <div ref={props.ref}>{props.element}</div>;
-  Header.Title = (props: any) => <h1 class="media-header-title">{props.children}</h1>;
+  Header.Title = (props: any) => <h1 class="media-header__title">{props.children}</h1>;
   Header.Subtitle = (props: any) => <p>{props.children}</p>;
   return {default: Header};
 });

@@ -33,6 +33,8 @@ import '@lib/polyfill';
 import '@lib/debug/mountLogExport'; // main-thread-only: wires window.downloadLogs / collectLogs
 import '@lib/debug/memoryReport'; // main-thread-only: wires window.memoryReport
 import apiManagerProxy from '@lib/apiManagerProxy';
+import {paintChatPageSnapshot, replaceChatPageSnapshot, watchChatPageSnapshot} from '@lib/chatPageSnapshotView';
+import type {ChatPageKey} from '@lib/chatPageSnapshot';
 import {performancePhaseTrace} from '@lib/appManagers/performanceTrace';
 import getProxiedManagers from '@lib/getProxiedManagers';
 import themeController from '@helpers/themeController';
@@ -76,9 +78,10 @@ import useHasFoldersSidebar, {useIsSidebarCollapsed} from '@stores/foldersSideba
 import appNavigationController from '@components/appNavigationController';
 import {preventCrossTabDynamicImportDeadlock} from '@helpers/preventDeadlock';
 import appChatBackground from '@components/chat/bubbles/chatBackground';
-import {getActiveServerHost, isAutoGuestEnabled} from '@config/serverContext';
+import {getActiveDemoWipeGeneration, getActiveServerHost, getRuntimeServerId, isAutoGuestEnabled} from '@config/serverContext';
 import {getServerSelectionAction} from '@config/serverSelection';
-import {createCurrentGuestAccountLifecycle, type GuestAccountManagers} from '@lib/guestAccountLifecycle';
+import {hasCurrentGuestWipeGenerationChanged, isCurrentGuestSnapshotIdentity} from '@lib/currentGuestAccountSnapshotIdentity';
+import {paintChatPageSnapshotSafely, paintGuestChatPageSnapshotIfCurrent} from '@lib/chatPageSnapshotStartup';
 import {markAutoGuestAttempted, markAutoGuestResetDetected} from '@lib/autoGuest';
 // import commonStateStorage from '@lib/commonStateStorage';
 // import { STATE_INIT } from '@config/state';
@@ -391,6 +394,7 @@ function setRootClasses() {
 }
 
 function onInstanceDeactivated(reason: InstanceDeactivateReason) {
+  replaceChatPageSnapshot();
   const onVersionClick = () => {
     appNavigationController.reload();
   };
@@ -582,6 +586,35 @@ const onDocumentReady = async() => {
       apiManagerProxy.loadAllStates()
   );
   const stateResult = allStates[getCurrentAccount()];
+  const autoGuestEnabled = isAutoGuestEnabled();
+  if(stateResult.state.authState._ === 'authStateSignedIn') {
+    watchChatPageSnapshot(getCurrentAccount(), autoGuestEnabled);
+    if(autoGuestEnabled) {
+      const account = getCurrentAccount();
+      const server = getActiveServerHost();
+      const serverId = getRuntimeServerId();
+      const generation = getActiveDemoWipeGeneration();
+      void paintGuestChatPageSnapshotIfCurrent({
+        accountNumber: account,
+        serverHost: server,
+        serverId,
+        wipeGeneration: generation,
+        isSnapshotIdentityCurrent: isCurrentGuestSnapshotIdentity,
+        getChatPageKey: async(accountNumber): Promise<ChatPageKey | undefined> =>
+          stateResult.resetStorages.size || stateResult.snapshotOwner?.accountNumber !== accountNumber ?
+            undefined : stateResult.snapshotOwner,
+        getCurrentAccountNumber: getCurrentAccount,
+        getActiveServerHost,
+        getRuntimeServerId,
+        getActiveDemoWipeGeneration,
+        readSnapshot: (key) => apiManagerProxy.readChatPageSnapshot(key),
+        paint: paintChatPageSnapshot,
+        clear: replaceChatPageSnapshot
+      });
+    } else {
+      paintChatPageSnapshotSafely(() => apiManagerProxy.readChatPageSnapshot(), paintChatPageSnapshot, replaceChatPageSnapshot);
+    }
+  }
 
   // console.log(stateResult);
   // await pause(10000000);
@@ -683,9 +716,9 @@ const onDocumentReady = async() => {
   setDocumentLangPackProperties(langPack);
 
   let authState = stateResult.state.authState;
-  if(isAutoGuestEnabled()) {
+  if(autoGuestEnabled) {
     try {
-      if(await createCurrentGuestAccountLifecycle(rootScope.managers as unknown as GuestAccountManagers).hasWipeGenerationChanged()) {
+      if(await hasCurrentGuestWipeGenerationChanged()) {
         markAutoGuestResetDetected();
         if(authState._ === 'authStateSignedIn') {
           rootScope.managers.appStateManager.pushToState('authState', authState = {_: 'authStateSignIn'});
@@ -699,6 +732,7 @@ const onDocumentReady = async() => {
       }
     }
   }
+  if(authState._ !== 'authStateSignedIn') replaceChatPageSnapshot();
 
   const hash = location.hash;
   const splitted = hash.split('?');

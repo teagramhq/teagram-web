@@ -52,6 +52,50 @@ export type FirstBubbleBoundary = {
   preInteractionMs?: number
 };
 
+export type FirstVisibleChatListBoundary = {
+  ms: number,
+  source: 'snapshot' | 'live'
+};
+
+export function observeFirstVisibleChatList() {
+  const perf = (window as any).__teagramPerf;
+  if(!Number.isFinite(perf?.started)) return;
+
+  const isVisible = (row: HTMLElement | null) => {
+    if(!row) return false;
+    let current: HTMLElement | null = row;
+    while(current) {
+      const style = getComputedStyle(current);
+      if(style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+      current = current.parentElement;
+    }
+    const rect = row.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+
+  const recordFirstVisibleRow = () => {
+    if(perf.firstVisibleChatListBoundary) return;
+    const snapshotRow = document.querySelector<HTMLElement>('.chat-page-snapshot .chatlist-chat');
+    const liveRow = document.querySelector<HTMLElement>('#page-chats #folders-container .chatlist-chat');
+    const source = isVisible(snapshotRow) ? 'snapshot' : isVisible(liveRow) ? 'live' : undefined;
+    if(source) {
+      perf.firstVisibleChatListBoundary = {ms: performance.now() - perf.started, source};
+      return;
+    }
+    requestAnimationFrame(recordFirstVisibleRow);
+  };
+
+  requestAnimationFrame(recordFirstVisibleRow);
+}
+
+export async function waitForFirstVisibleChatList(page: Page): Promise<FirstVisibleChatListBoundary> {
+  await page.waitForFunction(() => {
+    const perf = (window as any).__teagramPerf;
+    return !!perf?.firstVisibleChatListBoundary;
+  }, undefined, {polling: 'raf', timeout: 120_000});
+  return page.evaluate(() => (window as any).__teagramPerf.firstVisibleChatListBoundary as FirstVisibleChatListBoundary);
+}
+
 export async function beginMeasurement(page: Page, requests: {value: number}, recordRpcSpans = true, traceEnabled = false, captureWorkerMessages = false) {
   requests.value = 0;
   await page.evaluate(async({recordSpans, traceEnabled, captureWorkerMessages}) => {

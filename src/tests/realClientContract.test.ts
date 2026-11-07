@@ -29,7 +29,7 @@ import * as realClientContract from '../../scripts/real-client/contract.mjs';
 const require = createRequire(import.meta.url);
 const {chromium} = require('@playwright/test');
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
-const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, getClientErrorDiagnostics, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, emitReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword, waitForUnreadCount} = realClientBrowser;
+const {captureCenterColumnState, captureChannelMembershipState, captureGroupCreatedState, captureGroupNameFormState, countClientErrors, getClientErrorDiagnostics, createNetworkObserver, createWorkerDiscovery, emitAuthProgressReport, emitReport, findChannelDialogRow, getSingleExactMessageFailure, getSingleExactMessageTextFailure, main: runRealClient, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openComposer, prepareUsernameEntry, resolveActiveGroupChat, sendGroupText, submitUsernameOnceAndWaitForPassword, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForPasswordField, submitPassword, waitForUnreadCount, waitForSingleSentMessage} = realClientBrowser;
 const observation = require('../../scripts/real-client/observation.cjs');
 
 const APP_ORIGIN = 'https://teagramd.test';
@@ -6046,6 +6046,79 @@ describe('real client centre-column failure state', () => {
       expect(await getSingleExactMessageTextFailure(await receivedMessages(page, ['browser-ci-hello!']), 'browser-ci-hello')).toBe('content');
       expect(await getSingleExactMessageTextFailure(await receivedMessages(page, [' browser-ci-hello']), 'browser-ci-hello')).toBe('content');
       expect(await getSingleExactMessageTextFailure(await receivedMessages(page, ['browser-ci-hello', 'browser-ci-hello']), 'browser-ci-hello')).toBe('count');
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('waits for one sent bubble after the pending echo is replaced', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="bubble is-sending"><div class="message">browser-ci-hello</div></div>
+        <div class="bubble is-sent"><div class="message">browser-ci-hello</div></div>
+      </div><script>
+        setTimeout(() => {
+          document.querySelector('.bubble.is-sending')?.remove();
+          const bubble = document.querySelector('.bubble.is-sent');
+          bubble?.classList.remove('is-sent');
+          bubble?.classList.add('is-sending');
+        }, 20);
+        setTimeout(() => {
+          const bubble = document.querySelector('.bubble');
+          bubble?.classList.remove('is-sending');
+          bubble?.classList.add('is-sent');
+        }, 40);
+      </script>`);
+      const messages = page.locator('#column-center .bubble .message').filter({hasText: 'browser-ci-hello'});
+
+      await waitForSingleSentMessage(messages, 'browser-ci-hello', 1_000);
+
+      expect(await messages.count()).toBe(1);
+      expect(await messages.first().evaluate((element: HTMLElement) => element.closest('.bubble')?.classList.contains('is-sent'))).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('rejects if a second sent bubble appears during the stability window', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="bubble is-sent"><div class="message">browser-ci-hello</div></div>
+      </div><script>
+        setTimeout(() => {
+          const duplicate = document.createElement('div');
+          duplicate.className = 'bubble is-sent';
+          duplicate.innerHTML = '<div class="message">browser-ci-hello</div>';
+          document.querySelector('#column-center')?.append(duplicate);
+        }, 100);
+      </script>`);
+      const messages = page.locator('#column-center .bubble .message').filter({hasText: 'browser-ci-hello'});
+
+      await expect(waitForSingleSentMessage(messages, 'browser-ci-hello', 1_000)).rejects.toThrow('message count or sent state changed during stability window');
+      expect(await messages.count()).toBe(2);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('rejects if the sent state changes during the stability window', async() => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<div id="column-center">
+        <div class="bubble is-sent"><div class="message">browser-ci-hello</div></div>
+      </div><script>
+        setTimeout(() => {
+          const bubble = document.querySelector('.bubble');
+          bubble?.classList.remove('is-sent');
+          bubble?.classList.add('is-sending');
+        }, 100);
+      </script>`);
+      const messages = page.locator('#column-center .bubble .message').filter({hasText: 'browser-ci-hello'});
+
+      await expect(waitForSingleSentMessage(messages, 'browser-ci-hello', 1_000)).rejects.toThrow('message count or sent state changed during stability window');
+      expect(await messages.first().evaluate((element: HTMLElement) => element.closest('.bubble')?.classList.contains('is-sending'))).toBe(true);
     } finally {
       await page.close();
     }

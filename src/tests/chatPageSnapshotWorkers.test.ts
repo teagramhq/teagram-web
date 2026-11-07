@@ -19,13 +19,13 @@ it('writes the first page after this worker completes its own storage reset', as
   const page = {dialogs: [{_: 'dialog', peerId: 42, top_message: 3, pFlags: {pinned: true}, topMessage: {_: 'message', message: 'Hello', date: 10}}]};
   const storage = Object.assign(Object.create(DialogsStorage.prototype), {
     getAccountNumber: () => 1,
-    appPeersManager: {getPeer: () => ({_: 'user', first_name: 'Alice'}), getPeerPhoto: (): undefined => undefined},
+    appPeersManager: {getPeer: () => ({_: 'user', id: 42, first_name: 'Alice', last_name: 'Brown', color: {_: 'peerColor', color: 6}}), getPeerPhoto: (): undefined => undefined},
     appMessagesManager: {getDialogUnreadCount: () => 2},
     appNotificationsManager: {isPeerLocalMuted: () => false}
   });
   await storage.refreshFirstChatPage(page, key, await manager.snapshotEpoch, key);
   await snapshots.loadChatPageSnapshot(key);
-  expect(snapshots.readChatPageSnapshot(key)).toMatchObject([{peerId: 42, preview: 'Hello'}]);
+  expect(snapshots.readChatPageSnapshot(key)).toMatchObject([{peerId: 42, title: 'Alice Brown', preview: 'Hello', avatarColor: 'pink'}]);
   vi.restoreAllMocks();
 });
 

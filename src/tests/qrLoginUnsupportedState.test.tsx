@@ -137,9 +137,6 @@ vi.mock('@/pages/AuthCard', () => ({
 vi.mock('@/pages/authFlow.module.scss', () => ({
   default: {pageSignQR: 'page-sign-qr', qrDescription: 'qr-description', qrDescriptionItem: 'qr-description-item', qrDescriptionMarker: 'qr-description-marker', qrContainer: 'qr-container', qrCanvas: 'qr-canvas'}
 }));
-vi.mock('@components/mediaHeader.module.scss', () => ({
-  default: {container: 'media-header-container', marginBottom: 'media-header-margin-bottom', sticker: 'media-header-sticker', lottie: 'media-header-lottie', title: 'media-header-title', subtitle: 'media-header-subtitle', secondary: 'media-header-secondary'}
-}));
 vi.mock('@helpers/string/classNames', () => ({
   default: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' ')
 }));
@@ -235,7 +232,7 @@ describe('QR sign-in failure states', () => {
     mocks.invokeApi.mockRejectedValueOnce({type: 'INPUT_METHOD_INVALID', secret: 'export-secret'});
     dispose = await mountCard();
 
-    await waitForText('.media-header-title', 'QR code sign-in unavailable');
+    await waitForText('.media-header__title', 'QR code sign-in unavailable');
     expect(document.body.textContent).toContain('This server doesn\'t support QR code sign-in.');
     expect(document.querySelector('[aria-live="polite"][aria-atomic="true"]')?.textContent)
     .toBe('This server doesn\'t support QR code sign-in.');
@@ -270,7 +267,7 @@ describe('QR sign-in failure states', () => {
     .mockReturnValueOnce(nextAttempt.promise);
     dispose = await mountCard();
 
-    await waitForText('.media-header-title', 'Connection problem');
+    await waitForText('.media-header__title', 'Connection problem');
     expect(document.body.textContent).toContain('The QR code couldn\'t be loaded. Check your connection and try again.');
     expect(document.querySelector('.preloader')).toBeNull();
     expect(document.querySelector('canvas')).toBeNull();
@@ -309,7 +306,7 @@ describe('QR sign-in failure states', () => {
     'classifies malformed export rejection %j without exposing it', async(error) => {
       mocks.invokeApi.mockRejectedValueOnce(error);
       dispose = await mountCard();
-      await waitForText('.media-header-title', 'Connection problem');
+      await waitForText('.media-header__title', 'Connection problem');
 
       expect(document.querySelector('.preloader')).toBeNull();
       expect(document.querySelector('canvas')).toBeNull();
@@ -327,7 +324,7 @@ describe('QR sign-in failure states', () => {
     .mockRejectedValueOnce({type: 'NETWORK_BAD_RESPONSE', code: 406});
     dispose = await mountCard();
 
-    await waitForText('.media-header-title', 'Connection problem');
+      await waitForText('.media-header__title', 'Connection problem');
     expect(mocks.setBaseDcId).toHaveBeenCalledOnce();
     expect(mocks.setBaseDcId).toHaveBeenCalledWith(2);
     expect(mocks.invokeApi.mock.calls.map(([method]) => method)).toEqual([
@@ -349,7 +346,7 @@ describe('QR sign-in failure states', () => {
   it('does not retry after user_auth invalidates the card', async() => {
     mocks.invokeApi.mockRejectedValueOnce({type: 'NETWORK_BAD_RESPONSE'});
     dispose = await mountCard();
-    await waitForText('.media-header-title', 'Connection problem');
+      await waitForText('.media-header__title', 'Connection problem');
     const retry = getButton('Try again')!;
 
     mocks.dispatchEvent('user_auth');
@@ -372,7 +369,7 @@ describe('QR sign-in failure states', () => {
     await vi.waitFor(() => expect(mocks.invokeApi).toHaveBeenCalledOnce());
     themeButton.focus();
     pendingExport.reject({type: 'NETWORK_BAD_RESPONSE'});
-    await waitForText('.media-header-title', 'Connection problem');
+      await waitForText('.media-header__title', 'Connection problem');
 
     expect(document.activeElement).toBe(themeButton);
     expect(getButton('Try again')).toBeDefined();
@@ -458,7 +455,7 @@ describe('QR sign-in failure states', () => {
     mocks.dispatchEvent('theme_changed');
     await vi.waitFor(() => expect(mocks.paintQrCode).toHaveBeenCalledTimes(2));
     polling.resolve();
-    await waitForText('.media-header-title', 'Connection problem');
+    await waitForText('.media-header__title', 'Connection problem');
     repaint.resolve({canvas: document.createElement('canvas')});
     await Promise.resolve();
     await Promise.resolve();
@@ -509,7 +506,7 @@ describe('QR sign-in failure states', () => {
     mocks.paintQrCode.mockRejectedValueOnce({type: 'INPUT_METHOD_INVALID', secret: 'paint-secret'});
     dispose = await mountCard();
 
-    await waitForText('.media-header-title', 'Connection problem');
+    await waitForText('.media-header__title', 'Connection problem');
     expect(document.querySelector('.preloader')).toBeNull();
     expect(document.querySelector('canvas')).toBeNull();
     expect(document.body.innerHTML).not.toContain('paint-secret');
@@ -533,7 +530,7 @@ describe('QR sign-in failure states', () => {
     mocks.paintQrCode.mockImplementation(paintQrCode);
     dispose = await mountCard();
 
-    await waitForText('.media-header-title', 'Connection problem');
+    await waitForText('.media-header__title', 'Connection problem');
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(document.querySelector('canvas')).toBeNull();
     expect(document.body.innerHTML).not.toContain('private logo fetch detail');
@@ -545,8 +542,8 @@ describe('QR sign-in failure states', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(successfulResponse.text).toHaveBeenCalledOnce();
-    expect(document.querySelector('.media-header-title')?.textContent).toBe('Log in by QR Code');
-    expect(document.querySelector('.media-header-subtitle')?.textContent).toBe('Scan with Telegram app on your phone');
+    expect(document.querySelector('.media-header__title')?.textContent).toBe('Log in by QR Code');
+    expect(document.querySelector('.media-header__subtitle')?.textContent).toBe('Scan with Telegram app on your phone');
     expect(document.querySelector<HTMLElement>('.preloader')?.style.animation).toBe('hide-icon .4s forwards');
     expect(mocks.invokeApi).toHaveBeenCalledTimes(2);
     expect(consoleSpies.flatMap((spy) => spy.mock.calls.flat()))
@@ -598,7 +595,7 @@ describe('QR sign-in failure states', () => {
     .mockRejectedValueOnce({type: 'NETWORK_BAD_RESPONSE'});
     dispose = await mountCard();
 
-    await waitForText('.media-header-title', 'Connection problem');
+    await waitForText('.media-header__title', 'Connection problem');
     expect(mocks.invokeApi).toHaveBeenCalledTimes(2);
     expect(consoleSpies.flatMap((spy) => spy.mock.calls.flat()))
     .toEqual(['SignQRCard: AUTH_TOKEN_EXPIRED', 'SignQRCard: retryable']);

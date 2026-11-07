@@ -1347,23 +1347,23 @@ class ApiManagerProxy extends MTProtoMessagePort {
   }
 
   public async loadAllStates() {
+    const accountNumber = getCurrentAccount();
+    const snapshotLoadPromise = DeferredIsUsingPasscode.isUsingPasscode()
+      .then((enabled) => !enabled && recoverPasscodeSnapshots())
+      .then(() => getChatPageKey(accountNumber))
+      .then((key) => AccountController.withAccountWriteLock(accountNumber, () => loadChatPageSnapshot(key)))
+      .catch((error) => {
+        forgetLoadedChatPageSnapshot();
+        this.log.error('failed to load chat page snapshot', error);
+      });
     const loadedStates = await loadStateForAllAccountsOnce();
-
     this.dispatchUserAuth();
 
-    const stateForThisAccount = loadedStates[getCurrentAccount()];
-    try {
-      if(!stateForThisAccount.common.settings?.passcode?.enabled) await recoverPasscodeSnapshots();
-      const accountNumber = getCurrentAccount();
-      await AccountController.withAccountWriteLock(accountNumber, async() => {
-        this.chatPageKey = await getChatPageKey(accountNumber);
-        await loadChatPageSnapshot(stateForThisAccount.resetStorages.size ? undefined : this.chatPageKey);
-      });
-    } catch(error) {
-      this.chatPageKey = undefined;
-      forgetLoadedChatPageSnapshot();
-      this.log.error('failed to load chat page snapshot', error);
-    }
+    await snapshotLoadPromise;
+
+    const stateForThisAccount = loadedStates[accountNumber];
+    this.chatPageKey = stateForThisAccount.resetStorages.size ? undefined : stateForThisAccount.snapshotOwner;
+    if(stateForThisAccount.resetStorages.size) forgetLoadedChatPageSnapshot();
     this.newVersion = stateForThisAccount.newVersion;
     this.oldVersion = stateForThisAccount.oldVersion;
     this.mirrors['state'] = stateForThisAccount.state;
