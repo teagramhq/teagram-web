@@ -1177,44 +1177,33 @@ class ApiManagerProxy extends MTProtoMessagePort {
     // Keep MTProto/crypto on the shared worker, but hand the lottie pool per-tab dedicated Workers.
     const constructor = IS_SHARED_WORKER_SUPPORTED && !(IS_SAFARI && type === 'lottie') ? SharedWorker : Worker;
     const createWorker = (url: string) => new constructor(url, {type: 'module'});
-    const attachWorkerToPort = (worker: SharedWorker | Worker) => this.attachWorkerToPort(
-      worker,
-      superMessagePort,
-      type
-    );
-
     const workers: Array<SharedWorker | Worker> = [];
-    const onPort = (_payload: void, _source: MessageEventSource, event: MessageEvent) => this.invokeVoid(
-      'threadedPort',
-      type,
-      undefined,
-      [event.ports[0]]
-    );
-    superMessagePort.addEventListener('port', onPort);
 
     try {
-      const firstWorker = createWorker(originalUrl);
-      workers.push(firstWorker);
-      attachWorkerToPort(firstWorker);
-
-      for(const url of urls.slice(1)) {
+      for(const url of [originalUrl, ...urls.slice(1)]) {
         const worker = createWorker(url);
         workers.push(worker);
-        attachWorkerToPort(worker);
+        this.attachWorkerToPort(worker, superMessagePort, type);
       }
 
       if(DEBUG) {
         console.log('Workers URLs', type, urls);
       }
     } catch(error) {
-      superMessagePort.removeEventListener('port', onPort);
       workers.forEach((worker) => {
-        const port = (worker as SharedWorker).port || worker as any;
-        superMessagePort.detachPort(port);
+        superMessagePort.detachPort((worker as SharedWorker).port || worker as any);
         (worker as Worker).terminate?.();
       });
       throw error;
     }
+
+    // Worker message events run after this stack, so the complete pool is attached before listening.
+    superMessagePort.addEventListener('port', (_payload, _source, event) => this.invokeVoid(
+      'threadedPort',
+      type,
+      undefined,
+      [event.ports[0]]
+    ));
   }
 
   private async registerCryptoWorker() {
