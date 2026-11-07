@@ -790,6 +790,8 @@ export default class LottiePlayer extends EventListenerBase<LottiePlayerEvents> 
 
     this.destroyed = true;
     this.pause();
+    clearTimeout(this.rafId);
+    this.rafId = undefined;
     this.sendQuery('destroy');
     if(this.offscreenViaCompositor) {
       compositorMessagePort.invokeCompositorVoid('detachSticker', {reqId: this.reqId});
