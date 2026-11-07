@@ -1168,31 +1168,18 @@ class ApiManagerProxy extends MTProtoMessagePort {
     }
 
     const originalUrl = (initialWorker as any).url;
+    const blob = await get(originalUrl);
+    const urls = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
+
     // Safari silently wedges a {type:'module'} SharedWorker used for lottie sticker decoding:
     // frames never arrive, no error is thrown, and every sticker canvas stays blank (never appended).
     // Keep MTProto/crypto on the shared worker, but hand the lottie pool per-tab dedicated Workers.
     const constructor = IS_SHARED_WORKER_SUPPORTED && !(IS_SAFARI && type === 'lottie') ? SharedWorker : Worker;
     const createWorker = (url: string) => new constructor(url, {type: 'module'});
     const workers: Array<SharedWorker | Worker> = [];
-    const pendingPorts: MessagePort[] = [];
-    let registrationSucceeded = false;
-    const forwardPort = (port: MessagePort) => this.invokeVoid('threadedPort', type, undefined, [port]);
-    const onPort = (_payload: void, _source: MessageEventSource, event: MessageEvent) => {
-      const port = event.ports[0];
-      if(registrationSucceeded) forwardPort(port);
-      else pendingPorts.push(port);
-    };
 
-    // Buffer ports until URL and worker registration succeeds; failures must not consume remote pool slots.
-    superMessagePort.addEventListener('port', onPort);
     try {
-      const firstWorker = createWorker(originalUrl);
-      workers.push(firstWorker);
-      this.attachWorkerToPort(firstWorker, superMessagePort, type);
-
-      const blob = await get(originalUrl);
-      const urls = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
-      for(const url of urls.slice(1)) {
+      for(const url of [originalUrl, ...urls.slice(1)]) {
         const worker = createWorker(url);
         workers.push(worker);
         this.attachWorkerToPort(worker, superMessagePort, type);
@@ -1202,16 +1189,18 @@ class ApiManagerProxy extends MTProtoMessagePort {
         console.log('Workers URLs', type, urls);
       }
 
-      pendingPorts.forEach(forwardPort);
-      registrationSucceeded = true;
-      pendingPorts.length = 0;
+      superMessagePort.addEventListener('port', (_payload, _source, event) => this.invokeVoid(
+        'threadedPort',
+        type,
+        undefined,
+        [event.ports[0]]
+      ));
     } catch(error) {
-      superMessagePort.removeEventListener('port', onPort);
-      pendingPorts.forEach((port) => port.close());
-      workers.forEach((worker) => {
-        superMessagePort.detachPort((worker as SharedWorker).port || worker as any);
-        (worker as Worker).terminate?.();
+      const {default: cleanup} = await import('@lib/cleanupThreadedWorkerRegistration').catch((cleanupError) => {
+        this.log.error('failed to load worker registration cleanup', cleanupError);
+        throw error;
       });
+      cleanup(superMessagePort, workers);
       throw error;
     }
   }
