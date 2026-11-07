@@ -499,6 +499,14 @@ async function finalizeCachedDialogReconcileSummaries(page: Page, targets: Cache
   targets.forEach((target, index) => target.metric.cachedDialogReconcile = summaries[index]);
 }
 
+async function waitForCachedDialogReconcileBeforeNavigation(page: Page) {
+  await expect.poll(async() => (await readCachedDialogReconcileSnapshot(page)).livePendingTraceIds, {
+    message: 'cached dialog reconciliation did not finish before the diagnostic page navigation',
+    timeout: 120_000,
+    intervals: [100]
+  }).toEqual([]);
+}
+
 async function addCachedDialogReconcileTarget(page: Page, targets: CachedDialogReconcileTarget[] | undefined, metric: Partial<Metric>, scenario: string) {
   if(!targets) return;
   expect(Number.isFinite(metric.ms), `${scenario} measurement duration is missing`).toBe(true);
@@ -1584,6 +1592,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         traceSamples.scrollBack2k.push(scrolled);
         await addCachedDialogReconcileTarget(page, reconcileTargets, scrolled, 'scrollBack2k');
 
+        await waitForCachedDialogReconcileBeforeNavigation(page);
         await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
         await waitForChatList(page);
 
