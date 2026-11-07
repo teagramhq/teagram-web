@@ -1844,6 +1844,14 @@ async function countClientErrors(page, getScenarioStep = readCurrentScenarioStep
     diagnosticLimit: PAGE_DIAGNOSTIC_LIMIT,
     diagnosticFieldLimit: PAGE_DIAGNOSTIC_FIELD_LIMIT
   });
+  // Custom emoji draw through a worker-owned OffscreenCanvas. In this sandboxed
+  // browser that path kills the renderer (Target crashed) as soon as a pack
+  // renders, so the smoke uses the app's main-thread canvas fallback instead.
+  await page.addInitScript(() => {
+    try {
+      window.localStorage.setItem('noOffscreenCanvas', '1');
+    } catch {}
+  });
 }
 
 function readCurrentScenarioStep() {

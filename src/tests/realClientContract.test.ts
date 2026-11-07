@@ -3953,6 +3953,12 @@ describe('real client scenario contract', () => {
     .toBeLessThan(scenarioSource.indexOf('installCustomEmojiSet(alice.page'));
   });
 
+  it('renders custom emoji on the main-thread canvas in the sandboxed browser', () => {
+    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
+
+    expect(browserSource).toContain(`window.localStorage.setItem('noOffscreenCanvas', '1')`);
+  });
+
   it('requires exactly one recipient message with the expected text', () => {
     expect(getSingleExactMessageFailure(['browser-ci-hello'], 'browser-ci-hello')).toBe(null);
     expect(getSingleExactMessageFailure(['prefix browser-ci-hello'], 'browser-ci-hello')).toBe('content');
