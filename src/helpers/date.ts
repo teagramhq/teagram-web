@@ -2,6 +2,9 @@ import {MOUNT_CLASS_TO} from '@config/debug';
 import I18n, {i18n} from '@lib/langPack';
 import {days, months} from '@helpers/date/common';
 import capitalizeFirstLetter from '@helpers/string/capitalizeFirstLetter';
+import {getDateFormatOptions, getWeekNumber} from '@helpers/dateFormatOptions';
+
+export {getWeekNumber};
 
 export const monthsLocalized = months.slice();
 export const daysLocalized = days.slice();
@@ -56,17 +59,6 @@ export function fillLocalizedDates() {
   daysLocalized.splice(0, daysLocalized.length, ...getWeekDays());
 }
 
-// https://stackoverflow.com/a/6117889
-export const getWeekNumber = (date: Date) => {
-  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-  const dayNum = d.getUTCDay() || 7;
-  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
-  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-  // getTime() deltas are in milliseconds, so divide by ms-per-day (ONE_DAY is in seconds)
-  return Math.ceil((((d.getTime() - yearStart.getTime()) / (ONE_DAY * 1000)) + 1) / 7);
-};
-
-
 type FormatDateOptions = {
   today?: Date;
   withTime?: boolean;
@@ -105,26 +97,9 @@ export function formatDate(date: Date, {today, withTime, shortMonth, overrideInt
 }
 
 export function formatDateAccordingToTodayNew(time: Date) {
-  const today = new Date();
-  const now = today.getTime() / 1000 | 0;
-  const timestamp = time.getTime() / 1000 | 0;
-
-  const options: Intl.DateTimeFormatOptions = {};
-  if((now - timestamp) < ONE_DAY && today.getDate() === time.getDate()) { // if the same day
-    options.hour = options.minute = '2-digit';
-  } else if(today.getFullYear() !== time.getFullYear()) { // different year
-    options.year = options.day = 'numeric';
-    options.month = '2-digit';
-  } else if((now - timestamp) < (ONE_DAY * 7) && getWeekNumber(today) === getWeekNumber(time)) { // current week
-    options.weekday = 'short';
-  } else { // same year
-    options.month = 'short';
-    options.day = 'numeric';
-  }
-
   return new I18n.IntlDateElement({
     date: time,
-    options
+    options: getDateFormatOptions(time)
   }).element;
 }
 

@@ -1,6 +1,6 @@
 import {beforeEach, expect, it, vi} from 'vitest';
 
-const testState = vi.hoisted(() => ({reset: false, reject: false, loaded: false, holdStateLoad: false, releaseStateLoad: undefined as (() => void) | undefined}));
+const testState = vi.hoisted(() => ({reset: false, reject: false, loaded: false, holdStateLoad: false, releaseStateLoad: undefined as (() => void) | undefined, holdSnapshotLoad: false, snapshotLoadStarted: false, releaseSnapshotLoad: undefined as (() => void) | undefined}));
 vi.hoisted(() => {
   vi.stubGlobal('IntersectionObserver', class {observe() {} unobserve() {} disconnect() {}});
   vi.stubGlobal('Worker', class {addEventListener() {} removeEventListener() {} postMessage() {} terminate() {}});
@@ -28,6 +28,10 @@ vi.mock('@lib/chatPageSnapshot', async(importOriginal) => ({
   ...await importOriginal<typeof import('@lib/chatPageSnapshot')>(),
   getChatPageKey: async() => { if(testState.reject) throw new Error('key failed'); return key; },
   loadChatPageSnapshot: async(value: unknown) => {
+    if(testState.holdSnapshotLoad) {
+      testState.snapshotLoadStarted = true;
+      await new Promise<void>((resolve) => { testState.releaseSnapshotLoad = resolve; });
+    }
     if(testState.reject) throw new Error('snapshot failed');
     testState.loaded = !!value;
   },
@@ -49,6 +53,9 @@ beforeEach(() => {
   testState.loaded = false;
   testState.holdStateLoad = false;
   testState.releaseStateLoad = undefined;
+  testState.holdSnapshotLoad = false;
+  testState.snapshotLoadStarted = false;
+  testState.releaseSnapshotLoad = undefined;
   DeferredIsUsingPasscode.resolveDeferred(false);
   vi.spyOn(AccountController, 'withAccountWriteLock').mockImplementation(async(_account, callback) => callback());
 });
@@ -75,6 +82,22 @@ it('loads the snapshot while account state is still loading', async() => {
   await loading;
 
   expect(proxy.readChatPageSnapshot()).toEqual(rows);
+});
+
+it('dispatches user auth before the snapshot read finishes', async() => {
+  testState.holdSnapshotLoad = true;
+  const dispatchUserAuth = vi.fn();
+  const proxy = Object.create(Object.getPrototypeOf(apiManagerProxy));
+  Object.assign(proxy, {dispatchUserAuth, mirrors: {}, log: {error: () => {}}});
+
+  const loading = proxy.loadAllStates();
+  await vi.waitFor(() => expect(testState.snapshotLoadStarted).toBe(true));
+  try {
+    expect(dispatchUserAuth).toHaveBeenCalledTimes(1);
+  } finally {
+    testState.releaseSnapshotLoad!();
+    await loading;
+  }
 });
 
 it('removes painted snapshot rows when the API proxy handles logout', async() => {

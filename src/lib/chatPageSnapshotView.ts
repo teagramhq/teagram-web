@@ -7,35 +7,14 @@ import {watchChatPageSnapshotInvalidations} from '@lib/chatPageSnapshot';
 import {listenForGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
 import {getRuntimeServerId} from '@config/serverContext';
 import type {ActiveAccountNumber} from '@lib/accounts/types';
+import {getDateFormatOptions} from '@helpers/dateFormatOptions';
 
 let snapshotElement: HTMLElement;
 let livePageArrived = false;
 let stopWatching: () => void;
 
-function getWeekNumber(date: Date) {
-  const weekDate = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-  weekDate.setUTCDate(weekDate.getUTCDate() + 4 - (weekDate.getUTCDay() || 7));
-  return Math.ceil((weekDate.getTime() - Date.UTC(weekDate.getUTCFullYear(), 0, 1) + 86400000) / 604800000);
-}
-
 function formatSnapshotDate(time: Date) {
-  const today = new Date();
-  const now = today.getTime() / 1000 | 0;
-  const timestamp = time.getTime() / 1000 | 0;
-  const options: Intl.DateTimeFormatOptions = {};
-  if((now - timestamp) < 86400 && today.getDate() === time.getDate()) {
-    options.hour = options.minute = '2-digit';
-  } else if(today.getFullYear() !== time.getFullYear()) {
-    options.year = options.day = 'numeric';
-    options.month = '2-digit';
-  } else if((now - timestamp) < (86400 * 7) && getWeekNumber(today) === getWeekNumber(time)) {
-    options.weekday = 'short';
-  } else {
-    options.month = 'short';
-    options.day = 'numeric';
-  }
-
-  return new I18n.IntlDateElement({date: time, options}).element;
+  return new I18n.IntlDateElement({date: time, options: getDateFormatOptions(time)}).element;
 }
 
 export function watchChatPageSnapshot(accountNumber: ActiveAccountNumber, guest: boolean) {

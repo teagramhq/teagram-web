@@ -7,7 +7,6 @@ import type {GuestAccountContext, GuestCredentialRecord, GuestCredentialRecords,
 import {chooseGuestCredentialRecord as chooseRecord, getGuestCredentialRecords as getRecords, matchingGuestRecords as matchingRecords, sameGuestUserId as sameUserId} from '@lib/guestAccountRecords';
 import {getActiveGuestServerIdentity, isGuestServerIdentityCurrent} from '@lib/guestAccountIdentity';
 import {createGuestAccountServerLock} from '@lib/guestAccountLock';
-import {hasGuestWipeGenerationChanged, isGuestSnapshotIdentityCurrent} from '@lib/guestAccountSnapshotIdentity';
 import {listenForGuestCredentialInvalidation, notifyGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
 import AccountController from '@lib/accounts/accountController';
 import {getCurrentAccount} from '@lib/accounts/getCurrentAccount';
@@ -504,26 +503,6 @@ export function createGuestAccountLifecycle(dependencies: GuestAccountLifecycleD
         const errorType = getErrorType(error);
         return errorType ? {kind: 'error', errorType} as const : {kind: 'error'} as const;
       }
-    },
-
-    async isSnapshotIdentityCurrent() {
-      const identity = dependencies.getServerIdentity();
-      return runLocked(identity, (cancelled) => isGuestSnapshotIdentityCurrent(identity, cancelled, {
-        getCurrentAccountNumber: dependencies.getCurrentAccountNumber,
-        getAccountUserId: dependencies.getAccountUserId,
-        readRecords,
-        isContextCurrent
-      }));
-    },
-
-    async hasWipeGenerationChanged() {
-      const identity = dependencies.getServerIdentity();
-      return runLocked(identity, (cancelled) => hasGuestWipeGenerationChanged(identity, cancelled, {
-        getCurrentAccountNumber: dependencies.getCurrentAccountNumber,
-        getAccountUserId: dependencies.getAccountUserId,
-        readRecords,
-        isContextCurrent
-      }));
     },
 
     async forget() {

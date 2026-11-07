@@ -1357,9 +1357,9 @@ class ApiManagerProxy extends MTProtoMessagePort {
         this.log.error('failed to load chat page snapshot', error);
       });
     const loadedStates = await loadStateForAllAccountsOnce();
-    await snapshotLoadPromise;
-
     this.dispatchUserAuth();
+
+    await snapshotLoadPromise;
 
     const stateForThisAccount = loadedStates[accountNumber];
     this.chatPageKey = stateForThisAccount.resetStorages.size ? undefined : stateForThisAccount.snapshotOwner;
