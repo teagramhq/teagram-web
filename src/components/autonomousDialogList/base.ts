@@ -13,6 +13,7 @@ import getDialogIndexKey from '@appManagers/utils/dialogs/getDialogIndexKey';
 import {isForumTopic} from '@appManagers/utils/dialogs/isDialog';
 import {logger} from '@lib/logger';
 import rootScope from '@lib/rootScope';
+import lottieLoader from '@lib/lottie/lottieLoader';
 import {AnyDialog, FilterType} from '@lib/storages/dialogs';
 import {MonoforumDialog} from '@lib/storages/monoforumDialogs';
 import Scrollable from '@components/scrollable';
@@ -325,10 +326,10 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
     this.loadedDialogsAtLeastOnce = true;
     this.hasReachedTheEnd = !!result.isEnd;
 
-    const isInitialAllChatsPage = !!(!offsetIndex && this.getFilterId() === FOLDER_ID_ALL &&
-      this.sortedList.list.closest('#folders-container'));
-    if(isInitialAllChatsPage) {
+    if(!offsetIndex && this.getFilterId() === FOLDER_ID_ALL &&
+      this.sortedList.list.closest('#folders-container')) {
       replaceChatPageSnapshot();
+      window.setTimeout(() => lottieLoader.loadLottieWorkers().catch((error) => this.log.error('Lottie worker warm-up failed', error)), 2000);
     }
     this.sortedList.addDeferredItems(items, result.count || 0);
 

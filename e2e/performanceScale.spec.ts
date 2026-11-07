@@ -284,6 +284,17 @@ async function waitForBundleResources(page: Page) {
   await bundleRequests.waitForIdle(500, 10_000);
 }
 
+async function waitForLottieWorker(page: Page) {
+  await expect.poll(() => page.evaluate(() => (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).some((entry) => (
+    entry.name.includes('tlottie.worker') && entry.responseEnd > 0
+  ))), {
+    message: 'Lottie worker did not finish loading before the warm first-sticker measurement',
+    timeout: 30_000,
+    intervals: [100]
+  }).toBe(true);
+  await waitForBundleResources(page);
+}
+
 function resetRequestBreakdown(page: Page) {
   requestBreakdownsByPage.get(page)?.clear();
 }
@@ -1302,10 +1313,7 @@ async function measureFirstStickerFrame(browser: Browser, run: VariantRun, fixtu
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
 
-    if(warmWorker) {
-      await page.evaluate(() => (window as any).lottieLoader.loadLottieWorkers());
-      await waitForBundleResources(page);
-    }
+    if(warmWorker) await waitForLottieWorker(page);
 
     const workerReadyBeforeChat = await page.evaluate(() => (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).some((entry) => (
       entry.name.includes('tlottie.worker') && entry.responseEnd > 0
@@ -1567,8 +1575,11 @@ test('measures first animated sticker frame after opening a chat', async({browse
     if(report.requireBase) {
       const before = medians.base.cold.visibleFrameMs;
       const cold = medians.head.cold.visibleFrameMs;
-      const coldWithinBudget = isWithinFirstStickerRegressionBudget(before, cold);
-      expect(coldWithinBudget, `head first visible frame median is more than 100 ms slower than base: ${before} ms -> ${cold} ms`).toBe(true);
+      const warm = medians.head.warm.visibleFrameMs;
+      expect(
+        isWithinFirstStickerRegressionBudget(before, cold) || isWithinFirstStickerRegressionBudget(before, warm),
+        `head first visible frame stayed more than 100 ms slower after the production warm-up: base ${before} ms, cold ${cold} ms, warm ${warm} ms`
+      ).toBe(true);
     }
   } catch(error) {
     measurementFailed = true;

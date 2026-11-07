@@ -35,14 +35,36 @@ async function createDialogList(filterId: number) {
 }
 
 it('replaces the snapshot without starting Lottie workers in the chat-list load', async() => {
+  vi.useFakeTimers();
   lottieMocks.loadLottieWorkers.mockClear();
-  const {list, liveList} = await createDialogList(0);
-  await list.loadDialogsInner({canFinish: () => true});
-  expect(document.querySelector('.chat-page-snapshot')).toBeNull();
-  expect(document.getElementById('folders-container').textContent).toBe('Live page');
-  expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
+  try {
+    const {list, liveList} = await createDialogList(0);
+    await list.loadDialogsInner({canFinish: () => true});
+    expect(document.querySelector('.chat-page-snapshot')).toBeNull();
+    expect(document.getElementById('folders-container').textContent).toBe('Live page');
+    expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
+  } finally {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  }
+});
+
+it('starts warming Lottie workers after the initial all-chats page has settled', async() => {
+  vi.useFakeTimers();
+  lottieMocks.loadLottieWorkers.mockClear();
+  try {
+    const {list} = await createDialogList(0);
+    await list.loadDialogsInner({canFinish: () => true});
+
+    expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(lottieMocks.loadLottieWorkers).toHaveBeenCalledOnce();
+  } finally {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  }
 });
 
 it.each([
