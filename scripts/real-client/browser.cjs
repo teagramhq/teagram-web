@@ -251,15 +251,35 @@ function getSingleExactMessageFailure(messages, expected) {
 // reactions, so the message's own text is what is left outside them. Emoji
 // drawn as custom emoji or images keep their characters in
 // `data-sticker-emoji` and `alt`, so they are put back as text first.
-async function getSingleExactMessageTextFailure(messages, expected) {
-  const texts = await messages.evaluateAll((elements) => elements.map((element) => {
+async function readMessageStates(messages) {
+  return messages.evaluateAll((elements) => elements.map((element) => {
     const text = element.cloneNode(true);
     text.querySelectorAll('.time, .reactions').forEach((chrome) => chrome.remove());
     text.querySelectorAll('[data-sticker-emoji]').forEach((emoji) => emoji.replaceWith(emoji.dataset.stickerEmoji));
     text.querySelectorAll('img[alt]').forEach((emoji) => emoji.replaceWith(emoji.alt));
-    return text.textContent;
+    const bubble = element.closest('.bubble');
+    return {
+      text: text.textContent,
+      sent: bubble?.classList.contains('is-sent') || bubble?.classList.contains('is-read') || false
+    };
   }));
-  return getSingleExactMessageFailure(texts, expected);
+}
+
+async function getSingleExactMessageTextFailure(messages, expected) {
+  const states = await readMessageStates(messages);
+  return getSingleExactMessageFailure(states.map((state) => state.text), expected);
+}
+
+async function waitForSingleSentMessage(messages, expected, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while(true) {
+    const states = await readMessageStates(messages);
+    if(states.length === 1 && states[0].text === expected && states[0].sent) return;
+
+    const remaining = deadline - Date.now();
+    if(remaining <= 0) throw new Error(`message did not settle to one sent bubble within ${timeoutMs}ms`);
+    await new Promise((resolve) => setTimeout(resolve, Math.min(100, remaining)));
+  }
 }
 
 function withCommandTimeout(operation) {
@@ -2737,10 +2757,7 @@ async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle)
   if(chat) {
     await waitForGroupMessageCount(page, chat, groupTitle, message, `${stage}_message_count`, timeoutMs);
   } else {
-    await page.waitForTimeout(600);
-    currentStage = stage;
-    const count = await message.count();
-    if(count !== 1) failStage(`${stage}_message_count`);
+    await waitForSingleSentMessage(message, text, timeoutMs).catch(() => failStage(`${stage}_message_count`));
   }
 }
 
@@ -6667,7 +6684,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
+module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
