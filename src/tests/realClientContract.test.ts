@@ -3945,18 +3945,15 @@ describe('real client scenario contract', () => {
     expect(scenario.slice(recipientChatSelected, recipientVisibilityChecked)).toContain('runtime.accounts[0].username');
   });
 
-  it('opens the emoji picker before the custom set is installed to tell a picker crash from a pack crash', () => {
+  it('reloads both pages onto the main-thread canvas only for the custom emoji scenario', () => {
     const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
     const scenarioSource = browserSource.slice(browserSource.indexOf('async function runCustomEmojiScenario'));
 
-    expect(scenarioSource.indexOf('probeEmojiPickerBeforeCustomSet(alice.page'))
+    expect(browserSource.match(/setItem\('noOffscreenCanvas', '1'\)/g)).toHaveLength(1);
+    expect(scenarioSource.indexOf('reloadWithMainThreadCanvas(alice.page'))
     .toBeLessThan(scenarioSource.indexOf('installCustomEmojiSet(alice.page'));
-  });
-
-  it('renders custom emoji on the main-thread canvas in the sandboxed browser', () => {
-    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
-
-    expect(browserSource).toContain(`window.localStorage.setItem('noOffscreenCanvas', '1')`);
+    expect(scenarioSource.indexOf('reloadWithMainThreadCanvas(bob.page'))
+    .toBeLessThan(scenarioSource.indexOf('installCustomEmojiSet(alice.page'));
   });
 
   it('requires exactly one recipient message with the expected text', () => {

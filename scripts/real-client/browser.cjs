@@ -1844,14 +1844,6 @@ async function countClientErrors(page, getScenarioStep = readCurrentScenarioStep
     diagnosticLimit: PAGE_DIAGNOSTIC_LIMIT,
     diagnosticFieldLimit: PAGE_DIAGNOSTIC_FIELD_LIMIT
   });
-  // Custom emoji draw through a worker-owned OffscreenCanvas. In this sandboxed
-  // browser that path kills the renderer (Target crashed) as soon as a pack
-  // renders, so the smoke uses the app's main-thread canvas fallback instead.
-  await page.addInitScript(() => {
-    try {
-      window.localStorage.setItem('noOffscreenCanvas', '1');
-    } catch {}
-  });
 }
 
 function readCurrentScenarioStep() {
@@ -2942,22 +2934,25 @@ async function setCustomEmojiStatus(page, otherPage, docId) {
   if(await page.locator('.popup-premium:visible').count()) failStage('alice_custom_emoji_status_premium_prompt');
 }
 
-async function probeEmojiPickerBeforeCustomSet(page, stage) {
-  setPageScenarioStep(page, `${stage}_toggle`);
-  const toggle = page.locator('#column-center .toggle-emoticons');
-  await toggle.click().catch(() => failStage(`${stage}_toggle`));
-  const dropdown = page.locator('.emoji-dropdown');
-  await dropdown.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_visible`));
-  await dropdown.locator('.emoji-category').first().waitFor({state: 'attached', timeout: 15_000})
-  .catch(() => failStage(`${stage}_loaded`));
-  await toggle.click().catch(() => failStage(`${stage}_close`));
-  await page.waitForFunction(() => !document.querySelector('.emoji-dropdown.active'), null, {timeout: 15_000})
-  .catch(() => failStage(`${stage}_close`));
+// Custom emoji draw through a worker-owned OffscreenCanvas. In this sandboxed
+// browser that path kills the renderer (Target crashed) as soon as a pack
+// renders, so this scenario reloads each page onto the app's main-thread canvas
+// fallback. Earlier scenarios keep the default path.
+async function reloadWithMainThreadCanvas(page, stage) {
+  setPageScenarioStep(page, `${stage}_flag`);
+  await page.evaluate(() => window.localStorage.setItem('noOffscreenCanvas', '1')).catch(() => failStage(`${stage}_flag`));
+  setPageScenarioStep(page, `${stage}_reload`);
+  await page.reload({waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage(`${stage}_reload`));
+  await page.waitForFunction(() => {
+    const chats = document.querySelector('#page-chats');
+    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+  }, null, {timeout: 45_000}).catch(() => failStage(`${stage}_reload_chats`));
 }
 
 async function runCustomEmojiScenario(alice, bob) {
-  currentStage = 'alice_emoji_picker_baseline';
-  await probeEmojiPickerBeforeCustomSet(alice.page, 'alice_emoji_picker_baseline');
+  currentStage = 'custom_emoji_canvas_reload';
+  await reloadWithMainThreadCanvas(alice.page, 'alice_custom_emoji_canvas');
+  await reloadWithMainThreadCanvas(bob.page, 'bob_custom_emoji_canvas');
   currentStage = 'alice_custom_emoji_set_install';
   await installCustomEmojiSet(alice.page, 'alice_custom_emoji');
   currentStage = 'bob_custom_emoji_set_install';
