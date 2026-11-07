@@ -1628,6 +1628,38 @@ async function prepareUsernameEntry(page, name, expected) {
   return waitForUsernameField(page, name);
 }
 
+async function waitForChatsList(page, stage) {
+  currentStage = stage;
+  await page.waitForFunction(() => {
+    const chats = document.querySelector('#page-chats');
+    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+  }, null, {timeout: 45_000}).catch(() => failStage(stage));
+}
+
+async function waitForServiceWorkerController(page, stage) {
+  await page.waitForFunction(() => Boolean(navigator.serviceWorker?.controller), null, {timeout: 20_000})
+  .catch(() => failStage(stage));
+}
+
+async function reloadWithNoOffscreenCanvas(page, name) {
+  const prefix = `${name}_reaction_fallback`;
+  const url = new URL(PRIVATE_CSP_ORIGIN);
+  url.searchParams.set('noOffscreenCanvas', '1');
+  setPageScenarioStep(page, `${prefix}_reload`);
+  const response = await page.goto(url.toString(), {waitUntil: 'domcontentloaded', timeout: 30_000})
+  .catch(() => failStage(`${prefix}_reload`));
+  if(response?.status() !== 200) failStage(`${prefix}_artifact_load`);
+
+  const hasFallbackFlag = await page.evaluate(() => new URL(location.href).searchParams.get('noOffscreenCanvas') === '1');
+  if(!hasFallbackFlag) failStage(`${prefix}_flag`);
+
+  await waitForChatsList(page, `${prefix}_chats_list`);
+  await page.locator('#new-menu').waitFor({state: 'visible', timeout: 15_000})
+  .catch(() => failStage(`${prefix}_new_chat_menu`));
+  setPageScenarioStep(page, `${prefix}_service_worker_controller`);
+  await waitForServiceWorkerController(page, `${prefix}_service_worker_controller`);
+}
+
 async function signIn(page, account, name, screenshotDirectory, capturedScreenshots, passwordEvidence) {
   const username = await prepareUsernameEntry(page, name, runtime);
   await captureState(page, screenshotDirectory, `${name}-sign-in`, capturedScreenshots);
@@ -1643,16 +1675,11 @@ async function signIn(page, account, name, screenshotDirectory, capturedScreensh
   await submitPassword(password, usernameField, account.password, name, passwordEvidence);
   await usernameField.dispose();
 
-  currentStage = `${name}_chats_list`;
-  await page.waitForFunction(() => {
-    const chats = document.querySelector('#page-chats');
-    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
-  }, null, {timeout: 45_000}).catch(() => failStage(`${name}_chats_list`));
+  await waitForChatsList(page, `${name}_chats_list`);
   await page.locator('#new-menu').waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${name}_new_chat_menu`));
   await captureState(page, screenshotDirectory, `${name}-chats-list`, capturedScreenshots);
 
-  await page.waitForFunction(() => Boolean(navigator.serviceWorker?.controller), null, {timeout: 20_000})
-  .catch(() => failStage(`${name}_service_worker_controller`));
+  await waitForServiceWorkerController(page, `${name}_service_worker_controller`);
 }
 
 async function submitUsernameOnceAndWaitForPassword(page, account, expected, name, passwordEvidence, actionCounts, timeoutMs = PASSWORD_FIELD_TIMEOUT_MS, webSocket101Observer) {
@@ -6471,6 +6498,35 @@ async function main(dependencies = {}) {
       }
       report.push({name: 'poll', status: 'passed'});
     }
+
+    currentScenario = 'message';
+    await reloadWithNoOffscreenCanvas(alice.page, 'alice');
+    await reloadWithNoOffscreenCanvas(bob.page, 'bob');
+    await selectUniquePeer(
+      alice.page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      accounts[1].username,
+      'alice_direct_reaction_fallback_chat'
+    );
+    await selectUniquePeer(
+      bob.page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      accounts[0].username,
+      'bob_direct_reaction_fallback_chat'
+    );
+    const aliceFallbackMessages = alice.page.locator('#column-center .bubble .message').filter({hasText: MESSAGE});
+    await waitForSingleSentMessage(aliceFallbackMessages, MESSAGE)
+    .catch(() => failStage('alice_direct_reaction_fallback_message'));
+    const bobFallbackMessages = bob.page.locator('#column-center .bubble .message').filter({hasText: MESSAGE});
+    await bobFallbackMessages.first().waitFor({state: 'visible', timeout: 30_000})
+    .catch(() => failStage('bob_direct_reaction_fallback_message_visible'));
+    if(await getSingleExactMessageTextFailure(bobFallbackMessages, MESSAGE)) {
+      failStage('bob_direct_reaction_fallback_message_content');
+    }
+    await toggleMessageReaction(bob.page, alice.page, MESSAGE, 'bob_direct_reaction_fallback_set', 1);
+    await toggleMessageReaction(bob.page, alice.page, MESSAGE, 'bob_direct_reaction_fallback_clear', 0);
 
     if(JSON.stringify(report.map((scenario) => scenario.name)) !== JSON.stringify(runtime.scenarios)) {
       failStage('scenario_report_incomplete');
