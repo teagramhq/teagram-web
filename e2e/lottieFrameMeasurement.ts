@@ -20,9 +20,8 @@ function nonBackgroundFraction(png: Buffer): number {
 export async function waitUntilOnScreen(page: Page, locator: Locator, timeoutMs: number): Promise<number | null> {
   const deadline = Date.now() + timeoutMs;
   while(Date.now() < deadline) {
-    const at = await page.evaluate(() => performance.now());
     if(nonBackgroundFraction(await locator.screenshot()) >= RENDERED_FRACTION) {
-      return at;
+      return page.evaluate(() => performance.now());
     }
   }
   return null;

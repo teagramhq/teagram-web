@@ -135,7 +135,13 @@ export class LottieLoader {
       return this.loadPromise;
     }
 
-    return this.loadPromise = this.registerLottieWorkers();
+    const loadPromise = this.registerLottieWorkers().catch((error) => {
+      if(this.loadPromise === loadPromise) {
+        this.loadPromise = undefined;
+      }
+      throw error;
+    });
+    return this.loadPromise = loadPromise;
   }
 
   private async registerLottieWorkers() {

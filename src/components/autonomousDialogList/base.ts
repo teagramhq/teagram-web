@@ -2,7 +2,6 @@ import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
 import DialogsPlaceholder from '@helpers/dialogsPlaceholder';
 import replaceContent from '@helpers/dom/replaceContent';
 import ListenerSetter from '@helpers/listenerSetter';
-import noop from '@helpers/noop';
 import throttle from '@helpers/schedulers/throttle';
 import {SequentialCursorFetcher, SequentialCursorFetcherResult} from '@helpers/sequentialCursorFetcher';
 import windowSize from '@helpers/windowSize';
@@ -338,7 +337,7 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
     if(isInitialAllChatsPage) {
       self.setTimeout(() => import('@lib/lottie/lottieLoader')
         .then(({default: lottieLoader}) => lottieLoader.loadLottieWorkers())
-        .catch(noop), 0);
+        .catch((error) => this.log.error('Lottie worker preload failed', error)), 0);
     }
 
     return {
