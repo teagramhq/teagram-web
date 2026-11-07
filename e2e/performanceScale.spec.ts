@@ -1568,10 +1568,7 @@ test('measures first animated sticker frame after opening a chat', async({browse
       const before = medians.base.cold.visibleFrameMs;
       const cold = medians.head.cold.visibleFrameMs;
       const coldWithinBudget = isWithinFirstStickerRegressionBudget(before, cold);
-      if(!coldWithinBudget) {
-        const warm = medians.head.warm.visibleFrameMs;
-        expect(isWithinFirstStickerRegressionBudget(before, warm), `warmed head first visible frame median is more than 100 ms slower than base: ${before} ms -> ${warm} ms`).toBe(true);
-      }
+      expect(coldWithinBudget, `head first visible frame median is more than 100 ms slower than base: ${before} ms -> ${cold} ms`).toBe(true);
     }
   } catch(error) {
     measurementFailed = true;

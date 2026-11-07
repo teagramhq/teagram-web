@@ -80,30 +80,37 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-test.each(['worker-source fetch', 'proxy-URL request'] as const)('cleans up an attached worker after a %s failure before retrying', async(failureStage) => {
+test.each(['worker-source fetch', 'proxy-URL request', 'second worker attachment'] as const)('cleans up registration after a %s failure before retrying', async(failureStage) => {
   workerState.instances.length = 0;
   vi.stubGlobal('Worker', workerState.TestWorker);
   const messagePort = new TestSuperMessagePort();
   const invokeVoid = vi.fn();
   const createProxyWorkerURLs = vi.fn();
-  const failedWorkerPort = {close: vi.fn()} as unknown as MessagePort;
-  const fetchError = new Error('worker source fetch failed');
+  const registrationError = new Error(`${failureStage} failed`);
   const attachedWorkers: Array<SharedWorker | globalThis.Worker> = [];
+  let failWorkerSourceFetch = failureStage === 'worker-source fetch';
+  let failSecondAttachment = failureStage === 'second worker attachment';
 
   vi.stubGlobal('fetch', vi.fn(async() => {
-    messagePort.emitPort(failedWorkerPort);
-    if(failureStage === 'worker-source fetch') throw fetchError;
+    if(failWorkerSourceFetch) {
+      failWorkerSourceFetch = false;
+      throw registrationError;
+    }
     return {text: async() => ''};
   }));
-  if(failureStage === 'proxy-URL request') createProxyWorkerURLs.mockRejectedValueOnce(fetchError);
+  if(failureStage === 'proxy-URL request') createProxyWorkerURLs.mockRejectedValueOnce(registrationError);
 
   const proxy = Object.create(Object.getPrototypeOf(apiManagerProxy)) as any;
   proxy.attachWorkerToPort = (worker: SharedWorker | globalThis.Worker, superMessagePort: TestSuperMessagePort) => {
     attachedWorkers.push(worker);
     superMessagePort.attachPort((worker as SharedWorker).port || worker);
+    if(failSecondAttachment && attachedWorkers.length === 2) throw registrationError;
   };
   proxy.invoke = (method: string, params: unknown) => {
-    if(method === 'createProxyWorkerURLs') return createProxyWorkerURLs(params);
+    if(method === 'createProxyWorkerURLs') {
+      expect(attachedWorkers).toHaveLength(0);
+      return createProxyWorkerURLs(params);
+    }
     throw new Error(`unexpected API manager invocation: ${method}`);
   };
   proxy.invokeVoid = invokeVoid;
@@ -115,19 +122,21 @@ test.each(['worker-source fetch', 'proxy-URL request'] as const)('cleans up an a
     superMessagePort: messagePort as any
   };
 
-  await expect(proxy.registerThreadedWorker(registration)).rejects.toBe(fetchError);
+  if(failureStage === 'second worker attachment') {
+    createProxyWorkerURLs.mockResolvedValueOnce(['original-worker.js', 'proxy-worker.js']);
+  }
+
+  await expect(proxy.registerThreadedWorker(registration)).rejects.toBe(registrationError);
   expect(messagePort.attached).toEqual([]);
-  expect(messagePort.detached).toHaveLength(1);
+  expect(messagePort.detached).toHaveLength(failureStage === 'second worker attachment' ? 2 : 0);
   expect(messagePort.portListenerCount).toBe(0);
-  expect((attachedWorkers[0] as globalThis.Worker & {terminated: boolean}).terminated).toBe(true);
-  expect((failedWorkerPort as any).close).toHaveBeenCalledOnce();
+  expect(attachedWorkers).toHaveLength(failureStage === 'second worker attachment' ? 2 : 0);
+  expect(attachedWorkers.every((worker) => (worker as globalThis.Worker & {terminated: boolean}).terminated)).toBe(true);
   expect(invokeVoid).not.toHaveBeenCalled();
 
   const retryWorkerPort = {close: vi.fn()} as unknown as MessagePort;
-  vi.stubGlobal('fetch', vi.fn(async() => {
-    messagePort.emitPort(retryWorkerPort);
-    return {text: async() => ''};
-  }));
+  failSecondAttachment = false;
+  attachedWorkers.length = 0;
   createProxyWorkerURLs.mockImplementation(() => {
     expect(invokeVoid).not.toHaveBeenCalled();
     return Promise.resolve(['original-worker.js', 'proxy-worker.js']);
@@ -135,6 +144,7 @@ test.each(['worker-source fetch', 'proxy-URL request'] as const)('cleans up an a
 
   await proxy.registerThreadedWorker(registration);
   expect(messagePort.portListenerCount).toBe(1);
+  messagePort.emitPort(retryWorkerPort);
   expect(invokeVoid).toHaveBeenCalledOnce();
   expect(invokeVoid).toHaveBeenCalledWith('threadedPort', 'lottie', undefined, [retryWorkerPort]);
 });
