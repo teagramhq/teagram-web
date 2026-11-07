@@ -7,6 +7,7 @@ import {pathToFileURL} from 'node:url';
 
 const FIXTURE_REPOSITORY = 'teagramhq/teagram-server';
 const HASH_RE = /^[a-f0-9]{64}$/i;
+const RETRYABLE_HTTP_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 
 export function assetPath(name) {
   if(typeof(name) !== 'string' || !name || name.includes('/') || name.includes('\\') || name.includes('\0')) {
@@ -81,8 +82,27 @@ export function reconstructAssets(assets) {
   return files;
 }
 
+async function fetchReleaseResponse(url) {
+  for(let attempt = 0; attempt < 4; ++attempt) {
+    let response;
+    try {
+      response = await fetch(url, {redirect: 'follow'});
+    } catch(error) {
+      if(attempt === 3) throw error;
+    }
+
+    if(response && ((response.ok && response.body) || !RETRYABLE_HTTP_STATUS_CODES.has(response.status) || attempt === 3)) {
+      return response;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+  }
+
+  throw new Error(`failed to download release asset: ${url}`);
+}
+
 async function fetchBytes(url, expectedHash) {
-  const response = await fetch(url, {redirect: 'follow'});
+  const response = await fetchReleaseResponse(url);
   if(!response.ok || !response.body) throw new Error(`download failed (${response.status}): ${url}`);
 
   const digest = createHash('sha256');
@@ -105,7 +125,7 @@ async function fetchBytes(url, expectedHash) {
 }
 
 async function downloadAsset(url, targetPath, expectedHash) {
-  const response = await fetch(url, {redirect: 'follow'});
+  const response = await fetchReleaseResponse(url);
   if(!response.ok || !response.body) throw new Error(`download failed (${response.status}): ${url}`);
 
   const digest = createHash('sha256');
