@@ -16,6 +16,10 @@ export const PERFORMANCE_REPEATS = 3;
 // Cold-load pairs need additional samples to outvote occasional runner long tasks.
 export const COLD_CHAT_LIST_REPEATS = 6;
 
+export function isWithinFirstStickerRegressionBudget(baseMs, headMs) {
+  return headMs - baseMs <= 100;
+}
+
 export function scenarioBundleBytes(resources, origin, startedAt, previouslyLoadedUrls = []) {
   const previousUrls = new Set(previouslyLoadedUrls);
   const bundleResources = new Map();

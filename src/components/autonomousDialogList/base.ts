@@ -325,8 +325,9 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
     this.loadedDialogsAtLeastOnce = true;
     this.hasReachedTheEnd = !!result.isEnd;
 
-    if(!offsetIndex && this.getFilterId() === FOLDER_ID_ALL &&
-      this.sortedList.list.closest('#folders-container')) {
+    const isInitialAllChatsPage = !!(!offsetIndex && this.getFilterId() === FOLDER_ID_ALL &&
+      this.sortedList.list.closest('#folders-container'));
+    if(isInitialAllChatsPage) {
       replaceChatPageSnapshot();
     }
     this.sortedList.addDeferredItems(items, result.count || 0);

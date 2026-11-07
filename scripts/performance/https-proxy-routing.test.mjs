@@ -11,6 +11,10 @@ test('routes each web origin to its matching fixture server', () => {
     http: 'http://127.0.0.1:2445',
     websocket: 'ws://127.0.0.1:2445'
   });
+  assert.deepEqual(targetForOrigin('http://localhost:4179'), {
+    http: 'http://127.0.0.1:2445',
+    websocket: 'ws://127.0.0.1:2445'
+  });
   assert.deepEqual(targetForOrigin('http://localhost:4175'), {
     http: 'http://127.0.0.1:2446',
     websocket: 'ws://127.0.0.1:2446'

@@ -9,11 +9,28 @@ const workflow = readFileSync(new URL('../../.github/workflows/performance.yml',
 const playwrightConfig = readFileSync(new URL('../../playwright.performance.config.ts', import.meta.url), 'utf8');
 const performanceScale = readFileSync(new URL('../../e2e/performanceScale.spec.ts', import.meta.url), 'utf8');
 const chatPageSnapshotView = readFileSync(new URL('../../src/lib/chatPageSnapshotView.ts', import.meta.url), 'utf8');
+const stickerBaseCommit = readFileSync(new URL('../../.github/perf-sticker-base-commit', import.meta.url), 'utf8').trim();
 
 test('performance comparisons use uninstrumented head and base bundles', () => {
   assert.match(workflow, /^\s+pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
   assert.match(workflow, /^\s+\(cd "\$base_directory" && pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
   assert.doesNotMatch(workflow, /VITE_PERF_(?:RECONCILE_)?TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
+});
+
+test('sticker timing uses the pre-178 baseline independently from the scale base', () => {
+  const buildStep = workflow.match(/- name: Build current and base private client bundles([\s\S]*?)(?=\n      - name: Start local HTTPS)/)?.[1];
+  assert.ok(buildStep, 'the performance workflow must define its client build step');
+  assert.match(buildStep, /cat \.github\/perf-sticker-base-commit/);
+  assert.match(buildStep, /teagram-web-sticker-base-dist/);
+  assert.equal(stickerBaseCommit, 'e28fb469fa0404c5ea396c0230d0c4c94bf20c5b');
+  assert.match(stickerBaseCommit, /^[a-f0-9]{40}$/);
+  assert.match(buildStep, /PERF_STICKER_BASE_ORIGIN=http:\/\/localhost:4179/);
+  assert.match(workflow, /TG_WEBSOCKET_ALLOWED_ORIGINS=.*4179/);
+  assert.match(workflow, /serve-dist\.mjs "\$PERF_STICKER_BASE_DIST" 4179/);
+  assert.match(performanceScale, /PERF_STICKER_BASE_ORIGIN/);
+  assert.match(performanceScale, /firstStickerBaseRun/);
+  assert.match(performanceScale, /expect\(firstVisibleChatList\.source\)\.toBe\('snapshot'\)/);
+  assert.doesNotMatch(performanceScale, /firstVisibleChatList\.source\)\.toBe\((?:run\.)?variant === 'head'/);
 });
 
 test('performance tracing uses a separate diagnostic bundle', () => {

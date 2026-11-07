@@ -1,6 +1,9 @@
 import {expect, it, vi} from 'vitest';
 import '@lib/polyfill';
 
+const lottieMocks = vi.hoisted(() => ({loadLottieWorkers: vi.fn().mockResolvedValue(undefined)}));
+vi.mock('@lib/lottie/lottieLoader', () => ({default: lottieMocks}));
+
 vi.mock('@environment/webpSupport', () => ({default: false}));
 vi.mock('@lib/appImManager', () => ({default: {}}));
 vi.mock('@components/sortedDialogList', () => ({default: class {}}));
@@ -31,21 +34,27 @@ async function createDialogList(filterId: number) {
   return {list, liveList};
 }
 
-it('replaces the snapshot when the worker first page is committed', async() => {
-  const {list} = await createDialogList(0);
+it('replaces the snapshot without starting Lottie workers in the chat-list load', async() => {
+  lottieMocks.loadLottieWorkers.mockClear();
+  const {list, liveList} = await createDialogList(0);
   await list.loadDialogsInner({canFinish: () => true});
   expect(document.querySelector('.chat-page-snapshot')).toBeNull();
   expect(document.getElementById('folders-container').textContent).toBe('Live page');
+  expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
 });
 
 it.each([
   {name: 'a non-All filter', filterId: 1, offsetIndex: 0},
   {name: 'an offset page', filterId: 0, offsetIndex: 1}
 ])('keeps the snapshot while loading $name', async({filterId, offsetIndex}) => {
+  lottieMocks.loadLottieWorkers.mockClear();
   const {list} = await createDialogList(filterId);
 
   await list.loadDialogsInner({offsetIndex, canFinish: () => true});
 
   expect(document.querySelector('.chat-page-snapshot')).not.toBeNull();
   expect(document.getElementById('folders-container').textContent).toBe('Live page');
+  expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
 });

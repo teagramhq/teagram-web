@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS, scenarioBundleBytes} from './policy.mjs';
+import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, isWithinFirstStickerRegressionBudget, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS, scenarioBundleBytes} from './policy.mjs';
 
 const SCALES = ['1x', '100x'];
 const CURRENT_FIXTURE = {
@@ -9,6 +9,18 @@ const CURRENT_FIXTURE = {
   serverCommit: 'runtime-server-v1',
   fixtureServerCommit: 'fixture-server-v1'
 };
+
+test('first-sticker regression budget accepts large improvements', () => {
+  assert.equal(isWithinFirstStickerRegressionBudget(1216, 632.2), true);
+});
+
+test('first-sticker regression budget permits exactly 100 ms slower', () => {
+  assert.equal(isWithinFirstStickerRegressionBudget(500, 600), true);
+});
+
+test('first-sticker regression budget rejects slowdowns greater than 100 ms', () => {
+  assert.equal(isWithinFirstStickerRegressionBudget(500, 600.1), false);
+});
 
 function scaleSamples(overrides = {}, scale) {
   return Object.fromEntries(SCENARIOS.map(({key}) => {

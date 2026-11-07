@@ -1160,37 +1160,59 @@ class ApiManagerProxy extends MTProtoMessagePort {
     ].filter(Boolean);
     originals.forEach((w) => window[w.name as any] = new Proxy(w, workerHandler));
 
-    const worker = _createWorker();
+    let initialWorker: SharedWorker | Worker;
+    try {
+      initialWorker = _createWorker();
+    } finally {
+      originals.forEach((w) => window[w.name as any] = w as any);
+    }
 
-    originals.forEach((w) => window[w.name as any] = w as any);
-
-    const originalUrl = (worker as any).url;
-
-    const createWorker = (url: string) => new constructor(url, {type: 'module'});
-    const attachWorkerToPort = (worker: SharedWorker | Worker) => this.attachWorkerToPort(
-      worker,
-      superMessagePort,
-      type
-    );
+    const originalUrl = (initialWorker as any).url;
     // Safari silently wedges a {type:'module'} SharedWorker used for lottie sticker decoding:
     // frames never arrive, no error is thrown, and every sticker canvas stays blank (never appended).
     // Keep MTProto/crypto on the shared worker, but hand the lottie pool per-tab dedicated Workers.
     const constructor = IS_SHARED_WORKER_SUPPORTED && !(IS_SAFARI && type === 'lottie') ? SharedWorker : Worker;
+    const createWorker = (url: string) => new constructor(url, {type: 'module'});
+    const workers: Array<SharedWorker | Worker> = [];
+    const pendingPorts: MessagePort[] = [];
+    let registrationSucceeded = false;
+    const forwardPort = (port: MessagePort) => this.invokeVoid('threadedPort', type, undefined, [port]);
+    const onPort = (_payload: void, _source: MessageEventSource, event: MessageEvent) => {
+      const port = event.ports[0];
+      if(registrationSucceeded) forwardPort(port);
+      else pendingPorts.push(port);
+    };
 
-    superMessagePort.addEventListener('port', (payload, source, event) => {
-      this.invokeVoid('threadedPort', type, undefined, [event.ports[0]]);
-    });
+    // Buffer ports until URL and worker registration succeeds; failures must not consume remote pool slots.
+    superMessagePort.addEventListener('port', onPort);
+    try {
+      const firstWorker = createWorker(originalUrl);
+      workers.push(firstWorker);
+      this.attachWorkerToPort(firstWorker, superMessagePort, type);
 
-    const firstWorker = createWorker(originalUrl);
-    attachWorkerToPort(firstWorker);
+      const blob = await get(originalUrl);
+      const urls = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
+      for(const url of urls.slice(1)) {
+        const worker = createWorker(url);
+        workers.push(worker);
+        this.attachWorkerToPort(worker, superMessagePort, type);
+      }
 
-    const blob = await get(originalUrl);
-    const urlsPromise = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
-    const workers = urlsPromise.slice(1).map(createWorker);
-    workers.forEach(attachWorkerToPort);
+      if(DEBUG) {
+        console.log('Workers URLs', type, urls);
+      }
 
-    if(DEBUG) {
-      console.log('Workers URLs', type, urlsPromise);
+      pendingPorts.forEach(forwardPort);
+      registrationSucceeded = true;
+      pendingPorts.length = 0;
+    } catch(error) {
+      superMessagePort.removeEventListener('port', onPort);
+      pendingPorts.forEach((port) => port.close());
+      workers.forEach((worker) => {
+        superMessagePort.detachPort((worker as SharedWorker).port || worker as any);
+        (worker as Worker).terminate?.();
+      });
+      throw error;
     }
   }
 
