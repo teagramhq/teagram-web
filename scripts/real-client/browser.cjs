@@ -4,7 +4,7 @@ const {createHash} = require('node:crypto');
 const {chromium} = require('playwright');
 const observation = require('./observation.cjs');
 
-const REQUIRED_SCENARIOS = ['sign-in', 'first-message', 'message', 'group'];
+const REQUIRED_SCENARIOS = ['sign-in', 'first-message', 'message', 'custom-emoji', 'group'];
 const OPTIONAL_SCENARIOS = ['channel', 'poll'];
 const AVAILABLE_SCENARIOS = [...REQUIRED_SCENARIOS, ...OPTIONAL_SCENARIOS];
 const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;
@@ -59,7 +59,7 @@ const PAGE_DIAGNOSTIC_LIMIT = 16;
 const PAGE_DIAGNOSTIC_STEP_LIMIT = 128;
 const PAGE_DIAGNOSTIC_FIELD_LIMIT = 256;
 const PAGE_DIAGNOSTIC_VALUE_TYPES = new Set(['undefined', 'null', 'boolean', 'number', 'string', 'object', 'function']);
-const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'first-message', 'message', 'group', 'channel', 'poll', 'unknown']);
+const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel', 'poll', 'unknown']);
 const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set(AVAILABLE_SCENARIOS);
 const PAGE_ERROR_EVENT_CAPTURE_KEY = '__teagramPageErrorEvents';
 const pageErrorDiagnosticCounts = new WeakMap();
@@ -2813,6 +2813,139 @@ async function toggleMessageReaction(page, otherPage, messageText, stage, expect
   const pages = [page, otherPage];
   if(pages.some((targetPage, index) => (clientErrorCounts.get(targetPage)?.consoleErrors ?? 0) !== pageErrors[index])) {
     failStage(`${stage}_console_errors`);
+  }
+}
+
+// Opens the composer emoji picker, then the free custom emoji fixture set, and
+// waits for the compositor to paint the set on the default renderer. The page
+// must stay alive through both surfaces.
+function browserLaunchArgs(config) {
+  return [
+    `--host-resolver-rules=MAP teagramd.test ${config.frontIp},MAP * ~NOTFOUND`,
+    `--ignore-certificate-errors-spki-list=${config.leafSPKI}`,
+    '--disable-background-networking',
+    '--disable-component-update',
+    '--disable-default-apps',
+    '--disable-domain-reliability',
+    '--disable-quic',
+    '--disable-sync',
+    '--dns-prefetch-disable'
+  ];
+}
+
+// Every trial is a fresh browser, so the first open of the emoji picker is always cold.
+const COLD_PICKER_TRIALS = 8;
+
+async function openEmojiPicker(page, stage) {
+  setPageScenarioStep(page, `${stage}_picker`);
+  await page.locator('#column-center .toggle-emoticons').click().catch(() => failStage(`${stage}_picker_open`));
+  const dropdown = page.locator('.emoji-dropdown');
+  await dropdown.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_picker_visible`));
+  await dropdown.locator('.emoji-category').first().waitFor({state: 'attached', timeout: 15_000})
+  .catch(() => failStage(`${stage}_picker_category`));
+
+  // The crash this guards against hit a couple of seconds after the picker opened
+  setPageScenarioStep(page, `${stage}_picker_loaded`);
+  await page.waitForFunction(() => {
+    const images = [...document.querySelectorAll('.emoji-dropdown img.emoji')].filter((image) => {
+      const rect = image.getBoundingClientRect();
+      const bounds = (image.closest('.scrollable') || image.closest('.emoji-dropdown')).getBoundingClientRect();
+      return rect.width > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom;
+    });
+    return images.filter((image) => image.naturalWidth > 0).length >= 20;
+  }, null, {timeout: 20_000}).catch(() => failStage(`${stage}_picker_loaded`));
+  await page.waitForTimeout(2_500);
+  await page.evaluate(() => document.title).catch(() => failStage(`${stage}_page_alive`));
+
+  setPageScenarioStep(page, `${stage}_picker_close`);
+  await page.locator('#column-center .toggle-emoticons').click().catch(() => failStage(`${stage}_picker_close`));
+  await page.waitForFunction(() => !document.querySelector('.emoji-dropdown.active'), null, {timeout: 15_000})
+  .catch(() => failStage(`${stage}_picker_close`));
+  await page.evaluate(() => document.title).catch(() => failStage(`${stage}_page_alive`));
+}
+
+async function openCustomEmojiSet(page, stage) {
+  setPageScenarioStep(page, `${stage}_set_link`);
+  const setLink = await page.evaluate(() => {
+    const link = document.createElement('a');
+    link.href = new URL('/addemoji/twemoji_custom_emojis', window.location.origin).toString();
+    link.addEventListener('click', (event) => window.stickerSet(link, event));
+    link.textContent = 'Open custom emoji smoke set';
+    link.style.cssText = 'position:fixed;left:8px;top:8px;z-index:2147483647;padding:8px;background:white;color:black';
+    document.body.append(link);
+    return link.textContent;
+  }).catch(() => failStage(`${stage}_set_link`));
+  await page.getByText(setLink, {exact: true}).click().catch(() => failStage(`${stage}_set_link`));
+  const link = page.getByText(setLink, {exact: true});
+  if(await link.count()) await link.evaluate((element) => element.remove());
+
+  setPageScenarioStep(page, `${stage}_set_preview`);
+  const popup = page.locator('.popup-stickers');
+  await popup.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`${stage}_set_preview`));
+
+  setPageScenarioStep(page, `${stage}_set_rendered`);
+  await page.waitForFunction(() => {
+    const canvas = document.querySelector('.popup-stickers canvas[data-offscreen="1"]');
+    const emojis = [...document.querySelectorAll('.popup-stickers .custom-emoji')].filter((emoji) => {
+      const rect = emoji.getBoundingClientRect();
+      const bounds = (emoji.closest('.scrollable') || document.documentElement).getBoundingClientRect();
+      return rect.width > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom;
+    });
+    return !!canvas && emojis.length > 0 && emojis.every((emoji) => emoji.childNodes.length === 0);
+  }, null, {timeout: 30_000}).catch(() => failStage(`${stage}_set_rendered`));
+
+  setPageScenarioStep(page, `${stage}_set_close`);
+  await page.keyboard.press('Escape').catch(() => failStage(`${stage}_set_close`));
+  await popup.waitFor({state: 'detached', timeout: 15_000}).catch(() => failStage(`${stage}_set_close`));
+  await page.evaluate(() => document.title).catch(() => failStage(`${stage}_page_alive`));
+}
+
+async function runColdPickerTrial(storageState, appUrl, trial) {
+  const stage = `alice_cold_picker_${trial + 1}`;
+  const browser = await chromium.launch({headless: true, chromiumSandbox: true, args: browserLaunchArgs(runtime)})
+  .catch(() => failStage(`${stage}_launch`));
+  try {
+    const context = await browser.newContext({viewport: {width: 1280, height: 900}, storageState})
+    .catch(() => failStage(`${stage}_context`));
+    const page = await context.newPage();
+    // A renderer crash otherwise only shows up as a timeout on whatever wait is pending
+    let crashed = false;
+    page.on('crash', () => { crashed = true; });
+    const crashGuard = (error) => {
+      if(crashed || /crash|has been closed/i.test(String(error?.message))) failStage(`${stage}_renderer_crashed`);
+      throw error;
+    };
+    try {
+      await page.goto(appUrl, {waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage(`${stage}_load`));
+      await page.waitForFunction(() => {
+        const chats = document.querySelector('#page-chats');
+        return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+      }, null, {timeout: 45_000}).catch(() => failStage(`${stage}_chats`));
+      await selectUniquePeer(
+        page,
+        '#column-left .input-search-input',
+        '#search-container .row[data-peer-id]',
+        runtime.accounts[1].username,
+        `${stage}_chat`
+      );
+      await openComposer(page, `${stage}_chat`);
+      await openEmojiPicker(page, stage);
+      await openCustomEmojiSet(page, stage);
+    } catch(error) {
+      crashGuard(error);
+    }
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+async function runCustomEmojiScenario(alice) {
+  currentStage = 'alice_custom_emoji_state';
+  const storageState = await alice.context.storageState({indexedDB: true}).catch(() => failStage('alice_custom_emoji_state'));
+  const appUrl = alice.page.url();
+  for(let trial = 0; trial < COLD_PICKER_TRIALS; ++trial) {
+    currentStage = `alice_cold_picker_${trial + 1}`;
+    await runColdPickerTrial(storageState, appUrl, trial);
   }
 }
 
@@ -6161,17 +6294,7 @@ async function main(dependencies = {}) {
     browser = await (dependencies.launchBrowser || ((options) => chromium.launch(options)))({
       headless: true,
       chromiumSandbox: true,
-      args: [
-        `--host-resolver-rules=MAP teagramd.test ${runtime.frontIp},MAP * ~NOTFOUND`,
-        `--ignore-certificate-errors-spki-list=${runtime.leafSPKI}`,
-        '--disable-background-networking',
-        '--disable-component-update',
-        '--disable-default-apps',
-        '--disable-domain-reliability',
-        '--disable-quic',
-        '--disable-sync',
-        '--dns-prefetch-disable'
-      ]
+      args: browserLaunchArgs(runtime)
     });
 
     // Browser-level discovery starts before this runner creates any context,
@@ -6391,6 +6514,10 @@ async function main(dependencies = {}) {
     await toggleMessageReaction(bob.page, alice.page, MESSAGE, 'bob_direct_reaction_set', 1);
     await toggleMessageReaction(bob.page, alice.page, MESSAGE, 'bob_direct_reaction_clear', 0);
     report.push({name: 'message', status: 'passed'});
+
+    currentScenario = 'custom-emoji';
+    await runCustomEmojiScenario(alice);
+    report.push({name: 'custom-emoji', status: 'passed'});
 
     currentScenario = 'group';
     currentStage = 'alice_new_group_menu';
