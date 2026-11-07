@@ -3894,6 +3894,18 @@ describe('discovery shared-worker network accounting', () => {
 });
 
 describe('real client scenario contract', () => {
+  it('opens the custom emoji smoke set through the CSP-safe app link handler', () => {
+    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
+    const setInstallSource = browserSource.slice(
+      browserSource.indexOf('async function installCustomEmojiSet'),
+      browserSource.indexOf('async function selectCustomEmoji')
+    );
+
+    expect(setInstallSource).toContain(`link.href = new URL('/links/addemoji/twemoji_custom_emojis', window.location.origin).toString();`);
+    expect(setInstallSource).toContain(`link.addEventListener('click', (event) => window.stickerSet(link, event));`);
+    expect(setInstallSource).not.toContain(`setAttribute('onclick'`);
+  });
+
   it('requires exactly one recipient message with the expected text', () => {
     expect(getSingleExactMessageFailure(['browser-ci-hello'], 'browser-ci-hello')).toBe(null);
     expect(getSingleExactMessageFailure(['prefix browser-ci-hello'], 'browser-ci-hello')).toBe('content');
