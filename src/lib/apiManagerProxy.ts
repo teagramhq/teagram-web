@@ -1168,19 +1168,29 @@ class ApiManagerProxy extends MTProtoMessagePort {
     }
 
     const originalUrl = (initialWorker as any).url;
-    // Resolve all proxy URLs before starting workers, so every port has a registered destination.
-    const blob = await get(originalUrl);
-    const urls = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
-
     // Safari silently wedges a {type:'module'} SharedWorker used for lottie sticker decoding:
     // frames never arrive, no error is thrown, and every sticker canvas stays blank (never appended).
     // Keep MTProto/crypto on the shared worker, but hand the lottie pool per-tab dedicated Workers.
     const constructor = IS_SHARED_WORKER_SUPPORTED && !(IS_SAFARI && type === 'lottie') ? SharedWorker : Worker;
     const createWorker = (url: string) => new constructor(url, {type: 'module'});
     const workers: Array<SharedWorker | Worker> = [];
+    const onPort = (_payload: void, _source: MessageEventSource, event: MessageEvent) => this.invokeVoid(
+      'threadedPort',
+      type,
+      undefined,
+      [event.ports[0]]
+    );
 
+    // Listen before starting workers; their port handshake can arrive while URLs are fetched.
+    superMessagePort.addEventListener('port', onPort);
     try {
-      for(const url of [originalUrl, ...urls.slice(1)]) {
+      const firstWorker = createWorker(originalUrl);
+      workers.push(firstWorker);
+      this.attachWorkerToPort(firstWorker, superMessagePort, type);
+
+      const blob = await get(originalUrl);
+      const urls = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
+      for(const url of urls.slice(1)) {
         const worker = createWorker(url);
         workers.push(worker);
         this.attachWorkerToPort(worker, superMessagePort, type);
@@ -1190,20 +1200,13 @@ class ApiManagerProxy extends MTProtoMessagePort {
         console.log('Workers URLs', type, urls);
       }
     } catch(error) {
+      superMessagePort.removeEventListener('port', onPort);
       workers.forEach((worker) => {
         superMessagePort.detachPort((worker as SharedWorker).port || worker as any);
         (worker as Worker).terminate?.();
       });
       throw error;
     }
-
-    // Worker message events run after this stack, so the complete pool is attached before listening.
-    superMessagePort.addEventListener('port', (_payload, _source, event) => this.invokeVoid(
-      'threadedPort',
-      type,
-      undefined,
-      [event.ports[0]]
-    ));
   }
 
   private async registerCryptoWorker() {

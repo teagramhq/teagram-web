@@ -92,6 +92,8 @@ test.each(['worker-source fetch', 'proxy-URL request', 'second worker attachment
   let failSecondAttachment = failureStage === 'second worker attachment';
 
   vi.stubGlobal('fetch', vi.fn(async() => {
+    expect(attachedWorkers).toHaveLength(1);
+    expect(messagePort.portListenerCount).toBe(1);
     if(failWorkerSourceFetch) {
       failWorkerSourceFetch = false;
       throw registrationError;
@@ -108,7 +110,8 @@ test.each(['worker-source fetch', 'proxy-URL request', 'second worker attachment
   };
   proxy.invoke = (method: string, params: unknown) => {
     if(method === 'createProxyWorkerURLs') {
-      expect(attachedWorkers).toHaveLength(0);
+      expect(attachedWorkers).toHaveLength(1);
+      expect(messagePort.portListenerCount).toBe(1);
       return createProxyWorkerURLs(params);
     }
     throw new Error(`unexpected API manager invocation: ${method}`);
@@ -128,9 +131,9 @@ test.each(['worker-source fetch', 'proxy-URL request', 'second worker attachment
 
   await expect(proxy.registerThreadedWorker(registration)).rejects.toBe(registrationError);
   expect(messagePort.attached).toEqual([]);
-  expect(messagePort.detached).toHaveLength(failureStage === 'second worker attachment' ? 2 : 0);
+  expect(messagePort.detached).toHaveLength(failureStage === 'second worker attachment' ? 2 : 1);
   expect(messagePort.portListenerCount).toBe(0);
-  expect(attachedWorkers).toHaveLength(failureStage === 'second worker attachment' ? 2 : 0);
+  expect(attachedWorkers).toHaveLength(failureStage === 'second worker attachment' ? 2 : 1);
   expect(attachedWorkers.every((worker) => (worker as globalThis.Worker & {terminated: boolean}).terminated)).toBe(true);
   expect(invokeVoid).not.toHaveBeenCalled();
 
