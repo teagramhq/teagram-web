@@ -1,10 +1,9 @@
 import {MOUNT_CLASS_TO} from '@config/debug';
-import I18n, {i18n} from '@lib/langPack';
+import I18n, {getDateFormatOptions, i18n} from '@lib/langPack';
 import {days, months} from '@helpers/date/common';
 import capitalizeFirstLetter from '@helpers/string/capitalizeFirstLetter';
-import {getDateFormatOptions, getWeekNumber} from '@helpers/dateFormatOptions';
 
-export {getWeekNumber};
+export {getWeekNumber} from '@lib/langPack';
 
 export const monthsLocalized = months.slice();
 export const daysLocalized = days.slice();

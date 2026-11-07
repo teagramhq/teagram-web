@@ -1,13 +1,12 @@
 import type {ChatPageRow} from '@lib/chatPageSnapshot';
 import getPreviewURLFromBytes from '@helpers/bytes/getPreviewURLFromBytes';
-import I18n from '@lib/langPack';
+import I18n, {getDateFormatOptions} from '@lib/langPack';
 import getAbbreviation from '@lib/richTextProcessor/getAbbreviation';
 import Icon from '@components/icon';
 import {watchChatPageSnapshotInvalidations} from '@lib/chatPageSnapshot';
 import {listenForGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
 import {getRuntimeServerId} from '@config/serverContext';
 import type {ActiveAccountNumber} from '@lib/accounts/types';
-import {getDateFormatOptions} from '@helpers/dateFormatOptions';
 
 let snapshotElement: HTMLElement;
 let livePageArrived = false;

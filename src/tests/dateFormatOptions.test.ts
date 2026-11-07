@@ -1,5 +1,5 @@
 import {expect, it} from 'vitest';
-import {getDateFormatOptions} from '@helpers/dateFormatOptions';
+import {getDateFormatOptions} from '@lib/langPack';
 
 it.each([
   ['today', new Date(2025, 4, 14, 9), new Date(2025, 4, 14, 12), {hour: '2-digit', minute: '2-digit'}],
