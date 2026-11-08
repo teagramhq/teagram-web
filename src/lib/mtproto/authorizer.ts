@@ -556,12 +556,7 @@ export class Authorizer {
       throw new Error('[MT] Set_client_DH_params_answer server_nonce mismatch');
     }
 
-    // let authKey: Uint8Array;
-    try {
-      var authKey = await CryptoWorker.invokeCrypto('mod-pow', auth.gA, auth.b, auth.dhPrime);
-    } catch(err) {
-      throw authKey;
-    }
+    const authKey = await CryptoWorker.invokeCrypto('mod-pow', auth.gA, auth.b, auth.dhPrime);
 
     const authKeyHash = await CryptoWorker.invokeCrypto('sha1', authKey),
       authKeyAux = authKeyHash.slice(0, 8),
