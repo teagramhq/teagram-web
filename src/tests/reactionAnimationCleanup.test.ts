@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => {
     getReaction: vi.fn(),
     getCacheContext: vi.fn(),
     loadAnimationAsAsset: vi.fn(),
+    waitForFirstFrame: vi.fn(() => Promise.resolve()),
     wrapSticker: vi.fn(),
     wrapStickerAnimation: vi.fn()
   };
@@ -53,7 +54,10 @@ vi.mock('@lib/apiManagerProxy', () => ({
 vi.mock('@lib/liteMode', () => ({default: {isAvailable: () => true}}));
 vi.mock('@helpers/liteMode', () => ({default: {isAvailable: () => true}}));
 vi.mock('@environment/webpSupport', () => ({default: true}));
-vi.mock('@lib/lottie/lottieLoader', () => ({default: {loadAnimationAsAsset: mocks.loadAnimationAsAsset}}));
+vi.mock('@lib/lottie/lottieLoader', () => ({default: {
+  loadAnimationAsAsset: mocks.loadAnimationAsAsset,
+  waitForFirstFrame: mocks.waitForFirstFrame
+}}));
 vi.mock('@lib/lottie/lottiePlayer', () => ({default: mocks.FakeLottiePlayer}));
 vi.mock('@lib/appDownloadManager', () => ({default: {downloadMediaURL: vi.fn()}}));
 vi.mock('@lib/customEmoji/element', () => ({default: {create: vi.fn()}}));
@@ -82,6 +86,7 @@ vi.mock('@components/wrappers/stickerAnimation', () => ({default: mocks.wrapStic
 vi.mock('@components/chat/reactions', () => ({savedReactionTags: []}));
 
 import ReactionElement from '@components/chat/reaction';
+import {ChatReactionsMenu} from '@components/chat/reactionsMenu';
 
 describe('reaction animation cleanup', () => {
   beforeEach(() => {
@@ -191,5 +196,51 @@ describe('reaction animation cleanup', () => {
 
     expect(removePlayer).toHaveBeenCalledOnce();
     expect(container.contains(overlay!)).toBe(false);
+  });
+
+  it('ignores cancelled appear and select animation renders without unhandled rejections', async() => {
+    const appearAnimation = {id: 'appear'};
+    const selectAnimation = {id: 'select'};
+    mocks.getCacheContext.mockReturnValue({downloaded: true, url: 'blob:reaction'});
+    mocks.wrapSticker.mockImplementation(async() => ({render: Promise.resolve(undefined)}));
+
+    const middleware = Object.assign(() => true, {onDestroy: vi.fn()});
+    const middlewareHelper = {get: () => middleware, clean: vi.fn()};
+    const parentMiddleware = {create: () => middlewareHelper};
+    const menu = new ChatReactionsMenu({
+      managers: {} as any,
+      type: 'horizontal',
+      middleware: parentMiddleware as any,
+      onFinish: vi.fn(),
+      getOpenPosition: () => new DOMRect()
+    });
+    const availableReaction = {
+      reaction: '👍',
+      around_animation: {id: 'around'},
+      center_icon: {id: 'center'},
+      appear_animation: appearAnimation,
+      select_animation: selectAnimation
+    } as any;
+    const addEventListener = vi.spyOn(mocks.FakeLottiePlayer.prototype, 'addEventListener');
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    try {
+      await expect((menu as any).renderReaction({_: 'reactionEmoji', emoticon: '👍'}, availableReaction))
+      .resolves.toEqual([]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(mocks.wrapSticker).toHaveBeenCalledTimes(2);
+      expect(mocks.wrapSticker.mock.calls.map(([{doc}]) => doc)).toEqual([appearAnimation, selectAnimation]);
+      expect({
+        addEventListenerCalls: addEventListener.mock.calls.length,
+        waitForFirstFrameCalls: mocks.waitForFirstFrame.mock.calls.length,
+        unhandled
+      }).toEqual({addEventListenerCalls: 0, waitForFirstFrameCalls: 0, unhandled: []});
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+      menu.cleanup();
+    }
   });
 });
