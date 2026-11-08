@@ -2923,7 +2923,12 @@ async function runColdPickerTrial(storageState, appUrl, trial) {
     // The trial page is not one of the signed-in app pages, so it needs its own error counters
     const errors = {page: 0, console: 0};
     page.on('pageerror', () => { errors.page++; });
-    page.on('console', (message) => { if(message.type() === 'error') errors.console++; });
+    page.on('console', (message) => {
+      if(message.type() !== 'error') return;
+      // The fixture's keep-alive timeout can reset a reused connection under an emoji image request
+      if(message.text().includes('net::ERR_FAILED') && (message.location().url || '').includes('/assets/img/emoji/')) return;
+      errors.console++;
+    });
     // pids.events is cumulative for the whole job, so only a refused fork during this trial counts
     const pidsHitsBefore = readPidsLimitHits();
     const crashGuard = (error) => {
@@ -2939,13 +2944,11 @@ async function runColdPickerTrial(storageState, appUrl, trial) {
         const chats = document.querySelector('#page-chats');
         return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
       }, null, {timeout: 45_000}).catch(() => failStage(`${stage}_chats`));
-      await selectUniquePeer(
-        page,
-        '#column-left .input-search-input',
-        '#search-container .row[data-peer-id]',
-        runtime.accounts[1].username,
-        `${stage}_chat`
-      );
+      // A fresh account session can briefly list the peer twice, so take the first matching row
+      await page.locator('#column-left .input-search-input').first().fill(runtime.accounts[1].username)
+      .catch(() => failStage(`${stage}_chat_search`));
+      await page.locator('#search-container .row[data-peer-id]').filter({hasText: runtime.accounts[1].username}).first()
+      .click({timeout: 25_000}).catch(() => failStage(`${stage}_chat_result`));
       await openComposer(page, `${stage}_chat`);
       // Console errors while the chat loads are not this scenario's concern
       const consoleErrorsBefore = errors.console;

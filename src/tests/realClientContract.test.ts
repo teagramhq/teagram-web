@@ -3937,8 +3937,10 @@ describe('real client scenario contract', () => {
     expect(trialSource).toContain('storageState');
     expect(trialSource).toContain('_renderer_crashed');
     expect(trialSource).toContain('_pids_limit');
+    expect(trialSource).toContain('/assets/img/emoji/');
+    expect(trialSource).toContain('_chat_result');
     expect(trialSource).toContain(`page.on('pageerror'`);
-    expect(trialSource).toContain(`message.type() === 'error'`);
+    expect(trialSource).toContain(`message.type() !== 'error'`);
     expect(trialSource).toContain('_page_error');
     expect(trialSource).toContain('_console_error');
     expect(trialSource).toContain('pidsHitsBefore');
