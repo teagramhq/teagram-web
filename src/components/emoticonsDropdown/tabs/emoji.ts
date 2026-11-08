@@ -62,6 +62,7 @@ import {
 import showLazyTonePicker from '@components/emoticonsDropdown/lazyTonePicker';
 import {hasLoadedURL, markLoadedURL} from '@helpers/dom/loadedUrlCache';
 import createLazyEmojiImages from '@helpers/lazyEmojiImages';
+import LazyLoadQueue from '@components/lazyLoadQueue';
 
 
 export function appendEmoji(_emoji: AppEmoji, options: {
@@ -221,6 +222,8 @@ type EmojiTabItem = {
 } & ReturnType<typeof getEmojiFromElement>;
 export type EmojiTabCategory = StickersTabCategory<EmojiTabItem, {renderer: CustomEmojiRendererElement}>;
 export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: AppEmoji[], localStickerSet?: {title: LangPackKey, stickers: MyDocument[]}}> {
+  // its own queue, because the dropdown's is locked while the dropdown opens, which is when the first screen is wanted
+  private emojiImageQueue = new LazyLoadQueue(1, true);
   private closeScrollTop: number;
   private menuInnerScroll: ScrollableX;
   private isStandalone?: boolean;
@@ -474,6 +477,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
 
   public destroy() {
     super.destroy();
+    this.emojiImageQueue.clear();
     this.menuInnerScroll?.destroy();
   }
 
@@ -1060,8 +1064,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
   }
 
   private getLazyEmojiLoad(category: EmojiTabCategory) {
-    const queue = this.emoticonsDropdown?.lazyLoadQueue;
-    return queue && createLazyEmojiImages(queue, category.middlewareHelper.get());
+    return createLazyEmojiImages(this.emojiImageQueue, category.middlewareHelper.get());
   }
 
   private updateEmojiItemTone(item: EmojiTabItem, tone: EmojiSkinTone, category: EmojiTabCategory) {
