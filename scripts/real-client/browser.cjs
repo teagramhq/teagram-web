@@ -3188,7 +3188,8 @@ async function runCustomEmojiFeatureFlow(alice, bob) {
   await alice.page.locator('#column-center .toggle-emoticons').click()
   .catch(() => failStage('alice_custom_emoji_send_picker'));
   const docId = await selectCustomEmoji(alice.page, 'alice_custom_emoji_send');
-  await input.press('Enter').catch(() => failStage('alice_custom_emoji_send_submit'));
+  await alice.page.locator('#column-center .btn-send').click()
+  .catch(() => failStage('alice_custom_emoji_send_submit'));
   await waitForCustomEmojiMessage(alice.page, messageText, docId, 'alice_custom_emoji_send_visible');
 
   const bobPeerId = await selectUniquePeer(
