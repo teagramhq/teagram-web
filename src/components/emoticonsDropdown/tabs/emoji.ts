@@ -60,7 +60,6 @@ import {
   getEmojiSkinToneVariants
 } from '@helpers/emojiSkinTone';
 import showLazyTonePicker from '@components/emoticonsDropdown/lazyTonePicker';
-import selectEmojiTone from '@components/emoticonsDropdown/selectEmojiTone';
 import {hasLoadedURL, markLoadedURL} from '@helpers/dom/loadedUrlCache';
 import createLazyEmojiImages from '@helpers/lazyEmojiImages';
 import LazyLoadQueue from '@components/lazyLoadQueue';
@@ -1123,7 +1122,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
     }
 
     const {baseEmoji, variants} = toneVariants;
-    const picker = showLazyTonePicker(() => import('@components/emoticonsDropdown/emojiTonePicker').then(({default: showEmojiTonePicker}) => showEmojiTonePicker({
+    const picker = showLazyTonePicker(() => import('@components/emoticonsDropdown/emojiTonePicker').then(({default: showEmojiTonePicker, selectEmojiTone}) => showEmojiTonePicker({
       event,
       variants,
       selectedTone: this.emojiVariants[baseEmoji] ?? getEmojiSkinTone(emoji.emoji),

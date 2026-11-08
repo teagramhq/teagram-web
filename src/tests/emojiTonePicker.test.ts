@@ -1,7 +1,6 @@
 import {simulateClickEvent} from '@helpers/dom/clickEvent';
 import {getEmojiSkinToneVariants} from '@helpers/emojiSkinTone';
-import selectEmojiTone from '@components/emoticonsDropdown/selectEmojiTone';
-import showEmojiTonePicker from '@components/emoticonsDropdown/emojiTonePicker';
+import showEmojiTonePicker, {selectEmojiTone} from '@components/emoticonsDropdown/emojiTonePicker';
 
 describe('emoji tone picker', () => {
   beforeEach(() => {
