@@ -2833,6 +2833,15 @@ function browserLaunchArgs(config) {
   ];
 }
 
+function readPidsLimitHits() {
+  try {
+    const hits = /^max (\d+)$/m.exec(fs.readFileSync('/sys/fs/cgroup/pids.events', 'utf8'));
+    return hits ? Number(hits[1]) : 0;
+  } catch(error) {
+    return 0;
+  }
+}
+
 // Every trial is a fresh browser, so the first open of the emoji picker is always cold.
 const COLD_PICKER_TRIALS = 8;
 
@@ -2912,7 +2921,10 @@ async function runColdPickerTrial(storageState, appUrl, trial) {
     let crashed = false;
     page.on('crash', () => { crashed = true; });
     const crashGuard = (error) => {
-      if(crashed || /crash|has been closed/i.test(String(error?.message))) failStage(`${stage}_renderer_crashed`);
+      if(crashed || /crash|has been closed/i.test(String(error?.message))) {
+        // A fork refused by the container's process limit looks the same as a renderer crash
+        failStage(readPidsLimitHits() > 0 ? `${stage}_pids_limit` : `${stage}_renderer_crashed`);
+      }
       throw error;
     };
     try {

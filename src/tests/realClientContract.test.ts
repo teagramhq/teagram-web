@@ -3936,6 +3936,7 @@ describe('real client scenario contract', () => {
     expect(trialSource).toContain('chromium.launch(');
     expect(trialSource).toContain('storageState');
     expect(trialSource).toContain('_renderer_crashed');
+    expect(trialSource).toContain('_pids_limit');
     expect(picker).toBeGreaterThan(-1);
     expect(set).toBeGreaterThan(picker);
     expect(trialSource).toContain('await browser.close()');
