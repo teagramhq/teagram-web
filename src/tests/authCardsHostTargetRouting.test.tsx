@@ -130,7 +130,10 @@ vi.mock('@components/popups/simpleConfirmation', () => ({SimpleConfirmationPopup
 vi.mock('@components/toast', () => ({toastNew: vi.fn()}));
 vi.mock('@components/wrappers/wrapDuration', () => ({wrapFormattedDuration: vi.fn()}));
 vi.mock('@environment/touchSupport', () => ({default: true}));
-vi.mock('@environment/userAgent', () => ({IS_MOBILE_SAFARI: false}));
+vi.mock('@environment/userAgent', async(importOriginal) => ({
+  ...await importOriginal<typeof import('@environment/userAgent')>(),
+  IS_MOBILE_SAFARI: false
+}));
 vi.mock('@helpers/dom/anchorCallback', () => ({default: vi.fn(() => document.createElement('a'))}));
 vi.mock('@helpers/dom/cancelEvent', () => ({default: (event?: Event) => event?.preventDefault()}));
 vi.mock('@helpers/dom/focusWhenConnected', () => ({default: vi.fn(() => () => {})}));
