@@ -3929,7 +3929,7 @@ describe('real client scenario contract', () => {
       browserSource.indexOf('async function runColdPickerTrial'),
       browserSource.indexOf('async function sendChannelText')
     );
-    const picker = trialSource.indexOf('await openEmojiPicker(page, stage)');
+    const picker = trialSource.indexOf('await openEmojiPicker(page, stage, emojiRequests)');
     const set = trialSource.indexOf('await openCustomEmojiSet(page, stage)');
 
     expect(browserSource).toContain('const COLD_PICKER_TRIALS = 8;');
@@ -3982,6 +3982,9 @@ describe('real client scenario contract', () => {
     expect(pickerSource.indexOf('_picker_loaded')).toBeGreaterThan(pickerSource.indexOf('_picker_category'));
     expect(pickerSource.indexOf('waitForTimeout(2_500)')).toBeGreaterThan(pickerSource.indexOf('_picker_loaded'));
     expect(pickerSource.indexOf('_page_alive')).toBeGreaterThan(pickerSource.indexOf('waitForTimeout(2_500)'));
+    expect(pickerSource).toContain('emojiRequests.count > EMOJI_PICKER_REQUEST_LIMIT');
+    expect(pickerSource).toContain('_picker_image_burst');
+    expect(browserSource).toContain('const EMOJI_PICKER_REQUEST_LIMIT = 200;');
   });
 
   it('requires every scenario exactly once', () => {

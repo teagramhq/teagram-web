@@ -2844,8 +2844,11 @@ function readPidsLimitHits() {
 
 // Every trial is a fresh browser, so the first open of the emoji picker is always cold.
 const COLD_PICKER_TRIALS = 8;
+// The picker used to request every emoji image (about 555) the moment it opened, which exhausted the
+// fixture browser's tmp and killed the renderer. Only the images near view may be requested.
+const EMOJI_PICKER_REQUEST_LIMIT = 200;
 
-async function openEmojiPicker(page, stage) {
+async function openEmojiPicker(page, stage, emojiRequests) {
   setPageScenarioStep(page, `${stage}_picker`);
   await page.locator('#column-center .toggle-emoticons').click().catch(() => failStage(`${stage}_picker_open`));
   const dropdown = page.locator('.emoji-dropdown');
@@ -2865,6 +2868,7 @@ async function openEmojiPicker(page, stage) {
   }, null, {timeout: 20_000}).catch(() => failStage(`${stage}_picker_loaded`));
   await page.waitForTimeout(2_500);
   await page.evaluate(() => document.title).catch(() => failStage(`${stage}_page_alive`));
+  if(emojiRequests.count > EMOJI_PICKER_REQUEST_LIMIT) failStage(`${stage}_picker_image_burst`);
 
   setPageScenarioStep(page, `${stage}_picker_close`);
   await page.locator('#column-center .toggle-emoticons').click().catch(() => failStage(`${stage}_picker_close`));
@@ -2930,6 +2934,10 @@ async function runColdPickerTrial(storageState, appUrl, trial) {
     // A renderer crash otherwise only shows up as a timeout on whatever wait is pending
     let crashed = false;
     page.on('crash', () => { crashed = true; });
+    const emojiRequests = {count: 0};
+    page.on('request', (request) => {
+      if(new URL(request.url()).pathname.startsWith('/assets/img/emoji/')) emojiRequests.count++;
+    });
     // The trial page is not one of the signed-in app pages, so it needs its own error counters
     const errors = {page: 0, console: 0};
     page.on('pageerror', () => { errors.page++; });
@@ -2957,7 +2965,7 @@ async function runColdPickerTrial(storageState, appUrl, trial) {
       await openComposer(page, `${stage}_chat`);
       // Console errors while the chat loads are not this scenario's concern
       const consoleErrorsBefore = errors.console;
-      await openEmojiPicker(page, stage);
+      await openEmojiPicker(page, stage, emojiRequests);
       await openCustomEmojiSet(page, stage);
       if(errors.page > 0) failStage(`${stage}_page_error`);
       if(errors.console !== consoleErrorsBefore) failStage(`${stage}_console_error`);
