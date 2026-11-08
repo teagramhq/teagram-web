@@ -63,7 +63,14 @@ export default async function wrapEmojiStatus({
     return container;
   }
 
-  const p = result.result.then(wrap);
+  const p = result.result.then(wrap).catch((error) => {
+    // A peer/title can be replaced while its status animation is loading.
+    // Middleware cancellation is expected during that teardown; keep real load
+    // failures observable.
+    if((error as ApiError)?.type !== 'MIDDLEWARE') {
+      throw error;
+    }
+  });
   if(result.cached) {
     await p;
   }
