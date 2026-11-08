@@ -1,6 +1,7 @@
 import type {MyDocument} from '@appManagers/appDocsManager';
 import {EmoticonsDropdown} from '..';
 import cancelEvent from '@helpers/dom/cancelEvent';
+import contextMenuController from '@helpers/contextMenuController';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import {fastRaf} from '@helpers/schedulers';
 import pause from '@helpers/schedulers/pause';
@@ -58,11 +59,18 @@ import {
   getEmojiSkinTone,
   getEmojiSkinToneVariants
 } from '@helpers/emojiSkinTone';
-import showEmojiTonePicker from '@components/emoticonsDropdown/emojiTonePicker';
+import showLazyTonePicker from '@components/emoticonsDropdown/lazyTonePicker';
+import {hasLoadedURL, markLoadedURL} from '@helpers/dom/loadedUrlCache';
+import createLazyEmojiImages from '@helpers/lazyEmojiImages';
+import LazyLoadQueue from '@components/lazyLoadQueue';
 
 
-const loadedURLs: Set<string> = new Set();
-export function appendEmoji(_emoji: AppEmoji, unify = false) {
+export function appendEmoji(_emoji: AppEmoji, options: {
+  unify?: boolean,
+  // the queue loads the emoji image when it is near view and drops it when the middleware is gone
+  lazyLoad?: ReturnType<typeof createLazyEmojiImages>
+} = {}) {
+  const {unify = false, lazyLoad} = options;
   if(_emoji.docId) {
     const customEmojiElement = CustomEmojiElement.create(_emoji.docId);
     const spanEmoji = document.createElement('span');
@@ -83,22 +91,28 @@ export function appendEmoji(_emoji: AppEmoji, unify = false) {
     el = wrapSingleEmoji(emoji);
   } else {
     emoji = fixEmoji(emoji);
-    el = wrapEmojiText(emoji);
+    el = wrapEmojiText(emoji, false, undefined, lazyLoad?.load);
   }
 
   spanEmoji.append(el);
 
   if(spanEmoji.children.length > 1) {
     const first = spanEmoji.firstElementChild;
+    // the images dropped here never load, so they must leave the queue too
+    lazyLoad?.release(spanEmoji, first);
     spanEmoji.replaceChildren(first);
   }
 
   if(spanEmoji.firstElementChild?.tagName === 'IMG') {
     const image = spanEmoji.firstElementChild as HTMLImageElement;
 
-    const url = image.src;
-    if(!loadedURLs.has(url)) {
-      image.setAttribute('loading', 'lazy');
+    // a deferred image has no src until the queue loads it
+    const deferred = !image.hasAttribute('src');
+    if(deferred || !hasLoadedURL(image.getAttribute('src'))) {
+      if(!deferred) {
+        image.setAttribute('loading', 'lazy');
+      }
+
       const placeholder = document.createElement('span');
       placeholder.classList.add('emoji-placeholder');
 
@@ -116,7 +130,7 @@ export function appendEmoji(_emoji: AppEmoji, unify = false) {
 
           spanEmoji.classList.remove('empty');
 
-          loadedURLs.add(url);
+          markLoadedURL(image.getAttribute('src'));
         });
       }, {once: true});
 
@@ -208,6 +222,8 @@ type EmojiTabItem = {
 } & ReturnType<typeof getEmojiFromElement>;
 export type EmojiTabCategory = StickersTabCategory<EmojiTabItem, {renderer: CustomEmojiRendererElement}>;
 export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: AppEmoji[], localStickerSet?: {title: LangPackKey, stickers: MyDocument[]}}> {
+  // its own queue, because the dropdown's is locked while the dropdown opens, which is when the first screen is wanted
+  private emojiImageQueue = new LazyLoadQueue(8, true);
   private closeScrollTop: number;
   private menuInnerScroll: ScrollableX;
   private isStandalone?: boolean;
@@ -461,6 +477,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
 
   public destroy() {
     super.destroy();
+    this.emojiImageQueue.clear();
     this.menuInnerScroll?.destroy();
   }
 
@@ -1046,7 +1063,11 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
     category.elements.items.append(renderer);
   }
 
-  private updateEmojiItemTone(item: EmojiTabItem, tone: EmojiSkinTone) {
+  private getLazyEmojiLoad(category: EmojiTabCategory) {
+    return createLazyEmojiImages(this.emojiImageQueue, category.middlewareHelper.get());
+  }
+
+  private updateEmojiItemTone(item: EmojiTabItem, tone: EmojiSkinTone, category: EmojiTabCategory) {
     const toneVariants = item.baseEmoji && getEmojiSkinToneVariants(item.baseEmoji);
     if(!toneVariants) {
       return;
@@ -1058,7 +1079,8 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
     }
 
     item.emoji = emoji;
-    const renderedEmoji = appendEmoji({emoji});
+    const renderedEmoji = appendEmoji({emoji}, {lazyLoad: this.getLazyEmojiLoad(category)});
+    this.getLazyEmojiLoad(category)?.release(item.element);
     item.element.replaceChildren(...Array.from(renderedEmoji.childNodes));
   }
 
@@ -1067,7 +1089,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
       category.items.forEach((item) => {
         const tone = item.baseEmoji && this.emojiVariants[item.baseEmoji];
         if(tone !== undefined) {
-          this.updateEmojiItemTone(item, tone);
+          this.updateEmojiItemTone(item, tone, category);
         }
       });
     });
@@ -1078,7 +1100,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
     this.categoriesMap.forEach((category) => {
       category.items.forEach((item) => {
         if(item.baseEmoji === baseEmoji) {
-          this.updateEmojiItemTone(item, tone);
+          this.updateEmojiItemTone(item, tone, category);
         }
       });
     });
@@ -1097,16 +1119,21 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
     }
 
     const {baseEmoji, variants} = toneVariants;
-    const picker = showEmojiTonePicker({
+    const picker = showLazyTonePicker(() => import('@components/emoticonsDropdown/emojiTonePicker').then(({default: showEmojiTonePicker}) => showEmojiTonePicker({
       event,
       variants,
       selectedTone: this.emojiVariants[baseEmoji] ?? getEmojiSkinTone(emoji.emoji),
       renderEmoji: (emoji) => appendEmoji({emoji}),
+      close: () => contextMenuController.close(),
       onSelect: (tone) => {
         this.applyEmojiVariant(baseEmoji, tone);
         this.managers.appEmojiManager.saveEmojiVariant(baseEmoji, tone);
       }
+    })), (error) => {
+      console.error('emoji tone picker failed to load', error);
+      toastNew({langPackKey: 'Error.AnError'});
     });
+    cancelEvent(event);
     this.emoticonsDropdown?.setIgnoreMouseOut('tooltip', true);
     return {
       cleanup: () => {
@@ -1147,7 +1174,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
       spanEmoji.append(element);
       element = spanEmoji;
     } else {
-      element = appendEmoji(emoji/* .replace(/[\ufe0f\u2640\u2642\u2695]/g, '') *//* , false */);
+      element = appendEmoji(emoji, {lazyLoad: this.getLazyEmojiLoad(category)});
 
       if(this.showLocks && !this.canUseEmoji(emoji, category)) {
         element.append(Icon('premium_lock', 'premium-sticker-lock'));

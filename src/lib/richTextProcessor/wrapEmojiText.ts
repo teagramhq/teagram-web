@@ -1,13 +1,13 @@
 import {createEffect} from 'solid-js';
 import {MessageEntity, TextWithEntities} from '@layer';
 import parseEntities from '@lib/richTextProcessor/parseEntities';
-import wrapRichText from '@lib/richTextProcessor/wrapRichText';
+import wrapRichText, {WrapRichTextOptions} from '@lib/richTextProcessor/wrapRichText';
 
-export default function wrapEmojiText(text: string, isDraft = false, entities?: MessageEntity[]) {
+export default function wrapEmojiText(text: string, isDraft = false, entities?: MessageEntity[], lazyEmojiImage?: WrapRichTextOptions['lazyEmojiImage']) {
   if(!text) return wrapRichText('');
 
   entities ??= parseEntities(text).filter((e) => e._ === 'messageEntityEmoji');
-  return wrapRichText(text, {entities, wrappingDraft: isDraft});
+  return wrapRichText(text, {entities, wrappingDraft: isDraft, lazyEmojiImage});
 }
 
 export function wrapEmojiTextWithEntities(obj: TextWithEntities, isDraft = false) {

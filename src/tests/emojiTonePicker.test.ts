@@ -1,13 +1,6 @@
-import contextMenuController from '@helpers/contextMenuController';
 import {simulateClickEvent} from '@helpers/dom/clickEvent';
 import {getEmojiSkinToneVariants} from '@helpers/emojiSkinTone';
 import showEmojiTonePicker from '@components/emoticonsDropdown/emojiTonePicker';
-
-vi.mock('@helpers/contextMenuController', () => ({
-  default: {
-    close: vi.fn()
-  }
-}));
 
 describe('emoji tone picker', () => {
   beforeEach(() => {
@@ -25,6 +18,7 @@ describe('emoji tone picker', () => {
     document.body.append(target);
     const variants = getEmojiSkinToneVariants('👍').variants;
     const onSelect = vi.fn();
+    const close = vi.fn();
     const picker = showEmojiTonePicker({
       event: new MouseEvent('contextmenu'),
       variants,
@@ -34,7 +28,8 @@ describe('emoji tone picker', () => {
         element.textContent = emoji;
         return element;
       },
-      onSelect
+      onSelect,
+      close
     });
 
     picker.show(target);
@@ -47,7 +42,7 @@ describe('emoji tone picker', () => {
 
     simulateClickEvent(buttons[4]);
     expect(onSelect).toHaveBeenCalledWith(4);
-    expect(contextMenuController.close).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
 
     picker.cleanup();
     vi.advanceTimersByTime(200);
