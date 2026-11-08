@@ -303,9 +303,14 @@ async function waitForLottieWorker(page: Page) {
 // scenario is running. Let it finish first so scenario windows only contain their own requests.
 async function settleLottieWarmup(page: Page) {
   if(!lottieWarmupPages.has(page)) return;
-  await expect.poll(() => page.evaluate(() => (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).some((entry) => (
-    entry.name.includes('tlottie.worker') && entry.responseEnd > 0
-  ))), {timeout: 30_000, message: 'Lottie worker warm-up did not finish after the live chat list'}).toBe(true);
+  // Starting a scenario clears resource timings, so remember the result for this document.
+  await expect.poll(() => page.evaluate(() => {
+    const w = window as any;
+    if(w.__lottieWarmupSettled) return true;
+    return w.__lottieWarmupSettled = (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).some((entry) => (
+      entry.name.includes('tlottie.worker') && entry.responseEnd > 0
+    ));
+  }), {timeout: 30_000, message: 'Lottie worker warm-up did not finish after the live chat list'}).toBe(true);
   await waitForBundleResources(page);
 }
 
