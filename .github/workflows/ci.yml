@@ -679,12 +679,13 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP/osv-checker-deps" \
             python .github/scripts/check_osv_report.py "$RUNNER_TEMP/osv-report.json"
 
-      - name: Scan pull request commits with Gitleaks
+      - name: Fetch pull request commits for Gitleaks
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_COMMITS: ${{ github.event.pull_request.commits }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           case "$BASE_SHA$HEAD_SHA" in
             *[!0-9a-f]*) echo "pull request commit is not a hexadecimal SHA" >&2; exit 1 ;;
@@ -692,14 +693,23 @@ jobs:
           case "$PR_COMMITS" in
             ''|*[!0-9]*) echo "pull request commit count is not a number" >&2; exit 1 ;;
           esac
+          # Checkout does not persist credentials; scope read-only auth to these fetches.
+          auth_header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          unset GH_TOKEN
+          fetch_pr_range() {
+            GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0='http.https://github.com/.extraheader' \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth_header" \
+              git fetch "$@"
+          }
           # Fetch enough base history to resolve ancestry in the scanned PR range.
-          git fetch --no-tags --no-recurse-submodules --depth="$((PR_COMMITS + 1))" \
+          fetch_pr_range --no-tags --no-recurse-submodules --depth="$((PR_COMMITS + 1))" \
             origin "$HEAD_SHA" "$BASE_SHA"
           range_parents="$(git rev-list --parents "$BASE_SHA..$HEAD_SHA")"
           while ! git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null || \
             awk 'NF == 1 { found = 1 } END { exit !found }' <<<"$range_parents"; do
             previous_base_commit_count="$(git rev-list --count "$BASE_SHA")"
-            git fetch --no-tags --no-recurse-submodules --deepen=128 \
+            fetch_pr_range --no-tags --no-recurse-submodules --deepen=128 \
               origin "$BASE_SHA"
             current_base_commit_count="$(git rev-list --count "$BASE_SHA")"
             if [ "$previous_base_commit_count" = "$current_base_commit_count" ]; then
@@ -708,6 +718,13 @@ jobs:
             fi
             range_parents="$(git rev-list --parents "$BASE_SHA..$HEAD_SHA")"
           done
+
+      - name: Scan pull request commits with Gitleaks
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
           gitleaks git --log-opts="$BASE_SHA..$HEAD_SHA" \
             --redact=100 --no-banner --report-format=json \
             --report-path="$RUNNER_TEMP/gitleaks-report.json"
