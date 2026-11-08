@@ -5,6 +5,7 @@ import {Authorizer} from '@lib/mtproto/authorizer';
 import Socket from '@lib/mtproto/transports/websocket';
 import TcpObfuscated from '@lib/mtproto/transports/tcpObfuscated';
 import {TimeManager} from '@lib/mtproto/timeManager';
+import withoutUint8ArrayConcat from '@/tests/helpers/withoutUint8ArrayConcat';
 
 const ENDPOINT = 'wss://synthetic.example.test/apiws';
 const NONCE = new Uint8Array(16).fill(1);
@@ -104,7 +105,7 @@ describe('authorizer long server_DH_params reply over the Web transport', () => 
   it.each([
     ['short', 256, 316, [0x4f]],
     ['long', 512, 572, [0x7f, 0x8f, 0, 0]]
-  ])('recognizes a %s reply and enters decrypt with its encrypted_answer', async(_name, encryptedAnswerLength, expectedMessageLength, expectedHeader) => {
+  ])('recognizes a %s reply without Uint8Array.concat and enters decrypt with its encrypted_answer', async(_name, encryptedAnswerLength, expectedMessageLength, expectedHeader) => {
     const {encryptedAnswer, message} = serializeDhReply(encryptedAnswerLength);
     const header = Uint8Array.from(expectedHeader);
     SyntheticWebSocket.responseFrame = concat(header, message);
@@ -142,7 +143,7 @@ describe('authorizer long server_DH_params reply over the Web transport', () => 
     const decryptEntry = vi.spyOn(internals, 'decryptServerDhDataAnswer').mockResolvedValue();
     vi.spyOn(internals, 'sendSetClientDhParams').mockResolvedValue(auth);
 
-    await expect(internals.sendReqDhParams(auth)).resolves.toBe(auth);
+    await expect(withoutUint8ArrayConcat(() => internals.sendReqDhParams(auth))).resolves.toBe(auth);
 
     expect(decryptEntry).toHaveBeenCalledWith(auth, encryptedAnswer);
     expect(message.byteLength).toBe(expectedMessageLength);

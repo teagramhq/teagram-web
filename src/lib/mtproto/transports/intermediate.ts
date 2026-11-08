@@ -1,4 +1,5 @@
 import {Codec} from '@lib/mtproto/transports/codec';
+import bufferConcats from '@helpers/bytes/bufferConcats';
 
 export class IntermediatePacketCodec implements Codec {
   public tag = 0xee;
@@ -15,7 +16,7 @@ export class IntermediatePacketCodec implements Codec {
     const header = new Uint8Array(new Int32Array([/* ++this.lol >= 25 ? 0x80000001 :  */len]).buffer);
 
     // console.log('got nobody cause im braindead', header, len, /* data,  */data.buffer.byteLength === data.length);
-    return header.concat(data);
+    return bufferConcats(header, data);
   }
 
   public readPacket(data: Uint8Array) {
