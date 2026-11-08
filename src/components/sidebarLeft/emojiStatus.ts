@@ -33,3 +33,15 @@ export async function updateSidebarEmojiStatus(
     reportError(error);
   }
 }
+
+export async function openEmojiStatusPickerSafely(
+  options: Parameters<typeof import('@components/sidebarLeft/emojiStatusPicker').openEmojiStatusPicker>[0],
+  reportError: (error: unknown) => void
+) {
+  try {
+    const {openEmojiStatusPicker} = await import('@components/sidebarLeft/emojiStatusPicker');
+    openEmojiStatusPicker(options);
+  } catch(error) {
+    reportError(error);
+  }
+}

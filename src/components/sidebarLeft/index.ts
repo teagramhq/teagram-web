@@ -66,7 +66,7 @@ import {updateSearchHelperResults} from '@components/sidebarLeft/searchHelperRes
 import {AttachMenuBot, User} from '@layer';
 import {Middleware, MiddlewareHelper} from '@helpers/middleware';
 import wrapEmojiStatus from '@components/wrappers/emojiStatus';
-import {getSidebarEmojiStatus, updateSidebarEmojiStatus} from './emojiStatus';
+import {getSidebarEmojiStatus, openEmojiStatusPickerSafely, updateSidebarEmojiStatus} from './emojiStatus';
 
 const log = logger('SidebarLeft');
 import {makeMediaSize} from '@helpers/mediaSize';
@@ -264,15 +264,14 @@ export class AppSidebarLeft extends SidebarSlider {
 
     const lockButton = createLockButton();
 
-    attachClickEvent(statusBtnIcon, async() => {
-      const {openEmojiStatusPicker} = await import('@components/sidebarLeft/emojiStatusPicker');
-      openEmojiStatusPicker({
+    attachClickEvent(statusBtnIcon, () => {
+      void openEmojiStatusPickerSafely({
         managers: this.managers,
         anchorElement: statusBtnIcon,
         onChosen: () => {
           fireOnNew = true
         }
-      })
+      }, (error) => log.error('Failed to open emoji status picker', error));
     });
 
     const wrapStatus = async(middleware: Middleware) => {

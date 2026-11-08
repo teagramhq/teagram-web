@@ -69,6 +69,21 @@ describe('wrapEmojiStatus', () => {
     expect(unhandled).not.toHaveBeenCalled();
   });
 
+  it('keeps real sticker load failures observable after the status is torn down', async() => {
+    let active = true;
+    const error = new Error('sticker load failed after teardown');
+    mocks.wrapSticker.mockImplementation(async({loadPromises}: any) => {
+      loadPromises.push(Promise.reject(error));
+      active = false;
+    });
+
+    await expect(wrapEmojiStatus({
+      emojiStatus: status,
+      wrapOptions: {middleware: () => active} as any,
+      size: {width: 24, height: 24} as any
+    })).rejects.toBe(error);
+  });
+
   it('keeps non-cancellation render failures observable', async() => {
     mocks.wrapSticker.mockRejectedValue(new Error('sticker load failed'));
 

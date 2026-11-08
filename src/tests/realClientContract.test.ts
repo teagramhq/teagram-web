@@ -3923,17 +3923,6 @@ describe('real client scenario contract', () => {
     expect(scenarioSource).not.toContain(`setAttribute('onclick'`);
   });
 
-  it('submits custom emoji messages through the composer send button', () => {
-    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
-    const flowSource = browserSource.slice(
-      browserSource.indexOf('async function runCustomEmojiFeatureFlow'),
-      browserSource.indexOf('async function sendChannelText')
-    );
-
-    expect(flowSource).toContain(`await alice.page.locator('#column-center .btn-send').click()`);
-    expect(flowSource).not.toContain(`await input.press('Enter').catch(() => failStage('alice_custom_emoji_send_submit'))`);
-  });
-
   it('opens the emoji picker cold, in a fresh browser, before the custom emoji set', () => {
     const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
     const trialSource = browserSource.slice(

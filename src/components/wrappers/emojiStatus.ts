@@ -46,11 +46,13 @@ export default async function wrapEmojiStatus({
       // group: 'none'
     });
 
-    // * a status torn down mid-render leaves its sticker load rejecting with MIDDLEWARE; observe it
-    // * either way so the cancellation does not surface as an unhandled rejection
+    // * a status torn down mid-render may leave its sticker load rejecting with MIDDLEWARE;
+    // * consume that cancellation here but preserve other failures through the parent promise
     const loaded = Promise.all(loadPromises);
     if(!middleware()) {
-      loaded.catch(() => {});
+      await loaded.catch((error) => {
+        if((error as ApiError)?.type !== 'MIDDLEWARE') throw error;
+      });
       return;
     }
 

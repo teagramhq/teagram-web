@@ -47,6 +47,7 @@ const mocks = vi.hoisted(() => {
     premiumShow: vi.fn(),
     PopupElementMock,
     openEmojiStatusPicker: vi.fn(),
+    emojiStatusPickerImportError: undefined as Error | undefined,
     wrapEmojiStatus: vi.fn()
   };
 });
@@ -62,7 +63,10 @@ vi.mock('@components/popups', () => ({default: mocks.PopupElementMock}));
 vi.mock('@components/popups/premium', () => ({default: {show: mocks.premiumShow}}));
 vi.mock('@components/popups/starGiftInfo', () => ({default: vi.fn()}));
 vi.mock('@components/popups/stickers', () => ({default: vi.fn()}));
-vi.mock('@components/sidebarLeft/emojiStatusPicker', () => ({openEmojiStatusPicker: mocks.openEmojiStatusPicker}));
+vi.mock('@components/sidebarLeft/emojiStatusPicker', () => {
+  if(mocks.emojiStatusPickerImportError) throw mocks.emojiStatusPickerImportError;
+  return {openEmojiStatusPicker: mocks.openEmojiStatusPicker};
+});
 vi.mock('@components/wrappers/emojiStatus', () => ({
   default: mocks.wrapEmojiStatus
 }));
@@ -98,6 +102,7 @@ describe('custom emoji access without Premium', () => {
   afterEach(() => {
     rootScope.premium = previousPremium;
     rootScope.myId = previousMyId;
+    mocks.emojiStatusPickerImportError = undefined;
     vi.clearAllMocks();
   });
 
@@ -263,5 +268,37 @@ describe('custom emoji access without Premium', () => {
     statusIcon.click();
 
     expect(PopupPremium.show).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed emoji status picker chunk from a clickable title status', async() => {
+    const error = new Error('emoji status picker chunk failed');
+    mocks.emojiStatusPickerImportError = error;
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const statusIcon = document.createElement('span');
+    mocks.wrapEmojiStatus.mockResolvedValue(statusIcon);
+    const middleware = Object.assign(() => true, {onDestroy: vi.fn()});
+
+    try {
+      await generateTitleIcons({
+        peerId: 1 as PeerId,
+        peer: {
+          _: 'user',
+          id: 1,
+          pFlags: {premium: false},
+          emoji_status: {_: 'emojiStatus', document_id: '42'}
+        } as any,
+        wrapOptions: {middleware} as any,
+        clickableEmojiStatus: true
+      });
+
+      statusIcon.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+      statusIcon.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(errorLog.mock.calls.flat().join(' ')).toContain('Failed to open emoji status picker');
+    } finally {
+      errorLog.mockRestore();
+      mocks.emojiStatusPickerImportError = undefined;
+    }
   });
 });
