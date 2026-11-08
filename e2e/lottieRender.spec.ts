@@ -1,7 +1,7 @@
-import {test, expect, type Page, type Locator} from '@playwright/test';
+import {test, expect} from '@playwright/test';
 import {readdirSync} from 'fs';
 import {resolve} from 'path';
-import {PNG} from 'pngjs';
+import {LOTTIE_FRAME_BG_CSS, waitUntilOnScreen} from './lottieFrameMeasurement';
 
 const TGS_DIR = resolve(__dirname, '..', 'public', 'assets', 'tgs');
 // ReactionGeneric is the colourless "generic reaction" template: it renders fully transparent
@@ -13,33 +13,7 @@ const SIZE = 140;
 // The host container is painted opaque magenta; a transferControlToOffscreen placeholder canvas
 // can't be read back, so we detect rendering by screenshotting and counting pixels that differ
 // from the background. A blank/transparent canvas leaves the box fully magenta.
-const BG = {r: 255, g: 0, b: 255};
-const BG_CSS = `rgb(${BG.r},${BG.g},${BG.b})`;
-const RENDERED_FRACTION = 0.005; // >0.5% of the box must differ from the background to count as "on screen" (a blank box is 0)
-
-function nonBackgroundFraction(png: Buffer): number {
-  const {data, width, height} = PNG.sync.read(png);
-  let differing = 0;
-  for(let i = 0; i < data.length; i += 4) {
-    const delta = Math.abs(data[i] - BG.r) + Math.abs(data[i + 1] - BG.g) + Math.abs(data[i + 2] - BG.b);
-    if(delta > 40) ++differing;
-  }
-  return differing / (width * height);
-}
-
-// THE precise detector: the moment the element actually shows rendered pixels on screen (the real
-// "firstFrame for the UI", as opposed to the player's firstFrame event, which only means the worker
-// drew into its offscreen buffer). Returns the page-clock timestamp, or null if it never appears.
-async function waitUntilOnScreen(page: Page, locator: Locator, timeoutMs: number): Promise<number | null> {
-  const deadline = Date.now() + timeoutMs;
-  while(Date.now() < deadline) {
-    const at = await page.evaluate(() => performance.now());
-    if(nonBackgroundFraction(await locator.screenshot()) >= RENDERED_FRACTION) {
-      return at;
-    }
-  }
-  return null;
-}
+const BG_CSS = LOTTIE_FRAME_BG_CSS;
 
 test.beforeEach(async({page}) => {
   await page.goto('/');

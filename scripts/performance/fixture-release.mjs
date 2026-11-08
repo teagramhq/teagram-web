@@ -7,6 +7,8 @@ import {pathToFileURL} from 'node:url';
 
 const FIXTURE_REPOSITORY = 'teagramhq/teagram-server';
 const HASH_RE = /^[a-f0-9]{64}$/i;
+const RETRYABLE_HTTP_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
+const MAX_FETCH_ATTEMPTS = 4;
 
 export function assetPath(name) {
   if(typeof(name) !== 'string' || !name || name.includes('/') || name.includes('\\') || name.includes('\0')) {
@@ -81,8 +83,32 @@ export function reconstructAssets(assets) {
   return files;
 }
 
+async function fetchReleaseResponse(url) {
+  for(let attempt = 0; attempt < MAX_FETCH_ATTEMPTS; ++attempt) {
+    let response;
+    let retryReason;
+    try {
+      response = await fetch(url, {redirect: 'follow'});
+    } catch(error) {
+      if(attempt === MAX_FETCH_ATTEMPTS - 1) throw error;
+      const message = (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, ' ');
+      retryReason = `network error: ${message}`;
+    }
+
+    if(response && ((response.ok && response.body) || !RETRYABLE_HTTP_STATUS_CODES.has(response.status) || attempt === MAX_FETCH_ATTEMPTS - 1)) {
+      return response;
+    }
+
+    if(response) retryReason = `HTTP ${response.status}`;
+    process.stderr.write(`Retrying fixture release request (attempt ${attempt + 1}/${MAX_FETCH_ATTEMPTS}, ${retryReason}): ${url}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+  }
+
+  throw new Error(`failed to download release asset: ${url}`);
+}
+
 async function fetchBytes(url, expectedHash) {
-  const response = await fetch(url, {redirect: 'follow'});
+  const response = await fetchReleaseResponse(url);
   if(!response.ok || !response.body) throw new Error(`download failed (${response.status}): ${url}`);
 
   const digest = createHash('sha256');
@@ -105,7 +131,7 @@ async function fetchBytes(url, expectedHash) {
 }
 
 async function downloadAsset(url, targetPath, expectedHash) {
-  const response = await fetch(url, {redirect: 'follow'});
+  const response = await fetchReleaseResponse(url);
   if(!response.ok || !response.body) throw new Error(`download failed (${response.status}): ${url}`);
 
   const digest = createHash('sha256');
