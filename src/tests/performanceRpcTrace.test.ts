@@ -202,6 +202,7 @@ describe('long task attribution', () => {
       ],
       profile,
       1000,
+      1000,
       1000
     );
 
