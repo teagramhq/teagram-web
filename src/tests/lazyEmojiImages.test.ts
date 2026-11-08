@@ -1,5 +1,5 @@
 import {beforeEach, describe, expect, test, vi} from 'vitest';
-import createLazyEmojiImages from '@helpers/lazyEmojiImages';
+import createLazyEmojiImages, {FIRST_SCREEN_REQUESTS, SLOT_HOLD_MS} from '@helpers/lazyEmojiImages';
 import {markLoadedURL} from '@helpers/dom/loadedUrlCache';
 import type {Middleware} from '@helpers/middleware';
 
@@ -46,6 +46,26 @@ describe('lazy emoji images', () => {
     expect(image.getAttribute('src')).toBe('/assets/img/emoji/1f600.png');
     await expect(loading).resolves.toBeUndefined();
     expect(decode).not.toHaveBeenCalled();
+  });
+
+  test('holds the queue slot for every load past the first screen', async() => {
+    vi.useFakeTimers();
+    try {
+      const lazy = createLazyEmojiImages(queue, middleware);
+      const images = Array.from({length: FIRST_SCREEN_REQUESTS + 1}, () => document.createElement('img'));
+      images.forEach((image, index) => lazy.load(image, `/assets/img/emoji/paced-${index}.png`));
+
+      const settled: boolean[] = [];
+      push.mock.calls.forEach(([item], index) => item.load().then(() => settled[index] = true));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(settled.slice(0, FIRST_SCREEN_REQUESTS).every(Boolean)).toBe(true);
+      expect(settled[FIRST_SCREEN_REQUESTS]).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(SLOT_HOLD_MS);
+      expect(settled[FIRST_SCREEN_REQUESTS]).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   test('deletes every replaced image from the queue except the one that stays', () => {

@@ -2983,7 +2983,9 @@ async function runColdPickerTrial(storageState, appUrl, trial, cleanupIssues) {
       await page.locator('#search-container .row[data-peer-id]').filter({hasText: runtime.accounts[1].username}).first()
       .click({timeout: 25_000}).catch(() => failStage(`${stage}_chat_result`));
       await openComposer(page, `${stage}_chat`);
-      // Console errors while the chat loads are not this scenario's concern
+      // The app can log a NO_STICKERS render error a moment after the chat opens, so let it settle
+      // before counting; console errors while the chat loads are not this scenario's concern
+      await page.waitForTimeout(2_000);
       const consoleErrorsBefore = errors.console;
       await openEmojiPicker(page, stage, emojiRequests);
       await openCustomEmojiSet(page, stage);
