@@ -3979,6 +3979,12 @@ describe('real client scenario contract', () => {
     .toBe(`${stage}_console_error`);
   });
 
+  it('counts every console error in a cold trial except the fixture\'s NO_STICKERS render error', () => {
+    expect(realClientBrowser.isCountedColdTrialConsoleError('%s [2.1] [CHAT-2-chat] renderMessage error: NO_STICKERS')).toBe(false);
+    expect(realClientBrowser.isCountedColdTrialConsoleError('Failed to load resource: net::ERR_FAILED')).toBe(true);
+    expect(realClientBrowser.isCountedColdTrialConsoleError('renderMessage error: SOMETHING_ELSE')).toBe(true);
+  });
+
   it('bounds the emoji images the cold picker may request', () => {
     expect(realClientBrowser.exceedsEmojiRequestLimit(34)).toBe(false);
     expect(realClientBrowser.exceedsEmojiRequestLimit(200)).toBe(false);

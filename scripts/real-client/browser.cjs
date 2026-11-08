@@ -2852,6 +2852,12 @@ function classifyColdTrialFailure({stage, crashed, message, pidsHitsBefore, pids
   return pidsHitsAfter > pidsHitsBefore ? `${stage}_pids_limit` : `${stage}_renderer_crashed`;
 }
 
+// The fixture has no sticker sets, so the chat logs this render error whenever it paints a message,
+// before or after the counting baseline; every other console error counts
+function isCountedColdTrialConsoleError(text) {
+  return !String(text).includes('renderMessage error: NO_STICKERS');
+}
+
 function classifyColdTrialErrors({stage, pageErrors, consoleErrors, consoleErrorsBefore}) {
   if(pageErrors > 0) return `${stage}_page_error`;
   if(consoleErrors !== consoleErrorsBefore) return `${stage}_console_error`;
@@ -2961,7 +2967,9 @@ async function runColdPickerTrial(storageState, appUrl, trial, cleanupIssues) {
     // The trial page is not one of the signed-in app pages, so it needs its own error counters
     const errors = {page: 0, console: 0};
     page.on('pageerror', () => { errors.page++; });
-    page.on('console', (message) => { if(message.type() === 'error') errors.console++; });
+    page.on('console', (message) => {
+      if(message.type() === 'error' && isCountedColdTrialConsoleError(message.text())) errors.console++;
+    });
     // pids.events is cumulative for the whole job, so only a refused fork during this trial counts
     const pidsHitsBefore = readPidsLimitHits();
     const crashGuard = (error) => {
@@ -2983,9 +2991,7 @@ async function runColdPickerTrial(storageState, appUrl, trial, cleanupIssues) {
       await page.locator('#search-container .row[data-peer-id]').filter({hasText: runtime.accounts[1].username}).first()
       .click({timeout: 25_000}).catch(() => failStage(`${stage}_chat_result`));
       await openComposer(page, `${stage}_chat`);
-      // The app can log a NO_STICKERS render error a moment after the chat opens, so let it settle
-      // before counting; console errors while the chat loads are not this scenario's concern
-      await page.waitForTimeout(2_000);
+      // Console errors while the chat loads are not this scenario's concern
       const consoleErrorsBefore = errors.console;
       await openEmojiPicker(page, stage, emojiRequests);
       await openCustomEmojiSet(page, stage);
@@ -6886,7 +6892,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {classifyColdTrialErrors, classifyColdTrialFailure, exceedsEmojiRequestLimit, attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
+module.exports = {isCountedColdTrialConsoleError, classifyColdTrialErrors, classifyColdTrialFailure, exceedsEmojiRequestLimit, attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
