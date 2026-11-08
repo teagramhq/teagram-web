@@ -638,14 +638,12 @@ describe('invited channel dialogs', () => {
       dialogsStorage.cachedListReconcileAttempts = cachedListReconcileAttempts;
       dialogsStorage.cachedListReconcileRecoveryPending = cachedListReconcileRecoveryPending;
       dialogsStorage.cachedListReconciled = cachedListReconciled;
-      dialogsStorage.cachedListReconcileScheduled = false;
       dialogsStorage.cachedListReconcileGeneration = cachedListReconcileGeneration + 1;
     };
 
     try {
       await dialogsStorage.getDialogs({limit: 20, filterId: 0});
-      // Fire the deferred callback directly so these tests stay deterministic without waiting 15 seconds.
-      dialogsStorage.cachedListReconcileScheduled = false;
+      // Run the deferred reconcile directly so these tests do not wait out its start delay.
       await dialogsStorage.reconcileCachedChannelDialogs();
       if(failFirstList || failFirstPeerDialogs) {
         await vi.waitFor(() => expect(dialogsStorage.cachedListReconciled).toBe(false));
@@ -654,7 +652,6 @@ describe('invited channel dialogs', () => {
       await dialogsStorage.getDialogs({limit: 20, filterId: 0});
       if(failFirstList || failFirstPeerDialogs) {
         const retryMethod = failFirstList ? 'messages.getDialogs' : 'messages.getPeerDialogs';
-        dialogsStorage.cachedListReconcileScheduled = false;
         await dialogsStorage.reconcileCachedChannelDialogs();
         await vi.waitFor(() => expect(requests.filter((method) => method === retryMethod)).toHaveLength(2), {timeout: 5000});
         await vi.waitFor(() => expect(dialogsStorage.cachedListReconciled).toBe(true), {timeout: 5000});

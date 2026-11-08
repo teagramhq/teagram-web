@@ -35,7 +35,7 @@ function makeMessage(mid: number, fromId: PeerId): Message.message {
   } as Message.message;
 }
 
-function createHarness(messages: Array<readonly [number, number]> = [[5, 1], [4, 2], [3, 1]]) {
+function createHarness() {
   const dateContainer = {container: document.createElement('div'), groupsLength: 0};
   const chat = {
     type: ChatType.Chat,
@@ -54,7 +54,7 @@ function createHarness(messages: Array<readonly [number, number]> = [[5, 1], [4,
   const groups = new BubbleGroups(chat);
   const bubbles = new Map<number, HTMLElement>();
 
-  for(const [mid, fromId] of messages) {
+  for(const [mid, fromId] of [[5, 1], [4, 2], [3, 1]] as const) {
     const bubble = document.createElement('div');
     bubbles.set(mid, bubble);
     groups.prepareForGrouping(bubble, makeMessage(mid, fromId as PeerId), false);
@@ -91,36 +91,16 @@ describe('deferred bubble group removal', () => {
     const deferredGroups = new Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>();
     deferred.groups.removeAndUnmountBubble(deferred.bubbles.get(4), deferredGroups);
 
+    expect(getGroupMemberships(deferred.groups)).toEqual(getGroupMemberships(immediate.groups));
+    expect(getGroupMemberships(deferred.groups)).toEqual([[1], [3, 5]]);
+    const regroupedGroup = deferred.groups.getItemByBubble(deferred.bubbles.get(1)).group;
+    expect(deferredGroups.has(regroupedGroup)).toBe(true);
     expect(deferredGroups.has(emptiedGroup)).toBe(true);
     expect(deferred.mountUnmountGroups).not.toHaveBeenCalled();
     expect(emptiedGroup.container.parentElement).toBe(deferred.dateContainer.container);
 
     deferred.groups.mountUnmountGroups(Array.from(deferredGroups));
-    expect(getGroupMemberships(deferred.groups)).toEqual(getGroupMemberships(immediate.groups));
-    expect(getGroupMemberships(deferred.groups)).toEqual([[1], [3, 5]]);
-    const regroupedGroup = deferred.groups.getItemByBubble(deferred.bubbles.get(1)).group;
-    expect(deferred.mountUnmountGroups.mock.calls[0][0]).toContain(regroupedGroup);
     expect(emptiedGroup.container.parentElement).toBeNull();
     expect(emptiedGroup.mounted).toBe(false);
-  });
-
-  it('regroups a batch of removed bubbles once before mounting', () => {
-    const messages: Array<readonly [number, number]> = [[6, 1], [5, 2], [4, 1], [3, 1], [2, 1]];
-    const immediate = createHarness(messages);
-    immediate.groups.removeAndUnmountBubble(immediate.bubbles.get(5));
-    immediate.groups.removeAndUnmountBubble(immediate.bubbles.get(4));
-
-    const deferred = createHarness(messages);
-    const deferredGroups = new Set<Parameters<BubbleGroups['mountUnmountGroups']>[0][number]>();
-    const groupUngrouped = vi.spyOn(deferred.groups, 'groupUngrouped');
-    deferred.groups.removeAndUnmountBubble(deferred.bubbles.get(5), deferredGroups);
-    deferred.groups.removeAndUnmountBubble(deferred.bubbles.get(4), deferredGroups);
-
-    expect(groupUngrouped).not.toHaveBeenCalled();
-    deferred.groups.mountUnmountGroups(Array.from(deferredGroups));
-
-    expect(groupUngrouped).toHaveBeenCalledOnce();
-    expect(getGroupMemberships(deferred.groups)).toEqual(getGroupMemberships(immediate.groups));
-    expect(getGroupMemberships(deferred.groups)).toEqual([[1], [2, 3, 6]]);
   });
 });

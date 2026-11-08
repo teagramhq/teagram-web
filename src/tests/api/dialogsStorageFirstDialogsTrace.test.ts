@@ -81,13 +81,14 @@ test('flushes current peers page by page without restoring peers cleared later',
     durationMs: expect.any(Number)
   });
   expect(performancePhaseTrace.getSnapshot().some(({name: phaseName}) => phaseName === 'worker.dialogs.firstPage')).toBe(false);
+  expect(pendingPages).toHaveLength(0);
+
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(pendingPages).toHaveLength(1);
   expect(performancePhaseTrace.getSnapshot().find(({name: phaseName}) => phaseName === 'worker.dialogs.cachedChannelReconcile')).toMatchObject({
     pageCount: 0,
     durationMs: null
   });
-
-  await vi.advanceTimersByTimeAsync(15_000);
-  expect(pendingPages).toHaveLength(1);
 
   const firstPage: any = {
     _: 'messages.dialogsSlice',
