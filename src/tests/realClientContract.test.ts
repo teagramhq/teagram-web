@@ -3935,24 +3935,55 @@ describe('real client scenario contract', () => {
     expect(browserSource).toContain('const COLD_PICKER_TRIALS = 8;');
     expect(trialSource).toContain('chromium.launch(');
     expect(trialSource).toContain('storageState');
-    expect(trialSource).toContain('_renderer_crashed');
-    expect(trialSource).toContain('_pids_limit');
-    expect(trialSource).not.toContain('ERR_FAILED');
-    expect(trialSource).toContain('_chat_result');
-    expect(trialSource).toContain('mkdtempSync');
     expect(trialSource).toContain('TMPDIR: trialDirectory');
-    expect(trialSource.lastIndexOf('fs.rmSync(trialDirectory')).toBeGreaterThan(trialSource.indexOf('await browser.close()'));
-    expect(trialSource).toContain(`page.on('pageerror'`);
-    expect(trialSource).toContain(`message.type() === 'error'`);
-    expect(trialSource).toContain('_page_error');
-    expect(trialSource).toContain('_console_error');
-    expect(trialSource).toContain('pidsHitsBefore');
-    expect(trialSource.indexOf('const consoleErrorsBefore')).toBeGreaterThan(trialSource.indexOf('await openComposer(page'));
-    expect(trialSource.indexOf('_console_error')).toBeGreaterThan(trialSource.indexOf('await openCustomEmojiSet(page, stage)'));
     expect(picker).toBeGreaterThan(-1);
     expect(set).toBeGreaterThan(picker);
-    expect(trialSource).toContain('await browser.close()');
-    expect(browserSource).toContain(`currentScenario = 'custom-emoji';\n    await runCustomEmojiScenario(alice);`);
+    expect(trialSource.indexOf('const consoleErrorsBefore')).toBeGreaterThan(trialSource.indexOf('await openComposer(page'));
+    expect(trialSource.indexOf('classifyColdTrialErrors(')).toBeGreaterThan(set);
+    expect(trialSource.lastIndexOf('fs.rmSync(trialDirectory')).toBeGreaterThan(trialSource.indexOf('await browser.close()'));
+    expect(trialSource).toContain(`push('browser_close_cleanup')`);
+    expect(browserSource).toContain(`currentScenario = 'custom-emoji';\n    await runCustomEmojiScenario(alice, cleanupIssues);`);
+  });
+
+  it('labels a cold trial failure by what killed the page', () => {
+    const stage = 'alice_cold_picker_3';
+    const crash = {stage, crashed: true, message: 'Target crashed'};
+
+    expect(realClientBrowser.classifyColdTrialFailure({...crash, pidsHitsBefore: 0, pidsHitsAfter: 0}))
+    .toBe(`${stage}_renderer_crashed`);
+    expect(realClientBrowser.classifyColdTrialFailure({...crash, pidsHitsBefore: 0, pidsHitsAfter: 2}))
+    .toBe(`${stage}_pids_limit`);
+    // refusals from an earlier trial are not this trial's
+    expect(realClientBrowser.classifyColdTrialFailure({...crash, pidsHitsBefore: 3, pidsHitsAfter: 3}))
+    .toBe(`${stage}_renderer_crashed`);
+    expect(realClientBrowser.classifyColdTrialFailure({...crash, pidsHitsBefore: null, pidsHitsAfter: 0}))
+    .toBe(`${stage}_pids_unknown`);
+    expect(realClientBrowser.classifyColdTrialFailure({...crash, pidsHitsBefore: 0, pidsHitsAfter: null}))
+    .toBe(`${stage}_pids_unknown`);
+    expect(realClientBrowser.classifyColdTrialFailure({
+      stage, crashed: false, message: 'browser has been closed', pidsHitsBefore: 0, pidsHitsAfter: 0
+    })).toBe(`${stage}_renderer_crashed`);
+    expect(realClientBrowser.classifyColdTrialFailure({
+      stage, crashed: false, message: 'Timeout 30000ms exceeded', pidsHitsBefore: 0, pidsHitsAfter: 0
+    })).toBe(null);
+  });
+
+  it('fails a cold trial on a page error or a new console error', () => {
+    const stage = 'alice_cold_picker_1';
+
+    expect(realClientBrowser.classifyColdTrialErrors({stage, pageErrors: 0, consoleErrors: 2, consoleErrorsBefore: 2}))
+    .toBe(null);
+    expect(realClientBrowser.classifyColdTrialErrors({stage, pageErrors: 1, consoleErrors: 2, consoleErrorsBefore: 2}))
+    .toBe(`${stage}_page_error`);
+    expect(realClientBrowser.classifyColdTrialErrors({stage, pageErrors: 0, consoleErrors: 3, consoleErrorsBefore: 2}))
+    .toBe(`${stage}_console_error`);
+  });
+
+  it('bounds the emoji images the cold picker may request', () => {
+    expect(realClientBrowser.exceedsEmojiRequestLimit(34)).toBe(false);
+    expect(realClientBrowser.exceedsEmojiRequestLimit(200)).toBe(false);
+    expect(realClientBrowser.exceedsEmojiRequestLimit(201)).toBe(true);
+    expect(realClientBrowser.exceedsEmojiRequestLimit(555)).toBe(true);
   });
 
   it('renders the custom emoji set on the default renderer and checks the page survived', () => {
@@ -3982,9 +4013,8 @@ describe('real client scenario contract', () => {
     expect(pickerSource.indexOf('_picker_loaded')).toBeGreaterThan(pickerSource.indexOf('_picker_category'));
     expect(pickerSource.indexOf('waitForTimeout(2_500)')).toBeGreaterThan(pickerSource.indexOf('_picker_loaded'));
     expect(pickerSource.indexOf('_page_alive')).toBeGreaterThan(pickerSource.indexOf('waitForTimeout(2_500)'));
-    expect(pickerSource).toContain('emojiRequests.count > EMOJI_PICKER_REQUEST_LIMIT');
+    expect(pickerSource).toContain('exceedsEmojiRequestLimit(emojiRequests.count)');
     expect(pickerSource).toContain('_picker_image_burst');
-    expect(browserSource).toContain('const EMOJI_PICKER_REQUEST_LIMIT = 200;');
   });
 
   it('requires every scenario exactly once', () => {

@@ -65,7 +65,7 @@ export default class EmojiHelper extends AutocompleteHelper {
     }
 
     emojis.forEach((emoji) => {
-      const wrapped = wrapAppEmoji(emoji, true);
+      const wrapped = wrapAppEmoji(emoji, {unify: true});
       inner.append(wrapped);
 
       if(emoji.docId) {

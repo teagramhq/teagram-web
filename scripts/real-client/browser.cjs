@@ -2833,13 +2833,33 @@ function browserLaunchArgs(config) {
   ];
 }
 
+// null when the counter cannot be read, which is not the same as no refused forks
 function readPidsLimitHits() {
   try {
     const hits = /^max (\d+)$/m.exec(fs.readFileSync('/sys/fs/cgroup/pids.events', 'utf8'));
-    return hits ? Number(hits[1]) : 0;
+    return hits ? Number(hits[1]) : null;
   } catch(error) {
-    return 0;
+    return null;
   }
+}
+
+// The failure label for an error thrown during a cold trial, or null when it is not a renderer death.
+// A fork refused by the container's process limit looks the same as a renderer crash, and pids.events
+// is cumulative for the whole job, so only a refusal during this trial counts.
+function classifyColdTrialFailure({stage, crashed, message, pidsHitsBefore, pidsHitsAfter}) {
+  if(!crashed && !/crash|has been closed/i.test(String(message))) return null;
+  if(!Number.isInteger(pidsHitsBefore) || !Number.isInteger(pidsHitsAfter)) return `${stage}_pids_unknown`;
+  return pidsHitsAfter > pidsHitsBefore ? `${stage}_pids_limit` : `${stage}_renderer_crashed`;
+}
+
+function classifyColdTrialErrors({stage, pageErrors, consoleErrors, consoleErrorsBefore}) {
+  if(pageErrors > 0) return `${stage}_page_error`;
+  if(consoleErrors !== consoleErrorsBefore) return `${stage}_console_error`;
+  return null;
+}
+
+function exceedsEmojiRequestLimit(count) {
+  return count > EMOJI_PICKER_REQUEST_LIMIT;
 }
 
 // Every trial is a fresh browser, so the first open of the emoji picker is always cold.
@@ -2868,7 +2888,7 @@ async function openEmojiPicker(page, stage, emojiRequests) {
   }, null, {timeout: 20_000}).catch(() => failStage(`${stage}_picker_loaded`));
   await page.waitForTimeout(2_500);
   await page.evaluate(() => document.title).catch(() => failStage(`${stage}_page_alive`));
-  if(emojiRequests.count > EMOJI_PICKER_REQUEST_LIMIT) failStage(`${stage}_picker_image_burst`);
+  if(exceedsEmojiRequestLimit(emojiRequests.count)) failStage(`${stage}_picker_image_burst`);
 
   setPageScenarioStep(page, `${stage}_picker_close`);
   await page.locator('#column-center .toggle-emoticons').click().catch(() => failStage(`${stage}_picker_close`));
@@ -2913,7 +2933,7 @@ async function openCustomEmojiSet(page, stage) {
   await page.evaluate(() => document.title).catch(() => failStage(`${stage}_page_alive`));
 }
 
-async function runColdPickerTrial(storageState, appUrl, trial) {
+async function runColdPickerTrial(storageState, appUrl, trial, cleanupIssues) {
   const stage = `alice_cold_picker_${trial + 1}`;
   // The container's /tmp is a small tmpfs and a browser profile left behind by each of the eight
   // trials would fill it for the scenarios that follow, so each trial gets a directory of its own
@@ -2945,10 +2965,10 @@ async function runColdPickerTrial(storageState, appUrl, trial) {
     // pids.events is cumulative for the whole job, so only a refused fork during this trial counts
     const pidsHitsBefore = readPidsLimitHits();
     const crashGuard = (error) => {
-      if(crashed || /crash|has been closed/i.test(String(error?.message))) {
-        // A fork refused by the container's process limit looks the same as a renderer crash
-        failStage(readPidsLimitHits() > pidsHitsBefore ? `${stage}_pids_limit` : `${stage}_renderer_crashed`);
-      }
+      const label = classifyColdTrialFailure({
+        stage, crashed, message: error?.message, pidsHitsBefore, pidsHitsAfter: readPidsLimitHits()
+      });
+      if(label) failStage(label);
       throw error;
     };
     try {
@@ -2967,24 +2987,27 @@ async function runColdPickerTrial(storageState, appUrl, trial) {
       const consoleErrorsBefore = errors.console;
       await openEmojiPicker(page, stage, emojiRequests);
       await openCustomEmojiSet(page, stage);
-      if(errors.page > 0) failStage(`${stage}_page_error`);
-      if(errors.console !== consoleErrorsBefore) failStage(`${stage}_console_error`);
+      const errorLabel = classifyColdTrialErrors({
+        stage, pageErrors: errors.page, consoleErrors: errors.console, consoleErrorsBefore
+      });
+      if(errorLabel) failStage(errorLabel);
     } catch(error) {
       crashGuard(error);
     }
   } finally {
-    await browser.close().catch(() => {});
+    // A browser that stays up keeps its processes against the fixture's limit, so the run reports it
+    await browser.close().catch(() => cleanupIssues.push('browser_close_cleanup'));
     fs.rmSync(trialDirectory, {recursive: true, force: true});
   }
 }
 
-async function runCustomEmojiScenario(alice) {
+async function runCustomEmojiScenario(alice, cleanupIssues) {
   currentStage = 'alice_custom_emoji_state';
   const storageState = await alice.context.storageState({indexedDB: true}).catch(() => failStage('alice_custom_emoji_state'));
   const appUrl = alice.page.url();
   for(let trial = 0; trial < COLD_PICKER_TRIALS; ++trial) {
     currentStage = `alice_cold_picker_${trial + 1}`;
-    await runColdPickerTrial(storageState, appUrl, trial);
+    await runColdPickerTrial(storageState, appUrl, trial, cleanupIssues);
   }
 }
 
@@ -6555,7 +6578,7 @@ async function main(dependencies = {}) {
     report.push({name: 'message', status: 'passed'});
 
     currentScenario = 'custom-emoji';
-    await runCustomEmojiScenario(alice);
+    await runCustomEmojiScenario(alice, cleanupIssues);
     report.push({name: 'custom-emoji', status: 'passed'});
 
     currentScenario = 'group';
@@ -6861,7 +6884,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
+module.exports = {classifyColdTrialErrors, classifyColdTrialFailure, exceedsEmojiRequestLimit, attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

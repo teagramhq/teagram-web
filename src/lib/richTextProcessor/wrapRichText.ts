@@ -32,7 +32,19 @@ import {createRoot, createSignal, createEffect, onCleanup} from 'solid-js';
 import formatFormattedDate from '@helpers/date/formatFormattedDate';
 import formatRelativeTime from '@helpers/date/formatRelativeTime';
 import tsNow from '@helpers/tsNow';
+import type {Middleware} from '@helpers/middleware';
+import type LazyLoadQueueIntersector from '@components/lazyLoadQueueIntersector';
 import filterDisabledEntities, {markMessageLinkEntity} from '@lib/richTextProcessor/filterDisabledEntities';
+
+// * An emoji image starts loading the moment its src is assigned, and the picker mounts hundreds at
+// * once. With this the image is created without a src and handed to the queue, which assigns it when
+// * the image is near view and lets go of it when its owner's middleware is gone.
+export type LazyEmojiImages = {
+  queue: Pick<LazyLoadQueueIntersector, 'push'>,
+  middleware?: Middleware,
+  // images already seen load straight away, with no placeholder to fade
+  isLoaded?: (url: string) => boolean
+};
 
 export type WrapRichTextOptions = Partial<{
   entities: MessageEntity[],
@@ -76,8 +88,7 @@ export type WrapRichTextOptions = Partial<{
   ignoreNextIndex?: number,
   doubleLinebreak?: number
   textColor?: WrapSomethingOptions['textColor'],
-  // * leave the emoji image's src in `data-src`, the caller loads it when the image is near view
-  deferEmojiImageSrc?: boolean
+  lazyEmojiImages?: LazyEmojiImages
 }> & CustomEmojiRendererElementOptions;
 
 export const ENTITY_ELEMENT_MAP: WeakMap<HTMLElement, MessageEntity> = new WeakMap();
@@ -501,10 +512,21 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           //   insertPart(entity, '<span class="emoji">', '</span>');
           // } else {
           element = document.createElement('img');
-          if(options.deferEmojiImageSrc) {
-            element.dataset.src = `/assets/img/emoji/${entity.unicode}.png`;
+          const emojiImageUrl = `/assets/img/emoji/${entity.unicode}.png`;
+          const lazyEmojiImages = options.lazyEmojiImages;
+          if(lazyEmojiImages && !lazyEmojiImages.isLoaded?.(new URL(emojiImageUrl, location.href).href)) {
+            const image = element as HTMLImageElement;
+            lazyEmojiImages.queue.push({
+              div: image,
+              middleware: lazyEmojiImages.middleware,
+              load: () => new Promise<void>((resolve) => {
+                image.addEventListener('load', () => resolve(), {once: true});
+                image.addEventListener('error', () => resolve(), {once: true});
+                image.src = emojiImageUrl;
+              })
+            });
           } else {
-            (element as HTMLImageElement).src = `/assets/img/emoji/${entity.unicode}.png`;
+            (element as HTMLImageElement).src = emojiImageUrl;
           }
           property = 'alt';
           element.className = 'emoji emoji-image';

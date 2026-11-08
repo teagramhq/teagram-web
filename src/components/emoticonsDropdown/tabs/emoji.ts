@@ -59,11 +59,17 @@ import {
   getEmojiSkinToneVariants
 } from '@helpers/emojiSkinTone';
 import showEmojiTonePicker from '@components/emoticonsDropdown/emojiTonePicker';
-import observeLazyEmojiImage, {loadLazyEmojiImage} from '@helpers/lazyEmojiImage';
+import type {LazyEmojiImages} from '@lib/richTextProcessor/wrapRichText';
+import type {Middleware} from '@helpers/middleware';
 
 
 const loadedURLs: Set<string> = new Set();
-export function appendEmoji(_emoji: AppEmoji, unify = false) {
+export function appendEmoji(_emoji: AppEmoji, options: {
+  unify?: boolean,
+  // the queue loads the emoji image when it is near view and drops it when the middleware is gone
+  lazyLoad?: {queue: LazyEmojiImages['queue'], middleware: Middleware}
+} = {}) {
+  const {unify = false, lazyLoad} = options;
   if(_emoji.docId) {
     const customEmojiElement = CustomEmojiElement.create(_emoji.docId);
     const spanEmoji = document.createElement('span');
@@ -84,7 +90,11 @@ export function appendEmoji(_emoji: AppEmoji, unify = false) {
     el = wrapSingleEmoji(emoji);
   } else {
     emoji = fixEmoji(emoji);
-    el = wrapEmojiText(emoji, false, undefined, true);
+    el = wrapEmojiText(emoji, false, undefined, lazyLoad && {
+      queue: lazyLoad.queue,
+      middleware: lazyLoad.middleware,
+      isLoaded: (url) => loadedURLs.has(url)
+    });
   }
 
   spanEmoji.append(el);
@@ -97,12 +107,13 @@ export function appendEmoji(_emoji: AppEmoji, unify = false) {
   if(spanEmoji.firstElementChild?.tagName === 'IMG') {
     const image = spanEmoji.firstElementChild as HTMLImageElement;
 
-    const url = image.dataset.src !== undefined ? new URL(image.dataset.src, location.href).href : image.src;
-    if(loadedURLs.has(url)) {
-      loadLazyEmojiImage(image);
-    } else {
-      observeLazyEmojiImage(image);
-      image.setAttribute('loading', 'lazy');
+    // a deferred image has no src until the queue loads it
+    const deferred = !image.hasAttribute('src');
+    if(deferred || !loadedURLs.has(image.src)) {
+      if(!deferred) {
+        image.setAttribute('loading', 'lazy');
+      }
+
       const placeholder = document.createElement('span');
       placeholder.classList.add('emoji-placeholder');
 
@@ -120,7 +131,7 @@ export function appendEmoji(_emoji: AppEmoji, unify = false) {
 
           spanEmoji.classList.remove('empty');
 
-          loadedURLs.add(url);
+          loadedURLs.add(image.src);
         });
       }, {once: true});
 
@@ -1050,7 +1061,12 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
     category.elements.items.append(renderer);
   }
 
-  private updateEmojiItemTone(item: EmojiTabItem, tone: EmojiSkinTone) {
+  private getLazyEmojiLoad(category: EmojiTabCategory) {
+    const queue = this.emoticonsDropdown?.lazyLoadQueue;
+    return queue && {queue, middleware: category.middlewareHelper.get()};
+  }
+
+  private updateEmojiItemTone(item: EmojiTabItem, tone: EmojiSkinTone, category: EmojiTabCategory) {
     const toneVariants = item.baseEmoji && getEmojiSkinToneVariants(item.baseEmoji);
     if(!toneVariants) {
       return;
@@ -1062,7 +1078,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
     }
 
     item.emoji = emoji;
-    const renderedEmoji = appendEmoji({emoji});
+    const renderedEmoji = appendEmoji({emoji}, {lazyLoad: this.getLazyEmojiLoad(category)});
     item.element.replaceChildren(...Array.from(renderedEmoji.childNodes));
   }
 
@@ -1071,7 +1087,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
       category.items.forEach((item) => {
         const tone = item.baseEmoji && this.emojiVariants[item.baseEmoji];
         if(tone !== undefined) {
-          this.updateEmojiItemTone(item, tone);
+          this.updateEmojiItemTone(item, tone, category);
         }
       });
     });
@@ -1082,7 +1098,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
     this.categoriesMap.forEach((category) => {
       category.items.forEach((item) => {
         if(item.baseEmoji === baseEmoji) {
-          this.updateEmojiItemTone(item, tone);
+          this.updateEmojiItemTone(item, tone, category);
         }
       });
     });
@@ -1151,7 +1167,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
       spanEmoji.append(element);
       element = spanEmoji;
     } else {
-      element = appendEmoji(emoji/* .replace(/[\ufe0f\u2640\u2642\u2695]/g, '') *//* , false */);
+      element = appendEmoji(emoji, {lazyLoad: this.getLazyEmojiLoad(category)});
 
       if(this.showLocks && !this.canUseEmoji(emoji, category)) {
         element.append(Icon('premium_lock', 'premium-sticker-lock'));
