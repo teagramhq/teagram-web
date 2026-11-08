@@ -62,25 +62,37 @@ describe('authorizer DH helpers without Uint8Array.concat', () => {
     expect(auth.gA).toEqual(new Uint8Array([0x12]));
   });
 
-  it('completes client DH parameter handling without the extension', async() => {
+  it.each([
+    {branch: 'dh_gen_ok', nonceMarkers: [1], branchHashBytes: [0x44], rejects: false},
+    {branch: 'dh_gen_retry', nonceMarkers: [2, 3], branchHashBytes: [0x44, 0x55], rejects: true},
+    {branch: 'dh_gen_fail', nonceMarkers: [3], branchHashBytes: [0x44], rejects: true}
+  ])('handles $branch client DH responses without the extension', async({branch, nonceMarkers, branchHashBytes, rejects}) => {
     const nonce = new Uint8Array(16).fill(0x01);
     const serverNonce = new Uint8Array(16).fill(0x22);
     const newNonce = new Uint8Array(32).fill(0x11);
     const authKey = new Uint8Array(256).fill(0x55);
-    const sha1Results = [
+    const sha1Results = branchHashBytes.flatMap((hashByte) => [
       new Uint8Array(20).fill(0x22),
       new Uint8Array(20).fill(0x33),
-      new Uint8Array(20).fill(0x44)
-    ];
-    const response = {
-      _: 'dh_gen_ok',
+      new Uint8Array(20).fill(hashByte)
+    ]);
+    const makeResponse = (type: string, marker: number, hashByte: number) => ({
+      _: type,
       nonce,
       server_nonce: serverNonce,
-      new_nonce_hash1: new Uint8Array(16).fill(0x44)
-    };
+      [`new_nonce_hash${marker}`]: new Uint8Array(16).fill(hashByte)
+    });
+    const responses = branch === 'dh_gen_retry' ? [
+      makeResponse('dh_gen_retry', 2, 0x44),
+      makeResponse('dh_gen_fail', 3, 0x55)
+    ] : branch === 'dh_gen_fail' ? [
+      makeResponse('dh_gen_fail', 3, 0x44)
+    ] : [
+      makeResponse('dh_gen_ok', 1, 0x44)
+    ];
     let modPowCall = 0;
-    const crypto = vi.spyOn(CryptoWorker, 'invokeCrypto').mockImplementation((async(method: string, ...args: any[]) => {
-      if(method === 'mod-pow') return (modPowCall++ === 0 ? new Uint8Array([0x33]) : authKey) as any;
+    const crypto = vi.spyOn(CryptoWorker, 'invokeCrypto').mockImplementation((async(method: string) => {
+      if(method === 'mod-pow') return (modPowCall++ % 2 === 0 ? new Uint8Array([0x33]) : authKey) as any;
       if(method === 'sha1') return sha1Results.shift() as any;
       if(method === 'aes-encrypt') return new Uint8Array([0x66]) as any;
       throw new Error(`Unexpected crypto method: ${method}`);
@@ -88,7 +100,11 @@ describe('authorizer DH helpers without Uint8Array.concat', () => {
 
     const authorizer = new Authorizer({timeManager: new TimeManager(), dcConfigurator: {} as never});
     const internals = authorizer as unknown as AuthorizerTestSurface;
-    vi.spyOn(authorizer as any, 'sendPlainRequest').mockResolvedValue({fetchObject: () => response});
+    const sendPlainRequest = vi.spyOn(authorizer as any, 'sendPlainRequest').mockImplementation(async() => {
+      const response = responses.shift();
+      if(!response) throw new Error('Missing synthetic DH response');
+      return {fetchObject: () => response};
+    });
     const auth: any = {
       dcId: 1,
       nonce,
@@ -102,13 +118,23 @@ describe('authorizer DH helpers without Uint8Array.concat', () => {
       gA: new Uint8Array([0xaa])
     };
 
-    await expect(withoutUint8ArrayConcat(() => internals.sendSetClientDhParams(auth))).resolves.toBe(auth);
+    const request = withoutUint8ArrayConcat(() => internals.sendSetClientDhParams(auth));
+    if(rejects) {
+      await expect(request).rejects.toThrow('Set_client_DH_params_answer fail');
+    } else {
+      await expect(request).resolves.toBe(auth);
+    }
 
     const sha1Inputs = crypto.mock.calls.filter(([method]) => method === 'sha1').map(([, bytes]) => bytes as Uint8Array);
-    expect(sha1Inputs[2]).toEqual(new Uint8Array([...newNonce, 1, ...new Uint8Array(8).fill(0x33)]));
+    expect(sendPlainRequest).toHaveBeenCalledTimes(nonceMarkers.length);
+    nonceMarkers.forEach((marker, attempt) => {
+      expect(sha1Inputs[attempt * 3 + 2]).toEqual(new Uint8Array([...newNonce, marker, ...new Uint8Array(8).fill(0x33)]));
+    });
     const encryptedData = crypto.mock.calls.find(([method]) => method === 'aes-encrypt')?.[1] as Uint8Array;
     expect(encryptedData.slice(0, 20)).toEqual(new Uint8Array(20).fill(0x22));
-    expect(auth.serverSalt).toEqual(new Uint8Array(8).fill(0x33));
-    expect(auth.authKey).toBeDefined();
+    if(branch === 'dh_gen_ok') {
+      expect(auth.serverSalt).toEqual(new Uint8Array(8).fill(0x33));
+      expect(auth.authKey).toBeDefined();
+    }
   });
 });
