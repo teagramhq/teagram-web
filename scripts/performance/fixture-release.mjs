@@ -7,8 +7,22 @@ import {pathToFileURL} from 'node:url';
 
 const FIXTURE_REPOSITORY = 'teagramhq/teagram-server';
 const HASH_RE = /^[a-f0-9]{64}$/i;
-const RETRYABLE_HTTP_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
-const MAX_FETCH_ATTEMPTS = 4;
+const MIN_RETRY_WINDOW_MS = 120_000;
+const INITIAL_RETRY_DELAY_MS = 1_000;
+const MAX_RETRY_DELAY_MS = 30_000;
+const NETWORK_ERROR_CODES = new Set([
+  'ABORT_ERR',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_SOCKET'
+]);
 
 export function assetPath(name) {
   if(typeof(name) !== 'string' || !name || name.includes('/') || name.includes('\\') || name.includes('\0')) {
@@ -83,67 +97,105 @@ export function reconstructAssets(assets) {
   return files;
 }
 
-async function fetchReleaseResponse(url) {
-  for(let attempt = 0; attempt < MAX_FETCH_ATTEMPTS; ++attempt) {
+function errorMessage(error) {
+  return (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, ' ');
+}
+
+function isNetworkError(error) {
+  for(let current = error; current; current = current.cause) {
+    if(NETWORK_ERROR_CODES.has(current.code)) return true;
+    if(/fetch failed|terminated|network error|socket|connection reset|timed out/i.test(current.message || '')) return true;
+  }
+  return false;
+}
+
+function assetFailure(assetName, attempts, lastStatus, error) {
+  const attemptLabel = attempts === 1 ? 'attempt' : 'attempts';
+  const message = `failed to download release asset ${assetName} after ${attempts} ${attemptLabel} (last status: ${lastStatus})`;
+  return error ? new Error(`${message}: ${errorMessage(error)}`, {cause: error}) : new Error(message);
+}
+
+function retryDelay(attempt) {
+  return Math.min(INITIAL_RETRY_DELAY_MS * 2 ** (attempt - 1), MAX_RETRY_DELAY_MS);
+}
+
+function sleepFor(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function fetchReleaseAsset(url, assetName, consumeResponse, sleep) {
+  let attempts = 0;
+  let totalRetryDelayMs = 0;
+  let lastStatus = 'no response';
+
+  const retry = async() => {
+    if(totalRetryDelayMs >= MIN_RETRY_WINDOW_MS) throw assetFailure(assetName, attempts, lastStatus);
+    const delay = retryDelay(attempts);
+    process.stderr.write(`Retrying fixture release asset ${assetName} (attempt ${attempts}, last status: ${lastStatus}, next retry in ${delay}ms): ${url}\n`);
+    await sleep(delay);
+    totalRetryDelayMs += delay;
+  };
+
+  while(true) {
+    ++attempts;
     let response;
-    let retryReason;
     try {
       response = await fetch(url, {redirect: 'follow'});
     } catch(error) {
-      if(attempt === MAX_FETCH_ATTEMPTS - 1) throw error;
-      const message = (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, ' ');
-      retryReason = `network error: ${message}`;
+      lastStatus = `network error: ${errorMessage(error)}`;
+      if(totalRetryDelayMs >= MIN_RETRY_WINDOW_MS) throw assetFailure(assetName, attempts, lastStatus, error);
+      await retry();
+      continue;
     }
 
-    if(response && ((response.ok && response.body) || !RETRYABLE_HTTP_STATUS_CODES.has(response.status) || attempt === MAX_FETCH_ATTEMPTS - 1)) {
-      return response;
+    lastStatus = `HTTP ${response.status}`;
+    if(response.status >= 500 && response.status <= 599) {
+      await retry();
+      continue;
+    }
+    if(!response.ok || !response.body) {
+      if(!response.body) lastStatus += ', empty response body';
+      throw assetFailure(assetName, attempts, lastStatus);
     }
 
-    if(response) retryReason = `HTTP ${response.status}`;
-    process.stderr.write(`Retrying fixture release request (attempt ${attempt + 1}/${MAX_FETCH_ATTEMPTS}, ${retryReason}): ${url}\n`);
-    await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+    try {
+      return await consumeResponse(response);
+    } catch(error) {
+      if(!isNetworkError(error)) throw assetFailure(assetName, attempts, lastStatus, error);
+      lastStatus = `HTTP ${response.status}; network error: ${errorMessage(error)}`;
+      if(totalRetryDelayMs >= MIN_RETRY_WINDOW_MS) throw assetFailure(assetName, attempts, lastStatus, error);
+      await retry();
+    }
   }
-
-  throw new Error(`failed to download release asset: ${url}`);
 }
 
-async function fetchBytes(url, expectedHash) {
-  const response = await fetchReleaseResponse(url);
-  if(!response.ok || !response.body) throw new Error(`download failed (${response.status}): ${url}`);
-
-  const digest = createHash('sha256');
-  const hasher = new Transform({
-    transform(chunk, encoding, callback) {
-      digest.update(chunk);
-      callback(null, chunk);
-    }
-  });
-  const chunks = [];
-  await pipeline(Readable.fromWeb(response.body), hasher, new Transform({
-    transform(chunk, encoding, callback) {
-      chunks.push(Buffer.from(chunk));
-      callback(null, chunk);
-    }
-  }));
-  const actualHash = digest.digest('hex');
-  if(expectedHash && actualHash !== expectedHash) throw new Error(`checksum mismatch for ${url}`);
-  return Buffer.concat(chunks);
+async function fetchBytes(url, assetName, sleep) {
+  return fetchReleaseAsset(url, assetName, async(response) => {
+    const chunks = [];
+    await pipeline(Readable.fromWeb(response.body), new Transform({
+      transform(chunk, encoding, callback) {
+        chunks.push(Buffer.from(chunk));
+        callback(null, chunk);
+      }
+    }));
+    return Buffer.concat(chunks);
+  }, sleep);
 }
 
-async function downloadAsset(url, targetPath, expectedHash) {
-  const response = await fetchReleaseResponse(url);
-  if(!response.ok || !response.body) throw new Error(`download failed (${response.status}): ${url}`);
-
-  const digest = createHash('sha256');
-  const hasher = new Transform({
-    transform(chunk, encoding, callback) {
-      digest.update(chunk);
-      callback(null, chunk);
-    }
-  });
-  await pipeline(Readable.fromWeb(response.body), hasher, createWriteStream(targetPath));
-  const actualHash = digest.digest('hex');
-  if(actualHash !== expectedHash) throw new Error(`checksum mismatch for ${url}`);
+async function downloadAsset(url, assetName, targetPath, expectedHash, sleep) {
+  await fetchReleaseAsset(url, assetName, async(response) => {
+    rmSync(targetPath, {force: true});
+    const digest = createHash('sha256');
+    const hasher = new Transform({
+      transform(chunk, encoding, callback) {
+        digest.update(chunk);
+        callback(null, chunk);
+      }
+    });
+    await pipeline(Readable.fromWeb(response.body), hasher, createWriteStream(targetPath));
+    const actualHash = digest.digest('hex');
+    if(actualHash !== expectedHash) throw new Error(`checksum mismatch for ${assetName}`);
+  }, sleep);
 }
 
 async function reconstructDownloadedAssets(assets, downloadedDirectory, snapshotDirectory) {
@@ -181,11 +233,11 @@ async function reconstructDownloadedAssets(assets, downloadedDirectory, snapshot
   }
 }
 
-export async function downloadFixtureRelease({version, outputDirectory}) {
+export async function downloadFixtureRelease({version, outputDirectory, sleep = sleepFor}) {
   if(!HASH_RE.test(version || '')) throw new Error('fixture version must be a 64-character SHA-256 hash');
   const tag = `perf-fixture-${version}`;
   const releaseUrl = `https://github.com/${FIXTURE_REPOSITORY}/releases/download/${tag}`;
-  const manifest = validateManifest(JSON.parse((await fetchBytes(`${releaseUrl}/manifest.json`)).toString('utf8')), version);
+  const manifest = validateManifest(JSON.parse((await fetchBytes(`${releaseUrl}/manifest.json`, 'manifest.json', sleep)).toString('utf8')), version);
   const root = resolve(outputDirectory);
   rmSync(root, {recursive: true, force: true});
   const downloadedDirectory = join(root, 'release-assets');
@@ -194,7 +246,7 @@ export async function downloadFixtureRelease({version, outputDirectory}) {
   mkdirSync(snapshotDirectory, {recursive: true});
 
   for(const asset of manifest.assets) {
-    await downloadAsset(`${releaseUrl}/${encodeURIComponent(asset.name)}`, join(downloadedDirectory, asset.name), asset.sha256);
+    await downloadAsset(`${releaseUrl}/${encodeURIComponent(asset.name)}`, asset.name, join(downloadedDirectory, asset.name), asset.sha256, sleep);
   }
   await reconstructDownloadedAssets(manifest.assets, downloadedDirectory, snapshotDirectory);
   writeFileSync(join(root, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
