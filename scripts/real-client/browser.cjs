@@ -2911,8 +2911,18 @@ async function openCustomEmojiSet(page, stage) {
 
 async function runColdPickerTrial(storageState, appUrl, trial) {
   const stage = `alice_cold_picker_${trial + 1}`;
-  const browser = await chromium.launch({headless: true, chromiumSandbox: true, args: browserLaunchArgs(runtime)})
-  .catch(() => failStage(`${stage}_launch`));
+  // The container's /tmp is a small tmpfs and a browser profile left behind by each of the eight
+  // trials would fill it for the scenarios that follow, so each trial gets a directory of its own
+  const trialDirectory = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'real-client-cold-'));
+  const browser = await chromium.launch({
+    headless: true,
+    chromiumSandbox: true,
+    args: browserLaunchArgs(runtime),
+    env: {...process.env, TMPDIR: trialDirectory, HOME: trialDirectory}
+  }).catch(() => {
+    fs.rmSync(trialDirectory, {recursive: true, force: true});
+    failStage(`${stage}_launch`);
+  });
   try {
     const context = await browser.newContext({viewport: {width: 1280, height: 900}, storageState})
     .catch(() => failStage(`${stage}_context`));
@@ -2961,6 +2971,7 @@ async function runColdPickerTrial(storageState, appUrl, trial) {
     }
   } finally {
     await browser.close().catch(() => {});
+    fs.rmSync(trialDirectory, {recursive: true, force: true});
   }
 }
 
