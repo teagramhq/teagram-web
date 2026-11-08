@@ -1,6 +1,5 @@
 import type {MyDocument} from '@appManagers/appDocsManager';
 import {EmoticonsDropdown} from '..';
-import cancelEvent from '@helpers/dom/cancelEvent';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import {fastRaf} from '@helpers/schedulers';
 import pause from '@helpers/schedulers/pause';
@@ -58,7 +57,7 @@ import {
   getEmojiSkinTone,
   getEmojiSkinToneVariants
 } from '@helpers/emojiSkinTone';
-import showEmojiTonePicker from '@components/emoticonsDropdown/emojiTonePicker';
+import cancelEvent from '@helpers/dom/cancelEvent';
 import type LazyLoadQueueIntersector from '@components/lazyLoadQueueIntersector';
 import releaseLazyEmojiImages from '@helpers/releaseLazyEmojiImages';
 import type {Middleware} from '@helpers/middleware';
@@ -1122,7 +1121,8 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
     }
 
     const {baseEmoji, variants} = toneVariants;
-    const picker = showEmojiTonePicker({
+    // the picker is only needed on a right click, so it stays out of the chat-list bundle
+    const picker = import('@components/emoticonsDropdown/emojiTonePicker').then(({default: showEmojiTonePicker}) => showEmojiTonePicker({
       event,
       variants,
       selectedTone: this.emojiVariants[baseEmoji] ?? getEmojiSkinTone(emoji.emoji),
@@ -1131,14 +1131,17 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
         this.applyEmojiVariant(baseEmoji, tone);
         this.managers.appEmojiManager.saveEmojiVariant(baseEmoji, tone);
       }
-    });
+    }));
+    cancelEvent(event);
     this.emoticonsDropdown?.setIgnoreMouseOut('tooltip', true);
     return {
       cleanup: () => {
-        picker.cleanup();
+        picker.then((result) => result.cleanup());
         this.emoticonsDropdown?.setIgnoreMouseOut('tooltip', false);
       },
-      onMenuOpen: picker.show
+      onMenuOpen: (menu: HTMLElement) => {
+        picker.then((result) => result.show(menu));
+      }
     };
   };
 
