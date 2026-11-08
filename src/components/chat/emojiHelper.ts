@@ -201,6 +201,9 @@ export default class EmojiHelper extends AutocompleteHelper {
       }
 
       this.render(emojis, true, middleware);
+    }).catch(() => {
+      // * a server without custom emoji search has no suggestions to show
+      if(middleware()) this.render([], true, middleware);
     });
   }
 }

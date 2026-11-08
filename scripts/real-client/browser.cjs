@@ -3081,7 +3081,7 @@ async function installCustomEmojiSet(page, stage) {
 
 async function selectCustomEmoji(page, stage, expectedDocId) {
   setPageScenarioStep(page, `${stage}_picker`);
-  const dropdown = page.locator('.emoji-dropdown');
+  const dropdown = page.locator('.emoji-dropdown.active');
   await dropdown.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_picker_visible`));
 
   const customSelector = expectedDocId ?
@@ -3148,6 +3148,12 @@ async function reactWithCustomEmoji(page, otherPage, text, docId, stage) {
 
 async function setCustomEmojiStatus(page, otherPage, docId) {
   setPageScenarioStep(page, 'alice_custom_emoji_status_open');
+  // The composer's picker stays open after sending; close it so the status picker is the only active one.
+  if(await page.locator('.emoji-dropdown.active').count()) {
+    await page.locator('#column-center .toggle-emoticons').click().catch(() => failStage('alice_custom_emoji_status_chat_picker_close'));
+    await page.waitForFunction(() => !document.querySelector('.emoji-dropdown.active'), null, {timeout: 15_000})
+    .catch(() => failStage('alice_custom_emoji_status_chat_picker_close'));
+  }
   const statusButton = page.locator('.sidebar-emoji-status');
   await statusButton.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_custom_emoji_status_button'));
   await statusButton.click().catch(() => failStage('alice_custom_emoji_status_open'));
@@ -3155,12 +3161,27 @@ async function setCustomEmojiStatus(page, otherPage, docId) {
 
   setPageScenarioStep(page, 'alice_custom_emoji_status_sender');
   await page.waitForFunction((docId) => {
-    return !!document.querySelector(`.sidebar-emoji-status-emoji .custom-emoji[data-doc-id="${docId}"]`);
+    return !!document.querySelector(`.sidebar-emoji-status-emoji[data-doc-id="${docId}"]`);
   }, docId, {timeout: 30_000}).catch(() => failStage('alice_custom_emoji_status_sender'));
 
+  // The server does not push status changes to other accounts, so the recipient sees it on its
+  // next load of Alice's profile: reload and reopen the chat.
+  setPageScenarioStep(otherPage, 'bob_custom_emoji_status_reload');
+  await otherPage.reload({waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage('bob_custom_emoji_status_reload'));
+  await otherPage.waitForFunction(() => {
+    const chats = document.querySelector('#page-chats');
+    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+  }, null, {timeout: 45_000}).catch(() => failStage('bob_custom_emoji_status_reload_chats'));
+  await selectUniquePeer(
+    otherPage,
+    '#column-left .input-search-input',
+    '#search-container .row[data-peer-id]',
+    runtime.accounts[0].username,
+    'bob_custom_emoji_status_chat'
+  );
   setPageScenarioStep(otherPage, 'bob_custom_emoji_status_receiver');
   await otherPage.waitForFunction((docId) => {
-    return !!document.querySelector(`#column-center .topbar .emoji-status .custom-emoji[data-doc-id="${docId}"]`);
+    return !!document.querySelector(`#column-center .topbar .emoji-status[data-doc-id="${docId}"], #column-center .topbar .emoji-status [data-doc-id="${docId}"]`);
   }, docId, {timeout: 30_000}).catch(() => failStage('bob_custom_emoji_status_receiver'));
   if(await page.locator('.popup-premium:visible').count()) failStage('alice_custom_emoji_status_premium_prompt');
 }
@@ -3188,6 +3209,9 @@ async function runCustomEmojiFeatureFlow(alice, bob) {
   await alice.page.locator('#column-center .toggle-emoticons').click()
   .catch(() => failStage('alice_custom_emoji_send_picker'));
   const docId = await selectCustomEmoji(alice.page, 'alice_custom_emoji_send');
+  // The picked emoji reaches the composer after its document loads; sending earlier drops it.
+  await alice.page.waitForFunction((id) => !!document.querySelector(`#column-center .input-message-input:not(.input-field-input-fake) [data-doc-id="${id}"]`), docId, {timeout: 15_000})
+  .catch(() => failStage('alice_custom_emoji_send_input'));
   await input.press('Enter').catch(() => failStage('alice_custom_emoji_send_submit'));
   await waitForCustomEmojiMessage(alice.page, messageText, docId, 'alice_custom_emoji_send_visible');
 
