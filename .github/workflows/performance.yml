@@ -150,7 +150,7 @@ jobs:
           TG_RSA_KEY_PATH=$RUNNER_TEMP/teagram-perf-server-key.pem
           TG_BLOB_DIR_1X=$RUNNER_TEMP/teagram-perf-blobs-1x
           TG_BLOB_DIR_100X=$RUNNER_TEMP/teagram-perf-blobs-100x
-          TG_WEBSOCKET_ALLOWED_ORIGINS=http://localhost:4173,http://localhost:4174,http://localhost:4175,http://localhost:4176,http://localhost:4177,http://localhost:4178
+          TG_WEBSOCKET_ALLOWED_ORIGINS=http://localhost:4173,http://localhost:4174,http://localhost:4175,http://localhost:4176,http://localhost:4177,http://localhost:4178,http://localhost:4179
           TG_REGISTRATION=closed
           TG_RATE_LIMIT_SEND_CODE_IP=100
           TG_RATE_LIMIT_SEND_CODE_IP_PHONES=100
@@ -227,8 +227,15 @@ jobs:
             ln -s "$GITHUB_WORKSPACE/node_modules" "$base_directory/node_modules"
             (cd "$base_directory" && pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-dist")
             (cd "$base_directory" && VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-trace-dist")
+            sticker_base_sha="$(cat .github/perf-sticker-base-commit)"
+            sticker_base_directory="$RUNNER_TEMP/teagram-web-sticker-base"
+            git worktree add --detach "$sticker_base_directory" "$sticker_base_sha"
+            ln -s "$GITHUB_WORKSPACE/node_modules" "$sticker_base_directory/node_modules"
+            (cd "$sticker_base_directory" && pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-sticker-base-dist")
             echo "PERF_BASE_DIST=$RUNNER_TEMP/teagram-web-base-dist" >> "$GITHUB_ENV"
             echo "PERF_TRACE_BASE_DIST=$RUNNER_TEMP/teagram-web-base-trace-dist" >> "$GITHUB_ENV"
+            echo "PERF_STICKER_BASE_DIST=$RUNNER_TEMP/teagram-web-sticker-base-dist" >> "$GITHUB_ENV"
+            echo 'PERF_STICKER_BASE_ORIGIN=http://localhost:4179' >> "$GITHUB_ENV"
             echo 'PERF_TRACE_BASE_ORIGIN_100X=http://localhost:4178' >> "$GITHUB_ENV"
             echo 'PERF_BASE_ORIGIN_1X=http://localhost:4173' >> "$GITHUB_ENV"
             echo 'PERF_BASE_ORIGIN_100X=http://localhost:4175' >> "$GITHUB_ENV"
@@ -255,6 +262,10 @@ jobs:
           echo "$!" >> "$PERF_SERVICE_PID_FILE"
           nohup node scripts/performance/serve-dist.mjs "$PERF_BASE_DIST" 4175 > "$RUNNER_TEMP/teagram-perf-base-web-100x.log" 2>&1 < /dev/null &
           echo "$!" >> "$PERF_SERVICE_PID_FILE"
+          if [ -n "${PERF_STICKER_BASE_DIST:-}" ]; then
+            nohup node scripts/performance/serve-dist.mjs "$PERF_STICKER_BASE_DIST" 4179 > "$RUNNER_TEMP/teagram-perf-sticker-base-web.log" 2>&1 < /dev/null &
+            echo "$!" >> "$PERF_SERVICE_PID_FILE"
+          fi
           nohup node scripts/performance/serve-dist.mjs "$PERF_HEAD_DIST" 4176 > "$RUNNER_TEMP/teagram-perf-head-web-100x.log" 2>&1 < /dev/null &
           echo "$!" >> "$PERF_SERVICE_PID_FILE"
           nohup node scripts/performance/serve-dist.mjs "$PERF_TRACE_HEAD_DIST" 4177 > "$RUNNER_TEMP/teagram-perf-trace-web-100x.log" 2>&1 < /dev/null &
@@ -286,6 +297,23 @@ jobs:
           if [ "$ready" -ne 1 ]; then
             cat "$RUNNER_TEMP/teagram-perf-proxy.log"
             exit 1
+          fi
+          if [ -n "${PERF_STICKER_BASE_ORIGIN:-}" ]; then
+            ready=0
+            for _ in $(seq 1 30); do
+              if curl -fsS http://localhost:4179/ >/dev/null && \
+                curl -kfsS --resolve teagramd.test:18443:127.0.0.1 \
+                  -H 'Origin: http://localhost:4179' \
+                  https://teagramd.test:18443/.well-known/teagramd/client >/dev/null; then
+                ready=1
+                break
+              fi
+              sleep 1
+            done
+            if [ "$ready" -ne 1 ]; then
+              cat "$RUNNER_TEMP/teagram-perf-proxy.log"
+              exit 1
+            fi
           fi
 
       - name: Run worker recorder replay

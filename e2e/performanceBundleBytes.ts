@@ -14,6 +14,11 @@ export type BundleRequestTracker = {
   waitForIdle: (quietMs: number, timeoutMs: number) => Promise<void>
 };
 
+export function isNetworkRequestURL(value: string) {
+  const protocol = new URL(value).protocol;
+  return protocol === 'http:' || protocol === 'https:';
+}
+
 export function trackBundleDocumentNavigation(page: Page, tracker: BundleRequestTracker) {
   // SharedWorker script requests can disappear on reload without a terminal event.
   // A real navigation commits before its new document starts loading scripts.
