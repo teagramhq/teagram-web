@@ -16,6 +16,7 @@ import {logger} from '@lib/logger';
 import DEBUG from '@config/debug';
 import {DcId, Modify} from '@types';
 import addPadding from '@helpers/bytes/addPadding';
+import bufferConcats from '@helpers/bytes/bufferConcats';
 import bytesCmp from '@helpers/bytes/bytesCmp';
 import bytesFromHex from '@helpers/bytes/bytesFromHex';
 import bytesToHex from '@helpers/bytes/bytesToHex';
@@ -312,14 +313,14 @@ export class Authorizer {
     const getKeyAesEncrypted = async() => {
       for(;;) {
         const tempKey = randomBytes(32);
-        const dataWithHash = dataPadReversed.concat(await CryptoWorker.invokeCrypto('sha256', tempKey.concat(dataWithPadding)));
+        const dataWithHash = bufferConcats(dataPadReversed, await CryptoWorker.invokeCrypto('sha256', bufferConcats(tempKey, dataWithPadding)));
         if(dataWithHash.length !== 224) {
           throw 'DH_params: dataWithHash !== 224 bytes!';
         }
 
         const aesEncrypted = await CryptoWorker.invokeCrypto('aes-encrypt', dataWithHash, tempKey, new Uint8Array([0]));
         const tempKeyXor = bytesXor(tempKey, await CryptoWorker.invokeCrypto('sha256', aesEncrypted));
-        const keyAesEncrypted = tempKeyXor.concat(aesEncrypted);
+        const keyAesEncrypted = bufferConcats(tempKeyXor, aesEncrypted);
 
         const keyAesEncryptedBigInt = bigIntFromBytes(keyAesEncrypted);
         const publicKeyModulusBigInt = bigInt(auth.publicKey.modulus, 16);
@@ -402,12 +403,16 @@ export class Authorizer {
   private async decryptServerDhDataAnswer(auth: AuthOptions, encryptedAnswer: any) {
     auth.localTime = Date.now();
 
-    // ! can't concat Array with Uint8Array!
-    auth.tmpAesKey = (await CryptoWorker.invokeCrypto('sha1', auth.newNonce.concat(auth.serverNonce)))
-    .concat((await CryptoWorker.invokeCrypto('sha1', auth.serverNonce.concat(auth.newNonce))).slice(0, 12));
+    auth.tmpAesKey = bufferConcats(
+      await CryptoWorker.invokeCrypto('sha1', bufferConcats(auth.newNonce, auth.serverNonce)),
+      (await CryptoWorker.invokeCrypto('sha1', bufferConcats(auth.serverNonce, auth.newNonce))).slice(0, 12)
+    );
 
-    auth.tmpAesIv = (await CryptoWorker.invokeCrypto('sha1', auth.serverNonce.concat(auth.newNonce))).slice(12)
-    .concat(await CryptoWorker.invokeCrypto('sha1', auth.newNonce.concat(auth.newNonce)), auth.newNonce.slice(0, 4));
+    auth.tmpAesIv = bufferConcats(
+      (await CryptoWorker.invokeCrypto('sha1', bufferConcats(auth.serverNonce, auth.newNonce))).slice(12),
+      await CryptoWorker.invokeCrypto('sha1', bufferConcats(auth.newNonce, auth.newNonce)),
+      auth.newNonce.slice(0, 4)
+    );
 
     const answerWithHash = new Uint8Array(await CryptoWorker.invokeCrypto('aes-decrypt', encryptedAnswer, auth.tmpAesKey, auth.tmpAesIv));
 
@@ -516,7 +521,7 @@ export class Authorizer {
       g_b: gB
     }, 'Client_DH_Inner_Data');
 
-    const dataWithHash = (await CryptoWorker.invokeCrypto('sha1', data.getBuffer())).concat(data.getBytes(true));
+    const dataWithHash = bufferConcats(await CryptoWorker.invokeCrypto('sha1', data.getBuffer()), data.getBytes(true));
     const encryptedData = await CryptoWorker.invokeCrypto('aes-encrypt', dataWithHash, auth.tmpAesKey, auth.tmpAesIv);
 
     const request = new TLSerialization({mtproto: true});
@@ -567,7 +572,7 @@ export class Authorizer {
     }
     switch(response._) {
       case 'dh_gen_ok': {
-        const newNonceHash1 = (await CryptoWorker.invokeCrypto('sha1', auth.newNonce.concat([1], authKeyAux))).slice(-16);
+        const newNonceHash1 = (await CryptoWorker.invokeCrypto('sha1', bufferConcats(auth.newNonce, [1], authKeyAux))).slice(-16);
 
         if(!bytesCmp(newNonceHash1, response.new_nonce_hash1)) {
           this.log.error('Set_client_DH_params_answer new_nonce_hash1 mismatch', newNonceHash1, response);
@@ -586,7 +591,7 @@ export class Authorizer {
       }
 
       case 'dh_gen_retry': {
-        const newNonceHash2 = (await CryptoWorker.invokeCrypto('sha1', auth.newNonce.concat([2], authKeyAux))).slice(-16);
+        const newNonceHash2 = (await CryptoWorker.invokeCrypto('sha1', bufferConcats(auth.newNonce, [2], authKeyAux))).slice(-16);
         if(!bytesCmp(newNonceHash2, response.new_nonce_hash2)) {
           throw new Error('[MT] Set_client_DH_params_answer new_nonce_hash2 mismatch');
         }
@@ -595,7 +600,7 @@ export class Authorizer {
       }
 
       case 'dh_gen_fail': {
-        const newNonceHash3 = (await CryptoWorker.invokeCrypto('sha1', auth.newNonce.concat([3], authKeyAux))).slice(-16);
+        const newNonceHash3 = (await CryptoWorker.invokeCrypto('sha1', bufferConcats(auth.newNonce, [3], authKeyAux))).slice(-16);
         if(!bytesCmp(newNonceHash3, response.new_nonce_hash3)) {
           throw new Error('[MT] Set_client_DH_params_answer new_nonce_hash3 mismatch');
         }

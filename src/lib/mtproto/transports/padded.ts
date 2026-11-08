@@ -1,4 +1,5 @@
 import {nextRandomUint, randomBytes} from '@helpers/random';
+import bufferConcats from '@helpers/bytes/bufferConcats';
 import {IntermediatePacketCodec} from '@lib/mtproto/transports/intermediate';
 /*  Data packets are aligned to 4bytes. This codec adds random bytes of size
   from 0 to 3 bytes, which are ignored by decoder. */
@@ -13,7 +14,7 @@ class PaddedIntermediatePacketCodec extends IntermediatePacketCodec {
     const header = new Uint8Array(new Uint32Array([len]).buffer);
     console.log('encodePacket', padding, len, data, header);
 
-    return header.concat(data, padding);
+    return bufferConcats(header, data, padding);
   }
 
   public readPacket(data: Uint8Array) {
