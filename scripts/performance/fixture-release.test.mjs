@@ -133,7 +133,38 @@ test('retries an interrupted asset body without keeping its partial download', a
   }
 });
 
-test('keeps retrying a failing asset for at least two minutes without redownloading verified assets', async() => {
+test('recovers when an asset returns 504 for more than two minutes', async() => {
+  const version = 'a'.repeat(64);
+  const data = Buffer.from('recovered fixture data');
+  const manifest = {
+    fixture: version,
+    server_commit: 'b'.repeat(40),
+    migration_revision: '20261025194500',
+    assets: [{name: 'fixture-recovered.json', sha256: digest(data)}]
+  };
+  const outputDirectory = mkdtempSync(join(tmpdir(), 'teagram-perf-fixture-'));
+  const originalFetch = globalThis.fetch;
+  const retryDelays = [];
+  let assetAttempts = 0;
+  globalThis.fetch = async(url) => {
+    if(String(url).endsWith('/manifest.json')) return new Response(JSON.stringify(manifest));
+    ++assetAttempts;
+    if(assetAttempts <= 8) return new Response('Gateway Timeout', {status: 504});
+    return new Response(data);
+  };
+
+  try {
+    await downloadFixtureRelease({version, outputDirectory, sleep: async(delay) => retryDelays.push(delay)});
+    assert.equal(assetAttempts, 9);
+    assert.ok(retryDelays.reduce((total, delay) => total + delay, 0) >= 120_000);
+    assert.deepEqual(readFileSync(join(outputDirectory, 'snapshot', 'fixture-recovered.json')), data);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(outputDirectory, {recursive: true, force: true});
+  }
+});
+
+test('keeps retrying a failing asset for at least five minutes without redownloading verified assets', async() => {
   const version = 'a'.repeat(64);
   const verifiedData = Buffer.from('verified asset');
   const failingData = Buffer.from('failing asset');
@@ -169,7 +200,7 @@ test('keeps retrying a failing asset for at least two minutes without redownload
     );
     assert.equal(assetAttempts.get('fixture-verified.json'), 1);
     assert.equal(assetAttempts.get('fixture-flaky.json'), retryDelays.length + 1);
-    assert.ok(retryDelays.reduce((total, delay) => total + delay, 0) >= 120_000);
+    assert.ok(retryDelays.reduce((total, delay) => total + delay, 0) >= 300_000);
     assert.deepEqual(retryDelays.slice(0, 5), [1000, 2000, 4000, 8000, 16000]);
     assert.ok(retryDelays.every((delay) => delay <= 30_000));
   } finally {

@@ -7,7 +7,7 @@ import {pathToFileURL} from 'node:url';
 
 const FIXTURE_REPOSITORY = 'teagramhq/teagram-server';
 const HASH_RE = /^[a-f0-9]{64}$/i;
-const MIN_RETRY_WINDOW_MS = 120_000;
+const MIN_RETRY_WINDOW_MS = 300_000;
 const INITIAL_RETRY_DELAY_MS = 1_000;
 const MAX_RETRY_DELAY_MS = 30_000;
 const NETWORK_ERROR_CODES = new Set([
