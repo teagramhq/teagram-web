@@ -59,17 +59,15 @@ import {
   getEmojiSkinTone,
   getEmojiSkinToneVariants
 } from '@helpers/emojiSkinTone';
-import type LazyLoadQueueIntersector from '@components/lazyLoadQueueIntersector';
-import {renderImageFromUrlPromise} from '@helpers/dom/renderImageFromUrl';
+import showLazyTonePicker from '@components/emoticonsDropdown/lazyTonePicker';
 import {hasLoadedURL, markLoadedURL} from '@helpers/dom/loadedUrlCache';
-import releaseLazyEmojiImages from '@helpers/releaseLazyEmojiImages';
-import type {Middleware} from '@helpers/middleware';
+import createLazyEmojiImages from '@helpers/lazyEmojiImages';
 
 
 export function appendEmoji(_emoji: AppEmoji, options: {
   unify?: boolean,
   // the queue loads the emoji image when it is near view and drops it when the middleware is gone
-  lazyLoad?: {queue: Pick<LazyLoadQueueIntersector, 'push' | 'delete'>, middleware: Middleware}
+  lazyLoad?: ReturnType<typeof createLazyEmojiImages>
 } = {}) {
   const {unify = false, lazyLoad} = options;
   if(_emoji.docId) {
@@ -92,13 +90,7 @@ export function appendEmoji(_emoji: AppEmoji, options: {
     el = wrapSingleEmoji(emoji);
   } else {
     emoji = fixEmoji(emoji);
-    el = wrapEmojiText(emoji, false, undefined, lazyLoad && ((image, url) => {
-      if(hasLoadedURL(url)) {
-        image.src = url;
-      } else {
-        lazyLoad.queue.push({div: image, middleware: lazyLoad.middleware, load: () => renderImageFromUrlPromise(image, url)});
-      }
-    }));
+    el = wrapEmojiText(emoji, false, undefined, lazyLoad?.load);
   }
 
   spanEmoji.append(el);
@@ -106,7 +98,7 @@ export function appendEmoji(_emoji: AppEmoji, options: {
   if(spanEmoji.children.length > 1) {
     const first = spanEmoji.firstElementChild;
     // the images dropped here never load, so they must leave the queue too
-    releaseLazyEmojiImages(spanEmoji, lazyLoad?.queue, first);
+    lazyLoad?.release(spanEmoji, first);
     spanEmoji.replaceChildren(first);
   }
 
@@ -1069,7 +1061,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
 
   private getLazyEmojiLoad(category: EmojiTabCategory) {
     const queue = this.emoticonsDropdown?.lazyLoadQueue;
-    return queue && {queue, middleware: category.middlewareHelper.get()};
+    return queue && createLazyEmojiImages(queue, category.middlewareHelper.get());
   }
 
   private updateEmojiItemTone(item: EmojiTabItem, tone: EmojiSkinTone, category: EmojiTabCategory) {
@@ -1085,7 +1077,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
 
     item.emoji = emoji;
     const renderedEmoji = appendEmoji({emoji}, {lazyLoad: this.getLazyEmojiLoad(category)});
-    releaseLazyEmojiImages(item.element, this.emoticonsDropdown?.lazyLoadQueue);
+    this.getLazyEmojiLoad(category)?.release(item.element);
     item.element.replaceChildren(...Array.from(renderedEmoji.childNodes));
   }
 
@@ -1124,8 +1116,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
     }
 
     const {baseEmoji, variants} = toneVariants;
-    // the picker is only needed on a right click, so it stays out of the chat-list bundle
-    const picker = import('@components/emoticonsDropdown/emojiTonePicker').then(({default: showEmojiTonePicker}) => showEmojiTonePicker({
+    const picker = showLazyTonePicker(() => import('@components/emoticonsDropdown/emojiTonePicker').then(({default: showEmojiTonePicker}) => showEmojiTonePicker({
       event,
       variants,
       selectedTone: this.emojiVariants[baseEmoji] ?? getEmojiSkinTone(emoji.emoji),
@@ -1135,17 +1126,18 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
         this.applyEmojiVariant(baseEmoji, tone);
         this.managers.appEmojiManager.saveEmojiVariant(baseEmoji, tone);
       }
-    }));
+    })), (error) => {
+      console.error('emoji tone picker failed to load', error);
+      toastNew({langPackKey: 'Error.AnError'});
+    });
     cancelEvent(event);
     this.emoticonsDropdown?.setIgnoreMouseOut('tooltip', true);
     return {
       cleanup: () => {
-        picker.then((result) => result.cleanup());
+        picker.cleanup();
         this.emoticonsDropdown?.setIgnoreMouseOut('tooltip', false);
       },
-      onMenuOpen: (menu: HTMLElement) => {
-        picker.then((result) => result.show(menu));
-      }
+      onMenuOpen: picker.show
     };
   };
 
