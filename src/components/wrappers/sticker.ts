@@ -736,13 +736,13 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
 
   // * callers that never read `render` (fire-and-forget status, title and reaction icons) would
   // * otherwise see a load cancelled by its middleware as an unhandled rejection; consumers that
-  // * do await it still receive the rejection
-  loadPromise.catch((err) => {
+  // * do await it still receive real render failures
+  const renderPromise = loadPromise.catch((err) => {
     if((err as ApiError)?.type !== 'MIDDLEWARE') throw err;
   });
 
   if(downloaded && (asStatic/*  || stickerType === 3 */)) {
-    loadThumbPromise = loadPromise as any;
+    loadThumbPromise = renderPromise as any;
     loadPromises?.push(loadThumbPromise);
   }
 
@@ -754,7 +754,7 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
       middleware,
       isOut,
       width,
-      loadPromise,
+      loadPromise: renderPromise,
       relativeEffect,
       loopEffect,
       scrollable,
@@ -762,7 +762,7 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
     });
   }
 
-  ret.render = loadPromise as any;
+  ret.render = renderPromise as any;
   return ret;
 }
 
