@@ -22,9 +22,10 @@ describe('AES-CTR', () => {
     try {
       const ctr = createCtr();
       const first = await updateChunk(ctr, data.slice(0, 1));
-      const second = await updateChunk(ctr, data.slice(1));
+      const shortFragment = await updateChunk(ctr, data.slice(1, 2));
+      const finalFragment = await updateChunk(ctr, data.slice(2));
 
-      expect(new Uint8Array([...first, ...second])).toEqual(expected);
+      expect(new Uint8Array([...first, ...shortFragment, ...finalFragment])).toEqual(expected);
     } finally {
       if(concatDescriptor) Object.defineProperty(Uint8Array.prototype, 'concat', concatDescriptor);
     }
