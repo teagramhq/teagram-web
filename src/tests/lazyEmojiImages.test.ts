@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
-import createLazyEmojiImages, {BURST_REQUESTS, QUIET_MS, SLOT_HOLD_MS} from '@helpers/lazyEmojiImages';
+import createLazyEmojiImages, {BURST_REQUESTS, SLOT_HOLD_MS, WINDOW_MS} from '@helpers/lazyEmojiImages';
 import {markLoadedURL} from '@helpers/dom/loadedUrlCache';
 import LazyLoadQueue from '@components/lazyLoadQueue';
 import type {Middleware} from '@helpers/middleware';
@@ -92,18 +92,56 @@ describe('lazy emoji images', () => {
     expect(settled[BURST_REQUESTS]).toBe(true);
   });
 
-  test('allows a new burst once the queue has been quiet', async() => {
+  test('allows a new burst once a whole window has passed without starts', async() => {
     vi.useFakeTimers();
     const lazy = createLazyEmojiImages(queue, middleware);
     loadEach(BURST_REQUESTS + 1, lazy);
     await vi.advanceTimersByTimeAsync(SLOT_HOLD_MS);
-    await vi.advanceTimersByTimeAsync(QUIET_MS + 1);
+    await vi.advanceTimersByTimeAsync(WINDOW_MS + 1);
 
     push.mockClear();
     const settled = loadEach(BURST_REQUESTS + 1, lazy);
     await vi.advanceTimersByTimeAsync(0);
 
     expect(settled).toEqual([...Array(BURST_REQUESTS).fill(true), false]);
+  });
+
+  test('keeps the hold for a burst that starts inside the window of the last one', async() => {
+    vi.useFakeTimers();
+    const lazy = createLazyEmojiImages(queue, middleware);
+    loadEach(BURST_REQUESTS, lazy);
+    await vi.advanceTimersByTimeAsync(WINDOW_MS - 1);
+
+    push.mockClear();
+    const settled = loadEach(3, lazy);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(settled).toEqual([false, false, false]);
+  });
+
+  test('bounds the long-run start rate for a page of new emoji every 0.6 s', async() => {
+    vi.useFakeTimers();
+    const realQueue = new LazyLoadQueue(8, true);
+    const lazy = createLazyEmojiImages(realQueue, middleware);
+    const images: HTMLImageElement[] = [];
+    const duration = 10_000;
+    for(let at = 0; at < duration; at += 600) {
+      setTimeout(() => {
+        for(let i = 0; i < 40; ++i) {
+          const image = document.createElement('img');
+          images.push(image);
+          lazy.load(image, emojiUrl(`cadence-${at}-${i}`));
+        }
+      }, at);
+    }
+    await vi.advanceTimersByTimeAsync(duration);
+
+    const started = images.filter((image) => image.hasAttribute('src')).length;
+    // at most one window's allowance up front, then 33 a second
+    expect(started).toBeLessThanOrEqual(BURST_REQUESTS + Math.ceil(duration / 1000 * 8 * 1000 / SLOT_HOLD_MS) + 16);
+    // a reset after every quiet gap would have started all of them
+    expect(images.length).toBe(Math.ceil(duration / 600) * 40);
+    expect(started).toBeLessThan(images.length * 0.6);
   });
 
   test('starts no more than the burst, then about eight loads per slot hold, through a real queue', async() => {

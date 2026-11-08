@@ -3,14 +3,15 @@ import type {Middleware} from '@helpers/middleware';
 import {hasLoadedURL} from '@helpers/dom/loadedUrlCache';
 import pause from '@helpers/schedulers/pause';
 
-// A burst of up to 40 loads is requested at once (the first screen, or a view after the queue has been
-// quiet). A queue runs eight loads at a time, so past a burst each load holds its slot for 240 ms: about
-// 33 requests a second however fast the picker is scrolled. On the 256 MiB fixture a flick through every
-// category killed the renderer at unpaced speed and at 67 a second (1 of 8), and did not at this rate.
+// No more than 40 loads start within any 1.5 s window without a hold. A queue runs eight loads at a time,
+// so once the window is full each load holds its slot for 240 ms. That keeps the long-run rate at or below
+// about 33 requests a second whatever the scroll cadence: a window is a hard bound, unlike a reset after a
+// quiet gap, which a page of new emoji every half second would keep reopening. On the 256 MiB fixture a
+// cold flick through every category killed the renderer at unpaced speed and at 67 a second (1 of 8).
 export const BURST_REQUESTS = 40;
+export const WINDOW_MS = 1500;
 export const SLOT_HOLD_MS = 240;
-export const QUIET_MS = 500;
-const bursts = new WeakMap<object, {count: number, lastStart: number}>();
+const starts = new WeakMap<object, number[]>();
 
 /**
  * Hands the picker's emoji images to the dropdown's load queue: an image gets its src when it is near
@@ -36,11 +37,10 @@ export default function createLazyEmojiImages(
         load: () => {
           image.src = url;
           const now = Date.now();
-          const burst = bursts.get(queue) ?? {count: 0, lastStart: 0};
-          bursts.set(queue, burst);
-          if(now - burst.lastStart > QUIET_MS) burst.count = 0;
-          burst.lastStart = now;
-          return ++burst.count > BURST_REQUESTS ? pause(SLOT_HOLD_MS) : Promise.resolve();
+          const recent = (starts.get(queue) ?? []).filter((time) => now - time < WINDOW_MS);
+          starts.set(queue, recent);
+          recent.push(now);
+          return recent.length > BURST_REQUESTS ? pause(SLOT_HOLD_MS) : Promise.resolve();
         }
       });
     },
