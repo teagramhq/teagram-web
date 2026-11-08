@@ -2,6 +2,28 @@ import getVisibleRect from '@helpers/dom/getVisibleRect';
 
 export type ViewportSlicePart = {element: HTMLElement, rect: DOMRect, visibleRect: ReturnType<typeof getVisibleRect>}[];
 
+function createPart(element: HTMLElement, rect?: DOMRect, visibleRect: ReturnType<typeof getVisibleRect> = null) {
+  return rect ? {element, rect, visibleRect} : {
+    element,
+    get rect() {
+      return element.getBoundingClientRect();
+    },
+    visibleRect
+  };
+}
+
+function findOrderedIndex(elements: HTMLElement[], key: 'top' | 'bottom', boundary: number, inclusive: boolean) {
+  let low = 0;
+  let high = elements.length;
+  while(low < high) {
+    const middle = (low + high) >> 1;
+    const value = elements[middle].getBoundingClientRect()[key];
+    if(inclusive ? value >= boundary : value > boundary) high = middle;
+    else low = middle + 1;
+  }
+  return low;
+}
+
 export default function getViewportSlice({
   overflowElement,
   overflowRect,
@@ -18,6 +40,7 @@ export default function getViewportSlice({
   elements?: HTMLElement[]
 }) {
   // const perf = performance.now();
+  const ordered = !elements;
   overflowRect ??= overflowElement.getBoundingClientRect();
   elements ??= Array.from(overflowElement.querySelectorAll<HTMLElement>(selector));
 
@@ -28,6 +51,41 @@ export default function getViewportSlice({
       bottom: overflowRect.bottom + extraSize,
       left: overflowRect.left - extraSize
     };
+  }
+
+  if(ordered) {
+    const first = findOrderedIndex(elements, 'bottom', overflowRect.top, false);
+    const end = findOrderedIndex(elements, 'top', overflowRect.bottom, true);
+    const invisibleTop: ViewportSlicePart = elements.slice(0, first).map((element) => createPart(element));
+    const visible: typeof invisibleTop = [];
+    const invisibleBottom: typeof invisibleTop = [];
+    let foundVisible = false;
+
+    for(let index = first; index < end; ++index) {
+      const element = elements[index];
+      const rect = element.getBoundingClientRect();
+      const visibleRect = getVisibleRect(element, overflowElement, false, rect, overflowRect);
+      if(visibleRect) {
+        foundVisible = true;
+        visible.push(createPart(element, rect, visibleRect));
+      } else if(foundVisible) {
+        invisibleBottom.push(createPart(element, rect));
+      } else {
+        invisibleTop.push(createPart(element, rect));
+      }
+    }
+
+    if(!foundVisible) {
+      return {invisibleTop: elements.map((element) => createPart(element)), visible, invisibleBottom};
+    }
+
+    invisibleBottom.push(...elements.slice(end).map((element) => createPart(element)));
+    if(extraMinLength) {
+      visible.unshift(...invisibleTop.splice(Math.max(0, invisibleTop.length - extraMinLength), extraMinLength));
+      visible.push(...invisibleBottom.splice(0, extraMinLength));
+    }
+
+    return {invisibleTop, visible, invisibleBottom};
   }
 
   const invisibleTop: ViewportSlicePart = [],
@@ -49,11 +107,7 @@ export default function getViewportSlice({
       array = invisibleTop;
     }
 
-    array.push({
-      element,
-      rect,
-      visibleRect
-    });
+    array.push(createPart(element, rect, visibleRect));
   }
 
   if(extraMinLength) {

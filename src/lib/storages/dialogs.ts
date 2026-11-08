@@ -52,9 +52,15 @@ import type {ChatPageKey} from '@lib/chatPageSnapshot';
 import AccountController from '@lib/accounts/accountController';
 
 let cachedDialogReconcileTraceSequence = 0;
+const CACHED_DIALOG_RECONCILE_START_DELAY_MS = 15_000;
 const CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE = 25;
 const CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE = 4;
 const CACHED_DIALOG_RECONCILE_MAX_ATTEMPTS = 2;
+
+type CachedDialogReconcileTrace = {
+  traceId: string,
+  finish: (summary?: {pageCount?: number}) => void
+};
 
 export enum FilterType {
   Folder,
@@ -143,6 +149,7 @@ export default class DialogsStorage extends AppManager {
   private cachedListReconcileAttempts: number;
   private cachedListReconcileRecoveryPending: boolean;
   private cachedListReconcileGeneration: number;
+  private cachedListReconcileScheduled = false;
   private savedDialogsOffsetDate: number;
   private savedDialogsPinnedOrder: PeerId[];
   private dialogsNum: number;
@@ -417,6 +424,7 @@ export default class DialogsStorage extends AppManager {
     this.cachedListReconcileRecoveryPending = false;
     this.cachedListReconciled = false;
     this.cachedListReconcileGeneration = (this.cachedListReconcileGeneration || 0) + 1;
+    this.cachedListReconcileScheduled = false;
 
     if(!init) {
       void this.storage.clear().catch((error) => this.log.error('Could not clear dialog storage', error));
@@ -2149,8 +2157,7 @@ export default class DialogsStorage extends AppManager {
     if((isServerSearchSupported ? false : query) || loadedAll || isEnoughDialogs || forceLocal) {
       if(!query && !offset && filterId === FOLDER_ID_ALL && !recursion) {
         if(import.meta.env.VITE_PERF_TRACE === '1') this.apiManager.finishFirstDialogsTrace();
-        // The walk competes with chat open and history scroll for the worker, so start it after them.
-        pause(20_000).then(() => this.reconcileCachedChannelDialogs());
+        this.scheduleCachedChannelDialogReconciliation();
       }
 
       const dialogs = curDialogStorage.slice(offset, offset + limit);
@@ -2219,7 +2226,7 @@ export default class DialogsStorage extends AppManager {
    * channel is never fetched back. If any dialog is still missing, retry only those peers with
    * once on the next cached first-page read without walking the server list again.
    */
-  private async reconcileCachedChannelDialogs() {
+  private async reconcileCachedChannelDialogs(traceContext?: CachedDialogReconcileTrace) {
     if(this.cachedListReconciled) return;
 
     const generation = this.cachedListReconcileGeneration;
@@ -2230,7 +2237,8 @@ export default class DialogsStorage extends AppManager {
     try {
       missingPeerIds = retryPeerIds ?
         retryPeerIds.filter((peerId) => this.appChatsManager.isInChat(peerId.toChatId())) :
-        await this.getServerChannelsMissingLocally();
+        await this.getServerChannelsMissingLocally(traceContext);
+      if(retryPeerIds) traceContext?.finish({pageCount: 0});
     } catch(err) {
       this.log.error('cached channel dialog reconcile failed', err);
       if(generation !== this.cachedListReconcileGeneration) return;
@@ -2265,6 +2273,34 @@ export default class DialogsStorage extends AppManager {
     this.cachedListReconciled = !shouldRetry;
   }
 
+  private scheduleCachedChannelDialogReconciliation() {
+    if(this.cachedListReconciled || this.cachedListReconcileScheduled) return;
+
+    this.cachedListReconcileScheduled = true;
+    const generation = this.cachedListReconcileGeneration || 0;
+    const trace = import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1' ?
+      'cachedChannelDialogsReconcile' as const :
+      undefined;
+    const traceId = trace ? `${Math.trunc(performance.timeOrigin)}-${++cachedDialogReconcileTraceSequence}` : undefined;
+    const finishTrace = trace ? performancePhaseTrace.start('worker.dialogs.cachedChannelReconcile', {traceId, pageCount: 0}) : undefined;
+    const traceContext = traceId && finishTrace ? {traceId, finish: finishTrace} : undefined;
+
+    void pause(CACHED_DIALOG_RECONCILE_START_DELAY_MS).then(() => {
+      if(generation !== (this.cachedListReconcileGeneration || 0)) {
+        finishTrace?.({pageCount: 0});
+        return;
+      }
+
+      this.cachedListReconcileScheduled = false;
+      if(this.cachedListReconciled) {
+        finishTrace?.({pageCount: 0});
+        return;
+      }
+
+      void this.reconcileCachedChannelDialogs(traceContext);
+    });
+  }
+
   private onConnectionStatusChange(status: ConnectionStatusChange) {
     if(!this.cachedListReconcileRecoveryPending || status.status !== ConnectionStatus.Connected || status.isFileNetworker) {
       return;
@@ -2275,12 +2311,12 @@ export default class DialogsStorage extends AppManager {
     this.cachedListReconciled = false;
   }
 
-  private async getServerChannelsMissingLocally() {
-    const trace = import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1' ?
+  private async getServerChannelsMissingLocally(traceContext?: CachedDialogReconcileTrace) {
+    const trace = traceContext || import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1' ?
       'cachedChannelDialogsReconcile' as const :
       undefined;
-    const traceId = trace ? `${Math.trunc(performance.timeOrigin)}-${++cachedDialogReconcileTraceSequence}` : undefined;
-    const finishTrace = trace ? performancePhaseTrace.start('worker.dialogs.cachedChannelReconcile', {traceId, pageCount: 0}) : undefined;
+    const traceId = traceContext?.traceId ?? (trace ? `${Math.trunc(performance.timeOrigin)}-${++cachedDialogReconcileTraceSequence}` : undefined);
+    const finishTrace = traceContext?.finish ?? (trace ? performancePhaseTrace.start('worker.dialogs.cachedChannelReconcile', {traceId, pageCount: 0}) : undefined);
     let pageCount = 0;
     const limit = 100;
     const missingPeerIds: PeerId[] = [];
