@@ -85,6 +85,26 @@ for argument in "$@"; do
     range="${argument#--log-opts=}"
   fi
 done
+token='workflow-contract-token'
+auth_header="$(printf 'x-access-token:%s' "$token" | base64 -w0)"
+while IFS= read -r variable; do
+  case "$variable" in
+    GH_TOKEN|GIT_CONFIG_*)
+      printf 'Gitleaks received credential environment variable %s\n' "$variable" >&2
+      exit 1
+      ;;
+  esac
+done < <(compgen -e)
+if env | grep -Fq -- "$token" || env | grep -Fq -- "$auth_header"; then
+  echo 'Gitleaks environment contains scan auth material' >&2
+  exit 1
+fi
+extraheader_status=0
+extraheader_config="$(git config --get-regexp extraheader 2>/dev/null)" || extraheader_status=$?
+if [[ "$extraheader_status" -ne 1 || -n "$extraheader_config" ]]; then
+  echo 'Gitleaks found an extraheader in Git config' >&2
+  exit 1
+fi
 actual_commits="$(git rev-list --reverse "$range")"
 expected_commits="$EXPECTED_COMMITS"
 if [[ "$actual_commits" != "$expected_commits" ]]; then
@@ -95,10 +115,39 @@ fi
 SH
 chmod +x "$tmp/bin/gitleaks"
 
+real_git="$(command -v git)"
+cat >"$tmp/bin/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == fetch ]]; then
+  expected_auth_header="$(printf 'x-access-token:%s' 'workflow-contract-token' | base64 -w0)"
+  if [[ "${GIT_CONFIG_COUNT:-}" != 1 || \
+    "${GIT_CONFIG_KEY_0:-}" != 'http.https://github.com/.extraheader' || \
+    "${GIT_CONFIG_VALUE_0:-}" != "AUTHORIZATION: basic $expected_auth_header" ]]; then
+    echo 'Git fetch did not receive the scoped read-only auth header' >&2
+    exit 1
+  fi
+  printf '%s\n' "$*" >>"$GIT_FETCH_AUTH_LOG"
+fi
+exec "$REAL_GIT" "$@"
+SH
+chmod +x "$tmp/bin/git"
+
 run_gitleaks_step() (
   local checkout_path="$1" head_sha="$2" pr_commits="$3" expected_commits="$4"
+  local fetch_log="$tmp/$(basename "$checkout_path")-fetches.log"
+  local variable
+  local -a clean_env=()
+  while IFS= read -r variable; do
+    case "$variable" in
+      GIT_CONFIG_*) clean_env+=(-u "$variable") ;;
+    esac
+  done < <(compgen -e)
   cd "$checkout_path"
-  PATH="$tmp/bin:$PATH" \
+  env "${clean_env[@]}" \
+    PATH="$tmp/bin:$PATH" \
+    REAL_GIT="$real_git" \
+    GIT_FETCH_AUTH_LOG="$fetch_log" \
     BASE_SHA="$base_sha" \
     HEAD_SHA="$head_sha" \
     PR_COMMITS="$pr_commits" \
@@ -106,6 +155,10 @@ run_gitleaks_step() (
     RUNNER_TEMP="$tmp" \
     EXPECTED_COMMITS="$expected_commits" \
     bash -euo pipefail "$tmp/gitleaks-step.sh"
+  if [[ ! -s "$fetch_log" ]]; then
+    echo 'Gitleaks range test did not observe an authenticated fetch' >&2
+    exit 1
+  fi
 )
 
 simple_expected_commits="$(printf '%s\n%s' "$first_pr_commit" "$second_pr_commit")"
@@ -127,4 +180,4 @@ run_gitleaks_step "$merged_checkout" "$merged_pr_commit" 5 "$merged_expected_com
   echo 'merged-base test fixture must have five PR commits' >&2
   exit 1
 }
-printf 'Gitleaks scanned only PR commits with advanced and merged bases\n'
+printf 'Gitleaks scanned only PR commits with advanced and merged bases and no scan auth\n'
