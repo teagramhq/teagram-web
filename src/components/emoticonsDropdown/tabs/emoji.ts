@@ -1,5 +1,7 @@
 import type {MyDocument} from '@appManagers/appDocsManager';
 import {EmoticonsDropdown} from '..';
+import cancelEvent from '@helpers/dom/cancelEvent';
+import contextMenuController from '@helpers/contextMenuController';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import {fastRaf} from '@helpers/schedulers';
 import pause from '@helpers/schedulers/pause';
@@ -57,13 +59,12 @@ import {
   getEmojiSkinTone,
   getEmojiSkinToneVariants
 } from '@helpers/emojiSkinTone';
-import cancelEvent from '@helpers/dom/cancelEvent';
 import type LazyLoadQueueIntersector from '@components/lazyLoadQueueIntersector';
+import {renderImageFromUrlPromise} from '@helpers/dom/renderImageFromUrl';
+import {hasLoadedURL, markLoadedURL} from '@helpers/dom/loadedUrlCache';
 import releaseLazyEmojiImages from '@helpers/releaseLazyEmojiImages';
 import type {Middleware} from '@helpers/middleware';
 
-
-const loadedURLs: Set<string> = new Set();
 
 export function appendEmoji(_emoji: AppEmoji, options: {
   unify?: boolean,
@@ -91,11 +92,13 @@ export function appendEmoji(_emoji: AppEmoji, options: {
     el = wrapSingleEmoji(emoji);
   } else {
     emoji = fixEmoji(emoji);
-    el = wrapEmojiText(emoji, false, undefined, lazyLoad && {
-      queue: lazyLoad.queue,
-      middleware: lazyLoad.middleware,
-      isLoaded: (url) => loadedURLs.has(url)
-    });
+    el = wrapEmojiText(emoji, false, undefined, lazyLoad && ((image, url) => {
+      if(hasLoadedURL(url)) {
+        image.src = url;
+      } else {
+        lazyLoad.queue.push({div: image, middleware: lazyLoad.middleware, load: () => renderImageFromUrlPromise(image, url)});
+      }
+    }));
   }
 
   spanEmoji.append(el);
@@ -112,7 +115,7 @@ export function appendEmoji(_emoji: AppEmoji, options: {
 
     // a deferred image has no src until the queue loads it
     const deferred = !image.hasAttribute('src');
-    if(deferred || !loadedURLs.has(image.src)) {
+    if(deferred || !hasLoadedURL(image.getAttribute('src'))) {
       if(!deferred) {
         image.setAttribute('loading', 'lazy');
       }
@@ -134,7 +137,7 @@ export function appendEmoji(_emoji: AppEmoji, options: {
 
           spanEmoji.classList.remove('empty');
 
-          loadedURLs.add(image.src);
+          markLoadedURL(image.getAttribute('src'));
         });
       }, {once: true});
 
@@ -1127,6 +1130,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
       variants,
       selectedTone: this.emojiVariants[baseEmoji] ?? getEmojiSkinTone(emoji.emoji),
       renderEmoji: (emoji) => appendEmoji({emoji}),
+      close: () => contextMenuController.close(),
       onSelect: (tone) => {
         this.applyEmojiVariant(baseEmoji, tone);
         this.managers.appEmojiManager.saveEmojiVariant(baseEmoji, tone);
