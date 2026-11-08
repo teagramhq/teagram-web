@@ -1,0 +1,107 @@
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import {listenForGuestCredentialInvalidation, notifyGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
+
+const storageEventKey = 'guest-credential-lifecycle-clear.v1';
+let unsubscribe: (() => void) | undefined;
+
+beforeEach(() => {
+  localStorage.clear();
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  unsubscribe?.();
+  unsubscribe = undefined;
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+function subscribeToLocalInvalidation() {
+  const callback = vi.fn();
+  unsubscribe = listenForGuestCredentialInvalidation('default', callback, true);
+  return callback;
+}
+
+describe('guest credential invalidation delivery', () => {
+  it('reports BroadcastChannel failure and still uses the storage fallback and same-tab event', () => {
+    vi.stubGlobal('BroadcastChannel', class {
+      constructor() {
+        throw new Error('account secret must not be logged');
+      }
+    });
+    const callback = subscribeToLocalInvalidation();
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    vi.mocked(console.error).mockClear();
+
+    notifyGuestCredentialInvalidation('default');
+
+    expect(callback).toHaveBeenCalledOnce();
+    expect(setItem).toHaveBeenCalledWith(storageEventKey, expect.any(String));
+    expect(localStorage.getItem(storageEventKey)).toBeNull();
+    expect(console.error).toHaveBeenCalledWith('Guest credential invalidation delivery failed', ['BroadcastChannel']);
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('account secret');
+  });
+
+  it('reports storage-event failure while still using BroadcastChannel and same-tab event', () => {
+    const postMessage = vi.fn();
+    vi.stubGlobal('BroadcastChannel', class {
+      postMessage = postMessage;
+      close = vi.fn();
+      addEventListener = vi.fn();
+    });
+    const originalSetItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function(this: Storage, key: string, value: string) {
+      if(key === storageEventKey) throw new Error('account secret must not be logged');
+      return originalSetItem.call(this, key, value);
+    });
+    const callback = subscribeToLocalInvalidation();
+    vi.mocked(console.error).mockClear();
+
+    notifyGuestCredentialInvalidation('default');
+
+    expect(callback).toHaveBeenCalledOnce();
+    expect(postMessage).toHaveBeenCalledWith({type: 'clear'});
+    expect(console.error).toHaveBeenCalledWith('Guest credential invalidation delivery failed', ['storage event']);
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('account secret');
+  });
+
+  it('reports both delivery failures without exposing credential or account values', () => {
+    vi.stubGlobal('BroadcastChannel', class {
+      constructor() {
+        throw new Error('account secret must not be logged');
+      }
+    });
+    const originalSetItem = Storage.prototype.setItem;
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function(this: Storage, key: string, value: string) {
+      if(key === storageEventKey) throw new Error('username secret must not be logged');
+      return originalSetItem.call(this, key, value);
+    });
+    const callback = subscribeToLocalInvalidation();
+    vi.mocked(console.error).mockClear();
+
+    notifyGuestCredentialInvalidation('default');
+
+    expect(callback).toHaveBeenCalledOnce();
+    expect(console.error).toHaveBeenCalledWith('Guest credential invalidation delivery failed', ['BroadcastChannel', 'storage event']);
+    const report = JSON.stringify(vi.mocked(console.error).mock.calls);
+    expect(report).not.toContain('account secret');
+    expect(report).not.toContain('username secret');
+  });
+
+  it('reports a BroadcastChannel listener setup failure and keeps the storage listener active', () => {
+    vi.stubGlobal('BroadcastChannel', class {
+      constructor() {
+        throw new Error('account secret must not be logged');
+      }
+    });
+    const callback = vi.fn();
+    unsubscribe = listenForGuestCredentialInvalidation('default', callback);
+
+    expect(console.error).toHaveBeenCalledWith('Failed to listen for guest credential invalidation via BroadcastChannel');
+
+    window.dispatchEvent(new StorageEvent('storage', {key: storageEventKey}));
+
+    expect(callback).toHaveBeenCalledOnce();
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('account secret');
+  });
+});

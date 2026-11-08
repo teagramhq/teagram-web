@@ -17,19 +17,38 @@ function storageEventKey(serverId: string) {
 
 export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId()) {
   if(typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(localInvalidationEvent, {detail: serverId}));
+  let broadcastChannelFailed = false;
+  let channel: BroadcastChannel | undefined;
   try {
     if(typeof BroadcastChannel !== 'undefined') {
-      const channel = new BroadcastChannel(channelName(serverId));
+      channel = new BroadcastChannel(channelName(serverId));
       channel.postMessage({type: 'clear'});
-      channel.close();
     }
-  } catch{}
+  } catch{
+    broadcastChannelFailed = true;
+  }
 
+  try {
+    channel?.close();
+  } catch{
+    broadcastChannelFailed = true;
+  }
+
+  let storageEventFailed = false;
   try {
     const key = storageEventKey(serverId);
     localStorage.setItem(key, `${Date.now()}-${++invalidationSequence}`);
     localStorage.removeItem(key);
-  } catch{}
+  } catch{
+    storageEventFailed = true;
+  }
+
+  if(broadcastChannelFailed || storageEventFailed) {
+    const failedMechanisms = [];
+    if(broadcastChannelFailed) failedMechanisms.push('BroadcastChannel');
+    if(storageEventFailed) failedMechanisms.push('storage event');
+    console.error('Guest credential invalidation delivery failed', failedMechanisms);
+  }
 }
 
 export function listenForGuestCredentialInvalidation(serverId: string, callback: () => void, includeLocal = false) {
@@ -47,7 +66,9 @@ export function listenForGuestCredentialInvalidation(serverId: string, callback:
         if(event.data?.type === 'clear') callback();
       });
     }
-  } catch{}
+  } catch{
+    console.error('Failed to listen for guest credential invalidation via BroadcastChannel');
+  }
   if(typeof window !== 'undefined') {
     window.addEventListener('storage', onStorage);
     if(includeLocal) window.addEventListener(localInvalidationEvent, onLocalInvalidation);
