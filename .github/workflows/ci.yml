@@ -679,7 +679,7 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP/osv-checker-deps" \
             python .github/scripts/check_osv_report.py "$RUNNER_TEMP/osv-report.json"
 
-      - name: Scan pull request commits with Gitleaks
+      - name: Fetch pull request commits for Gitleaks
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -718,7 +718,13 @@ jobs:
             fi
             range_parents="$(git rev-list --parents "$BASE_SHA..$HEAD_SHA")"
           done
-          unset auth_header
+
+      - name: Scan pull request commits with Gitleaks
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
           gitleaks git --log-opts="$BASE_SHA..$HEAD_SHA" \
             --redact=100 --no-banner --report-format=json \
             --report-path="$RUNNER_TEMP/gitleaks-report.json"
