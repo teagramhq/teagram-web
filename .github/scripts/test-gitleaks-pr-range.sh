@@ -102,6 +102,7 @@ run_gitleaks_step() (
     BASE_SHA="$base_sha" \
     HEAD_SHA="$head_sha" \
     PR_COMMITS="$pr_commits" \
+    GH_TOKEN='workflow-contract-token' \
     RUNNER_TEMP="$tmp" \
     EXPECTED_COMMITS="$expected_commits" \
     bash -euo pipefail "$tmp/gitleaks-step.sh"
