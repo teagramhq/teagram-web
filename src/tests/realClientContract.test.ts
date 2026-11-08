@@ -3937,6 +3937,13 @@ describe('real client scenario contract', () => {
     expect(trialSource).toContain('storageState');
     expect(trialSource).toContain('_renderer_crashed');
     expect(trialSource).toContain('_pids_limit');
+    expect(trialSource).toContain(`page.on('pageerror'`);
+    expect(trialSource).toContain(`message.type() === 'error'`);
+    expect(trialSource).toContain('_page_error');
+    expect(trialSource).toContain('_console_error');
+    expect(trialSource).toContain('pidsHitsBefore');
+    expect(trialSource.indexOf('const consoleErrorsBefore')).toBeGreaterThan(trialSource.indexOf('await openComposer(page'));
+    expect(trialSource.indexOf('_console_error')).toBeGreaterThan(trialSource.indexOf('await openCustomEmojiSet(page, stage)'));
     expect(picker).toBeGreaterThan(-1);
     expect(set).toBeGreaterThan(picker);
     expect(trialSource).toContain('await browser.close()');

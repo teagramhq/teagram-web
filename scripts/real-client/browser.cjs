@@ -2920,10 +2920,16 @@ async function runColdPickerTrial(storageState, appUrl, trial) {
     // A renderer crash otherwise only shows up as a timeout on whatever wait is pending
     let crashed = false;
     page.on('crash', () => { crashed = true; });
+    // The trial page is not one of the signed-in app pages, so it needs its own error counters
+    const errors = {page: 0, console: 0};
+    page.on('pageerror', () => { errors.page++; });
+    page.on('console', (message) => { if(message.type() === 'error') errors.console++; });
+    // pids.events is cumulative for the whole job, so only a refused fork during this trial counts
+    const pidsHitsBefore = readPidsLimitHits();
     const crashGuard = (error) => {
       if(crashed || /crash|has been closed/i.test(String(error?.message))) {
         // A fork refused by the container's process limit looks the same as a renderer crash
-        failStage(readPidsLimitHits() > 0 ? `${stage}_pids_limit` : `${stage}_renderer_crashed`);
+        failStage(readPidsLimitHits() > pidsHitsBefore ? `${stage}_pids_limit` : `${stage}_renderer_crashed`);
       }
       throw error;
     };
@@ -2941,8 +2947,12 @@ async function runColdPickerTrial(storageState, appUrl, trial) {
         `${stage}_chat`
       );
       await openComposer(page, `${stage}_chat`);
+      // Console errors while the chat loads are not this scenario's concern
+      const consoleErrorsBefore = errors.console;
       await openEmojiPicker(page, stage);
       await openCustomEmojiSet(page, stage);
+      if(errors.page > 0) failStage(`${stage}_page_error`);
+      if(errors.console !== consoleErrorsBefore) failStage(`${stage}_console_error`);
     } catch(error) {
       crashGuard(error);
     }
