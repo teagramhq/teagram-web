@@ -36,6 +36,7 @@ import {PAID_REACTION_EMOJI_DOCID} from '@lib/customEmoji/constants';
 import {StarsStar} from '@components/popups/stars';
 import {cleanEmoji} from '@lib/richTextProcessor/fixEmoji';
 import {createReactionPickerEmojiTab} from './reactionsMenuEmojiAccess';
+import {onReactionAnimationRendered} from './reactionsMenuRender';
 
 const REACTIONS_CLASS_NAME = 'btn-menu-reactions';
 const REACTION_CLASS_NAME = REACTIONS_CLASS_NAME + '-reaction';
@@ -649,23 +650,27 @@ export class ChatReactionsMenu {
         liteModeKey: false,
         ...options
       }).then(({render}) => render).then((player) => {
-        assumeType<LottiePlayer>(player);
+        onReactionAnimationRendered(player, (player) => {
+          assumeType<LottiePlayer>(player);
 
-        players.appear = player;
+          players.appear = player;
 
-        player.addEventListener('enterFrame', (frameNo) => {
-          if(player.maxFrame === frameNo) {
-            selectLoadPromise.then((selectPlayer) => {
-              assumeType<LottiePlayer>(selectPlayer);
-              appearWrapper.classList.add('hide');
-              selectWrapper.classList.remove('hide');
+          player.addEventListener('enterFrame', (frameNo) => {
+            if(player.maxFrame === frameNo) {
+              selectLoadPromise.then((selectPlayer) => {
+                onReactionAnimationRendered(selectPlayer, (selectPlayer) => {
+                  assumeType<LottiePlayer>(selectPlayer);
+                  appearWrapper.classList.add('hide');
+                  selectWrapper.classList.remove('hide');
 
-              if(isFirst) {
-                players.select = selectPlayer;
-                isFirst = false;
-              }
-            }, noop);
-          }
+                  if(isFirst) {
+                    players.select = selectPlayer;
+                    isFirst = false;
+                  }
+                });
+              }, noop);
+            }
+          });
         });
       }, noop);
 
@@ -675,9 +680,11 @@ export class ChatReactionsMenu {
         liteModeKey: false,
         ...options
       }).then(({render}) => render).then((player) => {
-        assumeType<LottiePlayer>(player);
+        return onReactionAnimationRendered(player, (player) => {
+          assumeType<LottiePlayer>(player);
 
-        return lottieLoader.waitForFirstFrame(player);
+          return lottieLoader.waitForFirstFrame(player);
+        });
       }).catch(noop);
     }
 
