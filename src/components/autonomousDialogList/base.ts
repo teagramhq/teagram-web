@@ -20,6 +20,7 @@ import SortedDialogList from '@components/sortedDialogList';
 import {AutonomousDialogList} from '@components/autonomousDialogList/dialogs';
 import {FOLDER_ID_ALL} from '@appManagers/constants';
 import {replaceChatPageSnapshot} from '@lib/chatPageSnapshotView';
+import {scheduleFirstPageCountRefresh} from '@components/autonomousDialogList/scheduleFirstPageCountRefresh';
 
 
 export const DIALOG_LOAD_COUNT = 20;
@@ -299,14 +300,14 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
     const result = await this.dialogsFetcher(offsetIndex, this.guessLoadCount());
 
     if(shouldRefetch) {
-      const id = this.refetchTimeout = self.setTimeout(async() => {
+      const id = this.refetchTimeout = scheduleFirstPageCountRefresh(async() => {
         try {
           const {totalCount} = await this.loadDialogsInner({
             canFinish: () => id === this.refetchTimeout
           });
           this.cursorFetcher.setFetchedItemsCount(totalCount);
         } catch{}
-      }, 500);
+      });
     }
 
     const newOffsetIndex = result.dialogs.reduce((prev, curr) => {
