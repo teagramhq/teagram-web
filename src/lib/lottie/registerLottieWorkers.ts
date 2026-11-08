@@ -2,6 +2,7 @@ import {bindActiveWindowListener, getAppWindow} from '@helpers/appWindow';
 import apiManagerProxy from '@lib/apiManagerProxy';
 import lottieMessagePort from '@lib/lottie/lottieMessagePort';
 import SHOULD_RENDER_OFFSCREEN from '@lib/lottie/shouldRenderOffscreen';
+import LottieWorkerURL from './tlottie.worker.ts?worker&url';
 
 let loadPromise: Promise<void> | undefined;
 
@@ -11,10 +12,7 @@ export function registerLottieWorkers() {
   const promise = (async() => {
     await apiManagerProxy.registerThreadedWorker({
       type: 'lottie',
-      createWorker: () => new Worker(
-        new URL('./tlottie.worker.ts', import.meta.url),
-        {type: 'module'}
-      ),
+      workerUrl: () => LottieWorkerURL,
       superMessagePort: lottieMessagePort
     });
 

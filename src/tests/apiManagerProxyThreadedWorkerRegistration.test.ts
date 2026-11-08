@@ -122,10 +122,10 @@ test.each(['worker-source fetch', 'proxy-URL request', 'second worker attachment
   };
   proxy.invokeVoid = invokeVoid;
 
-  const createWorker = () => new (window as any).Worker(new URL('/assets/lottie.worker.js', location.href), {type: 'module'});
+  const workerUrl = () => new URL('/assets/lottie.worker.js', location.href);
   const registration = {
     type: 'lottie',
-    createWorker,
+    workerUrl,
     superMessagePort: messagePort as any
   };
 
@@ -150,6 +150,11 @@ test.each(['worker-source fetch', 'proxy-URL request', 'second worker attachment
   });
 
   await proxy.registerThreadedWorker(registration);
+  expect(createProxyWorkerURLs).toHaveBeenLastCalledWith({
+    originalUrl: new URL('/assets/lottie.worker.js', location.href).toString(),
+    blob: expect.any(Blob),
+    type: 'lottie'
+  });
   expect(messagePort.portListenerCount).toBe(1);
   messagePort.emitPort(retryWorkerPort);
   expect(invokeVoid).toHaveBeenCalledOnce();

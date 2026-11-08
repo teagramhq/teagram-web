@@ -32,6 +32,7 @@ import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
 import {makeWorkerURL} from '@helpers/setWorkerProxy';
 import {createPrivateWorkerBlobURL, rewritePrivateWorkerImports} from '@helpers/createPrivateWorkerBlobURL';
 import ServiceWorkerURL from '../../sw?worker&url';
+import CryptoWorkerURL from './crypto/crypto.worker.ts?worker&url';
 import MainWorkerURL from './mainWorker/index.worker.ts?worker&url';
 import setDeepProperty, {joinDeepPath, splitDeepPath} from '@helpers/object/setDeepProperty';
 import getThumbKey from '@lib/storages/utils/thumbs/getThumbKey';
@@ -1127,11 +1128,11 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
   public async registerThreadedWorker({
     type,
-    createWorker: _createWorker,
+    workerUrl,
     superMessagePort
   }: {
     type: ThreadedWorkerType,
-    createWorker: () => SharedWorker | Worker,
+    workerUrl: () => string | URL,
     superMessagePort: SuperMessagePort<ThreadedWorkerEvents, ThreadedWorkerEvents, any>
   }) {
     const get = (url: string) => {
@@ -1146,28 +1147,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
       });
     };
 
-    const workerHandler = {
-      construct(target: any, args: any): any {
-        return {
-          url: makeWorkerURL(args[0]).toString()
-        };
-      }
-    };
-
-    const originals = [
-      Worker,
-      typeof(SharedWorker) !== 'undefined' && SharedWorker
-    ].filter(Boolean);
-    originals.forEach((w) => window[w.name as any] = new Proxy(w, workerHandler));
-
-    let initialWorker: SharedWorker | Worker;
-    try {
-      initialWorker = _createWorker();
-    } finally {
-      originals.forEach((w) => window[w.name as any] = w as any);
-    }
-
-    const originalUrl = (initialWorker as any).url;
+    const originalUrl = makeWorkerURL(workerUrl()).toString();
     const blob = await get(originalUrl);
     const urls = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
 
@@ -1179,11 +1159,10 @@ class ApiManagerProxy extends MTProtoMessagePort {
     const workers: Array<SharedWorker | Worker> = [];
 
     try {
-      for(const url of [originalUrl, ...urls.slice(1)]) {
-        const worker = createWorker(url);
-        workers.push(worker);
-        this.attachWorkerToPort(worker, superMessagePort, type);
-      }
+      urls.forEach((url, i) => {
+        workers.push(createWorker(i ? url : originalUrl));
+        this.attachWorkerToPort(workers[i], superMessagePort, type);
+      });
 
       if(DEBUG) {
         console.log('Workers URLs', type, urls);
@@ -1216,12 +1195,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
     await this.registerThreadedWorker({
       type: 'crypto',
-      createWorker: () => {
-        return new Worker(
-          new URL('./crypto/crypto.worker.ts', import.meta.url),
-          {type: 'module'}
-        );
-      },
+      workerUrl: () => CryptoWorkerURL,
       superMessagePort: cryptoMessagePort
     });
   }

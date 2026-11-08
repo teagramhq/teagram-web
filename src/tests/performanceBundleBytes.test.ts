@@ -1,9 +1,14 @@
 import {describe, expect, test} from 'vitest';
-import {createBundleRequestTracker, sumBundleBytes} from '../../e2e/performanceBundleBytes';
+import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes} from '../../e2e/performanceBundleBytes';
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe('scenario bundle byte measurement', () => {
+  test('counts network request URLs but excludes blob URLs', () => {
+    expect(isNetworkRequestURL('https://app.test/api')).toBe(true);
+    expect(isNetworkRequestURL('blob:https://app.test/worker')).toBe(false);
+  });
+
   test('includes only same-origin script and style resources started within the scenario boundary', () => {
     const resources = [
       {name: 'https://app.test/before.js', startTime: 99, decodedBodySize: 1_000},

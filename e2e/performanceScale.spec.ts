@@ -4,7 +4,7 @@ import {writePerformanceReport} from './performanceReport';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, isWithinFirstStickerRegressionBudget, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
-import {createBundleRequestTracker, sumBundleBytes, trackBundleDocumentNavigation, type BundleRequestTracker} from './performanceBundleBytes';
+import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes, trackBundleDocumentNavigation, type BundleRequestTracker} from './performanceBundleBytes';
 import {CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateNoWalkLongTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
@@ -163,10 +163,11 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   requestBreakdownsByPage.set(page, requestBreakdown);
   trackBundleDocumentNavigation(page, bundleRequests);
   page.on('request', (request) => {
-    if(request.resourceType() !== 'websocket') {
+    const requestUrl = request.url();
+    if(isNetworkRequestURL(requestUrl)) {
       ++requestCounter.value;
-      const url = new URL(request.url());
-      const path = url.protocol === 'http:' || url.protocol === 'https:' ? url.pathname : url.protocol;
+      const url = new URL(requestUrl);
+      const path = url.pathname;
       const key = `${request.method()} ${request.resourceType()} ${path}`;
       requestBreakdown.set(key, (requestBreakdown.get(key) || 0) + 1);
     }
@@ -1313,7 +1314,10 @@ async function measureFirstStickerFrame(browser: Browser, run: VariantRun, fixtu
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
 
-    if(warmWorker) await waitForLottieWorker(page);
+    if(warmWorker) {
+      await page.evaluate(() => (window as any).lottieLoader.loadLottieWorkers());
+      await waitForLottieWorker(page);
+    }
 
     const workerReadyBeforeChat = await page.evaluate(() => (performance.getEntriesByType('resource') as PerformanceResourceTiming[]).some((entry) => (
       entry.name.includes('tlottie.worker') && entry.responseEnd > 0

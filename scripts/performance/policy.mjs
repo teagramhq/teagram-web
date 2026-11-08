@@ -267,6 +267,21 @@ export function evaluatePerformance(report, history = []) {
             }
           }
         });
+
+        if(scenario.key === 'coldChatList' || scenario.key === 'warmChatList') {
+          const startupMetrics = [
+            ['requests', medianMetric(baseSamples, 'requests'), medianMetric(headSamples, 'requests')],
+            ['rpcCallCount', medianMetric(baseSamples, 'rpcCallCount'), medianMetric(headSamples, 'rpcCallCount')],
+            ['bundleBytes', base.bundleBytes, head.bundleBytes]
+          ];
+          for(const [field, baseValue, headValue] of startupMetrics) {
+            if(!Number.isFinite(baseValue) || !Number.isFinite(headValue)) {
+              addFailure(blockingFailures, scale, scenario.key, `${field} is missing at the chat-list boundary`);
+            } else if(headValue > baseValue) {
+              addFailure(blockingFailures, scale, scenario.key, `${field} increased from ${baseValue} to ${headValue} at the chat-list boundary`);
+            }
+          }
+        }
       }
 
       if(scale === '100x') {
