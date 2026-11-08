@@ -10,7 +10,6 @@ import {useLockScreenHotReloadGuard} from '@lib/solidjs/hotReloadGuard';
 import DeferredIsUsingPasscode from '@lib/passcode/deferredIsUsingPasscode';
 import EncryptionKeyStore from '@lib/passcode/keyStore';
 import {createEncryptionArtifactsForPasscode, deriveEncryptionKey, hashPasscode} from '@lib/passcode/utils';
-import {blockSnapshotReads, snapshotReadGuard, unblockSnapshotReads, withPasscodeSnapshotLock} from '@lib/chatPageSnapshot';
 
 export type PasscodeActions = ReturnType<typeof usePasscodeActions>;
 
@@ -41,30 +40,18 @@ export function usePasscodeActions() {
   }
 
   async function enablePasscode(passcode: string) {
-    return withPasscodeSnapshotLock(() => enablePasscodeLocked(passcode));
-  }
-
-  async function enablePasscodeLocked(passcode: string) {
     const {verificationHash, verificationSalt, encryptionSalt, encryptionKey} =
       await createEncryptionArtifactsForPasscode(passcode);
 
     passcode = ''; // forget
 
-    const snapshotGuard = blockSnapshotReads();
-    try {
-      await apiManagerProxy.invoke('preparePasscodeSnapshots', snapshotGuard);
-      await commonStateStorage.set({
-        passcode: {verificationHash, verificationSalt, encryptionSalt}
-      });
-    } catch(error) {
-      try {
-        await apiManagerProxy.invoke('resumePasscodeSnapshots', snapshotGuard);
-        unblockSnapshotReads(snapshotGuard);
-      } catch(cleanupError) {
-        console.error('failed to resume chat page snapshots', cleanupError);
+    await commonStateStorage.set({
+      passcode: {
+        verificationHash,
+        verificationSalt,
+        encryptionSalt
       }
-      throw error;
-    }
+    });
 
     const [, setAppSettings] = useAppSettings();
     await setAppSettings('passcode', 'enabled', true);
@@ -102,12 +89,6 @@ export function usePasscodeActions() {
   }
 
   async function disablePasscode() {
-    return withPasscodeSnapshotLock(disablePasscodeLocked);
-  }
-
-  async function disablePasscodeLocked() {
-    const snapshotGuard = snapshotReadGuard();
-    if(snapshotGuard === undefined) throw new Error('Chat page snapshot guard is unavailable');
     const [, setAppSettings] = useAppSettings();
     await setAppSettings('passcode', 'enabled', false);
     rootScope.dispatchEvent('toggle_using_passcode', false);
@@ -123,9 +104,7 @@ export function usePasscodeActions() {
 
     await enableCacheStorages();
 
-    await commonStateStorage.delete('passcode');
-    await apiManagerProxy.invoke('resumePasscodeSnapshots', snapshotGuard);
-    unblockSnapshotReads(snapshotGuard);
+    commonStateStorage.delete('passcode');
   }
 
   /**

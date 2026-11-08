@@ -1,14 +1,9 @@
 import {describe, expect, test} from 'vitest';
-import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes} from '../../e2e/performanceBundleBytes';
+import {createBundleRequestTracker, sumBundleBytes} from '../../e2e/performanceBundleBytes';
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe('scenario bundle byte measurement', () => {
-  test('counts network request URLs but excludes blob URLs', () => {
-    expect(isNetworkRequestURL('https://app.test/api')).toBe(true);
-    expect(isNetworkRequestURL('blob:https://app.test/worker')).toBe(false);
-  });
-
   test('includes only same-origin script and style resources started within the scenario boundary', () => {
     const resources = [
       {name: 'https://app.test/before.js', startTime: 99, decodedBodySize: 1_000},
@@ -65,27 +60,6 @@ describe('scenario bundle byte measurement', () => {
     tracker.workerReady(workerUrl);
     await waiting;
 
-    expect(settled).toBe(true);
-  });
-
-  test('drops abandoned requests on navigation but waits for the new document worker and fetch', async() => {
-    const tracker = createBundleRequestTracker('https://app.test');
-    const workerUrl = 'https://app.test/tlottie.worker.js';
-    const abandoned = {url: () => workerUrl};
-    const worker = {url: () => workerUrl};
-    const fetch = {url: () => workerUrl};
-    tracker.requestStarted(abandoned);
-    tracker.documentNavigated();
-    tracker.requestStarted(worker);
-    tracker.requestStarted(fetch);
-
-    let settled = false;
-    const waiting = tracker.waitForIdle(10, 500).then(() => settled = true);
-    tracker.workerReady(workerUrl);
-    await wait(20);
-    expect(settled).toBe(false);
-    tracker.requestFinished(fetch);
-    await waiting;
     expect(settled).toBe(true);
   });
 });

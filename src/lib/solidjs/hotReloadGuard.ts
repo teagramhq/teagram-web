@@ -24,7 +24,7 @@ import PopupElement from '@components/popups';
 import showBirthdayPopup, {saveMyBirthday} from '@components/popups/birthday';
 import {useStickersDropdown} from '@components/popups/createPoll/stickersDropdown';
 import showLimitPopup from '@components/popups/limit';
-import type showMyQrCodePopup from '@components/popups/myQrCode';
+import showMyQrCodePopup from '@components/popups/myQrCode';
 import {showSharingPickerPopup} from '@components/popups/pickUser';
 import PopupPremium from '@components/popups/premium';
 import PopupSendGift from '@components/popups/sendGift';

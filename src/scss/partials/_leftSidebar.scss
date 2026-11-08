@@ -412,13 +412,6 @@
     background-color: var(--surface-color);
   }
 
-  .chat-page-snapshot {
-    position: absolute;
-    inset: 0;
-    z-index: 1;
-    background-color: var(--surface-color);
-  }
-
   #folders-container {
     position: relative;
     flex: 1 1 auto;

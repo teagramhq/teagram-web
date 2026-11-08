@@ -2,42 +2,6 @@ import {describe, expect, test} from 'vitest';
 import {PerformancePhaseTrace, PerformanceRpcTrace} from '@lib/appManagers/performanceTrace';
 
 describe('performance trace collectors', () => {
-  test('reports the newest page request on a running phase only', () => {
-    const trace = new PerformancePhaseTrace(true);
-    const finish = trace.start('worker.walk', {traceId: 'walk-1'});
-
-    trace.setPageRequested('walk-1', 1_500);
-    expect(trace.getSnapshot()[0]).toMatchObject({traceId: 'walk-1', durationMs: null, lastPageRequestedAtEpochMs: 1_500});
-
-    finish();
-    trace.setPageRequested('walk-1', 2_500);
-    expect(trace.getSnapshot()[0].lastPageRequestedAtEpochMs).toBe(1_500);
-  });
-
-  test('reports the pages seen so far on a running phase only', () => {
-    const trace = new PerformancePhaseTrace(true);
-    const finish = trace.start('worker.walk', {traceId: 'walk-1', pageCount: 0});
-
-    expect(trace.getSnapshot()[0]).toMatchObject({traceId: 'walk-1', durationMs: null, pageCount: 0});
-
-    trace.setPageCount('walk-1', 4);
-    expect(trace.getSnapshot()[0]).toMatchObject({traceId: 'walk-1', durationMs: null, pageCount: 4});
-
-    finish({pageCount: 5});
-    trace.setPageCount('walk-1', 9);
-    expect(trace.getSnapshot()[0].pageCount).toBe(5);
-  });
-
-  test('preserves completed page timestamps in independent snapshots', () => {
-    const trace = new PerformancePhaseTrace(true);
-    trace.start('worker.walk', {traceId: 'walk', pageCount: 0});
-    trace.setPageCount('walk', 1, 1_100);
-    const first = trace.getSnapshot();
-    trace.setPageCount('walk', 2, 1_200);
-    expect(first[0].pageCompletedAtEpochMs).toEqual([1_100]);
-    expect(trace.getSnapshot()[0].pageCompletedAtEpochMs).toEqual([1_100, 1_200]);
-  });
-
   test('records named phases in the page performance timeline', () => {
     const name = 'main.chatlist.mount.test';
     performance.clearMeasures(name);
@@ -92,19 +56,6 @@ describe('performance trace collectors', () => {
     expect(performance.getEntriesByName(name, 'measure')).toEqual([]);
   });
 
-  test('records only allowlisted phases while the general trace is disabled', () => {
-    const reconcileName = 'worker.dialogs.cachedChannelReconcile';
-    const trace = new PerformancePhaseTrace(false, [reconcileName]);
-    const finish = trace.start(reconcileName);
-    trace.start('worker.storage.load')();
-
-    finish({pageCount: 4});
-
-    expect(trace.getSnapshot()).toMatchObject([
-      {name: reconcileName, pageCount: 4, durationMs: expect.any(Number)}
-    ]);
-  });
-
   test('records worker phases without retaining arbitrary details', () => {
     const trace = new PerformancePhaseTrace(true);
     const finish = trace.start('worker.storage.load', {accountNumber: 2});
@@ -126,29 +77,6 @@ describe('performance trace collectors', () => {
 
     expect(trace.getSnapshot()).toMatchObject([{name, startedAtEpochMs, durationMs: expect.any(Number)}]);
     expect(trace.getSnapshot()[0].durationMs).toBeGreaterThanOrEqual(50);
-  });
-
-  test('records phase counters supplied at completion', () => {
-    const trace = new PerformancePhaseTrace(true);
-    const finish = trace.start('worker.dialogs.cachedChannelReconcile');
-
-    finish({pageCount: 30});
-
-    expect(trace.getSnapshot()).toMatchObject([
-      {name: 'worker.dialogs.cachedChannelReconcile', pageCount: 30}
-    ]);
-  });
-
-  test('preserves selected phases when resetting other profile spans', () => {
-    const trace = new PerformancePhaseTrace(true);
-    trace.start('worker.dialogs.cachedChannelReconcile')({pageCount: 30});
-    trace.start('worker.storage.load')();
-
-    trace.reset(['worker.dialogs.cachedChannelReconcile']);
-
-    expect(trace.getSnapshot()).toMatchObject([
-      {name: 'worker.dialogs.cachedChannelReconcile', pageCount: 30}
-    ]);
   });
 
   test('counts RPC calls without recording their spans when detail tracing is disabled', () => {

@@ -19,8 +19,6 @@ import {IDB} from '@lib/files/idb';
 import createStorages from '@appManagers/utils/storages/createStorages';
 import isObject from '@helpers/object/isObject';
 import AppStorage from '@lib/storage';
-import {getChatPageKey, getChatPageKeyFromAccount} from '@lib/chatPageSnapshot';
-import type {ChatPageKey} from '@lib/chatPageSnapshot';
 
 export type LoadStateResult = {
   state: State,
@@ -30,7 +28,6 @@ export type LoadStateResult = {
   oldVersion: string,
   pushedKeys: Set<keyof State>,
   userId: UserId
-  snapshotOwner?: ChatPageKey
   refetchStorages?: boolean
 };
 
@@ -288,10 +285,6 @@ async function loadStateForAccount(accountNumber: ActiveAccountNumber): Promise<
   STATE_STEPS.VALIDATE(commonWriter, COMMON_STATE_INIT);
   STATE_STEPS.MIGRATE_THEMES(commonWriter);
   const {newVersion, oldVersion} = STATE_STEPS.VERSION(writer);
-  const snapshotOwner = await getChatPageKeyFromAccount(accountNumber, accountData).catch((error): undefined => {
-    log.error('failed to capture chat page snapshot owner', error);
-    return undefined;
-  });
 
   return {
     state: writer.state,
@@ -300,8 +293,7 @@ async function loadStateForAccount(accountNumber: ActiveAccountNumber): Promise<
     oldVersion,
     resetStorages: writer.resetStorages,
     common: commonWriter.state,
-    userId: accountData.userId,
-    snapshotOwner
+    userId: accountData.userId
   };
 }
 
@@ -508,10 +500,6 @@ async function loadStateForAllAccounts() {
       moveAccessKeysToMultiAccountFormat(),
       moveStoragesToMultiAccountFormat()
     ]);
-    stateForFirstAccount.snapshotOwner = await getChatPageKey(1).catch((error): undefined => {
-      console.error('failed to capture chat page snapshot owner', error);
-      return undefined;
-    });
     stateForFirstAccount.refetchStorages = true;
 
     if(!TEST_MULTI_MIGRATION) {

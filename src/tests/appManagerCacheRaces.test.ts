@@ -1997,7 +1997,6 @@ describe('manager cache race guards', () => {
         dialogsStorage: {
           isVirtualFilter: () => false,
           getOffsetDate: () => 0,
-          getOffsetCursor: (): undefined => undefined,
           getFolderDialogs: (): any[] => []
         },
         appPeersManager: {getInputPeerById: () => ({_: 'inputPeerEmpty'})},

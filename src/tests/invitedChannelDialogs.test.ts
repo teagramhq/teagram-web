@@ -586,10 +586,6 @@ describe('invited channel dialogs', () => {
     const originalInvoke = apiManager.invokeApi;
     const originalInvokeSingleProcess = apiManager.invokeApiSingleProcess;
     const allDialogsLoaded = dialogsStorage.allDialogsLoaded;
-    const cachedListReconciled = dialogsStorage.cachedListReconciled;
-    const cachedListReconcileRetryPeerIds = dialogsStorage.cachedListReconcileRetryPeerIds;
-    const cachedListReconcileAttempts = dialogsStorage.cachedListReconcileAttempts;
-    const cachedListReconcileRecoveryPending = dialogsStorage.cachedListReconcileRecoveryPending;
     const requests: string[] = [];
     const listParams: any[] = [];
     apiManager.invokeApiSingleProcess = (options: any) => {
@@ -625,18 +621,11 @@ describe('invited channel dialogs', () => {
     dialogsStorage.allDialogsLoaded = {...allDialogsLoaded};
     dialogsStorage.setDialogsLoaded(0, true);
     dialogsStorage.setDialogsLoaded(GLOBAL_FOLDER_ID, true);
-    dialogsStorage.cachedListReconcileRetryPeerIds = undefined;
-    dialogsStorage.cachedListReconcileAttempts = 0;
-    dialogsStorage.cachedListReconcileRecoveryPending = false;
     dialogsStorage.cachedListReconciled = false;
     const restore = () => {
       apiManager.invokeApi = originalInvoke;
       apiManager.invokeApiSingleProcess = originalInvokeSingleProcess;
       dialogsStorage.allDialogsLoaded = allDialogsLoaded;
-      dialogsStorage.cachedListReconcileRetryPeerIds = cachedListReconcileRetryPeerIds;
-      dialogsStorage.cachedListReconcileAttempts = cachedListReconcileAttempts;
-      dialogsStorage.cachedListReconcileRecoveryPending = cachedListReconcileRecoveryPending;
-      dialogsStorage.cachedListReconciled = cachedListReconciled;
     };
 
     try {
@@ -647,11 +636,6 @@ describe('invited channel dialogs', () => {
       }
 
       await dialogsStorage.getDialogs({limit: 20, filterId: 0});
-      if(failFirstList || failFirstPeerDialogs) {
-        const retryMethod = failFirstList ? 'messages.getDialogs' : 'messages.getPeerDialogs';
-        await vi.waitFor(() => expect(requests.filter((method) => method === retryMethod)).toHaveLength(2), {timeout: 5000});
-        await vi.waitFor(() => expect(dialogsStorage.cachedListReconciled).toBe(true), {timeout: 5000});
-      }
     } catch(err) {
       restore();
       throw err;

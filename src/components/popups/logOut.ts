@@ -1,6 +1,7 @@
 import rootScope from '@lib/rootScope';
 import confirmationPopup from '@components/confirmationPopup';
 import {toastNew} from '@components/toast';
+import {createCurrentGuestAccountLifecycle} from '@lib/guestAccountLifecycle';
 import type {GuestAccountManagers} from '@lib/guestAccountLifecycle';
 
 export default function showLogOutPopup() {
@@ -11,11 +12,9 @@ export default function showLogOutPopup() {
       langKey: 'LogOut',
       isDanger: true
     }
-  }).then(async() => {
-    try {
-      const {createCurrentGuestAccountLifecycle} = await import('@lib/guestAccountLifecycle');
-      const lifecycle = createCurrentGuestAccountLifecycle(rootScope.managers as unknown as GuestAccountManagers);
-      const result = await lifecycle.forget();
+  }).then(() => {
+    const lifecycle = createCurrentGuestAccountLifecycle(rootScope.managers as unknown as GuestAccountManagers);
+    return lifecycle.forget().then(async(result): Promise<void> => {
       if(result.kind === 'forgotten' || result.kind === 'cancelled') return;
       if(result.kind !== 'noGuest') {
         toastNew({langPackKey: 'Teagram.Guest.SignOutFailed'});
@@ -26,8 +25,8 @@ export default function showLogOutPopup() {
       } catch{
         toastNew({langPackKey: 'Teagram.SignOutFailed'});
       }
-    } catch{
+    }).catch(() => {
       toastNew({langPackKey: 'Teagram.Guest.SignOutFailed'});
-    }
+    });
   }, (): undefined => undefined);
 }

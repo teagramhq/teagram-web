@@ -33,7 +33,6 @@ import {notifyMtprotoWorkerReady} from '@helpers/mtprotoWorkerReady';
 import {MainBroadcastChannelEvents, unversionedMainBroadcastChannelName} from '@config/broadcastChannel';
 import objectUrlRegistry from '@lib/mainWorker/objectUrlRegistry';
 import SharedObjectUrlCache, {getSharedObjectURLCacheStats, resetSharedObjectURLCaches} from '@lib/mainWorker/sharedObjectUrlCache';
-import {disableChatPageSnapshots, enableChatPageSnapshots} from '@lib/chatPageSnapshot';
 
 
 const log = logger('MTPROTO');
@@ -150,7 +149,7 @@ port.addMultipleEventsListeners({
 
   setLogBufferEnabled: (enabled) => setLogBufferEnabled(enabled),
 
-  state: ({state, resetStorages, pushedKeys, newVersion, oldVersion, userId, snapshotOwner, accountNumber, common, refetchStorages}) => {
+  state: ({state, resetStorages, pushedKeys, newVersion, oldVersion, userId, accountNumber, common, refetchStorages}) => {
     // if(haveState) {
     //   return;
     // }
@@ -159,7 +158,6 @@ port.addMultipleEventsListeners({
 
     const appStateManager = appManagersManager.stateManagersByAccount[accountNumber];
     appStateManager.userId = userId;
-    appStateManager.snapshotOwner = snapshotOwner;
     appStateManager.newVersion = newVersion;
     appStateManager.oldVersion = oldVersion;
 
@@ -252,15 +250,7 @@ port.addMultipleEventsListeners({
     selfTerminate();
   },
 
-  preparePasscodeSnapshots: async(token, source) => {
-    await disableChatPageSnapshots(token);
-    await port.invokeExceptSourceAsync('forgetChatPageSnapshot', undefined, source);
-  },
-
-  resumePasscodeSnapshots: (token) => enableChatPageSnapshots(token),
-
   toggleUsingPasscode: async(payload, source) => {
-    if(payload.isUsingPasscode) await disableChatPageSnapshots();
     DeferredIsUsingPasscode.resolveDeferred(payload.isUsingPasscode);
     EncryptionKeyStore.save(payload.encryptionKey);
 

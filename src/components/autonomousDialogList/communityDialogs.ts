@@ -228,16 +228,16 @@ export class AutonomousCommunityDialogList
       }
     });
 
-    this.listenerSetter.add(rootScope)('user_update', async(userId, options) => {
+    this.listenerSetter.add(rootScope)('user_update', async(userId) => {
       const peerId = userId.toPeerId();
       const dialogElement = this.dialogElements.get(peerId);
       if(!dialogElement?.dom.avatarEl?.node) {
         return;
       }
 
-      const status = options?.statusFromWorker ?
-        options.status :
-        await this.managers.appUsersManager.getUserStatus(userId).catch((): undefined => undefined);
+      const status = await this.managers.appUsersManager
+      .getUserStatus(userId)
+      .catch((): undefined => undefined);
       if(this.dialogElements.get(peerId) === dialogElement) {
         this.appDialogsManager.xd?.setOnlineStatus(
           dialogElement.dom.avatarEl.node,

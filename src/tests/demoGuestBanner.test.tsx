@@ -30,7 +30,7 @@ vi.mock('@lib/langPack', () => ({
   i18n: (key: string) => key === 'Teagram.Demo.Banner.Title' ? 'Demo server: you\'re a guest.' :
     'Everything is wiped every week. Use your own server at'
 }));
-vi.mock('@lib/currentGuestAccountSnapshotIdentity', () => ({isCurrentAccountGuest: mocks.isCurrentAccountGuest}));
+vi.mock('@lib/guestAccountLifecycle', () => ({isCurrentAccountGuest: mocks.isCurrentAccountGuest}));
 vi.mock('@lib/autoGuest', () => ({markAutoGuestAttempted: mocks.markAutoGuestAttempted}));
 vi.mock('@lib/rootScope', () => ({default: {
   addEventListener: mocks.addEventListener,

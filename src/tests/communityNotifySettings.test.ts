@@ -247,7 +247,6 @@ describe('community pinned dialog order', () => {
     };
     Object.assign(storage as any, {
       allDialogsLoaded: {},
-      dialogsOffsetCursors: {},
       dialogs: {},
       dialogsOffsetDate: {},
       folders: {},

@@ -2853,12 +2853,9 @@ export class AppMessagesManager extends AppManager {
             toggleError(error, repayRequest);
             throw error;
           });
-        }, noop);
+        });
 
         const messagePromise = message.promise as CancellablePromise<void>;
-        // The upload deferred reports the failure to its caller; the local
-        // message promise may have no observer of its own.
-        messagePromise.catch(noop);
         sentDeferred.then(
           () => messagePromise.resolve(),
           (err) => messagePromise.reject(err)
@@ -3187,14 +3184,16 @@ export class AppMessagesManager extends AppManager {
       return;
     }
 
-    if(activeEphemeralContext && options.sendFileDetails.length > 1 && !activeEphemeralContext.replyTo) {
-      return;
+    if(activeEphemeralContext) {
+      if(options.sendFileDetails.length > 1 && !activeEphemeralContext.replyTo) {
+        return;
+      }
+
+      return this.sendFile({...options, ...options.sendFileDetails[0]});
     }
 
-    if(activeEphemeralContext || options.sendFileDetails.length === 1) {
-      const result = await this.sendFile({...options, ...options.sendFileDetails[0]});
-      await result?.promise;
-      return;
+    if(options.sendFileDetails.length === 1) {
+      return this.sendFile({...options, ...options.sendFileDetails[0]});
     }
 
     let caption = options.caption || '';
@@ -3465,10 +3464,6 @@ export class AppMessagesManager extends AppManager {
         return;
       }
       return invoke(inputs);
-    }, (error: ApiError) => {
-      // One failed upload prevents the whole album from being sent.
-      results.forEach(({message}) => toggleError(message, error));
-      throw error;
     });
   }
 
@@ -4898,13 +4893,7 @@ export class AppMessagesManager extends AppManager {
       if(hasPrepend) {
         this.scheduleHandleNewDialogs();
       } else {
-        const reconcilePeerIds = filterType === FilterType.Folder && !isSearch ?
-          items.filter(isDialog).map((dialog) => dialog.peerId) : undefined;
-        if(reconcilePeerIds) {
-          this.rootScope.dispatchEvent('dialogs_multiupdate', new Map(), {reconcilePeerIds});
-        } else {
-          this.rootScope.dispatchEvent('dialogs_multiupdate', new Map());
-        }
+        this.rootScope.dispatchEvent('dialogs_multiupdate', new Map());
       }
 
       log('end', {isEnd, hasPrepend, offsetDate: this.dialogsStorage.getOffsetDate(folderId, filterType)});
@@ -4981,47 +4970,18 @@ export class AppMessagesManager extends AppManager {
       // ! ВНИМАНИЕ: ОЧЕНЬ СЛОЖНАЯ ЛОГИКА:
       // ! если делать запрос сначала по папке 0, потом по папке 1, по индексу 0 в массиве будет один и тот же диалог, с dialog.pFlags.pinned, ЛОЛ???
       // ! т.е., с запросом folder_id: 1, и exclude_pinned: 0, в результате будут ещё и закреплённые с папки 0
-      // ! the server pages by the last dialog's top message and peer and ignores the date, so a
-      // ! next page without them is the first page again, and filling the list never ends
-      const cursor = this.dialogsStorage.getOffsetCursor(folderId);
-
       promise = this.apiManager.invokeApiSingleProcess({
         method: method = 'messages.getDialogs',
         params: params = {
           folder_id: folderId,
           offset_date: offsetDate,
-          offset_id: cursor?.id ?? offsetId,
-          offset_peer: this.appPeersManager.getInputPeerById(cursor?.peerId ?? offsetPeerId),
+          offset_id: offsetId,
+          offset_peer: this.appPeersManager.getInputPeerById(offsetPeerId),
           limit: useLimit,
           hash: '0'
         },
         options: requestOptions,
-        processResult: (result) => {
-          const hasCurrentCutoff = cutoffGeneration === undefined ||
-            cutoffGeneration === this.getChannelAvailableMinIdGeneration();
-          const pageDialogs = hasCurrentCutoff &&
-            (result._ === 'messages.dialogs' || result._ === 'messages.dialogsSlice') ? result.dialogs : undefined;
-          const serverDialogs = pageDialogs?.filter((dialog) => dialog._ === 'dialog');
-          const lastDialog = serverDialogs?.[serverDialogs.length - 1];
-          const cursorSource = lastDialog && {peer: {...lastDialog.peer}, top_message: lastDialog.top_message};
-
-          const processed = processResult(result);
-          return Promise.resolve(processed).then((processedResult) => {
-            if(!processedResult || !cursorSource) {
-              return processedResult;
-            }
-
-            const pageCursor = this.dialogsStorage.setOffsetCursor(folderId, cursorSource);
-
-            if(cursor && cursor.peerId === pageCursor.peerId && cursor.id === pageCursor.id) {
-              // * The server returned the same raw page tail, so there is no next page to request.
-              this.dialogsStorage.setDialogsLoaded(folderId, true, filterType);
-              return {...processedResult, isEnd: true};
-            }
-
-            return processedResult;
-          });
-        }
+        processResult
       });
     }
 
@@ -11336,18 +11296,6 @@ export class AppMessagesManager extends AppManager {
 
     delete this.pendingByRandomId[randomId];
     this.deletePendingTopMsg(peerId, tempId);
-
-    const dialog = this.getDialogOnly(peerId);
-    if(dialog?.top_message === tempId) {
-      this.setDialogTopMessage(finalMessage, dialog);
-    }
-
-    if(threadId) {
-      const threadDialog = this.dialogsStorage.getAnyDialog(peerId, threadId);
-      if(threadDialog?.top_message === tempId) {
-        this.setDialogTopMessage(finalMessage, threadDialog);
-      }
-    }
 
     this.finalizePendingMessageCallbacks(storage, tempId, finalMessage);
 

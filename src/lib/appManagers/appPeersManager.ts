@@ -19,8 +19,6 @@ import getPeerPhoto from '@appManagers/utils/peers/getPeerPhoto';
 import getServerMessageId from '@appManagers/utils/messageId/getServerMessageId';
 import MTProtoMessagePort from '@lib/mainWorker/mainMessagePort';
 import callbackify from '@helpers/callbackify';
-import type {PeerMirrorBatch, PeerMirrorEvent, PeerMirrorValue, PeerSaveOptions} from '@appManagers/peerMirrorBatch';
-import type {PerformancePhase} from '@appManagers/performanceTrace';
 
 export type PeerType = 'channel' | 'community' | 'chat' | 'megagroup' | 'group' | 'saved' | 'savedDialog' | 'monoforum' | 'monoforum_thread' | 'botforum_thread';
 export class AppPeersManager extends AppManager {
@@ -32,64 +30,9 @@ export class AppPeersManager extends AppManager {
     else appUsersManager.saveApiUser(instance);
   } */
 
-  public saveApiPeers(object: {chats?: Chat[], users?: User[]}, trace?: 'cachedChannelDialogsReconcile', mirrorBatch?: PeerMirrorBatch, options?: PeerSaveOptions) {
-    this.appChatsManager.saveApiChats(object.chats, undefined, trace, mirrorBatch, options);
-    this.appUsersManager.saveApiUsers(object.users, undefined, trace, mirrorBatch);
-  }
-
-  public mirrorApiPeers(
-    peerKeys: Iterable<string>,
-    trace?: 'cachedChannelDialogsReconcile',
-    traceId?: string,
-    reconcilePhase?: PerformancePhase,
-    chatUpdateIds?: Iterable<ChatId>,
-    events?: PeerMirrorEvent[],
-    suppressedActiveChatUpdateIds?: ChatId[]
-  ) {
-    // The paginated walk can outlive a clear or a newer peer update.
-    const peers: Record<string, PeerMirrorValue> = {};
-    for(const peerKey of peerKeys) {
-      const peer = this.getPeer(Number(peerKey) as PeerId) as Chat | User;
-      if(!peer || peer._ === 'chatEmpty' || peer._ === 'userEmpty') continue;
-      peers[peerKey] = peer;
-    }
-
-    const chatUpdates = Array.from(chatUpdateIds ?? []);
-    const currentEvents = events?.filter((event) => {
-      if(event.name === 'chat_update') {
-        const chat = this.appChatsManager.getChat(event.args[0]);
-        return !!chat;
-      }
-      if(event.name === 'user_update') {
-        const user = this.appUsersManager.getUser(event.args[0]);
-        return !!user;
-      }
-      return true;
-    }).map((event) => {
-      if(event.name !== 'user_update' || !event.args[1]?.statusFromWorker) return event;
-      return {...event, args: [event.args[0], {
-        ...event.args[1],
-        status: this.appUsersManager.getUserStatus(event.args[0]) || undefined
-      }]};
-    });
-    const traceOnly = !Object.keys(peers).length && !chatUpdates.length && !currentEvents?.length;
-    if(traceOnly && !traceId) return;
-
-    MTProtoMessagePort.getInstance<false>().invokeVoid('mirror', {
-      name: 'peers',
-      value: peers,
-      merge: true,
-      ...(chatUpdates.length ? {chatUpdateIds: chatUpdates} : {}),
-      ...(currentEvents?.length ? {events: currentEvents} : {}),
-      ...(suppressedActiveChatUpdateIds?.length ? {suppressedActiveChatUpdateIds} : {}),
-      accountNumber: this.getAccountNumber(),
-      // The walk reloads its missing dialogs itself; avoid starting a second empty-channel scan in the tab.
-      skipEmptyChannelDialogReconciliation: true,
-      ...(trace ? {trace} : {}),
-      ...(traceId ? {traceId} : {}),
-      ...(reconcilePhase ? {reconcilePhase} : {}),
-      ...(traceOnly ? {traceOnly: true} : {})
-    });
+  public saveApiPeers(object: {chats?: Chat[], users?: User[]}) {
+    this.appChatsManager.saveApiChats(object.chats);
+    this.appUsersManager.saveApiUsers(object.users);
   }
 
   public canPinMessage(peerId: PeerId) {

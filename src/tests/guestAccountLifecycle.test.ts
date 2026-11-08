@@ -72,10 +72,7 @@ function createDeferred<T>() {
   return {promise, resolve};
 }
 
-afterEach(() => {
-  vi.restoreAllMocks();
-  vi.unstubAllGlobals();
-});
+afterEach(() => vi.unstubAllGlobals());
 
 describe('guest account lifecycle', () => {
   it('generates a lowercase username with 80 random bits and a 32-byte password', () => {
@@ -519,6 +516,56 @@ describe('guest account lifecycle', () => {
     expect(state.invokeApi).not.toHaveBeenCalled();
     expect(state.records).toHaveLength(0);
     expect(state.clearInvalidatedAccount).toHaveBeenCalledWith(1, 42);
+  });
+
+  it('detects a changed wipe generation without clearing the active account during startup', async() => {
+    const state = makeDependencies();
+    state.currentIdentity = {...IDENTITY, wipeGeneration: 'week-43'} as GuestServerIdentity;
+    state.accountUserId = 42;
+    state.records = [{
+      version: 1,
+      serverId: IDENTITY.serverId,
+      keyFingerprint: IDENTITY.keyFingerprint,
+      username: `guest_${'a'.repeat(16)}`,
+      password: 'P'.repeat(43),
+      status: 'committed',
+      wipeGeneration: 'week-42',
+      accountUserId: 42,
+      accountNumber: 1
+    }];
+
+    await expect(createGuestAccountLifecycle(state.dependencies).hasWipeGenerationChanged()).resolves.toBe(true);
+
+    expect(state.invokeApi).not.toHaveBeenCalled();
+    expect(state.records).toHaveLength(1);
+    expect(state.clearInvalidatedAccount).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a server lock failure while checking the wipe generation', async() => {
+    const state = makeDependencies();
+    state.dependencies.withServerLock = async<T>() => {
+      throw new Error('Server lock failed');
+    };
+
+    await expect(createGuestAccountLifecycle(state.dependencies).hasWipeGenerationChanged()).rejects.toThrow('Server lock failed');
+  });
+
+  it('surfaces an account lookup failure while checking the wipe generation', async() => {
+    const state = makeDependencies();
+    state.dependencies.getAccountUserId = async() => {
+      throw new Error('Account lookup failed');
+    };
+
+    await expect(createGuestAccountLifecycle(state.dependencies).hasWipeGenerationChanged()).rejects.toThrow('Account lookup failed');
+  });
+
+  it('surfaces a credential read failure while checking the wipe generation', async() => {
+    const state = makeDependencies();
+    state.dependencies.readCredentials = async() => {
+      throw new Error('Credential read failed');
+    };
+
+    await expect(createGuestAccountLifecycle(state.dependencies).hasWipeGenerationChanged()).rejects.toThrow('Credential read failed');
   });
 
   it.each([

@@ -2,11 +2,7 @@ export type PerformancePhase = {
   name: string,
   startedAtEpochMs: number,
   durationMs: number | null,
-  traceId?: string,
-  accountNumber?: number,
-  pageCount?: number
-  pageCompletedAtEpochMs?: number[],
-  lastPageRequestedAtEpochMs?: number
+  accountNumber?: number
 };
 
 export type PerformanceRpcCall = {
@@ -28,19 +24,14 @@ export type PerformanceRpcHandle = {
 
 export class PerformancePhaseTrace {
   private readonly enabled: boolean;
-  private readonly alwaysEnabledNames: Set<string>;
   private phases: PerformancePhase[] = [];
 
-  constructor(enabled: boolean, alwaysEnabledNames: string[] = []) {
+  constructor(enabled: boolean) {
     this.enabled = enabled;
-    this.alwaysEnabledNames = new Set(alwaysEnabledNames);
   }
 
-  public start(
-    name: string,
-    details: {accountNumber?: number, startedAtEpochMs?: number, traceId?: string, pageCount?: number} = {}
-  ): (summary?: {pageCount?: number}) => void {
-    if(!this.enabled && !this.alwaysEnabledNames.has(name)) return () => {};
+  public start(name: string, details: {accountNumber?: number, startedAtEpochMs?: number} = {}) {
+    if(!this.enabled) return () => {};
 
     const started = performance.now();
     const startedAtEpochMs = details.startedAtEpochMs ?? performance.timeOrigin + started;
@@ -48,40 +39,22 @@ export class PerformancePhaseTrace {
       name,
       startedAtEpochMs,
       durationMs: null,
-      ...(details.traceId === undefined ? {} : {traceId: details.traceId}),
-      ...(details.accountNumber === undefined ? {} : {accountNumber: details.accountNumber}),
-      ...(details.pageCount === undefined ? {} : {pageCount: details.pageCount, pageCompletedAtEpochMs: []})
+      ...(details.accountNumber === undefined ? {} : {accountNumber: details.accountNumber})
     };
     this.phases.push(phase);
 
     let finished = false;
-    return (summary = {}) => {
+    return () => {
       if(finished) return;
       finished = true;
-      if(summary.pageCount !== undefined) phase.pageCount = summary.pageCount;
       const duration = Number((performance.timeOrigin + performance.now() - startedAtEpochMs).toFixed(2));
       phase.durationMs = duration;
       if(name.startsWith('main.')) performance.measure(name, {start: startedAtEpochMs - performance.timeOrigin, duration});
     };
   }
 
-  // A phase that is still running reports the pages seen so far, for a reader that never sees it finish.
-  public setPageCount(traceId: string, pageCount: number, completedAtEpochMs?: number) {
-    const phase = this.phases.find((candidate) => candidate.traceId === traceId && candidate.durationMs === null);
-    if(phase) {
-      phase.pageCount = pageCount;
-      if(completedAtEpochMs !== undefined) phase.pageCompletedAtEpochMs?.push(completedAtEpochMs);
-    }
-  }
-
-  // The newest page request tells a reader whether a walk that is not advancing is waiting on a response or never asked.
-  public setPageRequested(traceId: string, requestedAtEpochMs: number) {
-    const phase = this.phases.find((candidate) => candidate.traceId === traceId && candidate.durationMs === null);
-    if(phase) phase.lastPageRequestedAtEpochMs = requestedAtEpochMs;
-  }
-
-  public reset(preserveNames: string[] = []) {
-    this.phases = this.phases.filter(({name}) => preserveNames.includes(name));
+  public reset() {
+    this.phases = [];
   }
 
   public track<T>(name: string, operation: () => T): T {
@@ -100,7 +73,7 @@ export class PerformancePhaseTrace {
   }
 
   public getSnapshot() {
-    return this.phases.map((phase) => ({...phase, ...(phase.pageCompletedAtEpochMs ? {pageCompletedAtEpochMs: [...phase.pageCompletedAtEpochMs]} : {})}));
+    return this.phases.map((phase) => ({...phase}));
   }
 }
 
@@ -180,9 +153,4 @@ export class PerformanceRpcTrace {
   }
 }
 
-const reconcileTraceEnabled = import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1';
-
-export const performancePhaseTrace = new PerformancePhaseTrace(
-  import.meta.env.VITE_PERF_TRACE === '1',
-  reconcileTraceEnabled ? ['worker.dialogs.cachedChannelReconcile'] : []
-);
+export const performancePhaseTrace = new PerformancePhaseTrace(import.meta.env.VITE_PERF_TRACE === '1');

@@ -17,7 +17,7 @@ import findUpClassName from '@helpers/dom/findUpClassName';
 import {User, AttachMenuPeerType, MessagesBotApp, BotApp, ChatlistsChatlistInvite, Chat, InputInvoice} from '@layer';
 import {i18n, LangPackKey, _i18n} from '@lib/langPack';
 import {PHONE_NUMBER_REG_EXP} from '@lib/richTextProcessor';
-import {isWebAppNameValid} from '@lib/richTextProcessor/webAppNameValidator';
+import {isWebAppNameValid} from '@lib/richTextProcessor/validators';
 import appImManager, {APP_TABS, JoinConferenceOptions} from '@lib/appImManager';
 import {makeFullMid} from '@appManagers/utils/messages/fullMid';
 import {INTERNAL_LINK_TYPE, InternalLinkTypeMap, InternalLink} from '@lib/internalLink';

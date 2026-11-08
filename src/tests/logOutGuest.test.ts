@@ -4,17 +4,15 @@ const mocks = vi.hoisted(() => ({
   confirmationPopup: vi.fn(),
   logOut: vi.fn(),
   forgetGuest: vi.fn(),
-  lifecycleImportCount: 0,
   toastNew: vi.fn()
 }));
 
 vi.mock('@components/confirmationPopup', () => ({default: mocks.confirmationPopup}));
 vi.mock('@components/toast', () => ({toastNew: mocks.toastNew}));
 vi.mock('@lib/rootScope', () => ({default: {managers: {apiManager: {logOut: mocks.logOut}}}}));
-vi.mock('@lib/guestAccountLifecycle', () => {
-  mocks.lifecycleImportCount++;
-  return {createCurrentGuestAccountLifecycle: () => ({forget: mocks.forgetGuest})};
-});
+vi.mock('@lib/guestAccountLifecycle', () => ({
+  createCurrentGuestAccountLifecycle: () => ({forget: mocks.forgetGuest})
+}));
 
 import showLogOutPopup from '@components/popups/logOut';
 
@@ -24,14 +22,6 @@ describe('guest sign-out confirmation', () => {
     mocks.logOut.mockReset();
     mocks.forgetGuest.mockReset().mockResolvedValue({kind: 'forgotten'});
     mocks.toastNew.mockReset();
-  });
-
-  it('loads the guest lifecycle only after sign-out confirmation', async() => {
-    expect(mocks.lifecycleImportCount).toBe(0);
-
-    showLogOutPopup();
-
-    await vi.waitFor(() => expect(mocks.lifecycleImportCount).toBe(1));
   });
 
   it('warns before signing out and uses the guest lifecycle after confirmation', async() => {

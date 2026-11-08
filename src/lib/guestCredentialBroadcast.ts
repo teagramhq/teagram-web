@@ -1,7 +1,6 @@
 import {getRuntimeServerId} from '@config/serverContext';
 
 let invalidationSequence = 0;
-const localInvalidationEvent = 'guest-credential-lifecycle-local-clear';
 
 function storagePrefix(serverId: string) {
   return serverId === 'default' ? '' : `teagram-${serverId}:`;
@@ -16,7 +15,6 @@ function storageEventKey(serverId: string) {
 }
 
 export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId()) {
-  if(typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(localInvalidationEvent, {detail: serverId}));
   try {
     if(typeof BroadcastChannel !== 'undefined') {
       const channel = new BroadcastChannel(channelName(serverId));
@@ -32,11 +30,8 @@ export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId(
   } catch{}
 }
 
-export function listenForGuestCredentialInvalidation(serverId: string, callback: () => void, includeLocal = false) {
+export function listenForGuestCredentialInvalidation(serverId: string, callback: () => void) {
   let channel: BroadcastChannel | undefined;
-  const onLocalInvalidation = (event: Event) => {
-    if((event as CustomEvent<string>).detail === serverId) callback();
-  };
   const onStorage = (event: StorageEvent) => {
     if(event.key === storageEventKey(serverId)) callback();
   };
@@ -48,16 +43,10 @@ export function listenForGuestCredentialInvalidation(serverId: string, callback:
       });
     }
   } catch{}
-  if(typeof window !== 'undefined') {
-    window.addEventListener('storage', onStorage);
-    if(includeLocal) window.addEventListener(localInvalidationEvent, onLocalInvalidation);
-  }
+  if(typeof window !== 'undefined') window.addEventListener('storage', onStorage);
 
   return () => {
     channel?.close();
-    if(typeof window !== 'undefined') {
-      window.removeEventListener('storage', onStorage);
-      if(includeLocal) window.removeEventListener(localInvalidationEvent, onLocalInvalidation);
-    }
+    if(typeof window !== 'undefined') window.removeEventListener('storage', onStorage);
   };
 }

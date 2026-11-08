@@ -42,7 +42,6 @@ import {isPrivateMtprotoTarget} from '@config/mtprotoTarget';
 import {recoverRejectedAuthKey, withAuthKeyRecoveryLock} from '@lib/mtproto/authKeyRecovery';
 import {clearAllGuestCredentials, clearGuestCredentialsForAccount} from '@lib/guestCredentialStorage';
 import {clearGuestAccountLocalState, clearInvalidatedGuestAccount as clearInvalidatedGuestAccountLocally} from '@lib/guestAccountLocalCleanup';
-import {beginChatPageSnapshotShift, finishChatPageSnapshotShift} from '@lib/chatPageSnapshot';
 /**
  * To not be used in an ApiManager instance as there is no account number attached to it
  */
@@ -337,24 +336,6 @@ export class ApiManager extends ApiManagerMethods {
     });
   }
 
-  private handleIdleNetworkerAuthKeyUnknown(networker: MTPNetworker, transport: MTTransport) {
-    if(networker.activeRequests || networker.transport !== transport || !this.isNetworkerCurrentForDc(networker.dcId, networker)) return;
-
-    if(this.rootScope.myId) {
-      this.onNetworkerDrain(networker);
-      this.logOutLocally().catch((error) => {
-        this.log.error('Failed to clear rejected auth session locally', error);
-      });
-      return;
-    }
-
-    const recoveryId = this.nextAuthKeyRecoveryId = (this.nextAuthKeyRecoveryId || 0) + 1;
-    (this.authKeyRecoveryTargets ??= new Map()).set(recoveryId, {networker, transport});
-    this.recoverUnknownAuthKey(recoveryId).catch((recoveryError) => {
-      this.log.error('Failed to recover unknown auth key', recoveryError);
-    });
-  }
-
   private chooseServer(dcId: DcId, connectionType: ConnectionType, transportType: TransportType) {
     return this.dcConfigurator.chooseServer(dcId, connectionType, transportType, connectionType === 'client', this.rootScope.premium);
   }
@@ -465,102 +446,55 @@ export class ApiManager extends ApiManagerMethods {
 
     this.loggingOut = true;
 
+    const totalAccounts = await AccountController.getTotalAccounts();
     const accountNumber = this.getAccountNumber();
-    let held: Awaited<ReturnType<typeof beginChatPageSnapshotShift>>;
-    let released = false;
-    const release = async() => {
-      if(!held || released) return;
-      await finishChatPageSnapshotShift(held);
-      released = true;
-    };
-    try {
-      held = await beginChatPageSnapshotShift(accountNumber);
-      const totalAccounts = await AccountController.getTotalAccounts();
-      const accountData = await AccountController.get(accountNumber);
+    const accountData = await AccountController.get(accountNumber);
 
-      const logoutPromises: Promise<any>[] = [];
+    const logoutPromises: Promise<any>[] = [];
 
-      for(let dcId = 1; dcId <= 5; dcId++) {
-        const key = `dc${dcId as TrueDcId}_auth_key` as const;
-        if(accountData[key]) {
-          logoutPromises.push(this.invokeApi('auth.logOut', {}, {dcId, ignoreErrors: true}));
-        }
+    for(let dcId = 1; dcId <= 5; dcId++) {
+      const key = `dc${dcId as TrueDcId}_auth_key` as const;
+      if(accountData[key]) {
+        logoutPromises.push(this.invokeApi('auth.logOut', {}, {dcId, ignoreErrors: true}));
       }
+    }
 
-      let clearing: Promise<void>;
-      const clear = () => (clearing ??= (async() => {
+    let wasCleared = false; // Prevent double logout 2 accounts in a row
+    const clear = async() => {
+      if(wasCleared) return;
+      wasCleared = true;
+
+      let accountNumberOnlyCredentialCleanup = false;
+      if(totalAccounts > 1 && accountData.userId !== undefined) {
         try {
-          await this.clearAccountLocally(accountNumber, totalAccounts, accountData, migrateAccountTo, release);
-        } finally {
-          await release();
+          accountNumberOnlyCredentialCleanup = await AccountController.hasUserIdInOtherAccounts(accountNumber, accountData.userId);
+        } catch(error) {
+          this.log.error('failed to inspect account slots before credential cleanup', error);
+          accountNumberOnlyCredentialCleanup = true;
         }
-      })());
-
-      setTimeout(clear, 1e3);
-      return await Promise.all(logoutPromises).catch((error) => {
-        error.handled = true;
-      }).finally(clear);
-    } catch(error) {
-      await release();
-      this.loggingOut = false;
-      throw error;
-    }
-  }
-
-  private async logOutLocally() {
-    if(this.loggingOut) return;
-
-    this.loggingOut = true;
-    const accountNumber = this.getAccountNumber();
-    let held: Awaited<ReturnType<typeof beginChatPageSnapshotShift>>;
-    let released = false;
-    const release = async() => {
-      if(!held || released) return;
-      await finishChatPageSnapshotShift(held);
-      released = true;
-    };
-    try {
-      held = await beginChatPageSnapshotShift(accountNumber);
-      const [totalAccounts, accountData] = await Promise.all([
-        AccountController.getTotalAccounts(),
-        AccountController.get(accountNumber)
-      ]);
-      await this.clearAccountLocally(accountNumber, totalAccounts, accountData, undefined, release);
-    } catch(error) {
-      this.loggingOut = false;
-      throw error;
-    } finally {
-      await release();
-    }
-  }
-
-  private async clearAccountLocally(
-    accountNumber: ActiveAccountNumber,
-    totalAccounts: number,
-    accountData: Awaited<ReturnType<typeof AccountController.get>>,
-    migrateAccountTo?: ActiveAccountNumber,
-    beforeClose?: () => Promise<void>
-  ) {
-    let accountNumberOnlyCredentialCleanup = false;
-    if(totalAccounts > 1 && accountData.userId !== undefined) {
-      try {
-        accountNumberOnlyCredentialCleanup = await AccountController.hasUserIdInOtherAccounts(accountNumber, accountData.userId);
-      } catch(error) {
-        this.log.error('failed to inspect account slots before credential cleanup', error);
-        accountNumberOnlyCredentialCleanup = true;
       }
-    }
 
-    try {
-      await clearGuestCredentialsForAccount(accountData.userId, accountNumber, accountNumberOnlyCredentialCleanup);
-    } catch(error) {
-      this.log.error('failed to clear guest credentials during logout', error);
-      await clearAllGuestCredentials();
-    }
+      try {
+        await clearGuestCredentialsForAccount(accountData.userId, accountNumber, accountNumberOnlyCredentialCleanup);
+      } catch(error) {
+        this.log.error('failed to clear guest credentials during logout', error);
+        await clearAllGuestCredentials();
+      }
 
-    this.baseDcId = undefined;
-    await clearGuestAccountLocalState(accountNumber, totalAccounts, migrateAccountTo, beforeClose);
-    this.rootScope.dispatchEvent('logging_out', {accountNumber, migrateTo: migrateAccountTo});
+      this.baseDcId = undefined;
+      await clearGuestAccountLocalState(accountNumber, totalAccounts, migrateAccountTo);
+      this.rootScope.dispatchEvent('logging_out', {accountNumber, migrateTo: migrateAccountTo});
+    };
+
+    setTimeout(clear, 1e3);
+
+    // return;
+
+    return Promise.all(logoutPromises).catch((error) => {
+      error.handled = true;
+    }).finally(clear)/* .then(() => {
+      location.pathname = '/';
+    }) */;
   }
 
   public async clearInvalidatedGuestAccount(accountNumber: ActiveAccountNumber, userId?: PeerId) {
@@ -568,39 +502,23 @@ export class ApiManager extends ApiManagerMethods {
       throw Object.assign(new Error('Guest account context changed before local cleanup'), {type: 'GUEST_ACCOUNT_CONTEXT_CHANGED'});
     }
 
-    const held = await beginChatPageSnapshotShift(accountNumber);
-    let released = false;
-    const release = async() => {
-      if(released) return;
-      await finishChatPageSnapshotShift(held);
-      released = true;
-    };
-    try {
-      await clearInvalidatedGuestAccountLocally(accountNumber, userId, release);
-    } finally {
-      await release();
-    }
+    await clearInvalidatedGuestAccountLocally(accountNumber, userId);
     this.baseDcId = undefined;
     this.rootScope.dispatchEvent('logging_out', {accountNumber});
   }
 
   public static async forceLogOutAll() {
-    const held = await beginChatPageSnapshotShift(1);
     const clearAllStoresPromises = ([1, 2, 3, 4] as ActiveAccountNumber[])
     .map(accountNumber => AppStoragesManager.clearAllStoresForAccount(accountNumber));
 
-    try {
-      await sessionStorage.localStorageProxy('clear');
-      await Promise.all([
-        clearAllGuestCredentials(),
-        commonStateStorage.clear(),
-        EncryptedStorageLayer.getInstance(getCommonDatabaseState(), 'localStorage__encrypted').clear(),
-        ...clearAllStoresPromises,
-        CacheStorageController.deleteAllStorages()
-      ]);
-    } finally {
-      await finishChatPageSnapshotShift(held);
-    }
+    await Promise.all([
+      sessionStorage.localStorageProxy('clear'),
+      clearAllGuestCredentials(),
+      commonStateStorage.clear(),
+      EncryptedStorageLayer.getInstance(getCommonDatabaseState(), 'localStorage__encrypted').clear(),
+      ...clearAllStoresPromises,
+      CacheStorageController.deleteAllStorages()
+    ]);
 
     IDB.closeDatabases();
     globalRootScope.dispatchEvent('logging_out', {});
@@ -735,8 +653,7 @@ export class ApiManager extends ApiManagerMethods {
           serverSalt: auth.serverSalt,
           isFileDownload: connectionType === 'download',
           isFileUpload: connectionType === 'upload',
-          isCurrentForDc: () => this.isNetworkerCurrentForDc(dcId, networker),
-          onAuthKeyUnknown: (_networker, transport) => this.handleIdleNetworkerAuthKeyUnknown(networker, transport)
+          isCurrentForDc: () => this.isNetworkerCurrentForDc(dcId, networker)
         });
 
         if(temporary) onTransport = async() => {
@@ -841,14 +758,12 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public getPerformancePhaseTrace() {
-    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1') {
-      return performancePhaseTrace.getSnapshot();
-    }
+    if(import.meta.env.VITE_PERF_TRACE === '1') return performancePhaseTrace.getSnapshot();
     return [];
   }
 
-  public resetPerformancePhaseTrace(preserveNames: string[] = []) {
-    if(import.meta.env.VITE_PERF_TRACE === '1') performancePhaseTrace.reset(preserveNames);
+  public resetPerformancePhaseTrace() {
+    if(import.meta.env.VITE_PERF_TRACE === '1') performancePhaseTrace.reset();
   }
 
   public startFirstDialogsDispatchTrace(startedAtEpochMs: number) {
@@ -995,20 +910,12 @@ export class ApiManager extends ApiManagerMethods {
       }
 
       return promise.catch((error: ApiError) => {
-        let authKeyRecoveryPromise: Promise<unknown> | undefined;
         if(error?.code === -404 && error.type === 'AUTH_KEY_UNKNOWN' && cachedNetworker &&
           cachedNetworker.transport === requestTransport && this.isNetworkerCurrentForDc(cachedNetworker.dcId, cachedNetworker)) {
-          if(authKeyRecovery || !this.rootScope.myId) {
+          if(authKeyRecovery) {
             const recoveryId = this.nextAuthKeyRecoveryId = (this.nextAuthKeyRecoveryId || 0) + 1;
             (this.authKeyRecoveryTargets ??= new Map()).set(recoveryId, {networker: cachedNetworker, transport: requestTransport});
-
-            if(authKeyRecovery) {
-              error = {...error, authKeyRecoveryId: recoveryId};
-            } else {
-              authKeyRecoveryPromise = this.recoverUnknownAuthKey(recoveryId).catch((recoveryError) => {
-                this.log.error('Failed to recover unknown auth key', recoveryError);
-              });
-            }
+            error = {...error, authKeyRecoveryId: recoveryId};
           }
 
           if(this.rootScope.myId) this.logOut();
@@ -1127,12 +1034,6 @@ export class ApiManager extends ApiManagerMethods {
         } else {
           if(RepayRequestHandler.canHandleError(error))
             error = RepayRequestHandler.attachInvokeArgsToError(error, [method, params, options]);
-
-          if(authKeyRecoveryPromise) {
-            return authKeyRecoveryPromise.then(() => {
-              throw error;
-            });
-          }
 
           throw error;
         }

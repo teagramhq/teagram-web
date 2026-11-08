@@ -17,8 +17,6 @@ import telegramMeWebManager from '@lib/telegramMeWebManager';
 import pause from '@helpers/schedulers/pause';
 import ENVIRONMENT from '@environment/index';
 import loadStateForAllAccountsOnce from '@appManagers/utils/state/loadState';
-import {forgetLoadedChatPageSnapshot, getChatPageKey, loadChatPageSnapshot, readChatPageSnapshot, recoverPasscodeSnapshots, setChatPageAccountGuard} from '@lib/chatPageSnapshot';
-import type {ChatPageKey} from '@lib/chatPageSnapshot';
 import opusDecodeController from '@lib/opusDecodeController';
 import MTProtoMessagePort, {ThreadedWorkerEvents} from '@lib/mainWorker/mainMessagePort';
 import cryptoMessagePort from '@lib/crypto/cryptoMessagePort';
@@ -32,7 +30,6 @@ import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
 import {makeWorkerURL} from '@helpers/setWorkerProxy';
 import {createPrivateWorkerBlobURL, rewritePrivateWorkerImports} from '@helpers/createPrivateWorkerBlobURL';
 import ServiceWorkerURL from '../../sw?worker&url';
-import CryptoWorkerURL from './crypto/crypto.worker.ts?worker&url';
 import MainWorkerURL from './mainWorker/index.worker.ts?worker&url';
 import setDeepProperty, {joinDeepPath, splitDeepPath} from '@helpers/object/setDeepProperty';
 import getThumbKey from '@lib/storages/utils/thumbs/getThumbKey';
@@ -80,7 +77,6 @@ import Modes from '@config/modes';
 import {getMtprotoTarget, isPrivateMtprotoTarget} from '@config/mtprotoTarget';
 import {getActiveServerId, getActiveServerQuery} from '@config/serverContext';
 import {waitForMtprotoWorkerReady} from '@helpers/mtprotoWorkerReady';
-import type {PerformancePhase} from '@appManagers/performanceTrace';
 import {toast} from '@components/toast';
 import appNavigationController from '@components/appNavigationController';
 import {BroadcastChannelWrapper, createBroadcastChannelWrapper} from './broadcastChannelWrapper';
@@ -91,10 +87,7 @@ import {
   deleteObjectURLMirrorValue,
   getNewActiveChannelMirrorChatId,
   reconcileObjectURLMirrorSnapshot,
-  reconcileObjectURLMirrorValue,
-  reconcilePeerMirrorBatch,
-  dispatchPeerMirrorBatchChatUpdates,
-  applyPeerMirrorBatch
+  reconcileObjectURLMirrorValue
 } from './apiManagerProxyUtils';
 
 function withRuntimeMtprotoTarget(url: string | URL) {
@@ -115,19 +108,6 @@ import type {
   CommunityPeerLinkRequestsState
 } from '@appManagers/appCommunitiesManager';
 
-const commonEventNames = new Set<keyof BroadcastEvents>([
-  'language_change',
-  'settings_updated',
-  'theme_changed',
-  'theme_change',
-  'background_change',
-  'logging_out',
-  'notification_count_update',
-  'account_logged_in',
-  'notification_cancel',
-  'notification_cancel_up_to',
-  'toggle_using_passcode'
-]);
 
 export type Mirrors = {
   state: State,
@@ -169,16 +149,7 @@ export type MirrorTaskPayload<
   value?: any,
   previousUrl?: string,
   previousUrls?: string[],
-  merge?: boolean,
-  accountNumber: ActiveAccountNumber,
-  trace?: 'cachedChannelDialogsReconcile',
-  traceId?: string,
-  reconcilePhase?: PerformancePhase,
-  traceOnly?: boolean,
-  skipEmptyChannelDialogReconciliation?: boolean,
-  chatUpdateIds?: ChatId[],
-  events?: Array<{name: string, args: any[]}>,
-  suppressedActiveChatUpdateIds?: ChatId[]
+  accountNumber: ActiveAccountNumber
 };
 
 export type NotificationBuildMessageTaskPayload = {
@@ -362,35 +333,6 @@ class ApiManagerProxy extends MTProtoMessagePort {
       },
 
       peers: (payload) => {
-        if(payload.merge) {
-          const options = payload.skipEmptyChannelDialogReconciliation ? {skipEmptyChannelDialogReconciliation: true} : undefined;
-          if(payload.events || payload.suppressedActiveChatUpdateIds) {
-            applyPeerMirrorBatch(
-              this.mirrors.peers as Record<string, any>,
-              payload.value,
-              [
-                ...(payload.events ?? []),
-                ...(payload.chatUpdateIds ?? []).map((chatId) => ({name: 'chat_update', args: [chatId, options]}))
-              ],
-              (chatId) => rootScope.dispatchEvent('chat_update', chatId, options),
-              ({name, args}) => rootScope.dispatchEventSingle(name as any, ...args),
-              payload.suppressedActiveChatUpdateIds
-            );
-            return false;
-          }
-          const activeChannelIds = reconcilePeerMirrorBatch(
-            this.mirrors.peers as Record<string, any>,
-            payload.value
-          );
-          dispatchPeerMirrorBatchChatUpdates(
-            activeChannelIds,
-            payload.chatUpdateIds ?? [],
-            (chatId) => rootScope.dispatchEvent('chat_update', chatId, options),
-            (chatId) => rootScope.dispatchEventSingle('chat_update', chatId, options)
-          );
-          return false;
-        }
-
         if(payload.key) {
           reconcilePeer(payload.key.toPeerId(), payload.value as any);
         } else {
@@ -497,6 +439,20 @@ class ApiManagerProxy extends MTProtoMessagePort {
     this.registerServiceWorker();
     this.registerCryptoWorker();
 
+    const commonEventNames = new Set<keyof BroadcastEvents>([
+      'language_change',
+      'settings_updated',
+      'theme_changed',
+      'theme_change',
+      'background_change',
+      'logging_out',
+      'notification_count_update',
+      'account_logged_in',
+      'notification_cancel',
+      'notification_cancel_up_to',
+      'toggle_using_passcode'
+    ]);
+
     // const perf = performance.now();
     this.addMultipleEventsListeners({
       convertWebp: ({fileName, bytes}) => {
@@ -516,10 +472,6 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
       localStorageProxy: (payload) => {
         return sessionStorage.localStorageProxy(payload.type, ...payload.args);
-      },
-
-      updateChatPageAccountGuard: ({serverId, accountNumber}) => {
-        setChatPageAccountGuard(serverId, accountNumber);
       },
 
       passcodeKeyHandoff: (payload) => {
@@ -597,10 +549,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
         CacheStorageController.temporarilyToggle(enabled);
       },
 
-      forgetChatPageSnapshot: () => forgetLoadedChatPageSnapshot(),
-
       toggleUsingPasscode: (payload) => {
-        if(payload.isUsingPasscode) forgetLoadedChatPageSnapshot();
         DeferredIsUsingPasscode.resolveDeferred(payload.isUsingPasscode);
         EncryptionKeyStore.save(payload.encryptionKey);
       }
@@ -687,7 +636,6 @@ class ApiManagerProxy extends MTProtoMessagePort {
     });
 
     rootScope.addEventListener('logging_out', ({accountNumber, migrateTo}) => {
-      forgetLoadedChatPageSnapshot();
       // const toClear: CacheStorageDbName[] = ['cachedFiles', 'cachedStreamChunks'];
       Promise.all([
         toggleStorages(false, true),
@@ -710,7 +658,6 @@ class ApiManagerProxy extends MTProtoMessagePort {
     });
 
     rootScope.addEventListener('toggle_using_passcode', (value) => {
-      if(value) forgetLoadedChatPageSnapshot();
       DeferredIsUsingPasscode.resolveDeferred(value);
     });
 
@@ -1128,11 +1075,11 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
   public async registerThreadedWorker({
     type,
-    workerUrl,
+    createWorker: _createWorker,
     superMessagePort
   }: {
     type: ThreadedWorkerType,
-    workerUrl: () => string | URL,
+    createWorker: () => SharedWorker | Worker,
     superMessagePort: SuperMessagePort<ThreadedWorkerEvents, ThreadedWorkerEvents, any>
   }) {
     const get = (url: string) => {
@@ -1147,53 +1094,51 @@ class ApiManagerProxy extends MTProtoMessagePort {
       });
     };
 
-    const originalUrl = makeWorkerURL(workerUrl()).toString();
+    const workerHandler = {
+      construct(target: any, args: any): any {
+        return {
+          url: makeWorkerURL(args[0]).toString()
+        };
+      }
+    };
+
+    const originals = [
+      Worker,
+      typeof(SharedWorker) !== 'undefined' && SharedWorker
+    ].filter(Boolean);
+    originals.forEach((w) => window[w.name as any] = new Proxy(w, workerHandler));
+
+    const worker = _createWorker();
+
+    originals.forEach((w) => window[w.name as any] = w as any);
+
+    const originalUrl = (worker as any).url;
+
+    const createWorker = (url: string) => new constructor(url, {type: 'module'});
+    const attachWorkerToPort = (worker: SharedWorker | Worker) => this.attachWorkerToPort(
+      worker,
+      superMessagePort,
+      type
+    );
     // Safari silently wedges a {type:'module'} SharedWorker used for lottie sticker decoding:
     // frames never arrive, no error is thrown, and every sticker canvas stays blank (never appended).
     // Keep MTProto/crypto on the shared worker, but hand the lottie pool per-tab dedicated Workers.
     const constructor = IS_SHARED_WORKER_SUPPORTED && !(IS_SAFARI && type === 'lottie') ? SharedWorker : Worker;
-    const workers: Array<SharedWorker | Worker> = [];
-    const createWorker = (url: string) => {
-      const worker = new constructor(url, {type: 'module'});
-      workers.push(worker);
-      this.attachWorkerToPort(worker, superMessagePort, type);
-    };
-    let bufferedPorts: MessagePort[] | undefined = [];
-    const forwardPort = (port: MessagePort) => this.invokeVoid(
-      'threadedPort',
-      type,
-      undefined,
-      [port]
-    );
-    const onPort = (_payload: void, _source: MessageEventSource, event: MessageEvent) => {
-      const port = event.ports[0];
-      if(!port) return;
-      if(bufferedPorts) bufferedPorts.push(port);
-      else forwardPort(port);
-    };
 
-    try {
-      superMessagePort.addEventListener('port', onPort);
-      createWorker(originalUrl);
+    superMessagePort.addEventListener('port', (payload, source, event) => {
+      this.invokeVoid('threadedPort', type, undefined, [event.ports[0]]);
+    });
 
-      const blob = await get(originalUrl);
-      const urls = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
-      urls.slice(1).forEach(createWorker);
+    const firstWorker = createWorker(originalUrl);
+    attachWorkerToPort(firstWorker);
 
-      if(DEBUG) {
-        console.log('Workers URLs', type, urls);
-      }
+    const blob = await get(originalUrl);
+    const urlsPromise = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
+    const workers = urlsPromise.slice(1).map(createWorker);
+    workers.forEach(attachWorkerToPort);
 
-      bufferedPorts.forEach(forwardPort);
-      bufferedPorts = undefined;
-    } catch(error) {
-      superMessagePort.removeEventListener('port', onPort);
-      bufferedPorts?.forEach((port) => port.close());
-      workers.forEach((worker) => {
-        superMessagePort.detachPort((worker as SharedWorker).port || worker as any);
-        (worker as Worker).terminate?.();
-      });
-      throw error;
+    if(DEBUG) {
+      console.log('Workers URLs', type, urlsPromise);
     }
   }
 
@@ -1209,7 +1154,12 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
     await this.registerThreadedWorker({
       type: 'crypto',
-      workerUrl: () => CryptoWorkerURL,
+      createWorker: () => {
+        return new Worker(
+          new URL('./crypto/crypto.worker.ts', import.meta.url),
+          {type: 'module'}
+        );
+      },
       superMessagePort: cryptoMessagePort
     });
   }
@@ -1345,23 +1295,11 @@ class ApiManagerProxy extends MTProtoMessagePort {
   }
 
   public async loadAllStates() {
-    const accountNumber = getCurrentAccount();
-    const snapshotLoadPromise = DeferredIsUsingPasscode.isUsingPasscode()
-      .then((enabled) => !enabled && recoverPasscodeSnapshots())
-      .then(() => getChatPageKey(accountNumber))
-      .then((key) => AccountController.withAccountWriteLock(accountNumber, () => loadChatPageSnapshot(key)))
-      .catch((error) => {
-        forgetLoadedChatPageSnapshot();
-        this.log.error('failed to load chat page snapshot', error);
-      });
     const loadedStates = await loadStateForAllAccountsOnce();
+
     this.dispatchUserAuth();
 
-    await snapshotLoadPromise;
-
-    const stateForThisAccount = loadedStates[accountNumber];
-    this.chatPageKey = stateForThisAccount.resetStorages.size ? undefined : stateForThisAccount.snapshotOwner;
-    if(stateForThisAccount.resetStorages.size) forgetLoadedChatPageSnapshot();
+    const stateForThisAccount = loadedStates[getCurrentAccount()];
     this.newVersion = stateForThisAccount.newVersion;
     this.oldVersion = stateForThisAccount.oldVersion;
     this.mirrors['state'] = stateForThisAccount.state;
@@ -1369,12 +1307,6 @@ class ApiManagerProxy extends MTProtoMessagePort {
     setAppSettingsSilent(stateForThisAccount.common.settings);
 
     return loadedStates;
-  }
-
-  private chatPageKey?: ChatPageKey;
-
-  public readChatPageSnapshot(key: ChatPageKey = this.chatPageKey) {
-    return key && readChatPageSnapshot(key);
   }
 
   private async dispatchUserAuth() {
@@ -1679,83 +1611,26 @@ class ApiManagerProxy extends MTProtoMessagePort {
     payload.previousUrls?.forEach(forgetLoadedURL);
 
     const isSettingsUpdate = name === 'state' && key === 'settings';
-    if(!isSettingsUpdate && accountNumber !== getCurrentAccount()) {
-      payload.events?.forEach(({name, args}) => {
-        if(commonEventNames.has(name as keyof BroadcastEvents)) rootScope.dispatchEventSingle(name as any, ...args);
-      });
+    if(!isSettingsUpdate && accountNumber !== getCurrentAccount()) return;
+
+    const newActiveChannelId = name === 'peers' && key ?
+      getNewActiveChannelMirrorChatId(this.mirrors.peers[key.toPeerId()], value) :
+      undefined;
+    const result = this.processMirrorTaskMap[name]?.(payload);
+    if(result === false) {
       return;
     }
 
-    const traceMirror = (import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_RECONCILE_TRACE === '1') &&
-      payload.trace === 'cachedChannelDialogsReconcile' &&
-      typeof payload.traceId === 'string';
-    const perf = traceMirror ? (globalThis as any).__teagramPerf : undefined;
-    const startedAt = perf ? performance.now() : 0;
-    try {
-      if(payload.traceOnly) return;
+    if(!payload.hasOwnProperty('key')) {
+      this.mirrors[name] = value;
+      return;
+    }
 
-      const newActiveChannelId = name === 'peers' && key ?
-        getNewActiveChannelMirrorChatId(this.mirrors.peers[key.toPeerId()], value) :
-        undefined;
-      const result = this.processMirrorTaskMap[name]?.(payload);
-      if(result === false) {
-        return;
-      }
+    const mirror = this.mirrors[name] ??= {} as any;
+    setDeepProperty(mirror, key, value, true);
 
-      if(!payload.hasOwnProperty('key')) {
-        this.mirrors[name] = value;
-        return;
-      }
-
-      const mirror = this.mirrors[name] ??= {} as any;
-      setDeepProperty(mirror, key, value, true);
-
-      if(newActiveChannelId !== undefined) {
-        rootScope.dispatchEvent('chat_update', newActiveChannelId);
-      }
-    } finally {
-      if(perf) {
-        const elapsedMs = performance.now() - startedAt;
-        const traceId = payload.traceId!;
-        const mainThreadTimes = perf.cachedDialogsReconcileMainThreadMsByTraceId as Record<string, number>;
-        let storedTimes: Record<string, number> = {};
-        try {
-          storedTimes = JSON.parse(window.sessionStorage.getItem('teagram-perf-cached-dialog-reconcile-main-thread-ms') || '{}');
-        } catch(err) {
-          this.log.error('cached dialog reconcile trace storage read failed', err);
-        }
-        const total = Math.max(mainThreadTimes[traceId] || 0, storedTimes[traceId] || 0) + elapsedMs;
-        // Each mirror task keeps its interval so a long task can be attributed to the walk by overlap.
-        (perf.cachedDialogsReconcileMirrorTasks ??= []).push({traceId, startedAtMs: startedAt, durationMs: elapsedMs});
-        mainThreadTimes[traceId] = total;
-        storedTimes[traceId] = total;
-        try {
-          window.sessionStorage.setItem('teagram-perf-cached-dialog-reconcile-main-thread-ms', JSON.stringify(storedTimes));
-        } catch(err) {
-          this.log.error('cached dialog reconcile trace storage write failed', err);
-        }
-        const phase = payload.reconcilePhase;
-        if(phase?.traceId && phase.durationMs !== null && Number.isFinite(phase.durationMs)) {
-          const phaseStorageKey = 'teagram-perf-cached-dialog-reconcile-phases';
-          let storedPhases: Record<string, PerformancePhase> = {};
-          try {
-            const parsed = JSON.parse(window.sessionStorage.getItem(phaseStorageKey) || '{}');
-            if(parsed && typeof parsed === 'object' && !Array.isArray(parsed)) storedPhases = parsed;
-          } catch(err) {
-            this.log.error('cached dialog reconcile phase storage read failed', err);
-          }
-          storedPhases[phase.traceId] = phase;
-          const traceIds = Object.keys(storedPhases);
-          if(traceIds.length > 100) {
-            traceIds.slice(0, traceIds.length - 100).forEach((oldTraceId) => delete storedPhases[oldTraceId]);
-          }
-          try {
-            window.sessionStorage.setItem(phaseStorageKey, JSON.stringify(storedPhases));
-          } catch(err) {
-            this.log.error('cached dialog reconcile phase storage write failed', err);
-          }
-        }
-      }
+    if(newActiveChannelId !== undefined) {
+      rootScope.dispatchEvent('chat_update', newActiveChannelId);
     }
   };
 

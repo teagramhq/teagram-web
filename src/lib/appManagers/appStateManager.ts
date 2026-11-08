@@ -9,7 +9,6 @@ import {StoragesResults} from '@appManagers/utils/storages/loadStorages';
 import commonStateStorage from '@lib/commonStateStorage';
 import callbackify from '@helpers/callbackify';
 import isObject from '@helpers/object/isObject';
-import type {ChatPageKey} from '@lib/chatPageSnapshot';
 
 export type ResetStoragesPromise = CancellablePromise<{
   storages: Map<keyof StoragesResults, (PeerId | UserId | ChatId)[]>,
@@ -25,7 +24,6 @@ export default class AppStateManager {
   public newVersion: string;
   public oldVersion: string;
   public userId: UserId;
-  public snapshotOwner?: ChatPageKey;
 
   public onSettingsUpdate: (value: StateSettings) => void;
 

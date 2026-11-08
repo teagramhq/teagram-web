@@ -15,29 +15,30 @@ import {clearGuestCredentialsForAccount} from '@lib/guestCredentialStorage';
 export async function clearGuestAccountLocalState(
   accountNumber: ActiveAccountNumber,
   totalAccounts: number,
-  migrateAccountTo?: ActiveAccountNumber,
-  beforeClose?: () => Promise<void>
+  migrateAccountTo?: ActiveAccountNumber
 ) {
   if(totalAccounts <= 1 && accountNumber === 1 && !migrateAccountTo) {
-    const keys: Parameters<typeof sessionStorage['delete']>[0][] = [
-      'account1',
-      'dc',
-      'server_time_offset',
-      'xt_instance',
-      'user_auth',
-      // 'state_id',
-      'k_build',
-      'auth_key_fingerprint'
-    ];
-    for(let i = 1; i <= 5; ++i) {
-      keys.push(`dc${i as TrueDcId}_server_salt`);
-      keys.push(`dc${i as TrueDcId}_auth_key`);
-      keys.push(`dc${i as TrueDcId}_hash`); // WebA only
-    }
-
-    await Promise.all(keys.map((key) => sessionStorage.delete(key)));
-    await sessionStorage.flush();
     await Promise.all([
+      (async() => {
+        const keys: Parameters<typeof sessionStorage['delete']>[0][] = [
+          'account1',
+          'dc',
+          'server_time_offset',
+          'xt_instance',
+          'user_auth',
+          // 'state_id',
+          'k_build',
+          'auth_key_fingerprint'
+        ];
+        for(let i = 1; i <= 5; ++i) {
+          keys.push(`dc${i as TrueDcId}_server_salt`);
+          keys.push(`dc${i as TrueDcId}_auth_key`);
+          keys.push(`dc${i as TrueDcId}_hash`); // WebA only
+        }
+
+        await Promise.all(keys.map((key) => sessionStorage.delete(key)));
+        await sessionStorage.flush();
+      })(),
       AppStoragesManager.clearAllStoresForAccount(1),
       AppStoragesManager.clearSessionStores(),
       commonStateStorage.clear(),
@@ -54,16 +55,15 @@ export async function clearGuestAccountLocalState(
     }
   }
 
-  await beforeClose?.();
   IDB.closeDatabases();
 }
 
-export async function clearInvalidatedGuestAccount(accountNumber: ActiveAccountNumber, userId?: PeerId, beforeClose?: () => Promise<void>) {
+export async function clearInvalidatedGuestAccount(accountNumber: ActiveAccountNumber, userId?: PeerId) {
   const totalAccounts = await AccountController.getTotalAccounts();
   const accountNumberOnlyCredentialCleanup = userId === undefined ? false :
     await AccountController.hasUserIdInOtherAccounts(accountNumber, userId);
   await Promise.all([
     clearGuestCredentialsForAccount(userId, accountNumber, accountNumberOnlyCredentialCleanup),
-    clearGuestAccountLocalState(accountNumber, totalAccounts, undefined, beforeClose)
+    clearGuestAccountLocalState(accountNumber, totalAccounts)
   ]);
 }

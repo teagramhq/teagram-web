@@ -30,6 +30,7 @@ import {i18n} from '@lib/langPack';
 import styles from '@/pages/authFlow.module.scss';
 import '@/materialize.scss';
 import '@/scss/style.scss';
+import mediaHeaderStyles from '@components/mediaHeader.module.scss';
 import {putPreloader} from '@components/putPreloader';
 import {getBootShell, type BootShell} from '@config/bootShell';
 
@@ -791,9 +792,9 @@ function showServerCheckShell(host: string) {
   <div class="${styles.placeholder} ${styles.placeholderTop}"></div>
   <div class="${styles.cardsContainer}"><div class="${styles.card}">
     <div>
-      <div class="media-header__sticker ${styles.logoContainer}" style="--sticker-size: 120px;"><img class="${styles.logo}" src="/assets/img/logo.svg" alt="" aria-hidden="true"></div>
-      <div class="media-header__title text-center text-overflow-wrap">Teagram</div>
-      <div class="media-header__subtitle text-center secondary" data-text="Teagram.Server.Subtitle"></div>
+      <div class="${mediaHeaderStyles.sticker} ${styles.logoContainer}" style="--sticker-size: 120px;"><img class="${styles.logo}" src="/assets/img/logo.svg" alt="" aria-hidden="true"></div>
+      <div class="${mediaHeaderStyles.title} text-center text-overflow-wrap">Teagram</div>
+      <div class="${mediaHeaderStyles.subtitle} text-center secondary" data-text="Teagram.Server.Subtitle"></div>
     </div>
     <div class="input-wrapper"><div class="${styles.serverSelection}">
       <div class="${styles.serverSelectionHostRow}"><div class="input-field">

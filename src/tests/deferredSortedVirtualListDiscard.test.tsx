@@ -119,19 +119,4 @@ describe('deferredSortedVirtualList item discard', () => {
     expect(list.removeItem('missing')).toBe(false);
     expect(onItemDiscard).not.toHaveBeenCalled();
   });
-
-  it('does not invalidate the sorted list for an unchanged or missing index', () => {
-    const {list} = setup();
-    list.addItems([item('a', 1), item('b', 2)]);
-    const before = list.sortedItems();
-
-    list.updateItem('a', 1);
-    expect(list.sortedItems()).toBe(before);
-    list.updateItem('missing', 3);
-    expect(list.sortedItems()).toBe(before);
-
-    list.updateItem('b', 0);
-    expect(list.sortedItems().map(({id}) => id)).toEqual(['b', 'a']);
-    expect(list.sortedItems()).not.toBe(before);
-  });
 });

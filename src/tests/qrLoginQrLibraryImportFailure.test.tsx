@@ -61,6 +61,10 @@ vi.mock('@/pages/authFlow.module.scss', () => ({default: {
   pageSignQR: 'page-sign-qr', qrDescription: 'qr-description', qrDescriptionItem: 'qr-description-item',
   qrDescriptionMarker: 'qr-description-marker', qrContainer: 'qr-container', qrCanvas: 'qr-canvas', qrStateIcon: 'qr-state-icon'
 }}));
+vi.mock('@components/mediaHeader.module.scss', () => ({default: {
+  container: 'media-header-container', sticker: 'media-header-sticker', title: 'media-header-title',
+  subtitle: 'media-header-subtitle', secondary: 'media-header-secondary'
+}}));
 vi.mock('@helpers/string/classNames', () => ({default: (...values: Array<string | undefined | false>) => values.filter(Boolean).join(' ')}));
 vi.mock('qr-code-styling', async() => {
   throw new Error('private QR library import detail');
@@ -97,7 +101,7 @@ it('shows a retryable state when qr-code-styling cannot be imported', async() =>
   window.addEventListener('unhandledrejection', onUnhandled);
   dispose = render(() => <SignQRCard spec={{name: 'signQR'}}/>, document.body);
 
-  await vi.waitFor(() => expect(document.querySelector('.media-header__title')?.textContent).toBe('Connection problem'));
+  await vi.waitFor(() => expect(document.querySelector('.media-header-title')?.textContent).toBe('Connection problem'));
   expect(document.body.textContent).toContain('The QR code couldn\'t be loaded. Check your connection and try again.');
   expect(document.querySelector('.preloader')).toBeNull();
   expect(document.querySelector('button')?.textContent).toBe('Try again');

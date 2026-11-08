@@ -246,7 +246,6 @@ export default class MTPNetworker {
   private createLogger?: typeof logger;
   private isForcedStopped?: () => boolean;
   private isCurrentForDc?: () => boolean;
-  private onAuthKeyUnknown?: (networker: MTPNetworker, transport: MTTransport) => void;
   private updatesProcessor?: (obj: any) => void;
   private onConnectionStatus?: (status: ConnectionStatusChange) => void;
   private onServerSalt?: (serverSalt: Uint8Array) => void;
@@ -264,7 +263,6 @@ export default class MTPNetworker {
     createLogger?: MTPNetworker['createLogger'],
     isForcedStopped?: MTPNetworker['isForcedStopped'],
     isCurrentForDc?: MTPNetworker['isCurrentForDc'],
-    onAuthKeyUnknown?: MTPNetworker['onAuthKeyUnknown'],
     updatesProcessor?: MTPNetworker['updatesProcessor'],
     onConnectionStatus?: MTPNetworker['onConnectionStatus'],
     onServerSalt?: MTPNetworker['onServerSalt']
@@ -1428,9 +1426,8 @@ export default class MTPNetworker {
     this.processMessage(response.response, response.messageId, response.sessionId, packetTime);
   }
 
-  public onTransportError(code: number, transport?: MTTransport) {
+  public onTransportError(code: number) {
     if(this.isCurrentForDc && !this.isCurrentForDc()) return;
-    if(transport && this.transport !== transport) return;
 
     const type = code === -404 ? 'AUTH_KEY_UNKNOWN' : code === -429 ? 'AUTH_KEY_RATE_LIMIT' : 'MTPROTO_TRANSPORT_ERROR';
     const error = makeError(type);
@@ -1448,8 +1445,6 @@ export default class MTPNetworker {
     this.pendingResendReq.length = 0;
     this.sentResendReq.clear();
     this.lastResendReq = undefined;
-
-    if(code === -404 && transport) this.onAuthKeyUnknown?.(this, transport);
   }
 
   public async parseResponse(responseBuffer: Uint8Array) {

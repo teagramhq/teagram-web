@@ -1,16 +1,5 @@
 import type {ActiveAccountNumber} from '@lib/accounts/types';
 
-export type GuestServerIdentity = {
-  serverId: string,
-  keyFingerprint: string,
-  wipeGeneration?: string
-};
-
-export type GuestAccountContext = GuestServerIdentity & {
-  accountNumber: ActiveAccountNumber,
-  accountUserId?: PeerId
-};
-
 export type GuestCredentialRecord = {
   version: 1,
   serverId: string,

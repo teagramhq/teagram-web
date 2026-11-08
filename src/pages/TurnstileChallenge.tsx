@@ -2,19 +2,32 @@ import {createSignal, onCleanup, onMount} from 'solid-js';
 
 import Button from '@components/buttonTsx';
 import {i18n} from '@lib/langPack';
-import {loadTurnstile} from '@lib/turnstile';
-import type {TurnstileApi} from '@lib/turnstile';
 
 import styles from '@/pages/authFlow.module.scss';
 import {getTurnstileSiteKey} from '@/pages/turnstileSignup';
 import type {RequestTurnstileChallenge, TurnstileAction} from '@/pages/turnstileSignup';
 
 type TurnstileAttemptResult = 'retry' | 'complete';
+type TurnstileCallbacks = {
+  sitekey: string,
+  action: TurnstileAction,
+  callback: (token: string) => void,
+  'expired-callback': () => void,
+  'error-callback': () => void
+};
+type TurnstileApi = {
+  render: (container: HTMLElement, callbacks: TurnstileCallbacks) => string,
+  reset: (widgetId: string) => void,
+  remove: (widgetId: string) => void
+};
+type TurnstileWindow = Window & {turnstile?: TurnstileApi};
 type ChallengeFailure =
   | 'Teagram.Registration.SecurityCheckFailed'
   | 'Teagram.Registration.SecurityCheckExpired'
   | 'Teagram.Registration.SecurityCheckUnavailable';
 type ChallengeStatus = 'loading' | 'ready' | 'checking' | 'retry';
+
+let turnstileScriptPromise: Promise<TurnstileApi> | undefined;
 
 export type TurnstileChallengeState = {
   siteKey: string,
@@ -148,4 +161,45 @@ export default function TurnstileChallenge(props: TurnstileChallengeState) {
       )}
     </div>
   );
+}
+
+function loadTurnstile(): Promise<TurnstileApi> {
+  const turnstileWindow = window as TurnstileWindow;
+  if(turnstileWindow.turnstile) return Promise.resolve(turnstileWindow.turnstile);
+  if(turnstileScriptPromise) return turnstileScriptPromise;
+
+  turnstileScriptPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    script.async = true;
+    script.defer = true;
+
+    let settled = false;
+    const timeoutId = window.setTimeout(() => fail(), 15000);
+    const fail = () => {
+      if(settled) return;
+      settled = true;
+      window.clearTimeout(timeoutId);
+      script.remove();
+      turnstileScriptPromise = undefined;
+      reject(new Error('Turnstile script failed to load'));
+    };
+
+    script.onload = () => {
+      const api = turnstileWindow.turnstile;
+      if(!api) {
+        fail();
+        return;
+      }
+
+      if(settled) return;
+      settled = true;
+      window.clearTimeout(timeoutId);
+      resolve(api);
+    };
+    script.onerror = fail;
+    document.head.append(script);
+  });
+
+  return turnstileScriptPromise;
 }

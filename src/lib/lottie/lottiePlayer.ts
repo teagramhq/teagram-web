@@ -704,11 +704,6 @@ export default class LottiePlayer extends EventListenerBase<LottiePlayerEvents> 
     this.setMainLoop();
   }
 
-  private cancelPendingFrame() {
-    clearTimeout(this.rafId);
-    this.rafId = undefined;
-  }
-
   public pause(clearPendingRAF = true) {
     if(this.paused) {
       return;
@@ -717,7 +712,8 @@ export default class LottiePlayer extends EventListenerBase<LottiePlayerEvents> 
     this.paused = true;
     this.downgradeFreeRun(); // no-op unless free-running; freezes the estimate + exact reconcile on ack
     if(clearPendingRAF) {
-      this.cancelPendingFrame();
+      clearTimeout(this.rafId);
+      this.rafId = undefined;
     }
     // window.cancelAnimationFrame(this.rafId);
   }
@@ -794,7 +790,6 @@ export default class LottiePlayer extends EventListenerBase<LottiePlayerEvents> 
 
     this.destroyed = true;
     this.pause();
-    this.cancelPendingFrame();
     this.sendQuery('destroy');
     if(this.offscreenViaCompositor) {
       compositorMessagePort.invokeCompositorVoid('detachSticker', {reqId: this.reqId});

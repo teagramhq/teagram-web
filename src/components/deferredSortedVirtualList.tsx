@@ -199,8 +199,7 @@ export const createDeferredSortedVirtualList = <T, >(args: CreateDeferredSortedV
   const updateItem = (id: any, index: number) => {
     setItems(prev => {
       const foundItem = prev.find(item => item.id === id);
-      if(!foundItem || foundItem.index === index) return prev;
-      foundItem.index = index; // we're not spreading here as we want to keep the same object reference for the animation to trigger
+      if(foundItem) foundItem.index = index; // we're not spreading here as we want to keep the same object reference for the animation to trigger
       return [...prev];
     });
   };

@@ -57,8 +57,6 @@ export default class MTProtoMessagePort<Master extends boolean = true> extends S
   setInterval: (timeout: number) => number,
   clearInterval: (intervalId: number) => void,
   terminate: () => void,
-  preparePasscodeSnapshots: (payload: string, source: MessageEventSource) => Promise<void>,
-  resumePasscodeSnapshots: (payload: string) => Promise<void>,
   toggleUsingPasscode: (payload: ToggleUsingPasscodePayload, source: MessageEventSource) => void,
   changePasscode: (payload: {toStore: PasscodeStorageValue, encryptionKey: CryptoKey}, source: MessageEventSource) => void,
   saveEncryptionKey: (payload: CryptoKey, source: MessageEventSource) => void,
@@ -84,7 +82,6 @@ export default class MTProtoMessagePort<Master extends boolean = true> extends S
   convertWebp: (payload: {fileName: string, bytes: Uint8Array}) => Promise<Uint8Array>,
   convertOpus: (payload: {fileName: string, bytes: Uint8Array}) => Promise<Uint8Array>,
   localStorageProxy: (payload: LocalStorageProxyTask['payload']) => Promise<any>,
-  updateChatPageAccountGuard: (payload: {serverId: string, accountNumber: ActiveAccountNumber}) => void,
   // Tab-scoped hand-off of the passcode key across an account-switch reload; see
   // @lib/passcode/keyHandoff for why it must not go through localStorage.
   passcodeKeyHandoff: (payload: string) => void,
@@ -100,7 +97,6 @@ export default class MTProtoMessagePort<Master extends boolean = true> extends S
   saveEncryptionKey: (payload: CryptoKey, source: MessageEventSource) => void,
   toggleCacheStorage: (value: boolean, source: MessageEventSource) => void,
   toggleUsingPasscode: (payload: ToggleUsingPasscodePayload, source: MessageEventSource) => void,
-  forgetChatPageSnapshot: (payload: void) => void,
 } & MTProtoBroadcastEvent, Master> {
   private static INSTANCE: MTProtoMessagePort;
   // In Modes.noWorker, both the proxy (master) and the worker-side port live

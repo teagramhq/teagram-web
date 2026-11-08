@@ -18,8 +18,6 @@ import {MonoforumDialog} from '@lib/storages/monoforumDialogs';
 import Scrollable from '@components/scrollable';
 import SortedDialogList from '@components/sortedDialogList';
 import {AutonomousDialogList} from '@components/autonomousDialogList/dialogs';
-import {FOLDER_ID_ALL} from '@appManagers/constants';
-import {replaceChatPageSnapshot} from '@lib/chatPageSnapshotView';
 
 
 export const DIALOG_LOAD_COUNT = 20;
@@ -259,7 +257,6 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
       offsetIndex: 0,
       limit: this.guessLoadCount(),
       filterId,
-      snapshot: true,
       filterType: this.getFilterType(),
       skipMigrated: this.skipMigrated
     });
@@ -272,7 +269,6 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
       offsetIndex,
       limit,
       filterId: this.getFilterId(),
-      snapshot: true,
       filterType: this.getFilterType(),
       skipMigrated: this.skipMigrated
     });
@@ -325,10 +321,6 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
     this.loadedDialogsAtLeastOnce = true;
     this.hasReachedTheEnd = !!result.isEnd;
 
-    if(!offsetIndex && this.getFilterId() === FOLDER_ID_ALL &&
-      this.sortedList.list.closest('#folders-container')) {
-      replaceChatPageSnapshot();
-    }
     this.sortedList.addDeferredItems(items, result.count || 0);
 
     if(removePlaceholder) this.placeholder?.detach(this.sortedList.itemsLength());

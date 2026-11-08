@@ -119,7 +119,8 @@ export class AppManagersManager {
     port.addEventListener('threadedPort', (type, source, event) => {
       const threadedWorker = this.threadedSharedWorkers[type];
       const port = event.ports[0];
-      // Cap by the thread count because multiple tabs can race to populate the shared worker pool.
+      // A threaded worker can post its MessagePort before createProxyWorkerURLs
+      // has populated urls, so cap by the configured thread count instead.
       if(threadedWorker.attached >= threadedWorker.threads) {
         port.close();
         return;
