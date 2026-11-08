@@ -38,7 +38,7 @@ describe('guest credential invalidation delivery', () => {
     expect(callback).toHaveBeenCalledOnce();
     expect(setItem).toHaveBeenCalledWith(storageEventKey, expect.any(String));
     expect(localStorage.getItem(storageEventKey)).toBeNull();
-    expect(console.error).toHaveBeenCalledWith('Guest credential invalidation delivery failed', ['BroadcastChannel']);
+    expect(console.error).toHaveBeenCalledWith('guest-credential-lifecycle-local-clear', 'failed');
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('account secret');
   });
 
@@ -61,7 +61,7 @@ describe('guest credential invalidation delivery', () => {
 
     expect(callback).toHaveBeenCalledOnce();
     expect(postMessage).toHaveBeenCalledWith({type: 'clear'});
-    expect(console.error).toHaveBeenCalledWith('Guest credential invalidation delivery failed', ['storage event']);
+    expect(console.error).toHaveBeenCalledWith('guest-credential-lifecycle-local-clear', 'failed');
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('account secret');
   });
 
@@ -82,7 +82,8 @@ describe('guest credential invalidation delivery', () => {
     notifyGuestCredentialInvalidation('default');
 
     expect(callback).toHaveBeenCalledOnce();
-    expect(console.error).toHaveBeenCalledWith('Guest credential invalidation delivery failed', ['BroadcastChannel', 'storage event']);
+    expect(console.error).toHaveBeenCalledWith('guest-credential-lifecycle-local-clear', 'failed');
+    expect(console.error).toHaveBeenCalledTimes(2);
     const report = JSON.stringify(vi.mocked(console.error).mock.calls);
     expect(report).not.toContain('account secret');
     expect(report).not.toContain('username secret');
@@ -97,11 +98,60 @@ describe('guest credential invalidation delivery', () => {
     const callback = vi.fn();
     unsubscribe = listenForGuestCredentialInvalidation('default', callback);
 
-    expect(console.error).toHaveBeenCalledWith('Failed to listen for guest credential invalidation via BroadcastChannel');
+    expect(console.error).toHaveBeenCalledWith('guest-credential-lifecycle-local-clear', 'failed');
 
     window.dispatchEvent(new StorageEvent('storage', {key: storageEventKey}));
 
     expect(callback).toHaveBeenCalledOnce();
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('account secret');
+  });
+
+  it('closes a BroadcastChannel after posting fails and still uses the storage fallback', () => {
+    const close = vi.fn();
+    vi.stubGlobal('BroadcastChannel', class {
+      postMessage = vi.fn(() => { throw new Error('account secret must not be logged'); });
+      close = close;
+      addEventListener = vi.fn();
+    });
+    const callback = subscribeToLocalInvalidation();
+    vi.mocked(console.error).mockClear();
+
+    notifyGuestCredentialInvalidation('default');
+
+    expect(callback).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+    expect(localStorage.getItem(storageEventKey)).toBeNull();
+    expect(console.error).toHaveBeenCalledWith('guest-credential-lifecycle-local-clear', 'failed');
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('account secret');
+  });
+
+  it('reports an unavailable BroadcastChannel and still uses the storage fallback', () => {
+    vi.stubGlobal('BroadcastChannel', undefined);
+    const callback = subscribeToLocalInvalidation();
+    vi.mocked(console.error).mockClear();
+
+    notifyGuestCredentialInvalidation('default');
+
+    expect(callback).toHaveBeenCalledOnce();
+    expect(localStorage.getItem(storageEventKey)).toBeNull();
+    expect(console.error).toHaveBeenCalledWith('guest-credential-lifecycle-local-clear', 'failed');
+  });
+
+  it('preserves server IDs containing the channel version when deriving the storage key', () => {
+    const channelNames: string[] = [];
+    vi.stubGlobal('BroadcastChannel', class {
+      constructor(name: string) {
+        channelNames.push(name);
+      }
+      addEventListener = vi.fn();
+      close = vi.fn();
+    });
+    const callback = vi.fn();
+    unsubscribe = listenForGuestCredentialInvalidation('server.v1', callback);
+
+    expect(channelNames).toEqual(['teagram-server.v1:guest-credential-lifecycle.v1']);
+    window.dispatchEvent(new StorageEvent('storage', {key: 'teagram-server.v1:guest-credential-lifecycle-clear.v1'}));
+
+    expect(callback).toHaveBeenCalledOnce();
   });
 });

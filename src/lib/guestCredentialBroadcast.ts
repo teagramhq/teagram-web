@@ -12,42 +12,32 @@ function channelName(serverId: string) {
 }
 
 function storageEventKey(serverId: string) {
-  return `${storagePrefix(serverId)}guest-credential-lifecycle-clear.v1`;
+  return `${channelName(serverId).slice(0, -3)}-clear.v1`;
+}
+
+function reportTransportFailure() {
+  console.error(localInvalidationEvent, 'failed');
 }
 
 export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId()) {
   if(typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(localInvalidationEvent, {detail: serverId}));
-  let broadcastChannelFailed = false;
-  let channel: BroadcastChannel | undefined;
   try {
-    if(typeof BroadcastChannel !== 'undefined') {
-      channel = new BroadcastChannel(channelName(serverId));
+    const channel = new BroadcastChannel(channelName(serverId));
+    try {
       channel.postMessage({type: 'clear'});
+    } finally {
+      channel.close();
     }
   } catch{
-    broadcastChannelFailed = true;
+    reportTransportFailure();
   }
 
-  try {
-    channel?.close();
-  } catch{
-    broadcastChannelFailed = true;
-  }
-
-  let storageEventFailed = false;
   try {
     const key = storageEventKey(serverId);
     localStorage.setItem(key, `${Date.now()}-${++invalidationSequence}`);
     localStorage.removeItem(key);
   } catch{
-    storageEventFailed = true;
-  }
-
-  if(broadcastChannelFailed || storageEventFailed) {
-    const failedMechanisms = [];
-    if(broadcastChannelFailed) failedMechanisms.push('BroadcastChannel');
-    if(storageEventFailed) failedMechanisms.push('storage event');
-    console.error('Guest credential invalidation delivery failed', failedMechanisms);
+    reportTransportFailure();
   }
 }
 
@@ -60,14 +50,12 @@ export function listenForGuestCredentialInvalidation(serverId: string, callback:
     if(event.key === storageEventKey(serverId)) callback();
   };
   try {
-    if(typeof BroadcastChannel !== 'undefined') {
-      channel = new BroadcastChannel(channelName(serverId));
-      channel.addEventListener('message', (event) => {
-        if(event.data?.type === 'clear') callback();
-      });
-    }
+    channel = new BroadcastChannel(channelName(serverId));
+    channel.addEventListener('message', (event) => {
+      if(event.data?.type === 'clear') callback();
+    });
   } catch{
-    console.error('Failed to listen for guest credential invalidation via BroadcastChannel');
+    reportTransportFailure();
   }
   if(typeof window !== 'undefined') {
     window.addEventListener('storage', onStorage);
