@@ -59,15 +59,17 @@ import {
   getEmojiSkinToneVariants
 } from '@helpers/emojiSkinTone';
 import showEmojiTonePicker from '@components/emoticonsDropdown/emojiTonePicker';
-import type {LazyEmojiImages} from '@lib/richTextProcessor/wrapRichText';
+import type LazyLoadQueueIntersector from '@components/lazyLoadQueueIntersector';
+import releaseLazyEmojiImages from '@helpers/releaseLazyEmojiImages';
 import type {Middleware} from '@helpers/middleware';
 
 
 const loadedURLs: Set<string> = new Set();
+
 export function appendEmoji(_emoji: AppEmoji, options: {
   unify?: boolean,
   // the queue loads the emoji image when it is near view and drops it when the middleware is gone
-  lazyLoad?: {queue: LazyEmojiImages['queue'], middleware: Middleware}
+  lazyLoad?: {queue: Pick<LazyLoadQueueIntersector, 'push' | 'delete'>, middleware: Middleware}
 } = {}) {
   const {unify = false, lazyLoad} = options;
   if(_emoji.docId) {
@@ -101,6 +103,8 @@ export function appendEmoji(_emoji: AppEmoji, options: {
 
   if(spanEmoji.children.length > 1) {
     const first = spanEmoji.firstElementChild;
+    // the images dropped here never load, so they must leave the queue too
+    releaseLazyEmojiImages(spanEmoji, lazyLoad?.queue, first);
     spanEmoji.replaceChildren(first);
   }
 
@@ -1079,6 +1083,7 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
 
     item.emoji = emoji;
     const renderedEmoji = appendEmoji({emoji}, {lazyLoad: this.getLazyEmojiLoad(category)});
+    releaseLazyEmojiImages(item.element, this.emoticonsDropdown?.lazyLoadQueue);
     item.element.replaceChildren(...Array.from(renderedEmoji.childNodes));
   }
 
