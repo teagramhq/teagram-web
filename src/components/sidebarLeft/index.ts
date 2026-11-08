@@ -108,7 +108,6 @@ import useHasFoldersSidebar, {
 import isObject from '@helpers/object/isObject';
 import {useAppSettings} from '@stores/appSettings';
 import {useCollapsedCommunityDialogsKey} from '@stores/communities';
-import {openEmojiStatusPicker} from '@components/sidebarLeft/emojiStatusPicker';
 import IS_CONFERENCE_CALL_SUPPORTED from '@environment/conferenceCallSupport';
 import IS_CALL_SUPPORTED from '@environment/callSupport';
 
@@ -265,7 +264,8 @@ export class AppSidebarLeft extends SidebarSlider {
 
     const lockButton = createLockButton();
 
-    attachClickEvent(statusBtnIcon, () => {
+    attachClickEvent(statusBtnIcon, async() => {
+      const {openEmojiStatusPicker} = await import('@components/sidebarLeft/emojiStatusPicker');
       openEmojiStatusPicker({
         managers: this.managers,
         anchorElement: statusBtnIcon,

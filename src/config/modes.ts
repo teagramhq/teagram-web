@@ -24,7 +24,6 @@ const Modes = {
   noSharedWorker: location.search.indexOf('noSharedWorker=1') > 0,
   noServiceWorker: location.search.indexOf('noServiceWorker=1') > 0,
   noOffscreenCanvas: location.search.indexOf('noOffscreenCanvas=1') > 0,
-  noCustomEmojiOffscreenCanvas: location.search.indexOf('noCustomEmojiOffscreenCanvas=1') > 0,
   // Kill switch for the SHARED object-URL lifecycle: with it on, worker-minted
   // blob URLs are never evicted from the caches, never revoked, and pins are
   // not reported — the old leak-forever behaviour for shared media.

@@ -14,7 +14,6 @@ import apiManagerProxy from '@lib/apiManagerProxy';
 import {Middleware, MiddlewareHelper, getMiddleware} from '@helpers/middleware';
 import noop from '@helpers/noop';
 import {DocumentAttribute} from '@layer';
-import Modes from '@config/modes';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
 import LottiePlayer, {applyColorOnContext, getLottiePixelRatio} from '@lib/lottie/lottiePlayer';
 import SHOULD_RENDER_OFFSCREEN from '@lib/lottie/shouldRenderOffscreen';
@@ -1120,7 +1119,7 @@ export class CustomEmojiRendererElement extends HTMLElement {
     renderer.size = options.customEmojiSize || mediaSizes.active.customEmoji;
     renderer.isSelectable = options.isSelectable;
     // isSelectable renderers stay whole-renderer legacy (live HTMLVideoElement compositing occurs only there)
-    renderer.offscreen = SHOULD_RENDER_OFFSCREEN && !Modes.noCustomEmojiOffscreenCanvas && !options.isSelectable;
+    renderer.offscreen = SHOULD_RENDER_OFFSCREEN && !options.isSelectable;
     if(renderer.offscreen) {
       renderer.rendererId = ++nextRendererId;
       const rendererId = renderer.rendererId;

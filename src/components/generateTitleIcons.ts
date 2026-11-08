@@ -9,7 +9,6 @@ import generateVerifiedIcon from '@components/generateVerifiedIcon';
 import PopupElement from '@components/popups';
 import PopupPremium from '@components/popups/premium';
 import PopupStarGiftInfo from '@components/popups/starGiftInfo';
-import {openEmojiStatusPicker} from '@components/sidebarLeft/emojiStatusPicker';
 import {wrapAdaptiveCustomEmoji} from '@components/wrappers/customEmojiSimple';
 import wrapEmojiStatus from '@components/wrappers/emojiStatus';
 
@@ -60,6 +59,7 @@ export default async function generateTitleIcons({
         const detach = attachClickEvent(container, async(e) => {
           e.stopPropagation();
           if(peerId === rootScope.myId) {
+            const {openEmojiStatusPicker} = await import('@components/sidebarLeft/emojiStatusPicker');
             openEmojiStatusPicker({
               managers: rootScope.managers,
               anchorElement: container

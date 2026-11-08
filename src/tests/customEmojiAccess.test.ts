@@ -76,12 +76,7 @@ vi.mock('@stores/contentSettings', () => ({
   })
 }));
 vi.mock('@stores/stars', () => ({default: () => () => 0}));
-vi.mock('@lib/lottie/shouldRenderOffscreen', () => ({default: true}));
-vi.mock('@config/modes', () => ({
-  default: new Proxy({noCustomEmojiOffscreenCanvas: true}, {
-    get: (target, property) => Reflect.get(target, property) ?? false
-  })
-}));
+vi.mock('@lib/lottie/shouldRenderOffscreen', () => ({default: false}));
 vi.mock('@lib/customEmoji/compositorChannels', () => ({ensureCompositor: vi.fn()}));
 vi.mock('@lib/customEmoji/compositorMessagePort', () => ({
   default: {addEventListener: vi.fn(), invokeCompositorVoid: vi.fn()}
