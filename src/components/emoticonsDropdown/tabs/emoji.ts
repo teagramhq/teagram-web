@@ -60,6 +60,7 @@ import {
   getEmojiSkinToneVariants
 } from '@helpers/emojiSkinTone';
 import showLazyTonePicker from '@components/emoticonsDropdown/lazyTonePicker';
+import selectEmojiTone from '@components/emoticonsDropdown/selectEmojiTone';
 import {hasLoadedURL, markLoadedURL} from '@helpers/dom/loadedUrlCache';
 import createLazyEmojiImages from '@helpers/lazyEmojiImages';
 import LazyLoadQueue from '@components/lazyLoadQueue';
@@ -1128,10 +1129,20 @@ export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: A
       selectedTone: this.emojiVariants[baseEmoji] ?? getEmojiSkinTone(emoji.emoji),
       renderEmoji: (emoji) => appendEmoji({emoji}),
       close: () => contextMenuController.close(),
-      onSelect: (tone) => {
-        this.applyEmojiVariant(baseEmoji, tone);
-        this.managers.appEmojiManager.saveEmojiVariant(baseEmoji, tone);
-      }
+      onSelect: (tone) => selectEmojiTone({
+        baseEmoji,
+        variants,
+        tone,
+        applyEmojiVariant: (baseEmoji, tone) => this.applyEmojiVariant(baseEmoji, tone),
+        saveEmojiVariant: (baseEmoji, tone) => this.managers.appEmojiManager.saveEmojiVariant(baseEmoji, tone),
+        onEmojiSelected: (emoji) => {
+          if(this.onClick) {
+            this.onClick({...emoji, element: target.firstElementChild as HTMLElement});
+          } else {
+            this.emoticonsDropdown.chatInput.onEmojiSelected(emoji, false);
+          }
+        }
+      })
     })), (error) => {
       console.error('emoji tone picker failed to load', error);
       toastNew({langPackKey: 'Error.AnError'});
