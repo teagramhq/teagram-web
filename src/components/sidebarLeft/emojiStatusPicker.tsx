@@ -7,6 +7,7 @@ import {EmoticonsDropdown} from '@components/emoticonsDropdown';
 import EmojiTab from '@components/emoticonsDropdown/tabs/emoji';
 import Icon, {getIconContent} from '@components/icon';
 import {getOverlayRoot} from '@helpers/appWindow';
+import {optionalStatuses} from './emojiStatus';
 
 const openPickers = new WeakMap<HTMLElement, EmoticonsDropdown>();
 
@@ -34,12 +35,12 @@ export function openEmojiStatusPicker(options: {
       });
 
       // * a server without recent or default status lists still has installed custom emoji to pick from
-      const convertEmojiStatuses = (emojiStatuses: AccountEmojiStatuses) => {
-        return ((emojiStatuses as AccountEmojiStatuses.accountEmojiStatuses)?.statuses || [])
-        .map((status) => (status as EmojiStatus.emojiStatus).document_id)
-        .filter(Boolean);
+      const convertEmojiStatuses = (emojiStatuses: AccountEmojiStatuses | undefined) => {
+        if(!emojiStatuses || emojiStatuses._ !== 'account.emojiStatuses') return [];
+        return emojiStatuses.statuses
+          .map((status) => (status as EmojiStatus.emojiStatus).document_id)
+          .filter(Boolean);
       };
-      const optionalStatuses = (promise: Promise<AccountEmojiStatuses>) => promise.catch(() => undefined as AccountEmojiStatuses);
 
       return [
         Promise.all([

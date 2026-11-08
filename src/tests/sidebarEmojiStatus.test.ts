@@ -1,7 +1,13 @@
-import {describe, expect, it, vi} from 'vitest';
-import {getSidebarEmojiStatus, updateSidebarEmojiStatus} from '@components/sidebarLeft/emojiStatus';
+import {beforeEach, describe, expect, it, vi} from 'vitest';
+import {getSidebarEmojiStatus, optionalStatuses, updateSidebarEmojiStatus} from '@components/sidebarLeft/emojiStatus';
+
+const mocks = vi.hoisted(() => ({error: vi.fn()}));
+
+vi.mock('@lib/logger', () => ({logger: () => ({error: mocks.error})}));
 
 describe('sidebar emoji status', () => {
+  beforeEach(() => mocks.error.mockClear());
+
   it('reports a missing current user instead of treating it as an empty status', () => {
     expect(() => getSidebarEmojiStatus(undefined)).toThrow('Current user is unavailable while rendering emoji status');
     expect(() => getSidebarEmojiStatus({_: 'userEmpty', id: 1})).toThrow('Current user is unavailable while rendering emoji status');
@@ -23,5 +29,16 @@ describe('sidebar emoji status', () => {
     }, reportError);
 
     expect(reportError).toHaveBeenCalledWith(error);
+  });
+
+  it('ignores unsupported optional emoji status lists', async() => {
+    await expect(optionalStatuses(Promise.reject({type: 'INPUT_METHOD_INVALID'}))).resolves.toBeUndefined();
+    expect(mocks.error).not.toHaveBeenCalled();
+  });
+
+  it('logs other optional emoji status list failures but keeps the list optional', async() => {
+    const error = new Error('network failed');
+    await expect(optionalStatuses(Promise.reject(error))).resolves.toBeUndefined();
+    expect(mocks.error).toHaveBeenCalledWith('Optional emoji status list failed', error);
   });
 });

@@ -6240,19 +6240,11 @@ describe('real client centre-column failure state', () => {
       await page.setContent(`<div id="column-center">
         <div class="bubble is-sent"><div class="message">browser-ci-hello</div></div>
       </div><script>
-        const originalContains = DOMTokenList.prototype.contains;
-        DOMTokenList.prototype.contains = function(token) {
-          const result = originalContains.call(this, token);
-          if(token === 'is-sent' && result && !window.__realClientSentStateChangeScheduled) {
-            window.__realClientSentStateChangeScheduled = true;
-            setTimeout(() => {
-              const bubble = document.querySelector('.bubble');
-              bubble?.classList.remove('is-sent');
-              bubble?.classList.add('is-sending');
-            }, 0);
-          }
-          return result;
-        };
+        setTimeout(() => {
+          const bubble = document.querySelector('.bubble');
+          bubble?.classList.remove('is-sent');
+          bubble?.classList.add('is-sending');
+        }, 100);
       </script>`);
       const messages = page.locator('#column-center .bubble .message').filter({hasText: 'browser-ci-hello'});
 
