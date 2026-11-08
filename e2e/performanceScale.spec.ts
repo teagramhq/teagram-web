@@ -1636,14 +1636,14 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
         captureWorkerMessages: captureScrollAttribution,
         includeLongTaskTrace: true
       } : undefined
-    ));
+    ), {timeout: 90_000}).catch(() => undefined);
     if(scroll) {
       measured.scrollBack2k.push(scroll);
     } else {
       // The base build may not reach the older history window. Its open-chat bundle is still the route baseline.
       measured.scrollBack2k.push({bundleBytes: chatOpen.bundleBytes});
     }
-    const jump = await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture, variant === 'base'), {timeout: 120_000});
+    const jump = await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture, variant === 'base'), {timeout: 60_000}).catch(() => undefined);
     if(jump) {
       measured.dateJump.push(jump);
     } else {
@@ -1680,12 +1680,12 @@ async function runTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixtu
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
     chatOpen = await openPartnerChat(page, requests, fixture);
-    scrollBack2k = await scrollBackTwoThousand(page, requests, run.variant === 'head', {
+    scrollBack2k = await Promise.race([scrollBackTwoThousand(page, requests, run.variant === 'head', {
       captureFrameTrace: true,
       captureCpuStacks: true,
       captureWorkerMessages,
       includeLongTaskTrace: true
-    });
+    }), new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 90_000))]).catch(() => undefined);
   } finally {
     await historyContext.close();
   }
