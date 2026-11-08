@@ -46,8 +46,15 @@ export default async function wrapEmojiStatus({
       // group: 'none'
     });
 
-    if(!middleware()) return;
-    await Promise.all(loadPromises);
+    // * a status torn down mid-render leaves its sticker load rejecting with MIDDLEWARE; observe it
+    // * either way so the cancellation does not surface as an unhandled rejection
+    const loaded = Promise.all(loadPromises);
+    if(!middleware()) {
+      loaded.catch(() => {});
+      return;
+    }
+
+    await loaded;
   };
 
   if(emojiStatus._ === 'emojiStatusCollectible' && RENDER_SPARKLES) {

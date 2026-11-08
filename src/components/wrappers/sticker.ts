@@ -734,6 +734,13 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
     (lazyLoadQueue.push({div: div[0], load, middleware}), Promise.resolve()) :
     load();
 
+  // * callers that never read `render` (fire-and-forget status, title and reaction icons) would
+  // * otherwise see a load cancelled by its middleware as an unhandled rejection; consumers that
+  // * do await it still receive the rejection
+  loadPromise.catch((err) => {
+    if((err as ApiError)?.type !== 'MIDDLEWARE') throw err;
+  });
+
   if(downloaded && (asStatic/*  || stickerType === 3 */)) {
     loadThumbPromise = loadPromise as any;
     loadPromises?.push(loadThumbPromise);

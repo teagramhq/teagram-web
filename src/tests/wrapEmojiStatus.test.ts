@@ -49,6 +49,26 @@ describe('wrapEmojiStatus', () => {
     expect(mocks.wrapSticker).toHaveBeenCalledOnce();
   });
 
+  it('does not leak a cancelled sticker load when the status is torn down mid-render', async() => {
+    let active = true;
+    mocks.wrapSticker.mockImplementation(async({loadPromises}: any) => {
+      loadPromises.push(Promise.reject({type: 'MIDDLEWARE'}));
+      active = false;
+    });
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+
+    await wrapEmojiStatus({
+      emojiStatus: status,
+      wrapOptions: {middleware: () => active} as any,
+      size: {width: 24, height: 24} as any
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    process.off('unhandledRejection', unhandled);
+
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
   it('keeps non-cancellation render failures observable', async() => {
     mocks.wrapSticker.mockRejectedValue(new Error('sticker load failed'));
 
