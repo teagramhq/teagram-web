@@ -22,6 +22,12 @@ function subscribeToLocalInvalidation() {
   return callback;
 }
 
+function expectLoggedError(message: string) {
+  expect(vi.mocked(console.error).mock.calls.some((args) => {
+    return args.includes('[[guest-credential-broadcast]]') && args.includes(message);
+  })).toBe(true);
+}
+
 describe('guest credential invalidation delivery', () => {
   it('reports BroadcastChannel failure and still uses the storage fallback and same-tab event', () => {
     vi.stubGlobal('BroadcastChannel', class {
@@ -38,7 +44,7 @@ describe('guest credential invalidation delivery', () => {
     expect(callback).toHaveBeenCalledOnce();
     expect(setItem).toHaveBeenCalledWith(storageEventKey, expect.any(String));
     expect(localStorage.getItem(storageEventKey)).toBeNull();
-    expect(console.error).toHaveBeenCalledWith('broadcast');
+    expectLoggedError('BroadcastChannel delivery failed');
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('account secret');
   });
 
@@ -61,7 +67,7 @@ describe('guest credential invalidation delivery', () => {
 
     expect(callback).toHaveBeenCalledOnce();
     expect(postMessage).toHaveBeenCalledWith({type: 'clear'});
-    expect(console.error).toHaveBeenCalledWith('storage');
+    expectLoggedError('storage-event delivery failed');
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('account secret');
   });
 
@@ -82,7 +88,8 @@ describe('guest credential invalidation delivery', () => {
     notifyGuestCredentialInvalidation('default');
 
     expect(callback).toHaveBeenCalledOnce();
-    expect(vi.mocked(console.error).mock.calls).toEqual([['broadcast'], ['storage']]);
+    expectLoggedError('BroadcastChannel delivery failed');
+    expectLoggedError('storage-event delivery failed');
     const report = JSON.stringify(vi.mocked(console.error).mock.calls);
     expect(report).not.toContain('account secret');
     expect(report).not.toContain('username secret');
@@ -97,7 +104,7 @@ describe('guest credential invalidation delivery', () => {
     const callback = vi.fn();
     unsubscribe = listenForGuestCredentialInvalidation('default', callback);
 
-    expect(console.error).toHaveBeenCalledWith('listener');
+    expectLoggedError('BroadcastChannel listener setup failed');
 
     window.dispatchEvent(new StorageEvent('storage', {key: storageEventKey}));
 
@@ -120,7 +127,7 @@ describe('guest credential invalidation delivery', () => {
     expect(callback).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
     expect(localStorage.getItem(storageEventKey)).toBeNull();
-    expect(console.error).toHaveBeenCalledWith('broadcast');
+    expectLoggedError('BroadcastChannel delivery failed');
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('account secret');
   });
 
@@ -133,7 +140,21 @@ describe('guest credential invalidation delivery', () => {
 
     expect(callback).toHaveBeenCalledOnce();
     expect(localStorage.getItem(storageEventKey)).toBeNull();
-    expect(console.error).toHaveBeenCalledWith('broadcast');
+    expectLoggedError('BroadcastChannel delivery failed');
+  });
+
+  it('skips storage-event delivery when localStorage is unavailable', () => {
+    const postMessage = vi.fn();
+    vi.stubGlobal('BroadcastChannel', class {
+      postMessage = postMessage;
+      close = vi.fn();
+    });
+    vi.stubGlobal('localStorage', undefined);
+
+    notifyGuestCredentialInvalidation('default');
+
+    expect(postMessage).toHaveBeenCalledWith({type: 'clear'});
+    expect(console.error).not.toHaveBeenCalled();
   });
 
   it('preserves server IDs containing the channel version when deriving the storage key', () => {

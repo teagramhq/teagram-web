@@ -1,7 +1,9 @@
 import {getRuntimeServerId} from '@config/serverContext';
+import {logger} from '@lib/logger';
 
 let invalidationSequence = 0;
 const localInvalidationEvent = 'guest-credential-lifecycle-local-clear';
+const log = logger('[guest-credential-broadcast]');
 
 function storagePrefix(serverId: string) {
   return serverId === 'default' ? '' : `teagram-${serverId}:`;
@@ -15,10 +17,10 @@ function storageEventKey(serverId: string) {
   return `${channelName(serverId).slice(0, -3)}-clear.v1`;
 }
 
-type TransportFailureOperation = 'broadcast' | 'storage' | 'listener';
+type TransportFailureMessage = 'BroadcastChannel delivery failed' | 'storage-event delivery failed' | 'BroadcastChannel listener setup failed';
 
-function reportTransportFailure(operation: TransportFailureOperation) {
-  console.error(operation);
+function reportTransportFailure(message: TransportFailureMessage) {
+  log.error(message);
 }
 
 export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId()) {
@@ -31,15 +33,17 @@ export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId(
       channel.close();
     }
   } catch{
-    reportTransportFailure('broadcast');
+    reportTransportFailure('BroadcastChannel delivery failed');
   }
 
   try {
-    const key = storageEventKey(serverId);
-    localStorage.setItem(key, `${Date.now()}-${++invalidationSequence}`);
-    localStorage.removeItem(key);
+    if(typeof localStorage !== 'undefined') {
+      const key = storageEventKey(serverId);
+      localStorage.setItem(key, `${Date.now()}-${++invalidationSequence}`);
+      localStorage.removeItem(key);
+    }
   } catch{
-    reportTransportFailure('storage');
+    reportTransportFailure('storage-event delivery failed');
   }
 }
 
@@ -57,7 +61,7 @@ export function listenForGuestCredentialInvalidation(serverId: string, callback:
       if(event.data?.type === 'clear') callback();
     });
   } catch{
-    reportTransportFailure('listener');
+    reportTransportFailure('BroadcastChannel listener setup failed');
   }
   if(typeof window !== 'undefined') {
     window.addEventListener('storage', onStorage);
