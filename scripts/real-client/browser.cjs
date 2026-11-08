@@ -3212,7 +3212,8 @@ async function runCustomEmojiFeatureFlow(alice, bob) {
   // The picked emoji reaches the composer after its document loads; sending earlier drops it.
   await alice.page.waitForFunction((id) => !!document.querySelector(`#column-center .input-message-input:not(.input-field-input-fake) [data-doc-id="${id}"]`), docId, {timeout: 15_000})
   .catch(() => failStage('alice_custom_emoji_send_input'));
-  await input.press('Enter').catch(() => failStage('alice_custom_emoji_send_submit'));
+  await alice.page.locator('#column-center .btn-send').click()
+  .catch(() => failStage('alice_custom_emoji_send_submit'));
   await waitForCustomEmojiMessage(alice.page, messageText, docId, 'alice_custom_emoji_send_visible');
 
   const bobPeerId = await selectUniquePeer(
