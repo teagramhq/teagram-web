@@ -52,7 +52,7 @@ import type {ChatPageKey} from '@lib/chatPageSnapshot';
 import AccountController from '@lib/accounts/accountController';
 
 let cachedDialogReconcileTraceSequence = 0;
-const CACHED_DIALOG_RECONCILE_START_DELAY_MS = 15_000;
+const CACHED_DIALOG_RECONCILE_START_DELAY_MS = 20_000;
 const CACHED_DIALOG_RECONCILE_RELOAD_BATCH_SIZE = 25;
 const CACHED_DIALOG_RECONCILE_MIRROR_BATCH_SIZE = 4;
 const CACHED_DIALOG_RECONCILE_MAX_ATTEMPTS = 2;

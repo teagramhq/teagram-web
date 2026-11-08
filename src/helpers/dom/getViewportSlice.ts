@@ -53,46 +53,15 @@ export default function getViewportSlice({
     };
   }
 
-  if(ordered) {
-    const first = findOrderedIndex(elements, 'bottom', overflowRect.top, false);
-    const end = findOrderedIndex(elements, 'top', overflowRect.bottom, true);
-    const invisibleTop: ViewportSlicePart = elements.slice(0, first).map((element) => createPart(element));
-    const visible: typeof invisibleTop = [];
-    const invisibleBottom: typeof invisibleTop = [];
-    let foundVisible = false;
-
-    for(let index = first; index < end; ++index) {
-      const element = elements[index];
-      const rect = element.getBoundingClientRect();
-      const visibleRect = getVisibleRect(element, overflowElement, false, rect, overflowRect);
-      if(visibleRect) {
-        foundVisible = true;
-        visible.push(createPart(element, rect, visibleRect));
-      } else if(foundVisible) {
-        invisibleBottom.push(createPart(element, rect));
-      } else {
-        invisibleTop.push(createPart(element, rect));
-      }
-    }
-
-    if(!foundVisible) {
-      return {invisibleTop: elements.map((element) => createPart(element)), visible, invisibleBottom};
-    }
-
-    invisibleBottom.push(...elements.slice(end).map((element) => createPart(element)));
-    if(extraMinLength) {
-      visible.unshift(...invisibleTop.splice(Math.max(0, invisibleTop.length - extraMinLength), extraMinLength));
-      visible.push(...invisibleBottom.splice(0, extraMinLength));
-    }
-
-    return {invisibleTop, visible, invisibleBottom};
-  }
-
   const invisibleTop: ViewportSlicePart = [],
     visible: typeof invisibleTop = [],
     invisibleBottom: typeof invisibleTop = [];
+  const first = ordered ? findOrderedIndex(elements, 'bottom', overflowRect.top, false) : 0;
+  const end = ordered ? findOrderedIndex(elements, 'top', overflowRect.bottom, true) : elements.length;
+  invisibleTop.push(...elements.slice(0, first).map((element) => createPart(element)));
   let foundVisible = false;
-  for(const element of elements) {
+  for(let index = first; index < end; ++index) {
+    const element = elements[index];
     const rect = element.getBoundingClientRect();
     const visibleRect = getVisibleRect(element, overflowElement, false, rect, overflowRect);
 
@@ -110,7 +79,15 @@ export default function getViewportSlice({
     array.push(createPart(element, rect, visibleRect));
   }
 
-  if(extraMinLength) {
+  if(ordered) {
+    invisibleBottom.push(...elements.slice(end).map((element) => createPart(element)));
+    if(!foundVisible) {
+      invisibleTop.push(...invisibleBottom);
+      invisibleBottom.length = 0;
+    }
+  }
+
+  if(extraMinLength && (foundVisible || !ordered)) {
     visible.unshift(...invisibleTop.splice(Math.max(0, invisibleTop.length - extraMinLength), extraMinLength));
     visible.push(...invisibleBottom.splice(0, extraMinLength));
   }

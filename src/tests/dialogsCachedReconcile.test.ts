@@ -29,7 +29,7 @@ test('starts the cached-dialog diagnostic before its deferred walk', async() => 
     }));
     expect(reconcile).not.toHaveBeenCalled();
 
-    await vi.advanceTimersByTimeAsync(14_999);
+    await vi.advanceTimersByTimeAsync(19_999);
     expect(reconcile).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
