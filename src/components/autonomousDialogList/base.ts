@@ -328,9 +328,6 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
     if(!offsetIndex && this.getFilterId() === FOLDER_ID_ALL &&
       this.sortedList.list.closest('#folders-container')) {
       replaceChatPageSnapshot();
-      window.setTimeout(() => import('@lib/lottie/lottieLoader')
-        .then(({default: lottieLoader}) => lottieLoader.loadLottieWorkers())
-        .catch((error) => this.log.error('Lottie worker warm-up failed', error)), 2000);
     }
     this.sortedList.addDeferredItems(items, result.count || 0);
 

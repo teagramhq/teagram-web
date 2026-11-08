@@ -51,7 +51,7 @@ it('replaces the snapshot without starting Lottie workers in the chat-list load'
   }
 });
 
-it('starts warming Lottie workers after the initial all-chats page has settled', async() => {
+it('does not warm Lottie workers after the initial all-chats page settles', async() => {
   vi.useFakeTimers();
   lottieMocks.loadLottieWorkers.mockClear();
   try {
@@ -61,7 +61,7 @@ it('starts warming Lottie workers after the initial all-chats page has settled',
     expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(2000);
     await vi.dynamicImportSettled();
-    expect(lottieMocks.loadLottieWorkers).toHaveBeenCalledOnce();
+    expect(lottieMocks.loadLottieWorkers).not.toHaveBeenCalled();
   } finally {
     vi.clearAllTimers();
     vi.useRealTimers();
