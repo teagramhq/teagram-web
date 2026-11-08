@@ -2933,12 +2933,7 @@ async function runColdPickerTrial(storageState, appUrl, trial) {
     // The trial page is not one of the signed-in app pages, so it needs its own error counters
     const errors = {page: 0, console: 0};
     page.on('pageerror', () => { errors.page++; });
-    page.on('console', (message) => {
-      if(message.type() !== 'error') return;
-      // The fixture's keep-alive timeout can reset a reused connection under an emoji image request
-      if(message.text().includes('net::ERR_FAILED') && (message.location().url || '').includes('/assets/img/emoji/')) return;
-      errors.console++;
-    });
+    page.on('console', (message) => { if(message.type() === 'error') errors.console++; });
     // pids.events is cumulative for the whole job, so only a refused fork during this trial counts
     const pidsHitsBefore = readPidsLimitHits();
     const crashGuard = (error) => {

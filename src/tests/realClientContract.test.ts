@@ -3937,13 +3937,13 @@ describe('real client scenario contract', () => {
     expect(trialSource).toContain('storageState');
     expect(trialSource).toContain('_renderer_crashed');
     expect(trialSource).toContain('_pids_limit');
-    expect(trialSource).toContain('/assets/img/emoji/');
+    expect(trialSource).not.toContain('ERR_FAILED');
     expect(trialSource).toContain('_chat_result');
     expect(trialSource).toContain('mkdtempSync');
     expect(trialSource).toContain('TMPDIR: trialDirectory');
     expect(trialSource.lastIndexOf('fs.rmSync(trialDirectory')).toBeGreaterThan(trialSource.indexOf('await browser.close()'));
     expect(trialSource).toContain(`page.on('pageerror'`);
-    expect(trialSource).toContain(`message.type() !== 'error'`);
+    expect(trialSource).toContain(`message.type() === 'error'`);
     expect(trialSource).toContain('_page_error');
     expect(trialSource).toContain('_console_error');
     expect(trialSource).toContain('pidsHitsBefore');
