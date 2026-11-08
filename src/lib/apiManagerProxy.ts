@@ -1152,10 +1152,13 @@ class ApiManagerProxy extends MTProtoMessagePort {
     // frames never arrive, no error is thrown, and every sticker canvas stays blank (never appended).
     // Keep MTProto/crypto on the shared worker, but hand the lottie pool per-tab dedicated Workers.
     const constructor = IS_SHARED_WORKER_SUPPORTED && !(IS_SAFARI && type === 'lottie') ? SharedWorker : Worker;
-    const createWorker = (url: string) => new constructor(url, {type: 'module'});
     const workers: Array<SharedWorker | Worker> = [];
-    const bufferedPorts: MessagePort[] = [];
-    let registrationReady = false;
+    const createWorker = (url: string) => {
+      const worker = new constructor(url, {type: 'module'});
+      workers.push(worker);
+      this.attachWorkerToPort(worker, superMessagePort, type);
+    };
+    let bufferedPorts: MessagePort[] | undefined = [];
     const forwardPort = (port: MessagePort) => this.invokeVoid(
       'threadedPort',
       type,
@@ -1165,33 +1168,27 @@ class ApiManagerProxy extends MTProtoMessagePort {
     const onPort = (_payload: void, _source: MessageEventSource, event: MessageEvent) => {
       const port = event.ports[0];
       if(!port) return;
-      if(registrationReady) forwardPort(port);
-      else bufferedPorts.push(port);
+      if(bufferedPorts) bufferedPorts.push(port);
+      else forwardPort(port);
     };
 
     try {
       superMessagePort.addEventListener('port', onPort);
-      workers.push(createWorker(originalUrl));
-      this.attachWorkerToPort(workers[0], superMessagePort, type);
+      createWorker(originalUrl);
 
       const blob = await get(originalUrl);
       const urls = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
-      urls.slice(1).forEach((url) => {
-        const worker = createWorker(url);
-        workers.push(worker);
-        this.attachWorkerToPort(worker, superMessagePort, type);
-      });
+      urls.slice(1).forEach(createWorker);
 
       if(DEBUG) {
         console.log('Workers URLs', type, urls);
       }
 
       bufferedPorts.forEach(forwardPort);
-      bufferedPorts.length = 0;
-      registrationReady = true;
+      bufferedPorts = undefined;
     } catch(error) {
       superMessagePort.removeEventListener('port', onPort);
-      bufferedPorts.forEach((port) => port.close());
+      bufferedPorts?.forEach((port) => port.close());
       workers.forEach((worker) => {
         superMessagePort.detachPort((worker as SharedWorker).port || worker as any);
         (worker as Worker).terminate?.();
