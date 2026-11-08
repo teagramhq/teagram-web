@@ -403,7 +403,6 @@ export default class BubbleGroups {
   public compareGroupItems?: typeof compareTimelineItems;
   private compareItems?: typeof compareTimelineItems;
   private compareGroups?: (group1: BubbleGroup, group2: BubbleGroup) => number;
-  private hasDeferredRegrouping = false;
   public reverse: boolean; // * used for search
 
   constructor(private chat: Chat) {
@@ -459,22 +458,13 @@ export default class BubbleGroups {
       this.canItemsBeGrouped(previousSibling, nextSibling) &&
       previousSibling.group !== nextSibling.group
     ) {
+      const group = nextSibling.group;
+      this.f(nextSibling.group.items);
+      if(deferredGroups) modifiedGroups.add(group);
+      else group.onItemUnmount();
+      modifiedGroups.add(previousSibling.group);
+      const regrouped = this.groupUngrouped();
       if(deferredGroups) {
-        const nextGroup = nextSibling.group;
-        if(nextGroup) {
-          this.f(nextGroup.items);
-          modifiedGroups.add(nextGroup);
-        }
-        if(previousSibling.group) modifiedGroups.add(previousSibling.group);
-        this.hasDeferredRegrouping = true;
-      } else {
-        const group = nextSibling.group;
-        if(group) {
-          this.f(group.items);
-          group.onItemUnmount();
-        }
-        if(previousSibling.group) modifiedGroups.add(previousSibling.group);
-        const regrouped = this.groupUngrouped();
         for(const group of regrouped) modifiedGroups.add(group);
       }
     }
@@ -487,14 +477,6 @@ export default class BubbleGroups {
   }
 
   mountUnmountGroups(groups: BubbleGroup[]) {
-    if(this.hasDeferredRegrouping) {
-      const regrouped = this.groupUngrouped();
-      this.hasDeferredRegrouping = false;
-      for(const group of regrouped) {
-        if(!groups.includes(group)) groups.push(group);
-      }
-    }
-
     // groups.sort((a, b) => (b.lastItem?.mid ?? 0) - (a.lastItem?.mid ?? 0));
 
     const [toMount, toUnmount] = partition(groups, (group) => !!group.items.length);

@@ -590,7 +590,6 @@ describe('invited channel dialogs', () => {
     const cachedListReconcileRetryPeerIds = dialogsStorage.cachedListReconcileRetryPeerIds;
     const cachedListReconcileAttempts = dialogsStorage.cachedListReconcileAttempts;
     const cachedListReconcileRecoveryPending = dialogsStorage.cachedListReconcileRecoveryPending;
-    const cachedListReconcileGeneration = dialogsStorage.cachedListReconcileGeneration;
     const requests: string[] = [];
     const listParams: any[] = [];
     apiManager.invokeApiSingleProcess = (options: any) => {
@@ -638,13 +637,11 @@ describe('invited channel dialogs', () => {
       dialogsStorage.cachedListReconcileAttempts = cachedListReconcileAttempts;
       dialogsStorage.cachedListReconcileRecoveryPending = cachedListReconcileRecoveryPending;
       dialogsStorage.cachedListReconciled = cachedListReconciled;
-      dialogsStorage.cachedListReconcileGeneration = cachedListReconcileGeneration + 1;
     };
 
     try {
       await dialogsStorage.getDialogs({limit: 20, filterId: 0});
-      // Run the deferred reconcile directly so these tests do not wait out its start delay.
-      await dialogsStorage.reconcileCachedChannelDialogs();
+      await vi.waitFor(() => expect(requests).toContain('messages.getDialogs'));
       if(failFirstList || failFirstPeerDialogs) {
         await vi.waitFor(() => expect(dialogsStorage.cachedListReconciled).toBe(false));
       }
@@ -652,7 +649,6 @@ describe('invited channel dialogs', () => {
       await dialogsStorage.getDialogs({limit: 20, filterId: 0});
       if(failFirstList || failFirstPeerDialogs) {
         const retryMethod = failFirstList ? 'messages.getDialogs' : 'messages.getPeerDialogs';
-        await dialogsStorage.reconcileCachedChannelDialogs();
         await vi.waitFor(() => expect(requests.filter((method) => method === retryMethod)).toHaveLength(2), {timeout: 5000});
         await vi.waitFor(() => expect(dialogsStorage.cachedListReconciled).toBe(true), {timeout: 5000});
       }

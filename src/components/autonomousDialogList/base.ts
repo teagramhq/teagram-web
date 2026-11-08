@@ -306,7 +306,7 @@ export class AutonomousDialogListBase<T extends PossibleDialog = PossibleDialog>
           });
           this.cursorFetcher.setFetchedItemsCount(totalCount);
         } catch{}
-      }, 20_000); // only corrects the total count: keep it out of the chat-open and history-scroll window
+      }, 500);
     }
 
     const newOffsetIndex = result.dialogs.reduce((prev, curr) => {

@@ -1750,10 +1750,7 @@ async function traceChatOpen(browser: Browser, run: VariantRun, fixture: Fixture
     await installInstrumentation(page, requests, run.origin);
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
-    await installPeerChangeTracing(page);
-    const sample = await openPartnerChat(page, requests, fixture, true);
-    sample.peerChangePhases = summarizePerformancePhases(await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []));
-    return sample;
+    return await openPartnerChat(page, requests, fixture, true);
   } finally {
     await context.close();
   }

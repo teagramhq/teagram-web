@@ -1,48 +1,7 @@
 import {expect, test, vi} from 'vitest';
 import '@helpers/peerIdPolyfill';
 import {ConnectionStatus} from '@lib/mtproto/connectionStatus';
-import {performancePhaseTrace} from '@appManagers/performanceTrace';
 import type DialogsStorage from '@lib/storages/dialogs';
-
-test('starts the cached-dialog diagnostic before its deferred walk', async() => {
-  vi.useFakeTimers();
-  vi.stubEnv('VITE_PERF_TRACE', '1');
-  const finishTrace = vi.fn();
-  const traceStart = vi.spyOn(performancePhaseTrace, 'start').mockReturnValue(finishTrace);
-  const reconcile = vi.fn();
-  try {
-    const storage = Object.create((await import('@lib/storages/dialogs')).default.prototype) as DialogsStorage & any;
-    Object.assign(storage, {
-      cachedListReconciled: false,
-      cachedListReconcileScheduled: false,
-      cachedListReconcileGeneration: 1,
-      reconcileCachedChannelDialogs: reconcile
-    });
-
-    storage.scheduleCachedChannelDialogReconciliation();
-    storage.scheduleCachedChannelDialogReconciliation();
-
-    expect(traceStart).toHaveBeenCalledTimes(1);
-    expect(traceStart).toHaveBeenCalledWith('worker.dialogs.cachedChannelReconcile', expect.objectContaining({
-      traceId: expect.any(String),
-      pageCount: 0
-    }));
-    expect(reconcile).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(19_999);
-    expect(reconcile).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({
-      traceId: expect.any(String),
-      finish: finishTrace
-    }));
-  } finally {
-    vi.restoreAllMocks();
-    vi.unstubAllEnvs();
-    vi.clearAllTimers();
-    vi.useRealTimers();
-  }
-});
 
 test('reloads missing cached dialogs in bounded worker batches', async() => {
   const peerIds = Array.from({length: 60}, (_, index) => -(index + 1) as PeerId);
@@ -85,7 +44,6 @@ test('retries unresolved peers on the next cached first-page read and stops at t
       appMessagesManager: {reloadConversation},
       appChatsManager: {isInChat: () => true},
       cachedListReconciled: false,
-      cachedListReconcileAttempts: 0,
       getDialogOnly: (peerId: PeerId): {} | undefined => loadedPeerIds.has(peerId) ? {} : undefined,
       getServerChannelsMissingLocally,
       log

@@ -4,12 +4,9 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.resetModules();
   vi.restoreAllMocks();
-  vi.clearAllTimers();
-  vi.useRealTimers();
 });
 
 test('flushes current peers page by page without restoring peers cleared later', async() => {
-  vi.useFakeTimers();
   vi.stubEnv('VITE_PERF_TRACE', '1');
   vi.resetModules();
   const {PerformanceRpcTrace, performancePhaseTrace} = await import('@appManagers/performanceTrace');
@@ -81,10 +78,6 @@ test('flushes current peers page by page without restoring peers cleared later',
     durationMs: expect.any(Number)
   });
   expect(performancePhaseTrace.getSnapshot().some(({name: phaseName}) => phaseName === 'worker.dialogs.firstPage')).toBe(false);
-  expect(pendingPages).toHaveLength(0);
-
-  await vi.advanceTimersByTimeAsync(20_000);
-  expect(pendingPages).toHaveLength(1);
   expect(performancePhaseTrace.getSnapshot().find(({name: phaseName}) => phaseName === 'worker.dialogs.cachedChannelReconcile')).toMatchObject({
     pageCount: 0,
     durationMs: null
@@ -99,8 +92,7 @@ test('flushes current peers page by page without restoring peers cleared later',
     messages: [{id: 11, peer_id: {_: 'peerUser', user_id: 1}, date: 100}]
   };
   pendingPages[0](firstPage);
-  await vi.advanceTimersByTimeAsync(0);
-  expect(pendingPages).toHaveLength(2);
+  await vi.waitFor(() => expect(pendingPages).toHaveLength(2));
   expect(performancePhaseTrace.getSnapshot().find(({name: phaseName}) => phaseName === 'worker.dialogs.cachedChannelReconcile')).toMatchObject({
     pageCount: 1,
     durationMs: null
