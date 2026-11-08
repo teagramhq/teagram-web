@@ -1,6 +1,4 @@
 import cancelEvent from '@helpers/dom/cancelEvent';
-import clamp from '@helpers/number/clamp';
-import contextMenuController from '@helpers/contextMenuController';
 import {getOverlayRoot} from '@helpers/appWindow';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import type {EmojiSkinTone, EmojiSkinToneVariants} from '@helpers/emojiSkinTone';
@@ -12,6 +10,7 @@ type EmojiTonePickerProps = {
   selectedTone: EmojiSkinTone,
   renderEmoji: (emoji: string) => HTMLElement,
   onSelect: (tone: EmojiSkinTone) => void,
+  close: () => void,
   ref: (element: HTMLDivElement) => void
 };
 
@@ -20,7 +19,8 @@ function EmojiTonePickerButton(props: {
   tone: EmojiSkinTone,
   selected: boolean,
   renderEmoji: EmojiTonePickerProps['renderEmoji'],
-  onSelect: EmojiTonePickerProps['onSelect']
+  onSelect: EmojiTonePickerProps['onSelect'],
+  close: EmojiTonePickerProps['close']
 }) {
   let button: HTMLButtonElement;
   const emojiElement = props.renderEmoji(props.emoji);
@@ -30,7 +30,7 @@ function EmojiTonePickerButton(props: {
     const detachClickEvent = attachClickEvent(button, (event) => {
       cancelEvent(event);
       props.onSelect(props.tone);
-      contextMenuController.close();
+      props.close();
     });
     onCleanup(detachClickEvent);
   });
@@ -69,6 +69,7 @@ function EmojiTonePicker(props: EmojiTonePickerProps) {
                   selected={index() === props.selectedTone}
                   renderEmoji={props.renderEmoji}
                   onSelect={props.onSelect}
+                  close={props.close}
                 />
               </>
             )}
@@ -84,13 +85,15 @@ export default function showEmojiTonePicker({
   variants,
   selectedTone,
   renderEmoji,
-  onSelect
+  onSelect,
+  close
 }: {
   event: MouseEvent | TouchEvent,
   variants: EmojiSkinToneVariants,
   selectedTone: EmojiSkinTone,
   renderEmoji: (emoji: string) => HTMLElement,
-  onSelect: (tone: EmojiSkinTone) => void
+  onSelect: (tone: EmojiSkinTone) => void,
+  close: () => void
 }) {
   cancelEvent(event);
 
@@ -104,6 +107,7 @@ export default function showEmojiTonePicker({
         selectedTone={selectedTone}
         renderEmoji={renderEmoji}
         onSelect={onSelect}
+        close={close}
         ref={(element) => container = element}
       />
     </Portal>;
@@ -120,16 +124,15 @@ export default function showEmojiTonePicker({
       const viewWidth = overlayRect.width || doc.defaultView.innerWidth;
       const viewHeight = overlayRect.height || doc.defaultView.innerHeight;
       const margin = 8;
-      const left = clamp(
+      const left = Math.min(Math.max(
         targetRect.left - overlayRect.left + (targetRect.width - menuRect.width) / 2,
-        margin,
-        Math.max(margin, viewWidth - menuRect.width - margin)
-      );
+        margin
+      ), Math.max(margin, viewWidth - menuRect.width - margin));
       const above = targetRect.top - overlayRect.top - menuRect.height - margin;
       const below = targetRect.bottom - overlayRect.top + margin;
       const top = above >= margin ?
         above :
-        clamp(below, margin, Math.max(margin, viewHeight - menuRect.height - margin));
+        Math.min(Math.max(below, margin), Math.max(margin, viewHeight - menuRect.height - margin));
 
       container.style.transform = `translate3d(${left}px, ${top}px, 0)`;
       void container.offsetLeft;

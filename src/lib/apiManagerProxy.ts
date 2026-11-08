@@ -32,6 +32,7 @@ import deferredPromise, {CancellablePromise} from '@helpers/cancellablePromise';
 import {makeWorkerURL} from '@helpers/setWorkerProxy';
 import {createPrivateWorkerBlobURL, rewritePrivateWorkerImports} from '@helpers/createPrivateWorkerBlobURL';
 import ServiceWorkerURL from '../../sw?worker&url';
+import CryptoWorkerURL from './crypto/crypto.worker.ts?worker&url';
 import MainWorkerURL from './mainWorker/index.worker.ts?worker&url';
 import setDeepProperty, {joinDeepPath, splitDeepPath} from '@helpers/object/setDeepProperty';
 import getThumbKey from '@lib/storages/utils/thumbs/getThumbKey';
@@ -1127,11 +1128,11 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
   public async registerThreadedWorker({
     type,
-    createWorker: _createWorker,
+    workerUrl,
     superMessagePort
   }: {
     type: ThreadedWorkerType,
-    createWorker: () => SharedWorker | Worker,
+    workerUrl: () => string | URL,
     superMessagePort: SuperMessagePort<ThreadedWorkerEvents, ThreadedWorkerEvents, any>
   }) {
     const get = (url: string) => {
@@ -1146,51 +1147,53 @@ class ApiManagerProxy extends MTProtoMessagePort {
       });
     };
 
-    const workerHandler = {
-      construct(target: any, args: any): any {
-        return {
-          url: makeWorkerURL(args[0]).toString()
-        };
-      }
-    };
-
-    const originals = [
-      Worker,
-      typeof(SharedWorker) !== 'undefined' && SharedWorker
-    ].filter(Boolean);
-    originals.forEach((w) => window[w.name as any] = new Proxy(w, workerHandler));
-
-    const worker = _createWorker();
-
-    originals.forEach((w) => window[w.name as any] = w as any);
-
-    const originalUrl = (worker as any).url;
-
-    const createWorker = (url: string) => new constructor(url, {type: 'module'});
-    const attachWorkerToPort = (worker: SharedWorker | Worker) => this.attachWorkerToPort(
-      worker,
-      superMessagePort,
-      type
-    );
+    const originalUrl = makeWorkerURL(workerUrl()).toString();
     // Safari silently wedges a {type:'module'} SharedWorker used for lottie sticker decoding:
     // frames never arrive, no error is thrown, and every sticker canvas stays blank (never appended).
     // Keep MTProto/crypto on the shared worker, but hand the lottie pool per-tab dedicated Workers.
     const constructor = IS_SHARED_WORKER_SUPPORTED && !(IS_SAFARI && type === 'lottie') ? SharedWorker : Worker;
+    const workers: Array<SharedWorker | Worker> = [];
+    const createWorker = (url: string) => {
+      const worker = new constructor(url, {type: 'module'});
+      workers.push(worker);
+      this.attachWorkerToPort(worker, superMessagePort, type);
+    };
+    let bufferedPorts: MessagePort[] | undefined = [];
+    const forwardPort = (port: MessagePort) => this.invokeVoid(
+      'threadedPort',
+      type,
+      undefined,
+      [port]
+    );
+    const onPort = (_payload: void, _source: MessageEventSource, event: MessageEvent) => {
+      const port = event.ports[0];
+      if(!port) return;
+      if(bufferedPorts) bufferedPorts.push(port);
+      else forwardPort(port);
+    };
 
-    superMessagePort.addEventListener('port', (payload, source, event) => {
-      this.invokeVoid('threadedPort', type, undefined, [event.ports[0]]);
-    });
+    try {
+      superMessagePort.addEventListener('port', onPort);
+      createWorker(originalUrl);
 
-    const firstWorker = createWorker(originalUrl);
-    attachWorkerToPort(firstWorker);
+      const blob = await get(originalUrl);
+      const urls = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
+      urls.slice(1).forEach(createWorker);
 
-    const blob = await get(originalUrl);
-    const urlsPromise = await this.invoke('createProxyWorkerURLs', {originalUrl, blob, type});
-    const workers = urlsPromise.slice(1).map(createWorker);
-    workers.forEach(attachWorkerToPort);
+      if(DEBUG) {
+        console.log('Workers URLs', type, urls);
+      }
 
-    if(DEBUG) {
-      console.log('Workers URLs', type, urlsPromise);
+      bufferedPorts.forEach(forwardPort);
+      bufferedPorts = undefined;
+    } catch(error) {
+      superMessagePort.removeEventListener('port', onPort);
+      bufferedPorts?.forEach((port) => port.close());
+      workers.forEach((worker) => {
+        superMessagePort.detachPort((worker as SharedWorker).port || worker as any);
+        (worker as Worker).terminate?.();
+      });
+      throw error;
     }
   }
 
@@ -1206,12 +1209,7 @@ class ApiManagerProxy extends MTProtoMessagePort {
 
     await this.registerThreadedWorker({
       type: 'crypto',
-      createWorker: () => {
-        return new Worker(
-          new URL('./crypto/crypto.worker.ts', import.meta.url),
-          {type: 'module'}
-        );
-      },
+      workerUrl: () => CryptoWorkerURL,
       superMessagePort: cryptoMessagePort
     });
   }

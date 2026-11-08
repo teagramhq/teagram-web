@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS, scenarioBundleBytes} from './policy.mjs';
+import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, isWithinFirstStickerRegressionBudget, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS, scenarioBundleBytes} from './policy.mjs';
 
 const SCALES = ['1x', '100x'];
 const CURRENT_FIXTURE = {
@@ -10,6 +10,18 @@ const CURRENT_FIXTURE = {
   fixtureServerCommit: 'fixture-server-v1'
 };
 
+test('first-sticker regression budget accepts large improvements', () => {
+  assert.equal(isWithinFirstStickerRegressionBudget(1216, 632.2), true);
+});
+
+test('first-sticker regression budget permits exactly 100 ms slower', () => {
+  assert.equal(isWithinFirstStickerRegressionBudget(500, 600), true);
+});
+
+test('first-sticker regression budget rejects slowdowns greater than 100 ms', () => {
+  assert.equal(isWithinFirstStickerRegressionBudget(500, 600.1), false);
+});
+
 function scaleSamples(overrides = {}, scale) {
   return Object.fromEntries(SCENARIOS.map(({key}) => {
     const override = overrides[key];
@@ -18,6 +30,7 @@ function scaleSamples(overrides = {}, scale) {
     return [key, values.map((sample) => ({
       ms: 100,
       requests: 12,
+      rpcCallCount: 0,
       domNodes: 300,
       bundleBytes: 100_000,
       longTasksOver50Ms: 0,
@@ -751,6 +764,20 @@ test('blocks bundle growth above two percent against a complete same-run base', 
   const result = evaluatePerformance(report({head}));
 
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('bundle') && failure.includes('coldChatList')));
+});
+
+test('blocks startup request, RPC, and bundle growth at the chat-list boundary', () => {
+  for(const scale of SCALES) {
+    for(const scenario of ['coldChatList', 'warmChatList']) {
+      for(const [field, baseValue] of [['requests', 12], ['rpcCallCount', 0], ['bundleBytes', 100_000]]) {
+        const base = scaleVariants({[scale]: {[scenario]: {[field]: baseValue}}});
+        const head = scaleVariants({[scale]: {[scenario]: {[field]: baseValue + 1}}});
+        const result = evaluatePerformance(report({base, head}));
+
+        assert.ok(result.blockingFailures.some((failure) => failure.includes(`${scale} ${scenario}`) && failure.includes(field)));
+      }
+    }
+  }
 });
 
 test('uses the largest bundle sample when a lazy chunk misses a measurement window', () => {

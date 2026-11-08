@@ -6,6 +6,10 @@ the same browser scenarios against each size. Pull request runs also compare the
 head bundle with the base bundle. Main branch runs record compatible timing
 history for calibration.
 
+The first-sticker frame probe uses the pinned pre-PR-178 client in
+`.github/perf-sticker-base-commit`; its baseline is separate from the current
+PR base used for the scale table.
+
 ## Performance gates
 
 The 1x and 100x scenarios are calibrated separately. Only master runs with the

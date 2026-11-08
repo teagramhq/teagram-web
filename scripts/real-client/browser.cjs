@@ -1628,6 +1628,38 @@ async function prepareUsernameEntry(page, name, expected) {
   return waitForUsernameField(page, name);
 }
 
+async function waitForChatsList(page, stage) {
+  currentStage = stage;
+  await page.waitForFunction(() => {
+    const chats = document.querySelector('#page-chats');
+    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+  }, null, {timeout: 45_000}).catch(() => failStage(stage));
+}
+
+async function waitForServiceWorkerController(page, stage) {
+  await page.waitForFunction(() => Boolean(navigator.serviceWorker?.controller), null, {timeout: 20_000})
+  .catch(() => failStage(stage));
+}
+
+async function reloadWithNoOffscreenCanvas(page, name) {
+  const prefix = `${name}_reaction_fallback`;
+  const url = new URL(PRIVATE_CSP_ORIGIN);
+  url.searchParams.set('noOffscreenCanvas', '1');
+  setPageScenarioStep(page, `${prefix}_reload`);
+  const response = await page.goto(url.toString(), {waitUntil: 'domcontentloaded', timeout: 30_000})
+  .catch(() => failStage(`${prefix}_reload`));
+  if(response?.status() !== 200) failStage(`${prefix}_artifact_load`);
+
+  const hasFallbackFlag = await page.evaluate(() => new URL(location.href).searchParams.get('noOffscreenCanvas') === '1');
+  if(!hasFallbackFlag) failStage(`${prefix}_flag`);
+
+  await waitForChatsList(page, `${prefix}_chats_list`);
+  await page.locator('#new-menu').waitFor({state: 'visible', timeout: 15_000})
+  .catch(() => failStage(`${prefix}_new_chat_menu`));
+  setPageScenarioStep(page, `${prefix}_service_worker_controller`);
+  await waitForServiceWorkerController(page, `${prefix}_service_worker_controller`);
+}
+
 async function signIn(page, account, name, screenshotDirectory, capturedScreenshots, passwordEvidence) {
   const username = await prepareUsernameEntry(page, name, runtime);
   await captureState(page, screenshotDirectory, `${name}-sign-in`, capturedScreenshots);
@@ -1643,16 +1675,11 @@ async function signIn(page, account, name, screenshotDirectory, capturedScreensh
   await submitPassword(password, usernameField, account.password, name, passwordEvidence);
   await usernameField.dispose();
 
-  currentStage = `${name}_chats_list`;
-  await page.waitForFunction(() => {
-    const chats = document.querySelector('#page-chats');
-    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
-  }, null, {timeout: 45_000}).catch(() => failStage(`${name}_chats_list`));
+  await waitForChatsList(page, `${name}_chats_list`);
   await page.locator('#new-menu').waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${name}_new_chat_menu`));
   await captureState(page, screenshotDirectory, `${name}-chats-list`, capturedScreenshots);
 
-  await page.waitForFunction(() => Boolean(navigator.serviceWorker?.controller), null, {timeout: 20_000})
-  .catch(() => failStage(`${name}_service_worker_controller`));
+  await waitForServiceWorkerController(page, `${name}_service_worker_controller`);
 }
 
 async function submitUsernameOnceAndWaitForPassword(page, account, expected, name, passwordEvidence, actionCounts, timeoutMs = PASSWORD_FIELD_TIMEOUT_MS, webSocket101Observer) {
@@ -1817,13 +1844,6 @@ function classifyLocatorError(error) {
   return 'other';
 }
 
-function setOffscreenCanvasMode(pageUrl, disabled) {
-  const url = new URL(pageUrl);
-  if(disabled) url.searchParams.set('noOffscreenCanvas', '1');
-  else url.searchParams.delete('noOffscreenCanvas');
-  return url.href;
-}
-
 // Keeps bounded, sanitized diagnostics by the runner's current scenario step.
 const clientErrorCounts = new WeakMap();
 async function countClientErrors(page, getScenarioStep = readCurrentScenarioStep) {
@@ -1850,16 +1870,6 @@ async function countClientErrors(page, getScenarioStep = readCurrentScenarioStep
     pattern: RPC_ERROR_TYPE_PATTERN.source,
     diagnosticLimit: PAGE_DIAGNOSTIC_LIMIT,
     diagnosticFieldLimit: PAGE_DIAGNOSTIC_FIELD_LIMIT
-  });
-  // Keep custom emoji on the main-thread canvas in the browser fixture. The URL
-  // mode is specific to emoji renderers, so normal Lottie offscreen rendering
-  // remains enabled for the other smoke scenarios.
-  await page.addInitScript(() => {
-    try {
-      const url = new URL(window.location.href);
-      url.searchParams.set('noCustomEmojiOffscreenCanvas', '1');
-      window.history.replaceState(null, '', url);
-    } catch {}
   });
 }
 
@@ -2833,6 +2843,210 @@ async function toggleMessageReaction(page, otherPage, messageText, stage, expect
   }
 }
 
+// Opens the composer emoji picker, then the free custom emoji fixture set, and
+// waits for the compositor to paint the set on the default renderer. The page
+// must stay alive through both surfaces.
+function browserLaunchArgs(config) {
+  return [
+    `--host-resolver-rules=MAP teagramd.test ${config.frontIp},MAP * ~NOTFOUND`,
+    `--ignore-certificate-errors-spki-list=${config.leafSPKI}`,
+    '--disable-background-networking',
+    '--disable-component-update',
+    '--disable-default-apps',
+    '--disable-domain-reliability',
+    '--disable-quic',
+    '--disable-sync',
+    '--dns-prefetch-disable'
+  ];
+}
+
+// null when the counter cannot be read, which is not the same as no refused forks
+function readPidsLimitHits() {
+  try {
+    const hits = /^max (\d+)$/m.exec(fs.readFileSync('/sys/fs/cgroup/pids.events', 'utf8'));
+    return hits ? Number(hits[1]) : null;
+  } catch(error) {
+    return null;
+  }
+}
+
+// The failure label for an error thrown during a cold trial, or null when it is not a renderer death.
+// A fork refused by the container's process limit looks the same as a renderer crash, and pids.events
+// is cumulative for the whole job, so only a refusal during this trial counts.
+function classifyColdTrialFailure({stage, crashed, message, pidsHitsBefore, pidsHitsAfter}) {
+  if(!crashed && !/crash|has been closed/i.test(String(message))) return null;
+  if(!Number.isInteger(pidsHitsBefore) || !Number.isInteger(pidsHitsAfter)) return `${stage}_pids_unknown`;
+  return pidsHitsAfter > pidsHitsBefore ? `${stage}_pids_limit` : `${stage}_renderer_crashed`;
+}
+
+// The fixture has no sticker sets, so the chat logs this render error whenever it paints a message,
+// before or after the counting baseline; every other console error counts
+function isCountedColdTrialConsoleError(text) {
+  return !String(text).includes('renderMessage error: NO_STICKERS');
+}
+
+function classifyColdTrialErrors({stage, pageErrors, consoleErrors, consoleErrorsBefore}) {
+  if(pageErrors > 0) return `${stage}_page_error`;
+  if(consoleErrors !== consoleErrorsBefore) return `${stage}_console_error`;
+  return null;
+}
+
+function exceedsEmojiRequestLimit(count) {
+  return count > EMOJI_PICKER_REQUEST_LIMIT;
+}
+
+// Every trial is a fresh browser, so the first open of the emoji picker is always cold.
+const COLD_PICKER_TRIALS = 8;
+// The picker used to request every emoji image (about 555) the moment it opened, which exhausted the
+// fixture browser's tmp and killed the renderer. Only the images near view may be requested.
+const EMOJI_PICKER_REQUEST_LIMIT = 200;
+
+async function openEmojiPicker(page, stage, emojiRequests) {
+  setPageScenarioStep(page, `${stage}_picker`);
+  await page.locator('#column-center .toggle-emoticons').click().catch(() => failStage(`${stage}_picker_open`));
+  const dropdown = page.locator('.emoji-dropdown');
+  await dropdown.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_picker_visible`));
+  await dropdown.locator('.emoji-category').first().waitFor({state: 'attached', timeout: 15_000})
+  .catch(() => failStage(`${stage}_picker_category`));
+
+  // The crash this guards against hit a couple of seconds after the picker opened
+  setPageScenarioStep(page, `${stage}_picker_loaded`);
+  await page.waitForFunction(() => {
+    const images = [...document.querySelectorAll('.emoji-dropdown img.emoji')].filter((image) => {
+      const rect = image.getBoundingClientRect();
+      const bounds = (image.closest('.scrollable') || image.closest('.emoji-dropdown')).getBoundingClientRect();
+      return rect.width > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom;
+    });
+    return images.filter((image) => image.naturalWidth > 0).length >= 20;
+  }, null, {timeout: 20_000}).catch(() => failStage(`${stage}_picker_loaded`));
+  await page.waitForTimeout(2_500);
+  await page.evaluate(() => document.title).catch(() => failStage(`${stage}_page_alive`));
+  if(exceedsEmojiRequestLimit(emojiRequests.count)) failStage(`${stage}_picker_image_burst`);
+
+  setPageScenarioStep(page, `${stage}_picker_close`);
+  await page.locator('#column-center .toggle-emoticons').click().catch(() => failStage(`${stage}_picker_close`));
+  await page.waitForFunction(() => !document.querySelector('.emoji-dropdown.active'), null, {timeout: 15_000})
+  .catch(() => failStage(`${stage}_picker_close`));
+  await page.evaluate(() => document.title).catch(() => failStage(`${stage}_page_alive`));
+}
+
+async function openCustomEmojiSet(page, stage) {
+  setPageScenarioStep(page, `${stage}_set_link`);
+  const setLink = await page.evaluate(() => {
+    const link = document.createElement('a');
+    link.href = new URL('/addemoji/twemoji_custom_emojis', window.location.origin).toString();
+    link.addEventListener('click', (event) => window.stickerSet(link, event));
+    link.textContent = 'Open custom emoji smoke set';
+    link.style.cssText = 'position:fixed;left:8px;top:8px;z-index:2147483647;padding:8px;background:white;color:black';
+    document.body.append(link);
+    return link.textContent;
+  }).catch(() => failStage(`${stage}_set_link`));
+  await page.getByText(setLink, {exact: true}).click().catch(() => failStage(`${stage}_set_link`));
+  const link = page.getByText(setLink, {exact: true});
+  if(await link.count()) await link.evaluate((element) => element.remove());
+
+  setPageScenarioStep(page, `${stage}_set_preview`);
+  const popup = page.locator('.popup-stickers');
+  await popup.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`${stage}_set_preview`));
+
+  setPageScenarioStep(page, `${stage}_set_rendered`);
+  await page.waitForFunction(() => {
+    const canvas = document.querySelector('.popup-stickers canvas[data-offscreen="1"]');
+    const emojis = [...document.querySelectorAll('.popup-stickers .custom-emoji')].filter((emoji) => {
+      const rect = emoji.getBoundingClientRect();
+      const bounds = (emoji.closest('.scrollable') || document.documentElement).getBoundingClientRect();
+      return rect.width > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom;
+    });
+    return !!canvas && emojis.length > 0 && emojis.every((emoji) => emoji.childNodes.length === 0);
+  }, null, {timeout: 30_000}).catch(() => failStage(`${stage}_set_rendered`));
+
+  setPageScenarioStep(page, `${stage}_set_close`);
+  await page.keyboard.press('Escape').catch(() => failStage(`${stage}_set_close`));
+  await popup.waitFor({state: 'detached', timeout: 15_000}).catch(() => failStage(`${stage}_set_close`));
+  await page.evaluate(() => document.title).catch(() => failStage(`${stage}_page_alive`));
+}
+
+async function runColdPickerTrial(storageState, appUrl, trial, cleanupIssues) {
+  const stage = `alice_cold_picker_${trial + 1}`;
+  // The container's /tmp is a small tmpfs and a browser profile left behind by each of the eight
+  // trials would fill it for the scenarios that follow, so each trial gets a directory of its own
+  const trialDirectory = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'real-client-cold-'));
+  const browser = await chromium.launch({
+    headless: true,
+    chromiumSandbox: true,
+    args: browserLaunchArgs(runtime),
+    env: {...process.env, TMPDIR: trialDirectory, HOME: trialDirectory}
+  }).catch(() => {
+    fs.rmSync(trialDirectory, {recursive: true, force: true});
+    failStage(`${stage}_launch`);
+  });
+  try {
+    const context = await browser.newContext({viewport: {width: 1280, height: 900}, storageState})
+    .catch(() => failStage(`${stage}_context`));
+    const page = await context.newPage();
+    // A renderer crash otherwise only shows up as a timeout on whatever wait is pending
+    let crashed = false;
+    page.on('crash', () => { crashed = true; });
+    const emojiRequests = {count: 0};
+    page.on('request', (request) => {
+      if(new URL(request.url()).pathname.startsWith('/assets/img/emoji/')) emojiRequests.count++;
+    });
+    // The trial page is not one of the signed-in app pages, so it needs its own error counters
+    const errors = {page: 0, console: 0};
+    page.on('pageerror', () => { errors.page++; });
+    page.on('console', (message) => {
+      if(message.type() === 'error' && isCountedColdTrialConsoleError(message.text())) errors.console++;
+    });
+    // pids.events is cumulative for the whole job, so only a refused fork during this trial counts
+    const pidsHitsBefore = readPidsLimitHits();
+    const crashGuard = (error) => {
+      const label = classifyColdTrialFailure({
+        stage, crashed, message: error?.message, pidsHitsBefore, pidsHitsAfter: readPidsLimitHits()
+      });
+      if(label) failStage(label);
+      throw error;
+    };
+    try {
+      await page.goto(appUrl, {waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage(`${stage}_load`));
+      await page.waitForFunction(() => {
+        const chats = document.querySelector('#page-chats');
+        return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+      }, null, {timeout: 45_000}).catch(() => failStage(`${stage}_chats`));
+      // A fresh account session can briefly list the peer twice, so take the first matching row
+      await page.locator('#column-left .input-search-input').first().fill(runtime.accounts[1].username)
+      .catch(() => failStage(`${stage}_chat_search`));
+      await page.locator('#search-container .row[data-peer-id]').filter({hasText: runtime.accounts[1].username}).first()
+      .click({timeout: 25_000}).catch(() => failStage(`${stage}_chat_result`));
+      await openComposer(page, `${stage}_chat`);
+      // Console errors while the chat loads are not this scenario's concern
+      const consoleErrorsBefore = errors.console;
+      await openEmojiPicker(page, stage, emojiRequests);
+      await openCustomEmojiSet(page, stage);
+      const errorLabel = classifyColdTrialErrors({
+        stage, pageErrors: errors.page, consoleErrors: errors.console, consoleErrorsBefore
+      });
+      if(errorLabel) failStage(errorLabel);
+    } catch(error) {
+      crashGuard(error);
+    }
+  } finally {
+    // A browser that stays up keeps its processes against the fixture's limit, so the run reports it
+    await browser.close().catch(() => cleanupIssues.push('browser_close_cleanup'));
+    fs.rmSync(trialDirectory, {recursive: true, force: true});
+  }
+}
+
+async function runColdPickerScenario(alice, cleanupIssues) {
+  currentStage = 'alice_custom_emoji_state';
+  const storageState = await alice.context.storageState({indexedDB: true}).catch(() => failStage('alice_custom_emoji_state'));
+  const appUrl = alice.page.url();
+  for(let trial = 0; trial < COLD_PICKER_TRIALS; ++trial) {
+    currentStage = `alice_cold_picker_${trial + 1}`;
+    await runColdPickerTrial(storageState, appUrl, trial, cleanupIssues);
+  }
+}
+
+
 async function installCustomEmojiSet(page, stage) {
   setPageScenarioStep(page, `${stage}_set_link`);
   const setLink = await page.evaluate(() => {
@@ -2951,32 +3165,8 @@ async function setCustomEmojiStatus(page, otherPage, docId) {
   if(await page.locator('.popup-premium:visible').count()) failStage('alice_custom_emoji_status_premium_prompt');
 }
 
-async function reloadWithOffscreenCanvasMode(page, stage, disabled) {
-  setPageScenarioStep(page, `${stage}_reload`);
-  const url = setOffscreenCanvasMode(page.url(), disabled);
-  if(new URL(url).origin !== PRIVATE_CSP_ORIGIN) failStage(`${stage}_origin`);
-  await page.goto(url, {waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage(`${stage}_reload`));
-  await page.waitForFunction(() => {
-    const chats = document.querySelector('#page-chats');
-    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
-  }, null, {timeout: 45_000}).catch(() => failStage(`${stage}_reload_chats`));
-  const modes = await page.evaluate(() => {
-    const searchParams = new URL(location.href).searchParams;
-    return {
-      noOffscreenCanvas: searchParams.get('noOffscreenCanvas'),
-      noCustomEmojiOffscreenCanvas: searchParams.get('noCustomEmojiOffscreenCanvas')
-    };
-  });
-  if((modes.noOffscreenCanvas === '1') !== disabled || modes.noCustomEmojiOffscreenCanvas !== '1') {
-    failStage(`${stage}_mode`);
-  }
-}
 
-async function runCustomEmojiScenario(alice, bob) {
-  currentStage = 'custom_emoji_canvas_reload';
-  await reloadWithOffscreenCanvasMode(alice.page, 'alice_custom_emoji_canvas', true);
-  await reloadWithOffscreenCanvasMode(bob.page, 'bob_custom_emoji_canvas', true);
-
+async function runCustomEmojiFeatureFlow(alice, bob) {
   currentStage = 'alice_custom_emoji_set_install';
   await installCustomEmojiSet(alice.page, 'alice_custom_emoji');
   currentStage = 'bob_custom_emoji_set_install';
@@ -3016,8 +3206,6 @@ async function runCustomEmojiScenario(alice, bob) {
   await reactWithCustomEmoji(bob.page, alice.page, messageText, docId, 'bob_custom_emoji_reaction');
   await setCustomEmojiStatus(alice.page, bob.page, docId);
 
-  await reloadWithOffscreenCanvasMode(alice.page, 'alice_custom_emoji_canvas_restore', false);
-  await reloadWithOffscreenCanvasMode(bob.page, 'bob_custom_emoji_canvas_restore', false);
 }
 
 async function sendChannelText(page, channelName, screenshotDirectory, capturedScreenshots, timeoutMs = 30_000) {
@@ -6365,17 +6553,7 @@ async function main(dependencies = {}) {
     browser = await (dependencies.launchBrowser || ((options) => chromium.launch(options)))({
       headless: true,
       chromiumSandbox: true,
-      args: [
-        `--host-resolver-rules=MAP teagramd.test ${runtime.frontIp},MAP * ~NOTFOUND`,
-        `--ignore-certificate-errors-spki-list=${runtime.leafSPKI}`,
-        '--disable-background-networking',
-        '--disable-component-update',
-        '--disable-default-apps',
-        '--disable-domain-reliability',
-        '--disable-quic',
-        '--disable-sync',
-        '--dns-prefetch-disable'
-      ]
+      args: browserLaunchArgs(runtime)
     });
 
     // Browser-level discovery starts before this runner creates any context,
@@ -6597,7 +6775,8 @@ async function main(dependencies = {}) {
     report.push({name: 'message', status: 'passed'});
 
     currentScenario = 'custom-emoji';
-    await runCustomEmojiScenario(alice, bob);
+    await runColdPickerScenario(alice, cleanupIssues);
+    await runCustomEmojiFeatureFlow(alice, bob);
     report.push({name: 'custom-emoji', status: 'passed'});
 
     currentScenario = 'group';
@@ -6679,6 +6858,35 @@ async function main(dependencies = {}) {
       }
       report.push({name: 'poll', status: 'passed'});
     }
+
+    currentScenario = 'message';
+    await reloadWithNoOffscreenCanvas(alice.page, 'alice');
+    await reloadWithNoOffscreenCanvas(bob.page, 'bob');
+    await selectUniquePeer(
+      alice.page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      accounts[1].username,
+      'alice_direct_reaction_fallback_chat'
+    );
+    await selectUniquePeer(
+      bob.page,
+      '#column-left .input-search-input',
+      '#search-container .row[data-peer-id]',
+      accounts[0].username,
+      'bob_direct_reaction_fallback_chat'
+    );
+    const aliceFallbackMessages = alice.page.locator('#column-center .bubble .message').filter({hasText: MESSAGE});
+    await waitForSingleSentMessage(aliceFallbackMessages, MESSAGE)
+    .catch(() => failStage('alice_direct_reaction_fallback_message'));
+    const bobFallbackMessages = bob.page.locator('#column-center .bubble .message').filter({hasText: MESSAGE});
+    await bobFallbackMessages.first().waitFor({state: 'visible', timeout: 30_000})
+    .catch(() => failStage('bob_direct_reaction_fallback_message_visible'));
+    if(await getSingleExactMessageTextFailure(bobFallbackMessages, MESSAGE)) {
+      failStage('bob_direct_reaction_fallback_message_content');
+    }
+    await toggleMessageReaction(bob.page, alice.page, MESSAGE, 'bob_direct_reaction_fallback_set', 1);
+    await toggleMessageReaction(bob.page, alice.page, MESSAGE, 'bob_direct_reaction_fallback_clear', 0);
 
     if(JSON.stringify(report.map((scenario) => scenario.name)) !== JSON.stringify(runtime.scenarios)) {
       failStage('scenario_report_incomplete');
@@ -6903,7 +7111,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setOffscreenCanvasMode, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
+module.exports = {isCountedColdTrialConsoleError, classifyColdTrialErrors, classifyColdTrialFailure, exceedsEmojiRequestLimit, attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

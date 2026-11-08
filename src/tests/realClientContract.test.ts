@@ -3894,20 +3894,6 @@ describe('discovery shared-worker network accounting', () => {
 });
 
 describe('real client scenario contract', () => {
-  it('toggles the shared canvas fallback without dropping the custom emoji mode', () => {
-    const url = new URL(`${APP_ORIGIN}/?noCustomEmojiOffscreenCanvas=1&fixture=custom-emoji`);
-    const withSharedFallback = new URL(realClientBrowser.setOffscreenCanvasMode(url.href, true));
-
-    expect(withSharedFallback.searchParams.get('noOffscreenCanvas')).toBe('1');
-    expect(withSharedFallback.searchParams.get('noCustomEmojiOffscreenCanvas')).toBe('1');
-    expect(withSharedFallback.searchParams.get('fixture')).toBe('custom-emoji');
-
-    const restored = new URL(realClientBrowser.setOffscreenCanvasMode(withSharedFallback.href, false));
-    expect(restored.searchParams.has('noOffscreenCanvas')).toBe(false);
-    expect(restored.searchParams.get('noCustomEmojiOffscreenCanvas')).toBe('1');
-    expect(restored.searchParams.get('fixture')).toBe('custom-emoji');
-  });
-
   it('requires exactly one recipient message with the expected text', () => {
     expect(getSingleExactMessageFailure(['browser-ci-hello'], 'browser-ci-hello')).toBe(null);
     expect(getSingleExactMessageFailure(['prefix browser-ci-hello'], 'browser-ci-hello')).toBe('content');
@@ -3921,8 +3907,120 @@ describe('real client scenario contract', () => {
   });
 
   it('rejects guest-signup from the private-artifact scenario list', () => {
-    expect(() => parseRequiredScenarios('sign-in,first-message,message,group,guest-signup'))
+    expect(() => parseRequiredScenarios('sign-in,first-message,message,custom-emoji,group,guest-signup'))
     .toThrow('unknown scenario: guest-signup');
+  });
+
+  it('opens the custom emoji smoke set through the CSP-safe app link handler', () => {
+    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
+    const scenarioSource = browserSource.slice(
+      browserSource.indexOf('async function openCustomEmojiSet'),
+      browserSource.indexOf('async function sendChannelText')
+    );
+
+    expect(scenarioSource).toContain(`link.href = new URL('/addemoji/twemoji_custom_emojis', window.location.origin).toString();`);
+    expect(scenarioSource).toContain(`link.addEventListener('click', (event) => window.stickerSet(link, event));`);
+    expect(scenarioSource).not.toContain(`setAttribute('onclick'`);
+  });
+
+  it('opens the emoji picker cold, in a fresh browser, before the custom emoji set', () => {
+    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
+    const trialSource = browserSource.slice(
+      browserSource.indexOf('async function runColdPickerTrial'),
+      browserSource.indexOf('async function sendChannelText')
+    );
+    const picker = trialSource.indexOf('await openEmojiPicker(page, stage, emojiRequests)');
+    const set = trialSource.indexOf('await openCustomEmojiSet(page, stage)');
+
+    expect(browserSource).toContain('const COLD_PICKER_TRIALS = 8;');
+    expect(trialSource).toContain('chromium.launch(');
+    expect(trialSource).toContain('storageState');
+    expect(trialSource).toContain('TMPDIR: trialDirectory');
+    expect(picker).toBeGreaterThan(-1);
+    expect(set).toBeGreaterThan(picker);
+    expect(trialSource.indexOf('const consoleErrorsBefore')).toBeGreaterThan(trialSource.indexOf('await openComposer(page'));
+    expect(trialSource.indexOf('classifyColdTrialErrors(')).toBeGreaterThan(set);
+    expect(trialSource.lastIndexOf('fs.rmSync(trialDirectory')).toBeGreaterThan(trialSource.indexOf('await browser.close()'));
+    expect(trialSource).toContain(`push('browser_close_cleanup')`);
+    expect(browserSource).toContain(`currentScenario = 'custom-emoji';\n    await runColdPickerScenario(alice, cleanupIssues);\n    await runCustomEmojiFeatureFlow(alice, bob);`);
+  });
+
+  it('labels a cold trial failure by what killed the page', () => {
+    const stage = 'alice_cold_picker_3';
+    const crash = {stage, crashed: true, message: 'Target crashed'};
+
+    expect(realClientBrowser.classifyColdTrialFailure({...crash, pidsHitsBefore: 0, pidsHitsAfter: 0}))
+    .toBe(`${stage}_renderer_crashed`);
+    expect(realClientBrowser.classifyColdTrialFailure({...crash, pidsHitsBefore: 0, pidsHitsAfter: 2}))
+    .toBe(`${stage}_pids_limit`);
+    // refusals from an earlier trial are not this trial's
+    expect(realClientBrowser.classifyColdTrialFailure({...crash, pidsHitsBefore: 3, pidsHitsAfter: 3}))
+    .toBe(`${stage}_renderer_crashed`);
+    expect(realClientBrowser.classifyColdTrialFailure({...crash, pidsHitsBefore: null, pidsHitsAfter: 0}))
+    .toBe(`${stage}_pids_unknown`);
+    expect(realClientBrowser.classifyColdTrialFailure({...crash, pidsHitsBefore: 0, pidsHitsAfter: null}))
+    .toBe(`${stage}_pids_unknown`);
+    expect(realClientBrowser.classifyColdTrialFailure({
+      stage, crashed: false, message: 'browser has been closed', pidsHitsBefore: 0, pidsHitsAfter: 0
+    })).toBe(`${stage}_renderer_crashed`);
+    expect(realClientBrowser.classifyColdTrialFailure({
+      stage, crashed: false, message: 'Timeout 30000ms exceeded', pidsHitsBefore: 0, pidsHitsAfter: 0
+    })).toBe(null);
+  });
+
+  it('fails a cold trial on a page error or a new console error', () => {
+    const stage = 'alice_cold_picker_1';
+
+    expect(realClientBrowser.classifyColdTrialErrors({stage, pageErrors: 0, consoleErrors: 2, consoleErrorsBefore: 2}))
+    .toBe(null);
+    expect(realClientBrowser.classifyColdTrialErrors({stage, pageErrors: 1, consoleErrors: 2, consoleErrorsBefore: 2}))
+    .toBe(`${stage}_page_error`);
+    expect(realClientBrowser.classifyColdTrialErrors({stage, pageErrors: 0, consoleErrors: 3, consoleErrorsBefore: 2}))
+    .toBe(`${stage}_console_error`);
+  });
+
+  it('counts every console error in a cold trial except the fixture\'s NO_STICKERS render error', () => {
+    expect(realClientBrowser.isCountedColdTrialConsoleError('%s [2.1] [CHAT-2-chat] renderMessage error: NO_STICKERS')).toBe(false);
+    expect(realClientBrowser.isCountedColdTrialConsoleError('Failed to load resource: net::ERR_FAILED')).toBe(true);
+    expect(realClientBrowser.isCountedColdTrialConsoleError('renderMessage error: SOMETHING_ELSE')).toBe(true);
+  });
+
+  it('bounds the emoji images the cold picker may request', () => {
+    expect(realClientBrowser.exceedsEmojiRequestLimit(34)).toBe(false);
+    expect(realClientBrowser.exceedsEmojiRequestLimit(200)).toBe(false);
+    expect(realClientBrowser.exceedsEmojiRequestLimit(201)).toBe(true);
+    expect(realClientBrowser.exceedsEmojiRequestLimit(555)).toBe(true);
+  });
+
+  it('renders the custom emoji set on the default renderer and checks the page survived', () => {
+    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
+    const setSource = browserSource.slice(
+      browserSource.indexOf('async function openCustomEmojiSet'),
+      browserSource.indexOf('async function runColdPickerTrial')
+    );
+    const rendered = setSource.indexOf('_set_rendered');
+    const closed = setSource.indexOf('_set_close');
+    const alive = setSource.lastIndexOf('_page_alive');
+
+    expect(setSource).not.toContain('noOffscreenCanvas');
+    expect(setSource).toContain('canvas[data-offscreen="1"]');
+    expect(rendered).toBeGreaterThan(-1);
+    expect(closed).toBeGreaterThan(rendered);
+    expect(alive).toBeGreaterThan(closed);
+  });
+
+  it('waits for the visible picker emoji images, then keeps the page alive past the crash window', () => {
+    const browserSource = readFileSync(resolve(process.cwd(), 'scripts/real-client/browser.cjs'), 'utf8');
+    const pickerSource = browserSource.slice(
+      browserSource.indexOf('async function openEmojiPicker'),
+      browserSource.indexOf('async function openCustomEmojiSet')
+    );
+
+    expect(pickerSource.indexOf('_picker_loaded')).toBeGreaterThan(pickerSource.indexOf('_picker_category'));
+    expect(pickerSource.indexOf('waitForTimeout(2_500)')).toBeGreaterThan(pickerSource.indexOf('_picker_loaded'));
+    expect(pickerSource.indexOf('_page_alive')).toBeGreaterThan(pickerSource.indexOf('waitForTimeout(2_500)'));
+    expect(pickerSource).toContain('exceedsEmojiRequestLimit(emojiRequests.count)');
+    expect(pickerSource).toContain('_picker_image_burst');
   });
 
   it('requires every scenario exactly once', () => {
@@ -3938,7 +4036,7 @@ describe('real client scenario contract', () => {
   });
 
   it('requires the first inbound private message scenario', () => {
-    expect(() => parseRequiredScenarios('sign-in,message,group')).toThrow('required scenarios are missing');
+    expect(() => parseRequiredScenarios('sign-in,message,custom-emoji,group')).toThrow('required scenarios are missing');
     expect(parseRequiredScenarios('sign-in,first-message,message,custom-emoji,group')).toEqual(['sign-in', 'first-message', 'message', 'custom-emoji', 'group']);
   });
 
@@ -4227,7 +4325,7 @@ describe('real client scenario contract', () => {
     expect(parseRealClientArgs(['--', ...args])).toEqual(parseRealClientArgs(args));
     expect(() => parseRealClientArgs([])).toThrow('missing required options');
     expect(() => parseRealClientArgs(args.slice(0, -2))).toThrow('scenario selection is required');
-    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,group'])).toThrow('option was provided more than once');
+    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in,message,custom-emoji,group'])).toThrow('option was provided more than once');
     expect(() => parseRealClientArgs([...args, '--source-sha', 'a'.repeat(40)])).toThrow('unknown option');
   });
 
