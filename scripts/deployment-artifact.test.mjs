@@ -79,6 +79,28 @@ afterAll(() => {
 });
 
 describe('deployment artifact verification', () => {
+  it('keeps frame restrictions in the HTTP policy and out of the meta policy', () => {
+    const metaPolicy = privateContentSecurityPolicy(target.endpoint);
+    const securityHeaders = readFileSync(resolve('deploy/teagram-web/security-headers.conf'), 'utf8');
+
+    expect(metaPolicy.split('; ')).toEqual([
+      "default-src 'self'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "frame-src 'self' https://challenges.cloudflare.com",
+      "object-src 'none'",
+      "script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self' data:",
+      "media-src 'self' blob:",
+      "worker-src 'self' blob:",
+      "manifest-src 'self'",
+      "connect-src 'self' https: wss:;"
+    ]);
+    expect(securityHeaders).toContain("frame-ancestors 'none';");
+  });
+
   it('allows the fixed Cloudflare Turnstile origin in the deployed nginx CSP', () => {
     const nginx = readFileSync(resolve('deploy/teagram-web/nginx.conf'), 'utf8');
     const securityHeaders = readFileSync(resolve('deploy/teagram-web/security-headers.conf'), 'utf8');

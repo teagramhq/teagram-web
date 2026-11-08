@@ -31,7 +31,7 @@ vi.hoisted(() => {
 
 function wrapTag(text: string, type: 'messageEntityHashtag' | 'messageEntityCashtag') {
   const entities: MessageEntity[] = [{_: type, offset: 0, length: text.length}];
-  return wrapRichText(text, {entities}).querySelector('a.anchor-hashtag');
+  return wrapRichText(text, {entities}).querySelector<HTMLAnchorElement>('a.anchor-hashtag');
 }
 
 describe('wrapRichText tags', () => {
@@ -40,7 +40,8 @@ describe('wrapRichText tags', () => {
 
     expect(anchor.textContent).toBe('#news@telegram');
     expect(anchor.getAttribute('href')).toBe('tg://search_hashtag?hashtag=news%40telegram');
-    expect(anchor.getAttribute('onclick')).toBe('searchByHashtag(this)');
+    expect(anchor.dataset.clickHandler).toBe('searchByHashtag');
+    expect(anchor.getAttribute('onclick')).toBeNull();
   });
 
   test('wraps chat-specific cashtags without losing the dollar prefix', () => {
@@ -48,7 +49,8 @@ describe('wrapRichText tags', () => {
 
     expect(anchor.textContent).toBe('$TON@telegram');
     expect(anchor.getAttribute('href')).toBe('tg://search_hashtag?hashtag=%24TON%40telegram');
-    expect(anchor.getAttribute('onclick')).toBe('searchByHashtag(this)');
+    expect(anchor.dataset.clickHandler).toBe('searchByHashtag');
+    expect(anchor.getAttribute('onclick')).toBeNull();
   });
 
   test('skips streamed highlighting and rejects stale async highlight results', async() => {

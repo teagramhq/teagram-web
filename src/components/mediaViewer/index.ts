@@ -63,8 +63,8 @@ export const onMediaCaptionClick = (caption: HTMLElement, e: MouseEvent) => {
   }
 
   if(a instanceof HTMLAnchorElement && (!spoiler || isSpoilerVisible)) { // close viewer if it's t.me/ redirect
-    const onclick = a.getAttribute('onclick');
-    if(!onclick || onclick.includes('showMaskedAlert')) {
+    const clickHandler = a.dataset.clickHandler;
+    if(!clickHandler || clickHandler === 'showMaskedAlert') {
       return;
     }
 

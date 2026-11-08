@@ -269,7 +269,7 @@ describe('rowTsxController', () => {
       media,
       link: {
         href: 'https://example.com/path',
-        onClick: 'return false',
+        clickHandler: 'openWebPage',
         targetBlank: true
       },
       middleware: middleware.get()
@@ -277,7 +277,8 @@ describe('rowTsxController', () => {
 
     expect(row).toBeInstanceOf(HTMLAnchorElement);
     expect(row.href).toBe('https://example.com/path');
-    expect(row.getAttribute('onclick')).toBe('return false');
+    expect(row.dataset.clickHandler).toBe('openWebPage');
+    expect(row.getAttribute('onclick')).toBeNull();
     expect(row.target).toBe('_blank');
     expect(row.rel).toBe('noopener noreferrer');
     expect(row.querySelector('.row-title')?.textContent).toBe('Title');

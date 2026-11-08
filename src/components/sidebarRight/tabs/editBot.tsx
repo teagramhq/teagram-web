@@ -28,6 +28,7 @@ import {purchaseUsernameCaption}
 from '@components/sidebarLeft/tabs/purchaseUsernameCaption';
 import type {User} from '@layer';
 import {i18n, LangPackKey} from '@lib/langPack';
+import setAnchorClickHandler from '@helpers/dom/setAnchorClickHandler';
 import wrapUrl from '@lib/richTextProcessor/wrapUrl';
 import {useAppConfig} from '@stores/appState';
 
@@ -305,7 +306,7 @@ function BotFatherButton(props: {
       ref={(element) => {
         const anchor = element as HTMLAnchorElement;
         anchor.href = wrapped.url;
-        anchor.setAttribute('onclick', wrapped.onclick + '(this)');
+        if(wrapped.onclick) setAnchorClickHandler(anchor, wrapped.onclick);
       }}
     />
   );
