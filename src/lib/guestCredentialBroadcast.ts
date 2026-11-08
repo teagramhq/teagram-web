@@ -15,8 +15,10 @@ function storageEventKey(serverId: string) {
   return `${channelName(serverId).slice(0, -3)}-clear.v1`;
 }
 
-function reportTransportFailure() {
-  console.error(localInvalidationEvent, 'failed');
+type TransportFailureOperation = 'broadcast' | 'storage' | 'listener';
+
+function reportTransportFailure(operation: TransportFailureOperation) {
+  console.error(operation);
 }
 
 export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId()) {
@@ -29,7 +31,7 @@ export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId(
       channel.close();
     }
   } catch{
-    reportTransportFailure();
+    reportTransportFailure('broadcast');
   }
 
   try {
@@ -37,7 +39,7 @@ export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId(
     localStorage.setItem(key, `${Date.now()}-${++invalidationSequence}`);
     localStorage.removeItem(key);
   } catch{
-    reportTransportFailure();
+    reportTransportFailure('storage');
   }
 }
 
@@ -55,7 +57,7 @@ export function listenForGuestCredentialInvalidation(serverId: string, callback:
       if(event.data?.type === 'clear') callback();
     });
   } catch{
-    reportTransportFailure();
+    reportTransportFailure('listener');
   }
   if(typeof window !== 'undefined') {
     window.addEventListener('storage', onStorage);

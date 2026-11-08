@@ -38,7 +38,7 @@ describe('guest credential invalidation delivery', () => {
     expect(callback).toHaveBeenCalledOnce();
     expect(setItem).toHaveBeenCalledWith(storageEventKey, expect.any(String));
     expect(localStorage.getItem(storageEventKey)).toBeNull();
-    expect(console.error).toHaveBeenCalledWith('guest-credential-lifecycle-local-clear', 'failed');
+    expect(console.error).toHaveBeenCalledWith('broadcast');
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('account secret');
   });
 
@@ -61,7 +61,7 @@ describe('guest credential invalidation delivery', () => {
 
     expect(callback).toHaveBeenCalledOnce();
     expect(postMessage).toHaveBeenCalledWith({type: 'clear'});
-    expect(console.error).toHaveBeenCalledWith('guest-credential-lifecycle-local-clear', 'failed');
+    expect(console.error).toHaveBeenCalledWith('storage');
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('account secret');
   });
 
@@ -82,8 +82,7 @@ describe('guest credential invalidation delivery', () => {
     notifyGuestCredentialInvalidation('default');
 
     expect(callback).toHaveBeenCalledOnce();
-    expect(console.error).toHaveBeenCalledWith('guest-credential-lifecycle-local-clear', 'failed');
-    expect(console.error).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(console.error).mock.calls).toEqual([['broadcast'], ['storage']]);
     const report = JSON.stringify(vi.mocked(console.error).mock.calls);
     expect(report).not.toContain('account secret');
     expect(report).not.toContain('username secret');
@@ -98,7 +97,7 @@ describe('guest credential invalidation delivery', () => {
     const callback = vi.fn();
     unsubscribe = listenForGuestCredentialInvalidation('default', callback);
 
-    expect(console.error).toHaveBeenCalledWith('guest-credential-lifecycle-local-clear', 'failed');
+    expect(console.error).toHaveBeenCalledWith('listener');
 
     window.dispatchEvent(new StorageEvent('storage', {key: storageEventKey}));
 
@@ -121,7 +120,7 @@ describe('guest credential invalidation delivery', () => {
     expect(callback).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
     expect(localStorage.getItem(storageEventKey)).toBeNull();
-    expect(console.error).toHaveBeenCalledWith('guest-credential-lifecycle-local-clear', 'failed');
+    expect(console.error).toHaveBeenCalledWith('broadcast');
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('account secret');
   });
 
@@ -134,7 +133,7 @@ describe('guest credential invalidation delivery', () => {
 
     expect(callback).toHaveBeenCalledOnce();
     expect(localStorage.getItem(storageEventKey)).toBeNull();
-    expect(console.error).toHaveBeenCalledWith('guest-credential-lifecycle-local-clear', 'failed');
+    expect(console.error).toHaveBeenCalledWith('broadcast');
   });
 
   it('preserves server IDs containing the channel version when deriving the storage key', () => {
