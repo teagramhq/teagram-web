@@ -223,7 +223,7 @@ type EmojiTabItem = {
 export type EmojiTabCategory = StickersTabCategory<EmojiTabItem, {renderer: CustomEmojiRendererElement}>;
 export default class EmojiTab extends EmoticonsTabC<EmojiTabCategory, {emojis: AppEmoji[], localStickerSet?: {title: LangPackKey, stickers: MyDocument[]}}> {
   // its own queue, because the dropdown's is locked while the dropdown opens, which is when the first screen is wanted
-  private emojiImageQueue = new LazyLoadQueue(1, true);
+  private emojiImageQueue = new LazyLoadQueue(8, true);
   private closeScrollTop: number;
   private menuInnerScroll: ScrollableX;
   private isStandalone?: boolean;

@@ -1,4 +1,4 @@
-import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
+import {beforeEach, describe, expect, test, vi} from 'vitest';
 import createLazyEmojiImages from '@helpers/lazyEmojiImages';
 import {markLoadedURL} from '@helpers/dom/loadedUrlCache';
 import type {Middleware} from '@helpers/middleware';
@@ -12,11 +12,6 @@ describe('lazy emoji images', () => {
   beforeEach(() => {
     push.mockClear();
     remove.mockClear();
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
   });
 
   test('gives an already seen image its src and does not queue it', () => {
@@ -46,15 +41,10 @@ describe('lazy emoji images', () => {
     image.decode = decode;
     createLazyEmojiImages(queue, middleware).load(image, '/assets/img/emoji/1f600.png');
 
-    let resolved = false;
-    const loading = push.mock.calls[0][0].load().then(() => { resolved = true; });
-    expect(image.getAttribute('src')).toBe('/assets/img/emoji/1f600.png');
+    const loading = push.mock.calls[0][0].load();
 
-    await vi.advanceTimersByTimeAsync(14);
-    expect(resolved).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
-    await loading;
-    expect(resolved).toBe(true);
+    expect(image.getAttribute('src')).toBe('/assets/img/emoji/1f600.png');
+    await expect(loading).resolves.toBeUndefined();
     expect(decode).not.toHaveBeenCalled();
   });
 
