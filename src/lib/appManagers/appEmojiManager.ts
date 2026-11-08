@@ -443,11 +443,22 @@ export class AppEmojiManager extends AppManager {
     });
   }
 
-  public searchCustomEmoji(emoticon: string) {
-    return this.apiManager.invokeApiCacheable(
-      'messages.searchCustomEmoji',
-      {hash: 0, emoticon},
-      {cacheSeconds: 3600, syncIfHasResult: true}
-    ) as MaybePromise<EmojiList.emojiList>;
+  public async searchCustomEmoji(emoticon: string): Promise<EmojiList.emojiList> {
+    try {
+      return await this.apiManager.invokeApiCacheable(
+        'messages.searchCustomEmoji',
+        {hash: 0, emoticon},
+        {cacheSeconds: 3600, syncIfHasResult: true}
+      ) as EmojiList.emojiList;
+    } catch(error) {
+      const errorType = (error as ApiError)?.type as string | undefined;
+      if(errorType !== 'INPUT_METHOD_INVALID') {
+        throw error;
+      }
+
+      // Teagram servers can omit this optional search method; regular emoji and installed sets
+      // remain available, so treat the unsupported search as no matching custom emoji.
+      return {_: 'emojiList', hash: 0, document_id: []};
+    }
   }
 }
