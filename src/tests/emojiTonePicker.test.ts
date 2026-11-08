@@ -1,6 +1,6 @@
-import {simulateClickEvent} from '@helpers/dom/clickEvent';
+import {attachClickEvent, simulateClickEvent} from '@helpers/dom/clickEvent';
 import {getEmojiSkinToneVariants} from '@helpers/emojiSkinTone';
-import showEmojiTonePicker, {selectEmojiTone} from '@components/emoticonsDropdown/emojiTonePicker';
+import showEmojiTonePicker from '@components/emoticonsDropdown/emojiTonePicker';
 
 describe('emoji tone picker', () => {
   beforeEach(() => {
@@ -51,19 +51,29 @@ describe('emoji tone picker', () => {
 
   test('inserts the chosen tone into the composer once', () => {
     const target = document.createElement('button');
-    document.body.append(target);
+    const emojiTarget = document.createElement('span');
+    emojiTarget.classList.add('super-emoji');
+    const emoji = document.createElement('span');
+    emoji.textContent = '👋';
+    emojiTarget.append(emoji);
+    document.body.append(emojiTarget, target);
     const {baseEmoji, variants} = getEmojiSkinToneVariants('👋');
     const composer = document.createElement('textarea');
     composer.value = 'hello world';
     composer.setSelectionRange(6, 6);
+    const contextMenuEvent = new MouseEvent('contextmenu', {bubbles: true});
+    emojiTarget.dispatchEvent(contextMenuEvent);
     const insertAtCaret = vi.fn((emoji: string) => {
       composer.setRangeText(emoji, composer.selectionStart, composer.selectionEnd, 'end');
     });
-    const applyEmojiVariant = vi.fn();
+    const detachClick = attachClickEvent(emojiTarget, () => insertAtCaret(emoji.textContent));
+    const applyEmojiVariant = vi.fn((_baseEmoji: string, tone: number) => {
+      emoji.textContent = variants[tone];
+    });
     const saveEmojiVariant = vi.fn();
     const close = vi.fn();
     const picker = showEmojiTonePicker({
-      event: new MouseEvent('contextmenu'),
+      event: contextMenuEvent,
       variants,
       selectedTone: 0,
       renderEmoji: (emoji) => {
@@ -71,14 +81,10 @@ describe('emoji tone picker', () => {
         element.textContent = emoji;
         return element;
       },
-      onSelect: (tone) => selectEmojiTone({
-        baseEmoji,
-        variants,
-        tone,
-        applyEmojiVariant,
-        saveEmojiVariant,
-        onEmojiSelected: (emoji) => insertAtCaret(emoji.emoji)
-      }),
+      onSelect: (tone) => {
+        applyEmojiVariant(baseEmoji, tone);
+        saveEmojiVariant(baseEmoji, tone);
+      },
       close
     });
 
@@ -92,6 +98,7 @@ describe('emoji tone picker', () => {
     expect(saveEmojiVariant).toHaveBeenCalledWith(baseEmoji, 4);
     expect(close).toHaveBeenCalledOnce();
 
+    detachClick();
     picker.cleanup();
     vi.advanceTimersByTime(200);
   });
