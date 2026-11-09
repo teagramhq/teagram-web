@@ -31,7 +31,7 @@ export default async function wrapEmojiStatus({
       container.classList.add('emoji-status-text-color');
     }
 
-    await wrapSticker({
+    const sticker = await wrapSticker({
       doc,
       div: container,
       width: size.width,
@@ -45,6 +45,10 @@ export default async function wrapEmojiStatus({
       textColor: textColor || 'primary-color'
       // group: 'none'
     });
+
+    if(sticker?.render) {
+      loadPromises.push(sticker.render);
+    }
 
     // * a status torn down mid-render may leave its sticker load rejecting with MIDDLEWARE;
     // * consume that cancellation here but preserve other failures through the parent promise

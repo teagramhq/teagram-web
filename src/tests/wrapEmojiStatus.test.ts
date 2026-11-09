@@ -69,6 +69,56 @@ describe('wrapEmojiStatus', () => {
     expect(unhandled).not.toHaveBeenCalled();
   });
 
+  it('consumes a cancelled render when the status is torn down after wrapper setup', async() => {
+    let rejectRender!: (error: unknown) => void;
+    const render = new Promise<void>((_resolve, reject) => {
+      rejectRender = reject;
+    });
+    let active = true;
+    mocks.wrapSticker.mockResolvedValue({render} as any);
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    try {
+      const result = wrapEmojiStatus({
+        emojiStatus: status,
+        wrapOptions: {middleware: () => active} as any,
+        size: {width: 24, height: 24} as any
+      });
+      await vi.waitFor(() => expect(mocks.wrapSticker).toHaveBeenCalledOnce());
+      active = false;
+      rejectRender({type: 'MIDDLEWARE'});
+
+      await expect(result).resolves.toBeInstanceOf(HTMLElement);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+    }
+  });
+
+  it('keeps non-cancellation render failures observable after status teardown', async() => {
+    let rejectRender!: (error: Error) => void;
+    const render = new Promise<void>((_resolve, reject) => {
+      rejectRender = reject;
+    });
+    let active = true;
+    mocks.wrapSticker.mockResolvedValue({render} as any);
+
+    const result = wrapEmojiStatus({
+      emojiStatus: status,
+      wrapOptions: {middleware: () => active} as any,
+      size: {width: 24, height: 24} as any
+    });
+    await vi.waitFor(() => expect(mocks.wrapSticker).toHaveBeenCalledOnce());
+    active = false;
+    const error = new Error('render failed after teardown');
+    rejectRender(error);
+
+    await expect(result).rejects.toBe(error);
+  });
+
   it('keeps real sticker load failures observable after the status is torn down', async() => {
     let active = true;
     const error = new Error('sticker load failed after teardown');
