@@ -23,23 +23,21 @@ function reportTransportFailure(operation: TransportFailureOperation) {
 
 export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId()) {
   if(typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(localInvalidationEvent, {detail: serverId}));
+  let channel: BroadcastChannel | undefined;
   try {
-    const channel = new BroadcastChannel(channelName(serverId));
-    try {
-      channel.postMessage({type: 'clear'});
-    } finally {
-      channel.close();
-    }
+    channel = new BroadcastChannel(channelName(serverId));
+    channel.postMessage({type: 'clear'});
   } catch{
     reportTransportFailure('broadcast');
   }
+  channel?.close();
 
   try {
-    if(typeof localStorage !== 'undefined') {
-      const key = storageEventKey(serverId);
-      localStorage.setItem(key, `${Date.now()}-${++invalidationSequence}`);
-      localStorage.removeItem(key);
-    }
+    // Workers such as SharedWorker have no localStorage; skip delivery there instead of reporting a failure.
+    const storage = self.localStorage;
+    const key = storageEventKey(serverId);
+    storage?.setItem(key, `${Date.now()}-${++invalidationSequence}`);
+    storage?.removeItem(key);
   } catch{
     reportTransportFailure('storage');
   }
