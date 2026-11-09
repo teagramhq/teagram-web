@@ -4,6 +4,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {test} from 'node:test';
+import {COLD_CHAT_LIST_REPEATS, PERFORMANCE_MEASUREMENT_VERSION, SCENARIOS} from './policy.mjs';
 
 const workflow = readFileSync(new URL('../../.github/workflows/performance.yml', import.meta.url), 'utf8');
 const playwrightConfig = readFileSync(new URL('../../playwright.performance.config.ts', import.meta.url), 'utf8');
@@ -11,6 +12,83 @@ const performanceScale = readFileSync(new URL('../../e2e/performanceScale.spec.t
 const workerReplay = readFileSync(new URL('../../e2e/workerMessageReplay.spec.ts', import.meta.url), 'utf8');
 const chatPageSnapshotView = readFileSync(new URL('../../src/lib/chatPageSnapshotView.ts', import.meta.url), 'utf8');
 const stickerBaseCommit = readFileSync(new URL('../../.github/perf-sticker-base-commit', import.meta.url), 'utf8').trim();
+
+function firstStickerMeasurements() {
+  const samples = Object.fromEntries(['head'].map((variant) => [variant, Object.fromEntries(
+    ['cold', 'warm'].map((temperature) => [temperature, Array.from({length: 3}, () => ({
+      clickToFirstFrameMs: temperature === 'cold' ? 120 : 90,
+      clickToVisibleFrameMs: temperature === 'cold' ? 200 : 150
+    }))])
+  )]));
+  return {
+    repeats: 3,
+    samples,
+    medians: {
+      head: {
+        cold: {workerFrameMs: 120, visibleFrameMs: 200},
+        warm: {workerFrameMs: 90, visibleFrameMs: 150}
+      }
+    }
+  };
+}
+
+function workerRecorderMeasurements() {
+  return {
+    peers: {offMs: 10, onMs: 11, pairedDeltaMs: 1, iterations: 50},
+    dialogs: {offMs: 20, onMs: 21, pairedDeltaMs: 1, iterations: 50}
+  };
+}
+
+function runSummaryWithArtifacts({firstSticker = firstStickerMeasurements(), recorderReplay = workerRecorderMeasurements()} = {}) {
+  const directory = mkdtempSync(join(tmpdir(), 'tweb-performance-summary-validation-'));
+  const reportPath = join(directory, 'report.json');
+  const recorderReplayPath = join(directory, 'recorder-replay.json');
+  const historyDirectory = join(directory, 'history');
+  const makeSample = (key) => ({
+    ms: 100,
+    requests: 12,
+    rpcCallCount: 2,
+    domNodes: 300,
+    bundleBytes: 100_000,
+    longTasksOver50Ms: 0,
+    blockingTimeMs: 0,
+    maxLongTaskDurationMs: 0,
+    ...(key === 'scrollBack2k' ? {frameIntervals: 100, droppedFrames: 0, droppedFramePercent: 0} : {})
+  });
+  const head = Object.fromEntries(['1x', '100x'].map((scale) => [scale, Object.fromEntries(SCENARIOS.map(({key}) => [
+    key,
+    Array.from({length: scale === '100x' && key === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : 3}, () => makeSample(key))
+  ]))]));
+  const report = {
+    measurementVersion: PERFORMANCE_MEASUREMENT_VERSION,
+    fixtureVersion: 'fixture-v1',
+    serverCommit: 'server-v1',
+    fixtureServerCommit: 'fixture-server-v1',
+    requireBase: false,
+    diagnostics: {firstSticker, '100x': {}},
+    variants: {base: {'1x': {}, '100x': {}}, head}
+  };
+  writeFileSync(reportPath, JSON.stringify(report));
+  if(recorderReplay !== null) writeFileSync(recorderReplayPath, JSON.stringify(recorderReplay));
+
+  try {
+    return spawnSync(process.execPath, [new URL('./write-summary.mjs', import.meta.url).pathname], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PERF_REPORT_PATH: reportPath,
+        PERF_RECORDER_REPLAY_PATH: recorderReplayPath,
+        PERF_HISTORY_DIRECTORY: historyDirectory,
+        PERF_BROWSER_OUTCOME: 'success',
+        PERF_RECORDER_REPLAY_OUTCOME: 'success',
+        GITHUB_EVENT_NAME: 'pull_request',
+        GITHUB_STEP_SUMMARY: ''
+      }
+    });
+  } finally {
+    rmSync(directory, {recursive: true, force: true});
+  }
+}
 
 test('performance comparisons use uninstrumented head and base bundles', () => {
   assert.match(workflow, /^\s+pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
@@ -88,6 +166,44 @@ test('timing regressions remain report-only while the negative control checks de
   assert.match(performanceScale, /coldLoadEvaluation\.reportOnlyFailures/);
   assert.match(performanceScale, /report-only \(would fail\)/);
   assert.doesNotMatch(workerReplay, /expect\(measurement\.pairedDeltaMs/);
+});
+
+test('summary fails closed for missing, invalid, and short first-sticker sample artifacts', () => {
+  const invalid = firstStickerMeasurements();
+  invalid.samples.head.cold[0].clickToVisibleFrameMs = null;
+  const short = firstStickerMeasurements();
+  short.samples.head.warm.pop();
+  const cases = [
+    {firstSticker: null, failure: 'first sticker timing samples are missing or shorter than three repeats'},
+    {firstSticker: invalid, failure: 'first sticker head cold sample set is missing, invalid, or shorter than 3 repeats'},
+    {firstSticker: short, failure: 'first sticker head warm sample set is missing, invalid, or shorter than 3 repeats'}
+  ];
+
+  for(const {firstSticker, failure} of cases) {
+    const result = runSummaryWithArtifacts({firstSticker});
+
+    assert.equal(result.status, 1, result.stderr);
+    assert.ok(result.stdout.includes(failure), result.stdout);
+  }
+});
+
+test('summary fails closed for missing, invalid, and short worker-recorder artifacts', () => {
+  const invalid = workerRecorderMeasurements();
+  invalid.peers.pairedDeltaMs = null;
+  const short = workerRecorderMeasurements();
+  short.dialogs.iterations = 49;
+  const cases = [
+    {recorderReplay: null, failure: 'worker recorder replay measurements are missing'},
+    {recorderReplay: invalid, failure: 'worker recorder peers sample set is missing, invalid, or shorter than 50 iterations'},
+    {recorderReplay: short, failure: 'worker recorder dialogs sample set is missing, invalid, or shorter than 50 iterations'}
+  ];
+
+  for(const {recorderReplay, failure} of cases) {
+    const result = runSummaryWithArtifacts({recorderReplay});
+
+    assert.equal(result.status, 1, result.stderr);
+    assert.ok(result.stdout.includes(failure), result.stdout);
+  }
 });
 
 test('extra timing samples are reported without changing the three-repeat policy verdict', () => {
