@@ -13378,7 +13378,7 @@ export default class ChatBubbles {
     }
 
     // Keep history paging serialized through the deferred tail while peer mounting waits only for first paint.
-    const waitPromise = (resultPromise ? processPromise(resultPromise) : promise).then(() => deferredHistoryPromise);
+    const waitPromise = Promise.all([promise, resultPromise && processPromise(resultPromise)]).then(() => deferredHistoryPromise);
 
     if(isFirstMessageRender && liteMode.isAvailable('animations')/*  && false */) {
       let times = isAdditionRender ? 2 : 1;

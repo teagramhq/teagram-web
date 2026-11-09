@@ -2256,18 +2256,22 @@ test('prioritizes first paint while rendering a stored last-message batch', asyn
     cached: false,
     result: Promise.resolve({history: [79, 78, 77, 76, 75, 74]})
   }));
-  const deferredTails: Array<() => void> = [];
+  let releaseCachedBatch!: () => void;
+  const cachedBatchGate = new Promise<void>((resolve) => { releaseCachedBatch = resolve; });
+  const deferredTails: Array<{kind: 'cached' | 'fetched', resolve: () => void}> = [];
   const performHistoryResult = vi.fn(async(
-    _historyResult: unknown,
+    historyResult: unknown,
     _reverse: boolean,
     _includeEphemeralHistory: boolean,
     prioritizeFirstPaint: boolean,
     onDeferredHistory?: (promise: Promise<void>) => void
   ) => {
     if(!prioritizeFirstPaint) return;
+    const kind = (historyResult as {history: number[]}).history[0] === 99 ? 'cached' : 'fetched';
+    if(kind === 'cached') await cachedBatchGate;
     let resolveTail!: () => void;
     const tail = new Promise<void>((resolve) => { resolveTail = resolve; });
-    deferredTails.push(resolveTail);
+    deferredTails.push({kind, resolve: resolveTail});
     onDeferredHistory?.(tail);
   });
   const harness = Object.assign(Object.create(ChatBubbles.prototype), {
@@ -2286,26 +2290,30 @@ test('prioritizes first paint while rendering a stored last-message batch', asyn
 
   try {
     const result = await harness.getHistory(undefined, true, false, makeFullMid(peerId, 100));
-    await result.promise;
     await vi.waitFor(() => expect(performHistoryResult).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(deferredTails.some(({kind}) => kind === 'fetched')).toBe(true));
 
     expect(performHistoryResult).toHaveBeenNthCalledWith(1, expect.anything(), true, true, true, expect.any(Function));
     expect(performHistoryResult).toHaveBeenNthCalledWith(2, expect.anything(), true, true, true, expect.any(Function));
 
     let waitSettled = false;
     void result.waitPromise.then(() => waitSettled = true);
-    await Promise.resolve();
+    deferredTails.find(({kind}) => kind === 'fetched')!.resolve();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(waitSettled).toBe(false);
 
-    deferredTails[1]();
-    await Promise.resolve();
+    releaseCachedBatch();
+    await vi.waitFor(() => expect(deferredTails.some(({kind}) => kind === 'cached')).toBe(true));
+    await result.promise;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(waitSettled).toBe(false);
 
-    deferredTails[0]();
+    deferredTails.find(({kind}) => kind === 'cached')!.resolve();
     await result.waitPromise;
     expect(waitSettled).toBe(true);
   } finally {
-    deferredTails.forEach((resolve) => resolve());
+    releaseCachedBatch();
+    deferredTails.forEach(({resolve}) => resolve());
     if(previousHeight) Object.defineProperty(windowSize, 'height', previousHeight);
     else delete (windowSize as any).height;
   }
