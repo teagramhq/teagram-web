@@ -76,6 +76,7 @@ let ChatBubbles: typeof import('@components/chat/bubbles').default;
 let PEER_CHANGED_ERROR: typeof import('@components/chat/bubbles').PEER_CHANGED_ERROR;
 let Chat: typeof import('@components/chat/chat').default;
 let ChatInput: typeof import('@components/chat/input').default;
+let ChatTopbar: typeof import('@components/chat/topbar').default;
 let AppImManager: typeof import('@lib/appImManager').AppImManager;
 let AppPeersManager: typeof import('@appManagers/appPeersManager').AppPeersManager;
 let BubbleGroups: typeof import('@components/chat/bubbleGroups').default;
@@ -124,6 +125,7 @@ beforeAll(async() => {
   } = await import('@components/chat/bubbles'));
   Chat = (await import('@components/chat/chat')).default;
   ChatInput = (await import('@components/chat/input')).default;
+  ChatTopbar = (await import('@components/chat/topbar')).default;
   AppImManager = (await import('@lib/appImManager')).AppImManager;
   AppPeersManager = (await import('@appManagers/appPeersManager')).AppPeersManager;
   ({default: BubbleGroups, BubbleGroup} = await import('@components/chat/bubbleGroups'));
@@ -552,6 +554,28 @@ test('collects chat peer-change flags in one manager call', async() => {
   expect(manager.canManageDirectMessages).toHaveBeenCalledOnce();
 });
 
+test('avoids redundant peer lookups while preparing the chat topbar', async() => {
+  const isBroadcast = vi.fn(async() => false);
+  const isAnyChat = vi.fn(async() => false);
+  const manager = Object.assign(Object.create(ChatTopbar.prototype), {
+    chat: {peerId, type: ChatType.Pinned, isBroadcast: false},
+    managers: {appPeersManager: {isBroadcast, isAnyChat}},
+    createStatus: vi.fn(() => undefined),
+    setTitleManual: vi.fn(async() => vi.fn()),
+    setupPinnedMessageForPeer: vi.fn(async() => undefined),
+    plates: {
+      requests: {setPeerId: vi.fn(() => Promise.resolve({cached: true, result: undefined}))},
+      actions: {setPeerId: vi.fn(() => Promise.resolve({cached: true, result: undefined}))},
+      removeFee: {setPeerId: vi.fn(() => Promise.resolve({cached: true, result: undefined}))}
+    }
+  }) as any;
+
+  await ChatTopbar.prototype.finishPeerChange.call(manager, {peerId, middleware: () => true});
+
+  expect(isBroadcast).not.toHaveBeenCalled();
+  expect(isAnyChat).not.toHaveBeenCalled();
+});
+
 test('selects an uncached user chat without waiting for background readiness or migration lookup', async() => {
   const chat = {
     peerId,
@@ -655,7 +679,7 @@ test('does not wait for loaded-end checks before rendering the first history bat
     ]);
 
     expect(result).toBe('rendered');
-    expect(renderedMids).toEqual([100, 99, 98, 97, 96]);
+    expect(renderedMids).toEqual([100]);
     expect(deferredHistory).toHaveLength(1);
     let deferredSettled = false;
     void deferredHistory[0].then(() => deferredSettled = true);
@@ -723,7 +747,7 @@ test('renders the deferred history tail when a loaded-end check rejects', async(
       (promise: Promise<void>) => deferredHistory.push(promise)
     );
     await renderPromise;
-    expect(renderedMids).toEqual([100, 99, 98, 97, 96]);
+    expect(renderedMids).toEqual([100]);
     expect(deferredHistory).toHaveLength(1);
 
     rejectLoaded(new Error('loaded-end check failed'));
@@ -2440,7 +2464,7 @@ test('keeps larger history pages for later scrolling', async() => {
   }
 });
 
-test('renders the newest first-paint batch before the remaining initial history', async() => {
+test('renders the newest first-paint bubble before the remaining initial history', async() => {
   const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
   Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
 
@@ -2484,12 +2508,12 @@ test('renders the newest first-paint batch before the remaining initial history'
   );
 
   try {
-    await vi.waitFor(() => expect(renderedMids).toHaveLength(5));
-    expect(renderedMids).toEqual([100, 99, 98, 97, 96]);
+    await vi.waitFor(() => expect(renderedMids).toHaveLength(1));
+    expect(renderedMids).toEqual([100]);
 
     releaseFirstBatch();
     await renderPromise;
-    expect(renderedMids).toHaveLength(5);
+    expect(renderedMids).toHaveLength(1);
     await vi.waitFor(() => expect(renderedMids).toHaveLength(messages.length));
 
     expect(renderedMids).toEqual(messages.map(({mid}) => mid));
@@ -2798,13 +2822,13 @@ test('propagates deferred history failure and retries the original tail before p
     await vi.waitFor(() => expect(harness.getHistoryTopPromise).toBeUndefined());
     expect(harness.log.error).toHaveBeenCalledWith('history render failed:', peerId, true, failure);
     expect(scrollable.loadedAll.top).toBe(false);
-    expect(new Set(bubbles.keys())).toEqual(new Set([...messages.slice(0, 5).map(({mid}) => makeFullMid(peerId, mid)), makeFullMid(peerId, 93)]));
+    expect(new Set(bubbles.keys())).toEqual(new Set([...messages.slice(0, 1).map(({mid}) => makeFullMid(peerId, mid)), makeFullMid(peerId, 93)]));
     queuePromise = Promise.resolve();
     harness.loadMoreHistory(true);
     await harness.getHistoryTopPromise;
     await vi.waitFor(() => expect(harness.getHistoryTopPromise).toBeUndefined());
     expect(harness.getHistory1).not.toHaveBeenCalled();
-    expect(attempts).toEqual([100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 95, 94, 93, 92, 91, 95, 94, 93, 92, 91]);
+    expect(attempts).toEqual([100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 99, 98, 97, 96, 95, 94, 93, 92, 91, 99, 98, 97, 96, 95, 94, 93, 92, 91]);
     expect(new Set(bubbles.keys())).toEqual(new Set(messages.map(({mid}) => makeFullMid(peerId, mid))));
     expect(bubbles.get(makeFullMid(peerId, 93))).toBe(replacement);
     expect(scrollable.loadedAll.top).toBe(true);

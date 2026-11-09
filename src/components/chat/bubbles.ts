@@ -621,11 +621,6 @@ function getViewportHistoryLoadCount(viewportHeight: number) {
   return Math.min(40, Math.max(8, Math.ceil(viewportHeight / 80)));
 }
 
-// Fetch enough to fill the viewport, while mounting a smaller slice for first paint.
-function getFirstPaintHistoryLoadCount(viewportHeight: number) {
-  return Math.ceil(getViewportHistoryLoadCount(viewportHeight) / 2);
-}
-
 const getSponsoredPhoto = (sponsoredMessage: SponsoredMessage) => {
   return sponsoredMessage.photo;
   // const peerId = getPeerId(sponsoredMessage.from_id);
@@ -11795,7 +11790,8 @@ export default class ChatBubbles {
     const messages = /* await Promise.all */(history.map((mid) => {
       return typeof(mid) === 'number' ? this.chat.getMessage(mid) : mid;
     }));
-    const firstPaintCount = getFirstPaintHistoryLoadCount(windowSize.height);
+    // Keep the first batch minimal so the new chat can paint before the remaining history.
+    const firstPaintCount = 1;
     const deferLoadedChecks = prioritizeFirstPaint && messages.length > firstPaintCount;
 
     const setLoadedPromises: Promise<any>[] = [];

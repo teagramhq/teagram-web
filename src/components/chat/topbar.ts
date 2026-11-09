@@ -1375,9 +1375,6 @@ export default class ChatTopbar {
     const status = this.status = this.createStatus();
 
     const promises = [
-      this.managers.appPeersManager.isBroadcast(peerId),
-      this.managers.appPeersManager.isAnyChat(peerId),
-      peerId.isAnyChat() ? this.chat.peer : undefined,
       newAvatar?.readyThumbPromise,
       this.setTitleManual(),
       status?.prepare(true),
@@ -1389,9 +1386,6 @@ export default class ChatTopbar {
     ] as const;
 
     const [
-      isBroadcast,
-      isAnyChat,
-      chat,
       _,
       setTitleCallback,
       setStatusCallback,
