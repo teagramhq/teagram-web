@@ -590,6 +590,7 @@ async function installPeerChangeTracing(page: Page) {
       wrap(chat.bubbles, 'finishPeerChange', 'bubbles.finishPeerChange');
       wrap(chat.input, 'finishPeerChange', 'input.finishPeerChange');
       wrap(chat.topbar, 'finishPeerChange', 'topbar.finishPeerChange');
+      wrap(chat.bubbles?.scrollable, 'replaceChildren', 'scrollable.replaceChildren');
     };
     wrap(chat, 'setPeer', 'chat.setPeer');
     wrap(chat, 'onChangePeer', 'chat.onChangePeer');
@@ -608,7 +609,6 @@ async function installPeerChangeTracing(page: Page) {
     const im = (window as any).appImManager;
     wrap(im, 'setPeer', 'im.setPeer');
     wrap(im, 'setInnerPeer', 'im.setInnerPeer');
-    wrap(chat.bubbles.scrollable, 'replaceChildren', 'scrollable.replaceChildren');
     wrap(chat, 'revealPreparedBackground', 'chat.revealPreparedBackground');
     const observer = new MutationObserver(() => {
       if(document.querySelector('.bubbles .bubble[data-mid]')) {
