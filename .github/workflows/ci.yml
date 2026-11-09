@@ -349,11 +349,22 @@ jobs:
           bash -n .github/scripts/deploy-k8s-web.sh
           bash -n .github/scripts/start-k3d-cluster.sh
           bash -n .github/scripts/test-private-artifact-image.sh
+          bash -n .github/scripts/test-cloudflared-connector-contract.sh
+          bash -n .github/scripts/test-deploy-k8s-web-rollback.sh
           node --check scripts/real-client/browser.cjs
           node --check scripts/real-client/run.mjs
 
       - name: Check the deploy workflow contract
         run: PATH="$(go env GOPATH)/bin:$PATH" bash .github/scripts/test-deploy-workflow-contract.sh
+
+      - name: Exercise production tunnel connector filters
+        run: bash .github/scripts/test-cloudflared-connector-contract.sh
+
+      - name: Exercise k3s web rollout rollback paths
+        run: bash .github/scripts/test-deploy-k8s-web-rollback.sh
+
+      - name: Exercise web artifact smoke failures
+        run: node --test .github/scripts/test-smoke-k8s-web.mjs
 
       - name: Check Gitleaks range with an advanced base
         run: PATH="$(go env GOPATH)/bin:$PATH" bash .github/scripts/test-gitleaks-pr-range.sh
@@ -649,7 +660,10 @@ jobs:
           restored_image=$(kubectl get deployment/teagram-web --namespace teagram --output json |
             jq -er '[.spec.template.spec.containers[] | select(.name == "teagram-web") | .image] |
               if length == 1 then .[0] else error("expected one teagram-web container") end')
-          test "$restored_image" = "$IMAGE_REF"
+          [[ "$restored_image" == "$IMAGE_REF" ]] || {
+            echo "::error::rollback restored image $restored_image instead of $IMAGE_REF" >&2
+            exit 1
+          }
           kubectl rollout status deployment/teagram-web --namespace teagram --timeout=180s
 
       - name: Delete the throwaway k3s cluster

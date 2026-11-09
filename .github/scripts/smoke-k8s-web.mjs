@@ -52,7 +52,12 @@ if(expectedSourceCommit !== undefined) {
     throw new Error(`artifact manifest returned HTTP ${targetResponse.status}`);
   }
 
-  const target = await targetResponse.json();
+  let target;
+  try {
+    target = await targetResponse.json();
+  } catch {
+    throw new Error('artifact manifest is not JSON; the origin is serving the SPA fallback for /mtproto-target.json');
+  }
   if(target.sourceCommit !== expectedSourceCommit || target.artifactDigest !== expectedArtifactDigest) {
     throw new Error(`served artifact manifest does not match source ${expectedSourceCommit}`);
   }

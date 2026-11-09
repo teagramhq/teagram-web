@@ -90,6 +90,32 @@ check_publication_call_graph() {
     fail 'check: security must check out shallowly; its Gitleaks step fetches the pull request range itself'
 }
 
+publication_call_graph_self_test() (
+  set -euo pipefail
+  local tmp private_group
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  private_group="$(publication_query "$private_artifact_workflow" '.concurrency.group')"
+  TEST_PRIVATE_GROUP="$private_group" yq '.concurrency.group = strenv(TEST_PRIVATE_GROUP)' \
+    "$repository_ci_workflow" >"$tmp/ci.yml"
+  if DEPLOY_WORKFLOW="$workflow" \
+    PRIVATE_ARTIFACT_WORKFLOW="$private_artifact_workflow" \
+    REPOSITORY_CI_WORKFLOW="$tmp/ci.yml" \
+    DEPLOYMENT_STACK_WORKFLOW="$deployment_stack_workflow" \
+    bash "$0" --contract-only >/dev/null 2>&1; then
+    fail 'publication call-graph self-test accepted a shared concurrency group'
+  fi
+)
+
+publisher_pin_prefix() {
+  local pin_template
+  pin_template="$(publication_query "$private_artifact_workflow" \
+    '.jobs.publish-teagram-web-image.steps[] | select(.name == "Publish the immutable web image pin") | .with.name')"
+  [[ "$pin_template" =~ ^([A-Za-z0-9-]+)\$\{\{ ]] ||
+    fail 'web image pin upload name must start with a literal prefix before its template values'
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
 check_target_selection() (
   set -euo pipefail
   tmp="$(mktemp -d)"
@@ -108,17 +134,33 @@ if [[ "$api_path" == *'/actions/workflows/private-artifact.yml/runs?'* ]]; then
   printf '%s\n' "$TEST_RUNS"
 elif [[ "$api_path" =~ /actions/runs/([0-9]+)/artifacts ]]; then
   run_id="${BASH_REMATCH[1]}"
+  if [[ "$run_id" == "${TEST_ARTIFACT_API_FAILURE_RUN_ID:-}" ]]; then
+    exit 1
+  fi
+  if [[ "$run_id" == "${TEST_ARTIFACT_API_MALFORMED_RUN_ID:-}" ]]; then
+    printf '{"artifacts":{}}\n'
+    exit 0
+  fi
   if [[ "$run_id" == "$TEST_UNPUBLISHED_RUN_ID" ]]; then
     printf '{"artifacts":[]}\n'
   elif [[ "$run_id" == "$TEST_EVENT_RUN_ID" && "$TEST_EVENT_PUBLICATION" == true ]]; then
-    printf '{"artifacts":[{"name":"teagram-web-image-pin-%s-%s"}]}\n' "$RUN_HEAD_SHA" "$TEST_EVENT_DIGEST"
+    printf '{"artifacts":[{"name":"%s%s-%s","expired":false}]}\n' "$TEST_PIN_PREFIX" "$RUN_HEAD_SHA" "$TEST_EVENT_DIGEST"
   elif [[ "$run_id" == "$TEST_LATEST_RUN_ID" && "$TEST_LATEST_PUBLICATION" == true ]]; then
-    printf '{"artifacts":[{"name":"teagram-web-image-pin-%s-%s"}]}\n' "$TEST_LATEST_SHA" "$TEST_LATEST_DIGEST"
+    printf '{"artifacts":[{"name":"%s%s-%s","expired":false}]}\n' "$TEST_PIN_PREFIX" "$TEST_LATEST_SHA" "$TEST_LATEST_DIGEST"
   elif [[ "$run_id" == "$TEST_PUBLISHED_RUN_ID" && "$TEST_PUBLISHED_PUBLICATION" == true ]]; then
-    printf '{"artifacts":[{"name":"teagram-web-image-pin-%s-%s"}]}\n' "$TEST_PUBLISHED_SHA" "$TEST_PUBLISHED_DIGEST"
+    printf '{"artifacts":[{"name":"%s%s-%s","expired":false}]}\n' "$TEST_PIN_PREFIX" "$TEST_PUBLISHED_SHA" "$TEST_PUBLISHED_DIGEST"
   else
     printf '{"artifacts":[]}\n'
   fi
+elif [[ "$api_path" =~ /actions/runs/([0-9]+)/jobs ]]; then
+  run_id="${BASH_REMATCH[1]}"
+  [[ "${TEST_JOBS_API_FAILURE:-false}" != true ]] || exit 1
+  [[ "$run_id" == "$TEST_EVENT_RUN_ID" ]] || {
+    echo "unexpected job query for run $run_id" >&2
+    exit 1
+  }
+  printf '{"jobs":[{"name":"publish: teagram-web-image","conclusion":"%s"}]}\n' \
+    "$TEST_EVENT_JOB_CONCLUSION"
 elif [[ "$api_path" == *'/compare/'* ]]; then
   [[ "$TEST_COMPARISON" != api-error ]] || exit 1
   printf '%s\n' "$TEST_COMPARISON"
@@ -135,8 +177,11 @@ SH
   printf -v TEST_LATEST_DIGEST '%064d' 2
   printf -v TEST_PUBLISHED_DIGEST '%064d' 3
   export TEST_EVENT_SHA TEST_OTHER_SHA TEST_EVENT_DIGEST TEST_LATEST_DIGEST TEST_PUBLISHED_DIGEST
+  TEST_PIN_PREFIX="$(publisher_pin_prefix)"
+  export TEST_PIN_PREFIX
   export RUN_ID=100 RUN_HEAD_SHA="$TEST_EVENT_SHA"
   export TEST_EVENT_RUN_ID=100 TEST_EVENT_PUBLICATION=true
+  export TEST_EVENT_JOB_CONCLUSION=success
   export TEST_LATEST_RUN_ID=200 TEST_LATEST_SHA="$TEST_OTHER_SHA" TEST_LATEST_PUBLICATION=true
   export TEST_PUBLISHED_RUN_ID=300 TEST_PUBLISHED_SHA="$TEST_EVENT_SHA" TEST_PUBLISHED_PUBLICATION=false
   export TEST_UNPUBLISHED_RUN_ID=999 TEST_COMPARISON GITHUB_EVENT_NAME
@@ -147,7 +192,7 @@ SH
   TEST_EVENT_PUBLICATION=true
   TEST_LATEST_PUBLICATION=true
   TEST_UNPUBLISHED_RUN_ID=999
-  for status in ahead identical behind diverged; do
+  for status in ahead identical behind; do
     TEST_COMPARISON="$status"
     TEST_LATEST_SHA="$TEST_OTHER_SHA"
     if [[ "$status" == identical ]]; then
@@ -167,13 +212,29 @@ SH
       expected_digest="$TEST_LATEST_DIGEST"
     fi
     : >"$GITHUB_OUTPUT"
-    bash -euo pipefail "$tmp/target.sh" >/dev/null
+    local resolver_output=/dev/null
+    if [[ "$status" == behind ]]; then
+      resolver_output="$tmp/behind.out"
+    fi
+    bash -euo pipefail "$tmp/target.sh" >"$resolver_output"
     grep -Fxq "sha=$expected" "$GITHUB_OUTPUT" || fail "wrong SHA for workflow_run comparison $status"
     grep -Fxq "run_id=$expected_run_id" "$GITHUB_OUTPUT" || fail "wrong publication run for comparison $status"
-    expected_name="teagram-web-image-pin-$expected-$expected_digest"
+    expected_name="$TEST_PIN_PREFIX$expected-$expected_digest"
     grep -Fxq "artifact_name=$expected_name" "$GITHUB_OUTPUT" || fail "wrong image pin for workflow_run comparison $status"
     grep -Fxq "image_digest=$expected_digest" "$GITHUB_OUTPUT" || fail "wrong image digest for workflow_run comparison $status"
+    if [[ "$status" == behind ]]; then
+      grep -Fq "latest publication $TEST_LATEST_SHA is behind; keeping event SHA $RUN_HEAD_SHA" "$tmp/behind.out" ||
+        fail 'a behind comparison must log the event SHA it keeps'
+    fi
   done
+
+  TEST_COMPARISON=diverged
+  TEST_RUNS="$TEST_LATEST_RUN_ID"$'\t'"$TEST_OTHER_SHA"$'\n'"$RUN_ID"$'\t'"$RUN_HEAD_SHA"
+  if bash -euo pipefail "$tmp/target.sh" >"$tmp/diverged.out" 2>&1; then
+    fail 'a diverged publication comparison must fail the deploy'
+  fi
+  grep -Fq '::error::publication commits' "$tmp/diverged.out" ||
+    fail 'a diverged publication comparison must explain the failure'
 
   TEST_COMPARISON=api-error
   if bash -euo pipefail "$tmp/target.sh" >/dev/null; then
@@ -198,21 +259,82 @@ SH
   bash -euo pipefail "$tmp/target.sh" >/dev/null
   grep -Fxq "sha=$TEST_EVENT_SHA" "$GITHUB_OUTPUT" || fail 'dispatch must skip a newer run with no web image pin'
   grep -Fxq "run_id=$TEST_PUBLISHED_RUN_ID" "$GITHUB_OUTPUT" || fail 'dispatch must select the latest published web image pin'
-  expected_name="teagram-web-image-pin-$TEST_EVENT_SHA-$TEST_PUBLISHED_DIGEST"
+  expected_name="$TEST_PIN_PREFIX$TEST_EVENT_SHA-$TEST_PUBLISHED_DIGEST"
   grep -Fxq "artifact_name=$expected_name" "$GITHUB_OUTPUT" || fail 'dispatch selected the wrong image pin'
   grep -Fxq "image_digest=$TEST_PUBLISHED_DIGEST" "$GITHUB_OUTPUT" || fail 'dispatch selected the wrong image digest'
+
+  # A published event is not displaced by a newer run without a pin.
+  GITHUB_EVENT_NAME=workflow_run
+  RUN_ID=100
+  RUN_HEAD_SHA="$TEST_EVENT_SHA"
+  TEST_EVENT_RUN_ID=100
+  TEST_EVENT_PUBLICATION=true
+  TEST_EVENT_JOB_CONCLUSION=success
+  TEST_LATEST_RUN_ID=200
+  TEST_LATEST_SHA="$TEST_OTHER_SHA"
+  TEST_LATEST_PUBLICATION=false
+  TEST_RUNS="$TEST_LATEST_RUN_ID"$'\t'"$TEST_LATEST_SHA"$'\n'"$RUN_ID"$'\t'"$RUN_HEAD_SHA"
+  TEST_COMPARISON=identical
+  : >"$GITHUB_OUTPUT"
+  bash -euo pipefail "$tmp/target.sh" >/dev/null
+  grep -Fxq 'skip=false' "$GITHUB_OUTPUT" || fail 'a published event must deploy when a newer run has no pin'
+  grep -Fxq "sha=$TEST_EVENT_SHA" "$GITHUB_OUTPUT" || fail 'the published event must keep its SHA when the newer run has no pin'
+
+  # A successful publication with no artifact pin must fail closed.
+  TEST_EVENT_RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
+  TEST_EVENT_JOB_CONCLUSION=success
+  RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
+  RUN_HEAD_SHA="$TEST_OTHER_SHA"
+  : >"$GITHUB_OUTPUT"
+  if bash -euo pipefail "$tmp/target.sh" >"$tmp/missing-pin.out" 2>&1; then
+    fail 'a successful publisher without its image pin must fail'
+  fi
+  if grep -Fxq 'skip=true' "$GITHUB_OUTPUT"; then
+    fail 'a successful publisher without its image pin must not be skipped'
+  fi
+  grep -Fq '::error::web image publication job succeeded' "$tmp/missing-pin.out" ||
+    fail 'a successful publisher without its image pin must explain the error'
 
   # An unpublished event skips before deployment serialization.
   GITHUB_EVENT_NAME=workflow_run
   RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
   RUN_HEAD_SHA="$TEST_OTHER_SHA"
   TEST_EVENT_RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
+  TEST_EVENT_JOB_CONCLUSION=skipped
   : >"$GITHUB_OUTPUT"
   bash -euo pipefail "$tmp/target.sh" >/dev/null
   grep -Fxq 'skip=true' "$GITHUB_OUTPUT" || fail 'an unpublished workflow_run must be skipped'
   if grep -q '^sha=' "$GITHUB_OUTPUT"; then
     fail 'an unpublished workflow_run must not select a deploy SHA'
   fi
+
+  # Artifacts API errors are operational failures, never a no-pin skip.
+  GITHUB_EVENT_NAME=workflow_dispatch
+  TEST_RUNS="$TEST_LATEST_RUN_ID"$'\t'"$TEST_OTHER_SHA"
+  TEST_LATEST_PUBLICATION=true
+  export TEST_ARTIFACT_API_FAILURE_RUN_ID="$TEST_LATEST_RUN_ID"
+  : >"$GITHUB_OUTPUT"
+  if bash -euo pipefail "$tmp/target.sh" >"$tmp/artifact-api.out" 2>&1; then
+    fail 'an artifacts API failure must fail the deploy target resolver'
+  fi
+  if grep -Fxq 'skip=true' "$GITHUB_OUTPUT"; then
+    fail 'an artifacts API failure must not skip the deploy'
+  fi
+  grep -Fq '::error::could not query or validate successful web image publications' "$tmp/artifact-api.out" ||
+    fail 'an artifacts API failure must have a distinct diagnostic'
+  unset TEST_ARTIFACT_API_FAILURE_RUN_ID
+
+  export TEST_ARTIFACT_API_MALFORMED_RUN_ID="$TEST_LATEST_RUN_ID"
+  : >"$GITHUB_OUTPUT"
+  if bash -euo pipefail "$tmp/target.sh" >"$tmp/artifact-malformed.out" 2>&1; then
+    fail 'malformed artifacts metadata must fail the deploy target resolver'
+  fi
+  if grep -Fxq 'skip=true' "$GITHUB_OUTPUT"; then
+    fail 'malformed artifacts metadata must not skip the deploy'
+  fi
+  grep -Fq '::error::could not query or validate successful web image publications' "$tmp/artifact-malformed.out" ||
+    fail 'malformed artifacts metadata must have a distinct diagnostic'
+  unset TEST_ARTIFACT_API_MALFORMED_RUN_ID
 
   # A delayed deployment refreshes to the latest descendant after acquiring the slot.
   GITHUB_EVENT_NAME=workflow_run
@@ -228,16 +350,39 @@ SH
   TEST_RUNS="$TEST_LATEST_RUN_ID"$'\t'"$TEST_LATEST_SHA"$'\n'"$RUN_ID"$'\t'"$RUN_HEAD_SHA"
   BASE_SHA="$TEST_EVENT_SHA"
   BASE_RUN_ID=100
-  BASE_ARTIFACT_NAME="teagram-web-image-pin-$TEST_EVENT_SHA-$TEST_EVENT_DIGEST"
+  BASE_ARTIFACT_NAME="$TEST_PIN_PREFIX$TEST_EVENT_SHA-$TEST_EVENT_DIGEST"
   BASE_IMAGE_DIGEST="$TEST_EVENT_DIGEST"
   export BASE_SHA BASE_RUN_ID BASE_ARTIFACT_NAME BASE_IMAGE_DIGEST
   : >"$GITHUB_OUTPUT"
   bash -euo pipefail "$tmp/refresh.sh" >/dev/null
   grep -Fxq "sha=$TEST_OTHER_SHA" "$GITHUB_OUTPUT" || fail 'post-slot refresh must select the latest descendant'
   grep -Fxq "run_id=$TEST_LATEST_RUN_ID" "$GITHUB_OUTPUT" || fail 'post-slot refresh must use the latest publication run'
-  expected_name="teagram-web-image-pin-$TEST_OTHER_SHA-$TEST_PUBLISHED_DIGEST"
+  expected_name="$TEST_PIN_PREFIX$TEST_OTHER_SHA-$TEST_PUBLISHED_DIGEST"
   grep -Fxq "artifact_name=$expected_name" "$GITHUB_OUTPUT" || fail 'post-slot refresh must download the latest image pin'
   grep -Fxq "image_digest=$TEST_PUBLISHED_DIGEST" "$GITHUB_OUTPUT" || fail 'post-slot refresh must use the latest image digest'
+
+  TEST_COMPARISON=behind
+  : >"$GITHUB_OUTPUT"
+  bash -euo pipefail "$tmp/refresh.sh" >"$tmp/refresh-behind.out"
+  grep -Fxq "sha=$BASE_SHA" "$GITHUB_OUTPUT" || fail 'post-slot refresh must retain its pre-resolved SHA when latest is behind'
+  grep -Fq "latest publication $TEST_LATEST_SHA is behind; keeping pre-resolved SHA $BASE_SHA" "$tmp/refresh-behind.out" ||
+    fail 'post-slot refresh must log the pre-resolved SHA it keeps'
+
+  TEST_COMPARISON=diverged
+  if bash -euo pipefail "$tmp/refresh.sh" >"$tmp/refresh-diverged.out" 2>&1; then
+    fail 'a diverged post-slot comparison must fail the deploy'
+  fi
+  grep -Fq '::error::publication commits' "$tmp/refresh-diverged.out" ||
+    fail 'a diverged post-slot comparison must explain the failure'
+
+  TEST_COMPARISON=ahead
+  export TEST_ARTIFACT_API_FAILURE_RUN_ID="$TEST_LATEST_RUN_ID"
+  if bash -euo pipefail "$tmp/refresh.sh" >"$tmp/refresh-api.out" 2>&1; then
+    fail 'a post-slot artifacts API failure must fail the deploy'
+  fi
+  grep -Fq '::error::could not query or validate successful web image publications' "$tmp/refresh-api.out" ||
+    fail 'a post-slot artifacts API failure must have a distinct diagnostic'
+  unset TEST_ARTIFACT_API_FAILURE_RUN_ID
 
   RUN_HEAD_SHA=null
   if bash -euo pipefail "$tmp/target.sh" >/dev/null; then
@@ -326,7 +471,7 @@ check_contract() {
   [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Remove the deploy kubeconfig") | .if][0]')" == '${{ always() }}' ]] ||
     fail 'the deploy kubeconfig must be removed after every deployment attempt'
 
-  local deploy_run
+  local deploy_run publisher_prefix target_run refresh_run
   deploy_run="$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .run][0]')"
   [[ "$deploy_run" == *'.github/scripts/deploy-k8s-web.sh'* ]] ||
     fail 'production must use the shared rollback-safe k3s deployment script'
@@ -334,25 +479,21 @@ check_contract() {
     fail 'production must require exactly one ready k3s tunnel connector'
   [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .env.SMOKE_URL][0]')" == 'https://web.teagram.io/' ]] ||
     fail 'production smoke must verify the public web route'
+  publisher_prefix="$(publisher_pin_prefix)"
+  target_run="$(query '.jobs.check-published-image-pin.steps[] | select(.id == "target") | .run')"
+  refresh_run="$(query '.jobs.deploy-web.steps[] | select(.id == "refresh") | .run')"
+  for resolver in "$target_run" "$refresh_run"; do
+    [[ "$resolver" == *"pin_prefix='$publisher_prefix'"* &&
+      "$resolver" == *'test("^" + $prefix'* &&
+      "$resolver" == *' =~ ^${pin_prefix}'* ]] ||
+      fail 'deploy pin lookup must use the literal prefix from the publisher artifact name'
+  done
   if query '.jobs.deploy-web.steps[].run // ""' | grep -Fq '${{'; then
     fail 'run blocks must pass GitHub values through environment variables'
   fi
   if query '.jobs.deploy-web.steps[].run // ""' | grep -Eiq '(^|[[:space:]])ssh[[:space:]]'; then
     fail 'the k3s deployment must not use the legacy SSH deploy path'
   fi
-
-  grep -Fq 'kubectl apply --dry-run=server --filename "$manifest"' .github/scripts/deploy-k8s-web.sh ||
-    fail 'deployment script must server-side dry-run the rendered manifests'
-  grep -Fq 'kubectl apply --filename "$manifest"' .github/scripts/deploy-k8s-web.sh ||
-    fail 'deployment script must apply the rendered manifests'
-  grep -Fq 'kubectl rollout undo' .github/scripts/deploy-k8s-web.sh ||
-    fail 'deployment script must roll back failed releases'
-  grep -Fq 'smoke-k8s-web.mjs' .github/scripts/deploy-k8s-web.sh ||
-    fail 'deployment script must smoke the served web artifact'
-  grep -Fq 'rollout=verified sha=%s' .github/scripts/deploy-k8s-web.sh ||
-    fail 'deployment script must log the verified source SHA'
-  grep -Fq 'rollout=rollback-verified previous_revision=' .github/scripts/deploy-k8s-web.sh ||
-    fail 'deployment script must verify automatic rollback'
 
   local uses
   while IFS= read -r uses; do
@@ -380,6 +521,8 @@ self_test() {
     'del(.jobs.deploy-web.needs)'
     '.jobs.deploy-web.environment = "staging"'
     '.jobs.deploy-web.concurrency."cancel-in-progress" = true'
+    '(.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .env.REQUIRE_SINGLE_CLOUDFLARED) = false'
+    '(.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .env.SMOKE_URL) = "https://wrong.example/"'
     '(.jobs.deploy-web.steps[] | select(.uses | test("^actions/checkout@")) | .with.ref) = "${{ github.event.workflow_run.head_sha }}"'
     '(.jobs.deploy-web.steps[] | select(.uses | test("^actions/download-artifact@")) | .with."run-id") = "${{ github.run_id }}"'
     'del(.jobs.deploy-web.steps[] | select(.name == "Install the deploy kubeconfig").env.KUBECONFIG_CONTENT)'
@@ -397,6 +540,7 @@ self_test() {
 
 check_contract
 if [[ "${1:-}" != '--contract-only' ]]; then
+  publication_call_graph_self_test
   self_test
   printf 'deploy workflow contract holds\n'
 fi

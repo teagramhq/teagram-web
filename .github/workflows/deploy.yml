@@ -45,32 +45,53 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
+          pin_prefix='teagram-web-image-pin-'
+
           artifact_for_run() {
-            local candidate_run_id="$1" candidate_sha="$2" artifacts matches
+            local candidate_run_id="$1" candidate_sha="$2" artifacts matches match_count match
             artifacts=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id/artifacts?per_page=100") || return 2
-            matches=$(jq -r --arg sha "$candidate_sha" \
-              '[.artifacts[]? | select(.expired != true and (.name | test("^teagram-web-image-pin-" + $sha + "-[0-9a-f]{64}$"))) | .name] | .[]' \
-              <<<"$artifacts") || return 2
-            [[ -n "$matches" ]] || return 1
-            [[ "$matches" != *$'\n'* && "$matches" =~ ^teagram-web-image-pin-${candidate_sha}-([0-9a-f]{64})$ ]] || return 2
-            printf '%s\t%s\n' "$matches" "${BASH_REMATCH[1]}"
+            matches=$(jq -cer --arg sha "$candidate_sha" --arg prefix "$pin_prefix" '
+              if (.artifacts | type) != "array" then error("artifacts must be an array")
+              elif any(.artifacts[]; (.name | type) != "string" or (.expired | type) != "boolean") then
+                error("artifact metadata is malformed")
+              else
+                [.artifacts[] | select(.expired != true and (.name | test("^" + $prefix + $sha + "-[0-9a-f]{64}$"))) | .name]
+              end
+            ' <<<"$artifacts") || return 2
+            match_count=$(jq -r 'length' <<<"$matches") || return 2
+            [[ "$match_count" == 0 ]] && return 1
+            [[ "$match_count" == 1 ]] || return 2
+            match=$(jq -er '.[0]' <<<"$matches") || return 2
+            [[ "$match" =~ ^${pin_prefix}${candidate_sha}-([0-9a-f]{64})$ ]] || return 2
+            printf '%s\t%s\n' "$match" "${BASH_REMATCH[1]}"
+          }
+
+          publication_job_conclusion() {
+            local candidate_run_id="$1" jobs conclusion
+            jobs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id/jobs?per_page=100") || return 2
+            conclusion=$(jq -er '
+              [.jobs[]? | select(.name == "publish: teagram-web-image") | .conclusion] | unique |
+              if length == 1 and (.[0] | type == "string" and length > 0) then .[0]
+              else error("expected one web image publication job conclusion") end
+            ' <<<"$jobs") || return 2
+            printf '%s\n' "$conclusion"
           }
 
           latest_publication() {
             local runs candidate_run_id candidate_sha artifact artifact_name image_digest result
             runs=$(gh api --paginate \
               "repos/$GITHUB_REPOSITORY/actions/workflows/private-artifact.yml/runs?branch=master&event=push&status=success&per_page=100" \
-              --jq '.workflow_runs[] | [.id, .head_sha] | @tsv') || return 1
+              --jq 'if (.workflow_runs | type) != "array" then error("workflow_runs must be an array") elif any(.workflow_runs[]; (.id | type) != "number" or (.head_sha | type) != "string") then error("workflow run metadata is malformed") else .workflow_runs[] | [.id, .head_sha] | @tsv end') || return 2
             while IFS=$'\t' read -r candidate_run_id candidate_sha; do
               [[ -n "$candidate_run_id" ]] || continue
-              [[ "$candidate_run_id" =~ ^[0-9]+$ && "$candidate_sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+              [[ "$candidate_run_id" =~ ^[0-9]+$ && "$candidate_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
               if artifact=$(artifact_for_run "$candidate_run_id" "$candidate_sha"); then
                 IFS=$'\t' read -r artifact_name image_digest <<<"$artifact"
                 printf '%s\t%s\t%s\t%s\n' "$candidate_run_id" "$candidate_sha" "$artifact_name" "$image_digest"
                 return 0
               else
                 result=$?
-                [[ "$result" == 1 ]] || return 1
+                [[ "$result" == 1 ]] || return "$result"
               fi
             done <<<"$runs"
             return 1
@@ -87,19 +108,38 @@ jobs:
             else
               result=$?
               if [[ "$result" == 1 ]]; then
-                echo "::notice::publication run $RUN_ID produced no matching web image pin; skipping deployment"
-                printf 'skip=true\n' > "$GITHUB_OUTPUT"
-                exit 0
+                if publication_conclusion=$(publication_job_conclusion "$RUN_ID"); then
+                  if [[ "$publication_conclusion" == skipped ]]; then
+                    echo "::notice::web image publication job was skipped for run $RUN_ID; skipping deployment"
+                    printf 'skip=true\n' > "$GITHUB_OUTPUT"
+                    exit 0
+                  fi
+                  if [[ "$publication_conclusion" == success ]]; then
+                    echo "::error::web image publication job succeeded in run $RUN_ID but its image pin is missing"
+                  else
+                    echo "::error::web image publication job in run $RUN_ID has unexpected conclusion '$publication_conclusion'"
+                  fi
+                else
+                  echo "::error::could not verify the web image publication job for run $RUN_ID"
+                fi
+                exit 1
               fi
               echo "::error::could not verify the web image pin for publication run $RUN_ID"
               exit 1
             fi
           fi
 
-          latest=$(latest_publication) || {
-            echo "::error::no successful web image publication found on master"
+          if latest=$(latest_publication); then
+            :
+          else
+            result=$?
+            if [[ "$result" == 1 ]]; then
+              echo "::error::no successful web image publication found on master"
+            else
+              echo "::error::could not query or validate successful web image publications on master"
+            fi
             exit 1
-          }
+          fi
           IFS=$'\t' read -r latest_run_id latest_sha latest_artifact_name latest_image_digest <<<"$latest"
 
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
@@ -121,13 +161,18 @@ jobs:
               run_id="$latest_run_id"
               artifact_name="$latest_artifact_name"
               image_digest="$latest_image_digest"
-            elif [[ "$comparison" != behind && "$comparison" != diverged ]]; then
+            elif [[ "$comparison" == behind ]]; then
+              echo "latest publication $latest_sha is behind; keeping event SHA $sha"
+            elif [[ "$comparison" == diverged ]]; then
+              echo "::error::publication commits $sha and $latest_sha have diverged"
+              exit 1
+            else
               echo "::error::unexpected publication comparison '$comparison'"
               exit 1
             fi
           fi
 
-          [[ "$artifact_name" =~ ^teagram-web-image-pin-${sha}-([0-9a-f]{64})$ && "${BASH_REMATCH[1]}" == "$image_digest" ]] || {
+          [[ "$artifact_name" =~ ^${pin_prefix}${sha}-([0-9a-f]{64})$ && "${BASH_REMATCH[1]}" == "$image_digest" ]] || {
             echo "::error::selected web image pin does not match commit $sha"
             exit 1
           }
@@ -164,32 +209,42 @@ jobs:
           BASE_ARTIFACT_NAME: ${{ needs.check-published-image-pin.outputs.artifact_name }}
           BASE_IMAGE_DIGEST: ${{ needs.check-published-image-pin.outputs.image_digest }}
         run: |
+          pin_prefix='teagram-web-image-pin-'
+
           artifact_for_run() {
-            local candidate_run_id="$1" candidate_sha="$2" artifacts matches
+            local candidate_run_id="$1" candidate_sha="$2" artifacts matches match_count match
             artifacts=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id/artifacts?per_page=100") || return 2
-            matches=$(jq -r --arg sha "$candidate_sha" \
-              '[.artifacts[]? | select(.expired != true and (.name | test("^teagram-web-image-pin-" + $sha + "-[0-9a-f]{64}$"))) | .name] | .[]' \
-              <<<"$artifacts") || return 2
-            [[ -n "$matches" ]] || return 1
-            [[ "$matches" != *$'\n'* && "$matches" =~ ^teagram-web-image-pin-${candidate_sha}-([0-9a-f]{64})$ ]] || return 2
-            printf '%s\t%s\n' "$matches" "${BASH_REMATCH[1]}"
+            matches=$(jq -cer --arg sha "$candidate_sha" --arg prefix "$pin_prefix" '
+              if (.artifacts | type) != "array" then error("artifacts must be an array")
+              elif any(.artifacts[]; (.name | type) != "string" or (.expired | type) != "boolean") then
+                error("artifact metadata is malformed")
+              else
+                [.artifacts[] | select(.expired != true and (.name | test("^" + $prefix + $sha + "-[0-9a-f]{64}$"))) | .name]
+              end
+            ' <<<"$artifacts") || return 2
+            match_count=$(jq -r 'length' <<<"$matches") || return 2
+            [[ "$match_count" == 0 ]] && return 1
+            [[ "$match_count" == 1 ]] || return 2
+            match=$(jq -er '.[0]' <<<"$matches") || return 2
+            [[ "$match" =~ ^${pin_prefix}${candidate_sha}-([0-9a-f]{64})$ ]] || return 2
+            printf '%s\t%s\n' "$match" "${BASH_REMATCH[1]}"
           }
 
           latest_publication() {
             local runs candidate_run_id candidate_sha artifact artifact_name image_digest result
             runs=$(gh api --paginate \
               "repos/$GITHUB_REPOSITORY/actions/workflows/private-artifact.yml/runs?branch=master&event=push&status=success&per_page=100" \
-              --jq '.workflow_runs[] | [.id, .head_sha] | @tsv') || return 1
+              --jq 'if (.workflow_runs | type) != "array" then error("workflow_runs must be an array") elif any(.workflow_runs[]; (.id | type) != "number" or (.head_sha | type) != "string") then error("workflow run metadata is malformed") else .workflow_runs[] | [.id, .head_sha] | @tsv end') || return 2
             while IFS=$'\t' read -r candidate_run_id candidate_sha; do
               [[ -n "$candidate_run_id" ]] || continue
-              [[ "$candidate_run_id" =~ ^[0-9]+$ && "$candidate_sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+              [[ "$candidate_run_id" =~ ^[0-9]+$ && "$candidate_sha" =~ ^[0-9a-f]{40}$ ]] || return 2
               if artifact=$(artifact_for_run "$candidate_run_id" "$candidate_sha"); then
                 IFS=$'\t' read -r artifact_name image_digest <<<"$artifact"
                 printf '%s\t%s\t%s\t%s\n' "$candidate_run_id" "$candidate_sha" "$artifact_name" "$image_digest"
                 return 0
               else
                 result=$?
-                [[ "$result" == 1 ]] || return 1
+                [[ "$result" == 1 ]] || return "$result"
               fi
             done <<<"$runs"
             return 1
@@ -204,10 +259,17 @@ jobs:
             exit 1
           }
 
-          latest=$(latest_publication) || {
-            echo "::error::no successful web image publication found on master"
+          if latest=$(latest_publication); then
+            :
+          else
+            result=$?
+            if [[ "$result" == 1 ]]; then
+              echo "::error::no successful web image publication found on master"
+            else
+              echo "::error::could not query or validate successful web image publications on master"
+            fi
             exit 1
-          }
+          fi
           IFS=$'\t' read -r latest_run_id latest_sha latest_artifact_name latest_image_digest <<<"$latest"
           comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE_SHA...$latest_sha" --jq '.status') || {
             echo "::error::could not compare publication commits after acquiring deployment slot"
@@ -223,12 +285,17 @@ jobs:
             sha="$latest_sha"
             artifact_name="$latest_artifact_name"
             image_digest="$latest_image_digest"
-          elif [[ "$comparison" != behind && "$comparison" != diverged ]]; then
+          elif [[ "$comparison" == behind ]]; then
+            echo "latest publication $latest_sha is behind; keeping pre-resolved SHA $sha"
+          elif [[ "$comparison" == diverged ]]; then
+            echo "::error::publication commits $BASE_SHA and $latest_sha have diverged after acquiring the deployment slot"
+            exit 1
+          else
             echo "::error::unexpected publication comparison '$comparison' after acquiring deployment slot"
             exit 1
           fi
 
-          [[ "$artifact_name" =~ ^teagram-web-image-pin-${sha}-([0-9a-f]{64})$ && "${BASH_REMATCH[1]}" == "$image_digest" ]] || {
+          [[ "$artifact_name" =~ ^${pin_prefix}${sha}-([0-9a-f]{64})$ && "${BASH_REMATCH[1]}" == "$image_digest" ]] || {
             echo "::error::refreshed web image pin does not match commit $sha"
             exit 1
           }
@@ -262,13 +329,26 @@ jobs:
           IMAGE_DIGEST: ${{ steps.refresh.outputs.image_digest }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+          actual_sha="$(git rev-parse HEAD)" || {
+            echo '::error::could not read the checked out source commit'
+            exit 1
+          }
+          [[ "$actual_sha" == "$DEPLOY_SHA" ]] || {
+            echo "::error::checked out source commit $actual_sha does not match publication SHA $DEPLOY_SHA"
+            exit 1
+          }
           pin="$RUNNER_TEMP/web-image-pin/teagram-web-image-pin.json"
-          test -f "$pin" && test ! -L "$pin"
+          [[ -f "$pin" && ! -L "$pin" ]] || {
+            echo '::error::downloaded image pin must be a regular, non-symlink file'
+            exit 1
+          }
           jq -e --arg sha "$DEPLOY_SHA" \
             --arg image "ghcr.io/teagramhq/teagram-web@sha256:$IMAGE_DIGEST" \
             '.sourceCommit == $sha and .image == $image and (.artifactDigest | test("^sha256:[0-9a-f]{64}$"))' \
-            "$pin" >/dev/null
+            "$pin" >/dev/null || {
+              echo '::error::downloaded image pin metadata does not match the selected source and image digest'
+              exit 1
+            }
           printf 'artifact_digest=%s\n' "$(jq -r '.artifactDigest' "$pin")" >> "$GITHUB_OUTPUT"
 
       - name: Render the production web overlay
@@ -302,7 +382,10 @@ jobs:
           KUBECONFIG_CONTENT: ${{ secrets.KUBECONFIG }}
         run: |
           set -euo pipefail
-          test -n "$KUBECONFIG_CONTENT"
+          [[ -n "$KUBECONFIG_CONTENT" ]] || {
+            echo '::error::k3s-prod KUBECONFIG secret is empty'
+            exit 1
+          }
           install -d -m 700 "$RUNNER_TEMP/k8s"
           (umask 077 && printf '%s' "$KUBECONFIG_CONTENT" > "$RUNNER_TEMP/k8s/config")
           printf 'KUBECONFIG=%s\n' "$RUNNER_TEMP/k8s/config" >> "$GITHUB_ENV"
