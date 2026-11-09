@@ -19,6 +19,7 @@ import rootScope from '@lib/rootScope';
 import appSidebarRight from '@components/sidebarRight';
 import {StackedAvatarsTsx} from '@components/stackedAvatars';
 import {wrapAdaptiveCustomEmoji} from '@components/wrappers/customEmojiSimple';
+import {handleStickerError} from '@components/wrappers/sticker';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
 
 export function UnknownUserBubble(props: {
@@ -38,6 +39,19 @@ export function UnknownUserBubble(props: {
 
     const [, month, year] = m;
     return monthsLocalized[Number(month) - 1] + ' ' + year;
+  };
+
+  const getBotVerificationIcon = () => {
+    const {container, loadPromise} = wrapAdaptiveCustomEmoji({
+      docId: props.user.bot_verification_icon,
+      size: 32,
+      as: 'span',
+      wrapOptions: {
+        textColor: 'white'
+      }
+    });
+    void loadPromise.catch(handleStickerError);
+    return container;
   };
 
   const [commonChats] = createResource(() => {
@@ -115,14 +129,7 @@ export function UnknownUserBubble(props: {
         )}
         {props.user.bot_verification_icon && (
           <Footer
-            icon={wrapAdaptiveCustomEmoji({
-              docId: props.user.bot_verification_icon,
-              size: 32,
-              as: 'span',
-              wrapOptions: {
-                textColor: 'white'
-              }
-            }).container}
+            icon={getBotVerificationIcon()}
             text={wrapRichText(props.userFull.bot_verification.description)}
           />
         )}
