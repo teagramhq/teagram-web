@@ -44,7 +44,7 @@ vi.mock('@lib/rootScope', () => ({
   default: {addEventListener: vi.fn(), managers: {}}
 }));
 vi.mock('@lib/appImManager', () => ({default: {}}));
-vi.mock('@environment/userAgent', () => ({IS_MOBILE: false, IS_SAFARI: false}));
+vi.mock('@environment/userAgent', () => ({IS_FIREFOX: false, IS_MOBILE: false, IS_SAFARI: false}));
 vi.mock('@lib/apiManagerProxy', () => ({
   default: {
     getReaction: mocks.getReaction,
@@ -238,6 +238,41 @@ describe('reaction animation cleanup', () => {
         waitForFirstFrameCalls: mocks.waitForFirstFrame.mock.calls.length,
         unhandled
       }).toEqual({addEventListenerCalls: 0, waitForFirstFrameCalls: 0, unhandled: []});
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+      menu.cleanup();
+    }
+  });
+
+  it('handles cancelled fire-and-forget custom reaction sticker renders', async() => {
+    const document = {id: 'custom-emoji'};
+    const middleware = Object.assign(() => true, {onDestroy: vi.fn()});
+    const middlewareHelper = {get: () => middleware, clean: vi.fn()};
+    const menu = new ChatReactionsMenu({
+      managers: {
+        acknowledged: {
+          appEmojiManager: {
+            getCustomEmojiDocument: vi.fn().mockResolvedValue({cached: true, result: document})
+          }
+        }
+      } as any,
+      type: 'horizontal',
+      middleware: {create: () => middlewareHelper} as any,
+      onFinish: vi.fn(),
+      getOpenPosition: () => new DOMRect()
+    });
+    mocks.wrapSticker.mockImplementation(async() => ({render: Promise.reject({type: 'MIDDLEWARE'})}));
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    try {
+      await expect((menu as any).renderReaction({_: 'reactionCustomEmoji', document_id: 'custom-emoji'}))
+      .resolves.toEqual([]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(mocks.wrapSticker).toHaveBeenCalledOnce();
+      expect(unhandled).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandledRejection);
       menu.cleanup();

@@ -113,11 +113,17 @@ export default async function generateTitleIcons({
 
   let botVerification: HTMLElement;
   if((peer as User.user | Chat.channel).bot_verification_icon && !noBotVerifiedIcon) {
-    const {container} = wrapAdaptiveCustomEmoji({
+    const {container, loadPromise} = wrapAdaptiveCustomEmoji({
       docId: (peer as User.user | Chat.channel).bot_verification_icon,
       size: 24,
       wrapOptions
-    })
+    });
+    void loadPromise.catch((error) => {
+      if((error as ApiError)?.type !== 'MIDDLEWARE') {
+        log.error('Failed to render bot verification icon', error);
+      }
+    });
+
     botVerification = container;
     container.classList.add('peer-title-bot-verification');
   }

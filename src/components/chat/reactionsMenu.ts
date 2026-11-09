@@ -35,8 +35,11 @@ import partition from '@helpers/array/partition';
 import {PAID_REACTION_EMOJI_DOCID} from '@lib/customEmoji/constants';
 import {StarsStar} from '@components/popups/stars';
 import {cleanEmoji} from '@lib/richTextProcessor/fixEmoji';
+import {logger} from '@lib/logger';
 import {createReactionPickerEmojiTab} from './reactionsMenuEmojiAccess';
 import {onReactionAnimationRendered} from './reactionsMenuRender';
+
+const log = logger('ChatReactionsMenu');
 
 const REACTIONS_CLASS_NAME = 'btn-menu-reactions';
 const REACTION_CLASS_NAME = REACTIONS_CLASS_NAME + '-reaction';
@@ -607,12 +610,16 @@ export class ChatReactionsMenu {
       delete options.withThumb;
 
       const wrap = () => {
-        wrapSticker({
+        void wrapSticker({
           doc,
           div: appearWrapper,
           liteModeKey: false,
           play: availableReaction === undefined ? true : undefined,
           ...options
+        }).then(({render}) => render).catch((error) => {
+          if((error as ApiError)?.type !== 'MIDDLEWARE') {
+            log.error('Failed to render reaction sticker', error);
+          }
         });
       };
 
