@@ -1,9 +1,9 @@
 import {copyTextToClipboard} from '@helpers/clipboard';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import findUpClassName from '@helpers/dom/findUpClassName';
+import setAnchorClickHandler from '@helpers/dom/setAnchorClickHandler';
 import htmlToDocumentFragment from '@helpers/dom/htmlToDocumentFragment';
 import toggleDisability from '@helpers/dom/toggleDisability';
-import setAnchorClickHandler, {getAnchorClickHandler} from '@helpers/dom/setAnchorClickHandler';
 import {KeyboardButton, Message, ReplyMarkup, InlineQueryPeerType} from '@layer';
 import {i18n} from '@lib/langPack';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
@@ -85,7 +85,7 @@ export function getKeyboardButtonHandler({
           }
         });
 
-        const clickHandler = getAnchorClickHandler(anchor);
+        const clickHandler = anchor.dataset.clickHandler;
         if(clickHandler) setAnchorClickHandler(ref, clickHandler);
       });
 

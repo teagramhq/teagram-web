@@ -39,7 +39,7 @@ type InternalLinkAnchorType =
   | 'addstyle'
 ;
 
-export const UNSAFE_ANCHOR_LINK_TYPES: Set<string> = new Set([
+export const UNSAFE_ANCHOR_LINK_TYPES: Set<InternalLinkAnchorType> = new Set([
   'showMaskedAlert',
   'execBotCommand'
 ]);

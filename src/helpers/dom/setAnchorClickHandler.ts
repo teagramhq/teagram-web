@@ -1,53 +1,9 @@
-import type addAnchorListener from '@helpers/addAnchorListener';
-
-export type AnchorClickHandlerName =
-  | Parameters<typeof addAnchorListener>[0]['name']
-  | 'onFormattedDateClick'
-  | 'openWebPage'
-  | `tg_${string}`;
-
-type WindowWithAnchorClickHandlers = Window & Record<AnchorClickHandlerName, unknown>;
-
-const boundElements = new WeakSet<HTMLElement>();
-
-function getWindowHandler(handlerName: AnchorClickHandlerName) {
-  return (window as unknown as WindowWithAnchorClickHandlers)[handlerName];
-}
-
-export function getAnchorClickHandler(element: HTMLElement): AnchorClickHandlerName | undefined {
-  const handlerName = element.dataset.clickHandler;
-  if(handlerName === undefined) return;
-  if(!handlerName) throw new Error('Anchor click handler name cannot be empty');
-  return handlerName as AnchorClickHandlerName;
-}
-
-export function isMaskedLinkWarningHandler(handlerName?: AnchorClickHandlerName) {
-  return handlerName === 'showMaskedAlert';
-}
-
-export function clearAnchorClickHandler(element: HTMLElement) {
-  delete element.dataset.clickHandler;
-}
-
-export default function setAnchorClickHandler(element: HTMLElement, handlerName: AnchorClickHandlerName) {
-  if(typeof getWindowHandler(handlerName) !== 'function') {
-    throw new Error(`Anchor click handler "${handlerName}" is not installed on window`);
-  }
+// Binds a window-level click handler by name without an inline `onclick` attribute (blocked by the
+// content security policy). The name is mirrored in `data-click-handler` for code that needs to
+// inspect it. A missing name leaves the anchor unbound. Assigning `onclick` replaces an earlier binding; set `onclick = null` to remove one.
+export default function setAnchorClickHandler(element: HTMLElement, handlerName?: string) {
+  if(!handlerName) return;
 
   element.dataset.clickHandler = handlerName;
-  if(boundElements.has(element)) return;
-  boundElements.add(element);
-
-  element.addEventListener('click', (event) => {
-    const currentHandlerName = getAnchorClickHandler(element);
-    if(!currentHandlerName) return;
-
-    const currentHandler = getWindowHandler(currentHandlerName);
-    if(typeof currentHandler !== 'function') {
-      event.preventDefault();
-      throw new Error(`Anchor click handler "${currentHandlerName}" is not installed on window`);
-    }
-
-    currentHandler.call(window, element, event);
-  });
+  element.onclick = (event) => (window as any)[handlerName](element, event);
 }

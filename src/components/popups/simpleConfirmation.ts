@@ -1,6 +1,5 @@
 import PopupElement, {addCancelButton, PopupButton} from '@components/popups';
 import cancelEvent from '@helpers/dom/cancelEvent';
-import {clearAnchorClickHandler} from '@helpers/dom/setAnchorClickHandler';
 import type {MessageEntity} from '@layer';
 import {FormatterArguments, LangPackKey, i18n} from '@lib/langPack';
 import mergeEntities from '@lib/richTextProcessor/mergeEntities';
@@ -73,13 +72,10 @@ export class SimpleConfirmationPopup extends PopupElement {
       description.append(wrapRichText(options.descriptionText, {
         entities,
         contextSite: 'Teagram',
-        disabledEntities,
-        // Popup descriptions open every link in a protected new tab below, so they do not
-        // need the masked-link confirmation handler (which is not installed on auth pages).
-        passMaskedLinks: true
+        disabledEntities
       }));
       description.querySelectorAll('a').forEach((link) => {
-        clearAnchorClickHandler(link);
+        link.onclick = null;
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
       });

@@ -13,7 +13,6 @@ import capitalizeFirstLetter from '@helpers/string/capitalizeFirstLetter';
 import matchUrlProtocol from '@lib/richTextProcessor/matchUrlProtocol';
 import wrapUrl from '@lib/richTextProcessor/wrapUrl';
 import {setDirection} from '@helpers/dom/setInnerHTML';
-import setAnchorClickHandler from '@helpers/dom/setAnchorClickHandler';
 import setBlankToAnchor from '@lib/richTextProcessor/setBlankToAnchor';
 import {createSignal} from 'solid-js';
 import commonStateStorage from '@lib/commonStateStorage';
@@ -437,7 +436,10 @@ namespace I18n {
           a = document.createElement('a');
           const wrappedUrl = wrapUrl(url);
           a.href = wrappedUrl.url;
-          if(wrappedUrl.onclick) setAnchorClickHandler(a, wrappedUrl.onclick);
+          const handlerName = wrappedUrl.onclick;
+          // bound inline rather than through setAnchorClickHandler: this module loads with the
+          // first screen and the shared helper would grow that bundle for an uncommon case
+          if(handlerName) a.onclick = (event) => (window as any)[handlerName](a, event);
           setBlankToAnchor(a);
         } else {
           a = args[indexHolder.i++] as HTMLAnchorElement;

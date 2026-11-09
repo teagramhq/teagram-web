@@ -1,17 +1,32 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import setAnchorClickHandler, * as anchorClickHandlerModule from '@helpers/dom/setAnchorClickHandler';
-
-const anchorClickHandlerApi = anchorClickHandlerModule as unknown as {
-  getAnchorClickHandler?: (element: HTMLElement) => string | undefined,
-  clearAnchorClickHandler?: (element: HTMLElement) => void
-};
+import setAnchorClickHandler from '@helpers/dom/setAnchorClickHandler';
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function click(element: HTMLElement) {
+  const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+  element.dispatchEvent(event);
+  return event;
+}
+
 describe('anchor click handlers', () => {
-  it('reuses one listener when the handler changes', () => {
+  it('calls the named window handler with the element and the event without an inline attribute', () => {
+    const element = document.createElement('a');
+    const handler = vi.fn();
+    vi.stubGlobal('im', handler);
+
+    setAnchorClickHandler(element, 'im');
+    const event = click(element);
+
+    expect(element.getAttribute('onclick')).toBeNull();
+    expect(element.dataset.clickHandler).toBe('im');
+    expect(handler).toHaveBeenCalledOnce();
+    expect(handler).toHaveBeenCalledWith(element, event);
+  });
+
+  it('replaces the earlier binding when the handler changes', () => {
     const element = document.createElement('a');
     const previousHandler = vi.fn();
     const nextHandler = vi.fn();
@@ -20,35 +35,31 @@ describe('anchor click handlers', () => {
 
     setAnchorClickHandler(element, 'im');
     setAnchorClickHandler(element, 'showMaskedAlert');
-    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
-    element.dispatchEvent(event);
+    click(element);
 
     expect(previousHandler).not.toHaveBeenCalled();
     expect(nextHandler).toHaveBeenCalledOnce();
-    expect(nextHandler).toHaveBeenCalledWith(element, event);
+    expect(element.dataset.clickHandler).toBe('showMaskedAlert');
   });
 
-  it('fails when a requested handler is not installed', () => {
+  it('leaves the anchor unbound without a handler name', () => {
     const element = document.createElement('a');
 
-    expect(() => setAnchorClickHandler(element, 'missingHandler' as never))
-    .toThrow(/missingHandler/);
-    expect(anchorClickHandlerApi.getAnchorClickHandler?.(element)).toBeUndefined();
+    setAnchorClickHandler(element, undefined);
+
+    expect(element.onclick).toBeNull();
+    expect(element.dataset.clickHandler).toBeUndefined();
   });
 
-  it('exposes the handler and clears it so later clicks do nothing', () => {
+  it('stops calling the handler once onclick is cleared', () => {
     const element = document.createElement('a');
     const handler = vi.fn();
     vi.stubGlobal('im', handler);
     setAnchorClickHandler(element, 'im');
 
-    expect(anchorClickHandlerApi.getAnchorClickHandler?.(element)).toBe('im');
-    expect(anchorClickHandlerApi.clearAnchorClickHandler).toBeTypeOf('function');
-    anchorClickHandlerApi.clearAnchorClickHandler?.(element);
-    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
-    element.dispatchEvent(event);
+    element.onclick = null;
+    click(element);
 
-    expect(anchorClickHandlerApi.getAnchorClickHandler?.(element)).toBeUndefined();
     expect(handler).not.toHaveBeenCalled();
   });
 });

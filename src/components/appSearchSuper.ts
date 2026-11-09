@@ -13,7 +13,6 @@ import useHeavyAnimationCheck, {getHeavyAnimationPromise} from '@hooks/useHeavyA
 import I18n, {LangPackKey, i18n, join} from '@lib/langPack';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import {getMiddleware, Middleware, MiddlewareHelper} from '@helpers/middleware';
-import {getAnchorClickHandler} from '@helpers/dom/setAnchorClickHandler';
 import {BotMenuButton, ChannelParticipant, Chat, ChatFull, ChatParticipant, ChatParticipants, Document, Message, MessageMedia, MessagesChats, MessagesFilter, Peer, Photo, StoryItem, Update, User, UserFull, WebPage} from '@layer';
 import SortedUserList from '@components/sortedUserList';
 import findUpTag from '@helpers/dom/findUpTag';
@@ -1401,7 +1400,7 @@ export default class AppSearchSuper {
       media: previewDiv,
       link: aIsAnchor ? {
         href: a.href,
-        clickHandler: getAnchorClickHandler(a),
+        clickHandler: a.dataset.clickHandler,
         targetBlank: a.target === '_blank'
       } : undefined,
       middleware

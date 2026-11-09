@@ -23,7 +23,7 @@ import {SolidJSHotReloadGuardContextValue, useHotReloadGuard} from '@lib/solidjs
 import {formatDate, formatFullSentTime} from '@helpers/date';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import cancelEvent from '@helpers/dom/cancelEvent';
-import setAnchorClickHandler, {clearAnchorClickHandler, getAnchorClickHandler, isMaskedLinkWarningHandler} from '@helpers/dom/setAnchorClickHandler';
+import setAnchorClickHandler from '@helpers/dom/setAnchorClickHandler';
 import Scrollable, {ScrollableContext} from '@components/scrollable2';
 import fastSmoothScroll, {fastSmoothScrollToStart} from '@helpers/fastSmoothScroll';
 import Animated from '@helpers/solid/animations';
@@ -1247,7 +1247,7 @@ function Block(props: {
               if(!element) return;
 
               const clickHandler = wrapped().onclick;
-              if(hasDisabledNavigation(context) || !clickHandler) clearAnchorClickHandler(element);
+              if(hasDisabledNavigation(context) || !clickHandler) element.onclick = null;
               else setAnchorClickHandler(element, clickHandler);
             });
             const photo = createMemo(() => article.photo_id ?
@@ -1643,14 +1643,14 @@ function RichTextRenderer(props: {text: RichText}) {
     typesetMath: boolean
   ) => {
     fragment.querySelectorAll<HTMLAnchorElement>('a').forEach((el) => {
-      if(getAnchorClickHandler(el) === 'tg_iv') el.classList.add(styles.Anchor);
+      if(el.dataset.clickHandler === 'tg_iv') el.classList.add(styles.Anchor);
     });
     // In-page fragment links (`#x`) get wrapped by wrapUrl into `https://#x` and flagged as
     // masked → wrapRichText attaches `showMaskedAlert` onclick. That alert is meaningless for
     // a same-page scroll, strip it so the IV onClick delegator can run scrollToAnchor.
     fragment.querySelectorAll<HTMLAnchorElement>('a.anchor-url').forEach((el) => {
-      if(isMaskedLinkWarningHandler(getAnchorClickHandler(el)) && FRAGMENT_HREF_RE.test(el.getAttribute('href') || '')) {
-        clearAnchorClickHandler(el);
+      if(el.dataset.clickHandler === 'showMaskedAlert' && FRAGMENT_HREF_RE.test(el.getAttribute('href') || '')) {
+        el.onclick = null;
       }
     });
     // Inline math markers (`$x$`) are carried as plain-text base64 by the parser. Decode them into
