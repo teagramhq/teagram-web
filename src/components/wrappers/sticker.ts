@@ -53,6 +53,10 @@ const locksUrls: {[docId: string]: string} = {};
 
 export const videosCache: {[key: string]: Promise<any>} = {};
 
+export function ignoreMiddlewareCancellation(error: unknown) {
+  if((error as ApiError)?.type !== 'MIDDLEWARE') throw error;
+}
+
 const getThumbFromContainer = (container: HTMLElement) => {
   let element = container.firstElementChild as HTMLElement;
   if(element && element.classList.contains('premium-sticker-lock')) {
@@ -791,7 +795,7 @@ export async function fireStickerEffect({e, container, doc, managers, middleware
   try {
     await loadPromise;
   } catch(error) {
-    if((error as ApiError)?.type !== 'MIDDLEWARE') throw error;
+    ignoreMiddlewareCancellation(error);
     return;
   }
 
@@ -818,9 +822,7 @@ export async function fireStickerEffect({e, container, doc, managers, middleware
     player.addEventListener('destroy', () => {
       delete container.dataset.playing;
     });
-  }, (error) => {
-    if((error as ApiError)?.type !== 'MIDDLEWARE') throw error;
-  });
+  }, ignoreMiddlewareCancellation);
 }
 
 function attachStickerEffectHandler(options: Omit<Parameters<typeof fireStickerEffect>[0], 'e'>) {

@@ -12,6 +12,7 @@ import PopupPremium from '@components/popups/premium';
 import PopupStarGiftInfo from '@components/popups/starGiftInfo';
 import {openEmojiStatusPickerSafely} from '@components/sidebarLeft/emojiStatus';
 import {wrapAdaptiveCustomEmoji} from '@components/wrappers/customEmojiSimple';
+import {ignoreMiddlewareCancellation} from '@components/wrappers/sticker';
 import wrapEmojiStatus from '@components/wrappers/emojiStatus';
 
 const log = logger('GenerateTitleIcons');
@@ -118,11 +119,7 @@ export default async function generateTitleIcons({
       size: 24,
       wrapOptions
     });
-    void loadPromise.catch((error) => {
-      if((error as ApiError)?.type !== 'MIDDLEWARE') {
-        log.error('Failed to render bot verification icon', error);
-      }
-    });
+    void loadPromise.catch(ignoreMiddlewareCancellation);
 
     botVerification = container;
     container.classList.add('peer-title-bot-verification');

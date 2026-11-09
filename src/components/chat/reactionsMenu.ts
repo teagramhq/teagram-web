@@ -25,7 +25,7 @@ import animationIntersector, {AnimationItemGroup} from '@components/animationInt
 import ButtonIcon from '@components/buttonIcon';
 import {EmoticonsDropdown} from '@components/emoticonsDropdown';
 import EmojiTab from '@components/emoticonsDropdown/tabs/emoji';
-import wrapSticker from '@components/wrappers/sticker';
+import wrapSticker, {ignoreMiddlewareCancellation} from '@components/wrappers/sticker';
 import {i18n} from '@lib/langPack';
 import anchorCallback from '@helpers/dom/anchorCallback';
 import PopupPremium from '@components/popups/premium';
@@ -35,11 +35,8 @@ import partition from '@helpers/array/partition';
 import {PAID_REACTION_EMOJI_DOCID} from '@lib/customEmoji/constants';
 import {StarsStar} from '@components/popups/stars';
 import {cleanEmoji} from '@lib/richTextProcessor/fixEmoji';
-import {logger} from '@lib/logger';
 import {createReactionPickerEmojiTab} from './reactionsMenuEmojiAccess';
 import {onReactionAnimationRendered} from './reactionsMenuRender';
-
-const log = logger('ChatReactionsMenu');
 
 const REACTIONS_CLASS_NAME = 'btn-menu-reactions';
 const REACTION_CLASS_NAME = REACTIONS_CLASS_NAME + '-reaction';
@@ -616,11 +613,7 @@ export class ChatReactionsMenu {
           liteModeKey: false,
           play: availableReaction === undefined ? true : undefined,
           ...options
-        }).then(({render}) => render).catch((error) => {
-          if((error as ApiError)?.type !== 'MIDDLEWARE') {
-            log.error('Failed to render reaction sticker', error);
-          }
-        });
+        }).then(({render}) => render).catch(ignoreMiddlewareCancellation);
       };
 
       let doc = availableReaction?.static_icon, delay = false;

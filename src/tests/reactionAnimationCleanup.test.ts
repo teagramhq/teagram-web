@@ -36,6 +36,9 @@ const mocks = vi.hoisted(() => {
     loadAnimationAsAsset: vi.fn(),
     waitForFirstFrame: vi.fn(() => Promise.resolve()),
     wrapSticker: vi.fn(),
+    ignoreMiddlewareCancellation: (error: {type?: string}) => {
+      if(error?.type !== 'MIDDLEWARE') throw error;
+    },
     wrapStickerAnimation: vi.fn()
   };
 });
@@ -44,7 +47,7 @@ vi.mock('@lib/rootScope', () => ({
   default: {addEventListener: vi.fn(), managers: {}}
 }));
 vi.mock('@lib/appImManager', () => ({default: {}}));
-vi.mock('@environment/userAgent', () => ({IS_FIREFOX: false, IS_MOBILE: false, IS_SAFARI: false}));
+vi.mock('@environment/userAgent', () => ({IS_MOBILE: false, IS_SAFARI: false}));
 vi.mock('@lib/apiManagerProxy', () => ({
   default: {
     getReaction: mocks.getReaction,
@@ -81,7 +84,10 @@ vi.mock('@components/sparkles', () => ({Sparkles: () => document.createElement('
 vi.mock('@components/animationIntersector', () => ({
   default: {setOverrideIdleGroup: vi.fn(), checkAnimations: vi.fn(), addAnimation: vi.fn()}
 }));
-vi.mock('@components/wrappers/sticker', () => ({default: mocks.wrapSticker}));
+vi.mock('@components/wrappers/sticker', () => ({
+  default: mocks.wrapSticker,
+  ignoreMiddlewareCancellation: mocks.ignoreMiddlewareCancellation
+}));
 vi.mock('@components/wrappers/stickerAnimation', () => ({default: mocks.wrapStickerAnimation}));
 vi.mock('@components/chat/reactions', () => ({savedReactionTags: []}));
 

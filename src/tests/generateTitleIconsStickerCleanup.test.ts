@@ -16,7 +16,14 @@ vi.mock('@components/popups', () => ({default: {createPopup: vi.fn()}}));
 vi.mock('@components/popups/premium', () => ({default: {show: vi.fn()}}));
 vi.mock('@components/popups/starGiftInfo', () => ({default: {}}));
 vi.mock('@components/sidebarLeft/emojiStatus', () => ({openEmojiStatusPickerSafely: vi.fn()}));
-vi.mock('@components/wrappers/customEmojiSimple', () => ({wrapAdaptiveCustomEmoji: mocks.wrapAdaptiveCustomEmoji}));
+vi.mock('@components/wrappers/customEmojiSimple', () => ({
+  wrapAdaptiveCustomEmoji: mocks.wrapAdaptiveCustomEmoji
+}));
+vi.mock('@components/wrappers/sticker', () => ({
+  ignoreMiddlewareCancellation: (error: {type?: string}) => {
+    if(error?.type !== 'MIDDLEWARE') throw error;
+  }
+}));
 vi.mock('@components/wrappers/emojiStatus', () => ({default: vi.fn()}));
 
 import generateTitleIcons from '@components/generateTitleIcons';
