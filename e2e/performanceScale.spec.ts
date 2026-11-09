@@ -1144,10 +1144,14 @@ async function describeRow(row: Locator) {
 async function installSendUiTiming(page: Page, text: string) {
   await page.evaluate((sendText) => {
     const composer = document.querySelector<HTMLElement>('.input-message-input:not(.input-field-input-fake)[contenteditable="true"]');
-    const bubbles = document.querySelector<HTMLElement>('#page-chats .bubbles');
-    if(!composer || !bubbles) throw new Error('send UI timing could not find the active composer and bubbles');
+    const pageChats = document.querySelector<HTMLElement>('#page-chats');
+    const bubbles = pageChats?.querySelector<HTMLElement>('.bubbles');
+    if(!composer || !pageChats || !bubbles) throw new Error('send UI timing could not find the active composer and bubbles');
 
-    const state: {startedAt: number | null, elapsedMs: number | null} = {startedAt: null, elapsedMs: null};
+    const state: {
+      startedAt: number | null,
+      elapsedMs: number | null
+    } = {startedAt: null, elapsedMs: null};
     const matchesBubble = (node: Node, searchDescendants = false) => {
       const element = node instanceof Element ? node : node.parentElement;
       if(!element) return false;
@@ -1165,17 +1169,21 @@ async function installSendUiTiming(page: Page, text: string) {
       }
     };
     const onKeydown = (event: KeyboardEvent) => {
-      if(event.key !== 'Enter' || event.shiftKey || event.isComposing || state.startedAt !== null) return;
+      if(!(event.target instanceof Element) || !event.target.closest('.input-message-input:not(.input-field-input-fake)[contenteditable="true"]')) return;
+      if(event.key !== 'Enter' || event.shiftKey) return;
+      if(event.isComposing) return;
+      if(state.startedAt !== null) return;
       state.startedAt = performance.now();
     };
     const observer = new MutationObserver(recordBubbleInsertion);
-    observer.observe(bubbles, {childList: true, subtree: true, characterData: true});
-    composer.addEventListener('keydown', onKeydown, true);
+    // Keep observing if chat setup replaces the bubbles element before the send completes.
+    observer.observe(pageChats, {childList: true, subtree: true, characterData: true});
+    document.addEventListener('keydown', onKeydown, true);
     (window as any).__teagramSendUiTiming = {
       state,
       cleanup: () => {
         observer.disconnect();
-        composer.removeEventListener('keydown', onKeydown, true);
+        document.removeEventListener('keydown', onKeydown, true);
         delete (window as any).__teagramSendUiTiming;
       }
     };
@@ -1183,15 +1191,15 @@ async function installSendUiTiming(page: Page, text: string) {
 }
 
 async function finishSendUiTiming(page: Page) {
-  const elapsedMs = await page.evaluate(() => {
+  const result = await page.evaluate(() => {
     const timing = (window as any).__teagramSendUiTiming;
     if(!timing) return undefined;
-    const {elapsedMs} = timing.state;
+    const elapsedMs = timing.state.elapsedMs;
     timing.cleanup();
     return elapsedMs;
   });
-  if(!Number.isFinite(elapsedMs)) throw new Error('in-page Enter-to-bubble timing did not observe the outgoing bubble');
-  return elapsedMs as number;
+  if(!Number.isFinite(result)) throw new Error('in-page Enter-to-bubble timing did not observe the outgoing bubble');
+  return result as number;
 }
 
 async function sendMessage(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void) {
@@ -2049,4 +2057,53 @@ test('blocks repeated injected 100 ms main-thread stalls during cold chat list l
   const coldLoadFailures = coldLoadEvaluation.blockingFailures.filter((failure) => failure.startsWith('100x coldChatList: '));
   const blockingTimes = (samples: Metric[]) => samples.map((sample) => sample.blockingTimeMs);
   expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `100 ms control was not blocked: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs same-phase head ${JSON.stringify(blockingTimes(controlSamples))} ms`).toBe(true);
+});
+
+test('tracks an outgoing bubble after the bubbles container is replaced', async({page}) => {
+  const text = 'replacement-send';
+  await page.setContent('<main id="page-chats"><div class="bubbles"></div><div class="input-message-input" contenteditable="true"></div></main>');
+  await installSendUiTiming(page, text);
+  await page.locator('.input-message-input').press('Enter');
+  await page.locator('#page-chats .bubbles').evaluate((bubbles, sendText) => {
+    const replacement = document.createElement('div');
+    replacement.className = 'bubbles';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble is-out';
+    bubble.textContent = sendText;
+    replacement.append(bubble);
+    bubbles.replaceWith(replacement);
+  }, text);
+
+  await expect(page.locator('#page-chats .bubble.is-out')).toHaveText(text);
+  expect(await finishSendUiTiming(page)).toBeGreaterThanOrEqual(0);
+});
+
+test('tracks an outgoing bubble when the composer is replaced before Enter', async({page}) => {
+  const text = 'replacement-composer-send';
+  await page.setContent('<main id="page-chats"><div class="bubbles"></div><div class="input-message-input" contenteditable="true"></div></main>');
+  await installSendUiTiming(page, text);
+  await page.locator('.input-message-input').evaluate((composer) => {
+    const replacement = document.createElement('div');
+    replacement.className = 'input-message-input';
+    replacement.contentEditable = 'true';
+    composer.replaceWith(replacement);
+  });
+  await page.locator('.input-message-input').press('Enter');
+  await page.locator('#page-chats .bubbles').evaluate((bubbles, sendText) => {
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble is-out';
+    bubble.textContent = sendText;
+    bubbles.append(bubble);
+  }, text);
+
+  await expect(page.locator('#page-chats .bubble.is-out')).toHaveText(text);
+  expect(await finishSendUiTiming(page)).toBeGreaterThanOrEqual(0);
+});
+
+test('fails closed when a send is suppressed and no outgoing bubble appears', async({page}) => {
+  await page.setContent('<main id="page-chats"><div class="bubbles"></div><div class="input-message-input" contenteditable="true"></div></main>');
+  await installSendUiTiming(page, 'suppressed-send');
+  await page.locator('.input-message-input').press('Enter');
+
+  await expect(finishSendUiTiming(page)).rejects.toThrow('in-page Enter-to-bubble timing did not observe the outgoing bubble');
 });
