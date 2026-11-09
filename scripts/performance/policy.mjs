@@ -33,7 +33,7 @@ const MAX_SCALE_RATIO = 1.5;
 const MIN_BLOCKING_TIME_REGRESSION_MS = 80;
 // A 100 ms task adds 50 ms of blocking time to every repeat.
 const MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS = 25;
-const HISTORICAL_LONG_TASK_COUNT_NOISE_ALLOWANCE = 1;
+const COLD_LOAD_HISTORICAL_LONG_TASK_COUNT_NOISE_ALLOWANCE = 1;
 const REQUIRED_METRICS = [
   ['ms', 'timing'],
   ['requests', 'requests'],
@@ -334,7 +334,9 @@ export function evaluatePerformance(report, history = []) {
           } else {
             const baselineLongTasks = report.requireBase ? 0 : historyLongTaskBaseline(history, scale, scenario.key, report);
             const baselineBlockingTime = report.requireBase ? undefined : historyBlockingTimeBaseline(history, scale, scenario.key, report);
-            const longTaskCountNoiseAllowance = report.requireBase ? 0 : HISTORICAL_LONG_TASK_COUNT_NOISE_ALLOWANCE;
+            const longTaskCountNoiseAllowance = !report.requireBase && scenario.key === 'coldChatList'
+              ? COLD_LOAD_HISTORICAL_LONG_TASK_COUNT_NOISE_ALLOWANCE
+              : 0;
             const headLongTasks = medianLongTasks(headSamples);
             const headBlockingTime = medianBlockingTime(headSamples);
             if(Number.isFinite(baselineLongTasks) && Number.isFinite(headLongTasks) && headLongTasks > baselineLongTasks + longTaskCountNoiseAllowance) {

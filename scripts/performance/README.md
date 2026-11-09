@@ -30,10 +30,11 @@ On pull requests, scrolling fails if any 100x repeat records a task over 50 ms
 or the pooled dropped-frame percentage reaches 1%; dropped-frame percentage is
 pooled across all frame intervals from the scroll repeats. Chat open, scroll
 back, and send measurements collect five same-run paired repeats in PR artifacts.
-The no-base master-history comparison allows one additional long task in the
-median count: seven of the eight master runs before this change measured two
-100x cold-load tasks against a historical median of one, while the remaining run
-measured one. PR count comparisons still use the same-run base with no allowance,
+The no-base 100x cold-load master-history comparison allows one additional long
+task in the median count: seven of the eight master runs before this change
+measured two cold-load tasks against a historical median of one, while the
+remaining run measured one. Other scenarios have no historical task-count
+allowance. PR count comparisons still use the same-run base with no allowance,
 and the injected 100 ms stall remains a blocking negative control.
 The existing three-sample policy and calibration version are unchanged; extra
 timing samples are report-only. Send and scroll timing add no timing gates.

@@ -669,7 +669,16 @@ test('blocks added 100x blocking time against compatible main history when there
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x globalSearch') && failure.includes('blocking time')));
 });
 
-test('allows a one-task increase within observed 100x master long-task count noise', () => {
+test('allows a one-task increase in the measured 100x cold-load scenario', () => {
+  const head = scaleVariants({'100x': {coldChatList: Array.from({length: COLD_CHAT_LIST_REPEATS}, () => ({longTasksOver50Ms: 2}))}});
+  const result = evaluatePerformance(report({head, requireBase: false}), mainHistory(20, {
+    '100x': {coldChatList: {longTasksOver50Ms: 1}}
+  }));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('long task')), false);
+});
+
+test('blocks a one-task increase outside the measured 100x cold-load scenario', () => {
   const head = scaleVariants({'100x': {globalSearch: [
     {longTasksOver50Ms: 2},
     {longTasksOver50Ms: 2},
@@ -679,10 +688,10 @@ test('allows a one-task increase within observed 100x master long-task count noi
     '100x': {globalSearch: {longTasksOver50Ms: 1}}
   }));
 
-  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x globalSearch') && failure.includes('long task')), false);
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x globalSearch') && failure.includes('long task')));
 });
 
-test('blocks a sustained long-task increase beyond the one-task history noise allowance', () => {
+test('blocks a sustained long-task increase beyond the cold-load history noise allowance', () => {
   const head = scaleVariants({'100x': {globalSearch: [
     {longTasksOver50Ms: 3},
     {longTasksOver50Ms: 3},
