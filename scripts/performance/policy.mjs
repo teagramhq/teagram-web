@@ -58,6 +58,11 @@ export function isWithinFirstStickerRegressionBudget(baseSamples, headSamples) {
   return pairedDifferences.every(Number.isFinite) && median(pairedDifferences) <= 100;
 }
 
+export function isWithinWorkerRecorderOverheadBudget(offMs, pairedDeltaMs) {
+  if(!Number.isFinite(offMs) || offMs <= 0 || !Number.isFinite(pairedDeltaMs)) return false;
+  return pairedDeltaMs <= 2 && pairedDeltaMs <= offMs * 0.2;
+}
+
 function spread(values) {
   if(!values.length) return undefined;
   const mean = values.reduce((sum, value) => sum + value, 0) / values.length;

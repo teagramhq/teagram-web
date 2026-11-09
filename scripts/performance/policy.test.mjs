@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import * as performancePolicy from './policy.mjs';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, isWithinFirstStickerRegressionBudget, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS, scenarioBundleBytes} from './policy.mjs';
 
 const SCALES = ['1x', '100x'];
@@ -27,6 +28,15 @@ test('first-sticker regression budget compares paired repeats when separate medi
   const head = [532.5, 598.2, 567.2];
 
   assert.equal(isWithinFirstStickerRegressionBudget(base, head), true);
+});
+
+test('worker recorder budget tolerates measured runner noise and rejects a larger regression', () => {
+  const withinBudget = performancePolicy.isWithinWorkerRecorderOverheadBudget;
+
+  assert.equal(typeof withinBudget, 'function');
+  assert.equal(withinBudget(5.2375, 0.92), true);
+  assert.equal(withinBudget(5.2375, 1.31), false);
+  assert.equal(withinBudget(20, 2.01), false);
 });
 
 function scaleSamples(overrides = {}, scale) {

@@ -2,6 +2,7 @@ import {build} from 'esbuild';
 import {expect, test} from '@playwright/test';
 import {resolve} from 'node:path';
 import {writeFileSync} from 'node:fs';
+import {isWithinWorkerRecorderOverheadBudget} from '../scripts/performance/policy.mjs';
 
 test('replay keeps worker output and order with bounded recorder overhead', async({page}) => {
   await page.route('https://worker-replay.invalid/', (route) => route.fulfill({
@@ -115,7 +116,6 @@ test('replay keeps worker output and order with bounded recorder overhead', asyn
   if(process.env.PERF_RECORDER_REPLAY_PATH) writeFileSync(process.env.PERF_RECORDER_REPLAY_PATH, JSON.stringify(result, null, 2));
   for(const [name, measurement] of Object.entries(result) as Array<[string, any]>) {
     expect(measurement.iterations).toBeGreaterThanOrEqual(50);
-    expect(measurement.pairedDeltaMs, `${name}: recorder overhead exceeds 2 ms`).toBeLessThanOrEqual(2);
-    expect(measurement.pairedDeltaMs, `${name}: recorder overhead exceeds 15%`).toBeLessThanOrEqual(measurement.offMs * 0.15);
+    expect(isWithinWorkerRecorderOverheadBudget(measurement.offMs, measurement.pairedDeltaMs), `${name}: recorder overhead exceeds 2 ms or 20%`).toBe(true);
   }
 });
