@@ -8,6 +8,7 @@ import {test} from 'node:test';
 const workflow = readFileSync(new URL('../../.github/workflows/performance.yml', import.meta.url), 'utf8');
 const playwrightConfig = readFileSync(new URL('../../playwright.performance.config.ts', import.meta.url), 'utf8');
 const performanceScale = readFileSync(new URL('../../e2e/performanceScale.spec.ts', import.meta.url), 'utf8');
+const workerReplay = readFileSync(new URL('../../e2e/workerMessageReplay.spec.ts', import.meta.url), 'utf8');
 const chatPageSnapshotView = readFileSync(new URL('../../src/lib/chatPageSnapshotView.ts', import.meta.url), 'utf8');
 const stickerBaseCommit = readFileSync(new URL('../../.github/perf-sticker-base-commit', import.meta.url), 'utf8').trim();
 
@@ -82,6 +83,13 @@ test('measured head scroll attribution is recorded without a validity gate', () 
   assert.doesNotMatch(performanceScale, /validateMeasuredLongTaskTraces\(/);
 });
 
+test('timing regressions remain report-only while the negative control checks detection', () => {
+  assert.doesNotMatch(performanceScale, /isWithinFirstStickerRegressionBudget\([\s\S]{0,100}\.toBe/);
+  assert.match(performanceScale, /coldLoadEvaluation\.reportOnlyFailures/);
+  assert.match(performanceScale, /report-only \(would fail\)/);
+  assert.doesNotMatch(workerReplay, /expect\(measurement\.pairedDeltaMs/);
+});
+
 test('extra timing samples are reported without changing the three-repeat policy verdict', () => {
   const scenarioKeys = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
   const makeSample = (ms) => ({
@@ -123,6 +131,19 @@ test('extra timing samples are reported without changing the three-repeat policy
       fixtureServerCommit: 'fixture-server-v1',
       requireBase: true,
       diagnostics: {
+        firstSticker: {
+          repeats: 3,
+          samples: Object.fromEntries(['base', 'head'].map((variant) => [variant, Object.fromEntries(
+            ['cold', 'warm'].map((temperature) => [temperature, Array.from({length: 3}, () => ({
+              clickToFirstFrameMs: variant === 'base' ? 120 : 240,
+              clickToVisibleFrameMs: variant === 'base' ? (temperature === 'cold' ? 200 : 150) : (temperature === 'cold' ? 350 : 210)
+            }))])
+          )])),
+          medians: {
+            base: {cold: {workerFrameMs: 120, visibleFrameMs: 200}, warm: {workerFrameMs: 90, visibleFrameMs: 150}},
+            head: {cold: {workerFrameMs: 240, visibleFrameMs: 350}, warm: {workerFrameMs: 140, visibleFrameMs: 210}}
+          }
+        },
         '100x': {
           sendMessage: [{
             ms: 123,
@@ -147,6 +168,11 @@ test('extra timing samples are reported without changing the three-repeat policy
     const directory = mkdtempSync(join(tmpdir(), 'tweb-performance-summary-'));
     const reportPath = join(directory, 'report.json');
     const report = makeReport(timingSamples, sendSamples);
+    const recorderReplayPath = join(directory, 'recorder-replay.json');
+    writeFileSync(recorderReplayPath, JSON.stringify({
+      peers: {offMs: 10, onMs: 13, pairedDeltaMs: 3, iterations: 50},
+      dialogs: {offMs: 10, onMs: 10.5, pairedDeltaMs: 0.5, iterations: 50}
+    }));
     const historyDirectory = join(directory, 'history');
     mkdirSync(historyDirectory);
     const historyVariants = JSON.parse(JSON.stringify(report.variants.head));
@@ -168,6 +194,7 @@ test('extra timing samples are reported without changing the three-repeat policy
         env: {
           ...process.env,
           PERF_REPORT_PATH: reportPath,
+          PERF_RECORDER_REPLAY_PATH: recorderReplayPath,
           PERF_HISTORY_DIRECTORY: historyDirectory,
           PERF_BROWSER_OUTCOME: 'success',
           GITHUB_EVENT_NAME: eventName,
@@ -203,6 +230,11 @@ test('extra timing samples are reported without changing the three-repeat policy
   assert.match(elevenSendSampleSummary, /Send a message \| head \| 11 \| 1100\.0 \| 1080\.0 \| 50\.0 \| 1150\.0/);
   assert.match(threeSampleSummary, /100x send action diagnostic/);
   assert.match(threeSampleSummary, /### Chat-list paint and counter boundaries/);
+  assert.match(threeSampleSummary, /### First animated sticker frame/);
+  assert.match(threeSampleSummary, /200\.0 ms.*350\.0 ms.*150\.0 ms.*100 ms.*report-only \(would fail\)/);
+  assert.match(threeSampleSummary, /### Worker recorder replay overhead/);
+  assert.match(threeSampleSummary, /peers \| 10\.0 \| 13\.0 \| 3\.0 \|.*report-only \(would fail\)/);
+  assert.doesNotMatch(threeSampleSummary, /Blocking findings:/);
   assert.match(threeSampleSummary, /\| Scenario \| Scale \| Variant \| First visible \(ms\) \| First visible state \| Live boundary \(ms\) \| Requests \| RPC calls \| DOM nodes \| Long tasks >50 ms \| Blocking \(ms\) \| Bundle bytes \|/);
   assert.match(threeSampleSummary, /\| Cold chat list \| 1x \| head \| 100\.0 \| snapshot \| 500\.0 \| 4 \| 2 \| 100 \| 0 \| 0\.0 \| 10000 \|/);
   assert.match(threeSampleSummary, /\| 123\.0 \| 101\.0 \| 1 \| 81\.0 \| 42\.0 \| 0 \| 1000 \| 12 \| 0 \| 0\.0 \| messages\.sendMessage \(81\.0 ms, success\) \| sendMessage \/input\.ts \(22\.0 ms\) \|/);

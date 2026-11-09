@@ -1,6 +1,6 @@
 import {mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
-import {evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PERFORMANCE_REPEATS} from './policy.mjs';
+import {evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, isWithinFirstStickerRegressionBudget, PERFORMANCE_REPEATS} from './policy.mjs';
 
 const reportPath = resolve(process.env.PERF_REPORT_PATH || '.performance-report.json');
 const historyDirectory = resolve(process.env.PERF_HISTORY_DIRECTORY || '.performance-history');
@@ -119,6 +119,89 @@ function formatChatListMeasurementTable(report) {
   return lines.join('\n');
 }
 
+function formatFirstStickerTable(diagnostics, requireBase, failures, reportOnlyFindings) {
+  if(!diagnostics || !Number.isInteger(diagnostics.repeats) || diagnostics.repeats < 3) {
+    failures.push('first sticker timing samples are missing or shorter than three repeats');
+    return '';
+  }
+
+  const variants = requireBase ? ['base', 'head'] : ['head'];
+  const temperatures = ['cold', 'warm'];
+  const lines = [
+    '### First animated sticker frame',
+    '',
+    '| Variant | Worker | Repeats | Click to first frame (ms) | Click to visible frame (ms) |',
+    '| --- | --- | ---: | ---: | ---: |'
+  ];
+  const show = (value) => Number.isFinite(value) ? value.toFixed(1) : 'n/a';
+
+  for(const variant of variants) {
+    for(const temperature of temperatures) {
+      const samples = diagnostics.samples?.[variant]?.[temperature];
+      const median = diagnostics.medians?.[variant]?.[temperature];
+      if(!Array.isArray(samples) || samples.length < diagnostics.repeats || !samples.every((sample) => (
+        Number.isFinite(sample?.clickToFirstFrameMs) && Number.isFinite(sample?.clickToVisibleFrameMs)
+      )) || !Number.isFinite(median?.workerFrameMs) || !Number.isFinite(median?.visibleFrameMs)) {
+        failures.push(`first sticker ${variant} ${temperature} sample set is missing, invalid, or shorter than ${diagnostics.repeats} repeats`);
+        continue;
+      }
+      lines.push(`| ${variant} | ${temperature} | ${samples.length} | ${show(median.workerFrameMs)} | ${show(median.visibleFrameMs)} |`);
+    }
+  }
+
+  if(requireBase) {
+    const baseMs = diagnostics.medians?.base?.cold?.visibleFrameMs;
+    const headMs = diagnostics.medians?.head?.cold?.visibleFrameMs;
+    if(Number.isFinite(baseMs) && Number.isFinite(headMs)) {
+      const deltaMs = headMs - baseMs;
+      const wouldFail = !isWithinFirstStickerRegressionBudget(baseMs, headMs);
+      const gate = wouldFail ? 'report-only (would fail)' : 'report-only';
+      lines.push('', `Pinned-client cold visible-frame comparison: base ${show(baseMs)} ms, head ${show(headMs)} ms, increase ${show(deltaMs)} ms; limit 100 ms; ${gate}.`);
+      if(wouldFail) {
+        reportOnlyFindings.push(`first sticker cold visible frame increased ${show(deltaMs)} ms over the pinned client; limit 100 ms; report-only (would fail)`);
+      }
+    } else {
+      failures.push('first sticker pinned-client comparison is missing a valid cold visible-frame median');
+    }
+  } else {
+    lines.push('', 'Pinned-client comparison: available on pull requests; this master run records the head timing only.');
+  }
+
+  return lines.join('\n');
+}
+
+function formatWorkerRecorderTable(replay, failures, reportOnlyFindings) {
+  if(!replay || typeof replay !== 'object') {
+    failures.push('worker recorder replay measurements are missing');
+    return '';
+  }
+
+  const lines = [
+    '### Worker recorder replay overhead',
+    '',
+    '| Workload | Record off (ms) | Record on (ms) | Overhead (ms) | Limit | Iterations | Gate |',
+    '| --- | ---: | ---: | ---: | --- | ---: | --- |'
+  ];
+  const show = (value) => Number.isFinite(value) ? value.toFixed(1) : 'n/a';
+  for(const name of ['peers', 'dialogs']) {
+    const measurement = replay[name];
+    if(!measurement || !Number.isFinite(measurement.offMs) || measurement.offMs < 0 ||
+      !Number.isFinite(measurement.onMs) || measurement.onMs < 0 ||
+      !Number.isFinite(measurement.pairedDeltaMs) || !Number.isInteger(measurement.iterations) || measurement.iterations < 50) {
+      failures.push(`worker recorder ${name} sample set is missing, invalid, or shorter than 50 iterations`);
+      continue;
+    }
+    const relativeLimitMs = measurement.offMs * 0.15;
+    const wouldFail = measurement.pairedDeltaMs > 2 || measurement.pairedDeltaMs > relativeLimitMs;
+    const gate = wouldFail ? 'report-only (would fail)' : 'report-only';
+    lines.push(`| ${name} | ${show(measurement.offMs)} | ${show(measurement.onMs)} | ${show(measurement.pairedDeltaMs)} | ≤2 ms and ≤15% of off (${show(relativeLimitMs)} ms) | ${measurement.iterations} | ${gate} |`);
+    if(wouldFail) {
+      reportOnlyFindings.push(`worker recorder ${name} overhead ${show(measurement.pairedDeltaMs)} ms exceeded 2 ms or 15% of off (${show(relativeLimitMs)} ms); report-only (would fail)`);
+    }
+  }
+  return lines.join('\n');
+}
+
 let report = {variants: {}};
 const failures = [];
 
@@ -141,6 +224,13 @@ try {
   if(error.code !== 'ENOENT') failures.push(`history could not be read: ${error.message}`);
 }
 
+let recorderReplay;
+try {
+  recorderReplay = readJson(resolve(process.env.PERF_RECORDER_REPLAY_PATH || '.performance-recorder-replay.json'));
+} catch(error) {
+  failures.push(`worker recorder replay report could not be read: ${error.message}`);
+}
+
 if(process.env.PERF_RECORDER_REPLAY_OUTCOME && process.env.PERF_RECORDER_REPLAY_OUTCOME !== 'success') {
   failures.push(`worker recorder replay did not succeed (${process.env.PERF_RECORDER_REPLAY_OUTCOME || 'not run'})`);
 }
@@ -156,6 +246,9 @@ const traceTable = formatPerformanceTraceTable(report.diagnostics?.['100x']);
 const chatListMeasurementTable = formatChatListMeasurementTable(report);
 const samplesTable = formatPerformanceSamplesTable(report);
 const sendActionDiagnosticTable = formatSendActionDiagnosticTable(report);
+const reportOnlyFindings = [...evaluation.reportOnlyFailures];
+const firstStickerTable = formatFirstStickerTable(report.diagnostics?.firstSticker, report.requireBase, failures, reportOnlyFindings);
+const workerRecorderTable = formatWorkerRecorderTable(recorderReplay, failures, reportOnlyFindings);
 const summary = [
   '## Web performance at scale',
   '',
@@ -166,8 +259,14 @@ const summary = [
   ...(chatListMeasurementTable ? ['', chatListMeasurementTable] : []),
   ...(samplesTable ? ['', samplesTable] : []),
   ...(sendActionDiagnosticTable ? ['', sendActionDiagnosticTable] : []),
+  ...(firstStickerTable ? ['', firstStickerTable] : []),
+  ...(workerRecorderTable ? ['', workerRecorderTable] : []),
   '',
-  evaluation.calibratedScenarios === 0 ? 'Timing budgets and the 100x/1x slowdown ceiling are report-only until each scale and scenario has 20 compatible successful master runs; over-budget 100x rows are marked in the table. PR artifacts collect five paired samples for 100x chat open and scroll back, plus eleven paired send samples; the existing three-sample policy and calibration version are unchanged, and extra timing samples are report-only. Send and scroll timing add no timing gates. After 20 compatible successful master runs, 100x scroll task counts and dropped-frame repeats beyond their noise bands block; scroll blocking-time deltas must also exceed the noise band by at least 80 ms. Pull requests require complete base bundle measurements; 100x non-scroll long-task count regressions and blocking-time increases of at least 80 ms, bundle growth and the 200 ms control block immediately.' : `Timing calibration is active for ${evaluation.calibratedScenarios} scale/scenario row(s); timing checks are report-only for uncalibrated rows and mark absolute budget misses until each reaches 20 compatible successful master runs. PR artifacts collect five paired samples for 100x chat open and scroll back, plus eleven paired send samples; the existing three-sample policy and calibration version are unchanged, and extra timing samples are report-only. Send and scroll timing add no timing gates. After 20 compatible successful master runs, 100x scroll task counts and dropped-frame repeats beyond their noise bands block; scroll blocking-time deltas must also exceed the noise band by at least 80 ms. Pull requests require complete base bundle measurements; 100x non-scroll long-task count regressions and blocking-time increases of at least 80 ms, bundle growth and the 200 ms control block immediately.`,
+  'Timing-derived gates are report-only in MAIN-3608. Their calculations and limits remain visible below; MAIN-3610 restores blocking after the paired noise model lands.',
+  '',
+  '### Report-only timing findings',
+  '',
+  reportOnlyFindings.length ? reportOnlyFindings.map((finding) => `- ${finding}`).join('\n') : 'No timing regressions would fail.',
   failures.length ? `\nBlocking findings:\n${failures.map((failure) => `- ${failure}`).join('\n')}` : '\nNo blocking performance findings.'
 ].join('\n');
 
