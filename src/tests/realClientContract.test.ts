@@ -3936,10 +3936,13 @@ describe('real client scenario contract', () => {
     expect(trialSource).toContain('chromium.launch(');
     expect(trialSource).toContain('storageState');
     expect(trialSource).toContain('TMPDIR: trialDirectory');
+    expect(trialSource).toContain('const errors = {page: 0, console: 0, csp: 0};');
+    expect(trialSource).toContain('if(/\\bContent Security Policy\\b/i.test(message.text())) errors.csp++;');
     expect(picker).toBeGreaterThan(-1);
     expect(set).toBeGreaterThan(picker);
     expect(trialSource.indexOf('const consoleErrorsBefore')).toBeGreaterThan(trialSource.indexOf('await openComposer(page'));
     expect(trialSource.indexOf('classifyColdTrialErrors(')).toBeGreaterThan(set);
+    expect(trialSource).toContain('cspMessages: errors.csp');
     expect(trialSource.lastIndexOf('fs.rmSync(trialDirectory')).toBeGreaterThan(trialSource.indexOf('await browser.close()'));
     expect(trialSource).toContain(`push('browser_close_cleanup')`);
     expect(browserSource).toContain(`currentScenario = 'custom-emoji';\n    await runCustomEmojiScenario(alice, cleanupIssues);`);
@@ -3977,6 +3980,14 @@ describe('real client scenario contract', () => {
     .toBe(`${stage}_page_error`);
     expect(realClientBrowser.classifyColdTrialErrors({stage, pageErrors: 0, consoleErrors: 3, consoleErrorsBefore: 2}))
     .toBe(`${stage}_console_error`);
+  });
+
+  it('fails a cold trial on a CSP message even when it predates the chat console baseline', () => {
+    const stage = 'alice_cold_picker_1';
+
+    expect(realClientBrowser.classifyColdTrialErrors({
+      stage, pageErrors: 0, consoleErrors: 2, consoleErrorsBefore: 2, cspMessages: 1
+    })).toBe(`${stage}_csp_error`);
   });
 
   it('counts every console error in a cold trial except the fixture\'s NO_STICKERS render error', () => {

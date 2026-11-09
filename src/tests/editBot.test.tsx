@@ -101,7 +101,7 @@ vi.mock('@lib/langPack', () => ({
 }));
 
 vi.mock('@lib/richTextProcessor/wrapUrl', () => ({
-  default: (url: string) => ({url, onclick: 'openUrl'})
+  default: (url: string) => ({url, onclick: 'im'})
 }));
 
 import EditBot from '@components/sidebarRight/tabs/editBot';
@@ -156,6 +156,7 @@ describe('EditBot', () => {
   afterEach(() => {
     dispose?.();
     dispose = undefined;
+    vi.unstubAllGlobals();
     document.body.replaceChildren();
   });
 
@@ -185,5 +186,18 @@ describe('EditBot', () => {
       );
       expect(mocks.tab.close).toHaveBeenCalledOnce();
     });
+  });
+
+  it('keeps BotFather Telegram links routed after rendering', async() => {
+    const im = vi.fn();
+    vi.stubGlobal('im', im);
+    dispose = render(() => <EditBot />, container);
+    await mocks.collected;
+
+    const anchor = container.querySelector<HTMLAnchorElement>('a');
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    anchor.dispatchEvent(event);
+
+    expect(im).toHaveBeenCalledWith(anchor, event);
   });
 });

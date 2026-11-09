@@ -75,6 +75,7 @@ it('allows the fixed Cloudflare Turnstile origin for scripts and frames in priva
 
   expect(directives['script-src']).toBe("'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com");
   expect(directives['frame-src']).toBe("'self' https://challenges.cloudflare.com");
+  expect(directives['frame-ancestors']).toBeUndefined();
 });
 
 function privateWorkflowJob(workflow, name) {

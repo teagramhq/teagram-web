@@ -1,12 +1,13 @@
 import {JSX} from 'solid-js';
 import RowTsx from '@components/rowTsx';
 import type {Middleware} from '@helpers/middleware';
+import setAnchorClickHandler from '@helpers/dom/setAnchorClickHandler';
 import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 import setBlankToAnchor from '@richTextProcessor/setBlankToAnchor';
 
 type SearchWebPageRowLink = {
   href: string,
-  onClick?: string,
+  clickHandler?: string,
   targetBlank?: boolean
 };
 
@@ -24,9 +25,7 @@ function SearchWebPageRow(props: SearchWebPageRowProps) {
 
     const anchor = element as HTMLAnchorElement;
     anchor.href = props.link.href;
-    if(props.link.onClick) {
-      anchor.setAttribute('onclick', props.link.onClick);
-    }
+    if(props.link.clickHandler) setAnchorClickHandler(anchor, props.link.clickHandler);
 
     if(props.link.targetBlank) {
       setBlankToAnchor(anchor);

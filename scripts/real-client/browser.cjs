@@ -2885,8 +2885,9 @@ function isCountedColdTrialConsoleError(text) {
   return !String(text).includes('renderMessage error: NO_STICKERS');
 }
 
-function classifyColdTrialErrors({stage, pageErrors, consoleErrors, consoleErrorsBefore}) {
+function classifyColdTrialErrors({stage, pageErrors, consoleErrors, consoleErrorsBefore, cspMessages}) {
   if(pageErrors > 0) return `${stage}_page_error`;
+  if(cspMessages > 0) return `${stage}_csp_error`;
   if(consoleErrors !== consoleErrorsBefore) return `${stage}_console_error`;
   return null;
 }
@@ -2992,9 +2993,10 @@ async function runColdPickerTrial(storageState, appUrl, trial, cleanupIssues) {
       if(new URL(request.url()).pathname.startsWith('/assets/img/emoji/')) emojiRequests.count++;
     });
     // The trial page is not one of the signed-in app pages, so it needs its own error counters
-    const errors = {page: 0, console: 0};
+    const errors = {page: 0, console: 0, csp: 0};
     page.on('pageerror', () => { errors.page++; });
     page.on('console', (message) => {
+      if(/\bContent Security Policy\b/i.test(message.text())) errors.csp++;
       if(message.type() === 'error' && isCountedColdTrialConsoleError(message.text())) errors.console++;
     });
     // pids.events is cumulative for the whole job, so only a refused fork during this trial counts
@@ -3023,7 +3025,7 @@ async function runColdPickerTrial(storageState, appUrl, trial, cleanupIssues) {
       await openEmojiPicker(page, stage, emojiRequests);
       await openCustomEmojiSet(page, stage);
       const errorLabel = classifyColdTrialErrors({
-        stage, pageErrors: errors.page, consoleErrors: errors.console, consoleErrorsBefore
+        stage, pageErrors: errors.page, consoleErrors: errors.console, consoleErrorsBefore, cspMessages: errors.csp
       });
       if(errorLabel) failStage(errorLabel);
     } catch(error) {

@@ -1,4 +1,4 @@
-import {describe, expect, test, vi} from 'vitest';
+import {afterEach, describe, expect, test, vi} from 'vitest';
 import {MessageEntity} from '@layer';
 import {getMiddleware} from '@helpers/middleware';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
@@ -31,24 +31,42 @@ vi.hoisted(() => {
 
 function wrapTag(text: string, type: 'messageEntityHashtag' | 'messageEntityCashtag') {
   const entities: MessageEntity[] = [{_: type, offset: 0, length: text.length}];
-  return wrapRichText(text, {entities}).querySelector('a.anchor-hashtag');
+  return wrapRichText(text, {entities}).querySelector<HTMLAnchorElement>('a.anchor-hashtag');
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('wrapRichText tags', () => {
   test('wraps chat-specific hashtags', () => {
+    const searchByHashtag = vi.fn();
+    vi.stubGlobal('searchByHashtag', searchByHashtag);
     const anchor = wrapTag('#news@telegram', 'messageEntityHashtag');
 
     expect(anchor.textContent).toBe('#news@telegram');
     expect(anchor.getAttribute('href')).toBe('tg://search_hashtag?hashtag=news%40telegram');
-    expect(anchor.getAttribute('onclick')).toBe('searchByHashtag(this)');
+    expect(anchor.dataset.clickHandler).toBe('searchByHashtag');
+    expect(anchor.getAttribute('onclick')).toBeNull();
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    anchor.dispatchEvent(event);
+    expect(searchByHashtag).toHaveBeenCalledWith(anchor, event);
   });
 
   test('wraps chat-specific cashtags without losing the dollar prefix', () => {
+    const searchByHashtag = vi.fn();
+    vi.stubGlobal('searchByHashtag', searchByHashtag);
     const anchor = wrapTag('$TON@telegram', 'messageEntityCashtag');
 
     expect(anchor.textContent).toBe('$TON@telegram');
     expect(anchor.getAttribute('href')).toBe('tg://search_hashtag?hashtag=%24TON%40telegram');
-    expect(anchor.getAttribute('onclick')).toBe('searchByHashtag(this)');
+    expect(anchor.dataset.clickHandler).toBe('searchByHashtag');
+    expect(anchor.getAttribute('onclick')).toBeNull();
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    anchor.dispatchEvent(event);
+    expect(searchByHashtag).toHaveBeenCalledWith(anchor, event);
   });
 
   test('skips streamed highlighting and rejects stale async highlight results', async() => {

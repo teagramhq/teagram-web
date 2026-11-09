@@ -132,7 +132,6 @@ export class InternalLinkProcessor {
         const a = element.cloneNode(true) as HTMLAnchorElement;
         a.className = 'anchor-url';
         a.innerText = href;
-        a.removeAttribute('onclick');
 
         const popup = PopupElement.createPopup(PopupPeer, 'popup-masked-url', {
           titleLangKey: 'OpenUrlTitle',
