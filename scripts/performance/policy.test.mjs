@@ -265,21 +265,55 @@ test('reports repeated 100x scroll long tasks during master calibration', () => 
 
 test('blocks new long tasks across 100x scenarios', () => {
   for(const {key} of SCENARIOS) {
+    const headTaskCount = key === 'sendMessage' ? 3 : 2;
     const base = scaleVariants({'100x': {[key]: [
       {longTasksOver50Ms: 1},
       {longTasksOver50Ms: 1},
       {longTasksOver50Ms: 0}
     ]}});
     const head = scaleVariants({'100x': {[key]: [
-      {longTasksOver50Ms: 2},
-      {longTasksOver50Ms: 2},
-      {longTasksOver50Ms: 2}
+      {longTasksOver50Ms: headTaskCount},
+      {longTasksOver50Ms: headTaskCount},
+      {longTasksOver50Ms: headTaskCount}
     ]}});
     const history = key === 'scrollBack2k' ? scrollHistory() : [];
     const result = evaluatePerformance(report({base, head}), history);
 
     assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes('long task')));
   }
+});
+
+test('allows one send-message task-count increase within observed runner noise', () => {
+  const base = scaleVariants({'100x': {sendMessage: [
+    {longTasksOver50Ms: 0, blockingTimeMs: 0},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0}
+  ]}});
+  const head = scaleVariants({'100x': {sendMessage: [
+    {longTasksOver50Ms: 1, blockingTimeMs: 12},
+    {longTasksOver50Ms: 1, blockingTimeMs: 15},
+    {longTasksOver50Ms: 1, blockingTimeMs: 19}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x sendMessage') && failure.includes('long task count rose')), false);
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x sendMessage') && failure.includes('blocking time')), false);
+});
+
+test('blocks a 100 ms send-message task increase by blocking time', () => {
+  const base = scaleVariants({'100x': {sendMessage: [
+    {longTasksOver50Ms: 0, blockingTimeMs: 0},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0},
+    {longTasksOver50Ms: 0, blockingTimeMs: 0}
+  ]}});
+  const head = scaleVariants({'100x': {sendMessage: [
+    {longTasksOver50Ms: 1, blockingTimeMs: 50},
+    {longTasksOver50Ms: 1, blockingTimeMs: 50},
+    {longTasksOver50Ms: 1, blockingTimeMs: 50}
+  ]}});
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x sendMessage') && failure.includes('blocking time')));
 });
 
 test('allows send-message task noise when the corresponding base repeat is worse', () => {

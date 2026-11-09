@@ -34,6 +34,7 @@ const MIN_BLOCKING_TIME_REGRESSION_MS = 80;
 // A 100 ms task adds 50 ms of blocking time to every repeat.
 const MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS = 25;
 const COLD_LOAD_HISTORICAL_LONG_TASK_COUNT_NOISE_ALLOWANCE = 1;
+const SEND_MESSAGE_LONG_TASK_COUNT_NOISE_ALLOWANCE = 1;
 const REQUIRED_METRICS = [
   ['ms', 'timing'],
   ['requests', 'requests'],
@@ -314,7 +315,12 @@ export function evaluatePerformance(report, history = []) {
         } else {
           const baseMeasured = report.requireBase && baseSamples.length > 0 && baseSamples.every((sample) => Number.isFinite(sample?.longTasksOver50Ms));
           if(baseMeasured) {
-            if(separatedRegression(headSamples, baseSamples, 'longTasksOver50Ms')) {
+            const medianLongTaskCountIncrease = medianLongTasks(headSamples) - medianLongTasks(baseSamples);
+            const medianBlockingTimeIncrease = medianBlockingTime(headSamples) - medianBlockingTime(baseSamples);
+            const measuredSendMessageNoise = scenario.key === 'sendMessage' &&
+              medianLongTaskCountIncrease > 0 && medianLongTaskCountIncrease <= SEND_MESSAGE_LONG_TASK_COUNT_NOISE_ALLOWANCE &&
+              Number.isFinite(medianBlockingTimeIncrease) && medianBlockingTimeIncrease < MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS;
+            if(separatedRegression(headSamples, baseSamples, 'longTasksOver50Ms') && !measuredSendMessageNoise) {
               addFailure(blockingFailures, scale, scenario.key, `long task count rose in every head repeat above every same-run base repeat`);
             }
             const medianHeadBlockingTime = medianBlockingTime(headSamples);

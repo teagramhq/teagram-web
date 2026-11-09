@@ -34,8 +34,12 @@ The no-base 100x cold-load master-history comparison allows one additional long
 task in the median count: seven of the eight master runs before this change
 measured two cold-load tasks against a historical median of one, while the
 remaining run measured one. Other scenarios have no historical task-count
-allowance. PR count comparisons still use the same-run base with no allowance,
-and the injected 100 ms stall remains a blocking negative control.
+allowance. PR count comparisons use the same-run base. For send-message repeats,
+a median count increase of at most one is tolerated when the blocking-time
+increase stays below 25 ms. The failed run on unchanged app source recorded base
+counts of 0/0/0 and head counts of 1/1/1, with head blocking times of 12/15/19 ms
+(15 ms median increase). Larger count increases remain blocking, and a 100 ms
+injected task remains blocked by the blocking-time gate.
 The existing three-sample policy and calibration version are unchanged; extra
 timing samples are report-only. Send and scroll timing add no timing gates.
 Every scenario and size needs three base bundle measurements or the performance
