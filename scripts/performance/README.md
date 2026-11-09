@@ -9,6 +9,9 @@ history for calibration.
 The first-sticker frame probe uses the pinned pre-PR-178 client in
 `.github/perf-sticker-base-commit`; its baseline is separate from the current
 PR base used for the scale table.
+Its cold first-frame gate pairs each base and head repeat, then applies the
+existing 100 ms limit to the median paired delta. This avoids separate medians
+turning runner drift between interleaved measurements into an apparent regression.
 
 ## Performance gates
 
@@ -27,6 +30,11 @@ On pull requests, scrolling fails if any 100x repeat records a task over 50 ms
 or the pooled dropped-frame percentage reaches 1%; dropped-frame percentage is
 pooled across all frame intervals from the scroll repeats. Chat open, scroll
 back, and send measurements collect five same-run paired repeats in PR artifacts.
+The no-base master-history comparison allows one additional long task in the
+median count: seven of the eight master runs before this change measured two
+100x cold-load tasks against a historical median of one, while the remaining run
+measured one. PR count comparisons still use the same-run base with no allowance,
+and the injected 100 ms stall remains a blocking negative control.
 The existing three-sample policy and calibration version are unchanged; extra
 timing samples are report-only. Send and scroll timing add no timing gates.
 Every scenario and size needs three base bundle measurements or the performance

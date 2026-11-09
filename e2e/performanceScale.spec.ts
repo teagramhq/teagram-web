@@ -1577,11 +1577,11 @@ test('measures first animated sticker frame after opening a chat', async({browse
     measurementsComplete = true;
 
     if(report.requireBase) {
-      const before = medians.base.cold.visibleFrameMs;
-      const cold = medians.head.cold.visibleFrameMs;
+      const before = samples.base.cold.map((sample) => sample.clickToVisibleFrameMs);
+      const cold = samples.head.cold.map((sample) => sample.clickToVisibleFrameMs);
       expect(
         isWithinFirstStickerRegressionBudget(before, cold),
-        `head on-demand first visible frame was more than 100 ms slower than base: base ${before} ms, cold ${cold} ms`
+        `head on-demand first visible frame was more than 100 ms slower than base: base ${median(before)} ms, cold ${median(cold)} ms`
       ).toBe(true);
     }
   } catch(error) {

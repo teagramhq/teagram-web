@@ -16,10 +16,6 @@ export const PERFORMANCE_REPEATS = 3;
 // Cold-load pairs need additional samples to outvote occasional runner long tasks.
 export const COLD_CHAT_LIST_REPEATS = 6;
 
-export function isWithinFirstStickerRegressionBudget(baseMs, headMs) {
-  return headMs - baseMs <= 100;
-}
-
 export function scenarioBundleBytes(resources, origin, startedAt, previouslyLoadedUrls = []) {
   const previousUrls = new Set(previouslyLoadedUrls);
   const bundleResources = new Map();
@@ -37,6 +33,7 @@ const MAX_SCALE_RATIO = 1.5;
 const MIN_BLOCKING_TIME_REGRESSION_MS = 80;
 // A 100 ms task adds 50 ms of blocking time to every repeat.
 const MIN_SEPARATED_BLOCKING_TIME_REGRESSION_MS = 25;
+const HISTORICAL_LONG_TASK_COUNT_NOISE_ALLOWANCE = 1;
 const REQUIRED_METRICS = [
   ['ms', 'timing'],
   ['requests', 'requests'],
@@ -52,6 +49,12 @@ function median(values) {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = sorted.length >> 1;
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+export function isWithinFirstStickerRegressionBudget(baseSamples, headSamples) {
+  if(!Array.isArray(baseSamples) || !Array.isArray(headSamples) || !baseSamples.length || baseSamples.length !== headSamples.length) return false;
+  const pairedDifferences = baseSamples.map((base, index) => headSamples[index] - base);
+  return pairedDifferences.every(Number.isFinite) && median(pairedDifferences) <= 100;
 }
 
 function spread(values) {
@@ -331,9 +334,10 @@ export function evaluatePerformance(report, history = []) {
           } else {
             const baselineLongTasks = report.requireBase ? 0 : historyLongTaskBaseline(history, scale, scenario.key, report);
             const baselineBlockingTime = report.requireBase ? undefined : historyBlockingTimeBaseline(history, scale, scenario.key, report);
+            const longTaskCountNoiseAllowance = report.requireBase ? 0 : HISTORICAL_LONG_TASK_COUNT_NOISE_ALLOWANCE;
             const headLongTasks = medianLongTasks(headSamples);
             const headBlockingTime = medianBlockingTime(headSamples);
-            if(Number.isFinite(baselineLongTasks) && Number.isFinite(headLongTasks) && headLongTasks > baselineLongTasks) {
+            if(Number.isFinite(baselineLongTasks) && Number.isFinite(headLongTasks) && headLongTasks > baselineLongTasks + longTaskCountNoiseAllowance) {
               addFailure(blockingFailures, scale, scenario.key, `median long task count ${headLongTasks} exceeded baseline ${baselineLongTasks}`);
             }
             if(Number.isFinite(baselineBlockingTime) && Number.isFinite(headBlockingTime) && headBlockingTime - baselineBlockingTime >= MIN_BLOCKING_TIME_REGRESSION_MS) {

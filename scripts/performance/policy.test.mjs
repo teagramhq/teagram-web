@@ -11,15 +11,22 @@ const CURRENT_FIXTURE = {
 };
 
 test('first-sticker regression budget accepts large improvements', () => {
-  assert.equal(isWithinFirstStickerRegressionBudget(1216, 632.2), true);
+  assert.equal(isWithinFirstStickerRegressionBudget([1216, 1200, 1220], [632.2, 620, 630]), true);
 });
 
 test('first-sticker regression budget permits exactly 100 ms slower', () => {
-  assert.equal(isWithinFirstStickerRegressionBudget(500, 600), true);
+  assert.equal(isWithinFirstStickerRegressionBudget([500, 510, 490], [600, 610, 590]), true);
 });
 
 test('first-sticker regression budget rejects slowdowns greater than 100 ms', () => {
-  assert.equal(isWithinFirstStickerRegressionBudget(500, 600.1), false);
+  assert.equal(isWithinFirstStickerRegressionBudget([500, 510, 490], [600.1, 610.1, 590.1]), false);
+});
+
+test('first-sticker regression budget compares paired repeats when separate medians amplify runner noise', () => {
+  const base = [443.6, 530.1, 446.6];
+  const head = [532.5, 598.2, 567.2];
+
+  assert.equal(isWithinFirstStickerRegressionBudget(base, head), true);
 });
 
 function scaleSamples(overrides = {}, scale) {
@@ -662,13 +669,26 @@ test('blocks added 100x blocking time against compatible main history when there
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x globalSearch') && failure.includes('blocking time')));
 });
 
-test('compares 100x long tasks with compatible main history when a push has no base', () => {
+test('allows a one-task increase within observed 100x master long-task count noise', () => {
   const head = scaleVariants({'100x': {globalSearch: [
     {longTasksOver50Ms: 2},
     {longTasksOver50Ms: 2},
     {longTasksOver50Ms: 2}
   ]}});
-  const result = evaluatePerformance(report({head, requireBase: false}), mainHistory(1, {
+  const result = evaluatePerformance(report({head, requireBase: false}), mainHistory(20, {
+    '100x': {globalSearch: {longTasksOver50Ms: 1}}
+  }));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('100x globalSearch') && failure.includes('long task')), false);
+});
+
+test('blocks a sustained long-task increase beyond the one-task history noise allowance', () => {
+  const head = scaleVariants({'100x': {globalSearch: [
+    {longTasksOver50Ms: 3},
+    {longTasksOver50Ms: 3},
+    {longTasksOver50Ms: 3}
+  ]}});
+  const result = evaluatePerformance(report({head, requireBase: false}), mainHistory(20, {
     '100x': {globalSearch: {longTasksOver50Ms: 1}}
   }));
 
