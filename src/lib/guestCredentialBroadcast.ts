@@ -1,9 +1,7 @@
 import {getRuntimeServerId} from '@config/serverContext';
-import {logger} from '@lib/logger';
 
 let invalidationSequence = 0;
 const localInvalidationEvent = 'guest-credential-lifecycle-local-clear';
-const log = logger('[guest-credential-broadcast]');
 
 function storagePrefix(serverId: string) {
   return serverId === 'default' ? '' : `teagram-${serverId}:`;
@@ -17,10 +15,10 @@ function storageEventKey(serverId: string) {
   return `${channelName(serverId).slice(0, -3)}-clear.v1`;
 }
 
-type TransportFailureMessage = 'BroadcastChannel delivery failed' | 'storage-event delivery failed' | 'BroadcastChannel listener setup failed';
+type TransportFailureOperation = 'broadcast' | 'storage' | 'listener';
 
-function reportTransportFailure(message: TransportFailureMessage) {
-  log.error(message);
+function reportTransportFailure(operation: TransportFailureOperation) {
+  console.error(operation);
 }
 
 export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId()) {
@@ -33,7 +31,7 @@ export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId(
       channel.close();
     }
   } catch{
-    reportTransportFailure('BroadcastChannel delivery failed');
+    reportTransportFailure('broadcast');
   }
 
   try {
@@ -43,7 +41,7 @@ export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId(
       localStorage.removeItem(key);
     }
   } catch{
-    reportTransportFailure('storage-event delivery failed');
+    reportTransportFailure('storage');
   }
 }
 
@@ -61,7 +59,7 @@ export function listenForGuestCredentialInvalidation(serverId: string, callback:
       if(event.data?.type === 'clear') callback();
     });
   } catch{
-    reportTransportFailure('BroadcastChannel listener setup failed');
+    reportTransportFailure('listener');
   }
   if(typeof window !== 'undefined') {
     window.addEventListener('storage', onStorage);
