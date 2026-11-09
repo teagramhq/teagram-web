@@ -713,7 +713,7 @@ export default class ChatBubbles {
 
   private getHistoryTopPromise: Promise<boolean>;
   private getHistoryBottomPromise: Promise<boolean>;
-  private deferredHistoryRetries = new Set<() => Promise<void>>();
+  private historyRetries: (() => Promise<void>)[] = [];
 
   // public messagesCount: number = -1;
 
@@ -4621,20 +4621,23 @@ export default class ChatBubbles {
       return;
     }
 
-    const retries = top ? [...this.deferredHistoryRetries] : [];
-    if(retries.length) {
-      const peerId = this.peerId;
-      const retryErrors: unknown[] = [];
+    const retryCount = top ? this.historyRetries.length : 0;
+    if(retryCount) {
+      let retryError: unknown;
+      let retryFailed = false;
       const retryPromise = Promise.resolve().then(async() => {
-        for(const retry of retries) {
+        for(let i = 0; i < retryCount; ++i) {
+          const retry = this.historyRetries.shift();
+          if(!retry) break;
           try {
             await retry();
           } catch(error) {
-            retryErrors.push(error);
+            if(!retryFailed) retryError = error;
+            retryFailed = true;
           }
         }
 
-        if(retryErrors.length) throw retryErrors[0];
+        if(retryFailed) throw retryError;
         return true;
       });
       this.getHistoryTopPromise = retryPromise;
@@ -4642,18 +4645,8 @@ export default class ChatBubbles {
         if(this.getHistoryTopPromise !== retryPromise) return;
         this.getHistoryTopPromise = undefined;
         this.scrollable.onScroll();
-      }, (error: unknown) => {
-        const errors = retryErrors.length ? retryErrors : [error];
-        if(this.getHistoryTopPromise !== retryPromise) {
-          errors.forEach((retryError) => {
-            if(retryError !== PEER_CHANGED_ERROR) this.log.warn('deferred history retry failed:', peerId, true, retryError, {stale: true});
-          });
-          return;
-        }
-        this.getHistoryTopPromise = undefined;
-        errors.forEach((retryError) => {
-          if(retryError !== PEER_CHANGED_ERROR) this.log.error('deferred history retry failed:', peerId, true, retryError);
-        });
+      }, () => {
+        if(this.getHistoryTopPromise === retryPromise) this.getHistoryTopPromise = undefined;
       });
       return;
     }
@@ -5741,7 +5734,7 @@ export default class ChatBubbles {
     this.batchProcessor.clear();
 
     this.getHistoryTopPromise = this.getHistoryBottomPromise = undefined;
-    this.deferredHistoryRetries.clear();
+    this.historyRetries.length = 0;
     this.fetchNewPromise = undefined;
     this.updateGradient = undefined;
     this.ephemeralHistoryPromise = undefined;
@@ -11923,25 +11916,20 @@ export default class ChatBubbles {
         const loadedTop = this.scrollable.loadedAll.top;
         const isCurrent = () => this.peerId === renderedPeerId && this.chatInner === renderedChatInner && this.bubbleGroups === renderedBubbleGroups;
         const retryTail = async() => {
-          if(!isCurrent()) {
-            this.deferredHistoryRetries.delete(retryTail);
-            return;
-          }
+          if(!isCurrent()) return;
           try {
             rollbackTailBubbles();
             await renderMessages(messages.slice(firstBatchEnd), true);
-            this.deferredHistoryRetries.delete(retryTail);
-            if(loadedTop && !this.deferredHistoryRetries.size) await this.setLoaded('top', true);
+            if(loadedTop && !this.historyRetries.length) await this.setLoaded('top', true);
           } catch(error) {
+            if(error !== PEER_CHANGED_ERROR) this.log.error('history render failed:', renderedPeerId, reverse, error);
             if(isCurrent()) {
-              this.deferredHistoryRetries.add(retryTail);
+              this.historyRetries.push(retryTail);
               try {
                 await this.setLoaded('top', false, false);
               } catch(setLoadedError) {
                 this.log.error('could not reset history end:', setLoadedError);
               }
-            } else {
-              this.deferredHistoryRetries.delete(retryTail);
             }
             throw error;
           }
@@ -13351,9 +13339,6 @@ export default class ChatBubbles {
 
         return this.performHistoryResult(historyResult, reverse, true, prioritizeFirstPaint, (promise) => {
           deferredHistoryPromises.push(promise);
-          void promise.catch((error: unknown) => {
-            if(error !== PEER_CHANGED_ERROR) this.log.error('deferred history render failed:', peerId, reverse, error);
-          });
         });
       });
     };
@@ -13396,12 +13381,10 @@ export default class ChatBubbles {
     }
 
     // Keep history paging serialized through the deferred tail while peer mounting waits only for first paint.
-    const historyPromises = [promise];
-    if(resultPromise) historyPromises.push(processPromise(resultPromise));
-    const waitPromise = Promise.allSettled(historyPromises).then(async(historyResults) => {
+    const waitPromise = Promise.allSettled([promise, resultPromise && processPromise(resultPromise)]).then(async(historyResults) => {
       const deferredResults = await Promise.allSettled(deferredHistoryPromises);
       const failedResult = [...historyResults, ...deferredResults].find((result) => result.status === 'rejected');
-      if(failedResult?.status === 'rejected') throw failedResult.reason;
+      if(failedResult) throw failedResult.reason;
     });
 
     if(isFirstMessageRender && liteMode.isAvailable('animations')/*  && false */) {

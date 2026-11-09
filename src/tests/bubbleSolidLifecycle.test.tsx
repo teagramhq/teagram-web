@@ -2201,7 +2201,7 @@ test('renders the newest first-paint batch before the remaining initial history'
     needReflowScroll: false,
     sponsoredMessageEvery: undefined,
     messagesQueueOnRenderAdditional: undefined,
-    deferredHistoryRetries: new Set(),
+    historyRetries: [],
     getBubble: vi.fn(),
     safeRenderMessage: vi.fn(({message}: {message: Message.message}) => {
       renderedMids.push(message.mid);
@@ -2416,7 +2416,7 @@ test('logs and retries both failed first-paint tails before paging', async() => 
   const harness = Object.assign(Object.create(ChatBubbles.prototype), {
     isFirstLoad: true,
     ephemeralHistoryLoaded: true,
-    deferredHistoryRetries: new Set(),
+    historyRetries: [],
     chat: {
       peerId,
       type: ChatType.Chat,
@@ -2456,8 +2456,8 @@ test('logs and retries both failed first-paint tails before paging', async() => 
     const waitError = await result.waitPromise.catch((error: unknown) => error);
     expect([cachedTailFailure, fetchedTailFailure]).toContain(waitError);
     await vi.waitFor(() => expect(harness.getHistoryTopPromise).toBeUndefined());
-    expect(harness.log.error).toHaveBeenCalledWith('deferred history render failed:', peerId, true, cachedTailFailure);
-    expect(harness.log.error).toHaveBeenCalledWith('deferred history render failed:', peerId, true, fetchedTailFailure);
+    expect(harness.log.error).toHaveBeenCalledWith('history render failed:', peerId, true, cachedTailFailure);
+    expect(harness.log.error).toHaveBeenCalledWith('history render failed:', peerId, true, fetchedTailFailure);
     expect(scrollable.loadedAll.top).toBe(false);
 
     harness.loadMoreHistory(true);
@@ -2493,7 +2493,7 @@ test('propagates deferred history failure and retries the original tail before p
     needReflowScroll: false,
     sponsoredMessageEvery: undefined,
     messagesQueueOnRenderAdditional: undefined,
-    deferredHistoryRetries: new Set(),
+    historyRetries: [],
     getBubble: vi.fn((id: FullMid) => bubbles.get(id)),
     safeRenderMessage: vi.fn(({message, propagateFailure}: {message: Message.message, propagateFailure?: boolean}) => {
       attempts.push(message.mid);
@@ -2536,7 +2536,7 @@ test('propagates deferred history failure and retries the original tail before p
     harness.loadMoreHistory(true);
     await expect(harness.getHistoryTopPromise).rejects.toBe(failure);
     await vi.waitFor(() => expect(harness.getHistoryTopPromise).toBeUndefined());
-    expect(harness.log.error).toHaveBeenCalledWith('deferred history retry failed:', peerId, true, failure);
+    expect(harness.log.error).toHaveBeenCalledWith('history render failed:', peerId, true, failure);
     expect(scrollable.loadedAll.top).toBe(false);
     expect(new Set(bubbles.keys())).toEqual(new Set([...messages.slice(0, 5).map(({mid}) => makeFullMid(peerId, mid)), makeFullMid(peerId, 93)]));
     queuePromise = Promise.resolve();
@@ -2605,14 +2605,14 @@ test('does not clear a newer history load when an older preload fails', async() 
   await vi.waitFor(() => expect(harness.getHistoryTopPromise).toBeUndefined());
 });
 
-test('logs a superseded deferred retry without clearing the newer load', async() => {
+test('does not clear a newer load when a deferred retry is superseded', async() => {
   const failure = new Error('retry failed');
   let rejectRetry!: (error: Error) => void;
   const retry = new Promise<void>((_resolve, reject) => { rejectRetry = reject; });
   const newLoad = Promise.resolve(true);
   const harness = Object.assign(Object.create(ChatBubbles.prototype), {
     chat: {peerId, setPeerPromise: false},
-    deferredHistoryRetries: new Set([() => retry]),
+    historyRetries: [() => retry],
     log: Object.assign(vi.fn(), {error: vi.fn(), warn: vi.fn()})
   }) as any;
   harness.loadMoreHistory(true);
@@ -2622,7 +2622,7 @@ test('logs a superseded deferred retry without clearing the newer load', async()
   harness.chat.peerId = 11 as PeerId;
   rejectRetry(failure);
   expect(await observed).toBe(failure);
-  await vi.waitFor(() => expect(harness.log.warn).toHaveBeenCalledWith('deferred history retry failed:', peerId, true, failure, {stale: true}));
+  await Promise.resolve();
   expect(harness.getHistoryTopPromise).toBe(newLoad);
 });
 
@@ -2639,7 +2639,7 @@ test('does not carry a deferred history retry into another peer', async() => {
     chat,
     chatInner: document.createElement('div'),
     bubbleGroups: {},
-    deferredHistoryRetries: new Set(),
+    historyRetries: [],
     scrollable,
     needReflowScroll: false,
     sponsoredMessageEvery: undefined,
