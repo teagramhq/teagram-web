@@ -73,7 +73,10 @@ export class SimpleConfirmationPopup extends PopupElement {
       description.append(wrapRichText(options.descriptionText, {
         entities,
         contextSite: 'Teagram',
-        disabledEntities
+        disabledEntities,
+        // Popup descriptions open every link in a protected new tab below, so they do not
+        // need the masked-link confirmation handler (which is not installed on auth pages).
+        passMaskedLinks: true
       }));
       description.querySelectorAll('a').forEach((link) => {
         clearAnchorClickHandler(link);
