@@ -1,4 +1,4 @@
-import type addAnchorListener from '@helpers/addAnchorListener';
+import type {AnchorClickHandlerName} from '@helpers/dom/setAnchorClickHandler';
 import {PHONE_NUMBER_REG_EXP} from '.';
 import {MOUNT_CLASS_TO} from '@config/debug';
 import {normalizeUrlProtocol} from '@lib/richTextProcessor/matchUrlProtocol';
@@ -8,7 +8,7 @@ import {getStickerSetLinkPrefix, isPotentialStickerSetShareLink, resolveStickerS
 export default function wrapUrl(url: string, safe?: boolean) {
   url = normalizeUrlProtocol(url);
 
-  const out: {url: string, onclick?: Parameters<typeof addAnchorListener>[0]['name'], pendingStickerSetLink?: boolean} = {url};
+  const out: {url: string, onclick?: AnchorClickHandlerName, pendingStickerSetLink?: boolean} = {url};
   // parsed once for every branch below. a url the parser rejects (a port out of range, say) has to
   // leave here as a plain external link: `wrapRichText` does not catch, so a throw would take the
   // whole message render down with it
@@ -75,7 +75,7 @@ export default function wrapUrl(url: string, safe?: boolean) {
   ) {
     onclick = 'im';
   } else if((tgMatch = url.match(/^tg:(?:\/\/)?(.+?)(?:\?|$)/))) {
-    onclick = 'tg_' + tgMatch[1].split('/')[0] as any;
+    onclick = 'tg_' + tgMatch[1].split('/')[0];
 
     switch(tgMatch[1]) {
       // * local
@@ -97,10 +97,6 @@ export default function wrapUrl(url: string, safe?: boolean) {
   }/*  else if(!safe) {
     url = 'tg://unsafe_url?url=' + encodeURIComponent(url);
   } */
-
-  if(!(window as any)[onclick]) {
-    onclick = undefined;
-  }
 
   out.onclick = onclick;
   if(pendingStickerSetLink) out.pendingStickerSetLink = true;

@@ -24,6 +24,7 @@ import {INTERNAL_LINK_TYPE, InternalLinkTypeMap, InternalLink} from '@lib/intern
 import {AppManagers} from '@lib/managers';
 import {createStoriesViewerWithPeer} from '@components/stories/viewer';
 import {simulateClickEvent} from '@helpers/dom/clickEvent';
+import {clearAnchorClickHandler} from '@helpers/dom/setAnchorClickHandler';
 import shake from '@helpers/dom/shake';
 import PopupPremium from '@components/popups/premium';
 import rootScope from '@lib/rootScope';
@@ -132,7 +133,7 @@ export class InternalLinkProcessor {
         const a = element.cloneNode(true) as HTMLAnchorElement;
         a.className = 'anchor-url';
         a.innerText = href;
-        a.removeAttribute('data-click-handler');
+        clearAnchorClickHandler(a);
 
         const popup = PopupElement.createPopup(PopupPeer, 'popup-masked-url', {
           titleLangKey: 'OpenUrlTitle',

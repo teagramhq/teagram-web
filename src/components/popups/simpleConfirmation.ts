@@ -1,5 +1,6 @@
 import PopupElement, {addCancelButton, PopupButton} from '@components/popups';
 import cancelEvent from '@helpers/dom/cancelEvent';
+import {clearAnchorClickHandler} from '@helpers/dom/setAnchorClickHandler';
 import type {MessageEntity} from '@layer';
 import {FormatterArguments, LangPackKey, i18n} from '@lib/langPack';
 import mergeEntities from '@lib/richTextProcessor/mergeEntities';
@@ -75,7 +76,7 @@ export class SimpleConfirmationPopup extends PopupElement {
         disabledEntities
       }));
       description.querySelectorAll('a').forEach((link) => {
-        link.removeAttribute('data-click-handler');
+        clearAnchorClickHandler(link);
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
       });

@@ -1,4 +1,4 @@
-import {beforeEach, describe, expect, it, vi} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 
 const rippleCleanup = vi.hoisted(() => vi.fn());
 
@@ -101,6 +101,10 @@ describe('rowTsxController', () => {
   beforeEach(() => {
     document.body.replaceChildren();
     rippleCleanup.mockClear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('forwards direct RowTsx title and subtitle refs', () => {
@@ -259,6 +263,8 @@ describe('rowTsxController', () => {
   });
 
   it('renders a search web page result as a Solid link with external media', () => {
+    const openWebPage = vi.fn();
+    vi.stubGlobal('openWebPage', openWebPage);
     const middleware = getMiddleware();
     const media = document.createElement('div');
     media.textContent = 'Preview';
@@ -286,6 +292,10 @@ describe('rowTsxController', () => {
     expect(row.querySelector('.row-subtitle')?.textContent).toBe('Subtitle');
     expect(media.classList.contains('row-media-big')).toBe(true);
     expect(media.parentElement).toBe(row);
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    row.dispatchEvent(event);
+    expect(openWebPage).toHaveBeenCalledWith(row, event);
 
     middleware.clean();
   });

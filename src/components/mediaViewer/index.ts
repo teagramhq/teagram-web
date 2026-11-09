@@ -1,6 +1,7 @@
 import type {MyDocument} from '@appManagers/appDocsManager';
 import MEDIA_MIME_TYPES_SUPPORTED from '@environment/mediaMimeTypesSupport';
 import cancelEvent from '@helpers/dom/cancelEvent';
+import {getAnchorClickHandler, isMaskedLinkWarningHandler} from '@helpers/dom/setAnchorClickHandler';
 import {attachClickEvent} from '@helpers/dom/clickEvent';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import findUpTag from '@helpers/dom/findUpTag';
@@ -63,8 +64,8 @@ export const onMediaCaptionClick = (caption: HTMLElement, e: MouseEvent) => {
   }
 
   if(a instanceof HTMLAnchorElement && (!spoiler || isSpoilerVisible)) { // close viewer if it's t.me/ redirect
-    const clickHandler = a.dataset.clickHandler;
-    if(!clickHandler || clickHandler === 'showMaskedAlert') {
+    const clickHandler = getAnchorClickHandler(a);
+    if(!clickHandler || isMaskedLinkWarningHandler(clickHandler)) {
       return;
     }
 

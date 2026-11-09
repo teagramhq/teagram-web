@@ -23,6 +23,7 @@ import {SolidJSHotReloadGuardContextValue, useHotReloadGuard} from '@lib/solidjs
 import {formatDate, formatFullSentTime} from '@helpers/date';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import cancelEvent from '@helpers/dom/cancelEvent';
+import setAnchorClickHandler, {clearAnchorClickHandler, getAnchorClickHandler, isMaskedLinkWarningHandler} from '@helpers/dom/setAnchorClickHandler';
 import Scrollable, {ScrollableContext} from '@components/scrollable2';
 import fastSmoothScroll, {fastSmoothScrollToStart} from '@helpers/fastSmoothScroll';
 import Animated from '@helpers/solid/animations';
@@ -1239,7 +1240,16 @@ function Block(props: {
           </div>
           <For each={block.articles}>{(article, idx) => {
             const context = useContext(InstantViewContext);
-            const wrapped = createMemo(() => wrapUrl('tg://iv?url=' + encodeURIComponent(article.url)));
+            const wrapped = createMemo(() => wrapUrl('tg://iv?url=' + encodeURIComponent(article.url), true));
+            const [anchor, setAnchor] = createSignal<HTMLAnchorElement>();
+            createEffect(() => {
+              const element = anchor();
+              if(!element) return;
+
+              const clickHandler = wrapped().onclick;
+              if(hasDisabledNavigation(context) || !clickHandler) clearAnchorClickHandler(element);
+              else setAnchorClickHandler(element, clickHandler);
+            });
             const photo = createMemo(() => article.photo_id ?
               findPagePhoto(context, article.photo_id) :
               undefined);
@@ -1247,6 +1257,7 @@ function Block(props: {
               <>
                 {idx() && <div class={styles.Border} />}
                 <a
+                  ref={(element) => setAnchor(element)}
                   dir="auto"
                   href={hasDisabledNavigation(context) ? undefined : wrapped().url}
                   aria-disabled={hasDisabledNavigation(context)}
@@ -1256,12 +1267,6 @@ function Block(props: {
                     idx() && styles.BorderTop,
                     !hasDisabledNavigation(context) && 'hover-effect'
                   )}
-                  onClick={(event) => {
-                    const clickHandler = wrapped().onclick;
-                    if(!hasDisabledNavigation(context) && clickHandler) {
-                      (window as any)[clickHandler](event.currentTarget, event);
-                    }
-                  }}
                 >
                   <div class={classNames(styles.RelatedArticleTitle, 'text-bold')}>
                     <RichTextRenderer text={{_: 'textPlain', text: article.title}} />
@@ -1637,15 +1642,15 @@ function RichTextRenderer(props: {text: RichText}) {
     middleware: Middleware,
     typesetMath: boolean
   ) => {
-    fragment.querySelectorAll('[data-click-handler="tg_iv"]').forEach((el) => {
-      el.classList.add(styles.Anchor);
+    fragment.querySelectorAll<HTMLAnchorElement>('a').forEach((el) => {
+      if(getAnchorClickHandler(el) === 'tg_iv') el.classList.add(styles.Anchor);
     });
     // In-page fragment links (`#x`) get wrapped by wrapUrl into `https://#x` and flagged as
     // masked → wrapRichText attaches `showMaskedAlert` onclick. That alert is meaningless for
     // a same-page scroll, strip it so the IV onClick delegator can run scrollToAnchor.
-    fragment.querySelectorAll<HTMLAnchorElement>('a.anchor-url[data-click-handler="showMaskedAlert"]').forEach((el) => {
-      if(FRAGMENT_HREF_RE.test(el.getAttribute('href') || '')) {
-        el.removeAttribute('data-click-handler');
+    fragment.querySelectorAll<HTMLAnchorElement>('a.anchor-url').forEach((el) => {
+      if(isMaskedLinkWarningHandler(getAnchorClickHandler(el)) && FRAGMENT_HREF_RE.test(el.getAttribute('href') || '')) {
+        clearAnchorClickHandler(el);
       }
     });
     // Inline math markers (`$x$`) are carried as plain-text base64 by the parser. Decode them into

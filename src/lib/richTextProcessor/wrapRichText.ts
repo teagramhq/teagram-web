@@ -10,7 +10,7 @@ import encodeSpoiler from '@lib/richTextProcessor/encodeSpoiler';
 import parseEntities from '@lib/richTextProcessor/parseEntities';
 import setBlankToAnchor from '@lib/richTextProcessor/setBlankToAnchor';
 import setExternalToAnchor, {getElectronHelpers} from '@helpers/electronHelpers';
-import setAnchorClickHandler from '@helpers/dom/setAnchorClickHandler';
+import setAnchorClickHandler, {AnchorClickHandlerName} from '@helpers/dom/setAnchorClickHandler';
 import wrapUrl from '@lib/richTextProcessor/wrapUrl';
 import EMOJI_VERSIONS_SUPPORTED from '@environment/emojiVersionsSupport';
 import {CLICK_EVENT_NAME} from '@helpers/dom/clickEvent';
@@ -572,7 +572,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           // let inner: string;
           let url: string = (entity as MessageEntity.messageEntityTextUrl).url || fullEntityText;
           let masked = false;
-          let onclick: string;
+          let onclick: AnchorClickHandlerName | undefined;
 
           const wrapped = wrapUrl(url, (entity as MessageEntity.messageEntityTextUrl).safe);
           url = wrapped.url;

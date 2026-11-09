@@ -65,6 +65,10 @@ describe('wrapUrl Telegram links', () => {
     expect(wrapUrl('https://evil.com/tg:resolve?domain=durov').onclick).toBeUndefined();
   });
 
+  test('retains an unregistered tg action so anchor construction can fail loudly', () => {
+    expect(wrapUrl('tg://unknown_action?value=1').onclick).toBe('tg_unknown_action');
+  });
+
   test('hands back a URL the parser rejects instead of throwing', () => {
     vi.stubGlobal('im', vi.fn());
 

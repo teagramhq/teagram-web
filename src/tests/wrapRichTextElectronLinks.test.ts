@@ -95,7 +95,8 @@ describe('wrapRichText external links', () => {
 
   test('a concealed link on a longer host beginning with t.me keeps the external-link alert', () => {
     vi.stubGlobal('im', vi.fn());
-    vi.stubGlobal('showMaskedAlert', vi.fn());
+    const showMaskedAlert = vi.fn();
+    vi.stubGlobal('showMaskedAlert', showMaskedAlert);
 
     const anchor = wrapTextUrlEntity('t.me/durov', 'https://t.me.evil.com/durov') as HTMLAnchorElement;
     expect(anchor.getAttribute('href')).toEqual('https://t.me.evil.com/durov');
@@ -103,6 +104,10 @@ describe('wrapRichText external links', () => {
     expect(anchor.getAttribute('onclick')).toBeNull();
     expect(anchor.getAttribute('target')).toEqual('_blank');
     expect(anchor.getAttribute('rel')).toEqual('noopener noreferrer');
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    anchor.dispatchEvent(event);
+    expect(showMaskedAlert).toHaveBeenCalledWith(anchor, event);
   });
 
   test('an exact t.me host routes clicks without an inline event handler', () => {
@@ -185,5 +190,52 @@ describe('wrapRichText external links', () => {
     expect(anchor.getAttribute('onclick')).toBeNull();
     expect(anchor.getAttribute('target')).toEqual('_blank');
     expect(anchor.getAttribute('rel')).toEqual('noopener noreferrer');
+  });
+
+  test('bot commands dispatch to the command handler', () => {
+    const execBotCommand = vi.fn();
+    vi.stubGlobal('execBotCommand', execBotCommand);
+    const anchor = wrapRichText('/help', {
+      entities: [{_: 'messageEntityBotCommand', offset: 0, length: 5}],
+      passEntities: {messageEntityBotCommand: true}
+    }).querySelector('a') as HTMLAnchorElement;
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    anchor.dispatchEvent(event);
+
+    expect(execBotCommand).toHaveBeenCalledWith(anchor, event);
+  });
+
+  test('timestamps dispatch to the media timestamp handler', () => {
+    const setMediaTimestamp = vi.fn();
+    vi.stubGlobal('setMediaTimestamp', setMediaTimestamp);
+    const anchor = wrapRichText('0:01', {
+      entities: [{_: 'messageEntityTimestamp', offset: 0, length: 4, time: 1}],
+      maxMediaTimestamp: 60
+    }).querySelector('a.timestamp') as HTMLAnchorElement;
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    anchor.dispatchEvent(event);
+
+    expect(setMediaTimestamp).toHaveBeenCalledWith(anchor, event);
+  });
+
+  test('formatted dates dispatch to their date handler', () => {
+    const onFormattedDateClick = vi.fn();
+    vi.stubGlobal('onFormattedDateClick', onFormattedDateClick);
+    const anchor = wrapRichText('today', {
+      entities: [{
+        _: 'messageEntityFormattedDate',
+        offset: 0,
+        length: 5,
+        date: 1,
+        pFlags: {}
+      }]
+    }).querySelector('.formatted-date') as HTMLElement;
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    anchor.dispatchEvent(event);
+
+    expect(onFormattedDateClick).toHaveBeenCalledWith(anchor, event);
   });
 });

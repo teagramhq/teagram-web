@@ -1,13 +1,13 @@
 import {JSX} from 'solid-js';
 import RowTsx from '@components/rowTsx';
 import type {Middleware} from '@helpers/middleware';
-import setAnchorClickHandler from '@helpers/dom/setAnchorClickHandler';
+import setAnchorClickHandler, {AnchorClickHandlerName} from '@helpers/dom/setAnchorClickHandler';
 import {wrapSolidComponent} from '@helpers/solid/wrapSolidComponent';
 import setBlankToAnchor from '@richTextProcessor/setBlankToAnchor';
 
 type SearchWebPageRowLink = {
   href: string,
-  clickHandler?: string,
+  clickHandler?: AnchorClickHandlerName,
   targetBlank?: boolean
 };
 

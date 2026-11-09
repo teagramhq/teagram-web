@@ -257,6 +257,7 @@ describe('InstantViewBlocks streaming updates', () => {
     instantViewMocks.scrollRestore.mockReset();
     instantViewMocks.webViewDestroyed.mockReset();
     instantViewMocks.webViews.length = 0;
+    vi.unstubAllGlobals();
   });
 
   test('updates rich-text leaves without remounting the root, block or open details state', async() => {
@@ -990,6 +991,8 @@ describe('InstantViewBlocks streaming updates', () => {
   });
 
   test('reactively disables manual Instant View links without remounting their block', async() => {
+    const telegramInstantViewClick = vi.fn();
+    vi.stubGlobal('tg_iv', telegramInstantViewClick);
     const page: Page.page = {
       ...makePage('', ''),
       blocks: [{
@@ -1029,10 +1032,15 @@ describe('InstantViewBlocks streaming updates', () => {
     expect(container.querySelector('a')).toBe(anchor);
     expect(anchor.getAttribute('href')).toBeTruthy();
     expect(anchor.getAttribute('aria-disabled')).toBe('false');
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    anchor.dispatchEvent(event);
+    expect(telegramInstantViewClick).toHaveBeenCalledWith(anchor, event);
     dispose();
   });
 
   test('disables inline rich-text links when noNavigation is the only policy flag', async() => {
+    vi.stubGlobal('showMaskedAlert', vi.fn());
     const page: Page.page = {
       ...makePage('', ''),
       blocks: [{
