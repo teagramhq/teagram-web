@@ -22,6 +22,9 @@ vi.mock('@components/wrappers/customEmojiSimple', () => ({
 vi.mock('@components/wrappers/sticker', () => ({
   ignoreMiddlewareCancellation: (error: {type?: string}) => {
     if(error?.type !== 'MIDDLEWARE') throw error;
+  },
+  handleFireAndForgetStickerError: (error: {type?: string}) => {
+    if(error?.type !== 'MIDDLEWARE') console.error(error);
   }
 }));
 vi.mock('@components/wrappers/emojiStatus', () => ({default: vi.fn()}));
@@ -60,6 +63,34 @@ describe('generateTitleIcons sticker cleanup', () => {
       expect(unhandled).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandledRejection);
+    }
+  });
+
+  it('logs unexpected bot-verification emoji failures without an unhandled rejection', async() => {
+    const failure = new Error('bot verification emoji failed');
+    mocks.wrapAdaptiveCustomEmoji.mockReturnValue({
+      container: document.createElement('div'),
+      loadPromise: Promise.reject(failure)
+    });
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    try {
+      await generateTitleIcons({
+        peerId: 1 as PeerId,
+        peer: {bot_verification_icon: 2, pFlags: {}} as any,
+        wrapOptions: {} as WrapSomethingOptions,
+        noPremiumIcon: true
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(log).toHaveBeenCalledWith(failure);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+      log.mockRestore();
     }
   });
 });

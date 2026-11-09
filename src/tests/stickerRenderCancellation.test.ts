@@ -1,5 +1,5 @@
 import {beforeEach, describe, expect, it, vi} from 'vitest';
-import wrapSticker, {ignoreMiddlewareCancellation} from '@components/wrappers/sticker';
+import wrapSticker, {handleFireAndForgetStickerError, ignoreMiddlewareCancellation} from '@components/wrappers/sticker';
 
 const mocks = vi.hoisted(() => {
   HTMLCanvasElement.prototype.toDataURL = () => 'data:image/webp;base64,';
@@ -33,6 +33,15 @@ describe('wrapSticker render cancellation handling', () => {
 
     const failure = new Error('sticker load failed');
     expect(() => ignoreMiddlewareCancellation(failure)).toThrow(failure);
+  });
+
+  it('logs and resolves unexpected fire-and-forget render failures', () => {
+    const failure = new Error('sticker load failed');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(() => handleFireAndForgetStickerError({type: 'MIDDLEWARE'})).not.toThrow();
+    expect(() => handleFireAndForgetStickerError(failure)).not.toThrow();
+    expect(log).toHaveBeenCalledWith(failure);
   });
 
   it('returns the observed render promise to its callers and load promise list', async() => {

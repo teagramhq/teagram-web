@@ -57,6 +57,10 @@ export function ignoreMiddlewareCancellation(error: unknown) {
   if((error as ApiError)?.type !== 'MIDDLEWARE') throw error;
 }
 
+export function handleFireAndForgetStickerError(error: unknown) {
+  if((error as ApiError)?.type !== 'MIDDLEWARE') console.error(error);
+}
+
 const getThumbFromContainer = (container: HTMLElement) => {
   let element = container.firstElementChild as HTMLElement;
   if(element && element.classList.contains('premium-sticker-lock')) {

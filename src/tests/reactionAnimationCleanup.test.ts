@@ -39,6 +39,9 @@ const mocks = vi.hoisted(() => {
     ignoreMiddlewareCancellation: (error: {type?: string}) => {
       if(error?.type !== 'MIDDLEWARE') throw error;
     },
+    handleFireAndForgetStickerError: (error: {type?: string}) => {
+      if(error?.type !== 'MIDDLEWARE') console.error(error);
+    },
     wrapStickerAnimation: vi.fn()
   };
 });
@@ -86,7 +89,8 @@ vi.mock('@components/animationIntersector', () => ({
 }));
 vi.mock('@components/wrappers/sticker', () => ({
   default: mocks.wrapSticker,
-  ignoreMiddlewareCancellation: mocks.ignoreMiddlewareCancellation
+  ignoreMiddlewareCancellation: mocks.ignoreMiddlewareCancellation,
+  handleFireAndForgetStickerError: mocks.handleFireAndForgetStickerError
 }));
 vi.mock('@components/wrappers/stickerAnimation', () => ({default: mocks.wrapStickerAnimation}));
 vi.mock('@components/chat/reactions', () => ({savedReactionTags: []}));
@@ -281,6 +285,45 @@ describe('reaction animation cleanup', () => {
       expect(unhandled).toEqual([]);
     } finally {
       process.off('unhandledRejection', onUnhandledRejection);
+      menu.cleanup();
+    }
+  });
+
+  it('logs unexpected fire-and-forget custom reaction sticker failures without an unhandled rejection', async() => {
+    const failure = new Error('sticker render failed');
+    const document = {id: 'custom-emoji'};
+    const middleware = Object.assign(() => true, {onDestroy: vi.fn()});
+    const middlewareHelper = {get: () => middleware, clean: vi.fn()};
+    const menu = new ChatReactionsMenu({
+      managers: {
+        acknowledged: {
+          appEmojiManager: {
+            getCustomEmojiDocument: vi.fn().mockResolvedValue({cached: true, result: document})
+          }
+        }
+      } as any,
+      type: 'horizontal',
+      middleware: {create: () => middlewareHelper} as any,
+      onFinish: vi.fn(),
+      getOpenPosition: () => new DOMRect()
+    });
+    mocks.wrapSticker.mockImplementation(async() => ({render: Promise.reject(failure)}));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandledRejection);
+
+    try {
+      await expect((menu as any).renderReaction({_: 'reactionCustomEmoji', document_id: 'custom-emoji'}))
+      .resolves.toEqual([]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(mocks.wrapSticker).toHaveBeenCalledOnce();
+      expect(log).toHaveBeenCalledWith(failure);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+      log.mockRestore();
       menu.cleanup();
     }
   });
