@@ -244,10 +244,16 @@ export class AppPeersManager extends AppManager {
   }
 
   public async getChatPeerChangeFlags(peerId: PeerId) {
-    const isRestricted = await this.isPeerRestricted(peerId);
-    return {
+    const isRestrictedPromise = this.isPeerRestricted(peerId);
+    const isUserBlocked = peerId.isUser() && this.appProfileManager.isCachedUserBlocked(peerId.toUserId());
+    const isPremiumRequiredPromise = peerId.isUser() ?
+      Promise.resolve(this.appUsersManager.getRequirementToContact(peerId.toUserId(), true)).then((requirement) => {
+        return requirement?._ === 'requirementToContactPremium';
+      }) :
+      Promise.resolve(false);
+
+    const flags = {
       noForwards: this.noForwards(peerId),
-      isRestricted,
       isLikeGroup: this.isLikeGroup(peerId),
       isRealGroup: this.isAnyGroup(peerId),
       isMegagroup: this.isMegagroup(peerId),
@@ -255,8 +261,15 @@ export class AppPeersManager extends AppManager {
       isChannel: this.isChannel(peerId),
       isBot: this.isBot(peerId),
       isAnonymousSending: this.appMessagesManager.isAnonymousSending(peerId),
-      canManageDirectMessages: this.canManageDirectMessages(peerId)
+      canManageDirectMessages: this.canManageDirectMessages(peerId),
+      isUserBlocked
     };
+
+    const [isRestricted, isPremiumRequired] = await Promise.all([
+      isRestrictedPromise,
+      isPremiumRequiredPromise
+    ]);
+    return {...flags, isRestricted, isPremiumRequired};
   }
 
   public isPeerPublic(peerId: PeerId) {

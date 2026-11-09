@@ -933,14 +933,10 @@ export default class Chat extends EventListenerBase<{
 
     const {
       peerChangeFlags,
-      isUserBlocked,
-      isPremiumRequired,
       starsAmount,
       chat
     } = await m(namedPromises({
       peerChangeFlags: this.managers.appPeersManager.getChatPeerChangeFlags(peerId),
-      isUserBlocked: peerId.isUser() && this.managers.appProfileManager.isCachedUserBlocked(peerId),
-      isPremiumRequired: this.isPremiumRequiredToContact(peerId),
       starsAmount: this.managers.acknowledged.appPeersManager.getStarsAmount(peerId),
       chat: peerId.isAnyChat() && this.peer as MTChat
     }, this.log));
@@ -955,7 +951,9 @@ export default class Chat extends EventListenerBase<{
       isChannel,
       isBot,
       isAnonymousSending,
-      canManageDirectMessages
+      canManageDirectMessages,
+      isUserBlocked,
+      isPremiumRequired
     } = peerChangeFlags;
     const isLikeGroup = forceLikeGroup || (!isBotforum && peerIsLikeGroup);
 

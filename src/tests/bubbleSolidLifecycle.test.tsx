@@ -500,9 +500,11 @@ test('does not log canceled bubble peer changes', async() => {
 });
 
 test('collects chat peer-change flags in one manager call', async() => {
+  let resolveRestricted!: (value: boolean) => void;
+  const restrictedPromise = new Promise<boolean>((resolve) => { resolveRestricted = resolve; });
   const manager = Object.assign(Object.create(AppPeersManager.prototype), {
     noForwards: vi.fn(() => true),
-    isPeerRestricted: vi.fn(() => false),
+    isPeerRestricted: vi.fn(() => restrictedPromise),
     isLikeGroup: vi.fn(() => true),
     isAnyGroup: vi.fn(() => true),
     isMegagroup: vi.fn(() => true),
@@ -510,10 +512,19 @@ test('collects chat peer-change flags in one manager call', async() => {
     isChannel: vi.fn(() => true),
     isBot: vi.fn(() => false),
     appMessagesManager: {isAnonymousSending: vi.fn(() => false)},
+    appProfileManager: {isCachedUserBlocked: vi.fn(() => false)},
+    appUsersManager: {getRequirementToContact: vi.fn(() => ({_: 'requirementToContactEmpty'}))},
     canManageDirectMessages: vi.fn(() => true)
   }) as any;
 
-  await expect(manager.getChatPeerChangeFlags(peerId)).resolves.toEqual({
+  const flagsPromise = manager.getChatPeerChangeFlags(peerId);
+  expect(manager.noForwards).toHaveBeenCalledOnce();
+  expect(manager.isLikeGroup).toHaveBeenCalledOnce();
+  expect(manager.appProfileManager.isCachedUserBlocked).toHaveBeenCalledOnce();
+  expect(manager.appUsersManager.getRequirementToContact).toHaveBeenCalledOnce();
+  resolveRestricted(false);
+
+  await expect(flagsPromise).resolves.toEqual({
     noForwards: true,
     isRestricted: false,
     isLikeGroup: true,
@@ -523,7 +534,9 @@ test('collects chat peer-change flags in one manager call', async() => {
     isChannel: true,
     isBot: false,
     isAnonymousSending: false,
-    canManageDirectMessages: true
+    canManageDirectMessages: true,
+    isUserBlocked: false,
+    isPremiumRequired: false
   });
   expect(manager.noForwards).toHaveBeenCalledOnce();
   expect(manager.isPeerRestricted).toHaveBeenCalledOnce();
@@ -534,6 +547,8 @@ test('collects chat peer-change flags in one manager call', async() => {
   expect(manager.isChannel).toHaveBeenCalledOnce();
   expect(manager.isBot).toHaveBeenCalledOnce();
   expect(manager.appMessagesManager.isAnonymousSending).toHaveBeenCalledOnce();
+  expect(manager.appProfileManager.isCachedUserBlocked).toHaveBeenCalledWith(peerId.toUserId());
+  expect(manager.appUsersManager.getRequirementToContact).toHaveBeenCalledWith(peerId.toUserId(), true);
   expect(manager.canManageDirectMessages).toHaveBeenCalledOnce();
 });
 
@@ -651,6 +666,72 @@ test('does not wait for loaded-end checks before rendering the first history bat
     await deferredHistory[0];
   } finally {
     resolveLoaded();
+    if(previousHeight) {
+      Object.defineProperty(windowSize, 'height', previousHeight);
+    } else {
+      delete (windowSize as any).height;
+    }
+  }
+});
+
+test('renders the deferred history tail when a loaded-end check rejects', async() => {
+  const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
+  Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
+
+  const messages = Array.from({length: 20}, (_, index) => ({
+    ...message(),
+    id: 100 - index,
+    mid: 100 - index
+  }));
+  const renderedMids: number[] = [];
+  let rejectLoaded!: (error: Error) => void;
+  const loadedPromise = new Promise<void>((_resolve, reject) => { rejectLoaded = reject; });
+  const deferredHistory: Promise<void>[] = [];
+  const log = Object.assign(vi.fn(), {
+    bindPrefix: vi.fn(() => vi.fn()),
+    error: vi.fn()
+  });
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chat: {peerId, type: ChatType.Chat},
+    chatInner: {parentElement: undefined},
+    scrollable: {loadedAll: {top: false, bottom: false}, onScroll: vi.fn()},
+    needReflowScroll: false,
+    sponsoredMessageEvery: undefined,
+    messagesQueueOnRenderAdditional: undefined,
+    historyRetries: [],
+    setLoaded: vi.fn(() => loadedPromise),
+    getBubble: vi.fn(),
+    safeRenderMessage: vi.fn(({message: rendered}: {message: Message.message}) => {
+      renderedMids.push(rendered.mid);
+      return Promise.resolve();
+    }),
+    checkIfEmptyPlaceholderNeeded: vi.fn(async() => undefined),
+    log
+  }) as any;
+  Object.defineProperty(harness, 'messagesQueuePromise', {
+    configurable: true,
+    get: () => Promise.resolve()
+  });
+
+  try {
+    const renderPromise = (ChatBubbles.prototype.performHistoryResult as any).call(
+      harness,
+      {history: messages, isEnd: {top: true, bottom: true, both: true}},
+      true,
+      false,
+      true,
+      (promise: Promise<void>) => deferredHistory.push(promise)
+    );
+    await renderPromise;
+    expect(renderedMids).toEqual([100, 99, 98, 97, 96]);
+    expect(deferredHistory).toHaveLength(1);
+
+    rejectLoaded(new Error('loaded-end check failed'));
+    await expect(deferredHistory[0]).resolves.toBeUndefined();
+
+    expect(renderedMids).toEqual(messages.map(({mid}) => mid));
+    expect(harness.historyRetries).toHaveLength(0);
+  } finally {
     if(previousHeight) {
       Object.defineProperty(windowSize, 'height', previousHeight);
     } else {

@@ -11806,12 +11806,17 @@ export default class ChatBubbles {
       setLoadedPromises.push(this.setLoaded('bottom', true));
     }
 
-    let loadedChecksPromise: Promise<any[]> | undefined;
+    let loadedChecksPromise: Promise<void> | undefined;
     if(setLoadedPromises.length) {
       const promise = Promise.all(setLoadedPromises);
       if(deferLoadedChecks) {
-        loadedChecksPromise = promise;
-        void promise.catch(noop);
+        loadedChecksPromise = promise
+          .then((): void => {})
+          .catch((error: unknown): void => {
+            if(error !== PEER_CHANGED_ERROR) {
+              this.log.error('history end check failed:', error);
+            }
+          });
       } else {
         await promise;
       }
@@ -11927,7 +11932,10 @@ export default class ChatBubbles {
         const retryTail = async() => {
           if(!isCurrent()) return;
           try {
-            await loadedChecksPromise;
+            if(loadedChecksPromise) {
+              await loadedChecksPromise;
+              if(!isCurrent()) return;
+            }
             rollbackTailBubbles();
             await renderMessages(messages.slice(firstBatchEnd), true);
             if(loadedTop && !this.historyRetries.length && isCurrent()) await this.setLoaded('top', true);
