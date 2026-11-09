@@ -713,7 +713,7 @@ export default class ChatBubbles {
 
   private getHistoryTopPromise: Promise<boolean>;
   private getHistoryBottomPromise: Promise<boolean>;
-  private deferredHistoryRetry?: () => Promise<void>;
+  private historyRetries: (() => Promise<void>)[] = [];
 
   // public messagesCount: number = -1;
 
@@ -3120,7 +3120,7 @@ export default class ChatBubbles {
     scrollSaver.restore();
   };
 
-  private onBubblesMouseMove = async(e: MouseEvent) => {
+  private async onBubblesMouseMove(e: MouseEvent) {
     const mediaVideoContainer = findUpClassName(e.target, 'media-video-mini');
     mediaVideoContainer?.onMiniVideoMouseMove?.(e);
 
@@ -3240,13 +3240,14 @@ export default class ChatBubbles {
         }, {listenerSetter: this.listenerSetter});
       }, noop);
     });
-  };
+  }
 
   public setReactionsHoverListeners() {
-    this.listenerSetter.add(contextMenuController)('toggle', this.unhoverPrevious);
-    this.listenerSetter.add(overlayCounter)('change', this.unhoverPrevious);
-    this.listenerSetter.add(this.chat.selection)('toggle', this.unhoverPrevious);
-    this.listenerSetter.add(this.container)('mousemove', this.onBubblesMouseMove);
+    const unhoverPrevious = this.unhoverPrevious.bind(this);
+    this.listenerSetter.add(contextMenuController)('toggle', unhoverPrevious);
+    this.listenerSetter.add(overlayCounter)('change', unhoverPrevious);
+    this.listenerSetter.add(this.chat.selection)('toggle', unhoverPrevious);
+    this.listenerSetter.add(this.container)('mousemove', this.onBubblesMouseMove.bind(this));
   }
 
   private setHoverVisible(hoverReaction: HTMLElement, visible: boolean) {
@@ -3267,7 +3268,7 @@ export default class ChatBubbles {
     });
   }
 
-  private unhoverPrevious = () => {
+  private unhoverPrevious() {
     const {hoverBubble, hoverReaction} = this;
     if(hoverBubble) {
       this.setHoverVisible(hoverReaction, false);
@@ -3275,7 +3276,7 @@ export default class ChatBubbles {
         this.hoverReaction =
         undefined;
     }
-  };
+  }
 
   public setStickyDateManually() {
     // const timestamps = Object.keys(this.dateMessages).map((k) => +k).sort((a, b) => b - a);
@@ -4621,22 +4622,32 @@ export default class ChatBubbles {
       return;
     }
 
-    const retry = top && this.deferredHistoryRetry;
-    if(retry) {
-      const peerId = this.peerId;
-      const retryPromise = Promise.resolve().then(retry).then(() => true);
+    const retryCount = top ? this.historyRetries.length : 0;
+    if(retryCount) {
+      let retryError: unknown;
+      let retryFailed = false;
+      const retryPromise = Promise.resolve().then(async() => {
+        for(let i = 0; i < retryCount; ++i) {
+          const retry = this.historyRetries.shift();
+          if(!retry) break;
+          try {
+            await retry();
+          } catch(error) {
+            if(!retryFailed) retryError = error;
+            retryFailed = true;
+          }
+        }
+
+        if(retryFailed) throw retryError;
+        return true;
+      });
       this.getHistoryTopPromise = retryPromise;
       retryPromise.then(() => {
         if(this.getHistoryTopPromise !== retryPromise) return;
         this.getHistoryTopPromise = undefined;
         this.scrollable.onScroll();
-      }, (error: unknown) => {
-        if(this.getHistoryTopPromise !== retryPromise) {
-          if(error !== PEER_CHANGED_ERROR) this.log.warn('deferred history retry failed:', peerId, true, error, {stale: true});
-          return;
-        }
-        this.getHistoryTopPromise = undefined;
-        if(error !== PEER_CHANGED_ERROR) this.log.error('deferred history retry failed:', peerId, true, error);
+      }, () => {
+        if(this.getHistoryTopPromise === retryPromise) this.getHistoryTopPromise = undefined;
       });
       return;
     }
@@ -5724,7 +5735,7 @@ export default class ChatBubbles {
     this.batchProcessor.clear();
 
     this.getHistoryTopPromise = this.getHistoryBottomPromise = undefined;
-    this.deferredHistoryRetry = undefined;
+    this.historyRetries.length = 0;
     this.fetchNewPromise = undefined;
     this.updateGradient = undefined;
     this.ephemeralHistoryPromise = undefined;
@@ -11906,27 +11917,20 @@ export default class ChatBubbles {
         const loadedTop = this.scrollable.loadedAll.top;
         const isCurrent = () => this.peerId === renderedPeerId && this.chatInner === renderedChatInner && this.bubbleGroups === renderedBubbleGroups;
         const retryTail = async() => {
-          if(!isCurrent()) {
-            if(this.deferredHistoryRetry === retryTail) this.deferredHistoryRetry = undefined;
-            return;
-          }
+          if(!isCurrent()) return;
           try {
             rollbackTailBubbles();
             await renderMessages(messages.slice(firstBatchEnd), true);
-            if(this.deferredHistoryRetry === retryTail) {
-              if(loadedTop) await this.setLoaded('top', true);
-              this.deferredHistoryRetry = undefined;
-            }
+            if(loadedTop && !this.historyRetries.length && isCurrent()) await this.setLoaded('top', true);
           } catch(error) {
+            if(error !== PEER_CHANGED_ERROR) this.log.error('history render failed:', renderedPeerId, reverse, error);
             if(isCurrent()) {
-              this.deferredHistoryRetry = retryTail;
+              this.historyRetries.push(retryTail);
               try {
                 await this.setLoaded('top', false, false);
               } catch(setLoadedError) {
                 this.log.error('could not reset history end:', setLoadedError);
               }
-            } else if(this.deferredHistoryRetry === retryTail) {
-              this.deferredHistoryRetry = undefined;
             }
             throw error;
           }
@@ -13231,7 +13235,7 @@ export default class ChatBubbles {
     middleware?: () => boolean
   ): Promise<{cached: boolean, promise: Promise<void>, waitPromise: Promise<any>}> {
     const peerId = this.peerId;
-    const prioritizeFirstPaint = this.isFirstLoad && reverse && !isBackLimit && !additionalFullMid && this.chat.type === ChatType.Chat;
+    const prioritizeFirstPaint = this.isFirstLoad && reverse && !isBackLimit && this.chat.type === ChatType.Chat;
 
     const isBroadcast = this.chat.isBroadcast;
     // console.time('appImManager call getHistory');
@@ -13306,7 +13310,7 @@ export default class ChatBubbles {
       appMessagesManager.getHistory(this.peerId, maxId, loadCount, backLimit); */
     let result: AckedResult<MyHistoryResult> = await this.requestHistory(maxId, loadCount, backLimit) as any;
     let resultPromise: typeof result['result'];
-    let deferredHistoryPromise: Promise<void> | undefined;
+    const deferredHistoryPromises: Promise<void>[] = [];
 
     this.log('i vin brehnya', result, maxId, loadCount, backLimit);
 
@@ -13328,25 +13332,14 @@ export default class ChatBubbles {
 
     this.isFirstLoad = false;
 
-    const processResult = async(historyResult: Awaited<typeof result['result']>) => {
-      // if((historyResult as HistoryResult).isEnd?.top) {
-      //   // * synchronize bot placeholder & user premium appearance
-      //   await this.managers.appProfileManager.getProfileByPeerId(peerId);
-
-      //   // await this.setLoaded('top', true);
-      // }
-    };
-
     const sup = (historyResult: Awaited<typeof result['result']>) => {
       return getHeavyAnimationPromise().then(() => {
-        return processResult(historyResult);
-      }).then(() => {
         if(!isAdditionRender && additionalFullMid) {
           historyResult.history.unshift(splitFullMid(additionalFullMid).mid);
         }
 
         return this.performHistoryResult(historyResult, reverse, true, prioritizeFirstPaint, (promise) => {
-          deferredHistoryPromise = promise;
+          deferredHistoryPromises.push(promise);
         });
       });
     };
@@ -13389,7 +13382,11 @@ export default class ChatBubbles {
     }
 
     // Keep history paging serialized through the deferred tail while peer mounting waits only for first paint.
-    const waitPromise = isAdditionRender ? processPromise(resultPromise) : (prioritizeFirstPaint ? promise.then(() => deferredHistoryPromise) : promise);
+    const waitPromise = Promise.allSettled([promise, resultPromise && processPromise(resultPromise)]).then(async(historyResults) => {
+      const deferredResults = await Promise.allSettled(deferredHistoryPromises);
+      const failedResult = [...historyResults, ...deferredResults].find((result) => result.status === 'rejected');
+      if(failedResult) throw failedResult.reason;
+    });
 
     if(isFirstMessageRender && liteMode.isAvailable('animations')/*  && false */) {
       let times = isAdditionRender ? 2 : 1;

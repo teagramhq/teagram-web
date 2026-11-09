@@ -20,6 +20,8 @@ beforeAll(async() => {
     unobserve() {}
     disconnect() {}
   });
+  vi.stubGlobal('execBotCommand', vi.fn());
+  vi.stubGlobal('setMediaTimestamp', vi.fn());
   vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/webp;base64,');
   vi.doMock('@lib/customEmoji/element', () => ({
     default: {

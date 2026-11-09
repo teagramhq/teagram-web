@@ -2885,8 +2885,9 @@ function isCountedColdTrialConsoleError(text) {
   return !String(text).includes('renderMessage error: NO_STICKERS');
 }
 
-function classifyColdTrialErrors({stage, pageErrors, consoleErrors, consoleErrorsBefore}) {
+function classifyColdTrialErrors({stage, pageErrors, consoleErrors, consoleErrorsBefore, cspMessages}) {
   if(pageErrors > 0) return `${stage}_page_error`;
+  if(cspMessages > 0) return `${stage}_csp_error`;
   if(consoleErrors !== consoleErrorsBefore) return `${stage}_console_error`;
   return null;
 }
@@ -2992,9 +2993,10 @@ async function runColdPickerTrial(storageState, appUrl, trial, cleanupIssues) {
       if(new URL(request.url()).pathname.startsWith('/assets/img/emoji/')) emojiRequests.count++;
     });
     // The trial page is not one of the signed-in app pages, so it needs its own error counters
-    const errors = {page: 0, console: 0};
+    const errors = {page: 0, console: 0, csp: 0};
     page.on('pageerror', () => { errors.page++; });
     page.on('console', (message) => {
+      if(/\bContent Security Policy\b/i.test(message.text())) errors.csp++;
       if(message.type() === 'error' && isCountedColdTrialConsoleError(message.text())) errors.console++;
     });
     // pids.events is cumulative for the whole job, so only a refused fork during this trial counts
@@ -3023,7 +3025,7 @@ async function runColdPickerTrial(storageState, appUrl, trial, cleanupIssues) {
       await openEmojiPicker(page, stage, emojiRequests);
       await openCustomEmojiSet(page, stage);
       const errorLabel = classifyColdTrialErrors({
-        stage, pageErrors: errors.page, consoleErrors: errors.console, consoleErrorsBefore
+        stage, pageErrors: errors.page, consoleErrors: errors.console, consoleErrorsBefore, cspMessages: errors.csp
       });
       if(errorLabel) failStage(errorLabel);
     } catch(error) {
@@ -3036,7 +3038,7 @@ async function runColdPickerTrial(storageState, appUrl, trial, cleanupIssues) {
   }
 }
 
-async function runCustomEmojiScenario(alice, cleanupIssues) {
+async function runColdPickerScenario(alice, cleanupIssues) {
   currentStage = 'alice_custom_emoji_state';
   const storageState = await alice.context.storageState({indexedDB: true}).catch(() => failStage('alice_custom_emoji_state'));
   const appUrl = alice.page.url();
@@ -3044,6 +3046,193 @@ async function runCustomEmojiScenario(alice, cleanupIssues) {
     currentStage = `alice_cold_picker_${trial + 1}`;
     await runColdPickerTrial(storageState, appUrl, trial, cleanupIssues);
   }
+}
+
+
+async function installCustomEmojiSet(page, stage) {
+  setPageScenarioStep(page, `${stage}_set_link`);
+  const setLink = await page.evaluate(() => {
+    const link = document.createElement('a');
+    link.href = new URL('/addemoji/twemoji_custom_emojis', window.location.origin).toString();
+    link.addEventListener('click', (event) => window.stickerSet(link, event));
+    link.textContent = 'Install custom emoji smoke set';
+    link.style.cssText = 'position:fixed;left:8px;top:8px;z-index:2147483647;padding:8px;background:white;color:black';
+    document.body.append(link);
+    return link.textContent;
+  });
+  await page.getByText(setLink, {exact: true}).click().catch(() => failStage(`${stage}_set_link`));
+  const link = page.getByText(setLink, {exact: true});
+  if(await link.count()) await link.evaluate((element) => element.remove());
+
+  const popup = page.locator('.popup-stickers');
+  await popup.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage(`${stage}_set_preview`));
+  const addButton = popup.locator('.popup-footer button');
+  await addButton.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_set_add_button`));
+  await page.waitForFunction(() => {
+    const button = document.querySelector('.popup-stickers .popup-footer button');
+    return button && !button.disabled && !/loading/i.test(button.textContent || '');
+  }, null, {timeout: 30_000}).catch(() => failStage(`${stage}_set_loaded`));
+  await addButton.click().catch(() => failStage(`${stage}_set_add`));
+  await page.waitForFunction(() => {
+    const button = document.querySelector('.popup-stickers .popup-footer button');
+    return button && /remove/i.test(button.textContent || '');
+  }, null, {timeout: 15_000}).catch(() => failStage(`${stage}_set_installed`));
+  await page.keyboard.press('Escape').catch(() => failStage(`${stage}_set_close`));
+  await popup.waitFor({state: 'detached', timeout: 15_000}).catch(() => failStage(`${stage}_set_close`));
+}
+
+async function selectCustomEmoji(page, stage, expectedDocId) {
+  setPageScenarioStep(page, `${stage}_picker`);
+  const dropdown = page.locator('.emoji-dropdown.active');
+  await dropdown.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_picker_visible`));
+
+  const customSelector = expectedDocId ?
+    `.custom-emoji[data-doc-id="${expectedDocId}"]` :
+    '.custom-emoji';
+  const customEmojiCategory = dropdown.locator('.emoji-category:not(.hide) .category-items.not-local').first();
+  await customEmojiCategory.waitFor({state: 'attached', timeout: 15_000})
+  .catch(() => failStage(`${stage}_custom_emoji_category`));
+  await customEmojiCategory.scrollIntoViewIfNeeded().catch(() => failStage(`${stage}_custom_emoji_category`));
+  const customEmoji = customEmojiCategory.locator(customSelector).first();
+  await customEmoji.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_custom_emoji_visible`));
+  const isLocked = await customEmoji.evaluate((element) => {
+    const category = element.closest('.emoji-category');
+    return element.matches('.premium-sticker-lock') || !!category?.querySelector('.category-title-lock, .premium-sticker-lock');
+  });
+  if(isLocked) failStage(`${stage}_premium_lock`);
+  const docId = await customEmoji.getAttribute('data-doc-id');
+  if(!docId || (expectedDocId && docId !== expectedDocId)) failStage(`${stage}_custom_emoji_identity`);
+  await customEmoji.click().catch(() => failStage(`${stage}_custom_emoji_click`));
+  if(await page.locator('.popup-premium:visible').count()) failStage(`${stage}_premium_prompt`);
+  return docId;
+}
+
+async function waitForCustomEmojiMessage(page, text, docId, stage) {
+  setPageScenarioStep(page, stage);
+  await page.waitForFunction(({text, docId}) => {
+    const messages = [...document.querySelectorAll('#column-center .bubble .message')]
+    .filter((message) => (message.textContent || '').includes(text));
+    return messages.length === 1 && [...messages[0].querySelectorAll('.custom-emoji')]
+    .some((emoji) => emoji.dataset.docId === docId);
+  }, {text, docId}, {timeout: 30_000}).catch(() => failStage(stage));
+}
+
+async function waitForCustomMessageReaction(page, text, docId, expectedCount, stage) {
+  setPageScenarioStep(page, stage);
+  await page.waitForFunction(({text, docId, expectedCount}) => {
+    const messages = [...document.querySelectorAll('#column-center .bubble .message')]
+    .filter((message) => (message.textContent || '').includes(text));
+    if(messages.length !== 1) return false;
+    const reactions = [...messages[0].closest('.bubble').querySelectorAll('reaction-element')];
+    const reaction = reactions.find((element) => {
+      return element.reactionCount?.reaction?._ === 'reactionCustomEmoji' &&
+        String(element.reactionCount.reaction.document_id) === docId;
+    });
+    return expectedCount === 0 ? !reaction : reaction?.reactionCount.count === expectedCount;
+  }, {text, docId, expectedCount}, {timeout: 30_000}).catch(() => failStage(stage));
+}
+
+async function reactWithCustomEmoji(page, otherPage, text, docId, stage) {
+  setPageScenarioStep(page, `${stage}_message`);
+  const message = page.locator('#column-center .bubble .message').filter({hasText: text});
+  if(await message.count() !== 1) failStage(`${stage}_message_count`);
+  await message.click({button: 'right'}).catch(() => failStage(`${stage}_context_menu`));
+
+  setPageScenarioStep(page, `${stage}_picker`);
+  const moreButton = page.locator('#bubble-contextmenu .btn-menu-reactions-more');
+  await moreButton.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage(`${stage}_more_button`));
+  await moreButton.click().catch(() => failStage(`${stage}_more_click`));
+  await selectCustomEmoji(page, stage, docId);
+  await waitForCustomMessageReaction(page, text, docId, 1, `${stage}_sender`);
+  await waitForCustomMessageReaction(otherPage, text, docId, 1, `${stage}_receiver`);
+  if(await page.locator('.popup-premium:visible').count()) failStage(`${stage}_premium_prompt`);
+}
+
+async function setCustomEmojiStatus(page, otherPage, docId) {
+  setPageScenarioStep(page, 'alice_custom_emoji_status_open');
+  // The composer's picker stays open after sending; close it so the status picker is the only active one.
+  if(await page.locator('.emoji-dropdown.active').count()) {
+    await page.locator('#column-center .toggle-emoticons').click().catch(() => failStage('alice_custom_emoji_status_chat_picker_close'));
+    await page.waitForFunction(() => !document.querySelector('.emoji-dropdown.active'), null, {timeout: 15_000})
+    .catch(() => failStage('alice_custom_emoji_status_chat_picker_close'));
+  }
+  const statusButton = page.locator('.sidebar-emoji-status');
+  await statusButton.waitFor({state: 'visible', timeout: 15_000}).catch(() => failStage('alice_custom_emoji_status_button'));
+  await statusButton.click().catch(() => failStage('alice_custom_emoji_status_open'));
+  await selectCustomEmoji(page, 'alice_custom_emoji_status', docId);
+
+  setPageScenarioStep(page, 'alice_custom_emoji_status_sender');
+  await page.waitForFunction((docId) => {
+    return !!document.querySelector(`.sidebar-emoji-status-emoji[data-doc-id="${docId}"]`);
+  }, docId, {timeout: 30_000}).catch(() => failStage('alice_custom_emoji_status_sender'));
+
+  // The server does not push status changes to other accounts, so the recipient sees it on its
+  // next load of Alice's profile: reload and reopen the chat.
+  setPageScenarioStep(otherPage, 'bob_custom_emoji_status_reload');
+  await otherPage.reload({waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage('bob_custom_emoji_status_reload'));
+  await otherPage.waitForFunction(() => {
+    const chats = document.querySelector('#page-chats');
+    return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
+  }, null, {timeout: 45_000}).catch(() => failStage('bob_custom_emoji_status_reload_chats'));
+  await selectUniquePeer(
+    otherPage,
+    '#column-left .input-search-input',
+    '#search-container .row[data-peer-id]',
+    runtime.accounts[0].username,
+    'bob_custom_emoji_status_chat'
+  );
+  setPageScenarioStep(otherPage, 'bob_custom_emoji_status_receiver');
+  await otherPage.waitForFunction((docId) => {
+    return !!document.querySelector(`#column-center .topbar .emoji-status[data-doc-id="${docId}"], #column-center .topbar .emoji-status [data-doc-id="${docId}"]`);
+  }, docId, {timeout: 30_000}).catch(() => failStage('bob_custom_emoji_status_receiver'));
+  if(await page.locator('.popup-premium:visible').count()) failStage('alice_custom_emoji_status_premium_prompt');
+}
+
+
+async function runCustomEmojiFeatureFlow(alice, bob) {
+  currentStage = 'alice_custom_emoji_set_install';
+  await installCustomEmojiSet(alice.page, 'alice_custom_emoji');
+  currentStage = 'bob_custom_emoji_set_install';
+  await installCustomEmojiSet(bob.page, 'bob_custom_emoji');
+
+  const alicePeerId = await selectUniquePeer(
+    alice.page,
+    '#column-left .input-search-input',
+    '#search-container .row[data-peer-id]',
+    runtime.accounts[1].username,
+    'alice_custom_emoji_send_chat'
+  );
+  await waitForActivePeerId(alice.page, alicePeerId, 'alice_custom_emoji_send_chat_active');
+
+  const messageText = `browser-ci-custom-emoji-${runtime.runId.slice(0, 8)}`;
+  currentStage = 'alice_custom_emoji_send';
+  const input = await openComposer(alice.page, 'alice_custom_emoji_send');
+  await input.fill(messageText).catch(() => failStage('alice_custom_emoji_send_fill'));
+  await alice.page.locator('#column-center .toggle-emoticons').click()
+  .catch(() => failStage('alice_custom_emoji_send_picker'));
+  const docId = await selectCustomEmoji(alice.page, 'alice_custom_emoji_send');
+  // The picked emoji reaches the composer after its document loads; sending earlier drops it.
+  await alice.page.waitForFunction((id) => !!document.querySelector(`#column-center .input-message-input:not(.input-field-input-fake) [data-doc-id="${id}"]`), docId, {timeout: 15_000})
+  .catch(() => failStage('alice_custom_emoji_send_input'));
+  await alice.page.locator('#column-center .btn-send').click()
+  .catch(() => failStage('alice_custom_emoji_send_submit'));
+  await waitForCustomEmojiMessage(alice.page, messageText, docId, 'alice_custom_emoji_send_visible');
+
+  const bobPeerId = await selectUniquePeer(
+    bob.page,
+    '#column-left .input-search-input',
+    '#search-container .row[data-peer-id]',
+    runtime.accounts[0].username,
+    'bob_custom_emoji_receive_chat'
+  );
+  await waitForActivePeerId(bob.page, bobPeerId, 'bob_custom_emoji_receive_chat_active');
+  await waitForCustomEmojiMessage(bob.page, messageText, docId, 'bob_custom_emoji_receive_visible');
+  if(await alice.page.locator('.popup-premium:visible').count()) failStage('alice_custom_emoji_send_premium_prompt');
+
+  await openComposer(bob.page, 'bob_custom_emoji_reaction_chat');
+  await reactWithCustomEmoji(bob.page, alice.page, messageText, docId, 'bob_custom_emoji_reaction');
+  await setCustomEmojiStatus(alice.page, bob.page, docId);
+
 }
 
 async function sendChannelText(page, channelName, screenshotDirectory, capturedScreenshots, timeoutMs = 30_000) {
@@ -6613,7 +6802,8 @@ async function main(dependencies = {}) {
     report.push({name: 'message', status: 'passed'});
 
     currentScenario = 'custom-emoji';
-    await runCustomEmojiScenario(alice, cleanupIssues);
+    await runColdPickerScenario(alice, cleanupIssues);
+    await runCustomEmojiFeatureFlow(alice, bob);
     report.push({name: 'custom-emoji', status: 'passed'});
 
     currentScenario = 'group';

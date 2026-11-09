@@ -95,41 +95,58 @@ describe('wrapRichText external links', () => {
 
   test('a concealed link on a longer host beginning with t.me keeps the external-link alert', () => {
     vi.stubGlobal('im', vi.fn());
+    const showMaskedAlert = vi.fn();
+    vi.stubGlobal('showMaskedAlert', showMaskedAlert);
 
-    const anchor = wrapTextUrlEntity('t.me/durov', 'https://t.me.evil.com/durov');
+    const anchor = wrapTextUrlEntity('t.me/durov', 'https://t.me.evil.com/durov') as HTMLAnchorElement;
     expect(anchor.getAttribute('href')).toEqual('https://t.me.evil.com/durov');
-    expect(anchor.getAttribute('onclick')).toEqual('showMaskedAlert(this)');
+    expect(anchor.dataset.clickHandler).toBe('showMaskedAlert');
+    expect(anchor.getAttribute('onclick')).toBeNull();
     expect(anchor.getAttribute('target')).toEqual('_blank');
     expect(anchor.getAttribute('rel')).toEqual('noopener noreferrer');
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    anchor.dispatchEvent(event);
+    expect(showMaskedAlert).toHaveBeenCalledWith(anchor, event);
   });
 
-  test('an exact t.me host keeps its internal link handler', () => {
-    vi.stubGlobal('im', vi.fn());
+  test('an exact t.me host routes clicks without an inline event handler', () => {
+    const im = vi.fn();
+    vi.stubGlobal('im', im);
 
-    const anchor = wrapUrlEntity('https://t.me/durov');
-    expect(anchor.getAttribute('onclick')).toEqual('im(this)');
+    const anchor = wrapUrlEntity('https://t.me/durov') as HTMLAnchorElement;
+    expect(anchor.dataset.clickHandler).toBe('im');
+    expect(anchor.getAttribute('onclick')).toBeNull();
     expect(anchor.getAttribute('target')).toBeNull();
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    anchor.dispatchEvent(event);
+    expect(im).toHaveBeenCalledTimes(1);
+    expect(im).toHaveBeenCalledWith(anchor, event);
   });
 
   test('masked and unmasked sticker links rendered before config resolves use the prefix at click time', () => {
-    vi.stubGlobal('stickerSet', vi.fn());
+    const stickerSet = vi.fn();
+    vi.stubGlobal('stickerSet', stickerSet);
     vi.stubGlobal('showMaskedAlert', vi.fn());
 
     const chatAnchor = wrapUrlEntity('https://links.teagram.test/addstickers/cats_a') as HTMLAnchorElement;
     const maskedAnchor = wrapTextUrlEntity('sticker pack', 'https://links.teagram.test/addstickers/dogs_b') as HTMLAnchorElement;
     document.body.append(chatAnchor, maskedAnchor);
 
-    expect(chatAnchor.getAttribute('onclick')).toBe('stickerSet(this,event)');
+    expect(chatAnchor.dataset.clickHandler).toBe('stickerSet');
+    expect(chatAnchor.getAttribute('onclick')).toBeNull();
     expect(chatAnchor.getAttribute('target')).toBe('_blank');
-    expect(maskedAnchor.getAttribute('onclick')).toBe('stickerSet(this,event)');
+    expect(maskedAnchor.dataset.clickHandler).toBe('stickerSet');
+    expect(maskedAnchor.getAttribute('onclick')).toBeNull();
     expect(maskedAnchor.getAttribute('target')).toBe('_blank');
 
     const querySelectorAll = vi.spyOn(document, 'querySelectorAll');
     setStickerSetLinkPrefix('https://links.teagram.test/');
 
-    expect(chatAnchor.getAttribute('onclick')).toBe('stickerSet(this,event)');
+    expect(chatAnchor.dataset.clickHandler).toBe('stickerSet');
     expect(chatAnchor.getAttribute('target')).toBe('_blank');
-    expect(maskedAnchor.getAttribute('onclick')).toBe('stickerSet(this,event)');
+    expect(maskedAnchor.dataset.clickHandler).toBe('stickerSet');
     expect(maskedAnchor.getAttribute('target')).toBe('_blank');
     expect(resolveStickerSetShareLink(chatAnchor.href)).toEqual({shortName: 'cats_a', isEmoji: false});
     expect(resolveStickerSetShareLink(maskedAnchor.href)).toEqual({shortName: 'dogs_b', isEmoji: false});
@@ -145,6 +162,10 @@ describe('wrapRichText external links', () => {
     expect(showMaskedAlert).toHaveBeenCalledTimes(1);
     expect(querySelectorAll).not.toHaveBeenCalled();
     querySelectorAll.mockRestore();
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    chatAnchor.dispatchEvent(event);
+    expect(stickerSet).toHaveBeenCalledWith(chatAnchor, event);
   });
 
   test('setting the sticker link prefix does not scan rendered message anchors', () => {
@@ -169,5 +190,52 @@ describe('wrapRichText external links', () => {
     expect(anchor.getAttribute('onclick')).toBeNull();
     expect(anchor.getAttribute('target')).toEqual('_blank');
     expect(anchor.getAttribute('rel')).toEqual('noopener noreferrer');
+  });
+
+  test('bot commands dispatch to the command handler', () => {
+    const execBotCommand = vi.fn();
+    vi.stubGlobal('execBotCommand', execBotCommand);
+    const anchor = wrapRichText('/help', {
+      entities: [{_: 'messageEntityBotCommand', offset: 0, length: 5}],
+      passEntities: {messageEntityBotCommand: true}
+    }).querySelector('a') as HTMLAnchorElement;
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    anchor.dispatchEvent(event);
+
+    expect(execBotCommand).toHaveBeenCalledWith(anchor, event);
+  });
+
+  test('timestamps dispatch to the media timestamp handler', () => {
+    const setMediaTimestamp = vi.fn();
+    vi.stubGlobal('setMediaTimestamp', setMediaTimestamp);
+    const anchor = wrapRichText('0:01', {
+      entities: [{_: 'messageEntityTimestamp', offset: 0, length: 4, time: 1}],
+      maxMediaTimestamp: 60
+    }).querySelector('a.timestamp') as HTMLAnchorElement;
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    anchor.dispatchEvent(event);
+
+    expect(setMediaTimestamp).toHaveBeenCalledWith(anchor, event);
+  });
+
+  test('formatted dates dispatch to their date handler', () => {
+    const onFormattedDateClick = vi.fn();
+    vi.stubGlobal('onFormattedDateClick', onFormattedDateClick);
+    const anchor = wrapRichText('today', {
+      entities: [{
+        _: 'messageEntityFormattedDate',
+        offset: 0,
+        length: 5,
+        date: 1,
+        pFlags: {}
+      }]
+    }).querySelector('.formatted-date') as HTMLElement;
+
+    const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+    anchor.dispatchEvent(event);
+
+    expect(onFormattedDateClick).toHaveBeenCalledWith(anchor, event);
   });
 });

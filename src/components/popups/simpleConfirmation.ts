@@ -75,7 +75,7 @@ export class SimpleConfirmationPopup extends PopupElement {
         disabledEntities
       }));
       description.querySelectorAll('a').forEach((link) => {
-        link.removeAttribute('onclick');
+        link.onclick = null;
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
       });

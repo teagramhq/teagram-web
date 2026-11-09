@@ -7,6 +7,7 @@ import {EmoticonsDropdown} from '@components/emoticonsDropdown';
 import EmojiTab from '@components/emoticonsDropdown/tabs/emoji';
 import Icon, {getIconContent} from '@components/icon';
 import {getOverlayRoot} from '@helpers/appWindow';
+import {optionalStatuses} from './emojiStatus';
 
 const openPickers = new WeakMap<HTMLElement, EmoticonsDropdown>();
 
@@ -26,24 +27,26 @@ export function openEmojiStatusPicker(options: {
   const emojiTab = new EmojiTab({
     noRegularEmoji: true,
     managers: managers,
+    canUsePremiumEmojiAlways: true,
     mainSets: () => {
       const defaultStatuses = managers.appStickersManager.getLocalStickerSet('inputStickerSetEmojiDefaultStatuses')
       .then((stickerSet) => {
         return stickerSet.documents.map((doc) => doc.id);
       });
 
-      const convertEmojiStatuses = (emojiStatuses: AccountEmojiStatuses) => {
-        return (emojiStatuses as AccountEmojiStatuses.accountEmojiStatuses)
-        .statuses
-        .map((status) => (status as EmojiStatus.emojiStatus).document_id)
-        .filter(Boolean);
+      // * a server without recent or default status lists still has installed custom emoji to pick from
+      const convertEmojiStatuses = (emojiStatuses: AccountEmojiStatuses | undefined) => {
+        if(!emojiStatuses || emojiStatuses._ !== 'account.emojiStatuses') return [];
+        return emojiStatuses.statuses
+          .map((status) => (status as EmojiStatus.emojiStatus).document_id)
+          .filter(Boolean);
       };
 
       return [
         Promise.all([
           defaultStatuses,
-          managers.appUsersManager.getRecentEmojiStatuses().then(convertEmojiStatuses),
-          managers.appUsersManager.getDefaultEmojiStatuses().then(convertEmojiStatuses),
+          optionalStatuses(managers.appUsersManager.getRecentEmojiStatuses()).then(convertEmojiStatuses),
+          optionalStatuses(managers.appUsersManager.getDefaultEmojiStatuses()).then(convertEmojiStatuses),
           managers.appEmojiManager.getRecentEmojis('custom')
         ]).then((arrays) => {
           return filterUnique(flatten(arrays));

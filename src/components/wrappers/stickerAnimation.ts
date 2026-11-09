@@ -115,6 +115,7 @@ export default function wrapStickerAnimation({
   }).then(({render}) => render);
 
   const stickerPromise = renderPromise.then((_animation) => {
+    if(!_animation) return;
     assumeType<LottiePlayer>(_animation);
     if(!middleware()) {
       _animation.remove();

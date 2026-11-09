@@ -1,4 +1,5 @@
 import {InputGroupCall, Message, MessageAction} from '@layer';
+import setAnchorClickHandler from '@helpers/dom/setAnchorClickHandler';
 import wrapUrl from '@lib/richTextProcessor/wrapUrl';
 
 export default function wrapJoinVoiceChatAnchor(message: Message.messageService) {
@@ -26,6 +27,6 @@ export default function wrapJoinVoiceChatAnchor(message: Message.messageService)
 
   const a = document.createElement('a');
   a.href = url;
-  a.setAttribute('onclick', onclick + '(this)');
+  setAnchorClickHandler(a, onclick);
   return a;
 }

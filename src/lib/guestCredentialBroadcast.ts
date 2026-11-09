@@ -12,24 +12,35 @@ function channelName(serverId: string) {
 }
 
 function storageEventKey(serverId: string) {
-  return `${storagePrefix(serverId)}guest-credential-lifecycle-clear.v1`;
+  return `${channelName(serverId).slice(0, -3)}-clear.v1`;
+}
+
+type TransportFailureOperation = 'broadcast' | 'storage' | 'listener';
+
+function reportTransportFailure(operation: TransportFailureOperation) {
+  console.error(operation);
 }
 
 export function notifyGuestCredentialInvalidation(serverId = getRuntimeServerId()) {
   if(typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(localInvalidationEvent, {detail: serverId}));
+  let channel: BroadcastChannel | undefined;
   try {
-    if(typeof BroadcastChannel !== 'undefined') {
-      const channel = new BroadcastChannel(channelName(serverId));
-      channel.postMessage({type: 'clear'});
-      channel.close();
-    }
-  } catch{}
+    channel = new BroadcastChannel(channelName(serverId));
+    channel.postMessage({type: 'clear'});
+  } catch{
+    reportTransportFailure('broadcast');
+  }
+  channel?.close();
 
   try {
+    // Workers such as SharedWorker have no localStorage; skip delivery there instead of reporting a failure.
+    const storage = self.localStorage;
     const key = storageEventKey(serverId);
-    localStorage.setItem(key, `${Date.now()}-${++invalidationSequence}`);
-    localStorage.removeItem(key);
-  } catch{}
+    storage?.setItem(key, `${Date.now()}-${++invalidationSequence}`);
+    storage?.removeItem(key);
+  } catch{
+    reportTransportFailure('storage');
+  }
 }
 
 export function listenForGuestCredentialInvalidation(serverId: string, callback: () => void, includeLocal = false) {
@@ -41,13 +52,13 @@ export function listenForGuestCredentialInvalidation(serverId: string, callback:
     if(event.key === storageEventKey(serverId)) callback();
   };
   try {
-    if(typeof BroadcastChannel !== 'undefined') {
-      channel = new BroadcastChannel(channelName(serverId));
-      channel.addEventListener('message', (event) => {
-        if(event.data?.type === 'clear') callback();
-      });
-    }
-  } catch{}
+    channel = new BroadcastChannel(channelName(serverId));
+    channel.addEventListener('message', (event) => {
+      if(event.data?.type === 'clear') callback();
+    });
+  } catch{
+    reportTransportFailure('listener');
+  }
   if(typeof window !== 'undefined') {
     window.addEventListener('storage', onStorage);
     if(includeLocal) window.addEventListener(localInvalidationEvent, onLocalInvalidation);

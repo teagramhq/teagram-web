@@ -14,8 +14,12 @@ import {AppMessagesManager} from '@appManagers/appMessagesManager';
 
 const moduleMocks = vi.hoisted(() => {
   const noop = vi.fn();
+  const getCacheContext = vi.fn(() => ({downloaded: false, url: undefined}));
   return {
-    apiManagerProxy: new Proxy({}, {get: () => noop}),
+    apiManagerProxy: new Proxy({getCacheContext, getAvailableReactions: vi.fn(async() => []), getStickerCachedThumb: vi.fn()}, {
+      get: (target, key: string | symbol) => key in target ? target[key as keyof typeof target] : noop
+    }),
+    downloadMedia: vi.fn(),
     sidebarLeft: new Proxy({}, {get: () => noop}),
     leftColumnActiveClassname: 'is-left-column-shown',
     sidebarRight: new Proxy({}, {get: () => noop}),
@@ -34,6 +38,19 @@ const moduleMocks = vi.hoisted(() => {
 });
 
 vi.mock('@lib/apiManagerProxy', () => ({default: moduleMocks.apiManagerProxy}));
+vi.mock('@lib/appDownloadManager', () => ({default: {downloadMedia: moduleMocks.downloadMedia}}));
+vi.mock('@appManagers/utils/stickers/getStickerEffectThumb', () => ({default: vi.fn()}));
+vi.mock('@lib/lottie/lottieLoader', () => ({default: {loadLottieWorkers: vi.fn(), loadAnimationWorker: vi.fn()}}));
+vi.mock('@components/wrappers/stickerAppearance', () => ({
+  default: vi.fn(() => ({
+    canBuildImage: () => true,
+    canBuildSilhouette: () => false,
+    setSilhouette: vi.fn(),
+    upgradeToImage: vi.fn(),
+    onMediaFirstFrame: vi.fn()
+  })),
+  onAnimationEnd: vi.fn()
+}));
 vi.mock('@components/sidebarLeft', () => ({default: moduleMocks.sidebarLeft, LEFT_COLUMN_ACTIVE_CLASSNAME: moduleMocks.leftColumnActiveClassname}));
 vi.mock('@components/sidebarRight', () => ({default: moduleMocks.sidebarRight}));
 vi.mock('@components/wrappers/getPeerTitle', () => ({default: moduleMocks.getPeerTitle}));
@@ -2201,6 +2218,7 @@ test('renders the newest first-paint batch before the remaining initial history'
     needReflowScroll: false,
     sponsoredMessageEvery: undefined,
     messagesQueueOnRenderAdditional: undefined,
+    historyRetries: [],
     getBubble: vi.fn(),
     safeRenderMessage: vi.fn(({message}: {message: Message.message}) => {
       renderedMids.push(message.mid);
@@ -2242,6 +2260,235 @@ test('renders the newest first-paint batch before the remaining initial history'
   }
 });
 
+test('prioritizes first paint while rendering a stored last-message batch', async() => {
+  const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
+  Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
+
+  const storedMids = Array.from({length: 20}, (_, index) => 99 - index);
+  const historySlice = {
+    isEnd: vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false),
+    slice: (start: number, end: number) => storedMids.slice(start, end)
+  };
+  const storedHistory = {slice: historySlice, sliceMe: vi.fn(() => undefined)};
+  const requestHistory = vi.fn(async() => ({
+    cached: false,
+    result: Promise.resolve({history: [79, 78, 77, 76, 75, 74]})
+  }));
+  let releaseCachedBatch!: () => void;
+  const cachedBatchGate = new Promise<void>((resolve) => { releaseCachedBatch = resolve; });
+  const deferredTails: Array<{kind: 'cached' | 'fetched', resolve: () => void}> = [];
+  const performHistoryResult = vi.fn(async(
+    historyResult: unknown,
+    _reverse: boolean,
+    _includeEphemeralHistory: boolean,
+    prioritizeFirstPaint: boolean,
+    onDeferredHistory?: (promise: Promise<void>) => void
+  ) => {
+    if(!prioritizeFirstPaint) return;
+    const kind = (historyResult as {history: number[]}).history[0] === 99 ? 'cached' : 'fetched';
+    if(kind === 'cached') await cachedBatchGate;
+    let resolveTail!: () => void;
+    const tail = new Promise<void>((resolve) => { resolveTail = resolve; });
+    deferredTails.push({kind, resolve: resolveTail});
+    onDeferredHistory?.(tail);
+  });
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    isFirstLoad: true,
+    chat: {
+      peerId,
+      type: ChatType.Chat,
+      isBroadcast: false,
+      getHistoryStorage: () => ({history: storedHistory}),
+      getMessage: vi.fn(() => ({}))
+    },
+    requestHistory,
+    performHistoryResult,
+    log: vi.fn()
+  }) as any;
+
+  try {
+    const result = await harness.getHistory(undefined, true, false, makeFullMid(peerId, 100));
+    await vi.waitFor(() => expect(performHistoryResult).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(deferredTails.some(({kind}) => kind === 'fetched')).toBe(true));
+
+    expect(performHistoryResult).toHaveBeenNthCalledWith(1, expect.anything(), true, true, true, expect.any(Function));
+    expect(performHistoryResult).toHaveBeenNthCalledWith(2, expect.anything(), true, true, true, expect.any(Function));
+
+    let waitSettled = false;
+    void result.waitPromise.then(() => waitSettled = true);
+    deferredTails.find(({kind}) => kind === 'fetched')!.resolve();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(waitSettled).toBe(false);
+
+    releaseCachedBatch();
+    await vi.waitFor(() => expect(deferredTails.some(({kind}) => kind === 'cached')).toBe(true));
+    await result.promise;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(waitSettled).toBe(false);
+
+    deferredTails.find(({kind}) => kind === 'cached')!.resolve();
+    await result.waitPromise;
+    expect(waitSettled).toBe(true);
+  } finally {
+    releaseCachedBatch();
+    deferredTails.forEach(({resolve}) => resolve());
+    if(previousHeight) Object.defineProperty(windowSize, 'height', previousHeight);
+    else delete (windowSize as any).height;
+  }
+});
+
+test('keeps paging locked until the fetched deferred tail settles after cached render fails', async() => {
+  const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
+  Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
+
+  const storedMids = Array.from({length: 20}, (_, index) => 99 - index);
+  const historySlice = {
+    isEnd: vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false),
+    slice: (start: number, end: number) => storedMids.slice(start, end)
+  };
+  const storedHistory = {slice: historySlice, sliceMe: vi.fn(() => undefined)};
+  const cachedFailure = new Error('cached first paint failed');
+  let rejectCachedBatch!: (error: Error) => void;
+  const cachedBatch = new Promise<void>((_resolve, reject) => { rejectCachedBatch = reject; });
+  let releaseFetchedTail!: () => void;
+  const fetchedTail = new Promise<void>((resolve) => { releaseFetchedTail = resolve; });
+  const performHistoryResult = vi.fn((
+    historyResult: unknown,
+    _reverse: boolean,
+    _includeEphemeralHistory: boolean,
+    _prioritizeFirstPaint: boolean,
+    onDeferredHistory?: (promise: Promise<void>) => void
+  ) => {
+    if((historyResult as {history: number[]}).history[0] === 99) return cachedBatch;
+    onDeferredHistory?.(fetchedTail);
+    return Promise.resolve();
+  });
+  const requestHistory = vi.fn(async() => ({
+    cached: false,
+    result: Promise.resolve({history: [79, 78, 77, 76, 75, 74]})
+  }));
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    isFirstLoad: true,
+    chat: {
+      peerId,
+      type: ChatType.Chat,
+      isBroadcast: false,
+      getHistoryStorage: () => ({history: storedHistory}),
+      getMessage: vi.fn(() => ({}))
+    },
+    requestHistory,
+    performHistoryResult,
+    getMiddleware: () => () => true,
+    getRenderedHistory: vi.fn(() => [makeFullMid(peerId, 100)]),
+    scrollable: {loadedAll: {top: false, bottom: false}, onScroll: vi.fn()},
+    log: Object.assign(vi.fn(), {error: vi.fn(), warn: vi.fn()})
+  }) as any;
+
+  try {
+    const result = await harness.getHistory1(undefined, true, false, makeFullMid(peerId, 100));
+    await vi.waitFor(() => expect(performHistoryResult).toHaveBeenCalledTimes(2));
+    expect(harness.getHistoryTopPromise).toBeDefined();
+
+    let waitSettled = false;
+    void result.waitPromise.then(() => waitSettled = true, () => waitSettled = true);
+    rejectCachedBatch(cachedFailure);
+    await expect(result.promise).rejects.toBe(cachedFailure);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(waitSettled).toBe(false);
+    const activeWait = harness.getHistoryTopPromise;
+    harness.loadMoreHistory(true);
+    expect(harness.getHistoryTopPromise).toBe(activeWait);
+    expect(requestHistory).toHaveBeenCalledTimes(1);
+
+    releaseFetchedTail();
+    await expect(result.waitPromise).rejects.toBe(cachedFailure);
+    await vi.waitFor(() => expect(harness.getHistoryTopPromise).toBeUndefined());
+  } finally {
+    rejectCachedBatch(cachedFailure);
+    releaseFetchedTail();
+    if(previousHeight) Object.defineProperty(windowSize, 'height', previousHeight);
+    else delete (windowSize as any).height;
+  }
+});
+
+test('logs and retries both failed first-paint tails before paging', async() => {
+  const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
+  Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
+
+  const storedMids = Array.from({length: 10}, (_, index) => 99 - index);
+  const historySlice = {
+    isEnd: vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false),
+    slice: (start: number, end: number) => storedMids.slice(start, end)
+  };
+  const storedHistory = {slice: historySlice, sliceMe: vi.fn(() => undefined)};
+  const cachedTailFailure = new Error('cached deferred tail failed');
+  const fetchedTailFailure = new Error('fetched deferred tail failed');
+  const messages = new Map<number, Message.message>();
+  [...storedMids, 79, 78, 77, 76, 75, 74].forEach((mid) => messages.set(mid, {...message(), id: mid, mid}));
+  const bubbles = new Map<FullMid, HTMLElement>();
+  const failedMids = new Set<number>();
+  const attempts: number[] = [];
+  const scrollable = {loadedAll: {top: true, bottom: true}, onScroll: vi.fn()};
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    isFirstLoad: true,
+    ephemeralHistoryLoaded: true,
+    historyRetries: [],
+    chat: {
+      peerId,
+      type: ChatType.Chat,
+      isBroadcast: false,
+      getHistoryStorage: () => ({history: storedHistory}),
+      getMessage: (fullMid: FullMid | number) => messages.get(typeof fullMid === 'number' ? fullMid : Number(fullMid.split(':').pop()))
+    },
+    chatInner: document.createElement('div'),
+    bubbleGroups: {},
+    scrollable,
+    needReflowScroll: false,
+    sponsoredMessageEvery: undefined,
+    messagesQueueOnRenderAdditional: undefined,
+    requestHistory: vi.fn(async() => ({cached: false, result: Promise.resolve({history: [79, 78, 77, 76, 75, 74]})})),
+    getBubble: vi.fn((id: FullMid) => bubbles.get(id)),
+    safeRenderMessage: vi.fn(({message: rendered}: {message: Message.message}) => {
+      attempts.push(rendered.mid);
+      const fullMid = makeFullMid(peerId, rendered.mid);
+      if(!bubbles.has(fullMid)) bubbles.set(fullMid, document.createElement('div'));
+      if((rendered.mid === 94 || rendered.mid === 74) && !failedMids.has(rendered.mid)) {
+        failedMids.add(rendered.mid);
+        return Promise.reject(rendered.mid === 94 ? cachedTailFailure : fetchedTailFailure);
+      }
+      return Promise.resolve();
+    }),
+    deleteMessagesByIds: vi.fn((ids: FullMid[]) => ids.forEach((id) => bubbles.delete(id))),
+    setLoaded: vi.fn(async(side: 'top' | 'bottom', value: boolean) => { scrollable.loadedAll[side] = value; }),
+    checkIfEmptyPlaceholderNeeded: vi.fn(async() => undefined),
+    getRenderedHistory: vi.fn(() => [makeFullMid(peerId, 99)]),
+    getMiddleware: () => () => true,
+    log: Object.assign(vi.fn(), {bindPrefix: vi.fn(() => vi.fn()), error: vi.fn(), warn: vi.fn()})
+  }) as any;
+  Object.defineProperty(harness, 'messagesQueuePromise', {get: () => Promise.resolve()});
+
+  try {
+    const result = await harness.getHistory1(undefined, true, false, makeFullMid(peerId, 100));
+    const waitError = await result.waitPromise.catch((error: unknown) => error);
+    expect([cachedTailFailure, fetchedTailFailure]).toContain(waitError);
+    await vi.waitFor(() => expect(harness.getHistoryTopPromise).toBeUndefined());
+    expect(harness.log.error).toHaveBeenCalledWith('history render failed:', peerId, true, cachedTailFailure);
+    expect(harness.log.error).toHaveBeenCalledWith('history render failed:', peerId, true, fetchedTailFailure);
+    expect(scrollable.loadedAll.top).toBe(false);
+
+    harness.loadMoreHistory(true);
+    await harness.getHistoryTopPromise;
+    await vi.waitFor(() => expect(harness.getHistoryTopPromise).toBeUndefined());
+    expect(attempts.filter((mid) => mid === 94)).toHaveLength(2);
+    expect(attempts.filter((mid) => mid === 74)).toHaveLength(2);
+    expect(scrollable.loadedAll.top).toBe(true);
+  } finally {
+    if(previousHeight) Object.defineProperty(windowSize, 'height', previousHeight);
+    else delete (windowSize as any).height;
+  }
+});
+
 test('propagates deferred history failure and retries the original tail before paging', async() => {
   const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
   Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
@@ -2263,6 +2510,7 @@ test('propagates deferred history failure and retries the original tail before p
     needReflowScroll: false,
     sponsoredMessageEvery: undefined,
     messagesQueueOnRenderAdditional: undefined,
+    historyRetries: [],
     getBubble: vi.fn((id: FullMid) => bubbles.get(id)),
     safeRenderMessage: vi.fn(({message, propagateFailure}: {message: Message.message, propagateFailure?: boolean}) => {
       attempts.push(message.mid);
@@ -2305,7 +2553,7 @@ test('propagates deferred history failure and retries the original tail before p
     harness.loadMoreHistory(true);
     await expect(harness.getHistoryTopPromise).rejects.toBe(failure);
     await vi.waitFor(() => expect(harness.getHistoryTopPromise).toBeUndefined());
-    expect(harness.log.error).toHaveBeenCalledWith('deferred history retry failed:', peerId, true, failure);
+    expect(harness.log.error).toHaveBeenCalledWith('history render failed:', peerId, true, failure);
     expect(scrollable.loadedAll.top).toBe(false);
     expect(new Set(bubbles.keys())).toEqual(new Set([...messages.slice(0, 5).map(({mid}) => makeFullMid(peerId, mid)), makeFullMid(peerId, 93)]));
     queuePromise = Promise.resolve();
@@ -2374,14 +2622,14 @@ test('does not clear a newer history load when an older preload fails', async() 
   await vi.waitFor(() => expect(harness.getHistoryTopPromise).toBeUndefined());
 });
 
-test('logs a superseded deferred retry without clearing the newer load', async() => {
+test('does not clear a newer load when a deferred retry is superseded', async() => {
   const failure = new Error('retry failed');
   let rejectRetry!: (error: Error) => void;
   const retry = new Promise<void>((_resolve, reject) => { rejectRetry = reject; });
   const newLoad = Promise.resolve(true);
   const harness = Object.assign(Object.create(ChatBubbles.prototype), {
     chat: {peerId, setPeerPromise: false},
-    deferredHistoryRetry: () => retry,
+    historyRetries: [() => retry],
     log: Object.assign(vi.fn(), {error: vi.fn(), warn: vi.fn()})
   }) as any;
   harness.loadMoreHistory(true);
@@ -2391,7 +2639,7 @@ test('logs a superseded deferred retry without clearing the newer load', async()
   harness.chat.peerId = 11 as PeerId;
   rejectRetry(failure);
   expect(await observed).toBe(failure);
-  await vi.waitFor(() => expect(harness.log.warn).toHaveBeenCalledWith('deferred history retry failed:', peerId, true, failure, {stale: true}));
+  await Promise.resolve();
   expect(harness.getHistoryTopPromise).toBe(newLoad);
 });
 
@@ -2408,6 +2656,7 @@ test('does not carry a deferred history retry into another peer', async() => {
     chat,
     chatInner: document.createElement('div'),
     bubbleGroups: {},
+    historyRetries: [],
     scrollable,
     needReflowScroll: false,
     sponsoredMessageEvery: undefined,
@@ -2435,6 +2684,62 @@ test('does not carry a deferred history retry into another peer', async() => {
     harness.loadMoreHistory(true);
     expect(harness.getHistory1).toHaveBeenCalledWith(makeFullMid(nextPeerId, 45), true, undefined, undefined, false);
   } finally {
+    if(previousHeight) Object.defineProperty(windowSize, 'height', previousHeight);
+    else delete (windowSize as any).height;
+  }
+});
+
+test('does not mark new peer history complete when a deferred render resolves', async() => {
+  const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
+  Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
+  const messages = Array.from({length: 10}, (_, index) => ({...message(), id: 100 - index, mid: 100 - index}));
+  const nextPeerId = 11 as PeerId;
+  let resolveTail!: () => void;
+  let startTail!: () => void;
+  const pendingTail = new Promise<void>((resolve) => { resolveTail = resolve; });
+  const tailStarted = new Promise<void>((resolve) => { startTail = resolve; });
+  const scrollable = {loadedAll: {top: true, bottom: true}, onScroll: vi.fn()};
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chat: {type: ChatType.Chat, peerId},
+    chatInner: document.createElement('div'),
+    bubbleGroups: {},
+    scrollable,
+    needReflowScroll: false,
+    sponsoredMessageEvery: undefined,
+    messagesQueueOnRenderAdditional: undefined,
+    historyRetries: [],
+    safeRenderMessage: vi.fn(({message: rendered}: {message: Message.message}) => {
+      if(rendered.mid === 95) {
+        startTail();
+        return pendingTail;
+      }
+      return Promise.resolve();
+    }),
+    getBubble: vi.fn(),
+    deleteMessagesByIds: vi.fn(),
+    setLoaded: vi.fn(async(side: 'top' | 'bottom', value: boolean) => { scrollable.loadedAll[side] = value; }),
+    checkIfEmptyPlaceholderNeeded: vi.fn(async() => undefined),
+    log: Object.assign(vi.fn(), {bindPrefix: vi.fn(() => vi.fn()), error: vi.fn()})
+  }) as any;
+  Object.defineProperty(harness, 'messagesQueuePromise', {get: () => Promise.resolve()});
+
+  try {
+    let tailPromise!: Promise<void>;
+    await harness.performHistoryResult({history: messages}, true, false, true, (promise: Promise<void>) => { tailPromise = promise; });
+    await tailStarted;
+
+    harness.chat.peerId = nextPeerId;
+    harness.chatInner = document.createElement('div');
+    harness.bubbleGroups = {};
+    harness.historyRetries.length = 0;
+    scrollable.loadedAll.top = false;
+    resolveTail();
+    await tailPromise;
+
+    expect(harness.setLoaded).not.toHaveBeenCalledWith('top', true);
+    expect(scrollable.loadedAll.top).toBe(false);
+  } finally {
+    resolveTail();
     if(previousHeight) Object.defineProperty(windowSize, 'height', previousHeight);
     else delete (windowSize as any).height;
   }
@@ -5071,4 +5376,73 @@ test.each([
 
   expect(chatUpdate).toBeTypeOf('function');
   await expect(chatUpdate(chatId)).resolves.toBeUndefined();
+});
+
+test('handles a cancelled quick-reaction sticker render after hover teardown', async() => {
+  vi.useFakeTimers();
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.dataset.peerId = String(peerId);
+  bubble.dataset.mid = '1';
+  const content = document.createElement('div');
+  content.className = 'bubble-content';
+  const target = document.createElement('span');
+  content.append(target);
+  bubble.append(content);
+
+  const message = {_:'message', peerId, id: 1} as any;
+  const doc = {id: '42', sticker: 2, attributes: [], thumbs: [], w: 18, h: 18} as any;
+  const rejectDownload = (() => {
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<never>((_resolve, rejectPromise) => {
+      reject = rejectPromise;
+    });
+    return {promise, reject: (error: unknown) => reject(error)};
+  })();
+  (moduleMocks.apiManagerProxy as any).getCacheContext.mockReturnValue({downloaded: false, url: undefined});
+  moduleMocks.downloadMedia.mockReset().mockReturnValue(rejectDownload.promise);
+
+  const middlewareHelper = getMiddleware();
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chat: {
+      peerId,
+      type: ChatType.Chat,
+      selection: {isSelecting: false, canSelectBubble: vi.fn(() => true)},
+      getMessage: vi.fn(() => message),
+      animationGroup: 'chat'
+    },
+    managers: {
+      appMessagesManager: {getGroupsFirstMessage: vi.fn(async() => message)},
+      appReactionsManager: {getAvailableReactionsByMessage: vi.fn(async() => ({reactions: [{_: 'reactionCustomEmoji', document_id: '42'}]}))},
+      appEmojiManager: {getCustomEmojiDocument: vi.fn(async() => doc)}
+    },
+    getMiddleware: () => middlewareHelper.get()
+  }) as any;
+  const event = new MouseEvent('mousemove');
+  Object.defineProperty(event, 'target', {value: target});
+  await harness.onBubblesMouseMove(event);
+  await vi.advanceTimersByTimeAsync(400);
+
+  expect(moduleMocks.downloadMedia).toHaveBeenCalledOnce();
+  const hoverReaction = content.querySelector<HTMLElement>('.bubble-hover-reaction');
+  expect(hoverReaction).not.toBeNull();
+
+  const addEventListener = vi.spyOn(HTMLElement.prototype, 'addEventListener');
+  const unhandled: unknown[] = [];
+  const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandledRejection);
+
+  try {
+    harness.unhoverPrevious();
+    vi.useRealTimers();
+    rejectDownload.reject({type: 'MIDDLEWARE'});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(addEventListener).not.toHaveBeenCalled();
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off('unhandledRejection', onUnhandledRejection);
+    addEventListener.mockRestore();
+    vi.useRealTimers();
+  }
 });

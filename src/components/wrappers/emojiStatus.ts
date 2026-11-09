@@ -31,7 +31,7 @@ export default async function wrapEmojiStatus({
       container.classList.add('emoji-status-text-color');
     }
 
-    await wrapSticker({
+    const sticker = await wrapSticker({
       doc,
       div: container,
       width: size.width,
@@ -46,8 +46,21 @@ export default async function wrapEmojiStatus({
       // group: 'none'
     });
 
-    if(!middleware()) return;
-    await Promise.all(loadPromises);
+    if(sticker?.render) {
+      loadPromises.push(sticker.render);
+    }
+
+    // * a status torn down mid-render may leave its sticker load rejecting with MIDDLEWARE;
+    // * consume that cancellation here but preserve other failures through the parent promise
+    const loaded = Promise.all(loadPromises);
+    if(!middleware()) {
+      await loaded.catch((error) => {
+        if((error as ApiError)?.type !== 'MIDDLEWARE') throw error;
+      });
+      return;
+    }
+
+    await loaded;
   };
 
   if(emojiStatus._ === 'emojiStatusCollectible' && RENDER_SPARKLES) {
@@ -63,7 +76,14 @@ export default async function wrapEmojiStatus({
     return container;
   }
 
-  const p = result.result.then(wrap);
+  const p = result.result.then(wrap).catch((error) => {
+    // A peer/title can be replaced while its status animation is loading.
+    // Middleware cancellation is expected during that teardown; keep real load
+    // failures observable.
+    if((error as ApiError)?.type !== 'MIDDLEWARE') {
+      throw error;
+    }
+  });
   if(result.cached) {
     await p;
   }

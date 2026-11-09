@@ -63,9 +63,10 @@ import getAttachMenuBotIcon from '@appManagers/utils/attachMenuBots/getAttachMen
 import wrapEmojiText from '@lib/richTextProcessor/wrapEmojiText';
 import wrapUrl from '@lib/richTextProcessor/wrapUrl';
 import {updateSearchHelperResults} from '@components/sidebarLeft/searchHelperResults';
-import {AttachMenuBot, EmojiStatus, User} from '@layer';
+import {AttachMenuBot, User} from '@layer';
 import {Middleware, MiddlewareHelper} from '@helpers/middleware';
 import wrapEmojiStatus from '@components/wrappers/emojiStatus';
+import {getSidebarEmojiStatus, openEmojiStatusPickerSafely, updateSidebarEmojiStatus} from './emojiStatus';
 
 const log = logger('SidebarLeft');
 import {makeMediaSize} from '@helpers/mediaSize';
@@ -107,7 +108,6 @@ import useHasFoldersSidebar, {
 import isObject from '@helpers/object/isObject';
 import {useAppSettings} from '@stores/appSettings';
 import {useCollapsedCommunityDialogsKey} from '@stores/communities';
-import {openEmojiStatusPicker} from '@components/sidebarLeft/emojiStatusPicker';
 import IS_CONFERENCE_CALL_SUPPORTED from '@environment/conferenceCallSupport';
 import IS_CALL_SUPPORTED from '@environment/callSupport';
 
@@ -260,24 +260,23 @@ export class AppSidebarLeft extends SidebarSlider {
     });
 
     let statusMiddlewareHelper: MiddlewareHelper, fireOnNew: boolean;
-    const premiumMiddlewareHelper = this.getMiddleware().create();
     const statusBtnIcon = ButtonIcon(' sidebar-emoji-status', {noRipple: true});
 
     const lockButton = createLockButton();
 
     attachClickEvent(statusBtnIcon, () => {
-      openEmojiStatusPicker({
+      void openEmojiStatusPickerSafely({
         managers: this.managers,
         anchorElement: statusBtnIcon,
         onChosen: () => {
           fireOnNew = true
         }
-      })
+      }, (error) => log.error('Failed to open emoji status picker', error));
     });
 
     const wrapStatus = async(middleware: Middleware) => {
       const user = apiManagerProxy.getUser(rootScope.myId.toUserId());
-      const emojiStatus = user.emoji_status as EmojiStatus.emojiStatus;
+      const emojiStatus = getSidebarEmojiStatus(user);
       if(!emojiStatus) {
         statusBtnIcon.replaceChildren();
         replaceButtonIcon(statusBtnIcon, 'star');
@@ -316,51 +315,43 @@ export class AppSidebarLeft extends SidebarSlider {
       statusBtnIcon.replaceChildren(container);
     };
 
-    const onPremium = async(isPremium: boolean) => {
-      premiumMiddlewareHelper.clean();
-      const middleware = premiumMiddlewareHelper.get();
-      if(isPremium) {
-        await wrapStatus((statusMiddlewareHelper = middleware.create()).get());
-        if(!middleware()) return;
-        toggleRightButtons(true, await DeferredIsUsingPasscode.isUsingPasscode());
+    const updateEmojiStatus = () => {
+      const oldStatusMiddlewareHelper = statusMiddlewareHelper;
+      statusMiddlewareHelper = this.getMiddleware().create();
+      void updateSidebarEmojiStatus(
+        () => wrapStatus(statusMiddlewareHelper.get()),
+        (error) => log.error('Failed to update sidebar emoji status', error)
+      ).finally(() => {
+        oldStatusMiddlewareHelper?.destroy();
+      });
+    };
+    rootScope.addEventListener('emoji_status_change', updateEmojiStatus);
+    this.getMiddleware().onDestroy(() => {
+      rootScope.removeEventListener('emoji_status_change', updateEmojiStatus);
+      statusMiddlewareHelper?.destroy();
+    });
+    updateEmojiStatus();
 
-        const onEmojiStatusChange = () => {
-          const oldStatusMiddlewareHelper = statusMiddlewareHelper;
-          wrapStatus((statusMiddlewareHelper = middleware.create()).get())
-          .finally(() => {
-            oldStatusMiddlewareHelper.destroy();
-          });
-        };
-
-        rootScope.addEventListener('emoji_status_change', onEmojiStatusChange);
-
-        middleware.onClean(() => {
-          rootScope.removeEventListener('emoji_status_change', onEmojiStatusChange);
-        });
-      } else {
-        toggleRightButtons(false, await DeferredIsUsingPasscode.isUsingPasscode());
-      }
-
+    const onPremium = async() => {
+      toggleRightButtons(await DeferredIsUsingPasscode.isUsingPasscode());
       appDialogsManager.resizeStoriesList?.();
     };
 
-    const toggleRightButtons = (isPremium: boolean, isUsingPasscode: boolean) => {
-      if(isPremium) sidebarHeader.append(statusBtnIcon);
-      else statusBtnIcon.remove();
-
+    const toggleRightButtons = (isUsingPasscode: boolean) => {
+      sidebarHeader.append(statusBtnIcon);
       if(isUsingPasscode) sidebarHeader.append(lockButton.element);
       else lockButton.element.remove();
 
-      sidebarHeader.classList.toggle('is-input-the-last-child', !isPremium && !isUsingPasscode);
+      sidebarHeader.classList.remove('is-input-the-last-child');
     };
 
     appImManager.addEventListener('premium_toggle', onPremium);
     rootScope.addEventListener('toggle_using_passcode', (isUsingPasscode) => {
-      toggleRightButtons(rootScope.premium, isUsingPasscode);
+      toggleRightButtons(isUsingPasscode);
     });
 
     const [appSettings] = useAppSettings();
-    toggleRightButtons(rootScope.premium, appSettings.passcode?.enabled);
+    toggleRightButtons(appSettings.passcode?.enabled);
 
     this.managers.appUsersManager.getTopPeers('correspondents');
 
