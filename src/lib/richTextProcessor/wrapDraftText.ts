@@ -1,5 +1,4 @@
 import type {AnimationItemGroup} from '@components/animationIntersector';
-import rootScope from '@lib/rootScope';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
 
 export default function wrapDraftText(text: string, options: Partial<{
@@ -10,14 +9,8 @@ export default function wrapDraftText(text: string, options: Partial<{
     return wrapRichText('');
   }
 
-  let entities = options.entities;
-  if(entities && !rootScope.premium && options.wrappingForPeerId !== rootScope.myId) {
-    entities = entities.filter((entity) => entity._ !== 'messageEntityCustomEmoji');
-  }
-
   const fragment = wrapRichText(text, {
     ...options,
-    entities,
     noLinks: true,
     wrappingDraft: true,
     passEntities: {

@@ -53,6 +53,10 @@ const locksUrls: {[docId: string]: string} = {};
 
 export const videosCache: {[key: string]: Promise<any>} = {};
 
+export const handleStickerError = (error: unknown) => (
+  (error as ApiError)?.type !== 'MIDDLEWARE' && console.error(error)
+);
+
 const getThumbFromContainer = (container: HTMLElement) => {
   let element = container.firstElementChild as HTMLElement;
   if(element && element.classList.contains('premium-sticker-lock')) {
@@ -734,8 +738,10 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
     (lazyLoadQueue.push({div: div[0], load, middleware}), Promise.resolve()) :
     load();
 
+  const renderPromise = loadPromise;
+
   if(downloaded && (asStatic/*  || stickerType === 3 */)) {
-    loadThumbPromise = loadPromise as any;
+    loadThumbPromise = renderPromise as any;
     loadPromises?.push(loadThumbPromise);
   }
 
@@ -747,7 +753,7 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
       middleware,
       isOut,
       width,
-      loadPromise,
+      loadPromise: renderPromise,
       relativeEffect,
       loopEffect,
       scrollable,
@@ -755,7 +761,7 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
     });
   }
 
-  ret.render = loadPromise as any;
+  ret.render = renderPromise as any;
   return ret;
 }
 
@@ -786,7 +792,14 @@ export async function fireStickerEffect({e, container, doc, managers, middleware
 
   container.dataset.playing = '1';
 
-  await loadPromise;
+  try {
+    await loadPromise;
+  } catch(error) {
+    handleStickerError(error);
+    return;
+  }
+
+  if(!middleware()) return;
   const {animationDiv, stickerPromise} = wrapStickerAnimation({
     doc,
     middleware,
@@ -805,10 +818,11 @@ export async function fireStickerEffect({e, container, doc, managers, middleware
   }
 
   stickerPromise.then((player) => {
+    if(!player) return;
     player.addEventListener('destroy', () => {
       delete container.dataset.playing;
     });
-  });
+  }, handleStickerError);
 }
 
 function attachStickerEffectHandler(options: Omit<Parameters<typeof fireStickerEffect>[0], 'e'>) {

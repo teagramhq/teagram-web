@@ -25,7 +25,7 @@ import animationIntersector, {AnimationItemGroup} from '@components/animationInt
 import ButtonIcon from '@components/buttonIcon';
 import {EmoticonsDropdown} from '@components/emoticonsDropdown';
 import EmojiTab from '@components/emoticonsDropdown/tabs/emoji';
-import wrapSticker from '@components/wrappers/sticker';
+import wrapSticker, {handleStickerError} from '@components/wrappers/sticker';
 import {i18n} from '@lib/langPack';
 import anchorCallback from '@helpers/dom/anchorCallback';
 import PopupPremium from '@components/popups/premium';
@@ -35,6 +35,8 @@ import partition from '@helpers/array/partition';
 import {PAID_REACTION_EMOJI_DOCID} from '@lib/customEmoji/constants';
 import {StarsStar} from '@components/popups/stars';
 import {cleanEmoji} from '@lib/richTextProcessor/fixEmoji';
+import {createReactionPickerEmojiTab} from './reactionsMenuEmojiAccess';
+import {onReactionAnimationRendered} from './reactionsMenuRender';
 
 const REACTIONS_CLASS_NAME = 'btn-menu-reactions';
 const REACTION_CLASS_NAME = REACTIONS_CLASS_NAME + '-reaction';
@@ -386,7 +388,7 @@ export class ChatReactionsMenu {
 
     const canShrink = this.noPacks && this.noSearch;
 
-    const emojiTab = new EmojiTab({
+    const emojiTab = createReactionPickerEmojiTab({
       noRegularEmoji: true,
       noPacks: this.noPacks,
       noSearch: this.noSearch,
@@ -463,7 +465,7 @@ export class ChatReactionsMenu {
         return this.splitAvailableEffects(availableEffects);
       } : undefined,
       showLocks: this.isEffects
-    });
+    }, this.isTags, this.isEffects, (options) => new EmojiTab(options));
 
     const emoticonsDropdown = new EmoticonsDropdown({
       tabsToRender: [emojiTab],
@@ -605,13 +607,13 @@ export class ChatReactionsMenu {
       delete options.withThumb;
 
       const wrap = () => {
-        wrapSticker({
+        void wrapSticker({
           doc,
           div: appearWrapper,
           liteModeKey: false,
           play: availableReaction === undefined ? true : undefined,
           ...options
-        });
+        }).then(({render}) => render).catch(handleStickerError);
       };
 
       let doc = availableReaction?.static_icon, delay = false;
@@ -648,23 +650,27 @@ export class ChatReactionsMenu {
         liteModeKey: false,
         ...options
       }).then(({render}) => render).then((player) => {
-        assumeType<LottiePlayer>(player);
+        onReactionAnimationRendered(player, (player) => {
+          assumeType<LottiePlayer>(player);
 
-        players.appear = player;
+          players.appear = player;
 
-        player.addEventListener('enterFrame', (frameNo) => {
-          if(player.maxFrame === frameNo) {
-            selectLoadPromise.then((selectPlayer) => {
-              assumeType<LottiePlayer>(selectPlayer);
-              appearWrapper.classList.add('hide');
-              selectWrapper.classList.remove('hide');
+          player.addEventListener('enterFrame', (frameNo) => {
+            if(player.maxFrame === frameNo) {
+              selectLoadPromise.then((selectPlayer) => {
+                onReactionAnimationRendered(selectPlayer, (selectPlayer) => {
+                  assumeType<LottiePlayer>(selectPlayer);
+                  appearWrapper.classList.add('hide');
+                  selectWrapper.classList.remove('hide');
 
-              if(isFirst) {
-                players.select = selectPlayer;
-                isFirst = false;
-              }
-            }, noop);
-          }
+                  if(isFirst) {
+                    players.select = selectPlayer;
+                    isFirst = false;
+                  }
+                });
+              }, noop);
+            }
+          });
         });
       }, noop);
 
@@ -674,9 +680,11 @@ export class ChatReactionsMenu {
         liteModeKey: false,
         ...options
       }).then(({render}) => render).then((player) => {
-        assumeType<LottiePlayer>(player);
+        return onReactionAnimationRendered(player, (player) => {
+          assumeType<LottiePlayer>(player);
 
-        return lottieLoader.waitForFirstFrame(player);
+          return lottieLoader.waitForFirstFrame(player);
+        });
       }).catch(noop);
     }
 

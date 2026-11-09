@@ -3945,7 +3945,7 @@ describe('real client scenario contract', () => {
     expect(trialSource).toContain('cspMessages: errors.csp');
     expect(trialSource.lastIndexOf('fs.rmSync(trialDirectory')).toBeGreaterThan(trialSource.indexOf('await browser.close()'));
     expect(trialSource).toContain(`push('browser_close_cleanup')`);
-    expect(browserSource).toContain(`currentScenario = 'custom-emoji';\n    await runCustomEmojiScenario(alice, cleanupIssues);`);
+    expect(browserSource).toContain(`currentScenario = 'custom-emoji';\n    await runColdPickerScenario(alice, cleanupIssues);\n    await runCustomEmojiFeatureFlow(alice, bob);`);
   });
 
   it('labels a cold trial failure by what killed the page', () => {

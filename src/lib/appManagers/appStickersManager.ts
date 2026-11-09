@@ -634,7 +634,9 @@ export class AppStickersManager extends AppManager {
 
   public async toggleStickerSet(set: StickerSet.stickerSet) {
     const input = getStickerSetInputByStickerSet(set);
-    const cacheKey = this.getCacheKey(input);
+    // A set opened from a link is cached under its short name, not its id.
+    const cacheKey = [input, getStickerSetInputByShortName(set.short_name)].map((candidate) => this.getCacheKey(candidate))
+    .find((key) => this.storage.getFromCache(key));
     const stickerSet = this.storage.getFromCache(cacheKey);
     set = stickerSet.set;
 

@@ -269,7 +269,7 @@ export class EmoticonsDropdown extends DropdownHover {
 
     if(!this.tabsToRender.length) {
       this.tabsToRender = [
-        new EmojiTab({managers: this.managers, preloaderDelay: 200}),
+        new EmojiTab({managers: this.managers, preloaderDelay: 200, canUsePremiumEmojiAlways: true}),
         new StickersTab(this.managers),
         new GifsTab({managers: this.managers})
       ];
