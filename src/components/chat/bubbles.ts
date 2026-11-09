@@ -11920,7 +11920,7 @@ export default class ChatBubbles {
           try {
             rollbackTailBubbles();
             await renderMessages(messages.slice(firstBatchEnd), true);
-            if(loadedTop && !this.historyRetries.length) await this.setLoaded('top', true);
+            if(loadedTop && !this.historyRetries.length && isCurrent()) await this.setLoaded('top', true);
           } catch(error) {
             if(error !== PEER_CHANGED_ERROR) this.log.error('history render failed:', renderedPeerId, reverse, error);
             if(isCurrent()) {

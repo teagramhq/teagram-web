@@ -2672,6 +2672,62 @@ test('does not carry a deferred history retry into another peer', async() => {
   }
 });
 
+test('does not mark new peer history complete when a deferred render resolves', async() => {
+  const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
+  Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
+  const messages = Array.from({length: 10}, (_, index) => ({...message(), id: 100 - index, mid: 100 - index}));
+  const nextPeerId = 11 as PeerId;
+  let resolveTail!: () => void;
+  let startTail!: () => void;
+  const pendingTail = new Promise<void>((resolve) => { resolveTail = resolve; });
+  const tailStarted = new Promise<void>((resolve) => { startTail = resolve; });
+  const scrollable = {loadedAll: {top: true, bottom: true}, onScroll: vi.fn()};
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chat: {type: ChatType.Chat, peerId},
+    chatInner: document.createElement('div'),
+    bubbleGroups: {},
+    scrollable,
+    needReflowScroll: false,
+    sponsoredMessageEvery: undefined,
+    messagesQueueOnRenderAdditional: undefined,
+    historyRetries: [],
+    safeRenderMessage: vi.fn(({message: rendered}: {message: Message.message}) => {
+      if(rendered.mid === 95) {
+        startTail();
+        return pendingTail;
+      }
+      return Promise.resolve();
+    }),
+    getBubble: vi.fn(),
+    deleteMessagesByIds: vi.fn(),
+    setLoaded: vi.fn(async(side: 'top' | 'bottom', value: boolean) => { scrollable.loadedAll[side] = value; }),
+    checkIfEmptyPlaceholderNeeded: vi.fn(async() => undefined),
+    log: Object.assign(vi.fn(), {bindPrefix: vi.fn(() => vi.fn()), error: vi.fn()})
+  }) as any;
+  Object.defineProperty(harness, 'messagesQueuePromise', {get: () => Promise.resolve()});
+
+  try {
+    let tailPromise!: Promise<void>;
+    await harness.performHistoryResult({history: messages}, true, false, true, (promise: Promise<void>) => { tailPromise = promise; });
+    await tailStarted;
+
+    harness.chat.peerId = nextPeerId;
+    harness.chatInner = document.createElement('div');
+    harness.bubbleGroups = {};
+    harness.historyRetries.length = 0;
+    scrollable.loadedAll.top = false;
+    resolveTail();
+    await tailPromise;
+
+    expect(harness.setLoaded).not.toHaveBeenCalledWith('top', true);
+    expect(scrollable.loadedAll.top).toBe(false);
+  } finally {
+    resolveTail();
+    if(previousHeight) Object.defineProperty(windowSize, 'height', previousHeight);
+    else delete (windowSize as any).height;
+  }
+});
+
 test('exposes a deferred tail failure through the history loading promise', async() => {
   const failure = new Error('deferred batch failed');
   let rejectTail!: (error: Error) => void;
