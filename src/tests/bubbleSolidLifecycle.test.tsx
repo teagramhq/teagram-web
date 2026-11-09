@@ -2297,11 +2297,11 @@ test('prioritizes first paint while rendering a stored last-message batch', asyn
     await Promise.resolve();
     expect(waitSettled).toBe(false);
 
-    deferredTails[0]();
+    deferredTails[1]();
     await Promise.resolve();
     expect(waitSettled).toBe(false);
 
-    deferredTails[1]();
+    deferredTails[0]();
     await result.waitPromise;
     expect(waitSettled).toBe(true);
   } finally {
