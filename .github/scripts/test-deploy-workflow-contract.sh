@@ -295,6 +295,42 @@ SH
   grep -Fq '::error::web image publication job succeeded' "$tmp/missing-pin.out" ||
     fail 'a successful publisher without its image pin must explain the error'
 
+  # An unavailable publication-job API must fail instead of skipping an unverified event.
+  TEST_EVENT_RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
+  TEST_EVENT_JOB_CONCLUSION=success
+  RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
+  RUN_HEAD_SHA="$TEST_OTHER_SHA"
+  export TEST_JOBS_API_FAILURE=true
+  : >"$GITHUB_OUTPUT"
+  if bash -euo pipefail "$tmp/target.sh" >"$tmp/event-jobs-api.out" 2>&1; then
+    fail 'a publication-job API failure must fail the event resolver'
+  else
+    status=$?
+  fi
+  [[ "$status" == 1 ]] || fail 'a publication-job API failure must exit 1'
+  if grep -Fxq 'skip=true' "$GITHUB_OUTPUT"; then
+    fail 'a publication-job API failure must not skip the deploy'
+  fi
+  grep -Fq '::error::could not verify the web image publication job' "$tmp/event-jobs-api.out" ||
+    fail 'a publication-job API failure must have a distinct diagnostic'
+  unset TEST_JOBS_API_FAILURE
+
+  # An unexpected publication-job conclusion must also fail closed.
+  TEST_EVENT_JOB_CONCLUSION=failure
+  : >"$GITHUB_OUTPUT"
+  if bash -euo pipefail "$tmp/target.sh" >"$tmp/event-unexpected-conclusion.out" 2>&1; then
+    fail 'an unexpected publication-job conclusion must fail the event resolver'
+  else
+    status=$?
+  fi
+  [[ "$status" == 1 ]] || fail 'an unexpected publication-job conclusion must exit 1'
+  if grep -Fxq 'skip=true' "$GITHUB_OUTPUT"; then
+    fail 'an unexpected publication-job conclusion must not skip the deploy'
+  fi
+  grep -Fq "::error::web image publication job in run $TEST_UNPUBLISHED_RUN_ID has unexpected conclusion 'failure'" \
+    "$tmp/event-unexpected-conclusion.out" ||
+    fail 'an unexpected publication-job conclusion must explain the error'
+
   # An unpublished event skips before deployment serialization.
   GITHUB_EVENT_NAME=workflow_run
   RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
@@ -307,6 +343,27 @@ SH
   if grep -q '^sha=' "$GITHUB_OUTPUT"; then
     fail 'an unpublished workflow_run must not select a deploy SHA'
   fi
+
+  # An event-run artifacts API error is operational, never an unpublished skip.
+  RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
+  RUN_HEAD_SHA="$TEST_OTHER_SHA"
+  TEST_EVENT_RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
+  TEST_EVENT_PUBLICATION=false
+  export TEST_ARTIFACT_API_FAILURE_RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
+  : >"$GITHUB_OUTPUT"
+  if bash -euo pipefail "$tmp/target.sh" >"$tmp/event-artifact-api.out" 2>&1; then
+    fail 'an event artifacts API failure must fail the target resolver'
+  else
+    status=$?
+  fi
+  [[ "$status" == 1 ]] || fail 'an event artifacts API failure must exit 1'
+  if grep -Fxq 'skip=true' "$GITHUB_OUTPUT"; then
+    fail 'an event artifacts API failure must not skip the deploy'
+  fi
+  grep -Fq "::error::could not verify the web image pin for publication run $TEST_UNPUBLISHED_RUN_ID" \
+    "$tmp/event-artifact-api.out" ||
+    fail 'an event artifacts API failure must have a distinct diagnostic'
+  unset TEST_ARTIFACT_API_FAILURE_RUN_ID
 
   # Artifacts API errors are operational failures, never a no-pin skip.
   GITHUB_EVENT_NAME=workflow_dispatch
