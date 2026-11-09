@@ -298,8 +298,8 @@ check_contract() {
     fail 'deployment concurrency group must remain deploy-teagram-web'
   [[ "$(query '.jobs.deploy-web.concurrency."cancel-in-progress"')" == false ]] ||
     fail 'deployment must not cancel a running rollout'
-  [[ "$(query '.jobs.deploy-web.environment')" == production ]] ||
-    fail 'deployment must use the production environment'
+  [[ "$(query '.jobs.deploy-web.environment')" == k3s-prod ]] ||
+    fail 'deployment must use the k3s-prod environment'
   [[ "$(query '.jobs.check-published-image-pin.environment // ""')" == '' ]] ||
     fail 'image-pin resolution must not request production secrets'
   [[ "$(query '.jobs.deploy-web.permissions.actions')" == read &&

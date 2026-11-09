@@ -7,7 +7,8 @@ Publication` run on `master`; it checks the pin's source commit and artifact
 digest before rendering the production overlay in `deploy/k8s/`.
 
 The production workflow connects to the k3s API through Tailscale and the
-`KUBECONFIG` secret in the `production` environment. It verifies that the k3s
+`KUBECONFIG` secret in the `k3s-prod` GitHub environment, restricted to
+deployment branch `master`. It verifies that the k3s
 Cloudflare connector has exactly one ready pod, runs a server-side dry run,
 applies the manifests, waits for the web rollout, and checks that
 `https://web.teagram.io/` serves the matching source commit and artifact

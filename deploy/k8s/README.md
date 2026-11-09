@@ -34,8 +34,9 @@ checks its source commit and private-artifact digest before rendering the
 production overlay. Only the published source commit is checked out.
 
 The production job joins the tailnet, uses the `KUBECONFIG` secret from the
-`production` environment, and confirms that exactly one k3s Cloudflare
-connector pod is ready. It runs `kubectl apply --dry-run=server`, applies the
+`k3s-prod` GitHub environment, restricted to deployment branch `master`, and
+confirms that exactly one k3s Cloudflare connector pod is ready. It runs
+`kubectl apply --dry-run=server`, applies the
 rendered overlay, waits for the Deployment, then checks the public web route's
 root, JavaScript bundle, and `mtproto-target.json` source identity. If apply,
 rollout, or smoke verification fails after changes begin, it runs

@@ -149,7 +149,7 @@ jobs:
     concurrency:
       group: deploy-teagram-web
       cancel-in-progress: false
-    environment: production
+    environment: k3s-prod
     permissions:
       contents: read
       actions: read
