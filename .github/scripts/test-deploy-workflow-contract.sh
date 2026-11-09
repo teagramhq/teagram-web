@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Guards private-artifact publication and the production deploy flow.
+# Guards web image publication and the production k3s deployment flow.
 set -euo pipefail
 
 workflow="${DEPLOY_WORKFLOW:-.github/workflows/deploy.yml}"
 expected_if="\${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push') }}"
-expected_deploy_if="\${{ needs.check-published-artifact.outputs.skip == 'false' }}"
+expected_deploy_if="\${{ needs.check-published-image-pin.outputs.skip == 'false' }}"
 expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inputs.issue) || '' }}"
 expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Leave empty for no report.'
 private_artifact_workflow="${PRIVATE_ARTIFACT_WORKFLOW:-.github/workflows/private-artifact.yml}"
@@ -67,7 +67,7 @@ check_publication_call_graph() {
   [[ "$private_group" == teagram-web-private-artifact-* ]] ||
     fail 'private artifact concurrency group must use literal prefix teagram-web-private-artifact'
   [[ "$stack_group" == teagram-web-deployment-stack-checks-* ]] ||
-    fail 'deployment stack concurrency group must use literal prefix teagram-web-deployment-stack-checks'
+    fail 'deployment stack checks concurrency group must use literal prefix teagram-web-deployment-stack-checks'
   [[ "$ci_group" != "$private_group" && "$ci_group" != "$stack_group" && "$private_group" != "$stack_group" ]] ||
     fail 'master publication workflows must have distinct concurrency groups'
 
@@ -94,7 +94,7 @@ check_target_selection() (
   set -euo pipefail
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  query '.jobs.check-published-artifact.steps[] | select(.id == "target") | .run' >"$tmp/target.sh"
+  query '.jobs.check-published-image-pin.steps[] | select(.id == "target") | .run' >"$tmp/target.sh"
   query '.jobs.deploy-web.steps[] | select(.id == "refresh") | .run' >"$tmp/refresh.sh"
   cat >"$tmp/gh" <<'SH'
 #!/usr/bin/env bash
@@ -111,11 +111,11 @@ elif [[ "$api_path" =~ /actions/runs/([0-9]+)/artifacts ]]; then
   if [[ "$run_id" == "$TEST_UNPUBLISHED_RUN_ID" ]]; then
     printf '{"artifacts":[]}\n'
   elif [[ "$run_id" == "$TEST_EVENT_RUN_ID" && "$TEST_EVENT_PUBLICATION" == true ]]; then
-    printf '{"artifacts":[{"name":"private-mtproto-%s-%s"}]}\n' "$RUN_HEAD_SHA" "$TEST_EVENT_DIGEST"
+    printf '{"artifacts":[{"name":"teagram-web-image-pin-%s-%s"}]}\n' "$RUN_HEAD_SHA" "$TEST_EVENT_DIGEST"
   elif [[ "$run_id" == "$TEST_LATEST_RUN_ID" && "$TEST_LATEST_PUBLICATION" == true ]]; then
-    printf '{"artifacts":[{"name":"private-mtproto-%s-%s"}]}\n' "$TEST_LATEST_SHA" "$TEST_LATEST_DIGEST"
+    printf '{"artifacts":[{"name":"teagram-web-image-pin-%s-%s"}]}\n' "$TEST_LATEST_SHA" "$TEST_LATEST_DIGEST"
   elif [[ "$run_id" == "$TEST_PUBLISHED_RUN_ID" && "$TEST_PUBLISHED_PUBLICATION" == true ]]; then
-    printf '{"artifacts":[{"name":"private-mtproto-%s-%s"}]}\n' "$TEST_PUBLISHED_SHA" "$TEST_PUBLISHED_DIGEST"
+    printf '{"artifacts":[{"name":"teagram-web-image-pin-%s-%s"}]}\n' "$TEST_PUBLISHED_SHA" "$TEST_PUBLISHED_DIGEST"
   else
     printf '{"artifacts":[]}\n'
   fi
@@ -170,9 +170,9 @@ SH
     bash -euo pipefail "$tmp/target.sh" >/dev/null
     grep -Fxq "sha=$expected" "$GITHUB_OUTPUT" || fail "wrong SHA for workflow_run comparison $status"
     grep -Fxq "run_id=$expected_run_id" "$GITHUB_OUTPUT" || fail "wrong publication run for comparison $status"
-    expected_name="private-mtproto-$expected-$expected_digest"
-    grep -Fxq "artifact_name=$expected_name" "$GITHUB_OUTPUT" || fail "wrong artifact for workflow_run comparison $status"
-    grep -Fxq "artifact_digest=$expected_digest" "$GITHUB_OUTPUT" || fail "wrong artifact digest for workflow_run comparison $status"
+    expected_name="teagram-web-image-pin-$expected-$expected_digest"
+    grep -Fxq "artifact_name=$expected_name" "$GITHUB_OUTPUT" || fail "wrong image pin for workflow_run comparison $status"
+    grep -Fxq "image_digest=$expected_digest" "$GITHUB_OUTPUT" || fail "wrong image digest for workflow_run comparison $status"
   done
 
   TEST_COMPARISON=api-error
@@ -180,7 +180,7 @@ SH
     fail 'a failed forge comparison must fail the deploy'
   fi
 
-  # A newer successful run that did not publish an artifact must not displace A.
+  # Dispatch finds the newest run that actually published a web image pin.
   TEST_PUBLISHED_RUN_ID=100
   TEST_PUBLISHED_SHA="$TEST_EVENT_SHA"
   TEST_PUBLISHED_PUBLICATION=true
@@ -189,7 +189,6 @@ SH
   TEST_LATEST_SHA="$TEST_OTHER_SHA"
   TEST_LATEST_PUBLICATION=false
   TEST_RUNS="$TEST_UNPUBLISHED_RUN_ID"$'\t'"$TEST_OTHER_SHA"$'\n'"$TEST_PUBLISHED_RUN_ID"$'\t'"$TEST_EVENT_SHA"
-
   GITHUB_EVENT_NAME=workflow_dispatch
   RUN_ID=
   RUN_HEAD_SHA=
@@ -197,132 +196,53 @@ SH
   TEST_EVENT_PUBLICATION=false
   : >"$GITHUB_OUTPUT"
   bash -euo pipefail "$tmp/target.sh" >/dev/null
-  grep -Fxq "sha=$TEST_EVENT_SHA" "$GITHUB_OUTPUT" || fail 'dispatch must skip a newer successful run with no publication'
-  grep -Fxq "run_id=$TEST_PUBLISHED_RUN_ID" "$GITHUB_OUTPUT" || fail 'dispatch must select the latest run that published an artifact'
-  expected_name="private-mtproto-$TEST_EVENT_SHA-$TEST_PUBLISHED_DIGEST"
-  grep -Fxq "artifact_name=$expected_name" "$GITHUB_OUTPUT" || fail 'dispatch must select the published artifact from that run'
-  grep -Fxq "artifact_digest=$TEST_PUBLISHED_DIGEST" "$GITHUB_OUTPUT" || fail 'dispatch must select the published artifact digest'
+  grep -Fxq "sha=$TEST_EVENT_SHA" "$GITHUB_OUTPUT" || fail 'dispatch must skip a newer run with no web image pin'
+  grep -Fxq "run_id=$TEST_PUBLISHED_RUN_ID" "$GITHUB_OUTPUT" || fail 'dispatch must select the latest published web image pin'
+  expected_name="teagram-web-image-pin-$TEST_EVENT_SHA-$TEST_PUBLISHED_DIGEST"
+  grep -Fxq "artifact_name=$expected_name" "$GITHUB_OUTPUT" || fail 'dispatch selected the wrong image pin'
+  grep -Fxq "image_digest=$TEST_PUBLISHED_DIGEST" "$GITHUB_OUTPUT" || fail 'dispatch selected the wrong image digest'
 
-  # A workflow_run for unpublished B should finish successfully without deploying.
+  # An unpublished event skips before deployment serialization.
   GITHUB_EVENT_NAME=workflow_run
   RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
   RUN_HEAD_SHA="$TEST_OTHER_SHA"
   TEST_EVENT_RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
   : >"$GITHUB_OUTPUT"
   bash -euo pipefail "$tmp/target.sh" >/dev/null
-  grep -Fxq 'skip=true' "$GITHUB_OUTPUT" || fail 'workflow_run without a matching published artifact must be skipped'
+  grep -Fxq 'skip=true' "$GITHUB_OUTPUT" || fail 'an unpublished workflow_run must be skipped'
   if grep -q '^sha=' "$GITHUB_OUTPUT"; then
     fail 'an unpublished workflow_run must not select a deploy SHA'
   fi
 
-  # The first successful non-publication must also skip when no older artifact exists.
-  TEST_RUNS="$TEST_UNPUBLISHED_RUN_ID"$'\t'"$TEST_OTHER_SHA"
-  : >"$GITHUB_OUTPUT"
-  bash -euo pipefail "$tmp/target.sh" >/dev/null
-  grep -Fxq 'skip=true' "$GITHUB_OUTPUT" || fail 'a first successful run without a publication must be skipped'
-
-  # A published A event also ignores newer successful B when B has no artifact.
-  RUN_ID="$TEST_PUBLISHED_RUN_ID"
-  RUN_HEAD_SHA="$TEST_EVENT_SHA"
-  TEST_EVENT_RUN_ID="$TEST_PUBLISHED_RUN_ID"
-  TEST_EVENT_PUBLICATION=true
-  TEST_COMPARISON=identical
-  TEST_RUNS="$TEST_UNPUBLISHED_RUN_ID"$'\t'"$TEST_OTHER_SHA"$'\n'"$TEST_PUBLISHED_RUN_ID"$'\t'"$TEST_EVENT_SHA"
-  : >"$GITHUB_OUTPUT"
-  bash -euo pipefail "$tmp/target.sh" >/dev/null
-  grep -Fxq "sha=$TEST_EVENT_SHA" "$GITHUB_OUTPUT" || fail 'published A must remain selected when newer B did not publish'
-  grep -Fxq "run_id=$TEST_PUBLISHED_RUN_ID" "$GITHUB_OUTPUT" || fail 'published A event must retain a run containing its artifact'
-
-  # A is eligible to wait for the deploy slot; later unpublished B must skip before that slot.
-  RUN_ID="$TEST_PUBLISHED_RUN_ID"
-  RUN_HEAD_SHA="$TEST_EVENT_SHA"
-  TEST_EVENT_RUN_ID="$TEST_PUBLISHED_RUN_ID"
-  TEST_EVENT_PUBLICATION=true
-  TEST_COMPARISON=identical
-  TEST_RUNS="$TEST_UNPUBLISHED_RUN_ID"$'\t'"$TEST_OTHER_SHA"$'\n'"$TEST_PUBLISHED_RUN_ID"$'\t'"$TEST_EVENT_SHA"
-  : >"$GITHUB_OUTPUT"
-  bash -euo pipefail "$tmp/target.sh" >/dev/null
-  grep -Fxq 'skip=false' "$GITHUB_OUTPUT" || fail 'published A must mark itself eligible for deployment'
-  grep -Fxq "run_id=$TEST_PUBLISHED_RUN_ID" "$GITHUB_OUTPUT" || fail 'published A must remain eligible while waiting for deployment'
-  if grep -q '^skip=true$' "$GITHUB_OUTPUT"; then
-    fail 'published A must not be skipped before entering the deployment queue'
-  fi
-  pending_run="$TEST_PUBLISHED_RUN_ID"
-
-  RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
-  RUN_HEAD_SHA="$TEST_OTHER_SHA"
-  TEST_EVENT_RUN_ID="$TEST_UNPUBLISHED_RUN_ID"
-  : >"$GITHUB_OUTPUT"
-  bash -euo pipefail "$tmp/target.sh" >/dev/null
-  grep -Fxq 'skip=true' "$GITHUB_OUTPUT" || fail 'later unpublished B must skip before deployment is queued'
-  if ! grep -q '^skip=true$' "$GITHUB_OUTPUT"; then
-    pending_run="$TEST_UNPUBLISHED_RUN_ID"
-  fi
-  [[ "$pending_run" == "$TEST_PUBLISHED_RUN_ID" ]] || fail 'unpublished B must not replace pending publication A'
-
-  # A snapshots A before serialization; B publishes while A waits, so refresh must select B in the slot.
+  # A delayed deployment refreshes to the latest descendant after acquiring the slot.
   GITHUB_EVENT_NAME=workflow_run
   RUN_ID=100
   RUN_HEAD_SHA="$TEST_EVENT_SHA"
   TEST_EVENT_RUN_ID=100
   TEST_EVENT_PUBLICATION=true
-  TEST_LATEST_RUN_ID=100
-  TEST_LATEST_SHA="$TEST_EVENT_SHA"
-  TEST_LATEST_DIGEST="$TEST_EVENT_DIGEST"
-  TEST_LATEST_PUBLICATION=true
-  TEST_COMPARISON=identical
-  TEST_RUNS="$TEST_LATEST_RUN_ID"$'\t'"$TEST_LATEST_SHA"
-  : >"$GITHUB_OUTPUT"
-  bash -euo pipefail "$tmp/target.sh" >/dev/null
-  grep -Fxq "sha=$TEST_EVENT_SHA" "$GITHUB_OUTPUT" || fail 'the delayed resolver fixture must snapshot publication A'
-  grep -Fxq "run_id=$TEST_LATEST_RUN_ID" "$GITHUB_OUTPUT" || fail "the delayed resolver fixture must snapshot A's artifact run"
-
-  BASE_SHA="$TEST_EVENT_SHA"
-  BASE_RUN_ID="$TEST_LATEST_RUN_ID"
-  BASE_ARTIFACT_NAME="private-mtproto-$TEST_EVENT_SHA-$TEST_EVENT_DIGEST"
-  BASE_ARTIFACT_DIGEST="$TEST_EVENT_DIGEST"
-  export BASE_SHA BASE_RUN_ID BASE_ARTIFACT_NAME BASE_ARTIFACT_DIGEST
   TEST_LATEST_RUN_ID=400
   TEST_LATEST_SHA="$TEST_OTHER_SHA"
   TEST_LATEST_DIGEST="$TEST_PUBLISHED_DIGEST"
   TEST_LATEST_PUBLICATION=true
   TEST_COMPARISON=ahead
-  TEST_RUNS="$TEST_LATEST_RUN_ID"$'\t'"$TEST_LATEST_SHA"$'\n'"$BASE_RUN_ID"$'\t'"$BASE_SHA"
+  TEST_RUNS="$TEST_LATEST_RUN_ID"$'\t'"$TEST_LATEST_SHA"$'\n'"$RUN_ID"$'\t'"$RUN_HEAD_SHA"
+  BASE_SHA="$TEST_EVENT_SHA"
+  BASE_RUN_ID=100
+  BASE_ARTIFACT_NAME="teagram-web-image-pin-$TEST_EVENT_SHA-$TEST_EVENT_DIGEST"
+  BASE_IMAGE_DIGEST="$TEST_EVENT_DIGEST"
+  export BASE_SHA BASE_RUN_ID BASE_ARTIFACT_NAME BASE_IMAGE_DIGEST
   : >"$GITHUB_OUTPUT"
   bash -euo pipefail "$tmp/refresh.sh" >/dev/null
-  grep -Fxq "sha=$TEST_OTHER_SHA" "$GITHUB_OUTPUT" || fail 'the post-slot refresh must select descendant B published while A waited'
-  grep -Fxq "run_id=$TEST_LATEST_RUN_ID" "$GITHUB_OUTPUT" || fail "the post-slot refresh must use B's publication run"
-  expected_name="private-mtproto-$TEST_OTHER_SHA-$TEST_LATEST_DIGEST"
-  grep -Fxq "artifact_name=$expected_name" "$GITHUB_OUTPUT" || fail 'the post-slot refresh must download B’s artifact'
-  grep -Fxq "artifact_digest=$TEST_LATEST_DIGEST" "$GITHUB_OUTPUT" || fail 'the post-slot refresh must verify B’s artifact digest'
+  grep -Fxq "sha=$TEST_OTHER_SHA" "$GITHUB_OUTPUT" || fail 'post-slot refresh must select the latest descendant'
+  grep -Fxq "run_id=$TEST_LATEST_RUN_ID" "$GITHUB_OUTPUT" || fail 'post-slot refresh must use the latest publication run'
+  expected_name="teagram-web-image-pin-$TEST_OTHER_SHA-$TEST_PUBLISHED_DIGEST"
+  grep -Fxq "artifact_name=$expected_name" "$GITHUB_OUTPUT" || fail 'post-slot refresh must download the latest image pin'
+  grep -Fxq "image_digest=$TEST_PUBLISHED_DIGEST" "$GITHUB_OUTPUT" || fail 'post-slot refresh must use the latest image digest'
 
-  GITHUB_EVENT_NAME=workflow_run
-  RUN_ID=100
   RUN_HEAD_SHA=null
   if bash -euo pipefail "$tmp/target.sh" >/dev/null; then
     fail 'an invalid publication event SHA must fail the deploy'
   fi
-)
-
-publication_call_graph_self_test() (
-  set -euo pipefail
-  local tmp private_group
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
-  cp "$private_artifact_workflow" "$tmp/private-artifact.yml"
-  cp "$repository_ci_workflow" "$tmp/ci.yml"
-  cp "$deployment_stack_workflow" "$tmp/deployment-stack-checks.yml"
-
-  private_group="$(publication_query "$tmp/private-artifact.yml" '.concurrency.group')"
-  TEST_CONCURRENCY_GROUP="$private_group" yq -i '.concurrency.group = strenv(TEST_CONCURRENCY_GROUP)' "$tmp/ci.yml"
-  if PRIVATE_ARTIFACT_WORKFLOW="$tmp/private-artifact.yml" \
-    REPOSITORY_CI_WORKFLOW="$tmp/ci.yml" \
-    DEPLOYMENT_STACK_WORKFLOW="$tmp/deployment-stack-checks.yml" \
-    bash "$0" --contract-only >"$tmp/collision.log" 2>&1; then
-    fail 'publication call-graph contract accepted reusable workflows with a shared concurrency group'
-  fi
-  grep -Fq 'repository CI concurrency group must use literal prefix teagram-web-ci' "$tmp/collision.log" ||
-    fail 'publication call-graph self-test failed for an unexpected reason'
 )
 
 check_contract() {
@@ -332,84 +252,109 @@ check_contract() {
 
   [[ "$(query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
     fail 'triggers must be exactly workflow_run and workflow_dispatch'
-  [[ "$(query '.on.workflow_dispatch.inputs | keys | join(",")')" == 'issue' ]] ||
+  [[ "$(query '.on.workflow_dispatch.inputs | keys | join(",")')" == issue ]] ||
     fail 'workflow_dispatch must take only the optional issue input'
   [[ "$(query '.on.workflow_dispatch.inputs.issue.description')" == "$expected_issue_description" ]] ||
     fail 'the issue input description must explain optional reporting'
-  [[ "$(query '.on.workflow_dispatch.inputs.issue.required')" == 'false' ]] ||
+  [[ "$(query '.on.workflow_dispatch.inputs.issue.required')" == false ]] ||
     fail 'the issue input must be optional'
-  [[ "$(query '.on.workflow_dispatch.inputs.issue.type')" == 'string' ]] ||
+  [[ "$(query '.on.workflow_dispatch.inputs.issue.type')" == string ]] ||
     fail 'the issue input must be a string'
   [[ -z "$(query '.on.workflow_dispatch.inputs.issue.default')" ]] ||
     fail 'the issue input must default to empty'
   [[ "$(query '."run-name"')" == "$expected_run_name" ]] ||
     fail 'run names must include only non-empty issue keys'
   [[ "$(query '.on.workflow_run.workflows | join(",")')" == 'Private MTProto Artifact Publication' ]] ||
-    fail 'workflow_run must follow only Private MTProto Artifact Publication'
-  [[ "$(query '.on.workflow_run.types | join(",")')" == 'completed' ]] ||
+    fail 'workflow_run must follow only private artifact publications'
+  [[ "$(query '.on.workflow_run.types | join(",")')" == completed ]] ||
     fail 'workflow_run must fire only on completion'
-  [[ "$(query '.on.workflow_run.branches | join(",")')" == 'master' ]] ||
-    fail 'workflow_run must be limited to branches: [master]'
+  [[ "$(query '.on.workflow_run.branches | join(",")')" == master ]] ||
+    fail 'workflow_run must be limited to master'
   [[ "$(query '.permissions | to_entries | map(.key + "=" + .value) | sort | join(",")')" == 'actions=read,contents=read' ]] ||
-    fail 'workflow permissions must be contents: read and actions: read'
-  [[ "$(query '.jobs | keys | sort | join(",")')" == 'check-published-artifact,deploy-web' ]] || fail 'workflow must define resolve and deploy jobs'
-  [[ "$(query '.jobs.check-published-artifact.if')" == "$expected_if" ]] ||
-    fail 'resolve must run only on a master dispatch or a successful push publication'
-  [[ "$(query '.jobs.deploy-web.needs')" == 'check-published-artifact' ]] || fail 'deploy must wait for artifact resolution'
+    fail 'workflow permissions must be read-only actions and contents'
+  [[ "$(query '.jobs | keys | sort | join(",")')" == 'check-published-image-pin,deploy-web' ]] ||
+    fail 'workflow must define image-pin resolution and deployment jobs'
+  [[ "$(query '.jobs.check-published-image-pin.if')" == "$expected_if" ]] ||
+    fail 'image-pin resolution must run only for master dispatches or successful push publications'
+  [[ "$(query '.jobs.deploy-web.needs')" == check-published-image-pin ]] ||
+    fail 'deployment must wait for image-pin resolution'
   [[ "$(query '.jobs.deploy-web.if')" == "$expected_deploy_if" ]] ||
-    fail 'deploy must skip before concurrency when resolution finds no publication'
-  [[ "$(query '.jobs.check-published-artifact.outputs.skip')" == '${{ steps.target.outputs.skip }}' ]] ||
-    fail 'resolve must expose the non-publication skip result to the deploy job'
-  [[ "$(query '.jobs.check-published-artifact.outputs.sha')" == '${{ steps.target.outputs.sha }}' ]] ||
-    fail 'resolve must expose the selected artifact SHA'
-  [[ "$(query '.jobs.check-published-artifact.outputs.run_id')" == '${{ steps.target.outputs.run_id }}' ]] ||
-    fail 'resolve must expose the selected artifact run'
-  [[ "$(query '.jobs.check-published-artifact.outputs.artifact_name')" == '${{ steps.target.outputs.artifact_name }}' ]] ||
-    fail 'resolve must expose the selected artifact name'
-  [[ "$(query '.jobs.check-published-artifact.outputs.artifact_digest')" == '${{ steps.target.outputs.artifact_digest }}' ]] ||
-    fail 'resolve must expose the selected artifact digest'
-  [[ "$(query '.concurrency // {} | length')" == 0 ]] || fail 'workflow-level concurrency must not queue resolver jobs'
-  [[ "$(query '.jobs.check-published-artifact.concurrency // {} | length')" == 0 ]] || fail 'artifact resolution must run before deployment concurrency'
-  [[ "$(query '.jobs.deploy-web.concurrency.group')" == 'deploy-teagram-web' ]] ||
-    fail 'deploy concurrency group must be deploy-teagram-web'
-  [[ "$(query '.jobs.deploy-web.concurrency."cancel-in-progress"')" == 'false' ]] ||
-    fail 'deploy concurrency must not cancel the running deployment'
-  [[ "$(query '.jobs.deploy-web.environment')" == 'production' ]] ||
-    fail 'deploy must use environment: production'
-  [[ "$(query '.jobs.check-published-artifact.environment // ""')" == '' ]] || fail 'artifact resolution must not request production environment secrets'
-  [[ "$(query '.jobs.check-published-artifact.permissions.actions')" == 'read' ]] || fail 'resolve job must grant actions: read'
-  [[ "$(query '.jobs.check-published-artifact.permissions.contents')" == 'read' ]] || fail 'resolve job must grant contents: read'
-  [[ "$(query '.jobs.deploy-web.permissions.actions')" == 'read' ]] ||
-    fail 'deploy job must grant actions: read'
-  [[ "$(query '.jobs.deploy-web.permissions.contents')" == 'read' ]] ||
-    fail 'deploy job must grant contents: read'
+    fail 'deployment must skip before concurrency when no image pin exists'
+  [[ "$(query '.jobs.check-published-image-pin.outputs.skip')" == '${{ steps.target.outputs.skip }}' ]] ||
+    fail 'image-pin resolution must expose its skip result'
+  [[ "$(query '.jobs.check-published-image-pin.outputs.sha')" == '${{ steps.target.outputs.sha }}' ]] ||
+    fail 'image-pin resolution must expose its source SHA'
+  [[ "$(query '.jobs.check-published-image-pin.outputs.run_id')" == '${{ steps.target.outputs.run_id }}' ]] ||
+    fail 'image-pin resolution must expose its publication run'
+  [[ "$(query '.jobs.check-published-image-pin.outputs.artifact_name')" == '${{ steps.target.outputs.artifact_name }}' ]] ||
+    fail 'image-pin resolution must expose its artifact name'
+  [[ "$(query '.jobs.check-published-image-pin.outputs.image_digest')" == '${{ steps.target.outputs.image_digest }}' ]] ||
+    fail 'image-pin resolution must expose its image digest'
+  [[ "$(query '.concurrency // {} | length')" == 0 ]] ||
+    fail 'workflow-level concurrency must not queue image-pin resolver jobs'
+  [[ "$(query '.jobs.check-published-image-pin.concurrency // {} | length')" == 0 ]] ||
+    fail 'image-pin resolution must happen before deployment concurrency'
+  [[ "$(query '.jobs.deploy-web.concurrency.group')" == deploy-teagram-web ]] ||
+    fail 'deployment concurrency group must remain deploy-teagram-web'
+  [[ "$(query '.jobs.deploy-web.concurrency."cancel-in-progress"')" == false ]] ||
+    fail 'deployment must not cancel a running rollout'
+  [[ "$(query '.jobs.deploy-web.environment')" == production ]] ||
+    fail 'deployment must use the production environment'
+  [[ "$(query '.jobs.check-published-image-pin.environment // ""')" == '' ]] ||
+    fail 'image-pin resolution must not request production secrets'
+  [[ "$(query '.jobs.deploy-web.permissions.actions')" == read &&
+    "$(query '.jobs.deploy-web.permissions.contents')" == read ]] ||
+    fail 'production workflow token permissions must remain read-only'
   [[ "$(query '.jobs.deploy-web.permissions | to_entries | map(select(.value != "read")) | length')" == 0 ]] ||
-    fail 'deploy job must not request write permissions'
+    fail 'production deployment must not request write token permissions'
 
-  local checkout_count download_count ssh_count uses
-  checkout_count="$(query '[.jobs[].steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
-  [[ "$checkout_count" == 0 ]] || fail 'deploy workflow must not use actions/checkout'
-  [[ "$(query '.jobs.deploy-web.steps[0].id')" == refresh ]] ||
-    fail 'deployment must refresh the selected publication after acquiring its concurrency slot'
+  local checkout_count download_count uses
+  checkout_count="$(query '[.jobs.deploy-web.steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
+  [[ "$checkout_count" == 1 ]] || fail 'deployment must check out only the published source commit'
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.uses // "" | test("^actions/checkout@")) | .with.ref][0]')" == '${{ steps.refresh.outputs.sha }}' ]] ||
+    fail 'deployment checkout must use the refreshed published SHA'
+  [[ "$(query '[.jobs.deploy-web.steps[0].id][0]')" == refresh ]] ||
+    fail 'deployment must refresh its target after acquiring the concurrency slot'
   download_count="$(query '[.jobs.deploy-web.steps[] | select((.uses // "" | test("^actions/download-artifact@")) and .with.name == "${{ steps.refresh.outputs.artifact_name }}" and .with."run-id" == "${{ steps.refresh.outputs.run_id }}" and .with."github-token" == "${{ github.token }}")] | length')"
-  [[ "$download_count" == 1 ]] || fail 'artifact download must use the refreshed artifact name, run and github token'
-  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Verify the artifact identity") | .env.DEPLOY_SHA][0]')" == '${{ steps.refresh.outputs.sha }}' ]] ||
-    fail 'artifact identity verification must use the refreshed SHA'
-  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Verify the artifact identity") | .env.ARTIFACT_DIGEST][0]')" == '${{ steps.refresh.outputs.artifact_digest }}' ]] ||
-    fail 'artifact identity verification must use the refreshed digest'
-  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy the published artifact") | .env.DEPLOY_SHA][0]')" == '${{ steps.refresh.outputs.sha }}' ]] ||
-    fail 'the forced command must receive the refreshed SHA'
-  cleanup_condition="$(query '[.jobs.deploy-web.steps[] | select(.name == "Remove the deploy key") | .if][0]')"
-  [[ "$cleanup_condition" == '${{ always() }}' ]] || fail 'deploy-key cleanup must run after deployment attempts'
-  ssh_count="$(query '[.jobs.deploy-web.steps[] | select(.run // "" | test("(^|\\s)ssh\\s"))] | length')"
-  [[ "$ssh_count" == 1 ]] || fail "expected one ssh step, found $ssh_count"
-  query '.jobs.deploy-web.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run' |
-    grep -Fq 'root@100.124.236.66 "$DEPLOY_SHA" < "$RUNNER_TEMP/private-artifact.zip"' ||
-    fail 'ssh must send the selected SHA and packaged artifact to the forced command'
+  [[ "$download_count" == 1 ]] || fail 'image pin download must use the refreshed artifact name, run, and token'
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Verify the source commit and image pin") | .env.DEPLOY_SHA][0]')" == '${{ steps.refresh.outputs.sha }}' ]] ||
+    fail 'image pin verification must use the refreshed source SHA'
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Verify the source commit and image pin") | .env.IMAGE_DIGEST][0]')" == '${{ steps.refresh.outputs.image_digest }}' ]] ||
+    fail 'image pin verification must use the refreshed image digest'
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Install the deploy kubeconfig") | .env.KUBECONFIG_CONTENT][0]')" == '${{ secrets.KUBECONFIG }}' ]] ||
+    fail 'production kubeconfig must come from the environment secret'
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Remove the deploy kubeconfig") | .if][0]')" == '${{ always() }}' ]] ||
+    fail 'the deploy kubeconfig must be removed after every deployment attempt'
+
+  local deploy_run
+  deploy_run="$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .run][0]')"
+  [[ "$deploy_run" == *'.github/scripts/deploy-k8s-web.sh'* ]] ||
+    fail 'production must use the shared rollback-safe k3s deployment script'
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .env.REQUIRE_SINGLE_CLOUDFLARED][0]')" == true ]] ||
+    fail 'production must require exactly one ready k3s tunnel connector'
+  [[ "$(query '[.jobs.deploy-web.steps[] | select(.name == "Deploy, verify the public route, and roll back on failure") | .env.SMOKE_URL][0]')" == 'https://web.teagram.io/' ]] ||
+    fail 'production smoke must verify the public web route'
   if query '.jobs.deploy-web.steps[].run // ""' | grep -Fq '${{'; then
     fail 'run blocks must pass GitHub values through environment variables'
   fi
+  if query '.jobs.deploy-web.steps[].run // ""' | grep -Eiq '(^|[[:space:]])ssh[[:space:]]'; then
+    fail 'the k3s deployment must not use the legacy SSH deploy path'
+  fi
 
+  grep -Fq 'kubectl apply --dry-run=server --filename "$manifest"' .github/scripts/deploy-k8s-web.sh ||
+    fail 'deployment script must server-side dry-run the rendered manifests'
+  grep -Fq 'kubectl apply --filename "$manifest"' .github/scripts/deploy-k8s-web.sh ||
+    fail 'deployment script must apply the rendered manifests'
+  grep -Fq 'kubectl rollout undo' .github/scripts/deploy-k8s-web.sh ||
+    fail 'deployment script must roll back failed releases'
+  grep -Fq 'smoke-k8s-web.mjs' .github/scripts/deploy-k8s-web.sh ||
+    fail 'deployment script must smoke the served web artifact'
+  grep -Fq 'rollout=verified sha=%s' .github/scripts/deploy-k8s-web.sh ||
+    fail 'deployment script must log the verified source SHA'
+  grep -Fq 'rollout=rollback-verified previous_revision=' .github/scripts/deploy-k8s-web.sh ||
+    fail 'deployment script must verify automatic rollback'
+
+  local uses
   while IFS= read -r uses; do
     [[ -n "$uses" ]] || continue
     [[ "$uses" =~ ^[^@]+@[0-9a-f]{40}$ ]] || fail "action not pinned to a commit SHA: $uses"
@@ -430,26 +375,15 @@ self_test() {
     'del(."run-name")'
     'del(.on.workflow_run.branches)'
     '.on.workflow_run.branches = ["master", "dev"]'
-    '.jobs.check-published-artifact.if = "wrong"'
-    'del(.jobs.check-published-artifact.if)'
+    '.jobs.check-published-image-pin.if = "wrong"'
     '.jobs.deploy-web.if = "wrong"'
-    'del(.jobs.deploy-web.if)'
     'del(.jobs.deploy-web.needs)'
-    'del(.jobs.check-published-artifact.outputs.skip)'
     '.jobs.deploy-web.environment = "staging"'
-    'del(.jobs.deploy-web.environment)'
-    '.concurrency = {"group":"deploy-teagram-web","cancel-in-progress":false}'
-    '.jobs.check-published-artifact.concurrency.group = "deploy-teagram-web"'
-    'del(.jobs.deploy-web.concurrency)'
-    '.jobs.deploy-web.concurrency.group = "deploy"'
     '.jobs.deploy-web.concurrency."cancel-in-progress" = true'
-    '.jobs.deploy-web.steps = [{"uses": "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"}] + .jobs.deploy-web.steps'
+    '(.jobs.deploy-web.steps[] | select(.uses | test("^actions/checkout@")) | .with.ref) = "${{ github.event.workflow_run.head_sha }}"'
     '(.jobs.deploy-web.steps[] | select(.uses | test("^actions/download-artifact@")) | .with."run-id") = "${{ github.run_id }}"'
-    '(.jobs.deploy-web.steps[] | select(.uses | test("^actions/download-artifact@")) | .with.name) = "${{ needs.check-published-artifact.outputs.artifact_name }}"'
-    '.jobs.deploy-web.steps[0].id = "wrong"'
-    '(.jobs.deploy-web.steps[] | select(.uses | test("^tailscale/github-action@")) | .uses) = "tailscale/github-action@v4"'
+    'del(.jobs.deploy-web.steps[] | select(.name == "Install the deploy kubeconfig").env.KUBECONFIG_CONTENT)'
     '.permissions.contents = "write"'
-    'del(.jobs.deploy-web.permissions.actions)'
   )
 
   for mutation in "${mutations[@]}"; do
@@ -459,7 +393,6 @@ self_test() {
       exit 1
     fi
   done
-  publication_call_graph_self_test
 }
 
 check_contract
