@@ -1,6 +1,7 @@
 import {copyTextToClipboard} from '@helpers/clipboard';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import findUpClassName from '@helpers/dom/findUpClassName';
+import setAnchorClickHandler from '@helpers/dom/setAnchorClickHandler';
 import htmlToDocumentFragment from '@helpers/dom/htmlToDocumentFragment';
 import toggleDisability from '@helpers/dom/toggleDisability';
 import {KeyboardButton, Message, ReplyMarkup, InlineQueryPeerType} from '@layer';
@@ -83,6 +84,9 @@ export function getKeyboardButtonHandler({
             ref.setAttribute(name, anchor.getAttribute(name));
           }
         });
+
+        const clickHandler = anchor.dataset.clickHandler;
+        if(clickHandler) setAnchorClickHandler(ref, clickHandler);
       });
 
       break;

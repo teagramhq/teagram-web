@@ -25,6 +25,7 @@ beforeAll(async() => {
     unobserve() {}
     disconnect() {}
   });
+  vi.stubGlobal('showMaskedAlert', vi.fn());
   vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/webp;base64,');
   vi.doMock('@lib/customEmoji/element', () => ({
     default: {create: () => document.createElement('span')}

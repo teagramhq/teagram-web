@@ -10,6 +10,7 @@ import encodeSpoiler from '@lib/richTextProcessor/encodeSpoiler';
 import parseEntities from '@lib/richTextProcessor/parseEntities';
 import setBlankToAnchor from '@lib/richTextProcessor/setBlankToAnchor';
 import setExternalToAnchor, {getElectronHelpers} from '@helpers/electronHelpers';
+import setAnchorClickHandler from '@helpers/dom/setAnchorClickHandler';
 import wrapUrl from '@lib/richTextProcessor/wrapUrl';
 import EMOJI_VERSIONS_SUPPORTED from '@environment/emojiVersionsSupport';
 import {CLICK_EVENT_NAME} from '@helpers/dom/clickEvent';
@@ -409,7 +410,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           element = document.createElement('a');
           (element as HTMLAnchorElement).href = encodeEntities('tg://bot_command?command=' + encodeURIComponent(command) + (bot ? '&bot=' + encodeURIComponent(bot) : ''));
           if(!contextExternal) {
-            element.setAttribute('onclick', 'execBotCommand(this)');
+            setAnchorClickHandler(element, 'execBotCommand');
           }
         }
 
@@ -629,9 +630,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
             (getElectronHelpers() ? setExternalToAnchor : setBlankToAnchor)(element as HTMLAnchorElement);
           }
 
-          if(onclick) {
-            element.setAttribute('onclick', onclick === 'stickerSet' ? 'stickerSet(this,event)' : onclick + '(this)');
-          }
+          setAnchorClickHandler(element, onclick);
         }
 
         break;
@@ -659,7 +658,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           if(contextExternal) {
             setBlankToAnchor(element as HTMLAnchorElement);
           } else {
-            element.setAttribute('onclick', 'searchByHashtag(this)');
+            setAnchorClickHandler(element, 'searchByHashtag');
           }
         }
 
@@ -756,7 +755,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
         element.classList.add('timestamp');
         element.dataset.timestamp = '' + entity.time;
         (element as HTMLAnchorElement).href = '#';
-        element.setAttribute('onclick', 'setMediaTimestamp(this)');
+        setAnchorClickHandler(element, 'setMediaTimestamp');
 
         if(options.maxMediaTimestamp === Infinity) {
           element.classList.add('is-disabled');
@@ -776,7 +775,7 @@ export default function wrapRichText(text: string, options: WrapRichTextOptions 
           element.dataset.date = '' + entity.date;
         } else {
           element.classList.add('formatted-date');
-          element.setAttribute('onclick', 'onFormattedDateClick(this, event)');
+          setAnchorClickHandler(element, 'onFormattedDateClick');
         }
 
         ENTITY_ELEMENT_MAP.set(element, entity);

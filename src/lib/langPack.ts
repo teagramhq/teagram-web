@@ -436,7 +436,10 @@ namespace I18n {
           a = document.createElement('a');
           const wrappedUrl = wrapUrl(url);
           a.href = wrappedUrl.url;
-          if(wrappedUrl.onclick) a.setAttribute('onclick', wrappedUrl.onclick + '(this)');
+          const handlerName = wrappedUrl.onclick;
+          // bound inline rather than through setAnchorClickHandler: this module loads with the
+          // first screen and the shared helper would grow that bundle for an uncommon case
+          if(handlerName) a.onclick = (event) => (window as any)[handlerName](a, event);
           setBlankToAnchor(a);
         } else {
           a = args[indexHolder.i++] as HTMLAnchorElement;

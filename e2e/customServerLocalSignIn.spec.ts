@@ -1498,6 +1498,10 @@ test('isolates two server tabs when a custom server worker takes control', async
         const scriptUrl = navigator.serviceWorker.controller?.scriptURL;
         return scriptUrl ? new URL(scriptUrl).searchParams.get('__tg_server') : null;
       }), {timeout: 30_000}).toBe(customServerId);
+      await expect.poll(() => customPage!.evaluate(() => {
+        const scriptUrl = navigator.serviceWorker.controller?.scriptURL;
+        return scriptUrl ? new URL(scriptUrl).searchParams.get('__tg_server') : null;
+      }), {timeout: 30_000}).toBe(customServerId);
       expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
     });
 
