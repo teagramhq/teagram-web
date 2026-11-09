@@ -14,8 +14,12 @@ import {AppMessagesManager} from '@appManagers/appMessagesManager';
 
 const moduleMocks = vi.hoisted(() => {
   const noop = vi.fn();
+  const getCacheContext = vi.fn(() => ({downloaded: false, url: undefined}));
   return {
-    apiManagerProxy: new Proxy({}, {get: () => noop}),
+    apiManagerProxy: new Proxy({getCacheContext, getAvailableReactions: vi.fn(async() => []), getStickerCachedThumb: vi.fn()}, {
+      get: (target, key: string | symbol) => key in target ? target[key as keyof typeof target] : noop
+    }),
+    downloadMedia: vi.fn(),
     sidebarLeft: new Proxy({}, {get: () => noop}),
     leftColumnActiveClassname: 'is-left-column-shown',
     sidebarRight: new Proxy({}, {get: () => noop}),
@@ -34,6 +38,19 @@ const moduleMocks = vi.hoisted(() => {
 });
 
 vi.mock('@lib/apiManagerProxy', () => ({default: moduleMocks.apiManagerProxy}));
+vi.mock('@lib/appDownloadManager', () => ({default: {downloadMedia: moduleMocks.downloadMedia}}));
+vi.mock('@appManagers/utils/stickers/getStickerEffectThumb', () => ({default: vi.fn()}));
+vi.mock('@lib/lottie/lottieLoader', () => ({default: {loadLottieWorkers: vi.fn(), loadAnimationWorker: vi.fn()}}));
+vi.mock('@components/wrappers/stickerAppearance', () => ({
+  default: vi.fn(() => ({
+    canBuildImage: () => true,
+    canBuildSilhouette: () => false,
+    setSilhouette: vi.fn(),
+    upgradeToImage: vi.fn(),
+    onMediaFirstFrame: vi.fn()
+  })),
+  onAnimationEnd: vi.fn()
+}));
 vi.mock('@components/sidebarLeft', () => ({default: moduleMocks.sidebarLeft, LEFT_COLUMN_ACTIVE_CLASSNAME: moduleMocks.leftColumnActiveClassname}));
 vi.mock('@components/sidebarRight', () => ({default: moduleMocks.sidebarRight}));
 vi.mock('@components/wrappers/getPeerTitle', () => ({default: moduleMocks.getPeerTitle}));
@@ -5071,4 +5088,73 @@ test.each([
 
   expect(chatUpdate).toBeTypeOf('function');
   await expect(chatUpdate(chatId)).resolves.toBeUndefined();
+});
+
+test('handles a cancelled quick-reaction sticker render after hover teardown', async() => {
+  vi.useFakeTimers();
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.dataset.peerId = String(peerId);
+  bubble.dataset.mid = '1';
+  const content = document.createElement('div');
+  content.className = 'bubble-content';
+  const target = document.createElement('span');
+  content.append(target);
+  bubble.append(content);
+
+  const message = {_:'message', peerId, id: 1} as any;
+  const doc = {id: '42', sticker: 2, attributes: [], thumbs: [], w: 18, h: 18} as any;
+  const rejectDownload = (() => {
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<never>((_resolve, rejectPromise) => {
+      reject = rejectPromise;
+    });
+    return {promise, reject: (error: unknown) => reject(error)};
+  })();
+  (moduleMocks.apiManagerProxy as any).getCacheContext.mockReturnValue({downloaded: false, url: undefined});
+  moduleMocks.downloadMedia.mockReset().mockReturnValue(rejectDownload.promise);
+
+  const middlewareHelper = getMiddleware();
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chat: {
+      peerId,
+      type: ChatType.Chat,
+      selection: {isSelecting: false, canSelectBubble: vi.fn(() => true)},
+      getMessage: vi.fn(() => message),
+      animationGroup: 'chat'
+    },
+    managers: {
+      appMessagesManager: {getGroupsFirstMessage: vi.fn(async() => message)},
+      appReactionsManager: {getAvailableReactionsByMessage: vi.fn(async() => ({reactions: [{_: 'reactionCustomEmoji', document_id: '42'}]}))},
+      appEmojiManager: {getCustomEmojiDocument: vi.fn(async() => doc)}
+    },
+    getMiddleware: () => middlewareHelper.get()
+  }) as any;
+  const event = new MouseEvent('mousemove');
+  Object.defineProperty(event, 'target', {value: target});
+  await harness.onBubblesMouseMove(event);
+  await vi.advanceTimersByTimeAsync(400);
+
+  expect(moduleMocks.downloadMedia).toHaveBeenCalledOnce();
+  const hoverReaction = content.querySelector<HTMLElement>('.bubble-hover-reaction');
+  expect(hoverReaction).not.toBeNull();
+
+  const addEventListener = vi.spyOn(HTMLElement.prototype, 'addEventListener');
+  const unhandled: unknown[] = [];
+  const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandledRejection);
+
+  try {
+    harness.unhoverPrevious();
+    vi.useRealTimers();
+    rejectDownload.reject({type: 'MIDDLEWARE'});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(addEventListener).not.toHaveBeenCalled();
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off('unhandledRejection', onUnhandledRejection);
+    addEventListener.mockRestore();
+    vi.useRealTimers();
+  }
 });

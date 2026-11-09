@@ -3120,7 +3120,7 @@ export default class ChatBubbles {
     scrollSaver.restore();
   };
 
-  private onBubblesMouseMove = async(e: MouseEvent) => {
+  private async onBubblesMouseMove(e: MouseEvent) {
     const mediaVideoContainer = findUpClassName(e.target, 'media-video-mini');
     mediaVideoContainer?.onMiniVideoMouseMove?.(e);
 
@@ -3240,13 +3240,14 @@ export default class ChatBubbles {
         }, {listenerSetter: this.listenerSetter});
       }, noop);
     });
-  };
+  }
 
   public setReactionsHoverListeners() {
-    this.listenerSetter.add(contextMenuController)('toggle', this.unhoverPrevious);
-    this.listenerSetter.add(overlayCounter)('change', this.unhoverPrevious);
-    this.listenerSetter.add(this.chat.selection)('toggle', this.unhoverPrevious);
-    this.listenerSetter.add(this.container)('mousemove', this.onBubblesMouseMove);
+    const unhoverPrevious = this.unhoverPrevious.bind(this);
+    this.listenerSetter.add(contextMenuController)('toggle', unhoverPrevious);
+    this.listenerSetter.add(overlayCounter)('change', unhoverPrevious);
+    this.listenerSetter.add(this.chat.selection)('toggle', unhoverPrevious);
+    this.listenerSetter.add(this.container)('mousemove', this.onBubblesMouseMove.bind(this));
   }
 
   private setHoverVisible(hoverReaction: HTMLElement, visible: boolean) {
@@ -3267,7 +3268,7 @@ export default class ChatBubbles {
     });
   }
 
-  private unhoverPrevious = () => {
+  private unhoverPrevious() {
     const {hoverBubble, hoverReaction} = this;
     if(hoverBubble) {
       this.setHoverVisible(hoverReaction, false);
@@ -3275,7 +3276,7 @@ export default class ChatBubbles {
         this.hoverReaction =
         undefined;
     }
-  };
+  }
 
   public setStickyDateManually() {
     // const timestamps = Object.keys(this.dateMessages).map((k) => +k).sort((a, b) => b - a);

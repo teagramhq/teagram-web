@@ -734,12 +734,7 @@ export default async function wrapSticker({doc, div, middleware, loadStickerMidd
     (lazyLoadQueue.push({div: div[0], load, middleware}), Promise.resolve()) :
     load();
 
-  // * callers that never read `render` (fire-and-forget status, title and reaction icons) would
-  // * otherwise see a load cancelled by its middleware as an unhandled rejection; consumers that
-  // * do await it still receive real render failures
-  const renderPromise = loadPromise.catch((err) => {
-    if((err as ApiError)?.type !== 'MIDDLEWARE') throw err;
-  });
+  const renderPromise = loadPromise;
 
   if(downloaded && (asStatic/*  || stickerType === 3 */)) {
     loadThumbPromise = renderPromise as any;
@@ -793,7 +788,14 @@ export async function fireStickerEffect({e, container, doc, managers, middleware
 
   container.dataset.playing = '1';
 
-  await loadPromise;
+  try {
+    await loadPromise;
+  } catch(error) {
+    if((error as ApiError)?.type !== 'MIDDLEWARE') throw error;
+    return;
+  }
+
+  if(!middleware()) return;
   const {animationDiv, stickerPromise} = wrapStickerAnimation({
     doc,
     middleware,
@@ -812,9 +814,12 @@ export async function fireStickerEffect({e, container, doc, managers, middleware
   }
 
   stickerPromise.then((player) => {
+    if(!player) return;
     player.addEventListener('destroy', () => {
       delete container.dataset.playing;
     });
+  }, (error) => {
+    if((error as ApiError)?.type !== 'MIDDLEWARE') throw error;
   });
 }
 

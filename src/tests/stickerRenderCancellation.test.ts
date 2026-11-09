@@ -47,7 +47,7 @@ describe('wrapSticker render cancellation handling', () => {
     await expect(result.render).rejects.toBe(failure);
   });
 
-  it('consumes middleware cancellation through both render handles', async() => {
+  it('preserves middleware cancellation through both render handles', async() => {
     mocks.downloadMediaURL.mockRejectedValue({type: 'MIDDLEWARE'});
     const loadPromises: Promise<unknown>[] = [];
     const result = await wrapSticker({
@@ -62,6 +62,6 @@ describe('wrapSticker render cancellation handling', () => {
     });
 
     expect(loadPromises[0]).toBe(result.render);
-    await expect(result.render).resolves.toBeUndefined();
+    await expect(result.render).rejects.toMatchObject({type: 'MIDDLEWARE'});
   });
 });
