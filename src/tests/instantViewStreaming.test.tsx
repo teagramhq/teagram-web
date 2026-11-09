@@ -1006,6 +1006,14 @@ describe('InstantViewBlocks streaming updates', () => {
           description: '',
           author: '',
           published_date: 0
+        }, {
+          _: 'pageRelatedArticle',
+          url: 'https://unverified.example.com',
+          webpage_id: 0,
+          title: 'Unverified',
+          description: '',
+          author: '',
+          published_date: 0
         }]
       }]
     };
@@ -1023,15 +1031,22 @@ describe('InstantViewBlocks streaming updates', () => {
     ), container);
 
     await Promise.resolve();
-    const anchor = container.querySelector('a') as HTMLAnchorElement;
+    const anchors = Array.from(container.querySelectorAll('a'));
+    const anchor = anchors[0];
+    const unverifiedAnchor = anchors[1];
     expect(anchor.getAttribute('href')).toBeNull();
+    expect(unverifiedAnchor.getAttribute('href')).toBeNull();
     expect(anchor.getAttribute('aria-disabled')).toBe('true');
+    expect(unverifiedAnchor.getAttribute('aria-disabled')).toBe('true');
 
     setNoLinks(false);
     await Promise.resolve();
-    expect(container.querySelector('a')).toBe(anchor);
-    expect(anchor.getAttribute('href')).toBeTruthy();
+    expect(container.querySelectorAll('a')[0]).toBe(anchor);
+    expect(container.querySelectorAll('a')[1]).toBe(unverifiedAnchor);
+    expect(anchor.getAttribute('href')).toBe('https://example.com');
+    expect(unverifiedAnchor.getAttribute('href')).toBe(`tg://iv?url=${encodeURIComponent('https://unverified.example.com')}`);
     expect(anchor.getAttribute('aria-disabled')).toBe('false');
+    expect(unverifiedAnchor.getAttribute('aria-disabled')).toBe('false');
 
     const event = new MouseEvent('click', {bubbles: true, cancelable: true});
     anchor.dispatchEvent(event);

@@ -1240,7 +1240,10 @@ function Block(props: {
           </div>
           <For each={block.articles}>{(article, idx) => {
             const context = useContext(InstantViewContext);
-            const wrapped = createMemo(() => wrapUrl('tg://iv?url=' + encodeURIComponent(article.url), true));
+            const wrapped = createMemo(() => wrapUrl(
+              'tg://iv?url=' + encodeURIComponent(article.url),
+              article.webpage_id !== 0
+            ));
             const [anchor, setAnchor] = createSignal<HTMLAnchorElement>();
             createEffect(() => {
               const element = anchor();
