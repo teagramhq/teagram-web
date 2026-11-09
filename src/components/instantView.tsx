@@ -1242,7 +1242,7 @@ function Block(props: {
             const context = useContext(InstantViewContext);
             const wrapped = createMemo(() => wrapUrl(
               'tg://iv?url=' + encodeURIComponent(article.url),
-              article.webpage_id !== 0
+              !!article.webpage_id && article.webpage_id !== '0'
             ));
             const [anchor, setAnchor] = createSignal<HTMLAnchorElement>();
             createEffect(() => {
