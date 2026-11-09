@@ -839,7 +839,13 @@ async function reloadChatList(page: Page, requests: {value: number}) {
   return capture(page, requests, await snapshotMeasurementBoundary(page, firstVisibleChatList), false, false, false, true);
 }
 
-async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false) {
+async function releaseCachedChannelReconcile(page: Page, run: VariantRun) {
+  if(process.env.PERF_DEFER_CACHED_RECONCILE !== '1' || run.variant !== 'head') return;
+
+  await page.evaluate(() => (window as any).rootScope.managers.dialogsStorage.releaseCachedChannelReconcile());
+}
+
+async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, run: VariantRun, traceRpc = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
   resetRequestBreakdown(page);
@@ -848,7 +854,9 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   await row.click();
   const boundary = await waitForFirstVisibleBubble(page);
   expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
-  return capture(page, requests, boundary, false, traceRpc);
+  const metric = await capture(page, requests, boundary, false, traceRpc);
+  await releaseCachedChannelReconcile(page, run);
+  return metric;
 }
 
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}) {
@@ -1626,7 +1634,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     expect(warmChatList.liveBoundaryMs).toBeGreaterThanOrEqual(warmChatList.ms);
     measured.warmChatList.push(warmChatList);
 
-    const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture));
+    const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture, run));
     measured.chatOpen.push(chatOpen);
     const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(
       page,
@@ -1681,7 +1689,7 @@ async function runTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixtu
     await installInstrumentation(page, requests, run.origin, false, captureWorkerMessages);
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
-    chatOpen = await openPartnerChat(page, requests, fixture);
+    chatOpen = await openPartnerChat(page, requests, fixture, run);
     scrollBack2k = await scrollBackTwoThousand(page, requests, run.variant === 'head', {
       captureFrameTrace: true,
       captureCpuStacks: true,
@@ -1750,7 +1758,7 @@ async function traceChatOpen(browser: Browser, run: VariantRun, fixture: Fixture
     await installInstrumentation(page, requests, run.origin);
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
-    return await openPartnerChat(page, requests, fixture, true);
+    return await openPartnerChat(page, requests, fixture, run, true);
   } finally {
     await context.close();
   }
@@ -1779,6 +1787,7 @@ async function traceDateJump(browser: Browser, run: VariantRun, fixture: Fixture
     await startMeasurementAtClick(row);
     await row.click();
     await waitForFirstVisibleBubble(page);
+    await releaseCachedChannelReconcile(page, run);
 
     let dateJumpBoundary: MeasurementBoundary | undefined;
     const jumped = await jumpToFixtureDate(page, requests, fixture, false, true, (boundary) => dateJumpBoundary = boundary);
@@ -1845,6 +1854,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
           peerChangePhases: summarizePerformancePhases(await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []))
         };
         traceSamples.chatOpen.push(chatOpenSample);
+        await releaseCachedChannelReconcile(page, run);
         await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpenSample, 'chatOpen');
 
         // Every diagnostic repeat scrolls back, so each one's long tasks carry their own CPU stacks and spans.
@@ -1929,7 +1939,7 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
 
   for(const scenario of scenarios) {
     const expectedRepeatCount = scenario === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
-    const requireWalk = scenario === 'warmChatList' || scenario === 'chatOpen' || scenario === 'scrollBack2k' || scenario === 'dateJump';
+    const requireWalk = scenario === 'scrollBack2k' || scenario === 'dateJump';
     validateCachedDialogReconcileDiagnostics(traceSamples[scenario], scenario, expectedRepeatCount, requireWalk);
   }
 

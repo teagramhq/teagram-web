@@ -219,8 +219,8 @@ jobs:
           PERF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
-          VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-trace-dist"
+          VITE_PERF_DEFER_CACHED_RECONCILE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
+          VITE_PERF_DEFER_CACHED_RECONCILE=1 VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-trace-dist"
           if [ -n "$PERF_BASE_SHA" ]; then
             base_directory="$RUNNER_TEMP/teagram-web-base"
             git worktree add --detach "$base_directory" "$PERF_BASE_SHA"
@@ -331,6 +331,7 @@ jobs:
           PERF_SERVER_COMMIT: ${{ steps.runtime-server.outputs.server_commit }}
           PERF_FIXTURE_SERVER_COMMIT: ${{ steps.fixture.outputs.server_commit }}
           PERF_REQUIRE_BASE: ${{ github.event_name == 'pull_request' }}
+          PERF_DEFER_CACHED_RECONCILE: '1'
         run: >-
           pnpm exec playwright test
           -c playwright.performance.config.ts

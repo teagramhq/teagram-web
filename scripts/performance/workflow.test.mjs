@@ -12,9 +12,10 @@ const chatPageSnapshotView = readFileSync(new URL('../../src/lib/chatPageSnapsho
 const stickerBaseCommit = readFileSync(new URL('../../.github/perf-sticker-base-commit', import.meta.url), 'utf8').trim();
 
 test('performance comparisons use uninstrumented head and base bundles', () => {
-  assert.match(workflow, /^\s+pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
+  assert.match(workflow, /^\s+VITE_PERF_DEFER_CACHED_RECONCILE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
   assert.match(workflow, /^\s+\(cd "\$base_directory" && pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
   assert.doesNotMatch(workflow, /VITE_PERF_(?:RECONCILE_)?TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
+  assert.match(workflow, /PERF_DEFER_CACHED_RECONCILE: '1'/);
 });
 
 test('sticker timing uses the pre-178 baseline independently from the scale base', () => {

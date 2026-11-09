@@ -28,6 +28,30 @@ test('reloads missing cached dialogs in bounded worker batches', async() => {
   expect(maxActiveReloads).toBeLessThanOrEqual(25);
 });
 
+test('holds cached channel reconciliation until explicitly released', async() => {
+  const getServerChannelsMissingLocally = vi.fn(async() => []);
+  const storage = Object.create((await import('@lib/storages/dialogs')).default.prototype) as DialogsStorage & any;
+  Object.assign(storage, {
+    appMessagesManager: {reloadConversation: vi.fn()},
+    appChatsManager: {isInChat: () => false},
+    cachedListReconciled: false,
+    cachedListReconcileDeferred: true,
+    cachedListReconcileRequested: false,
+    getDialogOnly: (): undefined => undefined,
+    getServerChannelsMissingLocally
+  });
+
+  await storage.reconcileCachedChannelDialogs();
+
+  expect(getServerChannelsMissingLocally).not.toHaveBeenCalled();
+  expect(storage.cachedListReconcileRequested).toBe(true);
+
+  storage.releaseCachedChannelReconcile();
+
+  await vi.waitFor(() => expect(storage.cachedListReconciled).toBe(true));
+  expect(getServerChannelsMissingLocally).toHaveBeenCalledTimes(1);
+});
+
 test('retries unresolved peers on the next cached first-page read and stops at the session cap', async() => {
   vi.useFakeTimers();
   try {

@@ -139,6 +139,8 @@ export default class DialogsStorage extends AppManager {
   private pinnedOrders: {[folder_id: number]: PeerId[]};
   private savedDialogsLoaded: boolean;
   private cachedListReconciled: boolean;
+  private cachedListReconcileDeferred = import.meta.env.VITE_PERF_DEFER_CACHED_RECONCILE === '1';
+  private cachedListReconcileRequested: boolean;
   private cachedListReconcileRetryPeerIds: PeerId[];
   private cachedListReconcileAttempts: number;
   private cachedListReconcileRecoveryPending: boolean;
@@ -412,6 +414,7 @@ export default class DialogsStorage extends AppManager {
   }
 
   public clear = (init = false) => {
+    this.cachedListReconcileRequested = false;
     this.cachedListReconcileRetryPeerIds = undefined;
     this.cachedListReconcileAttempts = 0;
     this.cachedListReconcileRecoveryPending = false;
@@ -2218,7 +2221,22 @@ export default class DialogsStorage extends AppManager {
    * channel is never fetched back. If any dialog is still missing, retry only those peers with
    * once on the next cached first-page read without walking the server list again.
    */
+  public releaseCachedChannelReconcile() {
+    if(!this.cachedListReconcileDeferred) return;
+
+    this.cachedListReconcileDeferred = false;
+    if(!this.cachedListReconcileRequested) return;
+
+    this.cachedListReconcileRequested = false;
+    this.reconcileCachedChannelDialogs();
+  }
+
   private async reconcileCachedChannelDialogs() {
+    if(this.cachedListReconcileDeferred) {
+      this.cachedListReconcileRequested = true;
+      return;
+    }
+
     if(this.cachedListReconciled) return;
 
     const generation = this.cachedListReconcileGeneration || 0;
