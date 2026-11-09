@@ -57,7 +57,7 @@ test('PR performance runs require complete base bundle measurements', () => {
 });
 
 test('performance comparisons use uninstrumented builds and diagnostics use a traced bundle', () => {
-  assert.match(workflow, /^\s+pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
+  assert.match(workflow, /^\s+VITE_PERF_DEFER_CACHED_RECONCILE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
   assert.match(workflow, /pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"/);
   assert.doesNotMatch(workflow, /VITE_PERF_(?:RECONCILE_)?TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
   assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
