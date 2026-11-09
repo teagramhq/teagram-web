@@ -1,5 +1,5 @@
-import {beforeEach, describe, expect, it, vi} from 'vitest';
-import wrapSticker, {handleFireAndForgetStickerError, ignoreMiddlewareCancellation} from '@components/wrappers/sticker';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import wrapSticker, {handleStickerError} from '@components/wrappers/sticker';
 
 const mocks = vi.hoisted(() => {
   HTMLCanvasElement.prototype.toDataURL = () => 'data:image/webp;base64,';
@@ -28,19 +28,14 @@ describe('wrapSticker render cancellation handling', () => {
     mocks.getCacheContext.mockReturnValue({downloaded: true, url: undefined});
   });
 
-  it('ignores only middleware cancellation', () => {
-    expect(() => ignoreMiddlewareCancellation({type: 'MIDDLEWARE'})).not.toThrow();
+  afterEach(() => vi.restoreAllMocks());
 
-    const failure = new Error('sticker load failed');
-    expect(() => ignoreMiddlewareCancellation(failure)).toThrow(failure);
-  });
-
-  it('logs and resolves unexpected fire-and-forget render failures', () => {
+  it('ignores cancellation and logs unexpected fire-and-forget sticker failures', () => {
     const failure = new Error('sticker load failed');
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    expect(() => handleFireAndForgetStickerError({type: 'MIDDLEWARE'})).not.toThrow();
-    expect(() => handleFireAndForgetStickerError(failure)).not.toThrow();
+    expect(() => handleStickerError({type: 'MIDDLEWARE'})).not.toThrow();
+    expect(() => handleStickerError(failure)).not.toThrow();
     expect(log).toHaveBeenCalledWith(failure);
   });
 

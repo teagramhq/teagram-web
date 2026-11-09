@@ -53,11 +53,7 @@ const locksUrls: {[docId: string]: string} = {};
 
 export const videosCache: {[key: string]: Promise<any>} = {};
 
-export function ignoreMiddlewareCancellation(error: unknown) {
-  if((error as ApiError)?.type !== 'MIDDLEWARE') throw error;
-}
-
-export function handleFireAndForgetStickerError(error: unknown) {
+export function handleStickerError(error: unknown) {
   if((error as ApiError)?.type !== 'MIDDLEWARE') console.error(error);
 }
 
@@ -799,7 +795,7 @@ export async function fireStickerEffect({e, container, doc, managers, middleware
   try {
     await loadPromise;
   } catch(error) {
-    ignoreMiddlewareCancellation(error);
+    handleStickerError(error);
     return;
   }
 
@@ -826,7 +822,7 @@ export async function fireStickerEffect({e, container, doc, managers, middleware
     player.addEventListener('destroy', () => {
       delete container.dataset.playing;
     });
-  }, ignoreMiddlewareCancellation);
+  }, handleStickerError);
 }
 
 function attachStickerEffectHandler(options: Omit<Parameters<typeof fireStickerEffect>[0], 'e'>) {

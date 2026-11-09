@@ -25,7 +25,7 @@ import animationIntersector, {AnimationItemGroup} from '@components/animationInt
 import ButtonIcon from '@components/buttonIcon';
 import {EmoticonsDropdown} from '@components/emoticonsDropdown';
 import EmojiTab from '@components/emoticonsDropdown/tabs/emoji';
-import wrapSticker, {handleFireAndForgetStickerError, ignoreMiddlewareCancellation} from '@components/wrappers/sticker';
+import wrapSticker, {handleStickerError} from '@components/wrappers/sticker';
 import {i18n} from '@lib/langPack';
 import anchorCallback from '@helpers/dom/anchorCallback';
 import PopupPremium from '@components/popups/premium';
@@ -613,7 +613,7 @@ export class ChatReactionsMenu {
           liteModeKey: false,
           play: availableReaction === undefined ? true : undefined,
           ...options
-        }).then(({render}) => render).catch(handleFireAndForgetStickerError);
+        }).then(({render}) => render).catch(handleStickerError);
       };
 
       let doc = availableReaction?.static_icon, delay = false;

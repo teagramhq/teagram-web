@@ -12,7 +12,7 @@ import PopupPremium from '@components/popups/premium';
 import PopupStarGiftInfo from '@components/popups/starGiftInfo';
 import {openEmojiStatusPickerSafely} from '@components/sidebarLeft/emojiStatus';
 import {wrapAdaptiveCustomEmoji} from '@components/wrappers/customEmojiSimple';
-import {handleFireAndForgetStickerError} from '@components/wrappers/sticker';
+import {handleStickerError} from '@components/wrappers/sticker';
 import wrapEmojiStatus from '@components/wrappers/emojiStatus';
 
 const log = logger('GenerateTitleIcons');
@@ -119,7 +119,7 @@ export default async function generateTitleIcons({
       size: 24,
       wrapOptions
     });
-    void loadPromise.catch(handleFireAndForgetStickerError);
+    void loadPromise.catch(handleStickerError);
 
     botVerification = container;
     container.classList.add('peer-title-bot-verification');

@@ -36,10 +36,7 @@ const mocks = vi.hoisted(() => {
     loadAnimationAsAsset: vi.fn(),
     waitForFirstFrame: vi.fn(() => Promise.resolve()),
     wrapSticker: vi.fn(),
-    ignoreMiddlewareCancellation: (error: {type?: string}) => {
-      if(error?.type !== 'MIDDLEWARE') throw error;
-    },
-    handleFireAndForgetStickerError: (error: {type?: string}) => {
+    handleStickerError: (error: {type?: string}) => {
       if(error?.type !== 'MIDDLEWARE') console.error(error);
     },
     wrapStickerAnimation: vi.fn()
@@ -89,8 +86,7 @@ vi.mock('@components/animationIntersector', () => ({
 }));
 vi.mock('@components/wrappers/sticker', () => ({
   default: mocks.wrapSticker,
-  ignoreMiddlewareCancellation: mocks.ignoreMiddlewareCancellation,
-  handleFireAndForgetStickerError: mocks.handleFireAndForgetStickerError
+  handleStickerError: mocks.handleStickerError
 }));
 vi.mock('@components/wrappers/stickerAnimation', () => ({default: mocks.wrapStickerAnimation}));
 vi.mock('@components/chat/reactions', () => ({savedReactionTags: []}));

@@ -20,10 +20,7 @@ vi.mock('@components/wrappers/customEmojiSimple', () => ({
   wrapAdaptiveCustomEmoji: mocks.wrapAdaptiveCustomEmoji
 }));
 vi.mock('@components/wrappers/sticker', () => ({
-  ignoreMiddlewareCancellation: (error: {type?: string}) => {
-    if(error?.type !== 'MIDDLEWARE') throw error;
-  },
-  handleFireAndForgetStickerError: (error: {type?: string}) => {
+  handleStickerError: (error: {type?: string}) => {
     if(error?.type !== 'MIDDLEWARE') console.error(error);
   }
 }));
