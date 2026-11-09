@@ -2242,6 +2242,75 @@ test('renders the newest first-paint batch before the remaining initial history'
   }
 });
 
+test('prioritizes first paint while rendering a stored last-message batch', async() => {
+  const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
+  Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
+
+  const storedMids = Array.from({length: 20}, (_, index) => 99 - index);
+  const historySlice = {
+    isEnd: vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false),
+    slice: (start: number, end: number) => storedMids.slice(start, end)
+  };
+  const storedHistory = {slice: historySlice, sliceMe: vi.fn(() => undefined)};
+  const requestHistory = vi.fn(async() => ({
+    cached: false,
+    result: Promise.resolve({history: [79, 78, 77, 76, 75, 74]})
+  }));
+  const deferredTails: Array<() => void> = [];
+  const performHistoryResult = vi.fn(async(
+    _historyResult: unknown,
+    _reverse: boolean,
+    _includeEphemeralHistory: boolean,
+    prioritizeFirstPaint: boolean,
+    onDeferredHistory?: (promise: Promise<void>) => void
+  ) => {
+    if(!prioritizeFirstPaint) return;
+    let resolveTail!: () => void;
+    const tail = new Promise<void>((resolve) => { resolveTail = resolve; });
+    deferredTails.push(resolveTail);
+    onDeferredHistory?.(tail);
+  });
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    isFirstLoad: true,
+    chat: {
+      peerId,
+      type: ChatType.Chat,
+      isBroadcast: false,
+      getHistoryStorage: () => ({history: storedHistory}),
+      getMessage: vi.fn(() => ({}))
+    },
+    requestHistory,
+    performHistoryResult,
+    log: vi.fn()
+  }) as any;
+
+  try {
+    const result = await harness.getHistory(undefined, true, false, makeFullMid(peerId, 100));
+    await result.promise;
+    await vi.waitFor(() => expect(performHistoryResult).toHaveBeenCalledTimes(2));
+
+    expect(performHistoryResult).toHaveBeenNthCalledWith(1, expect.anything(), true, true, true, expect.any(Function));
+    expect(performHistoryResult).toHaveBeenNthCalledWith(2, expect.anything(), true, true, true, expect.any(Function));
+
+    let waitSettled = false;
+    void result.waitPromise.then(() => waitSettled = true);
+    await Promise.resolve();
+    expect(waitSettled).toBe(false);
+
+    deferredTails[0]();
+    await Promise.resolve();
+    expect(waitSettled).toBe(false);
+
+    deferredTails[1]();
+    await result.waitPromise;
+    expect(waitSettled).toBe(true);
+  } finally {
+    deferredTails.forEach((resolve) => resolve());
+    if(previousHeight) Object.defineProperty(windowSize, 'height', previousHeight);
+    else delete (windowSize as any).height;
+  }
+});
+
 test('propagates deferred history failure and retries the original tail before paging', async() => {
   const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
   Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
