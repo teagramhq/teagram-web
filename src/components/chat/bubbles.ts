@@ -13306,7 +13306,7 @@ export default class ChatBubbles {
       appMessagesManager.getHistory(this.peerId, maxId, loadCount, backLimit); */
     let result: AckedResult<MyHistoryResult> = await this.requestHistory(maxId, loadCount, backLimit) as any;
     let resultPromise: typeof result['result'];
-    const deferredHistoryPromises: Promise<void>[] = [];
+    let deferredHistoryPromise: Promise<void> | undefined;
 
     this.log('i vin brehnya', result, maxId, loadCount, backLimit);
 
@@ -13346,7 +13346,7 @@ export default class ChatBubbles {
         }
 
         return this.performHistoryResult(historyResult, reverse, true, prioritizeFirstPaint, (promise) => {
-          deferredHistoryPromises.push(promise);
+          deferredHistoryPromise = deferredHistoryPromise ? deferredHistoryPromise.then(() => promise) : promise;
         });
       });
     };
@@ -13389,7 +13389,7 @@ export default class ChatBubbles {
     }
 
     // Keep history paging serialized through the deferred tail while peer mounting waits only for first paint.
-    const waitForDeferredHistory = () => Promise.all(deferredHistoryPromises);
+    const waitForDeferredHistory = () => deferredHistoryPromise;
     const waitPromise = isAdditionRender ? processPromise(resultPromise).finally(waitForDeferredHistory) : (prioritizeFirstPaint ? promise.then(waitForDeferredHistory) : promise);
 
     if(isFirstMessageRender && liteMode.isAvailable('animations')/*  && false */) {
