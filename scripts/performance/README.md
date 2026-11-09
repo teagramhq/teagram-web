@@ -16,17 +16,20 @@ Timing-derived gates are report-only under MAIN-3608 while the paired noise
 model is prepared in MAIN-3610. This interim policy covers median timing against
 the master noise band and absolute budgets, the 100x/1x slowdown ratio, long-task
 count and blocking-time comparisons against same-run pairs or master history,
-100x scroll long tasks and dropped frames, the first animated sticker frame
-against the pinned client, and worker recorder replay overhead. Their values
-and limits remain in the job summary; a would-fail result is marked
-`report-only (would fail)`. MAIN-3610 restores these timing gates as blocking.
+100x scroll long tasks and dropped frames, long tasks over 50 ms overlapping a
+walk mirror (maximum count in one diagnostic repeat against a zero limit), the
+first animated sticker frame against the pinned client, and worker recorder
+replay overhead. Their values and limits remain in the job summary; a would-fail
+result is marked `report-only (would fail)`. MAIN-3610 restores these timing
+gates as blocking.
 
 The blocking gates remain bundle growth above 2%, request and RPC count increases
-at the chat-list boundary, bundle measurements that vary across repeats, and
-missing, invalid, or short sample sets. Bundle-size comparisons keep their
-existing strictness. The 100 ms negative control must still be detected as a
-report-only would-fail timing regression; the job fails if detection is missing.
-There are no per-scenario allowances from the closed teagram-web#202.
+at the chat-list boundary, contacts-list bundle measurements that vary across
+repeats, and missing, invalid, or short sample sets. Bundle-size comparisons
+keep their existing strictness. The 100 ms negative control must still be
+detected as a report-only would-fail timing regression; the job fails if
+detection is missing. There are no per-scenario allowances from the closed
+teagram-web#202.
 
 The 1x and 100x scenarios are calibrated separately. Only master runs with the
 same measurement version, fixture version, fixture seed commit, and pinned

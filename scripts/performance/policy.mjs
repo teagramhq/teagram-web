@@ -149,6 +149,25 @@ function addReportOnlyFailure(failures, scale, key, message) {
   failures.push(`${scale} ${key}: ${message}; report-only (would fail)`);
 }
 
+function maxWalkLongTasksOver50Ms(report, scenarioKey, blockingFailures) {
+  const samples = report.diagnostics?.['100x']?.[scenarioKey];
+  if(!Array.isArray(samples)) return undefined;
+  if(!samples.length) {
+    addFailure(blockingFailures, '100x', scenarioKey, 'walk-mirror long-task diagnostic sample set is empty');
+    return undefined;
+  }
+
+  const counts = samples.map((sample, index) => {
+    const count = sample?.walkLongTasksOver50Ms;
+    if(!Number.isInteger(count) || count < 0) {
+      addFailure(blockingFailures, '100x', scenarioKey, `walk-mirror long-task diagnostic is missing or invalid in sample ${index + 1}`);
+      return undefined;
+    }
+    return count;
+  });
+  return counts.every(Number.isInteger) ? Math.max(...counts) : undefined;
+}
+
 function historyScrollMetrics(history, report) {
   return history.flatMap((run) => {
     if(!matchesFixture(run, report)) return [];
@@ -221,6 +240,11 @@ export function evaluatePerformance(report, history = []) {
         blockingTimeMs: metricNoiseBand(scrollHistory.map((run) => run.blockingTimeMs)),
         droppedFramePercent: metricNoiseBand(scrollHistory.map((run) => run.droppedFramePercent))
       } : undefined;
+      const walkLongTasksOver50Ms = scale === '100x' ? maxWalkLongTasksOver50Ms(report, scenario.key, blockingFailures) : undefined;
+      const walkLongTasksWouldFail = Number.isFinite(walkLongTasksOver50Ms) && walkLongTasksOver50Ms > 0;
+      if(walkLongTasksWouldFail) {
+        addReportOnlyFailure(reportOnlyFailures, scale, scenario.key, `up to ${walkLongTasksOver50Ms} long task(s) over 50 ms overlapped a walk mirror in one repeat (limit 0)`);
+      }
       if(calibrated) ++calibratedScenarios;
 
       if(!headSamples.length) {
@@ -383,13 +407,14 @@ export function evaluatePerformance(report, history = []) {
         budgetMs,
         base,
         head,
+        walkLongTasksOver50Ms,
         scrollHistoryRuns: scale === '100x' && scenario.key === 'scrollBack2k' ? scrollHistoryRuns : undefined,
         scrollNoiseBands,
         scrollGateStatus,
         historyRuns: mainValues.length,
         noiseBand: calibrated ? [median(mainValues) - noiseWidth, median(mainValues) + noiseWidth] : undefined,
         budgetStatus,
-        reportOnlyFailure: timingWouldFail,
+        reportOnlyFailure: timingWouldFail || walkLongTasksWouldFail,
         timingFailures
       });
     }
@@ -416,8 +441,8 @@ export function evaluatePerformance(report, history = []) {
 
 export function formatPerformanceTable(evaluation) {
   const lines = [
-    '| Scenario | Head (ms) | Budget (ms) | Main noise band (ms) | 100x/1x | Scroll noise band | Base (ms) | Requests | DOM nodes | Long tasks >50 ms | Blocking time (ms) | Dropped frames | Bundle (bytes) | Gate |',
-    '| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |'
+    '| Scenario | Head (ms) | Budget (ms) | Main noise band (ms) | 100x/1x | Scroll noise band | Base (ms) | Requests | DOM nodes | Long tasks >50 ms | Walk-mirror tasks >50 ms (max/repeat; limit 0) | Blocking time (ms) | Dropped frames | Bundle (bytes) | Gate |',
+    '| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |'
   ];
   for(const row of evaluation.rows) {
     const show = (value, digits = 0) => Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
@@ -429,7 +454,8 @@ export function formatPerformanceTable(evaluation) {
     const overBudget = row.budgetMs !== null && Number.isFinite(row.head.ms) && row.head.ms > row.budgetMs;
     const scenarioFailure = evaluation.blockingFailures.some((failure) => failure.startsWith(`${row.scale} ${row.key}:`));
     const gate = scenarioFailure ? 'failed' : row.reportOnlyFailure ? 'report-only (would fail)' : row.scrollGateStatus || (row.budgetStatus === 'warming' ? overBudget ? 'over budget (report-only)' : 'warming' : 'report-only');
-    lines.push(`| ${row.label} (${row.scale}) | ${show(row.head.ms, 1)} | ${budget} | ${noise} | ${ratio} | ${scrollNoise} | ${show(row.base.ms, 1)} | ${show(row.head.requests)} | ${show(row.head.domNodes)} | ${show(row.head.longTasksOver50Ms)} | ${show(row.head.blockingTimeMs, 1)} | ${show(row.head.droppedFramePercent, 2)}% | ${show(row.head.bundleBytes)} | ${gate} |`);
+    const walkLongTasks = Number.isFinite(row.walkLongTasksOver50Ms) ? show(row.walkLongTasksOver50Ms) : '—';
+    lines.push(`| ${row.label} (${row.scale}) | ${show(row.head.ms, 1)} | ${budget} | ${noise} | ${ratio} | ${scrollNoise} | ${show(row.base.ms, 1)} | ${show(row.head.requests)} | ${show(row.head.domNodes)} | ${show(row.head.longTasksOver50Ms)} | ${walkLongTasks} | ${show(row.head.blockingTimeMs, 1)} | ${show(row.head.droppedFramePercent, 2)}% | ${show(row.head.bundleBytes)} | ${gate} |`);
   }
   return lines.join('\n');
 }

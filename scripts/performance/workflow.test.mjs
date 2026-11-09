@@ -268,6 +268,7 @@ test('extra timing samples are reported without changing the three-repeat policy
             domNodes: 1_000,
             domNodeCounts: {bubbleGroups: 12},
             longTasksOver50Ms: 0,
+            walkLongTasksOver50Ms: 1,
             blockingTimeMs: 0,
             rpcCallCount: 1,
             rpcWallMs: 81,
@@ -350,6 +351,8 @@ test('extra timing samples are reported without changing the three-repeat policy
   assert.match(threeSampleSummary, /200\.0 ms.*350\.0 ms.*150\.0 ms.*100 ms.*report-only \(would fail\)/);
   assert.match(threeSampleSummary, /### Worker recorder replay overhead/);
   assert.match(threeSampleSummary, /peers \| 10\.0 \| 13\.0 \| 3\.0 \|.*report-only \(would fail\)/);
+  assert.match(threeSampleSummary, /Walk-mirror tasks >50 ms \(max\/repeat; limit 0\)/);
+  assert.match(threeSampleSummary, /100x sendMessage: up to 1 long task\(s\) over 50 ms overlapped a walk mirror in one repeat \(limit 0\); report-only \(would fail\)/);
   assert.doesNotMatch(threeSampleSummary, /Blocking findings:/);
   assert.match(threeSampleSummary, /\| Scenario \| Scale \| Variant \| First visible \(ms\) \| First visible state \| Live boundary \(ms\) \| Requests \| RPC calls \| DOM nodes \| Long tasks >50 ms \| Blocking \(ms\) \| Bundle bytes \|/);
   assert.match(threeSampleSummary, /\| Cold chat list \| 1x \| head \| 100\.0 \| snapshot \| 500\.0 \| 4 \| 2 \| 100 \| 0 \| 0\.0 \| 10000 \|/);

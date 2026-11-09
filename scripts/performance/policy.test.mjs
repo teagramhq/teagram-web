@@ -810,10 +810,37 @@ test('reports calibrated timing regressions without blocking', () => {
   const row = result.rows.find((item) => item.scale === '100x' && item.key === 'dateJump');
   const tableRow = formatPerformanceTable(result).split('\n').find((line) => line.includes('Jump to a date (100x)'));
 
-  assert.equal(result.blockingFailures.some((failure) => failure.includes('dateJump')), false);
+  assert.deepEqual(result.blockingFailures, []);
   assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x dateJump') && failure.includes('125') && failure.includes('115.0')));
   assert.match(tableRow, /report-only \(would fail\)/);
   assert.equal(row.head.ms, 125);
+});
+
+test('reports walk-mirror long tasks with their limit without blocking', () => {
+  const diagnostics = {'100x': {scrollBack2k: [
+    {walkLongTasksOver50Ms: 0},
+    {walkLongTasksOver50Ms: 2},
+    {walkLongTasksOver50Ms: 1}
+  ]}};
+  const result = evaluatePerformance(report({diagnostics}));
+  const row = result.rows.find((item) => item.scale === '100x' && item.key === 'scrollBack2k');
+  const tableRow = formatPerformanceTable(result).split('\n').find((line) => line.includes('Scroll back 2,000 messages (100x)'));
+
+  assert.deepEqual(result.blockingFailures, []);
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('2') && failure.includes('limit 0') && failure.includes('report-only (would fail)')));
+  assert.equal(row.walkLongTasksOver50Ms, 2);
+  assert.equal(row.reportOnlyFailure, true);
+  assert.match(tableRow, /\| 2 \|.*report-only \(would fail\)/);
+});
+
+test('fails closed when a walk-mirror long-task count is missing from a trace sample', () => {
+  const diagnostics = {'100x': {scrollBack2k: [
+    {walkLongTasksOver50Ms: 0},
+    {}
+  ]}};
+  const result = evaluatePerformance(report({diagnostics}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('walk-mirror long-task diagnostic') && failure.includes('sample 2')));
 });
 
 test('reports absolute timing budget misses without calibration', () => {
@@ -821,7 +848,7 @@ test('reports absolute timing budget misses without calibration', () => {
   const result = evaluatePerformance(report({head}), mainHistory(19));
   const row = result.rows.find((item) => item.scale === '100x' && item.key === 'coldChatList');
 
-  assert.equal(result.blockingFailures.some((failure) => failure.includes('1000 ms absolute budget')), false);
+  assert.deepEqual(result.blockingFailures, []);
   assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('1001') && failure.includes('1000 ms absolute budget')));
   assert.equal(row.budgetStatus, 'report-only (would fail)');
 });
