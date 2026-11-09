@@ -77,6 +77,7 @@ let PEER_CHANGED_ERROR: typeof import('@components/chat/bubbles').PEER_CHANGED_E
 let Chat: typeof import('@components/chat/chat').default;
 let ChatInput: typeof import('@components/chat/input').default;
 let AppImManager: typeof import('@lib/appImManager').AppImManager;
+let AppPeersManager: typeof import('@appManagers/appPeersManager').AppPeersManager;
 let BubbleGroups: typeof import('@components/chat/bubbleGroups').default;
 let BubbleGroup: typeof import('@components/chat/bubbleGroups').BubbleGroup;
 let getInitialHistoryLoadCount: typeof import('@components/chat/bubbles').getInitialHistoryLoadCount;
@@ -124,6 +125,7 @@ beforeAll(async() => {
   Chat = (await import('@components/chat/chat')).default;
   ChatInput = (await import('@components/chat/input')).default;
   AppImManager = (await import('@lib/appImManager')).AppImManager;
+  AppPeersManager = (await import('@appManagers/appPeersManager')).AppPeersManager;
   ({default: BubbleGroups, BubbleGroup} = await import('@components/chat/bubbleGroups'));
   // Importing the whole bubbles graph costs far more than the default hook
   // budget once the rest of the suite is competing for the same CPU.
@@ -495,6 +497,166 @@ test('does not log canceled bubble peer changes', async() => {
   await trackedSetPeer;
 
   expect(chat.log.error).not.toHaveBeenCalled();
+});
+
+test('collects chat peer-change flags in one manager call', async() => {
+  const manager = Object.assign(Object.create(AppPeersManager.prototype), {
+    noForwards: vi.fn(() => true),
+    isPeerRestricted: vi.fn(() => false),
+    isLikeGroup: vi.fn(() => true),
+    isAnyGroup: vi.fn(() => true),
+    isMegagroup: vi.fn(() => true),
+    isBroadcast: vi.fn(() => false),
+    isChannel: vi.fn(() => true),
+    isBot: vi.fn(() => false),
+    appMessagesManager: {isAnonymousSending: vi.fn(() => false)},
+    canManageDirectMessages: vi.fn(() => true)
+  }) as any;
+
+  await expect(manager.getChatPeerChangeFlags(peerId)).resolves.toEqual({
+    noForwards: true,
+    isRestricted: false,
+    isLikeGroup: true,
+    isRealGroup: true,
+    isMegagroup: true,
+    isBroadcast: false,
+    isChannel: true,
+    isBot: false,
+    isAnonymousSending: false,
+    canManageDirectMessages: true
+  });
+  expect(manager.noForwards).toHaveBeenCalledOnce();
+  expect(manager.isPeerRestricted).toHaveBeenCalledOnce();
+  expect(manager.isLikeGroup).toHaveBeenCalledOnce();
+  expect(manager.isAnyGroup).toHaveBeenCalledOnce();
+  expect(manager.isMegagroup).toHaveBeenCalledOnce();
+  expect(manager.isBroadcast).toHaveBeenCalledOnce();
+  expect(manager.isChannel).toHaveBeenCalledOnce();
+  expect(manager.isBot).toHaveBeenCalledOnce();
+  expect(manager.appMessagesManager.isAnonymousSending).toHaveBeenCalledOnce();
+  expect(manager.canManageDirectMessages).toHaveBeenCalledOnce();
+});
+
+test('selects an uncached user chat without waiting for background readiness or migration lookup', async() => {
+  const chat = {
+    peerId,
+    setPeer: vi.fn(async() => ({cached: false, promise: Promise.resolve()}))
+  };
+  const getReadyPromise = vi.fn(() => new Promise<void>(() => {}));
+  const selectTab = vi.fn();
+  const getPeerMigratedTo = vi.fn(async() => undefined);
+  const manager = Object.assign(Object.create(AppImManager.prototype), {
+    managers: {appPeersManager: {getPeerMigratedTo}},
+    chats: [chat],
+    isSamePeer: vi.fn(() => false),
+    appChatBackground: {getReadyPromise},
+    selectTab: selectTab,
+    chatsSelectTab: vi.fn(),
+    log: {error: vi.fn()}
+  }) as any;
+
+  await AppImManager.prototype.setPeer.call(manager, {peerId});
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+  expect(chat.setPeer).toHaveBeenCalledWith({peerId});
+  expect(getPeerMigratedTo).not.toHaveBeenCalled();
+  expect(getReadyPromise).not.toHaveBeenCalled();
+  expect(selectTab).toHaveBeenCalled();
+});
+
+test('waits for cached chat rendering before selecting the chat tab', async() => {
+  let resolveCachedRender!: () => void;
+  const cachedRender = new Promise<void>((resolve) => { resolveCachedRender = resolve; });
+  const chat = {
+    peerId,
+    setPeer: vi.fn(async() => ({cached: true, promise: cachedRender}))
+  };
+  const selectTab = vi.fn();
+  const manager = Object.assign(Object.create(AppImManager.prototype), {
+    managers: {appPeersManager: {getPeerMigratedTo: vi.fn(async() => undefined)}},
+    chats: [chat],
+    isSamePeer: vi.fn(() => false),
+    appChatBackground: {getReadyPromise: vi.fn(() => new Promise<void>(() => {}))},
+    selectTab,
+    chatsSelectTab: vi.fn(),
+    log: {error: vi.fn()}
+  }) as any;
+
+  await AppImManager.prototype.setPeer.call(manager, {peerId});
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  expect(selectTab).not.toHaveBeenCalled();
+
+  resolveCachedRender();
+  await vi.waitFor(() => expect(selectTab).toHaveBeenCalled());
+});
+
+test('does not wait for loaded-end checks before rendering the first history batch', async() => {
+  const previousHeight = Object.getOwnPropertyDescriptor(windowSize, 'height');
+  Object.defineProperty(windowSize, 'height', {configurable: true, value: 800});
+
+  const messages = Array.from({length: 20}, (_, index) => ({
+    ...message(),
+    id: 100 - index,
+    mid: 100 - index
+  }));
+  const renderedMids: number[] = [];
+  let resolveLoaded!: () => void;
+  const loadedPromise = new Promise<void>((resolve) => { resolveLoaded = resolve; });
+  const deferredHistory: Promise<void>[] = [];
+  const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+    chat: {type: ChatType.Chat},
+    chatInner: {parentElement: undefined},
+    scrollable: {loadedAll: {top: false, bottom: false}, onScroll: vi.fn()},
+    needReflowScroll: false,
+    sponsoredMessageEvery: undefined,
+    messagesQueueOnRenderAdditional: undefined,
+    historyRetries: [],
+    setLoaded: vi.fn(() => loadedPromise),
+    getBubble: vi.fn(),
+    safeRenderMessage: vi.fn(({message: rendered}: {message: Message.message}) => {
+      renderedMids.push(rendered.mid);
+      return Promise.resolve();
+    }),
+    checkIfEmptyPlaceholderNeeded: vi.fn(async() => undefined),
+    log: Object.assign(vi.fn(), {bindPrefix: vi.fn(() => vi.fn())})
+  }) as any;
+  Object.defineProperty(harness, 'messagesQueuePromise', {
+    configurable: true,
+    get: () => Promise.resolve()
+  });
+
+  try {
+    const renderPromise = (ChatBubbles.prototype.performHistoryResult as any).call(
+      harness,
+      {history: messages, isEnd: {top: true, bottom: true, both: true}},
+      true,
+      false,
+      true,
+      (promise: Promise<void>) => deferredHistory.push(promise)
+    );
+    const result = await Promise.race([
+      renderPromise.then(() => 'rendered'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 100))
+    ]);
+
+    expect(result).toBe('rendered');
+    expect(renderedMids).toEqual([100, 99, 98, 97, 96]);
+    expect(deferredHistory).toHaveLength(1);
+    let deferredSettled = false;
+    void deferredHistory[0].then(() => deferredSettled = true);
+    await Promise.resolve();
+    expect(deferredSettled).toBe(false);
+
+    resolveLoaded();
+    await deferredHistory[0];
+  } finally {
+    resolveLoaded();
+    if(previousHeight) {
+      Object.defineProperty(windowSize, 'height', previousHeight);
+    } else {
+      delete (windowSize as any).height;
+    }
+  }
 });
 
 test('logs cached peer render failures in the app im manager', async() => {

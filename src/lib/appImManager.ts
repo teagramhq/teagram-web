@@ -3254,7 +3254,9 @@ export class AppImManager extends EventListenerBase<{
 
   public async setPeer(options: Partial<ChatSetInnerPeerOptions> = {}, animate?: boolean): Promise<boolean> {
     options.peerId ??= NULL_PEER_ID;
-    options.peerId = await this.managers.appPeersManager.getPeerMigratedTo(options.peerId) || options.peerId;
+    if(!options.peerId.isUser()) {
+      options.peerId = await this.managers.appPeersManager.getPeerMigratedTo(options.peerId) || options.peerId;
+    }
 
     const {peerId, lastMsgId, threadId} = options;
 
@@ -3331,10 +3333,7 @@ export class AppImManager extends EventListenerBase<{
       // * wait for cached render
       const promise = result?.cached ? result.promise : Promise.resolve();
       if(peerId) {
-        Promise.all([
-          promise,
-          this.appChatBackground.getReadyPromise()
-        ]).then(() => {
+        promise.then(() => {
           // window.requestAnimationFrame(() => {
           setTimeout(() => { // * setTimeout is better here
             setTimeout(() => {

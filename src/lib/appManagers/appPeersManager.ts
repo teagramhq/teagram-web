@@ -243,6 +243,22 @@ export class AppPeersManager extends AppManager {
     });
   }
 
+  public async getChatPeerChangeFlags(peerId: PeerId) {
+    const isRestricted = await this.isPeerRestricted(peerId);
+    return {
+      noForwards: this.noForwards(peerId),
+      isRestricted,
+      isLikeGroup: this.isLikeGroup(peerId),
+      isRealGroup: this.isAnyGroup(peerId),
+      isMegagroup: this.isMegagroup(peerId),
+      isBroadcast: this.isBroadcast(peerId),
+      isChannel: this.isChannel(peerId),
+      isBot: this.isBot(peerId),
+      isAnonymousSending: this.appMessagesManager.isAnonymousSending(peerId),
+      canManageDirectMessages: this.canManageDirectMessages(peerId)
+    };
+  }
+
   public isPeerPublic(peerId: PeerId) {
     return !!getPeerActiveUsernames(this.getPeer(peerId))[0];
   }

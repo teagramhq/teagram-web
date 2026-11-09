@@ -926,37 +926,38 @@ export default class Chat extends EventListenerBase<{
     const type = options.type ?? ChatType.Chat;
     this.setType(type);
 
+    const forceLikeGroup = peerId === rootScope.myId ||
+      peerId === REPLIES_PEER_ID ||
+      (type === ChatType.Search && this.hashtagType !== 'this') ||
+      type === ChatType.Logs;
+
+    const {
+      peerChangeFlags,
+      isUserBlocked,
+      isPremiumRequired,
+      starsAmount,
+      chat
+    } = await m(namedPromises({
+      peerChangeFlags: this.managers.appPeersManager.getChatPeerChangeFlags(peerId),
+      isUserBlocked: peerId.isUser() && this.managers.appProfileManager.isCachedUserBlocked(peerId),
+      isPremiumRequired: this.isPremiumRequiredToContact(peerId),
+      starsAmount: this.managers.acknowledged.appPeersManager.getStarsAmount(peerId),
+      chat: peerId.isAnyChat() && this.peer as MTChat
+    }, this.log));
+
     const {
       noForwards,
       isRestricted,
-      isLikeGroup,
+      isLikeGroup: peerIsLikeGroup,
       isRealGroup,
       isMegagroup,
       isBroadcast,
       isChannel,
       isBot,
       isAnonymousSending,
-      isUserBlocked,
-      isPremiumRequired,
-      starsAmount,
-      chat,
       canManageDirectMessages
-    } = await m(namedPromises({
-      noForwards: this.managers.appPeersManager.noForwards(peerId),
-      isRestricted: this.managers.appPeersManager.isPeerRestricted(peerId),
-      isLikeGroup: this._isLikeGroup(peerId),
-      isRealGroup: this.managers.appPeersManager.isAnyGroup(peerId),
-      isMegagroup: this.managers.appPeersManager.isMegagroup(peerId),
-      isBroadcast: this.managers.appPeersManager.isBroadcast(peerId),
-      isChannel: this.managers.appPeersManager.isChannel(peerId),
-      isBot: this.managers.appPeersManager.isBot(peerId),
-      isAnonymousSending: this.managers.appMessagesManager.isAnonymousSending(peerId),
-      isUserBlocked: peerId.isUser() && this.managers.appProfileManager.isCachedUserBlocked(peerId),
-      isPremiumRequired: this.isPremiumRequiredToContact(peerId),
-      starsAmount: this.managers.acknowledged.appPeersManager.getStarsAmount(peerId),
-      chat: peerId.isAnyChat() && this.peer as MTChat,
-      canManageDirectMessages: this.managers.appPeersManager.canManageDirectMessages(peerId)
-    }, this.log));
+    } = peerChangeFlags;
+    const isLikeGroup = forceLikeGroup || (!isBotforum && peerIsLikeGroup);
 
     // ! WARNING: TEMPORARY, HAVE TO GET TOPIC
     if(isForum && threadId) {

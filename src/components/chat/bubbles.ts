@@ -11795,6 +11795,8 @@ export default class ChatBubbles {
     const messages = /* await Promise.all */(history.map((mid) => {
       return typeof(mid) === 'number' ? this.chat.getMessage(mid) : mid;
     }));
+    const firstPaintCount = getFirstPaintHistoryLoadCount(windowSize.height);
+    const deferLoadedChecks = prioritizeFirstPaint && messages.length > firstPaintCount;
 
     const setLoadedPromises: Promise<any>[] = [];
     if(isEnd?.top) {
@@ -11804,8 +11806,15 @@ export default class ChatBubbles {
       setLoadedPromises.push(this.setLoaded('bottom', true));
     }
 
+    let loadedChecksPromise: Promise<any[]> | undefined;
     if(setLoadedPromises.length) {
-      await Promise.all(setLoadedPromises);
+      const promise = Promise.all(setLoadedPromises);
+      if(deferLoadedChecks) {
+        loadedChecksPromise = promise;
+        void promise.catch(noop);
+      } else {
+        await promise;
+      }
     }
 
     if(this.sponsoredMessageEvery && this.sponsoredMessagesAvailable.length) {
@@ -11898,7 +11907,6 @@ export default class ChatBubbles {
     };
 
     try {
-      const firstPaintCount = getFirstPaintHistoryLoadCount(windowSize.height);
       if(prioritizeFirstPaint && messages.length > firstPaintCount) {
         let firstBatchEnd = firstPaintCount;
         const firstBatchLastMessage = messages[firstBatchEnd - 1];
@@ -11919,6 +11927,7 @@ export default class ChatBubbles {
         const retryTail = async() => {
           if(!isCurrent()) return;
           try {
+            await loadedChecksPromise;
             rollbackTailBubbles();
             await renderMessages(messages.slice(firstBatchEnd), true);
             if(loadedTop && !this.historyRetries.length && isCurrent()) await this.setLoaded('top', true);
