@@ -53,9 +53,9 @@ const locksUrls: {[docId: string]: string} = {};
 
 export const videosCache: {[key: string]: Promise<any>} = {};
 
-export function handleStickerError(error: unknown) {
-  if((error as ApiError)?.type !== 'MIDDLEWARE') console.error(error);
-}
+export const handleStickerError = (error: unknown) => (
+  (error as ApiError)?.type !== 'MIDDLEWARE' && console.error(error)
+);
 
 const getThumbFromContainer = (container: HTMLElement) => {
   let element = container.firstElementChild as HTMLElement;
