@@ -143,7 +143,7 @@ test('extra timing samples are reported without changing the three-repeat policy
       variants
     };
   };
-  const summaryFor = (timingSamples, sendSamples = {base: [100, 100, 100], head: [100, 100, 100]}, eventName = 'pull_request') => {
+  const summaryFor = (timingSamples, sendSamples = {base: [100, 100, 100], head: [100, 100, 100]}, eventName = 'pull_request', historyCount = 20) => {
     const directory = mkdtempSync(join(tmpdir(), 'tweb-performance-summary-'));
     const reportPath = join(directory, 'report.json');
     const report = makeReport(timingSamples, sendSamples);
@@ -153,7 +153,7 @@ test('extra timing samples are reported without changing the three-repeat policy
     historyVariants['100x'].chatOpen = Array.from({length: 3}, () => makeSample(100));
     historyVariants['100x'].sendMessage = historyVariants['100x'].sendMessage.slice(0, 3);
     writeFileSync(reportPath, JSON.stringify(report));
-    for(let index = 0; index < 20; ++index) {
+    for(let index = 0; index < historyCount; ++index) {
       writeFileSync(join(historyDirectory, `history-${index}.json`), JSON.stringify({
         measurementVersion: 2,
         fixtureVersion: report.fixtureVersion,
@@ -191,6 +191,7 @@ test('extra timing samples are reported without changing the three-repeat policy
 
   const threeSampleSummary = summaryFor([100, 100, 190]);
   const fiveSampleSummary = summaryFor([100, 100, 190, 900, 1_000]);
+  const uncalibratedSummary = summaryFor([100, 100, 190], undefined, 'pull_request', 0);
   const elevenSendSampleSummary = summaryFor([100, 100, 190], {
     base: [100, 100, 100, 200, 300, 400, 500, 600, 700, 800, 900],
     head: [100, 100, 100, 200, 300, 400, 500, 600, 700, 800, 1_100]
@@ -206,4 +207,11 @@ test('extra timing samples are reported without changing the three-repeat policy
   assert.match(threeSampleSummary, /\| Scenario \| Scale \| Variant \| First visible \(ms\) \| First visible state \| Live boundary \(ms\) \| Requests \| RPC calls \| DOM nodes \| Long tasks >50 ms \| Blocking \(ms\) \| Bundle bytes \|/);
   assert.match(threeSampleSummary, /\| Cold chat list \| 1x \| head \| 100\.0 \| snapshot \| 500\.0 \| 4 \| 2 \| 100 \| 0 \| 0\.0 \| 10000 \|/);
   assert.match(threeSampleSummary, /\| 123\.0 \| 101\.0 \| 1 \| 81\.0 \| 42\.0 \| 0 \| 1000 \| 12 \| 0 \| 0\.0 \| messages\.sendMessage \(81\.0 ms, success\) \| sendMessage \/input\.ts \(22\.0 ms\) \|/);
+
+  for(const summary of [threeSampleSummary, uncalibratedSummary]) {
+    assert.match(summary, /blocking-time increases of at least 25 ms/);
+    assert.doesNotMatch(summary, /blocking-time increases of at least 80 ms/);
+    assert.match(summary, /Master-history long-task count noise allowance applies only to coldChatList/);
+    assert.doesNotMatch(summary, /Master-history non-scroll long-task counts allow one additional median event/);
+  }
 });

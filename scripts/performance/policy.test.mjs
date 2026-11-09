@@ -23,6 +23,12 @@ test('first-sticker regression budget rejects slowdowns greater than 100 ms', ()
   assert.equal(isWithinFirstStickerRegressionBudget([500, 510, 490], [600.1, 610.1, 590.1]), false);
 });
 
+test('first-sticker regression budget fails closed for empty, mismatched, or invalid repeats', () => {
+  assert.equal(isWithinFirstStickerRegressionBudget([], []), false);
+  assert.equal(isWithinFirstStickerRegressionBudget([500], [600, 610]), false);
+  assert.equal(isWithinFirstStickerRegressionBudget([500], [Number.NaN]), false);
+});
+
 test('first-sticker regression budget compares paired repeats when separate medians amplify runner noise', () => {
   const base = [443.6, 530.1, 446.6];
   const head = [532.5, 598.2, 567.2];
