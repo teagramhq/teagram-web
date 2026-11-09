@@ -603,6 +603,21 @@ async function installPeerChangeTracing(page: Page) {
     };
     wrapPeerChangeParts();
     perf.peerChangePhases = phases;
+    perf.peerChangeBase = base;
+    const mark = (name: string) => phases.push({name, startMs: performance.now() - base, durationMs: 0});
+    const im = (window as any).appImManager;
+    wrap(im, 'setPeer', 'im.setPeer');
+    wrap(im, 'setInnerPeer', 'im.setInnerPeer');
+    wrap(chat.bubbles.scrollable, 'replaceChildren', 'scrollable.replaceChildren');
+    wrap(chat, 'revealPreparedBackground', 'chat.revealPreparedBackground');
+    const observer = new MutationObserver(() => {
+      if(document.querySelector('.bubbles .bubble[data-mid]')) {
+        mark('dom.firstBubbleInserted');
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.body, {childList: true, subtree: true});
+    document.addEventListener('click', () => mark('click'), {capture: true, once: true});
     return phases;
   });
 }
@@ -1850,7 +1865,11 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         const chatOpenSample = {
           ...chatOpenCapture,
           cpu: chatCpu,
-          peerChangePhases: summarizePerformancePhases(await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []))
+          peerChangePhases: summarizePerformancePhases(await page.evaluate(() => {
+            const perf = (window as any).__teagramPerf;
+            const offset = perf.clickAt - perf.peerChangeBase;
+            return (perf.peerChangePhases || []).map((phase: {startMs: number}) => ({...phase, startMs: Number((phase.startMs - offset).toFixed(1))}));
+          }))
         };
         traceSamples.chatOpen.push(chatOpenSample);
         await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpenSample, 'chatOpen');
