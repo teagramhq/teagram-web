@@ -92,9 +92,7 @@ export class ApiManager extends ApiManagerMethods {
     super();
     this.name = 'API';
 
-    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1') {
-      this.performanceRpcTrace = new PerformanceRpcTrace(true);
-    }
+    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace = new PerformanceRpcTrace(true);
 
     this.cachedNetworkers = {} as any;
     this.cachedExportPromise = {};
@@ -837,9 +835,7 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public resetPerformanceRpcTrace(recordSpans = true) {
-    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1') {
-      this.performanceRpcTrace!.reset(recordSpans);
-    }
+    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace!.reset(recordSpans);
   }
 
   public getPerformancePhaseTrace() {
@@ -874,8 +870,7 @@ export class ApiManager extends ApiManagerMethods {
     if(import.meta.env.VITE_PERF_TRACE === '1' && method === 'messages.getDialogs') {
       this.finishFirstDialogsTrace();
     }
-    const traceSearch = import.meta.env.VITE_PERF_SEARCH_TRACE === '1' && method === 'messages.searchGlobal';
-    return import.meta.env.VITE_PERF_TRACE === '1' || traceSearch ?
+    return import.meta.env.VITE_PERF_TRACE === '1' ?
       this.performanceRpcTrace?.trackWait(method, request) ?? request :
       request;
   }
