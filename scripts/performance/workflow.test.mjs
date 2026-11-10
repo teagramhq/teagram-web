@@ -205,9 +205,11 @@ test('global-search measurements prewarm the shared fixture RPC before starting 
   assert.ok(measurementStart < traceReset && traceReset < measuredQuery, 'warm-up RPCs must be excluded from the measured RPC trace');
   const warmResult = warmSearch.indexOf('await waitForGlobalSearchResult(page, query, false);');
   const closeWarmSearch = warmSearch.indexOf("page.locator('#column-left .sidebar-back-button.is-visible').click()");
+  const waitForCleanup = warmSearch.indexOf("await expect(input).toHaveValue(''");
   const reopenWarmSearch = warmSearch.indexOf("await page.keyboard.press('Control+f');");
+  const waitForReopen = warmSearch.indexOf("await expect(page.locator('#search-container.active')).toHaveCount(1");
   assert.ok(warmResult >= 0, 'warm-up must wait for a matching result before returning');
-  assert.ok(warmResult < closeWarmSearch && closeWarmSearch < reopenWarmSearch, 'warm-up results must be cleared by closing and reopening search before measurement');
+  assert.ok(warmResult < closeWarmSearch && closeWarmSearch < waitForCleanup && waitForCleanup < reopenWarmSearch && reopenWarmSearch < waitForReopen, 'warm-up results must be fully cleared and search reopened before measurement');
 });
 
 test('only pull requests build and require a base comparison', () => {

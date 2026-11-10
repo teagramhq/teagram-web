@@ -1170,8 +1170,10 @@ async function warmGlobalSearch(page: Page, query: string) {
   // the first side of a pair cannot pay a cold search-path cost by itself.
   await page.locator('#column-left .sidebar-back-button.is-visible').click();
   await expect(page.locator('#search-container.active')).toHaveCount(0, {timeout: 10_000});
+  await expect(input).toHaveValue('', {timeout: 10_000});
   await page.keyboard.press('Control+f');
-  await expect(input).toBeVisible();
+  await expect(page.locator('#search-container.active')).toHaveCount(1, {timeout: 10_000});
+  await expect(input).toBeFocused();
 }
 
 async function globalSearch(page: Page, requests: {value: number}, scale: Scale, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void, collectWalkDiagnostics = false) {
