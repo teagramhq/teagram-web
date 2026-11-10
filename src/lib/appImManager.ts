@@ -22,6 +22,7 @@ import {MOUNT_CLASS_TO} from '@config/debug';
 import appNavigationController, {USE_NAVIGATION_API} from '@components/appNavigationController';
 import {AppPrivateSearchTab} from '@components/solidJsTabs/tabs';
 import I18n, {i18n, join, LangPackKey} from '@lib/langPack';
+import getTypingLangPackKey from '@lib/typingLangPackKey';
 import {ChatFull, ChatParticipants, Game, Message, MessageAction, MessageMedia, SendMessageAction, User, Chat as MTChat, UrlAuthResult, WallPaper, Config, AttachMenuBot, Peer, InputChannel, HelpPeerColors, Reaction, Document, MessageEntity, PeerColor, SponsoredMessage, InputGroupCall, WebPage} from '@layer';
 import PeerTitle from '@components/peerTitle';
 import {PopupPeerCheckboxOptions} from '@components/popups/peer';
@@ -3507,68 +3508,9 @@ export class AppImManager extends EventListenerBase<{
 
     const typing = typings[0];
 
-    const langPackKeys: {
-      [peerType in 'private' | 'chat' | 'multi' | 'pair']?: Partial<{[action in SendMessageAction['_']]: LangPackKey}>
-    } = {
-      private: {
-        'sendMessageTypingAction': 'Peer.Activity.User.TypingText',
-        'sendMessageUploadAudioAction': 'Peer.Activity.User.SendingFile',
-        'sendMessageUploadDocumentAction': 'Peer.Activity.User.SendingFile',
-        'sendMessageUploadPhotoAction': 'Peer.Activity.User.SendingPhoto',
-        'sendMessageUploadVideoAction': 'Peer.Activity.User.SendingVideo',
-        'sendMessageUploadRoundAction': 'Peer.Activity.User.SendingVideo',
-        'sendMessageRecordVideoAction': 'Peer.Activity.User.RecordingVideo',
-        'sendMessageRecordAudioAction': 'Peer.Activity.User.RecordingAudio',
-        'sendMessageRecordRoundAction': 'Peer.Activity.User.RecordingVideo',
-        'sendMessageGamePlayAction': 'Peer.Activity.User.PlayingGame',
-        'sendMessageChooseStickerAction': 'Peer.Activity.User.ChoosingSticker',
-        'sendMessageEmojiInteractionSeen': 'Peer.Activity.User.EnjoyingAnimations'
-      },
-      chat: {
-        'sendMessageTypingAction': 'Peer.Activity.Chat.TypingText',
-        'sendMessageUploadAudioAction': 'Peer.Activity.Chat.SendingFile',
-        'sendMessageUploadDocumentAction': 'Peer.Activity.Chat.SendingFile',
-        'sendMessageUploadPhotoAction': 'Peer.Activity.Chat.SendingPhoto',
-        'sendMessageUploadVideoAction': 'Peer.Activity.Chat.SendingVideo',
-        'sendMessageUploadRoundAction': 'Peer.Activity.Chat.SendingVideo',
-        'sendMessageRecordVideoAction': 'Peer.Activity.Chat.RecordingVideo',
-        'sendMessageRecordAudioAction': 'Peer.Activity.Chat.RecordingAudio',
-        'sendMessageRecordRoundAction': 'Peer.Activity.Chat.RecordingVideo',
-        'sendMessageGamePlayAction': 'Peer.Activity.Chat.PlayingGame',
-        'sendMessageChooseStickerAction': 'Peer.Activity.Chat.ChoosingSticker',
-        'sendMessageEmojiInteractionSeen': 'Peer.Activity.Chat.EnjoyingAnimations'
-      },
-      multi: {
-        'sendMessageTypingAction': 'Peer.Activity.Chat.Multi.TypingText1',
-        'sendMessageUploadAudioAction': 'Peer.Activity.Chat.Multi.SendingFile1',
-        'sendMessageUploadDocumentAction': 'Peer.Activity.Chat.Multi.SendingFile1',
-        'sendMessageUploadPhotoAction': 'Peer.Activity.Chat.Multi.SendingPhoto1',
-        'sendMessageUploadVideoAction': 'Peer.Activity.Chat.Multi.SendingVideo1',
-        'sendMessageUploadRoundAction': 'Peer.Activity.Chat.Multi.SendingVideo1',
-        'sendMessageRecordVideoAction': 'Peer.Activity.Chat.Multi.RecordingVideo1',
-        'sendMessageRecordAudioAction': 'Peer.Activity.Chat.Multi.RecordingAudio1',
-        'sendMessageRecordRoundAction': 'Peer.Activity.Chat.Multi.RecordingVideo1',
-        'sendMessageGamePlayAction': 'Peer.Activity.Chat.Multi.PlayingGame1',
-        'sendMessageChooseStickerAction': 'Peer.Activity.Chat.Multi.ChoosingSticker1'
-      },
-      pair: {
-        'sendMessageTypingAction': 'Peer.Activity.Chat.Pair.TypingText',
-        'sendMessageUploadAudioAction': 'Peer.Activity.Chat.Pair.SendingFile',
-        'sendMessageUploadDocumentAction': 'Peer.Activity.Chat.Pair.SendingFile',
-        'sendMessageUploadPhotoAction': 'Peer.Activity.Chat.Pair.SendingPhoto',
-        'sendMessageUploadVideoAction': 'Peer.Activity.Chat.Pair.SendingVideo',
-        'sendMessageUploadRoundAction': 'Peer.Activity.Chat.Pair.SendingVideo',
-        'sendMessageRecordVideoAction': 'Peer.Activity.Chat.Pair.RecordingVideo',
-        'sendMessageRecordAudioAction': 'Peer.Activity.Chat.Pair.RecordingAudio',
-        'sendMessageRecordRoundAction': 'Peer.Activity.Chat.Pair.RecordingVideo',
-        'sendMessageGamePlayAction': 'Peer.Activity.Chat.Pair.PlayingGame',
-        'sendMessageChooseStickerAction': 'Peer.Activity.Chat.Pair.ChoosingSticker'
-      }
-    };
-
     // * with exactly two typings there's no point in hiding the second one behind "1 other"
     const isPair = typings.length === 2;
-    const mapa = isUser ? langPackKeys.private : (isPair ? langPackKeys.pair : (typings.length > 1 ? langPackKeys.multi : langPackKeys.chat));
+    const peerKind = isUser ? 'private' : (isPair ? 'pair' : (typings.length > 1 ? 'multi' : 'chat'));
     let action = typing.action;
 
     if(typings.length > 1) {
@@ -3586,7 +3528,7 @@ export class AppImManager extends EventListenerBase<{
       }
     }
 
-    const langPackKey = mapa[action._];
+    const langPackKey = getTypingLangPackKey(peerKind, action._);
     if(!langPackKey) {
       // log('no langPackKey');
       return;
