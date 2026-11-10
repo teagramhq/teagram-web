@@ -248,6 +248,31 @@ test('requires both dropped-frame measures for every 100x scroll sample', () => 
 
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k: base presented drop count is missing or invalid in sample 1')));
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k: head RAF drop count is missing or invalid in sample 2')));
+
+  const invalidSamples = [
+    {
+      sample: {rafDropped: 1},
+      failure: '100x scrollBack2k: head RAF drop count is invalid in sample 1'
+    },
+    {
+      sample: {presentedFrames: 0},
+      failure: '100x scrollBack2k: head presented frame count must be positive in sample 1'
+    },
+    {
+      sample: {presentedDropped: -1},
+      failure: '100x scrollBack2k: head presented drop count cannot be negative in sample 1'
+    },
+    {
+      sample: {presentedDroppedPercent: 100.1},
+      failure: '100x scrollBack2k: head presented drop percentage is outside 0-100 in sample 1'
+    }
+  ];
+  for(const {sample: invalidSample, failure} of invalidSamples) {
+    const invalidHead = scaleVariants();
+    Object.assign(invalidHead['100x'].scrollBack2k[0], invalidSample);
+    const invalidResult = evaluatePerformance(report({head: invalidHead}));
+    assert.ok(invalidResult.blockingFailures.some((message) => message.includes(failure)), failure);
+  }
 });
 
 test('paired absolute budget headroom fails only when the lower bound crosses the budget', () => {

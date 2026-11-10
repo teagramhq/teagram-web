@@ -5,7 +5,7 @@ import {expect, test, type Browser, type BrowserContext, type Locator, type Page
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes, trackBundleDocumentNavigation, type BundleRequestTracker} from './performanceBundleBytes';
-import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, classifyAndRemoveLongTaskTrace, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
+import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
 import {startPresentedFrameCapture, type PresentedFrameSummary} from './performancePresentedFrames';
@@ -53,7 +53,6 @@ type Metric = {
   cpu?: PerformanceCpuSummary,
   longTaskAttribution?: PerformanceTaskAttribution[],
   workerMessageAttribution?: ReturnType<typeof summarizeWorkerMessageAttribution>,
-  historyPathTasks?: PerformanceTaskAttribution[],
   scrollSpanTracing?: {installed: string[], spanCount: number, loafObserved: boolean},
   droppedFramePercent?: number,
   droppedFrames?: number,
@@ -66,7 +65,6 @@ type Metric = {
   droppedFrameCpu?: PerformanceTaskAttribution[],
   droppedFrameScripts?: ReturnType<typeof summarizeFrameScripts>,
   longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>,
-  longTaskTraceStatus?: ReturnType<typeof classifyMeasuredLongTaskTrace>,
   walkLongTasksOver50Ms?: number,
   reconcileMirrorTasks?: ReconcileMirrorTask[],
   preInteractionMs?: number,
@@ -1960,11 +1958,9 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       validateCachedDialogReconcileDiagnostics(samples, scenario, PERFORMANCE_REPEATS);
       samples.forEach((sample) => {
         delete sample.cachedDialogReconcile;
+        delete sample.longTaskTrace;
         if(variant === 'head' && scenario === 'scrollBack2k') {
-          classifyAndRemoveLongTaskTrace(sample);
-          if(sample.longTaskAttribution) sample.historyPathTasks = selectHistoryPathTasks(sample.longTaskAttribution, SCROLL_SPAN_NAMES);
-        } else {
-          delete sample.longTaskTrace;
+          expect(sample).not.toHaveProperty('longTaskTraceStatus');
         }
         delete sample.reconcileMirrorTasks;
       });

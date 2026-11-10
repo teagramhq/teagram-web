@@ -32,8 +32,10 @@ export async function startPresentedFrameCapture(page: Page) {
   const timestampsMs: number[] = [];
   const acknowledgements: Promise<void>[] = [];
   let acknowledgementError: Error | undefined;
+  let missingTimestampCount = 0;
   const onFrame = ({sessionId, metadata}: ScreencastFrameEvent): void => {
     if(Number.isFinite(metadata.timestamp)) timestampsMs.push(metadata.timestamp * 1_000);
+    else ++missingTimestampCount;
     const acknowledgement: Promise<void> = session.send('Page.screencastFrameAck', {sessionId}).then((): void => {}).catch((error: unknown): void => {
       acknowledgementError = error instanceof Error ? error : new Error(String(error));
     });
@@ -69,6 +71,10 @@ export async function startPresentedFrameCapture(page: Page) {
         await session.detach();
       } catch(error) {
         stopError = stopError ? new Error(`${String(stopError)}; CDP detach failed: ${String(error)}`) : error;
+      }
+      if(missingTimestampCount > 0) {
+        const timestampError = new Error(`${missingTimestampCount} screencast frame(s) lacked a timestamp`);
+        stopError = stopError ? new Error(`${String(stopError)}; ${timestampError.message}`) : timestampError;
       }
       if(stopError) throw new Error(`failed to stop compositor frame capture: ${String(stopError)}`);
       return summarizePresentedFrameGaps(timestampsMs, startMs, endMs);

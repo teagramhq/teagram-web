@@ -261,11 +261,6 @@ test('a hung browser action fails its own step instead of consuming the test tim
   assert.match(playwrightConfig, /actionTimeout:\s*60_000/);
 });
 
-test('measured head scroll attribution is recorded without a validity gate', () => {
-  assert.match(performanceScale, /if\(variant === 'head' && scenario === 'scrollBack2k'\) \{\s+classifyAndRemoveLongTaskTrace\(sample\);/);
-  assert.doesNotMatch(performanceScale, /validateMeasuredLongTaskTraces\(/);
-});
-
 test('timing regressions use the paired blocking policy and the negative control still fails', () => {
   assert.doesNotMatch(performanceScale, /isWithinFirstStickerRegressionBudget/);
   assert.match(performanceScale, /coldLoadEvaluation\.blockingFailures/);
