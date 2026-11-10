@@ -2,6 +2,8 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import EmojiTab, {appendEmoji} from '@components/emoticonsDropdown/tabs/emoji';
 import {attachClickEvent, simulateClickEvent} from '@helpers/dom/clickEvent';
 import {getMiddleware} from '@helpers/middleware';
+import getRichValueWithCaret from '@helpers/dom/getRichValueWithCaret';
+import ChatInput from '@components/chat/input';
 import {CustomEmojiRendererElement} from '@lib/customEmoji/renderer';
 import PopupPremium from '@components/popups/premium';
 import generateTitleIcons from '@components/generateTitleIcons';
@@ -59,7 +61,7 @@ vi.mock('@lib/rootScope', () => ({default: mocks.rootScope, BroadcastEvents: {}}
 vi.mock('@lib/appImManager', () => ({default: {openPremiumBot: mocks.openPremiumBot}}));
 vi.mock('@components/sidebarLeft', () => ({default: {}}));
 vi.mock('@components/sidebarRight', () => ({default: {}}));
-vi.mock('@components/emoticonsDropdown', () => ({EmoticonsDropdown: class {}}));
+vi.mock('@components/emoticonsDropdown', () => ({default: {}, EmoticonsDropdown: class {}}));
 vi.mock('@lib/solidjs/hotReloadGuardProvider', () => ({default: vi.fn()}));
 vi.mock('@components/popups', () => ({default: mocks.PopupElementMock}));
 vi.mock('@components/popups/premium', () => ({default: {show: mocks.premiumShow}}));
@@ -318,11 +320,48 @@ describe('emoji tab skin tones', () => {
     document.body.replaceChildren();
   });
 
-  function createEmojiTab() {
+  // a real composer holding `text` with the caret at `caret`
+  function createComposer(text: string, caret: number) {
+    const messageInput = document.createElement('div');
+    messageInput.contentEditable = 'true';
+    messageInput.tabIndex = 0;
+    // jsdom implements neither isContentEditable nor execCommand, which the composer relies on
+    Object.defineProperty(messageInput, 'isContentEditable', {value: true});
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: (command: string, showUI: boolean, html: string) => {
+        const selection = document.getSelection();
+        const range = selection.getRangeAt(0);
+        range.deleteContents();
+        const fragment = range.createContextualFragment(html);
+        const last = fragment.lastChild;
+        range.insertNode(fragment);
+        range.setStartAfter(last);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return true;
+      }
+    });
+    messageInput.textContent = text;
+    document.body.append(messageInput);
+    messageInput.focus();
+    const range = document.createRange();
+    range.setStart(messageInput.firstChild, caret);
+    range.collapse(true);
+    document.getSelection().removeAllRanges();
+    document.getSelection().addRange(range);
+
+    const chatInput = new ChatInput({peerId: 2} as any, undefined, undefined, 'chat-input');
+    Object.assign(chatInput, {messageInput, chatInput: document.createElement('div')});
+    return {chatInput, getText: () => getRichValueWithCaret(messageInput).value};
+  }
+
+  function createEmojiTab(composerText: string, caret: number) {
     const saveEmojiVariant = vi.fn();
-    const onEmojiSelected = vi.fn();
     const tab = createStandaloneEmojiTab({appEmojiManager: {saveEmojiVariant}});
-    tab.emoticonsDropdown = {chatInput: {onEmojiSelected}, setIgnoreMouseOut: vi.fn()} as any;
+    const {chatInput, getText} = createComposer(composerText, caret);
+    tab.emoticonsDropdown = {chatInput, setIgnoreMouseOut: vi.fn()} as any;
 
     const container = document.createElement('div');
     container.classList.add('emoji-category');
@@ -342,9 +381,10 @@ describe('emoji tab skin tones', () => {
       detachClick();
       middlewareHelper.destroy();
       tab.destroy();
+      delete (document as any).execCommand;
     };
 
-    return {tab, element, saveEmojiVariant, onEmojiSelected};
+    return {tab, element, saveEmojiVariant, getText};
   }
 
   async function chooseTone(tab: EmojiTab, glyph: Element, tone: number) {
@@ -360,27 +400,25 @@ describe('emoji tab skin tones', () => {
     simulateClickEvent(buttons[tone]);
   }
 
-  it('inserts the chosen tone once when the menu was opened on the emoji glyph', async() => {
-    const {tab, element, saveEmojiVariant, onEmojiSelected} = createEmojiTab();
+  it('inserts the chosen tone once at the composer caret when the menu was opened on the emoji glyph', async() => {
+    const {tab, element, saveEmojiVariant, getText} = createEmojiTab('hello world', 6);
     const glyph = element.firstElementChild;
     expect(glyph.classList.contains('emoji')).toBe(true);
 
     await chooseTone(tab, glyph, 4);
 
-    expect(onEmojiSelected).toHaveBeenCalledOnce();
-    expect(onEmojiSelected).toHaveBeenCalledWith({emoji: '👋🏾'}, false);
+    expect(getText()).toBe('hello 👋🏾world');
     expect(saveEmojiVariant).toHaveBeenCalledWith('👋', 4);
     expect(element.firstElementChild.getAttribute('alt')).toBe('👋🏾');
   });
 
   it('inserts the saved tone once on a plain click after a tone choice', async() => {
-    const {tab, element, onEmojiSelected} = createEmojiTab();
+    const {tab, element, getText} = createEmojiTab('hello world', 6);
     await chooseTone(tab, element.firstElementChild, 2);
-    onEmojiSelected.mockClear();
+    expect(getText()).toBe('hello 👋🏼world');
 
     simulateClickEvent(element.firstElementChild as HTMLElement);
 
-    expect(onEmojiSelected).toHaveBeenCalledOnce();
-    expect(onEmojiSelected).toHaveBeenCalledWith({emoji: '👋🏼'}, false);
+    expect(getText()).toBe('hello 👋🏼👋🏼world');
   });
 });
