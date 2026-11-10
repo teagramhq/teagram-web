@@ -5435,7 +5435,11 @@ describe('real client username field readiness', () => {
     }
   }
 
-  function runOuterAuthProgressRunner(browserOutput: string, {browserExitCode = 0, failRunnerCleanup = false}: {browserExitCode?: number, failRunnerCleanup?: boolean} = {}) {
+  function runOuterRunner(browserOutput: string, {
+    browserExitCode = 0,
+    failRunnerCleanup = false,
+    scenarioValidation = false
+  }: {browserExitCode?: number, failRunnerCleanup?: boolean, scenarioValidation?: boolean} = {}) {
     const fixtureDirectory = mkdtempSync(join(tmpdir(), 'real-client-runner-contract-'));
     const secretDirectory = mkdtempSync(join(tmpdir(), `teagram-fixture-${READINESS_PINS.runId}.`));
     const passwordFiles = [join(secretDirectory, 'a-password'), join(secretDirectory, 'b-password')];
@@ -5533,7 +5537,9 @@ describe('real client username field readiness', () => {
         '--server-revision', READINESS_PINS.serverRevision,
         '--web-revision', READINESS_PINS.webRevision,
         '--run-id', READINESS_PINS.runId,
-        '--auth-progress-one-submission'
+        ...(scenarioValidation
+          ? ['--scenarios', 'sign-in,first-message,message,custom-emoji,group']
+          : ['--auth-progress-one-submission'])
       ], {
         encoding: 'utf8',
         env: {
@@ -5571,6 +5577,16 @@ describe('real client username field readiness', () => {
   async function passwordInputValues(page: any) {
     return page.locator('#auth-pages input[data-password-test]').evaluateAll((inputs: HTMLInputElement[]) => inputs.map((input) => input.value));
   }
+
+  it('emits a failed report when post-browser validation rejects a passed report', () => {
+    const result = runOuterRunner(JSON.stringify({status: 'passed'}), {scenarioValidation: true});
+
+    expect(result.status).toBe(1);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      status: 'failed',
+      stage: 'report_validation'
+    });
+  });
 
   it('submits Username once and stops at the masked password-card boundary', async() => {
     setFixture(authProgressMarkup());
@@ -5642,7 +5658,7 @@ describe('real client username field readiness', () => {
     });
     expect(result.fixtureRequests).toEqual(['/', '/mtproto-target.json']);
 
-    const outer = runOuterAuthProgressRunner(result.output);
+    const outer = runOuterRunner(result.output);
     expect(outer.status).toBe(0);
     expect(outer.stderr).toBe('');
     expect(outer.cleanup).toHaveLength(2);
@@ -5657,7 +5673,7 @@ describe('real client username field readiness', () => {
       manifestArtifactDigest: outer.artifactReady.manifestArtifactDigest
     });
 
-    const cleanupFailure = runOuterAuthProgressRunner(result.output, {failRunnerCleanup: true});
+    const cleanupFailure = runOuterRunner(result.output, {failRunnerCleanup: true});
     expect(cleanupFailure.status).toBe(1);
     expect(cleanupFailure.cleanup).toHaveLength(2);
     const cleanupReport = JSON.parse(cleanupFailure.stdout.trim());
@@ -5695,7 +5711,7 @@ describe('real client username field readiness', () => {
       passwordSubmissions: 0
     });
 
-    const outer = runOuterAuthProgressRunner(result.output, {browserExitCode: 1});
+    const outer = runOuterRunner(result.output, {browserExitCode: 1});
     expect(outer.status).toBe(1);
     expect(outer.stderr).toBe('');
     expect(outer.cleanup).toHaveLength(2);
@@ -5723,7 +5739,7 @@ describe('real client username field readiness', () => {
       controlsRuns: 1
     });
     expect(result.screenshotExists).toBe(false);
-    const outer = runOuterAuthProgressRunner(result.output, {browserExitCode: 1});
+    const outer = runOuterRunner(result.output, {browserExitCode: 1});
     expect(outer.status).toBe(1);
     expect(outer.cleanup).toHaveLength(2);
     expect(JSON.parse(outer.stdout.trim())).toMatchObject(result.report);

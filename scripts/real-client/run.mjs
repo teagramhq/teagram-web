@@ -448,10 +448,9 @@ if(args?.help) {
           artifactDigest: readiness.artifactReady.artifactDigest
         } : {})
       };
-      if(cleanupError) {
-        failureReport.status = 'failed';
-        failureReport.stage = 'cleanup';
-      }
+      failureReport.status = 'failed';
+      failureReport.stage = cleanupError ? 'cleanup' :
+        browserResult.status === 'failed' && typeof browserResult.stage === 'string' ? browserResult.stage : 'report_validation';
       process.stdout.write(`${JSON.stringify(failureReport)}\n`);
     }
     process.stderr.write(`${errors.join('; ') || 'real client runner failed'}\n`);
