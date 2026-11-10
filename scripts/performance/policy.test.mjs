@@ -156,19 +156,17 @@ test('scenario budget values come only from the timing minimum-effects table', (
   assert.ok(SCENARIOS.every((scenario) => !Object.hasOwn(scenario, 'budgetMs')));
 });
 
-test('detects twice the timing minimum at the measured CI spread in at least 95 of 100 fixed-seed trials', () => {
-  // The legacy CI artifact had a 15.24 ms paired SD for 1x chat-open timing.
+test('detects the 95%-power shift at the measured final-head spread in at least 95 of 100 fixed-seed trials', () => {
   const random = seededRandom(3611);
   let detections = 0;
-  const baseMedian = 205.7;
+  const baseMedian = 151.9;
+  const pairedSpread = 16.60828578437991;
   const minimumEffect = baseMedian * 0.15;
-  const perVariantSpread = 15.24 / Math.sqrt(2);
+  const shiftFor95Power = minimumEffect + 1.7389 * pairedSpread;
 
   for(let trial = 0; trial < 100; ++trial) {
-    const base = Array.from({length: PERFORMANCE_REPEATS}, () => baseMedian + normalSample(random) * perVariantSpread);
-    const head = Array.from({length: PERFORMANCE_REPEATS}, () => baseMedian + 2 * minimumEffect + normalSample(random) * perVariantSpread);
-    const result = evaluatePerformance(timingReport(base, head));
-    if(result.blockingFailures.some((failure) => failure.startsWith('1x chatOpen:'))) ++detections;
+    const differences = Array.from({length: PERFORMANCE_REPEATS}, () => shiftFor95Power + normalSample(random) * pairedSpread);
+    if(evaluatePairedDifferences(differences, minimumEffect).regression) ++detections;
   }
 
   assert.ok(detections >= 95, `only ${detections}/100 shifted trials were detected`);
