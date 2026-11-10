@@ -2447,6 +2447,22 @@ export class AppMessagesManager extends AppManager {
         }
 
         if(updates) {
+          if(updates._ === 'updates' || updates._ === 'updatesCombined') {
+            const messageRandomId = String(message.random_id);
+            const matchingMessageIdUpdate = updates.updates.find((update) =>
+              update._ === 'updateMessageID' && String(update.random_id) === messageRandomId
+            );
+            if(matchingMessageIdUpdate) {
+              this.apiUpdatesManager.processLocalUpdate(matchingMessageIdUpdate);
+              updates = {
+                ...updates,
+                updates: updates.updates.filter((update) =>
+                  update._ !== 'updateMessageID' || String(update.random_id) !== messageRandomId
+                )
+              };
+            }
+          }
+
           withMessageAcknowledgementUpdateObservationSuppressed(() => {
             this.apiUpdatesManager.processUpdateMessage(updates);
           });
