@@ -274,6 +274,29 @@ test('summary rejects cold first-sticker samples when the worker was ready befor
   assert.match(result.stdout, /first sticker base cold worker was ready before chat opened/);
 });
 
+test('summary keeps a preloaded pinned client report-only and outside the cold gate', () => {
+  const firstSticker = firstStickerMeasurements();
+  firstSticker.samples.pinned.cold.forEach((sample) => {
+    sample.workerReadyBeforeChat = true;
+    sample.clickToWorkerRequestMs = -50;
+    sample.pageTimestamps = {clickAt: 100, workerRequestAt: 50, firstFrameAt: 200, nextPaintAt: 220};
+    sample.clickToFirstFrameMs = 100;
+    sample.clickToNextPaintMs = 120;
+    sample.firstFrameToNextPaintMs = 20;
+  });
+  firstSticker.medians.pinned.cold = {
+    workerRequestMs: -50,
+    workerFrameMs: 100,
+    paintedFrameMs: 120,
+    firstFrameToPaintMs: 20
+  };
+
+  const result = runSummaryWithArtifacts({firstSticker});
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Pinned baseline worker was ready before chat in 3\/3 report-only samples; excluded from cold gate pairs/);
+});
+
 test('summary fails closed for missing, invalid, and short worker-recorder artifacts', () => {
   const invalid = workerRecorderMeasurements();
   invalid.peers.pairedDeltaMs = null;

@@ -149,12 +149,12 @@ function formatFirstStickerTable(diagnostics, requireBase, failures, reportOnlyF
       const cold = temperature === 'cold';
       const expectedRepeats = temperature === 'cold' && variant !== 'pinned' ? diagnostics.repeats : 3;
       if(variant === 'pinned' && temperature === 'warm' && (!Array.isArray(samples) || samples.length === 0)) continue;
-      if(cold && Array.isArray(samples) && samples.some((sample) => sample?.workerReadyBeforeChat === true)) {
+      if(cold && variant !== 'pinned' && Array.isArray(samples) && samples.some((sample) => sample?.workerReadyBeforeChat === true)) {
         failures.push(`first sticker ${variant} cold worker was ready before chat opened`);
       }
       const validSamples = Array.isArray(samples) && samples.every((sample) => (
         Number.isFinite(sample?.clickToFirstFrameMs) && (cold ? (
-          sample?.workerReadyBeforeChat === false &&
+          (variant === 'pinned' || sample?.workerReadyBeforeChat === false) &&
           Number.isFinite(sample?.clickToWorkerRequestMs) &&
           Number.isFinite(sample?.clickToNextPaintMs) &&
           Number.isFinite(sample?.firstFrameToNextPaintMs) &&
@@ -198,6 +198,12 @@ function formatFirstStickerTable(diagnostics, requireBase, failures, reportOnlyF
       }
     } else {
       failures.push(`first sticker PR base/head comparison requires exactly ${PERFORMANCE_REPEATS} valid cold samples per variant`);
+    }
+
+    const pinnedSamples = diagnostics.samples?.pinned?.cold;
+    const preloadedPinnedSamples = Array.isArray(pinnedSamples) ? pinnedSamples.filter((sample) => sample?.workerReadyBeforeChat === true).length : 0;
+    if(preloadedPinnedSamples > 0) {
+      lines.push(`Pinned baseline worker was ready before chat in ${preloadedPinnedSamples}/${pinnedSamples.length} report-only samples; excluded from cold gate pairs.`);
     }
 
     const pinnedMs = diagnostics.medians?.pinned?.cold?.paintedFrameMs;

@@ -1629,7 +1629,7 @@ test('measures first animated sticker frame after opening a chat', async({browse
 
     if(report.requireBase) {
       for(let repeat = 0; repeat < FIRST_STICKER_REPORT_REPEATS; ++repeat) {
-        const pinnedSample = await test.step(`1x pinned cold first sticker report repeat ${repeat + 1}`, async() => (
+        const pinnedSample = await test.step(`1x pinned pre-178 first sticker comparison repeat ${repeat + 1}`, async() => (
           measureFirstStickerFrame(browser, stickerRuns.pinned!, fixture, false)
         ));
         samples.pinned.cold.push(pinnedSample);
@@ -1647,7 +1647,7 @@ test('measures first animated sticker frame after opening a chat', async({browse
         expect(values).toHaveLength(variant === 'pinned' ? FIRST_STICKER_REPORT_REPEATS : temperature === 'cold' ? coldRepeats : FIRST_STICKER_REPORT_REPEATS);
         if(temperature === 'cold') {
           expect(values.every((sample) => (
-            sample.workerReadyBeforeChat === false &&
+            (variant === 'pinned' || sample.workerReadyBeforeChat === false) &&
             Number.isFinite(sample.clickToWorkerRequestMs) &&
             Number.isFinite(sample.clickToFirstFrameMs) &&
             Number.isFinite(sample.clickToNextPaintMs) &&
