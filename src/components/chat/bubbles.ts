@@ -869,7 +869,6 @@ export default class ChatBubbles {
   /** The first history page of a peer change, asked for while the chat is still being prepared. */
   private historyPrefetch?: {
     tempId: number,
-    peerId: PeerId,
     maxId: FullMid,
     loadCount: number,
     backLimit: number,
@@ -5853,62 +5852,24 @@ export default class ChatBubbles {
   private prefetchOpenHistory(tempId: number, peerId: PeerId, readMaxId: number, dialog: Awaited<ReturnType<Chat['getDialogOrTopic']>>) {
     const peer = apiManagerProxy.getPeer(peerId);
     const historyStorage = this.chat.getHistoryStorage();
-    if(
-      this.setPeerTempId !== tempId ||
-      this.chat.peerId !== peerId ||
-      !peerId.isUser() ||
-      !peer ||
-      isPeerRestricted(peer, false) ||
-      !historyStorage?.maxId
-    ) {
+    if(this.setPeerTempId !== tempId || !peerId.isUser() || !peer || isPeerRestricted(peer, false) || !historyStorage?.maxId) {
       return;
     }
 
     const topMessageFullMid = makeFullMid(peerId, historyStorage.maxId);
-    const {lastMsgFullMid: pickedLastMsgFullMid, followingUnread, overrideAdditionMsgId} = this.pickUnreadAnchor({
-      peerId,
-      readMaxId,
-      dialog,
-      historyStorage,
-      topMessageFullMid,
-      samePeer: false,
-      sameSearch: false
-    });
-    const {isJump, lastMsgFullMid} = this.settleOpenTarget(pickedLastMsgFullMid, topMessageFullMid, followingUnread);
-    const {additionalFullMid, requestMaxId} = this.getOpenHistoryRequest({
-      peerId,
-      chatType: ChatType.Chat,
-      lastMsgFullMid,
-      topMessageFullMid,
-      overrideAdditionMsgId,
-      isJump,
-      isRestricted: false
-    });
-    const {maxId, loadCount, backLimit} = this.planHistoryRequest(peerId, requestMaxId, true, false, additionalFullMid, true, false);
-    const request = this.requestHistory(maxId, loadCount, backLimit);
-    // * a request nobody takes must not surface as an unhandled rejection
-    request.then((acked) => acked?.result?.catch?.(noop), noop);
-    this.historyPrefetch = {tempId, peerId, maxId, loadCount, backLimit, request};
-  }
-
-  private takeHistoryPrefetch(peerId: PeerId, maxId: FullMid, loadCount: number, backLimit: number) {
-    const prefetch = this.historyPrefetch;
-    if(
-      !prefetch ||
-      prefetch.tempId !== this.setPeerTempId ||
-      prefetch.peerId !== peerId ||
-      prefetch.maxId !== maxId ||
-      prefetch.loadCount !== loadCount ||
-      prefetch.backLimit !== backLimit
-    ) {
+    // * the plain open of an unread-free chat: the newest message is the anchor and the page starts below it
+    if(this.pickUnreadAnchor(peerId, readMaxId, dialog, historyStorage, topMessageFullMid, false, false)[0] !== topMessageFullMid || !this.chat.getMessage(topMessageFullMid)) {
       return;
     }
 
-    this.historyPrefetch = undefined;
-    return prefetch.request;
+    const plan = this.planHistoryRequest(peerId, topMessageFullMid, true, false, topMessageFullMid, true, false);
+    const request = this.requestHistory(plan[0], plan[1], plan[2]);
+    // * a request nobody takes must not surface as an unhandled rejection
+    request.then((acked) => acked?.result?.catch?.(noop), noop);
+    this.historyPrefetch = {tempId, maxId: plan[0], loadCount: plan[1], backLimit: plan[2], request};
   }
 
-  private pickUnreadAnchor({peerId, readMaxId, dialog, historyStorage, topMessageFullMid, samePeer, sameSearch}: {
+  private pickUnreadAnchor(
     peerId: PeerId,
     readMaxId: number,
     dialog: Awaited<ReturnType<Chat['getDialogOrTopic']>>,
@@ -5916,56 +5877,20 @@ export default class ChatBubbles {
     topMessageFullMid: FullMid,
     samePeer: boolean,
     sameSearch: boolean
-  }) {
-    let lastMsgFullMid: FullMid, followingUnread: boolean, overrideAdditionMsgId: number;
+  ): [lastMsgFullMid: FullMid, followingUnread: boolean, overrideAdditionMsgId: number] {
     if(/* dialog.unread_count */
       readMaxId &&
       (!samePeer || (sameSearch && !this.shouldJumpToEndInsteadOfUnread(readMaxId))) &&
       (!dialog || (!isSavedDialog(dialog) && dialog.unread_count !== 1))
     ) {
       const foundSlice = historyStorage.history.findSliceOffset(readMaxId);
-      if(foundSlice && foundSlice.slice.isEnd(SliceEnd.Bottom)) {
-        overrideAdditionMsgId = foundSlice.slice[foundSlice.offset - 25] || foundSlice.slice[0] || readMaxId;
-      }
-
-      followingUnread = true;
-      lastMsgFullMid = makeFullMid(peerId, readMaxId);
-    } else {
-      lastMsgFullMid = topMessageFullMid;
+      const overrideAdditionMsgId = foundSlice && foundSlice.slice.isEnd(SliceEnd.Bottom) ?
+        foundSlice.slice[foundSlice.offset - 25] || foundSlice.slice[0] || readMaxId :
+        undefined;
+      return [makeFullMid(peerId, readMaxId), true, overrideAdditionMsgId];
     }
 
-    return {lastMsgFullMid, followingUnread, overrideAdditionMsgId};
-  }
-
-  private settleOpenTarget(lastMsgFullMid: FullMid, topMessageFullMid: FullMid, followingUnread: boolean) {
-    const isGoingToBottomEnd = lastMsgFullMid === topMessageFullMid || (lastMsgFullMid === EMPTY_FULL_MID && !followingUnread);
-    const isJump = lastMsgFullMid !== topMessageFullMid/*  && overrideAdditionMsgId === undefined */;
-
-    if(isGoingToBottomEnd && lastMsgFullMid !== EMPTY_FULL_MID) {
-      const message = this.chat.getMessage(lastMsgFullMid);
-      if(!message) {
-        this.log('fix going to bottom end without existing message', lastMsgFullMid);
-        lastMsgFullMid = EMPTY_FULL_MID;
-      }
-    }
-
-    return {isJump, lastMsgFullMid};
-  }
-
-  private getOpenHistoryRequest({peerId, chatType, lastMsgFullMid, topMessageFullMid, overrideAdditionMsgId, isJump, isRestricted}: {
-    peerId: PeerId,
-    chatType: ChatType,
-    lastMsgFullMid: FullMid,
-    topMessageFullMid: FullMid,
-    overrideAdditionMsgId: number,
-    isJump: boolean,
-    isRestricted: boolean
-  }) {
-    // add last message, bc in getHistory will load < max_id
-    const additionalMid = isJump || isRestricted || [ChatType.Search, ChatType.Scheduled].includes(chatType) ? undefined : overrideAdditionMsgId ?? splitFullMid(topMessageFullMid).mid;
-    const additionalFullMid = additionalMid ? makeFullMid(peerId, additionalMid) : undefined;
-    const requestMaxId = !isJump && !additionalFullMid && lastMsgFullMid === topMessageFullMid ? EMPTY_FULL_MID : lastMsgFullMid;
-    return {additionalFullMid, requestMaxId};
+    return [topMessageFullMid, undefined, undefined];
   }
 
   public async setPeer(options: ChatSetPeerOptions & {samePeer: boolean, sameSearch: boolean, forceIsFirstLoad?: boolean}): Promise<{cached?: boolean, promise: Chat['setPeerPromise']}> {
@@ -6091,20 +6016,20 @@ export default class ChatBubbles {
           ]));
         }
 
-        ({lastMsgFullMid, followingUnread, overrideAdditionMsgId} = this.pickUnreadAnchor({
-          peerId,
-          readMaxId,
-          dialog,
-          historyStorage,
-          topMessageFullMid,
-          samePeer,
-          sameSearch
-        }));
+        [lastMsgFullMid, followingUnread, overrideAdditionMsgId] = this.pickUnreadAnchor(peerId, readMaxId, dialog, historyStorage, topMessageFullMid, samePeer, sameSearch);
       }
     }
 
-    const {isJump, lastMsgFullMid: settledLastMsgFullMid} = this.settleOpenTarget(lastMsgFullMid, topMessageFullMid, followingUnread);
-    lastMsgFullMid = settledLastMsgFullMid;
+    const isGoingToBottomEnd = lastMsgFullMid === topMessageFullMid || (lastMsgFullMid === EMPTY_FULL_MID && !followingUnread);
+    const isJump = lastMsgFullMid !== topMessageFullMid/*  && overrideAdditionMsgId === undefined */;
+
+    if(isGoingToBottomEnd && lastMsgFullMid !== EMPTY_FULL_MID) {
+      const message = this.chat.getMessage(lastMsgFullMid);
+      if(!message) {
+        this.log('fix going to bottom end without existing message', lastMsgFullMid);
+        lastMsgFullMid = EMPTY_FULL_MID;
+      }
+    }
 
     if(startParam === undefined && (samePeer || this.chat.isBot) && await m(this.chat.isStartButtonNeeded())) {
       startParam = BOT_START_PARAM;
@@ -6188,15 +6113,9 @@ export default class ChatBubbles {
       log('setPeer peerId:', peerId, historyStorage, lastMsgFullMid, topMessageFullMid);
     }
 
-    const {additionalFullMid, requestMaxId} = this.getOpenHistoryRequest({
-      peerId,
-      chatType,
-      lastMsgFullMid,
-      topMessageFullMid,
-      overrideAdditionMsgId,
-      isJump,
-      isRestricted: this.chat.isRestricted
-    });
+    // add last message, bc in getHistory will load < max_id
+    const additionalMid = isJump || [ChatType.Search, ChatType.Scheduled].includes(chatType) || this.chat.isRestricted ? undefined : overrideAdditionMsgId ?? splitFullMid(topMessageFullMid).mid;
+    const additionalFullMid = additionalMid ? makeFullMid(peerId, additionalMid) : undefined;
 
     let maxBubbleFullMid = EMPTY_FULL_MID;
     if(samePeer) {
@@ -6379,7 +6298,7 @@ export default class ChatBubbles {
       let historyRequest: Promise<Awaited<ReturnType<ChatBubbles['getHistory']>>>;
       if(!savedPosition?.mids) {
         historyRequest = this.getHistory1(
-          requestMaxId,
+          !isJump && !additionalFullMid && lastMsgFullMid === topMessageFullMid ? EMPTY_FULL_MID : lastMsgFullMid,
           true,
           isJump,
           additionalFullMid
@@ -12170,6 +12089,13 @@ export default class ChatBubbles {
   };
 
   public requestHistory(offsetId: number | FullMid, limit: number, backLimit: number): Promise<AckedResult<LocalHistoryResult>>  {
+    // * the page `prefetchOpenHistory` already asked for in this peer change
+    const prefetch = this.historyPrefetch;
+    if(prefetch?.tempId === this.setPeerTempId && prefetch.maxId === offsetId && prefetch.loadCount === limit && prefetch.backLimit === backLimit) {
+      this.historyPrefetch = undefined;
+      return prefetch.request;
+    }
+
     let offsetPeerId: PeerId;
     if(typeof(offsetId) === 'string') {
       const {peerId, mid} = splitFullMid(offsetId);
@@ -13361,7 +13287,7 @@ export default class ChatBubbles {
     additionalFullMid: FullMid | undefined,
     isFirstLoad: boolean,
     isBroadcast: boolean
-  ) {
+  ): [maxId: FullMid, loadCount: number, backLimit: number, additionalFullMids: FullMid[]] {
     // console.time('appImManager call getHistory');
     const pageCount = getInitialHistoryLoadCount(windowSize.height);
     // During a peer switch, old bubbles remain until finishPeerChange, so only use history
@@ -13429,7 +13355,7 @@ export default class ChatBubbles {
       }
     }
 
-    return {maxId, loadCount, backLimit, additionalFullMids};
+    return [maxId, loadCount, backLimit, additionalFullMids];
   }
 
   /**
@@ -13451,21 +13377,13 @@ export default class ChatBubbles {
     const peerId = this.peerId;
     const prioritizeFirstPaint = this.isFirstLoad && reverse && !isBackLimit && this.chat.type === ChatType.Chat;
 
-    const {maxId: requestMaxId, loadCount, backLimit, additionalFullMids} = this.planHistoryRequest(
-      peerId,
-      maxId,
-      reverse,
-      isBackLimit,
-      additionalFullMid,
-      this.isFirstLoad,
-      this.chat.isBroadcast
-    );
-    maxId = requestMaxId;
+    let loadCount: number, backLimit: number, additionalFullMids: FullMid[];
+    [maxId, loadCount, backLimit, additionalFullMids] = this.planHistoryRequest(peerId, maxId, reverse, isBackLimit, additionalFullMid, this.isFirstLoad, this.chat.isBroadcast);
 
     /* const result = additionMsgID ?
       {history: [additionMsgID]} :
       appMessagesManager.getHistory(this.peerId, maxId, loadCount, backLimit); */
-    let result: AckedResult<MyHistoryResult> = await (this.takeHistoryPrefetch(peerId, maxId, loadCount, backLimit) || this.requestHistory(maxId, loadCount, backLimit)) as any;
+    let result: AckedResult<MyHistoryResult> = await this.requestHistory(maxId, loadCount, backLimit) as any;
     let resultPromise: typeof result['result'];
     const deferredHistoryPromises: Promise<void>[] = [];
 

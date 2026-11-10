@@ -5456,97 +5456,102 @@ describe('first history page asked for during a peer change', () => {
   };
 
   const createHarness = (overrides: Record<string, unknown> = {}) => {
-    const requestHistory = vi.fn(async() => ({cached: false, result: Promise.resolve({history: [99, 98]})}));
+    const getHistory = vi.fn(async() => ({cached: false, result: Promise.resolve({history: [99, 98]})}));
     const harness = Object.assign(Object.create(ChatBubbles.prototype), {
       setPeerTempId: 1,
       isFirstLoad: true,
       bubbleGroups: {groups: []},
+      managers: {acknowledged: {appMessagesManager: {getHistory}}},
       chat: {
         peerId,
         type: ChatType.Chat,
         isBroadcast: false,
+        requestHistoryOptionsPart: {peerId},
         getHistoryStorage: () => ({maxId: topMid, history: {slice: {isEnd: () => false}, findSliceOffset: (): undefined => undefined}}),
         getMessage: vi.fn(() => ({}))
       },
-      requestHistory,
       log: vi.fn(),
       ...overrides
     }) as any;
-    return {harness, requestHistory};
+    return {harness, getHistory, loadCount: getInitialHistoryLoadCount(windowSize.height)};
   };
 
   beforeEach(() => setPeerMirror(user));
   afterAll(() => setPeerMirror(undefined));
 
   test('requests the page the open will ask for and hands it to getHistory once', async() => {
-    const {harness, requestHistory} = createHarness();
+    const {harness, getHistory, loadCount} = createHarness();
     harness.prefetchOpenHistory(1, peerId, 0, undefined);
 
-    expect(requestHistory).toHaveBeenCalledTimes(1);
-    const loadCount = getInitialHistoryLoadCount(windowSize.height);
-    expect(requestHistory).toHaveBeenCalledWith(topFullMid, loadCount, 0);
+    expect(getHistory).toHaveBeenCalledTimes(1);
+    expect(getHistory).toHaveBeenCalledWith(expect.objectContaining({peerId, offsetId: topMid, limit: loadCount, backLimit: 0}));
 
-    const performHistoryResult = vi.fn(async() => undefined);
-    harness.performHistoryResult = performHistoryResult;
-    await harness.getHistory(topFullMid, true, false, undefined);
-    expect(requestHistory).toHaveBeenCalledTimes(1);
-    await vi.waitFor(() => expect(performHistoryResult).toHaveBeenCalled());
+    harness.performHistoryResult = vi.fn(async() => undefined);
+    await harness.getHistory(topFullMid, true, false, topFullMid);
+    expect(getHistory).toHaveBeenCalledTimes(1);
 
     // a later page of the same peer change is a different request
-    harness.isFirstLoad = false;
-    await harness.getHistory(topFullMid, true, false, undefined);
-    expect(requestHistory).toHaveBeenCalledTimes(2);
+    await harness.getHistory(topFullMid, true, false, topFullMid);
+    expect(getHistory).toHaveBeenCalledTimes(2);
   });
 
   test('plans from the opened peer, not from state the previous peer left behind', () => {
-    const {harness, requestHistory} = createHarness({isFirstLoad: false});
+    const {harness, getHistory, loadCount} = createHarness({isFirstLoad: false});
     harness.chat.isBroadcast = true;
     harness.prefetchOpenHistory(1, peerId, 0, undefined);
 
-    expect(requestHistory).toHaveBeenCalledWith(topFullMid, getInitialHistoryLoadCount(windowSize.height), 0);
+    expect(getHistory).toHaveBeenCalledWith(expect.objectContaining({limit: loadCount, backLimit: 0}));
   });
 
-  test('does not use a prefetch for another peer change', () => {
-    const {harness, requestHistory} = createHarness();
+  test('does not hand a prefetch to another peer change or another page', () => {
+    const {harness, getHistory, loadCount} = createHarness();
     harness.prefetchOpenHistory(1, peerId, 0, undefined);
-    const loadCount = getInitialHistoryLoadCount(windowSize.height);
+    const prefetched = harness.historyPrefetch.request;
+    getHistory.mockClear();
 
     // A -> B -> A: the second A is a new peer change with its own tempId
     harness.setPeerTempId = 3;
-    expect(harness.takeHistoryPrefetch(peerId, topFullMid, loadCount, 0)).toBeUndefined();
+    harness.requestHistory(topFullMid, loadCount, 0);
     harness.setPeerTempId = 1;
-    expect(harness.takeHistoryPrefetch(11 as PeerId, topFullMid, loadCount, 0)).toBeUndefined();
-    expect(harness.takeHistoryPrefetch(peerId, topFullMid, loadCount + 1, 0)).toBeUndefined();
-    expect(harness.takeHistoryPrefetch(peerId, topFullMid, loadCount, 0)).toBe(requestHistory.mock.results[0].value);
+    harness.requestHistory(topFullMid, loadCount + 1, 0);
+    harness.requestHistory(makeFullMid(peerId, 50), loadCount, 0);
+    expect(getHistory).toHaveBeenCalledTimes(3);
+    expect(harness.historyPrefetch.request).toBe(prefetched);
+
+    expect(harness.requestHistory(topFullMid, loadCount, 0)).toBe(prefetched);
+    expect(harness.historyPrefetch).toBeUndefined();
   });
 
   test('asks for nothing once the peer change is superseded', () => {
-    const {harness, requestHistory} = createHarness({setPeerTempId: 2});
+    const {harness, getHistory} = createHarness({setPeerTempId: 2});
     harness.prefetchOpenHistory(1, peerId, 0, undefined);
-    expect(requestHistory).not.toHaveBeenCalled();
-
-    harness.setPeerTempId = 1;
-    harness.chat.peerId = 11 as PeerId;
-    harness.prefetchOpenHistory(1, peerId, 0, undefined);
-    expect(requestHistory).not.toHaveBeenCalled();
+    expect(getHistory).not.toHaveBeenCalled();
   });
 
-  test('leaves restricted peers and chats to the regular request', () => {
-    const {harness, requestHistory} = createHarness();
+  test('leaves restricted peers, groups and a missing top message to the regular request', () => {
+    const {harness, getHistory} = createHarness();
     setPeerMirror({...user, pFlags: {restricted: true}, restriction_reason: [{_: 'restrictionReason', platform: 'all', reason: 'porn', text: ''}]});
     harness.prefetchOpenHistory(1, peerId, 0, undefined);
     setPeerMirror(undefined);
     harness.prefetchOpenHistory(1, peerId, 0, undefined);
     setPeerMirror(user);
-    harness.chat.peerId = (-5) as PeerId;
     harness.prefetchOpenHistory(1, (-5) as PeerId, 0, undefined);
+    harness.chat.getMessage = vi.fn(() => undefined);
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
 
-    expect(requestHistory).not.toHaveBeenCalled();
+    expect(getHistory).not.toHaveBeenCalled();
+  });
+
+  test('leaves an open at the unread position to the regular request', () => {
+    const {harness, getHistory} = createHarness();
+    harness.prefetchOpenHistory(1, peerId, 90, undefined);
+
+    expect(getHistory).not.toHaveBeenCalled();
   });
 
   test('a prefetch nobody takes does not leave an unhandled rejection', async() => {
     const failure = new Error('worker gone');
-    const {harness} = createHarness({requestHistory: vi.fn(() => Promise.reject(failure))});
+    const {harness} = createHarness({managers: {acknowledged: {appMessagesManager: {getHistory: vi.fn(() => Promise.reject(failure))}}}});
     const unhandled: unknown[] = [];
     const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
     process.on('unhandledRejection', onUnhandledRejection);
