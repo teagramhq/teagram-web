@@ -5689,6 +5689,29 @@ describe('peer changes racing over the prefetched first page', () => {
     expect(rendered).toEqual([{peer: peerB, mids: [100, 902]}]);
     expect(getHistory).toHaveBeenCalledTimes(2);
   });
+
+  test('a synchronous prefetch failure falls back to the regular history request', async() => {
+    const {harness, peerChanges, rendered, open} = createRace();
+    const failure = new Error('request failed');
+    const requestHistory = vi.fn()
+      .mockImplementationOnce(() => { throw failure; })
+      .mockImplementation(() => ({cached: false, result: Promise.resolve({history: [903]})}));
+    harness.requestHistory = requestHistory;
+
+    const opening = open(peerA);
+    await vi.waitFor(() => expect(requestHistory).toHaveBeenCalledTimes(1));
+    expect(harness.log.error).toHaveBeenCalledWith('history prefetch failed:', peerA, failure);
+    expect(harness.historyPrefetch).toBeUndefined();
+
+    peerChanges[0]();
+    await vi.waitFor(() => expect(requestHistory).toHaveBeenCalledTimes(2));
+    await opening;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requestHistory).toHaveBeenCalledTimes(2);
+    expect(rendered).toEqual([{peer: peerA, mids: [100, 903]}]);
+  });
+
   test('a second open of the same peer never takes the first open\'s request', async() => {
     const {getHistory, responses, peerChanges, rendered, open} = createRace();
 
