@@ -324,7 +324,7 @@ export function recordMessageAcknowledgementPendingEntry(randomIdValue: unknown,
 
   const pendingTempId = pendingData ? safeId(pendingData.tempId) : undefined;
   const found = !!pendingData;
-  trace.record.pendingEntryFound = found;
+  if(trace.record.pendingEntryFound === null) trace.record.pendingEntryFound = found;
   trace.record.events.push({
     kind: 'pending_entry',
     atMs: elapsedMs(trace),

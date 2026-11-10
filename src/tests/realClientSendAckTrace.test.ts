@@ -199,6 +199,36 @@ describe('real-client text-send acknowledgement trace', () => {
     expect(JSON.stringify(records)).not.toContain('private body');
   });
 
+  it('keeps the first pending lookup summary when a duplicate update arrives after send', async() => {
+    const harness = createSendHarness();
+    harness.manager.enableRealClientMessageAckTrace();
+    harness.manager.setRealClientMessageAckTraceCheckName('alice_channel_post_visible');
+    const sendPromise = harness.manager.sendText({peerId: harness.peerId, text: 'private body'});
+
+    await vi.waitFor(() => expect(harness.invokeApiAfter).toHaveBeenCalled());
+    harness.resolveApiResult(createSendResult(harness.randomId));
+    await sendPromise;
+    harness.manager.finalizePendingMessage(harness.randomId, {
+      _: 'message',
+      id: 2,
+      mid: 2,
+      peerId: harness.peerId,
+      pFlags: {is_outgoing: true}
+    });
+
+    expect(harness.manager.pendingByRandomId[harness.randomId]).toBeUndefined();
+    harness.apiUpdatesManager.processUpdateMessage({
+      _: 'updateShort',
+      update: {_: 'updateMessageID', random_id: harness.randomId, id: 2}
+    }, {}, 'pushed');
+
+    const [record] = (window as any)[TRACE_STATE].records;
+    expect(record.pendingEntryFound).toBe(true);
+    expect(record.messageSent.emitted).toBe(true);
+    expect(record.events.filter((event: any) => event.kind === 'pending_entry').map((event: any) => event.found))
+      .toEqual([true, false]);
+  });
+
   it('records nothing and keeps sending when the diagnostic switch is disabled', async() => {
     setTraceSwitch(false);
     const harness = createSendHarness();
