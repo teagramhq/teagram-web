@@ -643,8 +643,15 @@ export default class Chat extends EventListenerBase<{
     // * nothing is on screen until a peer opens
     this.container.hidden = true;
     const build = () => {
-      if(!this.inited) {
+      if(this.inited) {
+        return;
+      }
+
+      try {
         this.buildParts();
+      } catch(error) {
+        // * `init` stays set, so the first open builds again and fails where it can be seen
+        this.log.error('could not build the chat parts ahead of the open:', error);
       }
     };
 

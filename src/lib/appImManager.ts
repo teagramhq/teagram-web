@@ -1813,18 +1813,7 @@ export class AppImManager extends EventListenerBase<{
         return;
       }
 
-      if(
-        chat?.input?.messageInput &&
-        target !== chat.input.messageInput &&
-        !isTargetAnInput &&
-        !IS_TOUCH_SUPPORTED &&
-        (!mediaSizes.isMobile || this.tabId === APP_TABS.CHAT) &&
-        // * a chat can be built before any peer opens in it, it must not take the typing
-        chat.peerId &&
-        !chat.selection.isSelecting &&
-        !chat.input.recording &&
-        chat.input.messageInput.isContentEditable
-      ) {
+      if(this.canTypeIntoChat(chat, target, isTargetAnInput)) {
         chat.input.passEventToInput(e);
       }
     };
@@ -3253,6 +3242,21 @@ export class AppImManager extends EventListenerBase<{
         chat.destroy();
       });
     }, 250 + 100);
+  }
+
+  // * a chat can be built before any peer opens in it, it must not take the typing
+  private canTypeIntoChat(chat: Chat, target: EventTarget, isTargetAnInput: boolean) {
+    return !!(
+      chat?.input?.messageInput &&
+      target !== chat.input.messageInput &&
+      !isTargetAnInput &&
+      !IS_TOUCH_SUPPORTED &&
+      (!mediaSizes.isMobile || this.tabId === APP_TABS.CHAT) &&
+      chat.peerId &&
+      !chat.selection.isSelecting &&
+      !chat.input.recording &&
+      chat.input.messageInput.isContentEditable
+    );
   }
 
   // * a user never migrates, so it skips the worker round trip on the chat-open path

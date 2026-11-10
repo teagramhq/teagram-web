@@ -5850,23 +5850,29 @@ export default class ChatBubbles {
    * wrong render.
    */
   private prefetchOpenHistory(tempId: number, peerId: PeerId, readMaxId: number, dialog: Awaited<ReturnType<Chat['getDialogOrTopic']>>) {
-    const peer = apiManagerProxy.getPeer(peerId);
-    const historyStorage = this.chat.getHistoryStorage();
-    if(this.setPeerTempId !== tempId || !peerId.isUser() || !peer || isPeerRestricted(peer, false) || !historyStorage?.maxId) {
-      return;
-    }
+    // * this only speeds the open up, so it must never be what fails it
+    try {
+      const peer = apiManagerProxy.getPeer(peerId);
+      const historyStorage = this.chat.getHistoryStorage();
+      if(this.setPeerTempId !== tempId || !peerId.isUser() || !peer || isPeerRestricted(peer, false) || !historyStorage?.maxId) {
+        return;
+      }
 
-    const topMessageFullMid = makeFullMid(peerId, historyStorage.maxId);
-    // * the plain open of an unread-free chat: the newest message is the anchor and the page starts below it
-    if(this.pickUnreadAnchor(peerId, readMaxId, dialog, historyStorage, topMessageFullMid, false, false)[0] !== topMessageFullMid || !this.chat.getMessage(topMessageFullMid)) {
-      return;
-    }
+      const topMessageFullMid = makeFullMid(peerId, historyStorage.maxId);
+      // * the plain open of an unread-free chat: the newest message is the anchor and the page starts below it
+      if(this.pickUnreadAnchor(peerId, readMaxId, dialog, historyStorage, topMessageFullMid, false, false)[0] !== topMessageFullMid || !this.chat.getMessage(topMessageFullMid)) {
+        return;
+      }
 
-    const plan = this.planHistoryRequest(peerId, topMessageFullMid, true, false, topMessageFullMid, true, false);
-    const request = this.requestHistory(plan[0], plan[1], plan[2]);
-    // * a request nobody takes must not surface as an unhandled rejection
-    request.then((acked) => acked?.result?.catch?.(noop), noop);
-    this.historyPrefetch = {tempId, maxId: plan[0], loadCount: plan[1], backLimit: plan[2], request};
+      const plan = this.planHistoryRequest(peerId, topMessageFullMid, true, false, topMessageFullMid, true, false);
+      const request = this.requestHistory(plan[0], plan[1], plan[2]);
+      // * a failure reaches whoever takes the request; a request nobody takes still leaves a trace
+      const warn = (error: unknown) => this.log.warn('history prefetch failed:', peerId, plan, error);
+      request.then((acked) => acked?.result?.catch?.(warn), warn);
+      this.historyPrefetch = {tempId, maxId: plan[0], loadCount: plan[1], backLimit: plan[2], request};
+    } catch(error) {
+      this.log.error('history prefetch failed:', peerId, error);
+    }
   }
 
   private pickUnreadAnchor(

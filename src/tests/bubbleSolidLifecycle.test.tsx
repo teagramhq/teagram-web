@@ -59,6 +59,7 @@ vi.mock('@components/toast', async(importOriginal) => ({
   toastNew: moduleMocks.toastNew
 }));
 vi.mock('@lib/rootScope', () => ({default: moduleMocks.rootScope}));
+vi.mock('@environment/touchSupport', () => ({default: false}));
 vi.mock('@stores/contentSettings', () => ({
   default: () => ({
     sensitiveEnabled: () => false,
@@ -5470,7 +5471,7 @@ describe('first history page asked for during a peer change', () => {
         getHistoryStorage: () => ({maxId: topMid, history: {slice: {isEnd: () => false}, findSliceOffset: (): undefined => undefined}}),
         getMessage: vi.fn(() => ({}))
       },
-      log: vi.fn(),
+      log: Object.assign(vi.fn(), {warn: vi.fn(), error: vi.fn()}),
       ...overrides
     }) as any;
     return {harness, getHistory, loadCount: getInitialHistoryLoadCount(windowSize.height)};
@@ -5549,7 +5550,18 @@ describe('first history page asked for during a peer change', () => {
     expect(getHistory).not.toHaveBeenCalled();
   });
 
-  test('a prefetch nobody takes does not leave an unhandled rejection', async() => {
+  test('a prefetch that throws leaves the open to the regular request', () => {
+    const failure = new Error('plan failed');
+    const {harness, getHistory} = createHarness();
+    harness.chat.getMessage = vi.fn(() => { throw failure; });
+
+    expect(() => harness.prefetchOpenHistory(1, peerId, 0, undefined)).not.toThrow();
+    expect(harness.log.error).toHaveBeenCalledWith('history prefetch failed:', peerId, failure);
+    expect(harness.historyPrefetch).toBeUndefined();
+    expect(getHistory).not.toHaveBeenCalled();
+  });
+
+  test('a prefetch nobody takes does not leave an unhandled rejection, and says why it failed', async() => {
     const failure = new Error('worker gone');
     const {harness} = createHarness({managers: {acknowledged: {appMessagesManager: {getHistory: vi.fn(() => Promise.reject(failure))}}}});
     const unhandled: unknown[] = [];
@@ -5559,6 +5571,7 @@ describe('first history page asked for during a peer change', () => {
       harness.prefetchOpenHistory(1, peerId, 0, undefined);
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(unhandled).toEqual([]);
+      expect(harness.log.warn).toHaveBeenCalledWith('history prefetch failed:', peerId, expect.anything(), failure);
     } finally {
       process.off('unhandledRejection', onUnhandledRejection);
     }
@@ -5577,11 +5590,12 @@ describe('peer changes racing over the prefetched first page', () => {
     void getHistory1;
     (moduleMocks.apiManagerProxy as any).getPeer = vi.fn((id: PeerId) => user(id));
 
-    const responses: Array<{peer: PeerId, resolve: (mids: number[]) => void}> = [];
-    const getHistory = vi.fn((options: {peerId: PeerId}) => new Promise((resolve) => {
+    const responses: Array<{peer: PeerId, resolve: (mids: number[]) => void, fail: (error: Error) => void}> = [];
+    const getHistory = vi.fn((options: {peerId: PeerId}) => new Promise((resolve, reject) => {
       responses.push({
         peer: options.peerId,
-        resolve: (mids) => resolve({cached: false, result: Promise.resolve({history: mids})})
+        resolve: (mids) => resolve({cached: false, result: Promise.resolve({history: mids})}),
+        fail: reject
       });
     }));
     const historyStorage = {maxId: 100, history: {length: 1, slice: {isEnd: () => false}, findSliceOffset: (): undefined => undefined}};
@@ -5609,12 +5623,14 @@ describe('peer changes racing over the prefetched first page', () => {
         rendered.push({peer: chat.peerId, mids: [...historyResult.history]});
       })
     });
+    harness.log.warn = vi.fn();
+    harness.log.error = vi.fn();
     harness.managers.acknowledged = {appMessagesManager: {getHistory}};
     harness.managers.appMessagesManager.getReadMaxIdIfUnread = vi.fn(async() => 0);
 
-    const open = (peer: PeerId) => {
+    const open = (peer: PeerId, samePeer = false) => {
       chat.peerId = peer;
-      const promise = harness.setPeer({peerId: peer, samePeer: false, sameSearch: false});
+      const promise = harness.setPeer({peerId: peer, samePeer, sameSearch: false});
       promise.catch(noopCatch);
       return promise;
     };
@@ -5696,6 +5712,35 @@ describe('peer changes racing over the prefetched first page', () => {
 
     expect(rendered).toEqual([{peer: peerA, mids: [100, 903]}]);
   });
+  test.each([['prefetched', true], ['plain', false]])('a failed %s page fails the open the same way and renders nothing', async(_, predictable) => {
+    const {harness, responses, peerChanges, rendered, open} = createRace();
+    if(!predictable) (moduleMocks.apiManagerProxy as any).getPeer = vi.fn();
+    const failure = new Error('history failed');
+
+    const opening = open(peerA);
+    peerChanges.forEach((resolve) => resolve());
+    await vi.waitFor(() => expect(responses).toHaveLength(1));
+    responses[0].fail(failure);
+
+    await expect(opening).rejects.toBe(failure);
+    expect(rendered).toEqual([]);
+    expect(harness.log.error).toHaveBeenCalledWith('history load failed:', peerA, true, failure);
+  });
+
+  test('an open of the same peer asks for the page once and never prefetches', async() => {
+    const {harness, getHistory, responses, rendered, open} = createRace();
+    harness.getBubbleByPoint = vi.fn(() => undefined);
+
+    const opening = open(peerA, true);
+    await vi.waitFor(() => expect(responses).toHaveLength(1));
+    expect(harness.historyPrefetch).toBeUndefined();
+    responses[0].resolve([901]);
+    await opening;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(getHistory).toHaveBeenCalledTimes(1);
+    expect(rendered).toEqual([{peer: peerA, mids: [100, 901]}]);
+  });
 });
 
 describe('building the chat parts ahead of the first open', () => {
@@ -5747,6 +5792,21 @@ describe('building the chat parts ahead of the first open', () => {
     expect(init).toHaveBeenCalledTimes(1);
   });
 
+  test('a failing idle build is logged and left to the first open to retry', () => {
+    const flush = runIdle();
+    const failure = new Error('init failed');
+    const {chat, init} = createChat();
+    init.mockImplementation(() => { throw failure; });
+    chat.log = {error: vi.fn()};
+    chat.buildPartsWhenIdle();
+
+    expect(flush).not.toThrow();
+    expect(chat.log.error).toHaveBeenCalledWith('could not build the chat parts ahead of the open:', failure);
+    expect(chat.init).toBe(init);
+    expect(() => chat.buildParts()).toThrow(failure);
+    expect(init).toHaveBeenCalledTimes(2);
+  });
+
   test('a preview chat is left alone', () => {
     const flush = runIdle();
     const {chat, init} = createChat();
@@ -5777,5 +5837,30 @@ describe('looking up where a peer migrated to', () => {
     const {result, getPeerMigratedTo} = lookup(group);
     await result;
     expect(getPeerMigratedTo).toHaveBeenCalledWith(group);
+  });
+});
+
+describe('typing anywhere', () => {
+  const canTypeIntoChat = (chat: unknown, isTargetAnInput = false) =>
+    (AppImManager.prototype as any).canTypeIntoChat.call({tabId: 1}, chat, document.body, isTargetAnInput) as boolean;
+  const makeChat = (chatPeerId: PeerId | 0) => ({
+    peerId: chatPeerId,
+    input: {messageInput: {isContentEditable: true}, recording: false},
+    selection: {isSelecting: false}
+  });
+
+  test('goes to the input of a chat with an open peer', () => {
+    expect(canTypeIntoChat(makeChat(peerId))).toBe(true);
+  });
+
+  test('does not go to a chat that was built but never opened', () => {
+    expect(canTypeIntoChat(makeChat(0))).toBe(false);
+  });
+
+  test('keeps the other conditions', () => {
+    expect(canTypeIntoChat(makeChat(peerId), true)).toBe(false);
+    expect(canTypeIntoChat({...makeChat(peerId), selection: {isSelecting: true}})).toBe(false);
+    expect(canTypeIntoChat({...makeChat(peerId), input: {messageInput: {isContentEditable: true}, recording: true}})).toBe(false);
+    expect(canTypeIntoChat({peerId, selection: {isSelecting: false}})).toBe(false);
   });
 });
