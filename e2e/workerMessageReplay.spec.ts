@@ -2,6 +2,7 @@ import {build} from 'esbuild';
 import {expect, test} from '@playwright/test';
 import {resolve} from 'node:path';
 import {writeFileSync} from 'node:fs';
+import {PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 
 test('replay keeps worker output and order while recording recorder overhead', async({page}) => {
   await page.route('https://worker-replay.invalid/', (route) => route.fulfill({
@@ -109,12 +110,28 @@ test('replay keeps worker output and order while recording recorder overhead', a
       const middle = Math.floor(sorted.length / 2);
       return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
     };
-    return Object.fromEntries(Object.entries(results).map(([name, value]) => [name, {offMs: median(value.off), onMs: median(value.on), pairedDeltaMs: median(value.on.map((on, index) => on - value.off[index])), iterations: value.off.length, output: outputs[name][0]}]));
+    const groupedMedians = (values: number[]) => Array.from({length: PERFORMANCE_REPEATS}, (_, index) => {
+      const start = Math.floor(index * values.length / PERFORMANCE_REPEATS);
+      const end = Math.floor((index + 1) * values.length / PERFORMANCE_REPEATS);
+      return median(values.slice(start, end));
+    });
+    return Object.fromEntries(Object.entries(results).map(([name, value]) => {
+      const pairedDeltaSamples = groupedMedians(value.on.map((on, index) => on - value.off[index]));
+      return [name, {
+        offMs: median(value.off),
+        onMs: median(value.on),
+        pairedDeltaMs: median(pairedDeltaSamples),
+        pairedDeltaSamples,
+        iterations: value.off.length,
+        output: outputs[name][0]
+      }];
+    }));
   });
   console.log('WORKER_REPLAY', JSON.stringify(result));
   if(process.env.PERF_RECORDER_REPLAY_PATH) writeFileSync(process.env.PERF_RECORDER_REPLAY_PATH, JSON.stringify(result, null, 2));
   for(const [name, measurement] of Object.entries(result) as Array<[string, any]>) {
     expect(measurement.iterations).toBeGreaterThanOrEqual(50);
-    expect(Number.isFinite(measurement.offMs) && Number.isFinite(measurement.onMs) && Number.isFinite(measurement.pairedDeltaMs), `${name}: recorder timing samples are incomplete`).toBe(true);
+    expect(measurement.pairedDeltaSamples).toHaveLength(PERFORMANCE_REPEATS);
+    expect(Number.isFinite(measurement.offMs) && Number.isFinite(measurement.onMs) && Number.isFinite(measurement.pairedDeltaMs) && measurement.pairedDeltaSamples.every(Number.isFinite), `${name}: recorder timing samples are incomplete`).toBe(true);
   }
 });

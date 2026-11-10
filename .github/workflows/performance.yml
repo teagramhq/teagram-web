@@ -5,6 +5,16 @@ on:
     branches: [master]
   push:
     branches: [master]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Multica issue key that owns this manual performance run
+        required: false
+        type: string
+      performance_base_sha:
+        description: Commit to compare with the checked-out head (use the head SHA for an A/A run)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -25,6 +35,7 @@ jobs:
       - name: Check out web client
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.performance_base_sha || '' }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -216,7 +227,7 @@ jobs:
       - name: Build current and base private client bundles
         shell: bash
         env:
-          PERF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PERF_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.performance_base_sha }}
         run: |
           set -euo pipefail
           pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
@@ -330,7 +341,7 @@ jobs:
           PERF_FIXTURE_VERSION: ${{ steps.fixture.outputs.fixture_version }}
           PERF_SERVER_COMMIT: ${{ steps.runtime-server.outputs.server_commit }}
           PERF_FIXTURE_SERVER_COMMIT: ${{ steps.fixture.outputs.server_commit }}
-          PERF_REQUIRE_BASE: ${{ github.event_name == 'pull_request' }}
+          PERF_REQUIRE_BASE: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.performance_base_sha != '') }}
         run: >-
           pnpm exec playwright test
           -c playwright.performance.config.ts
@@ -357,6 +368,7 @@ jobs:
           name: web-performance-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/teagram-web-performance.json
+            ${{ runner.temp }}/teagram-recorder-replay.json
             ${{ runner.temp }}/teagram-perf-server-1x.log
             ${{ runner.temp }}/teagram-perf-server-100x.log
           if-no-files-found: ignore

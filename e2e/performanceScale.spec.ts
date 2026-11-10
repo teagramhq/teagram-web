@@ -18,9 +18,9 @@ type Fixture = {
 
 type Scale = '1x' | '100x';
 type Variant = 'base' | 'head';
-const PERFORMANCE_TIMING_REPEATS = 5;
-const REPORT_ONLY_SEND_REPEATS = 11;
-const FIRST_STICKER_REPEATS = 3;
+type StickerVariant = Variant | 'pinned';
+const FIRST_STICKER_REPEATS = PERFORMANCE_REPEATS;
+const FIRST_STICKER_REPORT_REPEATS = 3;
 const FIRST_STICKER_ASSET = '/assets/tgs/key.json';
 
 type Metric = {
@@ -130,7 +130,6 @@ const report = {
   serverCommit: process.env.PERF_SERVER_COMMIT || '',
   fixtureServerCommit: process.env.PERF_FIXTURE_SERVER_COMMIT || '',
   requireBase: process.env.PERF_REQUIRE_BASE === 'true',
-  requireTimingRepeats: process.env.PERF_REQUIRE_BASE === 'true',
   diagnostics: {} as Record<string, Record<string, unknown>>,
   variants: {
     base: {'1x': {}, '100x': {}},
@@ -138,7 +137,7 @@ const report = {
   } as Record<Variant, Record<Scale, Record<string, Partial<Metric>[]>>>
 };
 const preparedVariants: Record<Scale, Partial<Record<Variant, VariantRun>>> = {'1x': {}, '100x': {}};
-let firstStickerBaseRun: VariantRun | undefined;
+let firstStickerPinnedRun: VariantRun | undefined;
 const bundleRequestTrackers = new WeakMap<Page, BundleRequestTracker>();
 const requestBreakdownsByPage = new WeakMap<Page, Map<string, number>>();
 
@@ -999,10 +998,9 @@ async function jumpToFixtureDate(
   page: Page,
   requests: {value: number},
   fixture: Fixture,
-  allowUnsupportedBase: boolean,
   traceEnabled = false,
   onMeasurementBoundary?: (boundary: MeasurementBoundary) => void
-): Promise<Metric | undefined> {
+): Promise<Metric> {
   await beginScenario(page, requests, traceEnabled);
   const beforeMids = await page.locator('.bubbles .bubble[data-mid]').evaluateAll((elements) => elements.map((element) => Number((element as HTMLElement).dataset.mid)));
   const searchIcon = String.fromCharCode(parseInt(Icons.search, 16));
@@ -1011,8 +1009,7 @@ async function jumpToFixtureDate(
   const searchCalendar = page.locator('#page-chats .topbar-search-container .topbar-search-right-filter > .btn-icon').filter({hasText: calendarIcon});
   await expect(page.locator('#page-chats .topbar-search-container')).toBeVisible();
   if(!await searchCalendar.count()) {
-    if(allowUnsupportedBase) return undefined;
-    throw new Error('date-jump calendar control is missing from the head build');
+    throw new Error('date-jump calendar control is missing from the measured build');
   }
   await expect(searchCalendar).toBeVisible();
   await searchCalendar.click();
@@ -1271,27 +1268,6 @@ async function prepareVariant(browser: Browser, variant: Variant, origin: string
   }
 }
 
-async function runColdChatList(browser: Browser, run: VariantRun): Promise<Metric> {
-  const context = await browser.newContext({
-    ignoreHTTPSErrors: true,
-    viewport: {width: 1280, height: 800},
-    storageState: run.storageState
-  });
-  try {
-    const page = await context.newPage();
-    const requests = {value: 0};
-    await installInstrumentation(page, requests, run.origin);
-    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
-    expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
-    const firstVisibleChatList = await waitForChatList(page);
-    expect(firstVisibleChatList.source).toBe('snapshot');
-    const boundary = await snapshotMeasurementBoundary(page, firstVisibleChatList);
-    return await capture(page, requests, boundary, false, false, false, true);
-  } finally {
-    await context.close();
-  }
-}
-
 async function measureColdControlWindow(browser: Browser, run: VariantRun, injectStall: boolean) {
   const context = await browser.newContext({
     ignoreHTTPSErrors: true,
@@ -1528,7 +1504,7 @@ test.beforeAll(async({browser}) => {
   }
 
   if(report.requireBase) {
-    firstStickerBaseRun = withOrigin(preparedVariants['1x'].base!, 'base', process.env.PERF_STICKER_BASE_ORIGIN!);
+    firstStickerPinnedRun = withOrigin(preparedVariants['1x'].base!, 'base', process.env.PERF_STICKER_BASE_ORIGIN!);
   }
 });
 
@@ -1543,46 +1519,68 @@ test('measures first animated sticker frame after opening a chat', async({browse
 
   try {
     const variants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
-    const stickerRuns: Partial<Record<Variant, VariantRun>> = {head};
-    if(report.requireBase) stickerRuns.base = firstStickerBaseRun!;
-    const conditions = variants.flatMap((variant) => [
-      {variant, warmWorker: false},
-      {variant, warmWorker: true}
-    ]);
-    const samples: Record<Variant, Record<'cold' | 'warm', Awaited<ReturnType<typeof measureFirstStickerFrame>>[]>> = {
+    const stickerRuns: Partial<Record<StickerVariant, VariantRun>> = {head};
+    if(report.requireBase) {
+      stickerRuns.base = preparedVariants['1x'].base!;
+      stickerRuns.pinned = firstStickerPinnedRun!;
+    }
+    const samples: Record<StickerVariant, Record<'cold' | 'warm', Awaited<ReturnType<typeof measureFirstStickerFrame>>[]>> = {
       base: {cold: [], warm: []},
-      head: {cold: [], warm: []}
+      head: {cold: [], warm: []},
+      pinned: {cold: [], warm: []}
     };
 
-    for(let repeat = 0; repeat < FIRST_STICKER_REPEATS; ++repeat) {
-      const order = repeat % 2 === 0 ? conditions : [...conditions].reverse();
-      for(const {variant, warmWorker} of order) {
-        const sample = await test.step(`1x ${variant} ${warmWorker ? 'warm' : 'cold'} first sticker repeat ${repeat + 1}`, async() => (
-          measureFirstStickerFrame(browser, stickerRuns[variant]!, fixture, warmWorker)
+    const coldRepeats = report.requireBase ? FIRST_STICKER_REPEATS : FIRST_STICKER_REPORT_REPEATS;
+    for(let repeat = 0; repeat < coldRepeats; ++repeat) {
+      const order = repeat % 2 === 0 ? variants : [...variants].reverse();
+      for(const variant of order) {
+        const coldSample = await test.step(`1x ${variant} cold first sticker repeat ${repeat + 1}`, async() => (
+          measureFirstStickerFrame(browser, stickerRuns[variant]!, fixture, false)
         ));
-        if(warmWorker) {
-          expect(sample.workerReadyBeforeChat, `${variant} worker was not ready before the first sticker interaction`).toBe(true);
-        } else if(variant === 'head') {
-          expect(sample.workerReadyBeforeChat, 'head worker was preloaded before the on-demand first sticker interaction').toBe(false);
+        if(variant === 'head') {
+          expect(coldSample.workerReadyBeforeChat, 'head worker was preloaded before the on-demand first sticker interaction').toBe(false);
         }
-        samples[variant][warmWorker ? 'warm' : 'cold'].push(sample);
+        samples[variant].cold.push(coldSample);
+      }
+
+      if(repeat < FIRST_STICKER_REPORT_REPEATS) {
+        for(const variant of order) {
+          const warmSample = await test.step(`1x ${variant} warm first sticker repeat ${repeat + 1}`, async() => (
+            measureFirstStickerFrame(browser, stickerRuns[variant]!, fixture, true)
+          ));
+          expect(warmSample.workerReadyBeforeChat, `${variant} worker was not ready before the first sticker interaction`).toBe(true);
+          samples[variant].warm.push(warmSample);
+        }
+      }
+    }
+
+    if(report.requireBase) {
+      for(let repeat = 0; repeat < FIRST_STICKER_REPORT_REPEATS; ++repeat) {
+        const pinnedSample = await test.step(`1x pinned cold first sticker report repeat ${repeat + 1}`, async() => (
+          measureFirstStickerFrame(browser, stickerRuns.pinned!, fixture, false)
+        ));
+        samples.pinned.cold.push(pinnedSample);
       }
     }
 
     const median = (values: number[]) => [...values].sort((left, right) => left - right)[Math.floor(values.length / 2)];
-    const medians = Object.fromEntries(variants.map((variant) => [variant, Object.fromEntries(
-      (['cold', 'warm'] as const).map((temperature) => {
+    const measuredVariants: StickerVariant[] = report.requireBase ? ['base', 'head', 'pinned'] : ['head'];
+    const medians: Record<string, Record<string, {workerFrameMs: number, visibleFrameMs: number}>> = {};
+    for(const variant of measuredVariants) {
+      medians[variant] = {};
+      for(const temperature of ['cold', 'warm'] as const) {
         const values = samples[variant][temperature];
-        expect(values).toHaveLength(FIRST_STICKER_REPEATS);
-        return [temperature, {
+        if(!values.length) continue;
+        expect(values).toHaveLength(variant === 'pinned' ? FIRST_STICKER_REPORT_REPEATS : temperature === 'cold' ? coldRepeats : FIRST_STICKER_REPORT_REPEATS);
+        medians[variant][temperature] = {
           workerFrameMs: median(values.map((sample) => sample.clickToFirstFrameMs)),
           visibleFrameMs: median(values.map((sample) => sample.clickToVisibleFrameMs))
-        }];
-      })
-    )]));
+        };
+      }
+    }
     report.diagnostics.firstSticker = {
       scale: '1x',
-      repeats: FIRST_STICKER_REPEATS,
+      repeats: coldRepeats,
       boundary: 'chat row click to first rendered pixels in the animated sticker bubble',
       samples,
       medians
@@ -1637,7 +1635,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(
       page,
       requests,
-      variant === 'head',
+      true,
       scale === '100x' ? {
         captureFrameTrace: true,
         captureCpuStacks: true,
@@ -1645,19 +1643,11 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
         includeLongTaskTrace: true
       } : undefined
     ));
-    if(scroll) {
-      measured.scrollBack2k.push(scroll);
-    } else {
-      // The base build may not reach the older history window. Its open-chat bundle is still the route baseline.
-      measured.scrollBack2k.push({bundleBytes: chatOpen.bundleBytes});
-    }
-    const jump = await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture, variant === 'base'), {timeout: 120_000});
-    if(jump) {
-      measured.dateJump.push(jump);
-    } else {
-      // The base build may lack the calendar control. Its open-chat bundle is still the route baseline.
-      measured.dateJump.push({bundleBytes: chatOpen.bundleBytes});
-    }
+    if(!scroll) throw new Error(`${variant} scroll-back did not reach 2,000 messages`);
+    measured.scrollBack2k.push(scroll);
+    const jump = await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture), {timeout: 120_000});
+    if(!jump) throw new Error(`${variant} date-jump did not reach the fixture date`);
+    measured.dateJump.push(jump);
 
     // Reset both variants to the same signed-in chat-list state before contacts measurements.
     await resetToChatList(page, origin);
@@ -1665,66 +1655,6 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     measured.contactSearch.push(await test.step('search contacts', () => searchContacts(page, requests, scale)));
     measured.globalSearch.push(await test.step('global message search', () => globalSearch(page, requests, scale)));
     measured.sendMessage.push(await test.step('send a message', () => sendMessage(page, requests, fixture)));
-  } finally {
-    await context.close();
-  }
-}
-
-async function runTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixture) {
-  const contextOptions = {
-    ignoreHTTPSErrors: true,
-    viewport: {width: 1280, height: 800},
-    storageState: run.storageState
-  };
-  let chatOpen: Metric;
-  let scrollBack2k: Metric | undefined;
-
-  const historyContext = await browser.newContext(contextOptions);
-  try {
-    const page = await historyContext.newPage();
-    const requests = {value: 0};
-    const captureWorkerMessages = run.variant === 'head';
-    await installInstrumentation(page, requests, run.origin, false, captureWorkerMessages);
-    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
-    await waitForChatList(page);
-    chatOpen = await openPartnerChat(page, requests, fixture);
-    scrollBack2k = await scrollBackTwoThousand(page, requests, run.variant === 'head', {
-      captureFrameTrace: true,
-      captureCpuStacks: true,
-      captureWorkerMessages,
-      includeLongTaskTrace: true
-    });
-  } finally {
-    await historyContext.close();
-  }
-
-  const sendContext = await browser.newContext(contextOptions);
-  try {
-    const page = await sendContext.newPage();
-    const requests = {value: 0};
-    await installInstrumentation(page, requests, run.origin);
-    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
-    await waitForChatList(page);
-    const send = await sendMessage(page, requests, fixture);
-    return {chatOpen, scrollBack2k: scrollBack2k || {bundleBytes: chatOpen.bundleBytes}, send};
-  } finally {
-    await sendContext.close();
-  }
-}
-
-async function runSendTimingRepeat(browser: Browser, run: VariantRun, fixture: Fixture) {
-  const context = await browser.newContext({
-    ignoreHTTPSErrors: true,
-    viewport: {width: 1280, height: 800},
-    storageState: run.storageState
-  });
-  try {
-    const page = await context.newPage();
-    const requests = {value: 0};
-    await installInstrumentation(page, requests, run.origin);
-    await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
-    await waitForChatList(page);
-    return await sendMessage(page, requests, fixture);
   } finally {
     await context.close();
   }
@@ -1787,7 +1717,7 @@ async function traceDateJump(browser: Browser, run: VariantRun, fixture: Fixture
     await waitForFirstVisibleBubble(page);
 
     let dateJumpBoundary: MeasurementBoundary | undefined;
-    const jumped = await jumpToFixtureDate(page, requests, fixture, false, true, (boundary) => dateJumpBoundary = boundary);
+    const jumped = await jumpToFixtureDate(page, requests, fixture, true, (boundary) => dateJumpBoundary = boundary);
     if(!jumped || !dateJumpBoundary) throw new Error('date-jump profile did not record its measurement boundary');
     await addCachedDialogReconcileTarget(page, reconcileTargets, jumped, 'dateJump');
     await finalizeCachedDialogReconcileSummaries(page, reconcileTargets);
@@ -1797,11 +1727,18 @@ async function traceDateJump(browser: Browser, run: VariantRun, fixture: Fixture
   }
 }
 
-async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: Fixture) {
-  const traceSamples = Object.fromEntries(scenarios.map((scenario) => [scenario, [] as Metric[]])) as Record<string, Metric[]>;
-  report.diagnostics['100x'] = traceSamples;
+async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Variant, VariantRun>>, fixture: Fixture) {
+  const variants = (Object.keys(runs) as Variant[]).sort((left, right) => left === 'base' ? -1 : right === 'base' ? 1 : 0);
+  const traceSamplesByVariant = Object.fromEntries(variants.map((variant) => [
+    variant,
+    Object.fromEntries(scenarios.map((scenario) => [scenario, [] as Metric[]])) as Record<string, Metric[]>
+  ])) as Partial<Record<Variant, Record<string, Metric[]>>>;
 
-  for(let repeat = 0; repeat < COLD_CHAT_LIST_REPEATS; ++repeat) {
+  for(let repeat = 0; repeat < PERFORMANCE_REPEATS; ++repeat) {
+    const order = repeat % 2 ? [...variants].reverse() : variants;
+    for(const variant of order) {
+    const run = runs[variant]!;
+    const traceSamples = traceSamplesByVariant[variant]!;
     const context = await browser.newContext({
       ignoreHTTPSErrors: true,
       viewport: {width: 1280, height: 800},
@@ -1931,15 +1868,25 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
       const jumped = await test.step(`profile 100x date jump (repeat ${repeat + 1})`, () => traceDateJump(browser, run, fixture));
       traceSamples.dateJump.push(jumped);
     }
+    }
   }
 
-  for(const scenario of scenarios) {
-    const expectedRepeatCount = scenario === 'coldChatList' ? COLD_CHAT_LIST_REPEATS : PERFORMANCE_REPEATS;
-    const requireWalk = scenario === 'warmChatList' || scenario === 'chatOpen' || scenario === 'scrollBack2k' || scenario === 'dateJump';
-    validateCachedDialogReconcileDiagnostics(traceSamples[scenario], scenario, expectedRepeatCount, requireWalk);
+  for(const variant of variants) {
+    const traceSamples = traceSamplesByVariant[variant]!;
+    for(const scenario of scenarios) {
+      const requireWalk = scenario === 'warmChatList' || scenario === 'chatOpen' || scenario === 'scrollBack2k' || scenario === 'dateJump';
+      validateCachedDialogReconcileDiagnostics(traceSamples[scenario], scenario, PERFORMANCE_REPEATS, requireWalk);
+      traceSamples[scenario].forEach((sample) => {
+        sample.walkLongTasksOver50Ms = findLongTasksOverlappingWalkMirrors(sample.longTaskTrace, sample.reconcileMirrorTasks).length;
+      });
+    }
   }
 
-  return traceSamples;
+  const walkComparison = Object.fromEntries(variants.map((variant) => [variant, Object.fromEntries(scenarios.map((scenario) => [
+    scenario,
+    traceSamplesByVariant[variant]![scenario].map(({walkLongTasksOver50Ms}) => ({walkLongTasksOver50Ms}))
+  ]))]));
+  return {...traceSamplesByVariant.head!, walkComparison};
 }
 
 test('measures the scale fixture in interleaved base and head runs', async({browser}) => {
@@ -1958,50 +1905,17 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
     }
   }
 
-  if(report.requireTimingRepeats) {
-    const timingVariants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
-    for(let repeat = PERFORMANCE_REPEATS; repeat < PERFORMANCE_TIMING_REPEATS; ++repeat) {
-      const order = repeat % 2 === 0 ? timingVariants : [...timingVariants].reverse();
-      for(const variant of order) {
-        const run = preparedVariants['100x'][variant]!;
-        const measured = await test.step(`100x ${variant} targeted timing repeat ${repeat + 1}`, () => runTimingRepeat(browser, run, fixtures['100x']!));
-        report.variants[variant]['100x'].chatOpen.push(measured.chatOpen);
-        report.variants[variant]['100x'].scrollBack2k.push(measured.scrollBack2k);
-        report.variants[variant]['100x'].sendMessage.push(measured.send);
-      }
-    }
-
-    for(let repeat = PERFORMANCE_TIMING_REPEATS; repeat < REPORT_ONLY_SEND_REPEATS; ++repeat) {
-      const order = repeat % 2 === 0 ? timingVariants : [...timingVariants].reverse();
-      for(const variant of order) {
-        const run = preparedVariants['100x'][variant]!;
-        const sample = await test.step(`100x ${variant} report-only send repeat ${repeat + 1}`, () => runSendTimingRepeat(browser, run, fixtures['100x']!));
-        report.variants[variant]['100x'].sendMessage.push(sample);
-      }
-    }
-  }
-
-  const coldScale: Scale = '100x';
-  const coldVariants: Variant[] = report.requireBase ? ['base', 'head'] : ['head'];
-  for(let repeat = PERFORMANCE_REPEATS; repeat < COLD_CHAT_LIST_REPEATS; ++repeat) {
-    const order = repeat % 2 === 0 ? coldVariants : [...coldVariants].reverse();
-    for(const variant of order) {
-      const run = preparedVariants[coldScale][variant]!;
-      const sample = await test.step(`${coldScale} ${variant} cold chat list round ${repeat + 1}`, () => runColdChatList(browser, run));
-      report.variants[variant][coldScale].coldChatList.push(sample);
-    }
-  }
   const traceOrigin = process.env.PERF_TRACE_HEAD_ORIGIN_100X;
   expect(traceOrigin, '100x traced head origin is missing').toBeTruthy();
   const traceRun = withOrigin(preparedVariants['100x'].head!, 'head', traceOrigin!);
-  report.diagnostics['100x'] = await test.step('trace 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRun!, fixtures['100x']!));
+  const traceRuns: Partial<Record<Variant, VariantRun>> = {head: traceRun};
   if(report.requireBase) {
     const baseTraceOrigin = process.env.PERF_TRACE_BASE_ORIGIN_100X;
     expect(baseTraceOrigin, '100x traced base origin is missing').toBeTruthy();
-    const traceRuns = {
-      base: withOrigin(preparedVariants['100x'].base!, 'base', baseTraceOrigin!),
-      head: traceRun
-    };
+    traceRuns.base = withOrigin(preparedVariants['100x'].base!, 'base', baseTraceOrigin!);
+  }
+  report.diagnostics['100x'] = await test.step('trace paired 100x client CPU and RPC waits', () => traceTargetScenarios(browser, traceRuns, fixtures['100x']!));
+  if(report.requireBase) {
     const rpcComparison: Record<Variant, {chatOpen: Metric[], sendMessage: Metric[]}> = {
       base: {chatOpen: [], sendMessage: []},
       head: {chatOpen: [], sendMessage: []}
@@ -2009,8 +1923,8 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
     for(let repeat = 0; repeat < PERFORMANCE_REPEATS; ++repeat) {
       const order: Variant[] = repeat % 2 ? ['head', 'base'] : ['base', 'head'];
       for(const variant of order) {
-        const chatOpen = await traceChatOpen(browser, traceRuns[variant], fixtures['100x']!);
-        const sendMessage = await traceSendMessage(browser, traceRuns[variant], fixtures['100x']!);
+        const chatOpen = await traceChatOpen(browser, traceRuns[variant]!, fixtures['100x']!);
+        const sendMessage = await traceSendMessage(browser, traceRuns[variant]!, fixtures['100x']!);
         expect(chatOpen.rpcSpansRecorded && sendMessage.rpcSpansRecorded, `${variant} RPC spans were not recorded`).toBe(true);
         rpcComparison[variant].chatOpen.push(chatOpen);
         rpcComparison[variant].sendMessage.push(sendMessage);
@@ -2027,7 +1941,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   measurementsComplete = true;
 });
 
-test('detects repeated injected 100 ms main-thread stalls as report-only regressions', async({browser}) => {
+test('detects repeated injected 100 ms main-thread stalls as blocking regressions', async({browser}) => {
   test.skip(!report.requireBase, 'negative control requires same-run base measurements');
   const preparedHead = preparedVariants['100x'].head;
   expect(preparedHead, '100x head sign-in snapshot was not prepared').toBeTruthy();
@@ -2052,11 +1966,11 @@ test('detects repeated injected 100 ms main-thread stalls as report-only regress
     }
   }
   const coldLoadEvaluation = evaluateWithControlSamples('coldChatList', controlSamples, negativeSamples);
-  const coldLoadFindings = coldLoadEvaluation.reportOnlyFailures.filter((finding) => finding.startsWith('100x coldChatList: '));
+  const coldLoadFindings = coldLoadEvaluation.blockingFailures.filter((finding) => finding.startsWith('100x coldChatList: '));
   const blockingTimes = (samples: Metric[]) => samples.map((sample) => sample.blockingTimeMs);
   expect(
-    coldLoadFindings.some((finding) => (finding.includes('long task') || finding.includes('blocking time')) && finding.includes('report-only (would fail)')),
-    `100 ms control was not detected as a report-only regression: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs same-phase head ${JSON.stringify(blockingTimes(controlSamples))} ms`
+    coldLoadFindings.some((finding) => finding.includes('long-task blocking time')),
+    `100 ms control was not detected as a blocking regression: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs same-phase head ${JSON.stringify(blockingTimes(controlSamples))} ms`
   ).toBe(true);
 });
 

@@ -6,47 +6,55 @@ the same browser scenarios against each size. Pull request runs also compare the
 head bundle with the base bundle. Main branch runs record compatible timing
 history for calibration.
 
-The first-sticker frame probe uses the pinned pre-PR-178 client in
-`.github/perf-sticker-base-commit`; its baseline is separate from the current
-PR base used for the scale table.
+Pull request runs measure the first animated sticker frame against the PR base.
+The pinned pre-PR-178 client in `.github/perf-sticker-base-commit` remains a
+report-only comparison.
 
 ## Performance gates
 
-Timing-derived gates are report-only under MAIN-3608 while the paired noise
-model is prepared in MAIN-3610. This interim policy covers median timing against
-the master noise band and absolute budgets, the 100x/1x slowdown ratio, long-task
-count and blocking-time comparisons against same-run pairs or master history,
-100x scroll long tasks and dropped frames, long tasks over 50 ms overlapping a
-walk mirror (maximum count in one diagnostic repeat against a zero limit), the
-first animated sticker frame against the pinned client, and worker recorder
-replay overhead. Their values and limits remain in the job summary; a would-fail
-result is marked `report-only (would fail)`. MAIN-3610 restores these timing
-gates as blocking.
+Pull requests record nine interleaved base/head pairs for every timing scenario.
+The first pair runs base then head, the next head then base, alternating through
+the run. The same nine-pair count applies to scenario timings, scroll quality,
+scale ratios, first-sticker cold timing, worker recorder overhead, and walk-mirror
+counts. Missing scenarios, incomplete metrics, or any base variant that cannot
+complete the date jump or 2,000-message scroll-back fail the job.
 
-The blocking gates remain bundle growth above 2%, request and RPC count increases
-at the chat-list boundary, contacts-list bundle measurements that vary across
-repeats, and missing, invalid, or short sample sets. Bundle-size comparisons
-keep their existing strictness. The 100 ms negative control must still be
-detected as a report-only would-fail timing regression; the job fails if
-detection is missing. There are no per-scenario allowances from the closed
-teagram-web#202.
+Every timing gate uses the one-sided 95% distribution-free sign-test lower
+confidence bound of the paired median. A gate fails only when that lower bound
+is above its minimum effect. Minimum effects and observed spread from the last
+pre-change performance artifact ([run 42710920668, attempt 3](https://github.com/teagramhq/teagram-web/actions/runs/42710920668)) are:
 
-The 1x and 100x scenarios are calibrated separately. Only master runs with the
-same measurement version, fixture version, fixture seed commit, and pinned
-server runtime contribute to a noise band. A calibrated timing regression is
-above the master median by more than `max(15%, 3σ)` and at least 2 ms; the 100x
-median is also compared with the 1x median against a 1.5x ceiling. Cold, warm,
-and chat-open absolute budgets are 1,000 ms, 300 ms, and 200 ms. Cold chat-list
-history also requires a matching cold-load measurement version; other scenarios
-continue using the shared measurement version.
+| Timing gate | Minimum effect | Paired run-to-run spread in the legacy CI artifact |
+| --- | --- | --- |
+| Scenario response time, all scales and scenarios | `max(2 ms, 15% of the base median)` | 2.62–349.62 ms across 3–11 pairs; the 1x chat-open pair SD was 15.24 ms |
+| 100x cold chat-list absolute budget | Headroom to 1,000 ms | 47.52 ms SD across 6 pairs |
+| 100x warm chat-list absolute budget | Headroom to 300 ms | 8.30 ms SD across 3 pairs |
+| 100x chat-open absolute budget | Headroom to 200 ms | 101.26 ms SD across 5 pairs |
+| 100x/1x slowdown ratio | Headroom to the 1.5x ceiling | 0.759x SD at most across 3 paired ratios |
+| 100x long-task count | 1 additional task | 0–1.40 tasks SD across 3–11 pairs |
+| 100x long-task blocking time | 25 ms | 0–28.53 ms SD across 3–11 pairs |
+| 100x scroll dropped-frame percentage | 15% of the base dropped-frame percentage | 1.081 percentage points SD across 5 pairs |
+| Walk-mirror long-task count | 1 additional task | 0 tasks SD across 5 legacy head-only trace repeats; the new report records paired base/head spread |
+| Cold first animated sticker visible frame | 100 ms | 602.59 ms SD across 3 legacy pinned-client/head pairs; the gate now uses PR base/head pairs |
+| Worker recorder overhead | `min(2 ms, 15% of record-off median)` | The legacy run kept medians only. The new report includes nine grouped paired deltas and their SD. |
 
-The 100x scroll noise band uses master history for long-task counts, blocking
-time, and pooled dropped-frame percentage. Chat open, scroll back, and send
-measurements collect five same-run paired repeats in PR artifacts; the existing
-three-sample policy and calibration version are unchanged, and extra timing
-samples are report-only. Send and scroll timing add no timing gates. Every
-scenario and size needs three base bundle measurements or the performance gate
-fails closed.
+The CI artifact used for these estimates predates the nine-pair policy and is a
+spread estimate, not a gate result. Each new worker-recorder summary prints the
+paired SD and lower bound; the uploaded report keeps all browser base/head pairs
+so the PR body can cite the measured spread from its A/A run. Master history is
+calibration only. It cannot affect a pull-request verdict, and a master push
+without a base blocks only on deterministic checks.
+
+Bundle growth still fails only above 2%, and request/RPC increases at the
+chat-list boundary, varying contacts-list bundle sizes, and missing or invalid
+samples remain blocking. The 100 ms negative control must fail under the paired
+rule. It uses the same bundle for control and injected-stall samples.
+
+After this workflow is available on the default branch, it can run an A/A
+comparison from `workflow_dispatch`: set `performance_base_sha` to the commit
+SHA to test and `issue` to its Multica key. The dispatch checks out that exact
+SHA and builds it as both variants, requiring the timing gates. Add its run link
+to the PR body. Bundle thresholds are unchanged.
 Each 100x scroll repeat in the JSON artifact includes `droppedFrameAttribution`,
 with the measured frame intervals, overlapping renderer trace events and
 instrumented history and chat-list spans. `droppedFrameCpu` joins sampled
@@ -55,16 +63,11 @@ scripts from long animation frames, including scripts shorter than 50 ms. The
 timestamps use the page performance clock. Empty event or stack lists describe
 what was observed, not proof that no work ran. These diagnostics do not change
 the frame counter or budget.
-The 100x cold chat-list measurement uses six fresh contexts for the paired
-blocking-time gate and its negative control. Its timing starts at navigation so
-the existing cold-load budget still includes the document fetch.
+The 100x cold chat-list measurement uses fresh contexts and starts at navigation
+so the cold-load budget includes the document fetch.
 Chat-open timing starts when the browser dispatches the chat-list row's click;
 the separate `preInteractionMs` field records the time before that event so
 browser-driver delay does not count against client response time.
-Because the base client has no date-jump flow, its open-chat
-bundle is the date-jump baseline; that row has no base timing sample. If the
-base client cannot load 2,000 older messages, its open-chat bundle is the scroll
-bundle baseline; that row has no base scroll timing sample.
 
 ## Fixture credentials and runner threat model
 
