@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {cachedDialogReconcileWindowMs, collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, findLongTasksOverlappingWalkMirrors, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileSummaries, validateNoWalkLongTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
+import {buildWalkComparison, cachedDialogReconcileWindowMs, classifyAndRemoveLongTaskTrace, collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, findLongTasksOverlappingWalkMirrors, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileSummaries, validateNoWalkLongTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
 import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
 
 const mirror = (startTimeMs: number, durationMs: number) => ({traceId: 'walk', startTimeMs, durationMs});
@@ -12,6 +12,19 @@ test('attributes a long task to the walk only when a walk mirror task overlaps i
   expect(findLongTasksOverlappingWalkMirrors(tasks, [mirror(610, 5)])).toEqual([]);
   expect(findLongTasksOverlappingWalkMirrors(tasks, [])).toEqual([]);
   expect(findLongTasksOverlappingWalkMirrors(undefined, undefined)).toEqual([]);
+});
+
+test('builds the paired walk gate from all nine measured samples', () => {
+  const repeats = Array.from({length: 9}, (_, index) => ({
+    longTaskTrace: [{startTimeMs: 100, durationMs: 70}],
+    reconcileMirrorTasks: index % 2 ? [mirror(120, 2)] : []
+  }));
+  const result = buildWalkComparison({base: {scrollBack2k: repeats}, head: {scrollBack2k: repeats}}, 9);
+
+  expect(result.base.scrollBack2k).toHaveLength(9);
+  expect(result.head.scrollBack2k.map(({walkLongTasksOver50Ms}) => walkLongTasksOver50Ms)).toEqual([0, 1, 0, 1, 0, 1, 0, 1, 0]);
+  expect(() => buildWalkComparison({base: {scrollBack2k: repeats.slice(1)}, head: {scrollBack2k: repeats}}, 9))
+  .toThrow('base scrollBack2k has 8 measured samples; expected 9');
 });
 
 test('does not attribute a task to a mirror ending exactly at its rounded start', () => {
@@ -302,6 +315,22 @@ test('records missing and partial measured attribution without failing', async()
   expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 1})).toBe('missing');
   expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 1, longTaskTrace: [{...task, scripts: []}]})).toBe('partial');
   expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 2, longTaskTrace: [task]})).toBe('partial');
+});
+
+test('classifies long-task traces before removing their payload', async() => {
+  const metric: Parameters<typeof classifyAndRemoveLongTaskTrace>[0] = {
+    longTasksOver50Ms: 1,
+    longTaskTrace: [{
+      startTimeMs: 10,
+      durationMs: 80,
+      scripts: [{functionName: 'onMessage', script: '/app.js', invoker: 'MessagePort.onmessage', invokerType: 'event-listener', durationMs: 70, forcedStyleAndLayoutDurationMs: 0}]
+    }]
+  };
+
+  classifyAndRemoveLongTaskTrace(metric);
+
+  expect(metric.longTaskTraceStatus).toBe('complete');
+  expect(metric.longTaskTrace).toBeUndefined();
 });
 
 test('returns history-path task attribution for the performance artifact', () => {

@@ -16,7 +16,7 @@ function nonBackgroundFraction(png: Buffer): number {
   return differing / (width * height);
 }
 
-// Detect the first actual on-screen pixels, after the worker's firstFrame event.
+// Detect the first actual on-screen pixels in the sticker's container.
 export async function waitUntilOnScreen(page: Page, locator: Locator, timeoutMs: number): Promise<number | null> {
   const deadline = Date.now() + timeoutMs;
   while(Date.now() < deadline) {
@@ -25,4 +25,12 @@ export async function waitUntilOnScreen(page: Page, locator: Locator, timeoutMs:
     }
   }
   return null;
+}
+
+export async function waitForFirstStickerFrame(page: Page, timeoutMs: number): Promise<number> {
+  await page.waitForFunction(() => Number.isFinite((window as any).__performanceFirstStickerFrameAt), undefined, {
+    polling: 'raf',
+    timeout: timeoutMs
+  });
+  return page.evaluate(() => (window as any).__performanceFirstStickerFrameAt as number);
 }

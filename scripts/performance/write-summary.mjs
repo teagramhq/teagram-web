@@ -1,6 +1,6 @@
 import {mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
-import {evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, isWithinFirstStickerRegressionBudget, PERFORMANCE_REPEATS} from './policy.mjs';
+import {evaluatePairedDifferences, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PAIRED_CONFIDENCE_LEVEL, PERFORMANCE_REPEATS, TIMING_MINIMUM_EFFECTS} from './policy.mjs';
 
 const reportPath = resolve(process.env.PERF_REPORT_PATH || '.performance-report.json');
 const historyDirectory = resolve(process.env.PERF_HISTORY_DIRECTORY || '.performance-history');
@@ -74,6 +74,12 @@ function median(values) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+function sampleStandardDeviation(values) {
+  if(values.length < 2) return 0;
+  const center = values.reduce((total, value) => total + value, 0) / values.length;
+  return Math.sqrt(values.reduce((total, value) => total + (value - center) ** 2, 0) / (values.length - 1));
+}
+
 function formatChatListMeasurementTable(report) {
   const scenarios = [
     ['coldChatList', 'Cold chat list'],
@@ -120,12 +126,13 @@ function formatChatListMeasurementTable(report) {
 }
 
 function formatFirstStickerTable(diagnostics, requireBase, failures, reportOnlyFindings) {
-  if(!diagnostics || !Number.isInteger(diagnostics.repeats) || diagnostics.repeats < 3) {
-    failures.push('first sticker timing samples are missing or shorter than three repeats');
+  if(!diagnostics || !Number.isInteger(diagnostics.repeats) || diagnostics.repeats < 3 || (requireBase && diagnostics.repeats !== PERFORMANCE_REPEATS)) {
+    const finding = `first sticker timing samples are missing or do not contain ${requireBase ? PERFORMANCE_REPEATS : 'at least 3'} cold repeats`;
+    failures.push(finding);
     return '';
   }
 
-  const variants = requireBase ? ['base', 'head'] : ['head'];
+  const variants = requireBase ? ['base', 'head', 'pinned'] : ['head'];
   const temperatures = ['cold', 'warm'];
   const lines = [
     '### First animated sticker frame',
@@ -139,10 +146,13 @@ function formatFirstStickerTable(diagnostics, requireBase, failures, reportOnlyF
     for(const temperature of temperatures) {
       const samples = diagnostics.samples?.[variant]?.[temperature];
       const median = diagnostics.medians?.[variant]?.[temperature];
-      if(!Array.isArray(samples) || samples.length < diagnostics.repeats || !samples.every((sample) => (
+      const expectedRepeats = temperature === 'cold' && variant !== 'pinned' ? diagnostics.repeats : 3;
+      if(variant === 'pinned' && temperature === 'warm' && (!Array.isArray(samples) || samples.length === 0)) continue;
+      if(!Array.isArray(samples) || samples.length !== expectedRepeats || !samples.every((sample) => (
         Number.isFinite(sample?.clickToFirstFrameMs) && Number.isFinite(sample?.clickToVisibleFrameMs)
       )) || !Number.isFinite(median?.workerFrameMs) || !Number.isFinite(median?.visibleFrameMs)) {
-        failures.push(`first sticker ${variant} ${temperature} sample set is missing, invalid, or shorter than ${diagnostics.repeats} repeats`);
+        const finding = `first sticker ${variant} ${temperature} sample set is missing, invalid, or does not contain ${expectedRepeats} repeats`;
+        failures.push(finding);
         continue;
       }
       lines.push(`| ${variant} | ${temperature} | ${samples.length} | ${show(median.workerFrameMs)} | ${show(median.visibleFrameMs)} |`);
@@ -150,27 +160,38 @@ function formatFirstStickerTable(diagnostics, requireBase, failures, reportOnlyF
   }
 
   if(requireBase) {
-    const baseMs = diagnostics.medians?.base?.cold?.visibleFrameMs;
-    const headMs = diagnostics.medians?.head?.cold?.visibleFrameMs;
-    if(Number.isFinite(baseMs) && Number.isFinite(headMs)) {
-      const deltaMs = headMs - baseMs;
-      const wouldFail = !isWithinFirstStickerRegressionBudget(baseMs, headMs);
-      const gate = wouldFail ? 'report-only (would fail)' : 'report-only';
-      lines.push('', `Pinned-client cold visible-frame comparison: base ${show(baseMs)} ms, head ${show(headMs)} ms, increase ${show(deltaMs)} ms; limit 100 ms; ${gate}.`);
-      if(wouldFail) {
-        reportOnlyFindings.push(`first sticker cold visible frame increased ${show(deltaMs)} ms over the pinned client; limit 100 ms; report-only (would fail)`);
+    const baseSamples = diagnostics.samples?.base?.cold?.map((sample) => sample.clickToVisibleFrameMs);
+    const headSamples = diagnostics.samples?.head?.cold?.map((sample) => sample.clickToVisibleFrameMs);
+    if(Array.isArray(baseSamples) && Array.isArray(headSamples) && baseSamples.length === PERFORMANCE_REPEATS && headSamples.length === PERFORMANCE_REPEATS) {
+      const differences = headSamples.map((value, index) => value - baseSamples[index]);
+      const gate = evaluatePairedDifferences(differences, TIMING_MINIMUM_EFFECTS.firstStickerVisibleFrameMs);
+      const status = gate.regression ? 'failed' : 'passed';
+      lines.push('', `PR base/head cold visible-frame gate: paired SD ${show(sampleStandardDeviation(differences))} ms; one-sided ${Math.round(PAIRED_CONFIDENCE_LEVEL * 100)}% median lower bound ${show(gate.lowerBound)} ms; minimum effect ${TIMING_MINIMUM_EFFECTS.firstStickerVisibleFrameMs} ms; ${status}.`);
+      if(gate.regression) {
+        failures.push(`first sticker cold visible frame: one-sided ${Math.round(PAIRED_CONFIDENCE_LEVEL * 100)}% median lower bound ${show(gate.lowerBound)} ms exceeded minimum effect ${TIMING_MINIMUM_EFFECTS.firstStickerVisibleFrameMs} ms`);
       }
+    } else {
+      failures.push(`first sticker PR base/head comparison requires exactly ${PERFORMANCE_REPEATS} valid cold samples per variant`);
+    }
+
+    const pinnedMs = diagnostics.medians?.pinned?.cold?.visibleFrameMs;
+    const headMs = diagnostics.medians?.head?.cold?.visibleFrameMs;
+    if(Number.isFinite(pinnedMs) && Number.isFinite(headMs)) {
+      const deltaMs = headMs - pinnedMs;
+      const note = `Pinned pre-PR-178 cold visible-frame comparison: pinned ${show(pinnedMs)} ms, head ${show(headMs)} ms, increase ${show(deltaMs)} ms; report-only.`;
+      lines.push(note);
+      if(deltaMs > TIMING_MINIMUM_EFFECTS.firstStickerVisibleFrameMs) reportOnlyFindings.push(note);
     } else {
       failures.push('first sticker pinned-client comparison is missing a valid cold visible-frame median');
     }
   } else {
-    lines.push('', 'Pinned-client comparison: available on pull requests; this master run records the head timing only.');
+    lines.push('', 'Master timing is calibration only; the timing gate runs on pull requests with base/head samples.');
   }
 
   return lines.join('\n');
 }
 
-function formatWorkerRecorderTable(replay, failures, reportOnlyFindings) {
+function formatWorkerRecorderTable(replay, requireBase, failures, reportOnlyFindings) {
   if(!replay || typeof replay !== 'object') {
     failures.push('worker recorder replay measurements are missing');
     return '';
@@ -179,24 +200,34 @@ function formatWorkerRecorderTable(replay, failures, reportOnlyFindings) {
   const lines = [
     '### Worker recorder replay overhead',
     '',
-    '| Workload | Record off (ms) | Record on (ms) | Overhead (ms) | Limit | Iterations | Gate |',
-    '| --- | ---: | ---: | ---: | --- | ---: | --- |'
+    '| Workload | Record off (ms) | Record on (ms) | Overhead (ms) | Paired SD (ms) | 95% lower bound (ms) | Minimum effect (ms) | Iterations | Gate |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |'
   ];
-  const show = (value) => Number.isFinite(value) ? value.toFixed(1) : 'n/a';
+  const show = (value, digits = 1) => Number.isFinite(value) ? value.toFixed(digits) : 'n/a';
   for(const name of ['peers', 'dialogs']) {
     const measurement = replay[name];
     if(!measurement || !Number.isFinite(measurement.offMs) || measurement.offMs < 0 ||
       !Number.isFinite(measurement.onMs) || measurement.onMs < 0 ||
-      !Number.isFinite(measurement.pairedDeltaMs) || !Number.isInteger(measurement.iterations) || measurement.iterations < 50) {
-      failures.push(`worker recorder ${name} sample set is missing, invalid, or shorter than 50 iterations`);
+      !Number.isFinite(measurement.pairedDeltaMs) || !Number.isInteger(measurement.iterations) || measurement.iterations < 50 ||
+      !Array.isArray(measurement.pairedDeltaSamples) || measurement.pairedDeltaSamples.length !== PERFORMANCE_REPEATS || !measurement.pairedDeltaSamples.every(Number.isFinite)) {
+      const finding = `worker recorder ${name} sample set is missing, invalid, or shorter than 50 iterations`;
+      failures.push(finding);
       continue;
     }
-    const relativeLimitMs = measurement.offMs * 0.15;
-    const wouldFail = measurement.pairedDeltaMs > 2 || measurement.pairedDeltaMs > relativeLimitMs;
-    const gate = wouldFail ? 'report-only (would fail)' : 'report-only';
-    lines.push(`| ${name} | ${show(measurement.offMs)} | ${show(measurement.onMs)} | ${show(measurement.pairedDeltaMs)} | ≤2 ms and ≤15% of off (${show(relativeLimitMs)} ms) | ${measurement.iterations} | ${gate} |`);
-    if(wouldFail) {
-      reportOnlyFindings.push(`worker recorder ${name} overhead ${show(measurement.pairedDeltaMs)} ms exceeded 2 ms or 15% of off (${show(relativeLimitMs)} ms); report-only (would fail)`);
+    if(Math.abs(measurement.pairedDeltaMs - median(measurement.pairedDeltaSamples)) > 0.000001) {
+      const finding = `worker recorder ${name} paired delta median does not match its sample set`;
+      failures.push(finding);
+      continue;
+    }
+    const minimumEffect = Math.min(TIMING_MINIMUM_EFFECTS.workerRecorder.maximumMs, measurement.offMs * TIMING_MINIMUM_EFFECTS.workerRecorder.baseMedianFraction);
+    const gate = evaluatePairedDifferences(measurement.pairedDeltaSamples, minimumEffect);
+    const gateStatus = requireBase ? gate.regression ? 'failed' : 'passed' : 'calibration';
+    const pairedSpread = sampleStandardDeviation(measurement.pairedDeltaSamples);
+    lines.push(`| ${name} | ${show(measurement.offMs)} | ${show(measurement.onMs)} | ${show(measurement.pairedDeltaMs, 3)} | ${show(pairedSpread, 3)} | ${show(gate.lowerBound, 3)} | ${show(minimumEffect, 3)} | ${measurement.iterations} | ${gateStatus} |`);
+    if(gate.regression) {
+      const finding = `worker recorder ${name}: one-sided ${Math.round(PAIRED_CONFIDENCE_LEVEL * 100)}% median lower bound ${show(gate.lowerBound)} ms exceeded minimum effect ${show(minimumEffect)} ms`;
+      if(requireBase) failures.push(finding);
+      else reportOnlyFindings.push(finding);
     }
   }
   return lines.join('\n');
@@ -248,7 +279,7 @@ const samplesTable = formatPerformanceSamplesTable(report);
 const sendActionDiagnosticTable = formatSendActionDiagnosticTable(report);
 const reportOnlyFindings = [...evaluation.reportOnlyFailures];
 const firstStickerTable = formatFirstStickerTable(report.diagnostics?.firstSticker, report.requireBase, failures, reportOnlyFindings);
-const workerRecorderTable = formatWorkerRecorderTable(recorderReplay, failures, reportOnlyFindings);
+const workerRecorderTable = formatWorkerRecorderTable(recorderReplay, report.requireBase, failures, reportOnlyFindings);
 const summary = [
   '## Web performance at scale',
   '',
@@ -262,11 +293,11 @@ const summary = [
   ...(firstStickerTable ? ['', firstStickerTable] : []),
   ...(workerRecorderTable ? ['', workerRecorderTable] : []),
   '',
-  'Timing-derived gates are report-only in MAIN-3608. Their calculations and limits remain visible below; MAIN-3610 restores blocking after the paired noise model lands.',
+  `Pull-request timing gates use interleaved base/head pairs and a one-sided ${Math.round(PAIRED_CONFIDENCE_LEVEL * 100)}% distribution-free lower confidence bound for the median. Master timing history is report-only calibration.`,
   '',
-  '### Report-only timing findings',
+  '### Timing calibration and pinned-baseline findings',
   '',
-  reportOnlyFindings.length ? reportOnlyFindings.map((finding) => `- ${finding}`).join('\n') : 'No timing regressions would fail.',
+  reportOnlyFindings.length ? reportOnlyFindings.map((finding) => `- ${finding}`).join('\n') : 'No calibration or pinned-baseline findings.',
   failures.length ? `\nBlocking findings:\n${failures.map((failure) => `- ${failure}`).join('\n')}` : '\nNo blocking performance findings.'
 ].join('\n');
 

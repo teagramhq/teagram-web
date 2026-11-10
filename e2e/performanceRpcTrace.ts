@@ -325,6 +325,15 @@ export function classifyMeasuredLongTaskTrace(
   return 'complete';
 }
 
+export function classifyAndRemoveLongTaskTrace(metric: {
+  longTasksOver50Ms?: number,
+  longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>,
+  longTaskTraceStatus?: ReturnType<typeof classifyMeasuredLongTaskTrace>
+}) {
+  metric.longTaskTraceStatus = classifyMeasuredLongTaskTrace(metric);
+  delete metric.longTaskTrace;
+}
+
 type OverlapTask = {startTimeMs: number, durationMs: number, preciseStartTimeMs?: number, preciseDurationMs?: number};
 export type ReconcileMirrorTask = OverlapTask & {traceId: string};
 
@@ -366,6 +375,26 @@ export function findLongTasksOverlappingWalkMirrors(
     const epsilon = Number.EPSILON * Math.max(1, Math.abs(taskStart), Math.abs(taskEnd), Math.abs(mirrorStart), Math.abs(mirrorEnd)) * 4;
     return mirrorStart < taskEnd - epsilon && mirrorEnd > taskStart + epsilon;
   }));
+}
+
+export function buildWalkComparison(
+  variants: Record<string, Record<string, Array<{longTaskTrace?: OverlapTask[], reconcileMirrorTasks?: ReconcileMirrorTask[]}>>>,
+  expectedRepeatCount: number
+) {
+  return Object.fromEntries(Object.entries(variants).map(([variant, scenarios]) => [
+    variant,
+    Object.fromEntries(Object.entries(scenarios).map(([scenario, samples]) => {
+      if(samples.length !== expectedRepeatCount) {
+        throw new Error(`${variant} ${scenario} has ${samples.length} measured samples; expected ${expectedRepeatCount}`);
+      }
+      return [scenario, samples.map((sample, index) => {
+        if(!Array.isArray(sample.longTaskTrace) || !Array.isArray(sample.reconcileMirrorTasks)) {
+          throw new Error(`${variant} ${scenario} measured sample ${index + 1} has incomplete walk-mirror data`);
+        }
+        return {walkLongTasksOver50Ms: findLongTasksOverlappingWalkMirrors(sample.longTaskTrace, sample.reconcileMirrorTasks).length};
+      })];
+    }))
+  ]));
 }
 
 // Tasks over 50 ms that no walk mirror task overlaps stay in the report; they are not a reconciliation failure.

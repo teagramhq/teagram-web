@@ -219,13 +219,13 @@ jobs:
           PERF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
+          VITE_PERF_RECONCILE_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
           VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-trace-dist"
           if [ -n "$PERF_BASE_SHA" ]; then
             base_directory="$RUNNER_TEMP/teagram-web-base"
             git worktree add --detach "$base_directory" "$PERF_BASE_SHA"
             ln -s "$GITHUB_WORKSPACE/node_modules" "$base_directory/node_modules"
-            (cd "$base_directory" && pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-dist")
+            (cd "$base_directory" && VITE_PERF_RECONCILE_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-dist")
             (cd "$base_directory" && VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-trace-dist")
             sticker_base_sha="$(cat .github/perf-sticker-base-commit)"
             sticker_base_directory="$RUNNER_TEMP/teagram-web-sticker-base"
@@ -357,6 +357,7 @@ jobs:
           name: web-performance-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/teagram-web-performance.json
+            ${{ runner.temp }}/teagram-recorder-replay.json
             ${{ runner.temp }}/teagram-perf-server-1x.log
             ${{ runner.temp }}/teagram-perf-server-100x.log
           if-no-files-found: ignore
