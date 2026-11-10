@@ -303,7 +303,10 @@ test('scenario bundle measurement counts each new same-origin JavaScript or CSS 
 
 test('trace table reports cold and warm diagnostics and handles absent data', () => {
   const diagnostics = {
-    coldChatList: [{mainPhases: [{name: 'main.bootstrapIm.import', startMs: 100, durationMs: 20}]}],
+    coldChatList: [{
+      mainPhases: [{name: 'main.bootstrapIm.import', startMs: 100, durationMs: 20}],
+      cachedDialogReconcile: {walks: [{pageCount: 12, startRelativeToScenarioMs: 5, endRelativeToScenarioMs: 25, mainThreadTimeMs: 4}]}
+    }],
     warmChatList: [{workerPhases: [{name: 'worker.managers.create', accountNumber: 2, startMs: 300, durationMs: 40}]}]
   };
   const table = formatPerformanceTraceTable(diagnostics);
@@ -311,5 +314,8 @@ test('trace table reports cold and warm diagnostics and handles absent data', ()
   assert.match(table, /### 100x startup trace spans/);
   assert.match(table, /main\.bootstrapIm\.import/);
   assert.match(table, /worker\.managers\.create/);
+  assert.match(table, /across 1 cold repeat and 1 warm repeat/);
+  assert.match(table, /one opt-in 100x diagnostic pair; this table reports the head details/);
+  assert.match(table, /all paired measured samples in `diagnostics\.100x\.walkComparison`/);
   assert.equal(formatPerformanceTraceTable({}), '');
 });

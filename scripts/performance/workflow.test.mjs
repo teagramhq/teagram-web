@@ -129,10 +129,11 @@ function runSummaryWithArtifacts({
   }
 }
 
-test('performance comparisons use uninstrumented head and base bundles', () => {
-  assert.match(workflow, /^\s+pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
-  assert.match(workflow, /^\s+\(cd "\$base_directory" && pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
-  assert.doesNotMatch(workflow, /VITE_PERF_(?:RECONCILE_)?TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
+test('timing bundles enable only the cached-dialog probe and keep full profiles separate', () => {
+  assert.match(workflow, /^\s+VITE_PERF_RECONCILE_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
+  assert.match(workflow, /^\s+\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
+  assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
+  assert.doesNotMatch(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
 });
 
 test('sticker timing gates against the PR base and keeps the pre-178 client report-only', () => {
@@ -154,12 +155,21 @@ test('sticker timing gates against the PR base and keeps the pre-178 client repo
 
 test('base and head both require date-jump and 2,000-message scroll-back samples', () => {
   assert.match(performanceScale, /scrollBackTwoThousand\(\s*page,\s*requests,\s*true,/);
-  assert.match(performanceScale, /jumpToFixtureDate\(page, requests, fixture\)/);
+  assert.match(performanceScale, /jumpToFixtureDate\(page, requests, fixture, false, undefined, collectWalkDiagnostics\)/);
   assert.doesNotMatch(performanceScale, /allowUnsupportedBase/);
   assert.doesNotMatch(performanceScale, /base build may (?:not reach|lack)/);
   assert.match(performanceScale, /if\(!scroll\) throw new Error/);
   assert.match(performanceScale, /if\(!jump\) throw new Error/);
   assert.match(performanceScale, /for\(let round = 0; round < PERFORMANCE_REPEATS; \+\+round\)/);
+});
+
+test('full trace diagnostics use one paired pass while walk gates keep nine measured samples', () => {
+  assert.match(performanceScale, /const TRACE_DIAGNOSTIC_REPEATS = 1/);
+  assert.match(performanceScale, /for\(let repeat = 0; repeat < TRACE_DIAGNOSTIC_REPEATS; \+\+repeat\)/);
+  assert.match(performanceScale, /buildWalkComparison\([\s\S]*?PERFORMANCE_REPEATS/);
+  assert.match(performanceScale, /validateCachedDialogReconcileDiagnostics\(samples, scenario, PERFORMANCE_REPEATS\)/);
+  assert.match(performanceScale, /validateCachedDialogReconcileDiagnostics\(traceSamples\[scenario\], scenario, TRACE_DIAGNOSTIC_REPEATS, requireWalk\)/);
+  assert.doesNotMatch(performanceScale, /for\(let repeat = 0; repeat < PERFORMANCE_REPEATS; \+\+repeat\)[\s\S]{0,250}rpcComparison/);
 });
 
 test('manual workflow dispatch can run A/A against the same commit', () => {

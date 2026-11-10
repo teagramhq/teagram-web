@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {cachedDialogReconcileWindowMs, collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, findLongTasksOverlappingWalkMirrors, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileSummaries, validateNoWalkLongTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
+import {buildWalkComparison, cachedDialogReconcileWindowMs, collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, findLongTasksOverlappingWalkMirrors, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileSummaries, validateNoWalkLongTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
 import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
 
 const mirror = (startTimeMs: number, durationMs: number) => ({traceId: 'walk', startTimeMs, durationMs});
@@ -12,6 +12,19 @@ test('attributes a long task to the walk only when a walk mirror task overlaps i
   expect(findLongTasksOverlappingWalkMirrors(tasks, [mirror(610, 5)])).toEqual([]);
   expect(findLongTasksOverlappingWalkMirrors(tasks, [])).toEqual([]);
   expect(findLongTasksOverlappingWalkMirrors(undefined, undefined)).toEqual([]);
+});
+
+test('builds the paired walk gate from all nine measured samples', () => {
+  const repeats = Array.from({length: 9}, (_, index) => ({
+    longTaskTrace: [{startTimeMs: 100, durationMs: 70}],
+    reconcileMirrorTasks: index % 2 ? [mirror(120, 2)] : []
+  }));
+  const result = buildWalkComparison({base: {scrollBack2k: repeats}, head: {scrollBack2k: repeats}}, 9);
+
+  expect(result.base.scrollBack2k).toHaveLength(9);
+  expect(result.head.scrollBack2k.map(({walkLongTasksOver50Ms}) => walkLongTasksOver50Ms)).toEqual([0, 1, 0, 1, 0, 1, 0, 1, 0]);
+  expect(() => buildWalkComparison({base: {scrollBack2k: repeats.slice(1)}, head: {scrollBack2k: repeats}}, 9))
+  .toThrow('base scrollBack2k has 8 measured samples; expected 9');
 });
 
 test('does not attribute a task to a mirror ending exactly at its rounded start', () => {

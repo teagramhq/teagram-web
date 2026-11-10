@@ -38,6 +38,11 @@ pre-change performance artifact ([run 42710920668, attempt 3](https://github.com
 | Cold first animated sticker visible frame | 100 ms | 602.59 ms SD across 3 legacy pinned-client/head pairs; the gate now uses PR base/head pairs |
 | Worker recorder overhead | `min(2 ms, 15% of record-off median)` | The legacy run kept medians only. The new report includes nine grouped paired deltas and their SD. |
 
+The measured 100x runs collect cached-dialog walk overlap counts directly from
+their nine paired samples. Full CPU/RPC attribution uses one additional
+base/head diagnostic pair, avoiding repeated traced copies of the timing
+scenarios while preserving all nine samples for every gate.
+
 The CI artifact used for these estimates predates the nine-pair policy and is a
 spread estimate, not a gate result. Each new worker-recorder summary prints the
 paired SD and lower bound; the uploaded report keeps all browser base/head pairs

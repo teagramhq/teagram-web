@@ -496,7 +496,7 @@ export function formatPerformanceTraceTable(diagnostics) {
   const lines = [
     '### 100x startup trace spans',
     '',
-    `Median start and duration in milliseconds from navigation over ${coldSamples.length} cold repeats and ${warmSamples.length} warm repeats.`,
+    `Median start and duration in milliseconds from navigation across ${coldSamples.length} cold ${coldSamples.length === 1 ? 'repeat' : 'repeats'} and ${warmSamples.length} warm ${warmSamples.length === 1 ? 'repeat' : 'repeats'}.`,
     '',
     '| Span | Cold start | Cold duration | Warm start | Warm duration |',
     '| --- | ---: | ---: | ---: | ---: |'
@@ -528,7 +528,7 @@ export function formatPerformanceTraceTable(diagnostics) {
       '',
       '### Cached channel dialog reconciliation diagnostics',
       '',
-      'Per-walk summaries from separate opt-in 100x diagnostic runs. Empty `walks` arrays count scenarios where no walk overlapped the window; individual repeats remain in `diagnostics.100x`. Offsets use each diagnostic scenario window.',
+      'Per-walk summaries come from one opt-in 100x diagnostic pair; this table reports the head details. The blocking walk-mirror gate compares all paired measured samples in `diagnostics.100x.walkComparison`. Empty `walks` arrays count scenarios where no walk overlapped the window; diagnostic samples remain in `diagnostics.100x`. Offsets use each diagnostic scenario window.',
       '',
       '| Scenario | Walks | No-walk repeats | Median pages | Median start offset (ms) | Median end offset (ms) | Median main-thread time (ms) |',
       '| --- | ---: | ---: | ---: | ---: | ---: | ---: |',

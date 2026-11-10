@@ -368,6 +368,26 @@ export function findLongTasksOverlappingWalkMirrors(
   }));
 }
 
+export function buildWalkComparison(
+  variants: Record<string, Record<string, Array<{longTaskTrace?: OverlapTask[], reconcileMirrorTasks?: ReconcileMirrorTask[]}>>>,
+  expectedRepeatCount: number
+) {
+  return Object.fromEntries(Object.entries(variants).map(([variant, scenarios]) => [
+    variant,
+    Object.fromEntries(Object.entries(scenarios).map(([scenario, samples]) => {
+      if(samples.length !== expectedRepeatCount) {
+        throw new Error(`${variant} ${scenario} has ${samples.length} measured samples; expected ${expectedRepeatCount}`);
+      }
+      return [scenario, samples.map((sample, index) => {
+        if(!Array.isArray(sample.longTaskTrace) || !Array.isArray(sample.reconcileMirrorTasks)) {
+          throw new Error(`${variant} ${scenario} measured sample ${index + 1} has incomplete walk-mirror data`);
+        }
+        return {walkLongTasksOver50Ms: findLongTasksOverlappingWalkMirrors(sample.longTaskTrace, sample.reconcileMirrorTasks).length};
+      })];
+    }))
+  ]));
+}
+
 // Tasks over 50 ms that no walk mirror task overlaps stay in the report; they are not a reconciliation failure.
 export function validateNoWalkLongTasks(
   samples: Array<{longTaskTrace?: OverlapTask[], reconcileMirrorTasks?: ReconcileMirrorTask[]}>,
