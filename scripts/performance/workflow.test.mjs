@@ -172,12 +172,13 @@ test('full trace diagnostics use one paired pass while walk gates keep nine meas
   assert.doesNotMatch(performanceScale, /for\(let repeat = 0; repeat < PERFORMANCE_REPEATS; \+\+repeat\)[\s\S]{0,250}rpcComparison/);
 });
 
-test('manual workflow dispatch can run A/A against the same commit', () => {
-  assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /performance_base_sha/);
-  assert.match(workflow, /github\.event\.inputs\.performance_base_sha/);
-  assert.match(workflow, /ref: \$\{\{ github\.event_name == 'workflow_dispatch' && github\.event\.inputs\.performance_base_sha/);
-  assert.match(workflow, /PERF_REQUIRE_BASE:.*github\.event_name == 'workflow_dispatch'/);
+test('only pull requests build and require a base comparison', () => {
+  assert.doesNotMatch(workflow, /workflow_dispatch:|performance_base_sha|github\.event\.inputs/);
+  const checkoutStep = workflow.match(/- name: Check out web client([\s\S]*?)(?=\n      - name: Set performance output paths)/)?.[1];
+  assert.ok(checkoutStep, 'the performance workflow must define its client checkout step');
+  assert.doesNotMatch(checkoutStep, /^\s+ref:/m, 'the checkout must use the event head');
+  assert.match(workflow, /PERF_BASE_SHA: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
+  assert.match(workflow, /PERF_REQUIRE_BASE: \$\{\{ github\.event_name == 'pull_request' \}\}/);
 });
 
 test('performance tracing uses a separate diagnostic bundle', () => {

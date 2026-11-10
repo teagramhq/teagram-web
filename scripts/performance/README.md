@@ -55,11 +55,6 @@ chat-list boundary, varying contacts-list bundle sizes, and missing or invalid
 samples remain blocking. The 100 ms negative control must fail under the paired
 rule. It uses the same bundle for control and injected-stall samples.
 
-After this workflow is available on the default branch, it can run an A/A
-comparison from `workflow_dispatch`: set `performance_base_sha` to the commit
-SHA to test and `issue` to its Multica key. The dispatch checks out that exact
-SHA and builds it as both variants, requiring the timing gates. Add its run link
-to the PR body. Bundle thresholds are unchanged.
 Each 100x scroll repeat in the JSON artifact includes `droppedFrameAttribution`,
 with the measured frame intervals, overlapping renderer trace events and
 instrumented history and chat-list spans. `droppedFrameCpu` joins sampled
