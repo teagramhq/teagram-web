@@ -110,17 +110,14 @@ describe('deployment artifact verification', () => {
     expect(securityHeaders).toContain("frame-src 'self' https://challenges.cloudflare.com;");
   });
 
-  it('retains the legacy network during the browser sign-in regression check', () => {
+  it('keeps the web stack independent from the old link-edge network', () => {
     const compose = readFileSync(resolve('deploy/teagram-web/compose.yaml'), 'utf8');
 
     expect(compose).toMatch(/^name: teagram-web-edge$/m);
     expect(compose).toMatch(/^    image: teagram-web:local$/m);
     expect(compose).toMatch(/^    name: teagram-web-edge-nginx-cache$/m);
     expect(compose).toMatch(/^    name: teagram-web-edge-net$/m);
-    expect(compose).toMatch(/^      - legacy_link_edge$/m);
-    expect(compose).toMatch(/^  legacy_link_edge:$/m);
-    expect(compose).toMatch(/^    external: true$/m);
-    expect(compose).toMatch(/^    name: telegram-web-edge-net$/m);
+    expect(compose).not.toMatch(/legacy_link_edge|external:\s*true/);
   });
 
   it('returns 404 for missing well-known resources instead of the SPA fallback', () => {
