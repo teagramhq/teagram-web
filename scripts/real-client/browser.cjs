@@ -62,12 +62,16 @@ const PAGE_DIAGNOSTIC_VALUE_TYPES = new Set(['undefined', 'null', 'boolean', 'nu
 const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel', 'poll', 'unknown']);
 const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set(AVAILABLE_SCENARIOS);
 const PAGE_ERROR_EVENT_CAPTURE_KEY = '__teagramPageErrorEvents';
+const MESSAGE_ACK_TRACE_SWITCH = '__realClientMessageAckTraceEnabled';
+const MESSAGE_ACK_TRACE_CHECK_NAME = '__realClientMessageAckTraceCheckName';
 const pageErrorDiagnosticCounts = new WeakMap();
 const pageErrorDiagnosticMessageHashes = new WeakMap();
 const pageErrorConsoleEvents = new WeakMap();
 const pageErrorProtocolEvents = new WeakMap();
 const pageScenarioSteps = new WeakMap();
 const pageScenarioActions = new WeakMap();
+const messageAckTraceInitScriptPages = new WeakSet();
+const messageAckTraceHistory = new WeakMap();
 const PAGE_ERROR_BLOB_ASSET_HINTS = Object.freeze([
   {pattern: /\bTLottieWasm\.createAnimation\b/, workerLabel: 'lottie_worker'}
 ]);
@@ -105,6 +109,224 @@ const CONTROL_PLAN = Object.freeze([
 let currentStage = 'runtime_inputs';
 let currentScenario;
 let pollFooterTransitions = [];
+
+function sanitizeMessageAckTraceId(value) {
+  if(Number.isFinite(value)) return value;
+  return typeof value === 'string' && /^-?[0-9]{1,24}(?:\.[0-9]{1,4})?$/.test(value) ? value : undefined;
+}
+
+function sanitizeMessageAckTraceRecord(record) {
+  const token = typeof record?.token === 'string' && /^send-[1-9][0-9]*-[a-f0-9]{8}$/.test(record.token)
+    ? record.token
+    : undefined;
+  if(!token) return undefined;
+
+  const events = Array.isArray(record.events) ? record.events.flatMap((event) => {
+    const atMs = Number.isSafeInteger(event?.atMs) && event.atMs >= 0 ? event.atMs : undefined;
+    if(atMs === undefined) return [];
+    if(event.kind === 'request') {
+      const pendingTempId = sanitizeMessageAckTraceId(event.pendingTempId);
+      if(pendingTempId === undefined || !['user', 'chat', 'channel'].includes(event.peerKind)) return [];
+      return [{kind: 'request', atMs, pendingTempId, peerKind: event.peerKind}];
+    }
+    if(event.kind === 'send_result') {
+      const updates = Array.isArray(event.updates) ? event.updates.flatMap((update) => {
+        if(typeof update?.constructor !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(update.constructor)) return [];
+        const messageId = sanitizeMessageAckTraceId(update.messageId);
+        return [{
+          constructor: update.constructor,
+          ...(messageId === undefined ? {} : {messageId}),
+          randomIdMatches: update.randomIdMatches === true
+        }];
+      }) : [];
+      return [{kind: 'send_result', atMs, updates}];
+    }
+    if(event.kind === 'update') {
+      if(!['pushed', 'difference'].includes(event.source) || typeof event.constructor !== 'string' ||
+          !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(event.constructor)) return [];
+      const messageId = sanitizeMessageAckTraceId(event.messageId);
+      return [{
+        kind: 'update',
+        atMs,
+        source: event.source,
+        constructor: event.constructor,
+        ...(messageId === undefined ? {} : {messageId}),
+        randomIdMatches: event.randomIdMatches === true
+      }];
+    }
+    if(event.kind === 'pending_entry') {
+      const pendingTempId = sanitizeMessageAckTraceId(event.pendingTempId);
+      return [{
+        kind: 'pending_entry',
+        atMs,
+        found: event.found === true,
+        ...(event.found === true && pendingTempId !== undefined ? {pendingTempId} : {})
+      }];
+    }
+    if(event.kind === 'message_sent') {
+      const tempId = sanitizeMessageAckTraceId(event.tempId);
+      const serverId = sanitizeMessageAckTraceId(event.serverId);
+      if(tempId === undefined) return [];
+      return [{kind: 'message_sent', atMs, tempId, ...(serverId === undefined ? {} : {serverId})}];
+    }
+    return [];
+  }) : [];
+  const tempId = sanitizeMessageAckTraceId(record.messageSent?.tempId);
+  const serverId = sanitizeMessageAckTraceId(record.messageSent?.serverId);
+
+  return {
+    token,
+    checkName: typeof record.checkName === 'string' && /^[a-z0-9_]{1,96}$/.test(record.checkName) ? record.checkName : null,
+    pendingEntryFound: typeof record.pendingEntryFound === 'boolean' ? record.pendingEntryFound : null,
+    messageSent: {
+      emitted: record.messageSent?.emitted === true,
+      ...(tempId === undefined ? {} : {tempId}),
+      serverId: serverId ?? null
+    },
+    events
+  };
+}
+
+async function enableMessageAckTrace(page) {
+  if(!messageAckTraceInitScriptPages.has(page)) {
+    await page.addInitScript(({switchKey, checkNameKey}) => {
+      globalThis[switchKey] = true;
+      globalThis[checkNameKey] = 'unassigned';
+    }, {switchKey: MESSAGE_ACK_TRACE_SWITCH, checkNameKey: MESSAGE_ACK_TRACE_CHECK_NAME})
+    .catch(() => failStage('message_ack_trace_enable'));
+    messageAckTraceInitScriptPages.add(page);
+  }
+
+  await page.evaluate(async() => {
+    const manager = window.rootScope?.managers?.appMessagesManager;
+    if(typeof manager?.enableRealClientMessageAckTrace !== 'function') throw new Error('trace_manager_unavailable');
+    await manager.enableRealClientMessageAckTrace();
+  }).catch(() => failStage('message_ack_trace_enable'));
+}
+
+async function setMessageAckTraceCheckName(page, checkName) {
+  if(!/^[a-z0-9_]{1,96}$/.test(checkName)) failStage('message_ack_trace_check_name');
+  await page.evaluate(async(value) => {
+    const manager = window.rootScope?.managers?.appMessagesManager;
+    if(typeof manager?.setRealClientMessageAckTraceCheckName !== 'function' ||
+        !await manager.setRealClientMessageAckTraceCheckName(value)) {
+      throw new Error('trace_manager_unavailable');
+    }
+  }, checkName).catch(() => failStage('message_ack_trace_check_name'));
+}
+
+async function captureMessageAckTrace(page) {
+  if(!page) return {records: [], diagnostics: undefined, captureError: 'page_unavailable'};
+  try {
+    const snapshot = await page.evaluate(async() => {
+      const manager = window.rootScope?.managers?.appMessagesManager;
+      if(typeof manager?.getRealClientMessageAckTraceSnapshot !== 'function') {
+        return {captureError: 'manager_unavailable'};
+      }
+      return await manager.getRealClientMessageAckTraceSnapshot();
+    });
+    if(snapshot?.captureError) return {records: [], diagnostics: undefined, captureError: snapshot.captureError};
+    if(!snapshot || typeof snapshot !== 'object' || !Array.isArray(snapshot.records)) {
+      return {records: [], diagnostics: undefined, captureError: 'snapshot_invalid'};
+    }
+
+    const rejectedReason = ['invalid_random_id', 'invalid_pending_temp_id', 'switch_disabled'].includes(snapshot.rejectedReason)
+      ? snapshot.rejectedReason
+      : null;
+    const beginCallsByCheckName = {};
+    if(snapshot.beginCallsByCheckName && typeof snapshot.beginCallsByCheckName === 'object') {
+      Object.entries(snapshot.beginCallsByCheckName).forEach(([checkName, calls]) => {
+        if(/^[a-z0-9_]{1,96}$/.test(checkName) && Number.isSafeInteger(calls) && calls >= 0) {
+          beginCallsByCheckName[checkName] = calls;
+        }
+      });
+    }
+    return {
+      records: snapshot.records.map(sanitizeMessageAckTraceRecord).filter(Boolean),
+      diagnostics: {
+        switchEnabled: snapshot.switchEnabled === true,
+        stateExists: snapshot.stateExists === true,
+        beginCalls: Number.isSafeInteger(snapshot.beginCalls) && snapshot.beginCalls >= 0 ? snapshot.beginCalls : 0,
+        rejectedReason,
+        beginCallsByCheckName
+      }
+    };
+  } catch {
+    return {records: [], diagnostics: undefined, captureError: 'page_evaluate_failed'};
+  }
+}
+
+function mergeMessageAckTraceCaptures(previous, current) {
+  const recordsByToken = new Map();
+  [...(previous?.records || []), ...(current?.records || [])].forEach((record) => recordsByToken.set(record.token, record));
+  const previousDiagnostics = previous?.diagnostics;
+  const currentDiagnostics = current?.diagnostics;
+  const beginCallsByCheckName = {...(previousDiagnostics?.beginCallsByCheckName || {})};
+  Object.entries(currentDiagnostics?.beginCallsByCheckName || {}).forEach(([checkName, calls]) => {
+    beginCallsByCheckName[checkName] = Math.max(beginCallsByCheckName[checkName] || 0, calls);
+  });
+  const captureError = current?.captureError || previous?.captureError;
+  return {
+    records: [...recordsByToken.values()],
+    diagnostics: previousDiagnostics || currentDiagnostics ? {
+      switchEnabled: previousDiagnostics?.switchEnabled === true || currentDiagnostics?.switchEnabled === true,
+      stateExists: previousDiagnostics?.stateExists === true || currentDiagnostics?.stateExists === true,
+      beginCalls: Math.max(previousDiagnostics?.beginCalls || 0, currentDiagnostics?.beginCalls || 0),
+      rejectedReason: currentDiagnostics?.rejectedReason || previousDiagnostics?.rejectedReason || null,
+      beginCallsByCheckName
+    } : undefined,
+    ...(captureError ? {captureError} : {})
+  };
+}
+
+async function checkpointMessageAckTrace(page) {
+  const captured = await captureMessageAckTrace(page);
+  const merged = mergeMessageAckTraceCaptures(messageAckTraceHistory.get(page), captured);
+  messageAckTraceHistory.set(page, merged);
+  if(merged.captureError) failStage('message_ack_trace_capture');
+}
+
+async function assertMessageAckTraceForCheck(page, checkName, failureStage) {
+  const captured = mergeMessageAckTraceCaptures(messageAckTraceHistory.get(page), await captureMessageAckTrace(page));
+  if(captured.captureError) failStage('message_ack_trace_capture');
+  messageAckTraceHistory.set(page, captured);
+  const traceCount = captured.records.filter((record) => record.checkName === checkName).length;
+  const beginCalls = captured.diagnostics?.beginCallsByCheckName?.[checkName] || 0;
+  if(captured.diagnostics?.switchEnabled !== true || captured.diagnostics?.stateExists !== true ||
+      beginCalls !== 1 || traceCount !== 1 || captured.diagnostics.rejectedReason) {
+    failStage(failureStage);
+  }
+}
+
+async function captureMessageAcknowledgementTraces(alicePage, bobPage) {
+  const [alice, bob] = await Promise.all([
+    captureMessageAckTrace(alicePage),
+    captureMessageAckTrace(bobPage)
+  ]);
+  const mergedAlice = mergeMessageAckTraceCaptures(alicePage ? messageAckTraceHistory.get(alicePage) : undefined, alice);
+  const mergedBob = mergeMessageAckTraceCaptures(bobPage ? messageAckTraceHistory.get(bobPage) : undefined, bob);
+  if(alicePage) messageAckTraceHistory.set(alicePage, mergedAlice);
+  if(bobPage) messageAckTraceHistory.set(bobPage, mergedBob);
+  return {
+    alice: mergedAlice.records,
+    bob: mergedBob.records,
+    diagnostics: {alice: mergedAlice.diagnostics || null, bob: mergedBob.diagnostics || null},
+    captureErrors: {
+      ...(mergedAlice.captureError ? {alice: mergedAlice.captureError} : {}),
+      ...(mergedBob.captureError ? {bob: mergedBob.captureError} : {})
+    }
+  };
+}
+
+function messageAckTraceReportFields(traceReport) {
+  return {
+    messageSendAcknowledgementTraces: {alice: traceReport.alice, bob: traceReport.bob},
+    messageSendAcknowledgementTraceDiagnostics: traceReport.diagnostics,
+    ...(Object.keys(traceReport.captureErrors).length > 0
+      ? {messageSendAcknowledgementTraceCaptureErrors: traceReport.captureErrors}
+      : {})
+  };
+}
 
 function readPageScenarioStep(page) {
   const pageAction = pageScenarioActions.get(page);
@@ -1646,6 +1868,7 @@ async function reloadWithNoOffscreenCanvas(page, name) {
   const url = new URL(PRIVATE_CSP_ORIGIN);
   url.searchParams.set('noOffscreenCanvas', '1');
   setPageScenarioStep(page, `${prefix}_reload`);
+  await checkpointMessageAckTrace(page);
   const response = await page.goto(url.toString(), {waitUntil: 'domcontentloaded', timeout: 30_000})
   .catch(() => failStage(`${prefix}_reload`));
   if(response?.status() !== 200) failStage(`${prefix}_artifact_load`);
@@ -1658,6 +1881,7 @@ async function reloadWithNoOffscreenCanvas(page, name) {
   .catch(() => failStage(`${prefix}_new_chat_menu`));
   setPageScenarioStep(page, `${prefix}_service_worker_controller`);
   await waitForServiceWorkerController(page, `${prefix}_service_worker_controller`);
+  await enableMessageAckTrace(page);
 }
 
 async function signIn(page, account, name, screenshotDirectory, capturedScreenshots, passwordEvidence) {
@@ -2780,10 +3004,15 @@ async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle)
   if(chat) {
     currentStage = `${stage}_fill`;
     await input.fill(text, {timeout: timeoutMs}).catch((error) => failGroupMessageStep(`${stage}_fill`, error));
+  } else {
+    await input.fill(text);
+  }
+  const checkName = `${stage}_message_count`;
+  await setMessageAckTraceCheckName(page, checkName);
+  if(chat) {
     currentStage = `${stage}_send`;
     await input.press('Enter', {timeout: timeoutMs}).catch((error) => failGroupMessageStep(`${stage}_send`, error));
   } else {
-    await input.fill(text);
     await input.press('Enter');
   }
   const message = (chat ? chat.locator('.bubble .message') : page.locator('#column-center .bubble .message')).filter({hasText: text});
@@ -2797,6 +3026,7 @@ async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle)
   } else {
     await waitForSingleSentMessage(message, text, timeoutMs).catch(() => failStage(`${stage}_message_count`));
   }
+  await assertMessageAckTraceForCheck(page, checkName, `${stage}_message_ack_trace`);
 }
 
 async function waitForMessageReaction(page, messageText, expectedCount, expectedChosen, stage) {
@@ -3169,11 +3399,13 @@ async function setCustomEmojiStatus(page, otherPage, docId) {
   // The server does not push status changes to other accounts, so the recipient sees it on its
   // next load of Alice's profile: reload and reopen the chat.
   setPageScenarioStep(otherPage, 'bob_custom_emoji_status_reload');
+  await checkpointMessageAckTrace(otherPage);
   await otherPage.reload({waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage('bob_custom_emoji_status_reload'));
   await otherPage.waitForFunction(() => {
     const chats = document.querySelector('#page-chats');
     return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
   }, null, {timeout: 45_000}).catch(() => failStage('bob_custom_emoji_status_reload_chats'));
+  await enableMessageAckTrace(otherPage);
   await selectUniquePeer(
     otherPage,
     '#column-left .input-search-input',
@@ -3214,9 +3446,11 @@ async function runCustomEmojiFeatureFlow(alice, bob) {
   // The picked emoji reaches the composer after its document loads; sending earlier drops it.
   await alice.page.waitForFunction((id) => !!document.querySelector(`#column-center .input-message-input:not(.input-field-input-fake) [data-doc-id="${id}"]`), docId, {timeout: 15_000})
   .catch(() => failStage('alice_custom_emoji_send_input'));
+  await setMessageAckTraceCheckName(alice.page, 'alice_custom_emoji_send_visible');
   await alice.page.locator('#column-center .btn-send').click()
   .catch(() => failStage('alice_custom_emoji_send_submit'));
   await waitForCustomEmojiMessage(alice.page, messageText, docId, 'alice_custom_emoji_send_visible');
+  await assertMessageAckTraceForCheck(alice.page, 'alice_custom_emoji_send_visible', 'alice_custom_emoji_send_ack_trace');
 
   const bobPeerId = await selectUniquePeer(
     bob.page,
@@ -3247,6 +3481,7 @@ async function sendChannelText(page, channelName, screenshotDirectory, capturedS
   const input = await openComposer(page, 'alice_channel_post', activeChannel.chat, timeoutMs);
   setPageActionStep(page, 'alice_channel_post_fill');
   await input.fill(CHANNEL_MESSAGE, {timeout: timeoutMs}).catch(() => failStage('alice_channel_post_fill'));
+  await setMessageAckTraceCheckName(page, 'alice_channel_post_visible');
   setPageActionStep(page, 'alice_channel_post_send');
   await input.press('Enter', {timeout: timeoutMs}).catch(() => failStage('alice_channel_post_send'));
   const message = activeChannel.chat.locator('.bubble .message').filter({hasText: CHANNEL_MESSAGE});
@@ -3255,6 +3490,7 @@ async function sendChannelText(page, channelName, screenshotDirectory, capturedS
   await page.waitForTimeout(600);
   const messageFailure = await getSingleExactMessageTextFailure(message, CHANNEL_MESSAGE);
   if(messageFailure) failStage(`alice_channel_post_${messageFailure}`);
+  await assertMessageAckTraceForCheck(page, 'alice_channel_post_visible', 'alice_channel_post_ack_trace');
   await captureState(page, screenshotDirectory, 'alice-channel-post', capturedScreenshots);
   return channelPeerId;
 }
@@ -6470,11 +6706,13 @@ async function runChannelScenario(alice, bob, runtimeConfig, capturedScreenshots
   await activeChannel.title.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('alice_channel_add_bob_complete'));
 
   setPageActionStep(bob.page, 'bob_channel_membership_refresh');
+  await checkpointMessageAckTrace(bob.page);
   await bob.page.reload({waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage('bob_channel_membership_refresh'));
   await bob.page.waitForFunction(() => {
     const chats = document.querySelector('#page-chats');
     return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
   }, null, {timeout: 45_000}).catch(() => failStage('bob_channel_membership_refresh'));
+  await enableMessageAckTrace(bob.page);
   const bobOtherRow = bob.page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${bobOtherPeerId}"]`);
   await bobOtherRow.waitFor({state: 'visible', timeout: 30_000}).catch(() => failStage('bob_channel_membership_refresh'));
   if(await bobOtherRow.getAttribute('data-peer-id') !== bobOtherPeerId) failStage('bob_channel_membership_refresh');
@@ -6515,12 +6753,14 @@ async function runChannelScenario(alice, bob, runtimeConfig, capturedScreenshots
   await captureState(bob.page, runtimeConfig.screenshotDirectory, 'bob-channel-return', capturedScreenshots);
 
   setPageActionStep(bob.page, 'bob_channel_reload');
+  await checkpointMessageAckTrace(bob.page);
   await bob.page.reload({waitUntil: 'domcontentloaded', timeout: 45_000}).catch(() => failStage('bob_channel_reload'));
   setPageScenarioStep(bob.page, 'bob_channel_reload_chats_list');
   await bob.page.waitForFunction(() => {
     const chats = document.querySelector('#page-chats');
     return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
   }, null, {timeout: 45_000}).catch(() => failStage('bob_channel_reload_chats_list'));
+  await enableMessageAckTrace(bob.page);
   await waitForActivePeerId(bob.page, bobOtherPeerId, 'bob_channel_other_conversation_after_reload');
   await waitForChannelDialogRow(bob.page, channelPeerId, channelName, 'bob_channel_membership_after_reload');
   await waitForUnreadCount(bob.page, channelPeerId, 0, 'bob_channel_unread_after_reload', 30_000, channelName);
@@ -6704,6 +6944,10 @@ async function main(dependencies = {}) {
     currentScenario = 'sign-in';
     await signIn(alice.page, accounts[0], 'alice', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
     await signIn(bob.page, accounts[1], 'bob', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
+    await Promise.all([
+      enableMessageAckTrace(alice.page),
+      enableMessageAckTrace(bob.page)
+    ]);
     for(const trace of traceContexts) {
       await trace.context.tracing.startChunk({title: `real-client ${trace.name} scenarios`});
       trace.active = true;
@@ -6752,12 +6996,14 @@ async function main(dependencies = {}) {
     await captureState(bob.page, runtime.screenshotDirectory, 'bob-first-message', capturedScreenshots);
 
     currentStage = 'bob_first_message_reload';
+    await checkpointMessageAckTrace(bob.page);
     await bob.page.reload({waitUntil: 'domcontentloaded', timeout: 30_000})
     .catch(() => failStage('bob_first_message_reload'));
     await bob.page.waitForFunction(() => {
       const chats = document.querySelector('#page-chats');
       return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
     }, null, {timeout: 45_000}).catch(() => failStage('bob_first_message_reload_chats'));
+    await enableMessageAckTrace(bob.page);
     const bobFirstMessageRowsAfterReload = bob.page.locator('#chatlist-container .chatlist-chat').filter({hasText: FIRST_MESSAGE});
     await bobFirstMessageRowsAfterReload.first().waitFor({state: 'visible', timeout: 30_000})
     .catch(() => failStage('bob_first_message_after_reload_chatlist_entry'));
@@ -6955,12 +7201,15 @@ async function main(dependencies = {}) {
     }
     if(observation.validateNetworkBlock(observationBlock)) failStage('worker_observation_unclassified');
 
+    const messageAckTraceReport = await captureMessageAcknowledgementTraces(alice.page, bob.page);
+    if(Object.keys(messageAckTraceReport.captureErrors).length > 0) failStage('message_ack_trace_capture');
     report = {
       status: 'passed',
       scenarios: report,
       contextCount: contexts.length,
       controlContextCount: CONTROL_PLAN.length,
       screenshotsCaptured: capturedScreenshots.count,
+      ...messageAckTraceReportFields(messageAckTraceReport),
       passwordEvidence,
       ...(runtime.scenarios?.includes('channel') ? {channelMembership: await captureChannelMembershipState()} : {}),
       ...(pollNegativeControlEvidence ? {pollNegativeControl: pollNegativeControlEvidence} : {}),
@@ -7023,6 +7272,7 @@ async function main(dependencies = {}) {
       const groupMember = groupMemberTrace.stages?.includes(currentStage) ? await captureGroupMemberState() : undefined;
       const groupMessage = groupMessageTrace.stage === currentStage ? await captureGroupMessageState() : undefined;
       const channelMembership = CHANNEL_MEMBERSHIP_STAGES.includes(currentStage) ? await captureChannelMembershipState() : undefined;
+      const messageAckTraceReport = await captureMessageAcknowledgementTraces(appPages.alice, appPages.bob);
       report = {
         status: 'failed',
         stage: currentStage,
@@ -7032,6 +7282,7 @@ async function main(dependencies = {}) {
         contextCount: contexts.length,
         controlContextCount: CONTROL_PLAN.length,
         screenshotsCaptured: capturedScreenshots.count,
+        ...messageAckTraceReportFields(messageAckTraceReport),
         passwordEvidence,
         ...(centerColumn ? {centerColumn} : {}),
         ...(groupNameForm ? {groupNameForm} : {}),
@@ -7120,7 +7371,14 @@ function emitReport(report, cleanupFailed, cleanupIssues = []) {
       ...(report?.failureTraceReady === true ? {failureTraceReady: true} : {}),
       ...(report?.workerCoverageBreakdown ? {workerCoverageBreakdown: report.workerCoverageBreakdown} : {}),
       ...(report?.workerOverflowReasons ? {workerOverflowReasons: report.workerOverflowReasons} : {}),
-      ...(report?.gateBreakdown ? {gateBreakdown: report.gateBreakdown} : {})
+      ...(report?.gateBreakdown ? {gateBreakdown: report.gateBreakdown} : {}),
+      ...(report?.messageSendAcknowledgementTraces ? {messageSendAcknowledgementTraces: report.messageSendAcknowledgementTraces} : {}),
+      ...(report?.messageSendAcknowledgementTraceDiagnostics
+        ? {messageSendAcknowledgementTraceDiagnostics: report.messageSendAcknowledgementTraceDiagnostics}
+        : {}),
+      ...(report?.messageSendAcknowledgementTraceCaptureErrors
+        ? {messageSendAcknowledgementTraceCaptureErrors: report.messageSendAcknowledgementTraceCaptureErrors}
+        : {})
     })}\n`);
     process.exitCode = 1;
     return;
@@ -7138,7 +7396,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {isCountedColdTrialConsoleError, classifyColdTrialErrors, classifyColdTrialFailure, exceedsEmojiRequestLimit, attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
+module.exports = {isCountedColdTrialConsoleError, classifyColdTrialErrors, classifyColdTrialFailure, exceedsEmojiRequestLimit, attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, captureMessageAcknowledgementTraces, assertMessageAckTraceForCheck, sanitizeMessageAckTraceRecord, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
