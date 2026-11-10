@@ -42,7 +42,7 @@ function scaleSamples(overrides = {}) {
   return Object.fromEntries(SCENARIOS.map(({key}) => {
     const override = overrides[key];
     const values = Array.isArray(override) ? override : Array.from({length: PERFORMANCE_REPEATS}, () => override || {});
-    return [key, values.map((entry) => sample(entry))];
+    return [key, values.map((entry) => sample(key === 'sendMessage' ? {appSendUiMs: entry.ms ?? 100, ...entry} : entry))];
   }));
 }
 
@@ -179,6 +179,32 @@ test('blocks only when the paired lower bound clears the relative minimum effect
 
   assert.equal(evaluatePerformance(timingReport(baseTimes, justBelow)).blockingFailures.some((failure) => failure.startsWith('1x chatOpen:')), false);
   assert.ok(evaluatePerformance(timingReport(baseTimes, justAbove)).blockingFailures.some((failure) => failure.startsWith('1x chatOpen:')));
+});
+
+test('sendMessage timing gates and summary use Enter-to-bubble values', () => {
+  const base = scaleVariants();
+  const head = scaleVariants();
+  base['1x'].sendMessage = Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: 599, appSendUiMs: 279.2}));
+  head['1x'].sendMessage = Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: 599, appSendUiMs: 321.2}));
+  base['100x'].sendMessage = Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: 599, appSendUiMs: 338.9}));
+  head['100x'].sendMessage = Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: 599, appSendUiMs: 389.9}));
+
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.startsWith('1x sendMessage: response timing:') && failure.includes('minimum effect 41.88 ms')));
+  assert.ok(result.blockingFailures.some((failure) => failure.startsWith('100x sendMessage: response timing:') && failure.includes('minimum effect 50.835 ms')));
+  assert.equal(result.rows.find((row) => row.key === 'sendMessage' && row.scale === '1x').base.ms, 279.2);
+  assert.equal(result.rows.find((row) => row.key === 'sendMessage' && row.scale === '1x').head.ms, 321.2);
+  assert.match(formatPerformanceTable(result), /\| Send a message, Enter-to-bubble \(1x\) \| 321\.2 \|/);
+});
+
+test('sendMessage timing gate fails closed when Enter-to-bubble timing is missing', () => {
+  const base = scaleVariants();
+  delete base['1x'].sendMessage[0].appSendUiMs;
+
+  const result = evaluatePerformance(report({base}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('1x sendMessage: base in-page Enter-to-bubble timing is missing or invalid in sample 1')));
 });
 
 test('requires exactly nine complete base and head samples for every PR timing scenario', () => {
