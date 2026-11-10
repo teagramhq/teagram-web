@@ -27,7 +27,7 @@ test('replay keeps worker output and order while recording recorder overhead', a
     logLevel: 'silent'
   });
   await page.addScriptTag({content: bundle.outputFiles[0].text});
-  const result = await page.evaluate(async() => {
+  const result = await page.evaluate(async(repeats) => {
     const {SuperMessagePort, reconcilePeer, usePeers, installWorkerMessageAttribution} = (window as any).__workerReplay;
     const port = new SuperMessagePort('replay');
     const originalHandlers = {...port.processTaskMap};
@@ -110,9 +110,9 @@ test('replay keeps worker output and order while recording recorder overhead', a
       const middle = Math.floor(sorted.length / 2);
       return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
     };
-    const groupedMedians = (values: number[]) => Array.from({length: PERFORMANCE_REPEATS}, (_, index) => {
-      const start = Math.floor(index * values.length / PERFORMANCE_REPEATS);
-      const end = Math.floor((index + 1) * values.length / PERFORMANCE_REPEATS);
+    const groupedMedians = (values: number[]) => Array.from({length: repeats}, (_, index) => {
+      const start = Math.floor(index * values.length / repeats);
+      const end = Math.floor((index + 1) * values.length / repeats);
       return median(values.slice(start, end));
     });
     return Object.fromEntries(Object.entries(results).map(([name, value]) => {
@@ -126,7 +126,7 @@ test('replay keeps worker output and order while recording recorder overhead', a
         output: outputs[name][0]
       }];
     }));
-  });
+  }, PERFORMANCE_REPEATS);
   console.log('WORKER_REPLAY', JSON.stringify(result));
   if(process.env.PERF_RECORDER_REPLAY_PATH) writeFileSync(process.env.PERF_RECORDER_REPLAY_PATH, JSON.stringify(result, null, 2));
   for(const [name, measurement] of Object.entries(result) as Array<[string, any]>) {

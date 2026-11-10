@@ -8,7 +8,7 @@ import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes, trackBu
 import {CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
-import {LOTTIE_FRAME_BG_CSS, waitUntilOnScreen} from './lottieFrameMeasurement';
+import {LOTTIE_FRAME_BG_CSS, waitForFirstStickerFrame, waitUntilOnScreen} from './lottieFrameMeasurement';
 
 type Fixture = {
   owner: number,
@@ -1344,21 +1344,18 @@ async function measureFirstStickerFrame(browser: Browser, run: VariantRun, fixtu
     await expect(page.locator('#page-chats .bubble.sticker-animated').first()).toBeVisible({timeout: 60_000});
 
     const onScreenAt = await waitUntilOnScreen(page, page.locator('#performance-first-sticker'), 20_000);
-    const {clickAt, firstFrameAt} = await page.evaluate(() => ({
-      clickAt: (window as any).__teagramPerf.clickAt as number,
-      firstFrameAt: (window as any).__performanceFirstStickerFrameAt as number | undefined
-    }));
+    expect(onScreenAt, `${run.variant} first sticker frame never reached the screen`).not.toBeNull();
+    const firstFrameAt = await waitForFirstStickerFrame(page, 20_000);
+    const {clickAt} = await page.evaluate(() => ({clickAt: (window as any).__teagramPerf.clickAt as number}));
     await page.evaluate(() => {
       const container = document.getElementById('performance-first-sticker');
       if(container) (window as any).lottieLoader.getAnimation(container)?.remove();
       container?.remove();
     });
 
-    expect(onScreenAt, `${run.variant} first sticker frame never reached the screen`).not.toBeNull();
-    expect(Number.isFinite(firstFrameAt), `${run.variant} firstFrame event was not recorded`).toBe(true);
     return {
       workerReadyBeforeChat,
-      clickToFirstFrameMs: firstFrameAt! - clickAt,
+      clickToFirstFrameMs: firstFrameAt - clickAt,
       clickToVisibleFrameMs: onScreenAt! - clickAt
     };
   } finally {
@@ -1587,7 +1584,6 @@ test('measures first animated sticker frame after opening a chat', async({browse
     };
     console.log(`[first-sticker] ${JSON.stringify({medians, samples})}`);
     measurementsComplete = true;
-
   } catch(error) {
     measurementFailed = true;
     throw error;

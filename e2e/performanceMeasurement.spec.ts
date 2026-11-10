@@ -2,6 +2,20 @@ import {expect, test} from '@playwright/test';
 import {beginMeasurement, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList} from './performanceMeasurement';
 import {createServer, type ServerResponse} from 'node:http';
 import * as bundleMeasurement from './performanceBundleBytes';
+import {LOTTIE_FRAME_BG_CSS, waitForFirstStickerFrame, waitUntilOnScreen} from './lottieFrameMeasurement';
+
+test('waits for the first sticker frame event after pixels are visible', async({page}) => {
+  await page.setContent(`<div id="performance-first-sticker" style="width:80px;height:80px;background:${LOTTIE_FRAME_BG_CSS}"><div style="width:40px;height:40px;background:blue"></div></div>`);
+  const visibleAt = await waitUntilOnScreen(page, page.locator('#performance-first-sticker'), 1_000);
+  expect(visibleAt).not.toBeNull();
+
+  const firstFrame = waitForFirstStickerFrame(page, 1_000);
+  await page.waitForTimeout(25);
+  await page.evaluate(() => { (window as any).__performanceFirstStickerFrameAt = performance.now(); });
+
+  const firstFrameAt = await firstFrame;
+  expect(firstFrameAt).toBeGreaterThanOrEqual(visibleAt!);
+});
 
 test('forgets an abandoned shared-worker request after document reload', async({page}) => {
   const held: ServerResponse[] = [];
