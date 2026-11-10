@@ -621,6 +621,40 @@ export default class Chat extends EventListenerBase<{
     this.type = type;
   }
 
+  /**
+   * Builds the topbar, bubbles and input once. `inited` still means "a peer was opened here", so a
+   * chat built ahead of time stays the one `setInnerPeer` reuses.
+   */
+  public buildParts() {
+    if(!this.init) {
+      return;
+    }
+
+    this.init(/* peerId */);
+    this.init = null;
+  }
+
+  /** Builds the parts in an idle moment, so the first open does not pay for them. */
+  public buildPartsWhenIdle() {
+    if(!this.init || this.isPreview) {
+      return;
+    }
+
+    // * nothing is on screen until a peer opens
+    this.container.hidden = true;
+    const build = () => {
+      if(!this.inited) {
+        this.buildParts();
+      }
+    };
+
+    if('requestIdleCallback' in window) {
+      window.requestIdleCallback(build, {timeout: 3000});
+    } else {
+      setTimeout(build, 1000);
+    }
+  }
+
   public init(/* peerId: PeerId */) {
     // this.initPeerId = peerId;
 
@@ -1044,11 +1078,7 @@ export default class Chat extends EventListenerBase<{
     if(!peerId) {
       this.inited = undefined;
     } else if(!this.inited) {
-      if(this.init) {
-        this.init(/* peerId */);
-        this.init = null;
-      }
-
+      this.buildParts();
       this.inited = true;
     }
 

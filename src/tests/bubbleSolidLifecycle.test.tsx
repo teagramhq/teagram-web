@@ -5446,3 +5446,198 @@ test('handles a cancelled quick-reaction sticker render after hover teardown', a
     vi.useRealTimers();
   }
 });
+
+describe('first history page asked for during a peer change', () => {
+  const topMid = 100;
+  const topFullMid = makeFullMid(peerId, topMid);
+  const user = {_: 'user', id: peerId, pFlags: {}};
+  const setPeerMirror = (peer: unknown) => {
+    (moduleMocks.apiManagerProxy as any).getPeer = vi.fn(() => peer);
+  };
+
+  const createHarness = (overrides: Record<string, unknown> = {}) => {
+    const requestHistory = vi.fn(async() => ({cached: false, result: Promise.resolve({history: [99, 98]})}));
+    const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+      setPeerTempId: 1,
+      isFirstLoad: true,
+      bubbleGroups: {groups: []},
+      chat: {
+        peerId,
+        type: ChatType.Chat,
+        isBroadcast: false,
+        getHistoryStorage: () => ({maxId: topMid, history: {slice: {isEnd: () => false}, findSliceOffset: (): undefined => undefined}}),
+        getMessage: vi.fn(() => ({}))
+      },
+      requestHistory,
+      log: vi.fn(),
+      ...overrides
+    }) as any;
+    return {harness, requestHistory};
+  };
+
+  beforeEach(() => setPeerMirror(user));
+  afterAll(() => setPeerMirror(undefined));
+
+  test('requests the page the open will ask for and hands it to getHistory once', async() => {
+    const {harness, requestHistory} = createHarness();
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+
+    expect(requestHistory).toHaveBeenCalledTimes(1);
+    const loadCount = getInitialHistoryLoadCount(windowSize.height);
+    expect(requestHistory).toHaveBeenCalledWith(topFullMid, loadCount, 0);
+
+    const performHistoryResult = vi.fn(async() => undefined);
+    harness.performHistoryResult = performHistoryResult;
+    await harness.getHistory(topFullMid, true, false, undefined);
+    expect(requestHistory).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(performHistoryResult).toHaveBeenCalled());
+
+    // a later page of the same peer change is a different request
+    harness.isFirstLoad = false;
+    await harness.getHistory(topFullMid, true, false, undefined);
+    expect(requestHistory).toHaveBeenCalledTimes(2);
+  });
+
+  test('plans from the opened peer, not from state the previous peer left behind', () => {
+    const {harness, requestHistory} = createHarness({isFirstLoad: false});
+    harness.chat.isBroadcast = true;
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+
+    expect(requestHistory).toHaveBeenCalledWith(topFullMid, getInitialHistoryLoadCount(windowSize.height), 0);
+  });
+
+  test('does not use a prefetch for another peer change', () => {
+    const {harness, requestHistory} = createHarness();
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+    const loadCount = getInitialHistoryLoadCount(windowSize.height);
+
+    // A -> B -> A: the second A is a new peer change with its own tempId
+    harness.setPeerTempId = 3;
+    expect(harness.takeHistoryPrefetch(peerId, topFullMid, loadCount, 0)).toBeUndefined();
+    harness.setPeerTempId = 1;
+    expect(harness.takeHistoryPrefetch(11 as PeerId, topFullMid, loadCount, 0)).toBeUndefined();
+    expect(harness.takeHistoryPrefetch(peerId, topFullMid, loadCount + 1, 0)).toBeUndefined();
+    expect(harness.takeHistoryPrefetch(peerId, topFullMid, loadCount, 0)).toBe(requestHistory.mock.results[0].value);
+  });
+
+  test('asks for nothing once the peer change is superseded', () => {
+    const {harness, requestHistory} = createHarness({setPeerTempId: 2});
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+    expect(requestHistory).not.toHaveBeenCalled();
+
+    harness.setPeerTempId = 1;
+    harness.chat.peerId = 11 as PeerId;
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+    expect(requestHistory).not.toHaveBeenCalled();
+  });
+
+  test('leaves restricted peers and chats to the regular request', () => {
+    const {harness, requestHistory} = createHarness();
+    setPeerMirror({...user, pFlags: {restricted: true}, restriction_reason: [{_: 'restrictionReason', platform: 'all', reason: 'porn', text: ''}]});
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+    setPeerMirror(undefined);
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+    setPeerMirror(user);
+    harness.chat.peerId = (-5) as PeerId;
+    harness.prefetchOpenHistory(1, (-5) as PeerId, 0, undefined);
+
+    expect(requestHistory).not.toHaveBeenCalled();
+  });
+
+  test('a prefetch nobody takes does not leave an unhandled rejection', async() => {
+    const failure = new Error('worker gone');
+    const {harness} = createHarness({requestHistory: vi.fn(() => Promise.reject(failure))});
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandledRejection);
+    try {
+      harness.prefetchOpenHistory(1, peerId, 0, undefined);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+    }
+  });
+});
+
+describe('building the chat parts ahead of the first open', () => {
+  const createChat = () => {
+    const init = vi.fn();
+    const chat = Object.assign(Object.create(Chat.prototype), {
+      init,
+      container: document.createElement('div'),
+      isPreview: false
+    }) as any;
+    return {chat, init};
+  };
+
+  const runIdle = () => {
+    const callbacks: Array<() => void> = [];
+    vi.stubGlobal('requestIdleCallback', vi.fn((callback: () => void) => callbacks.push(callback)));
+    Object.defineProperty(window, 'requestIdleCallback', {configurable: true, value: (globalThis as any).requestIdleCallback});
+    return () => callbacks.splice(0).forEach((callback) => callback());
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete (window as any).requestIdleCallback;
+  });
+
+  test('builds once when idle, stays hidden and does not count as an opened chat', () => {
+    const flush = runIdle();
+    const {chat, init} = createChat();
+    chat.buildPartsWhenIdle();
+
+    expect(init).not.toHaveBeenCalled();
+    expect(chat.container.hidden).toBe(true);
+    flush();
+    expect(init).toHaveBeenCalledTimes(1);
+    expect(chat.init).toBeNull();
+    expect(chat.inited).toBeFalsy();
+
+    chat.buildParts();
+    expect(init).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not build twice when the first open comes before the idle moment', () => {
+    const flush = runIdle();
+    const {chat, init} = createChat();
+    chat.buildPartsWhenIdle();
+    chat.buildParts();
+    flush();
+
+    expect(init).toHaveBeenCalledTimes(1);
+  });
+
+  test('a preview chat is left alone', () => {
+    const flush = runIdle();
+    const {chat, init} = createChat();
+    chat.isPreview = true;
+    chat.buildPartsWhenIdle();
+    flush();
+
+    expect(init).not.toHaveBeenCalled();
+    expect(chat.container.hidden).toBe(false);
+  });
+});
+
+describe('looking up where a peer migrated to', () => {
+  const lookup = (peer: PeerId) => {
+    const getPeerMigratedTo = vi.fn(async() => undefined as PeerId | undefined);
+    const result = (AppImManager.prototype as any).getMigratedPeerId.call({managers: {appPeersManager: {getPeerMigratedTo}}}, peer);
+    return {result, getPeerMigratedTo};
+  };
+
+  test('skips the worker for a user and for no peer', async() => {
+    expect(await lookup(peerId).result).toBeUndefined();
+    expect(lookup(peerId).getPeerMigratedTo).not.toHaveBeenCalled();
+    expect(lookup(0 as PeerId).getPeerMigratedTo).not.toHaveBeenCalled();
+  });
+
+  test('still asks for a group', async() => {
+    const group = (-20) as PeerId;
+    const {result, getPeerMigratedTo} = lookup(group);
+    await result;
+    expect(getPeerMigratedTo).toHaveBeenCalledWith(group);
+  });
+});

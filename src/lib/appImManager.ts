@@ -365,7 +365,7 @@ export class AppImManager extends EventListenerBase<{
 
     this.columnEl.append(this.chatsContainer);
 
-    this.createNewChat();
+    this.createNewChat().buildPartsWhenIdle();
     this.chatsSelectTab(this.chat);
 
     appNavigationController.onHashChange = this.onHashChange;
@@ -1818,6 +1818,8 @@ export class AppImManager extends EventListenerBase<{
         !isTargetAnInput &&
         !IS_TOUCH_SUPPORTED &&
         (!mediaSizes.isMobile || this.tabId === APP_TABS.CHAT) &&
+        // * a chat can be built before any peer opens in it, it must not take the typing
+        chat.peerId &&
         !chat.selection.isSelecting &&
         !chat.input.recording &&
         chat.input.messageInput.isContentEditable
@@ -3252,9 +3254,14 @@ export class AppImManager extends EventListenerBase<{
     }, 250 + 100);
   }
 
+  // * a user never migrates, so it skips the worker round trip on the chat-open path
+  private getMigratedPeerId(peerId: PeerId): MaybePromise<PeerId | undefined> {
+    return peerId && !peerId.isUser() ? this.managers.appPeersManager.getPeerMigratedTo(peerId) : undefined;
+  }
+
   public async setPeer(options: Partial<ChatSetInnerPeerOptions> = {}, animate?: boolean): Promise<boolean> {
     options.peerId ??= NULL_PEER_ID;
-    options.peerId = await this.managers.appPeersManager.getPeerMigratedTo(options.peerId) || options.peerId;
+    options.peerId = await this.getMigratedPeerId(options.peerId) || options.peerId;
 
     const {peerId, lastMsgId, threadId} = options;
 
@@ -3360,7 +3367,7 @@ export class AppImManager extends EventListenerBase<{
       return;
     }
 
-    peerId = options.peerId = await this.managers.appPeersManager.getPeerMigratedTo(peerId) || peerId;
+    peerId = options.peerId = await this.getMigratedPeerId(peerId) || peerId;
 
     if(!options.type) {
       if(options.threadId) {
