@@ -50,11 +50,12 @@ function createSendHarness() {
   const manager = new AppMessagesManager() as any;
   const dispatchEvent = vi.fn();
   const invokeApiAfter = vi.fn((..._args: any[]) => apiResult);
+  const historyMids = new Set<number>();
   const history = {
     history: {
-      unshift: vi.fn(),
-      delete: vi.fn(),
-      findSlice: vi.fn(),
+      unshift: vi.fn((mid: number) => historyMids.add(mid)),
+      delete: vi.fn((mid: number) => historyMids.delete(mid)),
+      findSlice: vi.fn((mid: number) => historyMids.has(mid)),
       first: {isEnd: () => false, length: 0}
     },
     count: null as number | null,
@@ -107,13 +108,13 @@ function createSendHarness() {
     setMessageToStorage: (storage: Map<number, unknown>, message: {mid: number}) => storage.set(message.mid, message),
     setDialogTopMessage: vi.fn(),
     updateMessageContextForInserting: vi.fn(),
-    getMessageFromStorage: (storage: Map<number, unknown>, mid: number) => mid === tempId ? tempMessage : storage?.get(mid),
+    getMessageFromStorage: (storage: Map<number, unknown>, mid: number) => storage?.get(mid) ?? (mid === tempId ? tempMessage : undefined),
     onMessagesSendError: vi.fn(),
     updateMessageContextForDeletion: vi.fn(),
     getDialogOnly: (): undefined => undefined,
     deletePendingTopMsg: vi.fn(),
     takeTempFinalizeCallbacks: (): undefined => undefined,
-    deleteMessageFromStorage: vi.fn(),
+    deleteMessageFromStorage: vi.fn((storage: Map<number, unknown>, mid: number) => storage.delete(mid)),
     handleReleasingMessage: vi.fn(),
     onMessageModification: vi.fn(),
     updateMessageRepliesIfNeeded: vi.fn(),
@@ -138,6 +139,7 @@ function createSendHarness() {
     finalizePendingMessage,
     invokeApiAfter,
     resolveApiResult,
+    historyMids,
     get randomId() { return invokeApiAfter.mock.calls[0]?.[1]?.random_id; },
     peerId,
     tempId
@@ -231,6 +233,31 @@ describe('real-client text-send acknowledgement trace', () => {
       beginCallsByCheckName: {alice_group_message_message_count: 1}
     });
     expect(JSON.stringify(records)).not.toContain('private body');
+  });
+
+  it('applies a matching send result during sync and deduplicates its difference replay', async() => {
+    const harness = createSendHarness();
+    harness.apiUpdatesManager.updatesState.syncLoading = new Promise<void>(() => undefined);
+    const sendPromise = harness.manager.sendText({peerId: harness.peerId, text: 'private body'});
+
+    await vi.waitFor(() => expect(harness.invokeApiAfter).toHaveBeenCalled());
+    const randomId = harness.randomId;
+    harness.apiUpdatesManager.updatesState.seq = 1;
+    const sendResult = createSendResult(randomId);
+    sendResult.seq = 3;
+    sendResult.seq_start = 3;
+    harness.resolveApiResult(sendResult);
+    await sendPromise;
+
+    harness.apiUpdatesManager.saveUpdate(createNewMessageUpdate(), {fromDifference: true});
+
+    expect(harness.manager.pendingByRandomId[randomId]).toBeUndefined();
+    expect(harness.finalizePendingMessage).toHaveBeenCalledTimes(1);
+    const sentEvents = harness.dispatchEvent.mock.calls.filter(([name]) => name === 'message_sent');
+    expect(sentEvents).toHaveLength(1);
+    expect(sentEvents[0][1]).toMatchObject({tempId: harness.tempId, mid: 2, message: {id: 2, mid: 2}});
+    expect(harness.historyMids).toEqual(new Set([2]));
+    expect([...harness.manager.getHistoryMessagesStorage(harness.peerId).keys()]).toEqual([2]);
   });
 
   it('keeps the first pending lookup summary when a duplicate update arrives after send', async() => {
