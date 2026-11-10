@@ -17,9 +17,8 @@ function setTraceSwitch(enabled: boolean) {
   delete scope[TRACE_STATE];
 }
 
-function createSendHarness() {
+function createSendHarness({tempId = 1.0001}: {tempId?: number} = {}) {
   const peerId = 777 as PeerId;
-  const tempId = 1.0001;
   const selfId = 1 as PeerId;
   const tempMessage = {_: 'message', mid: tempId, pFlags: {is_outgoing: true}};
   let resolveApiResult: (value: unknown) => void = () => undefined;
@@ -146,12 +145,12 @@ function createSendHarness() {
   };
 }
 
-function createNewMessageUpdate(): any {
+function createNewMessageUpdate(serverId = 2): any {
   return {
     _: 'updateNewMessage',
     message: {
       _: 'message',
-      id: 2,
+      id: serverId,
       message: '',
       pFlags: {out: true},
       from_id: {_: 'peerUser', user_id: 777},
@@ -160,14 +159,14 @@ function createNewMessageUpdate(): any {
   };
 }
 
-function createSendResult(randomId: string): any {
+function createSendResult(randomId: string, serverId = 2): any {
   return {
     _: 'updates',
     users: [],
     chats: [],
     updates: [
-      {_: 'updateMessageID', random_id: randomId, id: 2},
-      createNewMessageUpdate()
+      {_: 'updateMessageID', random_id: randomId, id: serverId},
+      createNewMessageUpdate(serverId)
     ]
   };
 }
@@ -236,28 +235,28 @@ describe('real-client text-send acknowledgement trace', () => {
   });
 
   it('applies a matching send result during sync and deduplicates its difference replay', async() => {
-    const harness = createSendHarness();
+    const harness = createSendHarness({tempId: 2.0001});
     harness.apiUpdatesManager.updatesState.syncLoading = new Promise<void>(() => undefined);
     const sendPromise = harness.manager.sendText({peerId: harness.peerId, text: 'private body'});
 
     await vi.waitFor(() => expect(harness.invokeApiAfter).toHaveBeenCalled());
     const randomId = harness.randomId;
     harness.apiUpdatesManager.updatesState.seq = 1;
-    const sendResult = createSendResult(randomId);
+    const sendResult = createSendResult(randomId, 3);
     sendResult.seq = 3;
     sendResult.seq_start = 3;
     harness.resolveApiResult(sendResult);
     await sendPromise;
 
-    harness.apiUpdatesManager.saveUpdate(createNewMessageUpdate(), {fromDifference: true});
+    harness.apiUpdatesManager.saveUpdate(createNewMessageUpdate(3), {fromDifference: true});
 
     expect(harness.manager.pendingByRandomId[randomId]).toBeUndefined();
     expect(harness.finalizePendingMessage).toHaveBeenCalledTimes(1);
     const sentEvents = harness.dispatchEvent.mock.calls.filter(([name]) => name === 'message_sent');
     expect(sentEvents).toHaveLength(1);
-    expect(sentEvents[0][1]).toMatchObject({tempId: harness.tempId, mid: 2, message: {id: 2, mid: 2}});
-    expect(harness.historyMids).toEqual(new Set([2]));
-    expect([...harness.manager.getHistoryMessagesStorage(harness.peerId).keys()]).toEqual([2]);
+    expect(sentEvents[0][1]).toMatchObject({tempId: 2.0001, mid: 3, message: {id: 3, mid: 3}});
+    expect(harness.historyMids).toEqual(new Set([3]));
+    expect([...harness.manager.getHistoryMessagesStorage(harness.peerId).keys()]).toEqual([3]);
   });
 
   it('keeps the first pending lookup summary when a duplicate update arrives after send', async() => {
