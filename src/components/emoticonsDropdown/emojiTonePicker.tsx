@@ -101,13 +101,12 @@ export default function showEmojiTonePicker({
   const overlayRoot = getOverlayRoot();
   const doc = overlayRoot.ownerDocument;
   let container: HTMLDivElement;
+  // resolved before onSelect, which replaces the glyph that was right-clicked
+  const emojiTarget = event.target && findUpClassName(event.target, 'super-emoji');
   const selectTone = (tone: EmojiSkinTone) => {
     onSelect(tone);
-    if(event.target) {
-      const emojiTarget = findUpClassName(event.target, 'super-emoji');
-      if(emojiTarget) {
-        simulateClickEvent(emojiTarget);
-      }
+    if(emojiTarget) {
+      simulateClickEvent(emojiTarget);
     }
   };
   const dispose = createRoot((dispose) => {

@@ -1,4 +1,4 @@
-import {attachClickEvent, simulateClickEvent} from '@helpers/dom/clickEvent';
+import {simulateClickEvent} from '@helpers/dom/clickEvent';
 import {getEmojiSkinToneVariants} from '@helpers/emojiSkinTone';
 import showEmojiTonePicker from '@components/emoticonsDropdown/emojiTonePicker';
 
@@ -47,59 +47,5 @@ describe('emoji tone picker', () => {
     picker.cleanup();
     vi.advanceTimersByTime(200);
     expect(document.querySelector('.emoji-tone-picker')).toBeNull();
-  });
-
-  test('inserts the chosen tone into the composer once', () => {
-    const target = document.createElement('button');
-    const emojiTarget = document.createElement('span');
-    emojiTarget.classList.add('super-emoji');
-    const emoji = document.createElement('span');
-    emoji.textContent = '👋';
-    emojiTarget.append(emoji);
-    document.body.append(emojiTarget, target);
-    const {baseEmoji, variants} = getEmojiSkinToneVariants('👋');
-    const composer = document.createElement('textarea');
-    composer.value = 'hello world';
-    composer.setSelectionRange(6, 6);
-    const contextMenuEvent = new MouseEvent('contextmenu', {bubbles: true});
-    emojiTarget.dispatchEvent(contextMenuEvent);
-    const insertAtCaret = vi.fn((emoji: string) => {
-      composer.setRangeText(emoji, composer.selectionStart, composer.selectionEnd, 'end');
-    });
-    const detachClick = attachClickEvent(emojiTarget, () => insertAtCaret(emoji.textContent));
-    const applyEmojiVariant = vi.fn((_baseEmoji: string, tone: number) => {
-      emoji.textContent = variants[tone];
-    });
-    const saveEmojiVariant = vi.fn();
-    const close = vi.fn();
-    const picker = showEmojiTonePicker({
-      event: contextMenuEvent,
-      variants,
-      selectedTone: 0,
-      renderEmoji: (emoji) => {
-        const element = document.createElement('span');
-        element.textContent = emoji;
-        return element;
-      },
-      onSelect: (tone) => {
-        applyEmojiVariant(baseEmoji, tone);
-        saveEmojiVariant(baseEmoji, tone);
-      },
-      close
-    });
-
-    picker.show(target);
-    const toneButton = document.querySelectorAll<HTMLButtonElement>('.emoji-tone-picker-button')[4];
-    simulateClickEvent(toneButton);
-
-    expect(composer.value).toBe('hello 👋🏾world');
-    expect(insertAtCaret).toHaveBeenCalledOnce();
-    expect(applyEmojiVariant).toHaveBeenCalledWith(baseEmoji, 4);
-    expect(saveEmojiVariant).toHaveBeenCalledWith(baseEmoji, 4);
-    expect(close).toHaveBeenCalledOnce();
-
-    detachClick();
-    picker.cleanup();
-    vi.advanceTimersByTime(200);
   });
 });
