@@ -34,3 +34,17 @@ export async function waitForFirstStickerFrame(page: Page, timeoutMs: number): P
   });
   return page.evaluate(() => (window as any).__performanceFirstStickerFrameAt as number);
 }
+
+export type FirstStickerPaintTiming = {
+  workerRequestAt: number,
+  firstFrameAt: number,
+  nextPaintAt: number
+};
+
+export async function waitForFirstStickerPaint(page: Page, timeoutMs: number): Promise<FirstStickerPaintTiming> {
+  await page.waitForFunction(() => {
+    const timing = (window as any).__performanceFirstStickerPaintTiming;
+    return Number.isFinite(timing?.workerRequestAt) && Number.isFinite(timing?.firstFrameAt) && Number.isFinite(timing?.nextPaintAt);
+  }, undefined, {polling: 'raf', timeout: timeoutMs});
+  return page.evaluate(() => (window as any).__performanceFirstStickerPaintTiming as FirstStickerPaintTiming);
+}
