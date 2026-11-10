@@ -1121,13 +1121,67 @@ async function searchContacts(page: Page, requests: {value: number}, scale: Scal
   return captureScenario(page, requests, traceEnabled, onMeasurementBoundary, collectWalkDiagnostics);
 }
 
+async function waitForGlobalSearchResult(page: Page, query: string, recordTimestamp: boolean) {
+  await page.waitForFunction(({query, recordTimestamp}) => {
+    const perf = (window as any).__teagramPerf;
+    const stages = perf?.globalSearchStages;
+    if(recordTimestamp && (!Number.isFinite(stages?.queryEnteredAtMs) || !Number.isFinite(stages?.debounceSettledAtMs))) return false;
+    const input = document.querySelector<HTMLInputElement>('#column-left .item-main .sidebar-header .input-search-input');
+    if(input?.value !== query) return false;
+
+    const isVisible = (row: HTMLElement) => {
+      let current: HTMLElement | null = row;
+      while(current) {
+        const style = getComputedStyle(current);
+        if(style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        current = current.parentElement;
+      }
+      const rect = row.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const baselineRows = perf.globalSearchBaselineRows as WeakSet<Element>;
+    for(const row of document.querySelectorAll<HTMLElement>('#search-container .chatlist-chat')) {
+      const messageText = row.querySelector('.dialog-subtitle-parts')?.textContent || '';
+      const matchesCurrentQuery = (window as any).__teagramIsCurrentGlobalSearchResult({
+        query,
+        inputValue: input.value,
+        messageText,
+        visible: isVisible(row),
+        presentBeforeQuery: baselineRows.has(row)
+      });
+      if(!matchesCurrentQuery) continue;
+
+      if(recordTimestamp) stages.matchingResultVisibleAtMs = performance.now();
+      return true;
+    }
+    return false;
+  }, {query, recordTimestamp}, {polling: 'raf', timeout: 90_000});
+}
+
+async function warmGlobalSearch(page: Page, query: string) {
+  const input = page.locator('#column-left .item-main .sidebar-header .input-search-input');
+  await page.evaluate(() => {
+    (window as any).__teagramPerf.globalSearchBaselineRows = new WeakSet(document.querySelectorAll('#search-container .chatlist-chat'));
+  });
+  await input.fill(query);
+  await waitForGlobalSearchResult(page, query, false);
+
+  // Base and head share the fixture server. Warm the same query in each fresh page so
+  // the first side of a pair cannot pay a cold search-path cost by itself.
+  await page.locator('#column-left .sidebar-back-button.is-visible').click();
+  await expect(page.locator('#search-container.active')).toHaveCount(0, {timeout: 10_000});
+  await page.keyboard.press('Control+f');
+  await expect(input).toBeVisible();
+}
+
 async function globalSearch(page: Page, requests: {value: number}, scale: Scale, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void, collectWalkDiagnostics = false) {
   await page.locator('#contacts-container .sidebar-close-button').click();
   await page.keyboard.press('Control+f');
   const input = page.locator('#column-left .item-main .sidebar-header .input-search-input');
   await expect(input).toBeVisible();
-  await beginScenario(page, requests, traceEnabled);
   const query = `needle ${scale === '1x' ? '5000' : '500000'}`;
+  await warmGlobalSearch(page, query);
+  await beginScenario(page, requests, traceEnabled);
   await page.evaluate((query) => {
     const perf = (window as any).__teagramPerf;
     const input = document.querySelector<HTMLInputElement>('#column-left .item-main .sidebar-header .input-search-input');
@@ -1158,40 +1212,7 @@ async function globalSearch(page: Page, requests: {value: number}, scale: Scale,
   }, query);
   await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace(true));
   await input.fill(query);
-  await page.waitForFunction((query) => {
-    const perf = (window as any).__teagramPerf;
-    const stages = perf?.globalSearchStages;
-    if(!Number.isFinite(stages?.queryEnteredAtMs) || !Number.isFinite(stages?.debounceSettledAtMs)) return false;
-    const input = document.querySelector<HTMLInputElement>('#column-left .item-main .sidebar-header .input-search-input');
-    if(input?.value !== query) return false;
-
-    const isVisible = (row: HTMLElement) => {
-      let current: HTMLElement | null = row;
-      while(current) {
-        const style = getComputedStyle(current);
-        if(style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-        current = current.parentElement;
-      }
-      const rect = row.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    };
-    const baselineRows = perf.globalSearchBaselineRows as WeakSet<Element>;
-    for(const row of document.querySelectorAll<HTMLElement>('#search-container .chatlist-chat')) {
-      const messageText = row.querySelector('.dialog-subtitle-parts')?.textContent || '';
-      const matchesCurrentQuery = (window as any).__teagramIsCurrentGlobalSearchResult({
-        query,
-        inputValue: input.value,
-        messageText,
-        visible: isVisible(row),
-        presentBeforeQuery: baselineRows.has(row)
-      });
-      if(!matchesCurrentQuery) continue;
-
-      stages.matchingResultVisibleAtMs = performance.now();
-      return true;
-    }
-    return false;
-  }, query, {polling: 'raf', timeout: 90_000});
+  await waitForGlobalSearchResult(page, query, true);
 
   const trace = await page.evaluate(async() => ({
     timeOrigin: performance.timeOrigin,

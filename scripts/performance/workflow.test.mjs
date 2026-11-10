@@ -191,6 +191,25 @@ test('full trace diagnostics use one paired pass while walk gates keep nine meas
   assert.doesNotMatch(performanceScale, /for\(let repeat = 0; repeat < PERFORMANCE_REPEATS; \+\+repeat\)[\s\S]{0,250}rpcComparison/);
 });
 
+test('global-search measurements prewarm the shared fixture RPC before starting the timing window', () => {
+  const globalSearch = performanceScale.match(/async function globalSearch\([\s\S]*?(?=\nasync function describeSendState)/)?.[0];
+  const warmSearch = performanceScale.match(/async function warmGlobalSearch\([\s\S]*?(?=\nasync function globalSearch)/)?.[0];
+  assert.ok(globalSearch, 'the performance scenario must define global search');
+  assert.ok(warmSearch, 'the performance scenario must define an unmeasured global-search warm-up');
+
+  const warmup = globalSearch.indexOf('await warmGlobalSearch(page, query);');
+  const measurementStart = globalSearch.indexOf('await beginScenario(page, requests, traceEnabled);');
+  const traceReset = globalSearch.indexOf('resetPerformanceRpcTrace(true)');
+  const measuredQuery = globalSearch.indexOf('await input.fill(query);', traceReset);
+  assert.ok(warmup >= 0 && warmup < measurementStart, 'the shared search path must be warmed before the measured window starts');
+  assert.ok(measurementStart < traceReset && traceReset < measuredQuery, 'warm-up RPCs must be excluded from the measured RPC trace');
+  const warmResult = warmSearch.indexOf('await waitForGlobalSearchResult(page, query, false);');
+  const closeWarmSearch = warmSearch.indexOf("page.locator('#column-left .sidebar-back-button.is-visible').click()");
+  const reopenWarmSearch = warmSearch.indexOf("await page.keyboard.press('Control+f');");
+  assert.ok(warmResult >= 0, 'warm-up must wait for a matching result before returning');
+  assert.ok(warmResult < closeWarmSearch && closeWarmSearch < reopenWarmSearch, 'warm-up results must be cleared by closing and reopening search before measurement');
+});
+
 test('only pull requests build and require a base comparison', () => {
   assert.doesNotMatch(workflow, /workflow_dispatch:|performance_base_sha|github\.event\.inputs/);
   const checkoutStep = workflow.match(/- name: Check out web client([\s\S]*?)(?=\n      - name: Set performance output paths)/)?.[1];
