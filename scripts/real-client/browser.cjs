@@ -62,6 +62,9 @@ const PAGE_DIAGNOSTIC_VALUE_TYPES = new Set(['undefined', 'null', 'boolean', 'nu
 const PAGE_ERROR_SCENARIOS = new Set(['sign-in', 'first-message', 'message', 'custom-emoji', 'group', 'channel', 'poll', 'unknown']);
 const PAGE_ERROR_DIAGNOSTIC_SCENARIOS = new Set(AVAILABLE_SCENARIOS);
 const PAGE_ERROR_EVENT_CAPTURE_KEY = '__teagramPageErrorEvents';
+const MESSAGE_ACK_TRACE_SWITCH = '__realClientMessageAckTraceEnabled';
+const MESSAGE_ACK_TRACE_CHECK_NAME = '__realClientMessageAckTraceCheckName';
+const MESSAGE_ACK_TRACE_STATE = '__realClientMessageAckTraceState';
 const pageErrorDiagnosticCounts = new WeakMap();
 const pageErrorDiagnosticMessageHashes = new WeakMap();
 const pageErrorConsoleEvents = new WeakMap();
@@ -105,6 +108,116 @@ const CONTROL_PLAN = Object.freeze([
 let currentStage = 'runtime_inputs';
 let currentScenario;
 let pollFooterTransitions = [];
+
+function sanitizeMessageAckTraceId(value) {
+  if(Number.isFinite(value)) return value;
+  return typeof value === 'string' && /^-?[0-9]{1,24}(?:\.[0-9]{1,4})?$/.test(value) ? value : undefined;
+}
+
+function sanitizeMessageAckTraceRecord(record) {
+  const token = typeof record?.token === 'string' && /^send-[1-9][0-9]*-[a-f0-9]{8}$/.test(record.token)
+    ? record.token
+    : undefined;
+  if(!token) return undefined;
+
+  const events = Array.isArray(record.events) ? record.events.flatMap((event) => {
+    const atMs = Number.isSafeInteger(event?.atMs) && event.atMs >= 0 ? event.atMs : undefined;
+    if(atMs === undefined) return [];
+    if(event.kind === 'request') {
+      const pendingTempId = sanitizeMessageAckTraceId(event.pendingTempId);
+      if(pendingTempId === undefined || !['user', 'chat', 'channel'].includes(event.peerKind)) return [];
+      return [{kind: 'request', atMs, pendingTempId, peerKind: event.peerKind}];
+    }
+    if(event.kind === 'send_result') {
+      const updates = Array.isArray(event.updates) ? event.updates.flatMap((update) => {
+        if(typeof update?.constructor !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(update.constructor)) return [];
+        const messageId = sanitizeMessageAckTraceId(update.messageId);
+        return [{
+          constructor: update.constructor,
+          ...(messageId === undefined ? {} : {messageId}),
+          randomIdMatches: update.randomIdMatches === true
+        }];
+      }) : [];
+      return [{kind: 'send_result', atMs, updates}];
+    }
+    if(event.kind === 'update') {
+      if(!['pushed', 'difference'].includes(event.source) || typeof event.constructor !== 'string' ||
+          !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(event.constructor)) return [];
+      const messageId = sanitizeMessageAckTraceId(event.messageId);
+      return [{
+        kind: 'update',
+        atMs,
+        source: event.source,
+        constructor: event.constructor,
+        ...(messageId === undefined ? {} : {messageId}),
+        randomIdMatches: event.randomIdMatches === true
+      }];
+    }
+    if(event.kind === 'pending_entry') {
+      const pendingTempId = sanitizeMessageAckTraceId(event.pendingTempId);
+      return [{
+        kind: 'pending_entry',
+        atMs,
+        found: event.found === true,
+        ...(event.found === true && pendingTempId !== undefined ? {pendingTempId} : {})
+      }];
+    }
+    if(event.kind === 'message_sent') {
+      const tempId = sanitizeMessageAckTraceId(event.tempId);
+      const serverId = sanitizeMessageAckTraceId(event.serverId);
+      if(tempId === undefined) return [];
+      return [{kind: 'message_sent', atMs, tempId, ...(serverId === undefined ? {} : {serverId})}];
+    }
+    return [];
+  }) : [];
+  const tempId = sanitizeMessageAckTraceId(record.messageSent?.tempId);
+  const serverId = sanitizeMessageAckTraceId(record.messageSent?.serverId);
+
+  return {
+    token,
+    checkName: typeof record.checkName === 'string' && /^[a-z0-9_]{1,96}$/.test(record.checkName) ? record.checkName : null,
+    pendingEntryFound: typeof record.pendingEntryFound === 'boolean' ? record.pendingEntryFound : null,
+    messageSent: {
+      emitted: record.messageSent?.emitted === true,
+      ...(tempId === undefined ? {} : {tempId}),
+      serverId: serverId ?? null
+    },
+    events
+  };
+}
+
+async function enableMessageAckTrace(page) {
+  await page.evaluate(({switchKey, checkNameKey}) => {
+    window[switchKey] = true;
+    window[checkNameKey] = 'unassigned';
+  }, {switchKey: MESSAGE_ACK_TRACE_SWITCH, checkNameKey: MESSAGE_ACK_TRACE_CHECK_NAME})
+  .catch(() => failStage('message_ack_trace_enable'));
+}
+
+async function setMessageAckTraceCheckName(page, checkName) {
+  if(!/^[a-z0-9_]{1,96}$/.test(checkName)) failStage('message_ack_trace_check_name');
+  await page.evaluate(({checkNameKey, value}) => { window[checkNameKey] = value; }, {
+    checkNameKey: MESSAGE_ACK_TRACE_CHECK_NAME,
+    value: checkName
+  }).catch(() => failStage('message_ack_trace_check_name'));
+}
+
+async function captureMessageAckTrace(page) {
+  if(!page) return [];
+  const records = await page.evaluate((stateKey) => {
+    const value = window[stateKey]?.records;
+    return Array.isArray(value) ? value : [];
+  }, MESSAGE_ACK_TRACE_STATE).catch(() => []);
+  return records.map(sanitizeMessageAckTraceRecord).filter(Boolean);
+}
+
+async function captureMessageAcknowledgementTraces(alicePage, bobPage) {
+  const [alice, bob] = await Promise.all([
+    captureMessageAckTrace(alicePage),
+    captureMessageAckTrace(bobPage)
+  ]);
+  return {alice, bob};
+}
 
 function readPageScenarioStep(page) {
   const pageAction = pageScenarioActions.get(page);
@@ -2780,10 +2893,14 @@ async function sendText(page, text, stage, chat, timeoutMs = 30_000, groupTitle)
   if(chat) {
     currentStage = `${stage}_fill`;
     await input.fill(text, {timeout: timeoutMs}).catch((error) => failGroupMessageStep(`${stage}_fill`, error));
+  } else {
+    await input.fill(text);
+  }
+  await setMessageAckTraceCheckName(page, `${stage}_message_count`);
+  if(chat) {
     currentStage = `${stage}_send`;
     await input.press('Enter', {timeout: timeoutMs}).catch((error) => failGroupMessageStep(`${stage}_send`, error));
   } else {
-    await input.fill(text);
     await input.press('Enter');
   }
   const message = (chat ? chat.locator('.bubble .message') : page.locator('#column-center .bubble .message')).filter({hasText: text});
@@ -3214,6 +3331,7 @@ async function runCustomEmojiFeatureFlow(alice, bob) {
   // The picked emoji reaches the composer after its document loads; sending earlier drops it.
   await alice.page.waitForFunction((id) => !!document.querySelector(`#column-center .input-message-input:not(.input-field-input-fake) [data-doc-id="${id}"]`), docId, {timeout: 15_000})
   .catch(() => failStage('alice_custom_emoji_send_input'));
+  await setMessageAckTraceCheckName(alice.page, 'alice_custom_emoji_send_visible');
   await alice.page.locator('#column-center .btn-send').click()
   .catch(() => failStage('alice_custom_emoji_send_submit'));
   await waitForCustomEmojiMessage(alice.page, messageText, docId, 'alice_custom_emoji_send_visible');
@@ -3247,6 +3365,7 @@ async function sendChannelText(page, channelName, screenshotDirectory, capturedS
   const input = await openComposer(page, 'alice_channel_post', activeChannel.chat, timeoutMs);
   setPageActionStep(page, 'alice_channel_post_fill');
   await input.fill(CHANNEL_MESSAGE, {timeout: timeoutMs}).catch(() => failStage('alice_channel_post_fill'));
+  await setMessageAckTraceCheckName(page, 'alice_channel_post_visible');
   setPageActionStep(page, 'alice_channel_post_send');
   await input.press('Enter', {timeout: timeoutMs}).catch(() => failStage('alice_channel_post_send'));
   const message = activeChannel.chat.locator('.bubble .message').filter({hasText: CHANNEL_MESSAGE});
@@ -6704,6 +6823,10 @@ async function main(dependencies = {}) {
     currentScenario = 'sign-in';
     await signIn(alice.page, accounts[0], 'alice', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
     await signIn(bob.page, accounts[1], 'bob', runtime.screenshotDirectory, capturedScreenshots, passwordEvidence);
+    await Promise.all([
+      enableMessageAckTrace(alice.page),
+      enableMessageAckTrace(bob.page)
+    ]);
     for(const trace of traceContexts) {
       await trace.context.tracing.startChunk({title: `real-client ${trace.name} scenarios`});
       trace.active = true;
@@ -6961,6 +7084,7 @@ async function main(dependencies = {}) {
       contextCount: contexts.length,
       controlContextCount: CONTROL_PLAN.length,
       screenshotsCaptured: capturedScreenshots.count,
+      messageSendAcknowledgementTraces: await captureMessageAcknowledgementTraces(alice.page, bob.page),
       passwordEvidence,
       ...(runtime.scenarios?.includes('channel') ? {channelMembership: await captureChannelMembershipState()} : {}),
       ...(pollNegativeControlEvidence ? {pollNegativeControl: pollNegativeControlEvidence} : {}),
@@ -7032,6 +7156,7 @@ async function main(dependencies = {}) {
         contextCount: contexts.length,
         controlContextCount: CONTROL_PLAN.length,
         screenshotsCaptured: capturedScreenshots.count,
+        messageSendAcknowledgementTraces: await captureMessageAcknowledgementTraces(appPages.alice, appPages.bob),
         passwordEvidence,
         ...(centerColumn ? {centerColumn} : {}),
         ...(groupNameForm ? {groupNameForm} : {}),
@@ -7120,7 +7245,8 @@ function emitReport(report, cleanupFailed, cleanupIssues = []) {
       ...(report?.failureTraceReady === true ? {failureTraceReady: true} : {}),
       ...(report?.workerCoverageBreakdown ? {workerCoverageBreakdown: report.workerCoverageBreakdown} : {}),
       ...(report?.workerOverflowReasons ? {workerOverflowReasons: report.workerOverflowReasons} : {}),
-      ...(report?.gateBreakdown ? {gateBreakdown: report.gateBreakdown} : {})
+      ...(report?.gateBreakdown ? {gateBreakdown: report.gateBreakdown} : {}),
+      ...(report?.messageSendAcknowledgementTraces ? {messageSendAcknowledgementTraces: report.messageSendAcknowledgementTraces} : {})
     })}\n`);
     process.exitCode = 1;
     return;
@@ -7138,7 +7264,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {isCountedColdTrialConsoleError, classifyColdTrialErrors, classifyColdTrialFailure, exceedsEmojiRequestLimit, attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
+module.exports = {isCountedColdTrialConsoleError, classifyColdTrialErrors, classifyColdTrialFailure, exceedsEmojiRequestLimit, attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, captureMessageAcknowledgementTraces, sanitizeMessageAckTraceRecord, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);

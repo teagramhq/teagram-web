@@ -436,6 +436,24 @@ if(args?.help) {
     if(finalReport.status !== 'passed') process.exitCode = 1;
   } else if(cleanupError || operationError) {
     const errors = [operationError?.message, cleanupError?.message].filter((message) => typeof message === 'string');
+    if(browserResult) {
+      const failureReport = {
+        ...browserResult,
+        ...(readiness ? {
+          runId: args.runId,
+          harnessRevision: args.harnessRevision,
+          serverRevision: args.serverRevision,
+          webRevision: args.webRevision,
+          artifactSourceCommit: readiness.artifactReady.webRevision,
+          artifactDigest: readiness.artifactReady.artifactDigest
+        } : {})
+      };
+      if(cleanupError) {
+        failureReport.status = 'failed';
+        failureReport.stage = 'cleanup';
+      }
+      process.stdout.write(`${JSON.stringify(failureReport)}\n`);
+    }
     process.stderr.write(`${errors.join('; ') || 'real client runner failed'}\n`);
     process.exitCode = 1;
   } else if(!controlsOnlyDone) {
@@ -464,7 +482,8 @@ if(args?.help) {
       screenshotsCaptured: browserResult.screenshotsCaptured,
       passwordEvidence,
       network: browserResult.network,
-      workerObservation: browserResult.workerObservation
+      workerObservation: browserResult.workerObservation,
+      ...(browserResult.messageSendAcknowledgementTraces ? {messageSendAcknowledgementTraces: browserResult.messageSendAcknowledgementTraces} : {})
     })}\n`);
   }
 }

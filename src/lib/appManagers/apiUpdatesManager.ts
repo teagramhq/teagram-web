@@ -61,6 +61,8 @@ const SYNC_DELAY = 6;
 const SYNC_MAX_SILENCE = 10e3;
 
 class ApiUpdatesManager {
+  public messageAcknowledgementTraceObserver?: (update: Update, source: 'pushed' | 'difference' | 'local' | 'api_result') => void;
+
   public updatesState: UpdatesState = {
     pendingPtsUpdates: [],
     pendingSeqUpdates: {},
@@ -202,7 +204,7 @@ class ApiUpdatesManager {
     override: boolean,
     ignoreSyncLoading: boolean,
     local: boolean
-  }> = {}) => {
+  }> = {}, source: 'pushed' | 'difference' | 'local' | 'api_result' = 'api_result') => {
     const log = this.log.bindPrefix('processUpdateMessage');
     // return forceGetDifference()
     const processOpts = {
@@ -210,7 +212,8 @@ class ApiUpdatesManager {
       seq: updateMessage.seq,
       seqStart: updateMessage.seq_start,
       ignoreSyncLoading: options.ignoreSyncLoading,
-      local: options.local
+      local: options.local,
+      source: options.local ? 'local' : source
     };
 
     log('processUpdateMessage', updateMessage, options);
@@ -354,11 +357,11 @@ class ApiUpdatesManager {
             case 'updateChannelTooLong':
             case 'updateNewChannelMessage':
             case 'updateEditChannelMessage':
-              this.processUpdate(update);
+              this.processUpdate(update, {fromDifference: true, source: 'difference'});
               return;
           }
 
-          this.saveUpdate(update, {fromDifference: true});
+        this.saveUpdate(update, {fromDifference: true});
         });
 
         log('applying', differenceResult.new_messages.length, 'new messages');
@@ -368,7 +371,7 @@ class ApiUpdatesManager {
             message: apiMessage,
             pts: updatesState.pts,
             pts_count: 0
-          });
+          }, {fromDifference: true});
         });
         const nextState = differenceResult._ === 'updates.difference' ? differenceResult.state : differenceResult.intermediate_state;
         updatesState.seq = nextState.seq;
@@ -468,7 +471,7 @@ class ApiUpdatesManager {
           return;
         }
 
-        this.saveUpdate(update, {fromDifference: true});
+          this.saveUpdate(update, {fromDifference: true});
       });
 
       log('applying', differenceResult.new_messages.length, 'channel new messages');
@@ -478,7 +481,7 @@ class ApiUpdatesManager {
           message: apiMessage,
           pts: channelState.pts,
           pts_count: 0
-        });
+        }, {fromDifference: true});
       });
       log('apply channel diff', channelState.pts);
 
@@ -628,8 +631,12 @@ class ApiUpdatesManager {
   private processUpdate(update: Update, options: Partial<{
     date: number,
     seq: number,
-    seqStart: number
+    seqStart: number,
+    fromDifference: boolean,
+    source: 'pushed' | 'difference' | 'local' | 'api_result'
   }> & Parameters<ApiUpdatesManager['processUpdateMessage']>[1] = {}) {
+    this.messageAcknowledgementTraceObserver?.(update, options.source || (options.fromDifference ? 'difference' : 'pushed'));
+
     let channelId: ChatId;
     switch(update._) {
       case 'updateNewChannelMessage':
@@ -789,7 +796,7 @@ class ApiUpdatesManager {
       }
     }
 
-    this.saveUpdate(update);
+    this.saveUpdate(update, {fromDifference: options.fromDifference, traceObserved: true});
 
     if(popPts) {
       this.popPendingPtsUpdate(channelId);
@@ -798,7 +805,10 @@ class ApiUpdatesManager {
     }
   }
 
-  public saveUpdate(update: Update, options?: {fromDifference?: boolean}) {
+  public saveUpdate(update: Update, options?: {fromDifference?: boolean, traceObserved?: boolean}) {
+    if(options?.fromDifference && !options.traceObserved) {
+      this.messageAcknowledgementTraceObserver?.(update, 'difference');
+    }
     this.log('saveUpdate', update);
     if(
       options?.fromDifference &&
@@ -948,7 +958,7 @@ class ApiUpdatesManager {
       };
       Promise.resolve(this.updatesState.syncLoading).then(onInitialSyncEnd, onInitialSyncEnd);
 
-      this.apiManager.setUpdatesProcessor(this.processUpdateMessage);
+      this.apiManager.setUpdatesProcessor((updates) => this.processUpdateMessage(updates, {}, 'pushed'));
 
       // this.updatesState.syncLoading.then(() => {
       this.setProxy();
