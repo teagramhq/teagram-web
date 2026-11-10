@@ -596,19 +596,40 @@ async function installPeerChangeTracing(page: Page) {
       wrap(chat.bubbles, 'finishPeerChange', 'bubbles.finishPeerChange');
       wrap(chat.input, 'finishPeerChange', 'input.finishPeerChange');
       wrap(chat.topbar, 'finishPeerChange', 'topbar.finishPeerChange');
+      wrap(chat.bubbles?.scrollable, 'replaceChildren', 'scrollable.replaceChildren');
+      // These split the time between mounting the chat and the first bubble appearing.
+      wrap(chat.bubbles, 'safeRenderMessage', 'bubbles.safeRenderMessage');
+      wrap(chat.bubbles, 'renderMessagesQueue', 'bubbles.renderMessagesQueue');
     };
     wrap(chat, 'setPeer', 'chat.setPeer');
     wrap(chat, 'onChangePeer', 'chat.onChangePeer');
     wrap(chat, 'finishPeerChange', 'chat.finishPeerChange');
-    wrap(chat, 'init', 'chat.init');
-    const originalInit = chat.init;
-    chat.init = function(...args: any[]) {
-      const result = originalInit.apply(this, args);
-      wrapPeerChangeParts();
-      return result;
-    };
+    // A chat built ahead of the first open has no `init` left, and putting one back would build it twice.
+    if(typeof chat.init === 'function') {
+      wrap(chat, 'init', 'chat.init');
+      const originalInit = chat.init;
+      chat.init = function(...args: any[]) {
+        const result = originalInit.apply(this, args);
+        wrapPeerChangeParts();
+        return result;
+      };
+    }
     wrapPeerChangeParts();
     perf.peerChangePhases = phases;
+    perf.peerChangeBase = base;
+    const mark = (name: string) => phases.push({name, startMs: performance.now() - base, durationMs: 0});
+    const im = (window as any).appImManager;
+    wrap(im, 'setPeer', 'im.setPeer');
+    wrap(im, 'setInnerPeer', 'im.setInnerPeer');
+    wrap(chat, 'revealPreparedBackground', 'chat.revealPreparedBackground');
+    const observer = new MutationObserver(() => {
+      if(document.querySelector('.bubbles .bubble[data-mid]')) {
+        mark('dom.firstBubbleInserted');
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.body, {childList: true, subtree: true});
+    document.addEventListener('click', () => mark('click'), {capture: true, once: true});
     return phases;
   });
 }
@@ -1848,7 +1869,11 @@ async function traceTargetScenarios(browser: Browser, run: VariantRun, fixture: 
         const chatOpenSample = {
           ...chatOpenCapture,
           cpu: chatCpu,
-          peerChangePhases: summarizePerformancePhases(await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []))
+          peerChangePhases: summarizePerformancePhases(await page.evaluate(() => {
+            const perf = (window as any).__teagramPerf;
+            const offset = perf.clickAt - perf.peerChangeBase;
+            return (perf.peerChangePhases || []).map((phase: {startMs: number}) => ({...phase, startMs: Number((phase.startMs - offset).toFixed(1))}));
+          }))
         };
         traceSamples.chatOpen.push(chatOpenSample);
         await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpenSample, 'chatOpen');
