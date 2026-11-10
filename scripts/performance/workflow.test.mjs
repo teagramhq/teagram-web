@@ -158,6 +158,14 @@ test('gated scroll samples keep tracing and CPU profiles in the diagnostic pass'
   assert.match(diagnosticScroll, /traceRpc: true/);
 });
 
+test('unprofiled scroll retains timing-only tasks for the walk-mirror gate', () => {
+  const capture = performanceScale.match(/async function capture\([\s\S]*?(?=\nasync function readCachedDialogReconcileSnapshot)/)?.[0];
+
+  assert.ok(capture, 'the performance capture function must be present');
+  assert.match(capture, /const longTaskTrace = includeLongTaskTrace \|\| collectWalkDiagnostics\s+\? summarizeLongTaskTrace\(longTasks, includeLongTaskTrace \? longAnimationFrames : \[\]/);
+  assert.match(capture, /\.\.\.\(includeLongTaskTrace \|\| collectWalkDiagnostics \? \{longTaskTrace\} : \{\}\)/);
+});
+
 test('performance workflow runs the compositor frame measurement regression test', () => {
   const browserStep = workflow.match(/- name: Run scale browser scenarios[\s\S]*?(?=\n      - name: Write performance summary)/)?.[0];
 

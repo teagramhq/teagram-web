@@ -412,7 +412,9 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
   const rpcCallCount = metrics.rpcSpansRecorded ? rpcInvocationsInWindow(rpcInvocations, timeOrigin, boundary.startedAtMs, boundary.ms).length : metrics.rpcCallCount;
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
   const rpcSummary = summarizeRpcTrace(rpcCalls, boundary.ms);
-  const longTaskTrace = includeLongTaskTrace ? summarizeLongTaskTrace(longTasks, longAnimationFrames, boundary.startedAtMs, boundary.ms) : undefined;
+  const longTaskTrace = includeLongTaskTrace || collectWalkDiagnostics
+    ? summarizeLongTaskTrace(longTasks, includeLongTaskTrace ? longAnimationFrames : [], boundary.startedAtMs, boundary.ms)
+    : undefined;
   const reconcileMirrorSummaries = includePhases || collectWalkDiagnostics ? summarizeReconcileMirrorTasks(reconcileMirrorTasks, boundary.startedAtMs, boundary.ms) : undefined;
   return {
     ...metrics,
@@ -421,7 +423,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     rpcCalls,
     bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
-    ...(includeLongTaskTrace ? {longTaskTrace} : {}),
+    ...(includeLongTaskTrace || collectWalkDiagnostics ? {longTaskTrace} : {}),
     ...(scroll && includeLongTaskTrace ? {droppedFrameScripts: summarizeFrameScripts(summarizeDroppedFrames(frameWindows, [], []), longAnimationFrames)} : {}),
     ...(includePhases || collectWalkDiagnostics ? {reconcileMirrorTasks: reconcileMirrorSummaries} : {}),
     ...(collectWalkDiagnostics ? {walkLongTasksOver50Ms: findLongTasksOverlappingWalkMirrors(longTaskTrace, reconcileMirrorSummaries).length} : {}),
