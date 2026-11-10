@@ -27,10 +27,10 @@ pre-change performance artifact ([run 42710920668, attempt 3](https://github.com
 | Timing gate | Minimum effect | Paired run-to-run spread in the legacy CI artifact |
 | --- | --- | --- |
 | Scenario response time, all scales and scenarios | `max(2 ms, 15% of the base median)` | 2.62–349.62 ms across 3–11 pairs; the 1x chat-open pair SD was 15.24 ms |
-| 100x cold chat-list absolute budget | Headroom to 1,000 ms | 47.52 ms SD across 6 pairs |
-| 100x warm chat-list absolute budget | Headroom to 300 ms | 8.30 ms SD across 3 pairs |
-| 100x chat-open absolute budget | Headroom to 200 ms | 101.26 ms SD across 5 pairs |
-| 100x/1x slowdown ratio | Headroom to the 1.5x ceiling | 0.759x SD at most across 3 paired ratios |
+| 100x cold chat-list absolute budget | `max(scenario response minimum, headroom to 1,000 ms)` | 47.52 ms SD across 6 pairs |
+| 100x warm chat-list absolute budget | `max(scenario response minimum, headroom to 300 ms)` | 8.30 ms SD across 3 pairs |
+| 100x chat-open absolute budget | `max(scenario response minimum, headroom to 200 ms)` | 101.26 ms SD across 5 pairs |
+| 100x/1x slowdown ratio | `max(15% of base ratio, headroom to the 1.5x ceiling)` | 0.759x SD at most across 3 paired ratios |
 | 100x long-task count | 1 additional task | 0–1.40 tasks SD across 3–11 pairs |
 | 100x long-task blocking time | 25 ms | 0–28.53 ms SD across 3–11 pairs |
 | 100x scroll dropped-frame percentage | 15% of the base dropped-frame percentage | 1.081 percentage points SD across 5 pairs |

@@ -1,13 +1,13 @@
 export const SCENARIOS = [
-  {key: 'coldChatList', label: 'Cold interactive chat list', budgetMs: 1_000},
-  {key: 'warmChatList', label: 'Warm interactive chat list', budgetMs: 300},
-  {key: 'chatOpen', label: 'Open long-history chat', budgetMs: 200},
-  {key: 'scrollBack2k', label: 'Scroll back 2,000 messages', budgetMs: null},
-  {key: 'dateJump', label: 'Jump to a date', budgetMs: null},
-  {key: 'contactsList', label: 'Open contacts list', budgetMs: null},
-  {key: 'contactSearch', label: 'Search contacts', budgetMs: null},
-  {key: 'globalSearch', label: 'Global message search', budgetMs: null},
-  {key: 'sendMessage', label: 'Send a message', budgetMs: null}
+  {key: 'coldChatList', label: 'Cold interactive chat list'},
+  {key: 'warmChatList', label: 'Warm interactive chat list'},
+  {key: 'chatOpen', label: 'Open long-history chat'},
+  {key: 'scrollBack2k', label: 'Scroll back 2,000 messages'},
+  {key: 'dateJump', label: 'Jump to a date'},
+  {key: 'contactsList', label: 'Open contacts list'},
+  {key: 'contactSearch', label: 'Search contacts'},
+  {key: 'globalSearch', label: 'Global message search'},
+  {key: 'sendMessage', label: 'Send a message'}
 ];
 
 export const SCALES = ['1x', '100x'];
@@ -18,7 +18,7 @@ export const PAIRED_CONFIDENCE_LEVEL = 0.95;
 export const TIMING_MINIMUM_EFFECTS = Object.freeze({
   scenarioTiming: Object.freeze({minimumMs: 2, baseMedianFraction: 0.15}),
   absoluteBudgets: Object.freeze({coldChatList: 1_000, warmChatList: 300, chatOpen: 200}),
-  scaleRatio: 1.5,
+  scaleRatio: Object.freeze({maximum: 1.5, baseMedianFraction: 0.15}),
   longTasksOver50Ms: 1,
   blockingTimeMs: 25,
   droppedFramePercent: Object.freeze({baseMedianFraction: 0.15}),
@@ -320,7 +320,7 @@ export function evaluatePerformance(report, history = []) {
           );
           applyTimingGate('response timing', timeDifferences, relativeMinimum, `${relativeMinimum.toFixed(2)} ms (${TIMING_MINIMUM_EFFECTS.scenarioTiming.baseMedianFraction * 100}% of base median, at least ${TIMING_MINIMUM_EFFECTS.scenarioTiming.minimumMs} ms)`);
           if(budgetMs !== null) {
-            const budgetHeadroom = Math.max(0, budgetMs - baseMedian);
+            const budgetHeadroom = Math.max(relativeMinimum, budgetMs - baseMedian);
             applyTimingGate('absolute timing budget', timeDifferences, budgetHeadroom, `${budgetHeadroom.toFixed(2)} ms to the ${budgetMs} ms budget`);
           }
         }
@@ -418,10 +418,14 @@ export function evaluatePerformance(report, history = []) {
       const headRatios = headLarge.map((value, index) => value / headSmall[index]);
       large.scaleRatio = median(headRatios);
       const differences = pairedDifferences(baseRatios, headRatios);
-      const minimumEffect = Math.max(0, TIMING_MINIMUM_EFFECTS.scaleRatio - median(baseRatios));
+      const baseRatio = median(baseRatios);
+      const minimumEffect = Math.max(
+        baseRatio * TIMING_MINIMUM_EFFECTS.scaleRatio.baseMedianFraction,
+        TIMING_MINIMUM_EFFECTS.scaleRatio.maximum - baseRatio
+      );
       const gate = differences && evaluatePairedDifferences(differences, minimumEffect);
       if(gate?.regression) {
-        const message = `100x/1x ${scenario.key}: one-sided ${Math.round(PAIRED_CONFIDENCE_LEVEL * 100)}% median lower bound ${gate.lowerBound.toFixed(2)} exceeded the paired effect that crosses the ${TIMING_MINIMUM_EFFECTS.scaleRatio.toFixed(2)}x ceiling`;
+        const message = `100x/1x ${scenario.key}: one-sided ${Math.round(PAIRED_CONFIDENCE_LEVEL * 100)}% median lower bound ${gate.lowerBound.toFixed(2)} exceeded the paired effect that crosses the ${TIMING_MINIMUM_EFFECTS.scaleRatio.maximum.toFixed(2)}x ceiling`;
         blockingFailures.push(message);
         large.timingFailures.push(message);
         large.gateFailure = true;

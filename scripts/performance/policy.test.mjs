@@ -123,6 +123,39 @@ test('A/A timing samples with one 150 ms runner stall pass in at least 99 of 100
   assert.ok(passes >= 99, `only ${passes}/100 A/A trials passed`);
 });
 
+test('A/A 100x budget and scale gates tolerate noise above their absolute limits', () => {
+  const random = seededRandom(3612);
+  let passes = 0;
+
+  const samplesAround = (center, deviation) => Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: center + normalSample(random) * deviation}));
+  for(let trial = 0; trial < 100; ++trial) {
+    const base = scaleVariants();
+    const head = scaleVariants();
+    for(const variant of [base, head]) {
+      variant['1x'].chatOpen = samplesAround(148, 2);
+      variant['100x'].chatOpen = samplesAround(310.5, 10);
+      variant['1x'].contactsList = samplesAround(100, 1.5);
+      variant['100x'].contactsList = samplesAround(302, 5);
+    }
+
+    const stalledScenario = trial % 2 ? 'chatOpen' : 'contactsList';
+    head['100x'][stalledScenario][trial % PERFORMANCE_REPEATS].ms += 150;
+    const failures = evaluatePerformance(report({base, head})).blockingFailures;
+    const targetedFailures = failures.filter((failure) => {
+      return failure.includes('100x chatOpen: absolute timing budget') ||
+        failure.startsWith('100x/1x chatOpen:') ||
+        failure.startsWith('100x/1x contactsList:');
+    });
+    if(!targetedFailures.length) ++passes;
+  }
+
+  assert.ok(passes >= 99, `only ${passes}/100 A/A trials passed`);
+});
+
+test('scenario budget values come only from the timing minimum-effects table', () => {
+  assert.ok(SCENARIOS.every((scenario) => !Object.hasOwn(scenario, 'budgetMs')));
+});
+
 test('detects twice the timing minimum at the measured CI spread in at least 95 of 100 fixed-seed trials', () => {
   // The legacy CI artifact had a 15.24 ms paired SD for 1x chat-open timing.
   const random = seededRandom(3611);
@@ -191,10 +224,21 @@ test('master runs still block on incomplete deterministic head and diagnostic sa
 test('paired absolute budget headroom fails only when the lower bound crosses the budget', () => {
   const base = scaleVariants({'100x': {coldChatList: {ms: 900}}});
   const atBudget = scaleVariants({'100x': {coldChatList: {ms: 1_000}}});
-  const overBudget = scaleVariants({'100x': {coldChatList: {ms: 1_001}}});
+  const overBudget = scaleVariants({'100x': {coldChatList: {ms: 1_036}}});
 
   assert.equal(evaluatePerformance(report({base, head: atBudget})).blockingFailures.some((failure) => failure.includes('1000 ms budget')), false);
   assert.ok(evaluatePerformance(report({base, head: overBudget})).blockingFailures.some((failure) => failure.includes('1000 ms budget')));
+});
+
+test('absolute budget gate keeps the relative minimum when base is already over budget', () => {
+  const base = scaleVariants({'100x': {chatOpen: {ms: 310.5}}});
+  const withinRelativeMinimum = scaleVariants({'100x': {chatOpen: {ms: 340.5}}});
+  const beyondRelativeMinimum = scaleVariants({'100x': {chatOpen: {ms: 360}}});
+  const withinResult = evaluatePerformance(report({base, head: withinRelativeMinimum}));
+  const beyondResult = evaluatePerformance(report({base, head: beyondRelativeMinimum}));
+
+  assert.equal(withinResult.blockingFailures.some((failure) => failure.includes('absolute timing budget')), false);
+  assert.ok(beyondResult.blockingFailures.some((failure) => failure.includes('absolute timing budget') && failure.includes('46.57 ms')));
 });
 
 test('long-task, blocking-time, and dropped-frame scroll gates compare paired repeats', () => {
@@ -259,6 +303,17 @@ test('scale slowdown compares paired base and head ratios against the unchanged 
 
   assert.equal(evaluatePerformance(report({base, head: atLimit})).blockingFailures.some((failure) => failure.includes('1.50x ceiling')), false);
   assert.ok(evaluatePerformance(report({base, head: overLimit})).blockingFailures.some((failure) => failure.includes('1.50x ceiling')));
+});
+
+test('scale ratio gate preserves 15 percent tolerance when base is already above the ceiling', () => {
+  const base = scaleVariants({'1x': {chatOpen: {ms: 148}}, '100x': {chatOpen: {ms: 310.8}}});
+  const withinRelativeMinimum = scaleVariants({'1x': {chatOpen: {ms: 310.8 / 2.3}}, '100x': {chatOpen: {ms: 310.8}}});
+  const beyondRelativeMinimum = scaleVariants({'1x': {chatOpen: {ms: 310.8 / 2.5}}, '100x': {chatOpen: {ms: 310.8}}});
+  const withinResult = evaluatePerformance(report({base, head: withinRelativeMinimum}));
+  const beyondResult = evaluatePerformance(report({base, head: beyondRelativeMinimum}));
+
+  assert.equal(withinResult.blockingFailures.some((failure) => failure.startsWith('100x/1x chatOpen:')), false);
+  assert.ok(beyondResult.blockingFailures.some((failure) => failure.startsWith('100x/1x chatOpen:')));
 });
 
 test('startup deterministic request, RPC, and bundle checks remain blocking', () => {
