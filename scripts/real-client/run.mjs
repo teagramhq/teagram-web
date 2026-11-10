@@ -482,7 +482,13 @@ if(args?.help) {
       passwordEvidence,
       network: browserResult.network,
       workerObservation: browserResult.workerObservation,
-      ...(browserResult.messageSendAcknowledgementTraces ? {messageSendAcknowledgementTraces: browserResult.messageSendAcknowledgementTraces} : {})
+      ...(browserResult.messageSendAcknowledgementTraces ? {messageSendAcknowledgementTraces: browserResult.messageSendAcknowledgementTraces} : {}),
+      ...(browserResult.messageSendAcknowledgementTraceDiagnostics
+        ? {messageSendAcknowledgementTraceDiagnostics: browserResult.messageSendAcknowledgementTraceDiagnostics}
+        : {}),
+      ...(browserResult.messageSendAcknowledgementTraceCaptureErrors
+        ? {messageSendAcknowledgementTraceCaptureErrors: browserResult.messageSendAcknowledgementTraceCaptureErrors}
+        : {})
     })}\n`);
   }
 }

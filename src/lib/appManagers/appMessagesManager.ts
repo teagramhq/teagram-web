@@ -100,11 +100,14 @@ import {createBotforumTopicFromAction} from './utils/dialogs/createBotforumTopic
 import {AttachedMedia, CreatePollPayload} from '@components/popups/createPoll/storeContext';
 import StreamedMessageDrafts, {StreamedMessageDraft, StreamedMessageDraftContent, StreamedMessageDraftRemovalReason, getStreamedMessageContentMatchText} from '@appManagers/utils/messages/streamedMessageDrafts';
 import {
+  enableRealClientMessageAckTrace,
   beginMessageAcknowledgementTrace,
+  getRealClientMessageAckTraceSnapshot,
   recordMessageAcknowledgementPendingEntry,
   recordMessageAcknowledgementResult,
   recordMessageAcknowledgementSent,
   recordMessageAcknowledgementUpdate,
+  setRealClientMessageAckTraceCheckName,
   withMessageAcknowledgementUpdateObservationSuppressed
 } from '@appManagers/utils/messages/realClientMessageAckTrace';
 
@@ -2182,6 +2185,18 @@ export class AppMessagesManager extends AppManager {
       config: this.apiManager.getConfig(),
       appConfig: this.apiManager.getAppConfig()
     });
+  }
+
+  public enableRealClientMessageAckTrace() {
+    enableRealClientMessageAckTrace();
+  }
+
+  public setRealClientMessageAckTraceCheckName(checkName: string) {
+    return setRealClientMessageAckTraceCheckName(checkName);
+  }
+
+  public getRealClientMessageAckTraceSnapshot() {
+    return getRealClientMessageAckTraceSnapshot();
   }
 
   public async sendText(

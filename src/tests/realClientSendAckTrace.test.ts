@@ -2,6 +2,7 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 import '@helpers/peerIdPolyfill';
 import {ApiUpdatesManager} from '@appManagers/apiUpdatesManager';
 import {AppMessagesManager} from '@appManagers/appMessagesManager';
+import {beginMessageAcknowledgementTrace} from '@appManagers/utils/messages/realClientMessageAckTrace';
 const realClientBrowser = require('../../scripts/real-client/browser.cjs');
 
 const TRACE_ENABLED = '__realClientMessageAckTraceEnabled';
@@ -16,10 +17,9 @@ function setTraceSwitch(enabled: boolean) {
 }
 
 function createSendHarness() {
-  const randomId = '123456789';
   const peerId = 777 as PeerId;
   const tempId = 1.0001;
-  const storage = {key: '777_history'};
+  const selfId = 1 as PeerId;
   const tempMessage = {_: 'message', mid: tempId, pFlags: {is_outgoing: true}};
   let resolveApiResult: (value: unknown) => void = () => undefined;
   let resolveMessage: () => void = () => undefined;
@@ -48,38 +48,55 @@ function createSendHarness() {
 
   const manager = new AppMessagesManager() as any;
   const dispatchEvent = vi.fn();
-  const invokeApiAfter = vi.fn(() => apiResult);
+  const invokeApiAfter = vi.fn((..._args: any[]) => apiResult);
+  const history = {history: {unshift: vi.fn(), delete: vi.fn()}, maxId: 0};
   Object.assign(manager, {
     appPeersManager: {
+      peerId: selfId,
       getPeerMigratedTo: (): undefined => undefined,
       getPeerId: () => peerId,
       getInputPeerById: () => ({_: 'inputPeerUser'}),
-      isChannel: () => false
+      getOutputPeer: (id: PeerId) => ({_: 'peerUser', user_id: id}),
+      isAnyChat: () => false,
+      isBroadcast: () => false,
+      isChannel: () => false,
+      isForum: () => false,
+      isBotforum: () => false,
+      isMonoforum: () => false,
+      isMegagroup: () => false,
+      canManageDirectMessages: () => false,
+      isPeerPublic: () => false
     },
+    appChatsManager: {isBroadcast: () => false},
+    appUsersManager: {getSelf: () => ({id: selfId}), isBot: () => false},
+    appMessagesIdsManager: {
+      generateTempMessageId: () => tempId,
+      generateMessageId: (id: number) => id
+    },
+    timeManager: {getServerTimeOffset: () => 0},
     apiManager: {invokeApiAfter},
     apiUpdatesManager,
     rootScope: {dispatchEvent},
+    tempMids: {},
+    historiesStorage: {},
+    messagesStorageByPeerId: {},
+    missingMessages: new Set(),
+    deletedMessages: new Set(),
     pendingByRandomId: {},
     pendingByMessageId: {},
     pendingAfterMsgs: {},
     checkSendOptions: async() => ({config: {message_length_max: 4096}, appConfig: {}}),
     getEphemeralSendContext: (): undefined => undefined,
     getInputEntities: (): any[] => [],
-    generateOutgoingMessage: () => ({
-      _: 'message',
-      random_id: randomId,
-      mid: tempId,
-      pFlags: {is_outgoing: true},
-      promise: messagePromise
-    }),
     generateOutgoingWebPage: () => ({}),
-    beforeMessageSending: (message: any) => {
-      manager.pendingByRandomId[randomId] = {peerId, tempId, storage};
-      void message.send();
-    },
-    onMessagesSendError: vi.fn(),
+    getMessagePeer: () => peerId,
+    getMonoforumThreadId: (): undefined => undefined,
+    getHistoryStorage: () => history,
+    setMessageToStorage: (storage: Map<number, unknown>, message: {mid: number}) => storage.set(message.mid, message),
+    setDialogTopMessage: vi.fn(),
+    updateMessageContextForInserting: vi.fn(),
     getMessageFromStorage: (_storage: unknown, mid: number) => mid === tempId ? tempMessage : undefined,
-    getHistoryStorage: () => ({history: {delete: vi.fn()}}),
+    onMessagesSendError: vi.fn(),
     updateMessageContextForDeletion: vi.fn(),
     getDialogOnly: (): undefined => undefined,
     deletePendingTopMsg: vi.fn(),
@@ -97,27 +114,29 @@ function createSendHarness() {
     apiUpdatesManager,
     invokeApiAfter,
     resolveApiResult,
-    randomId,
+    get randomId() { return invokeApiAfter.mock.calls[0]?.[1]?.random_id; },
     peerId,
     tempId
   };
 }
 
-const sendResult: any = {
-  _: 'updates',
-  users: [],
-  chats: [],
-  updates: [
-    {_: 'updateMessageID', random_id: '123456789', id: 2},
-    {_: 'updateNewMessage', message: {
-      _: 'message',
-      id: 2,
-      pFlags: {out: true},
-      from_id: {_: 'peerUser', user_id: 777},
-      peer_id: {_: 'peerUser', user_id: 777}
-    }}
-  ]
-};
+function createSendResult(randomId: string): any {
+  return {
+    _: 'updates',
+    users: [],
+    chats: [],
+    updates: [
+      {_: 'updateMessageID', random_id: randomId, id: 2},
+      {_: 'updateNewMessage', message: {
+        _: 'message',
+        id: 2,
+        pFlags: {out: true},
+        from_id: {_: 'peerUser', user_id: 777},
+        peer_id: {_: 'peerUser', user_id: 777}
+      }}
+    ]
+  };
+}
 
 afterEach(() => {
   const scope = window as any;
@@ -128,8 +147,9 @@ afterEach(() => {
 
 describe('real-client text-send acknowledgement trace', () => {
   it('records the send result and applied update order while the diagnostic switch is enabled', async() => {
-    setTraceSwitch(true);
     const harness = createSendHarness();
+    harness.manager.enableRealClientMessageAckTrace();
+    harness.manager.setRealClientMessageAckTraceCheckName('alice_group_message_message_count');
     const sendPromise = harness.manager.sendText({peerId: harness.peerId, text: 'private body'});
 
     await vi.waitFor(() => expect(harness.invokeApiAfter).toHaveBeenCalledWith(
@@ -137,9 +157,10 @@ describe('real-client text-send acknowledgement trace', () => {
       expect.objectContaining({random_id: harness.randomId}),
       expect.any(Object)
     ));
-    harness.resolveApiResult(sendResult);
+    expect(harness.manager.pendingByRandomId[harness.randomId]?.tempId).toBe(harness.tempId);
+    expect(harness.manager.getHistoryMessagesStorage(harness.peerId).get(harness.tempId)?.mid).toBe(harness.tempId);
+    harness.resolveApiResult(createSendResult(harness.randomId));
     await sendPromise;
-
     harness.manager.finalizePendingMessage(harness.randomId, {
       _: 'message',
       id: 2,
@@ -168,6 +189,13 @@ describe('real-client text-send acknowledgement trace', () => {
     expect(records[0].events.map((event: any) => event.kind)).toEqual([
       'request', 'send_result', 'pending_entry', 'message_sent'
     ]);
+    expect(harness.manager.getRealClientMessageAckTraceSnapshot()).toMatchObject({
+      switchEnabled: true,
+      stateExists: true,
+      beginCalls: 1,
+      rejectedReason: null as string | null,
+      beginCallsByCheckName: {alice_group_message_message_count: 1}
+    });
     expect(JSON.stringify(records)).not.toContain('private body');
   });
 
@@ -177,9 +205,8 @@ describe('real-client text-send acknowledgement trace', () => {
     const sendPromise = harness.manager.sendText({peerId: harness.peerId, text: 'private body'});
 
     await vi.waitFor(() => expect(harness.invokeApiAfter).toHaveBeenCalled());
-    harness.resolveApiResult(sendResult);
+    harness.resolveApiResult(createSendResult(harness.randomId));
     await sendPromise;
-
     harness.manager.finalizePendingMessage(harness.randomId, {
       _: 'message',
       id: 2,
@@ -191,6 +218,27 @@ describe('real-client text-send acknowledgement trace', () => {
     expect(harness.invokeApiAfter).toHaveBeenCalledTimes(1);
     expect(harness.dispatchEvent).toHaveBeenCalledWith('message_sent', expect.any(Object));
     expect((window as any)[TRACE_STATE]).toBeUndefined();
+  });
+
+  it('reports why an enabled trace attempt was rejected by the ID guard', () => {
+    const harness = createSendHarness();
+    harness.manager.enableRealClientMessageAckTrace();
+    harness.manager.setRealClientMessageAckTraceCheckName('alice_direct_message_count');
+
+    expect(beginMessageAcknowledgementTrace({
+      randomId: '123456789',
+      pendingTempId: undefined,
+      peerKind: 'user',
+      peerKey: harness.peerId
+    })).toBeUndefined();
+    expect(harness.manager.getRealClientMessageAckTraceSnapshot()).toMatchObject({
+      switchEnabled: true,
+      stateExists: true,
+      beginCalls: 1,
+      rejectedReason: 'invalid_pending_temp_id',
+      beginCallsByCheckName: {alice_direct_message_count: 1},
+      records: []
+    });
   });
 
   it('keeps pre-result mismatched pushed and difference update IDs in arrival order', async() => {
@@ -245,7 +293,14 @@ describe('real-client text-send acknowledgement trace', () => {
       text: 'private body',
       username: 'private-user'
     };
-    const makePage = () => ({evaluate: async() => [rawRecord]});
+    const makePage = () => ({evaluate: async() => ({
+      records: [rawRecord],
+      switchEnabled: true,
+      stateExists: true,
+      beginCalls: 1,
+      rejectedReason: null as string | null,
+      beginCallsByCheckName: {alice_group_message_message_count: 1}
+    })});
     const report = await realClientBrowser.captureMessageAcknowledgementTraces(makePage(), makePage());
 
     expect(report.alice).toMatchObject([{
@@ -256,7 +311,42 @@ describe('real-client text-send acknowledgement trace', () => {
       ]
     }]);
     expect(report.bob).toEqual(report.alice);
+    expect(report.diagnostics.alice).toMatchObject({
+      switchEnabled: true,
+      stateExists: true,
+      beginCalls: 1,
+      rejectedReason: null
+    });
+    expect(report.captureErrors).toEqual({});
     expect(JSON.stringify(report)).not.toContain('private body');
     expect(JSON.stringify(report)).not.toContain('private-user');
+  });
+
+  it('surfaces trace snapshot evaluation failures instead of treating them as empty captures', async() => {
+    const report = await realClientBrowser.captureMessageAcknowledgementTraces({
+      evaluate: async() => { throw new Error('private browser detail'); }
+    }, {evaluate: async() => ({records: [] as any[], switchEnabled: true, stateExists: true, beginCalls: 0, rejectedReason: null as string | null})});
+
+    expect(report.alice).toEqual([]);
+    expect(report.captureErrors.alice).toBe('page_evaluate_failed');
+    expect(report.captureErrors.bob).toBeUndefined();
+    expect(JSON.stringify(report)).not.toContain('private browser detail');
+  });
+
+  it('fails a checked send stage when its begin call has no trace record', async() => {
+    const page = {evaluate: async() => ({
+      records: [] as any[],
+      switchEnabled: true,
+      stateExists: true,
+      beginCalls: 1,
+      rejectedReason: null as string | null,
+      beginCallsByCheckName: {alice_direct_message_count: 1}
+    })};
+
+    await expect(realClientBrowser.assertMessageAckTraceForCheck(
+      page,
+      'alice_direct_message_count',
+      'alice_direct_message_ack_trace'
+    )).rejects.toThrow('alice_direct_message_ack_trace');
   });
 });

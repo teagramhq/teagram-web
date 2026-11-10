@@ -64,30 +64,46 @@ type TraceState = {
   tracesByRandomId: Map<string, InternalTrace>,
   records: MessageAcknowledgementTrace[],
   suppressedUpdateObservation: number,
-  nextTraceToken: number
+  nextTraceToken: number,
+  beginCalls: number,
+  beginCallsByCheckName: Record<string, number>,
+  rejectedReason: 'invalid_random_id' | 'invalid_pending_temp_id' | null
 };
 
-type TraceWindow = Window & {
+type TraceScope = typeof globalThis & {
   __realClientMessageAckTraceEnabled?: boolean,
   __realClientMessageAckTraceCheckName?: string,
   __realClientMessageAckTraceState?: TraceState
 };
 
 const TRACE_STATE = '__realClientMessageAckTraceState';
+const TRACE_ENABLED = '__realClientMessageAckTraceEnabled';
+const TRACE_CHECK_NAME = '__realClientMessageAckTraceCheckName';
 
-function getTraceWindow() {
-  if(typeof window === 'undefined') return undefined;
-  const scope = window as TraceWindow;
-  return scope.__realClientMessageAckTraceEnabled === true ? scope : undefined;
+function getTraceScope() {
+  return globalThis as TraceScope;
+}
+
+function getEnabledTraceScope() {
+  const scope = getTraceScope();
+  return scope[TRACE_ENABLED] === true ? scope : undefined;
 }
 
 function getTraceState(create: boolean): TraceState | undefined {
-  const scope = getTraceWindow();
+  const scope = getEnabledTraceScope();
   if(!scope) return undefined;
 
   if(!scope[TRACE_STATE] && create) {
     Object.defineProperty(scope, TRACE_STATE, {
-      value: {tracesByRandomId: new Map(), records: [], suppressedUpdateObservation: 0, nextTraceToken: 0},
+      value: {
+        tracesByRandomId: new Map(),
+        records: [],
+        suppressedUpdateObservation: 0,
+        nextTraceToken: 0,
+        beginCalls: 0,
+        beginCallsByCheckName: {},
+        rejectedReason: null
+      },
       configurable: true
     });
   }
@@ -139,8 +155,32 @@ function normalizeUpdate(update: any, randomId: string): MessageAckTraceUpdate {
 }
 
 function getCheckName() {
-  const value = getTraceWindow()?.__realClientMessageAckTraceCheckName;
+  const value = getEnabledTraceScope()?.[TRACE_CHECK_NAME];
   return typeof value === 'string' && /^[a-z0-9_]{1,96}$/.test(value) ? value : null;
+}
+
+export function enableRealClientMessageAckTrace() {
+  getTraceScope()[TRACE_ENABLED] = true;
+  getTraceState(true);
+}
+
+export function setRealClientMessageAckTraceCheckName(checkName: string) {
+  if(!/^[a-z0-9_]{1,96}$/.test(checkName)) return false;
+  getTraceScope()[TRACE_CHECK_NAME] = checkName;
+  return true;
+}
+
+export function getRealClientMessageAckTraceSnapshot() {
+  const scope = getTraceScope();
+  const state = scope[TRACE_STATE];
+  return {
+    switchEnabled: scope[TRACE_ENABLED] === true,
+    stateExists: !!state,
+    beginCalls: state?.beginCalls ?? 0,
+    rejectedReason: state?.rejectedReason ?? (scope[TRACE_ENABLED] === true ? null : 'switch_disabled'),
+    beginCallsByCheckName: state ? {...state.beginCallsByCheckName} : {},
+    records: state ? [...state.records] : []
+  };
 }
 
 function hashRandomId(randomId: string) {
@@ -167,9 +207,26 @@ export function beginMessageAcknowledgementTrace(options: {
   peerKey: unknown
 }) {
   const state = getTraceState(true);
+  if(!state) return undefined;
+  state.beginCalls++;
+  const checkName = getCheckName();
+  if(checkName) {
+    state.beginCallsByCheckName[checkName] = (state.beginCallsByCheckName[checkName] || 0) + 1;
+  }
+
   const randomId = safeRandomId(options.randomId);
+  if(randomId === undefined) {
+    state.rejectedReason = 'invalid_random_id';
+    return undefined;
+  }
+
   const pendingTempId = safeId(options.pendingTempId);
-  if(!state || randomId === undefined || pendingTempId === undefined) return undefined;
+  if(pendingTempId === undefined) {
+    state.rejectedReason = 'invalid_pending_temp_id';
+    return undefined;
+  }
+
+  state.rejectedReason = null;
 
   const existingTrace = state.tracesByRandomId.get(randomId);
   if(existingTrace) return existingTrace;

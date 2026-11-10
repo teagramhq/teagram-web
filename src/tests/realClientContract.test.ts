@@ -5588,6 +5588,48 @@ describe('real client username field readiness', () => {
     });
   });
 
+  it('forwards a traced browser failure with its check name through both report emitters', () => {
+    const trace = {
+      token: 'send-1-075e4a1d',
+      checkName: 'alice_group_message_message_count',
+      pendingEntryFound: true,
+      messageSent: {emitted: true, tempId: 1.0001, serverId: 2},
+      events: [{kind: 'request', atMs: 0, pendingTempId: 1.0001, peerKind: 'chat'}]
+    };
+    const diagnostics = {
+      alice: {switchEnabled: true, stateExists: true, beginCalls: 1, rejectedReason: null as string | null},
+      bob: {switchEnabled: true, stateExists: true, beginCalls: 0, rejectedReason: null as string | null}
+    };
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true as any);
+    const originalExitCode = process.exitCode;
+    try {
+      emitReport({
+        status: 'failed',
+        stage: 'alice_group_message_message_count_ack_trace',
+        messageSendAcknowledgementTraces: {alice: [trace], bob: []},
+        messageSendAcknowledgementTraceDiagnostics: diagnostics
+      }, true);
+      const browserOutput = stdout.mock.calls.map(([chunk]) => String(chunk)).join('');
+      expect(JSON.parse(browserOutput)).toMatchObject({
+        status: 'failed',
+        messageSendAcknowledgementTraces: {alice: [{checkName: 'alice_group_message_message_count'}]},
+        messageSendAcknowledgementTraceDiagnostics: diagnostics
+      });
+
+      const outer = runOuterRunner(browserOutput, {browserExitCode: 1, scenarioValidation: true});
+      expect(outer.status).toBe(1);
+      expect(JSON.parse(outer.stdout.trim())).toMatchObject({
+        status: 'failed',
+        stage: 'alice_group_message_message_count_ack_trace',
+        messageSendAcknowledgementTraces: {alice: [{checkName: 'alice_group_message_message_count'}]},
+        messageSendAcknowledgementTraceDiagnostics: diagnostics
+      });
+    } finally {
+      stdout.mockRestore();
+      process.exitCode = originalExitCode;
+    }
+  });
+
   it('submits Username once and stops at the masked password-card boundary', async() => {
     setFixture(authProgressMarkup());
     const page = await createRunnerPage();
@@ -6913,6 +6955,29 @@ describe('real client group created', () => {
 
   async function installMessageSender(page: any, mode = 'single') {
     await page.evaluate((mode: string) => {
+      const traceState = {checkName: 'unassigned'};
+      (window as any).rootScope = {managers: {appMessagesManager: {
+        setRealClientMessageAckTraceCheckName(checkName: string) {
+          traceState.checkName = checkName;
+          return true;
+        },
+        getRealClientMessageAckTraceSnapshot() {
+          return {
+            switchEnabled: true,
+            stateExists: true,
+            beginCalls: 1,
+            rejectedReason: null as string | null,
+            beginCallsByCheckName: {[traceState.checkName]: 1},
+            records: [{
+              token: 'send-1-075e4a1d',
+              checkName: traceState.checkName,
+              pendingEntryFound: true,
+              messageSent: {emitted: true, tempId: 1.0001, serverId: 2},
+              events: [{kind: 'request', atMs: 0, pendingTempId: 1.0001, peerKind: 'chat'}]
+            }]
+          };
+        }
+      }}};
       document.addEventListener('keydown', (event) => {
         const input = event.target as HTMLElement;
         if(event.key !== 'Enter' || !input.matches('.input-message-input:not(.input-field-input-fake)')) return;
