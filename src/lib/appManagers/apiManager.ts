@@ -92,7 +92,9 @@ export class ApiManager extends ApiManagerMethods {
     super();
     this.name = 'API';
 
-    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace = new PerformanceRpcTrace(true);
+    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1') {
+      this.performanceRpcTrace = new PerformanceRpcTrace(true);
+    }
 
     this.cachedNetworkers = {} as any;
     this.cachedExportPromise = {};
@@ -835,7 +837,9 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public resetPerformanceRpcTrace(recordSpans = true) {
-    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace!.reset(recordSpans);
+    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1') {
+      this.performanceRpcTrace!.reset(recordSpans);
+    }
   }
 
   public getPerformancePhaseTrace() {
@@ -878,8 +882,10 @@ export class ApiManager extends ApiManagerMethods {
   public invokeApi<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {}, options: InvokeApiOptions = {}): CancellablePromise<MethodDeclMap[T]['res']> {
     const methodName = String(method);
     if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace?.recordCall(methodName);
+    const traceSearch = import.meta.env.VITE_PERF_SEARCH_TRACE === '1' && methodName === 'messages.searchGlobal';
     if(!getAuthMethod(methodName, params)) {
-      return this.invokeApiInternal(method, params, options);
+      const request = this.invokeApiInternal(method, params, options);
+      return traceSearch ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;
     }
 
     const redactor = this.authLogRedactor ??= new AuthLogRedactor(this.log);

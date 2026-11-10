@@ -139,12 +139,20 @@ function runSummaryWithArtifacts({
   }
 }
 
-test('timing bundles enable only the cached-dialog probe and keep full profiles separate', () => {
-  assert.match(workflow, /^\s+VITE_PERF_RECONCILE_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
-  assert.match(workflow, /^\s+\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
-  assert.doesNotMatch(workflow, /VITE_PERF_SEARCH_TRACE/);
+test('timing bundles enable reconciliation and targeted search probes while keeping full profiles separate', () => {
+  assert.match(workflow, /^\s+VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
+  assert.match(workflow, /^\s+\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
   assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
   assert.doesNotMatch(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
+});
+
+test('the base timing bundle gets the PR search-RPC tracer without taking PR application changes', () => {
+  const buildStep = workflow.match(/- name: Build current and base private client bundles([\s\S]*?)(?=\n      - name: Start local HTTPS)/)?.[1];
+  assert.ok(buildStep, 'the performance workflow must define its client build step');
+  assert.match(workflow, /PERF_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
+  assert.match(buildStep, /git -C "\$base_directory" checkout "\$PERF_HEAD_SHA" -- src\/lib\/appManagers\/apiManager\.ts/);
+  assert.match(buildStep, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
+  assert.match(buildStep, /\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)/);
 });
 
 test('sticker timing gates against the PR base and keeps the pre-178 client report-only', () => {

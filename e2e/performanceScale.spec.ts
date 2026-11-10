@@ -9,7 +9,7 @@ import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogRec
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
 import {LOTTIE_FRAME_BG_CSS, waitForFirstStickerFrame, waitUntilOnScreen} from './lottieFrameMeasurement';
-import {findMatchingGlobalSearchRpc, globalSearchSampleMs, isCurrentGlobalSearchResult} from '../scripts/performance/global-search-measurement.mjs';
+import {globalSearchSampleMs, isCurrentGlobalSearchResult} from '../scripts/performance/global-search-measurement.mjs';
 
 type Fixture = {
   owner: number,
@@ -24,13 +24,6 @@ const FIRST_STICKER_REPEATS = PERFORMANCE_REPEATS;
 const FIRST_STICKER_REPORT_REPEATS = 3;
 const TRACE_DIAGNOSTIC_REPEATS = 1;
 const FIRST_STICKER_ASSET = '/assets/tgs/key.json';
-
-type GlobalSearchStages = {
-  queryEnteredAtMs: number,
-  debounceSettledAtMs: number,
-  matchingSearchRpcReturnedAtMs: number,
-  matchingResultVisibleAtMs: number
-};
 
 type Metric = {
   ms: number,
@@ -76,7 +69,12 @@ type Metric = {
   appSendUiMs?: number,
   composerReadyAfterFirstBubbleMs?: number,
   firstBubbleToSentMs?: number,
-  globalSearchStages?: GlobalSearchStages
+  globalSearchStages?: {
+    queryEnteredAtMs: number,
+    debounceSettledAtMs: number,
+    matchingSearchRpcReturnedAtMs: number,
+    matchingResultVisibleAtMs: number
+  }
 };
 
 type VariantRun = {
@@ -1135,38 +1133,18 @@ async function globalSearch(page: Page, requests: {value: number}, scale: Scale,
     const input = document.querySelector<HTMLInputElement>('#column-left .item-main .sidebar-header .input-search-input');
     if(!input) throw new Error('global-search input is missing');
 
-    const apiManager = (window as any).rootScope.managers.apiManager;
-    const invokeApi = apiManager?.invokeApi;
-    if(typeof invokeApi !== 'function') throw new Error('global-search API manager is unavailable');
-    const apiManagerProxy = (window as any).apiManagerProxy;
-    const invoke = apiManagerProxy?.invoke;
-    if(typeof invoke !== 'function') throw new Error('global-search manager proxy is unavailable');
-
     const stages: Record<string, number> = perf.globalSearchStages = {};
     perf.globalSearchBaselineRows = new WeakSet(document.querySelectorAll('#search-container .chatlist-chat'));
-    perf.globalSearchRpcCalls = [];
-    perf.globalSearchRpcErrors = [];
-    const onInput = () => {
+    input.addEventListener('input', () => {
       if(input.value === query && !Number.isFinite(stages.queryEnteredAtMs)) {
         stages.queryEnteredAtMs = performance.now();
       }
-    };
-    input.addEventListener('input', onInput, {capture: true});
+    }, {capture: true});
 
-    const invokeApiProxy = (method: string, params: any, ...args: any[]) => {
-      const isMatchingSearch = method === 'messages.searchGlobal' && params?.q === query &&
-        params?.filter?._ === 'inputMessagesFilterEmpty';
-      const startedAtMs = isMatchingSearch ? performance.now() : undefined;
-      const request = invokeApi.call(apiManager, method, params, ...args);
-      if(isMatchingSearch) {
-        request.then(
-          () => perf.globalSearchRpcCalls.push({method, query: params.q, startedAtMs, returnedAtMs: performance.now()}),
-          (error: unknown) => perf.globalSearchRpcErrors.push(String(error))
-        );
-      }
-      return request;
-    };
-    const managerInvokeProxy = function(this: any, method: string, payload: any, ...args: any[]) {
+    const apiManagerProxy = (window as any).apiManagerProxy;
+    const invoke = apiManagerProxy?.invoke;
+    if(typeof invoke !== 'function') throw new Error('global-search manager proxy is unavailable');
+    apiManagerProxy.invoke = function(method: string, payload: any, ...args: any[]) {
       const result = invoke.call(this, method, payload, ...args);
       const options = payload?.args?.[0];
       if(method === 'manager' && payload?.name === 'appMessagesManager' && payload?.method === 'getHistory' &&
@@ -1177,87 +1155,62 @@ async function globalSearch(page: Page, requests: {value: number}, scale: Scale,
       }
       return result;
     };
-    apiManager.invokeApi = invokeApiProxy;
-    apiManagerProxy.invoke = managerInvokeProxy;
-    perf.globalSearchInstrumentation = {apiManager, invokeApi, invokeApiProxy, apiManagerProxy, invoke, managerInvokeProxy, input, onInput};
   }, query);
-  let observation: {
-    stages: Omit<GlobalSearchStages, 'matchingSearchRpcReturnedAtMs'>,
-    rpcCalls: {method: string, query: string, startedAtMs: number, returnedAtMs: number}[],
-    rpcErrors: string[]
-  } | undefined;
-  try {
-    await input.fill(query);
-    await page.waitForFunction((query) => {
-      const perf = (window as any).__teagramPerf;
-      const stages = perf?.globalSearchStages;
-      if(!Number.isFinite(stages?.queryEnteredAtMs) || !Number.isFinite(stages?.debounceSettledAtMs)) return false;
-      const input = document.querySelector<HTMLInputElement>('#column-left .item-main .sidebar-header .input-search-input');
-      if(input?.value !== query) return false;
+  await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace(true));
+  await input.fill(query);
+  await page.waitForFunction((query) => {
+    const perf = (window as any).__teagramPerf;
+    const stages = perf?.globalSearchStages;
+    if(!Number.isFinite(stages?.queryEnteredAtMs) || !Number.isFinite(stages?.debounceSettledAtMs)) return false;
+    const input = document.querySelector<HTMLInputElement>('#column-left .item-main .sidebar-header .input-search-input');
+    if(input?.value !== query) return false;
 
-      const isVisible = (row: HTMLElement) => {
-        let current: HTMLElement | null = row;
-        while(current) {
-          const style = getComputedStyle(current);
-          if(style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-          current = current.parentElement;
-        }
-        const rect = row.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-      };
-      const baselineRows = perf.globalSearchBaselineRows as WeakSet<Element>;
-      for(const row of document.querySelectorAll<HTMLElement>('#search-container .chatlist-chat')) {
-        const messageText = row.querySelector('.dialog-subtitle-parts')?.textContent || '';
-        const matchesCurrentQuery = (window as any).__teagramIsCurrentGlobalSearchResult({
-          query,
-          inputValue: input.value,
-          messageText,
-          visible: isVisible(row),
-          presentBeforeQuery: baselineRows.has(row)
-        });
-        if(!matchesCurrentQuery) continue;
-
-        stages.matchingResultVisibleAtMs = performance.now();
-        return true;
+    const isVisible = (row: HTMLElement) => {
+      let current: HTMLElement | null = row;
+      while(current) {
+        const style = getComputedStyle(current);
+        if(style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        current = current.parentElement;
       }
-      return false;
-    }, query, {polling: 'raf', timeout: 90_000});
+      const rect = row.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const baselineRows = perf.globalSearchBaselineRows as WeakSet<Element>;
+    for(const row of document.querySelectorAll<HTMLElement>('#search-container .chatlist-chat')) {
+      const messageText = row.querySelector('.dialog-subtitle-parts')?.textContent || '';
+      const matchesCurrentQuery = (window as any).__teagramIsCurrentGlobalSearchResult({
+        query,
+        inputValue: input.value,
+        messageText,
+        visible: isVisible(row),
+        presentBeforeQuery: baselineRows.has(row)
+      });
+      if(!matchesCurrentQuery) continue;
 
-    observation = await page.evaluate(() => {
-      const perf = (window as any).__teagramPerf;
-      return {
-        stages: {...perf.globalSearchStages},
-        rpcCalls: [...perf.globalSearchRpcCalls],
-        rpcErrors: [...perf.globalSearchRpcErrors]
-      };
-    });
-  } finally {
-    await page.evaluate(() => {
-      const perf = (window as any).__teagramPerf;
-      const instrumentation = perf?.globalSearchInstrumentation;
-      if(!instrumentation) return;
-      instrumentation.input.removeEventListener('input', instrumentation.onInput, true);
-      if(instrumentation.apiManager.invokeApi === instrumentation.invokeApiProxy) {
-        instrumentation.apiManager.invokeApi = instrumentation.invokeApi;
-      }
-      if(instrumentation.apiManagerProxy.invoke === instrumentation.managerInvokeProxy) {
-        instrumentation.apiManagerProxy.invoke = instrumentation.invoke;
-      }
-      delete perf.globalSearchInstrumentation;
-    });
-  }
+      stages.matchingResultVisibleAtMs = performance.now();
+      return true;
+    }
+    return false;
+  }, query, {polling: 'raf', timeout: 90_000});
 
-  if(!observation) throw new Error('global-search instrumentation did not return its captured stages');
-  const stages = observation.stages;
-  const matchingRpc = findMatchingGlobalSearchRpc(observation.rpcCalls, {
-    query,
-    debounceSettledAtMs: stages.debounceSettledAtMs,
-    matchingResultVisibleAtMs: stages.matchingResultVisibleAtMs
-  });
-  expect(matchingRpc, `the current global-search query did not complete a matching search RPC; failures: ${observation.rpcErrors.join(', ')}`).toBeDefined();
+  const trace = await page.evaluate(async() => ({
+    timeOrigin: performance.timeOrigin,
+    trace: await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace()
+  }));
+  expect(trace.trace.enabled, 'targeted global-search RPC tracing was not enabled').toBe(true);
+  const stages = await page.evaluate(() => ({...(window as any).__teagramPerf.globalSearchStages}));
+  const matchingRpc = trace.trace.calls
+  .filter((call: {method: string, startedAtEpochMs: number, durationMs: number | null, outcome: string}) => (
+    call.method === 'messages.searchGlobal' && call.outcome === 'success' && typeof call.durationMs === 'number' && Number.isFinite(call.durationMs) &&
+    call.startedAtEpochMs - trace.timeOrigin >= stages.debounceSettledAtMs &&
+    call.startedAtEpochMs - trace.timeOrigin + call.durationMs <= stages.matchingResultVisibleAtMs
+  ))
+  .sort((left: {startedAtEpochMs: number}, right: {startedAtEpochMs: number}) => left.startedAtEpochMs - right.startedAtEpochMs)
+  .at(-1);
+  expect(matchingRpc, 'the current global-search query did not complete a matching search RPC').toBeDefined();
   if(!matchingRpc) throw new Error('the current global-search query did not complete a matching search RPC');
-  const matchingSearchRpcReturnedAtMs = matchingRpc.returnedAtMs;
-  const globalSearchStages: GlobalSearchStages = {...stages, matchingSearchRpcReturnedAtMs};
+  const matchingSearchRpcReturnedAtMs = matchingRpc.startedAtEpochMs - trace.timeOrigin + matchingRpc.durationMs;
+  const globalSearchStages = {...stages, matchingSearchRpcReturnedAtMs};
   const stageTimestamps = [
     globalSearchStages.queryEnteredAtMs,
     globalSearchStages.debounceSettledAtMs,
