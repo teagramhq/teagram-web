@@ -52,8 +52,8 @@ test('the performance workflow assigns the 1x and 100x browser origins to separa
   assert.match(workflow, /2446/);
 });
 
-test('PR and paired manual performance runs require complete base bundle measurements', () => {
-  assert.match(workflow, /PERF_REQUIRE_BASE: \$\{\{ github\.event_name == 'pull_request' \|\| \(github\.event_name == 'workflow_dispatch' && github\.event\.inputs\.performance_base_sha != ''\) \}\}/);
+test('PR performance runs require complete base bundle measurements', () => {
+  assert.match(workflow, /PERF_REQUIRE_BASE: \$\{\{ github\.event_name == 'pull_request' \}\}/);
 });
 
 test('timing builds use the cached-dialog probe and diagnostics use a full trace bundle', () => {
