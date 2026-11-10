@@ -5565,6 +5565,139 @@ describe('first history page asked for during a peer change', () => {
   });
 });
 
+describe('peer changes racing over the prefetched first page', () => {
+  const peerA = peerId;
+  const peerB = 11 as PeerId;
+  const user = (id: PeerId) => ({_: 'user', id, pFlags: {}});
+
+  const createRace = () => {
+    const {harness, chat, getHistory1} = makeMountableSetPeerHarness();
+    // the real history chain runs: getHistory1 -> getHistory -> requestHistory (prefetched or not)
+    delete harness.getHistory1;
+    void getHistory1;
+    (moduleMocks.apiManagerProxy as any).getPeer = vi.fn((id: PeerId) => user(id));
+
+    const responses: Array<{peer: PeerId, resolve: (mids: number[]) => void}> = [];
+    const getHistory = vi.fn((options: {peerId: PeerId}) => new Promise((resolve) => {
+      responses.push({
+        peer: options.peerId,
+        resolve: (mids) => resolve({cached: false, result: Promise.resolve({history: mids})})
+      });
+    }));
+    const historyStorage = {maxId: 100, history: {length: 1, slice: {isEnd: () => false}, findSliceOffset: (): undefined => undefined}};
+    const peerChanges: Array<() => void> = [];
+    const rendered: Array<{peer: PeerId, mids: number[]}> = [];
+
+    Object.assign(chat, {
+      type: ChatType.Chat,
+      getHistoryStorage: () => historyStorage,
+      getDialogOrTopic: vi.fn(async() => undefined),
+      getMessage: vi.fn(() => ({})),
+      onChangePeer: vi.fn(() => new Promise<void>((resolve) => peerChanges.push(resolve)))
+    });
+    Object.defineProperty(chat, 'requestHistoryOptionsPart', {get: () => ({peerId: chat.peerId})});
+    Object.assign(harness, {
+      bubbleGroups: {groups: []},
+      historyRetries: [],
+      loadMoreHistory: vi.fn(),
+      isFirstLoad: false,
+      getMiddleware: (extra?: () => boolean) => {
+        const generation = harness.setPeerTempId;
+        return () => harness.setPeerTempId === generation && (!extra || extra());
+      },
+      performHistoryResult: vi.fn(async(historyResult: {history: number[]}) => {
+        rendered.push({peer: chat.peerId, mids: [...historyResult.history]});
+      })
+    });
+    harness.managers.acknowledged = {appMessagesManager: {getHistory}};
+    harness.managers.appMessagesManager.getReadMaxIdIfUnread = vi.fn(async() => 0);
+
+    const open = (peer: PeerId) => {
+      chat.peerId = peer;
+      const promise = harness.setPeer({peerId: peer, samePeer: false, sameSearch: false});
+      promise.catch(noopCatch);
+      return promise;
+    };
+    return {harness, chat, getHistory, responses, peerChanges, rendered, open};
+  };
+  const noopCatch = (): undefined => undefined;
+  afterAll(() => {
+    (moduleMocks.apiManagerProxy as any).getPeer = vi.fn();
+  });
+
+  test('B then A again: only the current A renders, and nothing is asked for twice', async() => {
+    const {harness, getHistory, responses, peerChanges, rendered, open} = createRace();
+
+    const firstA = open(peerA);
+    await vi.waitFor(() => expect(responses).toHaveLength(1));
+    const toB = open(peerB);
+    await vi.waitFor(() => expect(responses).toHaveLength(2));
+    const secondA = open(peerA);
+    await vi.waitFor(() => expect(responses).toHaveLength(3));
+    expect(responses.map(({peer}) => peer)).toEqual([peerA, peerB, peerA]);
+
+    // the stale prefetches answer first, the current one last
+    responses[0].resolve([901]);
+    responses[1].resolve([902]);
+    peerChanges.forEach((resolve) => resolve());
+    await Promise.all([firstA, toB]).catch(noopCatch);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(rendered).toEqual([]);
+
+    responses[2].resolve([903]);
+    await secondA;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(rendered).toEqual([{peer: peerA, mids: [100, 903]}]);
+    expect(getHistory).toHaveBeenCalledTimes(3);
+    expect(harness.historyPrefetch).toBeUndefined();
+  });
+
+  test('a switch while the old peer is still cleaning up renders only the new peer', async() => {
+    const {getHistory, responses, peerChanges, rendered, open} = createRace();
+
+    const toA = open(peerA);
+    await vi.waitFor(() => expect(responses).toHaveLength(1));
+    // A's change finishes and its response is in flight when the user moves to B
+    peerChanges[0]();
+    const toB = open(peerB);
+    await vi.waitFor(() => expect(responses).toHaveLength(2));
+
+    responses[0].resolve([901]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    responses[1].resolve([902]);
+    peerChanges[1]();
+    await Promise.all([toA.catch(noopCatch), toB]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(rendered).toEqual([{peer: peerB, mids: [100, 902]}]);
+    expect(getHistory).toHaveBeenCalledTimes(2);
+  });
+  test('a second open of the same peer never takes the first open\'s request', async() => {
+    const {getHistory, responses, peerChanges, rendered, open} = createRace();
+
+    const first = open(peerA);
+    await vi.waitFor(() => expect(responses).toHaveLength(1));
+    // the second open cannot be predicted (the mirror has no peer), so it asks for itself
+    (moduleMocks.apiManagerProxy as any).getPeer = vi.fn();
+    const second = open(peerA);
+    peerChanges.forEach((resolve) => resolve());
+    await vi.waitFor(() => expect(responses).toHaveLength(2));
+    expect(getHistory).toHaveBeenCalledTimes(2);
+
+    responses[0].resolve([901]);
+    await Promise.all([first.catch(noopCatch)]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(rendered).toEqual([]);
+
+    responses[1].resolve([903]);
+    await second;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(rendered).toEqual([{peer: peerA, mids: [100, 903]}]);
+  });
+});
+
 describe('building the chat parts ahead of the first open', () => {
   const createChat = () => {
     const init = vi.fn();
