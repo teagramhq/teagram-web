@@ -1,4 +1,4 @@
-import {afterEach, describe, expect, it, vi} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import '@helpers/peerIdPolyfill';
 import {ApiUpdatesManager} from '@appManagers/apiUpdatesManager';
 import {AppMessagesManager} from '@appManagers/appMessagesManager';
@@ -8,6 +8,7 @@ const realClientBrowser = require('../../scripts/real-client/browser.cjs');
 const TRACE_ENABLED = '__realClientMessageAckTraceEnabled';
 const TRACE_CHECK_NAME = '__realClientMessageAckTraceCheckName';
 const TRACE_STATE = '__realClientMessageAckTraceState';
+const TRACE_BUILD_FLAG = 'VITE_REAL_CLIENT_ACK_TRACE';
 
 function setTraceSwitch(enabled: boolean) {
   const scope = window as any;
@@ -49,7 +50,16 @@ function createSendHarness() {
   const manager = new AppMessagesManager() as any;
   const dispatchEvent = vi.fn();
   const invokeApiAfter = vi.fn((..._args: any[]) => apiResult);
-  const history = {history: {unshift: vi.fn(), delete: vi.fn()}, maxId: 0};
+  const history = {
+    history: {
+      unshift: vi.fn(),
+      delete: vi.fn(),
+      findSlice: vi.fn(),
+      first: {isEnd: () => false, length: 0}
+    },
+    count: null as number | null,
+    maxId: 0
+  };
   Object.assign(manager, {
     appPeersManager: {
       peerId: selfId,
@@ -73,6 +83,8 @@ function createSendHarness() {
       generateTempMessageId: () => tempId,
       generateMessageId: (id: number) => id
     },
+    dialogsStorage: {getAnyDialog: () => ({_: 'dialog', top_message: 0, unread_count: 0})},
+    reloadConversationsPeers: new Set(),
     timeManager: {getServerTimeOffset: () => 0},
     apiManager: {invokeApiAfter},
     apiUpdatesManager,
@@ -95,7 +107,7 @@ function createSendHarness() {
     setMessageToStorage: (storage: Map<number, unknown>, message: {mid: number}) => storage.set(message.mid, message),
     setDialogTopMessage: vi.fn(),
     updateMessageContextForInserting: vi.fn(),
-    getMessageFromStorage: (_storage: unknown, mid: number) => mid === tempId ? tempMessage : undefined,
+    getMessageFromStorage: (storage: Map<number, unknown>, mid: number) => mid === tempId ? tempMessage : storage?.get(mid),
     onMessagesSendError: vi.fn(),
     updateMessageContextForDeletion: vi.fn(),
     getDialogOnly: (): undefined => undefined,
@@ -103,20 +115,46 @@ function createSendHarness() {
     takeTempFinalizeCallbacks: (): undefined => undefined,
     deleteMessageFromStorage: vi.fn(),
     handleReleasingMessage: vi.fn(),
-    onMessageModification: vi.fn()
+    onMessageModification: vi.fn(),
+    updateMessageRepliesIfNeeded: vi.fn(),
+    updateSlowModeOnNewMessage: vi.fn(),
+    updateNoForwardsOnNewMessage: vi.fn(),
+    mergeReplyKeyboard: () => false,
+    handleNewMessage: vi.fn()
   });
   apiUpdatesManager.appMessagesManager = manager;
+  const checkPendingMessage = vi.spyOn(manager, 'checkPendingMessage');
+  const finalizePendingMessage = vi.spyOn(manager, 'finalizePendingMessage');
   apiUpdatesManager.addEventListener('updateMessageID', manager.onUpdateMessageId);
+  const onUpdateNewMessage = vi.fn(manager.onUpdateNewMessage);
+  apiUpdatesManager.addEventListener('updateNewMessage', onUpdateNewMessage);
 
   return {
     manager,
     dispatchEvent,
     apiUpdatesManager,
+    onUpdateNewMessage,
+    checkPendingMessage,
+    finalizePendingMessage,
     invokeApiAfter,
     resolveApiResult,
     get randomId() { return invokeApiAfter.mock.calls[0]?.[1]?.random_id; },
     peerId,
     tempId
+  };
+}
+
+function createNewMessageUpdate(): any {
+  return {
+    _: 'updateNewMessage',
+    message: {
+      _: 'message',
+      id: 2,
+      message: '',
+      pFlags: {out: true},
+      from_id: {_: 'peerUser', user_id: 777},
+      peer_id: {_: 'peerUser', user_id: 777}
+    }
   };
 }
 
@@ -127,18 +165,17 @@ function createSendResult(randomId: string): any {
     chats: [],
     updates: [
       {_: 'updateMessageID', random_id: randomId, id: 2},
-      {_: 'updateNewMessage', message: {
-        _: 'message',
-        id: 2,
-        pFlags: {out: true},
-        from_id: {_: 'peerUser', user_id: 777},
-        peer_id: {_: 'peerUser', user_id: 777}
-      }}
+      createNewMessageUpdate()
     ]
   };
 }
 
+beforeEach(() => {
+  vi.stubEnv(TRACE_BUILD_FLAG, '1');
+});
+
 afterEach(() => {
+  vi.unstubAllEnvs();
   const scope = window as any;
   delete scope[TRACE_ENABLED];
   delete scope[TRACE_CHECK_NAME];
@@ -161,13 +198,10 @@ describe('real-client text-send acknowledgement trace', () => {
     expect(harness.manager.getHistoryMessagesStorage(harness.peerId).get(harness.tempId)?.mid).toBe(harness.tempId);
     harness.resolveApiResult(createSendResult(harness.randomId));
     await sendPromise;
-    harness.manager.finalizePendingMessage(harness.randomId, {
-      _: 'message',
-      id: 2,
-      mid: 2,
-      peerId: harness.peerId,
-      pFlags: {is_outgoing: true}
-    });
+    expect(harness.onUpdateNewMessage).toHaveBeenCalled();
+    expect(harness.checkPendingMessage).toHaveBeenCalled();
+    expect(harness.finalizePendingMessage).toHaveBeenCalled();
+    expect((harness.onUpdateNewMessage.mock.calls[0][0] as any).message.mid).toBe(2);
 
     const records = (window as any)[TRACE_STATE]?.records;
     expect(records).toMatchObject([{
@@ -208,13 +242,6 @@ describe('real-client text-send acknowledgement trace', () => {
     await vi.waitFor(() => expect(harness.invokeApiAfter).toHaveBeenCalled());
     harness.resolveApiResult(createSendResult(harness.randomId));
     await sendPromise;
-    harness.manager.finalizePendingMessage(harness.randomId, {
-      _: 'message',
-      id: 2,
-      mid: 2,
-      peerId: harness.peerId,
-      pFlags: {is_outgoing: true}
-    });
 
     expect(harness.manager.pendingByRandomId[harness.randomId]).toBeUndefined();
     harness.apiUpdatesManager.processUpdateMessage({
@@ -227,6 +254,65 @@ describe('real-client text-send acknowledgement trace', () => {
     expect(record.messageSent.emitted).toBe(true);
     expect(record.events.filter((event: any) => event.kind === 'pending_entry').map((event: any) => event.found))
       .toEqual([true, false]);
+  });
+
+  it('resolves a buffered pushed message when a later pushed acknowledgement reveals its ID without an RPC result', async() => {
+    const harness = createSendHarness();
+    harness.manager.enableRealClientMessageAckTrace();
+    harness.manager.setRealClientMessageAckTraceCheckName('alice_direct_message_count');
+    void harness.manager.sendText({peerId: harness.peerId, text: 'private body'});
+    await vi.waitFor(() => expect(harness.invokeApiAfter).toHaveBeenCalled());
+
+    const [record] = (window as any)[TRACE_STATE].records;
+    harness.apiUpdatesManager.processUpdateMessage({_: 'updateShort', update: createNewMessageUpdate()}, {}, 'pushed');
+    expect(record.events.map((event: any) => event.kind)).toEqual(['request']);
+
+    harness.apiUpdatesManager.processUpdateMessage({_: 'updateShort', update: {
+      _: 'updateMessageID',
+      random_id: harness.randomId,
+      id: 2
+    }}, {}, 'pushed');
+
+    expect(record.events.map((event: any) => event.kind)).toEqual([
+      'request', 'update', 'update', 'pending_entry', 'message_sent'
+    ]);
+    expect(record.events.slice(1, 5)).toMatchObject([
+      {kind: 'update', source: 'pushed', constructor: 'updateNewMessage', messageId: 2},
+      {kind: 'update', source: 'pushed', constructor: 'updateMessageID', messageId: 2, randomIdMatches: true},
+      {kind: 'pending_entry', found: true},
+      {kind: 'message_sent', tempId: harness.tempId, serverId: 2}
+    ] as any);
+    expect(record.messageSent.emitted).toBe(true);
+  });
+
+  it('preserves buffered update arrival order when the RPC result arrives after a pushed acknowledgement', async() => {
+    const harness = createSendHarness();
+    harness.manager.enableRealClientMessageAckTrace();
+    harness.manager.setRealClientMessageAckTraceCheckName('alice_direct_message_count');
+    const sendPromise = harness.manager.sendText({peerId: harness.peerId, text: 'private body'});
+    await vi.waitFor(() => expect(harness.invokeApiAfter).toHaveBeenCalled());
+
+    harness.apiUpdatesManager.processUpdateMessage({_: 'updateShort', update: createNewMessageUpdate()}, {}, 'pushed');
+    harness.apiUpdatesManager.processUpdateMessage({_: 'updateShort', update: {
+      _: 'updateMessageID',
+      random_id: harness.randomId,
+      id: 2
+    }}, {}, 'pushed');
+    harness.resolveApiResult(createSendResult(harness.randomId));
+    await sendPromise;
+
+    const [record] = (window as any)[TRACE_STATE].records;
+    expect(record.events.map((event: any) => event.kind)).toEqual([
+      'request', 'update', 'update', 'pending_entry', 'message_sent', 'send_result', 'pending_entry'
+    ]);
+    expect(record.events.slice(1, 5)).toMatchObject([
+      {kind: 'update', source: 'pushed', constructor: 'updateNewMessage', messageId: 2},
+      {kind: 'update', source: 'pushed', constructor: 'updateMessageID', messageId: 2, randomIdMatches: true},
+      {kind: 'pending_entry', found: true},
+      {kind: 'message_sent', tempId: harness.tempId, serverId: 2}
+    ] as any);
+    expect(record.pendingEntryFound).toBe(true);
+    expect(record.events[6]).toMatchObject({kind: 'pending_entry', found: false});
   });
 
   it('records nothing and keeps sending when the diagnostic switch is disabled', async() => {
@@ -248,6 +334,28 @@ describe('real-client text-send acknowledgement trace', () => {
     expect(harness.invokeApiAfter).toHaveBeenCalledTimes(1);
     expect(harness.dispatchEvent).toHaveBeenCalledWith('message_sent', expect.any(Object));
     expect((window as any)[TRACE_STATE]).toBeUndefined();
+  });
+
+  it('cannot enable or create traces when the real-client build flag is off', async() => {
+    vi.stubEnv(TRACE_BUILD_FLAG, '0');
+    const harness = createSendHarness();
+    harness.manager.enableRealClientMessageAckTrace();
+    const checkNameAccepted = harness.manager.setRealClientMessageAckTraceCheckName('alice_direct_message_count');
+    const sendPromise = harness.manager.sendText({peerId: harness.peerId, text: 'private body'});
+
+    await vi.waitFor(() => expect(harness.invokeApiAfter).toHaveBeenCalled());
+    harness.resolveApiResult(createSendResult(harness.randomId));
+    await sendPromise;
+
+    expect(checkNameAccepted).toBe(false);
+    expect(harness.manager.getRealClientMessageAckTraceSnapshot()).toMatchObject({
+      switchEnabled: false,
+      stateExists: false,
+      beginCalls: 0,
+      records: []
+    });
+    expect((window as any)[TRACE_STATE]).toBeUndefined();
+    expect(harness.dispatchEvent).toHaveBeenCalledWith('message_sent', expect.any(Object));
   });
 
   it('reports why an enabled trace attempt was rejected by the ID guard', () => {

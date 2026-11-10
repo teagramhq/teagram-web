@@ -27,6 +27,7 @@ jobs:
       REAL_CLIENT_WEB_ROOT: ${{ github.workspace }}
       REAL_CLIENT_PR_HEAD: ${{ github.event.pull_request.head.sha }}
       REAL_CLIENT_TESTED_REVISION: ${{ github.sha }}
+      VITE_REAL_CLIENT_ACK_TRACE: '1'
 
     steps:
       - name: Start complete job timer

@@ -54,9 +54,11 @@ type InternalTrace = {
   unmatchedUpdates: Array<{
     peerKey?: string,
     messageId: string,
-    event: MessageAckTraceEvent
+    event: MessageAckTraceEvent,
+    sequence: number
   }>,
-  resultReceived: boolean,
+  orderedEvents: Array<{sequence: number, event: MessageAckTraceEvent}>,
+  nextEventSequence: number,
   record: MessageAcknowledgementTrace
 };
 
@@ -84,9 +86,25 @@ function getTraceScope() {
   return globalThis as TraceScope;
 }
 
+function isRealClientMessageAckTraceBuild() {
+  return import.meta.env.VITE_REAL_CLIENT_ACK_TRACE === '1';
+}
+
 function getEnabledTraceScope() {
   const scope = getTraceScope();
-  return scope[TRACE_ENABLED] === true ? scope : undefined;
+  return isRealClientMessageAckTraceBuild() && scope[TRACE_ENABLED] === true ? scope : undefined;
+}
+
+function appendTraceEvent(trace: InternalTrace, event: MessageAckTraceEvent, sequence = ++trace.nextEventSequence) {
+  const eventIndex = trace.orderedEvents.findIndex((entry) => entry.sequence > sequence);
+  const orderedEvent = {sequence, event};
+  if(eventIndex === -1) {
+    trace.orderedEvents.push(orderedEvent);
+    trace.record.events.push(event);
+  } else {
+    trace.orderedEvents.splice(eventIndex, 0, orderedEvent);
+    trace.record.events.splice(eventIndex, 0, event);
+  }
 }
 
 function getTraceState(create: boolean): TraceState | undefined {
@@ -160,17 +178,31 @@ function getCheckName() {
 }
 
 export function enableRealClientMessageAckTrace() {
+  if(!isRealClientMessageAckTraceBuild()) return;
+
   getTraceScope()[TRACE_ENABLED] = true;
   getTraceState(true);
 }
 
 export function setRealClientMessageAckTraceCheckName(checkName: string) {
+  if(!isRealClientMessageAckTraceBuild()) return false;
   if(!/^[a-z0-9_]{1,96}$/.test(checkName)) return false;
   getTraceScope()[TRACE_CHECK_NAME] = checkName;
   return true;
 }
 
 export function getRealClientMessageAckTraceSnapshot() {
+  if(!isRealClientMessageAckTraceBuild()) {
+    return {
+      switchEnabled: false,
+      stateExists: false,
+      beginCalls: 0,
+      rejectedReason: 'build_disabled',
+      beginCallsByCheckName: {},
+      records: []
+    };
+  }
+
   const scope = getTraceScope();
   const state = scope[TRACE_STATE];
   return {
@@ -191,13 +223,16 @@ function hashRandomId(randomId: string) {
   return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
-function appendUnmatchedUpdates(trace: InternalTrace) {
+function resolveUnmatchedUpdates(trace: InternalTrace) {
+  const remainingUpdates: InternalTrace['unmatchedUpdates'] = [];
   for(const candidate of trace.unmatchedUpdates) {
     if((candidate.peerKey === undefined || candidate.peerKey === trace.peerKey) && trace.serverMessageIds.has(candidate.messageId)) {
-      trace.record.events.push(candidate.event);
+      appendTraceEvent(trace, candidate.event, candidate.sequence);
+    } else {
+      remainingUpdates.push(candidate);
     }
   }
-  trace.unmatchedUpdates = [];
+  trace.unmatchedUpdates = remainingUpdates;
 }
 
 export function beginMessageAcknowledgementTrace(options: {
@@ -244,11 +279,12 @@ export function beginMessageAcknowledgementTrace(options: {
     startedAt: getNow(),
     serverMessageIds: new Set(),
     unmatchedUpdates: [],
-    resultReceived: false,
+    orderedEvents: [],
+    nextEventSequence: 0,
     record
   };
 
-  record.events.push({
+  appendTraceEvent(trace, {
     kind: 'request',
     atMs: 0,
     pendingTempId,
@@ -275,9 +311,8 @@ export function recordMessageAcknowledgementResult(randomIdValue: unknown, resul
     }
   });
 
-  appendUnmatchedUpdates(trace);
-  trace.resultReceived = true;
-  trace.record.events.push({kind: 'send_result', atMs: elapsedMs(trace), updates});
+  resolveUnmatchedUpdates(trace);
+  appendTraceEvent(trace, {kind: 'send_result', atMs: elapsedMs(trace), updates});
 }
 
 export function recordMessageAcknowledgementUpdate(update: any, source: MessageAckTraceSource, peerKey?: unknown) {
@@ -307,11 +342,19 @@ export function recordMessageAcknowledgementUpdate(update: any, source: MessageA
     };
 
     if(randomIdMatches || messageIdMatches) {
-      trace.record.events.push(event);
-      if(randomIdMatches && messageIdValue !== undefined) trace.serverMessageIds.add(messageIdValue);
-    } else if(!trace.resultReceived && messageIdValue !== undefined &&
+      if(randomIdMatches && messageIdValue !== undefined) {
+        trace.serverMessageIds.add(messageIdValue);
+        resolveUnmatchedUpdates(trace);
+      }
+      appendTraceEvent(trace, event);
+    } else if(messageIdValue !== undefined &&
         (peerKeyValue === trace.peerKey || peerKeyValue === undefined && update?._ === 'updateMessageID')) {
-      trace.unmatchedUpdates.push({peerKey: peerKeyValue, messageId: messageIdValue, event});
+      trace.unmatchedUpdates.push({
+        peerKey: peerKeyValue,
+        messageId: messageIdValue,
+        event,
+        sequence: ++trace.nextEventSequence
+      });
     }
   });
 }
@@ -325,7 +368,7 @@ export function recordMessageAcknowledgementPendingEntry(randomIdValue: unknown,
   const pendingTempId = pendingData ? safeId(pendingData.tempId) : undefined;
   const found = !!pendingData;
   if(trace.record.pendingEntryFound === null) trace.record.pendingEntryFound = found;
-  trace.record.events.push({
+  appendTraceEvent(trace, {
     kind: 'pending_entry',
     atMs: elapsedMs(trace),
     found,
@@ -346,7 +389,7 @@ export function recordMessageAcknowledgementSent(randomIdValue: unknown, tempIdV
     tempId,
     serverId: serverId ?? null
   };
-  trace.record.events.push({
+  appendTraceEvent(trace, {
     kind: 'message_sent',
     atMs: elapsedMs(trace),
     tempId,
