@@ -92,7 +92,7 @@ export class ApiManager extends ApiManagerMethods {
     super();
     this.name = 'API';
 
-    if(import.meta.env.VITE_PERF_TRACE === '1') {
+    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1') {
       this.performanceRpcTrace = new PerformanceRpcTrace(true);
     }
 
@@ -837,7 +837,9 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public resetPerformanceRpcTrace(recordSpans = true) {
-    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace!.reset(recordSpans);
+    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1') {
+      this.performanceRpcTrace!.reset(recordSpans);
+    }
   }
 
   public getPerformancePhaseTrace() {
@@ -872,7 +874,8 @@ export class ApiManager extends ApiManagerMethods {
     if(import.meta.env.VITE_PERF_TRACE === '1' && method === 'messages.getDialogs') {
       this.finishFirstDialogsTrace();
     }
-    return import.meta.env.VITE_PERF_TRACE === '1' ?
+    const traceSearch = import.meta.env.VITE_PERF_SEARCH_TRACE === '1' && method === 'messages.searchGlobal';
+    return import.meta.env.VITE_PERF_TRACE === '1' || traceSearch ?
       this.performanceRpcTrace?.trackWait(method, request) ?? request :
       request;
   }

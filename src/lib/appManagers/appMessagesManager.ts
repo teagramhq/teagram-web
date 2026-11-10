@@ -12703,7 +12703,8 @@ export class AppMessagesManager extends AppManager {
         throw error;
       }
     });
-    return import.meta.env.VITE_PERF_TRACE === '1' ?
+    return import.meta.env.VITE_PERF_TRACE === '1' ||
+      (import.meta.env.VITE_PERF_SEARCH_TRACE === '1' && method === 'messages.searchGlobal') ?
       this.apiManager.trackPerformanceRpcWait(method, request) :
       request;
   }

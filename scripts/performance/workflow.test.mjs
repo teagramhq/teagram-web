@@ -50,14 +50,23 @@ function runSummaryWithArtifacts({
   firstSticker = firstStickerMeasurements(),
   recorderReplay = workerRecorderMeasurements(),
   requireBase = true,
-  eventName = 'pull_request'
+  eventName = 'pull_request',
+  mutateReport
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'tweb-performance-summary-validation-'));
   const reportPath = join(directory, 'report.json');
   const recorderReplayPath = join(directory, 'recorder-replay.json');
   const historyDirectory = join(directory, 'history');
   const makeSample = (key) => ({
-    ms: 100,
+    ms: key === 'globalSearch' ? 400 : 100,
+    ...(key === 'globalSearch' ? {
+      globalSearchStages: {
+        queryEnteredAtMs: 100,
+        debounceSettledAtMs: 400,
+        matchingSearchRpcReturnedAtMs: 480,
+        matchingResultVisibleAtMs: 500
+      }
+    } : {}),
     requests: 12,
     rpcCallCount: 2,
     domNodes: 300,
@@ -106,6 +115,7 @@ function runSummaryWithArtifacts({
     },
     variants: {base, head}
   };
+  mutateReport?.(report);
   writeFileSync(reportPath, JSON.stringify(report));
   if(recorderReplay !== null) writeFileSync(recorderReplayPath, JSON.stringify(recorderReplay));
 
@@ -130,8 +140,8 @@ function runSummaryWithArtifacts({
 }
 
 test('timing bundles enable only the cached-dialog probe and keep full profiles separate', () => {
-  assert.match(workflow, /^\s+VITE_PERF_RECONCILE_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
-  assert.match(workflow, /^\s+\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
+  assert.match(workflow, /^\s+VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
+  assert.match(workflow, /^\s+\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
   assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
   assert.doesNotMatch(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
 });
@@ -300,8 +310,16 @@ test('summary blocks first-sticker and worker-recorder regressions using the pai
 
 test('summary reports nine paired samples and keeps extra diagnostic samples out of the gate', () => {
   const scenarioKeys = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
-  const makeSample = (ms) => ({
+  const makeSample = (ms, key) => ({
     ms,
+    ...(key === 'globalSearch' ? {
+      globalSearchStages: {
+        queryEnteredAtMs: 100,
+        debounceSettledAtMs: 120,
+        matchingSearchRpcReturnedAtMs: 150,
+        matchingResultVisibleAtMs: 100 + ms
+      }
+    } : {}),
     firstVisibleChatListMs: ms,
     firstVisibleChatListSource: 'snapshot',
     liveBoundaryMs: ms + 400,
@@ -324,8 +342,8 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
       variants[variant] = {'1x': {}, '100x': {}};
       for(const key of scenarioKeys) {
         const count = PERFORMANCE_REPEATS;
-        variants[variant]['1x'][key] = Array.from({length: count}, () => makeSample(100));
-        variants[variant]['100x'][key] = Array.from({length: count}, () => makeSample(100));
+        variants[variant]['1x'][key] = Array.from({length: count}, () => makeSample(100, key));
+        variants[variant]['100x'][key] = Array.from({length: count}, () => makeSample(100, key));
       }
     }
     variants.base['100x'].chatOpen = Array.from({length: PERFORMANCE_REPEATS}, () => makeSample(100));
@@ -450,4 +468,35 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
   assert.match(nineSampleSummary, /\| Scenario \| Scale \| Variant \| First visible \(ms\) \| First visible state \| Live boundary \(ms\) \| Requests \| RPC calls \| DOM nodes \| Long tasks >50 ms \| Blocking \(ms\) \| Bundle bytes \|/);
   assert.match(nineSampleSummary, /\| Cold chat list \| 1x \| head \| 100\.0 \| snapshot \| 500\.0 \| 4 \| 2 \| 100 \| 0 \| 0\.0 \| 10000 \|/);
   assert.match(nineSampleSummary, /\| 123\.0 \| 101\.0 \| 1 \| 81\.0 \| 42\.0 \| 0 \| 1000 \| 12 \| 0 \| 0\.0 \| messages\.sendMessage \(81\.0 ms, success\) \| sendMessage \/input\.ts \(22\.0 ms\) \|/);
+});
+
+test('summary reports query stages for every global-search sample', () => {
+  const result = runSummaryWithArtifacts();
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /### Global search query stages per sample/);
+  assert.match(result.stdout, /Query entered \(page ms\).*Debounce settled \(page ms\).*Matching search RPC returned \(page ms\).*Matching result visible \(page ms\)/);
+  assert.match(result.stdout, /\| 1x \| base \| 1 \| 100\.0 \| 400\.0 \| 480\.0 \| 500\.0 \| 400\.0 \|/);
+});
+
+test('summary fails closed for a global-search sample with missing stage timestamps', () => {
+  const result = runSummaryWithArtifacts({
+    mutateReport: (report) => {
+      report.variants.base['1x'].globalSearch[0].globalSearchStages.matchingSearchRpcReturnedAtMs = null;
+    }
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /global search 1x base sample 1 has missing or invalid stage timestamps/);
+});
+
+test('summary fails closed when global-search time does not match its query stages', () => {
+  const result = runSummaryWithArtifacts({
+    mutateReport: (report) => {
+      report.variants.head['100x'].globalSearch[0].ms -= 1;
+    }
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /global search 100x head sample 1 has missing or invalid stage timestamps/);
 });
