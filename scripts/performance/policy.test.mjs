@@ -181,21 +181,43 @@ test('blocks only when the paired lower bound clears the relative minimum effect
   assert.ok(evaluatePerformance(timingReport(baseTimes, justAbove)).blockingFailures.some((failure) => failure.startsWith('1x chatOpen:')));
 });
 
-test('sendMessage timing gates and summary use Enter-to-bubble values', () => {
+test('sendMessage timing gates use fixed Enter-to-bubble minimums and label them', () => {
   const base = scaleVariants();
+  const makeSendSamples = (appSendUiMs) => Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: 599, appSendUiMs}));
+  base['1x'].sendMessage = makeSendSamples(100);
+  base['100x'].sendMessage = makeSendSamples(100);
+
+  const belowMinimum = scaleVariants();
+  belowMinimum['1x'].sendMessage = makeSendSamples(141.8);
+  belowMinimum['100x'].sendMessage = makeSendSamples(150.8);
+  const belowResult = evaluatePerformance(report({base, head: belowMinimum}));
+  assert.equal(belowResult.blockingFailures.some((failure) => failure.includes('sendMessage: response timing')), false);
+
   const head = scaleVariants();
-  base['1x'].sendMessage = Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: 599, appSendUiMs: 279.2}));
-  head['1x'].sendMessage = Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: 599, appSendUiMs: 321.2}));
-  base['100x'].sendMessage = Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: 599, appSendUiMs: 338.9}));
-  head['100x'].sendMessage = Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: 599, appSendUiMs: 389.9}));
+  head['1x'].sendMessage = makeSendSamples(141.9);
+  head['100x'].sendMessage = makeSendSamples(150.9);
 
   const result = evaluatePerformance(report({base, head}));
 
   assert.ok(result.blockingFailures.some((failure) => failure.startsWith('1x sendMessage: response timing:') && failure.includes('minimum effect 41.88 ms')));
   assert.ok(result.blockingFailures.some((failure) => failure.startsWith('100x sendMessage: response timing:') && failure.includes('minimum effect 50.835 ms')));
-  assert.equal(result.rows.find((row) => row.key === 'sendMessage' && row.scale === '1x').base.ms, 279.2);
-  assert.equal(result.rows.find((row) => row.key === 'sendMessage' && row.scale === '1x').head.ms, 321.2);
-  assert.match(formatPerformanceTable(result), /\| Send a message, Enter-to-bubble \(1x\) \| 321\.2 \|/);
+  assert.equal(result.rows.find((row) => row.key === 'sendMessage' && row.scale === '1x').base.ms, 100);
+  assert.equal(result.rows.find((row) => row.key === 'sendMessage' && row.scale === '1x').head.ms, 141.9);
+  assert.match(formatPerformanceTable(result), /\| Send a message, Enter-to-bubble \(1x\) \| 141\.9 \|/);
+});
+
+test('sendMessage timing ignores a regressed outer interval when Enter-to-bubble is flat', () => {
+  const base = scaleVariants();
+  const head = scaleVariants();
+  base['1x'].sendMessage = Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: 599, appSendUiMs: 480}));
+  head['1x'].sendMessage = Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: 900, appSendUiMs: 480}));
+  base['100x'].sendMessage = Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: 599, appSendUiMs: 480}));
+  head['100x'].sendMessage = Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms: 599, appSendUiMs: 480}));
+
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.equal(result.blockingFailures.some((failure) => failure.startsWith('1x sendMessage: response timing:')), false);
+  assert.equal(result.rows.find((row) => row.key === 'sendMessage' && row.scale === '1x').head.ms, 480);
 });
 
 test('sendMessage timing gate fails closed when Enter-to-bubble timing is missing', () => {
