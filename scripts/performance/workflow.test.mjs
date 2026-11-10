@@ -224,8 +224,7 @@ test('a hung browser action fails its own step instead of consuming the test tim
 });
 
 test('measured head scroll attribution is recorded without a validity gate', () => {
-  assert.match(performanceScale, /const headScrollRepeats = report\.variants\.head\['100x'\]\.scrollBack2k;/);
-  assert.match(performanceScale, /metric\.longTaskTraceStatus = classifyMeasuredLongTaskTrace\(metric\)/);
+  assert.match(performanceScale, /if\(variant === 'head' && scenario === 'scrollBack2k'\) \{\s+classifyAndRemoveLongTaskTrace\(sample\);/);
   assert.doesNotMatch(performanceScale, /validateMeasuredLongTaskTraces\(/);
 });
 

@@ -1,5 +1,5 @@
 import {describe, expect, test} from 'vitest';
-import {buildWalkComparison, cachedDialogReconcileWindowMs, collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, findLongTasksOverlappingWalkMirrors, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileSummaries, validateNoWalkLongTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
+import {buildWalkComparison, cachedDialogReconcileWindowMs, classifyAndRemoveLongTaskTrace, collectCachedDialogReconcileSummaries, collectCachedDialogReconciles, findLongTasksWithSignificantSpanWork, findLongTasksOverlappingWalkMirrors, mergeCachedDialogReconcilePhaseSnapshots, observeLongAnimationFrames, selectHistoryPathTasks, settleInterruptedCachedDialogReconciles, summarizeCachedDialogReconcile, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileSummaries, validateNoWalkLongTasks, type PerformanceTaskAttribution} from '../../e2e/performanceRpcTrace';
 import {PerformancePhaseTrace} from '../lib/appManagers/performanceTrace';
 
 const mirror = (startTimeMs: number, durationMs: number) => ({traceId: 'walk', startTimeMs, durationMs});
@@ -315,6 +315,22 @@ test('records missing and partial measured attribution without failing', async()
   expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 1})).toBe('missing');
   expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 1, longTaskTrace: [{...task, scripts: []}]})).toBe('partial');
   expect(classifyMeasuredLongTaskTrace({longTasksOver50Ms: 2, longTaskTrace: [task]})).toBe('partial');
+});
+
+test('classifies long-task traces before removing their payload', async() => {
+  const metric: Parameters<typeof classifyAndRemoveLongTaskTrace>[0] = {
+    longTasksOver50Ms: 1,
+    longTaskTrace: [{
+      startTimeMs: 10,
+      durationMs: 80,
+      scripts: [{functionName: 'onMessage', script: '/app.js', invoker: 'MessagePort.onmessage', invokerType: 'event-listener', durationMs: 70, forcedStyleAndLayoutDurationMs: 0}]
+    }]
+  };
+
+  classifyAndRemoveLongTaskTrace(metric);
+
+  expect(metric.longTaskTraceStatus).toBe('complete');
+  expect(metric.longTaskTrace).toBeUndefined();
 });
 
 test('returns history-path task attribution for the performance artifact', () => {

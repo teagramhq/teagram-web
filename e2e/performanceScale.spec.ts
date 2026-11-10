@@ -5,7 +5,7 @@ import {expect, test, type Browser, type BrowserContext, type Locator, type Page
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes, trackBundleDocumentNavigation, type BundleRequestTracker} from './performanceBundleBytes';
-import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
+import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, classifyAndRemoveLongTaskTrace, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
 import {LOTTIE_FRAME_BG_CSS, waitForFirstStickerFrame, waitUntilOnScreen} from './lottieFrameMeasurement';
@@ -1925,18 +1925,17 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       validateCachedDialogReconcileDiagnostics(samples, scenario, PERFORMANCE_REPEATS);
       samples.forEach((sample) => {
         delete sample.cachedDialogReconcile;
-        delete sample.longTaskTrace;
+        if(variant === 'head' && scenario === 'scrollBack2k') {
+          classifyAndRemoveLongTaskTrace(sample);
+          if(sample.longTaskAttribution) sample.historyPathTasks = selectHistoryPathTasks(sample.longTaskAttribution, SCROLL_SPAN_NAMES);
+        } else {
+          delete sample.longTaskTrace;
+        }
         delete sample.reconcileMirrorTasks;
       });
     }
   }
   report.diagnostics['100x'] = {...traceDiagnostics, walkComparison};
-
-  const headScrollRepeats = report.variants.head['100x'].scrollBack2k;
-  headScrollRepeats.forEach((metric) => {
-    metric.longTaskTraceStatus = classifyMeasuredLongTaskTrace(metric);
-    if(metric.longTaskAttribution) metric.historyPathTasks = selectHistoryPathTasks(metric.longTaskAttribution, SCROLL_SPAN_NAMES);
-  });
   measurementsComplete = true;
 });
 

@@ -325,6 +325,15 @@ export function classifyMeasuredLongTaskTrace(
   return 'complete';
 }
 
+export function classifyAndRemoveLongTaskTrace(metric: {
+  longTasksOver50Ms?: number,
+  longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>,
+  longTaskTraceStatus?: ReturnType<typeof classifyMeasuredLongTaskTrace>
+}) {
+  metric.longTaskTraceStatus = classifyMeasuredLongTaskTrace(metric);
+  delete metric.longTaskTrace;
+}
+
 type OverlapTask = {startTimeMs: number, durationMs: number, preciseStartTimeMs?: number, preciseDurationMs?: number};
 export type ReconcileMirrorTask = OverlapTask & {traceId: string};
 
