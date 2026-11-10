@@ -1,6 +1,7 @@
 import cancelEvent from '@helpers/dom/cancelEvent';
 import {getOverlayRoot} from '@helpers/appWindow';
-import {attachClickEvent} from '@helpers/dom/clickEvent';
+import {attachClickEvent, simulateClickEvent} from '@helpers/dom/clickEvent';
+import findUpClassName from '@helpers/dom/findUpClassName';
 import type {EmojiSkinTone, EmojiSkinToneVariants} from '@helpers/emojiSkinTone';
 import {createRoot, For, onCleanup, onMount, Show} from 'solid-js';
 import {Portal} from 'solid-js/web';
@@ -100,13 +101,21 @@ export default function showEmojiTonePicker({
   const overlayRoot = getOverlayRoot();
   const doc = overlayRoot.ownerDocument;
   let container: HTMLDivElement;
+  // resolved before onSelect, which replaces the glyph that was right-clicked
+  const emojiTarget = event.target && findUpClassName(event.target, 'super-emoji');
+  const selectTone = (tone: EmojiSkinTone) => {
+    onSelect(tone);
+    if(emojiTarget) {
+      simulateClickEvent(emojiTarget);
+    }
+  };
   const dispose = createRoot((dispose) => {
     <Portal mount={overlayRoot}>
       <EmojiTonePicker
         variants={variants}
         selectedTone={selectedTone}
         renderEmoji={renderEmoji}
-        onSelect={onSelect}
+        onSelect={selectTone}
         close={close}
         ref={(element) => container = element}
       />

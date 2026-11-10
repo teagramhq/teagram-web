@@ -99,6 +99,17 @@ import callbackifyAll from '@helpers/callbackifyAll';
 import {createBotforumTopicFromAction} from './utils/dialogs/createBotforumTopicFromAction';
 import {AttachedMedia, CreatePollPayload} from '@components/popups/createPoll/storeContext';
 import StreamedMessageDrafts, {StreamedMessageDraft, StreamedMessageDraftContent, StreamedMessageDraftRemovalReason, getStreamedMessageContentMatchText} from '@appManagers/utils/messages/streamedMessageDrafts';
+import {
+  enableRealClientMessageAckTrace,
+  beginMessageAcknowledgementTrace,
+  getRealClientMessageAckTraceSnapshot,
+  recordMessageAcknowledgementPendingEntry,
+  recordMessageAcknowledgementResult,
+  recordMessageAcknowledgementSent,
+  recordMessageAcknowledgementUpdate,
+  setRealClientMessageAckTraceCheckName,
+  withMessageAcknowledgementUpdateObservationSuppressed
+} from '@appManagers/utils/messages/realClientMessageAckTrace';
 
 // console.trace('include');
 // TODO: если удалить диалог находясь в папке, то он не удалится из папки и будет виден в настройках
@@ -2176,6 +2187,18 @@ export class AppMessagesManager extends AppManager {
     });
   }
 
+  public enableRealClientMessageAckTrace() {
+    enableRealClientMessageAckTrace();
+  }
+
+  public setRealClientMessageAckTraceCheckName(checkName: string) {
+    return setRealClientMessageAckTraceCheckName(checkName);
+  }
+
+  public getRealClientMessageAckTraceSnapshot() {
+    return getRealClientMessageAckTraceSnapshot();
+  }
+
   public async sendText(
     options: MessageSendingParams & Partial<{
       text: string,
@@ -2291,6 +2314,7 @@ export class AppMessagesManager extends AppManager {
     };
 
     const paidStars = options.confirmedPaymentResult?.starsAmount || undefined;
+    let messageAckTrace: ReturnType<typeof beginMessageAcknowledgementTrace>;
 
     message.send = () => {
       toggleError();
@@ -2346,16 +2370,37 @@ export class AppMessagesManager extends AppManager {
           ...webPageSend
         };
 
-        apiPromise = this.apiManager.invokeApiAfter(
-          options.webPage || media ? 'messages.sendMedia' : 'messages.sendMessage',
-          mergedOptions,
-          sentRequestOptions
-        );
+        const method = options.webPage || media ? 'messages.sendMedia' : 'messages.sendMessage';
+        if(method === 'messages.sendMessage') {
+          const peerKind = peerId.isUser() ? 'user' : isChannel ? 'channel' : 'chat';
+          messageAckTrace = beginMessageAcknowledgementTrace({
+            randomId: message.random_id,
+            pendingTempId: message.mid,
+            peerKind,
+            peerKey: peerId
+          });
+
+          if(messageAckTrace && !this.apiUpdatesManager.messageAcknowledgementTraceObserver) {
+            this.apiUpdatesManager.messageAcknowledgementTraceObserver = (update, source) => {
+              if(source !== 'pushed' && source !== 'difference') return;
+              const updateMessage = (update as any).message;
+              const updatePeerId = updateMessage && typeof updateMessage === 'object' && 'peer_id' in updateMessage ?
+                this.appPeersManager.getPeerId(updateMessage.peer_id) : undefined;
+              recordMessageAcknowledgementUpdate(update, source, updatePeerId);
+            };
+          }
+        }
+
+        apiPromise = this.apiManager.invokeApiAfter(method, mergedOptions, sentRequestOptions);
       }
 
       this.pendingAfterMsgs[peerId] = sentRequestOptions;
 
       return apiPromise.then((updates: Updates) => {
+        if(messageAckTrace && updates) {
+          recordMessageAcknowledgementResult(message.random_id, updates);
+        }
+
         if(updates._ === 'updateShortSentMessage') {
           // * fix copying object with promise
           const promise = message.promise;
@@ -2377,17 +2422,19 @@ export class AppMessagesManager extends AppManager {
           // * override with new updates
           const {pts, pts_count} = updates;
 
-          this.apiUpdatesManager.processLocalUpdate({
-            _: 'updateMessageID',
-            random_id: message.random_id,
-            id: newMessage.id
-          });
+          withMessageAcknowledgementUpdateObservationSuppressed(() => {
+            this.apiUpdatesManager.processLocalUpdate({
+              _: 'updateMessageID',
+              random_id: message.random_id,
+              id: newMessage.id
+            });
 
-          this.apiUpdatesManager.processLocalUpdate({
-            _: options.scheduleDate ? 'updateNewScheduledMessage' : (isChannel ? 'updateNewChannelMessage' : 'updateNewMessage'),
-            message: newMessage,
-            pts,
-            pts_count
+            this.apiUpdatesManager.processLocalUpdate({
+              _: options.scheduleDate ? 'updateNewScheduledMessage' : (isChannel ? 'updateNewChannelMessage' : 'updateNewMessage'),
+              message: newMessage,
+              pts,
+              pts_count
+            });
           });
 
           updates = undefined;
@@ -2400,7 +2447,25 @@ export class AppMessagesManager extends AppManager {
         }
 
         if(updates) {
-          this.apiUpdatesManager.processUpdateMessage(updates);
+          if(updates._ === 'updates' || updates._ === 'updatesCombined') {
+            const messageRandomId = String(message.random_id);
+            const matchingMessageIdUpdate = updates.updates.find((update) =>
+              update._ === 'updateMessageID' && String(update.random_id) === messageRandomId
+            );
+            if(matchingMessageIdUpdate) {
+              this.apiUpdatesManager.processLocalUpdate(matchingMessageIdUpdate);
+              updates = {
+                ...updates,
+                updates: updates.updates.filter((update) =>
+                  update._ !== 'updateMessageID' || String(update.random_id) !== messageRandomId
+                )
+              };
+            }
+          }
+
+          withMessageAcknowledgementUpdateObservationSuppressed(() => {
+            this.apiUpdatesManager.processUpdateMessage(updates);
+          });
           this.apiUpdatesManager.processPaidMessageUpdate({
             paidStars,
             wereStarsReserved: options.confirmedPaymentResult?.canUndo
@@ -9495,6 +9560,7 @@ export class AppMessagesManager extends AppManager {
   private onUpdateMessageId = (update: Update.updateMessageID) => {
     const randomId = update.random_id;
     const pendingData = this.pendingByRandomId[randomId];
+    recordMessageAcknowledgementPendingEntry(randomId, pendingData);
     if(!pendingData) {
       return;
     }
@@ -11349,12 +11415,12 @@ export class AppMessagesManager extends AppManager {
       }
     }
 
-    this.finalizePendingMessageCallbacks(storage, tempId, finalMessage);
+    this.finalizePendingMessageCallbacks(storage, tempId, finalMessage, randomId);
 
     return tempMessage;
   }
 
-  public finalizePendingMessageCallbacks(storage: MessagesStorage, tempId: number, message: MyMessage) {
+  public finalizePendingMessageCallbacks(storage: MessagesStorage, tempId: number, message: MyMessage, randomId?: Long) {
     const callbacks = this.takeTempFinalizeCallbacks(tempId);
     // this.log.warn(callbacks, tempId);
     if(callbacks !== undefined) {
@@ -11430,6 +11496,7 @@ export class AppMessagesManager extends AppManager {
     this.handleReleasingMessage(tempMessage, storage);
     this.onMessageModification(message, storage); // * mirror it
 
+    if(randomId !== undefined) recordMessageAcknowledgementSent(randomId, tempId, message.id);
     this.rootScope.dispatchEvent('message_sent', {storageKey: storage.key, tempId, tempMessage, mid: message.mid, message});
   }
 

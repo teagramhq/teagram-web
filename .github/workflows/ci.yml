@@ -346,19 +346,31 @@ jobs:
             .github/workflows/real-client-browser-flow.yml
           node --check .github/scripts/smoke-k8s-web.mjs
           bash -n .github/scripts/install-kubectl.sh
+          bash -n .github/scripts/deploy-k8s-web.sh
           bash -n .github/scripts/start-k3d-cluster.sh
           bash -n .github/scripts/test-private-artifact-image.sh
+          bash -n .github/scripts/test-cloudflared-connector-contract.sh
+          bash -n .github/scripts/test-deploy-k8s-web-rollback.sh
           node --check scripts/real-client/browser.cjs
           node --check scripts/real-client/run.mjs
 
       - name: Check the deploy workflow contract
         run: PATH="$(go env GOPATH)/bin:$PATH" bash .github/scripts/test-deploy-workflow-contract.sh
 
+      - name: Exercise production tunnel connector filters
+        run: bash .github/scripts/test-cloudflared-connector-contract.sh
+
+      - name: Exercise k3s web rollout rollback paths
+        run: bash .github/scripts/test-deploy-k8s-web-rollback.sh
+
+      - name: Exercise web artifact smoke failures
+        run: node --test .github/scripts/test-smoke-k8s-web.mjs
+
       - name: Check Gitleaks range with an advanced base
         run: PATH="$(go env GOPATH)/bin:$PATH" bash .github/scripts/test-gitleaks-pr-range.sh
 
       - name: Check deployment script syntax
-        run: bash -n deploy/teagram-web/deploy-main.sh && bash -n deploy/telegram-web/deploy-main.sh
+        run: bash -n deploy/teagram-web/deploy-main.sh
 
       - name: Check rollback artifact modes
         run: bash .github/scripts/test-deploy-backup-rollback.sh
@@ -370,6 +382,8 @@ jobs:
     name: 'check: k8s-manifests'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      K3S_IMAGE: rancher/k3s:v1.37.1-k3s1@sha256:8d298cb81ca94e875d31e804e5aa10b56355d1d7d95d7e1ef8a8d9239f15ada0
     outputs:
       run_deploy_test: ${{ steps.scope.outputs.run_deploy_test }}
 
@@ -396,7 +410,9 @@ jobs:
           changed_paths="$(git diff --name-only "$BASE_SHA" HEAD -- \
             deploy/k8s/ \
             .github/workflows/ci.yml \
+            .github/workflows/deploy.yml \
             .github/workflows/private-artifact.yml \
+            .github/scripts/deploy-k8s-web.sh \
             .github/scripts/install-kubectl.sh \
             .github/scripts/smoke-k8s-web.mjs \
             deploy/teagram-web/Dockerfile \
@@ -422,7 +438,7 @@ jobs:
 
       - name: Install kubectl for the pinned Kubernetes version
         env:
-          KUBERNETES_VERSION: 1.37.0
+          KUBERNETES_VERSION: 1.37.1
         run: bash .github/scripts/install-kubectl.sh
 
       - name: Install k3d
@@ -431,12 +447,12 @@ jobs:
       - name: Start a throwaway Kubernetes API for client dry-runs
         env:
           K3D_CLUSTER: teagram-web-manifest-check
-          KUBERNETES_VERSION: 1.37.0
+          KUBERNETES_VERSION: 1.37.1
         run: bash .github/scripts/start-k3d-cluster.sh
 
       - name: Render and validate production and CI overlays
         env:
-          KUBERNETES_VERSION: 1.37.0
+          KUBERNETES_VERSION: 1.37.1
         run: |
           set -euo pipefail
           source_commit="$(printf '%040d' 1)"
@@ -484,6 +500,8 @@ jobs:
     if: needs.check-k8s-manifests.outputs.run_deploy_test == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      K3S_IMAGE: rancher/k3s:v1.37.1-k3s1@sha256:8d298cb81ca94e875d31e804e5aa10b56355d1d7d95d7e1ef8a8d9239f15ada0
 
     steps:
       - name: Check out code
@@ -528,6 +546,18 @@ jobs:
           pnpm run check:private-artifact-assets -- dist-private
           node scripts/verify-deployment-artifact.mjs --dist dist-private --commit "$PRIVATE_ARTIFACT_COMMIT"
 
+      - name: Read the audited artifact identity
+        id: artifact
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.commit }}
+        run: |
+          set -euo pipefail
+          jq -e --arg sha "$SOURCE_SHA" \
+            '.sourceCommit == $sha and (.artifactDigest | test("^sha256:[0-9a-f]{64}$"))' \
+            dist-private/mtproto-target.json >/dev/null
+          printf 'artifact_digest=%s\n' "$(jq -r '.artifactDigest' dist-private/mtproto-target.json)" \
+            >> "$GITHUB_OUTPUT"
+
       - name: Build the reviewed web image
         env:
           IMAGE_REF: ghcr.io/teagramhq/teagram-web:ci
@@ -547,7 +577,7 @@ jobs:
 
       - name: Install kubectl for the pinned Kubernetes version
         env:
-          KUBERNETES_VERSION: 1.37.0
+          KUBERNETES_VERSION: 1.37.1
         run: bash .github/scripts/install-kubectl.sh
 
       - name: Install k3d
@@ -556,7 +586,7 @@ jobs:
       - name: Start the pinned throwaway k3s cluster
         env:
           K3D_CLUSTER: teagram-web-test
-          KUBERNETES_VERSION: 1.37.0
+          KUBERNETES_VERSION: 1.37.1
         run: bash .github/scripts/start-k3d-cluster.sh
 
       - name: Apply the web image to the throwaway cluster
@@ -567,15 +597,20 @@ jobs:
           set -euo pipefail
           "$(go env GOPATH)/bin/k3d" image import "$IMAGE_REF" --cluster "$K3D_CLUSTER" --mode direct
           kubectl create namespace teagram
-          kubectl apply --dry-run=server -k deploy/k8s/overlays/ci
-          kubectl apply -k deploy/k8s/overlays/ci
+          kubectl kustomize deploy/k8s/overlays/ci > "$RUNNER_TEMP/teagram-web-ci.yaml"
+          kubectl apply --dry-run=server --filename "$RUNNER_TEMP/teagram-web-ci.yaml"
+          kubectl apply --filename "$RUNNER_TEMP/teagram-web-ci.yaml"
           kubectl rollout status deployment/teagram-web --namespace teagram --timeout=180s
           kubectl wait --for=condition=Ready pod \
             --namespace teagram \
             --selector app.kubernetes.io/name=teagram-web \
             --timeout=60s
 
-      - name: Smoke test the web root and JavaScript bundle
+      - name: Smoke test deployment and forced rollback on the throwaway cluster
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.commit }}
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact_digest }}
+          IMAGE_REF: ghcr.io/teagramhq/teagram-web:ci
         run: |
           set -euo pipefail
           kubectl port-forward --namespace teagram --address 127.0.0.1 service/teagram-web 18080:80 \
@@ -599,7 +634,37 @@ jobs:
             echo 'teagram-web service did not become reachable' >&2
             exit 1
           fi
-          node .github/scripts/smoke-k8s-web.mjs http://127.0.0.1:18080/
+          smoke_url=http://127.0.0.1:18080/
+          node .github/scripts/smoke-k8s-web.mjs "$smoke_url" "$SOURCE_SHA" "$ARTIFACT_DIGEST"
+          bash .github/scripts/deploy-k8s-web.sh \
+            "$RUNNER_TEMP/teagram-web-ci.yaml" "$SOURCE_SHA" "$ARTIFACT_DIGEST" "$IMAGE_REF" "$smoke_url"
+
+          previous_revision=$(kubectl get deployment/teagram-web --namespace teagram --output json |
+            jq -er '.metadata.annotations["deployment.kubernetes.io/revision"]')
+          bad_image="ghcr.io/teagramhq/teagram-web:rollback-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sed "s|ghcr\\.io/teagramhq/teagram-web:ci|$bad_image|g" \
+            "$RUNNER_TEMP/teagram-web-ci.yaml" > "$RUNNER_TEMP/teagram-web-ci-bad.yaml"
+          grep --fixed-strings --quiet -- "$bad_image" "$RUNNER_TEMP/teagram-web-ci-bad.yaml"
+
+          if ROLLOUT_TIMEOUT=45s bash .github/scripts/deploy-k8s-web.sh \
+            "$RUNNER_TEMP/teagram-web-ci-bad.yaml" "$SOURCE_SHA" "$ARTIFACT_DIGEST" "$bad_image" "$smoke_url" \
+            > "$RUNNER_TEMP/teagram-web-forced-rollback.log" 2>&1; then
+            cat "$RUNNER_TEMP/teagram-web-forced-rollback.log"
+            echo 'the deliberately unavailable web image unexpectedly rolled out' >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/teagram-web-forced-rollback.log"
+          grep --fixed-strings --quiet -- \
+            "rollout=rollback-verified previous_revision=$previous_revision" \
+            "$RUNNER_TEMP/teagram-web-forced-rollback.log"
+          restored_image=$(kubectl get deployment/teagram-web --namespace teagram --output json |
+            jq -er '[.spec.template.spec.containers[] | select(.name == "teagram-web") | .image] |
+              if length == 1 then .[0] else error("expected one teagram-web container") end')
+          [[ "$restored_image" == "$IMAGE_REF" ]] || {
+            echo "::error::rollback restored image $restored_image instead of $IMAGE_REF" >&2
+            exit 1
+          }
+          kubectl rollout status deployment/teagram-web --namespace teagram --timeout=180s
 
       - name: Delete the throwaway k3s cluster
         if: always()

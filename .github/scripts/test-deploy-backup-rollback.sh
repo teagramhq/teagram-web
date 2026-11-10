@@ -21,8 +21,8 @@ grep -Fq 'PRIVATE_ARTIFACT_COMMIT="$SHA" docker compose ps' "$deploy_script" ||
   fail 'failure diagnostics must pass the attempted commit to docker compose ps'
 grep -Fq 'PRIVATE_ARTIFACT_COMMIT="$SHA" docker compose logs --tail=50 web' "$deploy_script" ||
   fail 'failure diagnostics must pass the attempted commit to docker compose logs'
-grep -Fq 'git -C "$ROOT" show "$SHA:deploy/teagram-web/deploy-main.sh"' "$compatibility_launcher" ||
-  fail 'the existing forced-command entry point must dispatch the selected commit'
+[[ ! -e "$compatibility_launcher" ]] ||
+  fail 'the obsolete deploy compatibility shim must remain deleted'
 grep -Fq 'docker compose stop --timeout 60 web' "$deploy_script" ||
   fail 'rollback must stop the renamed project before restoring the previous stack'
 grep -Fq 'docker compose rm --force web' "$deploy_script" ||
