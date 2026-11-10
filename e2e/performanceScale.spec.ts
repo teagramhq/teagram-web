@@ -8,7 +8,7 @@ import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes, trackBu
 import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, classifyAndRemoveLongTaskTrace, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
-import {LOTTIE_FRAME_BG_CSS, waitForFirstStickerFrame, waitForFirstStickerPaint, waitUntilOnScreen} from './lottieFrameMeasurement';
+import {LOTTIE_FRAME_BG_CSS, scheduleAfterInterveningPaint, waitForFirstStickerFrame, waitForFirstStickerPaint, waitUntilOnScreen} from './lottieFrameMeasurement';
 
 type Fixture = {
   owner: number,
@@ -196,6 +196,9 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   // The gated scroll repeat starts this observer only for the measured window.
   await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
   if(recordWorkerMessages) await page.addInitScript({content: `window.__teagramInstallWorkerMessageAttribution = ${installWorkerMessageAttribution.toString()};`});
+  if(recordLottieWorkerRequest) {
+    await page.addInitScript({content: `window.__teagramScheduleAfterInterveningPaint = ${scheduleAfterInterveningPaint.toString()};`});
+  }
   await page.addInitScript(({injectColdStall, observeAnimationFrames, recordLottieWorkerRequest}: {injectColdStall: boolean, observeAnimationFrames: boolean, recordLottieWorkerRequest: boolean}) => {
     const recordWorkerRequest = recordLottieWorkerRequest ? (url: unknown) => {
       if(!String(url).includes('tlottie.worker')) return;
@@ -1378,7 +1381,7 @@ async function measureFirstStickerFrame(browser: Browser, run: VariantRun, fixtu
             if(!warmWorker) {
               const timing = w.__performanceFirstStickerPaintTiming;
               timing.firstFrameAt = firstFrameAt;
-              requestAnimationFrame(() => timing.nextPaintAt = performance.now());
+              w.__teagramScheduleAfterInterveningPaint((nextPaintAt: number) => timing.nextPaintAt = nextPaintAt);
             }
           };
           if(player.hasRenderedFirstFrame) recordFirstFrame();

@@ -162,6 +162,12 @@ test('sticker timing gates against the PR base and keeps the pre-178 client repo
   assert.doesNotMatch(performanceScale, /firstVisibleChatList\.source\)\.toBe\((?:run\.)?variant === 'head'/);
 });
 
+test('cold sticker paint timing uses an endpoint after an intervening render', () => {
+  assert.match(performanceScale, /scheduleAfterInterveningPaint\.toString\(\)/);
+  assert.match(performanceScale, /__teagramScheduleAfterInterveningPaint\(\(nextPaintAt: number\)/);
+  assert.doesNotMatch(performanceScale, /requestAnimationFrame\(\(\) => timing\.nextPaintAt/);
+});
+
 test('base and head both require date-jump and 2,000-message scroll-back samples', () => {
   assert.match(performanceScale, /scrollBackTwoThousand\(\s*page,\s*requests,\s*true,/);
   assert.match(performanceScale, /jumpToFixtureDate\(page, requests, fixture, false, undefined, collectWalkDiagnostics\)/);

@@ -1,30 +1,53 @@
 import {expect, it, vi} from 'vitest';
 import type {Locator, Page} from '@playwright/test';
 import {PNG} from 'pngjs';
-import {waitForFirstStickerPaint, waitUntilOnScreen} from '../../e2e/lottieFrameMeasurement';
+import * as frameMeasurement from '../../e2e/lottieFrameMeasurement';
 
-it('waits for the worker request, first frame, and following paint timestamps in the page', async() => {
+it('waits for the endpoint after an intervening paint and later frame work', async() => {
   const timing: Record<string, number | undefined> = {workerRequestAt: 12, firstFrameAt: 410};
   vi.stubGlobal('window', {__performanceFirstStickerPaintTiming: timing});
+  const frameCallbacks: FrameRequestCallback[] = [];
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    frameCallbacks.push(callback);
+    return frameCallbacks.length;
+  });
+  const events: string[] = [];
   let waitCount = 0;
   const page = {
     waitForFunction: async(predicate: () => boolean, _argument: unknown, options: {polling: string, timeout: number}) => {
       ++waitCount;
       expect(options).toEqual({polling: 'raf', timeout: 1_000});
       expect(predicate()).toBe(false);
-      timing.nextPaintAt = 426;
+      const scheduleAfterInterveningPaint = (frameMeasurement as unknown as {
+        scheduleAfterInterveningPaint?: (callback: FrameRequestCallback) => void
+      }).scheduleAfterInterveningPaint;
+      expect(scheduleAfterInterveningPaint).toEqual(expect.any(Function));
+      if(!scheduleAfterInterveningPaint) return;
+      events.push('first-frame');
+      scheduleAfterInterveningPaint((timestamp) => {
+        timing.nextPaintAt = timestamp;
+        events.push('endpoint');
+      });
+      expect(frameCallbacks).toHaveLength(1);
+      frameCallbacks.shift()?.(416);
+      expect(predicate()).toBe(false);
+      events.push('intervening-paint');
+      events.push('later-frame-work');
+      expect(frameCallbacks).toHaveLength(1);
+      frameCallbacks.shift()?.(458);
       expect(predicate()).toBe(true);
     },
     evaluate: async<T>(callback: () => T) => callback()
   } as unknown as Page;
 
   try {
-    await expect(waitForFirstStickerPaint(page, 1_000)).resolves.toEqual({
+    await expect(frameMeasurement.waitForFirstStickerPaint(page, 1_000)).resolves.toEqual({
       workerRequestAt: 12,
       firstFrameAt: 410,
-      nextPaintAt: 426
+      nextPaintAt: 458
     });
     expect(waitCount).toBe(1);
+    expect(events).toEqual(['first-frame', 'intervening-paint', 'later-frame-work', 'endpoint']);
   } finally {
     vi.unstubAllGlobals();
   }
@@ -55,6 +78,6 @@ it('samples the timestamp after the screenshot observes rendered pixels', async(
     }
   } as unknown as Locator;
 
-  await expect(waitUntilOnScreen(page, locator, 100)).resolves.toBe(42);
+  await expect(frameMeasurement.waitUntilOnScreen(page, locator, 100)).resolves.toBe(42);
   expect(events).toEqual(['screenshot', 'timestamp']);
 });

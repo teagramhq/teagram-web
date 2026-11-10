@@ -41,6 +41,13 @@ export type FirstStickerPaintTiming = {
   nextPaintAt: number
 };
 
+// The first callback precedes rendering; the second follows its intervening render update.
+export function scheduleAfterInterveningPaint(callback: FrameRequestCallback): void {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(callback);
+  });
+}
+
 export async function waitForFirstStickerPaint(page: Page, timeoutMs: number): Promise<FirstStickerPaintTiming> {
   await page.waitForFunction(() => {
     const timing = (window as any).__performanceFirstStickerPaintTiming;
