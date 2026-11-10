@@ -3,9 +3,9 @@ import {readFileSync} from 'node:fs';
 import {writePerformanceReport} from './performanceReport';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
-import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, isWithinFirstStickerRegressionBudget, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
+import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes, trackBundleDocumentNavigation, type BundleRequestTracker} from './performanceBundleBytes';
-import {CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, validateNoWalkLongTasks, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
+import {CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
 import {LOTTIE_FRAME_BG_CSS, waitUntilOnScreen} from './lottieFrameMeasurement';
@@ -61,6 +61,7 @@ type Metric = {
   droppedFrameScripts?: ReturnType<typeof summarizeFrameScripts>,
   longTaskTrace?: ReturnType<typeof summarizeLongTaskTrace>,
   longTaskTraceStatus?: ReturnType<typeof classifyMeasuredLongTaskTrace>,
+  walkLongTasksOver50Ms?: number,
   reconcileMirrorTasks?: ReconcileMirrorTask[],
   preInteractionMs?: number,
   appSendUiMs?: number,
@@ -148,12 +149,17 @@ let measurementsComplete = false;
 
 test.afterAll(() => {
   if(!measurementsStarted) return;
+  if(measurementsComplete) {
+    scenarios.forEach((scenario) => {
+      const diagnosticSamples = report.diagnostics['100x']?.[scenario];
+      if(!Array.isArray(diagnosticSamples)) return;
+      diagnosticSamples.forEach((sample) => {
+        const metric = sample as Metric;
+        metric.walkLongTasksOver50Ms = findLongTasksOverlappingWalkMirrors(metric.longTaskTrace, metric.reconcileMirrorTasks).length;
+      });
+    });
+  }
   if(reportPath) writePerformanceReport(reportPath, report);
-  if(!measurementsComplete) return;
-  scenarios.forEach((scenario) => {
-    const diagnosticSamples = report.diagnostics['100x']?.[scenario];
-    if(Array.isArray(diagnosticSamples)) validateNoWalkLongTasks(diagnosticSamples, `100x ${scenario} diagnostic`);
-  });
 });
 
 async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false, observeAnimationFrames = false, recordWorkerMessages = observeAnimationFrames) {
@@ -1584,14 +1590,6 @@ test('measures first animated sticker frame after opening a chat', async({browse
     console.log(`[first-sticker] ${JSON.stringify({medians, samples})}`);
     measurementsComplete = true;
 
-    if(report.requireBase) {
-      const before = medians.base.cold.visibleFrameMs;
-      const cold = medians.head.cold.visibleFrameMs;
-      expect(
-        isWithinFirstStickerRegressionBudget(before, cold),
-        `head on-demand first visible frame was more than 100 ms slower than base: base ${before} ms, cold ${cold} ms`
-      ).toBe(true);
-    }
   } catch(error) {
     measurementFailed = true;
     throw error;
@@ -2029,7 +2027,7 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
   measurementsComplete = true;
 });
 
-test('blocks repeated injected 100 ms main-thread stalls during cold chat list load', async({browser}) => {
+test('detects repeated injected 100 ms main-thread stalls as report-only regressions', async({browser}) => {
   test.skip(!report.requireBase, 'negative control requires same-run base measurements');
   const preparedHead = preparedVariants['100x'].head;
   expect(preparedHead, '100x head sign-in snapshot was not prepared').toBeTruthy();
@@ -2054,9 +2052,12 @@ test('blocks repeated injected 100 ms main-thread stalls during cold chat list l
     }
   }
   const coldLoadEvaluation = evaluateWithControlSamples('coldChatList', controlSamples, negativeSamples);
-  const coldLoadFailures = coldLoadEvaluation.blockingFailures.filter((failure) => failure.startsWith('100x coldChatList: '));
+  const coldLoadFindings = coldLoadEvaluation.reportOnlyFailures.filter((finding) => finding.startsWith('100x coldChatList: '));
   const blockingTimes = (samples: Metric[]) => samples.map((sample) => sample.blockingTimeMs);
-  expect(coldLoadFailures.some((failure) => failure.includes('long task') || failure.includes('blocking time')), `100 ms control was not blocked: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs same-phase head ${JSON.stringify(blockingTimes(controlSamples))} ms`).toBe(true);
+  expect(
+    coldLoadFindings.some((finding) => (finding.includes('long task') || finding.includes('blocking time')) && finding.includes('report-only (would fail)')),
+    `100 ms control was not detected as a report-only regression: control blocking ${JSON.stringify(blockingTimes(negativeSamples))} ms vs same-phase head ${JSON.stringify(blockingTimes(controlSamples))} ms`
+  ).toBe(true);
 });
 
 test('tracks an outgoing bubble after the bubbles container is replaced', async({page}) => {

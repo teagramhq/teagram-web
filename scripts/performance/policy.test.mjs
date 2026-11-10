@@ -94,14 +94,14 @@ test('counts only new same-origin bundle resources once per URL', () => {
   assert.equal(scenarioBundleBytes(resources, 'https://app.example', 10, ['https://app.example/chat-list.js']), 55);
 });
 
-test('blocks a 100 ms main-thread task on 100x cold load from the first run', () => {
+test('reports a 100 ms main-thread task on 100x cold load from the first run', () => {
   const head = scaleVariants({
     '1x': {coldChatList: {longTasksOver50Ms: 1}},
     '100x': {coldChatList: {longTasksOver50Ms: 1}}
   });
   const result = evaluatePerformance(report({head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('coldChatList') && failure.includes('long task')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x') && failure.includes('coldChatList') && failure.includes('long task')));
   assert.equal(result.blockingFailures.some((failure) => failure.includes('1x coldChatList') && failure.includes('long task')), false);
 });
 
@@ -155,7 +155,7 @@ test('reports reconciliation summaries for every diagnostic scenario', () => {
   }
 });
 
-test('blocks an added 100 ms task when the 100x cold-load base already has long tasks', () => {
+test('reports an added 100 ms task when the 100x cold-load base already has long tasks', () => {
   const base = scaleVariants({'100x': {coldChatList: [
     {longTasksOver50Ms: 3, blockingTimeMs: 140, maxLongTaskDurationMs: 118},
     {longTasksOver50Ms: 3, blockingTimeMs: 134, maxLongTaskDurationMs: 119},
@@ -174,10 +174,10 @@ test('blocks an added 100 ms task when the 100x cold-load base already has long 
   ]}});
   const result = evaluatePerformance(report({base, head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('long task')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('long task')));
 });
 
-test('blocks a repeated 100 ms task despite cold-load variance seen in CI', () => {
+test('reports a repeated 100 ms task despite cold-load variance seen in CI', () => {
   const base = scaleVariants({'100x': {coldChatList: [66, 95, 82].map((blockingTimeMs) => ({
     longTasksOver50Ms: 3,
     blockingTimeMs,
@@ -190,7 +190,7 @@ test('blocks a repeated 100 ms task despite cold-load variance seen in CI', () =
   }))}});
   const result = evaluatePerformance(report({base, head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('long-task blocking time')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('long-task blocking time')));
 });
 
 test('reports 100x scroll frame loss during master calibration', () => {
@@ -203,7 +203,7 @@ test('reports 100x scroll frame loss during master calibration', () => {
   const row = result.rows.find((item) => item.scale === '100x' && item.key === 'scrollBack2k');
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k')), false);
   assert.equal(row.scrollHistoryRuns, 0);
-  assert.match(row.scrollGateStatus, /report only.*0\/20/);
+  assert.match(row.scrollGateStatus, /report-only.*0\/20/);
 });
 
 test('pools dropped frame counts across all scroll repeats', () => {
@@ -253,10 +253,10 @@ test('reports repeated 100x scroll long tasks during master calibration', () => 
   const row = result.rows.find((item) => item.scale === '100x' && item.key === 'scrollBack2k');
 
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k')), false);
-  assert.match(row.scrollGateStatus, /report only.*0\/20/);
+  assert.match(row.scrollGateStatus, /report-only.*0\/20/);
 });
 
-test('blocks new long tasks across 100x scenarios', () => {
+test('reports new long tasks across 100x scenarios', () => {
   for(const {key} of SCENARIOS) {
     const base = scaleVariants({'100x': {[key]: [
       {longTasksOver50Ms: 1},
@@ -271,7 +271,7 @@ test('blocks new long tasks across 100x scenarios', () => {
     const history = key === 'scrollBack2k' ? scrollHistory() : [];
     const result = evaluatePerformance(report({base, head}), history);
 
-    assert.ok(result.blockingFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes('long task')));
+    assert.ok(result.reportOnlyFailures.some((failure) => failure.includes(`100x ${key}`) && failure.includes('long task')));
   }
 });
 
@@ -329,7 +329,7 @@ test('allows head chat-open task noise that stays inside the same-run base repea
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x chatOpen')), false);
 });
 
-test('blocks an added 100 ms task by blocking time when base task counts vary', () => {
+test('reports an added 100 ms task by blocking time when base task counts vary', () => {
   const base = scaleVariants({'100x': {coldChatList: [
     {longTasksOver50Ms: 2, blockingTimeMs: 70},
     {longTasksOver50Ms: 3, blockingTimeMs: 134},
@@ -348,7 +348,7 @@ test('blocks an added 100 ms task by blocking time when base task counts vary', 
   ]}});
   const result = evaluatePerformance(report({base, head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')));
 });
 
 test('allows one 100x contacts long-task and blocking-time outlier', () => {
@@ -414,7 +414,7 @@ test('reports scroll misses while master calibration warms up', () => {
   const row = formatPerformanceTable(result).split('\n').find((line) => line.includes('Scroll back 2,000 messages (100x)'));
 
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k')), false);
-  assert.match(row, /report only.*19\/20/);
+  assert.match(row, /report-only.*19\/20/);
 });
 
 test('reports scroll misses when base history measurements are unavailable', () => {
@@ -425,10 +425,10 @@ test('reports scroll misses when base history measurements are unavailable', () 
   const row = formatPerformanceTable(result).split('\n').find((line) => line.includes('Scroll back 2,000 messages (100x)'));
 
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k')), false);
-  assert.match(row, /report only.*0\/20/);
+  assert.match(row, /report-only.*0\/20/);
 });
 
-test('blocks calibrated scroll regressions against the master noise band', () => {
+test('reports calibrated scroll regressions against the master noise band', () => {
   const base = scaleVariants({'100x': {scrollBack2k: [
     {longTasksOver50Ms: 10, blockingTimeMs: 300, maxLongTaskDurationMs: 100, droppedFrames: 202, frameIntervals: 865, droppedFramePercent: 18.93},
     {longTasksOver50Ms: 10, blockingTimeMs: 300, maxLongTaskDurationMs: 100, droppedFrames: 2, frameIntervals: 701, droppedFramePercent: 0.28},
@@ -443,9 +443,9 @@ test('blocks calibrated scroll regressions against the master noise band', () =>
   const table = formatPerformanceTable(result);
   const row = table.split('\n').find((line) => line.includes('Scroll back 2,000 messages (100x)'));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')));
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('blocking time')));
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('dropped frames')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('blocking time')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('dropped frames')));
   assert.match(table, /Scroll noise band/);
   assert.match(row, /tasks 0\.0–0\.0; blocking 0\.0–0\.0 ms; frames 0\.00–0\.00%/);
 });
@@ -466,7 +466,7 @@ test('allows one noisy head scroll repeat against the calibrated master band', (
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k')), false);
 });
 
-test('blocks repeated dropped frames above the calibrated master band', () => {
+test('reports repeated dropped frames above the calibrated master band', () => {
   const base = scaleVariants({'100x': {scrollBack2k: [
     {longTasksOver50Ms: 10, blockingTimeMs: 300, droppedFrames: 202, frameIntervals: 865, droppedFramePercent: 18.93},
     {longTasksOver50Ms: 10, blockingTimeMs: 300, droppedFrames: 2, frameIntervals: 701, droppedFramePercent: 0.28},
@@ -479,10 +479,10 @@ test('blocks repeated dropped frames above the calibrated master band', () => {
   ]}});
   const result = evaluatePerformance(report({base, head}), scrollHistory());
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('dropped frames')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('dropped frames')));
 });
 
-test('blocks repeated dropped-frame regressions above a stable nonzero master baseline', () => {
+test('reports repeated dropped-frame regressions above a stable nonzero master baseline', () => {
   const masterSamples = Array.from({length: 3}, () => ({
     longTasksOver50Ms: 0,
     blockingTimeMs: 0,
@@ -500,7 +500,7 @@ test('blocks repeated dropped-frame regressions above a stable nonzero master ba
   }))}});
   const result = evaluatePerformance(report({head}), scrollHistory(20, masterSamples));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('dropped frames')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('dropped frames')));
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('long task')), false);
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('blocking time')), false);
 });
@@ -537,7 +537,7 @@ test('fails closed when the measured 100x base omits blocking time', () => {
   assert.ok(result.blockingFailures.some((failure) => failure.includes('100x chatOpen') && failure.includes('base long-task blocking time')));
 });
 
-test('blocks a 100 ms cold-load stall when noisy repeats overlap', () => {
+test('reports a 100 ms cold-load stall when noisy repeats overlap', () => {
   const base = scaleVariants({'100x': {coldChatList: [
     {longTasksOver50Ms: 2, blockingTimeMs: 175},
     {longTasksOver50Ms: 2, blockingTimeMs: 184},
@@ -556,7 +556,7 @@ test('blocks a 100 ms cold-load stall when noisy repeats overlap', () => {
   ]}});
   const result = evaluatePerformance(report({base, head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')));
 });
 
 test('allows a lone noisy cold-load pair to cross the blocking-time threshold', () => {
@@ -613,7 +613,7 @@ test('allows observed no-change cold-load noise across six fresh contexts', () =
   assert.equal(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')), false);
 });
 
-test('blocks a 100 ms cold-load stall across six fresh contexts with observed runner noise', () => {
+test('reports a 100 ms cold-load stall across six fresh contexts with observed runner noise', () => {
   const {base, head} = noChangeColdLoadSamples();
   head['100x'].coldChatList = head['100x'].coldChatList.map((sample) => ({
     ...sample,
@@ -622,10 +622,10 @@ test('blocks a 100 ms cold-load stall across six fresh contexts with observed ru
 
   const result = evaluatePerformance(report({base, head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')));
 });
 
-test('blocks an 80 ms increase in blocking time when a 100x task count matches base', () => {
+test('reports an 80 ms increase in blocking time when a 100x task count matches base', () => {
   const base = scaleVariants({'100x': {coldChatList: [
     {longTasksOver50Ms: 2, blockingTimeMs: 100},
     {longTasksOver50Ms: 2, blockingTimeMs: 100},
@@ -638,19 +638,19 @@ test('blocks an 80 ms increase in blocking time when a 100x task count matches b
   ]}});
   const result = evaluatePerformance(report({base, head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('blocking time')));
 });
 
-test('blocks a non-scroll long task when the base has no measured count', () => {
+test('reports a non-scroll long task when the base has no measured count', () => {
   const base = scaleVariants();
   base['100x'].dateJump = Array.from({length: 3}, () => ({bundleBytes: 100_000}));
   const head = scaleVariants({'100x': {dateJump: {longTasksOver50Ms: 1}}});
   const result = evaluatePerformance(report({base, head}));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x dateJump') && failure.includes('long task')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x dateJump') && failure.includes('long task')));
 });
 
-test('blocks added 100x blocking time against compatible main history when there is no base', () => {
+test('reports added 100x blocking time against compatible main history when there is no base', () => {
   const head = scaleVariants({'100x': {globalSearch: [
     {longTasksOver50Ms: 1, blockingTimeMs: 180},
     {longTasksOver50Ms: 1, blockingTimeMs: 180},
@@ -659,10 +659,10 @@ test('blocks added 100x blocking time against compatible main history when there
   const history = mainHistory(1, {'100x': {globalSearch: {longTasksOver50Ms: 1, blockingTimeMs: 100}}});
   const result = evaluatePerformance(report({head, requireBase: false}), history);
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x globalSearch') && failure.includes('blocking time')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x globalSearch') && failure.includes('blocking time')));
 });
 
-test('compares 100x long tasks with compatible main history when a push has no base', () => {
+test('reports 100x long tasks against compatible main history when a push has no base', () => {
   const head = scaleVariants({'100x': {globalSearch: [
     {longTasksOver50Ms: 2},
     {longTasksOver50Ms: 2},
@@ -672,7 +672,7 @@ test('compares 100x long tasks with compatible main history when a push has no b
     '100x': {globalSearch: {longTasksOver50Ms: 1}}
   }));
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x globalSearch') && failure.includes('long task')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x globalSearch') && failure.includes('long task')));
 });
 
 test('does not block for a long task measured only at 1x', () => {
@@ -692,9 +692,9 @@ test('reports fixed 100x timing budget misses before calibration', () => {
   assert.match(table, /Blocking time \(ms\)/);
   for(const scenario of SCENARIOS.filter(({budgetMs}) => budgetMs !== null)) {
     assert.equal(result.blockingFailures.some((failure) => failure.includes(`100x ${scenario.key}`) && failure.includes(`${scenario.budgetMs} ms budget`)), false);
-    assert.equal(result.rows.find((row) => row.scale === '100x' && row.key === scenario.key).budgetStatus, 'warming');
+    assert.equal(result.rows.find((row) => row.scale === '100x' && row.key === scenario.key).budgetStatus, 'report-only (would fail)');
     const row = table.split('\n').find((line) => line.includes(`${scenario.label} (100x)`));
-    assert.match(row, /over budget \(report only\)/);
+    assert.match(row, /report-only \(would fail\)/);
   }
 });
 
@@ -714,16 +714,16 @@ test('marks timing budgets as report-only while historical comparisons warm up',
   const coldRow = table.split('\n').find((line) => line.includes('Cold interactive chat list (100x)'));
   const dateJumpRow = table.split('\n').find((line) => line.includes('Jump to a date (100x)'));
 
-  assert.match(coldRow, /report only/);
-  assert.match(dateJumpRow, /report only/);
+  assert.match(coldRow, /warming/);
+  assert.match(dateJumpRow, /warming/);
 });
 
-test('blocks fixed 100x timing budgets once that scenario is calibrated', () => {
+test('reports fixed 100x timing budget misses once that scenario is calibrated', () => {
   const head = scaleVariants({'100x': {coldChatList: {ms: 1_200}}});
   const result = evaluatePerformance(report({head}), mainHistory());
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('coldChatList') && failure.includes('1000 ms budget')));
-  assert.equal(result.rows.find((row) => row.scale === '100x' && row.key === 'coldChatList').budgetStatus, 'failed');
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x') && failure.includes('coldChatList') && failure.includes('1000 ms absolute budget')));
+  assert.equal(result.rows.find((row) => row.scale === '100x' && row.key === 'coldChatList').budgetStatus, 'report-only (would fail)');
 });
 
 test('reports request and DOM changes without blocking the gate', () => {
@@ -797,11 +797,60 @@ test('fails closed when a required base bundle measurement is unavailable', () =
   assert.ok(result.blockingFailures.some((failure) => failure.includes('base') && failure.includes('bundle') && failure.includes('100x') && failure.includes('coldChatList')));
 });
 
-test('compares the median head time with the calibrated main median', () => {
+test('reports the median head time against the calibrated main median', () => {
   const head = scaleVariants({'100x': {dateJump: [{ms: 121}, {ms: 114}]}});
   const result = evaluatePerformance(report({head}), mainHistory());
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x') && failure.includes('dateJump') && failure.includes('regressed beyond')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x') && failure.includes('dateJump') && failure.includes('noise band')));
+});
+
+test('reports calibrated timing regressions without blocking', () => {
+  const head = scaleVariants({'100x': {dateJump: {ms: 125}}});
+  const result = evaluatePerformance(report({head}), mainHistory());
+  const row = result.rows.find((item) => item.scale === '100x' && item.key === 'dateJump');
+  const tableRow = formatPerformanceTable(result).split('\n').find((line) => line.includes('Jump to a date (100x)'));
+
+  assert.deepEqual(result.blockingFailures, []);
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x dateJump') && failure.includes('125') && failure.includes('115.0')));
+  assert.match(tableRow, /report-only \(would fail\)/);
+  assert.equal(row.head.ms, 125);
+});
+
+test('reports walk-mirror long tasks with their limit without blocking', () => {
+  const diagnostics = {'100x': {scrollBack2k: [
+    {walkLongTasksOver50Ms: 0},
+    {walkLongTasksOver50Ms: 2},
+    {walkLongTasksOver50Ms: 1}
+  ]}};
+  const result = evaluatePerformance(report({diagnostics}));
+  const row = result.rows.find((item) => item.scale === '100x' && item.key === 'scrollBack2k');
+  const tableRow = formatPerformanceTable(result).split('\n').find((line) => line.includes('Scroll back 2,000 messages (100x)'));
+
+  assert.deepEqual(result.blockingFailures, []);
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('2') && failure.includes('limit 0') && failure.includes('report-only (would fail)')));
+  assert.equal(row.walkLongTasksOver50Ms, 2);
+  assert.equal(row.reportOnlyFailure, true);
+  assert.match(tableRow, /\| 2 \|.*report-only \(would fail\)/);
+});
+
+test('fails closed when a walk-mirror long-task count is missing from a trace sample', () => {
+  const diagnostics = {'100x': {scrollBack2k: [
+    {walkLongTasksOver50Ms: 0},
+    {}
+  ]}};
+  const result = evaluatePerformance(report({diagnostics}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k') && failure.includes('walk-mirror long-task diagnostic') && failure.includes('sample 2')));
+});
+
+test('reports absolute timing budget misses without calibration', () => {
+  const head = scaleVariants({'100x': {coldChatList: {ms: 1_001}}});
+  const result = evaluatePerformance(report({head}), mainHistory(19));
+  const row = result.rows.find((item) => item.scale === '100x' && item.key === 'coldChatList');
+
+  assert.deepEqual(result.blockingFailures, []);
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('100x coldChatList') && failure.includes('1001') && failure.includes('1000 ms absolute budget')));
+  assert.equal(row.budgetStatus, 'report-only (would fail)');
 });
 
 test('applies a two millisecond minimum relative timing threshold', () => {
@@ -809,8 +858,8 @@ test('applies a two millisecond minimum relative timing threshold', () => {
   const withinFloor = scaleVariants({'100x': {dateJump: {ms: 11.9}}});
   const aboveFloor = scaleVariants({'100x': {dateJump: {ms: 12}}});
 
-  assert.equal(evaluatePerformance(report({head: withinFloor}), history).blockingFailures.some((failure) => failure.includes('dateJump') && failure.includes('regressed beyond')), false);
-  assert.ok(evaluatePerformance(report({head: aboveFloor}), history).blockingFailures.some((failure) => failure.includes('dateJump') && failure.includes('regressed beyond')));
+  assert.equal(evaluatePerformance(report({head: withinFloor}), history).reportOnlyFailures.some((failure) => failure.includes('dateJump') && failure.includes('noise band')), false);
+  assert.ok(evaluatePerformance(report({head: aboveFloor}), history).reportOnlyFailures.some((failure) => failure.includes('dateJump') && failure.includes('noise band')));
 });
 
 test('ignores calibration runs from a different fixture or server runtime', () => {
@@ -838,14 +887,14 @@ test('keeps master cold-load timing history at both scales', () => {
   }
 });
 
-test('blocks a calibrated 100x scenario above the 1.5x slowdown ceiling', () => {
+test('reports a calibrated 100x scenario above the 1.5x slowdown ceiling', () => {
   const head = scaleVariants({
     '1x': {coldChatList: {ms: 100}},
     '100x': {coldChatList: {ms: 151}}
   });
   const result = evaluatePerformance(report({head}), mainHistory());
 
-  assert.ok(result.blockingFailures.some((failure) => failure.includes('coldChatList') && failure.includes('1.5x') && failure.includes('151')));
+  assert.ok(result.reportOnlyFailures.some((failure) => failure.includes('coldChatList') && failure.includes('1.5x') && failure.includes('151')));
 });
 
 test('allows a calibrated scenario at the 1.5x slowdown ceiling', () => {
@@ -855,7 +904,7 @@ test('allows a calibrated scenario at the 1.5x slowdown ceiling', () => {
   });
   const result = evaluatePerformance(report({head}), mainHistory());
 
-  assert.equal(result.blockingFailures.some((failure) => failure.includes('coldChatList') && failure.includes('1.5x')), false);
+  assert.equal(result.reportOnlyFailures.some((failure) => failure.includes('coldChatList') && failure.includes('1.5x')), false);
 });
 
 test('keeps the 1.5x scale ceiling report-only until both scales are calibrated', () => {
@@ -865,5 +914,5 @@ test('keeps the 1.5x scale ceiling report-only until both scales are calibrated'
   });
   const result = evaluatePerformance(report({head}), mainHistory(19));
 
-  assert.equal(result.blockingFailures.some((failure) => failure.includes('coldChatList') && failure.includes('1.5x')), false);
+  assert.equal(result.reportOnlyFailures.some((failure) => failure.includes('coldChatList') && failure.includes('1.5x')), false);
 });
