@@ -334,6 +334,7 @@ jobs:
         run: >-
           pnpm exec playwright test
           -c playwright.performance.config.ts
+          e2e/performancePresentedFrames.spec.ts
           e2e/performanceMeasurement.spec.ts
           e2e/performanceScale.spec.ts
           --project=performance-chromium

@@ -34,6 +34,10 @@ function sample(overrides = {}) {
     frameIntervals: 100,
     droppedFrames: 0,
     droppedFramePercent: 0,
+    rafDropped: 0,
+    presentedFrames: 100,
+    presentedDropped: 0,
+    presentedDroppedPercent: 0,
     ...overrides
   };
 }
@@ -217,6 +221,33 @@ test('master runs still block on incomplete deterministic head and diagnostic sa
   diagnostics['100x'].walkComparison.head.dateJump = diagnostics['100x'].walkComparison.head.dateJump.slice(0, PERFORMANCE_REPEATS - 1);
   const missingTrace = evaluatePerformance(report({requireBase: false, diagnostics}));
   assert.ok(missingTrace.blockingFailures.some((failure) => failure.includes('100x dateJump: head walk-mirror diagnostic expected exactly 9 samples, got 8')));
+});
+
+test('legacy profiled scroll history does not calibrate the unprofiled 100x scroll window', () => {
+  const history = mainHistory(20, {'100x': {scrollBack2k: {droppedFramePercent: 10}}});
+  history.forEach((run) => run.variants.head['100x'].scrollBack2k.forEach((sample) => {
+    delete sample.presentedFrames;
+    delete sample.presentedDropped;
+    delete sample.presentedDroppedPercent;
+  }));
+  const result = evaluatePerformance(report({requireBase: false}), history);
+  const scroll = result.rows.find((row) => row.scale === '100x' && row.key === 'scrollBack2k');
+  const chatOpen = result.rows.find((row) => row.scale === '100x' && row.key === 'chatOpen');
+
+  assert.equal(scroll.historyRuns, 0);
+  assert.equal(scroll.scrollHistoryRuns, 0);
+  assert.equal(chatOpen.historyRuns, 20);
+});
+
+test('requires both dropped-frame measures for every 100x scroll sample', () => {
+  const base = scaleVariants();
+  const head = scaleVariants();
+  delete base['100x'].scrollBack2k[0].presentedDropped;
+  delete head['100x'].scrollBack2k[1].rafDropped;
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k: base presented drop count is missing or invalid in sample 1')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k: head RAF drop count is missing or invalid in sample 2')));
 });
 
 test('paired absolute budget headroom fails only when the lower bound crosses the budget', () => {
