@@ -97,6 +97,7 @@ function historyFor(history, scale, key, report) {
     if(!matchesFixture(run, report)) return [];
     const samples = run.variants?.head?.[scale]?.[key];
     if(!Array.isArray(samples) || !samples.length) return [];
+    if(scale === '100x' && key === 'scrollBack2k' && !samples.every((sample) => Number.isInteger(sample?.rafDropped) && sample.rafDropped >= 0)) return [];
     const value = median(samples.map((sample) => sample[timingFieldForScenario(key)]).filter(Number.isFinite));
     return Number.isFinite(value) ? [value] : [];
   });
@@ -189,6 +190,7 @@ function historyScrollMetrics(history, report) {
         Number.isFinite(sample?.blockingTimeMs) &&
         Number.isFinite(sample?.frameIntervals) && sample.frameIntervals > 0 &&
         Number.isFinite(sample?.droppedFrames) && sample.droppedFrames >= 0 &&
+        Number.isInteger(sample?.rafDropped) && sample.rafDropped >= 0 &&
         Number.isFinite(sample?.droppedFramePercent);
     });
     if(!complete) return [];
@@ -255,6 +257,9 @@ export function evaluatePerformance(report, history = []) {
             ['droppedFrames', 'dropped frame count'],
             ['droppedFramePercent', 'dropped frame percentage']
           ] : REQUIRED_METRICS;
+          if(scale === '100x' && scenario.key === 'scrollBack2k') {
+            requiredMetrics.push(['rafDropped', 'RAF drop count']);
+          }
           for(const [field, label] of requiredMetrics) {
             if(!Number.isFinite(sample?.[field])) {
               addFailure(blockingFailures, scale, scenario.key, `${variant} ${label} is missing or invalid in sample ${index + 1}`);
@@ -272,6 +277,12 @@ export function evaluatePerformance(report, history = []) {
           if(scenario.key === 'scrollBack2k' && Number.isFinite(sample?.droppedFrames) && sample.droppedFrames < 0) {
             addFailure(blockingFailures, scale, scenario.key, `${variant} dropped frame count cannot be negative in sample ${index + 1}`);
             gateFailure = true;
+          }
+          if(scale === '100x' && scenario.key === 'scrollBack2k') {
+            if(Number.isFinite(sample?.rafDropped) && (!Number.isInteger(sample.rafDropped) || sample.rafDropped < 0 || sample.rafDropped !== sample.droppedFrames)) {
+              addFailure(blockingFailures, scale, scenario.key, `${variant} RAF drop count is invalid in sample ${index + 1}`);
+              gateFailure = true;
+            }
           }
         });
       }

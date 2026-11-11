@@ -84,7 +84,13 @@ function runSummaryWithArtifacts({
     longTasksOver50Ms: 0,
     blockingTimeMs: 0,
     maxLongTaskDurationMs: 0,
-    ...(key === 'scrollBack2k' ? {frameIntervals: 100, droppedFrames: 0, droppedFramePercent: 0} : {})
+    ...(key === 'sendMessage' ? {appSendUiMs: 80} : {}),
+    ...(key === 'scrollBack2k' ? {
+      frameIntervals: 100,
+      droppedFrames: 3,
+      droppedFramePercent: 3 / 103 * 100,
+      rafDropped: 3
+    } : {})
   });
   const variantsFor = () => Object.fromEntries(['1x', '100x'].map((scale) => [scale, Object.fromEntries(SCENARIOS.map(({key}) => [
     key,
@@ -222,6 +228,35 @@ test('search RPC tracer injection still rejects duplicate anchors in an instrume
   );
 });
 
+test('gated scroll samples record RAF gaps without screencast, tracing or CPU profiles', () => {
+  const gatedScroll = performanceScale.match(/const scroll = await test\.step\('scroll back 2,000 messages'[\s\S]*?if\(!scroll\)/)?.[0];
+  const diagnosticScroll = performanceScale.match(/const scrolled = await test\.step\(`profile 100x scroll back 2,000 messages[\s\S]*?if\(!scrolled/)?.[0];
+
+  assert.ok(gatedScroll, 'the gated scroll scenario must be present');
+  assert.doesNotMatch(gatedScroll, /capturePresentedFrames|Page\.startScreencast/);
+  assert.match(gatedScroll, /pauseLongAnimationFrames: true/);
+  assert.doesNotMatch(performanceScale, /startPresentedFrameCapture|presentedFrames|presentedDropped/);
+  assert.doesNotMatch(gatedScroll, /captureCpuStacks|captureFrameTrace|captureWorkerMessages|includeLongTaskTrace/);
+  assert.ok(diagnosticScroll, 'the separate diagnostic scroll pass must be present');
+  assert.match(diagnosticScroll, /captureCpuStacks: true/);
+  assert.match(diagnosticScroll, /traceRpc: true/);
+});
+
+test('unprofiled scroll retains timing-only tasks for the walk-mirror gate', () => {
+  const capture = performanceScale.match(/async function capture\([\s\S]*?(?=\nasync function readCachedDialogReconcileSnapshot)/)?.[0];
+
+  assert.ok(capture, 'the performance capture function must be present');
+  assert.match(capture, /const longTaskTrace = includeLongTaskTrace \|\| collectWalkDiagnostics\s+\? summarizeLongTaskTrace\(longTasks, includeLongTaskTrace \? longAnimationFrames : \[\]/);
+  assert.match(capture, /\.\.\.\(includeLongTaskTrace \|\| collectWalkDiagnostics \? \{longTaskTrace\} : \{\}\)/);
+});
+
+test('performance workflow does not run the removed screencast frame measurement test', () => {
+  const browserStep = workflow.match(/- name: Run scale browser scenarios[\s\S]*?(?=\n      - name: Write performance summary)/)?.[0];
+
+  assert.ok(browserStep, 'the performance browser step must be present');
+  assert.doesNotMatch(browserStep, /performancePresentedFrames\.spec\.ts/);
+});
+
 test('sticker timing gates against the PR base and keeps the pre-178 client report-only', () => {
   const buildStep = workflow.match(/- name: Build current and base private client bundles([\s\S]*?)(?=\n      - name: Start local HTTPS)/)?.[1];
   assert.ok(buildStep, 'the performance workflow must define its client build step');
@@ -335,11 +370,6 @@ test('Playwright reports a performance-test timeout before the job is cancelled'
 
 test('a hung browser action fails its own step instead of consuming the test timeout', () => {
   assert.match(playwrightConfig, /actionTimeout:\s*60_000/);
-});
-
-test('measured head scroll attribution is recorded without a validity gate', () => {
-  assert.match(performanceScale, /if\(variant === 'head' && scenario === 'scrollBack2k'\) \{\s+classifyAndRemoveLongTaskTrace\(sample\);/);
-  assert.doesNotMatch(performanceScale, /validateMeasuredLongTaskTraces\(/);
 });
 
 test('timing regressions use the paired blocking policy and the negative control still fails', () => {
@@ -477,6 +507,7 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
     frameIntervals: 100,
     droppedFrames: 0,
     droppedFramePercent: 0,
+    rafDropped: 0,
     composerReadyAfterFirstBubbleMs: 50,
     firstBubbleToSentMs: ms + 50
   });
@@ -660,4 +691,13 @@ test('summary fails closed when global-search time does not match its query stag
 
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stderr, /global search 100x head sample 1 has missing or invalid stage timestamps/);
+});
+
+test('summary lists RAF frame counts for every 100x scroll sample', () => {
+  const result = runSummaryWithArtifacts();
+
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /### 100x scroll frame samples/);
+  assert.match(result.stdout, /\| base \| 1 \| 100 \| 3 \| 2\.91% \|/);
+  assert.doesNotMatch(result.stdout, /Presented frames|Presented drops|Presented drop/);
 });

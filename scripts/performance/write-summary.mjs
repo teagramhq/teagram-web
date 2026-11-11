@@ -75,6 +75,27 @@ function formatGlobalSearchSamplesTable(report) {
   return lines.join('\n');
 }
 
+function formatScrollFrameSamplesTable(report) {
+  const rows = ['base', 'head'].flatMap((variant) => {
+    const samples = report.variants?.[variant]?.['100x']?.scrollBack2k;
+    return Array.isArray(samples) ? samples.map((sample, index) => ({variant, sample, index})) : [];
+  });
+  if(!rows.length) return '';
+
+  const show = (value, digits = 0) => Number.isFinite(value) ? value.toFixed(digits) : '—';
+  const lines = [
+    '### 100x scroll frame samples',
+    '',
+    '| Variant | Pair | RAF intervals | RAF drops | RAF drop % |',
+    '| --- | ---: | ---: | ---: | ---: |'
+  ];
+  for(const {variant, sample, index} of rows) {
+    lines.push(`| ${variant} | ${index + 1} | ${show(sample.frameIntervals)} | ${show(sample.rafDropped)} | ${show(sample.droppedFramePercent, 2)}% |`);
+  }
+  return lines.join('\n');
+}
+
+
 function validateGlobalSearchSamples(report, failures) {
   const variants = report.requireBase ? ['base', 'head'] : ['head'];
   for(const scale of ['1x', '100x']) {
@@ -354,6 +375,7 @@ const traceTable = formatPerformanceTraceTable(report.diagnostics?.['100x']);
 const chatListMeasurementTable = formatChatListMeasurementTable(report);
 const samplesTable = formatPerformanceSamplesTable(report);
 const globalSearchSamplesTable = formatGlobalSearchSamplesTable(report);
+const scrollFrameSamplesTable = formatScrollFrameSamplesTable(report);
 const sendActionDiagnosticTable = formatSendActionDiagnosticTable(report);
 const reportOnlyFindings = [...evaluation.reportOnlyFailures];
 const firstStickerTable = formatFirstStickerTable(report.diagnostics?.firstSticker, report.requireBase, failures, reportOnlyFindings);
@@ -368,6 +390,7 @@ const summary = [
   ...(chatListMeasurementTable ? ['', chatListMeasurementTable] : []),
   ...(globalSearchSamplesTable ? ['', globalSearchSamplesTable] : []),
   ...(samplesTable ? ['', samplesTable] : []),
+  ...(scrollFrameSamplesTable ? ['', scrollFrameSamplesTable] : []),
   ...(sendActionDiagnosticTable ? ['', sendActionDiagnosticTable] : []),
   ...(firstStickerTable ? ['', firstStickerTable] : []),
   ...(workerRecorderTable ? ['', workerRecorderTable] : []),
