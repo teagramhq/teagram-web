@@ -3,16 +3,78 @@ import {expect, test} from '@playwright/test';
 
 test('counts missed presentations during activity but ignores idle gaps on pause and resume', () => {
   const summarize = (performanceFrameTrace as any).summarizePresentedFrameDrops;
+  const calibrate = (performanceFrameTrace as any).choosePageClockCalibration;
+  const toTraceWindows = (performanceFrameTrace as any).toTraceActivityWindows;
   expect(typeof summarize, 'presented-frame summary must be available').toBe('function');
-  if(typeof summarize !== 'function') return;
+  expect(typeof calibrate, 'page clock calibration must be available').toBe('function');
+  expect(typeof toTraceWindows, 'activity windows must use the production clock conversion').toBe('function');
+  if(typeof summarize !== 'function' || typeof calibrate !== 'function' || typeof toTraceWindows !== 'function') return;
+
+  const calibration = calibrate([
+    {beforeTimestampUs: 1_000_000, pageTimestampMs: 50, afterTimestampUs: 1_050_000},
+    {beforeTimestampUs: 1_099_000, pageTimestampMs: 100, afterTimestampUs: 1_101_000}
+  ]);
+  expect(calibration, 'the 50 ms delayed clock sample must not bias the chosen offset').toEqual({offsetMs: 1_000, uncertaintyMs: 1});
+
+  const activityWindows = toTraceWindows(
+    [{startMs: 0, endMs: 50}, {startMs: 1_050, endMs: 1_100}],
+    calibration
+  );
+  expect(activityWindows.expectedDropWindows).toEqual([{startMs: 1_001, endMs: 1_049}, {startMs: 2_051, endMs: 2_099}]);
+  expect(activityWindows.presentedFrameWindows[0].startMs).toBeLessThan(activityWindows.expectedDropWindows[0].startMs);
+  expect(activityWindows.presentedFrameWindows[0].endMs).toBeGreaterThan(activityWindows.expectedDropWindows[0].endMs);
 
   const result = summarize(
-    [0, 50, 1_050, 1_100],
-    [{startMs: 0, endMs: 50}, {startMs: 1_050, endMs: 1_100}]
+    [1_002, 1_048, 2_052, 2_098],
+    activityWindows.presentedFrameWindows,
+    activityWindows.expectedDropWindows
   );
 
   expect(result.presentedFrames).toBe(4);
-  expect(result.presentedDropped, 'the one-second idle pause between bursts is not a missed-frame interval').toBe(4);
+  expect(result.presentedDropped, 'clock uncertainty and window conversion must not make idle pause slots eligible').toBe(4);
+});
+
+test('page clock calibration stays bounded when one page command is delayed', async({page}) => {
+  const startCapture = (performanceFrameTrace as any).startPresentedFrameCapture;
+  const stopCapture = (performanceFrameTrace as any).stopPresentedFrameCapture;
+  const chooseCalibration = (performanceFrameTrace as any).choosePageClockCalibration;
+  expect(typeof startCapture, 'presented-frame capture must be available').toBe('function');
+  expect(typeof stopCapture, 'presented-frame capture must be available').toBe('function');
+  expect(typeof chooseCalibration, 'page clock calibration must be available').toBe('function');
+  if(typeof startCapture !== 'function' || typeof stopCapture !== 'function' || typeof chooseCalibration !== 'function') return;
+
+  const originalEvaluate = page.evaluate.bind(page) as (pageFunction: () => number) => Promise<number>;
+  let delayed = false;
+  (page as any).evaluate = async(pageFunction: () => number) => {
+    if(!delayed) {
+      delayed = true;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return originalEvaluate(pageFunction);
+  };
+
+  let capture: any;
+  try {
+    capture = await startCapture(page);
+    expect(delayed, 'the first clock sample should include the injected command delay').toBe(true);
+
+    const readTimestampUs = async() => {
+      const {metrics} = await capture.session.send('Performance.getMetrics');
+      return (metrics as Array<{name: string, value: number}>).find(({name}) => name === 'Timestamp')!.value * 1_000_000;
+    };
+    const beforeTimestampUs = await readTimestampUs();
+    const pageTimestampMs = await originalEvaluate(() => performance.now());
+    const afterTimestampUs = await readTimestampUs();
+    const reference = chooseCalibration([{beforeTimestampUs, pageTimestampMs, afterTimestampUs}]);
+    const calibration = capture.pageClockCalibration;
+
+    expect(calibration.uncertaintyMs, 'a single slow sample must not become the selected calibration').toBeLessThan(50);
+    expect(Math.abs(calibration.offsetMs - reference.offsetMs), 'the selected offset should agree with an independent bounded sample')
+    .toBeLessThanOrEqual(calibration.uncertaintyMs + reference.uncertaintyMs + 1);
+  } finally {
+    (page as any).evaluate = originalEvaluate;
+    if(capture) await stopCapture(capture);
+  }
 });
 
 test('does not count the idle pause between wheel-driven scroll bursts', async({page}) => {
@@ -38,7 +100,7 @@ test('does not count the idle pause between wheel-driven scroll bursts', async({
 
   const result = await stopCapture(capture);
   expect(result.presentedFrames).toBeGreaterThanOrEqual(2);
-  expect(result.presentedDropped, 'the one-second pause between damage bursts is idle, not 60 dropped frames').toBeLessThan(10);
+  expect(result.presentedDropped, 'padding around the damage bursts must not add idle gap slots').toBeLessThan(6);
 });
 
 test('counts a fixed 60 Hz animation within three presented frames', async({page}) => {

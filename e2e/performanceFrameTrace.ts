@@ -1,13 +1,16 @@
 import type {CDPSession, Page} from '@playwright/test';
 
 type Interval = {startMs: number, endMs: number};
+type PageClockSample = {beforeTimestampUs: number, pageTimestampMs: number, afterTimestampUs: number};
+type PageClockCalibration = {offsetMs: number, uncertaintyMs: number};
+type PresentedFrameActivityWindows = {presentedFrameWindows: Interval[], expectedDropWindows: Interval[]};
 type FrameTraceEvent = {name: string, startMs: number, durationMs: number, detail?: string};
 type Span = {name: string, startMs: number, syncMs: number};
 type PresentedFrameTrace = {
   session: CDPSession,
   page: Page,
   startTimestampUs: number,
-  pageTimestampOffsetMs: number,
+  pageClockCalibration: PageClockCalibration,
   trackScrollActivity: boolean
 };
 type PresentedFrameTraceEvent = {name: string, cat?: string, ts: number};
@@ -25,6 +28,7 @@ class PresentedFrameCleanupError extends Error {
 const PRESENTED_FRAME_INTERVAL_MS = 1000 / 60;
 const PRESENTED_FRAME_ACTIVITY_KEY = '__teagramPresentedFrameActivity';
 const PRESENTED_FRAME_ACTIVITY_IDLE_MS = 100;
+const PAGE_CLOCK_CALIBRATION_SAMPLES = 3;
 
 export function summarizeFrameScripts(intervals: Interval[], frames: Array<{
   startTime: number, duration: number,
@@ -81,19 +85,54 @@ async function readMonotonicTimestampUs(session: CDPSession) {
   return timestamp * 1_000_000;
 }
 
-export function summarizePresentedFrameDrops(timestampsMs: number[], activityWindows?: Interval[]) {
+export function choosePageClockCalibration(samples: PageClockSample[]): PageClockCalibration {
+  if(!samples.length) throw new Error('Page clock calibration requires at least one sample');
+  const best = samples.reduce((best, sample, index) => {
+    const beforeMs = sample.beforeTimestampUs / 1000;
+    const afterMs = sample.afterTimestampUs / 1000;
+    if(!Number.isFinite(beforeMs) || !Number.isFinite(afterMs) || !Number.isFinite(sample.pageTimestampMs) || afterMs < beforeMs) {
+      throw new Error('Page clock calibration sample is invalid');
+    }
+    const roundTripMs = afterMs - beforeMs;
+    if(index && roundTripMs >= best.roundTripMs) return best;
+    return {
+      offsetMs: (beforeMs + afterMs) / 2 - sample.pageTimestampMs,
+      uncertaintyMs: roundTripMs / 2,
+      roundTripMs
+    };
+  }, {offsetMs: 0, uncertaintyMs: 0, roundTripMs: Infinity});
+  return {offsetMs: best.offsetMs, uncertaintyMs: best.uncertaintyMs};
+}
+
+export function toTraceActivityWindows(windows: Interval[], {offsetMs, uncertaintyMs}: PageClockCalibration): PresentedFrameActivityWindows {
+  const presentedFrameWindows: Interval[] = [];
+  const expectedDropWindows: Interval[] = [];
+  windows.forEach(({startMs, endMs}) => {
+    presentedFrameWindows.push({
+      startMs: startMs + offsetMs - uncertaintyMs - PRESENTED_FRAME_INTERVAL_MS,
+      endMs: endMs + offsetMs + uncertaintyMs + PRESENTED_FRAME_INTERVAL_MS
+    });
+    const expectedStartMs = startMs + offsetMs + uncertaintyMs;
+    const expectedEndMs = endMs + offsetMs - uncertaintyMs;
+    if(expectedEndMs > expectedStartMs) expectedDropWindows.push({startMs: expectedStartMs, endMs: expectedEndMs});
+  });
+  return {presentedFrameWindows, expectedDropWindows};
+}
+
+export function summarizePresentedFrameDrops(timestampsMs: number[], presentedFrameWindows?: Interval[], expectedDropWindows = presentedFrameWindows) {
   const frames = [...new Set(timestampsMs.filter(Number.isFinite))].sort((left, right) => left - right);
-  const isActive = (timestampMs: number) => activityWindows === undefined || activityWindows.some(({startMs, endMs}) => timestampMs >= startMs && timestampMs <= endMs);
+  const isPresentedFrameActive = (timestampMs: number) => presentedFrameWindows === undefined || presentedFrameWindows.some(({startMs, endMs}) => timestampMs >= startMs && timestampMs <= endMs);
+  const isExpectedDropActive = (timestampMs: number) => expectedDropWindows === undefined || expectedDropWindows.some(({startMs, endMs}) => timestampMs >= startMs && timestampMs <= endMs);
   let presentedDropped = 0;
   let presentedFrames = 0;
   frames.forEach((frame) => {
-    if(isActive(frame)) ++presentedFrames;
+    if(isPresentedFrameActive(frame)) ++presentedFrames;
   });
   for(let index = 1; index < frames.length; ++index) {
     const elapsedIntervals = Math.round((frames[index] - frames[index - 1]) / PRESENTED_FRAME_INTERVAL_MS);
     for(let interval = 1; interval < elapsedIntervals; ++interval) {
       const expectedPresentationMs = frames[index - 1] + interval * PRESENTED_FRAME_INTERVAL_MS;
-      if(isActive(expectedPresentationMs)) ++presentedDropped;
+      if(isExpectedDropActive(expectedPresentationMs)) ++presentedDropped;
     }
   }
   return {presentedFrames, presentedDropped};
@@ -146,7 +185,6 @@ async function startPresentedFrameActivityCapture(page: Page) {
         return windows;
       }
     };
-    return performance.now();
   }, {key: PRESENTED_FRAME_ACTIVITY_KEY, idleMs: PRESENTED_FRAME_ACTIVITY_IDLE_MS});
 }
 
@@ -158,18 +196,30 @@ async function stopPresentedFrameActivityCapture(page: Page) {
   }, PRESENTED_FRAME_ACTIVITY_KEY);
 }
 
+async function calibratePageClock(session: CDPSession, page: Page): Promise<PageClockCalibration> {
+  const samples: PageClockSample[] = [];
+  for(let index = 0; index < PAGE_CLOCK_CALIBRATION_SAMPLES; ++index) {
+    const beforeTimestampUs = await readMonotonicTimestampUs(session);
+    const pageTimestampMs = await page.evaluate(() => performance.now());
+    const afterTimestampUs = await readMonotonicTimestampUs(session);
+    samples.push({beforeTimestampUs, pageTimestampMs, afterTimestampUs});
+  }
+  return choosePageClockCalibration(samples);
+}
+
 export async function startPresentedFrameCapture(page: Page, options: {trackScrollActivity?: boolean} = {}): Promise<PresentedFrameTrace> {
   const session = await page.context().newCDPSession(page);
   await session.send('Performance.enable');
   await session.send('Tracing.start', {categories: 'disabled-by-default-display.framedisplayed,-*', transferMode: 'ReturnAsStream'});
   try {
     const startTimestampUs = await readMonotonicTimestampUs(session);
-    const pageTimestampMs = options.trackScrollActivity ? await startPresentedFrameActivityCapture(page) : await page.evaluate(() => performance.now());
+    const pageClockCalibration = await calibratePageClock(session, page);
+    if(options.trackScrollActivity) await startPresentedFrameActivityCapture(page);
     return {
       session,
       page,
       startTimestampUs,
-      pageTimestampOffsetMs: startTimestampUs / 1000 - pageTimestampMs,
+      pageClockCalibration,
       trackScrollActivity: options.trackScrollActivity === true
     };
   } catch(error) {
@@ -178,12 +228,9 @@ export async function startPresentedFrameCapture(page: Page, options: {trackScro
   }
 }
 
-export async function endPresentedFrameCapture({session, page, startTimestampUs, pageTimestampOffsetMs, trackScrollActivity}: PresentedFrameTrace) {
+export async function endPresentedFrameCapture({session, page, startTimestampUs, pageClockCalibration, trackScrollActivity}: PresentedFrameTrace) {
   const pageActivityWindows = trackScrollActivity ? await stopPresentedFrameActivityCapture(page) : undefined;
-  const activityWindows = pageActivityWindows?.map(({startMs, endMs}) => ({
-    startMs: startMs + pageTimestampOffsetMs - PRESENTED_FRAME_INTERVAL_MS,
-    endMs: endMs + pageTimestampOffsetMs + PRESENTED_FRAME_INTERVAL_MS
-  }));
+  const activityWindows = pageActivityWindows && toTraceActivityWindows(pageActivityWindows, pageClockCalibration);
   const endTimestampUs = await readMonotonicTimestampUs(session);
   const completed = new Promise<string>((resolve) => session.once('Tracing.tracingComplete', ({stream}) => resolve(stream!)));
   const endCommand = session.send('Tracing.end');
@@ -204,7 +251,7 @@ export async function endPresentedFrameCapture({session, page, startTimestampUs,
         return event.name === 'Display::FrameDisplayed' && categories.includes('disabled-by-default-display.framedisplayed') &&
           event.ts >= startTimestampUs && event.ts <= endTimestampUs;
       }).map((event) => event.ts / 1000);
-      return summarizePresentedFrameDrops(timestampsMs, activityWindows);
+      return summarizePresentedFrameDrops(timestampsMs, activityWindows?.presentedFrameWindows, activityWindows?.expectedDropWindows);
     } finally {
       await session.detach();
     }
