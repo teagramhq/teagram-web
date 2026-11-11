@@ -41,10 +41,10 @@ export type FirstStickerPaintTiming = {
   nextPaintAt: number
 };
 
-// The first callback precedes rendering; the second follows its intervening render update.
+// The RAF callback precedes rendering; its timer task runs after the intervening render update.
 export function scheduleAfterInterveningPaint(callback: FrameRequestCallback): void {
   requestAnimationFrame(() => {
-    requestAnimationFrame(callback);
+    setTimeout(() => callback(performance.now()), 0);
   });
 }
 

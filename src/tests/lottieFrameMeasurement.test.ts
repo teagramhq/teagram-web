@@ -3,16 +3,22 @@ import type {Locator, Page} from '@playwright/test';
 import {PNG} from 'pngjs';
 import * as frameMeasurement from '../../e2e/lottieFrameMeasurement';
 
-it('waits for the endpoint after an intervening paint and later frame work', async() => {
+it('runs the endpoint in a timer task after the intervening paint', async() => {
   const timing: Record<string, number | undefined> = {workerRequestAt: 12, firstFrameAt: 410};
   vi.stubGlobal('window', {__performanceFirstStickerPaintTiming: timing});
   const frameCallbacks: FrameRequestCallback[] = [];
+  const timerCallbacks: Array<() => void> = [];
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     frameCallbacks.push(callback);
     return frameCallbacks.length;
   });
-  const events: string[] = [];
+  vi.stubGlobal('setTimeout', (callback: () => void, delay: number) => {
+    expect(delay).toBe(0);
+    timerCallbacks.push(callback);
+    return timerCallbacks.length;
+  });
   let waitCount = 0;
+  let endpointCount = 0;
   const page = {
     waitForFunction: async(predicate: () => boolean, _argument: unknown, options: {polling: string, timeout: number}) => {
       ++waitCount;
@@ -23,18 +29,19 @@ it('waits for the endpoint after an intervening paint and later frame work', asy
       }).scheduleAfterInterveningPaint;
       expect(scheduleAfterInterveningPaint).toEqual(expect.any(Function));
       if(!scheduleAfterInterveningPaint) return;
-      events.push('first-frame');
       scheduleAfterInterveningPaint((timestamp) => {
         timing.nextPaintAt = timestamp;
-        events.push('endpoint');
+        ++endpointCount;
       });
       expect(frameCallbacks).toHaveLength(1);
       frameCallbacks.shift()?.(416);
+      expect(frameCallbacks).toHaveLength(0);
+      expect(timerCallbacks).toHaveLength(1);
+      expect(endpointCount).toBe(0);
       expect(predicate()).toBe(false);
-      events.push('intervening-paint');
-      events.push('later-frame-work');
-      expect(frameCallbacks).toHaveLength(1);
-      frameCallbacks.shift()?.(458);
+      timerCallbacks.shift()?.();
+      expect(timerCallbacks).toHaveLength(0);
+      expect(endpointCount).toBe(1);
       expect(predicate()).toBe(true);
     },
     evaluate: async<T>(callback: () => T) => callback()
@@ -44,10 +51,9 @@ it('waits for the endpoint after an intervening paint and later frame work', asy
     await expect(frameMeasurement.waitForFirstStickerPaint(page, 1_000)).resolves.toEqual({
       workerRequestAt: 12,
       firstFrameAt: 410,
-      nextPaintAt: 458
+      nextPaintAt: expect.any(Number)
     });
     expect(waitCount).toBe(1);
-    expect(events).toEqual(['first-frame', 'intervening-paint', 'later-frame-work', 'endpoint']);
   } finally {
     vi.unstubAllGlobals();
   }
