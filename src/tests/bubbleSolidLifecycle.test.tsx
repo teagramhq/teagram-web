@@ -5792,6 +5792,10 @@ describe('building the chat parts ahead of the first open', () => {
   test('builds once when idle, stays hidden and does not count as an opened chat', () => {
     const flush = runIdle();
     const {chat, init} = createChat();
+    const preparedPart = document.createElement('div');
+    init.mockImplementation(() => chat.container.append(preparedPart));
+    document.body.append(chat.container);
+    const nodeCount = document.body.querySelectorAll('*').length;
     chat.buildPartsWhenIdle();
 
     expect(init).not.toHaveBeenCalled();
@@ -5800,9 +5804,14 @@ describe('building the chat parts ahead of the first open', () => {
     expect(init).toHaveBeenCalledTimes(1);
     expect(chat.init).toBeNull();
     expect(chat.inited).toBeFalsy();
+    expect(chat.container.childNodes).toHaveLength(0);
+    expect(preparedPart.isConnected).toBe(false);
+    expect(document.body.querySelectorAll('*')).toHaveLength(nodeCount);
 
     chat.buildParts();
     expect(init).toHaveBeenCalledTimes(1);
+    expect(chat.container.firstChild).toBe(preparedPart);
+    expect(document.body.querySelectorAll('*')).toHaveLength(nodeCount + 1);
   });
 
   test('does not build twice when the first open comes before the idle moment', () => {

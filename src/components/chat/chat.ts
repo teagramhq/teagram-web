@@ -148,6 +148,7 @@ export default class Chat extends EventListenerBase<{
   public onPreviewClose?: () => void;
 
   public inited: boolean;
+  private preparedParts?: DocumentFragment;
 
   public isRestricted: boolean;
   public autoDownload: ChatAutoDownloadSettings;
@@ -622,16 +623,20 @@ export default class Chat extends EventListenerBase<{
   }
 
   /**
-   * Builds the topbar, bubbles and input once. `inited` still means "a peer was opened here", so a
-   * chat built ahead of time stays the one `setInnerPeer` reuses.
+   * Builds the topbar, bubbles and input once. Idle-prepared parts are attached here on first open.
+   * `inited` still means "a peer was opened here", so a chat built ahead of time stays the one
+   * `setInnerPeer` reuses.
    */
   public buildParts() {
-    if(!this.init) {
-      return;
+    if(this.init) {
+      this.init(/* peerId */);
+      this.init = null;
     }
 
-    this.init(/* peerId */);
-    this.init = null;
+    if(this.preparedParts) {
+      this.container.append(this.preparedParts);
+      this.preparedParts = undefined;
+    }
   }
 
   /** Builds the parts in an idle moment, so the first open does not pay for them. */
@@ -649,6 +654,10 @@ export default class Chat extends EventListenerBase<{
 
       try {
         this.buildParts();
+        this.preparedParts = document.createDocumentFragment();
+        while(this.container.firstChild) {
+          this.preparedParts.append(this.container.firstChild);
+        }
       } catch(error) {
         // * `init` stays set, so the first open builds again and fails where it can be seen
         this.log.error('could not build the chat parts ahead of the open:', error);
