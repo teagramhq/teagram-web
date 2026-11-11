@@ -1,23 +1,15 @@
-import {
-  ACTIVE_SERVER_ID_KEY,
-  getServerProfileId,
-  normalizeServerHost,
-  SERVER_CHOICE_KEY,
-  SERVER_TARGET_KEY,
-  updateServerPins
-} from '@config/serverSelection';
-import {notifyGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
+import type {ServerPin} from '@config/serverSelection';
 
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-export async function forgetServerData(hostInput: string, profileId: string) {
-  if(typeof navigator === 'undefined' || !navigator.locks) {
-    throw new Error('This browser cannot safely update server pins');
-  }
-  const host = normalizeServerHost(hostInput);
-  const id = getServerProfileId(host, profileId);
+export async function forgetServerData(
+  host: string,
+  id: string,
+  updateServerPins: (update: (pins: Record<string, ServerPin>) => void) => Promise<unknown>,
+  notifyGuestCredentialInvalidation: (serverId: string) => void
+) {
   notifyGuestCredentialInvalidation(id);
   const belongsToProfile = (key: string) => id === 'default' ?
     !key.startsWith('teagram.') && !/^teagram-custom-[0-9a-f]{64}:/.test(key) : key.startsWith(`teagram-${id}:`);
@@ -48,14 +40,14 @@ export async function forgetServerData(hostInput: string, profileId: string) {
   }
 
   await updateServerPins((pins) => { delete pins[host]; });
-  if(localStorage.getItem(SERVER_CHOICE_KEY) === host) localStorage.removeItem(SERVER_CHOICE_KEY);
-  if(localStorage.getItem(ACTIVE_SERVER_ID_KEY) === id) localStorage.removeItem(ACTIVE_SERVER_ID_KEY);
+  if(localStorage.getItem('teagram.server-choice.v1') === host) localStorage.removeItem('teagram.server-choice.v1');
+  if(localStorage.getItem('teagram.active-server-id.v1') === id) localStorage.removeItem('teagram.active-server-id.v1');
   try {
-    const savedTarget: unknown = JSON.parse(localStorage.getItem(SERVER_TARGET_KEY) || 'null');
+    const savedTarget: unknown = JSON.parse(localStorage.getItem('teagram.server-target.v1') || 'null');
     if(!record(savedTarget) || savedTarget.host === host) {
-      localStorage.removeItem(SERVER_TARGET_KEY);
+      localStorage.removeItem('teagram.server-target.v1');
     }
   } catch{
-    localStorage.removeItem(SERVER_TARGET_KEY);
+    localStorage.removeItem('teagram.server-target.v1');
   }
 }

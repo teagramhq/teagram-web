@@ -1,6 +1,7 @@
 import type {MtprotoTarget} from '@config/mtprotoTarget';
 import {validatePrivateEndpoint, validateMtprotoTarget} from '@config/mtprotoTarget';
 import {TELEGRAM_BOT_API_ORIGIN} from '@config/telegramBotApi';
+import {notifyGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
 
 export const SERVER_CHOICE_KEY = 'teagram.server-choice.v1';
 export const SERVER_TARGET_KEY = 'teagram.server-target.v1';
@@ -443,6 +444,11 @@ export function writeServerPin(discovered: DiscoveredServer) {
 }
 
 export async function forgetServer(hostInput: string, profileId: string) {
+  if(typeof navigator === 'undefined' || !navigator.locks) {
+    throw new Error('This browser cannot safely update server pins');
+  }
+  const host = normalizeServerHost(hostInput);
+  const id = getServerProfileId(host, profileId);
   const {forgetServerData} = await import('./forgetServer');
-  return forgetServerData(hostInput, profileId);
+  return forgetServerData(host, id, updateServerPins, notifyGuestCredentialInvalidation);
 }
