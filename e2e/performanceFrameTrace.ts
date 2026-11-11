@@ -9,6 +9,13 @@ type PresentedFrameDrainResult =
   | {ok: true, counts: ReturnType<typeof summarizePresentedFrameDrops>}
   | {ok: false, error: unknown};
 
+class PresentedFrameCleanupError extends Error {
+  constructor(readonly errors: unknown[]) {
+    super('scenario and presented-frame cleanup failed');
+    this.name = 'PresentedFrameCleanupError';
+  }
+}
+
 const PRESENTED_FRAME_INTERVAL_MS = 1000 / 60;
 
 export function summarizeFrameScripts(intervals: Interval[], frames: Array<{
@@ -126,6 +133,35 @@ export async function stopPresentedFrameCapture(trace: PresentedFrameTrace) {
   const outcome = await result;
   if(outcome.ok === false) throw outcome.error;
   return outcome.counts;
+}
+
+export async function withPresentedFrameCleanup<T>(run: () => Promise<T>, drain: () => Promise<void>, close: () => Promise<void>): Promise<T> {
+  let runFailed = false;
+  let runError: unknown;
+  try {
+    return await run();
+  } catch(error) {
+    runFailed = true;
+    runError = error;
+    throw error;
+  } finally {
+    const cleanupErrors: unknown[] = [];
+    try {
+      await drain();
+    } catch(error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      await close();
+    } catch(error) {
+      cleanupErrors.push(error);
+    }
+    if(cleanupErrors.length) {
+      const errors = runFailed ? [runError, ...cleanupErrors] : cleanupErrors;
+      if(errors.length === 1) throw errors[0];
+      throw new PresentedFrameCleanupError(errors);
+    }
+  }
 }
 
 export async function stopFrameTrace({session, anchorMs}: Awaited<ReturnType<typeof startFrameTrace>>): Promise<Event[]> {

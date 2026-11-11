@@ -7,7 +7,7 @@ import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VER
 import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes, trackBundleDocumentNavigation, type BundleRequestTracker} from './performanceBundleBytes';
 import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
-import {endPresentedFrameCapture, startFrameTrace, startPresentedFrameCapture, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
+import {endPresentedFrameCapture, startFrameTrace, startPresentedFrameCapture, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts, withPresentedFrameCleanup} from './performanceFrameTrace';
 import {LOTTIE_FRAME_BG_CSS, scheduleAfterInterveningPaint, waitForFirstStickerFrame, waitForFirstStickerPaint, waitUntilOnScreen} from './lottieFrameMeasurement';
 
 type Fixture = {
@@ -1763,9 +1763,9 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   const captureScrollAttribution = variant === 'head' && scale === '100x';
   let scrollMetric: MetricWithPendingPresentedFrameCounts | undefined;
   let pendingPresentedFrameCounts: Promise<PresentedFrameDrainResult> | undefined;
-  await installInstrumentation(page, requests, origin, false, captureScrollAttribution);
 
-  try {
+  return withPresentedFrameCleanup(async() => {
+    await installInstrumentation(page, requests, origin, false, captureScrollAttribution);
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     const firstVisibleChatList = await waitForChatList(page);
@@ -1830,17 +1830,13 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       await addCachedDialogReconcileTarget(page, reconcileTargets, sendMessageSample, 'sendMessage');
       await finalizeCachedDialogReconcileSummaries(page, reconcileTargets);
     }
-  } finally {
-    try {
-      if(scrollMetric && pendingPresentedFrameCounts) {
-        const outcome = await pendingPresentedFrameCounts;
-        if(outcome.ok === false) throw outcome.error;
-        Object.assign(scrollMetric, outcome.counts);
-      }
-    } finally {
-      await context.close();
+  }, async() => {
+    if(scrollMetric && pendingPresentedFrameCounts) {
+      const outcome = await pendingPresentedFrameCounts;
+      if(outcome.ok === false) throw outcome.error;
+      Object.assign(scrollMetric, outcome.counts);
     }
-  }
+  }, () => context.close());
 }
 
 async function traceDateJump(browser: Browser, run: VariantRun, fixture: Fixture) {

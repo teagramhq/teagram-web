@@ -25,3 +25,27 @@ test('counts a fixed 60 Hz animation within three presented frames', async({page
   expect(result.presentedFrames, 'one second at 60 Hz is 60 frames ±3').toBeLessThanOrEqual(63);
   expect(result.presentedDropped, 'a fixed-rate animation should have at most two missed presentations').toBeLessThanOrEqual(2);
 });
+
+test('reports both scenario and trace-drain failures while still closing the context', async() => {
+  const withCleanup = (performanceFrameTrace as any).withPresentedFrameCleanup;
+  expect(typeof withCleanup, 'presented-frame cleanup must be available').toBe('function');
+  if(typeof withCleanup !== 'function') return;
+
+  const scenarioError = new Error('scenario failed');
+  const drainError = new Error('trace drain failed');
+  let contextClosed = false;
+  let thrown: unknown;
+  try {
+    await withCleanup(
+      async() => { throw scenarioError; },
+      async() => { throw drainError; },
+      async() => { contextClosed = true; }
+    );
+  } catch(error) {
+    thrown = error;
+  }
+
+  expect(thrown).toBeInstanceOf(Error);
+  expect((thrown as Error & {errors: unknown[]}).errors).toEqual([scenarioError, drainError]);
+  expect(contextClosed, 'context closure must run after a drain failure').toBe(true);
+});

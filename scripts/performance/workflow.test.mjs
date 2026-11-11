@@ -192,10 +192,11 @@ test('gated presented-frame trace draining overlaps later scenarios and finishes
   assert.match(presentedFrameDrain, /IO\.read', \{handle: stream, size: 1_048_576\}/);
   assert.match(scrollCapture, /endPresentedFrameCapture\(presentedFrameTrace\)/);
   assert.match(scrollCapture, /pendingPresentedFrameCountsKey/);
+  assert.match(runVariant, /return withPresentedFrameCleanup\(/);
   assert.match(runVariant, /pendingPresentedFrameCounts = scroll\[pendingPresentedFrameCountsKey\]/);
   assert.match(runVariant, /await pendingPresentedFrameCounts/);
   assert.ok(runVariant.indexOf('await pendingPresentedFrameCounts') > runVariant.indexOf("test.step('send a message'"));
-  assert.ok(runVariant.indexOf('await pendingPresentedFrameCounts') < runVariant.indexOf('await context.close()'));
+  assert.match(runVariant, /\(\) => context\.close\(\)/);
 });
 
 test('unprofiled scroll retains timing-only tasks for the walk-mirror gate', () => {
