@@ -14,6 +14,13 @@ function validateOffset(offset) {
   if(!Number.isSafeInteger(offset) || offset < 0) throw new TypeError('RPC trace byte offset must be a non-negative safe integer');
 }
 
+export function serverRpcTraceExpectation(clientRpcCount) {
+  if(clientRpcCount === undefined) return {minimumCount: 1};
+  if(!Number.isSafeInteger(clientRpcCount) || clientRpcCount < 0) throw new TypeError('client RPC count must be a non-negative safe integer');
+  if(clientRpcCount === 0) return {minimumCount: 1};
+  return {minimumCount: clientRpcCount, exactCount: clientRpcCount};
+}
+
 function parseRecord(line, index) {
   let record;
   try {

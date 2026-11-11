@@ -3,13 +3,22 @@ import {mkdtempSync, rmSync, writeFileSync, appendFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {test} from 'node:test';
-import {getServerRpcTracePosition, readServerRpcTraceRecordsSince, waitForServerRpcTraceRecords} from './server-rpc-trace.mjs';
+import {getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from './server-rpc-trace.mjs';
 
 const record = (method, duration_us = 40_123) => JSON.stringify({
   method,
   duration_us,
   result: 'success',
   end_unix_ms: 1_762_800_000_123
+});
+
+test('server RPC trace keeps a required record when the client sample has no calls', () => {
+  assert.deepEqual(serverRpcTraceExpectation(0), {minimumCount: 1});
+  assert.deepEqual(serverRpcTraceExpectation(undefined), {minimumCount: 1});
+});
+
+test('server RPC trace matches the client count when it is available', () => {
+  assert.deepEqual(serverRpcTraceExpectation(2), {minimumCount: 2, exactCount: 2});
 });
 
 async function withTraceFile(run) {

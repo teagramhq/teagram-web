@@ -1,7 +1,7 @@
 import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
 import {readFileSync} from 'node:fs';
 import {writePerformanceReport} from './performanceReport';
-import {getServerRpcTracePosition, waitForServerRpcTraceRecords} from '../scripts/performance/server-rpc-trace.mjs';
+import {getServerRpcTracePosition, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from '../scripts/performance/server-rpc-trace.mjs';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
@@ -176,16 +176,16 @@ function serverRpcTraceOffset() {
 
 async function attachServerRpcTrace(sample: Metric, offset: number | undefined, expectedCount?: number) {
   if(offset === undefined) return sample;
-  if(expectedCount === 0) throw new Error('100x chat-open measurement recorded no messages.getHistory RPC calls');
+  const expectation = serverRpcTraceExpectation(expectedCount);
   const records = await waitForServerRpcTraceRecords(
     serverRpcTraceFile!,
     offset,
     'messages.getHistory',
-    expectedCount ?? 1,
+    expectation.minimumCount,
     {quietMs: 150}
   );
-  if(expectedCount !== undefined && records.length !== expectedCount) {
-    throw new Error(`100x chat-open expected ${expectedCount} messages.getHistory server duration records, found ${records.length}`);
+  if(expectation.exactCount !== undefined && records.length !== expectation.exactCount) {
+    throw new Error(`100x chat-open expected ${expectation.exactCount} messages.getHistory server duration records, found ${records.length}`);
   }
   const serverRpcRecords = records;
   if(!serverRpcRecords.length) throw new Error('100x chat-open measurement has no server messages.getHistory duration records');

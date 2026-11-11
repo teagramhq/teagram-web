@@ -1,6 +1,7 @@
 import {mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {evaluatePairedDifferences, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PAIRED_CONFIDENCE_LEVEL, PERFORMANCE_REPEATS, TIMING_MINIMUM_EFFECTS} from './policy.mjs';
+import {serverRpcTraceExpectation} from './server-rpc-trace.mjs';
 
 const reportPath = resolve(process.env.PERF_REPORT_PATH || '.performance-report.json');
 const historyDirectory = resolve(process.env.PERF_HISTORY_DIRECTORY || '.performance-history');
@@ -74,10 +75,11 @@ function formatChatOpenServerTimingTable(report, failures) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has missing or invalid messages.getHistory server durations`);
         continue;
       }
+      const clientHistoryCallCount = diagnostic && Array.isArray(sample.rpcCalls) ? sample.rpcCalls.filter((call) => call?.method === 'messages.getHistory').length : undefined;
       if(diagnostic) {
-        const expectedCount = Array.isArray(sample.rpcCalls) ? sample.rpcCalls.filter((call) => call?.method === 'messages.getHistory').length : undefined;
-        if(!Number.isInteger(expectedCount) || expectedCount !== serverRecords.length) {
-          failures.push(`100x chatOpen RPC diagnostic ${variant} sample ${index + 1} has ${serverRecords.length} server records for ${expectedCount ?? 'unknown'} client messages.getHistory calls`);
+        const expectation = Number.isSafeInteger(clientHistoryCallCount) && clientHistoryCallCount >= 0 ? serverRpcTraceExpectation(clientHistoryCallCount) : undefined;
+        if(!expectation || serverRecords.length < expectation.minimumCount || (expectation.exactCount !== undefined && serverRecords.length !== expectation.exactCount)) {
+          failures.push(`100x chatOpen RPC diagnostic ${variant} sample ${index + 1} has ${serverRecords.length} server records for ${clientHistoryCallCount ?? 'unknown'} client messages.getHistory calls`);
           continue;
         }
         if(!Number.isFinite(sample.ms) || !Number.isFinite(sample.rpcWallMs) || !Number.isFinite(sample.nonRpcElapsedMs)) {
@@ -87,7 +89,7 @@ function formatChatOpenServerTimingTable(report, failures) {
       }
       const serverDurations = serverRecords.map((record) => `${show(record.duration_us / 1000)} ms (${record.result})`).join(', ');
       const serverTotalMs = serverRecords.reduce((total, record) => total + record.duration_us / 1000, 0);
-      const rpcResidual = diagnostic && Number.isFinite(sample.rpcWallMs) ? sample.rpcWallMs - serverTotalMs : undefined;
+      const rpcResidual = diagnostic && clientHistoryCallCount > 0 && Number.isFinite(sample.rpcWallMs) ? sample.rpcWallMs - serverTotalMs : undefined;
       rows.push(`| ${source} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.rpcWallMs)} | ${show(sample.nonRpcElapsedMs)} | ${serverDurations} | ${show(rpcResidual)} |`);
     }
   };

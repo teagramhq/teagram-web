@@ -125,8 +125,8 @@ function runSummaryWithArtifacts({
           chatOpen: [{
             ms: 377,
             rpcCallCount: chatOpenClientHistoryCallCount,
-            rpcWallMs: 377,
-            nonRpcElapsedMs: 0,
+            rpcWallMs: chatOpenClientHistoryCallCount ? 377 : 0,
+            nonRpcElapsedMs: chatOpenClientHistoryCallCount ? 0 : 377,
             rpcCalls: Array.from({length: chatOpenClientHistoryCallCount}, () => ({method: 'messages.getHistory', durationMs: 377, outcome: 'success'})),
             ...(serverRpcRecords ? {serverRpcRecords} : {})
           }]
@@ -386,6 +386,12 @@ test('summary fails closed when the server trace count does not match client get
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /has 1 server records for 2 client messages\.getHistory calls/);
+});
+
+test('summary keeps server timings when the client boundary records no getHistory calls', () => {
+  const result = runSummaryWithArtifacts({chatOpenClientHistoryCallCount: 0});
+
+  assert.equal(result.status, 0);
 });
 
 test('summary reports nine paired samples and keeps extra diagnostic samples out of the gate', () => {
