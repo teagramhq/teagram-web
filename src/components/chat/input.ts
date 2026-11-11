@@ -478,6 +478,10 @@ export default class ChatInput {
     return this.recordingController?.active ?? false;
   }
 
+  public attachRecordingPanel() {
+    this.recordingController?.attachVideoRecordingPanel();
+  }
+
   public construct() {
     const className2 = this.className;
 
@@ -1017,8 +1021,8 @@ export default class ChatInput {
 
   private constructRecorder() {
     // All recording state + behaviour lives in ChatRecording now; constructing
-    // it wires the recorders, mounts the voice + video panels, and installs the
-    // record-mode switch menu (the same work this method used to do inline).
+    // it wires the recorders and voice panel. The video overlay mounts on first
+    // open, after idle prebuilding has finished.
     this.recordingController = new ChatRecording(this);
   }
 
@@ -1441,10 +1445,9 @@ export default class ChatInput {
     this.newMessageWrapper.append(this.btnSendContainer);
     this.inputContainer.append(...[this.btnReaction].filter(Boolean));
 
-    // The voice + round-video recording panels are constructed and mounted by
-    // ChatRecording (built in constructRecorder below): the voice panel is
-    // inserted into newMessageWrapper before btnSendContainer, the round-video
-    // preview overlay onto <body>.
+    // ChatRecording (built in constructRecorder below) inserts the voice panel
+    // into newMessageWrapper before btnSendContainer. Its round-video preview
+    // is attached to the overlay root when the chat first opens.
 
     if(this.btnToggleEmoticons) {
       this.emoticonsDropdown.attachButtonListener(this.btnToggleEmoticons, this.listenerSetter);

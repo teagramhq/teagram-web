@@ -2,6 +2,7 @@ import type {Message, PeerSettings} from '@layer';
 import '@helpers/peerIdPolyfill';
 import {getMiddleware} from '@helpers/middleware';
 import ScrollSaver from '@helpers/scrollSaver';
+import {getOverlayRoot} from '@helpers/appWindow';
 import lang from '@/lang';
 import mediaSizes, {ScreenSize} from '@helpers/mediaSizes';
 import windowSize from '@helpers/windowSize';
@@ -36,6 +37,14 @@ const moduleMocks = vi.hoisted(() => {
     }
   };
 });
+
+const nativeVideoRecorderMock = vi.hoisted(() => ({supported: false}));
+vi.mock('@helpers/videoRecorder/nativeVideoRecorder', () => ({
+  default: class {
+    releaseStream = vi.fn();
+  },
+  isNativeVideoRecorderSupported: () => nativeVideoRecorderMock.supported
+}));
 
 vi.mock('@lib/apiManagerProxy', () => ({default: moduleMocks.apiManagerProxy}));
 vi.mock('@lib/appDownloadManager', () => ({default: {downloadMedia: moduleMocks.downloadMedia}}));
@@ -5812,6 +5821,40 @@ describe('building the chat parts ahead of the first open', () => {
     expect(init).toHaveBeenCalledTimes(1);
     expect(chat.container.firstChild).toBe(preparedPart);
     expect(document.body.querySelectorAll('*')).toHaveLength(nodeCount + 1);
+  });
+
+  test('keeps the real ChatInput video overlay detached until the first open', () => {
+    const flush = runIdle();
+    const {chat, init} = createChat();
+    const newMessageWrapper = document.createElement('div');
+    const btnSendContainer = document.createElement('div');
+    newMessageWrapper.append(btnSendContainer);
+    const input = new ChatInput(chat, {} as any, {} as any, 'chat-input-main');
+    Object.assign(input, {newMessageWrapper, btnSendContainer});
+    chat.input = input;
+    init.mockImplementation(() => (input as any).constructRecorder());
+    const overlayRoot = getOverlayRoot();
+    document.body.append(chat.container);
+    const documentNodeCount = document.body.querySelectorAll('*').length;
+    const overlayChildCount = overlayRoot.childNodes.length;
+    nativeVideoRecorderMock.supported = true;
+
+    try {
+      chat.buildPartsWhenIdle();
+      flush();
+
+      expect(document.body.querySelectorAll('*')).toHaveLength(documentNodeCount);
+      expect(overlayRoot.childNodes).toHaveLength(overlayChildCount);
+      expect(overlayRoot.querySelector('.video-recording-stage')).toBeNull();
+
+      chat.buildParts();
+
+      expect(overlayRoot.childNodes).toHaveLength(overlayChildCount + 1);
+      expect(overlayRoot.querySelector('.video-recording-stage')).not.toBeNull();
+    } finally {
+      (input as any).recordingController?.destroy();
+      nativeVideoRecorderMock.supported = false;
+    }
   });
 
   test('does not build twice when the first open comes before the idle moment', () => {

@@ -627,15 +627,19 @@ export default class Chat extends EventListenerBase<{
    * `inited` still means "a peer was opened here", so a chat built ahead of time stays the one
    * `setInnerPeer` reuses.
    */
-  public buildParts() {
+  public buildParts(attachPreparedParts = true) {
     if(this.init) {
       this.init(/* peerId */);
       this.init = null;
     }
 
-    if(this.preparedParts) {
-      this.container.append(this.preparedParts);
-      this.preparedParts = undefined;
+    if(attachPreparedParts) {
+      if(this.preparedParts) {
+        this.container.append(this.preparedParts);
+        this.preparedParts = undefined;
+      }
+
+      this.input?.attachRecordingPanel();
     }
   }
 
@@ -653,7 +657,7 @@ export default class Chat extends EventListenerBase<{
       }
 
       try {
-        this.buildParts();
+        this.buildParts(false);
         this.preparedParts = document.createDocumentFragment();
         while(this.container.firstChild) {
           this.preparedParts.append(this.container.firstChild);
