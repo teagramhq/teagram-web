@@ -965,7 +965,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     expect(observed, 'long-animation-frame observer is not supported in the browser').toBe(true);
   }
   const cpuProfile = captureCpuStacks ? await startCpuProfile(page) : undefined;
-  const presentedFrameTrace = capturePresentedFrames ? await startPresentedFrameCapture(page) : undefined;
+  const presentedFrameTrace = capturePresentedFrames ? await startPresentedFrameCapture(page, {trackScrollActivity: true}) : undefined;
   await page.evaluate((recordWindows) => (window as any).__teagramPerf.startFrames(recordWindows), captureFrameTrace);
   const initial = await page.evaluate(() => {
     const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));

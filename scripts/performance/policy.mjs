@@ -11,7 +11,7 @@ export const SCENARIOS = [
 ];
 
 export const SCALES = ['1x', '100x'];
-export const PERFORMANCE_MEASUREMENT_VERSION = 3;
+export const PERFORMANCE_MEASUREMENT_VERSION = 4;
 export const PERFORMANCE_REPEATS = 9;
 export const COLD_CHAT_LIST_REPEATS = PERFORMANCE_REPEATS;
 export const PAIRED_CONFIDENCE_LEVEL = 0.95;

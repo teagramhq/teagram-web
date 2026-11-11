@@ -1,9 +1,15 @@
 import type {CDPSession, Page} from '@playwright/test';
 
 type Interval = {startMs: number, endMs: number};
-type Event = {name: string, startMs: number, durationMs: number, detail?: string};
+type FrameTraceEvent = {name: string, startMs: number, durationMs: number, detail?: string};
 type Span = {name: string, startMs: number, syncMs: number};
-type PresentedFrameTrace = {session: CDPSession, startTimestampUs: number};
+type PresentedFrameTrace = {
+  session: CDPSession,
+  page: Page,
+  startTimestampUs: number,
+  pageTimestampOffsetMs: number,
+  trackScrollActivity: boolean
+};
 type PresentedFrameTraceEvent = {name: string, cat?: string, ts: number};
 type PresentedFrameDrainResult =
   | {ok: true, counts: ReturnType<typeof summarizePresentedFrameDrops>}
@@ -17,6 +23,8 @@ class PresentedFrameCleanupError extends Error {
 }
 
 const PRESENTED_FRAME_INTERVAL_MS = 1000 / 60;
+const PRESENTED_FRAME_ACTIVITY_KEY = '__teagramPresentedFrameActivity';
+const PRESENTED_FRAME_ACTIVITY_IDLE_MS = 100;
 
 export function summarizeFrameScripts(intervals: Interval[], frames: Array<{
   startTime: number, duration: number,
@@ -36,7 +44,7 @@ export function summarizeFrameScripts(intervals: Interval[], frames: Array<{
   }));
 }
 
-export function summarizeDroppedFrames(_intervals: Interval[], _events: Event[], _spans: Span[]) {
+export function summarizeDroppedFrames(_intervals: Interval[], _events: FrameTraceEvent[], _spans: Span[]) {
   return _intervals.flatMap(({startMs, endMs}) => {
     const droppedFrames = Math.max(0, Math.round((endMs - startMs) / (1000 / 60)) - 1);
     if(!droppedFrames) return [];
@@ -73,29 +81,109 @@ async function readMonotonicTimestampUs(session: CDPSession) {
   return timestamp * 1_000_000;
 }
 
-export function summarizePresentedFrameDrops(timestampsMs: number[]) {
+export function summarizePresentedFrameDrops(timestampsMs: number[], activityWindows?: Interval[]) {
   const frames = [...new Set(timestampsMs.filter(Number.isFinite))].sort((left, right) => left - right);
+  const isActive = (timestampMs: number) => activityWindows === undefined || activityWindows.some(({startMs, endMs}) => timestampMs >= startMs && timestampMs <= endMs);
   let presentedDropped = 0;
+  let presentedFrames = 0;
+  frames.forEach((frame) => {
+    if(isActive(frame)) ++presentedFrames;
+  });
   for(let index = 1; index < frames.length; ++index) {
     const elapsedIntervals = Math.round((frames[index] - frames[index - 1]) / PRESENTED_FRAME_INTERVAL_MS);
-    presentedDropped += Math.max(0, elapsedIntervals - 1);
+    for(let interval = 1; interval < elapsedIntervals; ++interval) {
+      const expectedPresentationMs = frames[index - 1] + interval * PRESENTED_FRAME_INTERVAL_MS;
+      if(isActive(expectedPresentationMs)) ++presentedDropped;
+    }
   }
-  return {presentedFrames: frames.length, presentedDropped};
+  return {presentedFrames, presentedDropped};
 }
 
-export async function startPresentedFrameCapture(page: Page): Promise<PresentedFrameTrace> {
+async function startPresentedFrameActivityCapture(page: Page) {
+  return page.evaluate(({key, idleMs}) => {
+    const scrollable = document.querySelector<HTMLElement>('.bubbles-scrollable');
+    if(!scrollable) throw new Error('Presented-frame activity tracking requires the scroll container');
+    const activity = window as any;
+    if(activity[key]) throw new Error('Presented-frame activity tracking is already active');
+    const windows: Interval[] = [];
+    let activeStartMs: number | undefined;
+    let idleTimer: number | undefined;
+    const close = () => {
+      if(activeStartMs === undefined) return;
+      windows.push({startMs: activeStartMs, endMs: performance.now()});
+      activeStartMs = undefined;
+    };
+    const recordActivity = () => {
+      if(activeStartMs === undefined) activeStartMs = performance.now();
+      if(idleTimer !== undefined) window.clearTimeout(idleTimer);
+      idleTimer = window.setTimeout(close, idleMs);
+    };
+    const onWheel = (event: Event) => {
+      const target = event.target;
+      if(target instanceof Node && scrollable.contains(target)) recordActivity();
+    };
+    const onScroll = (event: Event) => {
+      if(event.target === scrollable) recordActivity();
+    };
+    const onScrollEnd = (event: Event) => {
+      if(event.target !== scrollable) return;
+      if(idleTimer !== undefined) window.clearTimeout(idleTimer);
+      idleTimer = undefined;
+      close();
+    };
+    scrollable.addEventListener('wheel', onWheel, {capture: true, passive: true});
+    scrollable.addEventListener('scroll', onScroll, {capture: true, passive: true});
+    scrollable.addEventListener('scrollend', onScrollEnd, true);
+    activity[key] = {
+      finish: () => {
+        if(idleTimer !== undefined) window.clearTimeout(idleTimer);
+        idleTimer = undefined;
+        close();
+        scrollable.removeEventListener('wheel', onWheel, true);
+        scrollable.removeEventListener('scroll', onScroll, true);
+        scrollable.removeEventListener('scrollend', onScrollEnd, true);
+        delete activity[key];
+        return windows;
+      }
+    };
+    return performance.now();
+  }, {key: PRESENTED_FRAME_ACTIVITY_KEY, idleMs: PRESENTED_FRAME_ACTIVITY_IDLE_MS});
+}
+
+async function stopPresentedFrameActivityCapture(page: Page) {
+  return page.evaluate((key) => {
+    const activity = (window as any)[key];
+    if(!activity) throw new Error('Presented-frame activity tracking is not active');
+    return activity.finish() as Interval[];
+  }, PRESENTED_FRAME_ACTIVITY_KEY);
+}
+
+export async function startPresentedFrameCapture(page: Page, options: {trackScrollActivity?: boolean} = {}): Promise<PresentedFrameTrace> {
   const session = await page.context().newCDPSession(page);
   await session.send('Performance.enable');
   await session.send('Tracing.start', {categories: 'disabled-by-default-display.framedisplayed,-*', transferMode: 'ReturnAsStream'});
   try {
-    return {session, startTimestampUs: await readMonotonicTimestampUs(session)};
+    const startTimestampUs = await readMonotonicTimestampUs(session);
+    const pageTimestampMs = options.trackScrollActivity ? await startPresentedFrameActivityCapture(page) : await page.evaluate(() => performance.now());
+    return {
+      session,
+      page,
+      startTimestampUs,
+      pageTimestampOffsetMs: startTimestampUs / 1000 - pageTimestampMs,
+      trackScrollActivity: options.trackScrollActivity === true
+    };
   } catch(error) {
     await session.detach();
     throw error;
   }
 }
 
-export async function endPresentedFrameCapture({session, startTimestampUs}: PresentedFrameTrace) {
+export async function endPresentedFrameCapture({session, page, startTimestampUs, pageTimestampOffsetMs, trackScrollActivity}: PresentedFrameTrace) {
+  const pageActivityWindows = trackScrollActivity ? await stopPresentedFrameActivityCapture(page) : undefined;
+  const activityWindows = pageActivityWindows?.map(({startMs, endMs}) => ({
+    startMs: startMs + pageTimestampOffsetMs - PRESENTED_FRAME_INTERVAL_MS,
+    endMs: endMs + pageTimestampOffsetMs + PRESENTED_FRAME_INTERVAL_MS
+  }));
   const endTimestampUs = await readMonotonicTimestampUs(session);
   const completed = new Promise<string>((resolve) => session.once('Tracing.tracingComplete', ({stream}) => resolve(stream!)));
   const endCommand = session.send('Tracing.end');
@@ -116,7 +204,7 @@ export async function endPresentedFrameCapture({session, startTimestampUs}: Pres
         return event.name === 'Display::FrameDisplayed' && categories.includes('disabled-by-default-display.framedisplayed') &&
           event.ts >= startTimestampUs && event.ts <= endTimestampUs;
       }).map((event) => event.ts / 1000);
-      return summarizePresentedFrameDrops(timestampsMs);
+      return summarizePresentedFrameDrops(timestampsMs, activityWindows);
     } finally {
       await session.detach();
     }
@@ -164,7 +252,7 @@ export async function withPresentedFrameCleanup<T>(run: () => Promise<T>, drain:
   }
 }
 
-export async function stopFrameTrace({session, anchorMs}: Awaited<ReturnType<typeof startFrameTrace>>): Promise<Event[]> {
+export async function stopFrameTrace({session, anchorMs}: Awaited<ReturnType<typeof startFrameTrace>>): Promise<FrameTraceEvent[]> {
   const completed = new Promise<string>((resolve) => session.once('Tracing.tracingComplete', ({stream}) => resolve(stream!)));
   await session.send('Tracing.end');
   const stream = await completed;
