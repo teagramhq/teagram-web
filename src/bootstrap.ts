@@ -420,7 +420,7 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
 
   async function showFirstUseConfirmation(discovered: DiscoveredServer, target: HTMLElement | undefined) {
     const extraContent = popupContent(
-      createServerEndpointBlock(i18n('Teagram.Server.AdvertisedEndpoint'), discovered.target.endpoint),
+      createServerEndpointBlock('Advertised WSS endpoint', discovered.target.endpoint),
       fingerprintBlock('Teagram.Server.Fingerprint', discovered.spkiFingerprint),
       popupParagraph('Teagram.Server.ConfirmNote')
     );
@@ -451,8 +451,8 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
     isCurrent: () => boolean = () => true
   ) {
     const extraContent = popupContent(
-      createServerEndpointBlock(i18n('Teagram.Server.PinnedEndpoint'), pin.endpoint),
-      createServerEndpointBlock(i18n('Teagram.Server.PresentedEndpoint'), discovered.target.endpoint),
+      createServerEndpointBlock('Pinned WSS endpoint', pin.endpoint),
+      createServerEndpointBlock('Current WSS endpoint', discovered.target.endpoint),
       fingerprintBlock('Teagram.Server.PinnedFingerprint', pin.key_fingerprint),
       fingerprintBlock('Teagram.Server.PresentedFingerprint', discovered.spkiFingerprint),
       popupParagraph('Teagram.Server.IdentityBlocked'),
@@ -695,8 +695,8 @@ function showServerIdentityChanged(
   newFingerprint.textContent = `Current SPKI SHA-256: ${formatSPKIFingerprint(discovered.spkiFingerprint)}`;
   mismatch.card.append(
     hostLine,
-    createServerEndpointBlock(document.createTextNode('Pinned WSS endpoint'), pin.endpoint),
-    createServerEndpointBlock(document.createTextNode('Current WSS endpoint'), discovered.target.endpoint),
+    createServerEndpointBlock('Pinned WSS endpoint', pin.endpoint),
+    createServerEndpointBlock('Current WSS endpoint', discovered.target.endpoint),
     oldFingerprint,
     newFingerprint
   );
@@ -747,7 +747,7 @@ function showFirstUseConfirmation(discovered: DiscoveredServer) {
   fingerprint.textContent = `SPKI SHA-256: ${formatSPKIFingerprint(discovered.spkiFingerprint)}`;
   card.append(
     host,
-    createServerEndpointBlock(document.createTextNode('Advertised WSS endpoint'), discovered.target.endpoint),
+    createServerEndpointBlock('Advertised WSS endpoint', discovered.target.endpoint),
     fingerprint
   );
   card.append(createButton('Confirm and use this server', async() => {

@@ -824,8 +824,10 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await expect(confirmation).toBeVisible();
     await expect(confirmation.locator('.popup-description')).toHaveCSS('outline-style', 'none');
     await expect(confirmation.getByText(`This browser hasn't connected to ${serverHost} before. Whoever runs this server can read your messages, so continue only if you trust them.`)).toBeVisible();
+    await expect(confirmation.getByText('Advertised WSS endpoint')).toBeVisible();
+    await expect(confirmation.locator('code.server-picker__endpoint')).toHaveText([privateEndpoint.href]);
     await expect(confirmation.getByText(/^(?:[0-9a-f]{4}-){15}[0-9a-f]{4}$/)).toHaveCount(1);
-    const fingerprint = confirmation.locator('[dir="ltr"]');
+    const fingerprint = confirmation.locator('[dir="ltr"]:has(span)');
     await expect(fingerprint.locator('span')).toHaveText([
       '3086-3c14-188a-34a4-',
       '286d-e6da-8e80-1ee5-',
@@ -1039,8 +1041,11 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     const mismatch = page.getByRole('dialog', {name: 'Server identity changed'});
     await expect(mismatch).toBeVisible();
     await expect(mismatch.getByText(`The identity of ${serverHost}, pinned in this browser, has changed.`)).toBeVisible();
+    await expect(mismatch.getByText('Pinned WSS endpoint')).toBeVisible();
+    await expect(mismatch.getByText('Current WSS endpoint')).toBeVisible();
+    await expect(mismatch.locator('code.server-picker__endpoint')).toHaveText([privateEndpoint.href, privateEndpoint.href]);
     await expect(mismatch.getByText(/^(?:[0-9a-f]{4}-){15}[0-9a-f]{4}$/)).toHaveCount(2);
-    const mismatchFingerprints = mismatch.locator('[dir="ltr"]');
+    const mismatchFingerprints = mismatch.locator('[dir="ltr"]:has(span)');
     await expect(mismatchFingerprints).toHaveCount(2);
     await expect(mismatchFingerprints.nth(0).locator('span')).toHaveText([
       '9b1f-04c2-77ae-51d0-',

@@ -3829,9 +3829,6 @@
 "Teagram.Server.Connecting" = "Connecting…";
 "Teagram.Server.ConfirmTitle" = "Confirm this server";
 "Teagram.Server.ConfirmText" = "This browser hasn't connected to %s before. Whoever runs this server can read your messages, so continue only if you trust them.";
-"Teagram.Server.AdvertisedEndpoint" = "Advertised WSS endpoint";
-"Teagram.Server.PinnedEndpoint" = "Pinned WSS endpoint";
-"Teagram.Server.PresentedEndpoint" = "Current WSS endpoint";
 "Teagram.Server.Fingerprint" = "Server fingerprint";
 "Teagram.Server.ConfirmNote" = "If your server administrator gave you a fingerprint, confirm only if it matches. Teagram pins it in this browser and blocks the connection if it ever changes.";
 "Teagram.Server.Confirm" = "Confirm";

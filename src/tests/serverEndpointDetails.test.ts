@@ -4,7 +4,7 @@ import {createServerEndpointBlock} from '@components/serverEndpointDetails';
 describe('server endpoint details', () => {
   it('renders the exact advertised WSS destination as selectable text', () => {
     const endpoint = 'wss://edge.example.org:8443/apiws';
-    const block = createServerEndpointBlock(document.createTextNode('Advertised WSS endpoint'), endpoint);
+    const block = createServerEndpointBlock('Advertised WSS endpoint', endpoint);
     const label = block.querySelector('p');
     const value = block.querySelector('code');
 
