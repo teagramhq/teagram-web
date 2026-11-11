@@ -11,32 +11,57 @@ function replaceOnce(source, before, after, description) {
   return source.slice(0, start) + after + source.slice(start + before.length);
 }
 
+function countOccurrences(source, needle) {
+  let count = 0;
+  let offset = 0;
+  while((offset = source.indexOf(needle, offset)) >= 0) {
+    count++;
+    offset += needle.length;
+  }
+  return count;
+}
+
+const replacements = [
+  {
+    before: '    if(import.meta.env.VITE_PERF_TRACE === \'1\') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }',
+    after: '    if(import.meta.env.VITE_PERF_TRACE === \'1\' || import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }',
+    description: 'the RPC trace initialization'
+  },
+  {
+    before: '    if(import.meta.env.VITE_PERF_TRACE === \'1\') this.performanceRpcTrace!.reset(recordSpans);',
+    after: '    if(import.meta.env.VITE_PERF_TRACE === \'1\' || import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\') {\n      this.performanceRpcTrace!.reset(recordSpans);\n    }',
+    description: 'the RPC trace reset'
+  },
+  {
+    before: '    if(import.meta.env.VITE_PERF_TRACE === \'1\') this.performanceRpcTrace?.recordCall(methodName);',
+    after: '    if(import.meta.env.VITE_PERF_TRACE === \'1\') this.performanceRpcTrace?.recordCall(methodName);\n    const traceSearch = import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\' && methodName === \'messages.searchGlobal\';',
+    description: 'the invoke call trace hook'
+  },
+  {
+    before: '      return this.invokeApiInternal(method, params, options);',
+    after: '      const request = this.invokeApiInternal(method, params, options);\n      return traceSearch ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;',
+    description: 'the unauthenticated RPC return hook'
+  }
+];
+
 export function injectSearchRpcTracer(source) {
+  const injectedHookCounts = replacements.map(({after}) => countOccurrences(source, after));
+  if(injectedHookCounts.every((count) => count === 1)) {
+    const uninstrumentedHookCounts = replacements.map(({before}) => countOccurrences(source, before));
+    const expectedUninstrumentedHookCounts = [0, 0, 1, 0];
+    if(uninstrumentedHookCounts.some((count, index) => count !== expectedUninstrumentedHookCounts[index])) {
+      throw new Error('Cannot inject search RPC tracer: already instrumented source has unexpected or ambiguous hooks');
+    }
+    return source;
+  }
+  if(injectedHookCounts.some((count) => count > 0)) {
+    throw new Error('Cannot inject search RPC tracer: source is partially instrumented or has ambiguous tracer hooks');
+  }
+
   let result = source;
-  result = replaceOnce(
-    result,
-    "    if(import.meta.env.VITE_PERF_TRACE === '1') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }",
-    "    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }",
-    'the RPC trace initialization'
-  );
-  result = replaceOnce(
-    result,
-    "    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace!.reset(recordSpans);",
-    "    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1') {\n      this.performanceRpcTrace!.reset(recordSpans);\n    }",
-    'the RPC trace reset'
-  );
-  result = replaceOnce(
-    result,
-    "    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace?.recordCall(methodName);",
-    "    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace?.recordCall(methodName);\n    const traceSearch = import.meta.env.VITE_PERF_SEARCH_TRACE === '1' && methodName === 'messages.searchGlobal';",
-    'the invoke call trace hook'
-  );
-  result = replaceOnce(
-    result,
-    '      return this.invokeApiInternal(method, params, options);',
-    '      const request = this.invokeApiInternal(method, params, options);\n      return traceSearch ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;',
-    'the unauthenticated RPC return hook'
-  );
+  for(const {before, after, description} of replacements) {
+    result = replaceOnce(result, before, after, description);
+  }
   return result;
 }
 

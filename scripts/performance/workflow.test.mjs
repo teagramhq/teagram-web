@@ -200,6 +200,28 @@ test('base search tracing preserves application RPC differences from the head bu
   assert.match(instrumentedHead, /VITE_PERF_SEARCH_TRACE/);
 });
 
+test('search RPC tracer injection accepts the current ApiManager unchanged and is repeatable', async() => {
+  const apiManager = readFileSync(new URL('../../src/lib/appManagers/apiManager.ts', import.meta.url), 'utf8');
+  const {injectSearchRpcTracer} = await import('./inject-search-rpc-tracer.mjs');
+
+  const firstInjection = injectSearchRpcTracer(apiManager);
+  const secondInjection = injectSearchRpcTracer(firstInjection);
+
+  assert.equal(firstInjection, apiManager);
+  assert.equal(secondInjection, apiManager);
+});
+
+test('search RPC tracer injection still rejects duplicate anchors in an instrumented source', async() => {
+  const apiManager = readFileSync(new URL('../../src/lib/appManagers/apiManager.ts', import.meta.url), 'utf8');
+  const {injectSearchRpcTracer} = await import('./inject-search-rpc-tracer.mjs');
+  const duplicateInitialization = '    if(import.meta.env.VITE_PERF_TRACE === \'1\') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }';
+
+  assert.throws(
+    () => injectSearchRpcTracer(`${apiManager}\n${duplicateInitialization}`),
+    /already instrumented source has unexpected or ambiguous hooks/
+  );
+});
+
 test('sticker timing gates against the PR base and keeps the pre-178 client report-only', () => {
   const buildStep = workflow.match(/- name: Build current and base private client bundles([\s\S]*?)(?=\n      - name: Start local HTTPS)/)?.[1];
   assert.ok(buildStep, 'the performance workflow must define its client build step');
