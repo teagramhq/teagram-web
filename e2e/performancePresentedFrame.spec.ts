@@ -45,7 +45,9 @@ test('page clock calibration stays bounded when one page command is delayed', as
 
   const originalEvaluate = page.evaluate.bind(page) as (pageFunction: () => number) => Promise<number>;
   let delayed = false;
+  let calibrationEvaluations = 0;
   (page as any).evaluate = async(pageFunction: () => number) => {
+    ++calibrationEvaluations;
     if(!delayed) {
       delayed = true;
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -57,6 +59,7 @@ test('page clock calibration stays bounded when one page command is delayed', as
   try {
     capture = await startCapture(page);
     expect(delayed, 'the first clock sample should include the injected command delay').toBe(true);
+    expect(calibrationEvaluations, 'clock calibration should reuse the initial monotonic timestamp and use two bounded samples').toBe(2);
 
     const readTimestampUs = async() => {
       const {metrics} = await capture.session.send('Performance.getMetrics');

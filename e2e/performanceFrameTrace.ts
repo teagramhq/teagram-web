@@ -28,7 +28,7 @@ class PresentedFrameCleanupError extends Error {
 const PRESENTED_FRAME_INTERVAL_MS = 1000 / 60;
 const PRESENTED_FRAME_ACTIVITY_KEY = '__teagramPresentedFrameActivity';
 const PRESENTED_FRAME_ACTIVITY_IDLE_MS = 100;
-const PAGE_CLOCK_CALIBRATION_SAMPLES = 3;
+const PAGE_CLOCK_CALIBRATION_SAMPLES = 2;
 
 export function summarizeFrameScripts(intervals: Interval[], frames: Array<{
   startTime: number, duration: number,
@@ -196,13 +196,14 @@ async function stopPresentedFrameActivityCapture(page: Page) {
   }, PRESENTED_FRAME_ACTIVITY_KEY);
 }
 
-async function calibratePageClock(session: CDPSession, page: Page): Promise<PageClockCalibration> {
+async function calibratePageClock(session: CDPSession, page: Page, initialBeforeTimestampUs: number): Promise<PageClockCalibration> {
   const samples: PageClockSample[] = [];
+  let beforeTimestampUs = initialBeforeTimestampUs;
   for(let index = 0; index < PAGE_CLOCK_CALIBRATION_SAMPLES; ++index) {
-    const beforeTimestampUs = await readMonotonicTimestampUs(session);
     const pageTimestampMs = await page.evaluate(() => performance.now());
     const afterTimestampUs = await readMonotonicTimestampUs(session);
     samples.push({beforeTimestampUs, pageTimestampMs, afterTimestampUs});
+    beforeTimestampUs = afterTimestampUs;
   }
   return choosePageClockCalibration(samples);
 }
@@ -213,7 +214,7 @@ export async function startPresentedFrameCapture(page: Page, options: {trackScro
   await session.send('Tracing.start', {categories: 'disabled-by-default-display.framedisplayed,-*', transferMode: 'ReturnAsStream'});
   try {
     const startTimestampUs = await readMonotonicTimestampUs(session);
-    const pageClockCalibration = await calibratePageClock(session, page);
+    const pageClockCalibration = await calibratePageClock(session, page, startTimestampUs);
     if(options.trackScrollActivity) await startPresentedFrameActivityCapture(page);
     return {
       session,
