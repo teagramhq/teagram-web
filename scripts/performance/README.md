@@ -8,8 +8,9 @@ history for calibration.
 
 Pull request runs measure the next painted frame after the player first frame
 for cold animated stickers against the PR base. Cold samples record the worker
-request, player first frame and a timestamp in the frame after the intervening
-render update, using two animation-frame callbacks on the page clock. Warm
+request, player first frame and a timestamp after the intervening render
+update, using one animation-frame callback followed by a zero-delay timer on the
+page clock. Warm
 sticker timing remains screenshot-observed. The pinned pre-PR-178 client in
 `.github/perf-sticker-base-commit` remains a report-only comparison.
 
