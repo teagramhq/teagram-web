@@ -46,7 +46,7 @@ function formatPerformanceSamplesTable(report, scale = '100x') {
   for(const {label, variant, index, sample} of rows) {
     lines.push(`| ${label} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.appSendUiMs)} | ${show(sample.composerReadyAfterFirstBubbleMs)} | ${show(sample.firstBubbleToSentMs)} | ${show(sample.preInteractionMs)} | ${show(sample.requests, 0)} | ${show(sample.domNodes, 0)} | ${show(sample.longTasksOver50Ms, 0)} | ${show(sample.blockingTimeMs)} | ${show(sample.droppedFramePercent)}% |`);
   }
-  lines.push('', 'For send rows, `Time` is the automation-observed interval and `App Enter-to-bubble` measures in-page time from Enter keydown to the matching outgoing bubble insertion.');
+  lines.push('', '`Send a message` is gated on `App Enter-to-bubble` (`appSendUiMs`); `Time` remains the outer automation interval in the artifact and is shown as a diagnostic. `App Enter-to-bubble` measures in-page time from Enter keydown to the matching outgoing bubble insertion.');
   return lines.join('\n');
 }
 
