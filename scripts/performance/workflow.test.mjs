@@ -67,6 +67,7 @@ function runSummaryWithArtifacts({
   const historyDirectory = join(directory, 'history');
   const makeSample = (key) => ({
     ms: 100,
+    ...(key === 'sendMessage' ? {appSendUiMs: 80} : {}),
     requests: 12,
     rpcCallCount: 2,
     domNodes: 300,
