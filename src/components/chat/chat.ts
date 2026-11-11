@@ -148,6 +148,7 @@ export default class Chat extends EventListenerBase<{
   public onPreviewClose?: () => void;
 
   public inited: boolean;
+  private preparedParts?: DocumentFragment;
 
   public isRestricted: boolean;
   public autoDownload: ChatAutoDownloadSettings;
@@ -621,6 +622,59 @@ export default class Chat extends EventListenerBase<{
     this.type = type;
   }
 
+  /**
+   * Builds the topbar, bubbles and input once. Idle-prepared parts are attached here on first open.
+   * `inited` still means "a peer was opened here", so a chat built ahead of time stays the one
+   * `setInnerPeer` reuses.
+   */
+  public buildParts(attachPreparedParts = true) {
+    if(this.init) {
+      this.init(/* peerId */);
+      this.init = null;
+    }
+
+    if(attachPreparedParts) {
+      if(this.preparedParts) {
+        this.container.append(this.preparedParts);
+        this.preparedParts = undefined;
+      }
+
+      this.input?.attachRecordingPanel();
+    }
+  }
+
+  /** Builds the parts in an idle moment, so the first open does not pay for them. */
+  public buildPartsWhenIdle() {
+    if(!this.init || this.isPreview) {
+      return;
+    }
+
+    // * nothing is on screen until a peer opens
+    this.container.hidden = true;
+    const build = () => {
+      if(this.inited) {
+        return;
+      }
+
+      try {
+        this.buildParts(false);
+        this.preparedParts = document.createDocumentFragment();
+        while(this.container.firstChild) {
+          this.preparedParts.append(this.container.firstChild);
+        }
+      } catch(error) {
+        // * `init` stays set, so the first open builds again and fails where it can be seen
+        this.log.error('could not build the chat parts ahead of the open:', error);
+      }
+    };
+
+    if('requestIdleCallback' in window) {
+      window.requestIdleCallback(build, {timeout: 3000});
+    } else {
+      setTimeout(build, 1000);
+    }
+  }
+
   public init(/* peerId: PeerId */) {
     // this.initPeerId = peerId;
 
@@ -1044,11 +1098,7 @@ export default class Chat extends EventListenerBase<{
     if(!peerId) {
       this.inited = undefined;
     } else if(!this.inited) {
-      if(this.init) {
-        this.init(/* peerId */);
-        this.init = null;
-      }
-
+      this.buildParts();
       this.inited = true;
     }
 

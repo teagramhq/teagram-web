@@ -114,18 +114,23 @@ export default class ChatRecording {
 
     // Round-video-note panel — created here (and not next to the voice panel)
     // because constructRecorder is what sets this.videoRecorder. The control
-    // bar slots into the input row the same way as voice; the dim overlay +
-    // 360x360 round preview is mounted into the chat container so it covers
-    // bubbles but stays under the input bar (which has a higher z-index).
+    // bar slots into the input row the same way as voice; its centered round
+    // preview mounts on first open so idle prebuilding adds no document nodes.
     if(this.videoRecorder) {
       // Just the centered round preview — all recording controls stay in the
       // chat input (the same voiceRecordingPanel + btn-send the voice flow
-      // uses). Mounted on <body> so it's reliably screen-centered.
+      // uses). It mounts on <body> so it's reliably screen-centered.
       this.videoRecordingPanel = createVideoRecordingPanel();
-      getOverlayRoot().append(this.videoRecordingPanel.element);
     }
 
     this.setupRecordingModeMenu();
+  }
+
+  public attachVideoRecordingPanel() {
+    const overlayRoot = getOverlayRoot();
+    if(this.videoRecordingPanel && this.videoRecordingPanel.element.parentElement !== overlayRoot) {
+      overlayRoot.append(this.videoRecordingPanel.element);
+    }
   }
 
   private constructRecorder() {
