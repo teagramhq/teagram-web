@@ -220,18 +220,18 @@ test('master runs still block on incomplete deterministic head and diagnostic sa
   assert.ok(missingTrace.blockingFailures.some((failure) => failure.includes('100x dateJump: head walk-mirror diagnostic expected exactly 9 samples, got 8')));
 });
 
-test('older measurement history does not calibrate the screencast-free 100x scroll window', () => {
-  const history = mainHistory(20, {'100x': {scrollBack2k: {droppedFramePercent: 10}}}, {
-    ...CURRENT_FIXTURE,
-    measurementVersion: PERFORMANCE_MEASUREMENT_VERSION - 1
-  });
+test('legacy scroll history without RAF counts does not hide other scenario history', () => {
+  const history = mainHistory(20, {'100x': {scrollBack2k: {droppedFramePercent: 10}}});
+  history.forEach((run) => run.variants.head['100x'].scrollBack2k.forEach((sample) => {
+    delete sample.rafDropped;
+  }));
   const result = evaluatePerformance(report({requireBase: false}), history);
   const scroll = result.rows.find((row) => row.scale === '100x' && row.key === 'scrollBack2k');
   const chatOpen = result.rows.find((row) => row.scale === '100x' && row.key === 'chatOpen');
 
   assert.equal(scroll.historyRuns, 0);
   assert.equal(scroll.scrollHistoryRuns, 0);
-  assert.equal(chatOpen.historyRuns, 0);
+  assert.equal(chatOpen.historyRuns, 20);
 });
 
 test('requires a valid RAF drop count for every 100x scroll sample', () => {

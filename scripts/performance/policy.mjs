@@ -11,7 +11,7 @@ export const SCENARIOS = [
 ];
 
 export const SCALES = ['1x', '100x'];
-export const PERFORMANCE_MEASUREMENT_VERSION = 4;
+export const PERFORMANCE_MEASUREMENT_VERSION = 3;
 export const PERFORMANCE_REPEATS = 9;
 export const COLD_CHAT_LIST_REPEATS = PERFORMANCE_REPEATS;
 export const PAIRED_CONFIDENCE_LEVEL = 0.95;
@@ -91,6 +91,7 @@ function historyFor(history, scale, key, report) {
     if(!matchesFixture(run, report)) return [];
     const samples = run.variants?.head?.[scale]?.[key];
     if(!Array.isArray(samples) || !samples.length) return [];
+    if(scale === '100x' && key === 'scrollBack2k' && !samples.every((sample) => Number.isInteger(sample?.rafDropped) && sample.rafDropped >= 0)) return [];
     const value = median(samples.map((sample) => sample.ms).filter(Number.isFinite));
     return Number.isFinite(value) ? [value] : [];
   });
@@ -183,6 +184,7 @@ function historyScrollMetrics(history, report) {
         Number.isFinite(sample?.blockingTimeMs) &&
         Number.isFinite(sample?.frameIntervals) && sample.frameIntervals > 0 &&
         Number.isFinite(sample?.droppedFrames) && sample.droppedFrames >= 0 &&
+        Number.isInteger(sample?.rafDropped) && sample.rafDropped >= 0 &&
         Number.isFinite(sample?.droppedFramePercent);
     });
     if(!complete) return [];
