@@ -307,7 +307,7 @@ async function showServerPicker(initialError?: string) {
 
     const {server: discovered, pin, pinState, id} = profile;
     if(pinState === 'mismatch') {
-      showServerIdentityChanged(discovered, pin!);
+      showServerIdentityChanged(discovered, pin!, id);
       return;
     }
 
@@ -454,6 +454,7 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
       popupParagraph('Teagram.Server.IdentityBlocked'),
       popupParagraph('Teagram.Server.IdentityCancel')
     );
+    const profileId = getServerProfileId(discovered.host, discovered.id);
     let SimpleConfirmationPopup: typeof import('@components/popups/simpleConfirmation').SimpleConfirmationPopup;
     try {
       ({SimpleConfirmationPopup} = await import('@components/popups/simpleConfirmation'));
@@ -502,7 +503,6 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
     const run = ++sequence;
     publish({phase: 'checking', host: discovered.host, changing: current.changing, locked: true});
     try {
-      const profileId = getServerProfileId(discovered.host, discovered.id);
       await unregisterServiceWorkers(profileId);
       await forgetServer(discovered.host, profileId);
       blockedServer = undefined;
@@ -677,6 +677,7 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
 function showServerIdentityChanged(
   discovered: DiscoveredServer,
   pin: NonNullable<ReturnType<typeof getServerPin>>,
+  profileId: string,
   {allowForget = true, allowChooseAnother = true}: {allowForget?: boolean, allowChooseAnother?: boolean} = {}
 ) {
   const mismatch = showPanel('Server identity changed', 'This server no longer matches the identity you pinned. Teagram will not connect with the changed key.');
@@ -702,7 +703,6 @@ function showServerIdentityChanged(
   if(allowForget) {
     mismatch.card.append(createButton('Forget this server', async() => {
       try {
-        const profileId = getServerProfileId(discovered.host, discovered.id);
         await unregisterServiceWorkers(profileId);
         await forgetServer(discovered.host, profileId);
         location.reload();
@@ -717,7 +717,7 @@ async function bootConfiguredServer(config: {server: string, autoGuest: boolean}
   setConnectPolicy(config.server);
   const {server: discovered, pin, pinState, id} = await resolveServerProfile(config.server);
   if(pinState === 'mismatch') {
-    showServerIdentityChanged(discovered, pin!, {allowForget: false, allowChooseAnother: false});
+    showServerIdentityChanged(discovered, pin!, id, {allowForget: false, allowChooseAnother: false});
     return;
   }
 

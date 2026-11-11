@@ -1,7 +1,6 @@
 import type {MtprotoTarget} from '@config/mtprotoTarget';
 import {validatePrivateEndpoint, validateMtprotoTarget} from '@config/mtprotoTarget';
 import {TELEGRAM_BOT_API_ORIGIN} from '@config/telegramBotApi';
-import {notifyGuestCredentialInvalidation} from '@lib/guestCredentialBroadcast';
 
 export const SERVER_CHOICE_KEY = 'teagram.server-choice.v1';
 export const SERVER_TARGET_KEY = 'teagram.server-target.v1';
@@ -392,7 +391,7 @@ export function readServerPins(): Record<string, ServerPin> {
   }
 }
 
-function updateServerPins(update: (pins: Record<string, ServerPin>) => void) {
+export function updateServerPins(update: (pins: Record<string, ServerPin>) => void) {
   if(typeof navigator === 'undefined' || !navigator.locks) {
     return Promise.reject(new Error('This browser cannot safely confirm this server'));
   }
@@ -443,54 +442,7 @@ export function writeServerPin(discovered: DiscoveredServer) {
   });
 }
 
-export async function forgetServer(hostInput: string, profileId?: string) {
-  if(typeof navigator === 'undefined' || !navigator.locks) {
-    throw new Error('This browser cannot safely update server pins');
-  }
-  const host = normalizeServerHost(hostInput);
-  const id = getServerProfileId(host, profileId || `custom-${toHex(await sha256(new TextEncoder().encode(host)))}`);
-  notifyGuestCredentialInvalidation(id);
-  const belongsToProfile = (key: string) => id === 'default' ?
-    !key.startsWith('teagram.') && !/^teagram-custom-[0-9a-f]{64}:/.test(key) : key.startsWith(`teagram-${id}:`);
-  for(const key of Object.keys(localStorage)) {
-    if(belongsToProfile(key)) localStorage.removeItem(key);
-  }
-  for(const key of Object.keys(sessionStorage)) {
-    if(belongsToProfile(key)) sessionStorage.removeItem(key);
-  }
-  const databaseSuffix = id === 'default' ? '' : `-${id}`;
-  const knownDatabases = [
-    `tweb${databaseSuffix}`,
-    `tweb${databaseSuffix}-common`,
-    ...[1, 2, 3, 4].map((account) => `tweb${databaseSuffix}-account-${account}`),
-    `telegram${databaseSuffix}`
-  ];
-  const databases = indexedDB.databases ? await indexedDB.databases() : [];
-  const databaseNames = new Set([
-    ...knownDatabases,
-    ...databases.map((database) => database.name).filter((name): name is string =>
-      !!name && id !== 'default' &&
-        (name.startsWith(`tweb-${id}-`) || name === `tweb-${id}` || name === `telegram-${id}`))
-  ]);
-  await Promise.all([...databaseNames].map((name) => new Promise<void>((resolve, reject) => {
-    const request = indexedDB.deleteDatabase(name);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(new Error(`Could not remove server database ${name}`));
-    request.onblocked = () => reject(new Error('Close other tabs using this server before forgetting it'));
-  })));
-  if(typeof caches !== 'undefined') {
-    const cacheNames = await caches.keys();
-    await Promise.all(cacheNames.filter((name) => id === 'default' ? name === 'cachedAssets' :
-      name.startsWith(`teagram-${id}-`)).map((name) => caches.delete(name)));
-  }
-
-  await updateServerPins((pins) => { delete pins[host]; });
-  if(localStorage.getItem(SERVER_CHOICE_KEY) === host) localStorage.removeItem(SERVER_CHOICE_KEY);
-  if(localStorage.getItem(ACTIVE_SERVER_ID_KEY) === id) localStorage.removeItem(ACTIVE_SERVER_ID_KEY);
-  try {
-    const savedTarget: unknown = JSON.parse(localStorage.getItem(SERVER_TARGET_KEY) || 'null');
-    if(!record(savedTarget) || savedTarget.host === host) localStorage.removeItem(SERVER_TARGET_KEY);
-  } catch{
-    localStorage.removeItem(SERVER_TARGET_KEY);
-  }
+export async function forgetServer(hostInput: string, profileId: string) {
+  const {forgetServerData} = await import('./forgetServer');
+  return forgetServerData(hostInput, profileId);
 }

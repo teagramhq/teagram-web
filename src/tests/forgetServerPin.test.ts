@@ -56,7 +56,7 @@ describe('forget server pin', () => {
       delete: async(name: string) => { deletedCaches.push(name); return true; }
     });
 
-    await (forgetServer as (host: string, profileId: string) => Promise<void>)(host, 'default');
+    await forgetServer(host, 'default');
 
     expect(localStorage.getItem('account1')).toBeNull();
     expect(localStorage.getItem('auth-key-recovery:1:2')).toBeNull();
@@ -98,7 +98,7 @@ describe('forget server pin', () => {
       }
     });
 
-    await expect(forgetServer(host)).rejects.toThrow('Close other tabs using this server before forgetting it');
+    await expect(forgetServer(host, id)).rejects.toThrow('Close other tabs using this server before forgetting it');
     expect(JSON.parse(localStorage.getItem(SERVER_PINS_KEY) || '{}')[host]).toEqual(pin);
     expect(localStorage.getItem(SERVER_CHOICE_KEY)).toBe(host);
     expect(localStorage.getItem(ACTIVE_SERVER_ID_KEY)).toBe(id);
