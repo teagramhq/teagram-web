@@ -6,9 +6,13 @@ the same browser scenarios against each size. Pull request runs also compare the
 head bundle with the base bundle. Main branch runs record compatible timing
 history for calibration.
 
-Pull request runs measure the first animated sticker frame against the PR base.
-The pinned pre-PR-178 client in `.github/perf-sticker-base-commit` remains a
-report-only comparison.
+Pull request runs measure the next painted frame after the player first frame
+for cold animated stickers against the PR base. Cold samples record the worker
+request, player first frame and a timestamp after the intervening render
+update, using one animation-frame callback followed by a zero-delay timer on the
+page clock. Warm
+sticker timing remains screenshot-observed. The pinned pre-PR-178 client in
+`.github/perf-sticker-base-commit` remains a report-only comparison.
 
 ## Performance gates
 
@@ -35,7 +39,7 @@ pre-change performance artifact ([run 42710920668, attempt 3](https://github.com
 | 100x long-task blocking time | 25 ms | 0–28.53 ms SD across 3–11 pairs |
 | 100x scroll dropped-frame percentage | 15% of the base dropped-frame percentage | 1.081 percentage points SD across 5 pairs |
 | Walk-mirror long-task count | 1 additional task | 0 tasks SD across 5 legacy head-only trace repeats; the new report records paired base/head spread |
-| Cold first animated sticker visible frame | 100 ms | 602.59 ms SD across 3 legacy pinned-client/head pairs; the gate now uses PR base/head pairs |
+| Cold first animated sticker next painted frame | 100 ms | 602.59 ms SD across 3 legacy screenshot-polling pinned-client/head pairs; the gate now uses PR base/head pairs |
 | Worker recorder overhead | `min(2 ms, 15% of record-off median)` | The legacy run kept medians only. The new report includes nine grouped paired deltas and their SD. |
 
 The measured 100x runs collect cached-dialog walk overlap counts directly from
