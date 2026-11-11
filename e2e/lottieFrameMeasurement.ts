@@ -34,3 +34,24 @@ export async function waitForFirstStickerFrame(page: Page, timeoutMs: number): P
   });
   return page.evaluate(() => (window as any).__performanceFirstStickerFrameAt as number);
 }
+
+export type FirstStickerPaintTiming = {
+  workerRequestAt: number,
+  firstFrameAt: number,
+  nextPaintAt: number
+};
+
+// The RAF callback precedes rendering; its timer task runs after the intervening render update.
+export function scheduleAfterInterveningPaint(callback: FrameRequestCallback): void {
+  requestAnimationFrame(() => {
+    setTimeout(() => callback(performance.now()), 0);
+  });
+}
+
+export async function waitForFirstStickerPaint(page: Page, timeoutMs: number): Promise<FirstStickerPaintTiming> {
+  await page.waitForFunction(() => {
+    const timing = (window as any).__performanceFirstStickerPaintTiming;
+    return Number.isFinite(timing?.workerRequestAt) && Number.isFinite(timing?.firstFrameAt) && Number.isFinite(timing?.nextPaintAt);
+  }, undefined, {polling: 'raf', timeout: timeoutMs});
+  return page.evaluate(() => (window as any).__performanceFirstStickerPaintTiming as FirstStickerPaintTiming);
+}

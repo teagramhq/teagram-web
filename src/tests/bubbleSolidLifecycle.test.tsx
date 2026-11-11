@@ -2,6 +2,7 @@ import type {Message, PeerSettings} from '@layer';
 import '@helpers/peerIdPolyfill';
 import {getMiddleware} from '@helpers/middleware';
 import ScrollSaver from '@helpers/scrollSaver';
+import {getOverlayRoot} from '@helpers/appWindow';
 import lang from '@/lang';
 import mediaSizes, {ScreenSize} from '@helpers/mediaSizes';
 import windowSize from '@helpers/windowSize';
@@ -37,6 +38,14 @@ const moduleMocks = vi.hoisted(() => {
   };
 });
 
+const nativeVideoRecorderMock = vi.hoisted(() => ({supported: false}));
+vi.mock('@helpers/videoRecorder/nativeVideoRecorder', () => ({
+  default: class {
+    releaseStream = vi.fn();
+  },
+  isNativeVideoRecorderSupported: () => nativeVideoRecorderMock.supported
+}));
+
 vi.mock('@lib/apiManagerProxy', () => ({default: moduleMocks.apiManagerProxy}));
 vi.mock('@lib/appDownloadManager', () => ({default: {downloadMedia: moduleMocks.downloadMedia}}));
 vi.mock('@appManagers/utils/stickers/getStickerEffectThumb', () => ({default: vi.fn()}));
@@ -59,6 +68,7 @@ vi.mock('@components/toast', async(importOriginal) => ({
   toastNew: moduleMocks.toastNew
 }));
 vi.mock('@lib/rootScope', () => ({default: moduleMocks.rootScope}));
+vi.mock('@environment/touchSupport', () => ({default: false}));
 vi.mock('@stores/contentSettings', () => ({
   default: () => ({
     sensitiveEnabled: () => false,
@@ -5445,4 +5455,487 @@ test('handles a cancelled quick-reaction sticker render after hover teardown', a
     addEventListener.mockRestore();
     vi.useRealTimers();
   }
+});
+
+describe('first history page asked for during a peer change', () => {
+  const topMid = 100;
+  const topFullMid = makeFullMid(peerId, topMid);
+  const user = {_: 'user', id: peerId, pFlags: {}};
+  const setPeerMirror = (peer: unknown) => {
+    (moduleMocks.apiManagerProxy as any).getPeer = vi.fn(() => peer);
+  };
+
+  const createHarness = (overrides: Record<string, unknown> = {}) => {
+    const getHistory = vi.fn(async() => ({cached: false, result: Promise.resolve({history: [99, 98]})}));
+    const harness = Object.assign(Object.create(ChatBubbles.prototype), {
+      setPeerTempId: 1,
+      isFirstLoad: true,
+      bubbleGroups: {groups: []},
+      managers: {acknowledged: {appMessagesManager: {getHistory}}},
+      chat: {
+        peerId,
+        type: ChatType.Chat,
+        isBroadcast: false,
+        requestHistoryOptionsPart: {peerId},
+        getHistoryStorage: () => ({maxId: topMid, history: {slice: {isEnd: () => false}, findSliceOffset: (): undefined => undefined}}),
+        getMessage: vi.fn(() => ({}))
+      },
+      log: Object.assign(vi.fn(), {warn: vi.fn(), error: vi.fn()}),
+      ...overrides
+    }) as any;
+    return {harness, getHistory, loadCount: getInitialHistoryLoadCount(windowSize.height)};
+  };
+
+  beforeEach(() => setPeerMirror(user));
+  afterAll(() => setPeerMirror(undefined));
+
+  test('requests the page the open will ask for and hands it to getHistory once', async() => {
+    const {harness, getHistory, loadCount} = createHarness();
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+
+    expect(getHistory).toHaveBeenCalledTimes(1);
+    expect(getHistory).toHaveBeenCalledWith(expect.objectContaining({peerId, offsetId: topMid, limit: loadCount, backLimit: 0}));
+
+    harness.performHistoryResult = vi.fn(async() => undefined);
+    await harness.getHistory(topFullMid, true, false, topFullMid);
+    expect(getHistory).toHaveBeenCalledTimes(1);
+
+    // a later page of the same peer change is a different request
+    await harness.getHistory(topFullMid, true, false, topFullMid);
+    expect(getHistory).toHaveBeenCalledTimes(2);
+  });
+
+  test('plans from the opened peer, not from state the previous peer left behind', () => {
+    const {harness, getHistory, loadCount} = createHarness({isFirstLoad: false});
+    harness.chat.isBroadcast = true;
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+
+    expect(getHistory).toHaveBeenCalledWith(expect.objectContaining({limit: loadCount, backLimit: 0}));
+  });
+
+  test('does not hand a prefetch to another peer change or another page', () => {
+    const {harness, getHistory, loadCount} = createHarness();
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+    const prefetched = harness.historyPrefetch.request;
+    getHistory.mockClear();
+
+    // A -> B -> A: the second A is a new peer change with its own tempId
+    harness.setPeerTempId = 3;
+    harness.requestHistory(topFullMid, loadCount, 0);
+    harness.setPeerTempId = 1;
+    harness.requestHistory(topFullMid, loadCount + 1, 0);
+    harness.requestHistory(makeFullMid(peerId, 50), loadCount, 0);
+    expect(getHistory).toHaveBeenCalledTimes(3);
+    expect(harness.historyPrefetch.request).toBe(prefetched);
+
+    expect(harness.requestHistory(topFullMid, loadCount, 0)).toBe(prefetched);
+    expect(harness.historyPrefetch).toBeUndefined();
+  });
+
+  test('asks for nothing once the peer change is superseded', () => {
+    const {harness, getHistory} = createHarness({setPeerTempId: 2});
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+    expect(getHistory).not.toHaveBeenCalled();
+  });
+
+  test('leaves restricted peers, groups and a missing top message to the regular request', () => {
+    const {harness, getHistory} = createHarness();
+    setPeerMirror({...user, pFlags: {restricted: true}, restriction_reason: [{_: 'restrictionReason', platform: 'all', reason: 'porn', text: ''}]});
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+    setPeerMirror(undefined);
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+    setPeerMirror(user);
+    harness.prefetchOpenHistory(1, (-5) as PeerId, 0, undefined);
+    harness.chat.getMessage = vi.fn(() => undefined);
+    harness.prefetchOpenHistory(1, peerId, 0, undefined);
+
+    expect(getHistory).not.toHaveBeenCalled();
+  });
+
+  test('leaves an open at the unread position to the regular request', () => {
+    const {harness, getHistory} = createHarness();
+    harness.prefetchOpenHistory(1, peerId, 90, undefined);
+
+    expect(getHistory).not.toHaveBeenCalled();
+  });
+
+  test('a prefetch that throws leaves the open to the regular request', () => {
+    const failure = new Error('plan failed');
+    const {harness, getHistory} = createHarness();
+    harness.chat.getMessage = vi.fn(() => { throw failure; });
+
+    expect(() => harness.prefetchOpenHistory(1, peerId, 0, undefined)).not.toThrow();
+    expect(harness.log.error).toHaveBeenCalledWith('history prefetch failed:', peerId, failure);
+    expect(harness.historyPrefetch).toBeUndefined();
+    expect(getHistory).not.toHaveBeenCalled();
+  });
+
+  test('a prefetch nobody takes does not leave an unhandled rejection, and says why it failed', async() => {
+    const failure = new Error('worker gone');
+    const {harness} = createHarness({managers: {acknowledged: {appMessagesManager: {getHistory: vi.fn(() => Promise.reject(failure))}}}});
+    const unhandled: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandledRejection);
+    try {
+      harness.prefetchOpenHistory(1, peerId, 0, undefined);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).toEqual([]);
+      expect(harness.log.warn).toHaveBeenCalledWith('history prefetch failed:', peerId, expect.anything(), failure);
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection);
+    }
+  });
+});
+
+describe('peer changes racing over the prefetched first page', () => {
+  const peerA = peerId;
+  const peerB = 11 as PeerId;
+  const user = (id: PeerId) => ({_: 'user', id, pFlags: {}});
+
+  const createRace = () => {
+    const {harness, chat, getHistory1} = makeMountableSetPeerHarness();
+    // the real history chain runs: getHistory1 -> getHistory -> requestHistory (prefetched or not)
+    delete harness.getHistory1;
+    void getHistory1;
+    (moduleMocks.apiManagerProxy as any).getPeer = vi.fn((id: PeerId) => user(id));
+
+    const responses: Array<{peer: PeerId, resolve: (mids: number[]) => void, fail: (error: Error) => void}> = [];
+    const getHistory = vi.fn((options: {peerId: PeerId}) => new Promise((resolve, reject) => {
+      responses.push({
+        peer: options.peerId,
+        resolve: (mids) => resolve({cached: false, result: Promise.resolve({history: mids})}),
+        fail: reject
+      });
+    }));
+    const historyStorage = {maxId: 100, history: {length: 1, slice: {isEnd: () => false}, findSliceOffset: (): undefined => undefined}};
+    const peerChanges: Array<() => void> = [];
+    const rendered: Array<{peer: PeerId, mids: number[]}> = [];
+
+    Object.assign(chat, {
+      type: ChatType.Chat,
+      getHistoryStorage: () => historyStorage,
+      getDialogOrTopic: vi.fn(async() => undefined),
+      getMessage: vi.fn(() => ({})),
+      onChangePeer: vi.fn(() => new Promise<void>((resolve) => peerChanges.push(resolve)))
+    });
+    Object.defineProperty(chat, 'requestHistoryOptionsPart', {get: () => ({peerId: chat.peerId})});
+    Object.assign(harness, {
+      bubbleGroups: {groups: []},
+      historyRetries: [],
+      loadMoreHistory: vi.fn(),
+      isFirstLoad: false,
+      getMiddleware: (extra?: () => boolean) => {
+        const generation = harness.setPeerTempId;
+        return () => harness.setPeerTempId === generation && (!extra || extra());
+      },
+      performHistoryResult: vi.fn(async(historyResult: {history: number[]}) => {
+        rendered.push({peer: chat.peerId, mids: [...historyResult.history]});
+      })
+    });
+    harness.log.warn = vi.fn();
+    harness.log.error = vi.fn();
+    harness.managers.acknowledged = {appMessagesManager: {getHistory}};
+    harness.managers.appMessagesManager.getReadMaxIdIfUnread = vi.fn(async() => 0);
+
+    const open = (peer: PeerId, samePeer = false) => {
+      chat.peerId = peer;
+      const promise = harness.setPeer({peerId: peer, samePeer, sameSearch: false});
+      promise.catch(noopCatch);
+      return promise;
+    };
+    return {harness, chat, getHistory, responses, peerChanges, rendered, open};
+  };
+  const noopCatch = (): undefined => undefined;
+  afterAll(() => {
+    (moduleMocks.apiManagerProxy as any).getPeer = vi.fn();
+  });
+
+  test('B then A again: only the current A renders, and nothing is asked for twice', async() => {
+    const {harness, getHistory, responses, peerChanges, rendered, open} = createRace();
+
+    const firstA = open(peerA);
+    await vi.waitFor(() => expect(responses).toHaveLength(1));
+    const toB = open(peerB);
+    await vi.waitFor(() => expect(responses).toHaveLength(2));
+    const secondA = open(peerA);
+    await vi.waitFor(() => expect(responses).toHaveLength(3));
+    expect(responses.map(({peer}) => peer)).toEqual([peerA, peerB, peerA]);
+
+    // the stale prefetches answer first, the current one last
+    responses[0].resolve([901]);
+    responses[1].resolve([902]);
+    peerChanges.forEach((resolve) => resolve());
+    await Promise.all([firstA, toB]).catch(noopCatch);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(rendered).toEqual([]);
+
+    responses[2].resolve([903]);
+    await secondA;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(rendered).toEqual([{peer: peerA, mids: [100, 903]}]);
+    expect(getHistory).toHaveBeenCalledTimes(3);
+    expect(harness.historyPrefetch).toBeUndefined();
+  });
+
+  test('a switch while the old peer is still cleaning up renders only the new peer', async() => {
+    const {getHistory, responses, peerChanges, rendered, open} = createRace();
+
+    const toA = open(peerA);
+    await vi.waitFor(() => expect(responses).toHaveLength(1));
+    // A's change finishes and its response is in flight when the user moves to B
+    peerChanges[0]();
+    const toB = open(peerB);
+    await vi.waitFor(() => expect(responses).toHaveLength(2));
+
+    responses[0].resolve([901]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    responses[1].resolve([902]);
+    peerChanges[1]();
+    await Promise.all([toA.catch(noopCatch), toB]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(rendered).toEqual([{peer: peerB, mids: [100, 902]}]);
+    expect(getHistory).toHaveBeenCalledTimes(2);
+  });
+
+  test('a synchronous prefetch failure falls back to the regular history request', async() => {
+    const {harness, peerChanges, rendered, open} = createRace();
+    const failure = new Error('request failed');
+    const requestHistory = vi.fn()
+      .mockImplementationOnce(() => { throw failure; })
+      .mockImplementation(() => ({cached: false, result: Promise.resolve({history: [903]})}));
+    harness.requestHistory = requestHistory;
+
+    const opening = open(peerA);
+    await vi.waitFor(() => expect(requestHistory).toHaveBeenCalledTimes(1));
+    expect(harness.log.error).toHaveBeenCalledWith('history prefetch failed:', peerA, failure);
+    expect(harness.historyPrefetch).toBeUndefined();
+
+    peerChanges[0]();
+    await vi.waitFor(() => expect(requestHistory).toHaveBeenCalledTimes(2));
+    await opening;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requestHistory).toHaveBeenCalledTimes(2);
+    expect(rendered).toEqual([{peer: peerA, mids: [100, 903]}]);
+  });
+
+  test('a second open of the same peer never takes the first open\'s request', async() => {
+    const {getHistory, responses, peerChanges, rendered, open} = createRace();
+
+    const first = open(peerA);
+    await vi.waitFor(() => expect(responses).toHaveLength(1));
+    // the second open cannot be predicted (the mirror has no peer), so it asks for itself
+    (moduleMocks.apiManagerProxy as any).getPeer = vi.fn();
+    const second = open(peerA);
+    peerChanges.forEach((resolve) => resolve());
+    await vi.waitFor(() => expect(responses).toHaveLength(2));
+    expect(getHistory).toHaveBeenCalledTimes(2);
+
+    responses[0].resolve([901]);
+    await Promise.all([first.catch(noopCatch)]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(rendered).toEqual([]);
+
+    responses[1].resolve([903]);
+    await second;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(rendered).toEqual([{peer: peerA, mids: [100, 903]}]);
+  });
+  test.each([['prefetched', true], ['plain', false]])('a failed %s page fails the open the same way and renders nothing', async(_, predictable) => {
+    const {harness, responses, peerChanges, rendered, open} = createRace();
+    if(!predictable) (moduleMocks.apiManagerProxy as any).getPeer = vi.fn();
+    const failure = new Error('history failed');
+
+    const opening = open(peerA);
+    peerChanges.forEach((resolve) => resolve());
+    await vi.waitFor(() => expect(responses).toHaveLength(1));
+    responses[0].fail(failure);
+
+    await expect(opening).rejects.toBe(failure);
+    expect(rendered).toEqual([]);
+    expect(harness.log.error).toHaveBeenCalledWith('history load failed:', peerA, true, failure);
+  });
+
+  test('an open of the same peer asks for the page once and never prefetches', async() => {
+    const {harness, getHistory, responses, rendered, open} = createRace();
+    harness.getBubbleByPoint = vi.fn(() => undefined);
+
+    const opening = open(peerA, true);
+    await vi.waitFor(() => expect(responses).toHaveLength(1));
+    expect(harness.historyPrefetch).toBeUndefined();
+    responses[0].resolve([901]);
+    await opening;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(getHistory).toHaveBeenCalledTimes(1);
+    expect(rendered).toEqual([{peer: peerA, mids: [100, 901]}]);
+  });
+});
+
+describe('building the chat parts ahead of the first open', () => {
+  const createChat = () => {
+    const init = vi.fn();
+    const chat = Object.assign(Object.create(Chat.prototype), {
+      init,
+      container: document.createElement('div'),
+      isPreview: false
+    }) as any;
+    return {chat, init};
+  };
+
+  const runIdle = () => {
+    const callbacks: Array<() => void> = [];
+    vi.stubGlobal('requestIdleCallback', vi.fn((callback: () => void) => callbacks.push(callback)));
+    Object.defineProperty(window, 'requestIdleCallback', {configurable: true, value: (globalThis as any).requestIdleCallback});
+    return () => callbacks.splice(0).forEach((callback) => callback());
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete (window as any).requestIdleCallback;
+  });
+
+  test('builds once when idle, stays hidden and does not count as an opened chat', () => {
+    const flush = runIdle();
+    const {chat, init} = createChat();
+    const preparedPart = document.createElement('div');
+    init.mockImplementation(() => chat.container.append(preparedPart));
+    document.body.append(chat.container);
+    const nodeCount = document.body.querySelectorAll('*').length;
+    chat.buildPartsWhenIdle();
+
+    expect(init).not.toHaveBeenCalled();
+    expect(chat.container.hidden).toBe(true);
+    flush();
+    expect(init).toHaveBeenCalledTimes(1);
+    expect(chat.init).toBeNull();
+    expect(chat.inited).toBeFalsy();
+    expect(chat.container.childNodes).toHaveLength(0);
+    expect(preparedPart.isConnected).toBe(false);
+    expect(document.body.querySelectorAll('*')).toHaveLength(nodeCount);
+
+    chat.buildParts();
+    expect(init).toHaveBeenCalledTimes(1);
+    expect(chat.container.firstChild).toBe(preparedPart);
+    expect(document.body.querySelectorAll('*')).toHaveLength(nodeCount + 1);
+  });
+
+  test('keeps the real ChatInput video overlay detached until the first open', () => {
+    const flush = runIdle();
+    const {chat, init} = createChat();
+    const newMessageWrapper = document.createElement('div');
+    const btnSendContainer = document.createElement('div');
+    newMessageWrapper.append(btnSendContainer);
+    const input = new ChatInput(chat, {} as any, {} as any, 'chat-input-main');
+    Object.assign(input, {newMessageWrapper, btnSendContainer});
+    chat.input = input;
+    init.mockImplementation(() => (input as any).constructRecorder());
+    const overlayRoot = getOverlayRoot();
+    document.body.append(chat.container);
+    const documentNodeCount = document.body.querySelectorAll('*').length;
+    const overlayChildCount = overlayRoot.childNodes.length;
+    nativeVideoRecorderMock.supported = true;
+
+    try {
+      chat.buildPartsWhenIdle();
+      flush();
+
+      expect(document.body.querySelectorAll('*')).toHaveLength(documentNodeCount);
+      expect(overlayRoot.childNodes).toHaveLength(overlayChildCount);
+      expect(overlayRoot.querySelector('.video-recording-stage')).toBeNull();
+
+      chat.buildParts();
+
+      expect(overlayRoot.childNodes).toHaveLength(overlayChildCount + 1);
+      expect(overlayRoot.querySelector('.video-recording-stage')).not.toBeNull();
+    } finally {
+      (input as any).recordingController?.destroy();
+      nativeVideoRecorderMock.supported = false;
+    }
+  });
+
+  test('does not build twice when the first open comes before the idle moment', () => {
+    const flush = runIdle();
+    const {chat, init} = createChat();
+    chat.buildPartsWhenIdle();
+    chat.buildParts();
+    flush();
+
+    expect(init).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failing idle build is logged and left to the first open to retry', () => {
+    const flush = runIdle();
+    const failure = new Error('init failed');
+    const {chat, init} = createChat();
+    init.mockImplementation(() => { throw failure; });
+    chat.log = {error: vi.fn()};
+    chat.buildPartsWhenIdle();
+
+    expect(flush).not.toThrow();
+    expect(chat.log.error).toHaveBeenCalledWith('could not build the chat parts ahead of the open:', failure);
+    expect(chat.init).toBe(init);
+    expect(() => chat.buildParts()).toThrow(failure);
+    expect(init).toHaveBeenCalledTimes(2);
+  });
+
+  test('a preview chat is left alone', () => {
+    const flush = runIdle();
+    const {chat, init} = createChat();
+    chat.isPreview = true;
+    chat.buildPartsWhenIdle();
+    flush();
+
+    expect(init).not.toHaveBeenCalled();
+    expect(chat.container.hidden).toBe(false);
+  });
+});
+
+describe('looking up where a peer migrated to', () => {
+  const lookup = (peer: PeerId) => {
+    const getPeerMigratedTo = vi.fn(async() => undefined as PeerId | undefined);
+    const result = (AppImManager.prototype as any).getMigratedPeerId.call({managers: {appPeersManager: {getPeerMigratedTo}}}, peer);
+    return {result, getPeerMigratedTo};
+  };
+
+  test('skips the worker for a user and for no peer', async() => {
+    expect(await lookup(peerId).result).toBeUndefined();
+    expect(lookup(peerId).getPeerMigratedTo).not.toHaveBeenCalled();
+    expect(lookup(0 as PeerId).getPeerMigratedTo).not.toHaveBeenCalled();
+  });
+
+  test('still asks for a group', async() => {
+    const group = (-20) as PeerId;
+    const {result, getPeerMigratedTo} = lookup(group);
+    await result;
+    expect(getPeerMigratedTo).toHaveBeenCalledWith(group);
+  });
+});
+
+describe('typing anywhere', () => {
+  const canTypeIntoChat = (chat: unknown, isTargetAnInput = false) =>
+    (AppImManager.prototype as any).canTypeIntoChat.call({tabId: 1}, chat, document.body, isTargetAnInput) as boolean;
+  const makeChat = (chatPeerId: PeerId | 0) => ({
+    peerId: chatPeerId,
+    input: {messageInput: {isContentEditable: true}, recording: false},
+    selection: {isSelecting: false}
+  });
+
+  test('goes to the input of a chat with an open peer', () => {
+    expect(canTypeIntoChat(makeChat(peerId))).toBe(true);
+  });
+
+  test('does not go to a chat that was built but never opened', () => {
+    expect(canTypeIntoChat(makeChat(0))).toBe(false);
+  });
+
+  test('keeps the other conditions', () => {
+    expect(canTypeIntoChat(makeChat(peerId), true)).toBe(false);
+    expect(canTypeIntoChat({...makeChat(peerId), selection: {isSelecting: true}})).toBe(false);
+    expect(canTypeIntoChat({...makeChat(peerId), input: {messageInput: {isContentEditable: true}, recording: true}})).toBe(false);
+    expect(canTypeIntoChat({peerId, selection: {isSelecting: false}})).toBe(false);
+  });
 });

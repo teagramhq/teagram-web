@@ -45,7 +45,7 @@ function formatPerformanceSamplesTable(report, scale = '100x') {
   for(const {label, variant, index, sample} of rows) {
     lines.push(`| ${label} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.appSendUiMs)} | ${show(sample.composerReadyAfterFirstBubbleMs)} | ${show(sample.firstBubbleToSentMs)} | ${show(sample.preInteractionMs)} | ${show(sample.requests, 0)} | ${show(sample.domNodes, 0)} | ${show(sample.longTasksOver50Ms, 0)} | ${show(sample.blockingTimeMs)} | ${show(sample.droppedFramePercent)}% |`);
   }
-  lines.push('', 'For send rows, `Time` is the automation-observed interval and `App Enter-to-bubble` measures in-page time from Enter keydown to the matching outgoing bubble insertion.');
+  lines.push('', '`Send a message` is gated on `App Enter-to-bubble` (`appSendUiMs`); `Time` remains the outer automation interval in the artifact and is shown as a diagnostic. `App Enter-to-bubble` measures in-page time from Enter keydown to the matching outgoing bubble insertion.');
   return lines.join('\n');
 }
 
@@ -198,8 +198,8 @@ function formatFirstStickerTable(diagnostics, requireBase, failures, reportOnlyF
   const lines = [
     '### First animated sticker frame',
     '',
-    '| Variant | Worker | Repeats | Click to first frame (ms) | Click to visible frame (ms) |',
-    '| --- | --- | ---: | ---: | ---: |'
+    '| Variant | Worker | Repeats | Click to worker request (ms) | Click to first frame (ms) | Click to next painted frame (ms) | Click to visible frame (ms) | First frame to next paint (ms) |',
+    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |'
   ];
   const show = (value) => Number.isFinite(value) ? value.toFixed(1) : 'n/a';
 
@@ -207,47 +207,81 @@ function formatFirstStickerTable(diagnostics, requireBase, failures, reportOnlyF
     for(const temperature of temperatures) {
       const samples = diagnostics.samples?.[variant]?.[temperature];
       const median = diagnostics.medians?.[variant]?.[temperature];
+      const cold = temperature === 'cold';
       const expectedRepeats = temperature === 'cold' && variant !== 'pinned' ? diagnostics.repeats : 3;
       if(variant === 'pinned' && temperature === 'warm' && (!Array.isArray(samples) || samples.length === 0)) continue;
-      if(!Array.isArray(samples) || samples.length !== expectedRepeats || !samples.every((sample) => (
-        Number.isFinite(sample?.clickToFirstFrameMs) && Number.isFinite(sample?.clickToVisibleFrameMs)
-      )) || !Number.isFinite(median?.workerFrameMs) || !Number.isFinite(median?.visibleFrameMs)) {
+      if(cold && variant !== 'pinned' && Array.isArray(samples) && samples.some((sample) => sample?.workerReadyBeforeChat === true)) {
+        failures.push(`first sticker ${variant} cold worker was ready before chat opened`);
+      }
+      const validSamples = Array.isArray(samples) && samples.every((sample) => (
+        Number.isFinite(sample?.clickToFirstFrameMs) && (cold ? (
+          (variant === 'pinned' || sample?.workerReadyBeforeChat === false) &&
+          Number.isFinite(sample?.clickToWorkerRequestMs) &&
+          Number.isFinite(sample?.clickToNextPaintMs) &&
+          Number.isFinite(sample?.firstFrameToNextPaintMs) &&
+          Number.isFinite(sample?.pageTimestamps?.clickAt) &&
+          Number.isFinite(sample?.pageTimestamps?.workerRequestAt) &&
+          Number.isFinite(sample?.pageTimestamps?.firstFrameAt) &&
+          Number.isFinite(sample?.pageTimestamps?.nextPaintAt) &&
+          sample.pageTimestamps.workerRequestAt <= sample.pageTimestamps.firstFrameAt &&
+          sample.pageTimestamps.firstFrameAt >= sample.pageTimestamps.clickAt &&
+          sample.pageTimestamps.nextPaintAt >= sample.pageTimestamps.firstFrameAt &&
+          Math.abs(sample.clickToWorkerRequestMs - (sample.pageTimestamps.workerRequestAt - sample.pageTimestamps.clickAt)) < 0.01 &&
+          Math.abs(sample.clickToFirstFrameMs - (sample.pageTimestamps.firstFrameAt - sample.pageTimestamps.clickAt)) < 0.01 &&
+          Math.abs(sample.clickToNextPaintMs - (sample.pageTimestamps.nextPaintAt - sample.pageTimestamps.clickAt)) < 0.01 &&
+          Math.abs(sample.firstFrameToNextPaintMs - (sample.pageTimestamps.nextPaintAt - sample.pageTimestamps.firstFrameAt)) < 0.01
+        ) : Number.isFinite(sample?.clickToVisibleFrameMs))
+      ));
+      const validMedian = Number.isFinite(median?.workerFrameMs) && (cold ? (
+        Number.isFinite(median?.workerRequestMs) &&
+        Number.isFinite(median?.paintedFrameMs) &&
+        Number.isFinite(median?.firstFrameToPaintMs)
+      ) : Number.isFinite(median?.visibleFrameMs));
+      if(!Array.isArray(samples) || samples.length !== expectedRepeats || !validSamples || !validMedian) {
         const finding = `first sticker ${variant} ${temperature} sample set is missing, invalid, or does not contain ${expectedRepeats} repeats`;
         failures.push(finding);
         continue;
       }
-      lines.push(`| ${variant} | ${temperature} | ${samples.length} | ${show(median.workerFrameMs)} | ${show(median.visibleFrameMs)} |`);
+      lines.push(`| ${variant} | ${temperature} | ${samples.length} | ${cold ? show(median.workerRequestMs) : 'n/a'} | ${show(median.workerFrameMs)} | ${cold ? show(median.paintedFrameMs) : 'n/a'} | ${cold ? 'n/a' : show(median.visibleFrameMs)} | ${cold ? show(median.firstFrameToPaintMs) : 'n/a'} |`);
     }
   }
 
   if(requireBase) {
-    const baseSamples = diagnostics.samples?.base?.cold?.map((sample) => sample.clickToVisibleFrameMs);
-    const headSamples = diagnostics.samples?.head?.cold?.map((sample) => sample.clickToVisibleFrameMs);
+    const baseSamples = diagnostics.samples?.base?.cold?.map((sample) => sample.clickToNextPaintMs);
+    const headSamples = diagnostics.samples?.head?.cold?.map((sample) => sample.clickToNextPaintMs);
     if(Array.isArray(baseSamples) && Array.isArray(headSamples) && baseSamples.length === PERFORMANCE_REPEATS && headSamples.length === PERFORMANCE_REPEATS) {
       const differences = headSamples.map((value, index) => value - baseSamples[index]);
       const gate = evaluatePairedDifferences(differences, TIMING_MINIMUM_EFFECTS.firstStickerVisibleFrameMs);
       const status = gate.regression ? 'failed' : 'passed';
-      lines.push('', `PR base/head cold visible-frame gate: paired SD ${show(sampleStandardDeviation(differences))} ms; one-sided ${Math.round(PAIRED_CONFIDENCE_LEVEL * 100)}% median lower bound ${show(gate.lowerBound)} ms; minimum effect ${TIMING_MINIMUM_EFFECTS.firstStickerVisibleFrameMs} ms; ${status}.`);
+      lines.push('', `PR base/head cold next-painted-frame gate: paired SD ${show(sampleStandardDeviation(differences))} ms; one-sided ${Math.round(PAIRED_CONFIDENCE_LEVEL * 100)}% median lower bound ${show(gate.lowerBound)} ms; minimum effect ${TIMING_MINIMUM_EFFECTS.firstStickerVisibleFrameMs} ms; ${status}.`);
       if(gate.regression) {
-        failures.push(`first sticker cold visible frame: one-sided ${Math.round(PAIRED_CONFIDENCE_LEVEL * 100)}% median lower bound ${show(gate.lowerBound)} ms exceeded minimum effect ${TIMING_MINIMUM_EFFECTS.firstStickerVisibleFrameMs} ms`);
+        failures.push(`first sticker cold next painted frame: one-sided ${Math.round(PAIRED_CONFIDENCE_LEVEL * 100)}% median lower bound ${show(gate.lowerBound)} ms exceeded minimum effect ${TIMING_MINIMUM_EFFECTS.firstStickerVisibleFrameMs} ms`);
       }
     } else {
       failures.push(`first sticker PR base/head comparison requires exactly ${PERFORMANCE_REPEATS} valid cold samples per variant`);
     }
 
-    const pinnedMs = diagnostics.medians?.pinned?.cold?.visibleFrameMs;
-    const headMs = diagnostics.medians?.head?.cold?.visibleFrameMs;
+    const pinnedSamples = diagnostics.samples?.pinned?.cold;
+    const preloadedPinnedSamples = Array.isArray(pinnedSamples) ? pinnedSamples.filter((sample) => sample?.workerReadyBeforeChat === true).length : 0;
+    if(preloadedPinnedSamples > 0) {
+      lines.push(`Pinned baseline worker was ready before chat in ${preloadedPinnedSamples}/${pinnedSamples.length} report-only samples; excluded from cold gate pairs.`);
+    }
+
+    const pinnedMs = diagnostics.medians?.pinned?.cold?.paintedFrameMs;
+    const headMs = diagnostics.medians?.head?.cold?.paintedFrameMs;
     if(Number.isFinite(pinnedMs) && Number.isFinite(headMs)) {
       const deltaMs = headMs - pinnedMs;
-      const note = `Pinned pre-PR-178 cold visible-frame comparison: pinned ${show(pinnedMs)} ms, head ${show(headMs)} ms, increase ${show(deltaMs)} ms; report-only.`;
+      const note = `Pinned pre-PR-178 cold next-painted-frame comparison: pinned ${show(pinnedMs)} ms, head ${show(headMs)} ms, increase ${show(deltaMs)} ms; report-only.`;
       lines.push(note);
       if(deltaMs > TIMING_MINIMUM_EFFECTS.firstStickerVisibleFrameMs) reportOnlyFindings.push(note);
     } else {
-      failures.push('first sticker pinned-client comparison is missing a valid cold visible-frame median');
+      failures.push('first sticker pinned-client comparison is missing a valid cold next-painted-frame median');
     }
   } else {
     lines.push('', 'Master timing is calibration only; the timing gate runs on pull requests with base/head samples.');
   }
+
+  lines.push('', 'Cold rows record the worker request, player first frame, and next animation-frame timestamp in the page clock. Warm rows retain screenshot-observed visible-frame timing.');
 
   return lines.join('\n');
 }

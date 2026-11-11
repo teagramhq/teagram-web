@@ -14,26 +14,35 @@ const chatPageSnapshotView = readFileSync(new URL('../../src/lib/chatPageSnapsho
 const stickerBaseCommit = readFileSync(new URL('../../.github/perf-sticker-base-commit', import.meta.url), 'utf8').trim();
 
 function firstStickerMeasurements() {
-  const sampleSet = (visibleFrameMs, count) => Array.from({length: count}, () => ({clickToFirstFrameMs: visibleFrameMs / 2, clickToVisibleFrameMs: visibleFrameMs}));
+  const coldSampleSet = (workerRequestMs, firstFrameMs, nextPaintMs, count) => Array.from({length: count}, () => ({
+    workerReadyBeforeChat: false,
+    clickToWorkerRequestMs: workerRequestMs,
+    clickToFirstFrameMs: firstFrameMs,
+    clickToNextPaintMs: nextPaintMs,
+    firstFrameToNextPaintMs: nextPaintMs - firstFrameMs,
+    pageTimestamps: {clickAt: 0, workerRequestAt: workerRequestMs, firstFrameAt: firstFrameMs, nextPaintAt: nextPaintMs},
+    clickToVisibleFrameMs: 900
+  }));
+  const warmSampleSet = (visibleFrameMs, count) => Array.from({length: count}, () => ({clickToFirstFrameMs: visibleFrameMs / 2, clickToVisibleFrameMs: visibleFrameMs}));
   const samples = {
-    base: {cold: sampleSet(200, PERFORMANCE_REPEATS), warm: sampleSet(150, 3)},
-    head: {cold: sampleSet(250, PERFORMANCE_REPEATS), warm: sampleSet(190, 3)},
-    pinned: {cold: sampleSet(180, 3), warm: []}
+    base: {cold: coldSampleSet(10, 180, 200, PERFORMANCE_REPEATS), warm: warmSampleSet(150, 3)},
+    head: {cold: coldSampleSet(12, 230, 250, PERFORMANCE_REPEATS), warm: warmSampleSet(190, 3)},
+    pinned: {cold: coldSampleSet(11, 160, 180, 3), warm: []}
   };
   return {
     repeats: PERFORMANCE_REPEATS,
     samples,
     medians: {
       base: {
-        cold: {workerFrameMs: 100, visibleFrameMs: 200},
+        cold: {workerRequestMs: 10, workerFrameMs: 180, paintedFrameMs: 200, firstFrameToPaintMs: 20},
         warm: {workerFrameMs: 75, visibleFrameMs: 150}
       },
       head: {
-        cold: {workerFrameMs: 125, visibleFrameMs: 250},
+        cold: {workerRequestMs: 12, workerFrameMs: 230, paintedFrameMs: 250, firstFrameToPaintMs: 20},
         warm: {workerFrameMs: 95, visibleFrameMs: 190}
       },
       pinned: {
-        cold: {workerFrameMs: 90, visibleFrameMs: 180}
+        cold: {workerRequestMs: 11, workerFrameMs: 160, paintedFrameMs: 180, firstFrameToPaintMs: 20}
       }
     }
   };
@@ -66,6 +75,7 @@ function runSummaryWithArtifacts({
   }] : undefined;
   const makeSample = (key) => ({
     ms: 100,
+    ...(key === 'sendMessage' ? {appSendUiMs: 80} : {}),
     requests: 12,
     rpcCallCount: 2,
     domNodes: 300,
@@ -172,6 +182,12 @@ test('sticker timing gates against the PR base and keeps the pre-178 client repo
   assert.doesNotMatch(performanceScale, /firstVisibleChatList\.source\)\.toBe\((?:run\.)?variant === 'head'/);
 });
 
+test('cold sticker paint timing uses an endpoint after an intervening render', () => {
+  assert.match(performanceScale, /scheduleAfterInterveningPaint\.toString\(\)/);
+  assert.match(performanceScale, /__teagramScheduleAfterInterveningPaint\(\(nextPaintAt: number\)/);
+  assert.doesNotMatch(performanceScale, /requestAnimationFrame\(\(\) => timing\.nextPaintAt/);
+});
+
 test('base and head both require date-jump and 2,000-message scroll-back samples', () => {
   assert.match(performanceScale, /scrollBackTwoThousand\(\s*page,\s*requests,\s*true,/);
   assert.match(performanceScale, /jumpToFixtureDate\(page, requests, fixture, false, undefined, collectWalkDiagnostics\)/);
@@ -257,7 +273,7 @@ test('timing regressions use the paired blocking policy and the negative control
 
 test('summary fails closed for missing, invalid, and short first-sticker sample artifacts', () => {
   const invalid = firstStickerMeasurements();
-  invalid.samples.head.cold[0].clickToVisibleFrameMs = null;
+  invalid.samples.head.cold[0].clickToNextPaintMs = null;
   const short = firstStickerMeasurements();
   short.samples.head.warm.pop();
   const cases = [
@@ -272,6 +288,39 @@ test('summary fails closed for missing, invalid, and short first-sticker sample 
     assert.equal(result.status, 1, result.stderr);
     assert.ok(result.stdout.includes(failure), result.stdout);
   }
+});
+
+test('summary rejects cold first-sticker samples when the worker was ready before chat opened', () => {
+  const firstSticker = firstStickerMeasurements();
+  firstSticker.samples.base.cold[0].workerReadyBeforeChat = true;
+
+  const result = runSummaryWithArtifacts({firstSticker});
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout, /first sticker base cold worker was ready before chat opened/);
+});
+
+test('summary keeps a preloaded pinned client report-only and outside the cold gate', () => {
+  const firstSticker = firstStickerMeasurements();
+  firstSticker.samples.pinned.cold.forEach((sample) => {
+    sample.workerReadyBeforeChat = true;
+    sample.clickToWorkerRequestMs = -50;
+    sample.pageTimestamps = {clickAt: 100, workerRequestAt: 50, firstFrameAt: 200, nextPaintAt: 220};
+    sample.clickToFirstFrameMs = 100;
+    sample.clickToNextPaintMs = 120;
+    sample.firstFrameToNextPaintMs = 20;
+  });
+  firstSticker.medians.pinned.cold = {
+    workerRequestMs: -50,
+    workerFrameMs: 100,
+    paintedFrameMs: 120,
+    firstFrameToPaintMs: 20
+  };
+
+  const result = runSummaryWithArtifacts({firstSticker});
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Pinned baseline worker was ready before chat in 3\/3 report-only samples; excluded from cold gate pairs/);
 });
 
 test('summary fails closed for missing, invalid, and short worker-recorder artifacts', () => {
@@ -304,8 +353,16 @@ test('master runs still block when deterministic timing artifacts are missing', 
 
 test('summary blocks first-sticker and worker-recorder regressions using the paired lower bound', () => {
   const firstSticker = firstStickerMeasurements();
-  firstSticker.samples.head.cold = Array.from({length: PERFORMANCE_REPEATS}, () => ({clickToFirstFrameMs: 160, clickToVisibleFrameMs: 301}));
-  firstSticker.medians.head.cold = {workerFrameMs: 160, visibleFrameMs: 301};
+  firstSticker.samples.head.cold = Array.from({length: PERFORMANCE_REPEATS}, () => ({
+    workerReadyBeforeChat: false,
+    clickToWorkerRequestMs: 15,
+    clickToFirstFrameMs: 160,
+    clickToNextPaintMs: 301,
+    firstFrameToNextPaintMs: 141,
+    pageTimestamps: {clickAt: 0, workerRequestAt: 15, firstFrameAt: 160, nextPaintAt: 301},
+    clickToVisibleFrameMs: 301
+  }));
+  firstSticker.medians.head.cold = {workerRequestMs: 15, workerFrameMs: 160, paintedFrameMs: 301, firstFrameToPaintMs: 141};
   const recorderReplay = workerRecorderMeasurements();
   recorderReplay.peers.pairedDeltaMs = 3;
   recorderReplay.peers.pairedDeltaSamples = Array(9).fill(3);
@@ -313,7 +370,7 @@ test('summary blocks first-sticker and worker-recorder regressions using the pai
   const result = runSummaryWithArtifacts({firstSticker, recorderReplay});
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /first sticker cold visible frame: one-sided 95% median lower bound 101\.0 ms exceeded minimum effect 100 ms/);
+  assert.match(result.stderr, /first sticker cold next painted frame: one-sided 95% median lower bound 101\.0 ms exceeded minimum effect 100 ms/);
   assert.match(result.stderr, /worker recorder peers: one-sided 95% median lower bound 3\.0 ms exceeded minimum effect 1\.5 ms/);
 });
 
@@ -357,8 +414,12 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
       variants[variant] = {'1x': {}, '100x': {}};
       for(const key of scenarioKeys) {
         const count = PERFORMANCE_REPEATS;
-        variants[variant]['1x'][key] = Array.from({length: count}, () => makeSample(100));
-        variants[variant]['100x'][key] = Array.from({length: count}, () => makeSample(100));
+        const samples = () => Array.from({length: count}, () => ({
+          ...makeSample(100),
+          ...(key === 'sendMessage' ? {appSendUiMs: 80} : {})
+        }));
+        variants[variant]['1x'][key] = samples();
+        variants[variant]['100x'][key] = samples();
       }
     }
     const withServerHistory = (sample) => ({
@@ -367,8 +428,12 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
     });
     variants.base['100x'].chatOpen = Array.from({length: PERFORMANCE_REPEATS}, () => withServerHistory(makeSample(100)));
     variants.head['100x'].chatOpen = timingSamples.map((ms) => withServerHistory(makeSample(ms)));
-    variants.base['100x'].sendMessage = sendSamples.base.map((ms) => ({...makeSample(ms), appSendUiMs: ms - 20}));
-    variants.head['100x'].sendMessage = sendSamples.head.map((ms) => ({...makeSample(ms), appSendUiMs: ms - 20}));
+    const makeSendSample = (measurement) => {
+      const {ms, appSendUiMs = ms - 20} = typeof measurement === 'number' ? {ms: measurement} : measurement;
+      return {...makeSample(ms), appSendUiMs};
+    };
+    variants.base['100x'].sendMessage = sendSamples.base.map(makeSendSample);
+    variants.head['100x'].sendMessage = sendSamples.head.map(makeSendSample);
     return {
       measurementVersion: PERFORMANCE_MEASUREMENT_VERSION,
       fixtureVersion: 'fixture-v1',
@@ -379,14 +444,14 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
         firstSticker: {
           repeats: PERFORMANCE_REPEATS,
           samples: {
-            base: {cold: Array.from({length: PERFORMANCE_REPEATS}, () => ({clickToFirstFrameMs: 100, clickToVisibleFrameMs: 200})), warm: Array.from({length: 3}, () => ({clickToFirstFrameMs: 75, clickToVisibleFrameMs: 150}))},
-            head: {cold: Array.from({length: PERFORMANCE_REPEATS}, () => ({clickToFirstFrameMs: 140, clickToVisibleFrameMs: 280})), warm: Array.from({length: 3}, () => ({clickToFirstFrameMs: 105, clickToVisibleFrameMs: 210}))},
-            pinned: {cold: Array.from({length: 3}, () => ({clickToFirstFrameMs: 90, clickToVisibleFrameMs: 180})), warm: []}
+            base: {cold: Array.from({length: PERFORMANCE_REPEATS}, () => ({workerReadyBeforeChat: false, clickToWorkerRequestMs: 10, clickToFirstFrameMs: 100, clickToNextPaintMs: 200, firstFrameToNextPaintMs: 100, pageTimestamps: {clickAt: 0, workerRequestAt: 10, firstFrameAt: 100, nextPaintAt: 200}})), warm: Array.from({length: 3}, () => ({clickToFirstFrameMs: 75, clickToVisibleFrameMs: 150}))},
+            head: {cold: Array.from({length: PERFORMANCE_REPEATS}, () => ({workerReadyBeforeChat: false, clickToWorkerRequestMs: 12, clickToFirstFrameMs: 140, clickToNextPaintMs: 280, firstFrameToNextPaintMs: 140, pageTimestamps: {clickAt: 0, workerRequestAt: 12, firstFrameAt: 140, nextPaintAt: 280}})), warm: Array.from({length: 3}, () => ({clickToFirstFrameMs: 105, clickToVisibleFrameMs: 210}))},
+            pinned: {cold: Array.from({length: 3}, () => ({workerReadyBeforeChat: false, clickToWorkerRequestMs: 11, clickToFirstFrameMs: 90, clickToNextPaintMs: 180, firstFrameToNextPaintMs: 90, pageTimestamps: {clickAt: 0, workerRequestAt: 11, firstFrameAt: 90, nextPaintAt: 180}})), warm: []}
           },
           medians: {
-            base: {cold: {workerFrameMs: 100, visibleFrameMs: 200}, warm: {workerFrameMs: 75, visibleFrameMs: 150}},
-            head: {cold: {workerFrameMs: 140, visibleFrameMs: 280}, warm: {workerFrameMs: 105, visibleFrameMs: 210}},
-            pinned: {cold: {workerFrameMs: 90, visibleFrameMs: 180}}
+            base: {cold: {workerRequestMs: 10, workerFrameMs: 100, paintedFrameMs: 200, firstFrameToPaintMs: 100}, warm: {workerFrameMs: 75, visibleFrameMs: 150}},
+            head: {cold: {workerRequestMs: 12, workerFrameMs: 140, paintedFrameMs: 280, firstFrameToPaintMs: 140}, warm: {workerFrameMs: 105, visibleFrameMs: 210}},
+            pinned: {cold: {workerRequestMs: 11, workerFrameMs: 90, paintedFrameMs: 180, firstFrameToPaintMs: 90}}
           }
         },
         '100x': {
@@ -490,14 +555,20 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
     base: [100, 100, 100, 200, 300, 400, 500, 600, 700, 800, 900],
     head: [100, 100, 100, 200, 300, 400, 500, 600, 700, 800, 1_100]
   }, 'push');
+  const boundarySummary = summaryFor(Array(9).fill(100), {
+    base: Array(PERFORMANCE_REPEATS).fill({ms: 599, appSendUiMs: 480}),
+    head: Array(PERFORMANCE_REPEATS).fill({ms: 599, appSendUiMs: 480})
+  });
 
   assert.match(extraSampleSummary, /Open long-history chat \| head \| 11 \| 1000\.0/);
   assert.match(elevenSendSampleSummary, /Send a message \| head \| 11 \| 1100\.0 \| 1080\.0 \| 50\.0 \| 1150\.0/);
   assert.match(nineSampleSummary, /100x send action diagnostic/);
   assert.match(nineSampleSummary, /### Chat-list paint and counter boundaries/);
   assert.match(nineSampleSummary, /### First animated sticker frame/);
-  assert.match(nineSampleSummary, /PR base\/head cold visible-frame gate: paired SD 0\.0 ms; one-sided 95% median lower bound 80\.0 ms; minimum effect 100 ms; passed/);
-  assert.match(nineSampleSummary, /Pinned pre-PR-178 cold visible-frame comparison: pinned 180\.0 ms, head 280\.0 ms, increase 100\.0 ms; report-only/);
+  assert.match(nineSampleSummary, /\| base \| cold \| 9 \| 10\.0 \| 100\.0 \| 200\.0 \| n\/a \| 100\.0 \|/);
+  assert.match(nineSampleSummary, /\| base \| warm \| 3 \| n\/a \| 75\.0 \| n\/a \| 150\.0 \| n\/a \|/);
+  assert.match(nineSampleSummary, /PR base\/head cold next-painted-frame gate: paired SD 0\.0 ms; one-sided 95% median lower bound 80\.0 ms; minimum effect 100 ms; passed/);
+  assert.match(nineSampleSummary, /Pinned pre-PR-178 cold next-painted-frame comparison: pinned 180\.0 ms, head 280\.0 ms, increase 100\.0 ms; report-only/);
   assert.match(nineSampleSummary, /### Worker recorder replay overhead/);
   assert.match(nineSampleSummary, /100x chat-open server handling/);
   assert.equal([...nineSampleSummary.matchAll(/\| gate sample \| base \|/g)].length, PERFORMANCE_REPEATS);
@@ -510,6 +581,9 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
   assert.match(nineSampleSummary, /\| Scenario \| Scale \| Variant \| First visible \(ms\) \| First visible state \| Live boundary \(ms\) \| Requests \| RPC calls \| DOM nodes \| Long tasks >50 ms \| Blocking \(ms\) \| Bundle bytes \|/);
   assert.match(nineSampleSummary, /\| Cold chat list \| 1x \| head \| 100\.0 \| snapshot \| 500\.0 \| 4 \| 2 \| 100 \| 0 \| 0\.0 \| 10000 \|/);
   assert.match(nineSampleSummary, /\| 123\.0 \| 101\.0 \| 1 \| 81\.0 \| 42\.0 \| 0 \| 1000 \| 12 \| 0 \| 0\.0 \| messages\.sendMessage \(81\.0 ms, success\) \| sendMessage \/input\.ts \(22\.0 ms\) \|/);
+  assert.match(boundarySummary, /`Send a message` is gated on `App Enter-to-bubble` \(`appSendUiMs`\)/);
+  assert.match(boundarySummary, /\| Send a message, Enter-to-bubble \(100x\) \| 480\.0 \|/);
+  assert.match(boundarySummary, /\| Send a message \| base \| 1 \| 599\.0 \| 480\.0 \|/);
 });
 
 test('performance workflow pins and enables the per-RPC server trace for 100x', () => {
