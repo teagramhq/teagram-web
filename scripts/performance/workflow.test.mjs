@@ -380,14 +380,22 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
       variants[variant] = {'1x': {}, '100x': {}};
       for(const key of scenarioKeys) {
         const count = PERFORMANCE_REPEATS;
-        variants[variant]['1x'][key] = Array.from({length: count}, () => makeSample(100));
-        variants[variant]['100x'][key] = Array.from({length: count}, () => makeSample(100));
+        const samples = () => Array.from({length: count}, () => ({
+          ...makeSample(100),
+          ...(key === 'sendMessage' ? {appSendUiMs: 80} : {})
+        }));
+        variants[variant]['1x'][key] = samples();
+        variants[variant]['100x'][key] = samples();
       }
     }
     variants.base['100x'].chatOpen = Array.from({length: PERFORMANCE_REPEATS}, () => makeSample(100));
     variants.head['100x'].chatOpen = timingSamples.map(makeSample);
-    variants.base['100x'].sendMessage = sendSamples.base.map((ms) => ({...makeSample(ms), appSendUiMs: ms - 20}));
-    variants.head['100x'].sendMessage = sendSamples.head.map((ms) => ({...makeSample(ms), appSendUiMs: ms - 20}));
+    const makeSendSample = (measurement) => {
+      const {ms, appSendUiMs = ms - 20} = typeof measurement === 'number' ? {ms: measurement} : measurement;
+      return {...makeSample(ms), appSendUiMs};
+    };
+    variants.base['100x'].sendMessage = sendSamples.base.map(makeSendSample);
+    variants.head['100x'].sendMessage = sendSamples.head.map(makeSendSample);
     return {
       measurementVersion: PERFORMANCE_MEASUREMENT_VERSION,
       fixtureVersion: 'fixture-v1',
@@ -491,6 +499,10 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
     base: [100, 100, 100, 200, 300, 400, 500, 600, 700, 800, 900],
     head: [100, 100, 100, 200, 300, 400, 500, 600, 700, 800, 1_100]
   }, 'push');
+  const boundarySummary = summaryFor(Array(9).fill(100), {
+    base: Array(PERFORMANCE_REPEATS).fill({ms: 599, appSendUiMs: 480}),
+    head: Array(PERFORMANCE_REPEATS).fill({ms: 599, appSendUiMs: 480})
+  });
 
   assert.match(extraSampleSummary, /Open long-history chat \| head \| 11 \| 1000\.0/);
   assert.match(elevenSendSampleSummary, /Send a message \| head \| 11 \| 1100\.0 \| 1080\.0 \| 50\.0 \| 1150\.0/);
@@ -508,4 +520,7 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
   assert.match(nineSampleSummary, /\| Scenario \| Scale \| Variant \| First visible \(ms\) \| First visible state \| Live boundary \(ms\) \| Requests \| RPC calls \| DOM nodes \| Long tasks >50 ms \| Blocking \(ms\) \| Bundle bytes \|/);
   assert.match(nineSampleSummary, /\| Cold chat list \| 1x \| head \| 100\.0 \| snapshot \| 500\.0 \| 4 \| 2 \| 100 \| 0 \| 0\.0 \| 10000 \|/);
   assert.match(nineSampleSummary, /\| 123\.0 \| 101\.0 \| 1 \| 81\.0 \| 42\.0 \| 0 \| 1000 \| 12 \| 0 \| 0\.0 \| messages\.sendMessage \(81\.0 ms, success\) \| sendMessage \/input\.ts \(22\.0 ms\) \|/);
+  assert.match(boundarySummary, /`Send a message` is gated on `App Enter-to-bubble` \(`appSendUiMs`\)/);
+  assert.match(boundarySummary, /\| Send a message, Enter-to-bubble \(100x\) \| 480\.0 \|/);
+  assert.match(boundarySummary, /\| Send a message \| base \| 1 \| 599\.0 \| 480\.0 \|/);
 });

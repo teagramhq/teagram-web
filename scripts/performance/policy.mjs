@@ -17,6 +17,7 @@ export const COLD_CHAT_LIST_REPEATS = PERFORMANCE_REPEATS;
 export const PAIRED_CONFIDENCE_LEVEL = 0.95;
 export const TIMING_MINIMUM_EFFECTS = Object.freeze({
   scenarioTiming: Object.freeze({minimumMs: 2, baseMedianFraction: 0.15}),
+  sendMessageTiming: Object.freeze({'1x': 41.88, '100x': 50.835}),
   absoluteBudgets: Object.freeze({coldChatList: 1_000, warmChatList: 300, chatOpen: 200}),
   scaleRatio: Object.freeze({maximum: 1.5, baseMedianFraction: 0.15}),
   longTasksOver50Ms: 1,
@@ -63,10 +64,15 @@ function spread(values) {
   return Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length);
 }
 
-function summarizeSamples(samples = []) {
+function timingFieldForScenario(key) {
+  return key === 'sendMessage' ? 'appSendUiMs' : 'ms';
+}
+
+function summarizeSamples(samples = [], timingField = 'ms') {
   const keys = ['ms', 'requests', 'domNodes', 'bundleBytes', 'longTasksOver50Ms', 'blockingTimeMs', 'droppedFramePercent'];
   const summary = Object.fromEntries(keys.map((key) => {
-    const values = samples.map((sample) => sample[key]).filter(Number.isFinite);
+    const field = key === 'ms' ? timingField : key;
+    const values = samples.map((sample) => sample[field]).filter(Number.isFinite);
     // Lazy chunks can load before a scenario clears resource timings, so preserve their largest observed byte count.
     return [key, (key === 'longTasksOver50Ms' || key === 'bundleBytes') && values.length ? Math.max(...values) : median(values)];
   }));
@@ -91,7 +97,7 @@ function historyFor(history, scale, key, report) {
     if(!matchesFixture(run, report)) return [];
     const samples = run.variants?.head?.[scale]?.[key];
     if(!Array.isArray(samples) || !samples.length) return [];
-    const value = median(samples.map((sample) => sample.ms).filter(Number.isFinite));
+    const value = median(samples.map((sample) => sample[timingFieldForScenario(key)]).filter(Number.isFinite));
     return Number.isFinite(value) ? [value] : [];
   });
 }
@@ -218,8 +224,9 @@ export function evaluatePerformance(report, history = []) {
       const rawHeadSamples = report.variants?.head?.[scale]?.[scenario.key];
       const baseSamples = Array.isArray(rawBaseSamples) ? rawBaseSamples : [];
       const headSamples = Array.isArray(rawHeadSamples) ? rawHeadSamples : [];
-      const base = summarizeSamples(baseSamples);
-      const head = summarizeSamples(headSamples);
+      const timingField = timingFieldForScenario(scenario.key);
+      const base = summarizeSamples(baseSamples, timingField);
+      const head = summarizeSamples(headSamples, timingField);
       const timingFailures = [];
       let gateFailure = false;
       const budgetMs = scale === '100x' ? TIMING_MINIMUM_EFFECTS.absoluteBudgets[scenario.key] ?? null : null;
@@ -253,6 +260,10 @@ export function evaluatePerformance(report, history = []) {
               addFailure(blockingFailures, scale, scenario.key, `${variant} ${label} is missing or invalid in sample ${index + 1}`);
               gateFailure = true;
             }
+          }
+          if(scenario.key === 'sendMessage' && !Number.isFinite(sample?.appSendUiMs)) {
+            addFailure(blockingFailures, scale, scenario.key, `${variant} in-page Enter-to-bubble timing is missing or invalid in sample ${index + 1}`);
+            gateFailure = true;
           }
           if(scenario.key === 'scrollBack2k' && Number.isFinite(sample?.frameIntervals) && sample.frameIntervals <= 0) {
             addFailure(blockingFailures, scale, scenario.key, `${variant} frame interval count must be positive in sample ${index + 1}`);
@@ -309,16 +320,17 @@ export function evaluatePerformance(report, history = []) {
           gateFailure = true;
         };
 
-        const baseTimes = baseSamples.map((sample) => sample?.ms);
-        const headTimes = headSamples.map((sample) => sample?.ms);
+        const baseTimes = baseSamples.map((sample) => sample?.[timingField]);
+        const headTimes = headSamples.map((sample) => sample?.[timingField]);
         const timeDifferences = pairedDifferences(baseTimes, headTimes);
         if(timeDifferences) {
           const baseMedian = median(baseTimes);
-          const relativeMinimum = Math.max(
+          const relativeMinimum = scenario.key === 'sendMessage' ? TIMING_MINIMUM_EFFECTS.sendMessageTiming[scale] : Math.max(
             TIMING_MINIMUM_EFFECTS.scenarioTiming.minimumMs,
             baseMedian * TIMING_MINIMUM_EFFECTS.scenarioTiming.baseMedianFraction
           );
-          applyTimingGate('response timing', timeDifferences, relativeMinimum, `${relativeMinimum.toFixed(2)} ms (${TIMING_MINIMUM_EFFECTS.scenarioTiming.baseMedianFraction * 100}% of base median, at least ${TIMING_MINIMUM_EFFECTS.scenarioTiming.minimumMs} ms)`);
+          const relativeMinimumText = scenario.key === 'sendMessage' ? `${relativeMinimum} ms` : `${relativeMinimum.toFixed(2)} ms (${TIMING_MINIMUM_EFFECTS.scenarioTiming.baseMedianFraction * 100}% of base median, at least ${TIMING_MINIMUM_EFFECTS.scenarioTiming.minimumMs} ms)`;
+          applyTimingGate('response timing', timeDifferences, relativeMinimum, relativeMinimumText);
           if(budgetMs !== null) {
             const budgetHeadroom = Math.max(relativeMinimum, budgetMs - baseMedian);
             applyTimingGate('absolute timing budget', timeDifferences, budgetHeadroom, `${budgetHeadroom.toFixed(2)} ms to the ${budgetMs} ms budget`);
@@ -402,10 +414,11 @@ export function evaluatePerformance(report, history = []) {
 
   if(report.requireBase) {
     for(const scenario of SCENARIOS) {
-      const baseSmall = report.variants.base?.['1x']?.[scenario.key]?.map((sample) => sample?.ms) || [];
-      const headSmall = report.variants.head?.['1x']?.[scenario.key]?.map((sample) => sample?.ms) || [];
-      const baseLarge = report.variants.base?.['100x']?.[scenario.key]?.map((sample) => sample?.ms) || [];
-      const headLarge = report.variants.head?.['100x']?.[scenario.key]?.map((sample) => sample?.ms) || [];
+      const timingField = timingFieldForScenario(scenario.key);
+      const baseSmall = report.variants.base?.['1x']?.[scenario.key]?.map((sample) => sample?.[timingField]) || [];
+      const headSmall = report.variants.head?.['1x']?.[scenario.key]?.map((sample) => sample?.[timingField]) || [];
+      const baseLarge = report.variants.base?.['100x']?.[scenario.key]?.map((sample) => sample?.[timingField]) || [];
+      const headLarge = report.variants.head?.['100x']?.[scenario.key]?.map((sample) => sample?.[timingField]) || [];
       const small = rows.find((row) => row.scale === '1x' && row.key === scenario.key);
       const large = rows.find((row) => row.scale === '100x' && row.key === scenario.key);
       if(!small || !large || ![baseSmall, headSmall, baseLarge, headLarge].every((values) => values.length === PERFORMANCE_REPEATS && values.every(Number.isFinite))) continue;
@@ -450,7 +463,8 @@ export function formatPerformanceTable(evaluation) {
     const scenarioFailure = evaluation.blockingFailures.some((failure) => failure.startsWith(`${row.scale} ${row.key}:`));
     const gate = scenarioFailure || row.gateFailure ? 'failed' : row.budgetStatus === 'paired' ? 'passed' : 'calibration';
     const walkLongTasks = Number.isFinite(row.walkLongTasksOver50Ms) ? show(row.walkLongTasksOver50Ms) : '—';
-    lines.push(`| ${row.label} (${row.scale}) | ${show(row.head.ms, 1)} | ${budget} | ${noise} | ${ratio} | ${scrollNoise} | ${show(row.base.ms, 1)} | ${show(row.head.requests)} | ${show(row.head.domNodes)} | ${show(row.head.longTasksOver50Ms)} | ${walkLongTasks} | ${show(row.head.blockingTimeMs, 1)} | ${show(row.head.droppedFramePercent, 2)}% | ${show(row.head.bundleBytes)} | ${gate} |`);
+    const label = row.key === 'sendMessage' ? `${row.label}, Enter-to-bubble (${row.scale})` : `${row.label} (${row.scale})`;
+    lines.push(`| ${label} | ${show(row.head.ms, 1)} | ${budget} | ${noise} | ${ratio} | ${scrollNoise} | ${show(row.base.ms, 1)} | ${show(row.head.requests)} | ${show(row.head.domNodes)} | ${show(row.head.longTasksOver50Ms)} | ${walkLongTasks} | ${show(row.head.blockingTimeMs, 1)} | ${show(row.head.droppedFramePercent, 2)}% | ${show(row.head.bundleBytes)} | ${gate} |`);
   }
   return lines.join('\n');
 }
