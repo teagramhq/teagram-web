@@ -51,8 +51,16 @@ describe('forget server pin', () => {
       }
     });
     const deletedCaches: string[] = [];
+    const defaultCaches = [
+      'cachedAssets',
+      'cachedFiles',
+      'cachedStreamChunks',
+      'cachedBackgrounds',
+      'cachedHlsQualityFiles',
+      'cachedHlsStreamChunks'
+    ];
     vi.stubGlobal('caches', {
-      keys: async() => ['cachedAssets', `teagram-${otherServerId}-cachedAssets`],
+      keys: async() => [...defaultCaches, `teagram-${otherServerId}-cachedAssets`],
       delete: async(name: string) => { deletedCaches.push(name); return true; }
     });
 
@@ -72,7 +80,7 @@ describe('forget server pin', () => {
       'tweb', 'tweb-common', 'tweb-account-1', 'tweb-account-2', 'tweb-account-3', 'tweb-account-4', 'telegram'
     ]));
     expect(deletedDatabases).not.toContain(`tweb-${otherServerId}`);
-    expect(deletedCaches).toEqual(['cachedAssets']);
+    expect(deletedCaches).toEqual(defaultCaches);
   });
 
   it('keeps the pin and active selection when namespace deletion is blocked', async() => {

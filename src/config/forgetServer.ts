@@ -35,7 +35,7 @@ export async function forgetServerData(
   })));
   if(typeof caches !== 'undefined') {
     const cacheNames = await caches.keys();
-    await Promise.all(cacheNames.filter((name) => id === 'default' ? name === 'cachedAssets' :
+    await Promise.all(cacheNames.filter((name) => id === 'default' ? !name.startsWith('teagram-') :
       name.startsWith(`teagram-${id}-`)).map((name) => caches.delete(name)));
   }
 
