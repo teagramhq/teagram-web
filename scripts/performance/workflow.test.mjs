@@ -299,34 +299,18 @@ test('full trace diagnostics use one paired pass while walk gates keep nine meas
   assert.doesNotMatch(performanceScale, /for\(let repeat = 0; repeat < PERFORMANCE_REPEATS; \+\+repeat\)[\s\S]{0,250}rpcComparison/);
 });
 
-test('global-search measurements prewarm the shared fixture RPC before starting the timing window', () => {
+test('global-search measurements include the first matching query without a prewarm request', () => {
   const globalSearch = performanceScale.match(/async function globalSearch\([\s\S]*?(?=\nasync function describeSendState)/)?.[0];
-  const warmSearch = performanceScale.match(/async function warmGlobalSearch\([\s\S]*?(?=\nasync function globalSearch)/)?.[0];
   assert.ok(globalSearch, 'the performance scenario must define global search');
-  assert.ok(warmSearch, 'the performance scenario must define an unmeasured global-search warm-up');
-
-  const warmup = globalSearch.indexOf('await warmGlobalSearch(page, query);');
+  assert.doesNotMatch(performanceScale, /warmGlobalSearch|globalSearchWarmup/);
   const measurementStart = globalSearch.indexOf('await beginScenario(page, requests, traceEnabled);');
   const traceReset = globalSearch.indexOf('resetPerformanceRpcTrace(true)');
   const measuredQuery = globalSearch.indexOf('await input.fill(query);', traceReset);
-  assert.ok(warmup >= 0 && warmup < measurementStart, 'the shared search path must be warmed before the measured window starts');
-  assert.ok(measurementStart < traceReset && traceReset < measuredQuery, 'warm-up RPCs must be excluded from the measured RPC trace');
-  const warmResult = warmSearch.indexOf('await waitForGlobalSearchResult(page, query, false);');
-  const closeWarmSearch = warmSearch.indexOf("page.locator('#column-left .sidebar-back-button.is-visible').click()");
-  const waitForCleanup = warmSearch.indexOf("await expect(input).toHaveValue(''");
-  const reopenWarmSearch = warmSearch.indexOf("await page.keyboard.press('Control+f');");
-  const waitForReopen = warmSearch.indexOf("await expect(page.locator('#search-container.active')).toHaveCount(1");
-  assert.ok(warmResult >= 0, 'warm-up must wait for a matching result before returning');
-  assert.ok(warmResult < closeWarmSearch && closeWarmSearch < waitForCleanup && waitForCleanup < reopenWarmSearch && reopenWarmSearch < waitForReopen, 'warm-up results must be fully cleared and search reopened before measurement');
-});
-
-test('global-search warm-up time is measured, reported, and gated against the one-minute job budget', () => {
-  const globalSearch = performanceScale.match(/async function globalSearch\([\s\S]*?(?=\nasync function describeSendState)/)?.[0];
-  assert.ok(globalSearch, 'the performance scenario must define global search');
-  assert.match(globalSearch, /const warmupStartedAtMs = performance\.now\(\);\s*await warmGlobalSearch\(page, query\);\s*globalSearchWarmupDurationsMs\.push\(performance\.now\(\) - warmupStartedAtMs\)/);
-  assert.match(performanceScale, /const globalSearchWarmup = summarizeGlobalSearchWarmups\(globalSearchWarmupDurationsMs\)/);
-  assert.match(performanceScale, /expect\(globalSearchWarmup\.totalMs,[\s\S]*?\)\.toBeLessThanOrEqual\(GLOBAL_SEARCH_WARMUP_BUDGET_MS\)/);
-  assert.match(performanceScale, /report\.diagnostics\.globalSearchWarmup = \{\.\.\.globalSearchWarmup, budgetMs: GLOBAL_SEARCH_WARMUP_BUDGET_MS\}/);
+  const queryFills = globalSearch.match(/await input\.fill\(query\);/g) || [];
+  assert.ok(measurementStart >= 0 && measurementStart < traceReset && traceReset < measuredQuery, 'the first search must run inside the measured RPC trace');
+  assert.equal(queryFills.length, 1, 'each sample must issue one query, without an earlier warm-up request');
+  assert.match(globalSearch, /globalSearchBaselineRows = new WeakSet\(document\.querySelectorAll\('#search-container \.chatlist-chat'\)\)/);
+  assert.match(globalSearch, /await waitForGlobalSearchResult\(page, query, true\)/);
 });
 
 test('only pull requests build and require a base comparison', () => {
