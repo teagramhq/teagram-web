@@ -8,7 +8,7 @@ import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes, trackBu
 import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, classifyAndRemoveLongTaskTrace, classifyMeasuredLongTaskTrace, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, selectHistoryPathTasks, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
-import {LOTTIE_FRAME_BG_CSS, waitForFirstStickerFrame, waitUntilOnScreen} from './lottieFrameMeasurement';
+import {LOTTIE_FRAME_BG_CSS, scheduleAfterInterveningPaint, waitForFirstStickerFrame, waitForFirstStickerPaint, waitUntilOnScreen} from './lottieFrameMeasurement';
 
 type Fixture = {
   owner: number,
@@ -19,6 +19,15 @@ type Fixture = {
 type Scale = '1x' | '100x';
 type Variant = 'base' | 'head';
 type StickerVariant = Variant | 'pinned';
+type FirstStickerSample = {
+  workerReadyBeforeChat: boolean,
+  clickToFirstFrameMs: number,
+  clickToVisibleFrameMs?: number,
+  clickToWorkerRequestMs?: number,
+  clickToNextPaintMs?: number,
+  firstFrameToNextPaintMs?: number,
+  pageTimestamps?: {clickAt: number, workerRequestAt: number, firstFrameAt: number, nextPaintAt: number}
+};
 const FIRST_STICKER_REPEATS = PERFORMANCE_REPEATS;
 const FIRST_STICKER_REPORT_REPEATS = 3;
 const TRACE_DIAGNOSTIC_REPEATS = 1;
@@ -163,7 +172,7 @@ test.afterAll(() => {
   if(reportPath) writePerformanceReport(reportPath, report);
 });
 
-async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false, observeAnimationFrames = false, recordWorkerMessages = observeAnimationFrames) {
+async function installInstrumentation(page: Page, requestCounter: {value: number}, origin: string, injectColdStall = false, observeAnimationFrames = false, recordWorkerMessages = observeAnimationFrames, recordLottieWorkerRequest = false) {
   const bundleRequests = createBundleRequestTracker(new URL(origin).origin);
   const requestBreakdown = new Map<string, number>();
   bundleRequestTrackers.set(page, bundleRequests);
@@ -187,12 +196,25 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   // The gated scroll repeat starts this observer only for the measured window.
   await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
   if(recordWorkerMessages) await page.addInitScript({content: `window.__teagramInstallWorkerMessageAttribution = ${installWorkerMessageAttribution.toString()};`});
-  await page.addInitScript(({injectColdStall, observeAnimationFrames}: {injectColdStall: boolean, observeAnimationFrames: boolean}) => {
+  if(recordLottieWorkerRequest) {
+    await page.addInitScript({content: `window.__teagramScheduleAfterInterveningPaint = ${scheduleAfterInterveningPaint.toString()};`});
+  }
+  await page.addInitScript(({injectColdStall, observeAnimationFrames, recordLottieWorkerRequest}: {injectColdStall: boolean, observeAnimationFrames: boolean, recordLottieWorkerRequest: boolean}) => {
+    const recordWorkerRequest = recordLottieWorkerRequest ? (url: unknown) => {
+      if(!String(url).includes('tlottie.worker')) return;
+      const perf = (window as any).__teagramPerf;
+      if(!perf || Number.isFinite(perf.firstStickerWorkerRequestAt)) return;
+      const workerRequestAt = performance.now();
+      perf.firstStickerWorkerRequestAt = workerRequestAt;
+      const stickerTiming = (window as any).__performanceFirstStickerPaintTiming;
+      if(stickerTiming) stickerTiming.workerRequestAt = workerRequestAt;
+    } : undefined;
     // Playwright does not emit a page worker event for SharedWorker; use its first port message as the ready signal.
     const SharedWorkerConstructor = (window as any).SharedWorker;
     if(SharedWorkerConstructor) {
       (window as any).SharedWorker = new Proxy(SharedWorkerConstructor, {
         construct(target, args, newTarget) {
+          recordWorkerRequest?.(args[0]);
           const worker = Reflect.construct(target, args, newTarget) as SharedWorker;
           const url = new URL(String(args[0]), location.href).href;
           worker.port.addEventListener('message', () => {
@@ -202,6 +224,17 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
           return worker;
         }
       });
+    }
+    if(recordLottieWorkerRequest) {
+      const WorkerConstructor = (window as any).Worker;
+      if(WorkerConstructor) {
+        (window as any).Worker = new Proxy(WorkerConstructor, {
+          construct(target, args, newTarget) {
+            recordWorkerRequest?.(args[0]);
+            return Reflect.construct(target, args, newTarget);
+          }
+        });
+      }
     }
     performance.setResourceTimingBufferSize(1_000);
     // Cached dialog reconciliation can outlive the warm reload in this diagnostic context.
@@ -282,7 +315,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
       requestAnimationFrame(sampleFrame);
     };
     perf.stopFrames = () => perf.frameActive = false;
-  }, {injectColdStall, observeAnimationFrames});
+  }, {injectColdStall, observeAnimationFrames, recordLottieWorkerRequest});
   return page.addInitScript({content: `(${observeFirstVisibleChatList.toString()})();`});
 }
 
@@ -1329,7 +1362,7 @@ async function measureFirstStickerFrame(browser: Browser, run: VariantRun, fixtu
   try {
     const page = await context.newPage();
     const requests = {value: 0};
-    await installInstrumentation(page, requests, run.origin);
+    await installInstrumentation(page, requests, run.origin, false, false, false, !warmWorker);
     await page.goto(run.origin, {waitUntil: 'domcontentloaded'});
     await waitForChatList(page);
 
@@ -1342,8 +1375,11 @@ async function measureFirstStickerFrame(browser: Browser, run: VariantRun, fixtu
       entry.name.includes('tlottie.worker') && entry.responseEnd > 0
     )));
 
-    await page.evaluate((background) => {
+    await page.evaluate(({background, warmWorker}) => {
       const w = window as any;
+      if(!warmWorker) {
+        w.__performanceFirstStickerPaintTiming = {workerRequestAt: w.__teagramPerf.firstStickerWorkerRequestAt};
+      }
       const loader = w.lottieLoader;
       const original = loader.loadAnimationWorker;
       let captured = false;
@@ -1357,13 +1393,24 @@ async function measureFirstStickerFrame(browser: Browser, run: VariantRun, fixtu
         container.id = 'performance-first-sticker';
         container.style.setProperty('background-color', background, 'important');
         return Promise.resolve(original.call(this, params)).then((player: any) => {
-          const recordFirstFrame = () => w.__performanceFirstStickerFrameAt = performance.now();
+          let recorded = false;
+          const recordFirstFrame = () => {
+            if(recorded) return;
+            recorded = true;
+            const firstFrameAt = performance.now();
+            w.__performanceFirstStickerFrameAt = firstFrameAt;
+            if(!warmWorker) {
+              const timing = w.__performanceFirstStickerPaintTiming;
+              timing.firstFrameAt = firstFrameAt;
+              w.__teagramScheduleAfterInterveningPaint((nextPaintAt: number) => timing.nextPaintAt = nextPaintAt);
+            }
+          };
           if(player.hasRenderedFirstFrame) recordFirstFrame();
           else player.addEventListener('firstFrame', recordFirstFrame, {once: true});
           return player;
         });
       };
-    }, LOTTIE_FRAME_BG_CSS);
+    }, {background: LOTTIE_FRAME_BG_CSS, warmWorker});
 
     const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
     await expect(row).toBeVisible({timeout: 60_000});
@@ -1372,20 +1419,46 @@ async function measureFirstStickerFrame(browser: Browser, run: VariantRun, fixtu
     await waitForFirstVisibleBubble(page);
     await expect(page.locator('#page-chats .bubble.sticker-animated').first()).toBeVisible({timeout: 60_000});
 
-    const onScreenAt = await waitUntilOnScreen(page, page.locator('#performance-first-sticker'), 20_000);
-    expect(onScreenAt, `${run.variant} first sticker frame never reached the screen`).not.toBeNull();
-    const firstFrameAt = await waitForFirstStickerFrame(page, 20_000);
+    let onScreenAt: number | null = null;
+    let firstFrameAt: number;
+    let paintTiming: Awaited<ReturnType<typeof waitForFirstStickerPaint>> | undefined;
+    if(warmWorker) {
+      onScreenAt = await waitUntilOnScreen(page, page.locator('#performance-first-sticker'), 20_000);
+      expect(onScreenAt, `${run.variant} first sticker frame never reached the screen`).not.toBeNull();
+      firstFrameAt = await waitForFirstStickerFrame(page, 20_000);
+    } else {
+      paintTiming = await waitForFirstStickerPaint(page, 20_000);
+      firstFrameAt = paintTiming.firstFrameAt;
+    }
     const {clickAt} = await page.evaluate(() => ({clickAt: (window as any).__teagramPerf.clickAt as number}));
+    expect(Number.isFinite(clickAt), `${run.variant} first sticker click timestamp was not recorded`).toBe(true);
     await page.evaluate(() => {
       const container = document.getElementById('performance-first-sticker');
       if(container) (window as any).lottieLoader.getAnimation(container)?.remove();
       container?.remove();
     });
 
+    if(warmWorker) {
+      return {
+        workerReadyBeforeChat,
+        clickToFirstFrameMs: firstFrameAt - clickAt,
+        clickToVisibleFrameMs: onScreenAt! - clickAt
+      };
+    }
+
+    expect(paintTiming && Number.isFinite(paintTiming.workerRequestAt), `${run.variant} first sticker worker request was not recorded`).toBe(true);
     return {
       workerReadyBeforeChat,
+      pageTimestamps: {
+        clickAt,
+        workerRequestAt: paintTiming!.workerRequestAt,
+        firstFrameAt,
+        nextPaintAt: paintTiming!.nextPaintAt
+      },
+      clickToWorkerRequestMs: paintTiming!.workerRequestAt - clickAt,
       clickToFirstFrameMs: firstFrameAt - clickAt,
-      clickToVisibleFrameMs: onScreenAt! - clickAt
+      clickToNextPaintMs: paintTiming!.nextPaintAt - clickAt,
+      firstFrameToNextPaintMs: paintTiming!.nextPaintAt - firstFrameAt
     };
   } finally {
     await context.close();
@@ -1550,7 +1623,7 @@ test('measures first animated sticker frame after opening a chat', async({browse
       stickerRuns.base = preparedVariants['1x'].base!;
       stickerRuns.pinned = firstStickerPinnedRun!;
     }
-    const samples: Record<StickerVariant, Record<'cold' | 'warm', Awaited<ReturnType<typeof measureFirstStickerFrame>>[]>> = {
+    const samples: Record<StickerVariant, Record<'cold' | 'warm', FirstStickerSample[]>> = {
       base: {cold: [], warm: []},
       head: {cold: [], warm: []},
       pinned: {cold: [], warm: []}
@@ -1563,9 +1636,7 @@ test('measures first animated sticker frame after opening a chat', async({browse
         const coldSample = await test.step(`1x ${variant} cold first sticker repeat ${repeat + 1}`, async() => (
           measureFirstStickerFrame(browser, stickerRuns[variant]!, fixture, false)
         ));
-        if(variant === 'head') {
-          expect(coldSample.workerReadyBeforeChat, 'head worker was preloaded before the on-demand first sticker interaction').toBe(false);
-        }
+        expect(coldSample.workerReadyBeforeChat, `${variant} worker was ready before the on-demand first sticker interaction`).toBe(false);
         samples[variant].cold.push(coldSample);
       }
 
@@ -1582,7 +1653,7 @@ test('measures first animated sticker frame after opening a chat', async({browse
 
     if(report.requireBase) {
       for(let repeat = 0; repeat < FIRST_STICKER_REPORT_REPEATS; ++repeat) {
-        const pinnedSample = await test.step(`1x pinned cold first sticker report repeat ${repeat + 1}`, async() => (
+        const pinnedSample = await test.step(`1x pinned pre-178 first sticker comparison repeat ${repeat + 1}`, async() => (
           measureFirstStickerFrame(browser, stickerRuns.pinned!, fixture, false)
         ));
         samples.pinned.cold.push(pinnedSample);
@@ -1591,23 +1662,39 @@ test('measures first animated sticker frame after opening a chat', async({browse
 
     const median = (values: number[]) => [...values].sort((left, right) => left - right)[Math.floor(values.length / 2)];
     const measuredVariants: StickerVariant[] = report.requireBase ? ['base', 'head', 'pinned'] : ['head'];
-    const medians: Record<string, Record<string, {workerFrameMs: number, visibleFrameMs: number}>> = {};
+    const medians: Record<string, Record<string, {workerRequestMs?: number, workerFrameMs: number, paintedFrameMs?: number, firstFrameToPaintMs?: number, visibleFrameMs?: number}>> = {};
     for(const variant of measuredVariants) {
       medians[variant] = {};
       for(const temperature of ['cold', 'warm'] as const) {
         const values = samples[variant][temperature];
         if(!values.length) continue;
         expect(values).toHaveLength(variant === 'pinned' ? FIRST_STICKER_REPORT_REPEATS : temperature === 'cold' ? coldRepeats : FIRST_STICKER_REPORT_REPEATS);
-        medians[variant][temperature] = {
-          workerFrameMs: median(values.map((sample) => sample.clickToFirstFrameMs)),
-          visibleFrameMs: median(values.map((sample) => sample.clickToVisibleFrameMs))
-        };
+        if(temperature === 'cold') {
+          expect(values.every((sample) => (
+            (variant === 'pinned' || sample.workerReadyBeforeChat === false) &&
+            Number.isFinite(sample.clickToWorkerRequestMs) &&
+            Number.isFinite(sample.clickToFirstFrameMs) &&
+            Number.isFinite(sample.clickToNextPaintMs) &&
+            Number.isFinite(sample.firstFrameToNextPaintMs)
+          )), `${variant} cold first sticker sample is missing an in-page boundary`).toBe(true);
+          medians[variant][temperature] = {
+            workerRequestMs: median(values.map((sample) => sample.clickToWorkerRequestMs!)),
+            workerFrameMs: median(values.map((sample) => sample.clickToFirstFrameMs)),
+            paintedFrameMs: median(values.map((sample) => sample.clickToNextPaintMs!)),
+            firstFrameToPaintMs: median(values.map((sample) => sample.firstFrameToNextPaintMs!))
+          };
+        } else {
+          medians[variant][temperature] = {
+            workerFrameMs: median(values.map((sample) => sample.clickToFirstFrameMs)),
+            visibleFrameMs: median(values.map((sample) => sample.clickToVisibleFrameMs!))
+          };
+        }
       }
     }
     report.diagnostics.firstSticker = {
       scale: '1x',
       repeats: coldRepeats,
-      boundary: 'chat row click to first rendered pixels in the animated sticker bubble',
+      boundary: 'cold: chat row click to the first painted frame after the player first frame; warm: chat row click to first rendered pixels',
       samples,
       medians
     };
