@@ -59,6 +59,7 @@ function runSummaryWithArtifacts({
   firstSticker = firstStickerMeasurements(),
   recorderReplay = workerRecorderMeasurements(),
   includeChatOpenServerRecords = true,
+  chatOpenServerHistoryRecordCount = 1,
   chatOpenClientHistoryCallCount = 1,
   requireBase = true,
   eventName = 'pull_request'
@@ -67,12 +68,12 @@ function runSummaryWithArtifacts({
   const reportPath = join(directory, 'report.json');
   const recorderReplayPath = join(directory, 'recorder-replay.json');
   const historyDirectory = join(directory, 'history');
-  const serverRpcRecords = includeChatOpenServerRecords ? [{
+  const serverRpcRecords = includeChatOpenServerRecords ? Array.from({length: chatOpenServerHistoryRecordCount}, (_, index) => ({
     method: 'messages.getHistory',
     duration_us: 40_123,
     result: 'success',
-    end_unix_ms: 1_762_800_000_123
-  }] : undefined;
+    end_unix_ms: 1_762_800_000_123 + index
+  })) : undefined;
   const makeSample = (key) => ({
     ms: 100,
     ...(key === 'sendMessage' ? {appSendUiMs: 80} : {}),
@@ -381,11 +382,17 @@ test('summary fails closed when a 100x chat-open server duration is missing', ()
   assert.match(result.stderr, /100x chatOpen .*has missing or invalid messages\.getHistory server durations/);
 });
 
-test('summary fails closed when the server trace count does not match client getHistory calls', () => {
+test('summary fails closed when server traces omit client getHistory handlers', () => {
   const result = runSummaryWithArtifacts({chatOpenClientHistoryCallCount: 2});
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /has 1 server records for 2 client messages\.getHistory calls/);
+});
+
+test('summary preserves extra server handlers when the client records fewer calls', () => {
+  const result = runSummaryWithArtifacts({chatOpenServerHistoryRecordCount: 2});
+
+  assert.equal(result.status, 0);
 });
 
 test('summary keeps server timings when the client boundary records no getHistory calls', () => {

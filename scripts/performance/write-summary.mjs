@@ -78,7 +78,7 @@ function formatChatOpenServerTimingTable(report, failures) {
       const clientHistoryCallCount = diagnostic && Array.isArray(sample.rpcCalls) ? sample.rpcCalls.filter((call) => call?.method === 'messages.getHistory').length : undefined;
       if(diagnostic) {
         const expectation = Number.isSafeInteger(clientHistoryCallCount) && clientHistoryCallCount >= 0 ? serverRpcTraceExpectation(clientHistoryCallCount) : undefined;
-        if(!expectation || serverRecords.length < expectation.minimumCount || (expectation.exactCount !== undefined && serverRecords.length !== expectation.exactCount)) {
+        if(!expectation || serverRecords.length < expectation.minimumCount) {
           failures.push(`100x chatOpen RPC diagnostic ${variant} sample ${index + 1} has ${serverRecords.length} server records for ${clientHistoryCallCount ?? 'unknown'} client messages.getHistory calls`);
           continue;
         }
@@ -89,7 +89,7 @@ function formatChatOpenServerTimingTable(report, failures) {
       }
       const serverDurations = serverRecords.map((record) => `${show(record.duration_us / 1000)} ms (${record.result})`).join(', ');
       const serverTotalMs = serverRecords.reduce((total, record) => total + record.duration_us / 1000, 0);
-      const rpcResidual = diagnostic && clientHistoryCallCount > 0 && Number.isFinite(sample.rpcWallMs) ? sample.rpcWallMs - serverTotalMs : undefined;
+      const rpcResidual = diagnostic && clientHistoryCallCount > 0 && serverRecords.length === clientHistoryCallCount && Number.isFinite(sample.rpcWallMs) ? sample.rpcWallMs - serverTotalMs : undefined;
       rows.push(`| ${source} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.rpcWallMs)} | ${show(sample.nonRpcElapsedMs)} | ${serverDurations} | ${show(rpcResidual)} |`);
     }
   };

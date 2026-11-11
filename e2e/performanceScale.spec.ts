@@ -184,9 +184,6 @@ async function attachServerRpcTrace(sample: Metric, offset: number | undefined, 
     expectation.minimumCount,
     {quietMs: 150}
   );
-  if(expectation.exactCount !== undefined && records.length !== expectation.exactCount) {
-    throw new Error(`100x chat-open expected ${expectation.exactCount} messages.getHistory server duration records, found ${records.length}`);
-  }
   const serverRpcRecords = records;
   if(!serverRpcRecords.length) throw new Error('100x chat-open measurement has no server messages.getHistory duration records');
   return {...sample, serverRpcRecords};

@@ -17,8 +17,8 @@ test('server RPC trace keeps a required record when the client sample has no cal
   assert.deepEqual(serverRpcTraceExpectation(undefined), {minimumCount: 1});
 });
 
-test('server RPC trace matches the client count when it is available', () => {
-  assert.deepEqual(serverRpcTraceExpectation(2), {minimumCount: 2, exactCount: 2});
+test('server RPC trace requires coverage for each client call without dropping extra handlers', () => {
+  assert.deepEqual(serverRpcTraceExpectation(2), {minimumCount: 2});
 });
 
 async function withTraceFile(run) {

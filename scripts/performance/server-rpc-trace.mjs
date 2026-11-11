@@ -17,8 +17,7 @@ function validateOffset(offset) {
 export function serverRpcTraceExpectation(clientRpcCount) {
   if(clientRpcCount === undefined) return {minimumCount: 1};
   if(!Number.isSafeInteger(clientRpcCount) || clientRpcCount < 0) throw new TypeError('client RPC count must be a non-negative safe integer');
-  if(clientRpcCount === 0) return {minimumCount: 1};
-  return {minimumCount: clientRpcCount, exactCount: clientRpcCount};
+  return {minimumCount: Math.max(1, clientRpcCount)};
 }
 
 function parseRecord(line, index) {
