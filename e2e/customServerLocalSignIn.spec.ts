@@ -86,13 +86,14 @@ function trackTlsServerSockets(server: ReturnType<typeof createServer>) {
   };
 }
 
-async function waitForServiceWorkerServerId(page: Page, serverId: string) {
-  await page.waitForFunction((expectedServerId) => {
-    const activeServerId = (window as any).__TEAGRAM_ACTIVE_SERVER_ID__;
+// The worker is shared by every tab of the origin, so a tab that keeps its own server
+// can be controlled by another server's worker: `activeServerId` is the tab's own server.
+async function waitForServiceWorkerServerId(page: Page, serverId: string, activeServerId = serverId) {
+  await page.waitForFunction(({expectedServerId, expectedActiveServerId}) => {
     const scriptUrl = navigator.serviceWorker.controller?.scriptURL;
-    return activeServerId === expectedServerId && !!scriptUrl &&
+    return (window as any).__TEAGRAM_ACTIVE_SERVER_ID__ === expectedActiveServerId && !!scriptUrl &&
       new URL(scriptUrl).searchParams.get('__tg_server') === expectedServerId;
-  }, serverId, {timeout: 30_000});
+  }, {expectedServerId: serverId, expectedActiveServerId: activeServerId}, {timeout: 30_000});
 }
 
 async function closeTlsServer(
@@ -1503,9 +1504,8 @@ test('isolates two server tabs when a custom server worker takes control', async
       await expect.poll(() => customPage!.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__ || ''), {timeout: 20_000})
         .toBe(SERVER_HOST);
       customServerId = await customPage.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__ as string);
-      await waitForServiceWorkerServerId(page, customServerId);
+      await waitForServiceWorkerServerId(page, customServerId, 'default');
       await waitForServiceWorkerServerId(customPage, customServerId);
-      expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
     });
 
     await runPhase('identity handshake', async() => {

@@ -60,7 +60,7 @@ export function isServerSelectionOrigin(host: string) {
 }
 
 export function getServerProfileId(host: string, serverId?: string) {
-  return isServerSelectionOrigin(host) ? 'default' : serverId || 'default';
+  return serverId && !isServerSelectionOrigin(host) ? serverId : 'default';
 }
 
 export function formatServerKeyId(fingerprint: string) {
@@ -153,10 +153,9 @@ function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+// `endpointHost` comes from `URL.hostname`, which is already lower case; a trailing dot still names the same host.
 function isAllowedServerEndpointHost(host: string, endpointHost: string) {
-  const normalizedEndpointHost = endpointHost.toLowerCase().replace(/\.+$/, '');
-  if(normalizedEndpointHost === host) return true;
-  return host === DEFAULT_SERVER_HOST && normalizedEndpointHost !== 'ts.net' && !normalizedEndpointHost.endsWith('.ts.net');
+  return endpointHost === host || host === DEFAULT_SERVER_HOST && !/(^|\.)ts\.net\.*$/.test(endpointHost);
 }
 
 function decodeBase64(value: string) {
@@ -419,12 +418,12 @@ export function getServerPinState(discovered: DiscoveredServer, pin?: ServerPin)
   return pinMatches(discovered, pin) ? 'match' as const : 'mismatch' as const;
 }
 
-export async function resolveServerProfile(hostInput: string, fetcher: typeof fetch = fetch, signal?: AbortSignal) {
+export async function resolveServerProfile(hostInput: string, fetcher?: typeof fetch, signal?: AbortSignal) {
   const discovered = await fetchServerDiscovery(hostInput, fetcher, signal);
   const pin = getServerPin(discovered.host);
   return {
     id: getServerProfileId(discovered.host, discovered.id),
-    discovered,
+    server: discovered,
     pin,
     pinState: getServerPinState(discovered, pin)
   };

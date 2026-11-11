@@ -305,7 +305,7 @@ async function showServerPicker(initialError?: string) {
       return;
     }
 
-    const {discovered, pin, pinState, id} = profile;
+    const {server: discovered, pin, pinState, id} = profile;
     if(pinState === 'mismatch') {
       showServerIdentityChanged(discovered, pin!);
       return;
@@ -580,7 +580,7 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
     }
     if(signal.aborted || run !== sequence) return;
 
-    const {discovered, pin, pinState} = profile;
+    const {server: discovered, pin, pinState} = profile;
     if(pinState === 'mismatch') {
       blockedServer = discovered;
       blockedPin = pin;
@@ -713,7 +713,7 @@ function showServerIdentityChanged(
 
 async function bootConfiguredServer(config: {server: string, autoGuest: boolean}) {
   setConnectPolicy(config.server);
-  const {discovered, pin, pinState, id} = await resolveServerProfile(config.server);
+  const {server: discovered, pin, pinState, id} = await resolveServerProfile(config.server);
   if(pinState === 'mismatch') {
     showServerIdentityChanged(discovered, pin!, {allowForget: false, allowChooseAnother: false});
     return;
@@ -836,7 +836,7 @@ async function connectSavedServer(savedChoice: string) {
   const shellTimeout = window.setTimeout(() => removeShell = showServerCheckShell(host), 1000);
   try {
     const profile = await resolveServerProfile(host);
-    discovered = profile.discovered;
+    discovered = profile.server;
     if(profile.pinState !== 'match' || discovered.target.mode !== 'private') throw undefined;
     if(!await probeWebSocket(discovered.target.endpoint)) throw undefined;
     if(previousId !== profile.id) throw undefined;

@@ -208,16 +208,16 @@ describe('custom server discovery', () => {
       expect.objectContaining({credentials: 'omit', redirect: 'error'})
     );
     expect(profile.id).toBe('default');
-    expect(profile.discovered.target).toMatchObject({endpoint: 'wss://server.teagram.io/apiws'});
-    expect(profile.discovered.turnstileSiteKey).toBe('production-site-key');
-    expect(profile.discovered.guestSignUpEnabled).toBe(true);
-    storeSavedServerTarget(profile.discovered);
+    expect(profile.server.target).toMatchObject({endpoint: 'wss://server.teagram.io/apiws'});
+    expect(profile.server.turnstileSiteKey).toBe('production-site-key');
+    expect(profile.server.guestSignUpEnabled).toBe(true);
+    storeSavedServerTarget(profile.server);
     expect(getSavedServerTarget('web.teagram.io')?.target).toMatchObject({endpoint: 'wss://server.teagram.io/apiws'});
 
     const existingPins = localStorage.getItem(SERVER_PINS_KEY);
     try {
       localStorage.setItem(SERVER_PINS_KEY, JSON.stringify({
-        'web.teagram.io': {...profile.discovered.pin, endpoint: 'wss://old.server.teagram.io/apiws'}
+        'web.teagram.io': {...profile.server.pin, endpoint: 'wss://old.server.teagram.io/apiws'}
       }));
       await expect(resolveServerProfile('web.teagram.io', fetcher as any)).resolves.toMatchObject({pinState: 'mismatch'});
     } finally {
