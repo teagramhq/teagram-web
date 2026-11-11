@@ -207,6 +207,27 @@ test('sendMessage timing gates use fixed Enter-to-bubble minimums and label them
   assert.match(formatPerformanceTable(result), /\| Send a message, Enter-to-bubble \(1x\) \| 141\.9 \|/);
 });
 
+test('globalSearch timing keeps its pre-boundary minimum effects at both scales', () => {
+  const base = scaleVariants();
+  const makeSearchSamples = (ms) => Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms}));
+  base['1x'].globalSearch = makeSearchSamples(337.8);
+  base['100x'].globalSearch = makeSearchSamples(339);
+
+  const belowMinimum = scaleVariants();
+  belowMinimum['1x'].globalSearch = makeSearchSamples(397.8);
+  belowMinimum['100x'].globalSearch = makeSearchSamples(399);
+  const belowResult = evaluatePerformance(report({base, head: belowMinimum}));
+  assert.equal(belowResult.blockingFailures.some((failure) => failure.includes('globalSearch: response timing')), false);
+
+  const aboveMinimum = scaleVariants();
+  aboveMinimum['1x'].globalSearch = makeSearchSamples(463.8);
+  aboveMinimum['100x'].globalSearch = makeSearchSamples(466);
+  const aboveResult = evaluatePerformance(report({base, head: aboveMinimum}));
+
+  assert.ok(aboveResult.blockingFailures.some((failure) => failure.startsWith('1x globalSearch: response timing:') && failure.includes('minimum effect 125.85 ms')));
+  assert.ok(aboveResult.blockingFailures.some((failure) => failure.startsWith('100x globalSearch: response timing:') && failure.includes('minimum effect 126.96 ms')));
+});
+
 test('sendMessage timing ignores a regressed outer interval when Enter-to-bubble is flat', () => {
   const base = scaleVariants();
   const head = scaleVariants();

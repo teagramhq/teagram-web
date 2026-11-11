@@ -17,6 +17,7 @@ export const COLD_CHAT_LIST_REPEATS = PERFORMANCE_REPEATS;
 export const PAIRED_CONFIDENCE_LEVEL = 0.95;
 export const TIMING_MINIMUM_EFFECTS = Object.freeze({
   scenarioTiming: Object.freeze({minimumMs: 2, baseMedianFraction: 0.15}),
+  globalSearchTiming: Object.freeze({'1x': 125.85, '100x': 126.96}),
   sendMessageTiming: Object.freeze({'1x': 41.88, '100x': 50.835}),
   absoluteBudgets: Object.freeze({coldChatList: 1_000, warmChatList: 300, chatOpen: 200}),
   scaleRatio: Object.freeze({maximum: 1.5, baseMedianFraction: 0.15}),
@@ -336,11 +337,14 @@ export function evaluatePerformance(report, history = []) {
         const timeDifferences = pairedDifferences(baseTimes, headTimes);
         if(timeDifferences) {
           const baseMedian = median(baseTimes);
-          const relativeMinimum = scenario.key === 'sendMessage' ? TIMING_MINIMUM_EFFECTS.sendMessageTiming[scale] : Math.max(
+          const fixedMinimum = scenario.key === 'sendMessage' ? TIMING_MINIMUM_EFFECTS.sendMessageTiming[scale]
+            : scenario.key === 'globalSearch' ? TIMING_MINIMUM_EFFECTS.globalSearchTiming[scale]
+              : null;
+          const relativeMinimum = fixedMinimum ?? Math.max(
             TIMING_MINIMUM_EFFECTS.scenarioTiming.minimumMs,
             baseMedian * TIMING_MINIMUM_EFFECTS.scenarioTiming.baseMedianFraction
           );
-          const relativeMinimumText = scenario.key === 'sendMessage' ? `${relativeMinimum} ms` : `${relativeMinimum.toFixed(2)} ms (${TIMING_MINIMUM_EFFECTS.scenarioTiming.baseMedianFraction * 100}% of base median, at least ${TIMING_MINIMUM_EFFECTS.scenarioTiming.minimumMs} ms)`;
+          const relativeMinimumText = fixedMinimum !== null ? `${relativeMinimum} ms` : `${relativeMinimum.toFixed(2)} ms (${TIMING_MINIMUM_EFFECTS.scenarioTiming.baseMedianFraction * 100}% of base median, at least ${TIMING_MINIMUM_EFFECTS.scenarioTiming.minimumMs} ms)`;
           applyTimingGate('response timing', timeDifferences, relativeMinimum, relativeMinimumText);
           if(budgetMs !== null) {
             const budgetHeadroom = Math.max(relativeMinimum, budgetMs - baseMedian);

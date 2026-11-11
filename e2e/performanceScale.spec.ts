@@ -9,6 +9,7 @@ import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogRec
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
 import {LOTTIE_FRAME_BG_CSS, scheduleAfterInterveningPaint, waitForFirstStickerFrame, waitForFirstStickerPaint, waitUntilOnScreen} from './lottieFrameMeasurement';
+import {globalSearchSampleMs, isCurrentGlobalSearchResult} from '../scripts/performance/global-search-measurement.mjs';
 
 type Fixture = {
   owner: number,
@@ -75,7 +76,13 @@ type Metric = {
   preInteractionMs?: number,
   appSendUiMs?: number,
   composerReadyAfterFirstBubbleMs?: number,
-  firstBubbleToSentMs?: number
+  firstBubbleToSentMs?: number,
+  globalSearchStages?: {
+    queryEnteredAtMs: number,
+    debounceSettledAtMs: number,
+    matchingSearchRpcReturnedAtMs: number,
+    matchingResultVisibleAtMs: number
+  }
 };
 
 type VariantRun = {
@@ -193,6 +200,7 @@ async function installInstrumentation(page: Page, requestCounter: {value: number
   page.on('requestfailed', (request) => bundleRequests.requestFailed(request));
   page.on('worker', (worker) => bundleRequests.workerReady(worker.url()));
   await page.exposeBinding('__teagramBundleWorkerReady', (_source, url: string) => bundleRequests.workerReady(url));
+  await page.addInitScript({content: `window.__teagramIsCurrentGlobalSearchResult = (${isCurrentGlobalSearchResult.toString()});`});
   // The gated scroll pauses this observer while it records RAF gaps.
   await page.addInitScript({content: `window.__teagramObserveLongAnimationFrames = ${observeLongAnimationFrames.toString()};`});
   if(recordWorkerMessages) await page.addInitScript({content: `window.__teagramInstallWorkerMessageAttribution = ${installWorkerMessageAttribution.toString()};`});
@@ -1184,15 +1192,117 @@ async function searchContacts(page: Page, requests: {value: number}, scale: Scal
   return captureScenario(page, requests, traceEnabled, onMeasurementBoundary, collectWalkDiagnostics);
 }
 
+async function waitForGlobalSearchResult(page: Page, query: string, recordTimestamp: boolean) {
+  await page.waitForFunction(({query, recordTimestamp}) => {
+    const perf = (window as any).__teagramPerf;
+    const stages = perf?.globalSearchStages;
+    if(recordTimestamp && (!Number.isFinite(stages?.queryEnteredAtMs) || !Number.isFinite(stages?.debounceSettledAtMs))) return false;
+    const input = document.querySelector<HTMLInputElement>('#column-left .item-main .sidebar-header .input-search-input');
+    if(input?.value !== query) return false;
+
+    const isVisible = (row: HTMLElement) => {
+      let current: HTMLElement | null = row;
+      while(current) {
+        const style = getComputedStyle(current);
+        if(style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        current = current.parentElement;
+      }
+      const rect = row.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const baselineRows = perf.globalSearchBaselineRows as WeakSet<Element>;
+    for(const row of document.querySelectorAll<HTMLElement>('#search-container .chatlist-chat')) {
+      const messageText = row.querySelector('.dialog-subtitle-parts')?.textContent || '';
+      const matchesCurrentQuery = (window as any).__teagramIsCurrentGlobalSearchResult({
+        query,
+        inputValue: input.value,
+        messageText,
+        visible: isVisible(row),
+        presentBeforeQuery: baselineRows.has(row)
+      });
+      if(!matchesCurrentQuery) continue;
+
+      if(recordTimestamp) stages.matchingResultVisibleAtMs = performance.now();
+      return true;
+    }
+    return false;
+  }, {query, recordTimestamp}, {polling: 'raf', timeout: 90_000});
+}
+
 async function globalSearch(page: Page, requests: {value: number}, scale: Scale, traceEnabled = false, onMeasurementBoundary?: (boundary: MeasurementBoundary) => void, collectWalkDiagnostics = false) {
   await page.locator('#contacts-container .sidebar-close-button').click();
-  await beginScenario(page, requests, traceEnabled);
   await page.keyboard.press('Control+f');
   const input = page.locator('#column-left .item-main .sidebar-header .input-search-input');
   await expect(input).toBeVisible();
-  await input.fill(`needle ${scale === '1x' ? '5000' : '500000'}`);
-  await expect(page.locator('#search-container .chatlist-chat').first()).toBeVisible({timeout: 90_000});
-  return captureScenario(page, requests, traceEnabled, onMeasurementBoundary, collectWalkDiagnostics);
+  const query = `needle ${scale === '1x' ? '5000' : '500000'}`;
+  await beginScenario(page, requests, traceEnabled);
+  await page.evaluate((query) => {
+    const perf = (window as any).__teagramPerf;
+    const input = document.querySelector<HTMLInputElement>('#column-left .item-main .sidebar-header .input-search-input');
+    if(!input) throw new Error('global-search input is missing');
+
+    const stages: Record<string, number> = perf.globalSearchStages = {};
+    perf.globalSearchBaselineRows = new WeakSet(document.querySelectorAll('#search-container .chatlist-chat'));
+    input.addEventListener('input', () => {
+      if(input.value === query && !Number.isFinite(stages.queryEnteredAtMs)) {
+        stages.queryEnteredAtMs = performance.now();
+      }
+    }, {capture: true});
+
+    const apiManagerProxy = (window as any).apiManagerProxy;
+    const invoke = apiManagerProxy?.invoke;
+    if(typeof invoke !== 'function') throw new Error('global-search manager proxy is unavailable');
+    apiManagerProxy.invoke = function(method: string, payload: any, ...args: any[]) {
+      const result = invoke.call(this, method, payload, ...args);
+      const options = payload?.args?.[0];
+      if(method === 'manager' && payload?.name === 'appMessagesManager' && payload?.method === 'getHistory' &&
+          options?.query === query && options?.inputFilter?._ === 'inputMessagesFilterEmpty' &&
+          Number.isFinite(stages.queryEnteredAtMs) && !Number.isFinite(stages.debounceSettledAtMs)) {
+        stages.debounceSettledAtMs = performance.now();
+        apiManagerProxy.invoke = invoke;
+      }
+      return result;
+    };
+  }, query);
+  await page.evaluate(() => (window as any).rootScope.managers.apiManager.resetPerformanceRpcTrace(true));
+  await input.fill(query);
+  await waitForGlobalSearchResult(page, query, true);
+
+  const trace = await page.evaluate(async() => ({
+    timeOrigin: performance.timeOrigin,
+    trace: await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace()
+  }));
+  expect(trace.trace.enabled, 'targeted global-search RPC tracing was not enabled').toBe(true);
+  const stages = await page.evaluate(() => ({...(window as any).__teagramPerf.globalSearchStages}));
+  const matchingRpc = trace.trace.calls
+  .filter((call: {method: string, startedAtEpochMs: number, durationMs: number | null, outcome: string}) => (
+    call.method === 'messages.searchGlobal' && call.outcome === 'success' && typeof call.durationMs === 'number' && Number.isFinite(call.durationMs) &&
+    call.startedAtEpochMs - trace.timeOrigin >= stages.debounceSettledAtMs &&
+    call.startedAtEpochMs - trace.timeOrigin + call.durationMs <= stages.matchingResultVisibleAtMs
+  ))
+  .sort((left: {startedAtEpochMs: number}, right: {startedAtEpochMs: number}) => left.startedAtEpochMs - right.startedAtEpochMs)
+  .at(-1);
+  expect(matchingRpc, 'the current global-search query did not complete a matching search RPC').toBeDefined();
+  if(!matchingRpc) throw new Error('the current global-search query did not complete a matching search RPC');
+  const matchingSearchRpcReturnedAtMs = matchingRpc.startedAtEpochMs - trace.timeOrigin + matchingRpc.durationMs;
+  const globalSearchStages = {...stages, matchingSearchRpcReturnedAtMs};
+  const stageTimestamps = [
+    globalSearchStages.queryEnteredAtMs,
+    globalSearchStages.debounceSettledAtMs,
+    globalSearchStages.matchingSearchRpcReturnedAtMs,
+    globalSearchStages.matchingResultVisibleAtMs
+  ];
+  expect(stageTimestamps.every(Number.isFinite), 'global-search stage timestamps are incomplete').toBe(true);
+  expect(globalSearchStages.queryEnteredAtMs).toBeLessThanOrEqual(globalSearchStages.debounceSettledAtMs);
+  expect(globalSearchStages.debounceSettledAtMs).toBeLessThanOrEqual(globalSearchStages.matchingSearchRpcReturnedAtMs);
+  expect(globalSearchStages.matchingSearchRpcReturnedAtMs).toBeLessThanOrEqual(globalSearchStages.matchingResultVisibleAtMs);
+
+  const ms = globalSearchSampleMs(globalSearchStages);
+  const snapshot = await snapshotMeasurementBoundary(page);
+  const boundary = {...snapshot, startedAtMs: globalSearchStages.queryEnteredAtMs, ms};
+  onMeasurementBoundary?.(boundary);
+  const sample = await capture(page, requests, boundary, false, traceEnabled, traceEnabled || collectWalkDiagnostics, false, collectWalkDiagnostics);
+  return {...sample, ms, globalSearchStages};
 }
 
 async function describeSendState(page: Page, fixture: Fixture) {
