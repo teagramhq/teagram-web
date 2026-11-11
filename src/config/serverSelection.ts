@@ -138,10 +138,12 @@ export type ServerPin = {
   key_fingerprint: string
 };
 
+type DiscoveredServerTarget = Extract<MtprotoTarget, {mode: 'private'}>;
+
 export type DiscoveredServer = {
   host: string,
   id: string,
-  target: MtprotoTarget,
+  target: DiscoveredServerTarget,
   pin: ServerPin,
   spkiFingerprint: string,
   turnstileSiteKey?: string,
@@ -314,6 +316,7 @@ export async function validateDiscoveryDocument(hostInput: string, value: unknow
       connectionTypes: ['client', 'upload', 'download']
     }
   });
+  if(target.mode !== 'private') throw new Error('not a Teagram server: invalid WebSocket target');
   const id = 'custom-' + toHex(await sha256(new TextEncoder().encode(host)));
   const pin = {host, endpoint: websocketEndpoint, dc_id, key_fingerprint: spkiFingerprint};
   const demo = record(value.demo) ? value.demo : undefined;
