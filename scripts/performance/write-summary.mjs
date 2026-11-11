@@ -49,6 +49,67 @@ function formatPerformanceSamplesTable(report, scale = '100x') {
   return lines.join('\n');
 }
 
+function getHistoryServerRecords(sample) {
+  if(!Array.isArray(sample?.serverRpcRecords)) return undefined;
+  const records = sample.serverRpcRecords;
+  if(!records.length || !records.every((record) => (
+    record?.method === 'messages.getHistory' && Number.isSafeInteger(record.duration_us) && record.duration_us >= 0 &&
+    typeof record.result === 'string' && record.result.length > 0 && Number.isSafeInteger(record.end_unix_ms) && record.end_unix_ms > 0
+  ))) return undefined;
+  return records;
+}
+
+function formatChatOpenServerTimingTable(report, failures) {
+  const rows = [];
+  const variants = report.requireBase ? ['base', 'head'] : ['head'];
+  const show = (value) => Number.isFinite(value) ? value.toFixed(1) : 'n/a';
+  const addRows = (source, variant, samples, diagnostic = false) => {
+    if(!Array.isArray(samples) || !samples.length) {
+      failures.push(`100x chatOpen ${source} ${variant} server timing samples are missing`);
+      return;
+    }
+    for(const [index, sample] of samples.entries()) {
+      const serverRecords = getHistoryServerRecords(sample);
+      if(!serverRecords) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has missing or invalid messages.getHistory server durations`);
+        continue;
+      }
+      if(diagnostic) {
+        const expectedCount = Array.isArray(sample.rpcCalls) ? sample.rpcCalls.filter((call) => call?.method === 'messages.getHistory').length : undefined;
+        if(!Number.isInteger(expectedCount) || expectedCount !== serverRecords.length) {
+          failures.push(`100x chatOpen RPC diagnostic ${variant} sample ${index + 1} has ${serverRecords.length} server records for ${expectedCount ?? 'unknown'} client messages.getHistory calls`);
+          continue;
+        }
+        if(!Number.isFinite(sample.ms) || !Number.isFinite(sample.rpcWallMs) || !Number.isFinite(sample.nonRpcElapsedMs)) {
+          failures.push(`100x chatOpen RPC diagnostic ${variant} sample ${index + 1} is missing total, RPC wall, or non-RPC timing`);
+          continue;
+        }
+      }
+      const serverDurations = serverRecords.map((record) => `${show(record.duration_us / 1000)} ms (${record.result})`).join(', ');
+      const serverTotalMs = serverRecords.reduce((total, record) => total + record.duration_us / 1000, 0);
+      const rpcResidual = diagnostic && Number.isFinite(sample.rpcWallMs) ? sample.rpcWallMs - serverTotalMs : undefined;
+      rows.push(`| ${source} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.rpcWallMs)} | ${show(sample.nonRpcElapsedMs)} | ${serverDurations} | ${show(rpcResidual)} |`);
+    }
+  };
+
+  for(const variant of variants) {
+    addRows('gate sample', variant, report.variants?.[variant]?.['100x']?.chatOpen);
+  }
+  for(const variant of variants) {
+    addRows('RPC diagnostic', variant, report.diagnostics?.['100x']?.rpcComparison?.[variant]?.chatOpen, true);
+  }
+  if(!rows.length) return '';
+  return [
+    '### 100x chat-open server handling',
+    '',
+    'Each server entry is one `messages.getHistory` handler duration. Gate samples preserve their existing timing boundary; RPC diagnostics also show the existing client RPC wall and non-RPC values.',
+    '',
+    '| Sample | Variant | Repeat | Time (ms) | RPC wall (ms) | Non-RPC (ms) | messages.getHistory server (ms each) | RPC wall minus server total (ms) |',
+    '| --- | --- | ---: | ---: | ---: | ---: | --- | ---: |',
+    ...rows
+  ].join('\n');
+}
+
 function formatSendActionDiagnosticTable(report) {
   const sendSamples = report.diagnostics?.['100x']?.sendMessage;
   const sample = Array.isArray(sendSamples) ? sendSamples[0] : sendSamples;
@@ -276,6 +337,7 @@ const table = formatPerformanceTable(evaluation);
 const traceTable = formatPerformanceTraceTable(report.diagnostics?.['100x']);
 const chatListMeasurementTable = formatChatListMeasurementTable(report);
 const samplesTable = formatPerformanceSamplesTable(report);
+const chatOpenServerTimingTable = formatChatOpenServerTimingTable(report, failures);
 const sendActionDiagnosticTable = formatSendActionDiagnosticTable(report);
 const reportOnlyFindings = [...evaluation.reportOnlyFailures];
 const firstStickerTable = formatFirstStickerTable(report.diagnostics?.firstSticker, report.requireBase, failures, reportOnlyFindings);
@@ -289,6 +351,7 @@ const summary = [
   ...(traceTable ? ['', traceTable] : []),
   ...(chatListMeasurementTable ? ['', chatListMeasurementTable] : []),
   ...(samplesTable ? ['', samplesTable] : []),
+  ...(chatOpenServerTimingTable ? ['', chatOpenServerTimingTable] : []),
   ...(sendActionDiagnosticTable ? ['', sendActionDiagnosticTable] : []),
   ...(firstStickerTable ? ['', firstStickerTable] : []),
   ...(workerRecorderTable ? ['', workerRecorderTable] : []),

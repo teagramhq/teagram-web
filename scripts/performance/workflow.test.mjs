@@ -49,6 +49,8 @@ function workerRecorderMeasurements() {
 function runSummaryWithArtifacts({
   firstSticker = firstStickerMeasurements(),
   recorderReplay = workerRecorderMeasurements(),
+  includeChatOpenServerRecords = true,
+  chatOpenClientHistoryCallCount = 1,
   requireBase = true,
   eventName = 'pull_request'
 } = {}) {
@@ -56,6 +58,12 @@ function runSummaryWithArtifacts({
   const reportPath = join(directory, 'report.json');
   const recorderReplayPath = join(directory, 'recorder-replay.json');
   const historyDirectory = join(directory, 'history');
+  const serverRpcRecords = includeChatOpenServerRecords ? [{
+    method: 'messages.getHistory',
+    duration_us: 40_123,
+    result: 'success',
+    end_unix_ms: 1_762_800_000_123
+  }] : undefined;
   const makeSample = (key) => ({
     ms: 100,
     requests: 12,
@@ -65,6 +73,7 @@ function runSummaryWithArtifacts({
     longTasksOver50Ms: 0,
     blockingTimeMs: 0,
     maxLongTaskDurationMs: 0,
+    ...(key === 'chatOpen' && serverRpcRecords ? {serverRpcRecords} : {}),
     ...(key === 'scrollBack2k' ? {frameIntervals: 100, droppedFrames: 0, droppedFramePercent: 0} : {})
   });
   const variantsFor = () => Object.fromEntries(['1x', '100x'].map((scale) => [scale, Object.fromEntries(SCENARIOS.map(({key}) => [
@@ -101,7 +110,17 @@ function runSummaryWithArtifacts({
           nonRpcElapsedMs: 42,
           rpcCalls: [{method: 'messages.sendMessage', durationMs: 81, outcome: 'success'}],
           cpu: {topFrames: [{functionName: 'sendMessage', script: '/input.ts', selfMs: 22}]}
-        }]
+        }],
+        rpcComparison: Object.fromEntries(['base', 'head'].map((variant) => [variant, {
+          chatOpen: [{
+            ms: 377,
+            rpcCallCount: chatOpenClientHistoryCallCount,
+            rpcWallMs: 377,
+            nonRpcElapsedMs: 0,
+            rpcCalls: Array.from({length: chatOpenClientHistoryCallCount}, () => ({method: 'messages.getHistory', durationMs: 377, outcome: 'success'})),
+            ...(serverRpcRecords ? {serverRpcRecords} : {})
+          }]
+        }]))
       }
     },
     variants: {base, head}
@@ -298,6 +317,20 @@ test('summary blocks first-sticker and worker-recorder regressions using the pai
   assert.match(result.stderr, /worker recorder peers: one-sided 95% median lower bound 3\.0 ms exceeded minimum effect 1\.5 ms/);
 });
 
+test('summary fails closed when a 100x chat-open server duration is missing', () => {
+  const result = runSummaryWithArtifacts({includeChatOpenServerRecords: false});
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /100x chatOpen .*has missing or invalid messages\.getHistory server durations/);
+});
+
+test('summary fails closed when the server trace count does not match client getHistory calls', () => {
+  const result = runSummaryWithArtifacts({chatOpenClientHistoryCallCount: 2});
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /has 1 server records for 2 client messages\.getHistory calls/);
+});
+
 test('summary reports nine paired samples and keeps extra diagnostic samples out of the gate', () => {
   const scenarioKeys = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
   const makeSample = (ms) => ({
@@ -328,8 +361,12 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
         variants[variant]['100x'][key] = Array.from({length: count}, () => makeSample(100));
       }
     }
-    variants.base['100x'].chatOpen = Array.from({length: PERFORMANCE_REPEATS}, () => makeSample(100));
-    variants.head['100x'].chatOpen = timingSamples.map(makeSample);
+    const withServerHistory = (sample) => ({
+      ...sample,
+      serverRpcRecords: [{method: 'messages.getHistory', duration_us: 40_123, result: 'success', end_unix_ms: 1_762_800_000_123}]
+    });
+    variants.base['100x'].chatOpen = Array.from({length: PERFORMANCE_REPEATS}, () => withServerHistory(makeSample(100)));
+    variants.head['100x'].chatOpen = timingSamples.map((ms) => withServerHistory(makeSample(ms)));
     variants.base['100x'].sendMessage = sendSamples.base.map((ms) => ({...makeSample(ms), appSendUiMs: ms - 20}));
     variants.head['100x'].sendMessage = sendSamples.head.map((ms) => ({...makeSample(ms), appSendUiMs: ms - 20}));
     return {
@@ -357,6 +394,24 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
             key,
             Array.from({length: PERFORMANCE_REPEATS}, () => ({walkLongTasksOver50Ms: 0}))
           ]))])),
+          chatOpen: [{
+            ms: 377,
+            rpcCallCount: 1,
+            rpcWallMs: 377,
+            nonRpcElapsedMs: 0,
+            rpcCalls: [{method: 'messages.getHistory', durationMs: 377, outcome: 'success'}],
+            serverRpcRecords: [{method: 'messages.getHistory', duration_us: 40_123, result: 'success', end_unix_ms: 1_762_800_000_123}]
+          }],
+          rpcComparison: Object.fromEntries(['base', 'head'].map((variant) => [variant, {
+            chatOpen: [{
+              ms: 377,
+              rpcCallCount: 1,
+              rpcWallMs: 377,
+              nonRpcElapsedMs: 0,
+              rpcCalls: [{method: 'messages.getHistory', durationMs: 377, outcome: 'success'}],
+              serverRpcRecords: [{method: 'messages.getHistory', duration_us: 40_123, result: 'success', end_unix_ms: 1_762_800_000_123}]
+            }]
+          }])),
           sendMessage: [{
             ms: 123,
             appSendUiMs: 101,
@@ -444,10 +499,26 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
   assert.match(nineSampleSummary, /PR base\/head cold visible-frame gate: paired SD 0\.0 ms; one-sided 95% median lower bound 80\.0 ms; minimum effect 100 ms; passed/);
   assert.match(nineSampleSummary, /Pinned pre-PR-178 cold visible-frame comparison: pinned 180\.0 ms, head 280\.0 ms, increase 100\.0 ms; report-only/);
   assert.match(nineSampleSummary, /### Worker recorder replay overhead/);
+  assert.match(nineSampleSummary, /100x chat-open server handling/);
+  assert.equal([...nineSampleSummary.matchAll(/\| gate sample \| base \|/g)].length, PERFORMANCE_REPEATS);
+  assert.equal([...nineSampleSummary.matchAll(/\| gate sample \| head \|/g)].length, PERFORMANCE_REPEATS);
+  assert.match(nineSampleSummary, /gate sample \| base \| 1 \| 100\.0 \| n\/a \| n\/a \| 40\.1 ms \(success\)/);
+  assert.match(nineSampleSummary, /RPC diagnostic \| head \| 1 \| 377\.0 \| 377\.0 \| 0\.0 \| 40\.1 ms \(success\) \|/);
   assert.match(nineSampleSummary, /peers \| 10\.0 \| 11\.0 \| 1\.000 \|.*passed/);
   assert.match(nineSampleSummary, /Walk-mirror tasks >50 ms \(head max\/repeat\)/);
   assert.doesNotMatch(nineSampleSummary, /Blocking findings:/);
   assert.match(nineSampleSummary, /\| Scenario \| Scale \| Variant \| First visible \(ms\) \| First visible state \| Live boundary \(ms\) \| Requests \| RPC calls \| DOM nodes \| Long tasks >50 ms \| Blocking \(ms\) \| Bundle bytes \|/);
   assert.match(nineSampleSummary, /\| Cold chat list \| 1x \| head \| 100\.0 \| snapshot \| 500\.0 \| 4 \| 2 \| 100 \| 0 \| 0\.0 \| 10000 \|/);
   assert.match(nineSampleSummary, /\| 123\.0 \| 101\.0 \| 1 \| 81\.0 \| 42\.0 \| 0 \| 1000 \| 12 \| 0 \| 0\.0 \| messages\.sendMessage \(81\.0 ms, success\) \| sendMessage \/input\.ts \(22\.0 ms\) \|/);
+});
+
+test('performance workflow pins and enables the per-RPC server trace for 100x', () => {
+  const serverCommit = readFileSync(new URL('../../.github/perf-server-commit', import.meta.url), 'utf8').trim();
+  assert.equal(serverCommit, '11aca52138df628f0ef9972e0583c768d12c221d');
+  assert.match(workflow, /PERF_SERVER_RPC_TRACE_FILE_100X/);
+  const serverStep = workflow.match(/- name: Build server at the fixture commit and start it([\s\S]*?)(?=\n      - name: Build current and base private client bundles)/)?.[1];
+  assert.ok(serverStep, 'the performance workflow must define its fixture server step');
+  assert.match(serverStep, /TG_RPC_TRACE_FILE/);
+  assert.match(serverStep, /if \[ "\$scale" = "100x" \]; then\s+rpc_trace_env\+=\("TG_RPC_TRACE_FILE=\$PERF_SERVER_RPC_TRACE_FILE_100X"\)/);
+  assert.match(workflow, /teagram-perf-server-rpc-100x\.jsonl/);
 });

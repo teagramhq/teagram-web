@@ -1,6 +1,7 @@
 import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
 import {readFileSync} from 'node:fs';
 import {writePerformanceReport} from './performanceReport';
+import {getServerRpcTracePosition, waitForServerRpcTraceRecords} from '../scripts/performance/server-rpc-trace.mjs';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
@@ -19,6 +20,12 @@ type Fixture = {
 type Scale = '1x' | '100x';
 type Variant = 'base' | 'head';
 type StickerVariant = Variant | 'pinned';
+type ServerRpcTraceRecord = {
+  method: string,
+  duration_us: number,
+  result: string,
+  end_unix_ms: number
+};
 const FIRST_STICKER_REPEATS = PERFORMANCE_REPEATS;
 const FIRST_STICKER_REPORT_REPEATS = 3;
 const TRACE_DIAGNOSTIC_REPEATS = 1;
@@ -42,6 +49,7 @@ type Metric = {
   rpcMethodCounts?: Record<string, number>,
   rpcWallMs: number | null,
   nonRpcElapsedMs: number | null,
+  serverRpcRecords?: ServerRpcTraceRecord[],
   rpcTraceEnabled: boolean,
   rpcSpansRecorded: boolean,
   rpcCalls: PerformanceRpcCall[],
@@ -120,6 +128,7 @@ const username = process.env.PERF_USERNAME;
 const password = process.env.PERF_PASSWORD;
 const reportPath = process.env.PERF_REPORT_PATH;
 const recorderReplayPath = process.env.PERF_RECORDER_REPLAY_PATH;
+const serverRpcTraceFile = process.env.PERF_SERVER_RPC_TRACE_FILE_100X;
 let recorderReplay: unknown;
 try {
   if(recorderReplayPath) recorderReplay = JSON.parse(readFileSync(recorderReplayPath, 'utf8'));
@@ -147,6 +156,32 @@ const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', '
 const scenarioPreservedPerformancePhases = getScenarioPreservedPerformancePhases();
 let measurementsStarted = false;
 let measurementsComplete = false;
+
+function serverRpcTraceOffset() {
+  if(!serverRpcTraceFile) {
+    if(report.requireBase) throw new Error('100x server RPC trace file path is missing');
+    return undefined;
+  }
+  return getServerRpcTracePosition(serverRpcTraceFile);
+}
+
+async function attachServerRpcTrace(sample: Metric, offset: number | undefined, expectedCount?: number) {
+  if(offset === undefined) return sample;
+  if(expectedCount === 0) throw new Error('100x chat-open measurement recorded no messages.getHistory RPC calls');
+  const records = await waitForServerRpcTraceRecords(
+    serverRpcTraceFile!,
+    offset,
+    'messages.getHistory',
+    expectedCount ?? 1,
+    {quietMs: 150}
+  );
+  if(expectedCount !== undefined && records.length !== expectedCount) {
+    throw new Error(`100x chat-open expected ${expectedCount} messages.getHistory server duration records, found ${records.length}`);
+  }
+  const serverRpcRecords = records;
+  if(!serverRpcRecords.length) throw new Error('100x chat-open measurement has no server messages.getHistory duration records');
+  return {...sample, serverRpcRecords};
+}
 
 test.afterAll(() => {
   if(!measurementsStarted) return;
@@ -850,16 +885,18 @@ async function reloadChatList(page: Page, requests: {value: number}, collectWalk
   return capture(page, requests, await snapshotMeasurementBoundary(page, firstVisibleChatList), false, false, collectWalkDiagnostics, true, collectWalkDiagnostics);
 }
 
-async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false, collectWalkDiagnostics = false) {
+async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false, collectWalkDiagnostics = false, collectServerRpcTrace = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
   resetRequestBreakdown(page);
   await begin(page, requests, true, traceRpc);
   await startMeasurementAtClick(row);
+  const traceOffset = collectServerRpcTrace ? serverRpcTraceOffset() : undefined;
   await row.click();
   const boundary = await waitForFirstVisibleBubble(page);
   expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
-  return capture(page, requests, boundary, false, traceRpc, traceRpc || collectWalkDiagnostics, false, collectWalkDiagnostics);
+  const sample = await capture(page, requests, boundary, false, traceRpc, traceRpc || collectWalkDiagnostics, false, collectWalkDiagnostics);
+  return collectServerRpcTrace ? attachServerRpcTrace(sample, traceOffset) : sample;
 }
 
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}) {
@@ -1647,7 +1684,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     measured.warmChatList.push(warmChatList);
     if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, warmChatList, 'warmChatList');
 
-    const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture, false, collectWalkDiagnostics));
+    const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture, false, collectWalkDiagnostics, scale === '100x'));
     measured.chatOpen.push(chatOpen);
     if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpen, 'chatOpen');
     const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(
@@ -1777,16 +1814,17 @@ async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Varia
         await beginScenario(page, requests, true);
         await installPeerChangeTracing(page);
         const chatProfile = await startCpuProfile(page);
+        const serverTraceOffset = serverRpcTraceOffset();
         await startMeasurementAtClick(row);
         await row.click();
         const chatOpenBoundary = await waitForFirstVisibleBubble(page);
         const chatCpu = await finishCpuProfile(chatProfile);
         const chatOpenCapture = await capture(page, requests, chatOpenBoundary, false, true);
-        const chatOpenSample = {
+        const chatOpenSample = await attachServerRpcTrace({
           ...chatOpenCapture,
           cpu: chatCpu,
           peerChangePhases: summarizePerformancePhases(await page.evaluate(() => (window as any).__teagramPerf.peerChangePhases || []))
-        };
+        }, serverTraceOffset, chatOpenCapture.rpcCalls.filter((call) => call.method === 'messages.getHistory').length);
         traceSamples.chatOpen.push(chatOpenSample);
         await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpenSample, 'chatOpen');
 
