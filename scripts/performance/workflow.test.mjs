@@ -146,13 +146,48 @@ test('timing bundles enable reconciliation and targeted search probes while keep
   assert.doesNotMatch(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
 });
 
-test('the base timing bundle gets the PR search-RPC tracer without taking PR application changes', () => {
+test('base search tracing preserves application RPC differences from the head bundle', async() => {
   const buildStep = workflow.match(/- name: Build current and base private client bundles([\s\S]*?)(?=\n      - name: Start local HTTPS)/)?.[1];
   assert.ok(buildStep, 'the performance workflow must define its client build step');
-  assert.match(workflow, /PERF_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
-  assert.match(buildStep, /git -C "\$base_directory" checkout "\$PERF_HEAD_SHA" -- src\/lib\/appManagers\/apiManager\.ts/);
+  assert.doesNotMatch(buildStep, /git -C "\$base_directory" checkout .*src\/lib\/appManagers\/apiManager\.ts/);
+  assert.match(buildStep, /node scripts\/performance\/inject-search-rpc-tracer\.mjs "\$base_directory\/src\/lib\/appManagers\/apiManager\.ts"/);
   assert.match(buildStep, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
   assert.match(buildStep, /\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)/);
+
+  const baseApiManager = [
+    'export class ApiManager {',
+    '  private performanceRpcTrace?: PerformanceRpcTrace;',
+    '  constructor() {',
+    "    if(import.meta.env.VITE_PERF_TRACE === '1') {",
+    '      this.performanceRpcTrace = new PerformanceRpcTrace(true);',
+    '    }',
+    '  }',
+    '  public resetPerformanceRpcTrace(recordSpans = true) {',
+    "    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace!.reset(recordSpans);",
+    '  }',
+    '  public invokeApi(method, params = {}, options = {}) {',
+    '    const methodName = String(method);',
+    "    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace?.recordCall(methodName);",
+    '    if(!getAuthMethod(methodName, params)) {',
+    '      return this.invokeApiInternal(method, params, options);',
+    '    }',
+    '  }',
+    '  private invokeApiInternal(method, params, options) {',
+    "    return {implementation: 'base RPC handling', method, params, options};",
+    '  }',
+    '}'
+  ].join('\n');
+  const headApiManager = baseApiManager.replace('base RPC handling', 'head RPC handling');
+  const {injectSearchRpcTracer} = await import('./inject-search-rpc-tracer.mjs');
+  const instrumentedBase = injectSearchRpcTracer(baseApiManager);
+  const instrumentedHead = injectSearchRpcTracer(headApiManager);
+
+  assert.match(instrumentedBase, /implementation: 'base RPC handling'/);
+  assert.doesNotMatch(instrumentedBase, /head RPC handling/);
+  assert.match(instrumentedHead, /implementation: 'head RPC handling'/);
+  assert.doesNotMatch(instrumentedHead, /base RPC handling/);
+  assert.match(instrumentedBase, /VITE_PERF_SEARCH_TRACE/);
+  assert.match(instrumentedHead, /VITE_PERF_SEARCH_TRACE/);
 });
 
 test('sticker timing gates against the PR base and keeps the pre-178 client report-only', () => {

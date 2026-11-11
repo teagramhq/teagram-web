@@ -217,7 +217,6 @@ jobs:
         shell: bash
         env:
           PERF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PERF_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
@@ -226,7 +225,7 @@ jobs:
             base_directory="$RUNNER_TEMP/teagram-web-base"
             git worktree add --detach "$base_directory" "$PERF_BASE_SHA"
             ln -s "$GITHUB_WORKSPACE/node_modules" "$base_directory/node_modules"
-            git -C "$base_directory" checkout "$PERF_HEAD_SHA" -- src/lib/appManagers/apiManager.ts
+            node scripts/performance/inject-search-rpc-tracer.mjs "$base_directory/src/lib/appManagers/apiManager.ts"
             (cd "$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-dist")
             (cd "$base_directory" && VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-trace-dist")
             sticker_base_sha="$(cat .github/perf-sticker-base-commit)"
