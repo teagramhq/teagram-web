@@ -7,7 +7,7 @@ import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VER
 import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes, trackBundleDocumentNavigation, type BundleRequestTracker} from './performanceBundleBytes';
 import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
-import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
+import {startFrameTrace, startPresentedFrameCapture, stopFrameTrace, stopPresentedFrameCapture, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
 import {LOTTIE_FRAME_BG_CSS, scheduleAfterInterveningPaint, waitForFirstStickerFrame, waitForFirstStickerPaint, waitUntilOnScreen} from './lottieFrameMeasurement';
 
 type Fixture = {
@@ -66,6 +66,8 @@ type Metric = {
   droppedFrames?: number,
   frameIntervals?: number,
   rafDropped?: number,
+  presentedFrames?: number,
+  presentedDropped?: number,
   droppedFrameAttribution?: ReturnType<typeof summarizeDroppedFrames>,
   droppedFrameCpu?: PerformanceTaskAttribution[],
   droppedFrameScripts?: ReturnType<typeof summarizeFrameScripts>,
@@ -107,6 +109,7 @@ type CachedDialogReconcileTarget = {
 type ScrollBackTraceOptions = {
   captureCpuStacks?: boolean,
   captureFrameTrace?: boolean,
+  capturePresentedFrames?: boolean,
   captureWorkerMessages?: boolean,
   traceRpc?: boolean,
   waitForHistory?: boolean,
@@ -932,6 +935,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   const {
     captureCpuStacks = false,
     captureFrameTrace = captureCpuStacks,
+    capturePresentedFrames = false,
     captureWorkerMessages = captureCpuStacks,
     traceRpc = false,
     waitForHistory = false,
@@ -956,6 +960,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     expect(observed, 'long-animation-frame observer is not supported in the browser').toBe(true);
   }
   const cpuProfile = captureCpuStacks ? await startCpuProfile(page) : undefined;
+  const presentedFrameTrace = capturePresentedFrames ? await startPresentedFrameCapture(page) : undefined;
   await page.evaluate((recordWindows) => (window as any).__teagramPerf.startFrames(recordWindows), captureFrameTrace);
   const initial = await page.evaluate(() => {
     const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));
@@ -991,6 +996,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     if(stagnant >= 12) break;
   }
   await page.evaluate(() => (window as any).__teagramPerf.stopFrames());
+  const presentedFrameCounts = presentedFrameTrace ? await stopPresentedFrameCapture(presentedFrameTrace) : undefined;
   if(resumeLongAnimationFrames) await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames());
   const scrollState = await page.evaluate(() => {
     const chat = (window as any).appImManager.chat;
@@ -1019,7 +1025,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     ...await capture(page, requests, boundary, true, traceRpc, includeLongTaskTrace, false, collectWalkDiagnostics)
   };
   const frameEvents = frameTrace ? await stopFrameTrace(frameTrace) : undefined;
-  if(!stoppedProfile && !frameEvents && !captureWorkerMessages) return metric;
+  if(!stoppedProfile && !frameEvents && !captureWorkerMessages) return {...metric, ...presentedFrameCounts};
   const {tasks, spans, frameWindows, workerMessages, workerBatches} = await page.evaluate((captureWorkerMessages) => {
     const perf = (window as any).__teagramPerf;
     const workerMessages = captureWorkerMessages ? perf.workerMessages.spans : [];
@@ -1041,7 +1047,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   } : {};
   const droppedFrameAttribution = frameTrace ? summarizeDroppedFrames(frameWindows, frameEvents || [], spans) : undefined;
   if(droppedFrameAttribution) expect(droppedFrameAttribution.reduce((sum, frame) => sum + frame.droppedFrames, 0), 'frame attribution must cover the measured drops').toBe(metric.droppedFrames || 0);
-  if(!stoppedProfile) return {...metric, ...workerAttribution, ...(droppedFrameAttribution ? {droppedFrameAttribution} : {})};
+  if(!stoppedProfile) return {...metric, ...presentedFrameCounts, ...workerAttribution, ...(droppedFrameAttribution ? {droppedFrameAttribution} : {})};
 
   const tracing = await page.evaluate(() => {
     const perf = (window as any).__teagramPerf;
@@ -1058,6 +1064,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
   }
   return {
     ...metric,
+    ...presentedFrameCounts,
     ...workerAttribution,
     ...(droppedFrameAttribution ? {droppedFrameAttribution} : {}),
     scrollSpanTracing: tracing,
@@ -1780,6 +1787,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       requests,
       true,
       scale === '100x' ? {
+        capturePresentedFrames: true,
         pauseLongAnimationFrames: true,
         collectWalkDiagnostics
       } : undefined

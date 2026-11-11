@@ -259,6 +259,8 @@ export function evaluatePerformance(report, history = []) {
           ] : REQUIRED_METRICS;
           if(scale === '100x' && scenario.key === 'scrollBack2k') {
             requiredMetrics.push(['rafDropped', 'RAF drop count']);
+            requiredMetrics.push(['presentedFrames', 'presented frame count']);
+            requiredMetrics.push(['presentedDropped', 'presented drop count']);
           }
           for(const [field, label] of requiredMetrics) {
             if(!Number.isFinite(sample?.[field])) {
@@ -281,6 +283,14 @@ export function evaluatePerformance(report, history = []) {
           if(scale === '100x' && scenario.key === 'scrollBack2k') {
             if(Number.isFinite(sample?.rafDropped) && (!Number.isInteger(sample.rafDropped) || sample.rafDropped < 0 || sample.rafDropped !== sample.droppedFrames)) {
               addFailure(blockingFailures, scale, scenario.key, `${variant} RAF drop count is invalid in sample ${index + 1}`);
+              gateFailure = true;
+            }
+            if(Number.isFinite(sample?.presentedFrames) && (!Number.isInteger(sample.presentedFrames) || sample.presentedFrames <= 1)) {
+              addFailure(blockingFailures, scale, scenario.key, `${variant} presented frame count is invalid in sample ${index + 1}`);
+              gateFailure = true;
+            }
+            if(Number.isFinite(sample?.presentedDropped) && (!Number.isInteger(sample.presentedDropped) || sample.presentedDropped < 0)) {
+              addFailure(blockingFailures, scale, scenario.key, `${variant} presented drop count is invalid in sample ${index + 1}`);
               gateFailure = true;
             }
           }

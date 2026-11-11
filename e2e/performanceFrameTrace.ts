@@ -1,8 +1,12 @@
-import type {Page} from '@playwright/test';
+import type {CDPSession, Page} from '@playwright/test';
 
 type Interval = {startMs: number, endMs: number};
 type Event = {name: string, startMs: number, durationMs: number, detail?: string};
 type Span = {name: string, startMs: number, syncMs: number};
+type PresentedFrameTrace = {session: CDPSession, startTimestampUs: number};
+type PresentedFrameTraceEvent = {name: string, cat?: string, ts: number};
+
+const PRESENTED_FRAME_INTERVAL_MS = 1000 / 60;
 
 export function summarizeFrameScripts(intervals: Interval[], frames: Array<{
   startTime: number, duration: number,
@@ -50,6 +54,60 @@ export async function startFrameTrace(page: Page) {
     return performance.getEntriesByName(name, 'mark')[0].startTime;
   }, markName);
   return {session, anchorMs};
+}
+
+async function readMonotonicTimestampUs(session: CDPSession) {
+  const {metrics} = await session.send('Performance.getMetrics');
+  const timestamp = (metrics as Array<{name: string, value: number}>).find(({name}) => name === 'Timestamp')?.value;
+  if(!Number.isFinite(timestamp)) throw new Error('CDP performance metrics are missing the monotonic timestamp');
+  return timestamp * 1_000_000;
+}
+
+export function summarizePresentedFrameDrops(timestampsMs: number[]) {
+  const frames = [...new Set(timestampsMs.filter(Number.isFinite))].sort((left, right) => left - right);
+  let presentedDropped = 0;
+  for(let index = 1; index < frames.length; ++index) {
+    const elapsedIntervals = Math.round((frames[index] - frames[index - 1]) / PRESENTED_FRAME_INTERVAL_MS);
+    presentedDropped += Math.max(0, elapsedIntervals - 1);
+  }
+  return {presentedFrames: frames.length, presentedDropped};
+}
+
+export async function startPresentedFrameCapture(page: Page): Promise<PresentedFrameTrace> {
+  const session = await page.context().newCDPSession(page);
+  await session.send('Performance.enable');
+  await session.send('Tracing.start', {categories: 'disabled-by-default-display.framedisplayed,-*', transferMode: 'ReturnAsStream'});
+  try {
+    return {session, startTimestampUs: await readMonotonicTimestampUs(session)};
+  } catch(error) {
+    await session.detach();
+    throw error;
+  }
+}
+
+export async function stopPresentedFrameCapture({session, startTimestampUs}: PresentedFrameTrace) {
+  try {
+    const endTimestampUs = await readMonotonicTimestampUs(session);
+    const completed = new Promise<string>((resolve) => session.once('Tracing.tracingComplete', ({stream}) => resolve(stream!)));
+    await session.send('Tracing.end');
+    const stream = await completed;
+    let data = '';
+    for(;;) {
+      const part = await session.send('IO.read', {handle: stream});
+      data += part.base64Encoded ? Buffer.from(part.data, 'base64').toString('utf8') : part.data;
+      if(part.eof) break;
+    }
+    await session.send('IO.close', {handle: stream});
+    const trace = JSON.parse(data) as {traceEvents: PresentedFrameTraceEvent[]};
+    const timestampsMs = trace.traceEvents.filter((event) => {
+      const categories = event.cat?.split(',') || [];
+      return event.name === 'Display::FrameDisplayed' && categories.includes('disabled-by-default-display.framedisplayed') &&
+        event.ts >= startTimestampUs && event.ts <= endTimestampUs;
+    }).map((event) => event.ts / 1000);
+    return summarizePresentedFrameDrops(timestampsMs);
+  } finally {
+    await session.detach();
+  }
 }
 
 export async function stopFrameTrace({session, anchorMs}: Awaited<ReturnType<typeof startFrameTrace>>): Promise<Event[]> {

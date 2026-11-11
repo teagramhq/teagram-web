@@ -336,6 +336,7 @@ jobs:
           -c playwright.performance.config.ts
           e2e/performanceMeasurement.spec.ts
           e2e/performanceScale.spec.ts
+          e2e/performancePresentedFrame.spec.ts
           --project=performance-chromium
           --workers=1
 

@@ -9,6 +9,7 @@ import {PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS} from '.
 const workflow = readFileSync(new URL('../../.github/workflows/performance.yml', import.meta.url), 'utf8');
 const playwrightConfig = readFileSync(new URL('../../playwright.performance.config.ts', import.meta.url), 'utf8');
 const performanceScale = readFileSync(new URL('../../e2e/performanceScale.spec.ts', import.meta.url), 'utf8');
+const performanceFrameTrace = readFileSync(new URL('../../e2e/performanceFrameTrace.ts', import.meta.url), 'utf8');
 const workerReplay = readFileSync(new URL('../../e2e/workerMessageReplay.spec.ts', import.meta.url), 'utf8');
 const chatPageSnapshotView = readFileSync(new URL('../../src/lib/chatPageSnapshotView.ts', import.meta.url), 'utf8');
 const stickerBaseCommit = readFileSync(new URL('../../.github/perf-sticker-base-commit', import.meta.url), 'utf8').trim();
@@ -80,7 +81,9 @@ function runSummaryWithArtifacts({
       frameIntervals: 100,
       droppedFrames: 3,
       droppedFramePercent: 3 / 103 * 100,
-      rafDropped: 3
+      rafDropped: 3,
+      presentedFrames: 98,
+      presentedDropped: 1
     } : {})
   });
   const variantsFor = () => Object.fromEntries(['1x', '100x'].map((scale) => [scale, Object.fromEntries(SCENARIOS.map(({key}) => [
@@ -152,18 +155,30 @@ test('timing bundles enable only the cached-dialog probe and keep full profiles 
   assert.doesNotMatch(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
 });
 
-test('gated scroll samples record RAF gaps without screencast, tracing or CPU profiles', () => {
+test('gated scroll samples avoid screencast and CPU profiles', () => {
   const gatedScroll = performanceScale.match(/const scroll = await test\.step\('scroll back 2,000 messages'[\s\S]*?if\(!scroll\)/)?.[0];
   const diagnosticScroll = performanceScale.match(/const scrolled = await test\.step\(`profile 100x scroll back 2,000 messages[\s\S]*?if\(!scrolled/)?.[0];
 
   assert.ok(gatedScroll, 'the gated scroll scenario must be present');
-  assert.doesNotMatch(gatedScroll, /capturePresentedFrames|Page\.startScreencast/);
+  assert.doesNotMatch(gatedScroll, /Page\.startScreencast/);
   assert.match(gatedScroll, /pauseLongAnimationFrames: true/);
-  assert.doesNotMatch(performanceScale, /startPresentedFrameCapture|presentedFrames|presentedDropped/);
   assert.doesNotMatch(gatedScroll, /captureCpuStacks|captureFrameTrace|captureWorkerMessages|includeLongTaskTrace/);
   assert.ok(diagnosticScroll, 'the separate diagnostic scroll pass must be present');
   assert.match(diagnosticScroll, /captureCpuStacks: true/);
   assert.match(diagnosticScroll, /traceRpc: true/);
+});
+
+test('gated scroll samples trace compositor presentations beside RAF drops', () => {
+  const gatedScroll = performanceScale.match(/const scroll = await test\.step\('scroll back 2,000 messages'[\s\S]*?if\(!scroll\)/)?.[0];
+  const presentedFrameCapture = performanceFrameTrace.match(/export async function startPresentedFrameCapture[\s\S]*?(?=\nexport async function stopPresentedFrameCapture)/)?.[0];
+
+  assert.ok(gatedScroll, 'the gated scroll scenario must be present');
+  assert.ok(presentedFrameCapture, 'the compositor presentation capture must be present');
+  assert.match(gatedScroll, /capturePresentedFrames: true/);
+  assert.match(performanceScale, /presentedDropped/);
+  assert.match(presentedFrameCapture, /categories: 'disabled-by-default-display\.framedisplayed,-\*'/);
+  assert.doesNotMatch(presentedFrameCapture, /devtools\.timeline|blink\.user_timing|disabled-by-default-v8\.cpu_profiler/);
+  assert.match(workflow, /e2e\/performancePresentedFrame\.spec\.ts/);
 });
 
 test('unprofiled scroll retains timing-only tasks for the walk-mirror gate', () => {
@@ -403,6 +418,8 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
     droppedFrames: 0,
     droppedFramePercent: 0,
     rafDropped: 0,
+    presentedFrames: 100,
+    presentedDropped: 0,
     composerReadyAfterFirstBubbleMs: 50,
     firstBubbleToSentMs: ms + 50
   });
@@ -557,11 +574,12 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
   assert.match(boundarySummary, /\| Send a message \| base \| 1 \| 599\.0 \| 480\.0 \|/);
 });
 
-test('summary lists RAF frame counts for every 100x scroll sample', () => {
+test('summary lists RAF and compositor frame counts for every 100x scroll sample', () => {
   const result = runSummaryWithArtifacts();
 
   assert.equal(result.status, 0);
   assert.match(result.stdout, /### 100x scroll frame samples/);
-  assert.match(result.stdout, /\| base \| 1 \| 100 \| 3 \| 2\.91% \|/);
-  assert.doesNotMatch(result.stdout, /Presented frames|Presented drops|Presented drop/);
+  assert.match(result.stdout, /\| base \| 1 \| 100 \| 3 \| 98 \| 1 \| 2\.91% \|/);
+  assert.match(result.stdout, /Presented frames/);
+  assert.match(result.stdout, /Presented drops/);
 });

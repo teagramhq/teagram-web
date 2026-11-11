@@ -35,6 +35,8 @@ function sample(overrides = {}) {
     droppedFrames: 0,
     droppedFramePercent: 0,
     rafDropped: 0,
+    presentedFrames: 60,
+    presentedDropped: 0,
     ...overrides
   };
 }
@@ -312,6 +314,27 @@ test('requires a valid RAF drop count for every 100x scroll sample', () => {
     const invalidResult = evaluatePerformance(report({head: invalidHead}));
     assert.ok(invalidResult.blockingFailures.some((message) => message.includes(failure)), failure);
   }
+});
+
+test('requires valid presented-frame counts while keeping the frame gate on RAF drops', () => {
+  const missing = scaleVariants();
+  delete missing['100x'].scrollBack2k[0].presentedFrames;
+  delete missing['100x'].scrollBack2k[1].presentedDropped;
+  const missingResult = evaluatePerformance(report({head: missing}));
+  assert.ok(missingResult.blockingFailures.some((failure) => failure.includes('100x scrollBack2k: head presented frame count is missing or invalid in sample 1')));
+  assert.ok(missingResult.blockingFailures.some((failure) => failure.includes('100x scrollBack2k: head presented drop count is missing or invalid in sample 2')));
+
+  const invalid = scaleVariants();
+  invalid['100x'].scrollBack2k[0].presentedFrames = 1;
+  invalid['100x'].scrollBack2k[1].presentedDropped = -1;
+  const invalidResult = evaluatePerformance(report({head: invalid}));
+  assert.ok(invalidResult.blockingFailures.some((failure) => failure.includes('100x scrollBack2k: head presented frame count is invalid in sample 1')));
+  assert.ok(invalidResult.blockingFailures.some((failure) => failure.includes('100x scrollBack2k: head presented drop count is invalid in sample 2')));
+
+  const highPresentedDrops = scaleVariants();
+  highPresentedDrops['100x'].scrollBack2k.forEach((sample) => sample.presentedDropped = 100);
+  const result = evaluatePerformance(report({head: highPresentedDrops}));
+  assert.equal(result.blockingFailures.some((failure) => failure.includes('dropped-frame percentage')), false);
 });
 
 test('paired absolute budget headroom fails only when the lower bound crosses the budget', () => {
