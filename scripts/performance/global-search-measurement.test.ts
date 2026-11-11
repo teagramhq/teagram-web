@@ -1,5 +1,5 @@
 import {expect, test} from 'vitest';
-import {globalSearchSampleMs, hasValidGlobalSearchStages, isCurrentGlobalSearchResult} from './global-search-measurement.mjs';
+import {globalSearchSampleMs, hasValidGlobalSearchStages, isCurrentGlobalSearchResult, summarizeGlobalSearchWarmups} from './global-search-measurement.mjs';
 
 const query = 'needle 500000';
 
@@ -32,4 +32,11 @@ test('global search duration is the visible-result timestamp minus query entry',
   expect(hasValidGlobalSearchStages(stages, 399)).toBe(false);
   expect(hasValidGlobalSearchStages({...stages, matchingSearchRpcReturnedAtMs: 390})).toBe(false);
   expect(hasValidGlobalSearchStages({...stages, matchingSearchRpcReturnedAtMs: null})).toBe(false);
+});
+
+test('global-search warm-up cost reports total elapsed time and rejects invalid samples', () => {
+  expect(summarizeGlobalSearchWarmups([125.5, 400, 74.5])).toEqual({sampleCount: 3, totalMs: 600, maxMs: 400});
+  expect(() => summarizeGlobalSearchWarmups([])).toThrow('at least one duration');
+  expect(() => summarizeGlobalSearchWarmups([12, Number.NaN])).toThrow('finite non-negative');
+  expect(() => summarizeGlobalSearchWarmups([12, -1])).toThrow('finite non-negative');
 });

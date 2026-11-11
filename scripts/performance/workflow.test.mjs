@@ -320,6 +320,15 @@ test('global-search measurements prewarm the shared fixture RPC before starting 
   assert.ok(warmResult < closeWarmSearch && closeWarmSearch < waitForCleanup && waitForCleanup < reopenWarmSearch && reopenWarmSearch < waitForReopen, 'warm-up results must be fully cleared and search reopened before measurement');
 });
 
+test('global-search warm-up time is measured, reported, and gated against the one-minute job budget', () => {
+  const globalSearch = performanceScale.match(/async function globalSearch\([\s\S]*?(?=\nasync function describeSendState)/)?.[0];
+  assert.ok(globalSearch, 'the performance scenario must define global search');
+  assert.match(globalSearch, /const warmupStartedAtMs = performance\.now\(\);\s*await warmGlobalSearch\(page, query\);\s*globalSearchWarmupDurationsMs\.push\(performance\.now\(\) - warmupStartedAtMs\)/);
+  assert.match(performanceScale, /const globalSearchWarmup = summarizeGlobalSearchWarmups\(globalSearchWarmupDurationsMs\)/);
+  assert.match(performanceScale, /expect\(globalSearchWarmup\.totalMs,[\s\S]*?\)\.toBeLessThanOrEqual\(GLOBAL_SEARCH_WARMUP_BUDGET_MS\)/);
+  assert.match(performanceScale, /report\.diagnostics\.globalSearchWarmup = \{\.\.\.globalSearchWarmup, budgetMs: GLOBAL_SEARCH_WARMUP_BUDGET_MS\}/);
+});
+
 test('only pull requests build and require a base comparison', () => {
   assert.doesNotMatch(workflow, /workflow_dispatch:|performance_base_sha|github\.event\.inputs/);
   const checkoutStep = workflow.match(/- name: Check out web client([\s\S]*?)(?=\n      - name: Set performance output paths)/)?.[1];

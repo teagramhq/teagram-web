@@ -9,7 +9,7 @@ import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogRec
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
 import {LOTTIE_FRAME_BG_CSS, scheduleAfterInterveningPaint, waitForFirstStickerFrame, waitForFirstStickerPaint, waitUntilOnScreen} from './lottieFrameMeasurement';
-import {globalSearchSampleMs, isCurrentGlobalSearchResult} from '../scripts/performance/global-search-measurement.mjs';
+import {GLOBAL_SEARCH_WARMUP_BUDGET_MS, globalSearchSampleMs, isCurrentGlobalSearchResult, summarizeGlobalSearchWarmups} from '../scripts/performance/global-search-measurement.mjs';
 
 type Fixture = {
   owner: number,
@@ -155,6 +155,7 @@ const report = {
   } as Record<Variant, Record<Scale, Record<string, Partial<Metric>[]>>>
 };
 const preparedVariants: Record<Scale, Partial<Record<Variant, VariantRun>>> = {'1x': {}, '100x': {}};
+const globalSearchWarmupDurationsMs: number[] = [];
 let firstStickerPinnedRun: VariantRun | undefined;
 const bundleRequestTrackers = new WeakMap<Page, BundleRequestTracker>();
 const requestBreakdownsByPage = new WeakMap<Page, Map<string, number>>();
@@ -1253,7 +1254,9 @@ async function globalSearch(page: Page, requests: {value: number}, scale: Scale,
   const input = page.locator('#column-left .item-main .sidebar-header .input-search-input');
   await expect(input).toBeVisible();
   const query = `needle ${scale === '1x' ? '5000' : '500000'}`;
+  const warmupStartedAtMs = performance.now();
   await warmGlobalSearch(page, query);
+  globalSearchWarmupDurationsMs.push(performance.now() - warmupStartedAtMs);
   await beginScenario(page, requests, traceEnabled);
   await page.evaluate((query) => {
     const perf = (window as any).__teagramPerf;
@@ -2188,6 +2191,12 @@ test('measures the scale fixture in interleaved base and head runs', async({brow
       });
     }
   }
+  const variantCount = report.requireBase ? 2 : 1;
+  const expectedWarmupSampleCount = scales.length * PERFORMANCE_REPEATS * variantCount + TRACE_DIAGNOSTIC_REPEATS * variantCount;
+  const globalSearchWarmup = summarizeGlobalSearchWarmups(globalSearchWarmupDurationsMs);
+  report.diagnostics.globalSearchWarmup = {...globalSearchWarmup, budgetMs: GLOBAL_SEARCH_WARMUP_BUDGET_MS};
+  expect(globalSearchWarmup.sampleCount, 'all global-search warm-ups must be included in the job-time budget').toBe(expectedWarmupSampleCount);
+  expect(globalSearchWarmup.totalMs, 'global-search warm-up must add no more than one minute to the job').toBeLessThanOrEqual(GLOBAL_SEARCH_WARMUP_BUDGET_MS);
   report.diagnostics['100x'] = {...traceDiagnostics, walkComparison};
   measurementsComplete = true;
 });
