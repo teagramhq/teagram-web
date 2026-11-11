@@ -7,16 +7,16 @@ import {
   SERVER_TARGET_KEY,
   DiscoveredServer,
   cleanServerHost,
-  fetchServerDiscovery,
   forgetServer,
   formatServerKeyId,
   formatSPKIFingerprint,
   getSavedServerTarget,
   getServerConnectSources,
   getServerPin,
-  getServerPinState,
+  getServerProfileId,
   isServerSelectionOrigin,
   normalizeServerHost,
+  resolveServerProfile,
   setServerSelectionAction,
   storeSavedServerTarget,
   websocketConnectionFailureMessage,
@@ -297,32 +297,22 @@ async function showServerPicker(initialError?: string) {
       return;
     }
 
-    if(host === DEFAULT_SERVER_HOST) {
-      if(!buildTarget) {
-        addError(card, 'The default server target is not available in this build.');
-        return;
-      }
-      await activateServer(DEFAULT_SERVER_HOST, 'default', buildTarget, DEFAULT_SERVER_HOST);
-      return;
-    }
-
-    let discovered: DiscoveredServer;
+    let profile: Awaited<ReturnType<typeof resolveServerProfile>>;
     try {
-      discovered = await fetchServerDiscovery(host);
+      profile = await resolveServerProfile(host);
     } catch(error) {
       addError(card, serverDiscoveryErrorMessage(host, error));
       return;
     }
 
-    const pin = getServerPin(host);
-    const pinState = getServerPinState(discovered, pin);
+    const {discovered, pin, pinState, id} = profile;
     if(pinState === 'mismatch') {
       showServerIdentityChanged(discovered, pin!);
       return;
     }
 
     if(pinState === 'match') {
-      await activateServer(host, discovered.id, discovered.target, host, true, discovered);
+      await activateServer(host, id, discovered.target, host, true, discovered);
       return;
     }
 
@@ -421,7 +411,7 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
     } catch(error) {
       console.error('Could not preserve focus while restoring the server', error);
     }
-    const target = host === DEFAULT_SERVER_HOST ? buildTarget : getSavedServerTarget(host)?.target;
+    const target = host === DEFAULT_SERVER_HOST && !isServerSelectionOrigin(pageHost) ? buildTarget : getSavedServerTarget(host)?.target;
     if(target) setConnectPolicy(host, target, true);
     publish({phase: 'connected', host, changing: false});
     location.reload();
@@ -525,7 +515,7 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
 
   async function saveAndReload(host: string, signal: AbortSignal, run: number, server?: DiscoveredServer) {
     if(!isCurrentRun(run, signal)) return;
-    const id = server?.id || 'default';
+    const id = getServerProfileId(host, server?.id);
     let previousId = 'default';
     try {
       previousId = localStorage.getItem(ACTIVE_SERVER_ID_KEY) || 'default';
@@ -579,18 +569,9 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
     }
 
     publish({phase: 'checking', host, changing, locked: !!current.locked && !changing});
-    if(host === DEFAULT_SERVER_HOST) {
-      if(!buildTarget) {
-        if(run === sequence) setFailure('Teagram.Server.Unsupported', host);
-        return;
-      }
-      await saveAndReload(host, signal, run);
-      return;
-    }
-
-    let discovered: DiscoveredServer;
+    let profile: Awaited<ReturnType<typeof resolveServerProfile>>;
     try {
-      discovered = await fetchServerDiscovery(host, fetch, signal);
+      profile = await resolveServerProfile(host, fetch, signal);
     } catch(error) {
       if(signal.aborted || run !== sequence) return;
       console.error('Server discovery failed', error);
@@ -599,8 +580,7 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
     }
     if(signal.aborted || run !== sequence) return;
 
-    const pin = getServerPin(host);
-    const pinState = getServerPinState(discovered, pin);
+    const {discovered, pin, pinState} = profile;
     if(pinState === 'mismatch') {
       blockedServer = discovered;
       blockedPin = pin;
@@ -733,16 +713,14 @@ function showServerIdentityChanged(
 
 async function bootConfiguredServer(config: {server: string, autoGuest: boolean}) {
   setConnectPolicy(config.server);
-  const discovered = await fetchServerDiscovery(config.server);
-  const pin = getServerPin(config.server);
-  const pinState = getServerPinState(discovered, pin);
+  const {discovered, pin, pinState, id} = await resolveServerProfile(config.server);
   if(pinState === 'mismatch') {
     showServerIdentityChanged(discovered, pin!, {allowForget: false, allowChooseAnother: false});
     return;
   }
 
-  if(!pin) await writeServerPin(discovered);
-  await activateServer(config.server, discovered.id, discovered.target, config.server, true, discovered, config.autoGuest);
+  if(pinState === 'first-use') await writeServerPin(discovered);
+  await activateServer(config.server, id, discovered.target, config.server, true, discovered, config.autoGuest);
 }
 
 function showFirstUseConfirmation(discovered: DiscoveredServer) {
@@ -759,7 +737,7 @@ function showFirstUseConfirmation(discovered: DiscoveredServer) {
   card.append(createButton('Confirm and use this server', async() => {
     try {
       await writeServerPin(discovered);
-      await activateServer(discovered.host, discovered.id, discovered.target, discovered.host, true, discovered);
+      await activateServer(discovered.host, getServerProfileId(discovered.host, discovered.id), discovered.target, discovered.host, true, discovered);
     } catch(error) {
       addError(card, error instanceof Error ? error.message : 'Could not save this server pin');
     }
@@ -851,26 +829,25 @@ async function connectSavedServer(savedChoice: string) {
 
   setServerSelectionPolicy();
   let id = 'default';
-  let target = buildTarget;
+  let target: MtprotoTarget | undefined;
   let discovered: DiscoveredServer | undefined;
-  if(host !== DEFAULT_SERVER_HOST) {
-    // A check that settles within a second goes straight to the sign-in card.
-    let removeShell = () => {};
-    const shellTimeout = window.setTimeout(() => removeShell = showServerCheckShell(host), 1000);
-    try {
-      discovered = await fetchServerDiscovery(host);
-      if(getServerPinState(discovered, getServerPin(host)) !== 'match' || discovered.target.mode !== 'private') throw undefined;
-      if(!await probeWebSocket(discovered.target.endpoint)) throw undefined;
-      if(previousId !== discovered.id) throw undefined;
-      storeSavedServerTarget(discovered);
-    } catch{
-      removeShell();
-      return false;
-    } finally {
-      clearTimeout(shellTimeout);
-    }
-    id = discovered.id;
+  // A check that settles within a second goes straight to the sign-in card.
+  let removeShell = () => {};
+  const shellTimeout = window.setTimeout(() => removeShell = showServerCheckShell(host), 1000);
+  try {
+    const profile = await resolveServerProfile(host);
+    discovered = profile.discovered;
+    if(profile.pinState !== 'match' || discovered.target.mode !== 'private') throw undefined;
+    if(!await probeWebSocket(discovered.target.endpoint)) throw undefined;
+    if(previousId !== profile.id) throw undefined;
+    storeSavedServerTarget(discovered);
+    id = profile.id;
     target = discovered.target;
+  } catch{
+    removeShell();
+    return false;
+  } finally {
+    clearTimeout(shellTimeout);
   }
   if(!target || previousId !== id) return false;
 
@@ -905,8 +882,8 @@ async function boot() {
       } catch{
         host = '';
       }
-      const discovered = host && host !== DEFAULT_SERVER_HOST ? getSavedServerTarget(host) : undefined;
-      const target = host === DEFAULT_SERVER_HOST ? buildTarget : discovered?.target;
+      const discovered = host ? getSavedServerTarget(host) : undefined;
+      const target = discovered?.target;
       if(host && target) {
         const changing = changeChoice === savedChoice;
         let restoreFocus = false;
@@ -918,7 +895,7 @@ async function boot() {
         } catch{}
         const action = createServerSelectionAction(changing ?
           {phase: 'selecting', host, changing: true} : {phase: 'connected', host}, host);
-        setActiveContext(localStorage.getItem(ACTIVE_SERVER_ID_KEY) || discovered?.id || 'default', host, target, discovered);
+        setActiveContext(localStorage.getItem(ACTIVE_SERVER_ID_KEY) || getServerProfileId(host, discovered?.id), host, target, discovered);
         if(changing) setServerSelectionPolicy();
         else setConnectPolicy(host, target, true);
         setServerSelectionAction(action);

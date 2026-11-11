@@ -59,6 +59,10 @@ export function isServerSelectionOrigin(host: string) {
   return host.toLowerCase().replace(/\.+$/, '') === DEFAULT_SERVER_HOST;
 }
 
+export function getServerProfileId(host: string, serverId?: string) {
+  return isServerSelectionOrigin(host) ? 'default' : serverId || 'default';
+}
+
 export function formatServerKeyId(fingerprint: string) {
   const keyId = fingerprint.toLowerCase();
   if(!/^[a-f0-9]{64}$/.test(keyId)) throw new Error('Invalid server key fingerprint');
@@ -79,7 +83,7 @@ export function getSavedServerTarget(hostInput: string): DiscoveredServer | unde
     }
 
     const target = validateMtprotoTarget(value.target);
-    if(target.mode !== 'private' || new URL(target.endpoint).hostname.toLowerCase() !== host) return;
+    if(target.mode !== 'private' || !isAllowedServerEndpointHost(host, new URL(target.endpoint).hostname)) return;
     const pin = value.pin;
     if(pin.host !== host || pin.endpoint !== target.endpoint || typeof pin.dc_id !== 'number' ||
       typeof pin.key_fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(pin.key_fingerprint) ||
@@ -147,6 +151,12 @@ export type DiscoveredServer = {
 
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isAllowedServerEndpointHost(host: string, endpointHost: string) {
+  const normalizedEndpointHost = endpointHost.toLowerCase().replace(/\.+$/, '');
+  if(normalizedEndpointHost === host) return true;
+  return host === DEFAULT_SERVER_HOST && normalizedEndpointHost !== 'ts.net' && !normalizedEndpointHost.endsWith('.ts.net');
 }
 
 function decodeBase64(value: string) {
@@ -255,7 +265,7 @@ export async function validateDiscoveryDocument(hostInput: string, value: unknow
   } catch{
     throw new Error('not a Teagram server: invalid WebSocket endpoint');
   }
-  if(socketUrl.hostname.toLowerCase() !== host) {
+  if(!isAllowedServerEndpointHost(host, socketUrl.hostname)) {
     throw new Error('not a Teagram server: WebSocket endpoint host does not match the entered host');
   }
 
@@ -407,6 +417,17 @@ export function pinMatches(discovered: DiscoveredServer, pin: ServerPin) {
 export function getServerPinState(discovered: DiscoveredServer, pin?: ServerPin) {
   if(!pin) return 'first-use' as const;
   return pinMatches(discovered, pin) ? 'match' as const : 'mismatch' as const;
+}
+
+export async function resolveServerProfile(hostInput: string, fetcher: typeof fetch = fetch, signal?: AbortSignal) {
+  const discovered = await fetchServerDiscovery(hostInput, fetcher, signal);
+  const pin = getServerPin(discovered.host);
+  return {
+    id: getServerProfileId(discovered.host, discovered.id),
+    discovered,
+    pin,
+    pinState: getServerPinState(discovered, pin)
+  };
 }
 
 export function writeServerPin(discovered: DiscoveredServer) {
