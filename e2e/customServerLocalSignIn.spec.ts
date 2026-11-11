@@ -86,6 +86,15 @@ function trackTlsServerSockets(server: ReturnType<typeof createServer>) {
   };
 }
 
+async function waitForServiceWorkerServerId(page: Page, serverId: string) {
+  await page.waitForFunction((expectedServerId) => {
+    const activeServerId = (window as any).__TEAGRAM_ACTIVE_SERVER_ID__;
+    const scriptUrl = navigator.serviceWorker.controller?.scriptURL;
+    return activeServerId === expectedServerId && !!scriptUrl &&
+      new URL(scriptUrl).searchParams.get('__tg_server') === expectedServerId;
+  }, serverId, {timeout: 30_000});
+}
+
 async function closeTlsServer(
   server: ReturnType<typeof createServer>,
   socketTracker?: ReturnType<typeof trackTlsServerSockets>,
@@ -1457,7 +1466,7 @@ test('isolates two server tabs when a custom server worker takes control', async
       await expect(defaultServerConfirmation.getByText(APP_HOST, {exact: true})).toBeVisible();
       await defaultServerConfirmation.getByRole('button', {name: 'Confirm', exact: true}).click();
       await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
-      await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
+      await waitForServiceWorkerServerId(page, 'default');
     });
 
     await runPhase('streaming: default tab', async() => {
@@ -1494,14 +1503,8 @@ test('isolates two server tabs when a custom server worker takes control', async
       await expect.poll(() => customPage!.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__ || ''), {timeout: 20_000})
         .toBe(SERVER_HOST);
       customServerId = await customPage.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__ as string);
-      await expect.poll(() => page.evaluate(() => {
-        const scriptUrl = navigator.serviceWorker.controller?.scriptURL;
-        return scriptUrl ? new URL(scriptUrl).searchParams.get('__tg_server') : null;
-      }), {timeout: 30_000}).toBe(customServerId);
-      await expect.poll(() => customPage!.evaluate(() => {
-        const scriptUrl = navigator.serviceWorker.controller?.scriptURL;
-        return scriptUrl ? new URL(scriptUrl).searchParams.get('__tg_server') : null;
-      }), {timeout: 30_000}).toBe(customServerId);
+      await waitForServiceWorkerServerId(page, customServerId);
+      await waitForServiceWorkerServerId(customPage, customServerId);
       expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
     });
 
