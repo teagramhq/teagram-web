@@ -65,6 +65,7 @@ function runSummaryWithArtifacts({
     longTasksOver50Ms: 0,
     blockingTimeMs: 0,
     maxLongTaskDurationMs: 0,
+    ...(key === 'sendMessage' ? {appSendUiMs: 80} : {}),
     ...(key === 'scrollBack2k' ? {
       frameIntervals: 100,
       droppedFrames: 3,
