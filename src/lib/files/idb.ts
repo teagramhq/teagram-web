@@ -213,10 +213,14 @@ export class IDB {
   }
 
   public static async closeDatabasesForServer(serverId: string) {
-    const names = [`tweb-${serverId}`, `telegram-${serverId}`];
-    const prefix = `tweb-${serverId}-`;
+    const suffix = serverId === 'default' ? '' : `-${serverId}`;
+    const names = [`tweb${suffix}`, `telegram${suffix}`];
+    const prefix = serverId === 'default' ? undefined : `tweb-${serverId}-`;
+    if(serverId === 'default') {
+      names.push('tweb-common', ...[1, 2, 3, 4].map((account) => `tweb-account-${account}`));
+    }
     const instances = this.INSTANCES.filter((storage) =>
-      names.includes(storage.name) || storage.name.startsWith(prefix)
+      names.includes(storage.name) || !!prefix && storage.name.startsWith(prefix)
     );
     await Promise.all(instances.map(async(storage) => {
       await Promise.resolve(storage.openDbPromise).catch((): undefined => undefined);

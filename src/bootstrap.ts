@@ -502,8 +502,9 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
     const run = ++sequence;
     publish({phase: 'checking', host: discovered.host, changing: current.changing, locked: true});
     try {
-      await unregisterServiceWorkers(discovered.id);
-      await forgetServer(discovered.host);
+      const profileId = getServerProfileId(discovered.host, discovered.id);
+      await unregisterServiceWorkers(profileId);
+      await forgetServer(discovered.host, profileId);
       blockedServer = undefined;
       blockedPin = undefined;
       await selectHost(discovered.host, new AbortController().signal, run, false);
@@ -701,8 +702,9 @@ function showServerIdentityChanged(
   if(allowForget) {
     mismatch.card.append(createButton('Forget this server', async() => {
       try {
-        await unregisterServiceWorkers(discovered.id);
-        await forgetServer(discovered.host);
+        const profileId = getServerProfileId(discovered.host, discovered.id);
+        await unregisterServiceWorkers(profileId);
+        await forgetServer(discovered.host, profileId);
         location.reload();
       } catch(error) {
         addError(mismatch.card, error instanceof Error ? error.message : 'Could not remove this server data');

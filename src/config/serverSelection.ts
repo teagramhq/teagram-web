@@ -443,30 +443,34 @@ export function writeServerPin(discovered: DiscoveredServer) {
   });
 }
 
-export async function forgetServer(hostInput: string) {
+export async function forgetServer(hostInput: string, profileId?: string) {
   if(typeof navigator === 'undefined' || !navigator.locks) {
     throw new Error('This browser cannot safely update server pins');
   }
   const host = normalizeServerHost(hostInput);
-  const id = 'custom-' + toHex(await sha256(new TextEncoder().encode(host)));
+  const id = getServerProfileId(host, profileId || `custom-${toHex(await sha256(new TextEncoder().encode(host)))}`);
   notifyGuestCredentialInvalidation(id);
+  const belongsToProfile = (key: string) => id === 'default' ?
+    !key.startsWith('teagram.') && !/^teagram-custom-[0-9a-f]{64}:/.test(key) : key.startsWith(`teagram-${id}:`);
   for(const key of Object.keys(localStorage)) {
-    if(key.startsWith(`teagram-${id}:`)) localStorage.removeItem(key);
+    if(belongsToProfile(key)) localStorage.removeItem(key);
   }
   for(const key of Object.keys(sessionStorage)) {
-    if(key.startsWith(`teagram-${id}:`)) sessionStorage.removeItem(key);
+    if(belongsToProfile(key)) sessionStorage.removeItem(key);
   }
+  const databaseSuffix = id === 'default' ? '' : `-${id}`;
   const knownDatabases = [
-    `tweb-${id}`,
-    `tweb-${id}-common`,
-    ...[1, 2, 3, 4].map((account) => `tweb-${id}-account-${account}`),
-    `telegram-${id}`
+    `tweb${databaseSuffix}`,
+    `tweb${databaseSuffix}-common`,
+    ...[1, 2, 3, 4].map((account) => `tweb${databaseSuffix}-account-${account}`),
+    `telegram${databaseSuffix}`
   ];
   const databases = indexedDB.databases ? await indexedDB.databases() : [];
   const databaseNames = new Set([
     ...knownDatabases,
     ...databases.map((database) => database.name).filter((name): name is string =>
-      !!name && (name.startsWith(`tweb-${id}-`) || name === `tweb-${id}` || name === `telegram-${id}`))
+      !!name && id !== 'default' &&
+        (name.startsWith(`tweb-${id}-`) || name === `tweb-${id}` || name === `telegram-${id}`))
   ]);
   await Promise.all([...databaseNames].map((name) => new Promise<void>((resolve, reject) => {
     const request = indexedDB.deleteDatabase(name);
@@ -476,7 +480,8 @@ export async function forgetServer(hostInput: string) {
   })));
   if(typeof caches !== 'undefined') {
     const cacheNames = await caches.keys();
-    await Promise.all(cacheNames.filter((name) => name.startsWith(`teagram-${id}-`)).map((name) => caches.delete(name)));
+    await Promise.all(cacheNames.filter((name) => id === 'default' ? name === 'cachedAssets' :
+      name.startsWith(`teagram-${id}-`)).map((name) => caches.delete(name)));
   }
 
   await updateServerPins((pins) => { delete pins[host]; });
