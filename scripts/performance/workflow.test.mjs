@@ -214,6 +214,14 @@ test('performance workflow does not run the removed screencast frame measurement
   assert.doesNotMatch(browserStep, /performancePresentedFrames\.spec\.ts/);
 });
 
+test('performance browser setup avoids Ubuntu apt mirror installs', () => {
+  const browserSetup = workflow.match(/- name: Install web dependencies and Chromium[\s\S]*?(?=\n      - name: )/)?.[0];
+
+  assert.ok(browserSetup, 'the performance browser setup step must be present');
+  assert.match(browserSetup, /pnpm exec playwright install chromium/);
+  assert.doesNotMatch(browserSetup, /--with-deps/);
+});
+
 test('sticker timing gates against the PR base and keeps the pre-178 client report-only', () => {
   const buildStep = workflow.match(/- name: Build current and base private client bundles([\s\S]*?)(?=\n      - name: Start local HTTPS)/)?.[1];
   assert.ok(buildStep, 'the performance workflow must define its client build step');

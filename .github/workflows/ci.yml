@@ -66,8 +66,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # GitHub-hosted Ubuntu images already include browser runtime libraries; avoid apt mirror resolution here.
       - name: Install Playwright Chromium and Firefox
-        run: pnpm exec playwright install --with-deps chromium firefox
+        run: pnpm exec playwright install chromium firefox
 
       - name: Read and validate the reviewed private target
         id: target
