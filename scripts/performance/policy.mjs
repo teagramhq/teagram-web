@@ -11,7 +11,7 @@ export const SCENARIOS = [
 ];
 
 export const SCALES = ['1x', '100x'];
-export const PERFORMANCE_MEASUREMENT_VERSION = 3;
+export const PERFORMANCE_MEASUREMENT_VERSION = 4;
 export const PERFORMANCE_REPEATS = 9;
 export const COLD_CHAT_LIST_REPEATS = PERFORMANCE_REPEATS;
 export const PAIRED_CONFIDENCE_LEVEL = 0.95;
@@ -91,9 +91,6 @@ function historyFor(history, scale, key, report) {
     if(!matchesFixture(run, report)) return [];
     const samples = run.variants?.head?.[scale]?.[key];
     if(!Array.isArray(samples) || !samples.length) return [];
-    if(scale === '100x' && key === 'scrollBack2k' && !samples.every((sample) => (
-      Number.isFinite(sample?.presentedFrames) && sample.presentedFrames > 0 && Number.isFinite(sample?.presentedDroppedPercent)
-    ))) return [];
     const value = median(samples.map((sample) => sample.ms).filter(Number.isFinite));
     return Number.isFinite(value) ? [value] : [];
   });
@@ -186,10 +183,7 @@ function historyScrollMetrics(history, report) {
         Number.isFinite(sample?.blockingTimeMs) &&
         Number.isFinite(sample?.frameIntervals) && sample.frameIntervals > 0 &&
         Number.isFinite(sample?.droppedFrames) && sample.droppedFrames >= 0 &&
-        Number.isFinite(sample?.droppedFramePercent) &&
-        Number.isFinite(sample?.presentedFrames) && sample.presentedFrames > 0 &&
-        Number.isFinite(sample?.presentedDropped) && sample.presentedDropped >= 0 &&
-        Number.isFinite(sample?.presentedDroppedPercent);
+        Number.isFinite(sample?.droppedFramePercent);
     });
     if(!complete) return [];
     const metrics = {
@@ -255,12 +249,7 @@ export function evaluatePerformance(report, history = []) {
             ['droppedFramePercent', 'dropped frame percentage']
           ] : REQUIRED_METRICS;
           if(scale === '100x' && scenario.key === 'scrollBack2k') {
-            requiredMetrics.push(
-              ['rafDropped', 'RAF drop count'],
-              ['presentedFrames', 'presented frame count'],
-              ['presentedDropped', 'presented drop count'],
-              ['presentedDroppedPercent', 'presented drop percentage']
-            );
+            requiredMetrics.push(['rafDropped', 'RAF drop count']);
           }
           for(const [field, label] of requiredMetrics) {
             if(!Number.isFinite(sample?.[field])) {
@@ -279,18 +268,6 @@ export function evaluatePerformance(report, history = []) {
           if(scale === '100x' && scenario.key === 'scrollBack2k') {
             if(Number.isFinite(sample?.rafDropped) && (!Number.isInteger(sample.rafDropped) || sample.rafDropped < 0 || sample.rafDropped !== sample.droppedFrames)) {
               addFailure(blockingFailures, scale, scenario.key, `${variant} RAF drop count is invalid in sample ${index + 1}`);
-              gateFailure = true;
-            }
-            if(Number.isFinite(sample?.presentedFrames) && (!Number.isInteger(sample.presentedFrames) || sample.presentedFrames <= 0)) {
-              addFailure(blockingFailures, scale, scenario.key, `${variant} presented frame count must be positive in sample ${index + 1}`);
-              gateFailure = true;
-            }
-            if(Number.isFinite(sample?.presentedDropped) && (!Number.isInteger(sample.presentedDropped) || sample.presentedDropped < 0)) {
-              addFailure(blockingFailures, scale, scenario.key, `${variant} presented drop count cannot be negative in sample ${index + 1}`);
-              gateFailure = true;
-            }
-            if(Number.isFinite(sample?.presentedDroppedPercent) && (sample.presentedDroppedPercent < 0 || sample.presentedDroppedPercent > 100)) {
-              addFailure(blockingFailures, scale, scenario.key, `${variant} presented drop percentage is outside 0-100 in sample ${index + 1}`);
               gateFailure = true;
             }
           }

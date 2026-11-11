@@ -55,11 +55,10 @@ chat-list boundary, varying contacts-list bundle sizes, and missing or invalid
 samples remain blocking. The 100 ms negative control must fail under the paired
 rule. It uses the same bundle for control and injected-stall samples.
 
-The 100x scroll gate samples run without CDP tracing or CPU profiling. Each
-artifact sample and the job summary record RAF callback totals and drops
-(`frameIntervals` and `rafDropped`) alongside compositor frame swaps and their
-drops (`presentedFrames` and `presentedDropped`). The existing gate still uses
-the RAF-based `droppedFramePercent`.
+The 100x scroll gate samples run without CDP tracing, CPU profiling, or screencast
+capture. Each artifact sample and the job summary record RAF callback totals and
+drops (`frameIntervals`, `droppedFrames`, `droppedFramePercent`, and
+`rafDropped`). The existing gate uses the RAF-based `droppedFramePercent`.
 
 The separate 100x diagnostic scroll samples include `droppedFrameAttribution`,
 with measured frame intervals, overlapping renderer trace events and

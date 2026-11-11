@@ -69,10 +69,7 @@ function runSummaryWithArtifacts({
       frameIntervals: 100,
       droppedFrames: 3,
       droppedFramePercent: 3 / 103 * 100,
-      rafDropped: 3,
-      presentedFrames: 96,
-      presentedDropped: 4,
-      presentedDroppedPercent: 4
+      rafDropped: 3
     } : {})
   });
   const variantsFor = () => Object.fromEntries(['1x', '100x'].map((scale) => [scale, Object.fromEntries(SCENARIOS.map(({key}) => [
@@ -144,15 +141,15 @@ test('timing bundles enable only the cached-dialog probe and keep full profiles 
   assert.doesNotMatch(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
 });
 
-test('gated scroll samples keep tracing and CPU profiles in the diagnostic pass', () => {
+test('gated scroll samples record RAF gaps without screencast, tracing or CPU profiles', () => {
   const gatedScroll = performanceScale.match(/const scroll = await test\.step\('scroll back 2,000 messages'[\s\S]*?if\(!scroll\)/)?.[0];
   const diagnosticScroll = performanceScale.match(/const scrolled = await test\.step\(`profile 100x scroll back 2,000 messages[\s\S]*?if\(!scrolled/)?.[0];
 
   assert.ok(gatedScroll, 'the gated scroll scenario must be present');
-  assert.match(gatedScroll, /capturePresentedFrames: true/);
+  assert.doesNotMatch(gatedScroll, /capturePresentedFrames|Page\.startScreencast/);
+  assert.match(gatedScroll, /pauseLongAnimationFrames: true/);
+  assert.doesNotMatch(performanceScale, /startPresentedFrameCapture|presentedFrames|presentedDropped/);
   assert.doesNotMatch(gatedScroll, /captureCpuStacks|captureFrameTrace|captureWorkerMessages|includeLongTaskTrace/);
-  assert.match(performanceScale, /const resumeLongAnimationFrames = capturePresentedFrames \? await page\.evaluate\(\(\) => \(window as any\).__teagramPerf\.stopLongAnimationFrames\(\)\) : false;/);
-  assert.match(performanceScale, /if\(resumeLongAnimationFrames\) await page\.evaluate\(\(\) => \(window as any\).__teagramPerf\.startLongAnimationFrames\(\)\)/);
   assert.ok(diagnosticScroll, 'the separate diagnostic scroll pass must be present');
   assert.match(diagnosticScroll, /captureCpuStacks: true/);
   assert.match(diagnosticScroll, /traceRpc: true/);
@@ -166,11 +163,11 @@ test('unprofiled scroll retains timing-only tasks for the walk-mirror gate', () 
   assert.match(capture, /\.\.\.\(includeLongTaskTrace \|\| collectWalkDiagnostics \? \{longTaskTrace\} : \{\}\)/);
 });
 
-test('performance workflow runs the compositor frame measurement regression test', () => {
+test('performance workflow does not run the removed screencast frame measurement test', () => {
   const browserStep = workflow.match(/- name: Run scale browser scenarios[\s\S]*?(?=\n      - name: Write performance summary)/)?.[0];
 
   assert.ok(browserStep, 'the performance browser step must be present');
-  assert.match(browserStep, /e2e\/performancePresentedFrames\.spec\.ts/);
+  assert.doesNotMatch(browserStep, /performancePresentedFrames\.spec\.ts/);
 });
 
 test('sticker timing gates against the PR base and keeps the pre-178 client report-only', () => {
@@ -348,9 +345,6 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
     droppedFrames: 0,
     droppedFramePercent: 0,
     rafDropped: 0,
-    presentedFrames: 100,
-    presentedDropped: 0,
-    presentedDroppedPercent: 0,
     composerReadyAfterFirstBubbleMs: 50,
     firstBubbleToSentMs: ms + 50
   });
@@ -488,10 +482,11 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
   assert.match(nineSampleSummary, /\| 123\.0 \| 101\.0 \| 1 \| 81\.0 \| 42\.0 \| 0 \| 1000 \| 12 \| 0 \| 0\.0 \| messages\.sendMessage \(81\.0 ms, success\) \| sendMessage \/input\.ts \(22\.0 ms\) \|/);
 });
 
-test('summary lists RAF and compositor frame counts for every 100x scroll sample', () => {
+test('summary lists RAF frame counts for every 100x scroll sample', () => {
   const result = runSummaryWithArtifacts();
 
   assert.equal(result.status, 0);
   assert.match(result.stdout, /### 100x scroll frame samples/);
-  assert.match(result.stdout, /\| base \| 1 \| 100 \| 3 \| 2\.91% \| 96 \| 4 \| 4\.00% \|/);
+  assert.match(result.stdout, /\| base \| 1 \| 100 \| 3 \| 2\.91% \|/);
+  assert.doesNotMatch(result.stdout, /Presented frames|Presented drops|Presented drop/);
 });
