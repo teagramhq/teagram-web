@@ -1384,7 +1384,7 @@ export default class ChatTopbar {
       modifyAckedPromise(this.plates.requests.setPeerId(peerId)),
       modifyAckedPromise(this.plates.actions.setPeerId(peerId)),
       modifyAckedPromise(this.plates.removeFee.setPeerId(peerId)),
-      this.chat.type === ChatType.Chat ? await modifyAckedPromise(this.chat.getAutoDeletePeriod()) : undefined,
+      this.chat.type === ChatType.Chat ? modifyAckedPromise(this.chat.getAutoDeletePeriod()) : undefined,
       this.setupPinnedMessageForPeer()
     ] as const;
 
