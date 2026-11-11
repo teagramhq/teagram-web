@@ -5,6 +5,9 @@ type Event = {name: string, startMs: number, durationMs: number, detail?: string
 type Span = {name: string, startMs: number, syncMs: number};
 type PresentedFrameTrace = {session: CDPSession, startTimestampUs: number};
 type PresentedFrameTraceEvent = {name: string, cat?: string, ts: number};
+type PresentedFrameDrainResult =
+  | {ok: true, counts: ReturnType<typeof summarizePresentedFrameDrops>}
+  | {ok: false, error: unknown};
 
 const PRESENTED_FRAME_INTERVAL_MS = 1000 / 60;
 
@@ -85,29 +88,44 @@ export async function startPresentedFrameCapture(page: Page): Promise<PresentedF
   }
 }
 
-export async function stopPresentedFrameCapture({session, startTimestampUs}: PresentedFrameTrace) {
-  try {
-    const endTimestampUs = await readMonotonicTimestampUs(session);
-    const completed = new Promise<string>((resolve) => session.once('Tracing.tracingComplete', ({stream}) => resolve(stream!)));
-    await session.send('Tracing.end');
-    const stream = await completed;
-    let data = '';
-    for(;;) {
-      const part = await session.send('IO.read', {handle: stream});
-      data += part.base64Encoded ? Buffer.from(part.data, 'base64').toString('utf8') : part.data;
-      if(part.eof) break;
+export async function endPresentedFrameCapture({session, startTimestampUs}: PresentedFrameTrace) {
+  const endTimestampUs = await readMonotonicTimestampUs(session);
+  const completed = new Promise<string>((resolve) => session.once('Tracing.tracingComplete', ({stream}) => resolve(stream!)));
+  const endCommand = session.send('Tracing.end');
+  const captureResult = (async(): Promise<ReturnType<typeof summarizePresentedFrameDrops>> => {
+    try {
+      await endCommand;
+      const stream = await completed;
+      let data = '';
+      for(;;) {
+        const part = await session.send('IO.read', {handle: stream, size: 1_048_576});
+        data += part.base64Encoded ? Buffer.from(part.data, 'base64').toString('utf8') : part.data;
+        if(part.eof) break;
+      }
+      await session.send('IO.close', {handle: stream});
+      const trace = JSON.parse(data) as {traceEvents: PresentedFrameTraceEvent[]};
+      const timestampsMs = trace.traceEvents.filter((event) => {
+        const categories = event.cat?.split(',') || [];
+        return event.name === 'Display::FrameDisplayed' && categories.includes('disabled-by-default-display.framedisplayed') &&
+          event.ts >= startTimestampUs && event.ts <= endTimestampUs;
+      }).map((event) => event.ts / 1000);
+      return summarizePresentedFrameDrops(timestampsMs);
+    } finally {
+      await session.detach();
     }
-    await session.send('IO.close', {handle: stream});
-    const trace = JSON.parse(data) as {traceEvents: PresentedFrameTraceEvent[]};
-    const timestampsMs = trace.traceEvents.filter((event) => {
-      const categories = event.cat?.split(',') || [];
-      return event.name === 'Display::FrameDisplayed' && categories.includes('disabled-by-default-display.framedisplayed') &&
-        event.ts >= startTimestampUs && event.ts <= endTimestampUs;
-    }).map((event) => event.ts / 1000);
-    return summarizePresentedFrameDrops(timestampsMs);
-  } finally {
-    await session.detach();
-  }
+  })();
+  const result = captureResult.then(
+    (counts): PresentedFrameDrainResult => ({ok: true, counts}),
+    (error: unknown): PresentedFrameDrainResult => ({ok: false, error})
+  );
+  return {result};
+}
+
+export async function stopPresentedFrameCapture(trace: PresentedFrameTrace) {
+  const {result} = await endPresentedFrameCapture(trace);
+  const outcome = await result;
+  if(outcome.ok === false) throw outcome.error;
+  return outcome.counts;
 }
 
 export async function stopFrameTrace({session, anchorMs}: Awaited<ReturnType<typeof startFrameTrace>>): Promise<Event[]> {

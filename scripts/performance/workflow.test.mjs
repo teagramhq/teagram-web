@@ -181,6 +181,23 @@ test('gated scroll samples trace compositor presentations beside RAF drops', () 
   assert.match(workflow, /e2e\/performancePresentedFrame\.spec\.ts/);
 });
 
+test('gated presented-frame trace draining overlaps later scenarios and finishes before context close', () => {
+  const presentedFrameDrain = performanceFrameTrace.match(/export async function endPresentedFrameCapture[\s\S]*?(?=\nexport async function stopFrameTrace)/)?.[0];
+  const scrollCapture = performanceScale.match(/async function scrollBackTwoThousand\([\s\S]*?(?=\nasync function )/)?.[0];
+  const runVariant = performanceScale.match(/async function runVariant\([\s\S]*?(?=\nasync function traceDateJump)/)?.[0];
+
+  assert.ok(presentedFrameDrain, 'the presented-frame trace must expose asynchronous drain completion');
+  assert.match(presentedFrameDrain, /const captureResult = \(async\(\): Promise<.*> =>/);
+  assert.match(presentedFrameDrain, /const result = captureResult\.then/);
+  assert.match(presentedFrameDrain, /IO\.read', \{handle: stream, size: 1_048_576\}/);
+  assert.match(scrollCapture, /endPresentedFrameCapture\(presentedFrameTrace\)/);
+  assert.match(scrollCapture, /pendingPresentedFrameCountsKey/);
+  assert.match(runVariant, /pendingPresentedFrameCounts = scroll\[pendingPresentedFrameCountsKey\]/);
+  assert.match(runVariant, /await pendingPresentedFrameCounts/);
+  assert.ok(runVariant.indexOf('await pendingPresentedFrameCounts') > runVariant.indexOf("test.step('send a message'"));
+  assert.ok(runVariant.indexOf('await pendingPresentedFrameCounts') < runVariant.indexOf('await context.close()'));
+});
+
 test('unprofiled scroll retains timing-only tasks for the walk-mirror gate', () => {
   const capture = performanceScale.match(/async function capture\([\s\S]*?(?=\nasync function readCachedDialogReconcileSnapshot)/)?.[0];
 
