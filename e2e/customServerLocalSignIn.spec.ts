@@ -1339,13 +1339,25 @@ test('isolates two server tabs when a custom server worker takes control', async
       }, (request, response) => {
         const host = (request.headers.host || '').replace(/:\d+$/, '');
         const url = new URL(request.url || '/', `https://${host}`);
-        if(host === APP_HOST) {
-          if(url.pathname === '/stream/__server-isolation-probe') {
-            response.writeHead(200, {'content-type': 'text/plain'});
-            response.end('network-default');
-            return;
-          }
-
+        if(host === APP_HOST && url.pathname === '/stream/__server-isolation-probe') {
+          response.writeHead(200, {'content-type': 'text/plain'});
+          response.end('network-default');
+        } else if((host === APP_HOST || host === SERVER_HOST) && url.pathname === '/.well-known/teagramd/client') {
+          void fetch(`${serverHttpUrl}/.well-known/teagramd/client`).then(async(upstreamResponse) => {
+            const body = await upstreamResponse.text();
+            if(!upstreamResponse.ok) throw new Error(`local server discovery returned ${upstreamResponse.status}`);
+            const discovery = JSON.parse(body) as {websocket?: {endpoint?: string}};
+            if(discovery.websocket?.endpoint !== SERVER_WSS_ENDPOINT) {
+              throw new Error(`local server discovery advertises ${discovery.websocket?.endpoint}, expected ${SERVER_WSS_ENDPOINT}`);
+            }
+            response.writeHead(upstreamResponse.status, Object.fromEntries(upstreamResponse.headers));
+            response.end(body);
+          }).catch((error: Error) => {
+            discoveryErrors.push(error.message);
+            response.writeHead(502);
+            response.end();
+          });
+        } else if(host === APP_HOST) {
           const upstream = httpRequest({
             host: 'localhost',
             port: localAppPort,
@@ -1366,21 +1378,6 @@ test('isolates two server tabs when a custom server worker takes control', async
           fixtureResponses.add(response);
           response.once('close', () => fixtureResponses.delete(response));
           holdTlsResponseOpen(response);
-        } else if(host === SERVER_HOST && url.pathname === '/.well-known/teagramd/client') {
-          void fetch(`${serverHttpUrl}/.well-known/teagramd/client`).then(async(upstreamResponse) => {
-            const body = await upstreamResponse.text();
-            if(!upstreamResponse.ok) throw new Error(`local server discovery returned ${upstreamResponse.status}`);
-            const discovery = JSON.parse(body) as {websocket?: {endpoint?: string}};
-            if(discovery.websocket?.endpoint !== SERVER_WSS_ENDPOINT) {
-              throw new Error(`local server discovery advertises ${discovery.websocket?.endpoint}, expected ${SERVER_WSS_ENDPOINT}`);
-            }
-            response.writeHead(upstreamResponse.status, Object.fromEntries(upstreamResponse.headers));
-            response.end(body);
-          }).catch((error: Error) => {
-            discoveryErrors.push(error.message);
-            response.writeHead(502);
-            response.end();
-          });
         } else {
           response.writeHead(404);
           response.end();
@@ -1456,6 +1453,9 @@ test('isolates two server tabs when a custom server worker takes control', async
       await expect(defaultHostInput).toHaveValue('');
       await defaultHostInput.fill(APP_HOST);
       await page.getByRole('button', {name: 'Create account', exact: true}).click();
+      const defaultServerConfirmation = page.getByRole('dialog', {name: 'Confirm this server'});
+      await expect(defaultServerConfirmation.getByText(APP_HOST, {exact: true})).toBeVisible();
+      await defaultServerConfirmation.getByRole('button', {name: 'Confirm', exact: true}).click();
       await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
       await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
     });
