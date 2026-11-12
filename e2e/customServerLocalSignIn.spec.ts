@@ -1041,6 +1041,10 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     const mismatch = page.getByRole('dialog', {name: 'Server identity changed'});
     await expect(mismatch).toBeVisible();
     await expect(mismatch.getByText(`The identity of ${serverHost}, pinned in this browser, has changed.`)).toBeVisible();
+    await expect(mismatch.getByText('Pinned fingerprint', {exact: true})).toBeVisible();
+    await expect(mismatch.getByText('Presented fingerprint', {exact: true})).toBeVisible();
+    await expect(mismatch.getByText('The client cannot distinguish a legitimate key rotation from an interception, so the connection is blocked.')).toBeVisible();
+    await expect(mismatch.getByText('Cancel keeps this server\'s data and its current pin unchanged. Continue opens a final confirmation. Nothing is deleted until that final confirmation is explicitly accepted.')).toBeVisible();
     await expect(mismatch.getByText('Pinned WSS endpoint')).toBeVisible();
     await expect(mismatch.getByText('Current WSS endpoint')).toBeVisible();
     await expect(mismatch.locator('code.server-picker__endpoint')).toHaveText([privateEndpoint.href, privateEndpoint.href]);

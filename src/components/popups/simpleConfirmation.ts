@@ -2,6 +2,7 @@ import PopupElement, {addCancelButton, PopupButton} from '@components/popups';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import type {MessageEntity} from '@layer';
 import {FormatterArguments, LangPackKey, i18n} from '@lib/langPack';
+import {ensureServerLangPackFallbacks} from '@components/popups/serverLangPackFallback';
 import mergeEntities from '@lib/richTextProcessor/mergeEntities';
 import parseEntities from '@lib/richTextProcessor/parseEntities';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
@@ -153,7 +154,15 @@ export class SimpleConfirmationPopup extends PopupElement {
     }
   }
 
-  static show(options: SimpleConfirmationPopupShowOptions) {
+  static async show(options: SimpleConfirmationPopupShowOptions) {
+    if(options.titleLangKey.startsWith('Teagram.Server.')) {
+      try {
+        await ensureServerLangPackFallbacks();
+      } catch(error) {
+        console.error('Could not load server confirmation language fallbacks', error);
+      }
+    }
+
     return new Promise<void>((resolve, reject) => {
       let resolved = false
       let accepted = false;

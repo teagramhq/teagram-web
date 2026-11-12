@@ -1,91 +1,81 @@
 import type {LangPackDifference, LangPackString} from '@layer';
-import lang from '@/lang';
-import commonStateStorage from '@lib/commonStateStorage';
-import I18n, {handleUpdateLangPack} from '@lib/langPack';
-import rootScope from '@lib/rootScope';
+import I18n from '@lib/langPack';
+import {ensureServerLangPackFallbacks} from '@components/popups/serverLangPackFallback';
 
-describe('cached language pack fallbacks', () => {
-  it('adds local fallback strings without replacing cached translations', async() => {
+describe('server confirmation language fallbacks', () => {
+  it('applies only missing local server strings while preserving cached translations', async() => {
     const cachedTranslation: LangPackString = {
       _: 'langPackString',
       key: 'Teagram.Server.IdentityTitle',
       value: 'Cached identity title'
     };
+    const otherCachedString: LangPackString = {
+      _: 'langPackString',
+      key: 'Other.Key',
+      value: 'Cached value'
+    };
+    const localFallback: LangPackString = {
+      _: 'langPackString',
+      key: 'Teagram.Server.PinnedFingerprint',
+      value: 'Pinned fingerprint'
+    };
+    const localTranslation: LangPackString = {
+      _: 'langPackString',
+      key: 'Teagram.Server.IdentityTitle',
+      value: 'Local identity title'
+    };
+    const localOtherString: LangPackString = {
+      _: 'langPackString',
+      key: 'Other.LocalKey',
+      value: 'Local value'
+    };
     const cachedPack: LangPackDifference = {
       _: 'langPackDifference',
       lang_code: 'en',
       from_version: 1,
       version: 1,
-      strings: [cachedTranslation]
+      strings: [cachedTranslation, otherCachedString]
     };
-    const previousStrings = new Map(I18n.strings);
-    const getCachedPack = vi.spyOn(commonStateStorage, 'get').mockResolvedValue(cachedPack as any);
-    const dispatchEvent = vi.spyOn(rootScope, 'dispatchEvent').mockImplementation((() => {}) as any);
-    const dispatchEventSingle = vi.spyOn(rootScope, 'dispatchEventSingle').mockImplementation((() => {}) as any);
+    const localPack: LangPackDifference = {
+      _: 'langPackDifference',
+      lang_code: 'en',
+      from_version: 0,
+      version: 1,
+      strings: [localFallback, localTranslation, localOtherString]
+    };
+    const getCachedPack = vi.spyOn(I18n, 'getCacheLangPack').mockResolvedValue(cachedPack);
+    const loadLocalPack = vi.spyOn(I18n, 'loadLocalLangPack').mockResolvedValue(localPack);
+    const savePack = vi.spyOn(I18n, 'saveLangPack').mockResolvedValue(cachedPack);
 
     try {
-      await I18n.getCacheLangPackAndApply();
+      await ensureServerLangPackFallbacks();
 
-      expect(I18n.format('Teagram.Server.IdentityTitle', true)).toBe('Cached identity title');
-      const fallbackKeys = [
-        'Teagram.Server.ConfirmTitle',
-        'Teagram.Server.ConfirmNote',
-        'Teagram.Server.PinnedFingerprint',
-        'Teagram.Server.PresentedFingerprint',
-        'Teagram.Server.IdentityBlocked',
-        'Teagram.Server.IdentityCancel',
-        'Teagram.Server.IdentityContinue',
-        'Teagram.Server.DeleteTitle',
-        'Teagram.Server.DeleteConfirm'
-      ] as const;
-      fallbackKeys.forEach((key) => expect(I18n.format(key, true)).toBe(lang[key]));
+      expect(getCachedPack).toHaveBeenCalledWith(true);
+      expect(savePack).toHaveBeenCalledWith({
+        ...cachedPack,
+        strings: [localFallback, cachedTranslation, otherCachedString]
+      }, true);
     } finally {
-      I18n.strings.clear();
-      previousStrings.forEach((value, key) => I18n.strings.set(key, value));
       getCachedPack.mockRestore();
-      dispatchEvent.mockRestore();
-      dispatchEventSingle.mockRestore();
+      loadLocalPack.mockRestore();
+      savePack.mockRestore();
     }
   });
 
-  it('keeps local fallback strings when applying an update to an older cache', async() => {
-    const cachedPack: LangPackDifference = {
-      _: 'langPackDifference',
-      lang_code: 'en',
-      from_version: 1,
-      version: 1,
-      strings: [{
-        _: 'langPackString',
-        key: 'Teagram.Server.IdentityTitle',
-        value: 'Cached identity title'
-      }]
-    };
-    const difference: LangPackDifference = {
-      _: 'langPackDifference',
-      lang_code: 'en',
-      from_version: 1,
-      version: 2,
-      strings: []
-    };
-    const previousStrings = new Map(I18n.strings);
-    const getCachedPack = vi.spyOn(commonStateStorage, 'get').mockResolvedValue(cachedPack as any);
-    const saveUpdatedPack = vi.spyOn(commonStateStorage, 'set').mockResolvedValue(undefined as any);
-    const dispatchEvent = vi.spyOn(rootScope, 'dispatchEvent').mockImplementation((() => {}) as any);
-    const dispatchEventSingle = vi.spyOn(rootScope, 'dispatchEventSingle').mockImplementation((() => {}) as any);
+  it('does not save when there is no cached language pack', async() => {
+    const getCachedPack = vi.spyOn(I18n, 'getCacheLangPack').mockResolvedValue(undefined);
+    const loadLocalPack = vi.spyOn(I18n, 'loadLocalLangPack');
+    const savePack = vi.spyOn(I18n, 'saveLangPack');
 
     try {
-      await I18n.loadLocalLangPackAndApply();
-      await handleUpdateLangPack({difference});
+      await ensureServerLangPackFallbacks();
 
-      expect(I18n.format('Teagram.Server.IdentityTitle', true)).toBe('Cached identity title');
-      expect(I18n.format('Teagram.Server.PinnedFingerprint', true)).toBe(lang['Teagram.Server.PinnedFingerprint']);
+      expect(loadLocalPack).not.toHaveBeenCalled();
+      expect(savePack).not.toHaveBeenCalled();
     } finally {
-      I18n.strings.clear();
-      previousStrings.forEach((value, key) => I18n.strings.set(key, value));
       getCachedPack.mockRestore();
-      saveUpdatedPack.mockRestore();
-      dispatchEvent.mockRestore();
-      dispatchEventSingle.mockRestore();
+      loadLocalPack.mockRestore();
+      savePack.mockRestore();
     }
   });
 });

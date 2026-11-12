@@ -148,8 +148,6 @@ namespace I18n {
       if(!langPack) {
         langPack = await loadLocalLangPack();
         langPack = await saveLangPack(langPack, false);
-      } else {
-        langPack = await mergeLocalFallbackStrings(langPack);
       }
 
       setLangCode(langPack.lang_code);
@@ -742,18 +740,6 @@ namespace I18n {
 export {I18n};
 export default I18n;
 
-async function mergeLocalFallbackStrings(langPack: LangPackDifference): Promise<LangPackDifference> {
-  const localLangPack = await I18n.loadLocalLangPack();
-  const cachedKeys = new Set(langPack.strings.map(({key}) => key));
-  return {
-    ...langPack,
-    strings: [
-      ...localLangPack.strings.filter(({key}) => !cachedKeys.has(key)),
-      ...langPack.strings
-    ]
-  };
-}
-
 const i18n = I18n.i18n;
 export {i18n};
 
@@ -799,7 +785,7 @@ export async function handleUpdateLangPack(update: {difference: LangPackDifferen
   }
 
   // Get current langPack from storage
-  let storedLangPack = await I18n.getCacheLangPack();
+  const storedLangPack = await I18n.getCacheLangPack();
   if(storedLangPack?.lang_code !== difference.lang_code || storedLangPack.lang_code !== I18n.getLastRequestedLangCode()) {
     return;
   }
@@ -808,8 +794,6 @@ export async function handleUpdateLangPack(update: {difference: LangPackDifferen
     handleUpdateLangPackTooLong(difference);
     return;
   }
-
-  storedLangPack = await mergeLocalFallbackStrings(storedLangPack);
 
   // Apply updates to langPack
   if(difference.strings) {
