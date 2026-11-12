@@ -362,6 +362,20 @@ describe('performance RPC trace summary', () => {
     expect(result.map((call: {method: string}) => call.method)).toEqual(['first', 'last']);
   });
 
+  test('captures chat-open history calls through settled trace capture after the visible boundary', async() => {
+    const trace = await import('../../e2e/performanceRpcTrace') as any;
+    const result = trace.rpcInvocationsBetween([
+      {method: 'before', startedAtEpochMs: 1099},
+      {method: 'visible-boundary', startedAtEpochMs: 1100},
+      {method: 'after-visible-before-settled-capture', startedAtEpochMs: 1250},
+      {method: 'after-capture', startedAtEpochMs: 1301}
+    ], 1000, 100, 300);
+    expect(result.map((call: {method: string}) => call.method)).toEqual([
+      'visible-boundary',
+      'after-visible-before-settled-capture'
+    ]);
+  });
+
   test('reports method counts for every invocation inside the measurement window', async() => {
     const trace = await import('../../e2e/performanceRpcTrace') as any;
     expect(trace.rpcMethodCounts([

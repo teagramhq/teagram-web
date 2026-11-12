@@ -61,6 +61,7 @@ function runSummaryWithArtifacts({
   includeChatOpenServerRecords = true,
   chatOpenServerHistoryRecordCount = 1,
   chatOpenClientHistoryCallCount = 1,
+  chatOpenServerClientHistoryCallCount = chatOpenClientHistoryCallCount,
   includeChatOpenClientRpcData = true,
   chatOpenRpcWallMs = 60,
   requireBase = true,
@@ -77,7 +78,7 @@ function runSummaryWithArtifacts({
     result: 'success',
     end_unix_ms: 1_762_800_000_123 + index
   })) : undefined;
-  const serverRpcClientCalls = Array.from({length: chatOpenClientHistoryCallCount}, () => ({
+  const serverRpcClientCalls = Array.from({length: chatOpenServerClientHistoryCallCount}, () => ({
     method: 'messages.getHistory',
     startedAtEpochMs: 1_762_800_000_000,
     durationMs: 200,
@@ -569,7 +570,7 @@ test('summary fails closed when server traces omit client getHistory handlers', 
   const result = runSummaryWithArtifacts({chatOpenClientHistoryCallCount: 2});
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /has 1 server records for 2 client messages\.getHistory calls/);
+  assert.match(result.stderr, /has 1 server records for 2 client messages\.getHistory spans/);
 });
 
 test('summary preserves extra server handlers when the client records fewer calls', () => {
@@ -598,11 +599,13 @@ test('100x chat-open gate records client RPC spans and waits for all history wor
   assert.match(gateCall, /openPartnerChat\(page, requests, fixture, scale === '100x', collectWalkDiagnostics, scale === '100x'\)/);
   assert.ok(capture, 'the capture helper must be present');
   assert.match(capture, /captureRpcTrace/);
+  assert.match(capture, /captureEndedAtMs: performance\.now\(\)/);
+  assert.match(capture, /rpcInvocationsBetween\(rpcRawCalls\.filter\(\(call\) => call\.method === 'messages\.getHistory'\), timeOrigin, boundary\.startedAtMs, captureEndedAtMs\)/);
   assert.ok(openPartnerChat, 'the chat-open helper must be present');
   assert.match(openPartnerChat, /await waitForHistorySettled\(page\)/);
   assert.match(openPartnerChat, /capture\(page, requests, boundary, false, false, collectWalkDiagnostics, false, collectWalkDiagnostics, traceRpc, collectServerRpcTrace\)/);
   assert.match(capture, /captureServerRpcClientCalls/);
-  assert.match(openPartnerChat, /attachServerRpcTrace\(sample, traceOffset, sample\.rpcCalls\.filter\(\(call\) => call\.method === 'messages\.getHistory'\)\.length\)/);
+  assert.match(openPartnerChat, /attachServerRpcTrace\(sample, traceOffset, sample\.serverRpcClientCalls\?\.length \?\? 0\)/);
   assert.ok(attachServerRpcTrace, 'server handler records must be correlated before attachment');
   assert.match(attachServerRpcTrace, /recordFilter: \(record\) => serverRpcRecordMatchesClientCalls\(record, clientCalls\)/);
   assert.match(attachServerRpcTrace, /serverRpcRecordsCoverClientCalls/);
@@ -619,6 +622,16 @@ test('summary fails closed when no client getHistory span can be correlated', ()
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /cannot correlate server messages\.getHistory records to client spans/);
+});
+
+test('summary correlates history spans that finish after the visible-boundary timing window', () => {
+  const result = runSummaryWithArtifacts({
+    chatOpenClientHistoryCallCount: 0,
+    chatOpenServerClientHistoryCallCount: 1
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /gate sample \| base \| 1 \| 100\.0 \| 60\.0 \| 40\.0 \| 40\.1 ms \(success\)/);
 });
 
 test('summary rejects a process-wide server handler outside the client sample span', () => {

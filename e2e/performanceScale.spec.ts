@@ -6,7 +6,7 @@ import {expect, test, type Browser, type BrowserContext, type Locator, type Page
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
 import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes, trackBundleDocumentNavigation, type BundleRequestTracker} from './performanceBundleBytes';
-import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
+import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsBetween, rpcInvocationsInWindow, rpcMethodCounts, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
 import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
 import {LOTTIE_FRAME_BG_CSS, scheduleAfterInterveningPaint, waitForFirstStickerFrame, waitForFirstStickerPaint, waitUntilOnScreen} from './lottieFrameMeasurement';
@@ -472,6 +472,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       rpcCallCount: rpcTrace.callCount,
       rpcInvocations: rpcTrace.invocations,
       rpcRawCalls: rpcTrace.calls,
+      captureEndedAtMs: performance.now(),
       workerPhases,
       mainPhases,
       droppedFramePercent: scroll && intervals.length ? droppedFramePercent : undefined,
@@ -480,7 +481,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       rafDropped: scroll && intervals.length ? droppedFrames : undefined
     };
   }, {scroll, includePhases, includeLongTaskTrace, collectWalkDiagnostics, captureRpcTrace});
-  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, frameWindows, reconcileMirrorTasks, loafObserved, rpcInvocations, rpcRawCalls, timeOrigin, ...metrics} = captured;
+  const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, frameWindows, reconcileMirrorTasks, loafObserved, rpcInvocations, rpcRawCalls, timeOrigin, captureEndedAtMs, ...metrics} = captured;
   if(captureRpcTrace) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
   if(captureServerRpcClientCalls) expect(captureRpcTrace && metrics.rpcSpansRecorded, 'server RPC correlation requires recorded client spans').toBe(true);
   // Lightweight walk counts need long tasks only; non-scroll samples may not start the animation-frame observer.
@@ -492,7 +493,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     outcome: call.outcome
   }));
   const serverRpcClientCalls = captureServerRpcClientCalls
-    ? rpcInvocationsInWindow(rpcRawCalls.filter((call) => call.method === 'messages.getHistory'), timeOrigin, boundary.startedAtMs, boundary.ms)
+    ? rpcInvocationsBetween(rpcRawCalls.filter((call) => call.method === 'messages.getHistory'), timeOrigin, boundary.startedAtMs, captureEndedAtMs)
     : undefined;
   const rpcCallCount = metrics.rpcSpansRecorded ? rpcInvocationsInWindow(rpcInvocations, timeOrigin, boundary.startedAtMs, boundary.ms).length : metrics.rpcCallCount;
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
@@ -991,7 +992,7 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   if(collectServerRpcTrace) await waitForHistorySettled(page);
   const sample = await capture(page, requests, boundary, false, false, collectWalkDiagnostics, false, collectWalkDiagnostics, traceRpc, collectServerRpcTrace);
   if(!collectServerRpcTrace) return sample;
-  return attachServerRpcTrace(sample, traceOffset, sample.rpcCalls.filter((call) => call.method === 'messages.getHistory').length);
+  return attachServerRpcTrace(sample, traceOffset, sample.serverRpcClientCalls?.length ?? 0);
 }
 
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}) {
@@ -2082,7 +2083,7 @@ async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Varia
             const offset = perf.clickAt - perf.peerChangeBase;
             return (perf.peerChangePhases || []).map((phase: {startMs: number}) => ({...phase, startMs: Number((phase.startMs - offset).toFixed(1))}));
           }))
-        }, serverTraceOffset, chatOpenCapture.rpcCalls.filter((call) => call.method === 'messages.getHistory').length);
+        }, serverTraceOffset, chatOpenCapture.serverRpcClientCalls?.length ?? 0);
         traceSamples.chatOpen.push(chatOpenSample);
         await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpenSample, 'chatOpen');
 

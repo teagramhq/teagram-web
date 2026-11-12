@@ -76,18 +76,19 @@ function formatChatOpenServerTimingTable(report, failures) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has missing or invalid messages.getHistory server durations`);
         continue;
       }
-      const clientHistoryCallCount = Array.isArray(sample.rpcCalls) ? sample.rpcCalls.filter((call) => call?.method === 'messages.getHistory').length : undefined;
+      const clientHistoryCalls = sample.serverRpcClientCalls;
+      const clientHistoryCallCount = Array.isArray(clientHistoryCalls) ? clientHistoryCalls.length : undefined;
+      const metricClientHistoryCallCount = Array.isArray(sample.rpcCalls) ? sample.rpcCalls.filter((call) => call?.method === 'messages.getHistory').length : undefined;
       const expectation = Number.isSafeInteger(clientHistoryCallCount) ? serverRpcTraceExpectation(clientHistoryCallCount) : undefined;
       if(!expectation || serverRecords.length < expectation.minimumCount) {
-        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has ${serverRecords.length} server records for ${clientHistoryCallCount ?? 'unknown'} client messages.getHistory calls`);
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has ${serverRecords.length} server records for ${clientHistoryCallCount ?? 'unknown'} client messages.getHistory spans`);
         continue;
       }
       if(!Number.isFinite(sample.ms) || !Number.isFinite(sample.rpcWallMs) || !Number.isFinite(sample.nonRpcElapsedMs)) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} is missing total, RPC wall, or non-RPC timing`);
         continue;
       }
-      const clientHistoryCalls = sample.serverRpcClientCalls;
-      if(!Array.isArray(clientHistoryCalls) || clientHistoryCalls.length !== clientHistoryCallCount ||
+      if(!Array.isArray(clientHistoryCalls) ||
         !serverRpcRecordsCoverClientCalls(serverRecords, clientHistoryCalls) ||
         !serverRecords.every((record) => serverRpcRecordMatchesClientCalls(record, clientHistoryCalls))) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} cannot correlate server messages.getHistory records to client spans`);
@@ -95,7 +96,8 @@ function formatChatOpenServerTimingTable(report, failures) {
       }
       const serverDurations = serverRecords.map((record) => `${show(record.duration_us / 1000)} ms (${record.result})`).join(', ');
       const serverIntervalUnionMs = serverRpcIntervalUnionMs(serverRecords);
-      const rpcResidual = clientHistoryCallCount > 0 && serverRecords.length === clientHistoryCallCount && serverIntervalUnionMs <= sample.rpcWallMs
+      const rpcResidual = Number.isSafeInteger(metricClientHistoryCallCount) && metricClientHistoryCallCount > 0 &&
+        serverRecords.length === metricClientHistoryCallCount && serverIntervalUnionMs <= sample.rpcWallMs
         ? sample.rpcWallMs - serverIntervalUnionMs
         : undefined;
       rows.push(`| ${source} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.rpcWallMs)} | ${show(sample.nonRpcElapsedMs)} | ${serverDurations} | ${show(rpcResidual)} |`);
