@@ -238,6 +238,24 @@ test('base search tracing preserves application RPC differences from the head bu
   const {injectSearchRpcTracer} = await import('./inject-search-rpc-tracer.mjs');
   const instrumentedBase = injectSearchRpcTracer(baseApiManager);
   const instrumentedHead = injectSearchRpcTracer(headApiManager);
+  const searchAwareBase = baseApiManager
+    .replace(
+      "    if(import.meta.env.VITE_PERF_TRACE === '1') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }",
+      "    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }"
+    )
+    .replace(
+      "    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace!.reset(recordSpans);",
+      "    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1') {\n      this.performanceRpcTrace!.reset(recordSpans);\n    }"
+    )
+    .replace(
+      "    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace?.recordCall(methodName);",
+      "    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace?.recordCall(methodName);\n    const traceSearch = import.meta.env.VITE_PERF_SEARCH_TRACE === '1' && methodName === 'messages.searchGlobal';"
+    )
+    .replace(
+      '      return this.invokeApiInternal(method, params, options);',
+      '      const request = this.invokeApiInternal(method, params, options);\n      return traceSearch ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;'
+    );
+  const instrumentedSearchAwareBase = injectSearchRpcTracer(searchAwareBase);
 
   assert.match(instrumentedBase, /implementation: 'base RPC handling'/);
   assert.doesNotMatch(instrumentedBase, /head RPC handling/);
@@ -249,6 +267,9 @@ test('base search tracing preserves application RPC differences from the head bu
   assert.match(instrumentedBase, /messages\.getHistory/);
   assert.match(instrumentedBase, /traceHistory \? this\.performanceRpcTrace\?\.trackWait/);
   assert.match(instrumentedHead, /VITE_PERF_HISTORY_TRACE/);
+  assert.match(instrumentedSearchAwareBase, /VITE_PERF_HISTORY_TRACE/);
+  assert.match(instrumentedSearchAwareBase, /const traceSearch =/);
+  assert.match(instrumentedSearchAwareBase, /return traceSearch \|\| traceHistory \?/);
 });
 
 test('search RPC tracer injection accepts the current ApiManager unchanged and is repeatable', async() => {
