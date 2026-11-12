@@ -419,7 +419,7 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
   }
 
   async function showFirstUseConfirmation(discovered: DiscoveredServer, target: HTMLElement | undefined) {
-    const extraContent = popupContent(
+    const extraContent = () => popupContent(
       createServerEndpointBlock('Advertised WSS endpoint', discovered.target.endpoint),
       fingerprintBlock('Teagram.Server.Fingerprint', discovered.spkiFingerprint),
       popupParagraph('Teagram.Server.ConfirmNote')
@@ -450,7 +450,7 @@ function createServerSelectionAction(initial: ServerSelectionState, initialActiv
     pin: NonNullable<ReturnType<typeof getServerPin>>,
     isCurrent: () => boolean = () => true
   ) {
-    const extraContent = popupContent(
+    const extraContent = () => popupContent(
       createServerEndpointBlock('Pinned WSS endpoint', pin.endpoint),
       createServerEndpointBlock('Current WSS endpoint', discovered.target.endpoint),
       fingerprintBlock('Teagram.Server.PinnedFingerprint', pin.key_fingerprint),

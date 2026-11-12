@@ -29,7 +29,9 @@ type SimpleConfirmationPopupOptions = {
   extraContent?: HTMLElement
 };
 
-type SimpleConfirmationPopupShowOptions = Omit<SimpleConfirmationPopupOptions, 'buttons'> & {
+type SimpleConfirmationPopupShowOptions = Omit<SimpleConfirmationPopupOptions, 'buttons' | 'extraContent'> & {
+  // A factory runs after the language fallbacks are in place, so its labels are never rendered as raw keys.
+  extraContent?: HTMLElement | (() => HTMLElement),
   button: PopupButton,
   cancelLangKey?: LangPackKey,
   focusReturnTarget?: HTMLElement
@@ -204,7 +206,7 @@ export class SimpleConfirmationPopup extends PopupElement {
         scrollable: options.scrollable || options.termsDialog,
         disableTextEnterConfirm: options.disableTextEnterConfirm,
         verticalButtons: options.verticalButtons,
-        extraContent: options.extraContent
+        extraContent: typeof options.extraContent === 'function' ? options.extraContent() : options.extraContent
       })
 
       popup.addEventListener('closeAfterTimeout', () => {
