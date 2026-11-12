@@ -92,7 +92,7 @@ export class ApiManager extends ApiManagerMethods {
     super();
     this.name = 'API';
 
-    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1') {
+    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1' || import.meta.env.VITE_PERF_HISTORY_TRACE === '1') {
       this.performanceRpcTrace = new PerformanceRpcTrace(true);
     }
 
@@ -837,7 +837,7 @@ export class ApiManager extends ApiManagerMethods {
   }
 
   public resetPerformanceRpcTrace(recordSpans = true) {
-    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1') {
+    if(import.meta.env.VITE_PERF_TRACE === '1' || import.meta.env.VITE_PERF_SEARCH_TRACE === '1' || import.meta.env.VITE_PERF_HISTORY_TRACE === '1') {
       this.performanceRpcTrace!.reset(recordSpans);
     }
   }
@@ -881,11 +881,12 @@ export class ApiManager extends ApiManagerMethods {
 
   public invokeApi<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {}, options: InvokeApiOptions = {}): CancellablePromise<MethodDeclMap[T]['res']> {
     const methodName = String(method);
-    if(import.meta.env.VITE_PERF_TRACE === '1') this.performanceRpcTrace?.recordCall(methodName);
+    const traceHistory = import.meta.env.VITE_PERF_HISTORY_TRACE === '1' && methodName === 'messages.getHistory';
+    if(import.meta.env.VITE_PERF_TRACE === '1' || traceHistory) this.performanceRpcTrace?.recordCall(methodName);
     const traceSearch = import.meta.env.VITE_PERF_SEARCH_TRACE === '1' && methodName === 'messages.searchGlobal';
     if(!getAuthMethod(methodName, params)) {
       const request = this.invokeApiInternal(method, params, options);
-      return traceSearch ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;
+      return traceSearch || traceHistory ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;
     }
 
     const redactor = this.authLogRedactor ??= new AuthLogRedactor(this.log);
@@ -896,7 +897,7 @@ export class ApiManager extends ApiManagerMethods {
         options;
       const request = this.invokeApiInternal(method, params, requestOptions);
       request.then(() => redactor.end(), () => redactor.end());
-      return request;
+      return traceHistory ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;
     } catch(error) {
       redactor.end();
       throw error;

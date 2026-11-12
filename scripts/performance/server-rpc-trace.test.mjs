@@ -3,7 +3,7 @@ import {mkdtempSync, rmSync, writeFileSync, appendFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {test} from 'node:test';
-import {getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from './server-rpc-trace.mjs';
+import {getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcIntervalUnionMs, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from './server-rpc-trace.mjs';
 
 const record = (method, duration_us = 40_123) => JSON.stringify({
   method,
@@ -19,6 +19,13 @@ test('server RPC trace keeps a required record when the client sample has no cal
 
 test('server RPC trace requires coverage for each client call without dropping extra handlers', () => {
   assert.deepEqual(serverRpcTraceExpectation(2), {minimumCount: 2});
+});
+
+test('server RPC interval union does not double count overlapping handlers', () => {
+  assert.equal(serverRpcIntervalUnionMs([
+    {duration_us: 40_000, end_unix_ms: 1_000},
+    {duration_us: 40_000, end_unix_ms: 1_010}
+  ]), 50);
 });
 
 async function withTraceFile(run) {

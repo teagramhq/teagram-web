@@ -61,6 +61,8 @@ function runSummaryWithArtifacts({
   includeChatOpenServerRecords = true,
   chatOpenServerHistoryRecordCount = 1,
   chatOpenClientHistoryCallCount = 1,
+  includeChatOpenClientRpcData = true,
+  chatOpenRpcWallMs = 60,
   requireBase = true,
   eventName = 'pull_request',
   mutateReport
@@ -94,6 +96,16 @@ function runSummaryWithArtifacts({
     blockingTimeMs: 0,
     maxLongTaskDurationMs: 0,
     ...(key === 'chatOpen' && serverRpcRecords ? {serverRpcRecords} : {}),
+    ...(key === 'chatOpen' ? {
+      rpcWallMs: includeChatOpenClientRpcData ? chatOpenRpcWallMs : null,
+      nonRpcElapsedMs: includeChatOpenClientRpcData ? 100 - chatOpenRpcWallMs : null,
+      rpcCalls: includeChatOpenClientRpcData ? Array.from({length: chatOpenClientHistoryCallCount}, () => ({
+        method: 'messages.getHistory',
+        startedAtMs: 0,
+        durationMs: 60,
+        outcome: 'success'
+      })) : []
+    } : {}),
     ...(key === 'scrollBack2k' ? {
       frameIntervals: 100,
       droppedFrames: 3,
@@ -142,7 +154,7 @@ function runSummaryWithArtifacts({
             rpcCallCount: chatOpenClientHistoryCallCount,
             rpcWallMs: chatOpenClientHistoryCallCount ? 377 : 0,
             nonRpcElapsedMs: chatOpenClientHistoryCallCount ? 0 : 377,
-            rpcCalls: Array.from({length: chatOpenClientHistoryCallCount}, () => ({method: 'messages.getHistory', durationMs: 377, outcome: 'success'})),
+            rpcCalls: includeChatOpenClientRpcData ? Array.from({length: chatOpenClientHistoryCallCount}, () => ({method: 'messages.getHistory', startedAtMs: 0, durationMs: 377, outcome: 'success'})) : [],
             ...(serverRpcRecords ? {serverRpcRecords} : {})
           }]
         }]))
@@ -174,9 +186,9 @@ function runSummaryWithArtifacts({
   }
 }
 
-test('timing bundles enable reconciliation and targeted search probes while keeping full profiles separate', () => {
-  assert.match(workflow, /^\s+VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
-  assert.match(workflow, /^\s+\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
+test('timing bundles enable targeted search and history probes while keeping full profiles separate', () => {
+  assert.match(workflow, /^\s+VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
+  assert.match(workflow, /^\s+\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
   assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
   assert.doesNotMatch(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
 });
@@ -186,8 +198,8 @@ test('base search tracing preserves application RPC differences from the head bu
   assert.ok(buildStep, 'the performance workflow must define its client build step');
   assert.doesNotMatch(buildStep, /git -C "\$base_directory" checkout .*src\/lib\/appManagers\/apiManager\.ts/);
   assert.match(buildStep, /node scripts\/performance\/inject-search-rpc-tracer\.mjs "\$base_directory\/src\/lib\/appManagers\/apiManager\.ts"/);
-  assert.match(buildStep, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
-  assert.match(buildStep, /\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)/);
+  assert.match(buildStep, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
+  assert.match(buildStep, /\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)/);
 
   const baseApiManager = [
     'export class ApiManager {',
@@ -206,6 +218,16 @@ test('base search tracing preserves application RPC differences from the head bu
     '    if(!getAuthMethod(methodName, params)) {',
     '      return this.invokeApiInternal(method, params, options);',
     '    }',
+    '    const redactor = this.authLogRedactor ??= new AuthLogRedactor(this.log);',
+    '    redactor.begin();',
+    '    try {',
+    '      const request = this.invokeApiInternal(method, params, options);',
+    '      request.then(() => redactor.end(), () => redactor.end());',
+    '      return request;',
+    '    } catch(error) {',
+    '      redactor.end();',
+    '      throw error;',
+    '    }',
     '  }',
     '  private invokeApiInternal(method, params, options) {',
     "    return {implementation: 'base RPC handling', method, params, options};",
@@ -223,6 +245,10 @@ test('base search tracing preserves application RPC differences from the head bu
   assert.doesNotMatch(instrumentedHead, /base RPC handling/);
   assert.match(instrumentedBase, /VITE_PERF_SEARCH_TRACE/);
   assert.match(instrumentedHead, /VITE_PERF_SEARCH_TRACE/);
+  assert.match(instrumentedBase, /VITE_PERF_HISTORY_TRACE/);
+  assert.match(instrumentedBase, /messages\.getHistory/);
+  assert.match(instrumentedBase, /traceHistory \? this\.performanceRpcTrace\?\.trackWait/);
+  assert.match(instrumentedHead, /VITE_PERF_HISTORY_TRACE/);
 });
 
 test('search RPC tracer injection accepts the current ApiManager unchanged and is repeatable', async() => {
@@ -342,6 +368,8 @@ test('only pull requests build and require a base comparison', () => {
 });
 
 test('performance tracing uses a separate diagnostic bundle', () => {
+  assert.match(workflow, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
+  assert.match(workflow, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"/);
   assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
   assert.match(workflow, /PERF_TRACE_HEAD_ORIGIN_100X=http:\/\/localhost:4177/);
   assert.match(workflow, /TG_WEBSOCKET_ALLOWED_ORIGINS=.*http:\/\/localhost:4177/);
@@ -501,6 +529,13 @@ test('summary fails closed when a 100x chat-open server duration is missing', ()
   assert.match(result.stderr, /100x chatOpen .*has missing or invalid messages\.getHistory server durations/);
 });
 
+test('summary requires RPC wall and non-RPC timing for each 100x chat-open gate sample', () => {
+  const result = runSummaryWithArtifacts({includeChatOpenClientRpcData: false});
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /100x chatOpen gate sample base sample 1 is missing total, RPC wall, or non-RPC timing/);
+});
+
 test('summary fails closed when server traces omit client getHistory handlers', () => {
   const result = runSummaryWithArtifacts({chatOpenClientHistoryCallCount: 2});
 
@@ -512,6 +547,33 @@ test('summary preserves extra server handlers when the client records fewer call
   const result = runSummaryWithArtifacts({chatOpenServerHistoryRecordCount: 2});
 
   assert.equal(result.status, 0);
+});
+
+test('summary subtracts the union of overlapping server handler intervals', () => {
+  const result = runSummaryWithArtifacts({chatOpenServerHistoryRecordCount: 2, chatOpenClientHistoryCallCount: 2});
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /RPC wall minus server interval union \(ms\)/);
+  assert.match(result.stdout, /RPC diagnostic \| base \| 1 \| 377\.0 \| 377\.0 \| 0\.0 \| 40\.1 ms \(success\), 40\.1 ms \(success\) \| 335\.9 \|/);
+});
+
+test('100x chat-open gate records client RPC spans and waits for all history work', () => {
+  const gateCall = performanceScale.match(/const chatOpen = await test\.step\('open scale fixture chat',[\s\S]*?\);/)?.[0];
+  const capture = performanceScale.match(/async function capture\([\s\S]*?(?=\nasync function readCachedDialogReconcileSnapshot)/)?.[0];
+  const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
+  const waitForHistorySettled = performanceScale.match(/async function waitForHistorySettled\([\s\S]*?(?=\nasync function reloadChatList)/)?.[0];
+
+  assert.ok(gateCall, 'the gated chat-open scenario must be present');
+  assert.match(gateCall, /openPartnerChat\(page, requests, fixture, scale === '100x', collectWalkDiagnostics, scale === '100x'\)/);
+  assert.ok(capture, 'the capture helper must be present');
+  assert.match(capture, /captureRpcTrace/);
+  assert.ok(openPartnerChat, 'the chat-open helper must be present');
+  assert.match(openPartnerChat, /await waitForHistorySettled\(page\)/);
+  assert.match(openPartnerChat, /capture\(page, requests, boundary, false, false, collectWalkDiagnostics, false, collectWalkDiagnostics, traceRpc\)/);
+  assert.match(openPartnerChat, /attachServerRpcTrace\(sample, traceOffset, sample\.rpcCalls\.filter\(\(call\) => call\.method === 'messages\.getHistory'\)\.length\)/);
+  assert.ok(waitForHistorySettled, 'history capture must wait for pending client getHistory spans');
+  assert.match(waitForHistorySettled, /getPerformanceRpcTrace\(\)/);
+  assert.match(waitForHistorySettled, /call\.method === 'messages\.getHistory' && call\.outcome === 'pending'/);
 });
 
 test('summary keeps server timings when the client boundary records no getHistory calls', () => {
@@ -567,8 +629,14 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
       ...sample,
       serverRpcRecords: [{method: 'messages.getHistory', duration_us: 40_123, result: 'success', end_unix_ms: 1_762_800_000_123}]
     });
-    variants.base['100x'].chatOpen = Array.from({length: PERFORMANCE_REPEATS}, () => withServerHistory(makeSample(100)));
-    variants.head['100x'].chatOpen = timingSamples.map((ms) => withServerHistory(makeSample(ms)));
+    const withChatOpenTimings = (sample) => ({
+      ...sample,
+      rpcWallMs: 60,
+      nonRpcElapsedMs: sample.ms - 60,
+      rpcCalls: [{method: 'messages.getHistory', startedAtMs: 0, durationMs: 60, outcome: 'success'}]
+    });
+    variants.base['100x'].chatOpen = Array.from({length: PERFORMANCE_REPEATS}, () => withServerHistory(withChatOpenTimings(makeSample(100))));
+    variants.head['100x'].chatOpen = timingSamples.map((ms) => withServerHistory(withChatOpenTimings(makeSample(ms))));
     const makeSendSample = (measurement) => {
       const {ms, appSendUiMs = ms - 20} = typeof measurement === 'number' ? {ms: measurement} : measurement;
       return {...makeSample(ms), appSendUiMs};
@@ -714,7 +782,7 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
   assert.match(nineSampleSummary, /100x chat-open server handling/);
   assert.equal([...nineSampleSummary.matchAll(/\| gate sample \| base \|/g)].length, PERFORMANCE_REPEATS);
   assert.equal([...nineSampleSummary.matchAll(/\| gate sample \| head \|/g)].length, PERFORMANCE_REPEATS);
-  assert.match(nineSampleSummary, /gate sample \| base \| 1 \| 100\.0 \| n\/a \| n\/a \| 40\.1 ms \(success\)/);
+  assert.match(nineSampleSummary, /gate sample \| base \| 1 \| 100\.0 \| 60\.0 \| 40\.0 \| 40\.1 ms \(success\) \| 19\.9 \|/);
   assert.match(nineSampleSummary, /RPC diagnostic \| head \| 1 \| 377\.0 \| 377\.0 \| 0\.0 \| 40\.1 ms \(success\) \|/);
   assert.match(nineSampleSummary, /peers \| 10\.0 \| 11\.0 \| 1\.000 \|.*passed/);
   assert.match(nineSampleSummary, /Walk-mirror tasks >50 ms \(head max\/repeat\)/);

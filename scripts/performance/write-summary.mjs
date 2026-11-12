@@ -1,7 +1,7 @@
 import {mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {evaluatePairedDifferences, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PAIRED_CONFIDENCE_LEVEL, PERFORMANCE_REPEATS, TIMING_MINIMUM_EFFECTS} from './policy.mjs';
-import {serverRpcTraceExpectation} from './server-rpc-trace.mjs';
+import {serverRpcIntervalUnionMs, serverRpcTraceExpectation} from './server-rpc-trace.mjs';
 import {hasValidGlobalSearchStages} from './global-search-measurement.mjs';
 
 const reportPath = resolve(process.env.PERF_REPORT_PATH || '.performance-report.json');
@@ -65,7 +65,7 @@ function formatChatOpenServerTimingTable(report, failures) {
   const rows = [];
   const variants = report.requireBase ? ['base', 'head'] : ['head'];
   const show = (value) => Number.isFinite(value) ? value.toFixed(1) : 'n/a';
-  const addRows = (source, variant, samples, diagnostic = false) => {
+  const addRows = (source, variant, samples) => {
     if(!Array.isArray(samples) || !samples.length) {
       failures.push(`100x chatOpen ${source} ${variant} server timing samples are missing`);
       return;
@@ -76,21 +76,21 @@ function formatChatOpenServerTimingTable(report, failures) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has missing or invalid messages.getHistory server durations`);
         continue;
       }
-      const clientHistoryCallCount = diagnostic && Array.isArray(sample.rpcCalls) ? sample.rpcCalls.filter((call) => call?.method === 'messages.getHistory').length : undefined;
-      if(diagnostic) {
-        const expectation = Number.isSafeInteger(clientHistoryCallCount) && clientHistoryCallCount >= 0 ? serverRpcTraceExpectation(clientHistoryCallCount) : undefined;
-        if(!expectation || serverRecords.length < expectation.minimumCount) {
-          failures.push(`100x chatOpen RPC diagnostic ${variant} sample ${index + 1} has ${serverRecords.length} server records for ${clientHistoryCallCount ?? 'unknown'} client messages.getHistory calls`);
-          continue;
-        }
-        if(!Number.isFinite(sample.ms) || !Number.isFinite(sample.rpcWallMs) || !Number.isFinite(sample.nonRpcElapsedMs)) {
-          failures.push(`100x chatOpen RPC diagnostic ${variant} sample ${index + 1} is missing total, RPC wall, or non-RPC timing`);
-          continue;
-        }
+      const clientHistoryCallCount = Array.isArray(sample.rpcCalls) ? sample.rpcCalls.filter((call) => call?.method === 'messages.getHistory').length : undefined;
+      const expectation = Number.isSafeInteger(clientHistoryCallCount) ? serverRpcTraceExpectation(clientHistoryCallCount) : undefined;
+      if(!expectation || serverRecords.length < expectation.minimumCount) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has ${serverRecords.length} server records for ${clientHistoryCallCount ?? 'unknown'} client messages.getHistory calls`);
+        continue;
+      }
+      if(!Number.isFinite(sample.ms) || !Number.isFinite(sample.rpcWallMs) || !Number.isFinite(sample.nonRpcElapsedMs)) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} is missing total, RPC wall, or non-RPC timing`);
+        continue;
       }
       const serverDurations = serverRecords.map((record) => `${show(record.duration_us / 1000)} ms (${record.result})`).join(', ');
-      const serverTotalMs = serverRecords.reduce((total, record) => total + record.duration_us / 1000, 0);
-      const rpcResidual = diagnostic && clientHistoryCallCount > 0 && serverRecords.length === clientHistoryCallCount && Number.isFinite(sample.rpcWallMs) ? sample.rpcWallMs - serverTotalMs : undefined;
+      const serverIntervalUnionMs = serverRpcIntervalUnionMs(serverRecords);
+      const rpcResidual = clientHistoryCallCount > 0 && serverRecords.length === clientHistoryCallCount && serverIntervalUnionMs <= sample.rpcWallMs
+        ? sample.rpcWallMs - serverIntervalUnionMs
+        : undefined;
       rows.push(`| ${source} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.rpcWallMs)} | ${show(sample.nonRpcElapsedMs)} | ${serverDurations} | ${show(rpcResidual)} |`);
     }
   };
@@ -99,15 +99,15 @@ function formatChatOpenServerTimingTable(report, failures) {
     addRows('gate sample', variant, report.variants?.[variant]?.['100x']?.chatOpen);
   }
   for(const variant of variants) {
-    addRows('RPC diagnostic', variant, report.diagnostics?.['100x']?.rpcComparison?.[variant]?.chatOpen, true);
+    addRows('RPC diagnostic', variant, report.diagnostics?.['100x']?.rpcComparison?.[variant]?.chatOpen);
   }
   if(!rows.length) return '';
   return [
     '### 100x chat-open server handling',
     '',
-    'Each server entry is one `messages.getHistory` handler duration. Gate samples preserve their existing timing boundary; RPC diagnostics also show the existing client RPC wall and non-RPC values.',
+    'Each server entry is one `messages.getHistory` handler duration. The RPC residual subtracts the union of server handler intervals from the client RPC wall union; it is shown only when client and server record counts match and the server union does not exceed client RPC wall time.',
     '',
-    '| Sample | Variant | Repeat | Time (ms) | RPC wall (ms) | Non-RPC (ms) | messages.getHistory server (ms each) | RPC wall minus server total (ms) |',
+    '| Sample | Variant | Repeat | Time (ms) | RPC wall (ms) | Non-RPC (ms) | messages.getHistory server (ms each) | RPC wall minus server interval union (ms) |',
     '| --- | --- | ---: | ---: | ---: | ---: | --- | ---: |',
     ...rows
   ].join('\n');

@@ -20,6 +20,31 @@ export function serverRpcTraceExpectation(clientRpcCount) {
   return {minimumCount: Math.max(1, clientRpcCount)};
 }
 
+export function serverRpcIntervalUnionMs(records) {
+  if(!Array.isArray(records)) throw new TypeError('RPC trace records must be an array');
+  const intervals = records.map(({duration_us, end_unix_ms}) => {
+    if(!Number.isSafeInteger(duration_us) || duration_us < 0 || !Number.isSafeInteger(end_unix_ms) || end_unix_ms <= 0) {
+      throw new TypeError('RPC trace interval requires a non-negative duration_us and positive end_unix_ms');
+    }
+    return {start: end_unix_ms - duration_us / 1000, end: end_unix_ms};
+  }).filter(({end, start}) => end > start).sort((left, right) => left.start - right.start);
+
+  let intervalUnionMs = 0;
+  let intervalStart = -1;
+  let intervalEnd = -1;
+  for(const interval of intervals) {
+    if(interval.start > intervalEnd) {
+      intervalUnionMs += intervalEnd - intervalStart;
+      intervalStart = interval.start;
+      intervalEnd = interval.end;
+    } else {
+      intervalEnd = Math.max(intervalEnd, interval.end);
+    }
+  }
+  intervalUnionMs += intervalEnd - intervalStart;
+  return Math.max(0, intervalUnionMs);
+}
+
 function parseRecord(line, index) {
   let record;
   try {

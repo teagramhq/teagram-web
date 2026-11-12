@@ -397,7 +397,7 @@ async function beginScenario(page: Page, requests: {value: number}, traceEnabled
   await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames());
 }
 
-async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false, includeLongTaskTrace = includePhases, includeRequestBreakdown = false, collectWalkDiagnostics = false): Promise<Metric> {
+async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false, includeLongTaskTrace = includePhases, includeRequestBreakdown = false, collectWalkDiagnostics = false, captureRpcTrace = includePhases): Promise<Metric> {
   const requestCount = requests.value;
   const requestBreakdownByPath = requestBreakdownsByPage.get(page);
   const requestBreakdown = requestBreakdownByPath ? Object.fromEntries([...requestBreakdownByPath].sort(([left], [right]) => left.localeCompare(right))) : undefined;
@@ -405,7 +405,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
   if(includeRequestBreakdown) expect(Object.values(requestBreakdown || {}).reduce((total, count) => total + count, 0)).toBe(requestCount);
   await page.waitForTimeout(150);
   await waitForBundleResources(page);
-  const captured = await page.evaluate(async({scroll, includePhases, includeLongTaskTrace, collectWalkDiagnostics}) => {
+  const captured = await page.evaluate(async({scroll, includePhases, includeLongTaskTrace, collectWalkDiagnostics, captureRpcTrace}) => {
     const perf = (window as any).__teagramPerf;
     const resources = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
     const resourceCaptureEndedAt = performance.now();
@@ -414,7 +414,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     const droppedFramePercent = intervals.length ? droppedFrames / (droppedFrames + intervals.length) * 100 : 0;
     const longTasks = perf.longTasks.filter((entry: {startTime: number}) => entry.startTime >= perf.started);
     const apiManager = (window as any).rootScope.managers.apiManager;
-    const rpcTrace = includePhases ? await apiManager.getPerformanceRpcTrace() as {
+    const rpcTrace = captureRpcTrace ? await apiManager.getPerformanceRpcTrace() as {
       enabled: boolean,
       recording: boolean,
       callCount: number,
@@ -465,9 +465,9 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       frameIntervals: scroll && intervals.length ? intervals.length : undefined,
       rafDropped: scroll && intervals.length ? droppedFrames : undefined
     };
-  }, {scroll, includePhases, includeLongTaskTrace, collectWalkDiagnostics});
+  }, {scroll, includePhases, includeLongTaskTrace, collectWalkDiagnostics, captureRpcTrace});
   const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, frameWindows, reconcileMirrorTasks, loafObserved, rpcInvocations, rpcRawCalls, timeOrigin, ...metrics} = captured;
-  if(includePhases) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
+  if(captureRpcTrace) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
   // Lightweight walk counts need long tasks only; non-scroll samples may not start the animation-frame observer.
   if(includeLongTaskTrace && includePhases) expect(loafObserved, 'long-animation-frame observer is not supported in the diagnostic browser').not.toBe(false);
   const rpcCalls = rpcInvocationsInWindow(rpcRawCalls, timeOrigin, boundary.startedAtMs, boundary.ms).map((call) => ({
@@ -936,8 +936,11 @@ async function waitForHistorySettled(page: Page) {
   await expect.poll(async() => {
     const state = await page.evaluate(() => {
       const bubbles = (window as any).appImManager.chat.bubbles;
+      const rpcCalls = (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace().calls;
       return {
-        pending: !!(bubbles?.getHistoryTopPromise || bubbles?.getHistoryBottomPromise),
+        pending: !!(bubbles?.getHistoryTopPromise || bubbles?.getHistoryBottomPromise) || rpcCalls.some((call: {method: string, outcome: string}) => (
+          call.method === 'messages.getHistory' && call.outcome === 'pending'
+        )),
         domNodes: document.querySelectorAll('*').length
       };
     });
@@ -966,8 +969,10 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   await row.click();
   const boundary = await waitForFirstVisibleBubble(page);
   expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
-  const sample = await capture(page, requests, boundary, false, traceRpc, traceRpc || collectWalkDiagnostics, false, collectWalkDiagnostics);
-  return collectServerRpcTrace ? attachServerRpcTrace(sample, traceOffset) : sample;
+  if(collectServerRpcTrace) await waitForHistorySettled(page);
+  const sample = await capture(page, requests, boundary, false, false, collectWalkDiagnostics, false, collectWalkDiagnostics, traceRpc);
+  if(!collectServerRpcTrace) return sample;
+  return attachServerRpcTrace(sample, traceOffset, sample.rpcCalls.filter((call) => call.method === 'messages.getHistory').length);
 }
 
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}) {
@@ -1916,7 +1921,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     measured.warmChatList.push(warmChatList);
     if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, warmChatList, 'warmChatList');
 
-    const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture, false, collectWalkDiagnostics, scale === '100x'));
+    const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture, scale === '100x', collectWalkDiagnostics, scale === '100x'));
     measured.chatOpen.push(chatOpen);
     if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpen, 'chatOpen');
     const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(
