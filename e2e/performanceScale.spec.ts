@@ -936,11 +936,11 @@ async function waitForHistorySettled(page: Page) {
   await expect.poll(async() => {
     const state = await page.evaluate(() => {
       const bubbles = (window as any).appImManager.chat.bubbles;
-      const rpcCalls = (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace().calls;
+      const rpcCalls = (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace()?.calls;
       return {
-        pending: !!(bubbles?.getHistoryTopPromise || bubbles?.getHistoryBottomPromise) || rpcCalls.some((call: {method: string, outcome: string}) => (
+        pending: !!(bubbles?.getHistoryTopPromise || bubbles?.getHistoryBottomPromise) || (Array.isArray(rpcCalls) && rpcCalls.some((call: {method: string, outcome: string}) => (
           call.method === 'messages.getHistory' && call.outcome === 'pending'
-        )),
+        ))),
         domNodes: document.querySelectorAll('*').length
       };
     });

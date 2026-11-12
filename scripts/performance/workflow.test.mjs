@@ -594,6 +594,7 @@ test('100x chat-open gate records client RPC spans and waits for all history wor
   assert.match(openPartnerChat, /attachServerRpcTrace\(sample, traceOffset, sample\.rpcCalls\.filter\(\(call\) => call\.method === 'messages\.getHistory'\)\.length\)/);
   assert.ok(waitForHistorySettled, 'history capture must wait for pending client getHistory spans');
   assert.match(waitForHistorySettled, /getPerformanceRpcTrace\(\)/);
+  assert.match(waitForHistorySettled, /Array\.isArray\(rpcCalls\)/, 'older base bundles may not expose a calls array');
   assert.match(waitForHistorySettled, /call\.method === 'messages\.getHistory' && call\.outcome === 'pending'/);
 });
 
