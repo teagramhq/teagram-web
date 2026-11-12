@@ -1926,6 +1926,25 @@ async function submitUsernameOnceAndWaitForPassword(page, account, expected, nam
   }
 }
 
+const SEARCH_RESULT_STABILITY_MS = 250;
+
+function resolveUniqueVisiblePeer(rows, username) {
+  const uniqueRows = new Map();
+  for(const row of rows) {
+    if(!row.peerId) continue;
+    const existing = uniqueRows.get(row.peerId);
+    if(!existing || (row.text.includes(username) && !existing.text.includes(username))) {
+      uniqueRows.set(row.peerId, row);
+    }
+  }
+
+  const peers = [...uniqueRows.values()];
+  const matches = peers.filter((row) => row.text.includes(username));
+  if(matches.length === 1) return matches[0];
+  if(matches.length > 1) return undefined;
+  return peers.length === 1 ? peers[0] : undefined;
+}
+
 async function selectUniquePeer(page, inputSelector, resultsSelector, username, stage) {
   setPageActionStep(page, stage);
   const input = page.locator(inputSelector).first();
@@ -1933,22 +1952,43 @@ async function selectUniquePeer(page, inputSelector, resultsSelector, username, 
   await input.fill(username);
 
   const rows = page.locator(resultsSelector);
-  await rows.first().waitFor({state: 'visible', timeout: 25_000}).catch(() => failStage(`${stage}_search_results`));
-  const count = await rows.count();
-  const usernameMatches = rows.filter({hasText: username});
-  const matchCount = await usernameMatches.count();
+  const deadline = Date.now() + 25_000;
+  let sawVisibleRow = false;
+  let previousPeerId;
+  let candidateSince = 0;
   let selectedRow;
-  if(matchCount === 1) {
-    selectedRow = usernameMatches;
-  } else {
-    const visible = [];
+  while(Date.now() < deadline) {
+    const visibleRows = [];
+    const count = await rows.count();
     for(let index = 0; index < count; index++) {
       const row = rows.nth(index);
-      if(await row.isVisible()) visible.push(row);
+      try {
+        if(!await row.isVisible()) continue;
+        sawVisibleRow = true;
+        const peerId = await row.getAttribute('data-peer-id');
+        if(!peerId) continue;
+        visibleRows.push({row, peerId, text: await row.innerText()});
+      } catch{
+        // Search results can be replaced while the query is still settling.
+      }
     }
-    if(visible.length !== 1) failStage(`${stage}_search_result_not_unique`);
-    selectedRow = visible[0];
+
+    const candidate = resolveUniqueVisiblePeer(visibleRows, username);
+    if(candidate && candidate.peerId === previousPeerId) {
+      if(Date.now() - candidateSince >= SEARCH_RESULT_STABILITY_MS) {
+        selectedRow = candidate.row;
+        break;
+      }
+    } else if(candidate) {
+      previousPeerId = candidate.peerId;
+      candidateSince = Date.now();
+    } else {
+      previousPeerId = undefined;
+      candidateSince = 0;
+    }
+    await page.waitForTimeout(100);
   }
+  if(!selectedRow) failStage(`${stage}_${sawVisibleRow ? 'search_result_not_unique' : 'search_results'}`);
   const peerId = await selectedRow.getAttribute('data-peer-id');
   if(!peerId) failStage(`${stage}_peer_identity`);
   centerColumnTrace = {
@@ -7396,7 +7436,7 @@ function emitAuthProgressReport(report, cleanupFailed) {
 }
 
 let runtime;
-module.exports = {isCountedColdTrialConsoleError, classifyColdTrialErrors, classifyColdTrialFailure, exceedsEmojiRequestLimit, attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, captureMessageAcknowledgementTraces, assertMessageAckTraceForCheck, sanitizeMessageAckTraceRecord, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
+module.exports = {isCountedColdTrialConsoleError, classifyColdTrialErrors, classifyColdTrialFailure, exceedsEmojiRequestLimit, attachSyntheticPollAnswerLink, captureCenterColumnState, captureChannelMembershipState, captureMessageAcknowledgementTraces, assertMessageAckTraceForCheck, sanitizeMessageAckTraceRecord, classifyPollSendConfirmation, createPageErrorExceptionEvent, createWorkerDiscovery, enrichPageErrorDetails, enrichPageErrorReport, installPageErrorEventCapture, recordPageErrorProtocolEvent, createPageErrorAssetResolver, captureGroupCreatedState, captureGroupMemberState, captureGroupMessageState, captureGroupNameFormState, captureRpcFailureFromConsole, countClientErrors, createNetworkObserver, emitAuthProgressReport, emitReport, ensurePollGroupActive, findChannelDialogRow, formatPollContentDiagnostic, formatPollResultsDiagnostic, formatPollSendDiagnostic, getClientErrorDiagnostics, getPollCreationRejectionErrorType, getPollOptionClickTarget, getPollResultIndicator, getPollVoteButton, getSingleExactMessageFailure, getSingleExactMessageTextFailure, hasMissingVisiblePollResultsLabel, hasPollFooterLabelOverlap, hasVisibleInFlowPollResultsLabel, installPollMessageErrorObserver, installWorkerPollSendObserver, isExpectedPollCreationRejection, main, matchesPrivateArtifactManifest, nameNewGroup, openBobGroupChat, openBobGroupMembers, openComposer, prepareUsernameEntry, readClientErrorScenarioStep, readPageScenarioStep, readPollContentDiagnostic, readPollResultsDiagnostic, readPollSendDiagnostic, readSafeRpcArguments, readWorkerPollSendObservation, recordPageError, resolveActiveGroupChat, resolveUniqueVisiblePeer, sendGroupText, setPageActionStep, setPageScenarioStep, shouldRunChannelScenario, shouldRunPollScenario, submitPollVote, submitUsernameOnceAndWaitForPassword, summarizeBrowserGateBreakdown, validateRuntimeInput, waitForChannelDialogRow, waitForChannelInviteCompletion, waitForGroupCreated, waitForGroupMessageCount, waitForSingleSentMessage, waitForPollMessage, waitForPollSendOutcome, waitForPasswordField, submitPassword, waitForUnreadCount, assertPollContent};
 if(require.main === module) {
   main().catch(() => {
     process.stdout.write(`${JSON.stringify({status: 'failed', stage: currentStage, errorClass: 'OtherError'})}\n`);
