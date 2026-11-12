@@ -612,7 +612,8 @@ test('100x chat-open gate records client RPC spans and waits for all history wor
   assert.ok(diagnosticChatOpen, 'the RPC diagnostic chat-open sample must be present');
   assert.match(diagnosticChatOpen, /await waitForHistorySettled\(page\)/);
   assert.ok(waitForHistorySettled, 'history capture must wait for pending client getHistory spans');
-  assert.match(waitForHistorySettled, /getPerformanceRpcTrace\(\)/);
+  assert.match(waitForHistorySettled, /page\.evaluate\(async\(\) => \{/, 'the pending-span check reads a promise returned by the manager proxy');
+  assert.match(waitForHistorySettled, /\(await \(window as any\)\.rootScope\.managers\.apiManager\.getPerformanceRpcTrace\(\)\)\?\.calls/, 'the trace promise must be awaited before reading spans');
   assert.match(waitForHistorySettled, /Array\.isArray\(rpcCalls\)/, 'older base bundles may not expose a calls array');
   assert.match(waitForHistorySettled, /call\.method === 'messages\.getHistory' && call\.outcome === 'pending'/);
 });

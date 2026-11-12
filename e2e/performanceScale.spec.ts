@@ -980,9 +980,10 @@ async function waitForHistorySettled(page: Page) {
   let previousDomNodes = -1;
   let stableSamples = 0;
   await expect.poll(async() => {
-    const state = await page.evaluate(() => {
+    const state = await page.evaluate(async() => {
       const bubbles = (window as any).appImManager.chat.bubbles;
-      const rpcCalls = (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace()?.calls;
+      // The manager proxy returns a promise, so the trace has to be awaited before its spans can be read.
+      const rpcCalls = (await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace())?.calls;
       return {
         pending: !!(bubbles?.getHistoryTopPromise || bubbles?.getHistoryBottomPromise) || (Array.isArray(rpcCalls) && rpcCalls.some((call: {method: string, outcome: string}) => (
           call.method === 'messages.getHistory' && call.outcome === 'pending'
