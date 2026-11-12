@@ -1,7 +1,7 @@
 import {mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {evaluatePairedDifferences, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PAIRED_CONFIDENCE_LEVEL, PERFORMANCE_REPEATS, TIMING_MINIMUM_EFFECTS} from './policy.mjs';
-import {serverRpcIntervalUnionMs, serverRpcTraceExpectation} from './server-rpc-trace.mjs';
+import {serverRpcIntervalUnionMs, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation} from './server-rpc-trace.mjs';
 import {hasValidGlobalSearchStages} from './global-search-measurement.mjs';
 
 const reportPath = resolve(process.env.PERF_REPORT_PATH || '.performance-report.json');
@@ -84,6 +84,13 @@ function formatChatOpenServerTimingTable(report, failures) {
       }
       if(!Number.isFinite(sample.ms) || !Number.isFinite(sample.rpcWallMs) || !Number.isFinite(sample.nonRpcElapsedMs)) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} is missing total, RPC wall, or non-RPC timing`);
+        continue;
+      }
+      const clientHistoryCalls = sample.serverRpcClientCalls;
+      if(!Array.isArray(clientHistoryCalls) || clientHistoryCalls.length !== clientHistoryCallCount ||
+        !serverRpcRecordsCoverClientCalls(serverRecords, clientHistoryCalls) ||
+        !serverRecords.every((record) => serverRpcRecordMatchesClientCalls(record, clientHistoryCalls))) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} cannot correlate server messages.getHistory records to client spans`);
         continue;
       }
       const serverDurations = serverRecords.map((record) => `${show(record.duration_us / 1000)} ms (${record.result})`).join(', ');

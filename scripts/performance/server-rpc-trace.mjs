@@ -20,6 +20,46 @@ export function serverRpcTraceExpectation(clientRpcCount) {
   return {minimumCount: Math.max(1, clientRpcCount)};
 }
 
+const SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS = 5;
+
+export function serverRpcRecordMatchesClientCall(record, call) {
+  if(record?.method !== 'messages.getHistory' ||
+    !Number.isSafeInteger(record.duration_us) || record.duration_us < 0 ||
+    !Number.isSafeInteger(record.end_unix_ms) || record.end_unix_ms <= 0 ||
+    call?.method !== 'messages.getHistory' ||
+    !Number.isFinite(call.startedAtEpochMs) ||
+    !Number.isFinite(call.durationMs) || call.durationMs < 0 ||
+    !['success', 'error'].includes(call.outcome)) return false;
+
+  const serverStartEpochMs = record.end_unix_ms - record.duration_us / 1000;
+  const clientEndEpochMs = call.startedAtEpochMs + call.durationMs;
+  return serverStartEpochMs >= call.startedAtEpochMs - SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS &&
+    serverStartEpochMs <= clientEndEpochMs + SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS &&
+    record.end_unix_ms <= clientEndEpochMs + SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS;
+}
+
+export function serverRpcRecordMatchesClientCalls(record, calls) {
+  return Array.isArray(calls) && calls.some((call) => serverRpcRecordMatchesClientCall(record, call));
+}
+
+export function serverRpcRecordsCoverClientCalls(records, calls) {
+  if(!Array.isArray(records) || !Array.isArray(calls) || !calls.length) return false;
+  const callByRecordIndex = new Map();
+  const assignRecord = (callIndex, visitedRecordIndexes) => {
+    for(let recordIndex = 0; recordIndex < records.length; ++recordIndex) {
+      if(visitedRecordIndexes.has(recordIndex) || !serverRpcRecordMatchesClientCall(records[recordIndex], calls[callIndex])) continue;
+      visitedRecordIndexes.add(recordIndex);
+      const previousCallIndex = callByRecordIndex.get(recordIndex);
+      if(previousCallIndex === undefined || assignRecord(previousCallIndex, visitedRecordIndexes)) {
+        callByRecordIndex.set(recordIndex, callIndex);
+        return true;
+      }
+    }
+    return false;
+  };
+  return calls.every((_, callIndex) => assignRecord(callIndex, new Set()));
+}
+
 export function serverRpcIntervalUnionMs(records) {
   if(!Array.isArray(records)) throw new TypeError('RPC trace records must be an array');
   const intervals = records.map(({duration_us, end_unix_ms}) => {
@@ -45,6 +85,9 @@ export function serverRpcIntervalUnionMs(records) {
   return Math.max(0, intervalUnionMs);
 }
 
+/** @typedef {{method: string, duration_us: number, result: string, end_unix_ms: number}} ServerRpcTraceRecord */
+
+/** @returns {ServerRpcTraceRecord} */
 function parseRecord(line, index) {
   let record;
   try {
@@ -66,6 +109,7 @@ export function getServerRpcTracePosition(path) {
   return traceFileStat(path).size;
 }
 
+/** @returns {ServerRpcTraceRecord[]} */
 export function readServerRpcTraceRecordsSince(path, offset) {
   validateOffset(offset);
   const size = traceFileStat(path).size;
@@ -94,26 +138,42 @@ export function readServerRpcTraceRecordsSince(path, offset) {
   return lines.map((line, index) => parseRecord(line, index));
 }
 
+/**
+ * @param {string} path
+ * @param {number} offset
+ * @param {string} method
+ * @param {number} minimumCount
+ * @param {{timeoutMs?: number, pollIntervalMs?: number, quietMs?: number, recordFilter?: (record: ServerRpcTraceRecord) => boolean}} [options]
+ * @returns {Promise<ServerRpcTraceRecord[]>}
+ */
 export async function waitForServerRpcTraceRecords(path, offset, method, minimumCount, {
   timeoutMs = 5_000,
   pollIntervalMs = 20,
-  quietMs = 25
+  quietMs = 25,
+  recordFilter = () => true
 } = {}) {
   if(typeof method !== 'string' || !method) throw new TypeError('RPC trace method must be non-empty');
   if(!Number.isSafeInteger(minimumCount) || minimumCount < 1) throw new TypeError('RPC trace minimum count must be a positive safe integer');
   if(!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('RPC trace timeout must be positive');
   if(!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) throw new TypeError('RPC trace poll interval must be positive');
   if(!Number.isFinite(quietMs) || quietMs < 0) throw new TypeError('RPC trace quiet period cannot be negative');
+  if(typeof recordFilter !== 'function') throw new TypeError('RPC trace record filter must be a function');
 
   const deadline = Date.now() + timeoutMs;
   let matchingRecords = [];
   let lastCount = 0;
+  let lastMatchingCount = 0;
   let lastChangeAt;
   do {
-    matchingRecords = readServerRpcTraceRecordsSince(path, offset).filter((record) => record.method === method);
+    const methodRecords = readServerRpcTraceRecordsSince(path, offset).filter((record) => record.method === method);
+    matchingRecords = methodRecords.filter(recordFilter);
+    if(methodRecords.length !== lastCount) {
+      lastCount = methodRecords.length;
+      lastChangeAt = Date.now();
+    }
     if(matchingRecords.length >= minimumCount) {
-      if(matchingRecords.length !== lastCount) {
-        lastCount = matchingRecords.length;
+      if(matchingRecords.length !== lastMatchingCount) {
+        lastMatchingCount = matchingRecords.length;
         lastChangeAt = Date.now();
       }
       if(Date.now() - lastChangeAt >= quietMs) return matchingRecords;

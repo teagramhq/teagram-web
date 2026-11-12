@@ -21,6 +21,30 @@ test('server RPC trace requires coverage for each client call without dropping e
   assert.deepEqual(serverRpcTraceExpectation(2), {minimumCount: 2});
 });
 
+test('server handler records must correlate to client spans in the chat-open sample', async() => {
+  const {serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls} = await import('./server-rpc-trace.mjs');
+  assert.equal(typeof serverRpcRecordMatchesClientCalls, 'function');
+  assert.equal(typeof serverRpcRecordsCoverClientCalls, 'function');
+
+  const recordValue = JSON.parse(record('messages.getHistory'));
+  const clientCalls = [
+    {method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_000, durationMs: 200, outcome: 'success'},
+    {method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_000, durationMs: 200, outcome: 'success'}
+  ];
+
+  assert.equal(serverRpcRecordMatchesClientCalls(recordValue, clientCalls), true);
+  assert.equal(serverRpcRecordMatchesClientCalls(recordValue, []), false);
+  assert.equal(serverRpcRecordMatchesClientCalls({...recordValue, end_unix_ms: 1_762_800_000_500}, clientCalls), false);
+  assert.equal(serverRpcRecordsCoverClientCalls([recordValue, recordValue], clientCalls), true);
+  assert.equal(serverRpcRecordsCoverClientCalls([recordValue], clientCalls), false);
+
+  const earlyRecord = {...recordValue, duration_us: 10_000, end_unix_ms: 1_762_800_000_115};
+  const lateRecord = {...recordValue, duration_us: 10_000, end_unix_ms: 1_762_800_000_205};
+  const broadCall = {method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_100, durationMs: 120, outcome: 'success'};
+  const narrowCall = {method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_100, durationMs: 30, outcome: 'success'};
+  assert.equal(serverRpcRecordsCoverClientCalls([earlyRecord, lateRecord], [broadCall, narrowCall]), true);
+});
+
 test('server RPC interval union does not double count overlapping handlers', () => {
   assert.equal(serverRpcIntervalUnionMs([
     {duration_us: 40_000, end_unix_ms: 1_000},

@@ -1,7 +1,7 @@
 import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
 import {readFileSync} from 'node:fs';
 import {writePerformanceReport} from './performanceReport';
-import {getServerRpcTracePosition, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from '../scripts/performance/server-rpc-trace.mjs';
+import {getServerRpcTracePosition, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from '../scripts/performance/server-rpc-trace.mjs';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
@@ -26,6 +26,12 @@ type ServerRpcTraceRecord = {
   duration_us: number,
   result: string,
   end_unix_ms: number
+};
+type ServerRpcClientCall = {
+  method: string,
+  startedAtEpochMs: number,
+  durationMs: number | null,
+  outcome: 'pending' | 'success' | 'error'
 };
 type FirstStickerSample = {
   workerReadyBeforeChat: boolean,
@@ -60,6 +66,7 @@ type Metric = {
   rpcWallMs: number | null,
   nonRpcElapsedMs: number | null,
   serverRpcRecords?: ServerRpcTraceRecord[],
+  serverRpcClientCalls?: ServerRpcClientCall[],
   rpcTraceEnabled: boolean,
   rpcSpansRecorded: boolean,
   rpcCalls: PerformanceRpcCall[],
@@ -183,14 +190,21 @@ function serverRpcTraceOffset() {
 
 async function attachServerRpcTrace(sample: Metric, offset: number | undefined, expectedCount?: number) {
   if(offset === undefined) return sample;
+  const clientCalls = sample.serverRpcClientCalls;
+  if(!Array.isArray(clientCalls) || !clientCalls.length) {
+    throw new Error('100x chat-open sample has no client messages.getHistory spans to correlate');
+  }
   const expectation = serverRpcTraceExpectation(expectedCount);
   const records = await waitForServerRpcTraceRecords(
     serverRpcTraceFile!,
     offset,
     'messages.getHistory',
     expectation.minimumCount,
-    {quietMs: 150}
+    {quietMs: 150, recordFilter: (record) => serverRpcRecordMatchesClientCalls(record, clientCalls)}
   );
+  if(!serverRpcRecordsCoverClientCalls(records, clientCalls)) {
+    throw new Error('100x chat-open server records do not cover every client messages.getHistory span');
+  }
   const serverRpcRecords = records;
   if(!serverRpcRecords.length) throw new Error('100x chat-open measurement has no server messages.getHistory duration records');
   return {...sample, serverRpcRecords};
@@ -397,7 +411,7 @@ async function beginScenario(page: Page, requests: {value: number}, traceEnabled
   await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames());
 }
 
-async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false, includeLongTaskTrace = includePhases, includeRequestBreakdown = false, collectWalkDiagnostics = false, captureRpcTrace = includePhases): Promise<Metric> {
+async function capture(page: Page, requests: {value: number}, boundary: MeasurementBoundary, scroll = false, includePhases = false, includeLongTaskTrace = includePhases, includeRequestBreakdown = false, collectWalkDiagnostics = false, captureRpcTrace = includePhases, captureServerRpcClientCalls = false): Promise<Metric> {
   const requestCount = requests.value;
   const requestBreakdownByPath = requestBreakdownsByPage.get(page);
   const requestBreakdown = requestBreakdownByPath ? Object.fromEntries([...requestBreakdownByPath].sort(([left], [right]) => left.localeCompare(right))) : undefined;
@@ -468,6 +482,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
   }, {scroll, includePhases, includeLongTaskTrace, collectWalkDiagnostics, captureRpcTrace});
   const {bundleResources, origin, resourceCaptureEndedAt, resourceUrlBaseline, longTasks, longAnimationFrames, frameWindows, reconcileMirrorTasks, loafObserved, rpcInvocations, rpcRawCalls, timeOrigin, ...metrics} = captured;
   if(captureRpcTrace) expect(metrics.rpcTraceEnabled, 'performance RPC trace flag was not enabled in the diagnostic client build').toBe(true);
+  if(captureServerRpcClientCalls) expect(captureRpcTrace && metrics.rpcSpansRecorded, 'server RPC correlation requires recorded client spans').toBe(true);
   // Lightweight walk counts need long tasks only; non-scroll samples may not start the animation-frame observer.
   if(includeLongTaskTrace && includePhases) expect(loafObserved, 'long-animation-frame observer is not supported in the diagnostic browser').not.toBe(false);
   const rpcCalls = rpcInvocationsInWindow(rpcRawCalls, timeOrigin, boundary.startedAtMs, boundary.ms).map((call) => ({
@@ -476,6 +491,9 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     durationMs: call.durationMs,
     outcome: call.outcome
   }));
+  const serverRpcClientCalls = captureServerRpcClientCalls
+    ? rpcInvocationsInWindow(rpcRawCalls.filter((call) => call.method === 'messages.getHistory'), timeOrigin, boundary.startedAtMs, boundary.ms)
+    : undefined;
   const rpcCallCount = metrics.rpcSpansRecorded ? rpcInvocationsInWindow(rpcInvocations, timeOrigin, boundary.startedAtMs, boundary.ms).length : metrics.rpcCallCount;
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
   const rpcSummary = summarizeRpcTrace(rpcCalls, boundary.ms);
@@ -488,6 +506,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     rpcCallCount,
     ...(metrics.rpcSpansRecorded ? {rpcMethodCounts: rpcMethodCounts(rpcInvocations, timeOrigin, boundary.startedAtMs, boundary.ms)} : {}),
     rpcCalls,
+    ...(serverRpcClientCalls ? {serverRpcClientCalls} : {}),
     bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
     ...(includeLongTaskTrace || collectWalkDiagnostics ? {longTaskTrace} : {}),
@@ -970,7 +989,7 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   const boundary = await waitForFirstVisibleBubble(page);
   expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
   if(collectServerRpcTrace) await waitForHistorySettled(page);
-  const sample = await capture(page, requests, boundary, false, false, collectWalkDiagnostics, false, collectWalkDiagnostics, traceRpc);
+  const sample = await capture(page, requests, boundary, false, false, collectWalkDiagnostics, false, collectWalkDiagnostics, traceRpc, collectServerRpcTrace);
   if(!collectServerRpcTrace) return sample;
   return attachServerRpcTrace(sample, traceOffset, sample.rpcCalls.filter((call) => call.method === 'messages.getHistory').length);
 }
@@ -2053,7 +2072,8 @@ async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Varia
         await row.click();
         const chatOpenBoundary = await waitForFirstVisibleBubble(page);
         const chatCpu = await finishCpuProfile(chatProfile);
-        const chatOpenCapture = await capture(page, requests, chatOpenBoundary, false, true);
+        await waitForHistorySettled(page);
+        const chatOpenCapture = await capture(page, requests, chatOpenBoundary, false, true, true, false, false, true, true);
         const chatOpenSample = await attachServerRpcTrace({
           ...chatOpenCapture,
           cpu: chatCpu,
