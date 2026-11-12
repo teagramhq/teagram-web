@@ -1040,6 +1040,21 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await page.reload({waitUntil: 'domcontentloaded'});
     const mismatch = page.getByRole('dialog', {name: 'Server identity changed'});
     await expect(mismatch).toBeVisible();
+    await page.setViewportSize({width: 1280, height: 800});
+    const mismatchContainer = mismatch.locator('.popup-container');
+    const mismatchHeader = mismatch.locator('.popup-header');
+    const mismatchBody = mismatch.locator('.popup-body > .scrollable-y');
+    const mismatchContinue = mismatch.getByRole('button', {name: 'Continue to confirmation'});
+    const mismatchCancel = mismatch.getByRole('button', {name: 'Cancel', exact: true});
+    const mismatchWarning = mismatch.getByText('The client cannot distinguish a legitimate key rotation from an interception, so the connection is blocked.');
+    const expectMismatchControlsInViewport = async() => {
+      await expect(mismatchContainer).toBeInViewport({ratio: 1});
+      await expect(mismatchHeader).toBeInViewport({ratio: 1});
+      await expect(mismatchContinue).toBeInViewport({ratio: 1});
+      await expect(mismatchCancel).toBeInViewport({ratio: 1});
+    };
+    await expectMismatchControlsInViewport();
+    expect(await mismatchBody.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
     await expect(mismatch.getByText(`The identity of ${serverHost}, pinned in this browser, has changed.`)).toBeVisible();
     await expect(mismatch.getByText('Pinned fingerprint', {exact: true})).toBeVisible();
     await expect(mismatch.getByText('Presented fingerprint', {exact: true})).toBeVisible();
@@ -1063,8 +1078,22 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
       'dc56-ae7e-b638-8fe3-',
       'e268-c2a4-cdd9-2684'
     ]);
+    await mismatchWarning.scrollIntoViewIfNeeded();
+    await expect(mismatchWarning).toBeInViewport({ratio: 1});
+    await expectMismatchControlsInViewport();
+    await mismatchBody.evaluate((element) => { element.scrollTop = 0; });
     await page.screenshot({path: join(screenshots, 'S9.png')});
-    await mismatch.getByRole('button', {name: 'Continue to confirmation'}).click();
+    await page.setViewportSize({width: 360, height: 760});
+    await expectMismatchControlsInViewport();
+    await expect(mismatchBody).toBeVisible();
+    expect(await mismatchBody.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    await mismatchWarning.scrollIntoViewIfNeeded();
+    await expect(mismatchWarning).toBeInViewport({ratio: 1});
+    await expectMismatchControlsInViewport();
+    await mismatchBody.evaluate((element) => { element.scrollTop = 0; });
+    await page.screenshot({path: join(screenshots, 'S9-phone.png')});
+    await page.setViewportSize({width: 1280, height: 800});
+    await mismatchContinue.click();
     const deletion = page.getByRole('dialog', {name: 'Confirm data deletion'});
     await expect(deletion).toBeVisible();
     await expect(deletion.getByText(`This is the final confirmation. Accepting permanently deletes the keys, sessions, cached messages and peers, endpoint, and server identity this browser keeps for ${serverHost}, before returning to server selection. A guest account used here can't be recovered. This cannot be undone.`)).toBeVisible();
