@@ -76,12 +76,12 @@ function runSummaryWithArtifacts({
     method: 'messages.getHistory',
     duration_us: 40_123,
     result: 'success',
-    end_unix_ms: 1_762_800_000_123 + index
+    end_unix_ms: 1_762_800_000_063 + index
   })) : undefined;
   const serverRpcClientCalls = Array.from({length: chatOpenServerClientHistoryCallCount}, () => ({
     method: 'messages.getHistory',
     startedAtEpochMs: 1_762_800_000_000,
-    durationMs: 200,
+    durationMs: 60,
     outcome: 'success'
   }));
   const makeSample = (key) => ({
@@ -104,13 +104,14 @@ function runSummaryWithArtifacts({
     maxLongTaskDurationMs: 0,
     ...(key === 'chatOpen' && serverRpcRecords ? {serverRpcRecords} : {}),
     ...(key === 'chatOpen' ? {
+      serverRpcGateWindow: {startEpochMs: 1_762_800_000_000, endEpochMs: 1_762_800_000_100},
       rpcWallMs: includeChatOpenClientRpcData ? chatOpenRpcWallMs : null,
       nonRpcElapsedMs: includeChatOpenClientRpcData ? 100 - chatOpenRpcWallMs : null,
       serverRpcClientCalls,
       rpcCalls: includeChatOpenClientRpcData ? Array.from({length: chatOpenClientHistoryCallCount}, () => ({
         method: 'messages.getHistory',
         startedAtMs: 0,
-        durationMs: 60,
+        durationMs: chatOpenRpcWallMs,
         outcome: 'success'
       })) : []
     } : {}),
@@ -159,6 +160,7 @@ function runSummaryWithArtifacts({
         rpcComparison: Object.fromEntries(['base', 'head'].map((variant) => [variant, {
           chatOpen: [{
             ms: 377,
+            serverRpcGateWindow: {startEpochMs: 1_762_800_000_000, endEpochMs: 1_762_800_000_377},
             rpcCallCount: chatOpenClientHistoryCallCount,
             rpcWallMs: chatOpenClientHistoryCallCount ? 377 : 0,
             nonRpcElapsedMs: chatOpenClientHistoryCallCount ? 0 : 377,
@@ -579,36 +581,66 @@ test('summary preserves extra server handlers when the client records fewer call
   assert.equal(result.status, 0);
 });
 
-test('summary subtracts the union of overlapping server handler intervals', () => {
+test('summary subtracts the gate-clipped union of overlapping server handler intervals', () => {
   const result = runSummaryWithArtifacts({chatOpenServerHistoryRecordCount: 2, chatOpenClientHistoryCallCount: 2});
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /RPC wall minus server interval union \(ms\)/);
-  assert.match(result.stdout, /RPC diagnostic \| base \| 1 \| 377\.0 \| 377\.0 \| 0\.0 \| 40\.1 ms \(success\), 40\.1 ms \(success\) \| 335\.9 \|/);
+  assert.match(result.stdout, /Gate-clipped getHistory client union minus server interval union \(ms\)/);
+  assert.match(result.stdout, /gate sample \| base \| 1 \| 100\.0 \| 60\.0 \| 40\.0 \| 40\.1 ms \(success\), 40\.1 ms \(success\) \| 18\.9 \|/);
 });
 
-test('100x chat-open gate records client RPC spans and waits for all history work', () => {
+test('summary excludes correlated client and server work wholly after the chat-open gate', () => {
+  const result = runSummaryWithArtifacts({
+    mutateReport(report) {
+      const samples = ['base', 'head'].flatMap((variant) => report.variants[variant]['100x'].chatOpen);
+      samples.push(...['base', 'head'].flatMap((variant) => report.diagnostics['100x'].rpcComparison[variant].chatOpen));
+      for(const sample of samples) {
+        const gateEnd = sample.serverRpcGateWindow.endEpochMs;
+        sample.rpcCallCount = 0;
+        sample.rpcWallMs = 0;
+        sample.nonRpcElapsedMs = sample.ms;
+        sample.rpcCalls = [];
+        sample.serverRpcClientCalls = [{method: 'messages.getHistory', startedAtEpochMs: gateEnd + 10, durationMs: 60, outcome: 'success'}];
+        sample.serverRpcRecords = [{method: 'messages.getHistory', duration_us: 40_123, result: 'success', end_unix_ms: Math.round(gateEnd + 63)}];
+      }
+    }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /gate sample \| base \| 1 \| 100\.0 \| 0\.0 \| 100\.0 \| 40\.1 ms \(success\) \| 0\.0 \|/);
+});
+
+test('100x chat-open gate captures its boundary and finalizes history telemetry after gated scenarios', () => {
   const gateCall = performanceScale.match(/const chatOpen = await test\.step\('open scale fixture chat',[\s\S]*?\);/)?.[0];
   const capture = performanceScale.match(/async function capture\([\s\S]*?(?=\nasync function readCachedDialogReconcileSnapshot)/)?.[0];
   const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
   const attachServerRpcTrace = performanceScale.match(/async function attachServerRpcTrace\([\s\S]*?(?=\ntest\.afterAll)/)?.[0];
+  const finalizeServerRpcTrace = performanceScale.match(/async function finalizeServerRpcTrace\([\s\S]*?(?=\nasync function reloadChatList)/)?.[0];
   const diagnosticChatOpen = performanceScale.match(/const chatOpenBoundary = await waitForFirstVisibleBubble\(page\);[\s\S]*?traceSamples\.chatOpen\.push\(chatOpenSample\);/)?.[0];
   const waitForHistorySettled = performanceScale.match(/async function waitForHistorySettled\([\s\S]*?(?=\nasync function reloadChatList)/)?.[0];
+  const mainScenarioFlow = performanceScale.match(/const chatOpen = await test\.step\('open scale fixture chat',[\s\S]*?await finalizeServerRpcTrace\(page, chatOpen\);/)?.[0];
 
   assert.ok(gateCall, 'the gated chat-open scenario must be present');
   assert.match(gateCall, /openPartnerChat\(page, requests, fixture, scale === '100x', collectWalkDiagnostics, scale === '100x'\)/);
   assert.ok(capture, 'the capture helper must be present');
   assert.match(capture, /captureRpcTrace/);
   assert.match(capture, /captureEndedAtMs: performance\.now\(\)/);
+  assert.match(capture, /serverRpcGateWindow/);
   assert.match(capture, /rpcInvocationsBetween\(rpcRawCalls\.filter\(\(call\) => call\.method === 'messages\.getHistory'\), timeOrigin, boundary\.startedAtMs, captureEndedAtMs\)/);
   assert.ok(openPartnerChat, 'the chat-open helper must be present');
-  assert.match(openPartnerChat, /await waitForHistorySettled\(page\)/);
+  assert.doesNotMatch(openPartnerChat, /waitForHistorySettled/);
   assert.match(openPartnerChat, /capture\(page, requests, boundary, false, false, collectWalkDiagnostics, false, collectWalkDiagnostics, traceRpc, collectServerRpcTrace\)/);
   assert.match(capture, /captureServerRpcClientCalls/);
-  assert.match(openPartnerChat, /attachServerRpcTrace\(sample, traceOffset, sample\.serverRpcClientCalls\?\.length \?\? 0\)/);
   assert.ok(attachServerRpcTrace, 'server handler records must be correlated before attachment');
   assert.match(attachServerRpcTrace, /recordFilter: \(record\) => serverRpcRecordMatchesClientCalls\(record, clientCalls\)/);
   assert.match(attachServerRpcTrace, /serverRpcRecordsCoverClientCalls/);
+  assert.ok(finalizeServerRpcTrace, 'the captured chat-open history trace must finalize after the gate sequence');
+  assert.match(finalizeServerRpcTrace, /await waitForHistorySettled\(page\)/);
+  assert.match(finalizeServerRpcTrace, /serverRpcClientCalls/);
+  assert.match(finalizeServerRpcTrace, /Object\.assign\(sample, await attachServerRpcTrace/);
+  assert.ok(mainScenarioFlow, 'the main gated scenario sequence must be present');
+  assert.ok(mainScenarioFlow.search(/test\.step\('scroll back 2,000 messages'/) < mainScenarioFlow.indexOf('finalizeServerRpcTrace(page, chatOpen)'), 'history telemetry must finalize after the scroll-back gate');
+  assert.ok(mainScenarioFlow.search(/test\.step\('jump to fixture date'/) < mainScenarioFlow.indexOf('finalizeServerRpcTrace(page, chatOpen)'), 'history telemetry must finalize after the date-jump gate');
   assert.ok(diagnosticChatOpen, 'the RPC diagnostic chat-open sample must be present');
   assert.match(diagnosticChatOpen, /await waitForHistorySettled\(page\)/);
   assert.ok(waitForHistorySettled, 'history capture must wait for pending client getHistory spans');
@@ -625,14 +657,17 @@ test('summary fails closed when no client getHistory span can be correlated', ()
   assert.match(result.stderr, /cannot correlate server messages\.getHistory records to client spans/);
 });
 
-test('summary correlates history spans that finish after the visible-boundary timing window', () => {
+test('summary fails closed when a zero-call sample attaches an uncorrelated process-wide handler', () => {
   const result = runSummaryWithArtifacts({
     chatOpenClientHistoryCallCount: 0,
-    chatOpenServerClientHistoryCallCount: 1
+    chatOpenServerClientHistoryCallCount: 1,
+    mutateReport(report) {
+      report.variants.base['100x'].chatOpen[0].serverRpcClientCalls = [];
+    }
   });
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /gate sample \| base \| 1 \| 100\.0 \| 60\.0 \| 40\.0 \| 40\.1 ms \(success\)/);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /cannot correlate server messages\.getHistory records to client spans/);
 });
 
 test('summary rejects a process-wide server handler outside the client sample span', () => {
@@ -692,13 +727,14 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
     }
     const withServerHistory = (sample) => ({
       ...sample,
-      serverRpcRecords: [{method: 'messages.getHistory', duration_us: 40_123, result: 'success', end_unix_ms: 1_762_800_000_123}]
+      serverRpcRecords: [{method: 'messages.getHistory', duration_us: 40_123, result: 'success', end_unix_ms: 1_762_800_000_063}]
     });
     const withChatOpenTimings = (sample) => ({
       ...sample,
+      serverRpcGateWindow: {startEpochMs: 1_762_800_000_000, endEpochMs: 1_762_800_000_000 + sample.ms},
       rpcWallMs: 60,
       nonRpcElapsedMs: sample.ms - 60,
-      serverRpcClientCalls: [{method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_000, durationMs: 200, outcome: 'success'}],
+      serverRpcClientCalls: [{method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_000, durationMs: 60, outcome: 'success'}],
       rpcCalls: [{method: 'messages.getHistory', startedAtMs: 0, durationMs: 60, outcome: 'success'}]
     });
     variants.base['100x'].chatOpen = Array.from({length: PERFORMANCE_REPEATS}, () => withServerHistory(withChatOpenTimings(makeSample(100))));
@@ -736,6 +772,7 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
           ]))])),
           chatOpen: [{
             ms: 377,
+            serverRpcGateWindow: {startEpochMs: 1_762_800_000_000, endEpochMs: 1_762_800_000_377},
             rpcCallCount: 1,
             rpcWallMs: 377,
             nonRpcElapsedMs: 0,
@@ -746,6 +783,7 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
           rpcComparison: Object.fromEntries(['base', 'head'].map((variant) => [variant, {
             chatOpen: [{
               ms: 377,
+              serverRpcGateWindow: {startEpochMs: 1_762_800_000_000, endEpochMs: 1_762_800_000_377},
               rpcCallCount: 1,
               rpcWallMs: 377,
               nonRpcElapsedMs: 0,

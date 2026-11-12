@@ -60,19 +60,18 @@ export function serverRpcRecordsCoverClientCalls(records, calls) {
   return calls.every((_, callIndex) => assignRecord(callIndex, new Set()));
 }
 
-export function serverRpcIntervalUnionMs(records) {
-  if(!Array.isArray(records)) throw new TypeError('RPC trace records must be an array');
-  const intervals = records.map(({duration_us, end_unix_ms}) => {
-    if(!Number.isSafeInteger(duration_us) || duration_us < 0 || !Number.isSafeInteger(end_unix_ms) || end_unix_ms <= 0) {
-      throw new TypeError('RPC trace interval requires a non-negative duration_us and positive end_unix_ms');
-    }
-    return {start: end_unix_ms - duration_us / 1000, end: end_unix_ms};
-  }).filter(({end, start}) => end > start).sort((left, right) => left.start - right.start);
+function validateIntervalWindow(window) {
+  if(!window || !Number.isFinite(window.startEpochMs) || !Number.isFinite(window.endEpochMs) || window.endEpochMs <= window.startEpochMs) {
+    throw new TypeError('RPC interval window requires finite startEpochMs and endEpochMs with end after start');
+  }
+}
 
+function intervalUnionMs(intervals) {
+  const nonEmptyIntervals = intervals.filter(({end, start}) => end > start).sort((left, right) => left.start - right.start);
   let intervalUnionMs = 0;
   let intervalStart = -1;
   let intervalEnd = -1;
-  for(const interval of intervals) {
+  for(const interval of nonEmptyIntervals) {
     if(interval.start > intervalEnd) {
       intervalUnionMs += intervalEnd - intervalStart;
       intervalStart = interval.start;
@@ -83,6 +82,38 @@ export function serverRpcIntervalUnionMs(records) {
   }
   intervalUnionMs += intervalEnd - intervalStart;
   return Math.max(0, intervalUnionMs);
+}
+
+function clipInterval(interval, window) {
+  if(!window) return interval;
+  return {
+    start: Math.max(interval.start, window.startEpochMs),
+    end: Math.min(interval.end, window.endEpochMs)
+  };
+}
+
+export function serverRpcIntervalUnionMs(records, window) {
+  if(!Array.isArray(records)) throw new TypeError('RPC trace records must be an array');
+  if(window) validateIntervalWindow(window);
+  const intervals = records.map(({duration_us, end_unix_ms}) => {
+    if(!Number.isSafeInteger(duration_us) || duration_us < 0 || !Number.isSafeInteger(end_unix_ms) || end_unix_ms <= 0) {
+      throw new TypeError('RPC trace interval requires a non-negative duration_us and positive end_unix_ms');
+    }
+    return clipInterval({start: end_unix_ms - duration_us / 1000, end: end_unix_ms}, window);
+  });
+  return intervalUnionMs(intervals);
+}
+
+export function clientRpcIntervalUnionMs(calls, window) {
+  if(!Array.isArray(calls)) throw new TypeError('client RPC calls must be an array');
+  validateIntervalWindow(window);
+  const intervals = calls.map(({method, startedAtEpochMs, durationMs, outcome}) => {
+    if(method !== 'messages.getHistory' || !Number.isFinite(startedAtEpochMs) || !Number.isFinite(durationMs) || durationMs < 0 || !['success', 'error'].includes(outcome)) {
+      throw new TypeError('client RPC interval requires a completed messages.getHistory call');
+    }
+    return clipInterval({start: startedAtEpochMs, end: startedAtEpochMs + durationMs}, window);
+  });
+  return intervalUnionMs(intervals);
 }
 
 /** @typedef {{method: string, duration_us: number, result: string, end_unix_ms: number}} ServerRpcTraceRecord */

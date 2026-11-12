@@ -1,7 +1,7 @@
 import {mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {evaluatePairedDifferences, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PAIRED_CONFIDENCE_LEVEL, PERFORMANCE_REPEATS, TIMING_MINIMUM_EFFECTS} from './policy.mjs';
-import {serverRpcIntervalUnionMs, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation} from './server-rpc-trace.mjs';
+import {clientRpcIntervalUnionMs, serverRpcIntervalUnionMs, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation} from './server-rpc-trace.mjs';
 import {hasValidGlobalSearchStages} from './global-search-measurement.mjs';
 
 const reportPath = resolve(process.env.PERF_REPORT_PATH || '.performance-report.json');
@@ -78,7 +78,6 @@ function formatChatOpenServerTimingTable(report, failures) {
       }
       const clientHistoryCalls = sample.serverRpcClientCalls;
       const clientHistoryCallCount = Array.isArray(clientHistoryCalls) ? clientHistoryCalls.length : undefined;
-      const metricClientHistoryCallCount = Array.isArray(sample.rpcCalls) ? sample.rpcCalls.filter((call) => call?.method === 'messages.getHistory').length : undefined;
       const expectation = Number.isSafeInteger(clientHistoryCallCount) ? serverRpcTraceExpectation(clientHistoryCallCount) : undefined;
       if(!expectation || serverRecords.length < expectation.minimumCount) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has ${serverRecords.length} server records for ${clientHistoryCallCount ?? 'unknown'} client messages.getHistory spans`);
@@ -94,11 +93,17 @@ function formatChatOpenServerTimingTable(report, failures) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} cannot correlate server messages.getHistory records to client spans`);
         continue;
       }
+      const gateWindow = sample.serverRpcGateWindow;
+      if(!gateWindow || !Number.isFinite(gateWindow.startEpochMs) || !Number.isFinite(gateWindow.endEpochMs) || gateWindow.endEpochMs <= gateWindow.startEpochMs ||
+        Math.abs((gateWindow.endEpochMs - gateWindow.startEpochMs) - sample.ms) > 0.01) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has a missing or invalid RPC gate window`);
+        continue;
+      }
       const serverDurations = serverRecords.map((record) => `${show(record.duration_us / 1000)} ms (${record.result})`).join(', ');
-      const serverIntervalUnionMs = serverRpcIntervalUnionMs(serverRecords);
-      const rpcResidual = Number.isSafeInteger(metricClientHistoryCallCount) && metricClientHistoryCallCount > 0 &&
-        serverRecords.length === metricClientHistoryCallCount && serverIntervalUnionMs <= sample.rpcWallMs
-        ? sample.rpcWallMs - serverIntervalUnionMs
+      const clientHistoryIntervalUnionMs = clientRpcIntervalUnionMs(clientHistoryCalls, gateWindow);
+      const serverIntervalUnionMs = serverRpcIntervalUnionMs(serverRecords, gateWindow);
+      const rpcResidual = clientHistoryIntervalUnionMs >= serverIntervalUnionMs
+        ? clientHistoryIntervalUnionMs - serverIntervalUnionMs
         : undefined;
       rows.push(`| ${source} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.rpcWallMs)} | ${show(sample.nonRpcElapsedMs)} | ${serverDurations} | ${show(rpcResidual)} |`);
     }
@@ -114,9 +119,9 @@ function formatChatOpenServerTimingTable(report, failures) {
   return [
     '### 100x chat-open server handling',
     '',
-    'Each server entry is one `messages.getHistory` handler duration. The RPC residual subtracts the union of server handler intervals from the client RPC wall union; it is shown only when client and server record counts match and the server union does not exceed client RPC wall time.',
+    'Each server entry is one correlated `messages.getHistory` handler duration; extra correlated handlers are retained. Attribution clips both the client `getHistory` interval union and server handler interval union to the click-through-first-bubble gate, then subtracts server handling from the client union.',
     '',
-    '| Sample | Variant | Repeat | Time (ms) | RPC wall (ms) | Non-RPC (ms) | messages.getHistory server (ms each) | RPC wall minus server interval union (ms) |',
+    '| Sample | Variant | Repeat | Time (ms) | RPC wall (ms) | Non-RPC (ms) | messages.getHistory server (ms each) | Gate-clipped getHistory client union minus server interval union (ms) |',
     '| --- | --- | ---: | ---: | ---: | ---: | --- | ---: |',
     ...rows
   ].join('\n');

@@ -3,7 +3,7 @@ import {mkdtempSync, rmSync, writeFileSync, appendFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {test} from 'node:test';
-import {getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcIntervalUnionMs, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from './server-rpc-trace.mjs';
+import {clientRpcIntervalUnionMs, getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcIntervalUnionMs, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from './server-rpc-trace.mjs';
 
 const record = (method, duration_us = 40_123) => JSON.stringify({
   method,
@@ -50,6 +50,25 @@ test('server RPC interval union does not double count overlapping handlers', () 
     {duration_us: 40_000, end_unix_ms: 1_000},
     {duration_us: 40_000, end_unix_ms: 1_010}
   ]), 50);
+});
+
+test('client and server RPC interval unions clip to the chat-open gate boundary', () => {
+  const gate = {startEpochMs: 100, endEpochMs: 200};
+  const clientCalls = [
+    {method: 'messages.getHistory', startedAtEpochMs: 80, durationMs: 70, outcome: 'success'},
+    {method: 'messages.getHistory', startedAtEpochMs: 140, durationMs: 80, outcome: 'success'},
+    {method: 'messages.getHistory', startedAtEpochMs: 210, durationMs: 10, outcome: 'success'}
+  ];
+  const serverRecords = [
+    {method: 'messages.getHistory', duration_us: 60_000, result: 'success', end_unix_ms: 130},
+    {method: 'messages.getHistory', duration_us: 40_000, result: 'success', end_unix_ms: 230},
+    {method: 'messages.getHistory', duration_us: 30_000, result: 'success', end_unix_ms: 240}
+  ];
+
+  assert.equal(clientRpcIntervalUnionMs(clientCalls, gate), 100);
+  assert.equal(clientRpcIntervalUnionMs(clientCalls.slice(2), gate), 0);
+  assert.equal(serverRpcIntervalUnionMs(serverRecords, gate), 40);
+  assert.equal(serverRpcIntervalUnionMs(serverRecords.slice(2), gate), 0);
 });
 
 async function withTraceFile(run) {

@@ -33,6 +33,10 @@ type ServerRpcClientCall = {
   durationMs: number | null,
   outcome: 'pending' | 'success' | 'error'
 };
+type ServerRpcGateWindow = {
+  startEpochMs: number,
+  endEpochMs: number
+};
 type FirstStickerSample = {
   workerReadyBeforeChat: boolean,
   clickToFirstFrameMs: number,
@@ -67,6 +71,7 @@ type Metric = {
   nonRpcElapsedMs: number | null,
   serverRpcRecords?: ServerRpcTraceRecord[],
   serverRpcClientCalls?: ServerRpcClientCall[],
+  serverRpcGateWindow?: ServerRpcGateWindow,
   rpcTraceEnabled: boolean,
   rpcSpansRecorded: boolean,
   rpcCalls: PerformanceRpcCall[],
@@ -174,6 +179,7 @@ const preparedVariants: Record<Scale, Partial<Record<Variant, VariantRun>>> = {'
 let firstStickerPinnedRun: VariantRun | undefined;
 const bundleRequestTrackers = new WeakMap<Page, BundleRequestTracker>();
 const requestBreakdownsByPage = new WeakMap<Page, Map<string, number>>();
+const serverRpcTraceOffsetsBySample = new WeakMap<Metric, number | undefined>();
 
 const scenarios = ['coldChatList', 'warmChatList', 'chatOpen', 'scrollBack2k', 'dateJump', 'contactsList', 'contactSearch', 'globalSearch', 'sendMessage'];
 const scenarioPreservedPerformancePhases = getScenarioPreservedPerformancePhases();
@@ -521,6 +527,10 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
   const serverRpcClientCalls = captureServerRpcClientCalls
     ? rpcInvocationsBetween(rpcRawCalls.filter((call) => call.method === 'messages.getHistory'), timeOrigin, boundary.startedAtMs, captureEndedAtMs)
     : undefined;
+  const serverRpcGateWindow = captureServerRpcClientCalls ? {
+    startEpochMs: timeOrigin + boundary.startedAtMs,
+    endEpochMs: timeOrigin + boundary.startedAtMs + boundary.ms
+  } : undefined;
   const rpcCallCount = metrics.rpcSpansRecorded ? rpcInvocationsInWindow(rpcInvocations, timeOrigin, boundary.startedAtMs, boundary.ms).length : metrics.rpcCallCount;
   const longTaskSummary = summarizeLongTaskWindow(longTasks, boundary.startedAtMs, boundary.ms);
   const rpcSummary = summarizeRpcTrace(rpcCalls, boundary.ms);
@@ -534,6 +544,7 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     ...(metrics.rpcSpansRecorded ? {rpcMethodCounts: rpcMethodCounts(rpcInvocations, timeOrigin, boundary.startedAtMs, boundary.ms)} : {}),
     rpcCalls,
     ...(serverRpcClientCalls ? {serverRpcClientCalls} : {}),
+    ...(serverRpcGateWindow ? {serverRpcGateWindow} : {}),
     bundleBytes: sumBundleBytes(bundleResources, origin, boundary.startedAtMs, resourceCaptureEndedAt, resourceUrlBaseline),
     ...longTaskSummary,
     ...(includeLongTaskTrace || collectWalkDiagnostics ? {longTaskTrace} : {}),
@@ -997,6 +1008,36 @@ async function waitForHistorySettled(page: Page) {
   }, {timeout: 60_000, intervals: [100]}).toBe(true);
 }
 
+async function finalizeServerRpcTrace(page: Page, sample: Metric) {
+  const offset = serverRpcTraceOffsetsBySample.get(sample);
+  if(offset === undefined) return sample;
+
+  await waitForHistorySettled(page);
+  const snapshot = await page.evaluate(async() => {
+    const trace = await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace();
+    return {
+      timeOrigin: performance.timeOrigin,
+      captureEndedAtMs: performance.now(),
+      calls: trace.calls as ServerRpcClientCall[]
+    };
+  });
+  const gateWindow = sample.serverRpcGateWindow;
+  if(!gateWindow) throw new Error('100x chat-open sample has no RPC gate boundary');
+  const captureEndedAtEpochMs = snapshot.timeOrigin + snapshot.captureEndedAtMs;
+  const clientCalls = rpcInvocationsBetween(
+    snapshot.calls.filter((call) => call.method === 'messages.getHistory'),
+    snapshot.timeOrigin,
+    gateWindow.startEpochMs - snapshot.timeOrigin,
+    snapshot.captureEndedAtMs
+  );
+  if(clientCalls.some((call) => call.outcome === 'pending' || !Number.isFinite(call.durationMs))) {
+    throw new Error(`100x chat-open history telemetry remained pending at ${captureEndedAtEpochMs}: ${JSON.stringify(clientCalls)}`);
+  }
+  sample.serverRpcClientCalls = clientCalls;
+  Object.assign(sample, await attachServerRpcTrace(sample, offset, clientCalls.length));
+  return sample;
+}
+
 async function reloadChatList(page: Page, requests: {value: number}, collectWalkDiagnostics = false) {
   resetRequestBreakdown(page);
   await begin(page, requests);
@@ -1016,10 +1057,10 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   await row.click();
   const boundary = await waitForFirstVisibleBubble(page);
   expect(Number.isFinite(boundary.preInteractionMs), 'chat-open timer did not start on the row click').toBe(true);
-  if(collectServerRpcTrace) await waitForHistorySettled(page);
   const sample = await capture(page, requests, boundary, false, false, collectWalkDiagnostics, false, collectWalkDiagnostics, traceRpc, collectServerRpcTrace);
   if(!collectServerRpcTrace) return sample;
-  return attachServerRpcTrace(sample, traceOffset, sample.serverRpcClientCalls?.length ?? 0);
+  serverRpcTraceOffsetsBySample.set(sample, traceOffset);
+  return sample;
 }
 
 async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}) {
@@ -1987,6 +2028,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     if(!jump) throw new Error(`${variant} date-jump did not reach the fixture date`);
     measured.dateJump.push(jump);
     if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, jump, 'dateJump');
+    await finalizeServerRpcTrace(page, chatOpen);
 
     // Reset both variants to the same signed-in chat-list state before contacts measurements.
     await resetToChatList(page, origin);
