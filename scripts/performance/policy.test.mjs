@@ -34,6 +34,7 @@ function sample(overrides = {}) {
     frameIntervals: 100,
     droppedFrames: 0,
     droppedFramePercent: 0,
+    rafDropped: 0,
     ...overrides
   };
 }
@@ -206,6 +207,27 @@ test('sendMessage timing gates use fixed Enter-to-bubble minimums and label them
   assert.match(formatPerformanceTable(result), /\| Send a message, Enter-to-bubble \(1x\) \| 141\.9 \|/);
 });
 
+test('globalSearch timing keeps its pre-boundary minimum effects at both scales', () => {
+  const base = scaleVariants();
+  const makeSearchSamples = (ms) => Array.from({length: PERFORMANCE_REPEATS}, () => sample({ms}));
+  base['1x'].globalSearch = makeSearchSamples(337.8);
+  base['100x'].globalSearch = makeSearchSamples(339);
+
+  const belowMinimum = scaleVariants();
+  belowMinimum['1x'].globalSearch = makeSearchSamples(397.8);
+  belowMinimum['100x'].globalSearch = makeSearchSamples(399);
+  const belowResult = evaluatePerformance(report({base, head: belowMinimum}));
+  assert.equal(belowResult.blockingFailures.some((failure) => failure.includes('globalSearch: response timing')), false);
+
+  const aboveMinimum = scaleVariants();
+  aboveMinimum['1x'].globalSearch = makeSearchSamples(463.8);
+  aboveMinimum['100x'].globalSearch = makeSearchSamples(466);
+  const aboveResult = evaluatePerformance(report({base, head: aboveMinimum}));
+
+  assert.ok(aboveResult.blockingFailures.some((failure) => failure.startsWith('1x globalSearch: response timing:') && failure.includes('minimum effect 125.85 ms')));
+  assert.ok(aboveResult.blockingFailures.some((failure) => failure.startsWith('100x globalSearch: response timing:') && failure.includes('minimum effect 126.96 ms')));
+});
+
 test('sendMessage timing ignores a regressed outer interval when Enter-to-bubble is flat', () => {
   const base = scaleVariants();
   const head = scaleVariants();
@@ -265,6 +287,52 @@ test('master runs still block on incomplete deterministic head and diagnostic sa
   diagnostics['100x'].walkComparison.head.dateJump = diagnostics['100x'].walkComparison.head.dateJump.slice(0, PERFORMANCE_REPEATS - 1);
   const missingTrace = evaluatePerformance(report({requireBase: false, diagnostics}));
   assert.ok(missingTrace.blockingFailures.some((failure) => failure.includes('100x dateJump: head walk-mirror diagnostic expected exactly 9 samples, got 8')));
+});
+
+test('legacy scroll history without RAF counts does not hide other scenario history', () => {
+  const history = mainHistory(20, {'100x': {scrollBack2k: {droppedFramePercent: 10}}});
+  history.forEach((run) => run.variants.head['100x'].scrollBack2k.forEach((sample) => {
+    delete sample.rafDropped;
+  }));
+  const result = evaluatePerformance(report({requireBase: false}), history);
+  const scroll = result.rows.find((row) => row.scale === '100x' && row.key === 'scrollBack2k');
+  const chatOpen = result.rows.find((row) => row.scale === '100x' && row.key === 'chatOpen');
+
+  assert.equal(scroll.historyRuns, 0);
+  assert.equal(scroll.scrollHistoryRuns, 0);
+  assert.equal(chatOpen.historyRuns, 20);
+});
+
+test('requires a valid RAF drop count for every 100x scroll sample', () => {
+  const base = scaleVariants();
+  const head = scaleVariants();
+  delete base['100x'].scrollBack2k[0].rafDropped;
+  delete head['100x'].scrollBack2k[1].rafDropped;
+  const result = evaluatePerformance(report({base, head}));
+
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k: base RAF drop count is missing or invalid in sample 1')));
+  assert.ok(result.blockingFailures.some((failure) => failure.includes('100x scrollBack2k: head RAF drop count is missing or invalid in sample 2')));
+
+  const invalidSamples = [
+    {
+      sample: {rafDropped: -1},
+      failure: '100x scrollBack2k: head RAF drop count is invalid in sample 1'
+    },
+    {
+      sample: {rafDropped: 1.5},
+      failure: '100x scrollBack2k: head RAF drop count is invalid in sample 1'
+    },
+    {
+      sample: {rafDropped: 1, droppedFrames: 0},
+      failure: '100x scrollBack2k: head RAF drop count is invalid in sample 1'
+    }
+  ];
+  for(const {sample: invalidSample, failure} of invalidSamples) {
+    const invalidHead = scaleVariants();
+    Object.assign(invalidHead['100x'].scrollBack2k[0], invalidSample);
+    const invalidResult = evaluatePerformance(report({head: invalidHead}));
+    assert.ok(invalidResult.blockingFailures.some((message) => message.includes(failure)), failure);
+  }
 });
 
 test('paired absolute budget headroom fails only when the lower bound crosses the budget', () => {

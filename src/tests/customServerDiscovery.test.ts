@@ -4,16 +4,20 @@ import {
   DISCOVERY_MAX_BYTES,
   DISCOVERY_TIMEOUT_MS,
   SERVER_CHOICE_KEY,
+  SERVER_PINS_KEY,
   cleanServerHost,
   fetchServerDiscovery,
   formatServerKeyId,
+  getSavedServerTarget,
   getSavedServerChoice,
   getServerConnectSources,
   getServerPinState,
   isServerSelectionOrigin,
   normalizeServerHost,
   pinMatches,
+  resolveServerProfile,
   shouldPromptForServerSelection,
+  storeSavedServerTarget,
   validateDiscoveryDocument,
   websocketConnectionFailureMessage
 } from '@config/serverSelection';
@@ -185,6 +189,48 @@ describe('custom server discovery', () => {
 
     const oversized = new Response(new Uint8Array(DISCOVERY_MAX_BYTES + 1));
     await expect(fetchServerDiscovery('demo.example', vi.fn(async() => oversized) as any)).rejects.toThrow(/too large/);
+  });
+
+  it('resolves the default profile from its public discovery target and authentication settings', async() => {
+    const advertisedDocument = {
+      ...document,
+      mtproto: {...document.mtproto, endpoint: 'server.teagram.io:443'},
+      websocket: {endpoint: 'wss://server.teagram.io/apiws'},
+      turnstile: {site_key: 'production-site-key'},
+      demo: {guest_sign_up: true}
+    };
+    const fetcher = vi.fn(async() => new Response(JSON.stringify(advertisedDocument)));
+
+    const profile = await resolveServerProfile('web.teagram.io', fetcher as any);
+
+    expect(fetcher).toHaveBeenCalledWith(
+      'https://web.teagram.io/.well-known/teagramd/client',
+      expect.objectContaining({credentials: 'omit', redirect: 'error'})
+    );
+    expect(profile.id).toBe('default');
+    expect(profile.server.target).toMatchObject({endpoint: 'wss://server.teagram.io/apiws'});
+    expect(profile.server.turnstileSiteKey).toBe('production-site-key');
+    expect(profile.server.guestSignUpEnabled).toBe(true);
+    storeSavedServerTarget(profile.server);
+    expect(getSavedServerTarget('web.teagram.io')?.target).toMatchObject({endpoint: 'wss://server.teagram.io/apiws'});
+
+    const existingPins = localStorage.getItem(SERVER_PINS_KEY);
+    try {
+      localStorage.setItem(SERVER_PINS_KEY, JSON.stringify({
+        'web.teagram.io': {...profile.server.pin, endpoint: 'wss://old.server.teagram.io/apiws'}
+      }));
+      await expect(resolveServerProfile('web.teagram.io', fetcher as any)).resolves.toMatchObject({pinState: 'mismatch'});
+    } finally {
+      if(existingPins === null) localStorage.removeItem(SERVER_PINS_KEY);
+      else localStorage.setItem(SERVER_PINS_KEY, existingPins);
+    }
+
+    const tailnetDocument = {
+      ...advertisedDocument,
+      websocket: {endpoint: 'wss://teagram.tailaa4918.ts.net/apiws'}
+    };
+    await expect(resolveServerProfile('web.teagram.io', vi.fn(async() => new Response(JSON.stringify(tailnetDocument))) as any))
+    .rejects.toThrow(/WebSocket endpoint host does not match/);
   });
 
   it('aborts a stalled discovery request after the timeout', async() => {

@@ -86,6 +86,16 @@ function trackTlsServerSockets(server: ReturnType<typeof createServer>) {
   };
 }
 
+// The worker is shared by every tab of the origin, so a tab that keeps its own server
+// can be controlled by another server's worker: `activeServerId` is the tab's own server.
+async function waitForServiceWorkerServerId(page: Page, serverId: string, activeServerId = serverId) {
+  await page.waitForFunction(({expectedServerId, expectedActiveServerId}) => {
+    const scriptUrl = navigator.serviceWorker.controller?.scriptURL;
+    return (window as any).__TEAGRAM_ACTIVE_SERVER_ID__ === expectedActiveServerId && !!scriptUrl &&
+      new URL(scriptUrl).searchParams.get('__tg_server') === expectedServerId;
+  }, {expectedServerId: serverId, expectedActiveServerId: activeServerId}, {timeout: 30_000});
+}
+
 async function closeTlsServer(
   server: ReturnType<typeof createServer>,
   socketTracker?: ReturnType<typeof trackTlsServerSockets>,
@@ -814,8 +824,10 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await expect(confirmation).toBeVisible();
     await expect(confirmation.locator('.popup-description')).toHaveCSS('outline-style', 'none');
     await expect(confirmation.getByText(`This browser hasn't connected to ${serverHost} before. Whoever runs this server can read your messages, so continue only if you trust them.`)).toBeVisible();
+    await expect(confirmation.getByText('Advertised WSS endpoint')).toBeVisible();
+    await expect(confirmation.locator('code.server-picker__endpoint')).toHaveText([privateEndpoint.href]);
     await expect(confirmation.getByText(/^(?:[0-9a-f]{4}-){15}[0-9a-f]{4}$/)).toHaveCount(1);
-    const fingerprint = confirmation.locator('[dir="ltr"]');
+    const fingerprint = confirmation.locator('[dir="ltr"]:has(span)');
     await expect(fingerprint.locator('span')).toHaveText([
       '3086-3c14-188a-34a4-',
       '286d-e6da-8e80-1ee5-',
@@ -1028,9 +1040,31 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
     await page.reload({waitUntil: 'domcontentloaded'});
     const mismatch = page.getByRole('dialog', {name: 'Server identity changed'});
     await expect(mismatch).toBeVisible();
+    await page.setViewportSize({width: 1280, height: 800});
+    const mismatchContainer = mismatch.locator('.popup-container');
+    const mismatchHeader = mismatch.locator('.popup-header');
+    const mismatchBody = mismatch.locator('.popup-body > .scrollable-y');
+    const mismatchContinue = mismatch.getByRole('button', {name: 'Continue to confirmation'});
+    const mismatchCancel = mismatch.getByRole('button', {name: 'Cancel', exact: true});
+    const mismatchWarning = mismatch.getByText('The client cannot distinguish a legitimate key rotation from an interception, so the connection is blocked.');
+    const expectMismatchControlsInViewport = async() => {
+      await expect(mismatchContainer).toBeInViewport({ratio: 1});
+      await expect(mismatchHeader).toBeInViewport({ratio: 1});
+      await expect(mismatchContinue).toBeInViewport({ratio: 1});
+      await expect(mismatchCancel).toBeInViewport({ratio: 1});
+    };
+    await expectMismatchControlsInViewport();
+    expect(await mismatchBody.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
     await expect(mismatch.getByText(`The identity of ${serverHost}, pinned in this browser, has changed.`)).toBeVisible();
+    await expect(mismatch.getByText('Pinned fingerprint', {exact: true})).toBeVisible();
+    await expect(mismatch.getByText('Presented fingerprint', {exact: true})).toBeVisible();
+    await expect(mismatch.getByText('The client cannot distinguish a legitimate key rotation from an interception, so the connection is blocked.')).toBeVisible();
+    await expect(mismatch.getByText('Cancel keeps this server\'s data and its current pin unchanged. Continue opens a final confirmation. Nothing is deleted until that final confirmation is explicitly accepted.')).toBeVisible();
+    await expect(mismatch.getByText('Pinned WSS endpoint')).toBeVisible();
+    await expect(mismatch.getByText('Current WSS endpoint')).toBeVisible();
+    await expect(mismatch.locator('code.server-picker__endpoint')).toHaveText([privateEndpoint.href, privateEndpoint.href]);
     await expect(mismatch.getByText(/^(?:[0-9a-f]{4}-){15}[0-9a-f]{4}$/)).toHaveCount(2);
-    const mismatchFingerprints = mismatch.locator('[dir="ltr"]');
+    const mismatchFingerprints = mismatch.locator('[dir="ltr"]:has(span)');
     await expect(mismatchFingerprints).toHaveCount(2);
     await expect(mismatchFingerprints.nth(0).locator('span')).toHaveText([
       '9b1f-04c2-77ae-51d0-',
@@ -1044,8 +1078,22 @@ test('private artifact discovers a server from web.teagram.io without CSP violat
       'dc56-ae7e-b638-8fe3-',
       'e268-c2a4-cdd9-2684'
     ]);
+    await mismatchWarning.scrollIntoViewIfNeeded();
+    await expect(mismatchWarning).toBeInViewport({ratio: 1});
+    await expectMismatchControlsInViewport();
+    await mismatchBody.evaluate((element) => { element.scrollTop = 0; });
     await page.screenshot({path: join(screenshots, 'S9.png')});
-    await mismatch.getByRole('button', {name: 'Continue to confirmation'}).click();
+    await page.setViewportSize({width: 360, height: 760});
+    await expectMismatchControlsInViewport();
+    await expect(mismatchBody).toBeVisible();
+    expect(await mismatchBody.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    await mismatchWarning.scrollIntoViewIfNeeded();
+    await expect(mismatchWarning).toBeInViewport({ratio: 1});
+    await expectMismatchControlsInViewport();
+    await mismatchBody.evaluate((element) => { element.scrollTop = 0; });
+    await page.screenshot({path: join(screenshots, 'S9-phone.png')});
+    await page.setViewportSize({width: 1280, height: 800});
+    await mismatchContinue.click();
     const deletion = page.getByRole('dialog', {name: 'Confirm data deletion'});
     await expect(deletion).toBeVisible();
     await expect(deletion.getByText(`This is the final confirmation. Accepting permanently deletes the keys, sessions, cached messages and peers, endpoint, and server identity this browser keeps for ${serverHost}, before returning to server selection. A guest account used here can't be recovered. This cannot be undone.`)).toBeVisible();
@@ -1339,13 +1387,25 @@ test('isolates two server tabs when a custom server worker takes control', async
       }, (request, response) => {
         const host = (request.headers.host || '').replace(/:\d+$/, '');
         const url = new URL(request.url || '/', `https://${host}`);
-        if(host === APP_HOST) {
-          if(url.pathname === '/stream/__server-isolation-probe') {
-            response.writeHead(200, {'content-type': 'text/plain'});
-            response.end('network-default');
-            return;
-          }
-
+        if(host === APP_HOST && url.pathname === '/stream/__server-isolation-probe') {
+          response.writeHead(200, {'content-type': 'text/plain'});
+          response.end('network-default');
+        } else if((host === APP_HOST || host === SERVER_HOST) && url.pathname === '/.well-known/teagramd/client') {
+          void fetch(`${serverHttpUrl}/.well-known/teagramd/client`).then(async(upstreamResponse) => {
+            const body = await upstreamResponse.text();
+            if(!upstreamResponse.ok) throw new Error(`local server discovery returned ${upstreamResponse.status}`);
+            const discovery = JSON.parse(body) as {websocket?: {endpoint?: string}};
+            if(discovery.websocket?.endpoint !== SERVER_WSS_ENDPOINT) {
+              throw new Error(`local server discovery advertises ${discovery.websocket?.endpoint}, expected ${SERVER_WSS_ENDPOINT}`);
+            }
+            response.writeHead(upstreamResponse.status, Object.fromEntries(upstreamResponse.headers));
+            response.end(body);
+          }).catch((error: Error) => {
+            discoveryErrors.push(error.message);
+            response.writeHead(502);
+            response.end();
+          });
+        } else if(host === APP_HOST) {
           const upstream = httpRequest({
             host: 'localhost',
             port: localAppPort,
@@ -1366,21 +1426,6 @@ test('isolates two server tabs when a custom server worker takes control', async
           fixtureResponses.add(response);
           response.once('close', () => fixtureResponses.delete(response));
           holdTlsResponseOpen(response);
-        } else if(host === SERVER_HOST && url.pathname === '/.well-known/teagramd/client') {
-          void fetch(`${serverHttpUrl}/.well-known/teagramd/client`).then(async(upstreamResponse) => {
-            const body = await upstreamResponse.text();
-            if(!upstreamResponse.ok) throw new Error(`local server discovery returned ${upstreamResponse.status}`);
-            const discovery = JSON.parse(body) as {websocket?: {endpoint?: string}};
-            if(discovery.websocket?.endpoint !== SERVER_WSS_ENDPOINT) {
-              throw new Error(`local server discovery advertises ${discovery.websocket?.endpoint}, expected ${SERVER_WSS_ENDPOINT}`);
-            }
-            response.writeHead(upstreamResponse.status, Object.fromEntries(upstreamResponse.headers));
-            response.end(body);
-          }).catch((error: Error) => {
-            discoveryErrors.push(error.message);
-            response.writeHead(502);
-            response.end();
-          });
         } else {
           response.writeHead(404);
           response.end();
@@ -1456,8 +1501,11 @@ test('isolates two server tabs when a custom server worker takes control', async
       await expect(defaultHostInput).toHaveValue('');
       await defaultHostInput.fill(APP_HOST);
       await page.getByRole('button', {name: 'Create account', exact: true}).click();
+      const defaultServerConfirmation = page.getByRole('dialog', {name: 'Confirm this server'});
+      await expect(defaultServerConfirmation.getByText(APP_HOST, {exact: true})).toBeVisible();
+      await defaultServerConfirmation.getByRole('button', {name: 'Confirm', exact: true}).click();
       await expect(page.locator('#auth-pages')).toBeVisible({timeout: 30_000});
-      await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
+      await waitForServiceWorkerServerId(page, 'default');
     });
 
     await runPhase('streaming: default tab', async() => {
@@ -1494,15 +1542,8 @@ test('isolates two server tabs when a custom server worker takes control', async
       await expect.poll(() => customPage!.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_HOST__ || ''), {timeout: 20_000})
         .toBe(SERVER_HOST);
       customServerId = await customPage.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__ as string);
-      await expect.poll(() => page.evaluate(() => {
-        const scriptUrl = navigator.serviceWorker.controller?.scriptURL;
-        return scriptUrl ? new URL(scriptUrl).searchParams.get('__tg_server') : null;
-      }), {timeout: 30_000}).toBe(customServerId);
-      await expect.poll(() => customPage!.evaluate(() => {
-        const scriptUrl = navigator.serviceWorker.controller?.scriptURL;
-        return scriptUrl ? new URL(scriptUrl).searchParams.get('__tg_server') : null;
-      }), {timeout: 30_000}).toBe(customServerId);
-      expect(await page.evaluate(() => (window as any).__TEAGRAM_ACTIVE_SERVER_ID__)).toBe('default');
+      await waitForServiceWorkerServerId(page, customServerId, 'default');
+      await waitForServiceWorkerServerId(customPage, customServerId);
     });
 
     await runPhase('identity handshake', async() => {

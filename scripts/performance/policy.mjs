@@ -17,6 +17,7 @@ export const COLD_CHAT_LIST_REPEATS = PERFORMANCE_REPEATS;
 export const PAIRED_CONFIDENCE_LEVEL = 0.95;
 export const TIMING_MINIMUM_EFFECTS = Object.freeze({
   scenarioTiming: Object.freeze({minimumMs: 2, baseMedianFraction: 0.15}),
+  globalSearchTiming: Object.freeze({'1x': 125.85, '100x': 126.96}),
   sendMessageTiming: Object.freeze({'1x': 41.88, '100x': 50.835}),
   absoluteBudgets: Object.freeze({coldChatList: 1_000, warmChatList: 300, chatOpen: 200}),
   scaleRatio: Object.freeze({maximum: 1.5, baseMedianFraction: 0.15}),
@@ -97,6 +98,7 @@ function historyFor(history, scale, key, report) {
     if(!matchesFixture(run, report)) return [];
     const samples = run.variants?.head?.[scale]?.[key];
     if(!Array.isArray(samples) || !samples.length) return [];
+    if(scale === '100x' && key === 'scrollBack2k' && !samples.every((sample) => Number.isInteger(sample?.rafDropped) && sample.rafDropped >= 0)) return [];
     const value = median(samples.map((sample) => sample[timingFieldForScenario(key)]).filter(Number.isFinite));
     return Number.isFinite(value) ? [value] : [];
   });
@@ -189,6 +191,7 @@ function historyScrollMetrics(history, report) {
         Number.isFinite(sample?.blockingTimeMs) &&
         Number.isFinite(sample?.frameIntervals) && sample.frameIntervals > 0 &&
         Number.isFinite(sample?.droppedFrames) && sample.droppedFrames >= 0 &&
+        Number.isInteger(sample?.rafDropped) && sample.rafDropped >= 0 &&
         Number.isFinite(sample?.droppedFramePercent);
     });
     if(!complete) return [];
@@ -255,6 +258,9 @@ export function evaluatePerformance(report, history = []) {
             ['droppedFrames', 'dropped frame count'],
             ['droppedFramePercent', 'dropped frame percentage']
           ] : REQUIRED_METRICS;
+          if(scale === '100x' && scenario.key === 'scrollBack2k') {
+            requiredMetrics.push(['rafDropped', 'RAF drop count']);
+          }
           for(const [field, label] of requiredMetrics) {
             if(!Number.isFinite(sample?.[field])) {
               addFailure(blockingFailures, scale, scenario.key, `${variant} ${label} is missing or invalid in sample ${index + 1}`);
@@ -272,6 +278,12 @@ export function evaluatePerformance(report, history = []) {
           if(scenario.key === 'scrollBack2k' && Number.isFinite(sample?.droppedFrames) && sample.droppedFrames < 0) {
             addFailure(blockingFailures, scale, scenario.key, `${variant} dropped frame count cannot be negative in sample ${index + 1}`);
             gateFailure = true;
+          }
+          if(scale === '100x' && scenario.key === 'scrollBack2k') {
+            if(Number.isFinite(sample?.rafDropped) && (!Number.isInteger(sample.rafDropped) || sample.rafDropped < 0 || sample.rafDropped !== sample.droppedFrames)) {
+              addFailure(blockingFailures, scale, scenario.key, `${variant} RAF drop count is invalid in sample ${index + 1}`);
+              gateFailure = true;
+            }
           }
         });
       }
@@ -325,11 +337,14 @@ export function evaluatePerformance(report, history = []) {
         const timeDifferences = pairedDifferences(baseTimes, headTimes);
         if(timeDifferences) {
           const baseMedian = median(baseTimes);
-          const relativeMinimum = scenario.key === 'sendMessage' ? TIMING_MINIMUM_EFFECTS.sendMessageTiming[scale] : Math.max(
+          const fixedMinimum = scenario.key === 'sendMessage' ? TIMING_MINIMUM_EFFECTS.sendMessageTiming[scale]
+            : scenario.key === 'globalSearch' ? TIMING_MINIMUM_EFFECTS.globalSearchTiming[scale]
+              : null;
+          const relativeMinimum = fixedMinimum ?? Math.max(
             TIMING_MINIMUM_EFFECTS.scenarioTiming.minimumMs,
             baseMedian * TIMING_MINIMUM_EFFECTS.scenarioTiming.baseMedianFraction
           );
-          const relativeMinimumText = scenario.key === 'sendMessage' ? `${relativeMinimum} ms` : `${relativeMinimum.toFixed(2)} ms (${TIMING_MINIMUM_EFFECTS.scenarioTiming.baseMedianFraction * 100}% of base median, at least ${TIMING_MINIMUM_EFFECTS.scenarioTiming.minimumMs} ms)`;
+          const relativeMinimumText = fixedMinimum !== null ? `${relativeMinimum} ms` : `${relativeMinimum.toFixed(2)} ms (${TIMING_MINIMUM_EFFECTS.scenarioTiming.baseMedianFraction * 100}% of base median, at least ${TIMING_MINIMUM_EFFECTS.scenarioTiming.minimumMs} ms)`;
           applyTimingGate('response timing', timeDifferences, relativeMinimum, relativeMinimumText);
           if(budgetMs !== null) {
             const budgetHeadroom = Math.max(relativeMinimum, budgetMs - baseMedian);
