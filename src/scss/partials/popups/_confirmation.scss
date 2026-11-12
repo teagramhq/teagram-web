@@ -25,16 +25,3 @@
     overflow-wrap: anywhere;
   }
 }
-
-.popup-key-confirmation {
-  --popup-max-height: 100%;
-
-  .popup-body {
-    min-height: 0;
-  }
-
-  .scrollable {
-    flex: 1 1 auto;
-    min-height: 0;
-  }
-}

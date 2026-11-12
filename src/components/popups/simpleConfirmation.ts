@@ -1,3 +1,4 @@
+import serverKeyConfirmationStyles from './simpleConfirmation.scss?inline';
 import PopupElement, {addCancelButton, PopupButton} from '@components/popups';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import type {MessageEntity} from '@layer';
@@ -6,6 +7,10 @@ import {ensureServerLangPackFallbacks} from '@components/popups/serverLangPackFa
 import mergeEntities from '@lib/richTextProcessor/mergeEntities';
 import parseEntities from '@lib/richTextProcessor/parseEntities';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
+
+const serverKeyConfirmationStyle = document.createElement('style');
+serverKeyConfirmationStyle.textContent = serverKeyConfirmationStyles;
+document.head.append(serverKeyConfirmationStyle);
 
 let termsPopupId = 0;
 

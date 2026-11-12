@@ -24,6 +24,16 @@ describe('server confirmation language fallbacks', () => {
       key: 'Teagram.Server.IdentityTitle',
       value: 'Local identity title'
     };
+    const cachedRawKey: LangPackString = {
+      _: 'langPackString',
+      key: 'Teagram.Server.IdentityBlocked',
+      value: 'Teagram.Server.IdentityBlocked'
+    };
+    const localBlockedWarning: LangPackString = {
+      _: 'langPackString',
+      key: 'Teagram.Server.IdentityBlocked',
+      value: 'The connection is blocked.'
+    };
     const localOtherString: LangPackString = {
       _: 'langPackString',
       key: 'Other.LocalKey',
@@ -34,14 +44,14 @@ describe('server confirmation language fallbacks', () => {
       lang_code: 'en',
       from_version: 1,
       version: 1,
-      strings: [cachedTranslation, otherCachedString]
+      strings: [cachedTranslation, cachedRawKey, otherCachedString]
     };
     const localPack: LangPackDifference = {
       _: 'langPackDifference',
       lang_code: 'en',
       from_version: 0,
       version: 1,
-      strings: [localFallback, localTranslation, localOtherString]
+      strings: [localFallback, localTranslation, localBlockedWarning, localOtherString]
     };
     const getCachedPack = vi.spyOn(I18n, 'getCacheLangPack').mockResolvedValue(cachedPack);
     const loadLocalPack = vi.spyOn(I18n, 'loadLocalLangPack').mockResolvedValue(localPack);
@@ -53,7 +63,7 @@ describe('server confirmation language fallbacks', () => {
       expect(getCachedPack).toHaveBeenCalledWith(true);
       expect(savePack).toHaveBeenCalledWith({
         ...cachedPack,
-        strings: [localFallback, cachedTranslation, otherCachedString]
+        strings: [localFallback, localBlockedWarning, cachedTranslation, otherCachedString]
       }, true);
     } finally {
       getCachedPack.mockRestore();
