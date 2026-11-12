@@ -1,7 +1,7 @@
 import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
 import {readFileSync} from 'node:fs';
 import {writePerformanceReport} from './performanceReport';
-import {getServerRpcTracePosition, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from '../scripts/performance/server-rpc-trace.mjs';
+import {getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from '../scripts/performance/server-rpc-trace.mjs';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
@@ -195,13 +195,39 @@ async function attachServerRpcTrace(sample: Metric, offset: number | undefined, 
     throw new Error('100x chat-open sample has no client messages.getHistory spans to correlate');
   }
   const expectation = serverRpcTraceExpectation(expectedCount);
-  const records = await waitForServerRpcTraceRecords(
-    serverRpcTraceFile!,
-    offset,
-    'messages.getHistory',
-    expectation.minimumCount,
-    {quietMs: 150, recordFilter: (record) => serverRpcRecordMatchesClientCalls(record, clientCalls)}
-  );
+  let records: ServerRpcTraceRecord[];
+  try {
+    records = await waitForServerRpcTraceRecords(
+      serverRpcTraceFile!,
+      offset,
+      'messages.getHistory',
+      expectation.minimumCount,
+      {quietMs: 150, recordFilter: (record) => serverRpcRecordMatchesClientCalls(record, clientCalls)}
+    );
+  } catch(error) {
+    const traceRecords = readServerRpcTraceRecordsSince(serverRpcTraceFile!, offset).filter((record) => record.method === 'messages.getHistory');
+    const correlation = {
+      clientCalls: clientCalls.map((call, callIndex) => ({
+        callIndex,
+        startedAtEpochMs: call.startedAtEpochMs,
+        durationMs: call.durationMs,
+        outcome: call.outcome,
+        matchingRecordIndexes: traceRecords.flatMap((record, recordIndex) => (
+          serverRpcRecordMatchesClientCall(record, call) ? [recordIndex] : []
+        ))
+      })),
+      serverRecords: traceRecords.map((record, recordIndex) => ({
+        recordIndex,
+        end_unix_ms: record.end_unix_ms,
+        duration_us: record.duration_us,
+        result: record.result,
+        matchingCallIndexes: clientCalls.flatMap((call, callIndex) => (
+          serverRpcRecordMatchesClientCall(record, call) ? [callIndex] : []
+        ))
+      }))
+    };
+    throw new Error(`${String(error)}; RPC sample correlation ${JSON.stringify(correlation)}`);
+  }
   if(!serverRpcRecordsCoverClientCalls(records, clientCalls)) {
     throw new Error('100x chat-open server records do not cover every client messages.getHistory span');
   }
