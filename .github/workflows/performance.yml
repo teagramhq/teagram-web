@@ -176,11 +176,34 @@ jobs:
           echo "MTPROTO_PRIVATE_ENDPOINT=wss://teagramd.test/apiws" >> "$GITHUB_ENV"
           echo "MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE=$RUNNER_TEMP/teagram-perf-server-public.pem" >> "$GITHUB_ENV"
 
-      - name: Build server at the fixture commit and start it
+      - name: Build fixture server and client bundles in parallel
         shell: bash
+        env:
+          PERF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          go -C teagram-server build -o "$RUNNER_TEMP/teagramd" ./cmd/teagramd
+          client_build_env="$RUNNER_TEMP/teagram-perf-client-build.env"
+          client_build_log="$RUNNER_TEMP/teagram-perf-client-build.log"
+          bash scripts/performance/build-client-bundles.sh "$client_build_env" > "$client_build_log" 2>&1 &
+          client_build_pid=$!
+
+          server_build_status=0
+          if go -C teagram-server build -o "$RUNNER_TEMP/teagramd" ./cmd/teagramd; then
+            server_build_status=0
+          else
+            server_build_status=$?
+          fi
+          if wait "$client_build_pid"; then
+            client_build_status=0
+          else
+            client_build_status=$?
+          fi
+          cat "$client_build_log"
+          if [ "$server_build_status" -ne 0 ] || [ "$client_build_status" -ne 0 ]; then
+            exit 1
+          fi
+          cat "$client_build_env" >> "$GITHUB_ENV"
+
           : > "$PERF_SERVER_PID_FILE"
           for scale in 1x 100x; do
             if [ "$scale" = 1x ]; then
@@ -220,45 +243,6 @@ jobs:
               exit 1
             fi
           done
-
-      - name: Build current and base private client bundles
-        shell: bash
-        env:
-          PERF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
-          VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-trace-dist"
-          if [ -n "$PERF_BASE_SHA" ]; then
-            base_directory="$RUNNER_TEMP/teagram-web-base"
-            git worktree add --detach "$base_directory" "$PERF_BASE_SHA"
-            ln -s "$GITHUB_WORKSPACE/node_modules" "$base_directory/node_modules"
-            node scripts/performance/inject-search-rpc-tracer.mjs "$base_directory/src/lib/appManagers/apiManager.ts"
-            (cd "$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-dist")
-            (cd "$base_directory" && VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-trace-dist")
-            sticker_base_sha="$(cat .github/perf-sticker-base-commit)"
-            sticker_base_directory="$RUNNER_TEMP/teagram-web-sticker-base"
-            git worktree add --detach "$sticker_base_directory" "$sticker_base_sha"
-            ln -s "$GITHUB_WORKSPACE/node_modules" "$sticker_base_directory/node_modules"
-            (cd "$sticker_base_directory" && pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-sticker-base-dist")
-            echo "PERF_BASE_DIST=$RUNNER_TEMP/teagram-web-base-dist" >> "$GITHUB_ENV"
-            echo "PERF_TRACE_BASE_DIST=$RUNNER_TEMP/teagram-web-base-trace-dist" >> "$GITHUB_ENV"
-            echo "PERF_STICKER_BASE_DIST=$RUNNER_TEMP/teagram-web-sticker-base-dist" >> "$GITHUB_ENV"
-            echo 'PERF_STICKER_BASE_ORIGIN=http://localhost:4179' >> "$GITHUB_ENV"
-            echo 'PERF_TRACE_BASE_ORIGIN_100X=http://localhost:4178' >> "$GITHUB_ENV"
-            echo 'PERF_BASE_ORIGIN_1X=http://localhost:4173' >> "$GITHUB_ENV"
-            echo 'PERF_BASE_ORIGIN_100X=http://localhost:4175' >> "$GITHUB_ENV"
-          else
-            echo "PERF_BASE_DIST=$RUNNER_TEMP/teagram-web-head-dist" >> "$GITHUB_ENV"
-            echo "PERF_TRACE_BASE_DIST=$RUNNER_TEMP/teagram-web-trace-dist" >> "$GITHUB_ENV"
-            echo 'PERF_BASE_ORIGIN_1X=' >> "$GITHUB_ENV"
-            echo 'PERF_BASE_ORIGIN_100X=' >> "$GITHUB_ENV"
-          fi
-          echo "PERF_HEAD_DIST=$RUNNER_TEMP/teagram-web-head-dist" >> "$GITHUB_ENV"
-          echo "PERF_TRACE_HEAD_DIST=$RUNNER_TEMP/teagram-web-trace-dist" >> "$GITHUB_ENV"
-          echo 'PERF_HEAD_ORIGIN_1X=http://localhost:4174' >> "$GITHUB_ENV"
-          echo 'PERF_HEAD_ORIGIN_100X=http://localhost:4176' >> "$GITHUB_ENV"
-          echo 'PERF_TRACE_HEAD_ORIGIN_100X=http://localhost:4177' >> "$GITHUB_ENV"
 
       - name: Start local HTTPS and static app servers
         shell: bash

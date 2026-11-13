@@ -76,6 +76,10 @@ port.addMultipleEventsListeners({
 
   getLogs: () => getLogEntries(),
 
+  mirrorQueueBarrier: () => {
+    // This reply follows earlier worker-to-window mirror messages on the same MessagePort.
+  },
+
   getMemoryStats: async() => {
     const urls = objectUrlRegistry.getStats();
     const caches = getSharedObjectURLCacheStats();

@@ -4,6 +4,7 @@ import {resolve} from 'node:path';
 import {test} from 'node:test';
 
 const workflow = readFileSync(new URL('../../.github/workflows/performance.yml', import.meta.url), 'utf8');
+const performanceClientBuild = readFileSync(new URL('./build-client-bundles.sh', import.meta.url), 'utf8');
 const viteConfig = readFileSync(new URL('../../vite.config.ts', import.meta.url), 'utf8');
 const serverCheckout = process.env.PERF_SERVER_CHECKOUT || 'teagram-server';
 const serverTestHelpers = readFileSync(resolve(serverCheckout, 'internal/pgtest/pgtest.go'), 'utf8');
@@ -42,10 +43,10 @@ test('the performance workflow restores and migrates both scale snapshots', () =
 });
 
 test('the performance workflow assigns the 1x and 100x browser origins to separate servers', () => {
-  assert.match(workflow, /PERF_BASE_ORIGIN_1X/);
-  assert.match(workflow, /PERF_HEAD_ORIGIN_1X/);
-  assert.match(workflow, /PERF_BASE_ORIGIN_100X/);
-  assert.match(workflow, /PERF_HEAD_ORIGIN_100X/);
+  assert.match(performanceClientBuild, /PERF_BASE_ORIGIN_1X/);
+  assert.match(performanceClientBuild, /PERF_HEAD_ORIGIN_1X/);
+  assert.match(performanceClientBuild, /PERF_BASE_ORIGIN_100X/);
+  assert.match(performanceClientBuild, /PERF_HEAD_ORIGIN_100X/);
   assert.match(workflow, /2443/);
   assert.match(workflow, /2444/);
   assert.match(workflow, /2445/);
@@ -57,8 +58,8 @@ test('PR performance runs require complete base bundle measurements', () => {
 });
 
 test('timing builds use the cached-dialog probe and diagnostics use a full trace bundle', () => {
-  assert.match(workflow, /^\s+VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
-  assert.match(workflow, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"/);
-  assert.doesNotMatch(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
-  assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
+  assert.match(performanceClientBuild, /^VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
+  assert.match(performanceClientBuild, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"/);
+  assert.doesNotMatch(performanceClientBuild, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
+  assert.match(performanceClientBuild, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
 });

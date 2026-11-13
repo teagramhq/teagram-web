@@ -997,7 +997,10 @@ async function waitForHistorySettled(page: Page) {
 
 async function flushFixtureHistoryBeforeMeasuredOpen(page: Page, fixture: Fixture) {
   await page.evaluate(async(peerId) => {
-    await (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId);
+    // The worker acknowledgement follows its fire-and-forget mirror deletions on the same port.
+    const cacheFlush = (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId);
+    const mirrorAck = (window as any).apiManagerProxy.invoke('mirrorQueueBarrier', undefined);
+    await Promise.all([cacheFlush, mirrorAck]);
   }, fixture.partner);
 }
 

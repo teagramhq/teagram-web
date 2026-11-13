@@ -10,6 +10,9 @@ const workflow = readFileSync(new URL('../../.github/workflows/performance.yml',
 const playwrightConfig = readFileSync(new URL('../../playwright.performance.config.ts', import.meta.url), 'utf8');
 const performanceScale = readFileSync(new URL('../../e2e/performanceScale.spec.ts', import.meta.url), 'utf8');
 const performanceTrace = readFileSync(new URL('../../src/lib/appManagers/performanceTrace.ts', import.meta.url), 'utf8');
+const mainMessagePort = readFileSync(new URL('../../src/lib/mainWorker/mainMessagePort.ts', import.meta.url), 'utf8');
+const mainWorker = readFileSync(new URL('../../src/lib/mainWorker/index.worker.ts', import.meta.url), 'utf8');
+const performanceClientBuild = readFileSync(new URL('./build-client-bundles.sh', import.meta.url), 'utf8');
 const workerReplay = readFileSync(new URL('../../e2e/workerMessageReplay.spec.ts', import.meta.url), 'utf8');
 const chatPageSnapshotView = readFileSync(new URL('../../src/lib/chatPageSnapshotView.ts', import.meta.url), 'utf8');
 const stickerBaseCommit = readFileSync(new URL('../../.github/perf-sticker-base-commit', import.meta.url), 'utf8').trim();
@@ -200,19 +203,17 @@ function runSummaryWithArtifacts({
 }
 
 test('timing bundles enable targeted search and history probes while keeping full profiles separate', () => {
-  assert.match(workflow, /^\s+VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
-  assert.match(workflow, /^\s+\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
-  assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
-  assert.doesNotMatch(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
+  assert.match(performanceClientBuild, /^VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"\s*$/m);
+  assert.match(performanceClientBuild, /^\s+\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)\s*$/m);
+  assert.match(performanceClientBuild, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
+  assert.doesNotMatch(performanceClientBuild, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-(?:head|base)-dist"/);
 });
 
 test('base search tracing preserves application RPC differences from the head bundle', async() => {
-  const buildStep = workflow.match(/- name: Build current and base private client bundles([\s\S]*?)(?=\n      - name: Start local HTTPS)/)?.[1];
-  assert.ok(buildStep, 'the performance workflow must define its client build step');
-  assert.doesNotMatch(buildStep, /git -C "\$base_directory" checkout .*src\/lib\/appManagers\/apiManager\.ts/);
-  assert.match(buildStep, /node scripts\/performance\/inject-search-rpc-tracer\.mjs "\$base_directory\/src\/lib\/appManagers\/apiManager\.ts"/);
-  assert.match(buildStep, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
-  assert.match(buildStep, /\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)/);
+  assert.doesNotMatch(performanceClientBuild, /git -C "\$base_directory" checkout .*src\/lib\/appManagers\/apiManager\.ts/);
+  assert.match(performanceClientBuild, /node scripts\/performance\/inject-search-rpc-tracer\.mjs "\$base_directory\/src\/lib\/appManagers\/apiManager\.ts"/);
+  assert.match(performanceClientBuild, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
+  assert.match(performanceClientBuild, /\(cd "\$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"\)/);
 
   const baseApiManager = [
     'export class ApiManager {',
@@ -337,13 +338,11 @@ test('performance workflow does not run the removed screencast frame measurement
 });
 
 test('sticker timing gates against the PR base and keeps the pre-178 client report-only', () => {
-  const buildStep = workflow.match(/- name: Build current and base private client bundles([\s\S]*?)(?=\n      - name: Start local HTTPS)/)?.[1];
-  assert.ok(buildStep, 'the performance workflow must define its client build step');
-  assert.match(buildStep, /cat \.github\/perf-sticker-base-commit/);
-  assert.match(buildStep, /teagram-web-sticker-base-dist/);
+  assert.match(performanceClientBuild, /cat \.github\/perf-sticker-base-commit/);
+  assert.match(performanceClientBuild, /teagram-web-sticker-base-dist/);
   assert.equal(stickerBaseCommit, 'e28fb469fa0404c5ea396c0230d0c4c94bf20c5b');
   assert.match(stickerBaseCommit, /^[a-f0-9]{40}$/);
-  assert.match(buildStep, /PERF_STICKER_BASE_ORIGIN=http:\/\/localhost:4179/);
+  assert.match(performanceClientBuild, /PERF_STICKER_BASE_ORIGIN=http:\/\/localhost:4179/);
   assert.match(workflow, /TG_WEBSOCKET_ALLOWED_ORIGINS=.*4179/);
   assert.match(workflow, /serve-dist\.mjs "\$PERF_STICKER_BASE_DIST" 4179/);
   assert.match(performanceScale, /PERF_STICKER_BASE_ORIGIN/);
@@ -402,10 +401,10 @@ test('only pull requests build and require a base comparison', () => {
 });
 
 test('performance tracing uses a separate diagnostic bundle', () => {
-  assert.match(workflow, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
-  assert.match(workflow, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"/);
-  assert.match(workflow, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
-  assert.match(workflow, /PERF_TRACE_HEAD_ORIGIN_100X=http:\/\/localhost:4177/);
+  assert.match(performanceClientBuild, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
+  assert.match(performanceClientBuild, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-base-dist"/);
+  assert.match(performanceClientBuild, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
+  assert.match(performanceClientBuild, /PERF_TRACE_HEAD_ORIGIN_100X=http:\/\/localhost:4177/);
   assert.match(workflow, /TG_WEBSOCKET_ALLOWED_ORIGINS=.*http:\/\/localhost:4177/);
 });
 
@@ -704,12 +703,17 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(diagnosticChatOpen, /finalizeServerRpcTrace\(page, chatOpenSample\)/);
 });
 
-test('100x chat-open awaits fixture cache flush without collecting unrelated worker memory stats', () => {
+test('100x chat-open waits for a worker acknowledgement after flushing fixture history', () => {
   const flush = performanceScale.match(/async function flushFixtureHistoryBeforeMeasuredOpen[\s\S]*?(?=\nfunction expectChatOpenHistoryCall)/)?.[0];
 
   assert.ok(flush, 'cold-history preparation should be isolated before the measured click');
-  assert.match(flush, /await \(window as any\)\.rootScope\.managers\.appMessagesManager\.flushStoragesByPeerId\(peerId\)/);
+  assert.match(flush, /const cacheFlush = \(window as any\)\.rootScope\.managers\.appMessagesManager\.flushStoragesByPeerId\(peerId\)/);
+  assert.match(flush, /const mirrorAck = \(window as any\)\.apiManagerProxy\.invoke\('mirrorQueueBarrier', undefined\)/);
+  assert.ok(flush.indexOf('flushStoragesByPeerId') < flush.indexOf("invoke('mirrorQueueBarrier'"), 'the worker acknowledgement must follow the cache deletion request');
+  assert.match(flush, /await Promise\.all\(\[cacheFlush, mirrorAck\]\)/, 'await both the cache flush result and the worker queue acknowledgement');
   assert.doesNotMatch(flush, /getMemoryStats/, 'the cache flush itself is the ordering barrier; do not scan worker state');
+  assert.match(mainMessagePort, /mirrorQueueBarrier: \(payload: void\) => void/);
+  assert.match(mainWorker, /mirrorQueueBarrier:\s*\(\) => \{[\s\S]*?earlier worker-to-window mirror messages[\s\S]*?\}/);
   assert.ok(performanceScale.includes('await flushFixtureHistoryBeforeMeasuredOpen(page, fixture)'));
   assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpen'));
   assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpenSample'));
@@ -1003,11 +1007,29 @@ test('performance workflow pins and enables the per-RPC server trace for 100x', 
   const serverCommit = readFileSync(new URL('../../.github/perf-server-commit', import.meta.url), 'utf8').trim();
   assert.equal(serverCommit, '11aca52138df628f0ef9972e0583c768d12c221d');
   assert.match(workflow, /PERF_SERVER_RPC_TRACE_FILE_100X/);
-  const serverStep = workflow.match(/- name: Build server at the fixture commit and start it([\s\S]*?)(?=\n      - name: Build current and base private client bundles)/)?.[1];
-  assert.ok(serverStep, 'the performance workflow must define its fixture server step');
+  const serverStep = workflow.match(/- name: Build fixture server and client bundles in parallel([\s\S]*?)(?=\n      - name: Start local HTTPS)/)?.[1];
+  assert.ok(serverStep, 'the performance workflow must define its combined fixture server and client build step');
   assert.match(serverStep, /TG_RPC_TRACE_FILE/);
   assert.match(serverStep, /if \[ "\$scale" = "100x" \]; then\s+rpc_trace_env\+=\("TG_RPC_TRACE_FILE=\$PERF_SERVER_RPC_TRACE_FILE_100X"\)/);
   assert.match(workflow, /teagram-perf-server-rpc-100x\.jsonl/);
+  assert.match(performanceClientBuild, /PERF_BASE_DIST=/);
+});
+
+test('performance setup overlaps client bundles with fixture server compilation', () => {
+  const buildStep = workflow.match(/- name: Build fixture server and client bundles in parallel([\s\S]*?)(?=\n      - name: Start local HTTPS)/)?.[1];
+
+  assert.ok(buildStep, 'the performance workflow must define a combined server and client build step');
+  const clientBuild = buildStep.indexOf('bash scripts/performance/build-client-bundles.sh "$client_build_env"');
+  const clientPid = buildStep.indexOf('client_build_pid=$!');
+  const serverBuild = buildStep.indexOf('go -C teagram-server build');
+  const clientWait = buildStep.indexOf('wait "$client_build_pid"');
+  const serverLaunch = buildStep.indexOf('nohup env TG_POSTGRES_DSN=');
+
+  assert.ok(clientBuild >= 0 && clientBuild < clientPid && clientPid < serverBuild, 'the client build must start in the background before the fixture server build');
+  assert.ok(serverBuild < clientWait && clientWait < serverLaunch, 'both builds must finish before the fixture server starts and the browser services launch');
+  assert.match(buildStep, /cat "\$client_build_env" >> "\$GITHUB_ENV"/);
+  assert.match(buildStep, /if wait "\$client_build_pid"; then/);
+  assert.match(performanceClientBuild, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build/);
 });
 
 test('summary reports query stages for every global-search sample', () => {
