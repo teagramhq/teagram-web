@@ -1,10 +1,16 @@
+import serverKeyConfirmationStyles from './simpleConfirmation.scss?inline';
 import PopupElement, {addCancelButton, PopupButton} from '@components/popups';
 import cancelEvent from '@helpers/dom/cancelEvent';
 import type {MessageEntity} from '@layer';
 import {FormatterArguments, LangPackKey, i18n} from '@lib/langPack';
+import {ensureServerLangPackFallbacks} from '@components/popups/serverLangPackFallback';
 import mergeEntities from '@lib/richTextProcessor/mergeEntities';
 import parseEntities from '@lib/richTextProcessor/parseEntities';
 import wrapRichText from '@lib/richTextProcessor/wrapRichText';
+
+const serverKeyConfirmationStyle = document.createElement('style');
+serverKeyConfirmationStyle.textContent = serverKeyConfirmationStyles;
+document.head.append(serverKeyConfirmationStyle);
 
 let termsPopupId = 0;
 
@@ -23,7 +29,9 @@ type SimpleConfirmationPopupOptions = {
   extraContent?: HTMLElement
 };
 
-type SimpleConfirmationPopupShowOptions = Omit<SimpleConfirmationPopupOptions, 'buttons'> & {
+type SimpleConfirmationPopupShowOptions = Omit<SimpleConfirmationPopupOptions, 'buttons' | 'extraContent'> & {
+  // A factory runs after the language fallbacks are in place, so its labels are never rendered as raw keys.
+  extraContent?: HTMLElement | (() => HTMLElement),
   button: PopupButton,
   cancelLangKey?: LangPackKey,
   focusReturnTarget?: HTMLElement
@@ -153,7 +161,15 @@ export class SimpleConfirmationPopup extends PopupElement {
     }
   }
 
-  static show(options: SimpleConfirmationPopupShowOptions) {
+  static async show(options: SimpleConfirmationPopupShowOptions) {
+    if(options.titleLangKey.startsWith('Teagram.Server.')) {
+      try {
+        await ensureServerLangPackFallbacks();
+      } catch(error) {
+        console.error('Could not load server confirmation language fallbacks', error);
+      }
+    }
+
     return new Promise<void>((resolve, reject) => {
       let resolved = false
       let accepted = false;
@@ -190,7 +206,7 @@ export class SimpleConfirmationPopup extends PopupElement {
         scrollable: options.scrollable || options.termsDialog,
         disableTextEnterConfirm: options.disableTextEnterConfirm,
         verticalButtons: options.verticalButtons,
-        extraContent: options.extraContent
+        extraContent: typeof options.extraContent === 'function' ? options.extraContent() : options.extraContent
       })
 
       popup.addEventListener('closeAfterTimeout', () => {

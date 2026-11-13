@@ -59,6 +59,10 @@ export function isServerSelectionOrigin(host: string) {
   return host.toLowerCase().replace(/\.+$/, '') === DEFAULT_SERVER_HOST;
 }
 
+export function getServerProfileId(host: string, serverId?: string) {
+  return serverId && !isServerSelectionOrigin(host) ? serverId : 'default';
+}
+
 export function formatServerKeyId(fingerprint: string) {
   const keyId = fingerprint.toLowerCase();
   if(!/^[a-f0-9]{64}$/.test(keyId)) throw new Error('Invalid server key fingerprint');
@@ -79,7 +83,7 @@ export function getSavedServerTarget(hostInput: string): DiscoveredServer | unde
     }
 
     const target = validateMtprotoTarget(value.target);
-    if(target.mode !== 'private' || new URL(target.endpoint).hostname.toLowerCase() !== host) return;
+    if(target.mode !== 'private' || !isAllowedServerEndpointHost(host, new URL(target.endpoint).hostname)) return;
     const pin = value.pin;
     if(pin.host !== host || pin.endpoint !== target.endpoint || typeof pin.dc_id !== 'number' ||
       typeof pin.key_fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(pin.key_fingerprint) ||
@@ -134,10 +138,12 @@ export type ServerPin = {
   key_fingerprint: string
 };
 
+type DiscoveredServerTarget = Extract<MtprotoTarget, {mode: 'private'}>;
+
 export type DiscoveredServer = {
   host: string,
   id: string,
-  target: MtprotoTarget,
+  target: DiscoveredServerTarget,
   pin: ServerPin,
   spkiFingerprint: string,
   turnstileSiteKey?: string,
@@ -147,6 +153,11 @@ export type DiscoveredServer = {
 
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+// `endpointHost` comes from `URL.hostname`, which is already lower case; a trailing dot still names the same host.
+function isAllowedServerEndpointHost(host: string, endpointHost: string) {
+  return endpointHost === host || host === DEFAULT_SERVER_HOST && !/(^|\.)ts\.net\.*$/.test(endpointHost);
 }
 
 function decodeBase64(value: string) {
@@ -255,7 +266,7 @@ export async function validateDiscoveryDocument(hostInput: string, value: unknow
   } catch{
     throw new Error('not a Teagram server: invalid WebSocket endpoint');
   }
-  if(socketUrl.hostname.toLowerCase() !== host) {
+  if(!isAllowedServerEndpointHost(host, socketUrl.hostname)) {
     throw new Error('not a Teagram server: WebSocket endpoint host does not match the entered host');
   }
 
@@ -305,6 +316,7 @@ export async function validateDiscoveryDocument(hostInput: string, value: unknow
       connectionTypes: ['client', 'upload', 'download']
     }
   });
+  if(target.mode !== 'private') throw new Error('not a Teagram server: invalid WebSocket target');
   const id = 'custom-' + toHex(await sha256(new TextEncoder().encode(host)));
   const pin = {host, endpoint: websocketEndpoint, dc_id, key_fingerprint: spkiFingerprint};
   const demo = record(value.demo) ? value.demo : undefined;
@@ -383,7 +395,7 @@ export function readServerPins(): Record<string, ServerPin> {
   }
 }
 
-function updateServerPins(update: (pins: Record<string, ServerPin>) => void) {
+export function updateServerPins(update: (pins: Record<string, ServerPin>) => void) {
   if(typeof navigator === 'undefined' || !navigator.locks) {
     return Promise.reject(new Error('This browser cannot safely confirm this server'));
   }
@@ -409,6 +421,17 @@ export function getServerPinState(discovered: DiscoveredServer, pin?: ServerPin)
   return pinMatches(discovered, pin) ? 'match' as const : 'mismatch' as const;
 }
 
+export async function resolveServerProfile(hostInput: string, fetcher?: typeof fetch, signal?: AbortSignal) {
+  const discovered = await fetchServerDiscovery(hostInput, fetcher, signal);
+  const pin = getServerPin(discovered.host);
+  return {
+    id: getServerProfileId(discovered.host, discovered.id),
+    server: discovered,
+    pin,
+    pinState: getServerPinState(discovered, pin)
+  };
+}
+
 export function writeServerPin(discovered: DiscoveredServer) {
   if(discovered.pin.host !== discovered.host) {
     return Promise.reject(new Error('The server identity does not match the confirmed host'));
@@ -423,49 +446,12 @@ export function writeServerPin(discovered: DiscoveredServer) {
   });
 }
 
-export async function forgetServer(hostInput: string) {
+export async function forgetServer(hostInput: string, profileId: string) {
   if(typeof navigator === 'undefined' || !navigator.locks) {
     throw new Error('This browser cannot safely update server pins');
   }
   const host = normalizeServerHost(hostInput);
-  const id = 'custom-' + toHex(await sha256(new TextEncoder().encode(host)));
-  notifyGuestCredentialInvalidation(id);
-  for(const key of Object.keys(localStorage)) {
-    if(key.startsWith(`teagram-${id}:`)) localStorage.removeItem(key);
-  }
-  for(const key of Object.keys(sessionStorage)) {
-    if(key.startsWith(`teagram-${id}:`)) sessionStorage.removeItem(key);
-  }
-  const knownDatabases = [
-    `tweb-${id}`,
-    `tweb-${id}-common`,
-    ...[1, 2, 3, 4].map((account) => `tweb-${id}-account-${account}`),
-    `telegram-${id}`
-  ];
-  const databases = indexedDB.databases ? await indexedDB.databases() : [];
-  const databaseNames = new Set([
-    ...knownDatabases,
-    ...databases.map((database) => database.name).filter((name): name is string =>
-      !!name && (name.startsWith(`tweb-${id}-`) || name === `tweb-${id}` || name === `telegram-${id}`))
-  ]);
-  await Promise.all([...databaseNames].map((name) => new Promise<void>((resolve, reject) => {
-    const request = indexedDB.deleteDatabase(name);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(new Error(`Could not remove server database ${name}`));
-    request.onblocked = () => reject(new Error('Close other tabs using this server before forgetting it'));
-  })));
-  if(typeof caches !== 'undefined') {
-    const cacheNames = await caches.keys();
-    await Promise.all(cacheNames.filter((name) => name.startsWith(`teagram-${id}-`)).map((name) => caches.delete(name)));
-  }
-
-  await updateServerPins((pins) => { delete pins[host]; });
-  if(localStorage.getItem(SERVER_CHOICE_KEY) === host) localStorage.removeItem(SERVER_CHOICE_KEY);
-  if(localStorage.getItem(ACTIVE_SERVER_ID_KEY) === id) localStorage.removeItem(ACTIVE_SERVER_ID_KEY);
-  try {
-    const savedTarget: unknown = JSON.parse(localStorage.getItem(SERVER_TARGET_KEY) || 'null');
-    if(!record(savedTarget) || savedTarget.host === host) localStorage.removeItem(SERVER_TARGET_KEY);
-  } catch{
-    localStorage.removeItem(SERVER_TARGET_KEY);
-  }
+  const id = getServerProfileId(host, profileId);
+  const {forgetServerData} = await import('./forgetServer');
+  return forgetServerData(host, id, updateServerPins, notifyGuestCredentialInvalidation);
 }

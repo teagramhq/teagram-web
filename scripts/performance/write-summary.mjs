@@ -1,6 +1,7 @@
 import {mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {evaluatePairedDifferences, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PAIRED_CONFIDENCE_LEVEL, PERFORMANCE_REPEATS, TIMING_MINIMUM_EFFECTS} from './policy.mjs';
+import {hasValidGlobalSearchStages} from './global-search-measurement.mjs';
 
 const reportPath = resolve(process.env.PERF_REPORT_PATH || '.performance-report.json');
 const historyDirectory = resolve(process.env.PERF_HISTORY_DIRECTORY || '.performance-history');
@@ -49,6 +50,31 @@ function formatPerformanceSamplesTable(report, scale = '100x') {
   return lines.join('\n');
 }
 
+function formatGlobalSearchSamplesTable(report) {
+  const rows = [];
+  for(const scale of ['1x', '100x']) {
+    for(const variant of ['base', 'head']) {
+      const samples = report.variants?.[variant]?.[scale]?.globalSearch;
+      if(!Array.isArray(samples)) continue;
+      samples.forEach((sample, index) => rows.push({scale, variant, index, sample}));
+    }
+  }
+  if(!rows.length) return '';
+
+  const show = (value) => Number.isFinite(value) ? value.toFixed(1) : '—';
+  const lines = [
+    '### Global search query stages per sample',
+    '',
+    '| Scale | Variant | Repeat | Query entered (page ms) | Debounce settled (page ms) | Matching search RPC returned (page ms) | Matching result visible (page ms) | Time (ms) |',
+    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |'
+  ];
+  for(const {scale, variant, index, sample} of rows) {
+    const stages = sample.globalSearchStages || {};
+    lines.push(`| ${scale} | ${variant} | ${index + 1} | ${show(stages.queryEnteredAtMs)} | ${show(stages.debounceSettledAtMs)} | ${show(stages.matchingSearchRpcReturnedAtMs)} | ${show(stages.matchingResultVisibleAtMs)} | ${show(sample.ms)} |`);
+  }
+  return lines.join('\n');
+}
+
 function formatScrollFrameSamplesTable(report) {
   const rows = ['base', 'head'].flatMap((variant) => {
     const samples = report.variants?.[variant]?.['100x']?.scrollBack2k;
@@ -67,6 +93,23 @@ function formatScrollFrameSamplesTable(report) {
     lines.push(`| ${variant} | ${index + 1} | ${show(sample.frameIntervals)} | ${show(sample.rafDropped)} | ${show(sample.presentedFrames)} | ${show(sample.presentedDropped)} | ${show(sample.droppedFramePercent, 2)}% |`);
   }
   return lines.join('\n');
+}
+
+
+function validateGlobalSearchSamples(report, failures) {
+  const variants = report.requireBase ? ['base', 'head'] : ['head'];
+  for(const scale of ['1x', '100x']) {
+    for(const variant of variants) {
+      const samples = report.variants?.[variant]?.[scale]?.globalSearch;
+      if(!Array.isArray(samples)) continue;
+      samples.forEach((sample, index) => {
+        const stages = sample?.globalSearchStages;
+        if(!hasValidGlobalSearchStages(stages, sample.ms)) {
+          failures.push(`global search ${scale} ${variant} sample ${index + 1} has missing or invalid stage timestamps`);
+        }
+      });
+    }
+  }
 }
 
 function formatSendActionDiagnosticTable(report) {
@@ -320,6 +363,7 @@ if(process.env.PERF_RECORDER_REPLAY_OUTCOME && process.env.PERF_RECORDER_REPLAY_
   failures.push(`worker recorder replay did not succeed (${process.env.PERF_RECORDER_REPLAY_OUTCOME || 'not run'})`);
 }
 
+validateGlobalSearchSamples(report, failures);
 const evaluation = evaluatePerformance(policyReportWithMasterRepeatCount(report), history);
 failures.push(...evaluation.blockingFailures);
 if(process.env.PERF_BROWSER_OUTCOME !== 'success') {
@@ -330,6 +374,7 @@ const table = formatPerformanceTable(evaluation);
 const traceTable = formatPerformanceTraceTable(report.diagnostics?.['100x']);
 const chatListMeasurementTable = formatChatListMeasurementTable(report);
 const samplesTable = formatPerformanceSamplesTable(report);
+const globalSearchSamplesTable = formatGlobalSearchSamplesTable(report);
 const scrollFrameSamplesTable = formatScrollFrameSamplesTable(report);
 const sendActionDiagnosticTable = formatSendActionDiagnosticTable(report);
 const reportOnlyFindings = [...evaluation.reportOnlyFailures];
@@ -343,6 +388,7 @@ const summary = [
   table,
   ...(traceTable ? ['', traceTable] : []),
   ...(chatListMeasurementTable ? ['', chatListMeasurementTable] : []),
+  ...(globalSearchSamplesTable ? ['', globalSearchSamplesTable] : []),
   ...(samplesTable ? ['', samplesTable] : []),
   ...(scrollFrameSamplesTable ? ['', scrollFrameSamplesTable] : []),
   ...(sendActionDiagnosticTable ? ['', sendActionDiagnosticTable] : []),

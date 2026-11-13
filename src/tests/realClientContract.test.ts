@@ -3894,6 +3894,21 @@ describe('discovery shared-worker network accounting', () => {
 });
 
 describe('real client scenario contract', () => {
+  it('selects a unique peer by identity when search rows duplicate', () => {
+    const duplicateRows = [
+      {peerId: '42', text: '@alice'},
+      {peerId: '42', text: '@alice'}
+    ];
+    const ambiguousRows = [
+      {peerId: '42', text: '@alice'},
+      {peerId: '43', text: '@alice'}
+    ];
+
+    expect(realClientBrowser.resolveUniqueVisiblePeer(duplicateRows, 'alice')).toBe(duplicateRows[0]);
+    expect(realClientBrowser.resolveUniqueVisiblePeer(ambiguousRows, 'alice')).toBeUndefined();
+    expect(realClientBrowser.resolveUniqueVisiblePeer([{peerId: '42', text: 'Alice'}], 'unmatched')).toMatchObject({peerId: '42'});
+  });
+
   it('requires exactly one recipient message with the expected text', () => {
     expect(getSingleExactMessageFailure(['browser-ci-hello'], 'browser-ci-hello')).toBe(null);
     expect(getSingleExactMessageFailure(['prefix browser-ci-hello'], 'browser-ci-hello')).toBe('content');
