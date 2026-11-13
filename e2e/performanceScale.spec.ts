@@ -109,7 +109,8 @@ type Metric = {
 type VariantRun = {
   variant: Variant,
   origin: string,
-  storageState: Awaited<ReturnType<BrowserContext['storageState']>>
+  storageState: Awaited<ReturnType<BrowserContext['storageState']>>,
+  chatOpenStorageState?: Awaited<ReturnType<BrowserContext['storageState']>>
 };
 
 type MeasurementBoundary = {
@@ -1010,6 +1011,17 @@ async function waitForHistorySettled(page: Page) {
   }, {timeout: 60_000, intervals: [100]}).toBe(true);
 }
 
+async function prepareChatOpenStartState(page: Page, fixture: Fixture) {
+  const otherRow = page.locator(`#chatlist-container .chatlist-chat[data-peer-id]:not([data-peer-id="${fixture.partner}"])`).first();
+  await expect(otherRow, '100x chat-open requires another chat to leave before opening the fixture peer').toBeVisible({timeout: 60_000});
+  const otherPeerId = await otherRow.getAttribute('data-peer-id');
+  if(!otherPeerId || otherPeerId === String(fixture.partner)) throw new Error('100x chat-open could not select a different starting peer');
+  await otherRow.click();
+  await expect.poll(() => page.evaluate(() => String((window as any).appImManager.chat.peerId)), {timeout: 60_000}).toBe(otherPeerId);
+  await waitForHistorySettled(page);
+  await page.evaluate(async(peerId) => (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId), fixture.partner);
+}
+
 async function finalizeServerRpcTrace(page: Page, sample: Metric) {
   const offset = serverRpcTraceOffsetsBySample.get(sample);
   if(offset === undefined) return sample;
@@ -1569,12 +1581,17 @@ async function sendMessage(page: Page, requests: {value: number}, fixture: Fixtu
   };
 }
 
-async function prepareVariant(browser: Browser, variant: Variant, origin: string): Promise<VariantRun> {
+async function prepareVariant(browser: Browser, variant: Variant, origin: string, chatOpenFixture?: Fixture): Promise<VariantRun> {
   const context = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 800}});
   try {
     const page = await context.newPage();
     await signIn(page, origin);
-    return {variant, origin, storageState: await context.storageState({indexedDB: true})};
+    const storageState = await context.storageState({indexedDB: true});
+    if(!chatOpenFixture) return {variant, origin, storageState};
+
+    // Prepare the cold chat-open state once and reuse it for fresh sample contexts.
+    await prepareChatOpenStartState(page, chatOpenFixture);
+    return {variant, origin, storageState, chatOpenStorageState: await context.storageState({indexedDB: true})};
   } finally {
     await context.close();
   }
@@ -1813,13 +1830,15 @@ async function deleteSeededStickerMessage(browser: Browser, run: VariantRun, fix
 
 // Both variants start from one signed-in snapshot so they share the auth key and cached client state.
 function withOrigin(run: VariantRun, variant: Variant, origin: string): VariantRun {
+  const remapOrigin = (storageState: VariantRun['storageState']) => ({
+    ...storageState,
+    origins: storageState.origins.map((entry) => entry.origin === run.origin ? {...entry, origin} : entry)
+  });
   return {
     variant,
     origin,
-    storageState: {
-      ...run.storageState,
-      origins: run.storageState.origins.map((entry) => entry.origin === run.origin ? {...entry, origin} : entry)
-    }
+    storageState: remapOrigin(run.storageState),
+    ...(run.chatOpenStorageState ? {chatOpenStorageState: remapOrigin(run.chatOpenStorageState)} : {})
   };
 }
 
@@ -1846,7 +1865,7 @@ test.beforeAll(async({browser}) => {
       ['head', headOrigin!]
     ] : [['head', headOrigin!]];
     const [[firstVariant, firstOrigin]] = variants;
-    const signedIn = await prepareVariant(browser, firstVariant, firstOrigin);
+    const signedIn = await prepareVariant(browser, firstVariant, firstOrigin, scale === '100x' ? fixture : undefined);
     for(const [variant, origin] of variants) {
       preparedVariants[scale][variant] = withOrigin(signedIn, variant, origin);
     }
@@ -1980,6 +1999,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   const captureScrollAttribution = variant === 'head' && scale === '100x';
   await installInstrumentation(page, requests, origin, false, captureScrollAttribution);
 
+  let chatOpenContext: BrowserContext | undefined;
   try {
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
@@ -2005,12 +2025,33 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     measured.warmChatList.push(warmChatList);
     if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, warmChatList, 'warmChatList');
 
-    const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture, scale === '100x', collectWalkDiagnostics, scale === '100x'));
+    let chatOpenPage = page;
+    let chatOpenRequests = requests;
+    let chatOpenReconcileTargets = reconcileTargets;
+    if(run.chatOpenStorageState) {
+      await finalizeCachedDialogReconcileSummaries(page, reconcileTargets);
+      reconcileTargets.length = 0;
+      await page.goto('about:blank');
+      chatOpenContext = await browser.newContext({
+        ignoreHTTPSErrors: true,
+        viewport: {width: 1280, height: 800},
+        storageState: run.chatOpenStorageState
+      });
+      chatOpenPage = await chatOpenContext.newPage();
+      chatOpenRequests = {value: 0};
+      chatOpenReconcileTargets = [];
+      await installInstrumentation(chatOpenPage, chatOpenRequests, origin, false, captureScrollAttribution);
+      await chatOpenPage.goto(origin, {waitUntil: 'domcontentloaded'});
+      await waitForChatList(chatOpenPage);
+      await expect.poll(() => chatOpenPage.evaluate(() => String((window as any).appImManager.chat.peerId))).not.toBe(String(fixture.partner));
+    }
+
+    const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(chatOpenPage, chatOpenRequests, fixture, scale === '100x', collectWalkDiagnostics, scale === '100x'));
     measured.chatOpen.push(chatOpen);
-    if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpen, 'chatOpen');
+    if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(chatOpenPage, chatOpenReconcileTargets, chatOpen, 'chatOpen');
     const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(
-      page,
-      requests,
+      chatOpenPage,
+      chatOpenRequests,
       true,
       scale === '100x' ? {
         pauseLongAnimationFrames: true,
@@ -2019,12 +2060,17 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     ));
     if(!scroll) throw new Error(`${variant} scroll-back did not reach 2,000 messages`);
     measured.scrollBack2k.push(scroll);
-    if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, scroll, 'scrollBack2k');
-    const jump = await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture, false, undefined, collectWalkDiagnostics), {timeout: 120_000});
+    if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(chatOpenPage, chatOpenReconcileTargets, scroll, 'scrollBack2k');
+    const jump = await test.step('jump to fixture date', () => jumpToFixtureDate(chatOpenPage, chatOpenRequests, fixture, false, undefined, collectWalkDiagnostics), {timeout: 120_000});
     if(!jump) throw new Error(`${variant} date-jump did not reach the fixture date`);
     measured.dateJump.push(jump);
-    if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, jump, 'dateJump');
-    await finalizeServerRpcTrace(page, chatOpen);
+    if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(chatOpenPage, chatOpenReconcileTargets, jump, 'dateJump');
+    await finalizeServerRpcTrace(chatOpenPage, chatOpen);
+    if(chatOpenContext) {
+      await finalizeCachedDialogReconcileSummaries(chatOpenPage, chatOpenReconcileTargets);
+      await chatOpenContext.close();
+      chatOpenContext = undefined;
+    }
 
     // Reset both variants to the same signed-in chat-list state before contacts measurements.
     await resetToChatList(page, origin);
@@ -2044,6 +2090,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       await finalizeCachedDialogReconcileSummaries(page, reconcileTargets);
     }
   } finally {
+    if(chatOpenContext) await chatOpenContext.close();
     await context.close();
   }
 }
@@ -2098,7 +2145,7 @@ async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Varia
     const context = await browser.newContext({
       ignoreHTTPSErrors: true,
       viewport: {width: 1280, height: 800},
-      storageState: run.storageState
+      storageState: run.chatOpenStorageState || run.storageState
     });
     const page = await context.newPage();
     const requests = {value: 0};

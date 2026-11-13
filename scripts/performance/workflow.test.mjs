@@ -360,8 +360,8 @@ test('cold sticker paint timing uses an endpoint after an intervening render', (
 });
 
 test('base and head both require date-jump and 2,000-message scroll-back samples', () => {
-  assert.match(performanceScale, /scrollBackTwoThousand\(\s*page,\s*requests,\s*true,/);
-  assert.match(performanceScale, /jumpToFixtureDate\(page, requests, fixture, false, undefined, collectWalkDiagnostics\)/);
+  assert.match(performanceScale, /scrollBackTwoThousand\(\s*(?:chatOpenPage|page),\s*(?:chatOpenRequests|requests),\s*true,/);
+  assert.match(performanceScale, /jumpToFixtureDate\((?:chatOpenPage|page), (?:chatOpenRequests|requests), fixture, false, undefined, collectWalkDiagnostics\)/);
   assert.doesNotMatch(performanceScale, /allowUnsupportedBase/);
   assert.doesNotMatch(performanceScale, /base build may (?:not reach|lack)/);
   assert.match(performanceScale, /if\(!scroll\) throw new Error/);
@@ -665,10 +665,10 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   const finalizeServerRpcTrace = performanceScale.match(/async function finalizeServerRpcTrace\([\s\S]*?(?=\nasync function reloadChatList)/)?.[0];
   const diagnosticChatOpen = performanceScale.match(/const chatOpenBoundary = await waitForFirstVisibleBubble\(page\);[\s\S]*?traceSamples\.chatOpen\.push\(chatOpenSample\);/)?.[0];
   const waitForHistorySettled = performanceScale.match(/async function waitForHistorySettled\([\s\S]*?(?=\nasync function reloadChatList)/)?.[0];
-  const mainScenarioFlow = performanceScale.match(/const chatOpen = await test\.step\('open scale fixture chat',[\s\S]*?await finalizeServerRpcTrace\(page, chatOpen\);/)?.[0];
+  const mainScenarioFlow = performanceScale.match(/const chatOpen = await test\.step\('open scale fixture chat',[\s\S]*?await finalizeServerRpcTrace\(chatOpenPage, chatOpen\);/)?.[0];
 
   assert.ok(gateCall, 'the gated chat-open scenario must be present');
-  assert.match(gateCall, /openPartnerChat\(page, requests, fixture, scale === '100x', collectWalkDiagnostics, scale === '100x'\)/);
+  assert.match(gateCall, /openPartnerChat\(chatOpenPage, chatOpenRequests, fixture, scale === '100x', collectWalkDiagnostics, scale === '100x'\)/);
   assert.ok(capture, 'the capture helper must be present');
   assert.match(capture, /captureRpcTrace/);
   assert.match(capture, /serverRpcGateWindow/);
@@ -690,8 +690,8 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.doesNotMatch(finalizeServerRpcTrace, /waitForHistorySettled/);
   assert.match(finalizeServerRpcTrace, /Object\.assign\(sample, await attachServerRpcTrace/);
   assert.ok(mainScenarioFlow, 'the main gated scenario sequence must be present');
-  assert.ok(mainScenarioFlow.search(/test\.step\('scroll back 2,000 messages'/) < mainScenarioFlow.indexOf('finalizeServerRpcTrace(page, chatOpen)'), 'history telemetry must finalize after the scroll-back gate');
-  assert.ok(mainScenarioFlow.search(/test\.step\('jump to fixture date'/) < mainScenarioFlow.indexOf('finalizeServerRpcTrace(page, chatOpen)'), 'history telemetry must finalize after the date-jump gate');
+  assert.ok(mainScenarioFlow.search(/test\.step\('scroll back 2,000 messages'/) < mainScenarioFlow.indexOf('finalizeServerRpcTrace(chatOpenPage, chatOpen)'), 'history telemetry must finalize after the scroll-back gate');
+  assert.ok(mainScenarioFlow.search(/test\.step\('jump to fixture date'/) < mainScenarioFlow.indexOf('finalizeServerRpcTrace(chatOpenPage, chatOpen)'), 'history telemetry must finalize after the date-jump gate');
   assert.ok(diagnosticChatOpen, 'the RPC diagnostic chat-open sample must be present');
   assert.doesNotMatch(diagnosticChatOpen, /await waitForHistorySettled\(page\)/);
   assert.match(diagnosticChatOpen, /finalizeServerRpcTrace\(page, chatOpenSample\)/);
@@ -702,14 +702,33 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(waitForHistorySettled, /call\.method === 'messages\.getHistory' && call\.outcome === 'pending'/);
 });
 
-test('100x chat-open gate and RPC diagnostic keep the original chat-list start state', () => {
+test('100x chat-open prepares cold state once and isolates it from adjacent scenarios', () => {
+  const beforeAll = performanceScale.match(/test\.beforeAll\(async\(\{browser\}\) => \{[\s\S]*?\n\}\);/)?.[0];
+  const prepareVariant = performanceScale.match(/async function prepareVariant\([\s\S]*?(?=\nasync function measureColdControlWindow)/)?.[0];
+  const prepareChatOpenStartState = performanceScale.match(/async function prepareChatOpenStartState\([\s\S]*?(?=\nasync function finalizeServerRpcTrace)/)?.[0];
+  const runVariant = performanceScale.match(/async function runVariant\([\s\S]*?(?=\nasync function traceDateJump)/)?.[0];
+  const traceTargetScenarios = performanceScale.match(/async function traceTargetScenarios\([\s\S]*?(?=\ntest\('measures the scale fixture)/)?.[0];
   const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
-  const diagnosticChatOpen = performanceScale.match(/const row = page\.locator\([\s\S]*?traceSamples\.chatOpen\.push\(chatOpenSample\);/)?.[0];
 
+  assert.ok(beforeAll, 'variant states must be prepared once before the performance repeats');
+  assert.match(beforeAll, /prepareVariant\(browser, firstVariant, firstOrigin, scale === '100x' \? fixture : undefined\)/);
+  assert.ok(prepareVariant, 'the signed-in state setup must be present');
+  assert.match(prepareVariant, /prepareChatOpenStartState\(page, chatOpenFixture\)/);
+  assert.ok(prepareChatOpenStartState, 'the one-time setup must prepare a cold target chat');
+  assert.match(prepareChatOpenStartState, /waitForHistorySettled\(page\)/);
+  assert.match(prepareChatOpenStartState, /flushStoragesByPeerId\(peerId\), fixture\.partner\)/);
   assert.ok(openPartnerChat, 'the measured chat-open helper must be present');
   assert.doesNotMatch(openPartnerChat, /prepareChatOpenStartState/);
-  assert.ok(diagnosticChatOpen, 'the diagnostic chat-open sample must be present');
-  assert.doesNotMatch(diagnosticChatOpen, /prepareChatOpenStartState/);
+  assert.ok(runVariant, 'the main performance samples must be present');
+  assert.match(runVariant, /storageState: run\.chatOpenStorageState/);
+  assert.match(runVariant, /openPartnerChat\(chatOpenPage/);
+  assert.match(runVariant, /scrollBackTwoThousand\(\s*chatOpenPage/);
+  assert.match(runVariant, /jumpToFixtureDate\(chatOpenPage/);
+  assert.ok(runVariant.indexOf("measured.warmChatList.push(warmChatList)") < runVariant.indexOf("page.goto('about:blank')"));
+  assert.ok(runVariant.indexOf("page.goto('about:blank')") < runVariant.indexOf('openPartnerChat(chatOpenPage'));
+  assert.match(runVariant, /resetToChatList\(page, origin\)/, 'non-chat-open scenarios return to their original page state');
+  assert.ok(traceTargetScenarios, 'the paired RPC diagnostic samples must be present');
+  assert.match(traceTargetScenarios, /storageState: run\.chatOpenStorageState/);
 });
 
 test('summary fails closed when no client getHistory span can be correlated', () => {
