@@ -147,15 +147,28 @@ async function startPresentedFrameActivityCapture(page: Page) {
     const windows: Interval[] = [];
     let activeStartMs: number | undefined;
     let idleTimer: number | undefined;
+    let lastActivityMs = 0;
     const close = () => {
       if(activeStartMs === undefined) return;
       windows.push({startMs: activeStartMs, endMs: performance.now()});
       activeStartMs = undefined;
     };
+    const scheduleIdleClose = (delayMs: number) => {
+      idleTimer = window.setTimeout(() => {
+        idleTimer = undefined;
+        const remainingMs = idleMs - (performance.now() - lastActivityMs);
+        if(remainingMs > 0) {
+          scheduleIdleClose(remainingMs);
+          return;
+        }
+        close();
+      }, delayMs);
+    };
     const recordActivity = () => {
-      if(activeStartMs === undefined) activeStartMs = performance.now();
-      if(idleTimer !== undefined) window.clearTimeout(idleTimer);
-      idleTimer = window.setTimeout(close, idleMs);
+      const activityMs = performance.now();
+      if(activeStartMs === undefined) activeStartMs = activityMs;
+      lastActivityMs = activityMs;
+      if(idleTimer === undefined) scheduleIdleClose(idleMs);
     };
     const onWheel = (event: Event) => {
       const target = event.target;

@@ -106,6 +106,36 @@ test('does not count the idle pause between wheel-driven scroll bursts', async({
   expect(result.presentedDropped, 'padding around the damage bursts must not add idle gap slots').toBeLessThan(6);
 });
 
+test('does not reset the inactivity timer on each scroll event', async({page}) => {
+  const startCapture = (performanceFrameTrace as any).startPresentedFrameCapture;
+  const stopCapture = (performanceFrameTrace as any).stopPresentedFrameCapture;
+  expect(typeof startCapture, 'presented-frame capture must be available').toBe('function');
+  expect(typeof stopCapture, 'presented-frame capture must be available').toBe('function');
+  if(typeof startCapture !== 'function' || typeof stopCapture !== 'function') return;
+
+  await page.setContent('<div class="bubbles-scrollable" style="height:100px;width:100px;overflow:auto"><div style="height:1000px;width:100px"></div></div>');
+  await page.evaluate(() => {
+    const windowAny = window as any;
+    const originalSetTimeout = window.setTimeout.bind(window);
+    windowAny.__presentedFrameIdleTimerSchedules = 0;
+    windowAny.setTimeout = (handler: any, delay?: number, ...args: any[]) => {
+      if(delay === 100) ++windowAny.__presentedFrameIdleTimerSchedules;
+      return originalSetTimeout(handler, delay, ...args);
+    };
+  });
+
+  const capture = await startCapture(page, {trackScrollActivity: true});
+  await page.evaluate(() => {
+    const scrollable = document.querySelector<HTMLElement>('.bubbles-scrollable')!;
+    scrollable.dispatchEvent(new WheelEvent('wheel', {bubbles: true}));
+    for(let index = 0; index < 100; ++index) scrollable.dispatchEvent(new Event('scroll'));
+  });
+  const schedules = await page.evaluate(() => (window as any).__presentedFrameIdleTimerSchedules as number);
+  await stopCapture(capture);
+
+  expect(schedules, 'one inactivity timer should cover the whole active burst').toBe(1);
+});
+
 test('counts a fixed 60 Hz animation within three presented frames', async({page}) => {
   const startCapture = (performanceFrameTrace as any).startPresentedFrameCapture;
   const stopCapture = (performanceFrameTrace as any).stopPresentedFrameCapture;
