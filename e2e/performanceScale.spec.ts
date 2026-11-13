@@ -1017,6 +1017,7 @@ async function prepareChatOpenStartState(page: Page, fixture: Fixture) {
   await otherRow.click();
   await expect.poll(() => page.evaluate(() => String((window as any).appImManager.chat.peerId)), {timeout: 60_000}).toBe(otherPeerId);
   await waitForHistorySettled(page);
+  await page.evaluate(async(peerId) => (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId), fixture.partner);
 }
 
 async function finalizeServerRpcTrace(page: Page, sample: Metric) {

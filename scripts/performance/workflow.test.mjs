@@ -668,7 +668,7 @@ test('100x chat-open gate captures call identities at its boundary and settles o
 });
 
 test('100x chat-open opens the fixture peer from another active chat before starting the gate', () => {
-  const prepareChatOpenStartState = performanceScale.match(/async function prepareChatOpenStartState\([\s\S]*?(?=\nasync function openPartnerChat)/)?.[0];
+  const prepareChatOpenStartState = performanceScale.match(/async function prepareChatOpenStartState\([\s\S]*?(?=\n})/)?.[0];
   const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
   const diagnosticChatOpen = performanceScale.match(/const row = page\.locator\(`#chatlist-container \.chatlist-chat\[data-peer-id=\"\$\{fixture\.partner\}\"\]`\)\.first\(\);[\s\S]*?traceSamples\.chatOpen\.push\(chatOpenSample\);/)?.[0];
 
@@ -676,6 +676,8 @@ test('100x chat-open opens the fixture peer from another active chat before star
   assert.match(prepareChatOpenStartState, /data-peer-id=\"\$\{fixture\.partner\}\"/);
   assert.match(prepareChatOpenStartState, /:not\(\[data-peer-id=/);
   assert.match(prepareChatOpenStartState, /waitForHistorySettled\(page\)/);
+  assert.match(prepareChatOpenStartState, /await page\.evaluate\(async\(peerId\) => \(window as any\)\.rootScope\.managers\.appMessagesManager\.flushStoragesByPeerId\(peerId\), fixture\.partner\)/);
+  assert.ok(prepareChatOpenStartState.indexOf('waitForHistorySettled(page)') < prepareChatOpenStartState.indexOf('flushStoragesByPeerId(peerId)'), 'the target cache must be flushed only after setup-peer history settles');
   assert.ok(openPartnerChat, 'the measured chat-open helper must be present');
   assert.ok(openPartnerChat.indexOf('prepareChatOpenStartState(page, fixture)') < openPartnerChat.indexOf('startMeasurementAtClick(row)'));
   assert.ok(diagnosticChatOpen, 'the diagnostic chat-open sample must be present');
