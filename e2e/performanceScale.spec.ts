@@ -1019,10 +1019,10 @@ async function finalizeServerRpcTrace(page: Page, sample: Metric) {
   }
   let clientCalls: ServerRpcClientCall[] = [];
   await expect.poll(async() => {
-    const currentCalls = await page.evaluate(async() => {
+    const currentCalls = await page.evaluate(async(callIds: number[]) => {
       const trace = await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace();
-      return trace.calls as Array<Omit<ServerRpcClientCall, 'callId'>>;
-    });
+      return Object.fromEntries(callIds.map((callId) => [callId, trace.calls?.[callId] ?? null]));
+    }, callIds);
     clientCalls = serverRpcClientCallsByIdentity(currentCalls, boundaryCalls);
     return clientCalls.length === callIds.length && clientCalls.every((call) => call.outcome !== 'pending' && Number.isFinite(call.durationMs));
   }, {timeout: 60_000, intervals: [20]}).toBe(true);

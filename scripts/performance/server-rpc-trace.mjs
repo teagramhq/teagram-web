@@ -24,7 +24,9 @@ export function serverRpcTraceExpectation(clientRpcCount) {
 export const SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS = 5;
 
 export function serverRpcClientCallsByIdentity(calls, identities) {
-  if(!Array.isArray(calls) || !Array.isArray(identities)) throw new TypeError('RPC trace calls and boundary identities must be arrays');
+  if((!Array.isArray(calls) && (!calls || typeof calls !== 'object')) || !Array.isArray(identities)) {
+    throw new TypeError('RPC trace calls must be an indexed object and boundary identities must be an array');
+  }
   const seenCallIds = new Set();
   return identities.map(({callId, startedAtEpochMs}) => {
     if(!Number.isSafeInteger(callId) || callId < 0 || !Number.isFinite(startedAtEpochMs)) {

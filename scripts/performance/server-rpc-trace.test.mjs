@@ -64,6 +64,24 @@ test('server RPC call identities reject a trace index that was remapped by reset
   assert.throws(() => serverRpcClientCallsByIdentity(resetTrace, boundaryCalls), /trace identity changed for callId 1/);
 });
 
+test('server RPC identity settlement accepts a compact snapshot of only boundary calls', async() => {
+  const {serverRpcClientCallsByIdentity} = await import('./server-rpc-trace.mjs');
+  const boundaryCalls = [
+    {callId: 2, startedAtEpochMs: 1_762_800_000_100},
+    {callId: 5, startedAtEpochMs: 1_762_800_000_200}
+  ];
+  const selectedCalls = {
+    2: {method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_100, durationMs: 30, outcome: 'success'},
+    5: {method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_200, durationMs: 40, outcome: 'success'}
+  };
+
+  assert.deepEqual(serverRpcClientCallsByIdentity(selectedCalls, boundaryCalls), [
+    {...selectedCalls[2], callId: 2},
+    {...selectedCalls[5], callId: 5}
+  ]);
+  assert.throws(() => serverRpcClientCallsByIdentity({...selectedCalls, 5: {...selectedCalls[5], startedAtEpochMs: 1_762_800_000_900}}, boundaryCalls), /trace identity changed for callId 5/);
+});
+
 test('server RPC interval union does not double count overlapping handlers', () => {
   assert.equal(serverRpcIntervalUnionMs([
     {duration_us: 40_000, end_unix_ms: 1_000},

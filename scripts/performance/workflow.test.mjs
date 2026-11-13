@@ -683,6 +683,7 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.ok(finalizeServerRpcTrace, 'the captured chat-open identities must settle before server records attach');
   assert.match(finalizeServerRpcTrace, /const callIds = boundaryCalls\.map\(\(call\) => call\.callId\)/);
   assert.match(finalizeServerRpcTrace, /Number\.isFinite\(boundaryCalls\[index\]\.startedAtEpochMs\)/);
+  assert.match(finalizeServerRpcTrace, /Object\.fromEntries\(callIds\.map/, 'settlement should transfer only the boundary calls instead of the full accumulated trace');
   assert.match(finalizeServerRpcTrace, /serverRpcClientCallsByIdentity\(currentCalls, boundaryCalls\)/);
   assert.doesNotMatch(finalizeServerRpcTrace, /calls\[callId\]/, 'settlement must reject a trace reset instead of silently remapping boundary indices');
   assert.match(finalizeServerRpcTrace, /expect\.poll/);
