@@ -16,6 +16,7 @@ if [ -n "$PERF_BASE_SHA" ]; then
   git worktree add --detach "$base_directory" "$PERF_BASE_SHA"
   ln -s "$GITHUB_WORKSPACE/node_modules" "$base_directory/node_modules"
   node scripts/performance/inject-search-rpc-tracer.mjs "$base_directory/src/lib/appManagers/apiManager.ts"
+  node scripts/performance/inject-mirror-queue-barrier.mjs "$base_directory"
   (cd "$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-dist")
   (cd "$base_directory" && VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-trace-dist")
   sticker_base_sha="$(cat .github/perf-sticker-base-commit)"

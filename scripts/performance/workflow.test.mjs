@@ -297,6 +297,35 @@ test('search RPC tracer injection accepts the current ApiManager unchanged and i
   assert.equal(secondInjection, apiManager);
 });
 
+test('base worker bundle injection adds an idempotent mirror queue acknowledgement', async() => {
+  const {injectMirrorQueueBarrier} = await import('./inject-mirror-queue-barrier.mjs');
+  const baseMainMessagePort = [
+    '  getLogs: (payload: void) => LogEntry[],',
+    '  setLogBufferEnabled: (enabled: boolean) => void,',
+    '  getMemoryStats: (payload: void) => Promise<ThreadMemoryStats>'
+  ].join('\n');
+  const baseIndexWorker = [
+    '  getLogs: () => getLogEntries(),',
+    '',
+    '  getMemoryStats: async() => {'
+  ].join('\n');
+
+  const firstInjection = injectMirrorQueueBarrier(baseMainMessagePort, baseIndexWorker);
+  const secondInjection = injectMirrorQueueBarrier(firstInjection.mainMessagePort, firstInjection.indexWorker);
+
+  assert.match(firstInjection.mainMessagePort, /mirrorQueueBarrier: \(payload: void\) => void/);
+  assert.match(firstInjection.indexWorker, /mirrorQueueBarrier: \(\) => \{[\s\S]*?earlier worker-to-window mirror messages/);
+  assert.deepEqual(secondInjection, firstInjection);
+  assert.throws(
+    () => injectMirrorQueueBarrier(`${baseMainMessagePort}\n${baseMainMessagePort}`, baseIndexWorker),
+    /main worker message-port anchor is ambiguous/
+  );
+  assert.throws(
+    () => injectMirrorQueueBarrier(firstInjection.mainMessagePort, baseIndexWorker),
+    /base worker sources are partially instrumented/
+  );
+});
+
 test('search RPC tracer injection still rejects duplicate anchors in an instrumented source', async() => {
   const apiManager = readFileSync(new URL('../../src/lib/appManagers/apiManager.ts', import.meta.url), 'utf8');
   const {injectSearchRpcTracer} = await import('./inject-search-rpc-tracer.mjs');
@@ -1013,6 +1042,7 @@ test('performance workflow pins and enables the per-RPC server trace for 100x', 
   assert.match(serverStep, /if \[ "\$scale" = "100x" \]; then\s+rpc_trace_env\+=\("TG_RPC_TRACE_FILE=\$PERF_SERVER_RPC_TRACE_FILE_100X"\)/);
   assert.match(workflow, /teagram-perf-server-rpc-100x\.jsonl/);
   assert.match(performanceClientBuild, /PERF_BASE_DIST=/);
+  assert.match(performanceClientBuild, /node scripts\/performance\/inject-mirror-queue-barrier\.mjs "\$base_directory"/);
 });
 
 test('performance setup overlaps client bundles with fixture server compilation', () => {
@@ -1024,12 +1054,16 @@ test('performance setup overlaps client bundles with fixture server compilation'
   const serverBuild = buildStep.indexOf('go -C teagram-server build');
   const clientWait = buildStep.indexOf('wait "$client_build_pid"');
   const serverLaunch = buildStep.indexOf('nohup env TG_POSTGRES_DSN=');
+  const baseBarrierInjection = performanceClientBuild.indexOf('node scripts/performance/inject-mirror-queue-barrier.mjs "$base_directory"');
+  const baseTimingBuild = performanceClientBuild.indexOf('teagram-web-base-dist');
+  const baseTraceBuild = performanceClientBuild.indexOf('teagram-web-base-trace-dist');
 
   assert.ok(clientBuild >= 0 && clientBuild < clientPid && clientPid < serverBuild, 'the client build must start in the background before the fixture server build');
   assert.ok(serverBuild < clientWait && clientWait < serverLaunch, 'both builds must finish before the fixture server starts and the browser services launch');
   assert.match(buildStep, /cat "\$client_build_env" >> "\$GITHUB_ENV"/);
   assert.match(buildStep, /if wait "\$client_build_pid"; then/);
   assert.match(performanceClientBuild, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build/);
+  assert.ok(baseBarrierInjection >= 0 && baseBarrierInjection < baseTimingBuild && baseBarrierInjection < baseTraceBuild, 'the base worker must receive the test-only acknowledgement before either client bundle is built');
 });
 
 test('summary reports query stages for every global-search sample', () => {
