@@ -995,12 +995,30 @@ async function waitForHistorySettled(page: Page) {
   }, {timeout: 60_000, intervals: [100]}).toBe(true);
 }
 
+async function waitForPartnerDialogHistoryPrefetch(page: Page, peerId: PeerId) {
+  await page.waitForFunction((peerId) => {
+    const queue = (window as any).appDialogsManager?.lazyLoadQueue;
+    if(!Array.isArray(queue?.queue) || !(queue?.inProcess instanceof Set)) {
+      throw new Error('chat-list history lazy-load queue is unavailable');
+    }
+
+    const rows = [...document.querySelectorAll<HTMLElement>(`#chatlist-container .chatlist-chat[data-peer-id="${peerId}"]`)];
+    if(!rows.length) throw new Error(`fixture peer ${peerId} has no chat-list row before the cold history flush`);
+
+    // A visible dialog can fetch its preview history independently of the click. Wait for that
+    // request to finish before clearing the cache, or its late response can warm the measured gate.
+    return ![...queue.queue, ...queue.inProcess].some((item) => rows.includes(item.div));
+  }, peerId, {timeout: 60_000, polling: 20});
+}
+
 async function prepareColdChatOpenStartState(page: Page, fixture: Fixture) {
   await page.evaluate(async(peerId) => {
     const appImManager = (window as any).appImManager;
     if(appImManager.chat?.peerId) await appImManager.setPeer({});
     if(appImManager.chat?.peerId) throw new Error(`chat-open start state still has active peer ${appImManager.chat.peerId}`);
-
+  }, fixture.partner);
+  await waitForPartnerDialogHistoryPrefetch(page, fixture.partner);
+  await page.evaluate(async(peerId) => {
     // Wait for the manager RPC to enqueue its fire-and-forget mirror deletions before issuing the port barrier.
     await (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId);
     await (window as any).apiManagerProxy.invoke('mirrorQueueBarrier', undefined);

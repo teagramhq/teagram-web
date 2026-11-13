@@ -738,13 +738,20 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(diagnosticChatOpen, /finalizeServerRpcTrace\(page, chatOpenSample\)/);
 });
 
-test('100x chat-open closes the active peer and waits for the history flush acknowledgement', () => {
+test('100x chat-open drains the fixture row prefetch before acknowledging the history flush', () => {
   const prepare = performanceScale.match(/async function prepareColdChatOpenStartState[\s\S]*?(?=\nfunction expectChatOpenHistoryCall)/)?.[0];
+  const waitForPrefetch = performanceScale.match(/async function waitForPartnerDialogHistoryPrefetch[\s\S]*?(?=\nasync function prepareColdChatOpenStartState)/)?.[0];
 
   assert.ok(prepare, 'cold-history preparation should be isolated before the measured click');
+  assert.ok(waitForPrefetch, 'the fixture row lazy-load must be drained before flushing its cache');
+  assert.match(prepare, /await waitForPartnerDialogHistoryPrefetch\(page, fixture\.partner\)/, 'finish any chat-list history prefetch before clearing the peer cache');
   assert.match(prepare, /if\(appImManager\.chat\?\.peerId\) await appImManager\.setPeer\(\{\}\)/, 'close an active chat before re-opening the fixture peer');
   assert.match(prepare, /if\(appImManager\.chat\?\.peerId\) throw new Error/, 'fail if the active chat did not close');
   assert.match(prepare, /await expect\(page\.locator\(`\.bubbles \.bubble\[data-peer-id=/, 'do not start a gate while stale fixture bubbles remain visible');
+  assert.ok(prepare.indexOf('waitForPartnerDialogHistoryPrefetch') < prepare.indexOf('flushStoragesByPeerId'), 'drain list prefetch before the cache is cleared');
+  assert.match(waitForPrefetch, /queue\.queue/);
+  assert.match(waitForPrefetch, /queue\.inProcess/);
+  assert.match(waitForPrefetch, /rows\.includes\(item\.div\)/, 'wait for pending loads on every visible fixture row');
   assert.match(prepare, /await \(window as any\)\.rootScope\.managers\.appMessagesManager\.flushStoragesByPeerId\(peerId\)/);
   assert.match(prepare, /await \(window as any\)\.apiManagerProxy\.invoke\('mirrorQueueBarrier', undefined\)/);
   assert.ok(prepare.indexOf('flushStoragesByPeerId') < prepare.indexOf("invoke('mirrorQueueBarrier'"), 'the worker acknowledgement must follow the cache deletion request');
