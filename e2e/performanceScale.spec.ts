@@ -995,13 +995,18 @@ async function waitForHistorySettled(page: Page) {
   }, {timeout: 60_000, intervals: [100]}).toBe(true);
 }
 
-async function flushFixtureHistoryBeforeMeasuredOpen(page: Page, fixture: Fixture) {
+async function prepareColdChatOpenStartState(page: Page, fixture: Fixture) {
   await page.evaluate(async(peerId) => {
+    const appImManager = (window as any).appImManager;
+    if(appImManager.chat?.peerId) await appImManager.setPeer({});
+    if(appImManager.chat?.peerId) throw new Error(`chat-open start state still has active peer ${appImManager.chat.peerId}`);
+
     // The worker acknowledgement follows its fire-and-forget mirror deletions on the same port.
     const cacheFlush = (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId);
     const mirrorAck = (window as any).apiManagerProxy.invoke('mirrorQueueBarrier', undefined);
     await Promise.all([cacheFlush, mirrorAck]);
   }, fixture.partner);
+  await expect(page.locator(`.bubbles .bubble[data-peer-id="${fixture.partner}"]:visible`)).toHaveCount(0, {timeout: 5_000});
 }
 
 function expectChatOpenHistoryCall(sample: Metric, description: string) {
@@ -1065,7 +1070,7 @@ async function reloadChatList(page: Page, requests: {value: number}, collectWalk
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false, collectWalkDiagnostics = false, collectServerRpcTrace = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
-  if(collectServerRpcTrace) await flushFixtureHistoryBeforeMeasuredOpen(page, fixture);
+  if(collectServerRpcTrace) await prepareColdChatOpenStartState(page, fixture);
   resetRequestBreakdown(page);
   await begin(page, requests, true, traceRpc);
   await startMeasurementAtClick(row);
@@ -2151,7 +2156,7 @@ async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Varia
 
         const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
         await expect(row).toBeVisible({timeout: 60_000});
-        await flushFixtureHistoryBeforeMeasuredOpen(page, fixture);
+        await prepareColdChatOpenStartState(page, fixture);
         await beginScenario(page, requests, true);
         await installPeerChangeTracing(page);
         const chatProfile = await startCpuProfile(page);
