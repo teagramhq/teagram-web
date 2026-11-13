@@ -177,19 +177,31 @@ describe('desktop Turnstile entry', () => {
     expect(postEvent).toHaveBeenCalledWith('turnstile_error', '{"code":"widget_error"}');
   });
 
-  it('posts a fixed widget error code and resets the widget', () => {
+  it('forwards the Cloudflare widget error code and resets the widget', () => {
     const {message} = preparePage('sitekey=valid_key-1&action=signin');
     const postEvent = installBridge();
     const {api, getCallbacks} = installTurnstile();
 
     mountDesktopTurnstilePage();
-    const errorCallback = getCallbacks()?.['error-callback'] as ((detail: string) => void) | undefined;
-    errorCallback?.('Cloudflare error 110200');
+    const errorCallback = getCallbacks()?.['error-callback'];
+    errorCallback?.(110200);
 
     expect(message.textContent).toBe('The security check failed. Try again.');
-    expect(postEvent).toHaveBeenCalledWith('turnstile_error', '{"code":"widget_error"}');
+    expect(postEvent).toHaveBeenCalledWith('turnstile_error', '{"code":"widget_error","cloudflare_code":"110200"}');
     expect(api.reset).toHaveBeenCalledWith('widget-1');
-    expect(JSON.stringify(postEvent.mock.calls)).not.toContain('Cloudflare');
+    expect(JSON.stringify(postEvent.mock.calls)).not.toContain('secret-turnstile-token');
+  });
+
+  it('omits non-code Cloudflare error callback data', () => {
+    preparePage('sitekey=valid_key-1&action=signin');
+    const postEvent = installBridge();
+    const {getCallbacks} = installTurnstile();
+
+    mountDesktopTurnstilePage();
+    const errorCallback = getCallbacks()?.['error-callback'];
+    errorCallback?.('600010\nsecret-turnstile-token');
+
+    expect(postEvent).toHaveBeenCalledWith('turnstile_error', '{"code":"widget_error"}');
   });
 
   it('posts a fixed expiry code and resets the widget', () => {

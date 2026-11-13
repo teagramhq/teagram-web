@@ -4,7 +4,7 @@ export type TurnstileRenderOptions = {
   'response-field'?: boolean,
   callback: (token: string) => void,
   'expired-callback': () => void,
-  'error-callback': () => void
+  'error-callback': (errorCode?: unknown) => void
 };
 
 export type TurnstileApi = {
