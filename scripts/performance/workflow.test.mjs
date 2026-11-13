@@ -297,6 +297,12 @@ test('search RPC tracer injection accepts the current ApiManager unchanged and i
   assert.equal(secondInjection, apiManager);
 });
 
+test('head worker registers the mirror queue barrier only in performance builds', () => {
+  assert.match(mainWorker, /\.\.\.\(import\.meta\.env\.VITE_PERF_HISTORY_TRACE === '1' \|\| import\.meta\.env\.VITE_PERF_TRACE === '1' \? \{\s*mirrorQueueBarrier:/);
+  assert.match(performanceClientBuild, /VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 VITE_PERF_HISTORY_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-head-dist"/);
+  assert.match(performanceClientBuild, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
+});
+
 test('base worker bundle injection adds an idempotent mirror queue acknowledgement', async() => {
   const {injectMirrorQueueBarrier} = await import('./inject-mirror-queue-barrier.mjs');
   const baseMainMessagePort = [
