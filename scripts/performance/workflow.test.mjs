@@ -732,18 +732,22 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(diagnosticChatOpen, /finalizeServerRpcTrace\(page, chatOpenSample\)/);
 });
 
-test('100x chat-open waits for a worker acknowledgement after flushing fixture history', () => {
-  const flush = performanceScale.match(/async function flushFixtureHistoryBeforeMeasuredOpen[\s\S]*?(?=\nfunction expectChatOpenHistoryCall)/)?.[0];
+test('100x chat-open closes the active peer and waits for the history flush acknowledgement', () => {
+  const prepare = performanceScale.match(/async function prepareColdChatOpenStartState[\s\S]*?(?=\nfunction expectChatOpenHistoryCall)/)?.[0];
 
-  assert.ok(flush, 'cold-history preparation should be isolated before the measured click');
-  assert.match(flush, /const cacheFlush = \(window as any\)\.rootScope\.managers\.appMessagesManager\.flushStoragesByPeerId\(peerId\)/);
-  assert.match(flush, /const mirrorAck = \(window as any\)\.apiManagerProxy\.invoke\('mirrorQueueBarrier', undefined\)/);
-  assert.ok(flush.indexOf('flushStoragesByPeerId') < flush.indexOf("invoke('mirrorQueueBarrier'"), 'the worker acknowledgement must follow the cache deletion request');
-  assert.match(flush, /await Promise\.all\(\[cacheFlush, mirrorAck\]\)/, 'await both the cache flush result and the worker queue acknowledgement');
-  assert.doesNotMatch(flush, /getMemoryStats/, 'the cache flush itself is the ordering barrier; do not scan worker state');
+  assert.ok(prepare, 'cold-history preparation should be isolated before the measured click');
+  assert.match(prepare, /if\(appImManager\.chat\?\.peerId\) await appImManager\.setPeer\(\{\}\)/, 'close an active chat before re-opening the fixture peer');
+  assert.match(prepare, /if\(appImManager\.chat\?\.peerId\) throw new Error/, 'fail if the active chat did not close');
+  assert.match(prepare, /await expect\(page\.locator\(`\.bubbles \.bubble\[data-peer-id=/, 'do not start a gate while stale fixture bubbles remain visible');
+  assert.match(prepare, /const cacheFlush = \(window as any\)\.rootScope\.managers\.appMessagesManager\.flushStoragesByPeerId\(peerId\)/);
+  assert.match(prepare, /const mirrorAck = \(window as any\)\.apiManagerProxy\.invoke\('mirrorQueueBarrier', undefined\)/);
+  assert.ok(prepare.indexOf('flushStoragesByPeerId') < prepare.indexOf("invoke('mirrorQueueBarrier'"), 'the worker acknowledgement must follow the cache deletion request');
+  assert.match(prepare, /await Promise\.all\(\[cacheFlush, mirrorAck\]\)/, 'await both the cache flush result and the worker queue acknowledgement');
+  assert.doesNotMatch(prepare, /getMemoryStats/, 'the queue acknowledgement is the ordering barrier; do not scan worker state');
   assert.match(mainMessagePort, /mirrorQueueBarrier: \(payload: void\) => void/);
   assert.match(mainWorker, /mirrorQueueBarrier:\s*\(\) => \{[\s\S]*?earlier worker-to-window mirror messages[\s\S]*?\}/);
-  assert.ok(performanceScale.includes('await flushFixtureHistoryBeforeMeasuredOpen(page, fixture)'));
+  assert.match(performanceScale, /if\(collectServerRpcTrace\) await prepareColdChatOpenStartState\(page, fixture\)/);
+  assert.ok(performanceScale.includes('await prepareColdChatOpenStartState(page, fixture)'));
   assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpen'));
   assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpenSample'));
   assert.ok(performanceScale.includes('scrollBackTwoThousand(\n      page'));
@@ -757,7 +761,7 @@ test('100x chat-open resets history without changing adjacent scenario sequencin
   const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
 
   assert.ok(beforeAll && runVariant && traceTargetScenarios && openPartnerChat);
-  assert.match(performanceScale, /flushFixtureHistoryBeforeMeasuredOpen/, 'cold-history preparation must happen before the measured click');
+  assert.match(performanceScale, /prepareColdChatOpenStartState/, 'cold-history preparation must happen before the measured click');
   assert.doesNotMatch(openPartnerChat, /waitForHistorySettled|flushStoragesByPeerId/);
   assert.doesNotMatch(traceTargetScenarios, /flushStoragesByPeerId|structuredClone/);
   assert.match(runVariant, /openPartnerChat\(page, requests, fixture, scale === '100x'/);
