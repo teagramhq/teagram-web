@@ -688,6 +688,8 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(finalizeServerRpcTrace, /Object\.fromEntries\(callIds\.map/, 'settlement should transfer only the boundary calls instead of the full accumulated trace');
   assert.match(finalizeServerRpcTrace, /serverRpcClientCallsByIdentity\(currentCalls, boundaryCalls\)/);
   assert.match(finalizeServerRpcTrace, /if\(!callIds\.length\)/, 'zero-call samples should skip a trace request entirely');
+  assert.match(finalizeServerRpcTrace, /serverRpcClientCallsAreSettled\(boundaryCalls\)/, 'already-settled boundary calls should attach without another browser polling round trip');
+  assert.ok(finalizeServerRpcTrace.indexOf('serverRpcClientCallsAreSettled(boundaryCalls)') < finalizeServerRpcTrace.indexOf('const settledCallsHandle = await page.waitForFunction'), 'the settled snapshot fast path must run before browser polling');
   assert.doesNotMatch(finalizeServerRpcTrace, /calls\[callId\]/, 'settlement must reject a trace reset instead of silently remapping boundary indices');
   assert.match(finalizeServerRpcTrace, /page\.waitForFunction/);
   assert.doesNotMatch(finalizeServerRpcTrace, /expect\.poll/);

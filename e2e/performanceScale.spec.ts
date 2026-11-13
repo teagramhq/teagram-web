@@ -1,7 +1,7 @@
 import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
 import {readFileSync} from 'node:fs';
 import {writePerformanceReport} from './performanceReport';
-import {getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcClientCallsByIdentity, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls} from '../scripts/performance/server-rpc-trace.mjs';
+import {getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcClientCallsAreSettled, serverRpcClientCallsByIdentity, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls} from '../scripts/performance/server-rpc-trace.mjs';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
@@ -1007,6 +1007,11 @@ async function finalizeServerRpcTrace(page: Page, sample: Metric) {
   }
   if(!callIds.length) {
     sample.serverRpcClientCalls = [];
+    Object.assign(sample, await attachServerRpcTrace(sample, offset));
+    return sample;
+  }
+  if(serverRpcClientCallsAreSettled(boundaryCalls)) {
+    sample.serverRpcClientCalls = boundaryCalls.map((call) => ({...call}));
     Object.assign(sample, await attachServerRpcTrace(sample, offset));
     return sample;
   }

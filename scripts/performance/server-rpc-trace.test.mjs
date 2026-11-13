@@ -82,6 +82,23 @@ test('server RPC identity settlement accepts a compact snapshot of only boundary
   assert.throws(() => serverRpcClientCallsByIdentity({...selectedCalls, 5: {...selectedCalls[5], startedAtEpochMs: 1_762_800_000_900}}, boundaryCalls), /trace identity changed for callId 5/);
 });
 
+test('settled boundary RPC snapshots do not need another browser polling round trip', async() => {
+  const {serverRpcClientCallsAreSettled} = await import('./server-rpc-trace.mjs');
+  const settledCalls = [
+    {callId: 2, method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_100, durationMs: 30, outcome: 'success'},
+    {callId: 5, method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_200, durationMs: 40, outcome: 'error'}
+  ];
+  const pendingCalls = [
+    ...settledCalls,
+    {callId: 8, method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_300, durationMs: null, outcome: 'pending'}
+  ];
+
+  assert.equal(serverRpcClientCallsAreSettled(settledCalls), true);
+  assert.equal(serverRpcClientCallsAreSettled(pendingCalls), false);
+  assert.equal(serverRpcClientCallsAreSettled([]), true);
+  assert.equal(serverRpcClientCallsAreSettled(undefined), false);
+});
+
 test('server RPC interval union does not double count overlapping handlers', () => {
   assert.equal(serverRpcIntervalUnionMs([
     {duration_us: 40_000, end_unix_ms: 1_000},

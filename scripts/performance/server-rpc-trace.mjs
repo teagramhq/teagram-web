@@ -23,6 +23,15 @@ export function serverRpcTraceExpectation(clientRpcCount) {
 
 export const SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS = 5;
 
+export function serverRpcClientCallsAreSettled(calls) {
+  return Array.isArray(calls) && calls.every((call) => (
+    Number.isSafeInteger(call?.callId) && call.callId >= 0 &&
+    call.method === 'messages.getHistory' && Number.isFinite(call.startedAtEpochMs) &&
+    Number.isFinite(call.durationMs) && call.durationMs >= 0 &&
+    ['success', 'error'].includes(call.outcome)
+  ));
+}
+
 export function serverRpcClientCallsByIdentity(calls, identities) {
   if((!Array.isArray(calls) && (!calls || typeof calls !== 'object')) || !Array.isArray(identities)) {
     throw new TypeError('RPC trace calls must be an indexed object and boundary identities must be an array');
