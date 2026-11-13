@@ -1022,6 +1022,12 @@ async function prepareChatOpenStartState(page: Page, fixture: Fixture) {
   await page.evaluate(async(peerId) => (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId), fixture.partner);
 }
 
+async function clearChatOpenHistoryCache(page: Page, fixture: Fixture) {
+  await page.evaluate((peerId) => (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId), fixture.partner);
+  // flushStoragesByPeerId mirrors its storage deletes to the worker asynchronously.
+  await page.waitForTimeout(150);
+}
+
 async function finalizeServerRpcTrace(page: Page, sample: Metric) {
   const offset = serverRpcTraceOffsetsBySample.get(sample);
   if(offset === undefined) return sample;
@@ -2035,7 +2041,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       chatOpenContext = await browser.newContext({
         ignoreHTTPSErrors: true,
         viewport: {width: 1280, height: 800},
-        storageState: run.chatOpenStorageState
+        storageState: structuredClone(run.chatOpenStorageState)
       });
       chatOpenPage = await chatOpenContext.newPage();
       chatOpenRequests = {value: 0};
@@ -2044,6 +2050,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       await chatOpenPage.goto(origin, {waitUntil: 'domcontentloaded'});
       await waitForChatList(chatOpenPage);
       await expect.poll(() => chatOpenPage.evaluate(() => String((window as any).appImManager.chat.peerId))).not.toBe(String(fixture.partner));
+      await clearChatOpenHistoryCache(chatOpenPage, fixture);
     }
 
     const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(chatOpenPage, chatOpenRequests, fixture, scale === '100x', collectWalkDiagnostics, scale === '100x'));
@@ -2145,7 +2152,7 @@ async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Varia
     const context = await browser.newContext({
       ignoreHTTPSErrors: true,
       viewport: {width: 1280, height: 800},
-      storageState: run.chatOpenStorageState || run.storageState
+      storageState: structuredClone(run.chatOpenStorageState || run.storageState)
     });
     const page = await context.newPage();
     const requests = {value: 0};
@@ -2177,6 +2184,7 @@ async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Varia
 
         const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
         await expect(row).toBeVisible({timeout: 60_000});
+        await clearChatOpenHistoryCache(page, fixture);
         await beginScenario(page, requests, true);
         await installPeerChangeTracing(page);
         const chatProfile = await startCpuProfile(page);

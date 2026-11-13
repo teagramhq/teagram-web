@@ -709,6 +709,7 @@ test('100x chat-open prepares cold state once and isolates it from adjacent scen
   const runVariant = performanceScale.match(/async function runVariant\([\s\S]*?(?=\nasync function traceDateJump)/)?.[0];
   const traceTargetScenarios = performanceScale.match(/async function traceTargetScenarios\([\s\S]*?(?=\ntest\('measures the scale fixture)/)?.[0];
   const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
+  const clearChatOpenHistoryCache = performanceScale.match(/async function clearChatOpenHistoryCache\([\s\S]*?(?=\nasync function finalizeServerRpcTrace)/)?.[0];
 
   assert.ok(beforeAll, 'variant states must be prepared once before the performance repeats');
   assert.match(beforeAll, /prepareVariant\(browser, firstVariant, firstOrigin, scale === '100x' \? fixture : undefined\)/);
@@ -717,10 +718,16 @@ test('100x chat-open prepares cold state once and isolates it from adjacent scen
   assert.ok(prepareChatOpenStartState, 'the one-time setup must prepare a cold target chat');
   assert.match(prepareChatOpenStartState, /waitForHistorySettled\(page\)/);
   assert.match(prepareChatOpenStartState, /flushStoragesByPeerId\(peerId\), fixture\.partner\)/);
+  assert.ok(clearChatOpenHistoryCache, 'each isolated sample needs its own cold target history cache');
+  assert.match(clearChatOpenHistoryCache, /flushStoragesByPeerId\(peerId\), fixture\.partner\)/);
+  assert.match(clearChatOpenHistoryCache, /await page\.waitForTimeout\(150\)/, 'allow the worker storage delete to settle before the measured click');
+  assert.doesNotMatch(clearChatOpenHistoryCache, /waitForHistorySettled|otherRow\.click/, 'the per-sample setup must not switch peers or wait for an unrelated history request');
   assert.ok(openPartnerChat, 'the measured chat-open helper must be present');
   assert.doesNotMatch(openPartnerChat, /prepareChatOpenStartState/);
   assert.ok(runVariant, 'the main performance samples must be present');
-  assert.match(runVariant, /storageState: run\.chatOpenStorageState/);
+  assert.match(runVariant, /storageState: structuredClone\(run\.chatOpenStorageState\)/, 'each sample must import an independent copy of the prepared state');
+  assert.match(runVariant, /await clearChatOpenHistoryCache\(chatOpenPage, fixture\)/);
+  assert.ok(runVariant.indexOf('clearChatOpenHistoryCache(chatOpenPage, fixture)') < runVariant.indexOf('openPartnerChat(chatOpenPage'), 'clear the target cache before each measured click');
   assert.match(runVariant, /openPartnerChat\(chatOpenPage/);
   assert.match(runVariant, /scrollBackTwoThousand\(\s*chatOpenPage/);
   assert.match(runVariant, /jumpToFixtureDate\(chatOpenPage/);
@@ -728,7 +735,9 @@ test('100x chat-open prepares cold state once and isolates it from adjacent scen
   assert.ok(runVariant.indexOf("page.goto('about:blank')") < runVariant.indexOf('openPartnerChat(chatOpenPage'));
   assert.match(runVariant, /resetToChatList\(page, origin\)/, 'non-chat-open scenarios return to their original page state');
   assert.ok(traceTargetScenarios, 'the paired RPC diagnostic samples must be present');
-  assert.match(traceTargetScenarios, /storageState: run\.chatOpenStorageState/);
+  assert.match(traceTargetScenarios, /storageState: structuredClone\(run\.chatOpenStorageState \|\| run\.storageState\)/, 'diagnostic samples must also receive an independent cache snapshot');
+  assert.match(traceTargetScenarios, /await clearChatOpenHistoryCache\(page, fixture\)/);
+  assert.ok(traceTargetScenarios.indexOf('clearChatOpenHistoryCache(page, fixture)') < traceTargetScenarios.indexOf('await row.click()'), 'clear the diagnostic target cache before its measured click');
 });
 
 test('summary fails closed when no client getHistory span can be correlated', () => {
