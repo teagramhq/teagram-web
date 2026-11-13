@@ -704,10 +704,12 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(diagnosticChatOpen, /finalizeServerRpcTrace\(page, chatOpenSample\)/);
 });
 
-test('100x chat-open resets the fixture cache before timing without a peer-switch wait', () => {
-  assert.ok(performanceScale.includes('async function flushFixtureHistoryBeforeMeasuredOpen'));
-  assert.ok(performanceScale.includes('flushStoragesByPeerId'));
-  assert.ok(performanceScale.includes("apiManagerProxy.invoke('getMemoryStats'"));
+test('100x chat-open awaits fixture cache flush without collecting unrelated worker memory stats', () => {
+  const flush = performanceScale.match(/async function flushFixtureHistoryBeforeMeasuredOpen[\s\S]*?(?=\nfunction expectChatOpenHistoryCall)/)?.[0];
+
+  assert.ok(flush, 'cold-history preparation should be isolated before the measured click');
+  assert.match(flush, /await \(window as any\)\.rootScope\.managers\.appMessagesManager\.flushStoragesByPeerId\(peerId\)/);
+  assert.doesNotMatch(flush, /getMemoryStats/, 'the cache flush itself is the ordering barrier; do not scan worker state');
   assert.ok(performanceScale.includes('await flushFixtureHistoryBeforeMeasuredOpen(page, fixture)'));
   assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpen'));
   assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpenSample'));

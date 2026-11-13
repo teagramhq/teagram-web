@@ -997,10 +997,7 @@ async function waitForHistorySettled(page: Page) {
 
 async function flushFixtureHistoryBeforeMeasuredOpen(page: Page, fixture: Fixture) {
   await page.evaluate(async(peerId) => {
-    (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId);
-    // Mirror deletions are sent with invokeVoid. A worker round-trip queued after them makes the
-    // cache reset deterministic without waiting for an arbitrary quiet period or loading another chat.
-    await (window as any).apiManagerProxy.invoke('getMemoryStats', undefined);
+    await (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId);
   }, fixture.partner);
 }
 
