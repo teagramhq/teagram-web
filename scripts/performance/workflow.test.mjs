@@ -745,10 +745,10 @@ test('100x chat-open closes the active peer and waits for the history flush ackn
   assert.match(prepare, /if\(appImManager\.chat\?\.peerId\) await appImManager\.setPeer\(\{\}\)/, 'close an active chat before re-opening the fixture peer');
   assert.match(prepare, /if\(appImManager\.chat\?\.peerId\) throw new Error/, 'fail if the active chat did not close');
   assert.match(prepare, /await expect\(page\.locator\(`\.bubbles \.bubble\[data-peer-id=/, 'do not start a gate while stale fixture bubbles remain visible');
-  assert.match(prepare, /const cacheFlush = \(window as any\)\.rootScope\.managers\.appMessagesManager\.flushStoragesByPeerId\(peerId\)/);
-  assert.match(prepare, /const mirrorAck = \(window as any\)\.apiManagerProxy\.invoke\('mirrorQueueBarrier', undefined\)/);
+  assert.match(prepare, /await \(window as any\)\.rootScope\.managers\.appMessagesManager\.flushStoragesByPeerId\(peerId\)/);
+  assert.match(prepare, /await \(window as any\)\.apiManagerProxy\.invoke\('mirrorQueueBarrier', undefined\)/);
   assert.ok(prepare.indexOf('flushStoragesByPeerId') < prepare.indexOf("invoke('mirrorQueueBarrier'"), 'the worker acknowledgement must follow the cache deletion request');
-  assert.match(prepare, /await Promise\.all\(\[cacheFlush, mirrorAck\]\)/, 'await both the cache flush result and the worker queue acknowledgement');
+  assert.doesNotMatch(prepare, /Promise\.all/, 'do not acknowledge mirror deletions before the asynchronous manager call has completed');
   assert.doesNotMatch(prepare, /getMemoryStats/, 'the queue acknowledgement is the ordering barrier; do not scan worker state');
   assert.match(mainMessagePort, /mirrorQueueBarrier: \(payload: void\) => void/);
   assert.match(mainWorker, /mirrorQueueBarrier:\s*\(\) => \{[\s\S]*?earlier worker-to-window mirror messages[\s\S]*?\}/);

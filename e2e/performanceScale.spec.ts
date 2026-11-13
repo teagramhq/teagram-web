@@ -1001,10 +1001,9 @@ async function prepareColdChatOpenStartState(page: Page, fixture: Fixture) {
     if(appImManager.chat?.peerId) await appImManager.setPeer({});
     if(appImManager.chat?.peerId) throw new Error(`chat-open start state still has active peer ${appImManager.chat.peerId}`);
 
-    // The worker acknowledgement follows its fire-and-forget mirror deletions on the same port.
-    const cacheFlush = (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId);
-    const mirrorAck = (window as any).apiManagerProxy.invoke('mirrorQueueBarrier', undefined);
-    await Promise.all([cacheFlush, mirrorAck]);
+    // Wait for the manager RPC to enqueue its fire-and-forget mirror deletions before issuing the port barrier.
+    await (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId);
+    await (window as any).apiManagerProxy.invoke('mirrorQueueBarrier', undefined);
   }, fixture.partner);
   await expect(page.locator(`.bubbles .bubble[data-peer-id="${fixture.partner}"]:visible`)).toHaveCount(0, {timeout: 5_000});
 }
