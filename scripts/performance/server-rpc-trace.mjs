@@ -20,7 +20,24 @@ export function serverRpcTraceExpectation(clientRpcCount) {
   return {minimumCount: Math.max(1, clientRpcCount)};
 }
 
-const SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS = 5;
+export const SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS = 5;
+
+export function serverRpcClientCallsByIdentity(calls, identities) {
+  if(!Array.isArray(calls) || !Array.isArray(identities)) throw new TypeError('RPC trace calls and boundary identities must be arrays');
+  const seenCallIds = new Set();
+  return identities.map(({callId, startedAtEpochMs}) => {
+    if(!Number.isSafeInteger(callId) || callId < 0 || !Number.isFinite(startedAtEpochMs)) {
+      throw new TypeError('RPC trace boundary identity requires a non-negative safe callId and finite startedAtEpochMs');
+    }
+    if(seenCallIds.has(callId)) throw new Error(`RPC trace boundary contains duplicate callId ${callId}`);
+    seenCallIds.add(callId);
+    const call = calls[callId];
+    if(!call || call.startedAtEpochMs !== startedAtEpochMs) {
+      throw new Error(`RPC trace identity changed for callId ${callId}: expected startedAtEpochMs ${startedAtEpochMs}, found ${call?.startedAtEpochMs ?? 'missing'}`);
+    }
+    return {...call, callId};
+  });
+}
 
 export function serverRpcRecordMatchesClientCall(record, call) {
   if(record?.method !== 'messages.getHistory' ||

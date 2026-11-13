@@ -1,7 +1,7 @@
 import {mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {evaluatePairedDifferences, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PAIRED_CONFIDENCE_LEVEL, PERFORMANCE_REPEATS, TIMING_MINIMUM_EFFECTS} from './policy.mjs';
-import {clientRpcIntervalUnionMs, serverRpcIntervalUnionMs, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation} from './server-rpc-trace.mjs';
+import {clientRpcIntervalUnionMs, SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS, serverRpcIntervalUnionMs, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation} from './server-rpc-trace.mjs';
 import {hasValidGlobalSearchStages} from './global-search-measurement.mjs';
 
 const reportPath = resolve(process.env.PERF_REPORT_PATH || '.performance-report.json');
@@ -107,6 +107,10 @@ function formatChatOpenServerTimingTable(report, failures) {
       const serverDurations = serverRecords.map((record) => `${show(record.duration_us / 1000)} ms (${record.result})`).join(', ');
       const clientHistoryIntervalUnionMs = clientRpcIntervalUnionMs(clientHistoryCalls, gateWindow);
       const serverIntervalUnionMs = serverRpcIntervalUnionMs(serverRecords, gateWindow);
+      if(serverIntervalUnionMs - clientHistoryIntervalUnionMs > SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} server messages.getHistory interval union exceeds client getHistory interval union by ${(serverIntervalUnionMs - clientHistoryIntervalUnionMs).toFixed(1)} ms (clock tolerance ${SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS} ms)`);
+        continue;
+      }
       const rpcResidual = clientHistoryIntervalUnionMs >= serverIntervalUnionMs
         ? clientHistoryIntervalUnionMs - serverIntervalUnionMs
         : undefined;

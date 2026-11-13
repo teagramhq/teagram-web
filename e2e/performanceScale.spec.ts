@@ -1,7 +1,7 @@
 import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
 import {readFileSync} from 'node:fs';
 import {writePerformanceReport} from './performanceReport';
-import {getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from '../scripts/performance/server-rpc-trace.mjs';
+import {getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcClientCallsByIdentity, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from '../scripts/performance/server-rpc-trace.mjs';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
@@ -524,8 +524,8 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     durationMs: call.durationMs,
     outcome: call.outcome
   }));
-  // Spans are append-only between trace resets and the reset precedes the click, so a span's position in the
-  // trace identifies it. The app trace carries no call id, and base bundles must not need one.
+  // Pair the trace position with its start time so a later trace reset cannot silently remap a boundary span.
+  // The app trace carries no call id, and base bundles must not need one.
   const serverRpcClientCalls = captureServerRpcClientCalls
     ? rpcInvocationsInWindow(rpcRawCalls.map((call, callId) => ({...call, callId})).filter((call) => call.method === 'messages.getHistory'), timeOrigin, boundary.startedAtMs, boundary.ms)
     : undefined;
@@ -1010,17 +1010,6 @@ async function waitForHistorySettled(page: Page) {
   }, {timeout: 60_000, intervals: [100]}).toBe(true);
 }
 
-async function prepareChatOpenStartState(page: Page, fixture: Fixture) {
-  const otherRow = page.locator(`#chatlist-container .chatlist-chat[data-peer-id]:not([data-peer-id="${fixture.partner}"])`).first();
-  await expect(otherRow, '100x chat-open requires another chat to leave before opening the fixture peer').toBeVisible({timeout: 60_000});
-  const otherPeerId = await otherRow.getAttribute('data-peer-id');
-  if(!otherPeerId || otherPeerId === String(fixture.partner)) throw new Error('100x chat-open could not select a different starting peer');
-  await otherRow.click();
-  await expect.poll(() => page.evaluate(() => String((window as any).appImManager.chat.peerId)), {timeout: 60_000}).toBe(otherPeerId);
-  await waitForHistorySettled(page);
-  await page.evaluate(async(peerId) => (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId), fixture.partner);
-}
-
 async function finalizeServerRpcTrace(page: Page, sample: Metric) {
   const offset = serverRpcTraceOffsetsBySample.get(sample);
   if(offset === undefined) return sample;
@@ -1028,19 +1017,16 @@ async function finalizeServerRpcTrace(page: Page, sample: Metric) {
   const boundaryCalls = sample.serverRpcClientCalls;
   if(!Array.isArray(boundaryCalls)) throw new Error('100x chat-open sample has no boundary client RPC identities');
   const callIds = boundaryCalls.map((call) => call.callId);
-  if(callIds.some((callId) => !Number.isSafeInteger(callId)) || new Set(callIds).size !== callIds.length) {
+  if(callIds.some((callId, index) => !Number.isSafeInteger(callId) || !Number.isFinite(boundaryCalls[index].startedAtEpochMs)) || new Set(callIds).size !== callIds.length) {
     throw new Error(`100x chat-open sample has invalid or duplicate client RPC identities: ${JSON.stringify(callIds)}`);
   }
   let clientCalls: ServerRpcClientCall[] = [];
   await expect.poll(async() => {
-    clientCalls = await page.evaluate(async(ids) => {
+    const currentCalls = await page.evaluate(async() => {
       const trace = await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace();
-      const calls = trace.calls as Array<Omit<ServerRpcClientCall, 'callId'>>;
-      return ids.flatMap((callId) => {
-        const call = calls[callId];
-        return call ? [{...call, callId}] : [];
-      });
-    }, callIds);
+      return trace.calls as Array<Omit<ServerRpcClientCall, 'callId'>>;
+    });
+    clientCalls = serverRpcClientCallsByIdentity(currentCalls, boundaryCalls);
     return clientCalls.length === callIds.length && clientCalls.every((call) => call.outcome !== 'pending' && Number.isFinite(call.durationMs));
   }, {timeout: 60_000, intervals: [20]}).toBe(true);
   sample.serverRpcClientCalls = clientCalls;
@@ -1060,7 +1046,6 @@ async function reloadChatList(page: Page, requests: {value: number}, collectWalk
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false, collectWalkDiagnostics = false, collectServerRpcTrace = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
-  if(collectServerRpcTrace) await prepareChatOpenStartState(page, fixture);
   resetRequestBreakdown(page);
   await begin(page, requests, true, traceRpc);
   await startMeasurementAtClick(row);
@@ -2145,7 +2130,6 @@ async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Varia
 
         const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
         await expect(row).toBeVisible({timeout: 60_000});
-        await prepareChatOpenStartState(page, fixture);
         await beginScenario(page, requests, true);
         await installPeerChangeTracing(page);
         const chatProfile = await startCpuProfile(page);

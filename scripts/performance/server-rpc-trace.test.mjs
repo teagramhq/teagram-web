@@ -45,6 +45,25 @@ test('server handler records must correlate to client spans in the chat-open sam
   assert.equal(serverRpcRecordsCoverClientCalls([earlyRecord, lateRecord], [broadCall, narrowCall]), true);
 });
 
+test('server RPC call identities reject a trace index that was remapped by reset', async() => {
+  const {serverRpcClientCallsByIdentity} = await import('./server-rpc-trace.mjs');
+  const boundaryCalls = [{callId: 1, startedAtEpochMs: 1_762_800_000_100}];
+  const currentTrace = [
+    {method: 'messages.sendMessage', startedAtEpochMs: 1_762_800_000_050, durationMs: 5, outcome: 'success'},
+    {method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_100, durationMs: 200, outcome: 'success'}
+  ];
+
+  assert.deepEqual(serverRpcClientCallsByIdentity(currentTrace, boundaryCalls), [
+    {...currentTrace[1], callId: 1}
+  ]);
+
+  const resetTrace = [
+    {method: 'messages.sendMessage', startedAtEpochMs: 1_762_800_000_050, durationMs: 5, outcome: 'success'},
+    {method: 'messages.getHistory', startedAtEpochMs: 1_762_800_000_900, durationMs: 200, outcome: 'success'}
+  ];
+  assert.throws(() => serverRpcClientCallsByIdentity(resetTrace, boundaryCalls), /trace identity changed for callId 1/);
+});
+
 test('server RPC interval union does not double count overlapping handlers', () => {
   assert.equal(serverRpcIntervalUnionMs([
     {duration_us: 40_000, end_unix_ms: 1_000},

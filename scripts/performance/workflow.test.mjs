@@ -604,6 +604,38 @@ test('summary subtracts the gate-clipped union of overlapping server handler int
   assert.match(result.stdout, /gate sample \| base \| 1 \| 100\.0 \| 60\.0 \| 40\.0 \| 40\.1 ms \(success\), 40\.1 ms \(success\) \| 18\.9 \|/);
 });
 
+test('summary only tolerates a server interval union larger than the client union within clock tolerance', () => {
+  const setServerOverhang = (report, durationUs) => {
+    const samples = ['base', 'head'].flatMap((variant) => [
+      ...report.variants[variant]['100x'].chatOpen,
+      ...report.diagnostics['100x'].rpcComparison[variant].chatOpen
+    ]);
+    for(const sample of samples) {
+      const {startEpochMs} = sample.serverRpcGateWindow;
+      sample.serverRpcClientCalls = [{
+        callId: 1,
+        method: 'messages.getHistory',
+        startedAtEpochMs: startEpochMs + 10,
+        durationMs: 60,
+        outcome: 'success'
+      }];
+      sample.serverRpcRecords = [{
+        method: 'messages.getHistory',
+        duration_us: durationUs,
+        result: 'success',
+        end_unix_ms: startEpochMs + 75
+      }];
+    }
+  };
+  const withinTolerance = runSummaryWithArtifacts({mutateReport(report) { setServerOverhang(report, 65_000); }});
+  assert.equal(withinTolerance.status, 0, withinTolerance.stderr);
+  assert.match(withinTolerance.stdout, /\| n\/a \|/);
+
+  const outsideTolerance = runSummaryWithArtifacts({mutateReport(report) { setServerOverhang(report, 70_000); }});
+  assert.equal(outsideTolerance.status, 1);
+  assert.match(outsideTolerance.stderr, /server messages\.getHistory interval union exceeds client getHistory interval union/);
+});
+
 test('summary excludes correlated client and server work wholly after the chat-open gate', () => {
   const result = runSummaryWithArtifacts({
     mutateReport(report) {
@@ -640,7 +672,7 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.ok(capture, 'the capture helper must be present');
   assert.match(capture, /captureRpcTrace/);
   assert.match(capture, /serverRpcGateWindow/);
-  assert.match(capture, /rpcInvocationsInWindow\(rpcRawCalls\.map\(\(call, callId\) => \(\{\.\.\.call, callId\}\)\)\.filter\(\(call\) => call\.method === 'messages\.getHistory'\), timeOrigin, boundary\.startedAtMs, boundary\.ms\)/, 'span identity is its trace position, so base bundles need no call id');
+  assert.match(capture, /rpcInvocationsInWindow\(rpcRawCalls\.map\(\(call, callId\) => \(\{\.\.\.call, callId\}\)\)\.filter\(\(call\) => call\.method === 'messages\.getHistory'\), timeOrigin, boundary\.startedAtMs, boundary\.ms\)/, 'base bundles keep trace positions paired with start times without adding app trace call ids');
   assert.doesNotMatch(performanceTrace, /callId/, 'the app trace must not grow a call id that base bundles lack');
   assert.ok(openPartnerChat, 'the chat-open helper must be present');
   assert.doesNotMatch(openPartnerChat, /waitForHistorySettled/);
@@ -651,8 +683,9 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(attachServerRpcTrace, /serverRpcRecordsCoverClientCalls/);
   assert.ok(finalizeServerRpcTrace, 'the captured chat-open identities must settle before server records attach');
   assert.match(finalizeServerRpcTrace, /const callIds = boundaryCalls\.map\(\(call\) => call\.callId\)/);
-  assert.match(finalizeServerRpcTrace, /ids\.flatMap\(\(callId\)/);
-  assert.match(finalizeServerRpcTrace, /const call = calls\[callId\]/);
+  assert.match(finalizeServerRpcTrace, /Number\.isFinite\(boundaryCalls\[index\]\.startedAtEpochMs\)/);
+  assert.match(finalizeServerRpcTrace, /serverRpcClientCallsByIdentity\(currentCalls, boundaryCalls\)/);
+  assert.doesNotMatch(finalizeServerRpcTrace, /calls\[callId\]/, 'settlement must reject a trace reset instead of silently remapping boundary indices');
   assert.match(finalizeServerRpcTrace, /expect\.poll/);
   assert.doesNotMatch(finalizeServerRpcTrace, /waitForHistorySettled/);
   assert.match(finalizeServerRpcTrace, /Object\.assign\(sample, await attachServerRpcTrace/);
@@ -669,21 +702,14 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(waitForHistorySettled, /call\.method === 'messages\.getHistory' && call\.outcome === 'pending'/);
 });
 
-test('100x chat-open opens the fixture peer from another active chat before starting the gate', () => {
-  const prepareChatOpenStartState = performanceScale.match(/async function prepareChatOpenStartState\([\s\S]*?(?=\n})/)?.[0];
+test('100x chat-open gate and RPC diagnostic keep the original chat-list start state', () => {
   const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
-  const diagnosticChatOpen = performanceScale.match(/const row = page\.locator\(`#chatlist-container \.chatlist-chat\[data-peer-id=\"\$\{fixture\.partner\}\"\]`\)\.first\(\);[\s\S]*?traceSamples\.chatOpen\.push\(chatOpenSample\);/)?.[0];
+  const diagnosticChatOpen = performanceScale.match(/const row = page\.locator\([\s\S]*?traceSamples\.chatOpen\.push\(chatOpenSample\);/)?.[0];
 
-  assert.ok(prepareChatOpenStartState, 'the 100x gate must begin with the target peer inactive');
-  assert.match(prepareChatOpenStartState, /data-peer-id=\"\$\{fixture\.partner\}\"/);
-  assert.match(prepareChatOpenStartState, /:not\(\[data-peer-id=/);
-  assert.match(prepareChatOpenStartState, /waitForHistorySettled\(page\)/);
-  assert.match(prepareChatOpenStartState, /await page\.evaluate\(async\(peerId\) => \(window as any\)\.rootScope\.managers\.appMessagesManager\.flushStoragesByPeerId\(peerId\), fixture\.partner\)/);
-  assert.ok(prepareChatOpenStartState.indexOf('waitForHistorySettled(page)') < prepareChatOpenStartState.indexOf('flushStoragesByPeerId(peerId)'), 'the target cache must be flushed only after setup-peer history settles');
   assert.ok(openPartnerChat, 'the measured chat-open helper must be present');
-  assert.ok(openPartnerChat.indexOf('prepareChatOpenStartState(page, fixture)') < openPartnerChat.indexOf('startMeasurementAtClick(row)'));
+  assert.doesNotMatch(openPartnerChat, /prepareChatOpenStartState/);
   assert.ok(diagnosticChatOpen, 'the diagnostic chat-open sample must be present');
-  assert.ok(diagnosticChatOpen.indexOf('prepareChatOpenStartState(page, fixture)') < diagnosticChatOpen.indexOf('startMeasurementAtClick(row)'));
+  assert.doesNotMatch(diagnosticChatOpen, /prepareChatOpenStartState/);
 });
 
 test('summary fails closed when no client getHistory span can be correlated', () => {
