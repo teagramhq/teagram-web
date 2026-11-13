@@ -21,6 +21,11 @@ const MESSAGES = {
   unavailable: 'The security check couldn’t load. Try again.'
 };
 
+function getCloudflareErrorCode(errorCode: unknown) {
+  const value = typeof errorCode === 'number' && Number.isSafeInteger(errorCode) ? String(errorCode) : errorCode;
+  return typeof value === 'string' && /^\d{6}$/.test(value) ? value : undefined;
+}
+
 export function mountDesktopTurnstilePage() {
   const pageWindow = window as DesktopTurnstileWindow;
   const message = document.getElementById('turnstile-message')!;
@@ -79,7 +84,7 @@ export function mountDesktopTurnstilePage() {
     }
   }
 
-  function reportError(code: TurnstileErrorCode, text: string) {
+  function reportError(code: TurnstileErrorCode, text: string, errorCode?: unknown) {
     if(completed) return;
 
     showError(text);
@@ -91,7 +96,11 @@ export function mountDesktopTurnstilePage() {
       }
     }
 
-    sendEvent('turnstile_error', JSON.stringify({code}));
+    const cloudflareCode = getCloudflareErrorCode(errorCode);
+    sendEvent('turnstile_error', JSON.stringify({
+      code,
+      ...(cloudflareCode ? {cloudflare_code: cloudflareCode} : {})
+    }));
   }
 
   function handleToken(token: string) {
@@ -122,7 +131,7 @@ export function mountDesktopTurnstilePage() {
         'response-field': false,
         callback: handleToken,
         'expired-callback': () => reportError('expired', MESSAGES.expired),
-        'error-callback': () => reportError('widget_error', MESSAGES.failed)
+        'error-callback': (errorCode) => reportError('widget_error', MESSAGES.failed, errorCode)
       });
     } catch{
       reportError('widget_error', MESSAGES.unavailable);
