@@ -45,10 +45,11 @@ jobs:
           node-version: 24.18.0
           cache: pnpm
 
+      # GitHub-hosted Ubuntu images already include browser runtime libraries; avoid apt mirror resolution here.
       - name: Install web dependencies and Chromium
         run: |
           pnpm install --frozen-lockfile
-          pnpm exec playwright install --with-deps chromium
+          pnpm exec playwright install chromium
 
       - name: Test fixture and performance gate helpers
         run: node --test scripts/performance/fixture-release.test.mjs scripts/performance/https-proxy-routing.test.mjs scripts/performance/policy.test.mjs scripts/performance/workflow.test.mjs
@@ -337,6 +338,7 @@ jobs:
           -c playwright.performance.config.ts
           e2e/performanceMeasurement.spec.ts
           e2e/performanceScale.spec.ts
+          e2e/performancePresentedFrame.spec.ts
           --project=performance-chromium
           --workers=1
 
