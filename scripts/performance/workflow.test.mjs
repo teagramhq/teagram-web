@@ -9,6 +9,7 @@ import {PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS, SCENARIOS} from '.
 const workflow = readFileSync(new URL('../../.github/workflows/performance.yml', import.meta.url), 'utf8');
 const playwrightConfig = readFileSync(new URL('../../playwright.performance.config.ts', import.meta.url), 'utf8');
 const performanceScale = readFileSync(new URL('../../e2e/performanceScale.spec.ts', import.meta.url), 'utf8');
+const performanceTrace = readFileSync(new URL('../../src/lib/appManagers/performanceTrace.ts', import.meta.url), 'utf8');
 const workerReplay = readFileSync(new URL('../../e2e/workerMessageReplay.spec.ts', import.meta.url), 'utf8');
 const chatPageSnapshotView = readFileSync(new URL('../../src/lib/chatPageSnapshotView.ts', import.meta.url), 'utf8');
 const stickerBaseCommit = readFileSync(new URL('../../.github/perf-sticker-base-commit', import.meta.url), 'utf8').trim();
@@ -639,8 +640,8 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.ok(capture, 'the capture helper must be present');
   assert.match(capture, /captureRpcTrace/);
   assert.match(capture, /serverRpcGateWindow/);
-  assert.match(capture, /rpcInvocationsInWindow\(rpcRawCalls\.filter\(\(call\) => call\.method === 'messages\.getHistory'\), timeOrigin, boundary\.startedAtMs, boundary\.ms\)/);
-  assert.match(capture, /callId: number/);
+  assert.match(capture, /rpcInvocationsInWindow\(rpcRawCalls\.map\(\(call, callId\) => \(\{\.\.\.call, callId\}\)\)\.filter\(\(call\) => call\.method === 'messages\.getHistory'\), timeOrigin, boundary\.startedAtMs, boundary\.ms\)/, 'span identity is its trace position, so base bundles need no call id');
+  assert.doesNotMatch(performanceTrace, /callId/, 'the app trace must not grow a call id that base bundles lack');
   assert.ok(openPartnerChat, 'the chat-open helper must be present');
   assert.doesNotMatch(openPartnerChat, /waitForHistorySettled/);
   assert.match(openPartnerChat, /capture\(page, requests, boundary, false, false, collectWalkDiagnostics, false, collectWalkDiagnostics, traceRpc, collectServerRpcTrace\)/);
@@ -651,6 +652,7 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.ok(finalizeServerRpcTrace, 'the captured chat-open identities must settle before server records attach');
   assert.match(finalizeServerRpcTrace, /const callIds = boundaryCalls\.map\(\(call\) => call\.callId\)/);
   assert.match(finalizeServerRpcTrace, /ids\.flatMap\(\(callId\)/);
+  assert.match(finalizeServerRpcTrace, /const call = calls\[callId\]/);
   assert.match(finalizeServerRpcTrace, /expect\.poll/);
   assert.doesNotMatch(finalizeServerRpcTrace, /waitForHistorySettled/);
   assert.match(finalizeServerRpcTrace, /Object\.assign\(sample, await attachServerRpcTrace/);

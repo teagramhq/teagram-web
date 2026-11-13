@@ -467,7 +467,6 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
       callCount: number,
       invocations: Array<{method: string, startedAtEpochMs: number}>,
       calls: Array<{
-        callId: number,
         method: string,
         startedAtEpochMs: number,
         durationMs: number | null,
@@ -525,8 +524,10 @@ async function capture(page: Page, requests: {value: number}, boundary: Measurem
     durationMs: call.durationMs,
     outcome: call.outcome
   }));
+  // Spans are append-only between trace resets and the reset precedes the click, so a span's position in the
+  // trace identifies it. The app trace carries no call id, and base bundles must not need one.
   const serverRpcClientCalls = captureServerRpcClientCalls
-    ? rpcInvocationsInWindow(rpcRawCalls.filter((call) => call.method === 'messages.getHistory'), timeOrigin, boundary.startedAtMs, boundary.ms)
+    ? rpcInvocationsInWindow(rpcRawCalls.map((call, callId) => ({...call, callId})).filter((call) => call.method === 'messages.getHistory'), timeOrigin, boundary.startedAtMs, boundary.ms)
     : undefined;
   const serverRpcGateWindow = captureServerRpcClientCalls ? {
     startEpochMs: timeOrigin + boundary.startedAtMs,
@@ -1034,10 +1035,10 @@ async function finalizeServerRpcTrace(page: Page, sample: Metric) {
   await expect.poll(async() => {
     clientCalls = await page.evaluate(async(ids) => {
       const trace = await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace();
-      const callsById = new Map((trace.calls as ServerRpcClientCall[]).map((call) => [call.callId, call]));
+      const calls = trace.calls as Array<Omit<ServerRpcClientCall, 'callId'>>;
       return ids.flatMap((callId) => {
-        const call = callsById.get(callId);
-        return call ? [call] : [];
+        const call = calls[callId];
+        return call ? [{...call, callId}] : [];
       });
     }, callIds);
     return clientCalls.length === callIds.length && clientCalls.every((call) => call.outcome !== 'pending' && Number.isFinite(call.durationMs));

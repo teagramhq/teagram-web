@@ -195,23 +195,6 @@ describe('performance trace collectors', () => {
     expect(JSON.stringify(snapshot)).not.toContain('params');
   });
 
-  test('keeps RPC span identities stable through settlement and resets', async() => {
-    const trace = new PerformanceRpcTrace(true);
-    const request = Promise.resolve('history');
-    const tracked = trace.trackWait('messages.getHistory', request);
-    const pendingCall = trace.getSnapshot().calls[0];
-    await expect(tracked).resolves.toBe('history');
-    const settledCall = trace.getSnapshot().calls[0];
-
-    expect(Number.isSafeInteger(pendingCall.callId)).toBe(true);
-    expect(settledCall.callId).toBe(pendingCall.callId);
-    expect(settledCall.outcome).toBe('success');
-
-    trace.reset();
-    await trace.trackWait('messages.getHistory', Promise.resolve('next'));
-    expect(trace.getSnapshot().calls[0].callId).toBeGreaterThan(pendingCall.callId);
-  });
-
   test('tracks resolved RPC requests through completion', async() => {
     const trace = new PerformanceRpcTrace(true);
     const request = Promise.resolve('config');

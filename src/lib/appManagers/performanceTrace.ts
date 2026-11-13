@@ -10,7 +10,6 @@ export type PerformancePhase = {
 };
 
 export type PerformanceRpcCall = {
-  callId: number,
   method: string,
   startedAtEpochMs: number,
   durationMs: number | null,
@@ -109,7 +108,6 @@ export class PerformanceRpcTrace {
   private readonly enabled: boolean;
   private recording: boolean;
   private callCount = 0;
-  private nextCallId = 1;
   private invocations: PerformanceRpcInvocation[] = [];
   private calls: PerformanceRpcCall[] = [];
 
@@ -142,7 +140,6 @@ export class PerformanceRpcTrace {
 
     const started = performance.now();
     const trace: PerformanceRpcCall = {
-      callId: this.nextCallId++,
       method,
       startedAtEpochMs: performance.timeOrigin + started,
       durationMs: null,
