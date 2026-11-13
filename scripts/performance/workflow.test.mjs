@@ -664,11 +664,10 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   const attachServerRpcTrace = performanceScale.match(/async function attachServerRpcTrace\([\s\S]*?(?=\ntest\.afterAll)/)?.[0];
   const finalizeServerRpcTrace = performanceScale.match(/async function finalizeServerRpcTrace\([\s\S]*?(?=\nasync function reloadChatList)/)?.[0];
   const diagnosticChatOpen = performanceScale.match(/const chatOpenBoundary = await waitForFirstVisibleBubble\(page\);[\s\S]*?traceSamples\.chatOpen\.push\(chatOpenSample\);/)?.[0];
-  const waitForHistorySettled = performanceScale.match(/async function waitForHistorySettled\([\s\S]*?(?=\nasync function reloadChatList)/)?.[0];
-  const mainScenarioFlow = performanceScale.match(/const chatOpen = await test\.step\('open scale fixture chat',[\s\S]*?await finalizeServerRpcTrace\(chatOpenPage, chatOpen\);/)?.[0];
+  const mainScenarioFlow = performanceScale.match(/const chatOpen = await test\.step\('open scale fixture chat',[\s\S]*?await finalizeServerRpcTrace\(page, chatOpen\);/)?.[0];
 
   assert.ok(gateCall, 'the gated chat-open scenario must be present');
-  assert.match(gateCall, /openPartnerChat\(chatOpenPage, chatOpenRequests, fixture, scale === '100x', collectWalkDiagnostics, scale === '100x'\)/);
+  assert.match(gateCall, /openPartnerChat\(page, requests, fixture, scale === '100x', collectWalkDiagnostics, scale === '100x'\)/);
   assert.ok(capture, 'the capture helper must be present');
   assert.match(capture, /captureRpcTrace/);
   assert.match(capture, /serverRpcGateWindow/);
@@ -690,61 +689,36 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.doesNotMatch(finalizeServerRpcTrace, /waitForHistorySettled/);
   assert.match(finalizeServerRpcTrace, /Object\.assign\(sample, await attachServerRpcTrace/);
   assert.ok(mainScenarioFlow, 'the main gated scenario sequence must be present');
-  assert.ok(mainScenarioFlow.search(/test\.step\('scroll back 2,000 messages'/) < mainScenarioFlow.indexOf('finalizeServerRpcTrace(chatOpenPage, chatOpen)'), 'history telemetry must finalize after the scroll-back gate');
-  assert.ok(mainScenarioFlow.search(/test\.step\('jump to fixture date'/) < mainScenarioFlow.indexOf('finalizeServerRpcTrace(chatOpenPage, chatOpen)'), 'history telemetry must finalize after the date-jump gate');
+  assert.ok(mainScenarioFlow.search(/test\.step\('scroll back 2,000 messages'/) < mainScenarioFlow.indexOf('finalizeServerRpcTrace(page, chatOpen)'), 'history telemetry must finalize after the scroll-back gate');
+  assert.ok(mainScenarioFlow.search(/test\.step\('jump to fixture date'/) < mainScenarioFlow.indexOf('finalizeServerRpcTrace(page, chatOpen)'), 'history telemetry must finalize after the date-jump gate');
   assert.ok(diagnosticChatOpen, 'the RPC diagnostic chat-open sample must be present');
   assert.doesNotMatch(diagnosticChatOpen, /await waitForHistorySettled\(page\)/);
   assert.match(diagnosticChatOpen, /finalizeServerRpcTrace\(page, chatOpenSample\)/);
-  assert.ok(waitForHistorySettled, 'history capture must wait for pending client getHistory spans');
-  assert.match(waitForHistorySettled, /page\.evaluate\(async\(\) => \{/, 'the pending-span check reads a promise returned by the manager proxy');
-  assert.match(waitForHistorySettled, /\(await \(window as any\)\.rootScope\.managers\.apiManager\.getPerformanceRpcTrace\(\)\)\?\.calls/, 'the trace promise must be awaited before reading spans');
-  assert.match(waitForHistorySettled, /Array\.isArray\(rpcCalls\)/, 'older base bundles may not expose a calls array');
-  assert.match(waitForHistorySettled, /call\.method === 'messages\.getHistory' && call\.outcome === 'pending'/);
 });
 
-test('100x chat-open prepares cold state once and isolates it from adjacent scenarios', () => {
+test('100x chat-open keeps the original start state and adjacent scenario sequencing', () => {
   const beforeAll = performanceScale.match(/test\.beforeAll\(async\(\{browser\}\) => \{[\s\S]*?\n\}\);/)?.[0];
-  const prepareVariant = performanceScale.match(/async function prepareVariant\([\s\S]*?(?=\nasync function measureColdControlWindow)/)?.[0];
-  const prepareChatOpenStartState = performanceScale.match(/async function prepareChatOpenStartState\([\s\S]*?(?=\nasync function finalizeServerRpcTrace)/)?.[0];
   const runVariant = performanceScale.match(/async function runVariant\([\s\S]*?(?=\nasync function traceDateJump)/)?.[0];
   const traceTargetScenarios = performanceScale.match(/async function traceTargetScenarios\([\s\S]*?(?=\ntest\('measures the scale fixture)/)?.[0];
   const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
-  const clearChatOpenHistoryCache = performanceScale.match(/async function clearChatOpenHistoryCache\([\s\S]*?(?=\nasync function finalizeServerRpcTrace)/)?.[0];
 
-  assert.ok(beforeAll, 'variant states must be prepared once before the performance repeats');
-  assert.match(beforeAll, /prepareVariant\(browser, firstVariant, firstOrigin, scale === '100x' \? fixture : undefined\)/);
-  assert.ok(prepareVariant, 'the signed-in state setup must be present');
-  assert.match(prepareVariant, /prepareChatOpenStartState\(page, chatOpenFixture\)/);
-  assert.ok(prepareChatOpenStartState, 'the one-time setup must prepare a cold target chat');
-  assert.match(prepareChatOpenStartState, /waitForHistorySettled\(page\)/);
-  assert.match(prepareChatOpenStartState, /flushStoragesByPeerId\(peerId\), fixture\.partner\)/);
-  assert.ok(clearChatOpenHistoryCache, 'each isolated sample needs its own cold target history cache');
-  assert.match(clearChatOpenHistoryCache, /flushStoragesByPeerId\(peerId\), fixture\.partner\)/);
-  assert.match(clearChatOpenHistoryCache, /await page\.waitForTimeout\(150\)/, 'allow the worker storage delete to settle before the measured click');
-  assert.doesNotMatch(clearChatOpenHistoryCache, /waitForHistorySettled|otherRow\.click/, 'the per-sample setup must not switch peers or wait for an unrelated history request');
-  assert.ok(openPartnerChat, 'the measured chat-open helper must be present');
-  assert.doesNotMatch(openPartnerChat, /prepareChatOpenStartState/);
-  assert.ok(runVariant, 'the main performance samples must be present');
-  assert.match(runVariant, /storageState: structuredClone\(run\.chatOpenStorageState\)/, 'each sample must import an independent copy of the prepared state');
-  assert.match(runVariant, /await clearChatOpenHistoryCache\(chatOpenPage, fixture\)/);
-  assert.ok(runVariant.indexOf('clearChatOpenHistoryCache(chatOpenPage, fixture)') < runVariant.indexOf('openPartnerChat(chatOpenPage'), 'clear the target cache before each measured click');
-  assert.match(runVariant, /openPartnerChat\(chatOpenPage/);
-  assert.match(runVariant, /scrollBackTwoThousand\(\s*chatOpenPage/);
-  assert.match(runVariant, /jumpToFixtureDate\(chatOpenPage/);
-  assert.ok(runVariant.indexOf("measured.warmChatList.push(warmChatList)") < runVariant.indexOf("page.goto('about:blank')"));
-  assert.ok(runVariant.indexOf("page.goto('about:blank')") < runVariant.indexOf('openPartnerChat(chatOpenPage'));
-  assert.match(runVariant, /resetToChatList\(page, origin\)/, 'non-chat-open scenarios return to their original page state');
-  assert.ok(traceTargetScenarios, 'the paired RPC diagnostic samples must be present');
-  assert.match(traceTargetScenarios, /storageState: structuredClone\(run\.chatOpenStorageState \|\| run\.storageState\)/, 'diagnostic samples must also receive an independent cache snapshot');
-  assert.match(traceTargetScenarios, /await clearChatOpenHistoryCache\(page, fixture\)/);
-  assert.ok(traceTargetScenarios.indexOf('clearChatOpenHistoryCache(page, fixture)') < traceTargetScenarios.indexOf('await row.click()'), 'clear the diagnostic target cache before its measured click');
+  assert.ok(beforeAll && runVariant && traceTargetScenarios && openPartnerChat);
+  assert.doesNotMatch(performanceScale, /prepareChatOpenStartState|clearChatOpenHistoryCache|chatOpenStorageState|chatOpenContext/, 'the measured workload must not be reshaped to force a cold history fetch');
+  assert.doesNotMatch(openPartnerChat, /waitForHistorySettled|flushStoragesByPeerId/);
+  assert.doesNotMatch(traceTargetScenarios, /flushStoragesByPeerId|structuredClone/);
+  assert.match(runVariant, /openPartnerChat\(page, requests, fixture, scale === '100x'/);
+  assert.match(runVariant, /resetToChatList\(page, origin\)/);
 });
 
-test('summary fails closed when no client getHistory span can be correlated', () => {
-  const result = runSummaryWithArtifacts({chatOpenClientHistoryCallCount: 0});
+test('summary accepts a chat-open gate window that issued no getHistory', () => {
+  const result = runSummaryWithArtifacts({
+    chatOpenClientHistoryCallCount: 0,
+    chatOpenServerHistoryRecordCount: 0,
+    chatOpenServerClientHistoryCallCount: 0
+  });
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /cannot correlate server messages\.getHistory records to client spans/);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /none \(no getHistory in gate window\)/);
 });
 
 test('summary fails closed when a zero-call sample attaches an uncorrelated process-wide handler', () => {
@@ -757,7 +731,7 @@ test('summary fails closed when a zero-call sample attaches an uncorrelated proc
   });
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /cannot correlate server messages\.getHistory records to client spans/);
+  assert.match(result.stderr, /1 server records for 0 client messages\.getHistory spans/);
 });
 
 test('summary rejects a process-wide server handler outside the client sample span', () => {

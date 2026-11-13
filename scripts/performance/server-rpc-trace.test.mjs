@@ -12,8 +12,8 @@ const record = (method, duration_us = 40_123) => JSON.stringify({
   end_unix_ms: 1_762_800_000_123
 });
 
-test('server RPC trace keeps a required record when the client sample has no calls', () => {
-  assert.deepEqual(serverRpcTraceExpectation(0), {minimumCount: 1});
+test('server RPC trace expects no records when the client sample issued no calls', () => {
+  assert.deepEqual(serverRpcTraceExpectation(0), {minimumCount: 0});
   assert.deepEqual(serverRpcTraceExpectation(undefined), {minimumCount: 1});
 });
 

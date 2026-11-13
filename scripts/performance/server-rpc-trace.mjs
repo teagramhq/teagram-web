@@ -17,7 +17,8 @@ function validateOffset(offset) {
 export function serverRpcTraceExpectation(clientRpcCount) {
   if(clientRpcCount === undefined) return {minimumCount: 1};
   if(!Number.isSafeInteger(clientRpcCount) || clientRpcCount < 0) throw new TypeError('client RPC count must be a non-negative safe integer');
-  return {minimumCount: Math.max(1, clientRpcCount)};
+  // A sample whose gate window issued no getHistory has nothing to wait for or attribute.
+  return {minimumCount: clientRpcCount};
 }
 
 export const SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS = 5;

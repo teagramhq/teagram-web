@@ -54,7 +54,7 @@ function formatPerformanceSamplesTable(report, scale = '100x') {
 function getHistoryServerRecords(sample) {
   if(!Array.isArray(sample?.serverRpcRecords)) return undefined;
   const records = sample.serverRpcRecords;
-  if(!records.length || !records.every((record) => (
+  if(!records.every((record) => (
     record?.method === 'messages.getHistory' && Number.isSafeInteger(record.duration_us) && record.duration_us >= 0 &&
     typeof record.result === 'string' && record.result.length > 0 && Number.isSafeInteger(record.end_unix_ms) && record.end_unix_ms > 0
   ))) return undefined;
@@ -84,7 +84,7 @@ function formatChatOpenServerTimingTable(report, failures) {
         continue;
       }
       const expectation = Number.isSafeInteger(clientHistoryCallCount) ? serverRpcTraceExpectation(clientHistoryCallCount) : undefined;
-      if(!expectation || serverRecords.length < expectation.minimumCount) {
+      if(!expectation || serverRecords.length < expectation.minimumCount || (!clientHistoryCallCount && serverRecords.length)) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has ${serverRecords.length} server records for ${clientHistoryCallCount ?? 'unknown'} client messages.getHistory spans`);
         continue;
       }
@@ -92,9 +92,8 @@ function formatChatOpenServerTimingTable(report, failures) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} is missing total, RPC wall, or non-RPC timing`);
         continue;
       }
-      if(!Array.isArray(clientHistoryCalls) ||
-        !serverRpcRecordsCoverClientCalls(serverRecords, clientHistoryCalls) ||
-        !serverRecords.every((record) => serverRpcRecordMatchesClientCalls(record, clientHistoryCalls))) {
+      if(clientHistoryCallCount && (!serverRpcRecordsCoverClientCalls(serverRecords, clientHistoryCalls) ||
+        !serverRecords.every((record) => serverRpcRecordMatchesClientCalls(record, clientHistoryCalls)))) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} cannot correlate server messages.getHistory records to client spans`);
         continue;
       }
@@ -104,7 +103,7 @@ function formatChatOpenServerTimingTable(report, failures) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has a missing or invalid RPC gate window`);
         continue;
       }
-      const serverDurations = serverRecords.map((record) => `${show(record.duration_us / 1000)} ms (${record.result})`).join(', ');
+      const serverDurations = serverRecords.length ? serverRecords.map((record) => `${show(record.duration_us / 1000)} ms (${record.result})`).join(', ') : 'none (no getHistory in gate window)';
       const clientHistoryIntervalUnionMs = clientRpcIntervalUnionMs(clientHistoryCalls, gateWindow);
       const serverIntervalUnionMs = serverRpcIntervalUnionMs(serverRecords, gateWindow);
       if(serverIntervalUnionMs - clientHistoryIntervalUnionMs > SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS) {
