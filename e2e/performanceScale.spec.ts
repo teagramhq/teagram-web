@@ -199,9 +199,9 @@ async function attachServerRpcTrace(sample: Metric, offset: number | undefined) 
   if(offset === undefined) return sample;
   const clientCalls = sample.serverRpcClientCalls;
   if(!Array.isArray(clientCalls)) throw new Error('100x chat-open sample has no client messages.getHistory span list');
-  // A chat open served from cache issues no getHistory inside its gate window: nothing to attribute, and any
-  // process-wide handler in the trace belongs to other work.
-  if(!clientCalls.length) return {...sample, serverRpcRecords: []};
+  if(!clientCalls.length) {
+    throw new Error(`cold 100x chat-open sample has no in-gate client messages.getHistory spans; RPC sample ${JSON.stringify(sample.rpcCalls)}`);
+  }
   const traceRecords = readServerRpcTraceRecordsSince(serverRpcTraceFile!, offset).filter((record) => record.method === 'messages.getHistory');
   const records = traceRecords.filter((record) => serverRpcRecordMatchesClientCalls(record, clientCalls));
   if(!serverRpcRecordsCoverClientCalls(records, clientCalls)) {
@@ -995,6 +995,25 @@ async function waitForHistorySettled(page: Page) {
   }, {timeout: 60_000, intervals: [100]}).toBe(true);
 }
 
+async function flushFixtureHistoryBeforeMeasuredOpen(page: Page, fixture: Fixture) {
+  await page.evaluate(async(peerId) => {
+    (window as any).rootScope.managers.appMessagesManager.flushStoragesByPeerId(peerId);
+    // Mirror deletions are sent with invokeVoid. A worker round-trip queued after them makes the
+    // cache reset deterministic without waiting for an arbitrary quiet period or loading another chat.
+    await (window as any).apiManagerProxy.invoke('getMemoryStats', undefined);
+  }, fixture.partner);
+}
+
+function expectChatOpenHistoryCall(sample: Metric, description: string) {
+  const calls = sample.serverRpcClientCalls;
+  if(!Array.isArray(calls) || !calls.length) {
+    throw new Error(`${description} has no in-gate client messages.getHistory spans; RPC sample ${JSON.stringify({
+      rpcCallCount: sample.rpcCallCount,
+      rpcCalls: sample.rpcCalls
+    })}`);
+  }
+}
+
 async function finalizeServerRpcTrace(page: Page, sample: Metric) {
   const offset = serverRpcTraceOffsetsBySample.get(sample);
   if(offset === undefined) return sample;
@@ -1006,9 +1025,7 @@ async function finalizeServerRpcTrace(page: Page, sample: Metric) {
     throw new Error(`100x chat-open sample has invalid or duplicate client RPC identities: ${JSON.stringify(callIds)}`);
   }
   if(!callIds.length) {
-    sample.serverRpcClientCalls = [];
-    Object.assign(sample, await attachServerRpcTrace(sample, offset));
-    return sample;
+    throw new Error(`cold 100x chat-open sample has no in-gate client messages.getHistory spans; RPC sample ${JSON.stringify(sample.rpcCalls)}`);
   }
   if(serverRpcClientCallsAreSettled(boundaryCalls)) {
     sample.serverRpcClientCalls = boundaryCalls.map((call) => ({...call}));
@@ -1048,6 +1065,7 @@ async function reloadChatList(page: Page, requests: {value: number}, collectWalk
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false, collectWalkDiagnostics = false, collectServerRpcTrace = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
+  if(collectServerRpcTrace) await flushFixtureHistoryBeforeMeasuredOpen(page, fixture);
   resetRequestBreakdown(page);
   await begin(page, requests, true, traceRpc);
   await startMeasurementAtClick(row);
@@ -2008,6 +2026,7 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, warmChatList, 'warmChatList');
 
     const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture, scale === '100x', collectWalkDiagnostics, scale === '100x'));
+    if(scale === '100x') expectChatOpenHistoryCall(chatOpen, `${variant} 100x chatOpen gate sample`);
     measured.chatOpen.push(chatOpen);
     if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpen, 'chatOpen');
     const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(
@@ -2132,6 +2151,7 @@ async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Varia
 
         const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
         await expect(row).toBeVisible({timeout: 60_000});
+        await flushFixtureHistoryBeforeMeasuredOpen(page, fixture);
         await beginScenario(page, requests, true);
         await installPeerChangeTracing(page);
         const chatProfile = await startCpuProfile(page);
@@ -2150,6 +2170,7 @@ async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Varia
             return (perf.peerChangePhases || []).map((phase: {startMs: number}) => ({...phase, startMs: Number((phase.startMs - offset).toFixed(1))}));
           }))
         };
+        expectChatOpenHistoryCall(chatOpenSample, `${variant} 100x chatOpen RPC diagnostic`);
         serverRpcTraceOffsetsBySample.set(chatOpenSample, serverTraceOffset);
         await finalizeServerRpcTrace(page, chatOpenSample);
         traceSamples.chatOpen.push(chatOpenSample);

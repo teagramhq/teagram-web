@@ -83,6 +83,10 @@ function formatChatOpenServerTimingTable(report, failures) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has missing or duplicate client RPC identities`);
         continue;
       }
+      if(clientHistoryCallCount === 0) {
+        failures.push(`cold 100x chatOpen ${source} ${variant} sample ${index + 1} has no client messages.getHistory span`);
+        continue;
+      }
       const expectation = Number.isSafeInteger(clientHistoryCallCount) ? serverRpcTraceExpectation(clientHistoryCallCount) : undefined;
       if(!expectation || serverRecords.length < expectation.minimumCount || (!clientHistoryCallCount && serverRecords.length)) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has ${serverRecords.length} server records for ${clientHistoryCallCount ?? 'unknown'} client messages.getHistory spans`);

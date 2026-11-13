@@ -687,7 +687,8 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(finalizeServerRpcTrace, /Number\.isFinite\(boundaryCalls\[index\]\.startedAtEpochMs\)/);
   assert.match(finalizeServerRpcTrace, /Object\.fromEntries\(callIds\.map/, 'settlement should transfer only the boundary calls instead of the full accumulated trace');
   assert.match(finalizeServerRpcTrace, /serverRpcClientCallsByIdentity\(currentCalls, boundaryCalls\)/);
-  assert.match(finalizeServerRpcTrace, /if\(!callIds\.length\)/, 'zero-call samples should skip a trace request entirely');
+  assert.ok(finalizeServerRpcTrace.includes('if(!callIds.length)'), 'zero-call cold samples must fail before a server trace can be attributed');
+  assert.ok(finalizeServerRpcTrace.includes('has no in-gate client messages.getHistory spans'), 'the failure should include trace correlation details');
   assert.match(finalizeServerRpcTrace, /serverRpcClientCallsAreSettled\(boundaryCalls\)/, 'already-settled boundary calls should attach without another browser polling round trip');
   assert.ok(finalizeServerRpcTrace.indexOf('serverRpcClientCallsAreSettled(boundaryCalls)') < finalizeServerRpcTrace.indexOf('const settledCallsHandle = await page.waitForFunction'), 'the settled snapshot fast path must run before browser polling');
   assert.doesNotMatch(finalizeServerRpcTrace, /calls\[callId\]/, 'settlement must reject a trace reset instead of silently remapping boundary indices');
@@ -703,29 +704,53 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(diagnosticChatOpen, /finalizeServerRpcTrace\(page, chatOpenSample\)/);
 });
 
-test('100x chat-open keeps the original start state and adjacent scenario sequencing', () => {
+test('100x chat-open resets the fixture cache before timing without a peer-switch wait', () => {
+  assert.ok(performanceScale.includes('async function flushFixtureHistoryBeforeMeasuredOpen'));
+  assert.ok(performanceScale.includes('flushStoragesByPeerId'));
+  assert.ok(performanceScale.includes("apiManagerProxy.invoke('getMemoryStats'"));
+  assert.ok(performanceScale.includes('await flushFixtureHistoryBeforeMeasuredOpen(page, fixture)'));
+  assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpen'));
+  assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpenSample'));
+  assert.ok(performanceScale.includes('scrollBackTwoThousand(\n      page'));
+  assert.ok(performanceScale.includes('jumpToFixtureDate(page'));
+});
+
+test('100x chat-open resets history without changing adjacent scenario sequencing', () => {
   const beforeAll = performanceScale.match(/test\.beforeAll\(async\(\{browser\}\) => \{[\s\S]*?\n\}\);/)?.[0];
   const runVariant = performanceScale.match(/async function runVariant\([\s\S]*?(?=\nasync function traceDateJump)/)?.[0];
   const traceTargetScenarios = performanceScale.match(/async function traceTargetScenarios\([\s\S]*?(?=\ntest\('measures the scale fixture)/)?.[0];
   const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
 
   assert.ok(beforeAll && runVariant && traceTargetScenarios && openPartnerChat);
-  assert.doesNotMatch(performanceScale, /prepareChatOpenStartState|clearChatOpenHistoryCache|chatOpenStorageState|chatOpenContext/, 'the measured workload must not be reshaped to force a cold history fetch');
+  assert.match(performanceScale, /flushFixtureHistoryBeforeMeasuredOpen/, 'cold-history preparation must happen before the measured click');
   assert.doesNotMatch(openPartnerChat, /waitForHistorySettled|flushStoragesByPeerId/);
   assert.doesNotMatch(traceTargetScenarios, /flushStoragesByPeerId|structuredClone/);
   assert.match(runVariant, /openPartnerChat\(page, requests, fixture, scale === '100x'/);
   assert.match(runVariant, /resetToChatList\(page, origin\)/);
 });
 
-test('summary accepts a chat-open gate window that issued no getHistory', () => {
+test('summary fails closed when a cold chat-open gate issued no getHistory', () => {
   const result = runSummaryWithArtifacts({
     chatOpenClientHistoryCallCount: 0,
     chatOpenServerHistoryRecordCount: 0,
     chatOpenServerClientHistoryCallCount: 0
   });
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /none \(no getHistory in gate window\)/);
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /cold 100x chatOpen gate sample base sample 1 has no client messages\.getHistory span/);
+});
+
+test('summary fails closed when a cold chat-open RPC diagnostic issued no getHistory', () => {
+  const result = runSummaryWithArtifacts({
+    mutateReport(report) {
+      const sample = report.diagnostics['100x'].rpcComparison.base.chatOpen[0];
+      sample.serverRpcClientCalls = [];
+      sample.rpcCalls = [];
+    }
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /cold 100x chatOpen RPC diagnostic base sample 1 has no client messages\.getHistory span/);
 });
 
 test('summary fails closed when a zero-call sample attaches an uncorrelated process-wide handler', () => {
@@ -738,7 +763,7 @@ test('summary fails closed when a zero-call sample attaches an uncorrelated proc
   });
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /1 server records for 0 client messages\.getHistory spans/);
+  assert.match(result.stderr, /cold 100x chatOpen gate sample base sample 1 has no client messages\.getHistory span/);
 });
 
 test('summary rejects a process-wide server handler outside the client sample span', () => {
