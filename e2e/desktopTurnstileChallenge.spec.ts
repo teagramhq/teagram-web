@@ -68,3 +68,25 @@ test('does not load Turnstile when opened without the desktop bridge', async({pa
   await expect(page.getByRole('status')).toHaveText('Open this security check from Teagram Desktop.');
   expect(turnstileRequests).toEqual([]);
 });
+
+test('forwards the Cloudflare error code to the desktop bridge', async({page}) => {
+  await page.addInitScript(() => {
+    (window as any).__desktopTurnstileEvents = [];
+    (window as any).TelegramWebviewProxy = {
+      postEvent(name: string, payload: string) {
+        (window as any).__desktopTurnstileEvents.push({name, payload});
+      }
+    };
+  });
+  await installTurnstileMock(page);
+
+  await page.goto('/turnstile.html#sitekey=desktop-test-key&action=signin', {waitUntil: 'domcontentloaded'});
+  await expect(page.getByRole('button', {name: 'Complete security check'})).toBeVisible();
+  await page.evaluate(() => (window as any).__turnstileCallbacks['error-callback']('600010'));
+  await expect(page.getByRole('alert')).toHaveText('The security check failed. Try again.');
+
+  await expect.poll(() => page.evaluate(() => (window as any).__desktopTurnstileEvents)).toEqual([{
+    name: 'turnstile_error',
+    payload: '{"code":"widget_error","cloudflare_code":"600010"}'
+  }]);
+});

@@ -59,10 +59,16 @@ chat-list boundary, varying contacts-list bundle sizes, and missing or invalid
 samples remain blocking. The 100 ms negative control must fail under the paired
 rule. It uses the same bundle for control and injected-stall samples.
 
-The 100x scroll gate samples run without CDP tracing, CPU profiling, or screencast
-capture. Each artifact sample and the job summary record RAF callback totals and
-drops (`frameIntervals`, `droppedFrames`, `droppedFramePercent`, and
-`rafDropped`). The existing gate uses the RAF-based `droppedFramePercent`.
+The 100x scroll gate samples collect only Chromium's
+`disabled-by-default-display.framedisplayed` events alongside the RAF callback
+counters. They do not use
+CPU profiling, script or long-task trace categories, or screencast capture. Each
+artifact sample and the job summary report RAF drops and compositor-presented
+frame drops separately. Expected presentation intervals are counted only during
+active scroll damage windows, opened by wheel or scroll events and closed by
+`scrollend` or 100 ms without further input or scrolling. Frame gaps during idle
+periods between scroll bursts do not count as missed presentations. The existing
+gate continues to use the RAF-based `droppedFramePercent`.
 
 The separate 100x diagnostic scroll samples include `droppedFrameAttribution`,
 with measured frame intervals, overlapping renderer trace events and

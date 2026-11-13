@@ -8,7 +8,7 @@ import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VER
 import {createBundleRequestTracker, isNetworkRequestURL, sumBundleBytes, trackBundleDocumentNavigation, type BundleRequestTracker} from './performanceBundleBytes';
 import {buildWalkComparison, CACHED_DIALOG_RECONCILE_PHASE_NAME, cachedDialogReconcileWindowMs, collectCachedDialogReconcileSummaries, findLongTasksOverlappingWalkMirrors, getScenarioPreservedPerformancePhases, mergeCachedDialogReconcilePhaseSnapshots, settleInterruptedCachedDialogReconciles, observeLongAnimationFrames, rpcInvocationsInWindow, rpcMethodCounts, summarizeCpuProfile, summarizeLongTaskAttribution, summarizeLongTaskTrace, summarizeLongTaskWindow, summarizePerformancePhases, summarizeReconcileMirrorTasks, summarizeRpcTrace, validateCachedDialogReconcileDiagnostics, type CachedDialogReconcilePhase, type CachedDialogReconcileSummary, type PerformanceCpuProfile, type PerformanceCpuSummary, type PerformancePhaseSummary, type PerformanceRpcCall, type PerformanceSpan, type PerformanceTaskAttribution, type ReconcileMirrorTask} from './performanceRpcTrace';
 import {beginMeasurement as begin, finishIncompleteScroll, getContactsFailureDetails, getContactsRpcFailureDetails, observeFirstVisibleChatList, startMeasurementAtClick, waitForFirstVisibleBubble, waitForFirstVisibleChatList, type DomNodeCounts, type FirstVisibleChatListBoundary} from './performanceMeasurement';
-import {startFrameTrace, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts} from './performanceFrameTrace';
+import {endPresentedFrameCapture, startFrameTrace, startPresentedFrameCapture, stopFrameTrace, summarizeDroppedFrames, summarizeFrameScripts, withPresentedFrameCleanup} from './performanceFrameTrace';
 import {LOTTIE_FRAME_BG_CSS, scheduleAfterInterveningPaint, waitForFirstStickerFrame, waitForFirstStickerPaint, waitUntilOnScreen} from './lottieFrameMeasurement';
 import {globalSearchSampleMs, isCurrentGlobalSearchResult} from '../scripts/performance/global-search-measurement.mjs';
 
@@ -88,6 +88,8 @@ type Metric = {
   droppedFrames?: number,
   frameIntervals?: number,
   rafDropped?: number,
+  presentedFrames?: number,
+  presentedDropped?: number,
   droppedFrameAttribution?: ReturnType<typeof summarizeDroppedFrames>,
   droppedFrameCpu?: PerformanceTaskAttribution[],
   droppedFrameScripts?: ReturnType<typeof summarizeFrameScripts>,
@@ -105,6 +107,11 @@ type Metric = {
     matchingResultVisibleAtMs: number
   }
 };
+
+const pendingPresentedFrameCountsKey: unique symbol = Symbol('pendingPresentedFrameCounts');
+type PresentedFrameCounts = {presentedFrames: number, presentedDropped: number};
+type PresentedFrameDrainResult = {ok: true, counts: PresentedFrameCounts} | {ok: false, error: unknown};
+type MetricWithPendingPresentedFrameCounts = Metric & {[pendingPresentedFrameCountsKey]?: Promise<PresentedFrameDrainResult>};
 
 type VariantRun = {
   variant: Variant,
@@ -135,6 +142,7 @@ type CachedDialogReconcileTarget = {
 type ScrollBackTraceOptions = {
   captureCpuStacks?: boolean,
   captureFrameTrace?: boolean,
+  capturePresentedFrames?: boolean,
   captureWorkerMessages?: boolean,
   traceRpc?: boolean,
   waitForHistory?: boolean,
@@ -1101,10 +1109,11 @@ async function openPartnerChat(page: Page, requests: {value: number}, fixture: F
   return sample;
 }
 
-async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}) {
+async function scrollBackTwoThousand(page: Page, requests: {value: number}, required: boolean, options: ScrollBackTraceOptions = {}): Promise<MetricWithPendingPresentedFrameCounts | undefined> {
   const {
     captureCpuStacks = false,
     captureFrameTrace = captureCpuStacks,
+    capturePresentedFrames = false,
     captureWorkerMessages = captureCpuStacks,
     traceRpc = false,
     waitForHistory = false,
@@ -1129,6 +1138,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     expect(observed, 'long-animation-frame observer is not supported in the browser').toBe(true);
   }
   const cpuProfile = captureCpuStacks ? await startCpuProfile(page) : undefined;
+  const presentedFrameTrace = capturePresentedFrames ? await startPresentedFrameCapture(page, {trackScrollActivity: true}) : undefined;
   await page.evaluate((recordWindows) => (window as any).__teagramPerf.startFrames(recordWindows), captureFrameTrace);
   const initial = await page.evaluate(() => {
     const mids = [...document.querySelectorAll<HTMLElement>('.bubbles .bubble[data-mid]')].map((bubble) => Number(bubble.dataset.mid));
@@ -1164,6 +1174,7 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
     if(stagnant >= 12) break;
   }
   await page.evaluate(() => (window as any).__teagramPerf.stopFrames());
+  const presentedFrameDrain = presentedFrameTrace ? await endPresentedFrameCapture(presentedFrameTrace) : undefined;
   if(resumeLongAnimationFrames) await page.evaluate(() => (window as any).__teagramPerf.startLongAnimationFrames());
   const scrollState = await page.evaluate(() => {
     const chat = (window as any).appImManager.chat;
@@ -1186,11 +1197,16 @@ async function scrollBackTwoThousand(page: Page, requests: {value: number}, requ
       required,
       frameTrace ? () => stopFrameTrace(frameTrace) : undefined
     );
+    if(presentedFrameDrain) {
+      const outcome = await presentedFrameDrain.result;
+      if(outcome.ok === false) throw outcome.error;
+    }
     return undefined;
   }
-  const metric = {
+  const metric: MetricWithPendingPresentedFrameCounts = {
     ...await capture(page, requests, boundary, true, traceRpc, includeLongTaskTrace, false, collectWalkDiagnostics)
   };
+  if(presentedFrameDrain) metric[pendingPresentedFrameCountsKey] = presentedFrameDrain.result;
   const frameEvents = frameTrace ? await stopFrameTrace(frameTrace) : undefined;
   if(!stoppedProfile && !frameEvents && !captureWorkerMessages) return metric;
   const {tasks, spans, frameWindows, workerMessages, workerBatches} = await page.evaluate((captureWorkerMessages) => {
@@ -2020,9 +2036,11 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
   const page = await context.newPage();
   const requests = {value: 0};
   const captureScrollAttribution = variant === 'head' && scale === '100x';
-  await installInstrumentation(page, requests, origin, false, captureScrollAttribution);
+  let scrollMetric: MetricWithPendingPresentedFrameCounts | undefined;
+  let pendingPresentedFrameCounts: Promise<PresentedFrameDrainResult> | undefined;
 
-  try {
+  return withPresentedFrameCleanup(async() => {
+    await installInstrumentation(page, requests, origin, false, captureScrollAttribution);
     await page.goto(origin, {waitUntil: 'domcontentloaded'});
     expect(await page.evaluate(() => Number.isFinite((window as any).__teagramPerf.started))).toBe(true);
     const firstVisibleChatList = await waitForChatList(page);
@@ -2056,11 +2074,14 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       requests,
       true,
       scale === '100x' ? {
+        capturePresentedFrames: true,
         pauseLongAnimationFrames: true,
         collectWalkDiagnostics
       } : undefined
     ));
     if(!scroll) throw new Error(`${variant} scroll-back did not reach 2,000 messages`);
+    scrollMetric = scroll;
+    pendingPresentedFrameCounts = scroll[pendingPresentedFrameCountsKey];
     measured.scrollBack2k.push(scroll);
     if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, scroll, 'scrollBack2k');
     const jump = await test.step('jump to fixture date', () => jumpToFixtureDate(page, requests, fixture, false, undefined, collectWalkDiagnostics), {timeout: 120_000});
@@ -2086,9 +2107,13 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
       await addCachedDialogReconcileTarget(page, reconcileTargets, sendMessageSample, 'sendMessage');
       await finalizeCachedDialogReconcileSummaries(page, reconcileTargets);
     }
-  } finally {
-    await context.close();
-  }
+  }, async() => {
+    if(scrollMetric && pendingPresentedFrameCounts) {
+      const outcome = await pendingPresentedFrameCounts;
+      if(outcome.ok === false) throw outcome.error;
+      Object.assign(scrollMetric, outcome.counts);
+    }
+  }, () => context.close());
 }
 
 async function traceDateJump(browser: Browser, run: VariantRun, fixture: Fixture) {

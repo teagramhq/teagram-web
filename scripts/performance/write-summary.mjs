@@ -175,11 +175,11 @@ function formatScrollFrameSamplesTable(report) {
   const lines = [
     '### 100x scroll frame samples',
     '',
-    '| Variant | Pair | RAF intervals | RAF drops | RAF drop % |',
-    '| --- | ---: | ---: | ---: | ---: |'
+    '| Variant | Pair | RAF intervals | RAF drops | Presented frames | Presented drops | RAF drop % |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: |'
   ];
   for(const {variant, sample, index} of rows) {
-    lines.push(`| ${variant} | ${index + 1} | ${show(sample.frameIntervals)} | ${show(sample.rafDropped)} | ${show(sample.droppedFramePercent, 2)}% |`);
+    lines.push(`| ${variant} | ${index + 1} | ${show(sample.frameIntervals)} | ${show(sample.rafDropped)} | ${show(sample.presentedFrames)} | ${show(sample.presentedDropped)} | ${show(sample.droppedFramePercent, 2)}% |`);
   }
   return lines.join('\n');
 }
