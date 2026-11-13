@@ -667,6 +667,21 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(waitForHistorySettled, /call\.method === 'messages\.getHistory' && call\.outcome === 'pending'/);
 });
 
+test('100x chat-open opens the fixture peer from another active chat before starting the gate', () => {
+  const prepareChatOpenStartState = performanceScale.match(/async function prepareChatOpenStartState\([\s\S]*?(?=\nasync function openPartnerChat)/)?.[0];
+  const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
+  const diagnosticChatOpen = performanceScale.match(/const row = page\.locator\(`#chatlist-container \.chatlist-chat\[data-peer-id=\"\$\{fixture\.partner\}\"\]`\)\.first\(\);[\s\S]*?traceSamples\.chatOpen\.push\(chatOpenSample\);/)?.[0];
+
+  assert.ok(prepareChatOpenStartState, 'the 100x gate must begin with the target peer inactive');
+  assert.match(prepareChatOpenStartState, /data-peer-id=\"\$\{fixture\.partner\}\"/);
+  assert.match(prepareChatOpenStartState, /:not\(\[data-peer-id=/);
+  assert.match(prepareChatOpenStartState, /waitForHistorySettled\(page\)/);
+  assert.ok(openPartnerChat, 'the measured chat-open helper must be present');
+  assert.ok(openPartnerChat.indexOf('prepareChatOpenStartState(page, fixture)') < openPartnerChat.indexOf('startMeasurementAtClick(row)'));
+  assert.ok(diagnosticChatOpen, 'the diagnostic chat-open sample must be present');
+  assert.ok(diagnosticChatOpen.indexOf('prepareChatOpenStartState(page, fixture)') < diagnosticChatOpen.indexOf('startMeasurementAtClick(row)'));
+});
+
 test('summary fails closed when no client getHistory span can be correlated', () => {
   const result = runSummaryWithArtifacts({chatOpenClientHistoryCallCount: 0});
 

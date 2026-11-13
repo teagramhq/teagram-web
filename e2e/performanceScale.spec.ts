@@ -1009,6 +1009,16 @@ async function waitForHistorySettled(page: Page) {
   }, {timeout: 60_000, intervals: [100]}).toBe(true);
 }
 
+async function prepareChatOpenStartState(page: Page, fixture: Fixture) {
+  const otherRow = page.locator(`#chatlist-container .chatlist-chat[data-peer-id]:not([data-peer-id="${fixture.partner}"])`).first();
+  await expect(otherRow, '100x chat-open requires another chat to leave before opening the fixture peer').toBeVisible({timeout: 60_000});
+  const otherPeerId = await otherRow.getAttribute('data-peer-id');
+  if(!otherPeerId || otherPeerId === String(fixture.partner)) throw new Error('100x chat-open could not select a different starting peer');
+  await otherRow.click();
+  await expect.poll(() => page.evaluate(() => String((window as any).appImManager.chat.peerId)), {timeout: 60_000}).toBe(otherPeerId);
+  await waitForHistorySettled(page);
+}
+
 async function finalizeServerRpcTrace(page: Page, sample: Metric) {
   const offset = serverRpcTraceOffsetsBySample.get(sample);
   if(offset === undefined) return sample;
@@ -1048,6 +1058,7 @@ async function reloadChatList(page: Page, requests: {value: number}, collectWalk
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false, collectWalkDiagnostics = false, collectServerRpcTrace = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
+  if(collectServerRpcTrace) await prepareChatOpenStartState(page, fixture);
   resetRequestBreakdown(page);
   await begin(page, requests, true, traceRpc);
   await startMeasurementAtClick(row);
@@ -2132,6 +2143,7 @@ async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Varia
 
         const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
         await expect(row).toBeVisible({timeout: 60_000});
+        await prepareChatOpenStartState(page, fixture);
         await beginScenario(page, requests, true);
         await installPeerChangeTracing(page);
         const chatProfile = await startCpuProfile(page);
