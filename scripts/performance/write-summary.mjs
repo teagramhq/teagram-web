@@ -78,6 +78,11 @@ function formatChatOpenServerTimingTable(report, failures) {
       }
       const clientHistoryCalls = sample.serverRpcClientCalls;
       const clientHistoryCallCount = Array.isArray(clientHistoryCalls) ? clientHistoryCalls.length : undefined;
+      const callIds = Array.isArray(clientHistoryCalls) ? clientHistoryCalls.map((call) => call?.callId) : [];
+      if(!Array.isArray(clientHistoryCalls) || callIds.some((callId) => !Number.isSafeInteger(callId)) || new Set(callIds).size !== callIds.length) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has missing or duplicate client RPC identities`);
+        continue;
+      }
       const expectation = Number.isSafeInteger(clientHistoryCallCount) ? serverRpcTraceExpectation(clientHistoryCallCount) : undefined;
       if(!expectation || serverRecords.length < expectation.minimumCount) {
         failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has ${serverRecords.length} server records for ${clientHistoryCallCount ?? 'unknown'} client messages.getHistory spans`);
