@@ -1,7 +1,7 @@
 import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
 import {readFileSync} from 'node:fs';
 import {writePerformanceReport} from './performanceReport';
-import {getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcClientCallsByIdentity, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from '../scripts/performance/server-rpc-trace.mjs';
+import {getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcClientCallsByIdentity, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls} from '../scripts/performance/server-rpc-trace.mjs';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
@@ -195,25 +195,16 @@ function serverRpcTraceOffset() {
   return getServerRpcTracePosition(serverRpcTraceFile);
 }
 
-async function attachServerRpcTrace(sample: Metric, offset: number | undefined, expectedCount?: number) {
+async function attachServerRpcTrace(sample: Metric, offset: number | undefined) {
   if(offset === undefined) return sample;
   const clientCalls = sample.serverRpcClientCalls;
   if(!Array.isArray(clientCalls)) throw new Error('100x chat-open sample has no client messages.getHistory span list');
   // A chat open served from cache issues no getHistory inside its gate window: nothing to attribute, and any
   // process-wide handler in the trace belongs to other work.
   if(!clientCalls.length) return {...sample, serverRpcRecords: []};
-  const expectation = serverRpcTraceExpectation(expectedCount);
-  let records: ServerRpcTraceRecord[];
-  try {
-    records = await waitForServerRpcTraceRecords(
-      serverRpcTraceFile!,
-      offset,
-      'messages.getHistory',
-      expectation.minimumCount,
-      {quietMs: 150, recordFilter: (record) => serverRpcRecordMatchesClientCalls(record, clientCalls)}
-    );
-  } catch(error) {
-    const traceRecords = readServerRpcTraceRecordsSince(serverRpcTraceFile!, offset).filter((record) => record.method === 'messages.getHistory');
+  const traceRecords = readServerRpcTraceRecordsSince(serverRpcTraceFile!, offset).filter((record) => record.method === 'messages.getHistory');
+  const records = traceRecords.filter((record) => serverRpcRecordMatchesClientCalls(record, clientCalls));
+  if(!serverRpcRecordsCoverClientCalls(records, clientCalls)) {
     const correlation = {
       clientCalls: clientCalls.map((call, callIndex) => ({
         callIndex,
@@ -234,10 +225,7 @@ async function attachServerRpcTrace(sample: Metric, offset: number | undefined, 
         ))
       }))
     };
-    throw new Error(`${String(error)}; RPC sample correlation ${JSON.stringify(correlation)}`);
-  }
-  if(!serverRpcRecordsCoverClientCalls(records, clientCalls)) {
-    throw new Error('100x chat-open server records do not cover every client messages.getHistory span');
+    throw new Error(`100x chat-open server records do not cover every client messages.getHistory span; RPC sample correlation ${JSON.stringify(correlation)}`);
   }
   const serverRpcRecords = records;
   if(!serverRpcRecords.length) throw new Error('100x chat-open measurement has no server messages.getHistory duration records');
@@ -1017,17 +1005,29 @@ async function finalizeServerRpcTrace(page: Page, sample: Metric) {
   if(callIds.some((callId, index) => !Number.isSafeInteger(callId) || !Number.isFinite(boundaryCalls[index].startedAtEpochMs)) || new Set(callIds).size !== callIds.length) {
     throw new Error(`100x chat-open sample has invalid or duplicate client RPC identities: ${JSON.stringify(callIds)}`);
   }
-  let clientCalls: ServerRpcClientCall[] = [];
-  await expect.poll(async() => {
-    const currentCalls = await page.evaluate(async(callIds: number[]) => {
-      const trace = await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace();
-      return Object.fromEntries(callIds.map((callId) => [callId, trace.calls?.[callId] ?? null]));
-    }, callIds);
-    clientCalls = serverRpcClientCallsByIdentity(currentCalls, boundaryCalls);
-    return clientCalls.length === callIds.length && clientCalls.every((call) => call.outcome !== 'pending' && Number.isFinite(call.durationMs));
-  }, {timeout: 60_000, intervals: [20]}).toBe(true);
+  if(!callIds.length) {
+    sample.serverRpcClientCalls = [];
+    Object.assign(sample, await attachServerRpcTrace(sample, offset));
+    return sample;
+  }
+  const settledCallsHandle = await page.waitForFunction(async({callIds, boundaryCalls}) => {
+    const trace = await (window as any).rootScope.managers.apiManager.getPerformanceRpcTrace();
+    const currentCalls = Object.fromEntries(callIds.map((callId) => [callId, trace.calls?.[callId] ?? null]));
+    for(const boundaryCall of boundaryCalls) {
+      const call = currentCalls[boundaryCall.callId];
+      if(!call || call.startedAtEpochMs !== boundaryCall.startedAtEpochMs) {
+        throw new Error(`RPC trace identity changed for callId ${boundaryCall.callId}: expected startedAtEpochMs ${boundaryCall.startedAtEpochMs}, found ${call?.startedAtEpochMs ?? 'missing'}`);
+      }
+    }
+    return boundaryCalls.every(({callId}) => {
+      const call = currentCalls[callId];
+      return ['success', 'error'].includes(call?.outcome) && Number.isFinite(call?.durationMs);
+    }) ? currentCalls : false;
+  }, {callIds, boundaryCalls}, {timeout: 60_000, polling: 20});
+  const currentCalls = await settledCallsHandle.jsonValue() as Record<number, Omit<ServerRpcClientCall, 'callId'> | null>;
+  const clientCalls = serverRpcClientCallsByIdentity(currentCalls, boundaryCalls);
   sample.serverRpcClientCalls = clientCalls;
-  Object.assign(sample, await attachServerRpcTrace(sample, offset, clientCalls.length));
+  Object.assign(sample, await attachServerRpcTrace(sample, offset));
   return sample;
 }
 
