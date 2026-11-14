@@ -4355,6 +4355,53 @@ describe('real client scenario contract', () => {
     expect(() => parseRealClientArgs([...args, '--source-sha', 'a'.repeat(40)])).toThrow('unknown option');
   });
 
+  it('keeps fresh guest signup as an explicit standalone browser mode', () => {
+    const args = [
+      '--readiness-file', './fixture.jsonl',
+      '--harness-revision', READINESS_PINS.harnessRevision,
+      '--server-revision', READINESS_PINS.serverRevision,
+      '--web-revision', READINESS_PINS.webRevision,
+      '--run-id', READINESS_PINS.runId,
+      '--guest-signup'
+    ];
+
+    expect(parseRealClientArgs(args)).toEqual({
+      readinessFile: './fixture.jsonl',
+      harnessRevision: READINESS_PINS.harnessRevision,
+      serverRevision: READINESS_PINS.serverRevision,
+      webRevision: READINESS_PINS.webRevision,
+      runId: READINESS_PINS.runId,
+      guestSignupOnly: true
+    });
+    expect(() => parseRealClientArgs([...args, '--scenarios', 'sign-in'])).toThrow('cannot be combined');
+    expect(() => parseRealClientArgs([...args, '--guest-signup'])).toThrow('option was provided more than once');
+  });
+
+  it('keeps gate-off guest signup explicit and limited to the guest browser mode', () => {
+    const args = [
+      '--readiness-file', './fixture.jsonl',
+      '--harness-revision', READINESS_PINS.harnessRevision,
+      '--server-revision', READINESS_PINS.serverRevision,
+      '--web-revision', READINESS_PINS.webRevision,
+      '--run-id', READINESS_PINS.runId,
+      '--guest-signup',
+      '--guest-signup-gate-off'
+    ];
+
+    expect(parseRealClientArgs(args)).toMatchObject({
+      guestSignupOnly: true,
+      guestSignupGateOff: true
+    });
+    expect(() => parseRealClientArgs([
+      '--readiness-file', './fixture.jsonl',
+      '--harness-revision', READINESS_PINS.harnessRevision,
+      '--server-revision', READINESS_PINS.serverRevision,
+      '--web-revision', READINESS_PINS.webRevision,
+      '--run-id', READINESS_PINS.runId,
+      '--guest-signup-gate-off'
+    ])).toThrow('requires --guest-signup');
+  });
+
   it('accepts the previously supported scenario selections without poll', () => {
     const args = [
       '--readiness-file', './fixture.jsonl',
@@ -4387,6 +4434,50 @@ describe('real client scenario contract', () => {
     .toThrow('one fixture readiness event is required');
     expect(() => parseFixtureReadiness(JSON.stringify({...serverReady, security: {...serverReady.security, registrationClosed: false}}), READINESS_PINS, {requireArtifact: false}))
     .toThrow('server-ready security evidence is incomplete');
+  });
+
+  it('requires open registration and the enabled sign-in gate for fresh guest signup readiness', () => {
+    const serverReady = buildServerReady();
+    serverReady.security = {
+      ...serverReady.security,
+      registrationClosed: false,
+      guestSignUpEnabled: true,
+      turnstileSignInEnabled: true,
+      finalAuthKeys: 0
+    };
+    const text = JSON.stringify(serverReady);
+
+    expect(parseFixtureReadiness(text, READINESS_PINS, {requireArtifact: false, guestSignupOnly: true}))
+    .toEqual({serverReady, artifactReady: undefined});
+    expect(() => parseFixtureReadiness(text, READINESS_PINS, {requireArtifact: false}))
+    .toThrow('server-ready security evidence is incomplete');
+    expect(() => parseFixtureReadiness(JSON.stringify({
+      ...serverReady,
+      security: {...serverReady.security, finalAuthKeys: 2}
+    }), READINESS_PINS, {requireArtifact: false, guestSignupOnly: true}))
+    .toThrow('server-ready security evidence is incomplete');
+  });
+
+  it('requires the disabled sign-in gate in explicit gate-off guest signup readiness', () => {
+    const serverReady = buildServerReady();
+    serverReady.security = {
+      ...serverReady.security,
+      registrationClosed: false,
+      guestSignUpEnabled: true,
+      turnstileSignInEnabled: false,
+      finalAuthKeys: 0
+    };
+    const text = JSON.stringify(serverReady);
+
+    expect(parseFixtureReadiness(text, READINESS_PINS, {
+      requireArtifact: false,
+      guestSignupOnly: true,
+      guestSignupGateOff: true
+    })).toEqual({serverReady, artifactReady: undefined});
+    expect(() => parseFixtureReadiness(text, READINESS_PINS, {
+      requireArtifact: false,
+      guestSignupOnly: true
+    })).toThrow('server-ready security evidence is incomplete');
   });
 
   it('requires the observer-controls-only flag to be explicit and complete', () => {
@@ -5453,8 +5544,10 @@ describe('real client username field readiness', () => {
   function runOuterRunner(browserOutput: string, {
     browserExitCode = 0,
     failRunnerCleanup = false,
-    scenarioValidation = false
-  }: {browserExitCode?: number, failRunnerCleanup?: boolean, scenarioValidation?: boolean} = {}) {
+    scenarioValidation = false,
+    guestSignupOnly = false,
+    guestSignupGateOff = false
+  }: {browserExitCode?: number, failRunnerCleanup?: boolean, scenarioValidation?: boolean, guestSignupOnly?: boolean, guestSignupGateOff?: boolean} = {}) {
     const fixtureDirectory = mkdtempSync(join(tmpdir(), 'real-client-runner-contract-'));
     const secretDirectory = mkdtempSync(join(tmpdir(), `teagram-fixture-${READINESS_PINS.runId}.`));
     const passwordFiles = [join(secretDirectory, 'a-password'), join(secretDirectory, 'b-password')];
@@ -5497,8 +5590,16 @@ describe('real client username field readiness', () => {
       Mounts: [] as {Type?: string}[]
     };
     const network = {Labels: {[runLabel]: READINESS_PINS.runId}, Internal: true, EnableIPv6: false};
+    const serverReadyBase = buildServerReady();
     const serverReady = {
-      ...buildServerReady(),
+      ...serverReadyBase,
+      ...(guestSignupOnly ? {security: {
+        ...serverReadyBase.security,
+        registrationClosed: false,
+        guestSignUpEnabled: true,
+        turnstileSignInEnabled: !guestSignupGateOff,
+        finalAuthKeys: 0
+      }} : {}),
       credentials: passwordFiles.map((passwordFile, index) => ({
         username: `u${READINESS_PINS.runId.slice(0, 30)}${index === 0 ? 'a' : 'b'}`,
         passwordFile
@@ -5554,7 +5655,9 @@ describe('real client username field readiness', () => {
         '--run-id', READINESS_PINS.runId,
         ...(scenarioValidation
           ? ['--scenarios', 'sign-in,first-message,message,custom-emoji,group']
-          : ['--auth-progress-one-submission'])
+          : guestSignupOnly
+            ? ['--guest-signup', ...(guestSignupGateOff ? ['--guest-signup-gate-off'] : [])]
+            : ['--auth-progress-one-submission'])
       ], {
         encoding: 'utf8',
         env: {
@@ -5737,6 +5840,78 @@ describe('real client username field readiness', () => {
     expect(cleanupReport).toMatchObject({...result.report, status: 'failed', stage: 'cleanup'});
     expect(cleanupReport.network).toEqual(result.report.network);
   }, 45_000);
+
+  it('emits a guest signup report after the outer browser run succeeds', () => {
+    const guestSignup = {
+      availabilityVisible: true,
+      appConfigLoaded: true,
+      turnstileActions: ['signup'],
+      authorized: true
+    };
+    const browserReport = {
+      status: 'passed',
+      mode: 'guest_signup',
+      runId: READINESS_PINS.runId,
+      harnessRevision: READINESS_PINS.harnessRevision,
+      serverRevision: READINESS_PINS.serverRevision,
+      webRevision: READINESS_PINS.webRevision,
+      guestSignup,
+      contextCount: 1,
+      controlContextCount: Object.keys(observation.CONTROL_EXPECTATIONS).length,
+      screenshotsCaptured: 2,
+      network: {unexpectedAttempts: 0, observerErrors: 0}
+    };
+
+    const outer = runOuterRunner(`${JSON.stringify(browserReport)}\n`, {guestSignupOnly: true});
+
+    expect(outer.status).toBe(0);
+    expect(outer.stderr).toBe('');
+    expect(outer.cleanup).toHaveLength(2);
+    expect(outer.stdout.trim().split('\n')).toHaveLength(1);
+    expect(JSON.parse(outer.stdout.trim())).toMatchObject({
+      status: 'passed',
+      mode: 'guest_signup',
+      guestSignup,
+      contextCount: 1,
+      screenshotsCaptured: 2
+    });
+  });
+
+  it('emits a gate-off guest signup report only when the readiness proves the gate is disabled', () => {
+    const guestSignup = {
+      availabilityVisible: true,
+      appConfigLoaded: true,
+      turnstileActions: ['signup'],
+      authorized: true
+    };
+    const browserReport = {
+      status: 'passed',
+      mode: 'guest_signup',
+      runId: READINESS_PINS.runId,
+      harnessRevision: READINESS_PINS.harnessRevision,
+      serverRevision: READINESS_PINS.serverRevision,
+      webRevision: READINESS_PINS.webRevision,
+      guestSignup,
+      contextCount: 1,
+      controlContextCount: Object.keys(observation.CONTROL_EXPECTATIONS).length,
+      screenshotsCaptured: 2,
+      network: {unexpectedAttempts: 0, observerErrors: 0}
+    };
+
+    const outer = runOuterRunner(`${JSON.stringify(browserReport)}\n`, {
+      guestSignupOnly: true,
+      guestSignupGateOff: true
+    });
+
+    expect(outer.status).toBe(0);
+    expect(outer.stderr).toBe('');
+    expect(JSON.parse(outer.stdout.trim())).toMatchObject({
+      status: 'passed',
+      mode: 'guest_signup',
+      turnstileSignInEnabled: false,
+      guestSignup
+    });
+  });
 
   it('reports a timeout after cleaning up and exits nonzero', async() => {
     const result = await runAuthProgressRunner({card: 'timeout', realEmitter: true});
