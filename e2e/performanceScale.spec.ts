@@ -1,7 +1,7 @@
 import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
 import {readFileSync} from 'node:fs';
 import {writePerformanceReport} from './performanceReport';
-import {getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcClientCallsAreSettled, serverRpcClientCallsByIdentity, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls} from '../scripts/performance/server-rpc-trace.mjs';
+import {getServerRpcTracePosition, matchServerRpcRecordToClientCall, readServerRpcTraceRecordsSince, serverRpcClientCallsAreSettled, serverRpcClientCallsByIdentity, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls} from '../scripts/performance/server-rpc-trace.mjs';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
@@ -105,7 +105,15 @@ type Metric = {
     debounceSettledAtMs: number,
     matchingSearchRpcReturnedAtMs: number,
     matchingResultVisibleAtMs: number
-  }
+  },
+  globalSearchServerRpcRecord?: ServerRpcTraceRecord,
+  globalSearchServerRpcClientCall?: {
+    method: string,
+    startedAtEpochMs: number,
+    durationMs: number,
+    outcome: 'success' | 'error'
+  },
+  globalSearchTimeOriginMs?: number
 };
 
 const pendingPresentedFrameCountsKey: unique symbol = Symbol('pendingPresentedFrameCounts');
@@ -165,7 +173,11 @@ const username = process.env.PERF_USERNAME;
 const password = process.env.PERF_PASSWORD;
 const reportPath = process.env.PERF_REPORT_PATH;
 const recorderReplayPath = process.env.PERF_RECORDER_REPLAY_PATH;
-const serverRpcTraceFile = process.env.PERF_SERVER_RPC_TRACE_FILE_100X;
+const serverRpcTraceFilesByScale: Record<Scale, string | undefined> = {
+  '1x': process.env.PERF_SERVER_RPC_TRACE_FILE_1X,
+  '100x': process.env.PERF_SERVER_RPC_TRACE_FILE_100X
+};
+const serverRpcTraceFile = serverRpcTraceFilesByScale['100x'];
 let recorderReplay: unknown;
 try {
   if(recorderReplayPath) recorderReplay = JSON.parse(readFileSync(recorderReplayPath, 'utf8'));
@@ -195,12 +207,13 @@ const scenarioPreservedPerformancePhases = getScenarioPreservedPerformancePhases
 let measurementsStarted = false;
 let measurementsComplete = false;
 
-function serverRpcTraceOffset() {
-  if(!serverRpcTraceFile) {
-    if(report.requireBase) throw new Error('100x server RPC trace file path is missing');
+function serverRpcTraceOffset(scale: Scale = '100x') {
+  const traceFile = serverRpcTraceFilesByScale[scale];
+  if(!traceFile) {
+    if(report.requireBase) throw new Error(`${scale} server RPC trace file path is missing`);
     return undefined;
   }
-  return getServerRpcTracePosition(serverRpcTraceFile);
+  return getServerRpcTracePosition(traceFile);
 }
 
 async function attachServerRpcTrace(sample: Metric, offset: number | undefined) {
@@ -1432,6 +1445,9 @@ async function globalSearch(page: Page, requests: {value: number}, scale: Scale,
   await expect(input).toBeVisible();
   const query = `needle ${scale === '1x' ? '5000' : '500000'}`;
   await beginScenario(page, requests, traceEnabled);
+  const serverTraceOffset = serverRpcTraceOffset(scale);
+  const globalSearchTraceFile = serverRpcTraceFilesByScale[scale];
+  if(serverTraceOffset === undefined || !globalSearchTraceFile) throw new Error(`${scale} global-search server RPC trace file path is missing`);
   await page.evaluate((query) => {
     const perf = (window as any).__teagramPerf;
     const input = document.querySelector<HTMLInputElement>('#column-left .item-main .sidebar-header .input-search-input');
@@ -1480,6 +1496,9 @@ async function globalSearch(page: Page, requests: {value: number}, scale: Scale,
   .at(-1);
   expect(matchingRpc, 'the current global-search query did not complete a matching search RPC').toBeDefined();
   if(!matchingRpc) throw new Error('the current global-search query did not complete a matching search RPC');
+  const traceRecords = readServerRpcTraceRecordsSince(globalSearchTraceFile, serverTraceOffset)
+    .filter((record) => record.method === 'messages.searchGlobal');
+  const globalSearchServerRpcRecord = matchServerRpcRecordToClientCall(traceRecords, matchingRpc, 'messages.searchGlobal');
   const matchingSearchRpcReturnedAtMs = matchingRpc.startedAtEpochMs - trace.timeOrigin + matchingRpc.durationMs;
   const globalSearchStages = {...stages, matchingSearchRpcReturnedAtMs};
   const stageTimestamps = [
@@ -1498,7 +1517,7 @@ async function globalSearch(page: Page, requests: {value: number}, scale: Scale,
   const boundary = {...snapshot, startedAtMs: globalSearchStages.queryEnteredAtMs, ms};
   onMeasurementBoundary?.(boundary);
   const sample = await capture(page, requests, boundary, false, traceEnabled, traceEnabled || collectWalkDiagnostics, false, collectWalkDiagnostics);
-  return {...sample, ms, globalSearchStages};
+  return {...sample, ms, globalSearchStages, globalSearchServerRpcRecord, globalSearchServerRpcClientCall: matchingRpc, globalSearchTimeOriginMs: trace.timeOrigin};
 }
 
 async function describeSendState(page: Page, fixture: Fixture) {

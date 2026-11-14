@@ -1,7 +1,7 @@
 import {mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {evaluatePairedDifferences, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PAIRED_CONFIDENCE_LEVEL, PERFORMANCE_REPEATS, TIMING_MINIMUM_EFFECTS} from './policy.mjs';
-import {clientRpcIntervalUnionMs, SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS, serverRpcIntervalUnionMs, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation} from './server-rpc-trace.mjs';
+import {clientRpcIntervalUnionMs, SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS, serverRpcIntervalUnionMs, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation} from './server-rpc-trace.mjs';
 import {hasValidGlobalSearchStages} from './global-search-measurement.mjs';
 
 const reportPath = resolve(process.env.PERF_REPORT_PATH || '.performance-report.json');
@@ -157,6 +157,26 @@ function formatChatOpenServerTimingTable(report, failures) {
   ].join('\n');
 }
 
+function globalSearchServerTiming(sample) {
+  const record = sample?.globalSearchServerRpcRecord;
+  const clientCall = sample?.globalSearchServerRpcClientCall;
+  const timeOriginMs = sample?.globalSearchTimeOriginMs;
+  const stages = sample?.globalSearchStages;
+  if(record?.method !== 'messages.searchGlobal' || !Number.isSafeInteger(record.duration_us) || record.duration_us < 0 ||
+    record.result !== 'success' || !Number.isSafeInteger(record.end_unix_ms) || record.end_unix_ms <= 0 ||
+    clientCall?.method !== 'messages.searchGlobal' || !Number.isFinite(clientCall.startedAtEpochMs) ||
+    !Number.isFinite(clientCall.durationMs) || clientCall.durationMs < 0 || clientCall.outcome !== 'success' ||
+    !Number.isFinite(timeOriginMs) || !Number.isFinite(stages?.debounceSettledAtMs) || !Number.isFinite(stages?.matchingSearchRpcReturnedAtMs) ||
+    !serverRpcRecordMatchesClientCall(record, clientCall, 'messages.searchGlobal')) return undefined;
+
+  const clientCallReturnedAtMs = clientCall.startedAtEpochMs - timeOriginMs + clientCall.durationMs;
+  if(Math.abs(clientCallReturnedAtMs - stages.matchingSearchRpcReturnedAtMs) > 0.01) return undefined;
+  const rpcWaitMs = stages.matchingSearchRpcReturnedAtMs - stages.debounceSettledAtMs;
+  const serverHandlingMs = record.duration_us / 1000;
+  if(serverHandlingMs - rpcWaitMs > SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS) return undefined;
+  return {rpcWaitMs, serverHandlingMs, clientTransportMs: Math.max(0, rpcWaitMs - serverHandlingMs)};
+}
+
 function formatGlobalSearchSamplesTable(report) {
   const rows = [];
   for(const scale of ['1x', '100x']) {
@@ -172,12 +192,15 @@ function formatGlobalSearchSamplesTable(report) {
   const lines = [
     '### Global search query stages per sample',
     '',
-    '| Scale | Variant | Repeat | Query entered (page ms) | Debounce settled (page ms) | Matching search RPC returned (page ms) | Matching result visible (page ms) | Time (ms) |',
-    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |'
+    'Server duration is correlated to the matching client `messages.searchGlobal` span; `RPC wait minus handler` is the remaining client/transport time between debounce and RPC return.',
+    '',
+    '| Scale | Variant | Repeat | Query entered (page ms) | Debounce settled (page ms) | Matching search RPC returned (page ms) | Matching result visible (page ms) | Time (ms) | RPC wait (ms) | messages.searchGlobal handler (ms) | RPC wait minus handler (ms) |',
+    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'
   ];
   for(const {scale, variant, index, sample} of rows) {
     const stages = sample.globalSearchStages || {};
-    lines.push(`| ${scale} | ${variant} | ${index + 1} | ${show(stages.queryEnteredAtMs)} | ${show(stages.debounceSettledAtMs)} | ${show(stages.matchingSearchRpcReturnedAtMs)} | ${show(stages.matchingResultVisibleAtMs)} | ${show(sample.ms)} |`);
+    const serverTiming = globalSearchServerTiming(sample);
+    lines.push(`| ${scale} | ${variant} | ${index + 1} | ${show(stages.queryEnteredAtMs)} | ${show(stages.debounceSettledAtMs)} | ${show(stages.matchingSearchRpcReturnedAtMs)} | ${show(stages.matchingResultVisibleAtMs)} | ${show(sample.ms)} | ${show(serverTiming?.rpcWaitMs)} | ${show(serverTiming?.serverHandlingMs)} | ${show(serverTiming?.clientTransportMs)} |`);
   }
   return lines.join('\n');
 }
@@ -213,6 +236,10 @@ function validateGlobalSearchSamples(report, failures) {
         const stages = sample?.globalSearchStages;
         if(!hasValidGlobalSearchStages(stages, sample.ms)) {
           failures.push(`global search ${scale} ${variant} sample ${index + 1} has missing or invalid stage timestamps`);
+          return;
+        }
+        if(!globalSearchServerTiming(sample)) {
+          failures.push(`global search ${scale} ${variant} sample ${index + 1} has missing or invalid messages.searchGlobal server duration or matching client span`);
         }
       });
     }

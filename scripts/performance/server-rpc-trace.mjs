@@ -51,11 +51,12 @@ export function serverRpcClientCallsByIdentity(calls, identities) {
   });
 }
 
-export function serverRpcRecordMatchesClientCall(record, call) {
-  if(record?.method !== 'messages.getHistory' ||
+export function serverRpcRecordMatchesClientCall(record, call, expectedMethod = 'messages.getHistory') {
+  if(typeof expectedMethod !== 'string' || !expectedMethod) throw new TypeError('expected RPC method must be a non-empty string');
+  if(record?.method !== expectedMethod ||
     !Number.isSafeInteger(record.duration_us) || record.duration_us < 0 ||
     !Number.isSafeInteger(record.end_unix_ms) || record.end_unix_ms <= 0 ||
-    call?.method !== 'messages.getHistory' ||
+    call?.method !== expectedMethod ||
     !Number.isFinite(call.startedAtEpochMs) ||
     !Number.isFinite(call.durationMs) || call.durationMs < 0 ||
     !['success', 'error'].includes(call.outcome)) return false;
@@ -67,16 +68,24 @@ export function serverRpcRecordMatchesClientCall(record, call) {
     record.end_unix_ms <= clientEndEpochMs + SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS;
 }
 
-export function serverRpcRecordMatchesClientCalls(record, calls) {
-  return Array.isArray(calls) && calls.some((call) => serverRpcRecordMatchesClientCall(record, call));
+export function matchServerRpcRecordToClientCall(records, call, expectedMethod) {
+  if(!Array.isArray(records)) throw new TypeError('RPC trace records must be an array');
+  if(typeof expectedMethod !== 'string' || !expectedMethod) throw new TypeError('expected RPC method must be a non-empty string');
+  const matches = records.filter((record) => serverRpcRecordMatchesClientCall(record, call, expectedMethod));
+  if(matches.length !== 1) throw new Error(`expected one ${expectedMethod} server record, found ${matches.length}`);
+  return matches[0];
 }
 
-export function serverRpcRecordsCoverClientCalls(records, calls) {
+export function serverRpcRecordMatchesClientCalls(record, calls, expectedMethod = 'messages.getHistory') {
+  return Array.isArray(calls) && calls.some((call) => serverRpcRecordMatchesClientCall(record, call, expectedMethod));
+}
+
+export function serverRpcRecordsCoverClientCalls(records, calls, expectedMethod = 'messages.getHistory') {
   if(!Array.isArray(records) || !Array.isArray(calls) || !calls.length) return false;
   const callByRecordIndex = new Map();
   const assignRecord = (callIndex, visitedRecordIndexes) => {
     for(let recordIndex = 0; recordIndex < records.length; ++recordIndex) {
-      if(visitedRecordIndexes.has(recordIndex) || !serverRpcRecordMatchesClientCall(records[recordIndex], calls[callIndex])) continue;
+      if(visitedRecordIndexes.has(recordIndex) || !serverRpcRecordMatchesClientCall(records[recordIndex], calls[callIndex], expectedMethod)) continue;
       visitedRecordIndexes.add(recordIndex);
       const previousCallIndex = callByRecordIndex.get(recordIndex);
       if(previousCallIndex === undefined || assignRecord(previousCallIndex, visitedRecordIndexes)) {
