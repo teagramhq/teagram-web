@@ -1246,6 +1246,20 @@ test('summary fails closed when a global-search server record does not match its
   assert.match(result.stderr, /global search 100x base sample 1 has missing or invalid messages\.searchGlobal server duration/);
 });
 
+test('summary fails closed when a global-search handler exceeds RPC wait beyond clock tolerance', () => {
+  const result = runSummaryWithArtifacts({
+    mutateReport: (report) => {
+      const sample = report.variants.base['1x'].globalSearch[0];
+      sample.globalSearchServerRpcRecord.duration_us = 86_000;
+      sample.globalSearchServerRpcClientCall.startedAtEpochMs = 1_762_800_000_388;
+      sample.globalSearchServerRpcClientCall.durationMs = 92;
+    }
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /global search 1x base sample 1 has missing or invalid messages\.searchGlobal server duration/);
+});
+
 test('summary fails closed for a global-search sample with missing stage timestamps', () => {
   const result = runSummaryWithArtifacts({
     mutateReport: (report) => {
