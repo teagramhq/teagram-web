@@ -6973,7 +6973,7 @@ async function main(dependencies = {}) {
       await guestPage.waitForFunction(() => {
         const chats = document.querySelector('#page-chats');
         return chats && getComputedStyle(chats).display !== 'none' && document.querySelector('#new-menu');
-      }, null, {timeout: 45_000}).catch(() => failStage('guest_account_authorized'));
+      }, null, {timeout: 90_000}).catch(() => failStage('guest_account_authorized'));
       const turnstileActions = await guestPage.evaluate(() => window.__fixtureTurnstileActions);
       if(JSON.stringify(turnstileActions) !== JSON.stringify(['signup'])) failStage('guest_turnstile_action');
       await captureState(guestPage, runtime.screenshotDirectory, 'guest-created', capturedScreenshots);

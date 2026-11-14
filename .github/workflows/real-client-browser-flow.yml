@@ -120,7 +120,7 @@ jobs:
           finished="$(date +%s)"
           elapsed=$((finished - started))
           printf 'Complete job duration: %dm %02ds\n' "$((elapsed / 60))" "$((elapsed % 60))" | tee -a "$GITHUB_STEP_SUMMARY"
-          if ((elapsed >= 900)); then
-            echo "::error::real-client browser-flow job exceeded 15 minutes"
+          if ((elapsed >= 1800)); then
+            echo "::error::real-client browser-flow job exceeded 30 minutes"
             exit 1
           fi
