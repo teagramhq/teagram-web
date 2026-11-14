@@ -455,6 +455,84 @@ describe('private username sign-in', () => {
     ]);
   });
 
+  it('retries signup-bound open sign-in with signin before checking a saved password', async() => {
+    const user = {_: 'user', id: 42};
+    const signinCode = {...SENT_CODE, phone_code_hash: 'signin-code-hash'};
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__signin-site-key'})
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__signin-site-key'})
+    .mockResolvedValueOnce(signinCode)
+    .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'});
+    const checkPassword = vi.fn().mockResolvedValue(user);
+    const onAuthorization = vi.fn();
+    const requestTurnstile = vi.fn((_siteKey, action, submit) => submit(`${action}-token`));
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Guest',
+      password: 'saved-password',
+      updatePasswordSettings: vi.fn(),
+      checkPassword,
+      onAuthorization
+    }, requestTurnstile, 'signup-site-key')).resolves.toEqual({kind: 'authorized', user});
+
+    expect(requestTurnstile).toHaveBeenCalledTimes(2);
+    expect(requestTurnstile).toHaveBeenNthCalledWith(1, 'signup-site-key', 'signup', expect.any(Function));
+    expect(requestTurnstile).toHaveBeenNthCalledWith(2, 'signin-site-key', 'signin', expect.any(Function));
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual([
+      'invokeWithReCaptcha',
+      'auth.signIn',
+      'auth.sendCode',
+      'invokeWithReCaptcha',
+      'auth.signIn'
+    ]);
+    expect(invokeApi).toHaveBeenNthCalledWith(4, 'invokeWithReCaptcha', {
+      token: 'signin-token',
+      query: expect.objectContaining({_: 'auth.sendCode', phone_number: USERNAME})
+    });
+    expect(invokeApi).toHaveBeenNthCalledWith(5, 'auth.signIn', {
+      phone_number: USERNAME,
+      phone_code_hash: 'signin-code-hash',
+      phone_code: ''
+    }, {ignoreErrors: true});
+    expect(checkPassword).toHaveBeenCalledOnce();
+    expect(checkPassword).toHaveBeenCalledWith('saved-password');
+    expect(onAuthorization).toHaveBeenCalledWith(user, false);
+  });
+
+  it('maps a taken open-registration username after the signin-challenge retry', async() => {
+    const signinCode = {...SENT_CODE, phone_code_hash: 'signin-code-hash'};
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__signin-site-key'})
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__signin-site-key'})
+    .mockResolvedValueOnce(signinCode)
+    .mockRejectedValueOnce({type: 'USERNAME_OCCUPIED'});
+    const requestTurnstile = vi.fn((_siteKey, action, submit) => submit(`${action}-token`));
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings: vi.fn()
+    }, requestTurnstile, 'signup-site-key')).resolves.toEqual({kind: 'usernameTaken'});
+
+    expect(requestTurnstile).toHaveBeenCalledTimes(2);
+    expect(requestTurnstile).toHaveBeenNthCalledWith(1, 'signup-site-key', 'signup', expect.any(Function));
+    expect(requestTurnstile).toHaveBeenNthCalledWith(2, 'signin-site-key', 'signin', expect.any(Function));
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual([
+      'invokeWithReCaptcha',
+      'auth.signIn',
+      'auth.sendCode',
+      'invokeWithReCaptcha',
+      'auth.signIn'
+    ]);
+    expect(invokeApi).toHaveBeenNthCalledWith(5, 'auth.signIn', expect.objectContaining({
+      phone_code_hash: 'signin-code-hash'
+    }), {ignoreErrors: true});
+  });
+
   it('requests one extra signup challenge when a code-bound signUp is rejected', async() => {
     const user = {_: 'user', id: 42};
     const invokeApi = vi.fn()

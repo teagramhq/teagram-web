@@ -2,7 +2,7 @@ import type {AuthCheckPassword, AuthSendCode, AuthSignIn, AuthSignUp, HelpTermsO
 import App from '@config/app';
 import type {MTAppConfig} from '@/appConfig';
 import {isPrivateUsernameCredentialError} from '@/pages/privateUsernameLoginState';
-import {invokeSignUpWithTurnstile, invokeTurnstileProtected} from '@/pages/turnstileSignup';
+import {getTurnstileSiteKey, invokeSignUpWithTurnstile, invokeTurnstileProtected} from '@/pages/turnstileSignup';
 import type {RequestTurnstileChallenge, TurnstileAction} from '@/pages/turnstileSignup';
 import {isUsernameValid} from '@lib/richTextProcessor/validators';
 import {parsePrivateUsernameInviteSecret} from '@/pages/privateUsernameInvite';
@@ -151,17 +151,31 @@ export async function authenticatePrivateUsername(
 
   let sentCode: unknown;
   const sendCodeAction: TurnstileAction = registration && registration.mode !== 'closed' ? 'signup' : 'signin';
-  const signupChallengeBoundToCode = sendCodeAction === 'signup' && !!requestTurnstile && !!turnstileSiteKey;
+  let signupChallengeBoundToCode = sendCodeAction === 'signup' && !!requestTurnstile && !!turnstileSiteKey;
+  const sendCodeParams: AuthSendCode = {
+    phone_number: username,
+    api_id: App.id,
+    api_hash: App.hash,
+    settings: {
+      _: 'codeSettings',
+      pFlags: {}
+    }
+  };
+  const invokeSendCode = (action: TurnstileAction, siteKey?: string) => invokeTurnstileProtected(
+    invokeAuthApi,
+    'auth.sendCode',
+    sendCodeParams,
+    action,
+    requestTurnstile,
+    siteKey
+  );
+  const invokeSignIn = (phoneCodeHash: string) => invokeAuthApi('auth.signIn', {
+    phone_number: username,
+    phone_code_hash: phoneCodeHash,
+    phone_code: registration?.mode === 'invite' ? inviteSecret : ''
+  }, {ignoreErrors: true});
   try {
-    sentCode = await invokeTurnstileProtected(invokeAuthApi, 'auth.sendCode', {
-      phone_number: username,
-      api_id: App.id,
-      api_hash: App.hash,
-      settings: {
-        _: 'codeSettings',
-        pFlags: {}
-      }
-    }, sendCodeAction, requestTurnstile, turnstileSiteKey);
+    sentCode = await invokeSendCode(sendCodeAction, turnstileSiteKey);
   } catch(error) {
     if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
     if(authKeyRecoveryFailed) return getAuthErrorResult(error, !!registration, true);
@@ -177,36 +191,52 @@ export async function authenticatePrivateUsername(
     return {kind: 'error'};
   }
 
+  let phoneCodeHash = sentCode.phone_code_hash;
   let authorization: unknown;
   try {
-    const phoneCode = registration?.mode === 'invite' ? inviteSecret : '';
-    authorization = await invokeAuthApi('auth.signIn', {
-      phone_number: username,
-      phone_code_hash: sentCode.phone_code_hash,
-      phone_code: phoneCode
-    }, {ignoreErrors: true});
+    authorization = await invokeSignIn(phoneCodeHash);
   } catch(error) {
-    if(wasCancelled(error, isCancelled)) return {kind: 'cancelled'};
-    if(authKeyRecoveryFailed) return getAuthErrorResult(error, !!registration, true);
-    const errorKind = getPrivateUsernameRegistrationError(error);
-    if(errorKind === 'usernameTaken' || errorKind === 'invalidUsername') return {kind: errorKind};
-    if(getErrorType(error) === 'SESSION_PASSWORD_NEEDED') {
-      if(registration?.checkPassword) {
-        try {
-          const user = await registration.checkPassword(registration.password);
-          if(!user) return {kind: 'usernameTaken'};
-          if(isCancelled()) return {kind: 'cancelled'};
-          await registration.onAuthorization?.(user, false);
-          return {kind: 'authorized', user};
-        } catch(checkError) {
-          if(getErrorType(checkError) === 'GUEST_CONTEXT_CHANGED') return getAuthErrorResult(checkError, true);
-          if(wasCancelled(checkError, isCancelled)) return {kind: 'cancelled'};
-          return getAuthErrorResult(checkError, true);
-        }
+    let signInError = error;
+    let retrySucceeded = false;
+    if(!wasCancelled(error, isCancelled) && signupChallengeBoundToCode && getTurnstileSiteKey(error, 'signin')) {
+      try {
+        const signinSentCode: unknown = await invokeSendCode('signin');
+        if(isCancelled()) return {kind: 'cancelled'};
+        if(!isRecord(signinSentCode)) return {kind: 'error'};
+        if(signinSentCode._ === 'auth.authorizationSignUpRequired') return {kind: 'invalidCredentials'};
+        if(signinSentCode._ !== 'auth.sentCode' || typeof signinSentCode.phone_code_hash !== 'string' ||
+            !signinSentCode.phone_code_hash) return {kind: 'error'};
+        phoneCodeHash = signinSentCode.phone_code_hash;
+        signupChallengeBoundToCode = false;
+        authorization = await invokeSignIn(phoneCodeHash);
+        retrySucceeded = true;
+      } catch(retryError) {
+        signInError = retryError;
       }
-      return registration ? {kind: 'usernameTaken'} : {kind: 'password'};
     }
-    return isPrivateUsernameCredentialError(error) ? {kind: 'invalidCredentials'} : getAuthErrorResult(error, !!registration, authKeyRecoveryFailed);
+    if(!retrySucceeded) {
+      if(wasCancelled(signInError, isCancelled)) return {kind: 'cancelled'};
+      if(authKeyRecoveryFailed) return getAuthErrorResult(signInError, !!registration, true);
+      const errorKind = getPrivateUsernameRegistrationError(signInError);
+      if(errorKind === 'usernameTaken' || errorKind === 'invalidUsername') return {kind: errorKind};
+      if(getErrorType(signInError) === 'SESSION_PASSWORD_NEEDED') {
+        if(registration?.checkPassword) {
+          try {
+            const user = await registration.checkPassword(registration.password);
+            if(!user) return {kind: 'usernameTaken'};
+            if(isCancelled()) return {kind: 'cancelled'};
+            await registration.onAuthorization?.(user, false);
+            return {kind: 'authorized', user};
+          } catch(checkError) {
+            if(getErrorType(checkError) === 'GUEST_CONTEXT_CHANGED') return getAuthErrorResult(checkError, true);
+            if(wasCancelled(checkError, isCancelled)) return {kind: 'cancelled'};
+            return getAuthErrorResult(checkError, true);
+          }
+        }
+        return registration ? {kind: 'usernameTaken'} : {kind: 'password'};
+      }
+      return isPrivateUsernameCredentialError(signInError) ? {kind: 'invalidCredentials'} : getAuthErrorResult(signInError, !!registration, authKeyRecoveryFailed);
+    }
   }
 
   if(isCancelled()) return {kind: 'cancelled'};
@@ -233,7 +263,7 @@ export async function authenticatePrivateUsername(
     try {
       const params: AuthSignUp = {
         phone_number: username,
-        phone_code_hash: sentCode.phone_code_hash,
+        phone_code_hash: phoneCodeHash,
         first_name: registration.displayName.trim(),
         last_name: ''
       };
