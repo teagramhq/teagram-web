@@ -33,6 +33,10 @@ jobs:
           echo "PERF_FIXTURE_DIRECTORY=$RUNNER_TEMP/teagram-perf-fixture" >> "$GITHUB_ENV"
           echo "PERF_REPORT_PATH=$RUNNER_TEMP/teagram-web-performance.json" >> "$GITHUB_ENV"
           echo "PERF_RECORDER_REPLAY_PATH=$RUNNER_TEMP/teagram-recorder-replay.json" >> "$GITHUB_ENV"
+          echo "PERF_SUMMARY_PATH=$RUNNER_TEMP/teagram-web-performance-summary.md" >> "$GITHUB_ENV"
+          echo "PERF_SERVER_RPC_TRACE_FILE_100X=$RUNNER_TEMP/teagram-perf-server-rpc-100x.jsonl" >> "$GITHUB_ENV"
+          : > "$RUNNER_TEMP/teagram-perf-server-rpc-100x.jsonl"
+          chmod 0600 "$RUNNER_TEMP/teagram-perf-server-rpc-100x.jsonl"
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47 # v4.0.0
@@ -52,7 +56,7 @@ jobs:
           pnpm exec playwright install chromium
 
       - name: Test fixture and performance gate helpers
-        run: node --test scripts/performance/fixture-release.test.mjs scripts/performance/https-proxy-routing.test.mjs scripts/performance/policy.test.mjs scripts/performance/workflow.test.mjs
+        run: node --test scripts/performance/fixture-release.test.mjs scripts/performance/https-proxy-routing.test.mjs scripts/performance/policy.test.mjs scripts/performance/server-rpc-trace.test.mjs scripts/performance/workflow.test.mjs
 
       - name: Restore main timing history
         uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
@@ -61,6 +65,14 @@ jobs:
           key: teagram-web-performance-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             teagram-web-performance-${{ runner.os }}-
+
+      - name: Restore same-head A/A evidence
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .performance-aa-evidence
+          key: teagram-web-performance-aa-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            teagram-web-performance-aa-${{ github.sha }}-
 
       - name: Download pinned server fixture release
         id: fixture
@@ -174,11 +186,35 @@ jobs:
           echo "MTPROTO_PRIVATE_ENDPOINT=wss://teagramd.test/apiws" >> "$GITHUB_ENV"
           echo "MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE=$RUNNER_TEMP/teagram-perf-server-public.pem" >> "$GITHUB_ENV"
 
-      - name: Build server at the fixture commit and start it
+      - name: Build fixture server and client bundles in parallel
+        id: build
         shell: bash
+        env:
+          PERF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          go -C teagram-server build -o "$RUNNER_TEMP/teagramd" ./cmd/teagramd
+          client_build_env="$RUNNER_TEMP/teagram-perf-client-build.env"
+          client_build_log="$RUNNER_TEMP/teagram-perf-client-build.log"
+          bash scripts/performance/build-client-bundles.sh "$client_build_env" > "$client_build_log" 2>&1 &
+          client_build_pid=$!
+
+          server_build_status=0
+          if go -C teagram-server build -o "$RUNNER_TEMP/teagramd" ./cmd/teagramd; then
+            server_build_status=0
+          else
+            server_build_status=$?
+          fi
+          if wait "$client_build_pid"; then
+            client_build_status=0
+          else
+            client_build_status=$?
+          fi
+          cat "$client_build_log"
+          if [ "$server_build_status" -ne 0 ] || [ "$client_build_status" -ne 0 ]; then
+            exit 1
+          fi
+          cat "$client_build_env" >> "$GITHUB_ENV"
+
           : > "$PERF_SERVER_PID_FILE"
           for scale in 1x 100x; do
             if [ "$scale" = 1x ]; then
@@ -192,10 +228,15 @@ jobs:
               listen_port=2444
               websocket_port=2446
             fi
+            rpc_trace_env=()
+            if [ "$scale" = "100x" ]; then
+              rpc_trace_env+=("TG_RPC_TRACE_FILE=$PERF_SERVER_RPC_TRACE_FILE_100X")
+            fi
             nohup env TG_POSTGRES_DSN="$dsn" TG_BLOB_DIR="$blob_dir" \
               TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT=0 \
               TG_LISTEN_ADDR="127.0.0.1:$listen_port" TG_ADVERTISE_ADDR="teagramd.test:$listen_port" \
               TG_WEBSOCKET_LISTEN_ADDR="127.0.0.1:$websocket_port" \
+              "${rpc_trace_env[@]}" \
               "$RUNNER_TEMP/teagramd" > "$RUNNER_TEMP/teagram-perf-server-$scale.log" 2>&1 < /dev/null &
             echo "$!" >> "$PERF_SERVER_PID_FILE"
           done
@@ -213,45 +254,6 @@ jobs:
               exit 1
             fi
           done
-
-      - name: Build current and base private client bundles
-        shell: bash
-        env:
-          PERF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-head-dist"
-          VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-trace-dist"
-          if [ -n "$PERF_BASE_SHA" ]; then
-            base_directory="$RUNNER_TEMP/teagram-web-base"
-            git worktree add --detach "$base_directory" "$PERF_BASE_SHA"
-            ln -s "$GITHUB_WORKSPACE/node_modules" "$base_directory/node_modules"
-            node scripts/performance/inject-search-rpc-tracer.mjs "$base_directory/src/lib/appManagers/apiManager.ts"
-            (cd "$base_directory" && VITE_PERF_RECONCILE_TRACE=1 VITE_PERF_SEARCH_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-dist")
-            (cd "$base_directory" && VITE_PERF_TRACE=1 pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-base-trace-dist")
-            sticker_base_sha="$(cat .github/perf-sticker-base-commit)"
-            sticker_base_directory="$RUNNER_TEMP/teagram-web-sticker-base"
-            git worktree add --detach "$sticker_base_directory" "$sticker_base_sha"
-            ln -s "$GITHUB_WORKSPACE/node_modules" "$sticker_base_directory/node_modules"
-            (cd "$sticker_base_directory" && pnpm exec vite build --outDir "$RUNNER_TEMP/teagram-web-sticker-base-dist")
-            echo "PERF_BASE_DIST=$RUNNER_TEMP/teagram-web-base-dist" >> "$GITHUB_ENV"
-            echo "PERF_TRACE_BASE_DIST=$RUNNER_TEMP/teagram-web-base-trace-dist" >> "$GITHUB_ENV"
-            echo "PERF_STICKER_BASE_DIST=$RUNNER_TEMP/teagram-web-sticker-base-dist" >> "$GITHUB_ENV"
-            echo 'PERF_STICKER_BASE_ORIGIN=http://localhost:4179' >> "$GITHUB_ENV"
-            echo 'PERF_TRACE_BASE_ORIGIN_100X=http://localhost:4178' >> "$GITHUB_ENV"
-            echo 'PERF_BASE_ORIGIN_1X=http://localhost:4173' >> "$GITHUB_ENV"
-            echo 'PERF_BASE_ORIGIN_100X=http://localhost:4175' >> "$GITHUB_ENV"
-          else
-            echo "PERF_BASE_DIST=$RUNNER_TEMP/teagram-web-head-dist" >> "$GITHUB_ENV"
-            echo "PERF_TRACE_BASE_DIST=$RUNNER_TEMP/teagram-web-trace-dist" >> "$GITHUB_ENV"
-            echo 'PERF_BASE_ORIGIN_1X=' >> "$GITHUB_ENV"
-            echo 'PERF_BASE_ORIGIN_100X=' >> "$GITHUB_ENV"
-          fi
-          echo "PERF_HEAD_DIST=$RUNNER_TEMP/teagram-web-head-dist" >> "$GITHUB_ENV"
-          echo "PERF_TRACE_HEAD_DIST=$RUNNER_TEMP/teagram-web-trace-dist" >> "$GITHUB_ENV"
-          echo 'PERF_HEAD_ORIGIN_1X=http://localhost:4174' >> "$GITHUB_ENV"
-          echo 'PERF_HEAD_ORIGIN_100X=http://localhost:4176' >> "$GITHUB_ENV"
-          echo 'PERF_TRACE_HEAD_ORIGIN_100X=http://localhost:4177' >> "$GITHUB_ENV"
 
       - name: Start local HTTPS and static app servers
         shell: bash
@@ -343,6 +345,7 @@ jobs:
           --workers=1
 
       - name: Write performance summary and apply gates
+        id: summary
         if: always()
         env:
           PERF_BROWSER_OUTCOME: ${{ steps.browser.outcome || 'not-run' }}
@@ -353,18 +356,95 @@ jobs:
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: node scripts/performance/write-summary.mjs
 
+      - name: Preserve same-head A/A evidence
+        if: always()
+        shell: bash
+        env:
+          PERF_BROWSER_OUTCOME: ${{ steps.browser.outcome || 'not-run' }}
+          PERF_SUMMARY_OUTCOME: ${{ steps.summary.outcome || 'not-run' }}
+          PERF_BUILD_OUTCOME: ${{ steps.build.outcome || 'not-run' }}
+          PERF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          attempt_directory=".performance-aa-evidence/attempt-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$attempt_directory"
+          copy_evidence() {
+            local label="$1"
+            local source="$2"
+            if [ -f "$source" ]; then cp "$source" "$attempt_directory/$label"; fi
+          }
+          copy_evidence report.json "$PERF_REPORT_PATH"
+          copy_evidence summary.md "$PERF_SUMMARY_PATH"
+          copy_evidence recorder-replay.json "$PERF_RECORDER_REPLAY_PATH"
+          copy_evidence server-1x.log "$RUNNER_TEMP/teagram-perf-server-1x.log"
+          copy_evidence server-100x.log "$RUNNER_TEMP/teagram-perf-server-100x.log"
+          copy_evidence server-rpc-100x.jsonl "$PERF_SERVER_RPC_TRACE_FILE_100X"
+          if [ -d test-results ]; then cp -a test-results "$attempt_directory/"; fi
+          if [ -d playwright-report ]; then cp -a playwright-report "$attempt_directory/"; fi
+          jq -n \
+            --arg runId "$GITHUB_RUN_ID" \
+            --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg headSha "$GITHUB_SHA" \
+            --arg baseSha "$PERF_BASE_SHA" \
+            --arg runUrl "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
+            --arg buildOutcome "$PERF_BUILD_OUTCOME" \
+            --arg browserOutcome "$PERF_BROWSER_OUTCOME" \
+            --arg summaryOutcome "$PERF_SUMMARY_OUTCOME" \
+            '{runId: $runId, attempt: ($attempt | tonumber), headSha: $headSha, baseSha: $baseSha, runUrl: $runUrl, buildOutcome: $buildOutcome, browserOutcome: $browserOutcome, summaryOutcome: $summaryOutcome}' \
+            > "$attempt_directory/manifest.json"
+          find "$attempt_directory" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > "$attempt_directory/SHA256SUMS"
+
       - name: Upload browser performance report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: web-performance-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            .performance-aa-evidence/
             ${{ runner.temp }}/teagram-web-performance.json
             ${{ runner.temp }}/teagram-recorder-replay.json
             ${{ runner.temp }}/teagram-perf-server-1x.log
             ${{ runner.temp }}/teagram-perf-server-100x.log
+            ${{ runner.temp }}/teagram-perf-server-rpc-100x.jsonl
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Upload preserved A/A attempt 1 evidence
+        if: always() && hashFiles('.performance-aa-evidence/attempt-1/manifest.json') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-performance-aa-${{ github.run_id }}-attempt-1
+          path: .performance-aa-evidence/attempt-1/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+      - name: Upload preserved A/A attempt 2 evidence
+        if: always() && hashFiles('.performance-aa-evidence/attempt-2/manifest.json') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-performance-aa-${{ github.run_id }}-attempt-2
+          path: .performance-aa-evidence/attempt-2/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+      - name: Upload preserved A/A attempt 3 evidence
+        if: always() && hashFiles('.performance-aa-evidence/attempt-3/manifest.json') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-performance-aa-${{ github.run_id }}-attempt-3
+          path: .performance-aa-evidence/attempt-3/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+      - name: Save same-head A/A evidence
+        if: always()
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .performance-aa-evidence
+          key: teagram-web-performance-aa-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save updated main timing history
         if: success() && github.event_name == 'push' && github.ref == 'refs/heads/master'

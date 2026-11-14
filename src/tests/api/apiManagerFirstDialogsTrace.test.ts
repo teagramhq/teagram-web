@@ -47,6 +47,27 @@ test('keeps the chat-list startup span open for unrelated requests', async() => 
   expect(trace.getSnapshot()).toMatchObject([{name, durationMs: null}]);
 });
 
+test('history-only performance tracing records getHistory spans without other RPCs', async() => {
+  vi.stubEnv('VITE_PERF_TRACE', '0');
+  vi.stubEnv('VITE_PERF_SEARCH_TRACE', '0');
+  vi.stubEnv('VITE_PERF_HISTORY_TRACE', '1');
+  vi.resetModules();
+  const {ApiManager} = await import('@appManagers/apiManager');
+  vi.spyOn(globalThis, 'setInterval').mockImplementation(() => 0 as any);
+  const manager = new ApiManager();
+  const invoke = vi.spyOn(manager as any, 'invokeApiInternal').mockImplementation((method: unknown) => Promise.resolve({method}));
+
+  manager.resetPerformanceRpcTrace(true);
+  await manager.invokeApi('messages.getHistory' as any);
+  await manager.invokeApi('help.getAppConfig' as any);
+
+  const trace = manager.getPerformanceRpcTrace();
+  expect(invoke).toHaveBeenCalledTimes(2);
+  expect(trace.enabled).toBe(true);
+  expect(trace.invocations.map(({method}) => method)).toEqual(['messages.getHistory']);
+  expect(trace.calls.map(({method, outcome}) => ({method, outcome}))).toEqual([{method: 'messages.getHistory', outcome: 'success'}]);
+});
+
 test('does not record RPC activity when performance tracing is disabled', async() => {
   vi.stubEnv('VITE_PERF_TRACE', '0');
   vi.resetModules();

@@ -76,6 +76,12 @@ port.addMultipleEventsListeners({
 
   getLogs: () => getLogEntries(),
 
+  ...(import.meta.env.VITE_PERF_HISTORY_TRACE === '1' || import.meta.env.VITE_PERF_TRACE === '1' ? {
+    mirrorQueueBarrier: () => {
+      // This reply follows earlier worker-to-window mirror messages on the same MessagePort.
+    }
+  } : {}),
+
   getMemoryStats: async() => {
     const urls = objectUrlRegistry.getStats();
     const caches = getSharedObjectURLCacheStats();

@@ -1,6 +1,7 @@
 import {mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {evaluatePairedDifferences, evaluatePerformance, formatPerformanceTable, formatPerformanceTraceTable, PAIRED_CONFIDENCE_LEVEL, PERFORMANCE_REPEATS, TIMING_MINIMUM_EFFECTS} from './policy.mjs';
+import {clientRpcIntervalUnionMs, SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS, serverRpcIntervalUnionMs, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls, serverRpcTraceExpectation} from './server-rpc-trace.mjs';
 import {hasValidGlobalSearchStages} from './global-search-measurement.mjs';
 
 const reportPath = resolve(process.env.PERF_REPORT_PATH || '.performance-report.json');
@@ -48,6 +49,112 @@ function formatPerformanceSamplesTable(report, scale = '100x') {
   }
   lines.push('', '`Send a message` is gated on `App Enter-to-bubble` (`appSendUiMs`); `Time` remains the outer automation interval in the artifact and is shown as a diagnostic. `App Enter-to-bubble` measures in-page time from Enter keydown to the matching outgoing bubble insertion.');
   return lines.join('\n');
+}
+
+function getHistoryServerRecords(sample) {
+  if(!Array.isArray(sample?.serverRpcRecords)) return undefined;
+  const records = sample.serverRpcRecords;
+  if(!records.every((record) => (
+    record?.method === 'messages.getHistory' && Number.isSafeInteger(record.duration_us) && record.duration_us >= 0 &&
+    typeof record.result === 'string' && record.result.length > 0 && Number.isSafeInteger(record.end_unix_ms) && record.end_unix_ms > 0
+  ))) return undefined;
+  return records;
+}
+
+function formatChatOpenServerTimingTable(report, failures) {
+  const rows = [];
+  const variants = report.requireBase ? ['base', 'head'] : ['head'];
+  const show = (value) => Number.isFinite(value) ? value.toFixed(1) : 'n/a';
+  const addRows = (source, variant, samples) => {
+    if(!Array.isArray(samples) || !samples.length) {
+      failures.push(`100x chatOpen ${source} ${variant} server timing samples are missing`);
+      return;
+    }
+    for(const [index, sample] of samples.entries()) {
+      const serverRecords = getHistoryServerRecords(sample);
+      if(!serverRecords) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has missing or invalid messages.getHistory server durations`);
+        continue;
+      }
+      const clientHistoryCalls = sample.serverRpcClientCalls;
+      const clientHistoryCallCount = Array.isArray(clientHistoryCalls) ? clientHistoryCalls.length : undefined;
+      const callIds = Array.isArray(clientHistoryCalls) ? clientHistoryCalls.map((call) => call?.callId) : [];
+      if(!Array.isArray(clientHistoryCalls) || callIds.some((callId) => !Number.isSafeInteger(callId)) || new Set(callIds).size !== callIds.length) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has missing or duplicate client RPC identities`);
+        continue;
+      }
+      if(clientHistoryCallCount === 0) {
+        if(source === 'RPC diagnostic') {
+          failures.push(`cold 100x chatOpen RPC diagnostic ${variant} sample ${index + 1} has no client messages.getHistory span`);
+          continue;
+        }
+        if(serverRecords.length) {
+          failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has ${serverRecords.length} server records for 0 client messages.getHistory spans`);
+          continue;
+        }
+        if(!Number.isFinite(sample.ms) || !Number.isFinite(sample.rpcWallMs) || !Number.isFinite(sample.nonRpcElapsedMs)) {
+          failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} is missing total, RPC wall, or non-RPC timing`);
+          continue;
+        }
+        const gateWindow = sample.serverRpcGateWindow;
+        if(!gateWindow || !Number.isFinite(gateWindow.startEpochMs) || !Number.isFinite(gateWindow.endEpochMs) || gateWindow.endEpochMs <= gateWindow.startEpochMs ||
+          Math.abs((gateWindow.endEpochMs - gateWindow.startEpochMs) - sample.ms) > 0.01) {
+          failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has a missing or invalid RPC gate window`);
+          continue;
+        }
+        rows.push(`| ${source} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.rpcWallMs)} | ${show(sample.nonRpcElapsedMs)} | none (no getHistory in gate window) | 0.0 |`);
+        continue;
+      }
+      const expectation = Number.isSafeInteger(clientHistoryCallCount) ? serverRpcTraceExpectation(clientHistoryCallCount) : undefined;
+      if(!expectation || serverRecords.length < expectation.minimumCount || (!clientHistoryCallCount && serverRecords.length)) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has ${serverRecords.length} server records for ${clientHistoryCallCount ?? 'unknown'} client messages.getHistory spans`);
+        continue;
+      }
+      if(!Number.isFinite(sample.ms) || !Number.isFinite(sample.rpcWallMs) || !Number.isFinite(sample.nonRpcElapsedMs)) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} is missing total, RPC wall, or non-RPC timing`);
+        continue;
+      }
+      if(clientHistoryCallCount && (!serverRpcRecordsCoverClientCalls(serverRecords, clientHistoryCalls) ||
+        !serverRecords.every((record) => serverRpcRecordMatchesClientCalls(record, clientHistoryCalls)))) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} cannot correlate server messages.getHistory records to client spans`);
+        continue;
+      }
+      const gateWindow = sample.serverRpcGateWindow;
+      if(!gateWindow || !Number.isFinite(gateWindow.startEpochMs) || !Number.isFinite(gateWindow.endEpochMs) || gateWindow.endEpochMs <= gateWindow.startEpochMs ||
+        Math.abs((gateWindow.endEpochMs - gateWindow.startEpochMs) - sample.ms) > 0.01) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has a missing or invalid RPC gate window`);
+        continue;
+      }
+      const serverDurations = serverRecords.length ? serverRecords.map((record) => `${show(record.duration_us / 1000)} ms (${record.result})`).join(', ') : 'none (no getHistory in gate window)';
+      const clientHistoryIntervalUnionMs = clientRpcIntervalUnionMs(clientHistoryCalls, gateWindow);
+      const serverIntervalUnionMs = serverRpcIntervalUnionMs(serverRecords, gateWindow);
+      if(serverIntervalUnionMs - clientHistoryIntervalUnionMs > SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS) {
+        failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} server messages.getHistory interval union exceeds client getHistory interval union by ${(serverIntervalUnionMs - clientHistoryIntervalUnionMs).toFixed(1)} ms (clock tolerance ${SERVER_RPC_TRACE_CLOCK_TOLERANCE_MS} ms)`);
+        continue;
+      }
+      const rpcResidual = clientHistoryIntervalUnionMs >= serverIntervalUnionMs
+        ? clientHistoryIntervalUnionMs - serverIntervalUnionMs
+        : undefined;
+      rows.push(`| ${source} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.rpcWallMs)} | ${show(sample.nonRpcElapsedMs)} | ${serverDurations} | ${show(rpcResidual)} |`);
+    }
+  };
+
+  for(const variant of variants) {
+    addRows('gate sample', variant, report.variants?.[variant]?.['100x']?.chatOpen);
+  }
+  for(const variant of variants) {
+    addRows('RPC diagnostic', variant, report.diagnostics?.['100x']?.rpcComparison?.[variant]?.chatOpen);
+  }
+  if(!rows.length) return '';
+  return [
+    '### 100x chat-open server handling',
+    '',
+    'Each server entry is one correlated `messages.getHistory` handler duration; extra correlated handlers are retained. Attribution clips both the client `getHistory` interval union and server handler interval union to the click-through-first-bubble gate, then subtracts server handling from the client union.',
+    '',
+    '| Sample | Variant | Repeat | Time (ms) | RPC wall (ms) | Non-RPC (ms) | messages.getHistory server (ms each) | Gate-clipped getHistory client union minus server interval union (ms) |',
+    '| --- | --- | ---: | ---: | ---: | ---: | --- | ---: |',
+    ...rows
+  ].join('\n');
 }
 
 function formatGlobalSearchSamplesTable(report) {
@@ -374,6 +481,7 @@ const table = formatPerformanceTable(evaluation);
 const traceTable = formatPerformanceTraceTable(report.diagnostics?.['100x']);
 const chatListMeasurementTable = formatChatListMeasurementTable(report);
 const samplesTable = formatPerformanceSamplesTable(report);
+const chatOpenServerTimingTable = formatChatOpenServerTimingTable(report, failures);
 const globalSearchSamplesTable = formatGlobalSearchSamplesTable(report);
 const scrollFrameSamplesTable = formatScrollFrameSamplesTable(report);
 const sendActionDiagnosticTable = formatSendActionDiagnosticTable(report);
@@ -390,6 +498,7 @@ const summary = [
   ...(chatListMeasurementTable ? ['', chatListMeasurementTable] : []),
   ...(globalSearchSamplesTable ? ['', globalSearchSamplesTable] : []),
   ...(samplesTable ? ['', samplesTable] : []),
+  ...(chatOpenServerTimingTable ? ['', chatOpenServerTimingTable] : []),
   ...(scrollFrameSamplesTable ? ['', scrollFrameSamplesTable] : []),
   ...(sendActionDiagnosticTable ? ['', sendActionDiagnosticTable] : []),
   ...(firstStickerTable ? ['', firstStickerTable] : []),
@@ -403,6 +512,7 @@ const summary = [
   failures.length ? `\nBlocking findings:\n${failures.map((failure) => `- ${failure}`).join('\n')}` : '\nNo blocking performance findings.'
 ].join('\n');
 
+if(process.env.PERF_SUMMARY_PATH) writeFileSync(process.env.PERF_SUMMARY_PATH, `${summary}\n`);
 if(process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`, {flag: 'a'});
 else process.stdout.write(`${summary}\n`);
 

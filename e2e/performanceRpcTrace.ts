@@ -411,8 +411,13 @@ export function validateNoWalkLongTasks(
 }
 
 export function rpcInvocationsInWindow<T extends {startedAtEpochMs: number}>(calls: T[], timeOrigin: number, startedAtMs: number, elapsedMs: number): T[] {
+  return rpcInvocationsBetween(calls, timeOrigin, startedAtMs, startedAtMs + elapsedMs);
+}
+
+export function rpcInvocationsBetween<T extends {startedAtEpochMs: number}>(calls: T[], timeOrigin: number, startedAtMs: number, endedAtMs: number): T[] {
   const start = timeOrigin + startedAtMs;
-  return calls.filter((call) => call.startedAtEpochMs >= start && call.startedAtEpochMs <= start + elapsedMs);
+  const end = timeOrigin + endedAtMs;
+  return calls.filter((call) => call.startedAtEpochMs >= start && call.startedAtEpochMs <= end);
 }
 
 export function rpcMethodCounts(calls: Array<{method: string, startedAtEpochMs: number}>, timeOrigin: number, startedAtMs: number, elapsedMs: number) {

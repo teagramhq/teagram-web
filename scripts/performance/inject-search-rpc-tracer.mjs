@@ -2,53 +2,85 @@ import {readFileSync, writeFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-function replaceOnce(source, before, after, description) {
+function replaceOnce(source, befores, after, description) {
+  const matches = befores.flatMap((before) => {
+    const offsets = occurrenceOffsets(source, before);
+    return offsets.length ? [{before, offsets}] : [];
+  }).sort((left, right) => right.before.length - left.before.length);
+  if(!matches.length) throw new Error(`Cannot inject search RPC tracer: missing ${description}`);
+  const {before, offsets} = matches[0];
+  if(offsets.length !== 1) {
+    throw new Error(`Cannot inject search RPC tracer: ${description} is ambiguous`);
+  }
   const start = source.indexOf(before);
-  if(start < 0) throw new Error(`Cannot inject search RPC tracer: missing ${description}`);
-  if(source.indexOf(before, start + before.length) >= 0) {
+  const end = start + before.length;
+  if(matches.slice(1).some(({before: nested, offsets: nestedOffsets}) => (
+    nestedOffsets.some((offset) => offset < start || offset + nested.length > end)
+  ))) {
     throw new Error(`Cannot inject search RPC tracer: ${description} is ambiguous`);
   }
   return source.slice(0, start) + after + source.slice(start + before.length);
 }
 
-function countOccurrences(source, needle) {
-  let count = 0;
+function occurrenceOffsets(source, needle) {
+  const offsets = [];
   let offset = 0;
   while((offset = source.indexOf(needle, offset)) >= 0) {
-    count++;
+    offsets.push(offset);
     offset += needle.length;
   }
-  return count;
+  return offsets;
+}
+
+function countOccurrences(source, needle) {
+  return occurrenceOffsets(source, needle).length;
 }
 
 const replacements = [
   {
-    before: '    if(import.meta.env.VITE_PERF_TRACE === \'1\') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }',
-    after: '    if(import.meta.env.VITE_PERF_TRACE === \'1\' || import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }',
+    before: [
+      '    if(import.meta.env.VITE_PERF_TRACE === \'1\') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }',
+      '    if(import.meta.env.VITE_PERF_TRACE === \'1\' || import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }'
+    ],
+    after: '    if(import.meta.env.VITE_PERF_TRACE === \'1\' || import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\' || import.meta.env.VITE_PERF_HISTORY_TRACE === \'1\') {\n      this.performanceRpcTrace = new PerformanceRpcTrace(true);\n    }',
     description: 'the RPC trace initialization'
   },
   {
-    before: '    if(import.meta.env.VITE_PERF_TRACE === \'1\') this.performanceRpcTrace!.reset(recordSpans);',
-    after: '    if(import.meta.env.VITE_PERF_TRACE === \'1\' || import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\') {\n      this.performanceRpcTrace!.reset(recordSpans);\n    }',
+    before: [
+      '    if(import.meta.env.VITE_PERF_TRACE === \'1\') this.performanceRpcTrace!.reset(recordSpans);',
+      '    if(import.meta.env.VITE_PERF_TRACE === \'1\' || import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\') {\n      this.performanceRpcTrace!.reset(recordSpans);\n    }'
+    ],
+    after: '    if(import.meta.env.VITE_PERF_TRACE === \'1\' || import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\' || import.meta.env.VITE_PERF_HISTORY_TRACE === \'1\') {\n      this.performanceRpcTrace!.reset(recordSpans);\n    }',
     description: 'the RPC trace reset'
   },
   {
-    before: '    if(import.meta.env.VITE_PERF_TRACE === \'1\') this.performanceRpcTrace?.recordCall(methodName);',
-    after: '    if(import.meta.env.VITE_PERF_TRACE === \'1\') this.performanceRpcTrace?.recordCall(methodName);\n    const traceSearch = import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\' && methodName === \'messages.searchGlobal\';',
+    before: [
+      '    if(import.meta.env.VITE_PERF_TRACE === \'1\') this.performanceRpcTrace?.recordCall(methodName);',
+      '    if(import.meta.env.VITE_PERF_TRACE === \'1\') this.performanceRpcTrace?.recordCall(methodName);\n    const traceSearch = import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\' && methodName === \'messages.searchGlobal\';'
+    ],
+    after: '    const traceHistory = import.meta.env.VITE_PERF_HISTORY_TRACE === \'1\' && methodName === \'messages.getHistory\';\n    if(import.meta.env.VITE_PERF_TRACE === \'1\' || traceHistory) this.performanceRpcTrace?.recordCall(methodName);\n    const traceSearch = import.meta.env.VITE_PERF_SEARCH_TRACE === \'1\' && methodName === \'messages.searchGlobal\';',
     description: 'the invoke call trace hook'
   },
   {
-    before: '      return this.invokeApiInternal(method, params, options);',
-    after: '      const request = this.invokeApiInternal(method, params, options);\n      return traceSearch ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;',
+    before: [
+      '      return this.invokeApiInternal(method, params, options);',
+      '      const request = this.invokeApiInternal(method, params, options);\n      return traceSearch ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;'
+    ],
+    after: '      const request = this.invokeApiInternal(method, params, options);\n      return traceSearch || traceHistory ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;',
     description: 'the unauthenticated RPC return hook'
+  },
+  {
+    before: ['      request.then(() => redactor.end(), () => redactor.end());\n      return request;'],
+    after: '      request.then(() => redactor.end(), () => redactor.end());\n      return traceHistory ? this.performanceRpcTrace?.trackWait(methodName, request) ?? request : request;',
+    description: 'the authenticated RPC return hook'
   }
 ];
 
 export function injectSearchRpcTracer(source) {
   const injectedHookCounts = replacements.map(({after}) => countOccurrences(source, after));
   if(injectedHookCounts.every((count) => count === 1)) {
-    const uninstrumentedHookCounts = replacements.map(({before}) => countOccurrences(source, before));
-    const expectedUninstrumentedHookCounts = [0, 0, 1, 0];
+    const uninstrumentedHookCounts = replacements.map(({before}) => before.reduce((total, anchor) => total + countOccurrences(source, anchor), 0));
+    const expectedUninstrumentedHookCounts = replacements.map(() => 0);
     if(uninstrumentedHookCounts.some((count, index) => count !== expectedUninstrumentedHookCounts[index])) {
       throw new Error('Cannot inject search RPC tracer: already instrumented source has unexpected or ambiguous hooks');
     }
