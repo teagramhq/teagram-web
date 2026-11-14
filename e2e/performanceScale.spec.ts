@@ -207,10 +207,21 @@ async function attachServerRpcTrace(sample: Metric, offset: number | undefined) 
   if(offset === undefined) return sample;
   const clientCalls = sample.serverRpcClientCalls;
   if(!Array.isArray(clientCalls)) throw new Error('100x chat-open sample has no client messages.getHistory span list');
-  if(!clientCalls.length) {
-    throw new Error(`cold 100x chat-open sample has no in-gate client messages.getHistory spans; RPC sample ${JSON.stringify(sample.rpcCalls)}`);
-  }
   const traceRecords = readServerRpcTraceRecordsSince(serverRpcTraceFile!, offset).filter((record) => record.method === 'messages.getHistory');
+  if(!clientCalls.length) {
+    const gateWindow = sample.serverRpcGateWindow;
+    if(!gateWindow || !Number.isFinite(gateWindow.startEpochMs) || !Number.isFinite(gateWindow.endEpochMs) || gateWindow.endEpochMs <= gateWindow.startEpochMs) {
+      throw new Error('100x chat-open sample has no valid gate window for zero-call server trace validation');
+    }
+    const inGateRecords = traceRecords.filter((record) => (
+      record.end_unix_ms >= gateWindow.startEpochMs &&
+      record.end_unix_ms - record.duration_us / 1000 <= gateWindow.endEpochMs
+    ));
+    if(inGateRecords.length) {
+      throw new Error(`100x chat-open zero-call gate has ${inGateRecords.length} uncorrelated server messages.getHistory records inside its gate window`);
+    }
+    return {...sample, serverRpcRecords: []};
+  }
   const records = traceRecords.filter((record) => serverRpcRecordMatchesClientCalls(record, clientCalls));
   if(!serverRpcRecordsCoverClientCalls(records, clientCalls)) {
     const correlation = {
@@ -1044,7 +1055,7 @@ function expectChatOpenHistoryCall(sample: Metric, description: string) {
   }
 }
 
-async function finalizeServerRpcTrace(page: Page, sample: Metric) {
+async function finalizeServerRpcTrace(page: Page, sample: Metric, requireClientHistoryCall = false) {
   const offset = serverRpcTraceOffsetsBySample.get(sample);
   if(offset === undefined) return sample;
 
@@ -1055,7 +1066,12 @@ async function finalizeServerRpcTrace(page: Page, sample: Metric) {
     throw new Error(`100x chat-open sample has invalid or duplicate client RPC identities: ${JSON.stringify(callIds)}`);
   }
   if(!callIds.length) {
-    throw new Error(`cold 100x chat-open sample has no in-gate client messages.getHistory spans; RPC sample ${JSON.stringify(sample.rpcCalls)}`);
+    if(requireClientHistoryCall) {
+      throw new Error(`cold 100x chat-open sample has no in-gate client messages.getHistory spans; RPC sample ${JSON.stringify(sample.rpcCalls)}`);
+    }
+    sample.serverRpcClientCalls = [];
+    Object.assign(sample, await attachServerRpcTrace(sample, offset));
+    return sample;
   }
   if(serverRpcClientCallsAreSettled(boundaryCalls)) {
     sample.serverRpcClientCalls = boundaryCalls.map((call) => ({...call}));
@@ -1095,7 +1111,6 @@ async function reloadChatList(page: Page, requests: {value: number}, collectWalk
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false, collectWalkDiagnostics = false, collectServerRpcTrace = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
-  if(collectServerRpcTrace) await prepareColdChatOpenStartState(page, fixture);
   resetRequestBreakdown(page);
   await begin(page, requests, true, traceRpc);
   await startMeasurementAtClick(row);
@@ -2219,7 +2234,7 @@ async function traceTargetScenarios(browser: Browser, runs: Partial<Record<Varia
         };
         expectChatOpenHistoryCall(chatOpenSample, `${variant} 100x chatOpen RPC diagnostic`);
         serverRpcTraceOffsetsBySample.set(chatOpenSample, serverTraceOffset);
-        await finalizeServerRpcTrace(page, chatOpenSample);
+        await finalizeServerRpcTrace(page, chatOpenSample, true);
         traceSamples.chatOpen.push(chatOpenSample);
         await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpenSample, 'chatOpen');
 

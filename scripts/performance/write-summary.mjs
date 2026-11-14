@@ -84,7 +84,25 @@ function formatChatOpenServerTimingTable(report, failures) {
         continue;
       }
       if(clientHistoryCallCount === 0) {
-        failures.push(`cold 100x chatOpen ${source} ${variant} sample ${index + 1} has no client messages.getHistory span`);
+        if(source === 'RPC diagnostic') {
+          failures.push(`cold 100x chatOpen RPC diagnostic ${variant} sample ${index + 1} has no client messages.getHistory span`);
+          continue;
+        }
+        if(serverRecords.length) {
+          failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has ${serverRecords.length} server records for 0 client messages.getHistory spans`);
+          continue;
+        }
+        if(!Number.isFinite(sample.ms) || !Number.isFinite(sample.rpcWallMs) || !Number.isFinite(sample.nonRpcElapsedMs)) {
+          failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} is missing total, RPC wall, or non-RPC timing`);
+          continue;
+        }
+        const gateWindow = sample.serverRpcGateWindow;
+        if(!gateWindow || !Number.isFinite(gateWindow.startEpochMs) || !Number.isFinite(gateWindow.endEpochMs) || gateWindow.endEpochMs <= gateWindow.startEpochMs ||
+          Math.abs((gateWindow.endEpochMs - gateWindow.startEpochMs) - sample.ms) > 0.01) {
+          failures.push(`100x chatOpen ${source} ${variant} sample ${index + 1} has a missing or invalid RPC gate window`);
+          continue;
+        }
+        rows.push(`| ${source} | ${variant} | ${index + 1} | ${show(sample.ms)} | ${show(sample.rpcWallMs)} | ${show(sample.nonRpcElapsedMs)} | none (no getHistory in gate window) | 0.0 |`);
         continue;
       }
       const expectation = Number.isSafeInteger(clientHistoryCallCount) ? serverRpcTraceExpectation(clientHistoryCallCount) : undefined;
@@ -494,6 +512,7 @@ const summary = [
   failures.length ? `\nBlocking findings:\n${failures.map((failure) => `- ${failure}`).join('\n')}` : '\nNo blocking performance findings.'
 ].join('\n');
 
+if(process.env.PERF_SUMMARY_PATH) writeFileSync(process.env.PERF_SUMMARY_PATH, `${summary}\n`);
 if(process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`, {flag: 'a'});
 else process.stdout.write(`${summary}\n`);
 
