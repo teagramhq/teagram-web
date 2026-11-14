@@ -168,7 +168,8 @@ export async function authenticatePrivateUsername(
     sendCodeParams,
     action,
     requestTurnstile,
-    siteKey
+    siteKey,
+    action === 'signup' ? ['signup', 'signin'] : undefined
   );
   const invokeSignIn = (phoneCodeHash: string) => invokeAuthApi('auth.signIn', {
     phone_number: username,

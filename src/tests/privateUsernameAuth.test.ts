@@ -501,11 +501,11 @@ describe('private username sign-in', () => {
     expect(onAuthorization).toHaveBeenCalledWith(user, false);
   });
 
-  it('retries open sign-in when sendCode learns the signup challenge key', async() => {
+  it('handles the server signin challenge on open sendCode before resuming saved-password auth', async() => {
     const user = {_: 'user', id: 42};
     const signinCode = {...SENT_CODE, phone_code_hash: 'signin-code-hash'};
     const invokeApi = vi.fn()
-    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signup__signup-site-key'})
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__server-signin-site-key'})
     .mockResolvedValueOnce(SENT_CODE)
     .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__signin-site-key'})
     .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__signin-site-key'})
@@ -523,7 +523,7 @@ describe('private username sign-in', () => {
     }, requestTurnstile)).resolves.toEqual({kind: 'authorized', user});
 
     expect(requestTurnstile).toHaveBeenCalledTimes(2);
-    expect(requestTurnstile).toHaveBeenNthCalledWith(1, 'signup-site-key', 'signup', expect.any(Function));
+    expect(requestTurnstile).toHaveBeenNthCalledWith(1, 'server-signin-site-key', 'signup', expect.any(Function));
     expect(requestTurnstile).toHaveBeenNthCalledWith(2, 'signin-site-key', 'signin', expect.any(Function));
     expect(invokeApi.mock.calls.map(([method]) => method)).toEqual([
       'auth.sendCode',

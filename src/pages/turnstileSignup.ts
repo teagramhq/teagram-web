@@ -36,9 +36,16 @@ export async function invokeTurnstileProtected<TResponse = unknown>(
   params: TurnstileAuthParams | GetTurnstileAuthParams,
   action: TurnstileAction,
   requestChallenge?: RequestTurnstileChallenge,
-  siteKey?: string
+  siteKey?: string,
+  serverChallengeActions: readonly TurnstileAction[] = [action]
 ): Promise<TResponse> {
   const getParams = typeof params === 'function' ? params : () => params;
+  const getChallengeSiteKey = (error: unknown) => {
+    for(const serverAction of serverChallengeActions) {
+      const challengeSiteKey = getTurnstileSiteKey(error, serverAction);
+      if(challengeSiteKey) return challengeSiteKey;
+    }
+  };
   const qaBypassToken = action === 'signup' && typeof localStorage !== 'undefined'
     ? localStorage.getItem(TURNSTILE_QA_BYPASS_LOCAL_STORAGE_KEY)?.trim() || undefined
     : undefined;
@@ -56,26 +63,32 @@ export async function invokeTurnstileProtected<TResponse = unknown>(
     try {
       return await submit(qaBypassToken) as TResponse;
     } catch(error) {
-      const challengeSiteKey = getTurnstileSiteKey(error, action);
+      const challengeSiteKey = getChallengeSiteKey(error);
       if(!challengeSiteKey || !requestChallenge) throw error;
       return await requestChallenge(challengeSiteKey, action, (token) => submit(token)) as TResponse;
     }
   }
 
   if(action === 'signup' && siteKey && requestChallenge) {
-    return await requestChallenge(siteKey, action, (token) => submit(token)) as TResponse;
+    try {
+      return await requestChallenge(siteKey, action, (token) => submit(token)) as TResponse;
+    } catch(error) {
+      const challengeSiteKey = getChallengeSiteKey(error);
+      if(!challengeSiteKey || challengeSiteKey === siteKey) throw error;
+      return await requestChallenge(challengeSiteKey, action, (token) => submit(token)) as TResponse;
+    }
   }
 
   try {
     return await submit();
   } catch(error) {
-    const challengeSiteKey = getTurnstileSiteKey(error, action);
+    const challengeSiteKey = getChallengeSiteKey(error);
     if(!challengeSiteKey || !requestChallenge) throw error;
     if(action === 'signup' && qaBypassToken) {
       try {
         return await submit(qaBypassToken) as TResponse;
       } catch(bypassError) {
-        const bypassSiteKey = getTurnstileSiteKey(bypassError, action);
+        const bypassSiteKey = getChallengeSiteKey(bypassError);
         if(!bypassSiteKey) throw bypassError;
         return await requestChallenge(bypassSiteKey, action, (token) => submit(token)) as TResponse;
       }
