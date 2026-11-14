@@ -155,6 +155,12 @@ async function setupGuestServer(
           first_name: firstName,
           username
         });
+        const sentCode = {
+          _: 'auth.sentCode',
+          phone_code_hash: 'guest-signup-code-hash',
+          type: {_ : 'auth.sentCodeTypeApp', length: 5},
+          timeout: 60
+        };
 
         proxy.invoke = (type: string, payload: any, ...args: any[]) => {
           if(type === 'manager' && payload?.name === 'apiManager') {
@@ -175,12 +181,13 @@ async function setupGuestServer(
                 return Promise.resolve({_ : 'auth.loggedOut'});
               }
               if(method === 'auth.sendCode') {
-                return Promise.resolve({
-                  _: 'auth.sentCode',
-                  phone_code_hash: 'guest-signup-code-hash',
-                  type: {_ : 'auth.sentCodeTypeApp', length: 5},
-                  timeout: 60
-                });
+                return Promise.resolve(sentCode);
+              }
+              if(method === 'invokeWithReCaptcha' && params.query?._ === 'auth.sendCode') {
+                if(guestSignupErrorType === 'RECAPTCHA_CHECK_FAILED') {
+                  return Promise.reject({type: guestSignupErrorType});
+                }
+                return Promise.resolve(sentCode);
               }
               if(method === 'auth.signIn') {
                 if(params.phone_number === localStorage.getItem('__teagram_guest_username')) {
@@ -334,13 +341,17 @@ test('creates a guest only when discovery advertises it and restores the same gu
     method: string,
     params?: Record<string, unknown>
   }>);
-  const turnstileSignUp = signupCalls.find((call) => call.method === 'invokeWithReCaptcha' &&
-    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp');
-  const guestSignUp = turnstileSignUp?.params?.query as Record<string, unknown> | undefined;
+  const turnstileSendCode = signupCalls.find((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.sendCode');
+  const guestSignUpCall = signupCalls.find((call) => call.method === 'auth.signUp');
+  const guestSignUp = guestSignUpCall?.params;
   const guestUsername = guestSignUp?.phone_number as string;
   expect(guestUsername).toMatch(/^guest_[a-z2-7]{16}$/);
   expect(guestSignUp).toMatchObject({first_name: 'Guest', last_name: ''});
-  expect(turnstileSignUp?.params?.token).toBe('guest-turnstile-token');
+  expect(turnstileSendCode?.params?.token).toBe('guest-turnstile-token');
+  expect(turnstileSendCode?.params?.query).toMatchObject({phone_number: guestUsername});
+  expect(signupCalls.filter((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp')).toHaveLength(0);
   expect(await page.evaluate(() => (window as any).__guestTurnstileActions)).toEqual(['signup']);
   expect(signupCalls.find((call) => call.method === 'account.updatePasswordSettings')?.params)
     .toMatchObject({newPassword: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/)});
@@ -397,8 +408,7 @@ test('auto-creates one guest from runtime config without a picker and restores i
   await expect.poll(() => page.evaluate(() => (window as any).__customGuestCalls?.filter((call: {
     method: string,
     params?: Record<string, unknown>
-  }) => call.method === 'auth.signUp' || (call.method === 'invokeWithReCaptcha' &&
-    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp')).length || 0))
+  }) => call.method === 'auth.signUp').length || 0))
     .toBe(1);
   expect(webSocketUrls).toContain('wss://demo.teagram.io/apiws');
   expect(webSocketUrls.filter((url) => new URL(url).pathname === '/apiws').every((url) =>
@@ -408,14 +418,15 @@ test('auto-creates one guest from runtime config without a picker and restores i
     method: string,
     params?: Record<string, unknown>
   }>);
-  const turnstileSignUp = signupCalls.find((call) => call.method === 'invokeWithReCaptcha' &&
-    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp');
-  const signup = turnstileSignUp?.params?.query as Record<string, unknown> | undefined;
+  const turnstileSendCode = signupCalls.find((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.sendCode');
+  const signup = signupCalls.find((call) => call.method === 'auth.signUp')?.params;
   const guestUsername = signup?.phone_number as string;
   expect(guestUsername).toMatch(/^guest_[a-z2-7]{16}$/);
-  expect(turnstileSignUp?.params?.token).toBe('guest-turnstile-token');
+  expect(turnstileSendCode?.params?.token).toBe('guest-turnstile-token');
   expect(signupCalls.filter((call) => call.method === 'auth.signUp' || (call.method === 'invokeWithReCaptcha' &&
     (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp'))).toHaveLength(1);
+  expect(turnstileSendCode?.params?.query).toMatchObject({phone_number: guestUsername});
   await expect.poll(() => page.evaluate(() => localStorage.getItem('__teagram_guest_username')))
     .toBe(guestUsername);
   await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
@@ -690,6 +701,9 @@ test('shows instance terms before guest sign-up and creates an account only afte
   const auth = page.locator('#auth-pages');
   const guestButton = auth.getByRole('button', {name: 'Try it as a guest'});
   await guestButton.click();
+  const challenge = auth.getByTestId('turnstile-challenge');
+  await expect(challenge).toBeVisible();
+  await challenge.getByRole('button', {name: 'Complete security check'}).click();
   const dialog = page.getByRole('dialog', {name: 'Terms of service'});
   await expect(dialog).toBeVisible();
   await expect(dialog).toBeFocused();
@@ -735,8 +749,12 @@ test('shows instance terms before guest sign-up and creates an account only afte
   await expect.poll(() => termsScroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   const mobileWidths = await page.evaluate(() => ({document: document.documentElement.scrollWidth, viewport: document.documentElement.clientWidth}));
   expect(mobileWidths.document).toBeLessThanOrEqual(mobileWidths.viewport);
-  const callsBeforeAccept = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
-  expect(callsBeforeAccept.filter((call) => call.method === 'auth.signUp' || call.method === 'invokeWithReCaptcha')).toHaveLength(0);
+  const callsBeforeAccept = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string, params?: Record<string, unknown>}>);
+  expect(callsBeforeAccept.filter((call) => call.method === 'auth.signUp')).toHaveLength(0);
+  expect(callsBeforeAccept.filter((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp')).toHaveLength(0);
+  expect(callsBeforeAccept.filter((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.sendCode')).toHaveLength(1);
   await captureState(page, testInfo, 'guest-terms-default');
 
   const popupBox = await dialog.locator('.popup-container').boundingBox();
@@ -779,17 +797,17 @@ test('shows instance terms before guest sign-up and creates an account only afte
 
   await dialog.locator('.popup-description').focus();
   await page.keyboard.press('Enter');
-  const challenge = auth.getByTestId('turnstile-challenge');
-  await expect(challenge).toBeVisible();
-  await captureState(page, testInfo, 'guest-terms-accepted-security-check');
-  await challenge.getByRole('button', {name: 'Complete security check'}).click();
   await expect(page.locator('#page-chats')).toBeVisible({timeout: 30_000});
   await captureState(page, testInfo, 'guest-terms-accepted-main-screen');
 
   const calls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string, params?: Record<string, unknown>}>);
-  const turnstileSignUp = calls.find((call) => call.method === 'invokeWithReCaptcha' &&
-    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp');
-  expect(turnstileSignUp).toBeDefined();
+  const turnstileSendCode = calls.find((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.sendCode');
+  expect(turnstileSendCode).toBeDefined();
+  expect(calls.filter((call) => call.method === 'auth.signUp')).toHaveLength(1);
+  expect(calls.filter((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp')).toHaveLength(0);
+  expect(await page.evaluate(() => (window as any).__guestTurnstileActions)).toEqual(['signup']);
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
 
@@ -801,6 +819,9 @@ test('declining guest terms leaves no account and remains recoverable after relo
   const auth = page.locator('#auth-pages');
   const guestButton = auth.getByRole('button', {name: 'Try it as a guest'});
   await guestButton.click();
+  const challenge = auth.getByTestId('turnstile-challenge');
+  await expect(challenge).toBeVisible();
+  await challenge.getByRole('button', {name: 'Complete security check'}).click();
   const dialog = page.getByRole('dialog', {name: 'Terms of service'});
   await expect(dialog).toBeVisible();
   await captureState(page, testInfo, 'guest-terms-before-decline');
@@ -809,8 +830,12 @@ test('declining guest terms leaves no account and remains recoverable after relo
   await expect(dialog).toBeHidden();
   await expect(auth.getByRole('status')).toHaveText('No account was created. Accept the terms to create one.');
   await expect(guestButton).toBeFocused();
-  const calls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
-  expect(calls.filter((call) => call.method === 'auth.signUp' || call.method === 'invokeWithReCaptcha')).toHaveLength(0);
+  const calls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string, params?: Record<string, unknown>}>);
+  expect(calls.filter((call) => call.method === 'auth.signUp')).toHaveLength(0);
+  expect(calls.filter((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp')).toHaveLength(0);
+  expect(calls.filter((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.sendCode')).toHaveLength(1);
   await captureState(page, testInfo, 'guest-terms-declined');
 
   await page.reload({waitUntil: 'domcontentloaded'});
@@ -836,12 +861,19 @@ test('surfaces guest terms popup load failures as an auth error', async({page}, 
 
   const auth = page.locator('#auth-pages');
   await auth.getByRole('button', {name: 'Try it as a guest'}).click();
+  const challenge = auth.getByTestId('turnstile-challenge');
+  await expect(challenge).toBeVisible();
+  await challenge.getByRole('button', {name: 'Complete security check'}).click();
 
   await expect(auth.getByRole('alert')).toHaveText('Unable to create your guest account. Check your connection and try again.');
   expect(termsPopupLoadFailed).toBe(true);
   await expect(auth.getByText('No account was created. Accept the terms to create one.')).toHaveCount(0);
-  const calls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string}>);
-  expect(calls.filter((call) => call.method === 'auth.signUp' || call.method === 'invokeWithReCaptcha')).toHaveLength(0);
+  const calls = await page.evaluate(() => (window as any).__customGuestCalls as Array<{method: string, params?: Record<string, unknown>}>);
+  expect(calls.filter((call) => call.method === 'auth.signUp')).toHaveLength(0);
+  expect(calls.filter((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp')).toHaveLength(0);
+  expect(calls.filter((call) => call.method === 'invokeWithReCaptcha' &&
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.sendCode')).toHaveLength(1);
   await captureState(page, testInfo, 'guest-terms-popup-load-error');
   await page.unroute('**/simpleConfirmation.ts*');
 
@@ -876,7 +908,7 @@ test('shows one Turnstile challenge failure without retrying automatically', asy
     params?: Record<string, unknown>
   }>);
   expect(calls.filter((call) => call.method === 'invokeWithReCaptcha' &&
-    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.signUp')).toHaveLength(1);
+    (call.params?.query as Record<string, unknown> | undefined)?._ === 'auth.sendCode')).toHaveLength(1);
   await captureState(page, testInfo, 'guest-auto-turnstile-failure');
   await page.unrouteAll({behavior: 'ignoreErrors'});
 });
