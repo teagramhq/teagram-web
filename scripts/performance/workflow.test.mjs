@@ -800,7 +800,6 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(attachServerRpcTrace, /readServerRpcTraceRecordsSince/);
   assert.match(attachServerRpcTrace, /if\(!clientCalls\.length\)/);
   assert.match(attachServerRpcTrace, /zero-call gate has .*uncorrelated server messages\.getHistory records inside its gate window/);
-  assert.match(attachServerRpcTrace, /serverRpcRecordStartsWithinWindow\(record, gateWindow\)/, 'zero-call gates only reject handlers that start within the measured window');
   assert.match(attachServerRpcTrace, /\.filter\(\(record\) => serverRpcRecordMatchesClientCalls\(record, clientCalls\)\)/, 'all completed correlated handlers must be retained without polling for a quiet period');
   assert.doesNotMatch(attachServerRpcTrace, /quietMs|waitForServerRpcTraceRecords/);
   assert.ok(finalizeServerRpcTrace, 'the captured chat-open identities must settle before server records attach');
@@ -853,6 +852,15 @@ test('cold chat-open preparation is restricted to the RPC diagnostic', () => {
   assert.match(traceTargetScenarios, /await prepareColdChatOpenStartState\(page, fixture\)/);
   assert.ok(traceTargetScenarios.indexOf('prepareColdChatOpenStartState') < traceTargetScenarios.indexOf('startMeasurementAtClick'));
   assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpenSample'), 'cold RPC diagnostics must still require an in-gate history call');
+});
+
+test('ordinary 100x chat-open drains fixture preview-history prefetch before the gate', () => {
+  const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
+
+  assert.ok(openPartnerChat, 'the measured chat-open helper must be present');
+  assert.match(openPartnerChat, /if\(collectServerRpcTrace\) await waitForPartnerDialogHistoryPrefetch\(page, fixture\.partner\)/);
+  assert.ok(openPartnerChat.indexOf('waitForPartnerDialogHistoryPrefetch') < openPartnerChat.indexOf('await begin(page, requests, true, traceRpc)'), 'drain prior row prefetch before starting the measured interaction');
+  assert.doesNotMatch(openPartnerChat, /flushStoragesByPeerId/, 'preserve the warmed chat-open state');
 });
 
 test('100x chat-open resets history without changing adjacent scenario sequencing', () => {

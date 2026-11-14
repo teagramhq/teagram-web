@@ -142,15 +142,6 @@ export function serverRpcIntervalUnionMs(records, window) {
   return intervalUnionMs(intervals);
 }
 
-export function serverRpcRecordStartsWithinWindow(record, window) {
-  validateIntervalWindow(window);
-  if(!Number.isSafeInteger(record?.duration_us) || record.duration_us < 0 || !Number.isSafeInteger(record?.end_unix_ms) || record.end_unix_ms <= 0) {
-    throw new TypeError('RPC trace interval requires a non-negative duration_us and positive end_unix_ms');
-  }
-  const startedAtEpochMs = record.end_unix_ms - record.duration_us / 1000;
-  return startedAtEpochMs >= window.startEpochMs && startedAtEpochMs < window.endEpochMs;
-}
-
 export function clientRpcIntervalUnionMs(calls, window) {
   if(!Array.isArray(calls)) throw new TypeError('client RPC calls must be an array');
   validateIntervalWindow(window);

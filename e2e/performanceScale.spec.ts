@@ -1,7 +1,7 @@
 import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
 import {readFileSync} from 'node:fs';
 import {writePerformanceReport} from './performanceReport';
-import {getServerRpcTracePosition, matchServerRpcRecordToClientCall, readServerRpcTraceRecordsSince, serverRpcClientCallsAreSettled, serverRpcClientCallsByIdentity, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordStartsWithinWindow, serverRpcRecordsCoverClientCalls} from '../scripts/performance/server-rpc-trace.mjs';
+import {getServerRpcTracePosition, matchServerRpcRecordToClientCall, readServerRpcTraceRecordsSince, serverRpcClientCallsAreSettled, serverRpcClientCallsByIdentity, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls} from '../scripts/performance/server-rpc-trace.mjs';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
@@ -226,7 +226,10 @@ async function attachServerRpcTrace(sample: Metric, offset: number | undefined) 
     if(!gateWindow || !Number.isFinite(gateWindow.startEpochMs) || !Number.isFinite(gateWindow.endEpochMs) || gateWindow.endEpochMs <= gateWindow.startEpochMs) {
       throw new Error('100x chat-open sample has no valid gate window for zero-call server trace validation');
     }
-    const inGateRecords = traceRecords.filter((record) => serverRpcRecordStartsWithinWindow(record, gateWindow));
+    const inGateRecords = traceRecords.filter((record) => (
+      record.end_unix_ms >= gateWindow.startEpochMs &&
+      record.end_unix_ms - record.duration_us / 1000 <= gateWindow.endEpochMs
+    ));
     if(inGateRecords.length) {
       throw new Error(`100x chat-open zero-call gate has ${inGateRecords.length} uncorrelated server messages.getHistory records inside its gate window`);
     }
@@ -1121,6 +1124,7 @@ async function reloadChatList(page: Page, requests: {value: number}, collectWalk
 async function openPartnerChat(page: Page, requests: {value: number}, fixture: Fixture, traceRpc = false, collectWalkDiagnostics = false, collectServerRpcTrace = false) {
   const row = page.locator(`#chatlist-container .chatlist-chat[data-peer-id="${fixture.partner}"]`).first();
   await expect(row).toBeVisible({timeout: 60_000});
+  if(collectServerRpcTrace) await waitForPartnerDialogHistoryPrefetch(page, fixture.partner);
   resetRequestBreakdown(page);
   await begin(page, requests, true, traceRpc);
   await startMeasurementAtClick(row);
