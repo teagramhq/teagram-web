@@ -151,7 +151,8 @@ export async function authenticatePrivateUsername(
 
   let sentCode: unknown;
   const sendCodeAction: TurnstileAction = registration && registration.mode !== 'closed' ? 'signup' : 'signin';
-  let signupChallengeBoundToCode = sendCodeAction === 'signup' && !!requestTurnstile && !!turnstileSiteKey;
+  const signupActionCanBeChallenged = sendCodeAction === 'signup' && !!requestTurnstile;
+  let signupChallengeBoundToCode = signupActionCanBeChallenged && !!turnstileSiteKey;
   const sendCodeParams: AuthSendCode = {
     phone_number: username,
     api_id: App.id,
@@ -198,7 +199,7 @@ export async function authenticatePrivateUsername(
   } catch(error) {
     let signInError = error;
     let retrySucceeded = false;
-    if(!wasCancelled(error, isCancelled) && signupChallengeBoundToCode && getTurnstileSiteKey(error, 'signin')) {
+    if(!wasCancelled(error, isCancelled) && signupActionCanBeChallenged && getTurnstileSiteKey(error, 'signin')) {
       try {
         const signinSentCode: unknown = await invokeSendCode('signin');
         if(isCancelled()) return {kind: 'cancelled'};

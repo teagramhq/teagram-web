@@ -501,6 +501,52 @@ describe('private username sign-in', () => {
     expect(onAuthorization).toHaveBeenCalledWith(user, false);
   });
 
+  it('retries open sign-in when sendCode learns the signup challenge key', async() => {
+    const user = {_: 'user', id: 42};
+    const signinCode = {...SENT_CODE, phone_code_hash: 'signin-code-hash'};
+    const invokeApi = vi.fn()
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signup__signup-site-key'})
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__signin-site-key'})
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__signin-site-key'})
+    .mockResolvedValueOnce(signinCode)
+    .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'});
+    const checkPassword = vi.fn().mockResolvedValue(user);
+    const requestTurnstile = vi.fn((_siteKey, action, submit) => submit(`${action}-token`));
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Guest',
+      password: 'saved-password',
+      updatePasswordSettings: vi.fn(),
+      checkPassword
+    }, requestTurnstile)).resolves.toEqual({kind: 'authorized', user});
+
+    expect(requestTurnstile).toHaveBeenCalledTimes(2);
+    expect(requestTurnstile).toHaveBeenNthCalledWith(1, 'signup-site-key', 'signup', expect.any(Function));
+    expect(requestTurnstile).toHaveBeenNthCalledWith(2, 'signin-site-key', 'signin', expect.any(Function));
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual([
+      'auth.sendCode',
+      'invokeWithReCaptcha',
+      'auth.signIn',
+      'auth.sendCode',
+      'invokeWithReCaptcha',
+      'auth.signIn'
+    ]);
+    expect(invokeApi).toHaveBeenNthCalledWith(2, 'invokeWithReCaptcha', {
+      token: 'signup-token',
+      query: expect.objectContaining({_: 'auth.sendCode', phone_number: USERNAME})
+    });
+    expect(invokeApi).toHaveBeenNthCalledWith(5, 'invokeWithReCaptcha', {
+      token: 'signin-token',
+      query: expect.objectContaining({_: 'auth.sendCode', phone_number: USERNAME})
+    });
+    expect(invokeApi).toHaveBeenNthCalledWith(6, 'auth.signIn', expect.objectContaining({
+      phone_code_hash: 'signin-code-hash'
+    }), {ignoreErrors: true});
+    expect(checkPassword).toHaveBeenCalledWith('saved-password');
+  });
+
   it('maps a taken open-registration username after the signin-challenge retry', async() => {
     const signinCode = {...SENT_CODE, phone_code_hash: 'signin-code-hash'};
     const invokeApi = vi.fn()
