@@ -306,6 +306,16 @@ test('head worker registers the mirror queue barrier only in performance builds'
   assert.match(performanceClientBuild, /VITE_PERF_TRACE=1 pnpm exec vite build --outDir "\$RUNNER_TEMP\/teagram-web-trace-dist"/);
 });
 
+test('mirror queue barrier injection accepts the current guarded worker listener idempotently', async() => {
+  const {injectMirrorQueueBarrier} = await import('./inject-mirror-queue-barrier.mjs');
+
+  const firstInjection = injectMirrorQueueBarrier(mainMessagePort, mainWorker);
+  const secondInjection = injectMirrorQueueBarrier(firstInjection.mainMessagePort, firstInjection.indexWorker);
+
+  assert.deepEqual(firstInjection, {mainMessagePort, indexWorker: mainWorker});
+  assert.deepEqual(secondInjection, firstInjection);
+});
+
 test('base worker bundle injection adds an idempotent mirror queue acknowledgement', async() => {
   const {injectMirrorQueueBarrier} = await import('./inject-mirror-queue-barrier.mjs');
   const baseMainMessagePort = [

@@ -10,6 +10,13 @@ const indexWorkerBarrier = [
   '    // This reply follows earlier worker-to-window mirror messages on the same MessagePort.',
   '  },'
 ].join('\n');
+const indexWorkerGuardedBarrier = [
+  "  ...(import.meta.env.VITE_PERF_HISTORY_TRACE === '1' || import.meta.env.VITE_PERF_TRACE === '1' ? {",
+  '    mirrorQueueBarrier: () => {',
+  '      // This reply follows earlier worker-to-window mirror messages on the same MessagePort.',
+  '    }',
+  '  } : {}),'
+].join('\n');
 
 function countOccurrences(source, needle) {
   return source.split(needle).length - 1;
@@ -27,7 +34,8 @@ function insertAfterUnique(source, anchor, insertion, description) {
 
 export function injectMirrorQueueBarrier(mainMessagePortSource, indexWorkerSource) {
   const hasMainMessagePortBarrier = countOccurrences(mainMessagePortSource, mainMessagePortBarrier);
-  const hasIndexWorkerBarrier = countOccurrences(indexWorkerSource, indexWorkerBarrier);
+  const hasIndexWorkerBarrier = countOccurrences(indexWorkerSource, indexWorkerBarrier) +
+    countOccurrences(indexWorkerSource, indexWorkerGuardedBarrier);
   if(hasMainMessagePortBarrier === 1 && hasIndexWorkerBarrier === 1) {
     return {mainMessagePort: mainMessagePortSource, indexWorker: indexWorkerSource};
   }
