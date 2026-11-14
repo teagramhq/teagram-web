@@ -800,6 +800,7 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.match(attachServerRpcTrace, /readServerRpcTraceRecordsSince/);
   assert.match(attachServerRpcTrace, /if\(!clientCalls\.length\)/);
   assert.match(attachServerRpcTrace, /zero-call gate has .*uncorrelated server messages\.getHistory records inside its gate window/);
+  assert.match(attachServerRpcTrace, /serverRpcRecordStartsWithinWindow\(record, gateWindow\)/, 'zero-call gates only reject handlers that start within the measured window');
   assert.match(attachServerRpcTrace, /\.filter\(\(record\) => serverRpcRecordMatchesClientCalls\(record, clientCalls\)\)/, 'all completed correlated handlers must be retained without polling for a quiet period');
   assert.doesNotMatch(attachServerRpcTrace, /quietMs|waitForServerRpcTraceRecords/);
   assert.ok(finalizeServerRpcTrace, 'the captured chat-open identities must settle before server records attach');

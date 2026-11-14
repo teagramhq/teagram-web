@@ -1,7 +1,7 @@
 import {installWorkerMessageAttribution, summarizeWorkerMessageAttribution} from './workerMessageAttribution';
 import {readFileSync} from 'node:fs';
 import {writePerformanceReport} from './performanceReport';
-import {getServerRpcTracePosition, matchServerRpcRecordToClientCall, readServerRpcTraceRecordsSince, serverRpcClientCallsAreSettled, serverRpcClientCallsByIdentity, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordsCoverClientCalls} from '../scripts/performance/server-rpc-trace.mjs';
+import {getServerRpcTracePosition, matchServerRpcRecordToClientCall, readServerRpcTraceRecordsSince, serverRpcClientCallsAreSettled, serverRpcClientCallsByIdentity, serverRpcRecordMatchesClientCall, serverRpcRecordMatchesClientCalls, serverRpcRecordStartsWithinWindow, serverRpcRecordsCoverClientCalls} from '../scripts/performance/server-rpc-trace.mjs';
 import {expect, test, type Browser, type BrowserContext, type Locator, type Page, type Request} from '@playwright/test';
 import Icons from '../src/icons';
 import {COLD_CHAT_LIST_REPEATS, evaluatePerformance, PERFORMANCE_MEASUREMENT_VERSION, PERFORMANCE_REPEATS} from '../scripts/performance/policy.mjs';
@@ -226,10 +226,7 @@ async function attachServerRpcTrace(sample: Metric, offset: number | undefined) 
     if(!gateWindow || !Number.isFinite(gateWindow.startEpochMs) || !Number.isFinite(gateWindow.endEpochMs) || gateWindow.endEpochMs <= gateWindow.startEpochMs) {
       throw new Error('100x chat-open sample has no valid gate window for zero-call server trace validation');
     }
-    const inGateRecords = traceRecords.filter((record) => (
-      record.end_unix_ms >= gateWindow.startEpochMs &&
-      record.end_unix_ms - record.duration_us / 1000 <= gateWindow.endEpochMs
-    ));
+    const inGateRecords = traceRecords.filter((record) => serverRpcRecordStartsWithinWindow(record, gateWindow));
     if(inGateRecords.length) {
       throw new Error(`100x chat-open zero-call gate has ${inGateRecords.length} uncorrelated server messages.getHistory records inside its gate window`);
     }

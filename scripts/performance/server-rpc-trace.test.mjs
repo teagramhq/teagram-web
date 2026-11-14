@@ -3,7 +3,7 @@ import {mkdtempSync, rmSync, writeFileSync, appendFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {test} from 'node:test';
-import {clientRpcIntervalUnionMs, getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcIntervalUnionMs, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from './server-rpc-trace.mjs';
+import {clientRpcIntervalUnionMs, getServerRpcTracePosition, readServerRpcTraceRecordsSince, serverRpcIntervalUnionMs, serverRpcRecordStartsWithinWindow, serverRpcTraceExpectation, waitForServerRpcTraceRecords} from './server-rpc-trace.mjs';
 
 const record = (method, duration_us = 40_123) => JSON.stringify({
   method,
@@ -116,6 +116,17 @@ test('server RPC interval union does not double count overlapping handlers', () 
     {duration_us: 40_000, end_unix_ms: 1_000},
     {duration_us: 40_000, end_unix_ms: 1_010}
   ]), 50);
+});
+
+test('zero-call server trace gates ignore handlers started before the gate', () => {
+  const gateWindow = {startEpochMs: 1_000, endEpochMs: 1_100};
+  const pendingBeforeGate = {duration_us: 19_087, end_unix_ms: 1_010};
+  const startedInGate = {duration_us: 2_086, end_unix_ms: 1_012};
+  const startedAfterGate = {duration_us: 2_000, end_unix_ms: 1_105};
+
+  assert.equal(serverRpcRecordStartsWithinWindow(pendingBeforeGate, gateWindow), false);
+  assert.equal(serverRpcRecordStartsWithinWindow(startedInGate, gateWindow), true);
+  assert.equal(serverRpcRecordStartsWithinWindow(startedAfterGate, gateWindow), false);
 });
 
 test('client and server RPC interval unions clip to the chat-open gate boundary', () => {
