@@ -45,6 +45,18 @@ test('server handler records must correlate to client spans in the chat-open sam
   assert.equal(serverRpcRecordsCoverClientCalls([earlyRecord, lateRecord], [broadCall, narrowCall]), true);
 });
 
+test('server handler records correlate to a search RPC by method and interval', async() => {
+  const {matchServerRpcRecordToClientCall, serverRpcRecordMatchesClientCall} = await import('./server-rpc-trace.mjs');
+  const recordValue = JSON.parse(record('messages.searchGlobal', 20_000));
+  const clientCall = {method: 'messages.searchGlobal', startedAtEpochMs: 1_762_800_000_100, durationMs: 30, outcome: 'success'};
+
+  assert.equal(serverRpcRecordMatchesClientCall(recordValue, clientCall), false);
+  assert.equal(serverRpcRecordMatchesClientCall(recordValue, clientCall, 'messages.searchGlobal'), true);
+  assert.deepEqual(matchServerRpcRecordToClientCall([recordValue], clientCall, 'messages.searchGlobal'), recordValue);
+  assert.throws(() => matchServerRpcRecordToClientCall([], clientCall, 'messages.searchGlobal'), /expected one messages.searchGlobal server record, found 0/);
+  assert.throws(() => matchServerRpcRecordToClientCall([recordValue, recordValue], clientCall, 'messages.searchGlobal'), /expected one messages.searchGlobal server record, found 2/);
+});
+
 test('server RPC call identities reject a trace index that was remapped by reset', async() => {
   const {serverRpcClientCallsByIdentity} = await import('./server-rpc-trace.mjs');
   const boundaryCalls = [{callId: 1, startedAtEpochMs: 1_762_800_000_100}];

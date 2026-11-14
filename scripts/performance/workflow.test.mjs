@@ -100,7 +100,20 @@ function runSummaryWithArtifacts({
         debounceSettledAtMs: 400,
         matchingSearchRpcReturnedAtMs: 480,
         matchingResultVisibleAtMs: 500
-      }
+      },
+      globalSearchServerRpcRecord: {
+        method: 'messages.searchGlobal',
+        duration_us: 20_000,
+        result: 'success',
+        end_unix_ms: 1_762_800_000_470
+      },
+      globalSearchServerRpcClientCall: {
+        method: 'messages.searchGlobal',
+        startedAtEpochMs: 1_762_800_000_420,
+        durationMs: 60,
+        outcome: 'success'
+      },
+      globalSearchTimeOriginMs: 1_762_800_000_000
     } : {}),
     requests: 12,
     rpcCallCount: 2,
@@ -478,6 +491,9 @@ test('global-search measurements include the first matching query without a prew
   assert.equal(queryFills.length, 1, 'each sample must issue one query, without an earlier warm-up request');
   assert.match(globalSearch, /globalSearchBaselineRows = new WeakSet\(document\.querySelectorAll\('#search-container \.chatlist-chat'\)\)/);
   assert.match(globalSearch, /await waitForGlobalSearchResult\(page, query, true\)/);
+  assert.match(globalSearch, /serverRpcTraceOffset\(scale\)/);
+  assert.match(globalSearch, /matchServerRpcRecordToClientCall\(traceRecords, matchingRpc, 'messages\.searchGlobal'\)/);
+  assert.match(globalSearch, /globalSearchServerRpcRecord/);
 });
 
 test('only pull requests build and require a base comparison', () => {
@@ -491,7 +507,7 @@ test('only pull requests build and require a base comparison', () => {
 
 test('same-head retries re-upload each attempt evidence as downloadable artifacts', () => {
   assert.match(workflow, /name: Restore same-head A\/A evidence[\s\S]*?path: \.performance-aa-evidence[\s\S]*?restore-keys:[\s\S]*?teagram-web-performance-aa-\$\{\{ github\.sha \}\}-/);
-  assert.match(workflow, /name: Preserve same-head A\/A evidence[\s\S]*?copy_evidence report\.json[\s\S]*?copy_evidence server-rpc-100x\.jsonl[\s\S]*?manifest\.json/);
+  assert.match(workflow, /name: Preserve same-head A\/A evidence[\s\S]*?copy_evidence report\.json[\s\S]*?copy_evidence server-rpc-1x\.jsonl[\s\S]*?copy_evidence server-rpc-100x\.jsonl[\s\S]*?manifest\.json/);
   assert.match(workflow, /name: Upload browser performance report[\s\S]*?path: \|\n\s+\.performance-aa-evidence\//);
   for(const attempt of [1, 2, 3]) {
     const upload = workflow.match(new RegExp(`name: Upload preserved A/A attempt ${attempt} evidence[\\s\\S]*?(?=\\n      - name:|$)`))?.[0];
@@ -838,6 +854,15 @@ test('cold chat-open preparation is restricted to the RPC diagnostic', () => {
   assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpenSample'), 'cold RPC diagnostics must still require an in-gate history call');
 });
 
+test('ordinary 100x chat-open drains fixture preview-history prefetch before the gate', () => {
+  const openPartnerChat = performanceScale.match(/async function openPartnerChat\([\s\S]*?(?=\nasync function scrollBackTwoThousand)/)?.[0];
+
+  assert.ok(openPartnerChat, 'the measured chat-open helper must be present');
+  assert.match(openPartnerChat, /if\(collectServerRpcTrace\) await waitForPartnerDialogHistoryPrefetch\(page, fixture\.partner\)/);
+  assert.ok(openPartnerChat.indexOf('waitForPartnerDialogHistoryPrefetch') < openPartnerChat.indexOf('await begin(page, requests, true, traceRpc)'), 'drain prior row prefetch before starting the measured interaction');
+  assert.doesNotMatch(openPartnerChat, /flushStoragesByPeerId/, 'preserve the warmed chat-open state');
+});
+
 test('100x chat-open resets history without changing adjacent scenario sequencing', () => {
   const beforeAll = performanceScale.match(/test\.beforeAll\(async\(\{browser\}\) => \{[\s\S]*?\n\}\);/)?.[0];
   const runVariant = performanceScale.match(/async function runVariant\([\s\S]*?(?=\nasync function traceDateJump)/)?.[0];
@@ -928,7 +953,20 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
         debounceSettledAtMs: 120,
         matchingSearchRpcReturnedAtMs: 150,
         matchingResultVisibleAtMs: 100 + ms
-      }
+      },
+      globalSearchServerRpcRecord: {
+        method: 'messages.searchGlobal',
+        duration_us: 20_000,
+        result: 'success',
+        end_unix_ms: 1_762_800_000_150
+      },
+      globalSearchServerRpcClientCall: {
+        method: 'messages.searchGlobal',
+        startedAtEpochMs: 1_762_800_000_130,
+        durationMs: 20,
+        outcome: 'success'
+      },
+      globalSearchTimeOriginMs: 1_762_800_000_000
     } : {}),
     firstVisibleChatListMs: ms,
     firstVisibleChatListSource: 'snapshot',
@@ -1139,14 +1177,17 @@ test('summary reports nine paired samples and keeps extra diagnostic samples out
   assert.match(boundarySummary, /\| Send a message \| base \| 1 \| 599\.0 \| 480\.0 \|/);
 });
 
-test('performance workflow pins and enables the per-RPC server trace for 100x', () => {
+test('performance workflow pins and enables the per-RPC server trace at both scales', () => {
   const serverCommit = readFileSync(new URL('../../.github/perf-server-commit', import.meta.url), 'utf8').trim();
   assert.equal(serverCommit, '11aca52138df628f0ef9972e0583c768d12c221d');
+  assert.match(workflow, /PERF_SERVER_RPC_TRACE_FILE_1X/);
   assert.match(workflow, /PERF_SERVER_RPC_TRACE_FILE_100X/);
   const serverStep = workflow.match(/- name: Build fixture server and client bundles in parallel([\s\S]*?)(?=\n      - name: Start local HTTPS)/)?.[1];
   assert.ok(serverStep, 'the performance workflow must define its combined fixture server and client build step');
   assert.match(serverStep, /TG_RPC_TRACE_FILE/);
-  assert.match(serverStep, /if \[ "\$scale" = "100x" \]; then\s+rpc_trace_env\+=\("TG_RPC_TRACE_FILE=\$PERF_SERVER_RPC_TRACE_FILE_100X"\)/);
+  assert.match(serverStep, /rpc_trace_env=\("TG_RPC_TRACE_FILE=\$rpc_trace_file"\)/);
+  assert.match(serverStep, /if \[ "\$scale" = 1x \]; then[\s\S]*?rpc_trace_file="\$PERF_SERVER_RPC_TRACE_FILE_1X"[\s\S]*?else[\s\S]*?rpc_trace_file="\$PERF_SERVER_RPC_TRACE_FILE_100X"/);
+  assert.match(workflow, /teagram-perf-server-rpc-1x\.jsonl/);
   assert.match(workflow, /teagram-perf-server-rpc-100x\.jsonl/);
   assert.match(performanceClientBuild, /PERF_BASE_DIST=/);
   assert.match(performanceClientBuild, /node scripts\/performance\/inject-mirror-queue-barrier\.mjs "\$base_directory"/);
@@ -1179,7 +1220,44 @@ test('summary reports query stages for every global-search sample', () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /### Global search query stages per sample/);
   assert.match(result.stdout, /Query entered \(page ms\).*Debounce settled \(page ms\).*Matching search RPC returned \(page ms\).*Matching result visible \(page ms\)/);
-  assert.match(result.stdout, /\| 1x \| base \| 1 \| 100\.0 \| 400\.0 \| 480\.0 \| 500\.0 \| 400\.0 \|/);
+  assert.match(result.stdout, /messages\.searchGlobal handler \(ms\).*RPC wait minus handler \(ms\)/);
+  assert.match(result.stdout, /\| 1x \| base \| 1 \| 100\.0 \| 400\.0 \| 480\.0 \| 500\.0 \| 400\.0 \| 80\.0 \| 20\.0 \| 60\.0 \|/);
+});
+
+test('summary fails closed when a global-search sample lacks its matching server duration', () => {
+  const result = runSummaryWithArtifacts({
+    mutateReport: (report) => {
+      delete report.variants.base['1x'].globalSearch[0].globalSearchServerRpcRecord;
+    }
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /global search 1x base sample 1 has missing or invalid messages\.searchGlobal server duration/);
+});
+
+test('summary fails closed when a global-search server record does not match its client RPC span', () => {
+  const result = runSummaryWithArtifacts({
+    mutateReport: (report) => {
+      report.variants.base['100x'].globalSearch[0].globalSearchServerRpcClientCall.startedAtEpochMs += 1_000;
+    }
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /global search 100x base sample 1 has missing or invalid messages\.searchGlobal server duration/);
+});
+
+test('summary fails closed when a global-search handler exceeds RPC wait beyond clock tolerance', () => {
+  const result = runSummaryWithArtifacts({
+    mutateReport: (report) => {
+      const sample = report.variants.base['1x'].globalSearch[0];
+      sample.globalSearchServerRpcRecord.duration_us = 86_000;
+      sample.globalSearchServerRpcClientCall.startedAtEpochMs = 1_762_800_000_388;
+      sample.globalSearchServerRpcClientCall.durationMs = 92;
+    }
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /global search 1x base sample 1 has missing or invalid messages\.searchGlobal server duration/);
 });
 
 test('summary fails closed for a global-search sample with missing stage timestamps', () => {

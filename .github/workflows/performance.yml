@@ -34,8 +34,11 @@ jobs:
           echo "PERF_REPORT_PATH=$RUNNER_TEMP/teagram-web-performance.json" >> "$GITHUB_ENV"
           echo "PERF_RECORDER_REPLAY_PATH=$RUNNER_TEMP/teagram-recorder-replay.json" >> "$GITHUB_ENV"
           echo "PERF_SUMMARY_PATH=$RUNNER_TEMP/teagram-web-performance-summary.md" >> "$GITHUB_ENV"
+          echo "PERF_SERVER_RPC_TRACE_FILE_1X=$RUNNER_TEMP/teagram-perf-server-rpc-1x.jsonl" >> "$GITHUB_ENV"
           echo "PERF_SERVER_RPC_TRACE_FILE_100X=$RUNNER_TEMP/teagram-perf-server-rpc-100x.jsonl" >> "$GITHUB_ENV"
+          : > "$RUNNER_TEMP/teagram-perf-server-rpc-1x.jsonl"
           : > "$RUNNER_TEMP/teagram-perf-server-rpc-100x.jsonl"
+          chmod 0600 "$RUNNER_TEMP/teagram-perf-server-rpc-1x.jsonl"
           chmod 0600 "$RUNNER_TEMP/teagram-perf-server-rpc-100x.jsonl"
 
       - name: Set up pnpm
@@ -222,16 +225,15 @@ jobs:
               blob_dir="$TG_BLOB_DIR_1X"
               listen_port=2443
               websocket_port=2445
+              rpc_trace_file="$PERF_SERVER_RPC_TRACE_FILE_1X"
             else
               dsn="$TG_POSTGRES_DSN_100X"
               blob_dir="$TG_BLOB_DIR_100X"
               listen_port=2444
               websocket_port=2446
+              rpc_trace_file="$PERF_SERVER_RPC_TRACE_FILE_100X"
             fi
-            rpc_trace_env=()
-            if [ "$scale" = "100x" ]; then
-              rpc_trace_env+=("TG_RPC_TRACE_FILE=$PERF_SERVER_RPC_TRACE_FILE_100X")
-            fi
+            rpc_trace_env=("TG_RPC_TRACE_FILE=$rpc_trace_file")
             nohup env TG_POSTGRES_DSN="$dsn" TG_BLOB_DIR="$blob_dir" \
               TG_RATE_LIMIT_CHANNEL_UNREAD_COUNT=0 \
               TG_LISTEN_ADDR="127.0.0.1:$listen_port" TG_ADVERTISE_ADDR="teagramd.test:$listen_port" \
@@ -378,6 +380,7 @@ jobs:
           copy_evidence recorder-replay.json "$PERF_RECORDER_REPLAY_PATH"
           copy_evidence server-1x.log "$RUNNER_TEMP/teagram-perf-server-1x.log"
           copy_evidence server-100x.log "$RUNNER_TEMP/teagram-perf-server-100x.log"
+          copy_evidence server-rpc-1x.jsonl "$PERF_SERVER_RPC_TRACE_FILE_1X"
           copy_evidence server-rpc-100x.jsonl "$PERF_SERVER_RPC_TRACE_FILE_100X"
           if [ -d test-results ]; then cp -a test-results "$attempt_directory/"; fi
           if [ -d playwright-report ]; then cp -a playwright-report "$attempt_directory/"; fi
@@ -405,6 +408,7 @@ jobs:
             ${{ runner.temp }}/teagram-recorder-replay.json
             ${{ runner.temp }}/teagram-perf-server-1x.log
             ${{ runner.temp }}/teagram-perf-server-100x.log
+            ${{ runner.temp }}/teagram-perf-server-rpc-1x.jsonl
             ${{ runner.temp }}/teagram-perf-server-rpc-100x.jsonl
           if-no-files-found: ignore
           retention-days: 14
