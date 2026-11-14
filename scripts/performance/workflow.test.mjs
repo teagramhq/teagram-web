@@ -800,6 +800,7 @@ test('100x chat-open gate captures call identities at its boundary and settles o
   assert.doesNotMatch(finalizeServerRpcTrace, /waitForHistorySettled/);
   assert.match(finalizeServerRpcTrace, /Object\.assign\(sample, await attachServerRpcTrace/);
   assert.ok(mainScenarioFlow, 'the main gated scenario sequence must be present');
+  assert.doesNotMatch(mainScenarioFlow, /expectChatOpenHistoryCall\(chatOpen,/, 'ordinary gate samples may have no getHistory calls');
   assert.ok(mainScenarioFlow.search(/test\.step\('scroll back 2,000 messages'/) < mainScenarioFlow.indexOf('finalizeServerRpcTrace(page, chatOpen)'), 'history telemetry must finalize after the scroll-back gate');
   assert.ok(mainScenarioFlow.search(/test\.step\('jump to fixture date'/) < mainScenarioFlow.indexOf('finalizeServerRpcTrace(page, chatOpen)'), 'history telemetry must finalize after the date-jump gate');
   assert.ok(diagnosticChatOpen, 'the RPC diagnostic chat-open sample must be present');
@@ -834,8 +835,7 @@ test('cold chat-open preparation is restricted to the RPC diagnostic', () => {
   assert.doesNotMatch(openPartnerChat, /prepareColdChatOpenStartState|flushStoragesByPeerId/);
   assert.match(traceTargetScenarios, /await prepareColdChatOpenStartState\(page, fixture\)/);
   assert.ok(traceTargetScenarios.indexOf('prepareColdChatOpenStartState') < traceTargetScenarios.indexOf('startMeasurementAtClick'));
-  assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpen'));
-  assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpenSample'));
+  assert.ok(performanceScale.includes('expectChatOpenHistoryCall(chatOpenSample'), 'cold RPC diagnostics must still require an in-gate history call');
 });
 
 test('100x chat-open resets history without changing adjacent scenario sequencing', () => {

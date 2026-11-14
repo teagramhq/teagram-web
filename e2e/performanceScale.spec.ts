@@ -2081,7 +2081,6 @@ async function runVariant(browser: Browser, run: VariantRun, scale: Scale, fixtu
     if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, warmChatList, 'warmChatList');
 
     const chatOpen = await test.step('open scale fixture chat', () => openPartnerChat(page, requests, fixture, scale === '100x', collectWalkDiagnostics, scale === '100x'));
-    if(scale === '100x') expectChatOpenHistoryCall(chatOpen, `${variant} 100x chatOpen gate sample`);
     measured.chatOpen.push(chatOpen);
     if(collectWalkDiagnostics) await addCachedDialogReconcileTarget(page, reconcileTargets, chatOpen, 'chatOpen');
     const scroll = await test.step('scroll back 2,000 messages', () => scrollBackTwoThousand(
