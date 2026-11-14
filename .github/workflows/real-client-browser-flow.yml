@@ -16,7 +16,7 @@ jobs:
   real-client-browser-flow:
     name: real-client-browser-flow
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
     env:
@@ -86,6 +86,30 @@ jobs:
         with:
           name: real-client-browser-flow-report-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.browser-flow.outputs.summary_path }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Run fresh-browser guest signup
+        id: guest-signup-flow
+        env:
+          REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'
+        run: node server-source/test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
+
+      - name: Upload guest-signup Playwright failure trace
+        if: ${{ always() && steps.guest-signup-flow.outputs.trace_ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-client-guest-signup-trace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.guest-signup-flow.outputs.trace_dir }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload guest-signup run report
+        if: ${{ always() && steps.guest-signup-flow.outputs.summary_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-client-guest-signup-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.guest-signup-flow.outputs.summary_path }}
           if-no-files-found: error
           retention-days: 7
 

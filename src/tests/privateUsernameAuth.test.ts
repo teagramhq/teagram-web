@@ -2,6 +2,7 @@ import {describe, expect, it, vi} from 'vitest';
 import type {HelpTermsOfService} from '@layer';
 
 import {authenticatePrivateUsername, isPrivateUsername, isPrivateUsernameCredentialError, parsePrivateUsernameInviteSecret} from '@/pages/privateUsernameAuth';
+import {TURNSTILE_QA_BYPASS_LOCAL_STORAGE_KEY} from '@/pages/turnstileSignup';
 import {
   capturePrivateUsernameInviteSecretFromFragment,
   restorePrivateUsernameInviteSecretForRetry,
@@ -385,6 +386,132 @@ describe('private username sign-in', () => {
     expect(checkPassword).toHaveBeenCalledWith('saved-password');
     expect(onAuthorization).toHaveBeenCalledWith(user, false);
     expect(invokeApi.mock.calls.map(([method]) => method)).toEqual(['auth.sendCode', 'auth.signIn']);
+  });
+
+  it('uses one signup challenge for invite-mode auth.sendCode and signUp', async() => {
+    const inviteSecret = 'a'.repeat(64);
+    const user = {_: 'user', id: 42};
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockResolvedValueOnce({_: 'auth.authorization', user});
+    const requestTurnstile = vi.fn((_siteKey, _action, submit) => submit('signup-token'));
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'invite',
+      inviteSecret,
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings: vi.fn().mockResolvedValue(true)
+    }, requestTurnstile, 'signup-site-key')).resolves.toEqual({kind: 'authorized', user});
+
+    expect(requestTurnstile).toHaveBeenCalledOnce();
+    expect(requestTurnstile).toHaveBeenCalledWith('signup-site-key', 'signup', expect.any(Function));
+    expect(invokeApi).toHaveBeenNthCalledWith(1, 'invokeWithReCaptcha', {
+      token: 'signup-token',
+      query: expect.objectContaining({_: 'auth.sendCode', phone_number: USERNAME})
+    });
+    expect(invokeApi).toHaveBeenNthCalledWith(2, 'auth.signIn', {
+      phone_number: USERNAME,
+      phone_code_hash: 'mock-code-hash',
+      phone_code: inviteSecret
+    }, {ignoreErrors: true});
+    expect(invokeApi).toHaveBeenNthCalledWith(3, 'auth.signUp', {
+      phone_number: USERNAME,
+      phone_code_hash: 'mock-code-hash',
+      first_name: 'Alice Example',
+      last_name: ''
+    });
+  });
+
+  it('uses signin challenge for closed-mode saved-password sign-in', async() => {
+    const user = {_: 'user', id: 42};
+    const invokeApi = vi.fn()
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signin__signin-site-key'})
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockRejectedValueOnce({type: 'SESSION_PASSWORD_NEEDED'});
+    const checkPassword = vi.fn().mockResolvedValue(user);
+    const requestTurnstile = vi.fn((_siteKey, _action, submit) => submit('signin-token'));
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'closed',
+      displayName: '',
+      password: 'saved-password',
+      updatePasswordSettings: vi.fn(),
+      checkPassword
+    }, requestTurnstile, 'signup-site-key')).resolves.toEqual({kind: 'authorized', user});
+
+    expect(requestTurnstile).toHaveBeenCalledOnce();
+    expect(requestTurnstile).toHaveBeenCalledWith('signin-site-key', 'signin', expect.any(Function));
+    expect(invokeApi).toHaveBeenNthCalledWith(2, 'invokeWithReCaptcha', {
+      token: 'signin-token',
+      query: expect.objectContaining({_: 'auth.sendCode', phone_number: USERNAME})
+    });
+    expect(checkPassword).toHaveBeenCalledWith('saved-password');
+    expect(invokeApi.mock.calls.map(([method]) => method)).toEqual([
+      'auth.sendCode',
+      'invokeWithReCaptcha',
+      'auth.signIn'
+    ]);
+  });
+
+  it('requests one extra signup challenge when a code-bound signUp is rejected', async() => {
+    const user = {_: 'user', id: 42};
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockRejectedValueOnce({type: 'RECAPTCHA_CHECK_signup__signup-site-key'})
+    .mockResolvedValueOnce({_: 'auth.authorization', user});
+    const requestTurnstile = vi.fn((_siteKey, _action, submit) => submit('signup-token'));
+
+    await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+      mode: 'open',
+      displayName: 'Alice Example',
+      password: 'StrongPassword123',
+      updatePasswordSettings: vi.fn().mockResolvedValue(true)
+    }, requestTurnstile, 'signup-site-key')).resolves.toEqual({kind: 'authorized', user});
+
+    expect(requestTurnstile).toHaveBeenCalledTimes(2);
+    expect(requestTurnstile).toHaveBeenNthCalledWith(1, 'signup-site-key', 'signup', expect.any(Function));
+    expect(requestTurnstile).toHaveBeenNthCalledWith(2, 'signup-site-key', 'signup', expect.any(Function));
+    expect(invokeApi).toHaveBeenNthCalledWith(3, 'auth.signUp', expect.any(Object));
+    expect(invokeApi).toHaveBeenNthCalledWith(4, 'invokeWithReCaptcha', {
+      token: 'signup-token',
+      query: expect.objectContaining({_: 'auth.signUp', phone_number: USERNAME})
+    });
+  });
+
+  it('uses the QA bypass for signup sendCode without putting it on signUp', async() => {
+    const user = {_: 'user', id: 42};
+    const invokeApi = vi.fn()
+    .mockResolvedValueOnce(SENT_CODE)
+    .mockResolvedValueOnce({_: 'auth.authorizationSignUpRequired', terms_of_service: {}})
+    .mockResolvedValueOnce({_: 'auth.authorization', user});
+    const requestTurnstile = vi.fn();
+    localStorage.setItem(TURNSTILE_QA_BYPASS_LOCAL_STORAGE_KEY, 'qa-bypass-token');
+
+    try {
+      await expect(authenticatePrivateUsername(USERNAME, invokeApi, undefined, {
+        mode: 'open',
+        displayName: 'Alice Example',
+        password: 'StrongPassword123',
+        updatePasswordSettings: vi.fn().mockResolvedValue(true)
+      }, requestTurnstile, 'signup-site-key')).resolves.toEqual({kind: 'authorized', user});
+    } finally {
+      localStorage.removeItem(TURNSTILE_QA_BYPASS_LOCAL_STORAGE_KEY);
+    }
+
+    expect(requestTurnstile).not.toHaveBeenCalled();
+    expect(invokeApi).toHaveBeenNthCalledWith(1, 'invokeWithReCaptcha', {
+      token: 'qa-bypass-token',
+      query: expect.objectContaining({_: 'auth.sendCode', phone_number: USERNAME})
+    });
+    expect(invokeApi).toHaveBeenNthCalledWith(3, 'auth.signUp', {
+      phone_number: USERNAME,
+      phone_code_hash: 'mock-code-hash',
+      first_name: 'Alice Example',
+      last_name: ''
+    });
   });
 
   it('retries sign-up with the Turnstile token requested by the server', async() => {
