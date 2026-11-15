@@ -41,7 +41,9 @@ rendered overlay, waits for the Deployment, then checks the public web route's
 root, JavaScript bundle, and `mtproto-target.json` source identity. If apply,
 rollout, or smoke verification fails after changes begin, it runs
 `kubectl rollout undo deployment/teagram-web --namespace teagram --to-revision="$PREVIOUS_REVISION"`,
-waits for that rollout, and verifies the previous image is restored. A successful run logs
+waits for that rollout, and verifies the previous image is restored. If the rollout
+fails, it first records the web pods' status, termination metadata, and recent
+events without printing pod environment values. A successful run logs
 `rollout=verified sha=<source-commit>`.
 
 The `test: k8s-deploy` job runs the same deployment script in a throwaway k3s
